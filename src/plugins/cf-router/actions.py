@@ -28,6 +28,7 @@ from typing import Any, Callable, Iterator, Optional, get_args
 # Deployed-system paths (mutable for tests)
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
 PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
+REVENUE_ROUTE_CLARIFICATION_PATH = Path("/opt/shift-agent/state/revenue-route-clarifications.json")
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 PROPOSALS_PATH = Path("/opt/shift-agent/state/catering-proposals.json")
 MENU_PENDING_PATH = Path("/opt/shift-agent/state/catering-menu-pending.json")
@@ -1169,6 +1170,35 @@ _REGISTERED_CONTEXTUAL_FLYER_DETAIL = re.compile(
     re.IGNORECASE,
 )
 _PRICE_AMOUNT = re.compile(r"(?:\$|rs\.?\s*)?\b\d{1,4}(?:\.\d{2})\b", re.IGNORECASE)
+_REVENUE_PRICE_AMOUNT = re.compile(
+    r"(?:\$|rs\.?\s*)\s*\d{1,5}(?:\.\d{2})?\b|\b\d{1,5}\.\d{2}\b",
+    re.IGNORECASE,
+)
+_REVENUE_ORDER_QUANTITY = re.compile(
+    r"\b(?:customi[sz]ed\s+orders?|orders?|pre[\s-]?orders?|tray|trays|"
+    r"count|counts|pcs|pieces|dozen|box|boxes|servings?)\b",
+    re.IGNORECASE,
+)
+_REVENUE_FOOD_OR_MENU = re.compile(
+    r"\b(?:menu|desserts?|sweets?|cake|cakes|custard|kheer|halwa|ladoo|laddu|"
+    r"rasmalai|jamun|jalebi|katli|pak|biryani|pulav|pulao|snacks?|combo|combos)\b",
+    re.IGNORECASE,
+)
+_REVENUE_PROMO_CONTEXT = re.compile(
+    r"\b(?:graduation|celebrate|celebration|special|sale|offer|discount|"
+    r"weekend|festival|holiday|party|event)\b",
+    re.IGNORECASE,
+)
+_REVENUE_ROUTE_CHOICE_FLYER = re.compile(
+    r"\b(?:flyer|flier|poster|design|graphic|creative|promo|promotional|"
+    r"social\s+post|instagram|ad)\b",
+    re.IGNORECASE,
+)
+_REVENUE_ROUTE_CHOICE_CATERING = re.compile(
+    r"\b(?:catering|cater|order|orders|ordering|tray|trays|delivery|pickup|"
+    r"quote|lead|menu\s+request)\b",
+    re.IGNORECASE,
+)
 _FLYER_CAMPAIGN_CTA = re.compile(
     r"^\s*(?:"
     r"start\s+free\s+(?:trial|trail)"
@@ -1369,6 +1399,138 @@ def classify_flyer_intent(text: str) -> tuple[bool, list[str]]:
     if _FLYER_INTENT.search(text):
         return True, ["flyer_intent"]
     return False, ["rejected:no_flyer_intent"]
+
+
+def classify_ambiguous_revenue_brief(text: str) -> tuple[bool, list[str]]:
+    """Return True for concrete revenue-zone briefs that need one route question.
+
+    This is router-only triage. It does not decide creative content or Catering
+    fields; it catches the gap where a customer sends priced food/menu/event
+    copy that could be either a promotional Flyer brief or a Catering/order
+    request, but neither explicit classifier is allowed to claim it.
+    """
+    body = " ".join(flyer_visible_message_text(text).split())
+    if len(body) < 40:
+        return False, ["too_short"]
+    if classify_flyer_intent(body)[0]:
+        return False, ["explicit_flyer"]
+    if classify_catering(body)[0]:
+        return False, ["explicit_catering"]
+    if is_flyer_onboarding_intent(body) or is_flyer_campaign_cta(body):
+        return False, ["explicit_flyer_account"]
+
+    signals: list[str] = []
+    if _REVENUE_PRICE_AMOUNT.search(body):
+        signals.append("price_amount")
+    if _EVENT_KEYWORDS.search(body) or _REVENUE_PROMO_CONTEXT.search(body):
+        signals.append("event_or_promo")
+    if _FOOD_KEYWORDS.search(body) or _REVENUE_FOOD_OR_MENU.search(body):
+        signals.append("food_or_menu")
+    if _REVENUE_ORDER_QUANTITY.search(body):
+        signals.append("order_quantity")
+
+    required = {"price_amount", "event_or_promo", "food_or_menu", "order_quantity"}
+    if required.issubset(set(signals)):
+        return True, signals
+    signals.append("rejected:insufficient_ambiguous_revenue_evidence")
+    return False, signals
+
+
+def classify_revenue_route_choice(text: str) -> Optional[str]:
+    """Classify a reply to the Flyer-vs-Catering clarification."""
+    body = " ".join(flyer_visible_message_text(text).split()).lower()
+    if not body:
+        return None
+    if re.fullmatch(r"(?:both|both please|both pls|flyer and catering|catering and flyer)", body):
+        return "both"
+    wants_flyer = bool(_REVENUE_ROUTE_CHOICE_FLYER.search(body))
+    wants_catering = bool(_REVENUE_ROUTE_CHOICE_CATERING.search(body))
+    if wants_flyer and wants_catering:
+        return "both"
+    if wants_flyer:
+        return "flyer"
+    if wants_catering:
+        return "catering"
+    return None
+
+
+def revenue_route_clarification_reply() -> str:
+    return "I can help with this. Is this for a promotional flyer, or a catering/order request?"
+
+
+def revenue_route_both_reply() -> str:
+    return "I can help with both. Which should I start first: promotional flyer or catering/order request?"
+
+
+def _load_revenue_route_clarification_doc() -> dict:
+    _ensure_platform_path()
+    from safe_io import safe_load_json  # type: ignore
+
+    doc, _status = safe_load_json(
+        REVENUE_ROUTE_CLARIFICATION_PATH,
+        default={"version": 1, "pending": {}},
+    )
+    if not isinstance(doc, dict):
+        doc = {"version": 1, "pending": {}}
+    pending = doc.get("pending")
+    if not isinstance(pending, dict):
+        doc["pending"] = {}
+    doc["version"] = 1
+    return doc
+
+
+def _write_revenue_route_clarification_doc(doc: dict) -> None:
+    _ensure_platform_path()
+    from safe_io import atomic_write_json  # type: ignore
+
+    atomic_write_json(REVENUE_ROUTE_CLARIFICATION_PATH, doc)
+
+
+def save_revenue_route_clarification(
+    *,
+    chat_id: str,
+    original_text: str,
+    message_id: str,
+    sender_phone: Optional[str],
+    sender_role: str,
+    signals: list[str],
+) -> None:
+    _ensure_platform_path()
+    from safe_io import flock  # type: ignore
+
+    with flock(REVENUE_ROUTE_CLARIFICATION_PATH):
+        doc = _load_revenue_route_clarification_doc()
+        doc["pending"][chat_id] = {
+            "chat_id": chat_id,
+            "original_text": original_text[:4000],
+            "message_id": message_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "sender_phone": sender_phone,
+            "sender_role": sender_role,
+            "signals": [str(sig)[:80] for sig in signals[:20]],
+        }
+        _write_revenue_route_clarification_doc(doc)
+
+
+def get_revenue_route_clarification(chat_id: str) -> Optional[dict]:
+    _ensure_platform_path()
+    from safe_io import flock  # type: ignore
+
+    with flock(REVENUE_ROUTE_CLARIFICATION_PATH):
+        doc = _load_revenue_route_clarification_doc()
+        row = doc.get("pending", {}).get(chat_id)
+        return row if isinstance(row, dict) else None
+
+
+def pop_revenue_route_clarification(chat_id: str) -> Optional[dict]:
+    _ensure_platform_path()
+    from safe_io import flock  # type: ignore
+
+    with flock(REVENUE_ROUTE_CLARIFICATION_PATH):
+        doc = _load_revenue_route_clarification_doc()
+        row = doc.get("pending", {}).pop(chat_id, None)
+        _write_revenue_route_clarification_doc(doc)
+        return row if isinstance(row, dict) else None
 
 
 def is_registered_customer_contextual_flyer_brief(text: str) -> bool:

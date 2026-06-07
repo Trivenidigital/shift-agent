@@ -1646,3 +1646,14 @@ Review/verification:
 - Multi-vector review: structural/code and product/quality reviewers both cleared after fixes; deploy acceptable pending live smoke.
 - Known unrelated local static failures: `tests/test_flyer_scripts_static.py` currently fails two cf-router hook ordering assertions on `origin/main`-equivalent code; no cf-router files changed in this slice.
 - Live eval result (2026-06-01): 7 real OpenRouter/Gemini image generations produced visually attractive but truth-unsafe posters: hallucinated address/phone, corrupted item names, and incomplete item counts. Decision: do NOT enable direct integrated rendering for customer traffic. Deployed safety follow-up defaults back to background-only + deterministic overlay; integrated path remains available only with explicit eval env flag.
+
+## Router Ambiguous Commercial Brief Clarification - 2026-06-07
+
+- Drift-check tag: extends-Hermes
+- Hermes-first analysis: Hermes already owns WhatsApp ingress, sender identity, cf-router pre-gateway hooks, Flyer Studio generation, and Catering lead creation. This change adds only deterministic front-door triage for concrete customer/revenue-zone briefs that are ambiguous between Flyer and Catering, then delegates to the existing Flyer or Catering paths after the customer chooses.
+- Product invariant: business-relevant customer/revenue-zone messages must not fall through to generic Hermes fallback. If route or required intake details are unclear, ask one deterministic clarification, persist context, provide a continuation path, and audit the reason.
+- [x] Add failing regressions for dessert graduation item/price brief asking Flyer-vs-Catering clarification instead of generic fallback.
+- [x] Add follow-up regressions: reply `flyer` routes the saved brief to Flyer, reply `catering` routes the saved brief to Catering.
+- [x] Preserve explicit routes: vague `Create flyer` still clarifies/starter path; birthday party catering still routes to Catering; active Flyer iteration context still routes Flyer.
+- [x] Implement minimal cf-router clarification state, audit rows, and deterministic reply copy.
+- [x] Run focused cf-router/router tests and compile checks.

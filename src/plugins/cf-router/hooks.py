@@ -23,6 +23,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from . import actions
@@ -318,6 +319,16 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
         # F7_WATCHDOG_TIMEOUT_SEC) remain in this module for backwards-compat
         # with the TestF7DispatcherWatchdog suite; they are NO LONGER wired
         # into pre_gateway_dispatch. Cleanup deferred to a follow-up PR.
+        revenue_choice_result = _try_revenue_route_clarification_choice(
+            text,
+            chat_id,
+            event,
+            flyer_generation_enabled=flyer_generation_enabled,
+            flyer_workflow_enabled=flyer_workflow_enabled,
+        )
+        if revenue_choice_result is not None:
+            return revenue_choice_result
+
         if flyer_workflow_enabled:
             campaign_cta_text = actions.flyer_campaign_cta_text(text)
             if campaign_cta_text:
@@ -589,6 +600,15 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 if f7_result is not None:
                     return f7_result
 
+        revenue_clarification_result = _try_revenue_route_clarification_start(
+            text,
+            chat_id,
+            message_id,
+            flyer_workflow_enabled=flyer_workflow_enabled,
+        )
+        if revenue_clarification_result is not None:
+            return revenue_clarification_result
+
         # (e) recent customer + broad non-object revision feedback -> deterministic "resend full
         # details" (no toolless-LLM loop). Placed AFTER the F7 catering block so catering ALWAYS
         # wins first for messages that do not name a flyer object: a follow-up like "add 20
@@ -611,6 +631,132 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
         except Exception:
             pass
         return None  # always let LLM run on plugin error
+
+
+def _clarified_text_event(*, text: str, chat_id: str, message_id: str) -> Any:
+    return SimpleNamespace(text=text, chat_id=chat_id, message_id=message_id)
+
+
+def _try_revenue_route_clarification_choice(
+    text: str,
+    chat_id: str,
+    event: Any,
+    *,
+    flyer_generation_enabled: bool,
+    flyer_workflow_enabled: bool,
+) -> Optional[dict]:
+    pending = actions.get_revenue_route_clarification(chat_id)
+    if not pending:
+        return None
+    choice = actions.classify_revenue_route_choice(text)
+    if choice is None:
+        return None
+
+    if choice == "both":
+        reply = actions.revenue_route_both_reply()
+        ack_ok, mid, err = actions.send_flyer_text(
+            chat_id,
+            reply,
+            action_context=build_action_context(
+                action_id="flyer.routing.revenue_route_clarification",
+                is_regulated_action=False,
+            ),
+        )
+        actions.audit_intercepted(
+            reason="revenue_route_clarification_sent",
+            chat_id=chat_id,
+            subprocess_rc=0 if ack_ok else 3,
+            detail=f"choice=both; pending_kept=true; ack_message_id={mid}; ack_error={err[:300]}",
+        )
+        return {"action": "skip", "reason": "cf-router revenue route clarification sent"}
+
+    pending = actions.pop_revenue_route_clarification(chat_id) or pending
+    original_text = str(pending.get("original_text") or "").strip()
+    if not original_text:
+        return None
+    original_message_id = str(pending.get("message_id") or "").strip()
+    if not original_message_id:
+        original_message_id = _extract_message_id(event, chat_id, original_text)
+
+    actions.audit_intercepted(
+        reason="revenue_route_clarification_chosen",
+        chat_id=chat_id,
+        detail=f"choice={choice}; original_message_id={original_message_id}",
+    )
+    original_event = _clarified_text_event(
+        text=original_text,
+        chat_id=chat_id,
+        message_id=original_message_id,
+    )
+
+    if choice == "flyer":
+        if flyer_generation_enabled:
+            return _try_flyer_primary_intercept(original_text, chat_id, original_event, force_new=True)
+        if flyer_workflow_enabled:
+            actions.spawn_bare_flyer_render_and_send(
+                chat_id, original_text, message_id=original_message_id,
+            )
+            return {"action": "skip", "reason": "cf-router bare flyer dispatched"}
+        return None
+
+    if choice == "catering":
+        phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+        if role == "owner":
+            return None
+        return _try_f7_primary_intercept(
+            original_text,
+            chat_id,
+            original_event,
+            signals=["revenue_route_choice:catering"],
+            allow_new_lead=True,
+        )
+
+    return None
+
+
+def _try_revenue_route_clarification_start(
+    text: str,
+    chat_id: str,
+    message_id: str,
+    *,
+    flyer_workflow_enabled: bool,
+) -> Optional[dict]:
+    if not flyer_workflow_enabled:
+        return None
+    is_ambiguous, signals = actions.classify_ambiguous_revenue_brief(text)
+    if not is_ambiguous:
+        return None
+    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    if role == "owner":
+        return None
+
+    actions.save_revenue_route_clarification(
+        chat_id=chat_id,
+        original_text=text,
+        message_id=message_id,
+        sender_phone=phone,
+        sender_role=role,
+        signals=signals,
+    )
+    reply = actions.revenue_route_clarification_reply()
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id,
+        reply,
+        action_context=build_action_context(
+            action_id="flyer.routing.revenue_route_clarification",
+            is_regulated_action=False,
+        ),
+    )
+    actions.audit_intercepted(
+        reason="revenue_route_clarification_sent",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 3,
+        detail=(
+            f"signals={','.join(signals)}; sender_role={role}; "
+            f"ack_message_id={mid}; ack_error={err[:300]}"
+        ),
+    )
+    return {"action": "skip", "reason": "cf-router revenue route clarification sent"}
 
 
 def _try_f8_intercept(text: str, chat_id: str) -> Optional[dict]:
