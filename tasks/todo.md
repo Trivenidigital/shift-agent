@@ -1657,3 +1657,14 @@ Review/verification:
 - [x] Preserve explicit routes: vague `Create flyer` still clarifies/starter path; birthday party catering still routes to Catering; active Flyer iteration context still routes Flyer.
 - [x] Implement minimal cf-router clarification state, audit rows, and deterministic reply copy.
 - [x] Run focused cf-router/router tests and compile checks.
+
+## Router Suffix-Price Revenue Clarification - 2026-06-07
+
+- Drift-check tag: extends-Hermes
+- Hermes-first analysis: Hermes/cf-router already owns WhatsApp ingress, identity, revenue-route clarification state, and delegation to Flyer/Catering. This hotfix only widens the deterministic price token for the existing ambiguous-revenue classifier so real WhatsApp suffix prices reach the existing clarification path.
+- [x] Add failing regressions for suffix prices such as `75$`, `75 $`, and `75 dollars`.
+- [x] Add route regression for dessert graduation suffix-price brief -> Flyer-vs-Catering clarification.
+- [x] Preserve negative/priority cases: plain graduation text no route, unknown sender no auto-Flyer, employee sick-call outranks revenue clarification.
+- [x] Implement the narrow `_REVENUE_PRICE_AMOUNT` regex fix only.
+- [x] Run focused cf-router tests and schema/static checks.
+- [ ] Run post-deploy exact-shape probe.

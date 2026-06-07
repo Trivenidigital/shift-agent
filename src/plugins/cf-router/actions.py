@@ -1171,7 +1171,10 @@ _REGISTERED_CONTEXTUAL_FLYER_DETAIL = re.compile(
 )
 _PRICE_AMOUNT = re.compile(r"(?:\$|rs\.?\s*)?\b\d{1,4}(?:\.\d{2})\b", re.IGNORECASE)
 _REVENUE_PRICE_AMOUNT = re.compile(
-    r"(?:\$|rs\.?\s*)\s*\d{1,5}(?:\.\d{2})?\b|\b\d{1,5}\.\d{2}\b",
+    r"(?:\$|rs\.?\s*)\s*\d{1,5}(?:\.\d{2})?\b"
+    r"|\b\d{1,5}(?:\.\d{2})?\s*\$"
+    r"|\b\d{1,5}(?:\.\d{2})?\s*(?:dollars?|usd)\b"
+    r"|\b\d{1,5}\.\d{2}\b",
     re.IGNORECASE,
 )
 _REVENUE_ORDER_QUANTITY = re.compile(
