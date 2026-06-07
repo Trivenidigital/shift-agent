@@ -637,17 +637,163 @@ class TestF9SickCallAlert:
         _seed_config(state_env)
         _seed_roster(state_env, employee_phone="+19045550101")
 
-        with patch.object(actions_mod, "fire_pushover_alert") as mock_pushover:
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
+             patch.object(actions_mod, "has_pending_candidate_response", return_value=False), \
+             patch.object(actions_mod, "fire_pushover_alert") as mock_pushover, \
+             patch.object(actions_mod, "audit_dispatcher_routed", create=True) as mock_routed, \
+             patch.object(actions_mod, "invoke_shift_sick_call", return_value=(0, "ok", ""), create=True) as mock_shift:
             event = _make_event("Boss I have fever, can't come tomorrow",
                                  "19045550101@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
 
-        # Plugin returns None — LLM still handles
-        assert result is None
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router F9: invoked handle-shift-sick-call (rc=0)",
+        }
         mock_pushover.assert_called_once()
+        mock_routed.assert_called_once()
+        mock_shift.assert_called_once()
+        assert mock_shift.call_args.kwargs["chat_id"] == "19045550101@s.whatsapp.net"
+        assert mock_shift.call_args.kwargs["text"] == "Boss I have fever, can't come tomorrow"
+        assert mock_shift.call_args.kwargs["message_id"].startswith(
+            "cf_router_f7_19045550101@s.whatsapp.net_"
+        )
         _args, kwargs = mock_pushover.call_args
         title_text = (kwargs.get("title") or (_args[0] if _args else "")).lower()
         assert "sick-call" in title_text
+
+    def test_employee_lid_sick_call_invokes_shift_handler_and_skips_llm(self, mods, state_env):
+        """Live regression: employee LID + clear sick-call must not fall
+        through into a stale mixed-domain LLM session.
+        """
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        state_env["roster_path"].write_text(json.dumps({
+            "employees": [{
+                "id": "e008", "name": "Srini", "phone": "+17329837841",
+                "role": "floor", "status": "active",
+                "can_cover_roles": ["cashier", "floor"], "languages": ["en"],
+                "phone_history": [], "restrictions": None,
+                "lid": "201975216009469@lid",
+            }],
+        }), encoding="utf-8")
+
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
+             patch.object(actions_mod, "has_pending_candidate_response", return_value=False), \
+             patch.object(actions_mod, "fire_pushover_alert") as mock_pushover, \
+             patch.object(actions_mod, "audit_dispatcher_routed", create=True) as mock_routed, \
+             patch.object(actions_mod, "invoke_shift_sick_call", return_value=(0, "ok", ""), create=True) as mock_shift:
+            event = _make_event(
+                "Hey Boss! I am down with fever, I can't come for shift today. Sorry for inconvenience.",
+                "201975216009469@lid",
+                message_id="wa-live-1414",
+            )
+            result = hooks_mod.pre_gateway_dispatch(event)
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router F9: invoked handle-shift-sick-call (rc=0)",
+        }
+        mock_pushover.assert_called_once()
+        mock_routed.assert_called_once_with(
+            message_id="wa-live-1414",
+            chat_id="201975216009469@lid",
+            routed_to_skill="handle_sick_call",
+            message_shape="text",
+        )
+        mock_shift.assert_called_once_with(
+            chat_id="201975216009469@lid",
+            text="Hey Boss! I am down with fever, I can't come for shift today. Sorry for inconvenience.",
+            message_id="wa-live-1414",
+        )
+
+    def test_employee_flyer_request_with_boss_phrase_does_not_match_f9(self, mods, state_env):
+        """The removed broad boss/im pattern must not hijack employee Flyer."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_roster(state_env, employee_phone="+19045550101")
+
+        with patch.object(actions_mod, "fire_pushover_alert") as mock_pushover, \
+             patch.object(actions_mod, "invoke_shift_sick_call", create=True) as mock_shift:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    "Boss, I'm creating a flyer for my event",
+                    "19045550101@s.whatsapp.net",
+                ),
+            )
+
+        assert result is None
+        mock_pushover.assert_not_called()
+        mock_shift.assert_not_called()
+
+    def test_malformed_sender_block_text_does_not_take_f9_bypass(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_roster(state_env, employee_phone="+19045550101")
+
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
+             patch.object(actions_mod, "fire_pushover_alert") as mock_pushover, \
+             patch.object(actions_mod, "invoke_shift_sick_call", create=True) as mock_shift:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    "[shift-agent-sender malformed]\nBoss I have fever, can't come tomorrow",
+                    "19045550101@s.whatsapp.net",
+                ),
+            )
+
+        assert result is None
+        mock_pushover.assert_not_called()
+        mock_shift.assert_not_called()
+
+    def test_pending_candidate_response_outranks_f9_bypass(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_roster(state_env, employee_phone="+19045550101")
+
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
+             patch.object(actions_mod, "has_pending_candidate_response", return_value=True), \
+             patch.object(actions_mod, "fire_pushover_alert") as mock_pushover, \
+             patch.object(actions_mod, "invoke_shift_sick_call", create=True) as mock_shift:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    "Sorry can't cover today",
+                    "19045550101@s.whatsapp.net",
+                ),
+            )
+
+        assert result is None
+        mock_pushover.assert_not_called()
+        mock_shift.assert_not_called()
+
+    def test_shift_handler_failure_is_audited_and_still_skips_llm(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_roster(state_env, employee_phone="+19045550101")
+
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
+             patch.object(actions_mod, "has_pending_candidate_response", return_value=False), \
+             patch.object(actions_mod, "fire_pushover_alert"), \
+             patch.object(actions_mod, "audit_dispatcher_routed", create=True), \
+             patch.object(actions_mod, "audit_intercepted") as mock_audit, \
+             patch.object(actions_mod, "invoke_shift_sick_call", return_value=(127, "", "missing"), create=True):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    "I have fever, can't come tomorrow",
+                    "19045550101@s.whatsapp.net",
+                    message_id="msg-f9-fail",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router F9: invoked handle-shift-sick-call (rc=127)",
+        }
+        mock_audit.assert_any_call(
+            reason="error",
+            chat_id="19045550101@s.whatsapp.net",
+            subprocess_rc=127,
+            detail="f9_shift_sick_call_failed; stdout=''; stderr='missing'",
+        )
 
     def test_non_employee_sick_text_NOT_alerted(self, mods, state_env):
         """A random sender saying 'sick' shouldn't trigger F9 alert."""
@@ -655,7 +801,8 @@ class TestF9SickCallAlert:
         _seed_config(state_env)
         _seed_roster(state_env)
 
-        with patch.object(actions_mod, "fire_pushover_alert") as mock_pushover:
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=False), \
+             patch.object(actions_mod, "fire_pushover_alert") as mock_pushover:
             event = _make_event("I'm sick of waiting for catering",
                                  "5555555555@s.whatsapp.net")
             hooks_mod.pre_gateway_dispatch(event)
@@ -668,7 +815,11 @@ class TestF9SickCallAlert:
         _seed_config(state_env)
         _seed_roster(state_env, employee_phone="+19045550101")
 
-        with patch.object(actions_mod, "fire_pushover_alert") as mock_pushover:
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
+             patch.object(actions_mod, "has_pending_candidate_response", return_value=False), \
+             patch.object(actions_mod, "fire_pushover_alert") as mock_pushover, \
+             patch.object(actions_mod, "audit_dispatcher_routed", create=True), \
+             patch.object(actions_mod, "invoke_shift_sick_call", return_value=(0, "ok", ""), create=True) as mock_shift:
             event = _make_event("can't come tomorrow, fever",
                                  "19045550101@s.whatsapp.net")
             hooks_mod.pre_gateway_dispatch(event)
@@ -676,6 +827,7 @@ class TestF9SickCallAlert:
             hooks_mod.pre_gateway_dispatch(event)
 
         assert mock_pushover.call_count == 1
+        assert mock_shift.call_count == 3
 
     def test_employee_normal_text_NOT_alerted(self, mods, state_env):
         hooks_mod, actions_mod = mods

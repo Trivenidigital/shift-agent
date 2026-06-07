@@ -23,6 +23,7 @@ for script in \
     /usr/local/bin/log-decision \
     /usr/local/bin/log-decision-direct \
     /usr/local/bin/create-proposal \
+    /usr/local/bin/handle-shift-sick-call \
     /usr/local/bin/update-proposal-status \
     /usr/local/bin/send-coverage-message \
     /usr/local/bin/render-coverage-template \

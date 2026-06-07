@@ -49,6 +49,7 @@ CREATE_CATERING_PROPOSALS_BIN = Path("/usr/local/bin/create-catering-proposal-op
 SELECT_CATERING_PROPOSAL_BIN = Path("/usr/local/bin/select-catering-proposal")
 CREATE_FLYER_PROJECT_BIN = Path("/usr/local/bin/create-flyer-project")
 BARE_FLYER_SEND_BIN = Path("/usr/local/bin/bare-flyer-render-and-send")  # Approach B async render+send
+HANDLE_SHIFT_SICK_CALL_BIN = Path("/usr/local/bin/handle-shift-sick-call")
 HANDLE_FLYER_ONBOARDING_BIN = Path("/usr/local/bin/handle-flyer-onboarding")
 HANDLE_FLYER_INTAKE_BIN = Path("/usr/local/bin/handle-flyer-intake")
 STORE_FLYER_BRAND_ASSET_BIN = Path("/usr/local/bin/store-flyer-brand-asset")
@@ -153,6 +154,45 @@ def is_employee_chat(chat_id: str) -> bool:
         return False
     except Exception:
         return False
+
+
+def is_verified_employee_chat(chat_id: str) -> bool:
+    """True only when identify-sender and roster both resolve active employee.
+
+    F9 used to be alert-only, so roster-only matching was enough. Once F9 can
+    skip the LLM and invoke Shift directly, the route must be gated by the same
+    identity authority as dispatch_shift_agent: identify-sender metadata.
+    """
+    identity = identify_sender_metadata(chat_id)
+    if identity.get("role") != "employee":
+        return False
+    return is_employee_chat(chat_id)
+
+
+def has_pending_candidate_response(chat_id: str) -> bool:
+    """Return True if this employee has a sent proposal awaiting YES/NO."""
+    identity = identify_sender_metadata(chat_id)
+    emp_id = identity.get("employee_id")
+    if not emp_id:
+        return False
+    try:
+        with PENDING_PATH.open(encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    proposals = doc.get("proposals", {}) if isinstance(doc, dict) else {}
+    if isinstance(proposals, dict):
+        rows = proposals.values()
+    elif isinstance(proposals, list):
+        rows = proposals
+    else:
+        rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("status") == "sent" and row.get("candidate_employee_id") == emp_id:
+            return True
+    return False
 
 
 # === State lookups ===
@@ -943,6 +983,80 @@ def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
         sys.stderr.write(f"cf-router: audit emit failed (non-fatal): {e}\n")
+
+
+def identify_sender_metadata(identifier: str) -> dict:
+    """Return identify-sender JSON for phone/LID/JID, or an unknown-role stub."""
+    try:
+        result = subprocess.run(
+            [str(IDENTIFY_SENDER_BIN), identifier],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return {"role": "unknown"}
+        doc = json.loads(result.stdout)
+        if isinstance(doc, dict):
+            return doc
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+        pass
+    return {"role": "unknown"}
+
+
+def audit_dispatcher_routed(
+    *,
+    message_id: str,
+    chat_id: str,
+    routed_to_skill: str,
+    message_shape: str = "text",
+) -> None:
+    """Emit the standard dispatcher_routed row for deterministic cf-router routes.
+
+    F9 now claims verified employee sick-call traffic before the LLM. Writing the
+    same route row keeps routing-accuracy monitoring aligned with the SKILL
+    dispatcher contract instead of creating a parallel metric.
+    """
+    try:
+        _ensure_platform_path()
+        from safe_io import ndjson_append  # type: ignore
+        from schemas import DispatcherRouted  # type: ignore
+
+        identity = identify_sender_metadata(chat_id)
+        sender_lid = identity.get("lid")
+        if not sender_lid and chat_id.endswith("@lid"):
+            sender_lid = chat_id
+        entry = DispatcherRouted(
+            type="dispatcher_routed",
+            ts=datetime.now(timezone.utc),
+            message_id=message_id,
+            sender_role=identity.get("role", "unknown"),
+            message_shape=message_shape,  # type: ignore[arg-type]
+            routed_to_skill=routed_to_skill,
+            sender_phone=identity.get("phone_normalized"),
+            sender_lid=sender_lid,
+        )
+        ndjson_append(LOG_PATH, entry.model_dump_json())
+    except Exception as e:
+        sys.stderr.write(f"cf-router: dispatcher_routed audit emit failed (non-fatal): {e}\n")
+
+
+def invoke_shift_sick_call(*, chat_id: str, text: str, message_id: str) -> tuple[int, str, str]:
+    """Run the Shift-owned deterministic sick-call entrypoint."""
+    try:
+        result = subprocess.run(
+            [
+                str(PYTHON_BIN),
+                str(HANDLE_SHIFT_SICK_CALL_BIN),
+                "--chat-id", chat_id,
+                "--message-text", text,
+                "--message-id", message_id,
+            ],
+            capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired as exc:
+        return 124, exc.stdout or "", exc.stderr or "timeout"
+    except OSError as exc:
+        return 127, "", str(exc)
 
 
 def audit_source_vs_new(

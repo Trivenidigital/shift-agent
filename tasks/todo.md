@@ -1,5 +1,39 @@
 # Backlog — pending items
 
+## Active - Router trust-zone emergency fix (2026-06-07)
+
+**Drift-check tag:** extends-Hermes
+
+**New primitives introduced:** Shift-owned `handle-shift-sick-call` CLI for deterministic cf-router F9 handoff.
+
+**Hermes-first analysis**
+
+| Domain | Hermes skill found? | Decision |
+|---|---|---|
+| WhatsApp ingress and sender metadata | Hermes gateway already provides pre-dispatch hook inputs and v=1 sender block | use it |
+| Employee identity resolution | existing local `identify-sender` + roster/LID mapping | use it; Hermes must not decide identity |
+| Employee absence routing | none found in current local/public Hermes skill surface | keep a narrow deterministic Shift handoff now |
+| Longer-term route judgment | Hermes can host a skill, but hook contract still needs deterministic validation | follow-up shadow-mode `frontdoor_router` design/PR |
+
+Awesome Hermes Agent ecosystem check: no specific maintained sick-call/frontdoor trust-zone skill was identified; use Hermes substrate, not custom identity judgment.
+
+- [x] Diagnose live screenshot path: F9 fired, identity resolved as employee by LID, no `dispatcher_routed` row, LLM sent generic failure from stale mixed-domain session.
+- [x] Put verified employee absence intent before broad Catering/Flyer keywords in `dispatch_shift_agent`.
+- [x] Make cf-router F9 deterministic for verified employee sick-call: alert, write `dispatcher_routed`, invoke Shift CLI, return `skip`.
+- [x] Add regression tests for employee absence vs broad customer-facing keywords, customer Catering, employee Flyer-without-absence, invalid sender block.
+- [x] Add Shift CLI tests for no-schedule live fallback and normal scheduled proposal creation.
+- [x] Address review blockers: remove broad `boss/sir/madam` F9 trigger, require verified employee identity before F9 skip, let pending candidate responses outrank F9, audit nonzero Shift CLI exits, and add smoke coverage for `/usr/local/bin/handle-shift-sick-call`.
+- [x] Run focused Windows and Linux verification.
+
+Review/results:
+- Root cause was gateway/skill invocation path, not Shift handler parsing: cf-router F9 was alert-only and returned allow, so Hermes could continue without invoking `dispatch_shift_agent`.
+- The live roster had no schedule for the screenshot target date; the new CLI handles that explicitly by acknowledging the employee and alerting the owner for manual coverage instead of falling into generic chat.
+- Review: read-only subagent review found F9 false-positive, identity-gating, candidate-response, failure-audit, and smoke-list gaps; all were fixed in this branch.
+- Verification: dispatcher replay 42 passed / 1 skipped; Shift sick-call script 2 passed; combined Windows focused 44 passed / 1 skipped; py_compile passed for changed Python modules; Git Bash `bash -n` passed for `shift-agent-smoke-test.sh`; Linux cf-router plugin suite on throwaway `/tmp` copy 144 passed.
+
+Follow-up, separate PR/design only:
+- [ ] Design Hermes `frontdoor_router` shadow-mode skill. It must consume deterministic inputs (`validate-sender-block`, `identify-sender`, active state summary, enabled features, raw text), output structured `RoutingDecision`, and be wrapped by a deterministic trust-zone validator. Do not mix this into the emergency routing fix.
+
 ## Active - Full SMB-Agents non-Flyer autonomous code review (2026-05-31)
 
 **Drift-check tag:** extends-Hermes

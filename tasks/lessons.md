@@ -1,5 +1,11 @@
 # Lessons
 
+## 2026-06-07 - Fix current front door before introducing Hermes router
+
+- When a live routing failure is caused by the current deterministic/skill-matrix front door, fix that path first: live log diagnosis, trust-zone priority, replay tests, and cf-router behavior. Do not mix a Hermes `frontdoor_router` redesign into the emergency PR.
+- A future Hermes router must consume deterministic identity/state inputs and emit a structured route decision behind a Python trust-zone validator. Hermes may judge intent, but Python/tools decide identity and enforce forbidden route zones.
+- When promoting an alert-only classifier to a deterministic skip/invoke path, remove broad false-positive patterns and add negative route tests. Alert-only tolerance does not carry over to LLM-bypass behavior.
+
 ## 2026-06-04 - Clean deploys must not drop live-only flyer routing
 
 - If a live flyer route works only because of an uncommitted/hotpatched cf-router block, the next clean tarball deploy can silently remove it and re-expose stale catering lead hijacks. Before deploy, diff the active VPS tarball/source against the branch for cf-router Flyer intercepts and commit the live routing block to source.

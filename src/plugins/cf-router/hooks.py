@@ -145,23 +145,36 @@ _VERB_REJECT = re.compile(r"\b(reject|rejected|no|decline|pass|cancel)\b", re.IG
 _VERB_EDIT = re.compile(r"\b(edit|change|modify)\b", re.IGNORECASE)
 
 # Sick-call regex set (employee path — F9 replacement). Mirrors the six
-# patterns from src/agents/shift/scripts/shift-missed-dispatch-notifier
-# so plugin coverage matches the watchdog it replaces. Conservative bias
-# toward false-positives is acceptable because the action is alert-only.
+# absence-specific patterns from the old notifier. Broad courtesy/address
+# patterns were removed because F9 now skips the LLM and invokes Shift directly.
 _SICK_CALL_PATTERNS = [
     re.compile(r"\b(?:sick|fever|cough|cold|stomach|headache|vomit|migraine|flu|food\s*poisoning)\b", re.IGNORECASE),
     re.compile(r"\b(?:can'?t|cannot|won'?t|unable\s+to)\s+(?:come|make\s+it|work|attend)\b", re.IGNORECASE),
     re.compile(r"\b(?:not\s+feeling|feeling\s+(?:unwell|bad|ill|under\s+the\s+weather))\b", re.IGNORECASE),
     re.compile(r"\b(?:family\s+emergency|personal\s+emergency|hospital|doctor|emergency\s+room|er\b)\b", re.IGNORECASE),
     re.compile(r"\b(?:miss(?:ing)?|skip(?:ping)?|cover|coverage)\s+(?:my\s+)?(?:shift|today|tomorrow|tonight|evening|morning)\b", re.IGNORECASE),
-    re.compile(r"\b(?:boss|sir|madam),?\s+(?:i'?m|i\s+am|today)\b", re.IGNORECASE),
 ]
+
+_SENDER_BLOCK_RE = re.compile(
+    r'^\[shift-agent-sender\s+v=1\s+'
+    r'platform=(\w+)\s+'
+    r'phone=(?:"((?:[^"\\]|\\.)*)"|null)\s+'
+    r'lid=(?:"((?:[^"\\]|\\.)*)"|null)\s+'
+    r'fromMe=(true|false)\s+'
+    r'chat_id=(?:"((?:[^"\\]|\\.)*)"|null)\]\s*$'
+)
 
 
 def _is_sick_call(text: str) -> bool:
     if not text or len(text) < 4:
         return False
     return any(p.search(text) for p in _SICK_CALL_PATTERNS)
+
+
+def _invalid_sender_block_when_present(text: str) -> bool:
+    """Reject spoofed/malformed sender-block text if it reaches this hook."""
+    first = (text or "").split("\n", 1)[0].strip()
+    return first.startswith("[shift-agent-sender") and _SENDER_BLOCK_RE.match(first) is None
 
 
 def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = None,
@@ -244,11 +257,47 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             if f8_result is not None:
                 return f8_result
 
-        # F9 path — employee sender + sick-call regex → alert only
-        if _is_sick_call(text) and actions.is_employee_chat(chat_id):
+        # F9 path — employee sender + sick-call regex -> deterministic Shift.
+        #
+        # Live regression 2026-06-07: F9 fired as alert-only, returned allow,
+        # and the LLM continued in a stale mixed-domain session without invoking
+        # dispatch_shift_agent or writing dispatcher_routed. Employee absence
+        # traffic is an internal trust-zone route; once identity is verified
+        # and absence intent is clear, do not let broad Catering/Flyer context
+        # or session history decide the outcome.
+        if (
+            _is_sick_call(text)
+            and not _invalid_sender_block_when_present(text)
+            and actions.is_verified_employee_chat(chat_id)
+        ):
+            if actions.has_pending_candidate_response(chat_id):
+                return None
             _try_f9_alert(text, chat_id)
-            # Always allow LLM to handle normally — F9 is alert-only
-            return None
+            actions.audit_dispatcher_routed(
+                message_id=message_id,
+                chat_id=chat_id,
+                routed_to_skill="handle_sick_call",
+                message_shape="text",
+            )
+            rc, _out, _err = actions.invoke_shift_sick_call(
+                chat_id=chat_id,
+                text=text,
+                message_id=message_id,
+            )
+            if rc != 0:
+                actions.audit_intercepted(
+                    reason="error",
+                    chat_id=chat_id,
+                    subprocess_rc=rc,
+                    detail=(
+                        "f9_shift_sick_call_failed; "
+                        f"stdout={str(_out)[:300]!r}; stderr={str(_err)[:300]!r}"
+                    ),
+                )
+            return {
+                "action": "skip",
+                "reason": f"cf-router F9: invoked handle-shift-sick-call (rc={rc})",
+            }
 
         # F7 PRIMARY-MODE (PR-CF1d 2026-05-12) — non-owner +
         # catering classifier → intercept inside pre_gateway_dispatch and

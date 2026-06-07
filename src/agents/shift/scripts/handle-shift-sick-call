@@ -1,0 +1,473 @@
+#!/usr/bin/env python3
+"""Deterministic sick-call entrypoint for verified employee absence traffic.
+
+This is the CLI cf-router calls after it has already verified employee identity
+and absence intent. It mirrors the handle_sick_call SKILL contract with
+deterministic helpers: resolve identity, check roster/schedule, create a
+proposal when there is a scheduled shift, and notify the owner for manual
+coverage when there is no schedule row.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any, Optional
+from zoneinfo import ZoneInfo
+
+sys.path.insert(0, "/opt/shift-agent")
+
+import yaml  # noqa: E402
+from schemas import ActionExecutionContext, Config, Employee, Roster, ScheduleEntry  # noqa: E402
+from exit_codes import (  # noqa: E402
+    EXIT_DEPENDENCY_DOWN,
+    EXIT_INVALID_INPUT,
+    EXIT_NOT_FOUND,
+    EXIT_OK,
+    EXIT_PRIVILEGE_DENIED,
+    EXIT_SCHEMA_VIOLATION,
+)
+
+
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+ROSTER_PATH = Path("/opt/shift-agent/roster.json")
+PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
+
+IDENTIFY_SENDER_BIN = Path("/usr/local/bin/identify-sender")
+CREATE_PROPOSAL_BIN = Path("/usr/local/bin/create-proposal")
+RENDER_TEMPLATE_BIN = Path("/usr/local/bin/render-coverage-template")
+NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
+PYTHON_BIN = Path("/usr/local/lib/hermes-agent/venv/bin/python")
+
+SUBPROCESS_TIMEOUT_SEC = 30
+ACTIVE_PROPOSAL_STATUSES = {
+    "awaiting_owner_approval",
+    "approved",
+    "reconciling",
+    "sent",
+}
+
+
+def _now(tz_name: str) -> datetime:
+    return datetime.now(ZoneInfo(tz_name))
+
+
+def _load_config() -> Config:
+    with CONFIG_PATH.open(encoding="utf-8") as f:
+        return Config.model_validate(yaml.safe_load(f))
+
+
+def _load_roster() -> Roster:
+    with ROSTER_PATH.open(encoding="utf-8") as f:
+        return Roster.model_validate(json.load(f))
+
+
+def _identify_sender(chat_id: str) -> dict[str, Any]:
+    result = subprocess.run(
+        [str(IDENTIFY_SENDER_BIN), chat_id],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return {"role": "unknown"}
+    try:
+        doc = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {"role": "unknown"}
+    return doc if isinstance(doc, dict) else {"role": "unknown"}
+
+
+def _resolve_employee(roster: Roster, identity: dict[str, Any], chat_id: str) -> Optional[Employee]:
+    employee_id = identity.get("employee_id")
+    if employee_id:
+        for emp in roster.employees:
+            if emp.id == employee_id and emp.status == "active":
+                return emp
+
+    phone = identity.get("phone_normalized")
+    if phone:
+        found = roster.find_by_phone(phone)
+        if found is not None:
+            return found
+
+    lid = identity.get("lid")
+    if not lid and chat_id.endswith("@lid"):
+        lid = chat_id
+    if lid:
+        for emp in roster.employees:
+            if emp.status == "active" and emp.lid == lid:
+                return emp
+    return None
+
+
+def _parse_absence_date(text: str, tz_name: str) -> str:
+    body = text.lower()
+    today = _now(tz_name).date()
+    explicit = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", text)
+    if explicit:
+        return date.fromisoformat(explicit.group(1)).isoformat()
+    if "tomorrow" in body:
+        return (today + timedelta(days=1)).isoformat()
+    return today.isoformat()
+
+
+def _reason_short(text: str) -> str:
+    body = text.lower()
+    if "fever" in body:
+        return "health: fever"
+    if any(term in body for term in ("sick", "flu", "cold", "cough", "headache")):
+        return "health"
+    if "emergency" in body:
+        return "emergency"
+    cleaned = re.sub(r"[^\w\s.,!?'()/-]", " ", text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return (cleaned or "employee absence")[:60]
+
+
+def _operator_excerpt(text: str, limit: int = 180) -> str:
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    return cleaned[:limit]
+
+
+def _short_name(emp: Employee) -> str:
+    return emp.nickname or emp.name.split()[0] or emp.name
+
+
+def _find_schedule(roster: Roster, employee_id: str, target_date: str) -> Optional[ScheduleEntry]:
+    for entry in roster.schedule.get(target_date, []):
+        if entry.employee_id == employee_id:
+            return entry
+    return None
+
+
+def _pending_candidate_conflicts(target_date: str) -> set[str]:
+    if not PENDING_PATH.exists():
+        return set()
+    try:
+        with PENDING_PATH.open(encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return set()
+    proposals = doc.get("proposals", {})
+    if isinstance(proposals, list):
+        rows = proposals
+    elif isinstance(proposals, dict):
+        rows = list(proposals.values())
+    else:
+        rows = []
+    conflicts: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("status") not in ACTIVE_PROPOSAL_STATUSES:
+            continue
+        if row.get("absent_date") != target_date:
+            continue
+        candidate_id = row.get("candidate_employee_id")
+        if candidate_id:
+            conflicts.add(str(candidate_id))
+    return conflicts
+
+
+def _restricted_on(emp: Employee, target_date: str) -> bool:
+    restrictions = emp.restrictions or {}
+    if not isinstance(restrictions, dict):
+        return False
+    if target_date in {str(d) for d in restrictions.get("dates_unavailable", [])}:
+        return True
+    try:
+        weekday = date.fromisoformat(target_date).strftime("%A").lower()
+    except ValueError:
+        return False
+    no_work_days = {str(d).lower() for d in restrictions.get("no_work_days", [])}
+    return weekday in no_work_days
+
+
+def _best_candidate(roster: Roster, absent: Employee, entry: ScheduleEntry, target_date: str) -> Optional[Employee]:
+    scheduled_ids = {s.employee_id for s in roster.schedule.get(target_date, [])}
+    conflicted_ids = _pending_candidate_conflicts(target_date)
+    candidates = []
+    for emp in roster.employees:
+        if emp.status != "active" or emp.id == absent.id:
+            continue
+        if entry.role not in emp.can_cover_roles:
+            continue
+        if emp.id in scheduled_ids or emp.id in conflicted_ids:
+            continue
+        if _restricted_on(emp, target_date):
+            continue
+        shared_languages = len(set(absent.languages or []) & set(emp.languages or []))
+        role_match = 1 if emp.role == entry.role else 0
+        candidates.append((role_match, shared_languages, emp.name, emp))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda row: (row[0], row[1], row[2]), reverse=True)
+    return candidates[0][3]
+
+
+def _render_template(template_name: str, fields: dict[str, Any]) -> tuple[bool, str]:
+    result = subprocess.run(
+        [
+            str(PYTHON_BIN),
+            str(RENDER_TEMPLATE_BIN),
+            template_name,
+            "--fields-json",
+            json.dumps(fields),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=SUBPROCESS_TIMEOUT_SEC,
+    )
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout or "").strip()
+    return True, result.stdout
+
+
+def _create_proposal(
+    *,
+    absent_employee_id: str,
+    absent_date: str,
+    absent_shift: str,
+    absent_role: str,
+    absent_reason: str,
+    input_message: str,
+    message_id: str,
+    candidate: Optional[Employee],
+    rendered_message: str,
+) -> tuple[int, dict[str, Any], str]:
+    cmd = [
+        str(PYTHON_BIN),
+        str(CREATE_PROPOSAL_BIN),
+        "--absent-employee-id",
+        absent_employee_id,
+        "--absent-date",
+        absent_date,
+        "--absent-shift",
+        absent_shift,
+        "--absent-role",
+        absent_role,
+        "--absent-reason",
+        absent_reason,
+        "--input-message",
+        input_message,
+        "--message-id",
+        message_id,
+    ]
+    if candidate is not None:
+        cmd.extend(["--candidate-employee-id", candidate.id])
+        cmd.extend(["--candidate-name", candidate.name])
+    if rendered_message:
+        cmd.extend(["--rendered-message", rendered_message])
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=SUBPROCESS_TIMEOUT_SEC,
+    )
+    detail = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0:
+        return result.returncode, {}, detail
+    try:
+        return 0, json.loads(result.stdout), detail
+    except json.JSONDecodeError:
+        return EXIT_SCHEMA_VIOLATION, {}, f"create-proposal emitted non-JSON: {detail[:200]}"
+
+
+def _send_text(jid: str, message: str, action_id: str) -> tuple[bool, str, str]:
+    from safe_io import bridge_post  # noqa: WPS433 - lazy import keeps Windows tests importable
+
+    ctx = ActionExecutionContext(
+        action_id=action_id,
+        is_regulated_action=False,
+        verified_action_result=True,
+        mutation_class="external_irreversible",
+    )
+    ok, mid, err, status = bridge_post(jid, message, action_context=ctx)
+    return ok, mid, "" if ok else f"{status}: {err}"
+
+
+def _notify_owner(title: str, message: str, priority: int = 1) -> None:
+    try:
+        subprocess.run(
+            [
+                str(NOTIFY_OWNER_BIN),
+                "--priority",
+                str(priority),
+                "--title",
+                title,
+                "--",
+                message,
+            ],
+            check=False,
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def _owner_jid(cfg: Config) -> str:
+    return cfg.owner.self_chat_jid or f"{str(cfg.owner.phone).lstrip('+')}@s.whatsapp.net"
+
+
+def process_absence(*, chat_id: str, text: str, message_id: str) -> int:
+    if not chat_id or not text:
+        return EXIT_INVALID_INPUT
+
+    identity = _identify_sender(chat_id)
+    if identity.get("role") != "employee":
+        return EXIT_PRIVILEGE_DENIED
+
+    try:
+        cfg = _load_config()
+        roster = _load_roster()
+    except Exception as exc:
+        _notify_owner("Shift sick-call failed", f"Config/roster load failed: {exc}", priority=2)
+        return EXIT_SCHEMA_VIOLATION
+
+    employee = _resolve_employee(roster, identity, chat_id)
+    if employee is None:
+        _notify_owner(
+            "Shift sick-call unresolved employee",
+            f"identify-sender returned employee but no active roster row matched {chat_id}.",
+            priority=2,
+        )
+        return EXIT_NOT_FOUND
+
+    target_date = _parse_absence_date(text, cfg.customer.timezone)
+    reason = _reason_short(text)
+    owner_jid = _owner_jid(cfg)
+    schedule_entry = _find_schedule(roster, employee.id, target_date)
+
+    if schedule_entry is None:
+        employee_msg = (
+            f"Understood, {_short_name(employee)}. I found your employee profile, "
+            f"but roster has no scheduled shift for {target_date}. I alerted the owner "
+            "to handle coverage manually."
+        )
+        owner_msg = (
+            f"Shift Agent: {employee.name} reported an absence for {target_date}, "
+            "but roster has no scheduled shift for them. "
+            f"Message: {_operator_excerpt(text)}"
+        )
+        emp_ok, _mid, emp_err = _send_text(chat_id, employee_msg, "shift.sick_call.employee_no_schedule_ack")
+        owner_ok, _owner_mid, owner_err = _send_text(owner_jid, owner_msg, "shift.sick_call.owner_no_schedule_alert")
+        if not owner_ok:
+            _notify_owner(
+                "Shift sick-call no schedule",
+                f"{employee.name} absence {target_date}; owner WhatsApp alert failed: {owner_err[:200]}",
+                priority=2,
+            )
+        if not emp_ok and not owner_ok:
+            _notify_owner(
+                "Shift sick-call send failed",
+                f"Employee and owner WhatsApp sends failed: employee={emp_err[:160]} owner={owner_err[:160]}",
+                priority=2,
+            )
+            return EXIT_DEPENDENCY_DOWN
+        return EXIT_OK
+
+    employee_ack = (
+        f"Understood, {_short_name(employee)}. Hope you feel better soon. "
+        "I am checking coverage with the owner."
+    )
+    _send_text(chat_id, employee_ack, "shift.sick_call.employee_ack")
+
+    candidate = _best_candidate(roster, employee, schedule_entry, target_date)
+    candidate_rendered = ""
+    candidate_reasoning = "No roster coverage candidate is available; owner manual action needed."
+    if candidate is not None:
+        ok, rendered = _render_template(
+            "coverage_message_to_candidate",
+            {
+                "candidate_name": candidate.name,
+                "absent_employee_name": employee.name,
+                "absent_date_human": target_date,
+                "absent_reason_short": reason,
+                "absent_shift": schedule_entry.shift,
+                "absent_role": schedule_entry.role,
+                "owner_name": cfg.owner.name,
+            },
+        )
+        if ok:
+            candidate_rendered = rendered
+        else:
+            candidate_rendered = (
+                f"Hi {candidate.name}, {employee.name} is out {target_date} "
+                f"({reason}). Can you cover {schedule_entry.shift} {schedule_entry.role}?"
+            )
+        candidate_reasoning = f"Can cover role {schedule_entry.role} and is not scheduled that day."
+
+    rc, proposal, detail = _create_proposal(
+        absent_employee_id=employee.id,
+        absent_date=target_date,
+        absent_shift=schedule_entry.shift,
+        absent_role=schedule_entry.role,
+        absent_reason=reason,
+        input_message=text,
+        message_id=message_id,
+        candidate=candidate,
+        rendered_message=candidate_rendered,
+    )
+    if rc != 0:
+        _notify_owner(
+            "Shift sick-call proposal failed",
+            f"{employee.name} absence {target_date}; create-proposal rc={rc}: {detail[:220]}",
+            priority=2,
+        )
+        return rc
+
+    proposal_id = str(proposal.get("proposal_id") or "")
+    code = str(proposal.get("code") or "")
+    candidate_name = candidate.name if candidate is not None else "Manual coverage needed"
+    ok, owner_rendered = _render_template(
+        "proposal_to_owner",
+        {
+            "absent_employee_name": employee.name,
+            "absent_date_human": target_date,
+            "absent_reason_short": reason,
+            "absent_shift": schedule_entry.shift,
+            "absent_role": schedule_entry.role,
+            "candidate_name": candidate_name,
+            "candidate_reasoning": candidate_reasoning,
+            "rendered_coverage_message": candidate_rendered or "No employee message will be sent until owner chooses a manual coverage path.",
+            "code": code,
+        },
+    )
+    if not ok:
+        owner_rendered = (
+            f"Shift Agent: {employee.name} is out {target_date} ({reason}). "
+            f"Shift: {schedule_entry.shift} {schedule_entry.role}. "
+            f"Candidate: {candidate_name}. Proposal {proposal_id} {code}."
+        )
+    owner_ok, _mid, err = _send_text(owner_jid, owner_rendered, "shift.sick_call.owner_proposal")
+    if not owner_ok:
+        _notify_owner(
+            "Shift sick-call owner proposal failed",
+            f"{proposal_id} {code}; owner WhatsApp send failed: {err[:220]}",
+            priority=2,
+        )
+        return EXIT_DEPENDENCY_DOWN
+    return EXIT_OK
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--chat-id", required=True)
+    parser.add_argument("--message-text", required=True)
+    parser.add_argument("--message-id", required=True)
+    args = parser.parse_args()
+    return process_absence(
+        chat_id=args.chat_id,
+        text=args.message_text,
+        message_id=args.message_id,
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(main())

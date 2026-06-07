@@ -351,6 +351,66 @@ def test_body_claiming_owner_does_not_escalate_role(skill_md):
     assert handler != "handle_owner_command", "message text must not escalate role"
 
 
+def test_employee_absence_intent_outranks_broad_catering_words(skill_md):
+    """Verified employee absence intent stays in the internal Shift zone even
+    when the reason contains broad customer-facing words like birthday/party.
+    """
+    raw, handler = mock_llm_priority_order(skill_md, {
+        "raw_text": (
+            "[shift-agent-sender v=1 platform=whatsapp phone=\"+17329837841\" "
+            "lid=null fromMe=false chat_id=\"17329837841@s.whatsapp.net\"]\n"
+            "Sorry boss, the kid's birthday party is tomorrow and I can't make it for shift"
+        ),
+        "identity": {
+            "role": "employee",
+            "employee_id": "e004",
+            "phone_normalized": "+17329837841",
+        },
+        "sender_block": {"valid": True, "v": 1, "phone": "+17329837841"},
+        "config": {"catering.enabled": True, "flyer.enabled": True},
+        "state_files": {},
+    })
+    assert handler == "handle_sick_call", raw
+
+
+def test_customer_catering_intent_stays_customer_facing(skill_md):
+    """Unknown/customer catering traffic still routes to Catering."""
+    raw, handler = mock_llm_priority_order(skill_md, {
+        "raw_text": (
+            "[shift-agent-sender v=1 platform=whatsapp phone=\"+15555550200\" "
+            "lid=null fromMe=false chat_id=\"15555550200@s.whatsapp.net\"]\n"
+            "Birthday party catering for 50 guests next Saturday"
+        ),
+        "identity": {"role": "unknown", "phone_normalized": "+15555550200"},
+        "sender_block": {"valid": True, "v": 1, "phone": "+15555550200"},
+        "config": {"catering.enabled": True, "flyer.enabled": True},
+        "state_files": {},
+    })
+    assert handler == "catering_dispatcher", raw
+
+
+def test_employee_explicit_flyer_without_absence_routes_customer_facing(skill_md):
+    """Employees can still use customer-facing agents when absence intent is
+    absent; identity allows the zone, intent priority picks Flyer.
+    """
+    raw, handler = mock_llm_priority_order(skill_md, {
+        "raw_text": (
+            "[shift-agent-sender v=1 platform=whatsapp phone=\"+17329837841\" "
+            "lid=null fromMe=false chat_id=\"17329837841@s.whatsapp.net\"]\n"
+            "Need a flyer for my event this weekend"
+        ),
+        "identity": {
+            "role": "employee",
+            "employee_id": "e004",
+            "phone_normalized": "+17329837841",
+        },
+        "sender_block": {"valid": True, "v": 1, "phone": "+17329837841"},
+        "config": {"catering.enabled": True, "flyer.enabled": True},
+        "state_files": {},
+    })
+    assert handler == "flyer_dispatcher", raw
+
+
 def test_priority_order_mock_diverges_on_known_ambiguity(fixtures, skill_md):
     """Sanity-print the divergence cases (if any).
 
