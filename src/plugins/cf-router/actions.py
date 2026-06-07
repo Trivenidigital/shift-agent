@@ -27,6 +27,7 @@ from typing import Any, Callable, Iterator, Optional, get_args
 
 # Deployed-system paths (mutable for tests)
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 PROPOSALS_PATH = Path("/opt/shift-agent/state/catering-proposals.json")
 MENU_PENDING_PATH = Path("/opt/shift-agent/state/catering-menu-pending.json")
