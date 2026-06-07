@@ -98,6 +98,46 @@ def test_no_price_request_with_address_phone_zip_does_not_false_positive():
     assert out == [], f"unexpected blockers on a clean no-price flyer: {out}"
 
 
+# ── 4b: locked dessert prices reject invented package pricing ──────────────────
+def test_dessert_locked_prices_block_invented_package_prices():
+    p = _project([
+        _fact("item:0:name", "Mango tresleches - half tray", label="Item"),
+        _fact("item:0:price", "$75", label="Price"),
+        _fact("item:1:name", "Rasmalai tresleches - half tray", label="Item"),
+        _fact("item:1:price", "$70", label="Price"),
+        _fact("item:2:name", "Khalakhandh - 100 count", label="Item"),
+        _fact("item:2:price", "$100", label="Price"),
+    ])
+    out = _blockers(
+        p,
+        f"{BNAME} Graduation Specials Celebration Sweet Box $29.99 "
+        "Graduation Party Platter $49.99 Custom Treat Bags $12.99 each "
+        "Location 90 Brybar Dr Contact +17329837841",
+    )
+    assert _has(out, "unexpected price visible")
+    assert _has(out, "$29.99")
+    assert _has(out, "$49.99")
+    assert _has(out, "$12.99")
+
+
+def test_dessert_locked_prices_allow_normalized_clean_render():
+    p = _project([
+        _fact("item:0:name", "Mango tresleches - half tray", label="Item"),
+        _fact("item:0:price", "$75", label="Price"),
+        _fact("item:1:name", "Rasmalai tresleches - half tray", label="Item"),
+        _fact("item:1:price", "$70", label="Price"),
+        _fact("item:2:name", "Khalakhandh - 100 count", label="Item"),
+        _fact("item:2:price", "$100", label="Price"),
+    ])
+    out = _blockers(
+        p,
+        f"{BNAME} Graduation Dessert Specials Mango tresleches half tray $75 "
+        "Rasmalai tresleches half tray $70 Khalakhandh 100 count $100 "
+        "Location 90 Brybar Dr Contact +17329837841",
+    )
+    assert out == [], f"clean dessert price render should pass: {out}"
+
+
 # ── 5: requested badges / notes must be visible (substantive read) ──────────────
 def test_requested_badges_missing_blocks_when_substantive():
     p = _project(

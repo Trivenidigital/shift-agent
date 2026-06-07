@@ -1,10 +1,31 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 import pytest
 
 from schemas import FlyerLockedFact, FlyerProject, FlyerRequestFields
+
+
+DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF = (
+    "Graduation is here and time to celebrate our kids \n\n"
+    "We take customized orders - Desserts\n\n"
+    "Mango tresleches - half tray - 75$\n"
+    "Rasmalai tresleches - half tray 70$\n"
+    "Apricot delight - half tray - 80$\n"
+    "Butter scotch - half tray 75$\n"
+    "Strawberry pastry - half 70$\n"
+    "Chocolate pastry - half 70$\n"
+    "Gulab jamun - 100count - 80$\n"
+    "Gulabjamun fusion - half tray - 75$\n"
+    "Kheer(Ramadan style) half tray - 55$\n"
+    "Kadhu ki sheet - small tray - 65$\n"
+    "Double ka meeta - small tray - 45$\n"
+    "Kurbanika meeta - small tray - 70$\n"
+    "Carrot halwa - small tray 55$\n"
+    "Khalakhandh - 100 count 100$"
+)
 
 
 def _project(**updates):
@@ -235,6 +256,79 @@ def test_extract_text_facts_does_not_treat_quantity_pieces_as_price():
     assert by_id["item:1:price"].value == "$3"
     assert "item:2:name" not in by_id
     assert "samosa" not in " ".join(fact.value.lower() for fact in facts)
+
+
+@pytest.mark.parametrize(
+    ("price_text", "expected"),
+    [
+        ("75$", "$75"),
+        ("75 $", "$75"),
+        ("75 dollars", "$75"),
+        ("$75", "$75"),
+    ],
+)
+def test_item_price_facts_normalize_suffix_and_prefix_prices(price_text, expected):
+    from agents.flyer.facts import _item_price_facts
+
+    facts = _item_price_facts(f"Mango tresleches - half tray - {price_text}", message_id="m-dessert")
+    by_id = {fact.fact_id: fact for fact in facts}
+
+    assert by_id["item:0:name"].value == "Mango tresleches - half tray"
+    assert by_id["item:0:price"].value == expected
+    assert by_id["item:0:price"].source == "customer_text"
+    assert by_id["item:0:price"].required is True
+
+
+def test_extract_text_facts_locks_exact_dessert_graduation_suffix_price_pairs(monkeypatch):
+    from agents.flyer import facts as facts_module
+
+    monkeypatch.setattr(facts_module, "build_hermes_semantic_brief_provider", lambda: None)
+
+    facts = facts_module.extract_text_facts(
+        FlyerRequestFields(notes=DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF),
+        DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF,
+        message_id="m-dessert-graduation",
+    )
+    by_id = facts_module.facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    expected = [
+        ("Mango tresleches - half tray", "$75"),
+        ("Rasmalai tresleches - half tray", "$70"),
+        ("Apricot delight - half tray", "$80"),
+        ("Butter scotch - half tray", "$75"),
+        ("Strawberry pastry - half", "$70"),
+        ("Chocolate pastry - half", "$70"),
+        ("Gulab jamun - 100 count", "$80"),
+        ("Gulabjamun fusion - half tray", "$75"),
+        ("Kheer(Ramadan style) half tray", "$55"),
+        ("Kadhu ki sheet - small tray", "$65"),
+        ("Double ka meeta - small tray", "$45"),
+        ("Kurbanika meeta - small tray", "$70"),
+        ("Carrot halwa - small tray", "$55"),
+        ("Khalakhandh - 100 count", "$100"),
+    ]
+    assert [by_id[f"item:{idx}:name"].value for idx in range(len(expected))] == [
+        name for name, _price in expected
+    ]
+    assert [by_id[f"item:{idx}:price"].value for idx in range(len(expected))] == [
+        price for _name, price in expected
+    ]
+    assert all(by_id[f"item:{idx}:name"].source == "customer_text" for idx in range(len(expected)))
+    assert all(by_id[f"item:{idx}:price"].required is True for idx in range(len(expected)))
+
+
+def test_extract_text_facts_no_price_thali_request_creates_no_price_facts(monkeypatch):
+    from agents.flyer import facts as facts_module
+
+    monkeypatch.setattr(facts_module, "build_hermes_semantic_brief_provider", lambda: None)
+    raw_request = (
+        "Create a daily thali flyer for Lakshmi's Kitchen with rice, dal, curry, "
+        "pickle, and weekend style. Use address and phone number stored."
+    )
+
+    facts = facts_module.extract_text_facts(FlyerRequestFields(notes=raw_request), raw_request, message_id="m-thali")
+
+    assert [fact for fact in facts if re.match(r"^item:\d+:price$", fact.fact_id)] == []
 
 
 def test_extract_text_facts_locks_all_you_can_eat_offer_price():
