@@ -1,0 +1,16 @@
+{
+  "topic": "visible-contract-validator-flyer-studio",
+  "task_text": "Deterministic post-render visible-contract validator for Flyer Studio. The integrated image model draws all text; sometimes the delivered image violates the brief (leaked [price]/[rice] placeholder tokens, invented prices when none requested, $39.99 rendered as $99, Any item rendered as Every item, internal asset id B0002 visible, title ending in raw medium word flyer, requested catering/delivery/payment badges missing) yet the pipeline logs OUTCOME=sent. A vision read-back QA gate already exists (visual_qa.run_visual_qa -> _vision_text OCRs the rendered PNG via gpt-4o-mini -> extracted_text, runs on every send path before SEND/REROLL/ITERATION, already fails closed via a blockers list, already has PLACEHOLDER_RE + item:N price-pair presence + brand/phone/date checks). The live failures are GAPS in that gate. Fix = consolidate the missing concrete-fact/copy checks into ONE named visible_contract_validator driven by the locked facts / FlyerBrief / request, invoked from the single existing run_visual_qa chokepoint, appending blockers so the existing FAILCLOSED path handles it. Keep integrated renderer; do NOT reopen CD+overlay; do NOT weaken existing checks; do NOT re-enable broad subjective QA. Flag + allowlist scoped to +17329837841. Fail-closed message concise/useful. Hermes is creative brain; Python is deterministic referee.",
+  "completed_at": "2026-06-07T17:55:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 1,
+  "hermes_step_count": 6,
+  "files_to_read_first": [
+    "src/agents/flyer/visual_qa.py",
+    "src/agents/flyer/bare_render.py",
+    "src/agents/flyer/facts.py",
+    "src/platform/schemas.py",
+    "src/agents/flyer/scripts/bare-flyer-render-and-send",
+    "tests/test_flyer_visual_qa.py"
+  ]
+}

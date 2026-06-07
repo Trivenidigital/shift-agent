@@ -4396,6 +4396,31 @@ class FlyerCreativeDirectorRouted(_BaseEntry):
     render_error: str = Field(default="", max_length=120)
 
 
+class FlyerVisibleContractChecked(_BaseEntry):
+    """Records the post-render VISIBLE-contract referee outcome (2026-06-07) for every
+    armed bare render. Hermes draws the flyer; this deterministic referee reads the
+    rendered image back (vision OCR) and proves whether the VISIBLE text obeys the
+    concrete locked facts. Emitted so the operator can MEASURE reliability before
+    deciding whether 'unverified' (the verifier itself could not read the image)
+    should harden from send-anyway to fail-closed.
+
+      - status='pass'       → read OK, no concrete violation → sent
+      - status='blocked'    → read OK, ≥1 concrete violation → FAILCLOSED (not sent)
+      - status='unverified' → vision read-back empty/unavailable → sent anyway (this
+                              scoped phase); ``visible_contract_reason`` records why
+
+    LOG-ONLY; never alters behavior beyond the gate's own send/hold decision."""
+    type: Literal["flyer_visible_contract_checked"] = "flyer_visible_contract_checked"
+    visible_contract_status: Literal["pass", "blocked", "unverified"]
+    visible_contract_reason: str = Field(default="", max_length=200)
+    blockers: list[str] = Field(default_factory=list, max_length=20)
+    module_version: str = Field(min_length=1, max_length=120)
+    module_file: str = Field(default="", max_length=500)
+    resolved_sender: str = Field(default="", max_length=200)
+    chat_id: str = Field(default="", max_length=200)
+    project_id: str = Field(default="", max_length=80)
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -5740,6 +5765,8 @@ LogEntry = Annotated[
         Annotated[FlyerOperatorFlaggedWarnTier, Tag("flyer_operator_flagged_warn_tier")],
         # PR3 2026-06-05 — Creative-Director wiring caller-provenance audit
         Annotated[FlyerCreativeDirectorRouted, Tag("flyer_creative_director_routed")],
+        # 2026-06-07 — post-render visible-contract referee outcome (metrics)
+        Annotated[FlyerVisibleContractChecked, Tag("flyer_visible_contract_checked")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
@@ -5842,7 +5869,7 @@ __all__ = [
     "FlyerSourceContractExtracted", "FlyerSourceVsNewChosen", "FlyerHermesIntentDecision",
     "FlyerIntakeBypassed", "FlyerIntakeBypassOutcome",
     "FlyerQASeverityClassified", "FlyerWarnTierDelivered", "FlyerOperatorFlaggedWarnTier",
-    "FlyerCreativeDirectorRouted",
+    "FlyerCreativeDirectorRouted", "FlyerVisibleContractChecked",
     # PR-ζ 2026-05-26 — regulated-intent runtime context + chokepoint audit variants
     "ActionExecutionContext",
     "FlyerVisualQAReport", "FlyerWarningSummary", "FlyerManualReview", "FlyerAsset", "FlyerConcept", "FlyerRevision",
