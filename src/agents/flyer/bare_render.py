@@ -210,6 +210,42 @@ def _creative_director_armed(resolved_sender: str) -> bool:
     return _normalize_sender(resolved_sender) in _creative_director_allowlist()
 
 
+# --- Advisory skill-driven integrated scene (separate flag from the CD+overlay path) ---
+SKILL_DRIVEN_SCENE_ENABLED_ENV = "FLYER_SKILL_DRIVEN_SCENE"
+SKILL_DRIVEN_SCENE_ALLOWLIST_ENV = "FLYER_SKILL_DRIVEN_SCENE_ALLOWLIST"
+
+
+def _skill_driven_scene_allowlist() -> set[str]:
+    raw = os.environ.get(SKILL_DRIVEN_SCENE_ALLOWLIST_ENV, "") or ""
+    return {n for n in (_normalize_sender(p) for p in raw.split(",")) if n}
+
+
+def _skill_driven_scene_armed(resolved_sender: str) -> bool:
+    """Gate for the advisory integrated-scene art direction — INDEPENDENT of the CD+overlay flag.
+    Flag == "1" AND the normalized resolved sender is allowlisted."""
+    if os.environ.get(SKILL_DRIVEN_SCENE_ENABLED_ENV) != "1":
+        return False
+    return _normalize_sender(resolved_sender) in _skill_driven_scene_allowlist()
+
+
+def _advisory_scene_direction(raw_text: str, locked_facts, customer, resolved_sender: str):
+    """ADVISORY occasion/theme art direction for the INTEGRATED renderer. Returns a VisualDirection
+    when armed (FLYER_SKILL_DRIVEN_SCENE + allowlist) AND the skill produced one; otherwise None so the
+    caller falls back to today's Python scene. NEVER raises and NEVER fail-closes — this improves
+    vague-request quality, it is not a firewall, and it is decoupled from FLYER_CREATIVE_DIRECTOR_ENABLED
+    and from build_flyer_brief's fail-closed contract."""
+    if not _skill_driven_scene_armed(resolved_sender):
+        return None
+    try:
+        cb = _context_builder()
+        advise = getattr(cb, "advise_scene_direction", None)
+        if advise is None:
+            return None
+        return advise(raw_text, locked_facts, customer)
+    except Exception:  # noqa: BLE001 — advisory only; ANY failure -> None -> Python scene fallback
+        return None
+
+
 def _emit_creative_director_audit(*, chat_id: str, resolved_sender: str, reached: bool,
                                   status: str, allowlisted: bool,
                                   error_summary: str = "", errors: list[str] | None = None,
@@ -629,7 +665,7 @@ def _generate_image(prompt: str, *, model: str, aspect_ratio: str = "4:5", image
     return base64.b64decode(url.split(",", 1)[1])
 
 
-def _generate_poster(project, *, strict_note: str = "", raw_bg_dest=None) -> bytes:
+def _generate_poster(project, *, strict_note: str = "", raw_bg_dest=None, scene_direction=None) -> bytes:
     """Generate with an integrated poster by default.
 
     Normal bare generation opts into the May 18 direct full-poster contract while keeping the
@@ -652,7 +688,7 @@ def _generate_poster(project, *, strict_note: str = "", raw_bg_dest=None) -> byt
         with tempfile.TemporaryDirectory() as _td:
             specs = rmod.render_concept_previews(
                 project, _td, model=GEN_MODEL, quality="medium", concept_count=1,
-                repair_instruction=strict_note,
+                repair_instruction=strict_note, scene_direction=scene_direction,
             )
             final = _Path(specs[0].path)
             png = final.read_bytes()
@@ -821,6 +857,9 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
     # Session persistence is enabled by default for customer follow-up edits. Raw-background capture is
     # separately opt-in so the first flyer can keep the direct integrated-poster path.
     raw_bg_dest = _unique_bg_path(chat_id) if (REVISION_APPLY_ENABLED and REVISION_CAPTURE_RAW_BG) else None
+    # Advisory skill-driven occasion/theme scene (FLYER_SKILL_DRIVEN_SCENE + allowlist). None ⇒ today's
+    # Python scene (fallback); never fail-closed. Computed once; reused for both render attempts.
+    scene_direction = _advisory_scene_direction(raw_text, locked_facts, customer, resolved_sender)
     last_blockers: list[str] = []
     last_render_detail = ""
     for attempt in range(2):
@@ -831,7 +870,7 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
               "nothing that is not listed."
         )
         try:
-            png = _generate_poster(project, strict_note=strict, raw_bg_dest=raw_bg_dest)
+            png = _generate_poster(project, strict_note=strict, raw_bg_dest=raw_bg_dest, scene_direction=scene_direction)
         except Exception as e:  # noqa: BLE001
             # last_blockers (the retry strict-note input) keeps the SAME generic shape — no
             # behavior change. The descriptive cause is captured LOG-ONLY in last_render_detail

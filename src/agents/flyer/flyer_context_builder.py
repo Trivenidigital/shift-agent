@@ -45,10 +45,10 @@ except ImportError:  # pragma: no cover - import-path shim
     from agents.flyer.semantic_brief import OPENROUTER_URL, _openrouter_key
 
 try:  # sibling FlyerBrief / validator — flat on the VPS, package-style in repo
-    from flyer_brief import FlyerBrief  # type: ignore
+    from flyer_brief import FlyerBrief, VisualDirection  # type: ignore
     import flyer_brief_validator as _validator  # type: ignore
 except ImportError:  # pragma: no cover - import-path shim
-    from agents.flyer.flyer_brief import FlyerBrief
+    from agents.flyer.flyer_brief import FlyerBrief, VisualDirection
     from agents.flyer import flyer_brief_validator as _validator
 
 
@@ -391,3 +391,48 @@ def build_flyer_brief(
         locked_facts.extend(materialized)
 
     return BriefResult(status="ok", brief=brief)
+
+
+def advise_scene_direction(
+    raw_request: str,
+    locked_facts: Sequence[FlyerLockedFact],
+    business_profile: Mapping[str, Any] | object | None,
+    source_summary: Optional[str] = None,
+    project_context: Optional[str] = None,
+) -> Optional[VisualDirection]:
+    """ADVISORY art-direction for the INTEGRATED renderer — NOT the CD+overlay/firewall path.
+
+    Reuses the ``flyer_generation`` SKILL via the gateway to infer the occasion/season/culture
+    *visual direction* (theme/palette/motifs/subjects), but deliberately departs from
+    ``build_flyer_brief``'s contract:
+
+      - It is **NOT** gated by ``FLYER_CREATIVE_DIRECTOR_ENABLED`` (the caller gates on the separate
+        ``FLYER_SKILL_DRIVEN_SCENE`` flag + allowlist).
+      - It **never fail-closes**: on ANY problem (skill body unreadable, gateway disabled/missing
+        key/error/timeout, unparseable response, missing/empty ``visual_direction``) it returns
+        ``None`` so the caller silently falls back to today's Python integrated scene.
+      - It reads **only** ``visual_direction`` (ignores ``background_brief``, ``offer_groups``,
+        ``fact_refs`` — facts stay Python-injected by reference; this carries NO commercial values).
+
+    The skill is an advisory art director here, never a new reason a render fails.
+    """
+    try:
+        system_prompt = _skill_body()
+        if not system_prompt:
+            return None
+        user_message = _build_user_message(
+            raw_request, locked_facts, business_profile, source_summary, project_context
+        )
+        raw = _call_gateway(system_prompt, user_message)
+        if not raw:
+            return None
+        vd_raw = dict(raw).get("visual_direction")
+        if not isinstance(vd_raw, Mapping):
+            return None
+        vd = VisualDirection.model_validate(dict(vd_raw))
+        # An empty direction is no better than today's Python scene — fall back instead.
+        if not (vd.theme_family.strip() or vd.visual_subjects or vd.motifs):
+            return None
+        return vd
+    except Exception:  # noqa: BLE001 — advisory only; ANY failure -> None -> Python scene fallback
+        return None
