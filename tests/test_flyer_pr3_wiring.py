@@ -671,6 +671,11 @@ def test_change_request_is_not_a_reroll(monkeypatch):
         "generate again but change the date to July 4",
         "redo this flyer with no Italian dishes",
         "regenerate and add our phone number",
+        # Codex 2026-06-07: a change BETWEEN the verb and "again" must NOT be swallowed into a
+        # re-roll (these reach _is_pure_reroll via "this flyer" -> must come back REVISION_NEEDED)
+        "generate this flyer in blue again",
+        "generate this flyer no Italian again",
+        "generate this flyer add phone number again",
     ):
         status, _ = br.render_grounded(CHAT_ID, text, message_id="rrc", sender_phone=SENDER)
         assert status == br.REVISION_NEEDED, text
@@ -685,7 +690,11 @@ def test_is_pure_reroll_detector():
         assert br._is_pure_reroll(t) is True, t
     for t in ("change the date to July 4", "no Italian flavour", "add the phone number",
               "make it blue", "regenerate with a blue background", "remove the price",
-              "you forgot the address", "use $8.99 for all items"):
+              "you forgot the address", "use $8.99 for all items",
+              # change between the verb and "again" must not be swallowed (Codex 2026-06-07)
+              "generate this flyer in blue again", "generate this flyer no Italian again",
+              "generate this flyer add phone number again", "make it $8.99 again",
+              "redo with delivery", "regenerate but add catering"):
         assert br._is_pure_reroll(t) is False, t
 
 

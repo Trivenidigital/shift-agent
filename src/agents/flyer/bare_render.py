@@ -371,36 +371,45 @@ def _looks_like_revision(text: str) -> bool:
 
 
 # A PURE re-roll = "make it again, same details" with NO specific change. We re-render the saved
-# project verbatim, so we must NOT treat a request that also carries a change ("...with a blue
-# background", "change the date", "no Italian") as a re-roll — those route to REVISION_NEEDED.
-_REROLL_RE = re.compile(
+# project verbatim, so we must NOT treat a request that ALSO carries a change as a re-roll — even
+# when the change sits between the verb and "again" ("generate this flyer in blue again", "...no
+# Italian again", "...add phone again"). Detection is TOKEN-based, NOT span-removal: require a
+# re-roll signal AND that every word is a re-roll/filler token; any other word (a noun/adjective/
+# number/new value) is a specific change -> route to REVISION_NEEDED (Codex 2026-06-07).
+_REROLL_SIGNAL_RE = re.compile(
     r"\b(?:re-?generate|regenerate|re-?do|redo|re-?create|recreate|re-?make|remake|"
     r"do\s+it\s+again|do\s+over|try\s+again|start\s+over|once\s+more|make\s+another|"
-    r"another\s+(?:one|version|take|go)|new\s+version)\b"
-    r"|\b(?:generate|create|make|design|render|do|build)\b[^.!?]{0,30}\bagain\b",
+    r"another\s+(?:one|version|take|go)|new\s+version)\b",
     re.IGNORECASE,
 )
-# Words that carry no flyer content — ignored when deciding whether a re-roll is "pure". Anything
-# left after stripping the re-roll phrase + this filler is treated as a substantive change.
-_REROLL_FILLER_RE = re.compile(
-    r"\b(?:i|we|you|u|please|pls|plz|kindly|can|could|would|will|the|this|that|it|its|"
-    r"flyer|flier|poster|image|design|picture|pic|one|again|now|just|so|did|do|does|done|"
-    r"not|dont|didnt|like|liked|love|want|wanted|need|a|an|of|to|for|me|my|with|same|"
-    r"fresh|new|version|but|and|ok|okay|hi|hey|thanks|thank|too|really|very)\b",
-    re.IGNORECASE,
-)
+_REROLL_VERB_RE = re.compile(r"\b(?:generate|create|make|design|render|do|build|produce)\b", re.IGNORECASE)
+_AGAIN_RE = re.compile(r"\bagain\b", re.IGNORECASE)
+# Bare tokens that carry NO change content: filler + re-roll verbs/objects. A pure re-roll contains
+# ONLY these; any other token signals a specific change.
+_REROLL_OK_TOKENS = frozenset({
+    "i", "we", "you", "u", "please", "pls", "plz", "kindly", "can", "could", "would", "will",
+    "the", "this", "that", "it", "its", "flyer", "flier", "poster", "image", "picture", "pic",
+    "one", "again", "now", "just", "so", "did", "do", "does", "done", "not", "dont", "didnt",
+    "like", "liked", "love", "want", "wanted", "need", "a", "an", "of", "to", "for", "me", "my",
+    "with", "same", "fresh", "new", "version", "but", "and", "ok", "okay", "hi", "hey", "thanks",
+    "thank", "too", "really", "very",
+    # re-roll verbs / phrase words as bare tokens
+    "generate", "regenerate", "create", "recreate", "make", "remake", "design", "render", "build",
+    "produce", "redo", "retry", "try", "over", "another", "once", "more", "start", "take", "go",
+})
 
 
 def _is_pure_reroll(text: str) -> bool:
-    """True only for a no-change re-roll ("I didn't like it, generate again"). A re-roll phrase plus
-    leftover substantive content (a noun/adjective/number = a specific change) is NOT a pure re-roll."""
+    """True only for a no-change re-roll ("I didn't like it, generate again"). Requires a re-roll
+    signal AND that EVERY word is a re-roll/filler token; any substantive word (a noun/adjective/
+    number/new value) — even between the verb and "again" — makes it a change, not a pure re-roll."""
     t = (text or "").strip()
-    if not _REROLL_RE.search(t):
+    has_signal = bool(_REROLL_SIGNAL_RE.search(t)) or (
+        bool(_REROLL_VERB_RE.search(t)) and bool(_AGAIN_RE.search(t))
+    )
+    if not has_signal:
         return False
-    residual = _REROLL_RE.sub(" ", t)
-    residual = _REROLL_FILLER_RE.sub(" ", residual)
-    residual = re.sub(r"[^a-z0-9]+", " ", residual, flags=re.IGNORECASE).strip()
-    return residual == ""
+    return all(tok in _REROLL_OK_TOKENS for tok in re.findall(r"[a-z0-9]+", t.casefold()))
 
 
 def _api_key() -> str:
