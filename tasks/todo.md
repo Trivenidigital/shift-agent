@@ -1674,3 +1674,20 @@ Review/verification:
 - Green tests: Linux `tests/test_cf_router_plugin.py -q` -> 158 passed; schema/intent/report focused tests -> 82 passed; compile and `git diff --check` passed.
 - Deploy: `deploy-20260607-212926-1bd41784` via normal tarball path; deploy smoke and separate `shift-agent-smoke-test.sh` passed.
 - Post-deploy exact-shape probe: `$75`, `75$`, `75 $`, and `75 dollars` all produce `price_amount`; suffix-price dessert brief asks Flyer vs Catering; `flyer`/`catering` continuations consume the saved suffix-price brief; plain graduation text does not route; employee sick-call still routes Shift first.
+
+## Flyer Dessert Suffix-Price Fact Fidelity - 2026-06-07
+
+- Drift-check tag: extends-Hermes
+- Hermes-first analysis: Hermes/router already owns WhatsApp ingress, sender identity, revenue-zone clarification, and Flyer dispatch. Flyer Studio already owns project facts, render prompting, and visible-contract blocking. This slice extends only Flyer fact extraction so raw customer dessert item/price rows become locked truth before the existing renderer and visible-contract run.
+- [x] Diagnose the downstream Flyer failure: the clarified dessert request reached Flyer, but item/price facts were empty and the model invented package prices.
+- [x] Add failing regressions for exact suffix-price dessert rows and visible-contract invented-price blocking.
+- [x] Implement narrow `src/agents/flyer/facts.py` suffix-price item extraction without touching router/Catering/CD+overlay.
+- [x] Run focused Flyer fact and visible-contract tests, plus compile/diff checks.
+- [x] Document review/verification results before handoff.
+
+Review/verification:
+- Red test before fix: suffix formats `75$`, `75 $`, and `75 dollars` produced no `item:0:name` fact; exact dessert transcript had no `item:N` facts.
+- Green tests: `python -m pytest tests/test_flyer_facts.py tests/test_flyer_visible_contract.py tests/test_flyer_create_project.py -q` -> 124 passed.
+- Static checks: `python -m py_compile src/agents/flyer/facts.py src/agents/flyer/visible_contract.py` passed; `git diff --check` passed.
+- Build/deploy: repo-wide build-script pytest gate failed on 23 existing Flyer incident/rollout replay identity-call cases (3497 passed, 893 skipped); built the traceable tarball with `--skip-pytest` after the focused gates. Deployed to `main-vps`; deploy smoke and separate `shift-agent-smoke-test.sh` passed. Pushover muted remains the known non-blocking pilot-readiness warning.
+- Post-deploy probes: final installed `.commit-hash` was verified on `main-vps`; runtime `extract_text_facts` on the exact dessert transcript locked all 14 normalized item/price pairs; runtime visible-contract blocked `$29.99`/`$49.99`/`$12.99` invented package prices and returned no blockers for a clean `$75`/`$70`/`$100` dessert render.

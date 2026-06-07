@@ -222,6 +222,10 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
         r"\$\s*(?P<price>\d+(?:\.\d{2})?)\s*(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,50})",
         flags=re.IGNORECASE,
     )
+    suffix_price = re.compile(
+        r"(?P<price>\d+(?:\.\d{1,2})?)\s*(?:\$|dollars?)\s*$",
+        flags=re.IGNORECASE,
+    )
     seen: set[str] = set()
     promo_name = re.compile(r"^(?:save|coupon|discount|offer|deal|special|cashback|credit)\b", flags=re.IGNORECASE)
     bad_context = re.compile(r"\b(?:create|make|generate|design|flyer|flier|poster|banner|promoting|promote|promotion)\b", flags=re.IGNORECASE)
@@ -239,6 +243,8 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
         name = re.sub(r"^.*\b(?:menu|items?|include|including)\s+", "", name, flags=re.IGNORECASE).strip()
         name = re.sub(r"^(?:each|plate|per\s+plate|pc|piece)\s+", "", name, flags=re.IGNORECASE).strip()
         name = re.sub(r"^(?:and|with|include|includes|feature|features|featuring)\s+", "", name, flags=re.IGNORECASE)
+        name = re.sub(r"\b(\d+)\s*(count|counts|cups?|trays?|pcs?|pieces?)\b", r"\1 \2", name, flags=re.IGNORECASE)
+        name = _clean(name.strip(" -:"))
         if not name or name.lower() in seen:
             return
         lowered_original = original_name.lower()
@@ -272,7 +278,8 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             lowered,
         ):
             return
-        if len(name.split()) > 5:
+        meaningful_words = [part for part in name.split() if part not in {"-", "–", "—"}]
+        if len(meaningful_words) > 5:
             return
         seen.add(name.lower())
         name_fact = _fact(f"item:{len(seen)-1}:name", "Item", name, "customer_text", message_id=message_id)
@@ -283,6 +290,12 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             facts.append(price_fact)
 
     for segment in re.split(r"[\n\r,;]+", text or ""):
+        suffix_match = suffix_price.search(segment)
+        if suffix_match:
+            name = segment[: suffix_match.start()].strip()
+            name = re.sub(r"[-:–—]+$", "", name).strip()
+            add_item(name, f"${suffix_match.group('price')}")
+            continue
         for match in price_for_name.finditer(segment):
             add_item(match.group("name"), f"${match.group('price')}")
         for match in compact_name_before_price.finditer(segment):
