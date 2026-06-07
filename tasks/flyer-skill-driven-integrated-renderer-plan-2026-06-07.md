@@ -105,3 +105,50 @@ Resolve locked facts/session; call the skill; **validate** fact-references/sourc
 
 ## Files to touch (Slice 1)
 `src/agents/flyer/render.py` (`_scene_block_from_visual_direction` + `_image_prompt`/`_render_model`/`render_concept_previews` `scene_direction` param), `src/agents/flyer/bare_render.py` (flag+allowlist gate on the integrated path; call `advise_scene_direction`; thread into `_generate_poster`), `src/agents/flyer/flyer_context_builder.py` (new advisory `advise_scene_direction` reusing the gateway+SKILL body, NOT `build_flyer_brief`, NOT CD-gated), tests (`tests/test_flyer_renderer.py`, `tests/flyer_oracle/`). **No edits to** `build_flyer_brief` semantics, the CD path, the firewall, or `FLYER_CREATIVE_DIRECTOR_ENABLED`.
+
+**Slice 1 status: SHIPPED + DEPLOYED + live-validated (PR #471).** Live 15:02 graduation flyer = graduation party theme, clean title, correct facts, no family-dinner, CD off.
+
+---
+
+# Slice 3 — iteration reachability + skill-driven revisions / style-reuse (operator spec 2026-06-07)
+
+**Drift-check tag:** `extends-Hermes` — composes the existing `flyer_generation` skill + saved session + Slice-1 scene seam + render/QA into a bare iteration handler; the only routing change is in the bare **script** (NOT cf-router); no Python occasion keyword lists; no CD+overlay.
+
+## Hermes-first analysis (Slice 3)
+4 net-new of 12 steps. Substrate reused: skill+gateway (`advise_scene_direction`), saved session (`render_reroll`), Slice-1 scene seam, `_build_locked_facts`, render/QA/audit. Net-new = routing the `--revision` dead-end into a handler + 3 thin render-composition branches + validation. **Composition, not new infrastructure.**
+
+## Root cause (live 15:00 + 15:03 failures)
+Create path works; **iteration path is broken**. cf-router flags "design"/"re-design"/"change" as `--revision`; the bare script's `--revision` branch returns **"resend full details"** even when a saved same-chat session exists — blocking style-reuse, creative revision, and design-flavored re-rolls.
+
+## Architecture (bounded; Python owns routing, skill is creative advisor)
+**The routing fix lives in the bare script + bare_render — NOT cf-router** (no high-blast-radius identity-layer change). cf-router keeps setting `--revision`; the script's `--revision` branch calls a new `bare_render.render_iteration(chat_id, raw_text, …)` instead of dead-ending. Gated by **`FLYER_BARE_ITERATION`** (+ the existing allowlist), fail-safe to today's `REVISION_REPLY` when off / no session / on any error.
+
+`render_iteration`:
+1. **Load saved same-chat session.** Missing/stale → `(UNCLEAR, one concise clarifying question)` — never "resend full details".
+2. **Classify intent (Python deterministic routing; skill is the creative advisor):**
+   - `pure_reroll` — `_is_pure_reroll` (existing; "generate again", "make another", "I don't like this design, make another"). → `render_reroll` (existing).
+   - `style_reuse` — bounded detector ("use this design/theme/look …" + a new-flyer subject). NOT an occasion keyword list — it's an intent classifier (routing = Python's job).
+   - `specific_revision` — a revision that's neither pure_reroll nor style_reuse (refine the current flyer).
+   - `unclear` — no clear iteration signal → one concise question.
+   (Operator permits "Hermes skill OR a small structured classifier, validated by Python"; routing stays deterministic, creativity stays in the skill.)
+3. **specific_revision** → load session, **preserve locked facts exactly**, call the skill with {revision text + prior `visual_direction`} → **updated `visual_direction` only** → re-render the saved project with the new scene (reuses `render_reroll`'s session-load + the Slice-1 scene seam). **No fact re-extraction** from the revision text.
+4. **style_reuse** → extract NEW facts from the request normally (`_build_locked_facts`), carry the prior/new `visual_direction` as the scene, render a NEW integrated flyer. **No old facts copied** into the new flyer.
+5. Render → hard-fact QA → SEND / fail-closed; audit the iteration intent + outcome (`send.log` `OUTCOME=iteration_*` + decisions.log).
+
+**Preserve `--revision-apply`** (uploaded-source / manual-edit / media edits) routing untouched — Slice 3 only touches the text `--revision` branch.
+
+## Constraints (binding)
+- Do NOT change cf-router. Do NOT let "design" alone force the dead-end. Do NOT reopen CD+overlay. No Python occasion keyword lists.
+- Skill never authors facts; Python preserves/extracts facts. specific_revision preserves locked facts exactly; style_reuse extracts fresh facts and never copies old ones.
+- Missing/stale session → ONE useful question, not a generic failure.
+
+## Required regressions (Slice 3 + campaign-title safety)
+1. "I don't like this design, generate again" → reroll (render_reroll), NOT resend-full-details.
+2. "redesign this, make it more graduation themed with two students turning back" → specific_revision; saved facts preserved exactly; new visual_direction only; integrated re-render.
+3. "Use this design/theme, create a weekend breakfast flyer …" → style_reuse; NEW breakfast facts extracted; prior visual style carried; NO old graduation facts copied.
+4. Employee/source-edit/media (`--revision-apply`) paths are NOT stolen by this logic.
+5. Missing/stale session → one concise clarifying question.
+6. Campaign-title safety (keep, per operator): graduation never `campaign_title="A"`; weekend-breakfast title stays breakfast-related; combo title stays combo-related; bare "Create flyer" does not create an empty/garbage flyer.
+
+## Files to touch (Slice 3)
+`scripts/bare-flyer-render-and-send` (`--revision` branch → `render_iteration`; new intent→reply mapping incl. the unclear question), `bare_render.py` (`render_iteration` + the style_reuse detector + specific_revision/style_reuse render branches + audit), `flyer_context_builder.py` (extend `advise_scene_direction` or add `advise_revision_direction` for prior-vd + revision text), tests (`test_flyer_pr3_wiring.py`, `test_flyer_skill_driven_scene.py`, `test_flyer_renderer.py`). **No edits to** cf-router, `--revision-apply`, the CD path, or `FLYER_CREATIVE_DIRECTOR_ENABLED`.

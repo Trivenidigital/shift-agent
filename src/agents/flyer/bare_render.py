@@ -157,6 +157,9 @@ SESSION_DIR = Path(os.environ.get("FLYER_BARE_SESSION_DIR", "/opt/shift-agent/st
 BG_DIR = Path(os.environ.get("FLYER_BARE_BG_DIR", "/opt/shift-agent/state/bare_flyer/backgrounds"))
 _FALSE_VALUES = {"0", "false", "no", "off"}
 REVISION_APPLY_ENABLED = (os.environ.get("FLYER_BARE_REVISION_APPLY", "1").strip().lower() not in _FALSE_VALUES)
+# Slice 3: skill-driven iteration (re-roll / specific_revision / style_reuse) on the text --revision
+# branch, instead of the "resend full details" dead-end. Default OFF (scoped via the allowlist).
+ITERATION_ENABLED = (os.environ.get("FLYER_BARE_ITERATION", "0").strip().lower() not in _FALSE_VALUES)
 REVISION_CAPTURE_RAW_BG = os.environ.get("FLYER_BARE_REVISION_CAPTURE_RAW_BG") == "1"
 
 # --- PR3: Creative-Director render branch (flag + allowlist scoped) ------------
@@ -226,6 +229,20 @@ def _skill_driven_scene_armed(resolved_sender: str) -> bool:
     if os.environ.get(SKILL_DRIVEN_SCENE_ENABLED_ENV) != "1":
         return False
     return _normalize_sender(resolved_sender) in _skill_driven_scene_allowlist()
+
+
+# Slice 3 iteration gate: FLYER_BARE_ITERATION flag + its own allowlist (scoped rollout).
+ITERATION_ALLOWLIST_ENV = "FLYER_BARE_ITERATION_ALLOWLIST"
+
+
+def _iteration_armed(resolved_sender: str) -> bool:
+    """The iteration handler runs only when FLYER_BARE_ITERATION is on AND the resolved sender is in
+    FLYER_BARE_ITERATION_ALLOWLIST (creative behavior, scoped like the scene flag — Codex 2026-06-07)."""
+    if not ITERATION_ENABLED:
+        return False
+    raw = os.environ.get(ITERATION_ALLOWLIST_ENV, "") or ""
+    allow = {n for n in (_normalize_sender(p) for p in raw.split(",")) if n}
+    return _normalize_sender(resolved_sender) in allow
 
 
 def _advisory_scene_direction(raw_text: str, locked_facts, customer, resolved_sender: str):
@@ -375,6 +392,9 @@ FAILCLOSED = "failclosed"
 UNREGISTERED = "unregistered"
 REVISION_NEEDED = "revision_needed"
 REROLL = "reroll"  # no-change "generate again" -> re-render the saved validated project, fresh variant
+ITERATION_REVISED = "iteration_revised"          # specific_revision: re-render saved project, new scene
+ITERATION_STYLE_REUSE = "iteration_style_reuse"  # style_reuse: new flyer (new facts) + prior style
+ITERATION_UNCLEAR = "iteration_unclear"          # no/stale session or unclear -> one concise question
 
 # Customer-facing copy attached to a re-roll's fresh variant (operator-approved 2026-06-07). It tells
 # the customer the same details were kept and invites a SPECIFIC change (which routes to the revision
@@ -421,12 +441,14 @@ _REROLL_SIGNAL_RE = re.compile(
 _REROLL_VERB_RE = re.compile(r"\b(?:generate|create|make|design|render|do|build|produce)\b", re.IGNORECASE)
 _AGAIN_RE = re.compile(r"\bagain\b", re.IGNORECASE)
 # A NEGATED re-roll ("do not generate again", "don't regenerate", "stop generating") must NOT re-roll.
-# Targets "do not"/"don't"/"never"/"stop"/"no need to" right before a re-roll verb — NOT "did not
-# like ...", which negates the liking, not the render (so the operator's phrase stays a pure re-roll).
+# The re-roll verb must IMMEDIATELY follow the negation (only auxiliaries between), so "do not design
+# again" is a negation but "I don't LIKE this design, generate again" is NOT — there "design" is a noun
+# after "like this", not the verb being negated (Codex 2026-06-07). Verb STEMs (no trailing boundary)
+# so "generating"/"designing" are caught too.
 _REROLL_NEGATION_RE = re.compile(
     r"\b(?:do\s*not|do\s*n['’]?t|don['’]?t|never|please\s+stop|stop|no\s+need\s+to)\b"
-    # verb STEM (no trailing boundary) so "generating"/"making" are caught, not just "generate"/"make"
-    r"[^.!?]{0,15}\b(?:re-?generat|regenerat|generat|re-?creat|recreat|creat|re-?mak|remak|mak|"
+    r"\s+(?:to\s+|want\s+to\s+|wanna\s+|need\s+to\s+|please\s+|just\s+|ever\s+)*"
+    r"(?:re-?generat|regenerat|generat|re-?creat|recreat|creat|re-?mak|remak|mak|"
     r"design|render|build|produc|redo|retry|try)",
     re.IGNORECASE,
 )
@@ -463,7 +485,10 @@ def _is_pure_reroll(text: str) -> bool:
     t = (text or "").strip()
     if not _has_reroll_signal(t) or _REROLL_NEGATION_RE.search(t):
         return False
-    return all(tok in _REROLL_OK_TOKENS for tok in re.findall(r"[a-z0-9]+", t.casefold()))
+    # Strip apostrophes first so "don't"/"i'd" tokenize as one filler token ("dont"/"id"), not
+    # "don"+"t" — otherwise a contraction would falsely read as a substantive (non-filler) word.
+    normalized = t.casefold().replace("'", "").replace("’", "")
+    return all(tok in _REROLL_OK_TOKENS for tok in re.findall(r"[a-z0-9]+", normalized))
 
 
 def _api_key() -> str:
@@ -1171,6 +1196,139 @@ def render_reroll(chat_id: str):
             return (REROLL, png)
         last_blockers = blockers
     return (FAILCLOSED, last_blockers + ([last_render_detail] if last_render_detail else []))
+
+
+# --- Slice 3: skill-driven iteration (re-roll / specific_revision / style_reuse) ------------------
+
+ITERATION_UNCLEAR_REPLY = (
+    "I can update your last flyer or reuse its style for a new one. Tell me what to change "
+    "(e.g. “make it more festive”, “use blue and gold”, “add balloons”), say "
+    "“generate again” for a fresh take, or “use this design for a <new> flyer”."
+)
+
+# style_reuse intent = reuse a prior flyer's design/look for a NEW flyer. This is an INTENT classifier
+# (routing — Python's job), NOT an occasion/holiday keyword list.
+_STYLE_REUSE_PHRASE_RE = re.compile(
+    r"\b(?:use|reuse|keep|same|with\s+(?:the\s+)?same)\b[^.!?]{0,25}"
+    r"\b(?:design|theme|style|look|layout|template|format)\b",
+    re.IGNORECASE,
+)
+# Require a NEW flyer ("create A/AN/ANOTHER/NEW <subject> flyer"), so "make THE/THIS flyer blue" stays
+# a specific_revision of the saved flyer — not a new sparse one (Codex 2026-06-07).
+_CREATE_NEW_FLYER_RE = re.compile(
+    r"\b(?:create|make|design|generate|build|need|want|prepare|do)\b[^.!?]{0,40}"
+    r"\b(?:a|an|another|new)\b[^.!?]{0,40}\bflyer\b",
+    re.IGNORECASE,
+)
+
+
+def _is_style_reuse(text: str) -> bool:
+    """True for 'use this design/theme/look … create A NEW <subject> flyer' — reuse a prior look for a
+    NEW flyer. A bare 'make THIS/THE flyer <change>' is a revision, not a style-reuse."""
+    t = text or ""
+    return bool(_STYLE_REUSE_PHRASE_RE.search(t)) and bool(_CREATE_NEW_FLYER_RE.search(t))
+
+
+def _advise_scene(request_text: str, locked_facts, customer):
+    """Call the flyer_generation skill (ungated) for a VisualDirection from a composed request. The
+    iteration handler is gated by FLYER_BARE_ITERATION; the skill is advisory (returns None on any
+    problem). Never raises."""
+    try:
+        cb = _context_builder()
+        advise = getattr(cb, "advise_scene_direction", None)
+        if advise is None:
+            return None
+        return advise(request_text, locked_facts, customer)
+    except Exception:  # noqa: BLE001 — advisory only
+        return None
+
+
+def _render_with_scene(chat_id, project, sess, scene_direction, *, status, err_prefix, brief=None):
+    """Render ``project`` with an advisory ``scene_direction`` (mirrors render_reroll's 2-attempt QA
+    loop). (status, png) on QA-pass; (FAILCLOSED, [blockers]) otherwise. ``brief`` overrides the
+    session brief written for the new pending session (style_reuse persists the NEW request, not the
+    old flyer's brief — Codex 2026-06-07)."""
+    persist_brief = brief if brief is not None else (sess or {}).get("brief", "")
+    last_blockers: list[str] = []
+    last_detail = ""
+    for attempt in range(2):
+        last_detail = ""
+        strict = "" if attempt == 0 else (
+            "CRITICAL: the previous render had these problems: " + "; ".join(last_blockers)
+            + ". Fix them — render every listed fact exactly, include every listed item, and add "
+              "nothing that is not listed."
+        )
+        try:
+            png = _generate_poster(project, strict_note=strict, raw_bg_dest=None, scene_direction=scene_direction)
+        except Exception as e:  # noqa: BLE001
+            last_blockers = [f"{err_prefix}:{type(e).__name__}"]
+            last_detail = _render_error_detail(e, project, err_prefix)
+            continue
+        ok, blockers = run_visual_qa(png, project)
+        if ok:
+            _write_session(chat_id, project, "", persist_brief,
+                           model=(sess or {}).get("model") or GEN_MODEL, pending=True)
+            return (status, png)
+        last_blockers = blockers
+    return (FAILCLOSED, last_blockers + ([last_detail] if last_detail else []))
+
+
+def render_iteration(chat_id: str, raw_text: str, *, message_id: str | None = None, sender_phone: str | None = None):
+    """Bare iteration handler for a follow-up on a delivered flyer (the text --revision branch).
+    Classifies intent (Python routing; the skill is the creative advisor) and routes — instead of the
+    "resend full details" dead-end. Returns:
+      (REROLL, png)                -> pure re-roll (no change), fresh variant
+      (ITERATION_REVISED, png)     -> specific visual revision applied to the SAVED project (facts kept)
+      (ITERATION_STYLE_REUSE, png) -> NEW flyer (new facts) reusing the prior style
+      (ITERATION_UNCLEAR, None)    -> no/stale session or unclear -> ONE concise question
+      (REVISION_NEEDED, None)      -> flag off (caller keeps today's resend reply)
+      (FAILCLOSED, [blockers])     -> a render failed
+    Facts are NEVER re-extracted from a revision; a style_reuse extracts FRESH facts and never copies
+    the old flyer's facts. A specific_revision needs the skill to produce updated art direction; if it
+    can't, we ask a concise question rather than render a no-op or a wrong flyer.
+    """
+    import schemas
+    if not _iteration_armed(_resolved_sender(chat_id, sender_phone)):
+        return (REVISION_NEEDED, None)   # flag off / not allowlisted -> caller keeps today's resend reply
+    # Pure re-roll first — deterministic, no skill, works even when phrased with "design".
+    if _is_pure_reroll(raw_text):
+        return render_reroll(chat_id)
+    sess = _load_session(chat_id)
+    if not sess or _session_is_stale(sess):
+        return (ITERATION_UNCLEAR, None)
+    customer = resolve_customer(chat_id, sender_phone)
+
+    if _is_style_reuse(raw_text):
+        # NEW flyer reusing the prior look. Extract FRESH facts from THIS request; never copy old facts.
+        if customer is None:
+            return (ITERATION_UNCLEAR, None)
+        IF = _intake_fields()
+        fields = IF._extract_fields(raw_text, now=datetime.now(timezone.utc))
+        flyer_cfg = _load_flyer_cfg()
+        new_facts = _build_locked_facts(customer, fields, raw_text, message_id or "", flyer_cfg)
+        new_project = _build_transient_project(customer, fields, new_facts, raw_text, message_id, chat_id)
+        composed = (raw_text + " . Reuse the visual STYLE (palette, design approach, polish) of the "
+                    "customer's previous flyer where it fits, but with subjects and theme suited to THIS "
+                    "new request.").strip()
+        vd = _advise_scene(composed, list(new_facts), customer)
+        # Renders the new flyer regardless of vd (vd None -> today's Python scene for the new request).
+        return _render_with_scene(chat_id, new_project, sess, vd, status=ITERATION_STYLE_REUSE,
+                                  err_prefix="style_reuse_render_error", brief=raw_text)
+
+    # specific_revision: re-render the SAVED project (facts preserved) with a skill-updated scene.
+    try:
+        project = schemas.FlyerProject.model_validate(sess["project"])
+    except Exception:  # noqa: BLE001
+        return (ITERATION_UNCLEAR, None)
+    prior_brief = str((sess or {}).get("brief") or "")
+    composed = (prior_brief + " . Customer revision — apply to the VISUAL look ONLY (theme, scene, "
+                "colors, motifs, composition); keep ALL text and facts exactly the same: "
+                + (raw_text or "")).strip()
+    vd = _advise_scene(composed, list(project.locked_facts), customer)
+    if vd is None:
+        return (ITERATION_UNCLEAR, None)
+    return _render_with_scene(chat_id, project, sess, vd, status=ITERATION_REVISED,
+                              err_prefix="revision_render_error")
 
 
 def render_revision_apply(chat_id: str, raw_text: str):
