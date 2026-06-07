@@ -921,7 +921,13 @@ def _unrequested_operational_claim_blockers(project: FlyerProject, extracted_tex
     ).casefold()
     blockers: list[str] = []
     for claim, pattern in OPERATIONAL_CLAIM_PATTERNS:
-        if claim in source_text:
+        # Credit the claim as REQUESTED only when the SAME detector pattern matches the customer's
+        # source (raw_request + notes + locked facts) — i.e. the customer actually stated it. A bare
+        # `claim in source_text` keyword check missed the customer's own offer: they write "we cater"
+        # / "we deliver" (the verb), not the gerund keyword "catering"/"delivery", so their own
+        # locked offer fact got flagged as unrequested. This stays strict and grounded: a source with
+        # NO matching claim phrasing still blocks the rendered claim (does NOT broadly allow it).
+        if pattern.search(source_text):
             continue
         if pattern.search(extracted_text or ""):
             blockers.append(f"unrequested operational claim visible: {claim}")

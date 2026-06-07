@@ -687,3 +687,41 @@ def test_is_pure_reroll_detector():
               "make it blue", "regenerate with a blue background", "remove the price",
               "you forgot the address", "use $8.99 for all items"):
         assert br._is_pure_reroll(t) is False, t
+
+
+def _load_bare_script():
+    """Load the no-extension dispatch script `bare-flyer-render-and-send` as a module."""
+    import importlib.machinery
+    import importlib.util
+    path = _SRC / "agents" / "flyer" / "scripts" / "bare-flyer-render-and-send"
+    loader = importlib.machinery.SourceFileLoader("bare_flyer_script", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_script_reroll_sends_invite_caption_and_audits_reroll_sent(monkeypatch):
+    """Operator regression (2026-06-07): the script's REROLL branch sends the fresh variant captioned
+    with the invite copy, commits the session, and audits OUTCOME=reroll_sent."""
+    script = _load_bare_script()
+    calls = {"images": [], "logs": [], "committed": []}
+    fake_B = types.SimpleNamespace(
+        SEND=br.SEND, REROLL=br.REROLL, CONFLICT=br.CONFLICT, FAILCLOSED=br.FAILCLOSED,
+        REVISION_NEEDED=br.REVISION_NEEDED, UNREGISTERED=br.UNREGISTERED, REROLL_INVITE=br.REROLL_INVITE,
+        render_grounded=lambda *a, **k: (br.REROLL, b"REROLL_PNG"),
+        commit_session=lambda chat_id: calls["committed"].append(chat_id),
+    )
+    monkeypatch.setattr(script, "_bare", lambda: fake_B)
+    monkeypatch.setattr(script, "send_image",
+                        lambda chat_id, b, caption, action: (calls["images"].append((caption, action)) or True))
+    monkeypatch.setattr(script, "send_text", lambda *a, **k: True)
+    monkeypatch.setattr(script, "mark_recent_flyer", lambda *a, **k: None)
+    monkeypatch.setattr(script, "log", lambda msg: calls["logs"].append(msg))
+
+    rc = script.main(["--chat-id", "201975216009469@lid", "--no-ack",
+                      "--brief", "I did not like, please generate this flyer again."])
+    assert rc == 0
+    assert calls["images"] == [(br.REROLL_INVITE, "flyer.bare.image_send")]   # invite caption on the variant
+    assert calls["committed"] == ["201975216009469@lid"]                       # session committed after delivery
+    assert any("OUTCOME=reroll_sent" in m for m in calls["logs"])              # audited as a re-roll
