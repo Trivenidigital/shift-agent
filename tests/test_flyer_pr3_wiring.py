@@ -616,6 +616,18 @@ def test_pure_reroll_rerenders_saved_session(monkeypatch):
     assert len(cap["wrote_session"]) == 1   # re-persisted (pending) for the next follow-up
 
 
+def test_bare_generate_again_reaches_reroll(monkeypatch):
+    """A bare "generate again" (no "this flyer" reference, so _looks_like_revision's change-oriented
+    patterns don't match it) must STILL route to re-roll, not fall through to the new-flyer path
+    (Codex 2026-06-07: re-roll is checked BEFORE the revision gate)."""
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    cap = _install_reroll(monkeypatch)
+    for text in ("generate again", "make another version", "can you make it again", "regenerate"):
+        status, _ = br.render_grounded(CHAT_ID, text, message_id="rrb", sender_phone=SENDER)
+        assert status == br.REROLL, text
+    assert len(cap["projects"]) == 4   # all four re-rendered the saved session
+
+
 def test_reroll_invite_copy_is_operator_approved():
     assert br.REROLL_INVITE.startswith("I made a fresh version using the same details.")
     assert "just tell me what to adjust" in br.REROLL_INVITE

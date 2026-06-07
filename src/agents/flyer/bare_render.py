@@ -754,18 +754,20 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
                     sender_phone: str | None = None):
     """Registered-path grounded render. (SEND, png) | (CONFLICT, {...}) | (FAILCLOSED, [blockers]) |
     (REVISION_NEEDED, None) | (UNREGISTERED, None)."""
+    # A no-change re-roll ("generate again", "I didn't like it, regenerate") with a saved same-chat
+    # session re-renders the saved validated facts as a fresh variant. Checked BEFORE the revision
+    # gate: a bare "generate again" is a pure re-roll that _looks_like_revision's change-oriented
+    # patterns do NOT match (Codex 2026-06-07), so it must not fall through to the new-flyer path.
+    # Do NOT ask for full details, do NOT re-extract the complaint, do NOT invoke revision-merge.
+    # No/stale session -> REVISION_NEEDED; render fail -> FAILCLOSED.
+    if _is_pure_reroll(raw_text):
+        status, payload = render_reroll(chat_id)
+        if status != REVISION_NEEDED:  # REROLL (sent) or FAILCLOSED (render failed) -> return as-is
+            return (status, payload)
+        return (REVISION_NEEDED, None)  # no/stale session -> ask for the full details
     if _looks_like_revision(raw_text):
-        # A no-change re-roll ("I didn't like it, generate again") with a saved same-chat session ->
-        # re-render the saved validated facts as a fresh variant (do NOT ask for full details again,
-        # do NOT re-extract the complaint, do NOT invoke revision-merge). A SPECIFIC-change request
-        # is not a pure re-roll and still routes to REVISION_NEEDED until merge (Rewire 2) lands.
-        if _is_pure_reroll(raw_text):
-            status, payload = render_reroll(chat_id)
-            if status != REVISION_NEEDED:  # REROLL (sent) or FAILCLOSED (render failed) -> return as-is
-                return (status, payload)
-            # session missing/stale -> fall through to the resend-full-details guidance below
-        # No prior-flyer context to merge against yet (Rewire 2) -> do NOT render the complaint as a
-        # fresh brief. Ask for the full request instead of inventing an unrelated flyer.
+        # A SPECIFIC-change request: no prior-flyer context to merge against yet (Rewire 2) -> do NOT
+        # render the complaint as a fresh brief. Ask for the full request instead of inventing one.
         return (REVISION_NEEDED, None)
     customer = resolve_customer(chat_id, sender_phone)
     if customer is None:
