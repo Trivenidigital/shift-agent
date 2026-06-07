@@ -540,3 +540,150 @@ def test_end_to_end_unavailable_persists_real_row_with_reason(monkeypatch, tmp_p
     assert row["creative_director_status"] == "unavailable"
     assert row["unavailable_reason"] == "timeout"
     assert row["error_summary"] == "unavailable:timeout"
+
+
+# ── re-roll: no-change "generate again" re-renders the saved session (operator Option 1, 2026-06-07) ──
+
+
+_REROLL_TEXT = "I did not like, please generate this flyer again."
+
+
+def _saved_session(*, sent_at=None, business="Lakshmi's Kitchen"):
+    """A committed bare-flyer session dict (the shape _write_session persists) holding a validated
+    graduation project — the exact input render_reroll re-renders verbatim."""
+    import json
+    from datetime import datetime, timezone
+    schemas = br._schemas()
+    now = datetime(2026, 6, 7, tzinfo=timezone.utc)
+    project = schemas.FlyerProject(
+        project_id="F0145", status="awaiting_final_approval", customer_phone="+17325550104",
+        created_at=now, updated_at=now, original_message_id="m0",
+        raw_request="Create a flyer to reflect the graduation. 2026 graduation parties. 10% off.",
+        fields=schemas.FlyerRequestFields(event_or_business_name=business),
+        locked_facts=[
+            schemas.FlyerLockedFact(fact_id="business_name", label="Business", value=business,
+                                    source="customer_profile", required=True),
+            schemas.FlyerLockedFact(fact_id="campaign_title", label="Campaign",
+                                    value="2026 Graduation Parties", source="customer_text", required=True),
+            schemas.FlyerLockedFact(fact_id="pricing_structure", label="Pricing",
+                                    value="10% off on entire order", source="customer_text", required=True),
+        ],
+    )
+    return {
+        "chat_id": CHAT_ID,
+        "sent_at": sent_at if sent_at is not None else datetime.now(timezone.utc).isoformat(),
+        "brief": "Create a graduation flyer for Lakshmi's Kitchen",
+        "project": json.loads(project.model_dump_json()),
+        "raw_background_path": "",
+        "model": "google/gemini-2.5-flash-image",
+        "output_size": [1080, 1350],
+    }
+
+
+def _install_reroll(monkeypatch, *, session=..., poster=None):
+    """Stub the session load + a poster spy that records the project it re-rendered."""
+    cap = {"projects": [], "stricts": [], "wrote_session": []}
+    sess = _saved_session() if session is ... else session
+    monkeypatch.setattr(br, "_load_session", lambda chat_id: sess)
+    monkeypatch.setattr(br, "run_visual_qa", lambda png, project: (True, []))
+    monkeypatch.setattr(br, "_write_session", lambda *a, **k: cap["wrote_session"].append((a, k)))
+
+    def _spy_poster(project, *, strict_note="", raw_bg_dest=None):
+        cap["projects"].append(project)
+        cap["stricts"].append(strict_note)
+        if poster is not None:
+            return poster(project, strict_note=strict_note, raw_bg_dest=raw_bg_dest)
+        return b"REROLL_PNG"
+    monkeypatch.setattr(br, "_generate_poster", _spy_poster)
+    return cap
+
+
+def test_pure_reroll_rerenders_saved_session(monkeypatch):
+    """"generate again" + a saved session ⇒ REROLL: the saved project is re-rendered VERBATIM
+    (every locked fact preserved), with no re-extraction and no resend-full-details prompt."""
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    cap = _install_reroll(monkeypatch)
+    status, payload = br.render_grounded(CHAT_ID, _REROLL_TEXT, message_id="rr1", sender_phone=SENDER)
+    assert status == br.REROLL
+    assert payload == b"REROLL_PNG"
+    assert len(cap["projects"]) == 1
+    # the saved project's locked facts are preserved EXACTLY (no mutation, no new facts)
+    facts = cap["projects"][0].locked_facts
+    assert [f.fact_id for f in facts] == ["business_name", "campaign_title", "pricing_structure"]
+    assert any(f.value == "2026 Graduation Parties" for f in facts)
+    # first attempt carries NO strict note -> the "generate again" text cannot leak into copy
+    assert cap["stricts"] == [""]
+    assert len(cap["wrote_session"]) == 1   # re-persisted (pending) for the next follow-up
+
+
+def test_reroll_invite_copy_is_operator_approved():
+    assert br.REROLL_INVITE.startswith("I made a fresh version using the same details.")
+    assert "just tell me what to adjust" in br.REROLL_INVITE
+
+
+def test_reroll_no_session_falls_back_to_revision_needed(monkeypatch):
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    cap = _install_reroll(monkeypatch, session=None)
+    status, _ = br.render_grounded(CHAT_ID, _REROLL_TEXT, message_id="rr2", sender_phone=SENDER)
+    assert status == br.REVISION_NEEDED
+    assert cap["projects"] == []   # nothing rendered without a session
+
+
+def test_reroll_stale_session_falls_back_to_revision_needed(monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    old = (datetime.now(timezone.utc) - timedelta(hours=br._REROLL_MAX_AGE_HOURS + 1)).isoformat()
+    cap = _install_reroll(monkeypatch, session=_saved_session(sent_at=old))
+    status, _ = br.render_grounded(CHAT_ID, _REROLL_TEXT, message_id="rr3", sender_phone=SENDER)
+    assert status == br.REVISION_NEEDED
+    assert cap["projects"] == []   # a stale session is not re-rolled
+
+
+def test_reroll_flag_off_falls_back_to_revision_needed(monkeypatch):
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    monkeypatch.setattr(br, "REVISION_APPLY_ENABLED", False)
+    cap = _install_reroll(monkeypatch)
+    status, _ = br.render_grounded(CHAT_ID, _REROLL_TEXT, message_id="rr4", sender_phone=SENDER)
+    assert status == br.REVISION_NEEDED
+    assert cap["projects"] == []
+
+
+def test_reroll_render_failure_failcloses(monkeypatch):
+    """A re-render that keeps raising ⇒ FAILCLOSED naming the re-roll stage — never a wrong flyer,
+    never the saved flyer silently re-sent."""
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+
+    def _boom(project, *, strict_note="", raw_bg_dest=None):
+        raise br._render_mod().FlyerRenderError("boom")
+    cap = _install_reroll(monkeypatch, poster=_boom)
+    status, payload = br.render_grounded(CHAT_ID, _REROLL_TEXT, message_id="rr5", sender_phone=SENDER)
+    assert status == br.FAILCLOSED
+    assert "reroll_render_error:FlyerRenderError" in " ".join(payload)
+
+
+def test_change_request_is_not_a_reroll(monkeypatch):
+    """A specific-change request is NOT a pure re-roll: re-rendering the saved facts would drop the
+    change, so it must route to REVISION_NEEDED (revision-merge is not built yet) — never re-roll."""
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    cap = _install_reroll(monkeypatch)
+    for text in (
+        "please regenerate with a blue background",
+        "generate again but change the date to July 4",
+        "redo this flyer with no Italian dishes",
+        "regenerate and add our phone number",
+    ):
+        status, _ = br.render_grounded(CHAT_ID, text, message_id="rrc", sender_phone=SENDER)
+        assert status == br.REVISION_NEEDED, text
+    assert cap["projects"] == []   # no saved-session re-render for change requests
+
+
+def test_is_pure_reroll_detector():
+    """Unit: the operator's exact phrase + common re-roll phrasings are pure; change requests are not."""
+    for t in ("I did not like, please generate this flyer again.",
+              "generate again", "regenerate", "redo it", "try again please",
+              "can you make it again", "do it again", "make another version", "redo"):
+        assert br._is_pure_reroll(t) is True, t
+    for t in ("change the date to July 4", "no Italian flavour", "add the phone number",
+              "make it blue", "regenerate with a blue background", "remove the price",
+              "you forgot the address", "use $8.99 for all items"):
+        assert br._is_pure_reroll(t) is False, t
