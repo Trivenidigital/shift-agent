@@ -108,6 +108,10 @@ def test_advise_scene_direction_returns_none_on_problems(monkeypatch):
     # palette alone is not enough taste -> fall back
     monkeypatch.setattr(CB, "_call_gateway", lambda sp, um: {"visual_direction": {"theme_family": "x", "palette": ["blue"]}})
     assert CB.advise_scene_direction("req", [], {}) is None
+    # whitespace-only subjects/motifs (render strips them) -> fall back, not a weak theme-only block
+    monkeypatch.setattr(CB, "_call_gateway",
+                        lambda sp, um: {"visual_direction": {"theme_family": "graduation", "visual_subjects": [" ", ""], "motifs": ["  "]}})
+    assert CB.advise_scene_direction("req", [], {}) is None
     # skill body unreadable
     monkeypatch.setattr(CB, "_call_gateway", lambda sp, um: {"visual_direction": {"theme_family": "x"}})
     monkeypatch.setattr(CB, "_skill_body", lambda: "")
