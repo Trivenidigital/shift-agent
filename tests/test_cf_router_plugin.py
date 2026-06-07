@@ -84,6 +84,7 @@ def state_env(tmp_path):
         "state_dir": state,
         "log_path": logs / "decisions.log",
         "config_path": tmp_path / "config.yaml",
+        "pending_path": state / "pending.json",
         "leads_path": state / "catering-leads.json",
         "proposals_path": state / "catering-proposals.json",
         "menu_pending_path": state / "catering-menu-pending.json",
@@ -632,6 +633,42 @@ class TestF8MenuYesNo:
 # ============================================================================
 
 class TestF9SickCallAlert:
+    def test_employee_lid_sick_call_uses_real_pending_helper(self, mods, state_env):
+        """Live regression: real pending-state check must not crash before F9.
+
+        The 2026-06-07 deployed miss raised NameError because actions.py used
+        PENDING_PATH without defining it; earlier tests patched the helper out.
+        """
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        assert hasattr(actions_mod, "PENDING_PATH")
+        actions_mod.PENDING_PATH = state_env["pending_path"]
+        state_env["pending_path"].write_text(json.dumps({"proposals": {}}), encoding="utf-8")
+
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
+             patch.object(actions_mod, "identify_sender_metadata",
+                          return_value={"role": "employee", "employee_id": "e008",
+                                        "phone_normalized": "+17329837841",
+                                        "lid": "201975216009469@lid"}), \
+             patch.object(actions_mod, "fire_pushover_alert"), \
+             patch.object(actions_mod, "audit_dispatcher_routed", create=True) as mock_routed, \
+             patch.object(actions_mod, "invoke_shift_sick_call",
+                          return_value=(0, "ok", ""), create=True) as mock_shift:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    "Hey Boss! I am down with fever, I can't come for shift today. Sorry for inconvenience.",
+                    "201975216009469@lid",
+                    message_id="wa-live-1538",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router F9: invoked handle-shift-sick-call (rc=0)",
+        }
+        mock_routed.assert_called_once()
+        mock_shift.assert_called_once()
+
     def test_employee_sick_call_fires_pushover(self, mods, state_env):
         hooks_mod, actions_mod = mods
         _seed_config(state_env)
