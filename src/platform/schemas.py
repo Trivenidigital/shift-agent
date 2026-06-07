@@ -4961,6 +4961,8 @@ class CfRouterIntercepted(_BaseEntry):
         # branches of the spawn audit (dispatched on success, failed otherwise).
         "flyer_bare_brief_generation_dispatched",
         "flyer_bare_brief_generation_failed",
+        "revenue_route_clarification_sent",
+        "revenue_route_clarification_chosen",
         "error",
     ]
     chat_id: str = Field(min_length=1, max_length=200)

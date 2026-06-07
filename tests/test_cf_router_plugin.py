@@ -27,6 +27,25 @@ REPO = Path(__file__).resolve().parent.parent
 PLUGIN_DIR = REPO / "src" / "plugins" / "cf-router"
 PLATFORM_DIR = REPO / "src" / "platform"
 
+DESSERT_GRADUATION_AMBIGUOUS_BRIEF = (
+    "Graduation is here and time to celebrate our kids. "
+    "We take customized orders - Desserts\n"
+    "Mango custard 40 count tray - $40\n"
+    "Rasmalai cups 25 count - $50\n"
+    "Gulab jamun tray 50 count - $35\n"
+    "Fruit custard 40 count tray - $40\n"
+    "Badam kheer 25 cups - $45\n"
+    "Carrot halwa tray - $55\n"
+    "Double ka meetha tray - $50\n"
+    "Qubani ka meetha tray - $60\n"
+    "Rice kheer 25 cups - $40\n"
+    "Motichoor ladoo 50 count - $45\n"
+    "Mysore pak 50 count - $45\n"
+    "Kaju katli 50 count - $60\n"
+    "Milk cake 50 count - $50\n"
+    "Jalebi 50 count - $40"
+)
+
 
 def _load_plugin_modules():
     """Load the cf-router plugin's hooks + actions as submodules of a
@@ -42,6 +61,9 @@ def _load_plugin_modules():
         for mod_name in list(sys.modules):
             if mod_name == pkg_name or mod_name.startswith(pkg_name + "."):
                 del sys.modules[mod_name]
+
+    for mod_name in ("schemas", "safe_io"):
+        sys.modules.pop(mod_name, None)
 
     # Synthetic parent package — points at the plugin directory
     pkg_spec = importlib.machinery.ModuleSpec(pkg_name, loader=None, is_package=True)
@@ -85,6 +107,7 @@ def state_env(tmp_path):
         "log_path": logs / "decisions.log",
         "config_path": tmp_path / "config.yaml",
         "pending_path": state / "pending.json",
+        "revenue_route_clarification_path": state / "revenue-route-clarifications.json",
         "leads_path": state / "catering-leads.json",
         "proposals_path": state / "catering-proposals.json",
         "menu_pending_path": state / "catering-menu-pending.json",
@@ -101,6 +124,7 @@ def mods(state_env):
     """Load plugin + override paths to test fixtures."""
     hooks_mod, actions_mod = _load_plugin_modules()
     actions_mod.CONFIG_PATH = state_env["config_path"]
+    actions_mod.REVENUE_ROUTE_CLARIFICATION_PATH = state_env["revenue_route_clarification_path"]
     actions_mod.LEADS_PATH = state_env["leads_path"]
     actions_mod.PROPOSALS_PATH = state_env["proposals_path"]
     actions_mod.MENU_PENDING_PATH = state_env["menu_pending_path"]
@@ -116,6 +140,12 @@ def mods(state_env):
     # Override PLATFORM_DIR so audit_intercepted picks up the in-repo
     # schemas.py (which has CfRouterIntercepted), not the deployed one.
     actions_mod.PLATFORM_DIR = PLATFORM_DIR
+    platform_text = str(PLATFORM_DIR)
+    while platform_text in sys.path:
+        sys.path.remove(platform_text)
+    sys.path.insert(0, platform_text)
+    for mod_name in ("schemas", "safe_io"):
+        sys.modules.pop(mod_name, None)
     return hooks_mod, actions_mod
 
 
@@ -1257,6 +1287,168 @@ def _seed_proposal_sets(state_env, sets):
         "sets": sets,
         "next_set_seq": len(sets) + 1,
     }), encoding="utf-8")
+
+
+def _seed_revenue_route_clarification(state_env, chat_id="201975216009469@lid",
+                                      original_text=DESSERT_GRADUATION_AMBIGUOUS_BRIEF):
+    state_env["revenue_route_clarification_path"].write_text(json.dumps({
+        "version": 1,
+        "pending": {
+            chat_id: {
+                "chat_id": chat_id,
+                "original_text": original_text,
+                "message_id": "msg-dessert-graduation",
+                "created_at": "2026-06-07T19:40:28+00:00",
+                "sender_phone": "+17329837841",
+                "sender_role": "customer",
+                "signals": ["price_amount", "event_keyword", "order_quantity"],
+            },
+        },
+    }), encoding="utf-8")
+
+
+class TestRevenueRouteClarification:
+    def test_ambiguous_dessert_graduation_brief_asks_flyer_vs_catering(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_leads_multi(state_env, [])
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+17329837841", "customer")), \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-clarify", "")) as mock_send, \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_flyer, \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_catering:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text=DESSERT_GRADUATION_AMBIGUOUS_BRIEF,
+                    chat_id="201975216009469@lid",
+                    message_id="msg-dessert-graduation",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router revenue route clarification sent",
+        }
+        mock_flyer.assert_not_called()
+        mock_catering.assert_not_called()
+        mock_send.assert_called_once()
+        reply = mock_send.call_args.args[1]
+        assert "promotional flyer" in reply
+        assert "catering/order request" in reply
+
+        doc = json.loads(state_env["revenue_route_clarification_path"].read_text(encoding="utf-8"))
+        pending = doc["pending"]["201975216009469@lid"]
+        assert pending["original_text"] == DESSERT_GRADUATION_AMBIGUOUS_BRIEF
+        assert pending["message_id"] == "msg-dessert-graduation"
+
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
+        assert audits[-1]["reason"] == "revenue_route_clarification_sent"
+
+    def test_revenue_route_reply_flyer_uses_saved_brief(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_revenue_route_clarification(state_env)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+17329837841", "customer")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender", return_value=None), \
+             patch.object(actions_mod, "trigger_create_flyer_project",
+                          return_value=(True, "created", {"project_id": "F0999"})) as mock_flyer, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-flyer", "")):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(text="flyer", chat_id="201975216009469@lid", message_id="msg-choice-flyer"),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer primary: project F0999 created",
+        }
+        assert " ".join(mock_flyer.call_args.kwargs["raw_request"].split()) == (
+            " ".join(DESSERT_GRADUATION_AMBIGUOUS_BRIEF.split())
+        )
+        doc = json.loads(state_env["revenue_route_clarification_path"].read_text(encoding="utf-8"))
+        assert "201975216009469@lid" not in doc["pending"]
+
+    def test_revenue_route_reply_catering_uses_saved_brief(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_leads_multi(state_env, [])
+        _seed_revenue_route_clarification(state_env)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+17329837841", "customer")), \
+             patch.object(actions_mod, "trigger_create_catering_lead",
+                          return_value=(True, "lead_created")) as mock_catering:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(text="catering", chat_id="201975216009469@lid", message_id="msg-choice-catering"),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router F7 primary: catering inquiry routed deterministically",
+        }
+        assert mock_catering.call_args.kwargs["raw_inquiry"] == DESSERT_GRADUATION_AMBIGUOUS_BRIEF
+        doc = json.loads(state_env["revenue_route_clarification_path"].read_text(encoding="utf-8"))
+        assert "201975216009469@lid" not in doc["pending"]
+
+    def test_revenue_route_reply_both_asks_which_route_first_and_keeps_context(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_revenue_route_clarification(state_env)
+
+        with patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-both", "")) as mock_send, \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_flyer, \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_catering:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(text="both", chat_id="201975216009469@lid", message_id="msg-choice-both"),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router revenue route clarification sent",
+        }
+        mock_flyer.assert_not_called()
+        mock_catering.assert_not_called()
+        reply = mock_send.call_args.args[1]
+        assert "Which should I start first" in reply
+        assert "promotional flyer" in reply
+        assert "catering/order request" in reply
+
+        doc = json.loads(state_env["revenue_route_clarification_path"].read_text(encoding="utf-8"))
+        assert doc["pending"]["201975216009469@lid"]["original_text"] == DESSERT_GRADUATION_AMBIGUOUS_BRIEF
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
+        assert audits[-1]["reason"] == "revenue_route_clarification_sent"
+        assert "choice=both" in audits[-1]["detail"]
+
+    def test_active_flyer_customer_itemized_prices_without_order_language_routes_flyer(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        text = "Weekend dessert special: Mango cake $4.99, Rasmalai cups $5.99. Use my saved business details."
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+17329837841", "customer")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value={"customer_id": "CUST0001", "status": "trial", "business_name": "Lakshmi"}), \
+             patch.object(actions_mod, "trigger_create_flyer_project",
+                          return_value=(True, "created", {"project_id": "F1000"})) as mock_flyer, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-flyer", "")):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(text=text, chat_id="201975216009469@lid", message_id="msg-active-flyer"),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer primary: project F1000 created",
+        }
+        assert mock_flyer.call_args.kwargs["raw_request"] == text
+        assert not state_env["revenue_route_clarification_path"].exists()
 
 
 class TestFindActiveCateringLeadBySender:

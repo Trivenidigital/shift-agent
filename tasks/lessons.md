@@ -5,6 +5,7 @@
 - When a live routing failure is caused by the current deterministic/skill-matrix front door, fix that path first: live log diagnosis, trust-zone priority, replay tests, and cf-router behavior. Do not mix a Hermes `frontdoor_router` redesign into the emergency PR.
 - A future Hermes router must consume deterministic identity/state inputs and emit a structured route decision behind a Python trust-zone validator. Hermes may judge intent, but Python/tools decide identity and enforce forbidden route zones.
 - When promoting an alert-only classifier to a deterministic skip/invoke path, remove broad false-positive patterns and add negative route tests. Alert-only tolerance does not carry over to LLM-bypass behavior.
+- Revenue-zone front-door invariant: never answer a business-relevant customer/revenue message with the generic "Sorry, I can't process this right now" fallback. If Flyer, Catering, Commerce, or required intake details are unclear, ask the smallest deterministic clarification question, persist the pending context, provide a next-message continuation path, and write an audit reason. Do not guess between revenue flows and do not make the customer resend context already provided.
 
 ## 2026-06-04 - Clean deploys must not drop live-only flyer routing
 
