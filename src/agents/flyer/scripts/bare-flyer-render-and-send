@@ -152,7 +152,42 @@ def main(argv=None) -> int:
         return 0
 
     if args.revision:
-        # Broad revision/feedback follow-up -> deterministic "resend full details" (no render, no LLM loop).
+        # Slice 3: skill-driven iteration (re-roll / specific_revision / style_reuse) when armed, instead
+        # of the "resend full details" dead-end. Falls back to REVISION_REPLY when the flag is off or on
+        # ANY error — never a worse outcome than today. --revision-apply (source edits) is unchanged above.
+        try:
+            B = _bare()
+            status, payload = B.render_iteration(
+                chat_id, args.brief, message_id=args.message_id, sender_phone=args.sender_phone,
+            )
+        except Exception as e:  # noqa: BLE001
+            log(f"OUTCOME=iteration_error {type(e).__name__}: {e}")
+            send_text(chat_id, REVISION_REPLY, "flyer.bare.revision_needed")
+            return 0
+        if status in (B.REROLL, B.ITERATION_REVISED, B.ITERATION_STYLE_REUSE):
+            caption = {
+                B.REROLL: B.REROLL_INVITE,
+                B.ITERATION_REVISED: "Here's your updated flyer - reply with any more changes.",
+                B.ITERATION_STYLE_REUSE: "Here's a new flyer reusing that style - reply with any changes.",
+            }[status]
+            ok = send_image(chat_id, payload, caption, "flyer.bare.image_send")
+            if ok:
+                mark_recent_flyer(chat_id, args.brief)
+                B.commit_session(chat_id)  # commit the pending iteration session only after delivery
+            log(f"OUTCOME={status} chat={chat_id} ok={ok}")
+            return 0 if ok else 1
+        if status == B.FAILCLOSED:
+            failures = ", ".join(payload or []) or "some details"
+            send_text(chat_id, "I couldn't update your flyer with all the correct details just now (I'd "
+                      "rather not show wrong info). Please try again in a moment, or tell me the exact change.",
+                      "flyer.bare.failclosed")
+            log(f"OUTCOME=iteration_failclosed chat={chat_id} failures={failures}")
+            return 0
+        if status == B.ITERATION_UNCLEAR:
+            send_text(chat_id, B.ITERATION_UNCLEAR_REPLY, "flyer.bare.iteration_unclear")
+            log(f"OUTCOME=iteration_unclear chat={chat_id}")
+            return 0
+        # REVISION_NEEDED (flag off) or any other status -> today's deterministic resend reply.
         send_text(chat_id, REVISION_REPLY, "flyer.bare.revision_needed")
         log(f"OUTCOME=revision_needed chat={chat_id}")
         return 0

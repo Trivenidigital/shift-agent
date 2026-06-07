@@ -133,11 +133,23 @@ def _business_title_from_text(value: str) -> str:
     return clean
 
 
+# A campaign_title that is a bare article/determiner or instruction stub is extraction garbage (e.g.
+# "A" grabbed from "create A flyer"). Better no title (the renderer falls back) than a garbage "A".
+# This is a fact-validation guard (Python owns facts), NOT an occasion/theme keyword list.
+_DEGENERATE_TITLES = {
+    "a", "an", "the", "this", "that", "these", "those", "my", "our", "your", "its", "it",
+    "create", "make", "design", "generate", "new", "flyer", "flier", "poster", "banner", "please",
+}
+
+
 def _normalize_campaign_title(value: str) -> str:
     clean = _clean(value)
     if not clean:
         return ""
     clean = re.sub(r"\s+\b(?:flyer|flier|poster|banner)\b\s*$", "", clean, flags=re.IGNORECASE).strip(" .")
+    # Drop a degenerate title (a bare article/determiner, or a 1-char fragment).
+    if clean.casefold() in _DEGENERATE_TITLES or len(re.sub(r"[^a-z0-9]", "", clean.casefold())) <= 1:
+        return ""
     return clean
 
 

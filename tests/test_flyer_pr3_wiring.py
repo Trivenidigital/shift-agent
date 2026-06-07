@@ -805,3 +805,38 @@ def test_skill_driven_scene_armed_threads_visual_direction(monkeypatch):
     assert status == br.SEND and payload == b"LEGACY_PNG"
     assert rec["scene_direction"] == [sentinel]        # advisory scene threaded to the integrated poster
     assert rec["cd_render"] == []                      # still NOT the CD path
+
+
+def test_script_revision_routes_to_iteration_apply_not_stolen(monkeypatch):
+    """Slice 3 (operator point 4): the TEXT --revision branch calls render_iteration (not the
+    'resend full details' dead-end), and a source-edit --revision-apply still calls
+    render_revision_apply — the iteration logic does NOT steal the source-edit path."""
+    script = _load_bare_script()
+    calls = {"images": [], "logs": [], "iteration": [], "revision_apply": []}
+    fake_B = types.SimpleNamespace(
+        SEND=br.SEND, REROLL=br.REROLL, CONFLICT=br.CONFLICT, FAILCLOSED=br.FAILCLOSED,
+        REVISION_NEEDED=br.REVISION_NEEDED, UNREGISTERED=br.UNREGISTERED, REROLL_INVITE=br.REROLL_INVITE,
+        ITERATION_REVISED=br.ITERATION_REVISED, ITERATION_STYLE_REUSE=br.ITERATION_STYLE_REUSE,
+        ITERATION_UNCLEAR=br.ITERATION_UNCLEAR, ITERATION_UNCLEAR_REPLY=br.ITERATION_UNCLEAR_REPLY,
+        render_iteration=lambda *a, **k: (calls["iteration"].append((a, k)) or (br.ITERATION_REVISED, b"REV_PNG")),
+        render_revision_apply=lambda *a, **k: (calls["revision_apply"].append(a) or (br.REVISION_NEEDED, None)),
+        commit_session=lambda chat_id: None,
+    )
+    monkeypatch.setattr(script, "_bare", lambda: fake_B)
+    monkeypatch.setattr(script, "send_image",
+                        lambda chat_id, b, caption, action: (calls["images"].append(caption) or True))
+    monkeypatch.setattr(script, "send_text", lambda *a, **k: True)
+    monkeypatch.setattr(script, "mark_recent_flyer", lambda *a, **k: None)
+    monkeypatch.setattr(script, "log", lambda msg: calls["logs"].append(msg))
+
+    # text --revision -> render_iteration -> ITERATION_REVISED -> image + audit
+    rc = script.main(["--chat-id", CHAT_ID, "--no-ack", "--revision", "--brief", "make it more festive"])
+    assert rc == 0
+    assert len(calls["iteration"]) == 1 and calls["revision_apply"] == []
+    assert calls["images"] == ["Here's your updated flyer - reply with any more changes."]
+    assert any("OUTCOME=iteration_revised" in m for m in calls["logs"])
+
+    # source-edit --revision-apply -> render_revision_apply (NOT stolen by iteration)
+    calls["iteration"].clear()
+    script.main(["--chat-id", CHAT_ID, "--no-ack", "--revision-apply", "--brief", "set price $8.99"])
+    assert len(calls["revision_apply"]) == 1 and calls["iteration"] == []
