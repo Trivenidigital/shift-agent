@@ -67,6 +67,7 @@ def _grad_session(*, sent_at=None):
 def _install(monkeypatch, *, session=..., advise_vd=None, qa=(True, [])):
     cap = {"poster": [], "wrote": [], "advise_calls": []}
     monkeypatch.setattr(br, "ITERATION_ENABLED", True)
+    monkeypatch.setenv(br.ITERATION_ALLOWLIST_ENV, SENDER)   # scoped allowlist (Codex)
     monkeypatch.setattr(br, "REVISION_APPLY_ENABLED", True)
     sess = _grad_session() if session is ... else session
     monkeypatch.setattr(br, "_load_session", lambda chat_id: sess)
@@ -185,6 +186,28 @@ def test_style_reuse_detector():
     assert br._is_style_reuse("redesign this, two students turning back") is False
     assert br._is_style_reuse("make it more graduation themed") is False
     assert br._is_style_reuse("generate again") is False
+    # Codex MAJOR: a revision phrased with "design"/"layout" + "THE/THIS flyer" must NOT be style_reuse
+    assert br._is_style_reuse("use this design but make the flyer blue") is False
+    assert br._is_style_reuse("keep the same layout but make this flyer more premium") is False
+
+
+def test_flag_on_but_not_allowlisted_returns_revision_needed(monkeypatch):
+    cap = _install(monkeypatch)
+    monkeypatch.setenv(br.ITERATION_ALLOWLIST_ENV, "19998887777")   # sender NOT in allowlist
+    status, _ = br.render_iteration(CHAT, "make it more festive", sender_phone=SENDER)
+    assert status == br.REVISION_NEEDED        # not allowlisted -> caller keeps today's reply
+    assert cap["poster"] == []
+
+
+def test_style_reuse_persists_new_brief_not_old(monkeypatch):
+    cap = _install(monkeypatch, advise_vd=_VD)
+    _install_new_facts(monkeypatch, title="Weekend Breakfast")
+    br.render_iteration(CHAT, "Use this design, create a weekend breakfast flyer for Lakshmi's",
+                        sender_phone=SENDER, message_id="m2")
+    # the persisted (pending) session brief is the NEW request, not the old graduation brief
+    persisted_brief = cap["wrote"][0][0][3]
+    assert "weekend breakfast" in persisted_brief.lower()
+    assert "graduation" not in persisted_brief.lower()
 
 
 def test_unclear_reply_is_a_question_not_resend_full_details():

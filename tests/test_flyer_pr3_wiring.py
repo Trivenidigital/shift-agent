@@ -706,11 +706,16 @@ def test_negated_reroll_is_not_a_reroll(monkeypatch):
     monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
     cap = _install_reroll(monkeypatch)
     for text in ("do not generate again", "please don't regenerate", "stop generating this flyer",
-                 "stop generating", "do not regenerate"):
+                 "stop generating", "do not regenerate",
+                 # Codex 2026-06-07: design/render verbs negated immediately must still be negations
+                 "do not design again", "don't render again", "please do not make another"):
         assert br._is_pure_reroll(text) is False, text
         status, _ = br.render_grounded(CHAT_ID, text, message_id="rrn", sender_phone=SENDER)
         assert status == br.REVISION_NEEDED, text   # handled, never a fresh render
     assert cap["projects"] == []   # never re-rendered on a negation
+    # ...but "I don't like this design, generate again" (design = NOUN) stays a pure re-roll
+    assert br._is_pure_reroll("I don't like this design, generate again") is True
+    assert br._is_pure_reroll("I don't like this design, make another") is True
 
 
 def test_reroll_with_same_details_phrasing_reaches_reroll(monkeypatch):
