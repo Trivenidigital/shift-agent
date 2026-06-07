@@ -688,10 +688,38 @@ def test_change_request_is_not_a_reroll(monkeypatch):
         "generate this flyer in blue again",
         "generate this flyer no Italian again",
         "generate this flyer add phone number again",
+        # Codex round-3: a re-roll-signalled change with NO "this flyer"/revision keyword must still
+        # route to REVISION_NEEDED via the follow-up gate — NOT fall through to a fresh render.
+        "generate again but make it blue",
+        "generate again but change color blue",
+        "regenerate with delivery added",
     ):
         status, _ = br.render_grounded(CHAT_ID, text, message_id="rrc", sender_phone=SENDER)
         assert status == br.REVISION_NEEDED, text
     assert cap["projects"] == []   # no saved-session re-render for change requests
+
+
+def test_negated_reroll_is_not_a_reroll(monkeypatch):
+    """An explicit negation ("do not generate again", "don't regenerate", "stop generating") must
+    NOT re-roll the saved flyer (Codex round-3). Routes to REVISION_NEEDED, never a render."""
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    cap = _install_reroll(monkeypatch)
+    for text in ("do not generate again", "please don't regenerate", "stop generating this flyer"):
+        assert br._is_pure_reroll(text) is False, text
+        status, _ = br.render_grounded(CHAT_ID, text, message_id="rrn", sender_phone=SENDER)
+        assert status == br.REVISION_NEEDED, text
+    assert cap["projects"] == []   # never re-rendered on a negation
+
+
+def test_reroll_with_same_details_phrasing_reaches_reroll(monkeypatch):
+    """"generate again with same details" is a pure re-roll (only filler tokens) and must re-roll,
+    not fall to the new-flyer path (Codex round-3 reachability)."""
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    cap = _install_reroll(monkeypatch)
+    status, _ = br.render_grounded(CHAT_ID, "generate again with same details",
+                                   message_id="rrsd", sender_phone=SENDER)
+    assert status == br.REROLL
+    assert len(cap["projects"]) == 1
 
 
 def test_is_pure_reroll_detector():

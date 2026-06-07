@@ -384,30 +384,47 @@ _REROLL_SIGNAL_RE = re.compile(
 )
 _REROLL_VERB_RE = re.compile(r"\b(?:generate|create|make|design|render|do|build|produce)\b", re.IGNORECASE)
 _AGAIN_RE = re.compile(r"\bagain\b", re.IGNORECASE)
+# A NEGATED re-roll ("do not generate again", "don't regenerate", "stop generating") must NOT re-roll.
+# Targets "do not"/"don't"/"never"/"stop"/"no need to" right before a re-roll verb — NOT "did not
+# like ...", which negates the liking, not the render (so the operator's phrase stays a pure re-roll).
+_REROLL_NEGATION_RE = re.compile(
+    r"\b(?:do\s*not|do\s*n['’]?t|don['’]?t|never|please\s+stop|stop|no\s+need\s+to)\b"
+    r"[^.!?]{0,15}\b(?:re-?generate|regenerate|re-?do|redo|re-?make|remake|generate|create|make|"
+    r"design|render|build|produce|try)\b",
+    re.IGNORECASE,
+)
 # Bare tokens that carry NO change content: filler + re-roll verbs/objects. A pure re-roll contains
-# ONLY these; any other token signals a specific change.
+# ONLY these; any other token signals a specific change. (Not safety-critical: an unrecognized token
+# falls to REVISION_NEEDED via the follow-up gate, never to a fresh render.)
 _REROLL_OK_TOKENS = frozenset({
     "i", "we", "you", "u", "please", "pls", "plz", "kindly", "can", "could", "would", "will",
     "the", "this", "that", "it", "its", "flyer", "flier", "poster", "image", "picture", "pic",
     "one", "again", "now", "just", "so", "did", "do", "does", "done", "not", "dont", "didnt",
     "like", "liked", "love", "want", "wanted", "need", "a", "an", "of", "to", "for", "me", "my",
-    "with", "same", "fresh", "new", "version", "but", "and", "ok", "okay", "hi", "hey", "thanks",
-    "thank", "too", "really", "very",
+    "with", "same", "fresh", "new", "version", "details", "but", "and", "ok", "okay", "hi", "hey",
+    "thanks", "thank", "too", "really", "very",
     # re-roll verbs / phrase words as bare tokens
     "generate", "regenerate", "create", "recreate", "make", "remake", "design", "render", "build",
     "produce", "redo", "retry", "try", "over", "another", "once", "more", "start", "take", "go",
 })
 
 
-def _is_pure_reroll(text: str) -> bool:
-    """True only for a no-change re-roll ("I didn't like it, generate again"). Requires a re-roll
-    signal AND that EVERY word is a re-roll/filler token; any substantive word (a noun/adjective/
-    number/new value) — even between the verb and "again" — makes it a change, not a pure re-roll."""
-    t = (text or "").strip()
-    has_signal = bool(_REROLL_SIGNAL_RE.search(t)) or (
+def _has_reroll_signal(text: str) -> bool:
+    """A re-roll intent is present: an explicit re-roll phrase, or a generate-verb with "again". Used
+    (with _looks_like_revision) to recognize a FOLLOW-UP about a prior flyer vs a fresh request."""
+    t = text or ""
+    return bool(_REROLL_SIGNAL_RE.search(t)) or (
         bool(_REROLL_VERB_RE.search(t)) and bool(_AGAIN_RE.search(t))
     )
-    if not has_signal:
+
+
+def _is_pure_reroll(text: str) -> bool:
+    """True only for a no-change, non-negated re-roll ("I didn't like it, generate again"). Requires
+    a re-roll signal, no negation of it, AND that EVERY word is a re-roll/filler token; any
+    substantive word (a noun/adjective/number/new value), even between the verb and "again", makes it
+    a specific change — routed to REVISION_NEEDED, not a re-roll."""
+    t = (text or "").strip()
+    if not _has_reroll_signal(t) or _REROLL_NEGATION_RE.search(t):
         return False
     return all(tok in _REROLL_OK_TOKENS for tok in re.findall(r"[a-z0-9]+", t.casefold()))
 
@@ -754,20 +771,18 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
                     sender_phone: str | None = None):
     """Registered-path grounded render. (SEND, png) | (CONFLICT, {...}) | (FAILCLOSED, [blockers]) |
     (REVISION_NEEDED, None) | (UNREGISTERED, None)."""
-    # A no-change re-roll ("generate again", "I didn't like it, regenerate") with a saved same-chat
-    # session re-renders the saved validated facts as a fresh variant. Checked BEFORE the revision
-    # gate: a bare "generate again" is a pure re-roll that _looks_like_revision's change-oriented
-    # patterns do NOT match (Codex 2026-06-07), so it must not fall through to the new-flyer path.
-    # Do NOT ask for full details, do NOT re-extract the complaint, do NOT invoke revision-merge.
-    # No/stale session -> REVISION_NEEDED; render fail -> FAILCLOSED.
-    if _is_pure_reroll(raw_text):
-        status, payload = render_reroll(chat_id)
-        if status != REVISION_NEEDED:  # REROLL (sent) or FAILCLOSED (render failed) -> return as-is
-            return (status, payload)
-        return (REVISION_NEEDED, None)  # no/stale session -> ask for the full details
-    if _looks_like_revision(raw_text):
-        # A SPECIFIC-change request: no prior-flyer context to merge against yet (Rewire 2) -> do NOT
-        # render the complaint as a fresh brief. Ask for the full request instead of inventing one.
+    # A FOLLOW-UP about a prior flyer = a re-roll signal ("generate again", "regenerate", "redo") OR
+    # a revision reference ("this flyer", "change the ..."). Handle it BEFORE the new-flyer path so a
+    # follow-up can never be mis-rendered as a brand-new flyer (Codex 2026-06-07):
+    #   - a CLEAN pure re-roll (no change, not negated, saved same-chat session) re-renders the saved
+    #     validated facts as a fresh variant (no re-extraction, no revision-merge);
+    #   - ANYTHING else (a specific change, a negation, ambiguous, or no/stale session) -> the
+    #     resend-full-details guidance. Never a fresh render, never a silently-dropped change.
+    if _has_reroll_signal(raw_text) or _looks_like_revision(raw_text):
+        if _is_pure_reroll(raw_text):
+            status, payload = render_reroll(chat_id)
+            if status != REVISION_NEEDED:  # REROLL (sent) or FAILCLOSED (render failed) -> return as-is
+                return (status, payload)
         return (REVISION_NEEDED, None)
     customer = resolve_customer(chat_id, sender_phone)
     if customer is None:
