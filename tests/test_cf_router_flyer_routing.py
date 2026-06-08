@@ -2575,6 +2575,7 @@ def test_real_brief_or_iteration_outranks_sample_prompt_menu(monkeypatch, messag
     monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
     monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_a, **_k: None)
     monkeypatch.setattr(hooks, "_try_flyer_regulated_account_guard", lambda *_a, **_k: None)
+    monkeypatch.setattr(hooks, "_try_revenue_route_clarification_choice", lambda *_a, **_k: None)
     monkeypatch.setattr(actions, "is_flyer_approval_text", lambda _text: False)
     monkeypatch.setattr(actions, "is_flyer_send_now_intent", lambda _text: False)
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
@@ -2616,6 +2617,7 @@ def test_active_project_iteration_outranks_sample_prompt_menu(monkeypatch):
     monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
     monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_a, **_k: None)
     monkeypatch.setattr(hooks, "_try_flyer_regulated_account_guard", lambda *_a, **_k: None)
+    monkeypatch.setattr(hooks, "_try_revenue_route_clarification_choice", lambda *_a, **_k: None)
     monkeypatch.setattr(actions, "is_flyer_approval_text", lambda _text: False)
     monkeypatch.setattr(actions, "is_flyer_send_now_intent", lambda _text: False)
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
@@ -2644,6 +2646,73 @@ def test_active_project_iteration_outranks_sample_prompt_menu(monkeypatch):
 
     assert intake_reached["called"] is True
     assert result == {"action": "skip", "reason": "intake-handled"}
+
+
+@pytest.mark.parametrize(
+    "message_text",
+    [
+        "Can you suggest me some flyer ideas",
+        "Can you suggest me more flyer ideas",
+        "Can you suggest me new flyer ideas",
+        "show me fresh poster options",
+    ],
+)
+def test_generic_flyer_ideas_request_with_active_project_still_sends_sample_ideas(
+    monkeypatch, message_text,
+):
+    # Live 2026-06-08 regression: generic ideas/suggestions are customer-help
+    # intent, not a request to mutate or regenerate a non-terminal project.
+    hooks, actions = _load_plugin_modules()
+    intake_calls = []
+    created = {"called": False}
+    sent = {}
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_a, **_k: None)
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_a, **_k: None)
+    monkeypatch.setattr(hooks, "_try_revenue_route_clarification_choice", lambda *_a, **_k: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(
+        actions,
+        "find_active_flyer_project_by_sender",
+        lambda _phone, _chat_id: {"project_id": "F0139", "status": "awaiting_final_approval"},
+    )
+    monkeypatch.setattr(
+        actions,
+        "find_flyer_customer_by_sender",
+        lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"},
+    )
+    monkeypatch.setattr(
+        actions,
+        "trigger_flyer_intake",
+        lambda **kwargs: intake_calls.append(kwargs)
+        or (True, "", {"reply_text": "Pick a sample idea to start:", "action": "choose_sample_idea"}),
+    )
+    monkeypatch.setattr(
+        actions,
+        "trigger_create_flyer_project",
+        lambda **_kwargs: created.update(called=True) or (True, "", {"project_id": "F9999"}),
+    )
+    monkeypatch.setattr(
+        actions,
+        "send_flyer_text",
+        lambda chat_id, text, **_kwargs: sent.update({"chat_id": chat_id, "text": text})
+        or (True, "sample-mid", ""),
+    )
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text=message_text,
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="live-generic-ideas-active-project",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer sample prompts sent"}
+    assert created["called"] is False
+    assert intake_calls
+    assert intake_calls[0]["start_source"] == "sample_idea"
+    assert sent["text"] == "Pick a sample idea to start:"
 
 
 @pytest.mark.parametrize(
