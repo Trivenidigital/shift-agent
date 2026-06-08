@@ -1,5 +1,12 @@
 # Lessons
 
+## 2026-06-08 - Flyer idea requests are help intent, even with active projects
+
+- Generic requests such as `Can you suggest me some flyer ideas` are not flyer briefs and must not send the processing ack or create/regenerate a project.
+- An active non-terminal Flyer project should only outrank the sample-idea path when the wording clearly asks to iterate that active project, such as `give me another flyer idea`, reroll, regenerate, or try again.
+- Do not treat generic modifiers like `more`, `new`, `fresh`, or `next` before `flyer ideas/options` as active-project iteration; those are still customer-help/sample-idea requests unless the customer clearly references the current flyer.
+- Regression tests need the active-project state shape, not only no-active-project sample prompt variants; otherwise production state can turn a customer-help request into mutation.
+
 ## 2026-06-08 - Flyer long-menu truth-preserving overlays are not customer quality
 
 - A long-menu flyer that preserves every locked price can still be unacceptable if it looks like a cramped debug/table overlay. Correct facts are necessary, not sufficient.

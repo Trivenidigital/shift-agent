@@ -1,5 +1,29 @@
 # Backlog — pending items
 
+## Active - Flyer idea request must not auto-generate (2026-06-08)
+
+**Drift-check tag:** extends-Hermes
+
+**New primitives introduced:** none. This is a cf-router/Flyer intake priority fix using the existing sample-idea intake path and active-project routing.
+
+**Hermes-first analysis**
+
+| Domain | Hermes skill found? | Decision |
+|---|---|---|
+| WhatsApp ingress and identity | Hermes gateway + cf-router already receive message text and resolve sender context | use it |
+| Flyer sample ideas | existing Flyer intake `sample_idea` flow already returns starter ideas | use it |
+| Active Flyer project routing | existing cf-router active-project intercept owns revisions/approvals | narrow its priority only for generic ideas requests |
+| Creative generation | existing Flyer generation remains unchanged | do not touch renderer/model |
+
+Awesome Hermes Agent ecosystem check: not applicable for this emergency routing bug; the existing Hermes/Flyer substrate already provides the needed sample-idea flow.
+
+- [x] Diagnose live failure class: deployed plugin is current `e5023bb`, but active Flyer projects for the sender cause the sample/ideas hook to yield before active-project routing.
+- [x] Add failing regression for `Can you suggest me some flyer ideas` with an active Flyer project: sample ideas, no project generation.
+- [x] Implement narrow routing priority fix while preserving explicit `give me another flyer idea` active-project iteration.
+- [x] Update `tasks/lessons.md` with the corrected invariant.
+- [x] Run focused cf-router/Flyer routing tests, compile, and diff checks.
+- [ ] Commit, PR, merge/deploy if verification passes.
+
 ## Active - Flyer catalog quality regression (2026-06-08)
 
 **Drift-check tag:** extends-Hermes

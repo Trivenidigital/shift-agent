@@ -130,6 +130,15 @@ _SAMPLE_PROMPT_REQUEST = re.compile(
     r"|\bcan\s+i\s+get\b.{0,20}\b(?:flyer|flier|poster|ad)\b.{0,20}\bideas?\b",
     re.IGNORECASE,
 )
+_ACTIVE_PROJECT_SAMPLE_IDEA_ITERATION = re.compile(
+    r"\banother\b.{0,35}"
+    r"\b(?:flyer|flier|poster|design|concept|idea|version|option)\b"
+    r"|\b(?:flyer|flier|poster|design|concept|idea)\b.{0,35}"
+    r"\banother\b.{0,20}"
+    r"\b(?:idea|design|concept|version|option)\b"
+    r"|\b(?:reroll|re-roll|regenerate|generate\s+again|try\s+again|redo)\b",
+    re.IGNORECASE,
+)
 
 
 def _flyer_request_excerpt_for_reply(text: str, *, limit: int = 140) -> str:
@@ -137,6 +146,11 @@ def _flyer_request_excerpt_for_reply(text: str, *, limit: int = 140) -> str:
     if len(excerpt) > limit:
         excerpt = excerpt[: limit - 3].rstrip() + "..."
     return excerpt
+
+
+def _sample_prompt_request_should_yield_to_active_project(body: str) -> bool:
+    """Return True only for idea wording that clearly iterates an active flyer."""
+    return bool(_ACTIVE_PROJECT_SAMPLE_IDEA_ITERATION.search(body or ""))
 
 # Verb classifier — mirrors the F8 watchdog's accepted verb set so plugin
 # coverage matches the watchdog it replaces. Past-tense forms ("approved",
@@ -845,11 +859,14 @@ def _try_flyer_sample_prompt_request_intercept(text: str, chat_id: str, event: A
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     if role == "owner":
         return None
-    # Priority #1 (operator 2026-06-07): an active saved flyer project means iteration / Slice 3
-    # outranks the sample-prompt menu. Decline so active-project + intake routing handles the
-    # follow-up (reroll / revision / style-reuse), even when the text reads like an idea/prompt
-    # request ("give me another flyer idea"). New senders / no active project still get the menu.
-    if actions.find_active_flyer_project_by_sender(phone, chat_id):
+    # Priority #1 (operator 2026-06-07): explicit active-project iteration /
+    # Slice 3 outranks the sample-prompt menu ("give me another flyer idea",
+    # reroll/regenerate wording). Generic ideas/suggestions are customer-help
+    # intent and must not mutate a non-terminal project just because one exists.
+    if (
+        actions.find_active_flyer_project_by_sender(phone, chat_id)
+        and _sample_prompt_request_should_yield_to_active_project(body)
+    ):
         return None
     customer = actions.find_flyer_customer_by_sender(phone, chat_id)
     if not customer:
