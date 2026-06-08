@@ -518,6 +518,8 @@ def _item_name_present(raw_text: str, value: str) -> bool:
         # notes like "ask about goat catering options".
         if len(re.findall(r"[A-Za-z][A-Za-z'&.-]*", line)) <= 3:
             return True
+    if _item_core_name_with_price_present(raw_text, value):
+        return True
     if _item_name_present_in_rowwise_layout(raw_text, value):
         return True
     return False
@@ -539,6 +541,10 @@ def _only_unit_or_quantity_text(text: str) -> bool:
     return has_unit and all(token.isdigit() or token in _UNIT_OR_QUANTITY_TOKENS for token in tokens)
 
 
+def _no_word_tokens_text(text: str) -> bool:
+    return not re.findall(r"[a-z0-9]+", _normalize_text_for_match(text))
+
+
 def _item_core_tokens(value: str) -> list[str]:
     core, _quantity = _item_core_and_quantity_tokens(value)
     return core
@@ -548,9 +554,32 @@ def _item_core_and_quantity_tokens(value: str) -> tuple[list[str], list[str]]:
     tokens = re.findall(r"[a-z0-9]+", _normalize_text_for_match(value))
     if len(tokens) >= 2 and tokens[-1] in _UNIT_OR_QUANTITY_TOKENS and tokens[-2].isdigit():
         return tokens[:-2], tokens[-2:]
+    if (
+        len(tokens) >= 2
+        and tokens[-1] in {"tray", "trays"}
+        and tokens[-2] in {"small", "medium", "large", "half", "full"}
+    ):
+        return tokens[:-2], tokens[-2:]
     if tokens and tokens[-1] in {"small", "medium", "large", "half", "full"}:
         return tokens[:-1], tokens[-1:]
     return tokens, []
+
+
+def _item_core_name_with_price_present(raw_text: str, value: str) -> bool:
+    core_tokens, quantity_tokens = _item_core_and_quantity_tokens(value)
+    if not core_tokens or not quantity_tokens:
+        return False
+    for line in (raw_text or "").splitlines():
+        normalized_line = _normalize_text_for_match(line)
+        span = _fuzzy_item_span_in_line(normalized_line, core_tokens)
+        if span is None:
+            continue
+        _start, end = span
+        tail = normalized_line[end:]
+        price_match = _first_price_match(tail, requires_currency=False)
+        if price_match is not None and _no_word_tokens_text(tail[: price_match.start()]):
+            return True
+    return False
 
 
 def _tokens_pattern(tokens: list[str]) -> re.Pattern[str] | None:
@@ -648,15 +677,16 @@ def _same_line_item_price_present(segment: str, name_re: re.Pattern[str], price:
     return _price_cents(next_price.group("amount")) == expected
 
 
-def _same_line_fuzzy_item_price_present(raw_text: str, name: str, price: str) -> bool:
+def _same_line_tokens_price_present(
+    raw_text: str,
+    tokens: list[str],
+    price: str,
+    *,
+    allow_unit_text_between: bool,
+) -> bool:
     expected = _price_cents(price)
     if expected is None:
         return False
-    tokens = [
-        token
-        for token in re.findall(r"[a-z0-9]+", _normalize_text_for_match(name))
-        if token
-    ]
     if not tokens:
         return False
     requires_currency = bool(re.search(r"[$â‚¹]", price or ""))
@@ -670,10 +700,29 @@ def _same_line_fuzzy_item_price_present(raw_text: str, name: str, price: str) ->
         price_match = _first_price_match(tail, requires_currency=requires_currency)
         if price_match is None:
             continue
-        if not _only_unit_or_quantity_text(tail[: price_match.start()]):
+        between = tail[: price_match.start()]
+        if allow_unit_text_between:
+            between_ok = _only_unit_or_quantity_text(between)
+        else:
+            between_ok = _no_word_tokens_text(between)
+        if not between_ok:
             continue
         if _price_cents(price_match.group("amount")) == expected:
             return True
+    return False
+
+
+def _same_line_fuzzy_item_price_present(raw_text: str, name: str, price: str) -> bool:
+    tokens = [
+        token
+        for token in re.findall(r"[a-z0-9]+", _normalize_text_for_match(name))
+        if token
+    ]
+    if _same_line_tokens_price_present(raw_text, tokens, price, allow_unit_text_between=True):
+        return True
+    core_tokens, quantity_tokens = _item_core_and_quantity_tokens(name)
+    if quantity_tokens and core_tokens != tokens:
+        return _same_line_tokens_price_present(raw_text, core_tokens, price, allow_unit_text_between=False)
     return False
 
 

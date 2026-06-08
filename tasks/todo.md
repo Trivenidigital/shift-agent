@@ -25,7 +25,10 @@ Awesome Hermes Agent ecosystem check: not applicable for this emergency renderer
 - [x] Commit, PR, merge, tarball deploy from merged `origin/main`, and run scoped smoke for the catalog renderer fix.
 - [x] Diagnose post-deploy no-send probe: generated catalog was visually acceptable, but visual QA falsely blocked on negative QA prose, `tray`/`count` unit text, and one-character OCR readback.
 - [x] Add visual QA regressions for dense dessert catalog OCR tolerance while preserving unknown-item rejection.
-- [ ] Commit, PR, merge, tarball deploy, smoke, and no-send probe the visual QA false-positive follow-up before claiming production recovery.
+- [x] Commit, PR, merge, tarball deploy, and smoke the first visual QA false-positive follow-up.
+- [x] Diagnose second deployed no-send probe: OCR dropped `half tray` from top card rows even though the image displayed it, producing false item/name pair blockers.
+- [x] Add a bounded OCR-quantity tolerance: item core plus exact price can satisfy trailing quantity/unit facts only when no other word tokens appear between core name and price.
+- [ ] Commit, PR, merge, tarball deploy, smoke, and no-send probe the OCR-quantity follow-up before claiming production recovery.
 
 ## Active - Router trust-zone emergency fix (2026-06-07)
 
