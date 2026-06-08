@@ -954,7 +954,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
     if plan.contact:
         lines.append(f"Contact: {plan.contact}")
     if plan.items:
-        lines.append("Menu item cards:")
+        lines.append(f"Menu items to feature - exactly {len(plan.items)} items:")
         for name, price in plan.items:
             lines.append(f"- {name} - {price}")
     if plan.detail_lines:
@@ -1033,7 +1033,7 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
     if has_reference_image:
         return False
     items = _menu_item_lines(project)
-    if len(items) > 10:
+    if len(items) > 10 and not _compact_menu_overlay_allowed(project, items):
         return False
     plan = _poster_copy_plan(project)
     if not (plan.items or plan.detail_lines or plan.title):

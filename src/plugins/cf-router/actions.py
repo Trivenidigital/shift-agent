@@ -2801,6 +2801,18 @@ def is_stale_for_new_request(
 
 def is_flyer_revision_intent(text: str) -> bool:
     body = flyer_visible_message_text(text).lower()
+    if re.search(
+        r"\b(?:flyer|flier|poster|design|image|output|quality|this|it)\b"
+        r"[\s\S]{0,120}\b(?:bad|poor|terrible|awful|miserable|unacceptable|not\s+acceptable|"
+        r"not\s+good|can(?:not|'?t)\s+accept|cant\s+accept)\b"
+        r"|"
+        r"\b(?:bad|poor|terrible|awful|miserable|unacceptable|not\s+acceptable|"
+        r"not\s+good|can(?:not|'?t)\s+accept|cant\s+accept)\b"
+        r"[\s\S]{0,120}\b(?:flyer|flier|poster|design|image|output|quality|this|it)\b",
+        body,
+        flags=re.IGNORECASE,
+    ):
+        return True
     # "update" is intentionally EXCLUDED (origin/main golden-pinned): a terse "any update?"
     # is a STATUS check-in, not a revision — a separate status detector handles it. Keeping
     # "update" here mis-routes status check-ins as revisions (golden live_status_any_update).

@@ -291,6 +291,8 @@ def test_extract_text_facts_locks_exact_dessert_graduation_suffix_price_pairs(mo
     )
     by_id = facts_module.facts_by_id(type("P", (), {"locked_facts": facts})())
 
+    assert by_id["campaign_title"].value == "Graduation Dessert Specials"
+
     expected = [
         ("Mango tresleches - half tray", "$75"),
         ("Rasmalai tresleches - half tray", "$70"),

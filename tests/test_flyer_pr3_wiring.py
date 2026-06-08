@@ -729,10 +729,37 @@ def test_reroll_with_same_details_phrasing_reaches_reroll(monkeypatch):
     assert len(cap["projects"]) == 1
 
 
+def test_quality_rejection_rerolls_saved_session_without_iteration_flag(monkeypatch):
+    """A recent customer saying the flyer quality is unacceptable is a no-change reroll.
+
+    The saved project facts must be preserved; rendering the complaint text as a
+    fresh flyer loses the menu and overwrites the session.
+    """
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    monkeypatch.setattr(br, "ITERATION_ENABLED", False)
+    cap = _install_reroll(monkeypatch)
+
+    text = "Flyer quality is very bad, I can't accept this."
+
+    assert br._is_pure_reroll(text) is True
+    status, payload = br.render_iteration(CHAT_ID, text, message_id="rrq", sender_phone=SENDER)
+
+    assert status == br.REROLL
+    assert payload == b"REROLL_PNG"
+    assert len(cap["projects"]) == 1
+    assert [fact.fact_id for fact in cap["projects"][0].locked_facts] == [
+        "business_name",
+        "campaign_title",
+        "pricing_structure",
+    ]
+
+
 def test_is_pure_reroll_detector():
     """Unit: the operator's exact phrase + common re-roll phrasings are pure; change requests are not."""
     for t in ("I did not like, please generate this flyer again.",
               "generate again", "regenerate", "redo it", "try again please",
+              "Flyer quality is very bad, I can't accept this.",
+              "This design is poor and not acceptable.",
               "can you make it again", "do it again", "make another version", "redo"):
         assert br._is_pure_reroll(t) is True, t
     for t in ("change the date to July 4", "no Italian flavour", "add the phone number",

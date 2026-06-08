@@ -111,24 +111,31 @@ def _title_case(value: str) -> str:
 
 
 def _campaign_from_source(text: str) -> str:
+    source = text or ""
+    if (
+        re.search(r"\bgraduation\b", source, flags=re.IGNORECASE)
+        and re.search(r"\bdesserts?\b", source, flags=re.IGNORECASE)
+        and re.search(r"\b(?:customi[sz]ed\s+orders?|orders?)\b", source, flags=re.IGNORECASE)
+    ):
+        return "Graduation Dessert Specials"
     occasion = re.search(
         r"\bon\s+the\s+occasion\s+of\s+(?P<occasion>.+?)(?=\s+(?:can\s+we\s+do|create|make|generate|design|build|need)\b|[.!?]|$)",
-        text or "",
+        source,
         flags=re.IGNORECASE,
     )
-    if occasion and re.search(r"\b(?:meal\s+)?combo(?:s)?\b|\bpackage(?:s)?\b", text or "", flags=re.IGNORECASE):
+    if occasion and re.search(r"\b(?:meal\s+)?combo(?:s)?\b|\bpackage(?:s)?\b", source, flags=re.IGNORECASE):
         occasion_text = _title_case(_clean(occasion.group("occasion")).strip(" .,"))
         occasion_text = re.sub(r"\b(?:Veg\s+and\s+Non\s+Veg|Non\s+Veg\s+and\s+Veg)\b", "", occasion_text)
         occasion_text = _clean(occasion_text)
         if occasion_text:
-            suffix = "Meal Combos" if re.search(r"\bmeal\s+combo", text or "", flags=re.IGNORECASE) else "Combos"
+            suffix = "Meal Combos" if re.search(r"\bmeal\s+combo", source, flags=re.IGNORECASE) else "Combos"
             return f"{occasion_text} {suffix}"
     patterns = [
         r"\b(?:create|make|generate|design|build|need)\s+(?:a\s+|an\s+)?(?:new\s+)?(?:flyer|flier|poster|banner|creative|graphic)\s+for\s+(.+?)(?=\s*(?:[.!?]|,|\b(?:all items?|any item|free|lucky draw|monday|tuesday|wednesday|thursday|friday|saturday|sunday|with|include|featuring)\b|$))",
         r"\b(?:flyer|flier|poster|banner|creative|graphic)\s+for\s+(.+?)(?=\s*(?:[.!?]|,|\b(?:all items?|any item|free|lucky draw|monday|tuesday|wednesday|thursday|friday|saturday|sunday|with|include|featuring)\b|$))",
     ]
     for pattern in patterns:
-        match = re.search(pattern, text or "", flags=re.IGNORECASE)
+        match = re.search(pattern, source, flags=re.IGNORECASE)
         if not match:
             continue
         candidate = _clean(match.group(1))

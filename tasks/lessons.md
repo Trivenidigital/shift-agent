@@ -1,5 +1,12 @@
 # Lessons
 
+## 2026-06-08 - Flyer long-menu truth-preserving overlays are not customer quality
+
+- A long-menu flyer that preserves every locked price can still be unacceptable if it looks like a cramped debug/table overlay. Correct facts are necessary, not sufficient.
+- For commercial menu/catalog briefs, the production baseline is a designed catalog composition: strong occasion headline, brand masthead, item/category cards, price badges, food imagery tied to the brief, and readable footer contact/location.
+- The deterministic overlay should remain a truth/QA safety net, not the primary customer-facing creative for dense item-price flyers. If the image model cannot reliably render all text, use a designed deterministic catalog template rather than a generic background plus tiny text.
+- Visual regression for Flyer Studio must inspect representative pixels/layout, not only manifests and locked-fact counts.
+
 ## 2026-06-07 - Fix current front door before introducing Hermes router
 
 - When a live routing failure is caused by the current deterministic/skill-matrix front door, fix that path first: live log diagnosis, trust-zone priority, replay tests, and cf-router behavior. Do not mix a Hermes `frontdoor_router` redesign into the emergency PR.
