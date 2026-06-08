@@ -556,21 +556,23 @@ def test_render_concept_previews_accepts_ten_item_menu(tmp_path):
     assert validate_text_manifest_file(specs[0].path, project_id=project.project_id, project_version=project.version).ok
 
 
-def test_exact_dessert_graduation_long_menu_renders_compact_overlay_and_finals(tmp_path, monkeypatch):
+def test_exact_dessert_graduation_long_menu_renders_integrated_catalog_and_finals(tmp_path, monkeypatch):
     """Production regression 2026-06-07 23:53 UTC.
 
     The router clarified Flyer vs Catering and the fact extractor locked all 14
     suffix-priced dessert rows, but the renderer failed closed before sending
     because the old menu cap only allowed about ten rows. Customer-supplied
-    itemized price lists should use the deterministic compact menu overlay,
-    not drop facts and not ask the image model to invent package prices.
+    itemized price lists should use the integrated catalog poster path with
+    all item facts in the controlled prompt, not the low-quality background
+    overlay fallback and not invented package prices.
     """
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setattr(render_module, "_openrouter_image_bytes", lambda *a, **k: _png_bytes())
     project = _dessert_graduation_project()
 
-    assert render_module._integrated_poster_eligible(project) is False
-    assert render_module._background_only_eligible(project) is True
+    assert render_module._integrated_poster_eligible(project) is True
+    assert render_module._background_only_eligible(project) is False
     facts = collect_text_facts(project)
     detail_texts = [fact.text for fact in facts if fact.fact_id.startswith("detail_")]
 
@@ -638,6 +640,28 @@ def test_exact_dessert_graduation_long_menu_renders_compact_overlay_and_finals(t
         expected_height=1080,
         mime_type="image/png",
     ).ok is True
+
+
+def test_exact_dessert_graduation_long_menu_uses_integrated_catalog_prompt(monkeypatch):
+    """Dense grounded customer menus need a designed poster path, not text-overlay fallback."""
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    project = _dessert_graduation_project()
+
+    assert render_module._compact_menu_overlay_allowed(project) is True
+    assert render_module._integrated_poster_eligible(project) is True
+    assert render_module._background_only_eligible(project) is False
+
+    prompt = render_module._image_prompt(
+        project,
+        concept_id="C1",
+        output_format="concept_preview",
+        size=(1080, 1350),
+    )
+
+    assert "Menu items to feature - exactly 14 items" in prompt
+    assert "full restaurant/menu poster" in prompt
+    assert "item cards with food imagery and prices" in prompt
+    assert "decorative BACKGROUND image only" not in prompt
 
 
 def test_menu_overlay_fails_closed_when_items_overflow_the_card_panel(tmp_path, monkeypatch):
@@ -1075,7 +1099,7 @@ def test_image_prompt_for_indochinese_menu_uses_structured_item_cards_not_raw_re
 
     prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
 
-    assert "Menu item cards:" in prompt
+    assert "Menu items to feature - exactly 8 items:" in prompt
     assert "- Veg Manchurian - $9.99" in prompt
     assert "- Spring Rolls - $9.99" in prompt
     assert "Campaign scene direction (menu product close-up)" in prompt

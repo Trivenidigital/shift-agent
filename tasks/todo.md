@@ -1,5 +1,29 @@
 # Backlog — pending items
 
+## Active - Flyer catalog quality regression (2026-06-08)
+
+**Drift-check tag:** extends-Hermes
+
+**New primitives introduced:** none. This is a Flyer renderer quality fix using existing Flyer state, facts, rendering, and visible-contract primitives.
+
+**Hermes-first analysis**
+
+| Domain | Hermes skill found? | Decision |
+|---|---|---|
+| WhatsApp intake/routing | Hermes gateway + cf-router already route the ambiguous dessert brief and preserve context | use it; no router changes |
+| Flyer fact truth | existing `facts.py` locks customer item/price facts | use it; no Catering/Commerce changes |
+| Flyer creative generation | existing Flyer renderer/OpenRouter path and deterministic visible contract | improve the Flyer renderer quality path, keep truth gates |
+| Long menu visual QA | no separate Hermes skill needed for deterministic item-card layout | add focused renderer regression only |
+
+Awesome Hermes Agent ecosystem check: not applicable for this emergency renderer bug; the existing Hermes/Flyer substrate is already in the path, and the gap is local layout quality.
+
+- [x] Diagnose the generated-vs-reference quality gap from `C:\Testing\1.png` and `C:\Testing\2.png`.
+- [x] Add a failing regression for the exact dessert long-menu flyer requiring a catalog/card composition instead of cramped generic overlays.
+- [x] Implement the narrow Flyer renderer fix under `src/agents/flyer/**`.
+- [x] Generate a no-send visual sample and inspect it before PR/deploy (`C:\Testing\flyer-quality-probe-integrated.png`).
+- [x] Run focused Flyer renderer/facts/visible-contract tests.
+- [ ] Commit, PR, merge, tarball deploy, and run scoped smoke before claiming production recovery.
+
 ## Active - Router trust-zone emergency fix (2026-06-07)
 
 **Drift-check tag:** extends-Hermes

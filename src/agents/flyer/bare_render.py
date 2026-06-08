@@ -438,6 +438,16 @@ _REROLL_SIGNAL_RE = re.compile(
     r"another\s+(?:one|version|take|go)|new\s+version)\b",
     re.IGNORECASE,
 )
+_QUALITY_REROLL_SIGNAL_RE = re.compile(
+    r"\b(?:flyer|flier|poster|design|image|output|quality|this|it)\b"
+    r"[\s\S]{0,120}\b(?:bad|poor|terrible|awful|miserable|unacceptable|not\s+acceptable|"
+    r"not\s+good|can(?:not|'?t)\s+accept|cant\s+accept)\b"
+    r"|"
+    r"\b(?:bad|poor|terrible|awful|miserable|unacceptable|not\s+acceptable|"
+    r"not\s+good|can(?:not|'?t)\s+accept|cant\s+accept)\b"
+    r"[\s\S]{0,120}\b(?:flyer|flier|poster|design|image|output|quality|this|it)\b",
+    re.IGNORECASE,
+)
 _REROLL_VERB_RE = re.compile(r"\b(?:generate|create|make|design|render|do|build|produce)\b", re.IGNORECASE)
 _AGAIN_RE = re.compile(r"\bagain\b", re.IGNORECASE)
 # A NEGATED re-roll ("do not generate again", "don't regenerate", "stop generating") must NOT re-roll.
@@ -461,7 +471,9 @@ _REROLL_OK_TOKENS = frozenset({
     "one", "again", "now", "just", "so", "did", "do", "does", "done", "not", "dont", "didnt",
     "like", "liked", "love", "want", "wanted", "need", "a", "an", "of", "to", "for", "me", "my",
     "with", "same", "fresh", "new", "version", "details", "but", "and", "ok", "okay", "hi", "hey",
-    "thanks", "thank", "too", "really", "very",
+    "thanks", "thank", "too", "really", "very", "is", "quality", "bad", "poor", "terrible",
+    "awful", "acceptable", "unacceptable", "accept", "cant", "cannot", "output", "look",
+    "looks", "miserable",
     # re-roll verbs / phrase words as bare tokens
     "generate", "regenerate", "create", "recreate", "make", "remake", "design", "render", "build",
     "produce", "redo", "retry", "try", "over", "another", "once", "more", "start", "take", "go",
@@ -472,7 +484,7 @@ def _has_reroll_signal(text: str) -> bool:
     """A re-roll intent is present: an explicit re-roll phrase, or a generate-verb with "again". Used
     (with _looks_like_revision) to recognize a FOLLOW-UP about a prior flyer vs a fresh request."""
     t = text or ""
-    return bool(_REROLL_SIGNAL_RE.search(t)) or (
+    return bool(_REROLL_SIGNAL_RE.search(t)) or bool(_QUALITY_REROLL_SIGNAL_RE.search(t)) or (
         bool(_REROLL_VERB_RE.search(t)) and bool(_AGAIN_RE.search(t))
     )
 
@@ -1402,11 +1414,11 @@ def render_iteration(chat_id: str, raw_text: str, *, message_id: str | None = No
     can't, we ask a concise question rather than render a no-op or a wrong flyer.
     """
     import schemas
-    if not _iteration_armed(_resolved_sender(chat_id, sender_phone)):
-        return (REVISION_NEEDED, None)   # flag off / not allowlisted -> caller keeps today's resend reply
     # Pure re-roll first — deterministic, no skill, works even when phrased with "design".
     if _is_pure_reroll(raw_text):
         return render_reroll(chat_id)
+    if not _iteration_armed(_resolved_sender(chat_id, sender_phone)):
+        return (REVISION_NEEDED, None)   # flag off / not allowlisted -> caller keeps today's resend reply
     sess = _load_session(chat_id)
     if not sess or _session_is_stale(sess):
         return (ITERATION_UNCLEAR, None)

@@ -3994,6 +3994,9 @@ def test_active_project_lookup_uses_latest_project_across_account_numbers(tmp_pa
     assert actions.is_flyer_revision_intent(
         "Design looks great, but remove Tatte Idly and swap with Ghee Karam Idly."
     )
+    assert actions.is_flyer_revision_intent(
+        "Flyer quality is very bad, I can't accept this."
+    )
 
 
 def test_lid_only_project_lookup_uses_primary_chat_id_account_numbers(tmp_path):
