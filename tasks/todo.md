@@ -1752,7 +1752,9 @@ Review/verification:
 - [x] Run focused Flyer renderer/bare-render/visual-QA tests and compile/diff checks.
 - [x] Deploy via tarball, run smoke, then rerun the exact no-send grounded dessert flow.
 - [x] Follow-up root cause from no-send pixel inspection: bare-path intake notes duplicated the raw request as one collapsed line, so the final suffix-price row was not locked.
-- [ ] Add/deploy the narrow facts dedupe fix, rerun no-send grounded dessert flow, and inspect pixels again.
+- [x] Add/deploy the narrow facts dedupe fix, rerun no-send grounded dessert flow, and inspect pixels again.
+- [x] Follow-up root cause from second no-send pixel inspection: brand asset prompt exposed internal asset ID `B0002`, and the model rendered it visibly under the logo.
+- [ ] Add/deploy the narrow asset-ID prompt/QA fix, rerun no-send grounded dessert flow, and inspect pixels again.
 
 Review/verification:
 - Red tests before fix: `test_wrong_brand_qa_retries_bare_render_without_saved_brand_assets` failed because the retry project lacked `render:disable_brand_assets`; `test_render_control_fact_disables_saved_customer_brand_assets` failed because the renderer still included `logo: B0001`.
@@ -1761,3 +1763,5 @@ Review/verification:
 - Static checks: `python -m py_compile src/agents/flyer/bare_render.py src/agents/flyer/render.py src/agents/flyer/visual_qa.py src/agents/flyer/facts.py` passed; `git diff --check` passed.
 - Deploy: `deploy-20260608-033619-a8227f62` completed and post-deploy smoke passed; `hermes-gateway` active; staging commit `a8227f62c283adbf17665c03e1d9e142e6783a85`.
 - No-send probe after PR #484: `render_grounded` returned `send`, but visual inspection of `C:\Testing\flyer-quality-grounded-pr484.png` showed only 13 dessert items; session facts confirmed `Khalakhandh - 100 count $100` was not locked.
+- Deploy: `deploy-20260608-035609-a39c9a7d` completed and post-deploy smoke passed; staging commit `a39c9a7d0219ef20d02efd8ad52c523991e39339`.
+- No-send probe after PR #485: `render_grounded` returned `send`; `C:\Testing\flyer-quality-grounded-pr485.png` showed all 14 item/price rows, but visibly rendered internal brand asset ID `(B0002)` under the business logo.
