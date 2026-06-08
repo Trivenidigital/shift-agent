@@ -659,6 +659,8 @@ def test_exact_dessert_graduation_long_menu_uses_integrated_catalog_prompt(monke
     )
 
     assert "Menu items to feature - exactly 14 items" in prompt
+    assert "Create exactly 14 menu item cards" in prompt
+    assert "Each listed item must appear once and only once" in prompt
     assert "full restaurant/menu poster" in prompt
     assert "item cards with food imagery and prices" in prompt
     assert "decorative BACKGROUND image only" not in prompt
@@ -1100,6 +1102,7 @@ def test_image_prompt_for_indochinese_menu_uses_structured_item_cards_not_raw_re
     prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
 
     assert "Menu items to feature - exactly 8 items:" in prompt
+    assert "Create exactly 8 menu item cards" in prompt
     assert "- Veg Manchurian - $9.99" in prompt
     assert "- Spring Rolls - $9.99" in prompt
     assert "Campaign scene direction (menu product close-up)" in prompt

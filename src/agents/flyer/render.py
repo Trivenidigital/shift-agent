@@ -955,6 +955,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
         lines.append(f"Contact: {plan.contact}")
     if plan.items:
         lines.append(f"Menu items to feature - exactly {len(plan.items)} items:")
+        lines.append(f"Create exactly {len(plan.items)} menu item cards. Each listed item must appear once and only once; do not duplicate any item card.")
         for name, price in plan.items:
             lines.append(f"- {name} - {price}")
     if plan.detail_lines:

@@ -28,7 +28,10 @@ Awesome Hermes Agent ecosystem check: not applicable for this emergency renderer
 - [x] Commit, PR, merge, tarball deploy, and smoke the first visual QA false-positive follow-up.
 - [x] Diagnose second deployed no-send probe: OCR dropped `half tray` from top card rows even though the image displayed it, producing false item/name pair blockers.
 - [x] Add a bounded OCR-quantity tolerance: item core plus exact price can satisfy trailing quantity/unit facts only when no other word tokens appear between core name and price.
-- [ ] Commit, PR, merge, tarball deploy, smoke, and no-send probe the OCR-quantity follow-up before claiming production recovery.
+- [x] Commit, PR, merge, tarball deploy, and smoke the OCR-quantity follow-up.
+- [x] Diagnose third deployed no-send probe: visual QA passed, but the generated catalog duplicated customer item cards (`Gulabjamun fusion` and visually repeated top cards).
+- [x] Add deterministic duplicate item/price blockers and strengthen the prompt to require each listed menu card once only.
+- [ ] Commit, PR, merge, tarball deploy, smoke, and no-send probe the duplicate-card follow-up before claiming production recovery.
 
 ## Active - Router trust-zone emergency fix (2026-06-07)
 
