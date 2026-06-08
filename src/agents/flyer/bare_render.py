@@ -954,6 +954,30 @@ def _render_error_detail(e: Exception, project, stage: str) -> str:
             return "render_detail: unavailable"
 
 
+_DISABLE_BRAND_ASSETS_FACT_ID = "render:disable_brand_assets"
+
+
+def _wrong_brand_blocker_seen(blockers: list[str]) -> bool:
+    for blocker in blockers or []:
+        normalized = str(blocker or "").strip().casefold()
+        if normalized.startswith("visible wrong business/brand:") or normalized.startswith("visible wrong business:"):
+            return True
+    return False
+
+
+def _with_saved_brand_assets_disabled(project):
+    if any(getattr(fact, "fact_id", "") == _DISABLE_BRAND_ASSETS_FACT_ID for fact in project.locked_facts):
+        return project
+    schemas = _schemas()
+    disabled_fact = schemas.FlyerLockedFact(
+        fact_id=_DISABLE_BRAND_ASSETS_FACT_ID,
+        label="Render Control",
+        value="true",
+        source="system",
+    )
+    return project.model_copy(update={"locked_facts": [*project.locked_facts, disabled_fact]})
+
+
 # --- orchestration ------------------------------------------------------------
 def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = None,
                     sender_phone: str | None = None):
@@ -1013,6 +1037,7 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
     scene_direction = _advisory_scene_direction(raw_text, locked_facts, customer, resolved_sender)
     last_blockers: list[str] = []
     last_render_detail = ""
+    render_project = project
     for attempt in range(2):
         last_render_detail = ""  # reset per attempt so a stale detail never rides a later QA-fail
         strict = "" if attempt == 0 else (
@@ -1021,23 +1046,25 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
               "nothing that is not listed."
         )
         try:
-            png = _generate_poster(project, strict_note=strict, raw_bg_dest=raw_bg_dest, scene_direction=scene_direction)
+            png = _generate_poster(render_project, strict_note=strict, raw_bg_dest=raw_bg_dest, scene_direction=scene_direction)
         except Exception as e:  # noqa: BLE001
             # last_blockers (the retry strict-note input) keeps the SAME generic shape — no
             # behavior change. The descriptive cause is captured LOG-ONLY in last_render_detail
             # and surfaced only in the FINAL fail-closed blockers (→ send.log), so a bare-path
             # FlyerRenderError is diagnosable instead of opaque (operator obs request 2026-06-06).
             last_blockers = [f"render_error:{type(e).__name__}"]
-            last_render_detail = _render_error_detail(e, project, "generate_poster")
+            last_render_detail = _render_error_detail(e, render_project, "generate_poster")
             continue
-        ok, blockers = run_visual_qa(png, project)
+        ok, blockers = run_visual_qa(png, render_project)
         if ok:
             if REVISION_APPLY_ENABLED:
                 # Write a PENDING session (project + optional raw bg). The orchestrator commits it
                 # only AFTER delivery succeeds, so an undelivered render never advances revision state.
-                _write_session(chat_id, project, raw_bg_dest or "", raw_text, model=GEN_MODEL, pending=True)
+                _write_session(chat_id, render_project, raw_bg_dest or "", raw_text, model=GEN_MODEL, pending=True)
             return (SEND, png)
         last_blockers = blockers
+        if _wrong_brand_blocker_seen(last_blockers):
+            render_project = _with_saved_brand_assets_disabled(project)
     return (FAILCLOSED, last_blockers + ([last_render_detail] if last_render_detail else []))
 
 
