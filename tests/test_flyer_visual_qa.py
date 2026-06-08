@@ -175,6 +175,40 @@ CONTACT: +17329837841""",
     assert any("item:0:name" in blocker or "item price mismatch: item:0" in blocker for blocker in report.blockers)
 
 
+def test_visual_qa_rejects_duplicate_dense_catalog_item_price_pair(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    artifact = tmp_path / "catalog.png"
+    artifact.write_bytes(b"not really an image but has bytes")
+    (tmp_path / "catalog.png.ocr.txt").write_text(
+        """LAKSHMIS KITCHEN
+GRADUATION DESSERT SPECIALS
+Mango tresleches - half tray - $75
+Rasmalai tresleches - half tray - $70
+Apricot delight - half tray - $80
+Butter scotch - half tray - $75
+Strawberry pastry - half - $70
+Chocolate pastry - half - $70
+Gulab jamun - 100 count - $80
+Gulabjamun fusion - half tray - $75
+Gulabjamun fusion - half tray - $75
+Kheer(Ramadan style) - half tray - $55
+Kadhu ki sheet - small tray - $65
+Double ka meeta - small tray - $45
+Kurbanika meeta - small tray - $70
+Carrot halwa - small tray - $55
+Khalakhand - 100 count - $100
+LOCATION: 90 BRYBAR DR ST JOHNS FL
+CONTACT: +17329837841""",
+        encoding="utf-8",
+    )
+
+    report = run_visual_qa(_dessert_catalog_project(), artifact, output_format="whatsapp_image", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert any("duplicate item price visible: item:7" in blocker for blocker in report.blockers)
+
+
 def test_visual_qa_ignores_negative_text_defect_notes():
     from agents.flyer.visual_qa import _text_defect_note_blockers
 

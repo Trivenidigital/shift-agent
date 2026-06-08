@@ -677,20 +677,21 @@ def _same_line_item_price_present(segment: str, name_re: re.Pattern[str], price:
     return _price_cents(next_price.group("amount")) == expected
 
 
-def _same_line_tokens_price_present(
+def _same_line_tokens_price_match_indices(
     raw_text: str,
     tokens: list[str],
     price: str,
     *,
     allow_unit_text_between: bool,
-) -> bool:
+) -> set[int]:
     expected = _price_cents(price)
     if expected is None:
-        return False
+        return set()
     if not tokens:
-        return False
+        return set()
     requires_currency = bool(re.search(r"[$â‚¹]", price or ""))
-    for line in (raw_text or "").splitlines():
+    matches: set[int] = set()
+    for line_index, line in enumerate((raw_text or "").splitlines()):
         normalized_line = _normalize_text_for_match(line)
         span = _fuzzy_item_span_in_line(normalized_line, tokens)
         if span is None:
@@ -708,22 +709,30 @@ def _same_line_tokens_price_present(
         if not between_ok:
             continue
         if _price_cents(price_match.group("amount")) == expected:
-            return True
-    return False
+            matches.add(line_index)
+    return matches
 
 
-def _same_line_fuzzy_item_price_present(raw_text: str, name: str, price: str) -> bool:
+def _same_line_fuzzy_item_price_match_count(raw_text: str, name: str, price: str) -> int:
     tokens = [
         token
         for token in re.findall(r"[a-z0-9]+", _normalize_text_for_match(name))
         if token
     ]
-    if _same_line_tokens_price_present(raw_text, tokens, price, allow_unit_text_between=True):
-        return True
+    matches = _same_line_tokens_price_match_indices(raw_text, tokens, price, allow_unit_text_between=True)
     core_tokens, quantity_tokens = _item_core_and_quantity_tokens(name)
     if quantity_tokens and core_tokens != tokens:
-        return _same_line_tokens_price_present(raw_text, core_tokens, price, allow_unit_text_between=False)
-    return False
+        matches.update(_same_line_tokens_price_match_indices(
+            raw_text,
+            core_tokens,
+            price,
+            allow_unit_text_between=False,
+        ))
+    return len(matches)
+
+
+def _same_line_fuzzy_item_price_present(raw_text: str, name: str, price: str) -> bool:
+    return _same_line_fuzzy_item_price_match_count(raw_text, name, price) > 0
 
 
 def _item_price_pair_present(raw_text: str, name: str, price: str, *, all_item_names: list[str]) -> bool:
@@ -841,6 +850,9 @@ def _item_price_pair_blockers(project: FlyerProject, raw_text: str) -> list[str]
             and not _same_line_fuzzy_item_price_present(raw_text, name, price)
         ):
             blockers.append(f"item price mismatch: item:{index} expected {name} {price}")
+            continue
+        if _same_line_fuzzy_item_price_match_count(raw_text, name, price) > 1:
+            blockers.append(f"duplicate item price visible: item:{index} {name} {price}")
     return blockers
 
 
