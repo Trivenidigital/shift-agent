@@ -206,6 +206,7 @@ CONTACT: +17329837841""",
     report = run_visual_qa(_dessert_catalog_project(), artifact, output_format="whatsapp_image", allow_sidecar=True)
 
     assert report.status == "failed"
+    assert report.severity == "block"
     assert any("duplicate item price visible: item:7" in blocker for blocker in report.blockers)
 
 
@@ -2377,6 +2378,24 @@ def test_classify_qa_severity_single_missing_location_returns_warn():
     assert classify_qa_severity(blockers, project=_classifier_project()) == "warn"
 
 
+def test_classify_qa_severity_single_missing_item_name_returns_block():
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = ["missing required visible fact: item:11:name"]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "block"
+
+
+def test_classify_qa_severity_item_price_mismatch_returns_block():
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = ["item price mismatch: item:11 expected Kurbanika meeta - small tray $70"]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "block"
+
+
+def test_classify_qa_severity_duplicate_item_price_returns_block():
+    from agents.flyer.visual_qa import classify_qa_severity
+    blockers = ["duplicate item price visible: item:7 Gulabjamun fusion - half tray $75"]
+    assert classify_qa_severity(blockers, project=_classifier_project()) == "block"
+
+
 def test_classify_qa_severity_unknown_blocker_fails_closed():
     from agents.flyer.visual_qa import classify_qa_severity
     blockers = ["missing required visible fact: replacement:0:new"]
@@ -2413,9 +2432,8 @@ def test_is_brand_typo_boundary_overlap_05_classifies_warn():
     assert _is_brand_typo("Laksmi'S Kitchen", "Lakshmi's Kitchen")
 
 
-def test_classify_qa_severity_two_item_warns_returns_block_via_core_promise():
-    """2 core-promise warn blockers (item:N:name) -> block via escalation,
-    even though count is below the cap."""
+def test_classify_qa_severity_multiple_missing_items_returns_block():
+    """Missing customer item rows are block-tier required-fact failures."""
     from agents.flyer.visual_qa import classify_qa_severity
     blockers = [
         "missing required visible fact: item:4:name",
