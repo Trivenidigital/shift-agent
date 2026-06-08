@@ -22,7 +22,10 @@ Awesome Hermes Agent ecosystem check: not applicable for this emergency renderer
 - [x] Implement the narrow Flyer renderer fix under `src/agents/flyer/**`.
 - [x] Generate a no-send visual sample and inspect it before PR/deploy (`C:\Testing\flyer-quality-probe-integrated.png`).
 - [x] Run focused Flyer renderer/facts/visible-contract tests.
-- [ ] Commit, PR, merge, tarball deploy, and run scoped smoke before claiming production recovery.
+- [x] Commit, PR, merge, tarball deploy from merged `origin/main`, and run scoped smoke for the catalog renderer fix.
+- [x] Diagnose post-deploy no-send probe: generated catalog was visually acceptable, but visual QA falsely blocked on negative QA prose, `tray`/`count` unit text, and one-character OCR readback.
+- [x] Add visual QA regressions for dense dessert catalog OCR tolerance while preserving unknown-item rejection.
+- [ ] Commit, PR, merge, tarball deploy, smoke, and no-send probe the visual QA false-positive follow-up before claiming production recovery.
 
 ## Active - Router trust-zone emergency fix (2026-06-07)
 

@@ -31,6 +31,92 @@ def _project():
     )
 
 
+def _dessert_catalog_project():
+    now = datetime(2026, 6, 8, tzinfo=timezone.utc)
+    expected = [
+        ("Mango tresleches - half tray", "$75"),
+        ("Rasmalai tresleches - half tray", "$70"),
+        ("Apricot delight - half tray", "$80"),
+        ("Butter scotch - half tray", "$75"),
+        ("Strawberry pastry - half", "$70"),
+        ("Chocolate pastry - half", "$70"),
+        ("Gulab jamun - 100 count", "$80"),
+        ("Gulabjamun fusion - half tray", "$75"),
+        ("Kheer(Ramadan style) half tray", "$55"),
+        ("Kadhu ki sheet - small tray", "$65"),
+        ("Double ka meeta - small tray", "$45"),
+        ("Kurbanika meeta - small tray", "$70"),
+        ("Carrot halwa - small tray", "$55"),
+        ("Khalakhandh - 100 count", "$100"),
+    ]
+    locked = [
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchen", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Graduation Dessert Specials", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+    ]
+    for idx, (name, price) in enumerate(expected):
+        locked.append(FlyerLockedFact(fact_id=f"item:{idx}:name", label="Item", value=name, source="customer_text", required=True))
+        locked.append(FlyerLockedFact(fact_id=f"item:{idx}:price", label="Price", value=price, source="customer_text", required=True))
+    return FlyerProject(
+        project_id="F9016",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-dessert-qa",
+        raw_request="Graduation dessert specials with itemized prices.",
+        fields=FlyerRequestFields(
+            event_or_business_name="Graduation Dessert Specials",
+            contact_info="+17329837841",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            preferred_language="en",
+        ),
+        locked_facts=locked,
+    )
+
+
+def test_visual_qa_accepts_dense_catalog_ocr_unit_expansions_and_minor_name_readback(tmp_path):
+    from agents.flyer.visual_qa import run_visual_qa
+
+    artifact = tmp_path / "catalog.png"
+    artifact.write_bytes(b"not really an image but has bytes")
+    (tmp_path / "catalog.png.ocr.txt").write_text(
+        """LAKSHMIS KITCHEN
+GRADUATION DESSERT SPECIALS
+Mango tresleches - half tray - $75
+Rasmalai tresleches - half tray - $70
+Apricot delight - half tray - $80
+Butter scotch - half tray - $75
+Strawberry pastry - half tray - $70
+Chocolate pastry - half tray - $70
+Gulab jamun - 100 count - $80
+Gulabjamun fusion - half tray - $75
+Kheer(Ramadan style) - half tray - $55
+Kadhu ki sheet - small tray - $65
+Double ka meeta - small tray - $45
+Kurbanika meeta - small tray - $70
+Carrot halwa - small tray - $55
+Khalakhand - 100 count - $100
+LOCATION: 90 BRYBAR DR ST JOHNS FL
+CONTACT: +17329837841""",
+        encoding="utf-8",
+    )
+
+    report = run_visual_qa(_dessert_catalog_project(), artifact, output_format="whatsapp_image", allow_sidecar=True)
+
+    assert report.status == "passed", report.blockers
+    assert report.blockers == []
+
+
+def test_visual_qa_ignores_negative_text_defect_notes():
+    from agents.flyer.visual_qa import _text_defect_note_blockers
+
+    assert _text_defect_note_blockers(["No garbled or misspelled text detected."]) == []
+    assert _text_defect_note_blockers(["No duplicated visible text detected."]) == []
+    assert _text_defect_note_blockers(["The word THURRSDAY is misspelled."])
+
+
 def test_visual_qa_blocks_placeholders_even_when_facts_present(tmp_path):
     from agents.flyer.visual_qa import run_visual_qa
 
