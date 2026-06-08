@@ -1691,3 +1691,18 @@ Review/verification:
 - Static checks: `python -m py_compile src/agents/flyer/facts.py src/agents/flyer/visible_contract.py` passed; `git diff --check` passed.
 - Build/deploy: repo-wide build-script pytest gate failed on 23 existing Flyer incident/rollout replay identity-call cases (3497 passed, 893 skipped); built the traceable tarball with `--skip-pytest` after the focused gates. Deployed to `main-vps`; deploy smoke and separate `shift-agent-smoke-test.sh` passed. Pushover muted remains the known non-blocking pilot-readiness warning.
 - Post-deploy probes: final installed `.commit-hash` was verified on `main-vps`; runtime `extract_text_facts` on the exact dessert transcript locked all 14 normalized item/price pairs; runtime visible-contract blocked `$29.99`/`$49.99`/`$12.99` invented package prices and returned no blockers for a clean `$75`/`$70`/`$100` dessert render.
+
+## Flyer Dessert Long-Menu Render Capacity - 2026-06-07
+
+- Drift-check tag: extends-Hermes
+- Hermes-first analysis: Hermes/router already owns WhatsApp ingress, sender identity, Flyer-vs-Catering clarification, and dispatch. Flyer fact extraction now locks the exact dessert item/price truth. This slice extends only Flyer rendering so explicit customer-supplied long price lists can be laid out deterministically without weakening visible-contract or router behavior.
+- [x] Diagnose the 23:53 follow-up failure: Flyer path ran and facts were locked, but `render_concept_previews` failed closed with `critical text facts do not fit` because 14 item rows exceeded the old ten-row menu cap.
+- [x] Add a failing renderer regression for the exact dessert transcript that renders preview plus final formats, including the square Instagram post.
+- [x] Implement compact deterministic long-menu overlay for grounded customer/source item facts only; keep inferred/planner long menus and truly oversized menus fail-closed.
+- [x] Run focused renderer/fact/visible-contract/create/generate tests, compile checks, and diff checks.
+
+Review/verification:
+- Red test before fix: `test_exact_dessert_graduation_long_menu_renders_compact_overlay_and_finals` failed in `_detail_clauses` with `critical text facts do not fit`.
+- Green tests: `python -m pytest tests/test_flyer_renderer.py tests/test_flyer_facts.py tests/test_flyer_visible_contract.py tests/test_flyer_create_project.py tests/test_flyer_generate_concepts.py -q` -> 275 passed.
+- Static checks: `python -m py_compile src/agents/flyer/render.py src/agents/flyer/facts.py src/agents/flyer/bare_render.py` passed; `git diff --check` passed.
+- Visual probe: generated `C:\Testing\flyer-dessert-layout\F9014-C1-preview.png` and `finals\F9014-instagram_post.png`; both show all 14 dessert item/price rows with the registered business and normalized prices.

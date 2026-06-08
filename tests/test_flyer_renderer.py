@@ -80,6 +80,82 @@ def _png_bytes(size=(1080, 1350), color=(240, 120, 40)) -> bytes:
     return buf.getvalue()
 
 
+DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF = (
+    "Graduation is here and time to celebrate our kids \n\n"
+    "We take customized orders - Desserts\n\n"
+    "Mango tresleches - half tray - 75$\n"
+    "Rasmalai tresleches - half tray 70$\n"
+    "Apricot delight - half tray - 80$\n"
+    "Butter scotch - half tray 75$\n"
+    "Strawberry pastry - half 70$\n"
+    "Chocolate pastry - half 70$\n"
+    "Gulab jamun - 100count - 80$\n"
+    "Gulabjamun fusion - half tray - 75$\n"
+    "Kheer(Ramadan style) half tray - 55$\n"
+    "Kadhu ki sheet - small tray - 65$\n"
+    "Double ka meeta - small tray - 45$\n"
+    "Kurbanika meeta - small tray - 70$\n"
+    "Carrot halwa - small tray 55$\n"
+    "Khalakhandh - 100 count 100$"
+)
+
+
+def _dessert_graduation_project() -> FlyerProject:
+    from agents.flyer.facts import extract_text_facts, merge_locked_facts
+
+    now = datetime(2026, 6, 7, tzinfo=timezone.utc)
+    fields = FlyerRequestFields(
+        event_or_business_name="Graduation Dessert Specials",
+        contact_info="+17329837841",
+        venue_or_location="90 Brybar Dr St Johns FL",
+        preferred_language="en",
+        notes=DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF,
+    )
+    profile_facts = [
+        FlyerLockedFact(
+            fact_id="business_name",
+            label="Business",
+            value="Lakshmis Kitchen",
+            source="customer_profile",
+            required=True,
+        ),
+        FlyerLockedFact(
+            fact_id="contact_phone",
+            label="Contact",
+            value="+17329837841",
+            source="customer_profile",
+            required=True,
+        ),
+        FlyerLockedFact(
+            fact_id="location",
+            label="Location",
+            value="90 Brybar Dr St Johns FL",
+            source="customer_profile",
+            required=True,
+        ),
+    ]
+    return FlyerProject(
+        project_id="F9014",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="wamid.dessert-graduation",
+        raw_request=DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF,
+        fields=fields,
+        locked_facts=merge_locked_facts(
+            profile_facts,
+            extract_text_facts(
+                fields,
+                DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF,
+                message_id="wamid.dessert-graduation",
+                profile_business_name="Lakshmis Kitchen",
+                allow_text_identity=False,
+            ),
+        ),
+    )
+
+
 def test_render_concept_previews_creates_one_png_by_default(tmp_path):
     project = _complete_project()
     specs = render_concept_previews(project, tmp_path)
@@ -478,6 +554,90 @@ def test_render_concept_previews_accepts_ten_item_menu(tmp_path):
 
     assert specs[0].path.exists()
     assert validate_text_manifest_file(specs[0].path, project_id=project.project_id, project_version=project.version).ok
+
+
+def test_exact_dessert_graduation_long_menu_renders_compact_overlay_and_finals(tmp_path, monkeypatch):
+    """Production regression 2026-06-07 23:53 UTC.
+
+    The router clarified Flyer vs Catering and the fact extractor locked all 14
+    suffix-priced dessert rows, but the renderer failed closed before sending
+    because the old menu cap only allowed about ten rows. Customer-supplied
+    itemized price lists should use the deterministic compact menu overlay,
+    not drop facts and not ask the image model to invent package prices.
+    """
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setattr(render_module, "_openrouter_image_bytes", lambda *a, **k: _png_bytes())
+    project = _dessert_graduation_project()
+
+    assert render_module._integrated_poster_eligible(project) is False
+    assert render_module._background_only_eligible(project) is True
+    facts = collect_text_facts(project)
+    detail_texts = [fact.text for fact in facts if fact.fact_id.startswith("detail_")]
+
+    assert len(detail_texts) == 14
+    assert "Mango tresleches - half tray $75" in detail_texts
+    assert "Khalakhandh - 100 count $100" in detail_texts
+
+    preview = render_concept_previews(
+        project,
+        tmp_path,
+        model="google/gemini-2.5-flash-image",
+    )[0]
+
+    assert inspect_rendered_asset(
+        preview.path,
+        expected_width=1080,
+        expected_height=1350,
+        mime_type="image/png",
+    ).ok is True
+    assert validate_text_manifest_file(
+        preview.path,
+        project_id=project.project_id,
+        project_version=project.version,
+        output_format="concept_preview",
+    ).ok is True
+    manifest = json.loads(Path(f"{preview.path}.text.json").read_text(encoding="utf-8"))
+    expected_text = "\n".join(fact["text"] for fact in manifest["expected_facts"])
+    assert "Mango tresleches - half tray $75" in expected_text
+    assert "Khalakhandh - 100 count $100" in expected_text
+
+    selected = project.model_copy(update={
+        "status": "awaiting_final_approval",
+        "selected_concept_id": "C1",
+        "concepts": [FlyerConcept(
+            concept_id="C1",
+            title="Best",
+            style_summary="Generated",
+            preview_asset_id="A0001",
+            prompt="",
+            created_at=project.created_at,
+        )],
+        "assets": [FlyerAsset(
+            asset_id="A0001",
+            kind="concept_preview",
+            source="rendered",
+            path=str(preview.path),
+            mime_type="image/png",
+            sha256="a" * 64,
+            original_message_id=project.original_message_id,
+            received_at=project.created_at,
+        )],
+    })
+    finals = render_final_package(selected, tmp_path / "finals")
+
+    assert {spec.output_format for spec in finals} == {
+        "whatsapp_image",
+        "instagram_post",
+        "instagram_story",
+        "printable_pdf",
+    }
+    square = next(spec for spec in finals if spec.output_format == "instagram_post")
+    assert inspect_rendered_asset(
+        square.path,
+        expected_width=1080,
+        expected_height=1080,
+        mime_type="image/png",
+    ).ok is True
 
 
 def test_menu_overlay_fails_closed_when_items_overflow_the_card_panel(tmp_path, monkeypatch):
