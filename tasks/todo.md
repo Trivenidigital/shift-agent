@@ -1741,3 +1741,19 @@ Review/verification:
 - Green tests: `python -m pytest tests/test_flyer_renderer.py tests/test_flyer_facts.py tests/test_flyer_visible_contract.py tests/test_flyer_create_project.py tests/test_flyer_generate_concepts.py -q` -> 275 passed.
 - Static checks: `python -m py_compile src/agents/flyer/render.py src/agents/flyer/facts.py src/agents/flyer/bare_render.py` passed; `git diff --check` passed.
 - Visual probe: generated `C:\Testing\flyer-dessert-layout\F9014-C1-preview.png` and `finals\F9014-instagram_post.png`; both show all 14 dessert item/price rows with the registered business and normalized prices.
+
+## Flyer Bare Render Saved-Brand-Asset Retry - 2026-06-08
+
+- Drift-check tag: extends-Hermes
+- Hermes-first analysis: Hermes/OpenRouter already owns image generation, WhatsApp ingress, customer identity, and audit/delivery. Flyer already owns saved brand assets, bare render orchestration, and visual QA wrong-brand blocking. This slice extends only the Flyer bare render retry policy so a saved logo/template that visually contains another business cannot poison the customer send path.
+- [x] Confirm production failure mode: grounded no-send path fails closed on `visible wrong business/brand: Indian Cafe & Bakery` after the dessert flyer reaches Flyer.
+- [x] Add failing regressions for wrong-brand QA causing the second bare render attempt to disable saved brand assets.
+- [x] Keep reference assets and explicit customer facts intact; only saved customer brand assets are disabled on the retry.
+- [x] Run focused Flyer renderer/bare-render/visual-QA tests and compile/diff checks.
+- [ ] Deploy via tarball, run smoke, then rerun the exact no-send grounded dessert flow.
+
+Review/verification:
+- Red tests before fix: `test_wrong_brand_qa_retries_bare_render_without_saved_brand_assets` failed because the retry project lacked `render:disable_brand_assets`; `test_render_control_fact_disables_saved_customer_brand_assets` failed because the renderer still included `logo: B0001`.
+- Green focused tests: `tests/test_flyer_pr3_wiring.py` -> 39 passed; `tests/test_flyer_renderer.py` -> 119 passed; `tests/test_flyer_visual_qa.py` -> 141 passed.
+- Broader Flyer checks: `tests/test_flyer_facts.py tests/test_flyer_visible_contract.py tests/test_flyer_create_project.py` -> 124 passed; `tests/test_flyer_generate_concepts.py tests/test_flyer_skill_driven_scene.py` -> 43 passed.
+- Static checks: `python -m py_compile src/agents/flyer/bare_render.py src/agents/flyer/render.py src/agents/flyer/visual_qa.py src/agents/flyer/facts.py` passed; `git diff --check` passed.

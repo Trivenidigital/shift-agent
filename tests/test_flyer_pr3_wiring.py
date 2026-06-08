@@ -178,6 +178,40 @@ def test_flag_off_clean_render_has_no_render_detail(monkeypatch):
     assert status == br.SEND and payload == b"LEGACY_PNG"
 
 
+def test_wrong_brand_qa_retries_bare_render_without_saved_brand_assets(monkeypatch):
+    """A saved customer logo/template can itself contain another business. When visual
+    QA catches that, the bare WhatsApp send path must retry without saved brand assets
+    before failing the customer."""
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ALLOWLIST_ENV, raising=False)
+    _install_common(monkeypatch)
+    calls = []
+
+    def _poster(project, *, strict_note="", raw_bg_dest=None, scene_direction=None):
+        calls.append({
+            "strict_note": strict_note,
+            "fact_ids": [fact.fact_id for fact in project.locked_facts],
+        })
+        return b"WRONG_BRAND" if len(calls) == 1 else b"CLEAN_BRAND"
+
+    def _qa(png, project):
+        if png == b"WRONG_BRAND":
+            return (False, ["visible wrong business/brand: Indian Cafe & Bakery"])
+        return (True, [])
+
+    monkeypatch.setattr(br, "_generate_poster", _poster)
+    monkeypatch.setattr(br, "run_visual_qa", _qa)
+
+    status, payload = br.render_grounded(CHAT_ID, RAW, message_id="mbrand", sender_phone=SENDER)
+
+    assert status == br.SEND
+    assert payload == b"CLEAN_BRAND"
+    assert len(calls) == 2
+    assert "render:disable_brand_assets" not in calls[0]["fact_ids"]
+    assert "render:disable_brand_assets" in calls[1]["fact_ids"]
+    assert "visible wrong business/brand: Indian Cafe & Bakery" in calls[1]["strict_note"]
+
+
 def test_render_error_detail_never_raises_into_render_path(monkeypatch):
     """Diagnostics must NEVER raise into the render path — even a render exception with a
     pathological __str__ still fails closed, not uncaught (Codex 2026-06-06)."""
