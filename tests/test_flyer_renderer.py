@@ -1750,7 +1750,9 @@ def test_image_prompt_includes_customer_brand_assets(tmp_path, monkeypatch):
     prompt = _image_prompt(_complete_project(), concept_id="C1", output_format="whatsapp_image", size=(1080, 1350))
 
     assert "Customer brand assets to honor" in prompt
-    assert "logo: B0001" in prompt
+    assert "saved logo reference" in prompt
+    assert "B0001" not in prompt
+    assert "B0001.png" not in prompt
 
 
 def test_render_control_fact_disables_saved_customer_brand_assets(tmp_path, monkeypatch):
@@ -1835,7 +1837,8 @@ def test_project_reference_image_is_sent_to_image_model(tmp_path, monkeypatch):
     assert isinstance(content, list)
     assert content[0]["type"] == "text"
     assert content[1]["type"] == "image_url"
-    assert "reference_image: A0001" in content[0]["text"]
+    assert "uploaded reference image" in content[0]["text"]
+    assert "A0001" not in content[0]["text"]
     assert "do not redesign from scratch" in content[0]["text"].lower()
 
 

@@ -1359,9 +1359,19 @@ def _brand_asset_prompt(project: FlyerProject) -> str:
     if not active_assets:
         return "- none"
     return "\n".join(
-        f"- {asset.kind}: {asset.asset_id} ({Path(asset.path).name}) notes={_sanitize_visual_context(getattr(asset, 'notes', '') or 'none')}"
+        f"- {_brand_asset_prompt_label(asset)}; notes={_sanitize_visual_context(getattr(asset, 'notes', '') or 'none')}"
         for asset in active_assets[-4:]
     )
+
+
+def _brand_asset_prompt_label(asset: FlyerAsset) -> str:
+    if asset.kind == "logo":
+        return "saved logo reference"
+    if asset.kind == "template":
+        return "saved template reference"
+    if asset.kind == "reference_image":
+        return "uploaded reference image"
+    return f"{str(asset.kind).replace('_', ' ')} reference"
 
 
 def _project_disables_saved_brand_assets(project: FlyerProject) -> bool:

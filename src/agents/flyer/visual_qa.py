@@ -51,6 +51,7 @@ RAW_REQUEST_INSTRUCTION_RE = re.compile(
     r"|\battaching\s+(?:a\s+)?(?:flyer|flier|poster|banner)\b",
     re.IGNORECASE,
 )
+INTERNAL_BRAND_ASSET_ID_RE = re.compile(r"\bB\d{4}\b", re.IGNORECASE)
 
 
 _PHONE_DIGITS_RE = re.compile(r"\D+")
@@ -1149,6 +1150,7 @@ _BLOCK_TIER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^missing required visible fact: item:\d+:name$"), "missing_item_name"),
     (re.compile(r"^item price mismatch: item:\d+ expected "), "item_price_mismatch"),
     (re.compile(r"^duplicate item price visible: item:\d+ "), "duplicate_item_price"),
+    (re.compile(r"^internal asset id visible: "), "internal_asset_id"),
     # bounded-creative-planner: a committed inferred item that did not render is a
     # block-tier intent failure (explicit, not implicit-via-default; Codex r5 #2).
     (re.compile(r"^inferred item not rendered: "), "inferred_item_not_rendered"),
@@ -1422,6 +1424,18 @@ def _sidecar_text(path: Path, *, allow_sidecar: bool) -> tuple[str, str, str]:
     return "", "unavailable", "ocr_vision"
 
 
+def _internal_asset_id_blockers(extracted_text: str) -> list[str]:
+    seen: set[str] = set()
+    blockers: list[str] = []
+    for match in INTERNAL_BRAND_ASSET_ID_RE.finditer(extracted_text or ""):
+        asset_id = match.group(0).upper()
+        if asset_id in seen:
+            continue
+        seen.add(asset_id)
+        blockers.append(f"internal asset id visible: {asset_id}")
+    return blockers
+
+
 def run_visual_qa(
     project: FlyerProject,
     artifact_path: Path | str,
@@ -1460,6 +1474,7 @@ def run_visual_qa(
         blockers.append("placeholder text is visible in generated flyer")
     if RAW_REQUEST_INSTRUCTION_RE.search(extracted_text):
         blockers.append("raw request instruction text is visible in generated flyer")
+    blockers.extend(_internal_asset_id_blockers(extracted_text))
     if (_requires_english_only(project) or _requires_english_only_menu_poster_contract(project)) and REGIONAL_SCRIPT_RE.search(extracted_text):
         blockers.append("English-only flyer contains regional/non-English script")
     blockers.extend(_unrequested_operational_claim_blockers(project, extracted_text))
