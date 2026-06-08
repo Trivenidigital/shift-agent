@@ -31,7 +31,9 @@ Awesome Hermes Agent ecosystem check: not applicable for this emergency renderer
 - [x] Commit, PR, merge, tarball deploy, and smoke the OCR-quantity follow-up.
 - [x] Diagnose third deployed no-send probe: visual QA passed, but the generated catalog duplicated customer item cards (`Gulabjamun fusion` and visually repeated top cards).
 - [x] Add deterministic duplicate item/price blockers and strengthen the prompt to require each listed menu card once only.
-- [ ] Commit, PR, merge, tarball deploy, smoke, and no-send probe the duplicate-card follow-up before claiming production recovery.
+- [x] Diagnose fourth deployed no-send probe: `bare_render.run_visual_qa` returned send-allowed with missing item/price blockers because single missing item facts were warn-tier.
+- [x] Move explicit catalog item-name, item-price mismatch, and duplicate item-price blockers to block-tier severity.
+- [ ] Commit, PR, merge, tarball deploy, smoke, and no-send probe the duplicate-card/send-gate follow-up before claiming production recovery.
 
 ## Active - Router trust-zone emergency fix (2026-06-07)
 

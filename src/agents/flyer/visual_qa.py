@@ -1146,6 +1146,9 @@ _BLOCK_TIER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # closed to manual.
     (re.compile(r"^visible text defect reported by QA: "), "text_defect"),
     (re.compile(r"^missing required visible fact: business_name$"), "missing_business_name"),
+    (re.compile(r"^missing required visible fact: item:\d+:name$"), "missing_item_name"),
+    (re.compile(r"^item price mismatch: item:\d+ expected "), "item_price_mismatch"),
+    (re.compile(r"^duplicate item price visible: item:\d+ "), "duplicate_item_price"),
     # bounded-creative-planner: a committed inferred item that did not render is a
     # block-tier intent failure (explicit, not implicit-via-default; Codex r5 #2).
     (re.compile(r"^inferred item not rendered: "), "inferred_item_not_rendered"),
@@ -1180,11 +1183,6 @@ _WARN_TIER_PATTERNS: tuple[_WarnTierBlockerSpec, ...] = (
         pattern=re.compile(r"^missing required visible fact: promotion_end$"),
         label="missing_promotion_end",
         is_event_essential=True,
-    ),
-    _WarnTierBlockerSpec(
-        pattern=re.compile(r"^missing required visible fact: item:\d+:name$"),
-        label="missing_item_name",
-        is_core_promise=True,
     ),
 )
 
