@@ -383,6 +383,35 @@ def test_auto_generates_two_grounded_options_from_menu(bridge_server, env_dir):
     assert "price" not in body.lower()
 
 
+def test_auto_generate_sample_menus_never_invents_off_menu_western_items(bridge_server, env_dir):
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+
+    result, parsed = _run_script(
+        env_dir,
+        port,
+        request_text="Can you create two sample menus mix n match.",
+        auto_generate=True,
+    )
+
+    assert parsed["rc"] == 0, result.stderr
+    sent = [s for s in _read_store(env_dir)["sets"] if s["status"] == "SENT"]
+    assert len(sent) == 1
+    item_names = {name for option in sent[0]["options"] for name in option["item_names"]}
+    assert item_names <= {item["name"] for item in DEFAULT_MENU}
+    body = stub.requests[0]["message"]
+    for invented in [
+        "Stuffed Mushrooms",
+        "Spring Rolls",
+        "Grilled Salmon",
+        "Vegetarian Tacos",
+        "Beef",
+        "Panna Cotta",
+    ]:
+        assert invented not in body
+
+
 def test_auto_generation_allows_three_only_when_requested(bridge_server, env_dir):
     port, _ = bridge_server
     _seed_lead(env_dir)

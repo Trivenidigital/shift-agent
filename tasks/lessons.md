@@ -1,5 +1,13 @@
 # Lessons
 
+## 2026-06-08 - Active Catering proposal turns must not fall through to generic LLM
+
+- A customer asking for catering menu combinations must never receive freeform LLM menu invention. In the live failure, an active Catering lead follow-up (`create two sample menus mix n match`) missed the deterministic proposal-request classifier and the generic LLM suggested Western/off-menu items including beef/tacos for an Indian restaurant.
+- Active-lead proposal/menu-option/sample-menu language must route to the deterministic menu-grounded proposal path, not generic Hermes chat.
+- If F7 bypasses the LLM extractor, it must still preserve obvious structured customer facts from the inbound text when deterministically extractable: event date, veg/non-veg split, and requested menu/proposal count.
+- Customer-facing Catering proposal options must come from `/opt/shift-agent/state/catering-menu.json` or fail closed. Never let freeform LLM menu suggestions reach a customer.
+- Regressions for Catering proposal bugs should assert both route behavior and negative content: no invented/off-menu items when an active lead asks for sample/menu combinations.
+
 ## 2026-06-08 - Flyer idea requests are help intent, even with active projects
 
 - Generic requests such as `Can you suggest me some flyer ideas` are not flyer briefs and must not send the processing ack or create/regenerate a project.

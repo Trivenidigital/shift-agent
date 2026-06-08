@@ -3676,9 +3676,11 @@ class TestF7PrimaryMode:
         assert result is not None and result["action"] == "skip"
         mock_trigger.assert_called_once()
         call_kwargs = mock_trigger.call_args.kwargs
-        # Headcount signal "headcount:80" should have been parsed + forwarded
-        assert call_kwargs.get("extracted_fields") == {"headcount": 80}, \
-            f"expected extracted_fields with headcount=80, got {call_kwargs.get('extracted_fields')!r}"
+        # Headcount and obvious vegetarian preference should be parsed + forwarded.
+        assert call_kwargs.get("extracted_fields") == {
+            "headcount": 80,
+            "dietary_restrictions": ["veg"],
+        }, f"expected extracted_fields with headcount/dietary, got {call_kwargs.get('extracted_fields')!r}"
 
     def test_branch_a_no_headcount_signal_passes_none(self, mods, state_env):
         """When classify_catering finds NO headcount signal (e.g. text says

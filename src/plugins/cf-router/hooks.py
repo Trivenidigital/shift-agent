@@ -19,6 +19,7 @@ Multi-plugin: gateway iterates results; first action != "allow" wins.
 """
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
@@ -659,7 +660,18 @@ def _try_revenue_route_clarification_choice(
     flyer_generation_enabled: bool,
     flyer_workflow_enabled: bool,
 ) -> Optional[dict]:
-    pending = actions.get_revenue_route_clarification(chat_id)
+    try:
+        pending = actions.get_revenue_route_clarification(chat_id)
+    except Exception as exc:  # noqa: BLE001 - clarification state must not preempt core routing
+        try:
+            actions.audit_intercepted(
+                reason="error",
+                chat_id=chat_id,
+                detail=f"revenue_route_clarification_lookup_failed: {type(exc).__name__}: {exc}",
+            )
+        except Exception:
+            pass
+        return None
     if not pending:
         return None
     choice = actions.classify_revenue_route_choice(text)
@@ -4295,6 +4307,151 @@ def _parse_headcount_from_signals(signals: list[str]) -> Optional[int]:
     return None
 
 
+_MONTH_NUMBERS = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+_MONTH_DAY_RE = re.compile(
+    r"\b("
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+    r")\s+(\d{1,2})(?:st|nd|rd|th)?(?:,\s*(\d{4}))?\b",
+    re.IGNORECASE,
+)
+_NON_VEG_COUNT_RE = re.compile(
+    r"\b(\d{1,5})\s+(?:people\s+)?(?:non[\s-]?vegetarians?|non[\s-]?veg(?:etarians?)?)\b",
+    re.IGNORECASE,
+)
+_VEG_COUNT_RE = re.compile(
+    r"\b(\d{1,5})\s+(?:people\s+)?(?:vegetarians?|veg(?:etarians?)?)\b",
+    re.IGNORECASE,
+)
+_REQUESTED_MENU_COUNT_RE = re.compile(
+    r"\b(\d+|one|two|three)\s+(?:sample\s+)?(?:combinations?\s+)?menus?\b",
+    re.IGNORECASE,
+)
+_COUNT_WORDS = {"one": 1, "two": 2, "three": 3}
+
+
+def _parse_month_day_event_date(text: str) -> Optional[str]:
+    match = _MONTH_DAY_RE.search(text or "")
+    if not match:
+        return None
+    month_label = match.group(1).lower()
+    month = _MONTH_NUMBERS.get(month_label)
+    day = int(match.group(2))
+    if month is None:
+        return None
+    today = datetime.now(timezone.utc).date()
+    year = int(match.group(3)) if match.group(3) else today.year
+    try:
+        candidate = datetime(year, month, day, tzinfo=timezone.utc).date()
+    except ValueError:
+        return None
+    if not match.group(3) and candidate < today:
+        try:
+            candidate = datetime(year + 1, month, day, tzinfo=timezone.utc).date()
+        except ValueError:
+            return None
+    return candidate.isoformat()
+
+
+def _extract_catering_fields_from_text(text: str, signals: list[str]) -> Optional[dict]:
+    fields: dict[str, Any] = {}
+    notes: list[str] = []
+
+    headcount = _parse_headcount_from_signals(signals or [])
+    if headcount is not None:
+        fields["headcount"] = headcount
+
+    event_date = _parse_month_day_event_date(text)
+    if event_date:
+        fields["event_date"] = event_date
+
+    dietary: list[str] = []
+    non_veg_match = _NON_VEG_COUNT_RE.search(text or "")
+    veg_match = _VEG_COUNT_RE.search(text or "")
+    if non_veg_match:
+        dietary.append("non-veg")
+        notes.append(f"{int(non_veg_match.group(1))} non-veg")
+    elif re.search(r"\bnon[\s-]?veg(?:etarian)?s?\b", text or "", re.IGNORECASE):
+        dietary.append("non-veg")
+    if veg_match:
+        dietary.append("veg")
+        notes.append(f"{int(veg_match.group(1))} veg")
+    elif re.search(r"\b(?:vegetarian|veg)\b", text or "", re.IGNORECASE):
+        dietary.append("veg")
+    if dietary:
+        # Preserve stable order while avoiding duplicates.
+        fields["dietary_restrictions"] = [value for value in ("veg", "non-veg") if value in set(dietary)]
+
+    count_match = _REQUESTED_MENU_COUNT_RE.search(text or "")
+    if count_match:
+        raw_count = count_match.group(1).lower()
+        count = _COUNT_WORDS.get(raw_count, int(raw_count) if raw_count.isdigit() else 0)
+        if count:
+            notes.append(f"requested {count} sample menu combinations")
+
+    if notes:
+        fields["notes"] = "; ".join(notes)
+    return fields or None
+
+
+def _lead_id_from_create_detail(detail: str) -> str:
+    try:
+        doc = json.loads(detail or "{}")
+    except json.JSONDecodeError:
+        match = re.search(r'"lead_id"\s*:\s*"([^"]+)"', detail or "")
+        return match.group(1) if match else ""
+    if isinstance(doc, dict):
+        return str(doc.get("lead_id") or "")
+    return ""
+
+
+def _maybe_generate_catering_proposals_for_new_lead(
+    *, text: str, chat_id: str, message_id: str, detail: str,
+) -> None:
+    if not actions.is_proposal_request(text):
+        return
+    lead_id = _lead_id_from_create_detail(detail)
+    if not lead_id:
+        actions.audit_intercepted(
+            reason="error",
+            chat_id=chat_id,
+            detail="f7_new_inquiry_proposal_requested_but_lead_id_missing",
+        )
+        return
+    rc = actions.invoke_create_catering_proposals(lead_id, chat_id, message_id, text)
+    actions.audit_intercepted(
+        reason="f7_proposal_request",
+        chat_id=chat_id,
+        subprocess_rc=rc,
+        detail=f"new {lead_id}; proposal request handled by cf-router",
+    )
+
+
 def _has_f7_followup_signal(signals: list[str]) -> bool:
     """Return True when weak catering signals are enough for Branch B only.
 
@@ -4336,10 +4493,7 @@ def _create_catering_lead_from_inbound(
     else:
         return None
 
-    extracted: Optional[dict] = None
-    headcount = _parse_headcount_from_signals(signals or [])
-    if headcount is not None:
-        extracted = {"headcount": headcount}
+    extracted = _extract_catering_fields_from_text(text, signals or [])
 
     ok, detail = actions.trigger_create_catering_lead(
         customer_phone=customer_phone_arg,
@@ -4354,6 +4508,12 @@ def _create_catering_lead_from_inbound(
     )
     if not ok:
         return None
+    _maybe_generate_catering_proposals_for_new_lead(
+        text=text,
+        chat_id=chat_id,
+        message_id=message_id,
+        detail=detail,
+    )
     return {"action": "skip",
             "reason": "cf-router F7 primary: catering inquiry routed deterministically"}
 
