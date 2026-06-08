@@ -83,6 +83,10 @@ _UNIT_OR_QUANTITY_TOKENS = {
     "dozen",
     "half",
     "full",
+    "tray",
+    "trays",
+    "count",
+    "counts",
     "small",
     "medium",
     "large",
@@ -239,6 +243,10 @@ def _past_event_date_blockers(project: FlyerProject) -> list[str]:
 
 
 _TEXT_DEFECT_NOTE_RE = re.compile(r"duplicat|misspell|mispell|repeated", re.IGNORECASE)
+_NEGATED_TEXT_DEFECT_NOTE_RE = re.compile(
+    r"\b(?:no|none|not|without)\b.{0,40}\b(?:duplicat|misspell|mispell|repeated|garbled|unreadable|placeholder)",
+    re.IGNORECASE,
+)
 
 
 def _text_defect_note_blockers(provider_notes: list[str]) -> list[str]:
@@ -250,7 +258,7 @@ def _text_defect_note_blockers(provider_notes: list[str]) -> list[str]:
     return [
         f"visible text defect reported by QA: {note}"
         for note in provider_notes
-        if _TEXT_DEFECT_NOTE_RE.search(note)
+        if _TEXT_DEFECT_NOTE_RE.search(note) and not _NEGATED_TEXT_DEFECT_NOTE_RE.search(note)
     ]
 
 
@@ -410,6 +418,75 @@ def _tokens_present(normalized_text: str, value: str) -> bool:
     return bool(tokens) and all(_text_value_present_in(normalized_text, token) for token in tokens)
 
 
+def _edit_distance_at_most_one(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) == len(right):
+        return sum(1 for a, b in zip(left, right) if a != b) <= 1
+    short, long = (left, right) if len(left) < len(right) else (right, left)
+    i = j = edits = 0
+    while i < len(short) and j < len(long):
+        if short[i] == long[j]:
+            i += 1
+            j += 1
+            continue
+        edits += 1
+        if edits > 1:
+            return False
+        j += 1
+    return True
+
+
+def _item_token_present_in_line(expected: str, actual_tokens: list[str]) -> bool:
+    if expected in actual_tokens:
+        return True
+    if len(expected) < 6:
+        return False
+    return any(
+        len(actual) >= 6 and _edit_distance_at_most_one(expected, actual)
+        for actual in actual_tokens
+    )
+
+
+def _item_token_matches(expected: str, actual: str) -> bool:
+    if expected == actual:
+        return True
+    return len(expected) >= 6 and len(actual) >= 6 and _edit_distance_at_most_one(expected, actual)
+
+
+def _fuzzy_item_span_in_line(normalized_line: str, expected_tokens: list[str]) -> tuple[int, int] | None:
+    token_spans = [
+        (match.group(0), match.start(), match.end())
+        for match in re.finditer(r"[a-z0-9]+", normalized_line)
+    ]
+    if not token_spans:
+        return None
+    first_start: int | None = None
+    previous_end: int | None = None
+    search_start = 0
+    for expected in expected_tokens:
+        found: tuple[int, int, int] | None = None
+        for token_index in range(search_start, len(token_spans)):
+            actual, start, end = token_spans[token_index]
+            if _item_token_matches(expected, actual):
+                found = (token_index, start, end)
+                break
+        if found is None:
+            return None
+        token_index, start, end = found
+        if previous_end is not None and not _only_unit_or_quantity_text(normalized_line[previous_end:start]):
+            return None
+        if first_start is None:
+            first_start = start
+        previous_end = end
+        search_start = token_index + 1
+    if first_start is None or previous_end is None:
+        return None
+    return first_start, previous_end
+
+
 def _item_name_present(raw_text: str, value: str) -> bool:
     item_descriptor_tokens = {"item", "items", "special", "specials", "daily"}
     tokens = [
@@ -426,10 +503,15 @@ def _item_name_present(raw_text: str, value: str) -> bool:
     )
     for line in (raw_text or "").splitlines():
         normalized_line = _normalize_text_for_match(line)
-        if not all(_text_value_present_in(normalized_line, token) for token in tokens):
+        exact_tokens_present = all(_text_value_present_in(normalized_line, token) for token in tokens)
+        line_tokens = re.findall(r"[a-z0-9]+", normalized_line)
+        fuzzy_tokens_present = all(_item_token_present_in_line(token, line_tokens) for token in tokens)
+        if not exact_tokens_present and not fuzzy_tokens_present:
             continue
         if negative_re.search(line):
             continue
+        if _first_price_match(line, requires_currency=False) is not None:
+            return True
         if menu_context_re.search(line):
             return True
         # Accept short masthead/card labels such as "GOAT" but not prose
@@ -566,6 +648,35 @@ def _same_line_item_price_present(segment: str, name_re: re.Pattern[str], price:
     return _price_cents(next_price.group("amount")) == expected
 
 
+def _same_line_fuzzy_item_price_present(raw_text: str, name: str, price: str) -> bool:
+    expected = _price_cents(price)
+    if expected is None:
+        return False
+    tokens = [
+        token
+        for token in re.findall(r"[a-z0-9]+", _normalize_text_for_match(name))
+        if token
+    ]
+    if not tokens:
+        return False
+    requires_currency = bool(re.search(r"[$â‚¹]", price or ""))
+    for line in (raw_text or "").splitlines():
+        normalized_line = _normalize_text_for_match(line)
+        span = _fuzzy_item_span_in_line(normalized_line, tokens)
+        if span is None:
+            continue
+        _start, end = span
+        tail = normalized_line[end:]
+        price_match = _first_price_match(tail, requires_currency=requires_currency)
+        if price_match is None:
+            continue
+        if not _only_unit_or_quantity_text(tail[: price_match.start()]):
+            continue
+        if _price_cents(price_match.group("amount")) == expected:
+            return True
+    return False
+
+
 def _item_price_pair_present(raw_text: str, name: str, price: str, *, all_item_names: list[str]) -> bool:
     name_re = _name_pattern(name)
     if name_re is None:
@@ -675,7 +786,11 @@ def _item_price_pair_blockers(project: FlyerProject, raw_text: str) -> list[str]
         price = record.get("price", "").strip()
         if not name or not price:
             continue
-        if not _item_price_pair_present(raw_text, name, price, all_item_names=all_names) and not _rowwise_item_price_pair_present(raw_text, records, index):
+        if (
+            not _item_price_pair_present(raw_text, name, price, all_item_names=all_names)
+            and not _rowwise_item_price_pair_present(raw_text, records, index)
+            and not _same_line_fuzzy_item_price_present(raw_text, name, price)
+        ):
             blockers.append(f"item price mismatch: item:{index} expected {name} {price}")
     return blockers
 
