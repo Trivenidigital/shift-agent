@@ -97,6 +97,18 @@ def _norm(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
 
 
+def _combined_extraction_text(raw_request: str, notes: str) -> str:
+    raw = raw_request or ""
+    extra = notes or ""
+    if not extra:
+        return raw
+    raw_norm = _norm(raw)
+    extra_norm = _norm(extra)
+    if raw_norm and extra_norm and extra_norm in raw_norm:
+        return raw
+    return f"{raw}\n{extra}" if raw else extra
+
+
 def _looks_like_instruction_fragment(value: str) -> bool:
     text = (value or "").strip()
     if not text:
@@ -659,7 +671,7 @@ def extract_text_facts(
     allow_text_identity: bool = True,
     cfg: "FlyerConfig | None" = None,
 ) -> list[FlyerLockedFact]:
-    text = f"{raw_request or ''} {fields.notes or ''}"
+    text = _combined_extraction_text(raw_request or "", fields.notes or "")
     semantic_brief = build_semantic_flyer_brief(
         fields,
         raw_request,
