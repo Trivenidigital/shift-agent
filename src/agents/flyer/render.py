@@ -143,6 +143,11 @@ TEXT_MANIFEST_SCHEMA_VERSION = 1
 # can't render at every delivered size must route to manual, not ship a partial set.
 MAX_DETAIL_FACTS = 10
 MAX_TEXT_FACTS = 16
+# Explicit customer-supplied item/price menus can use the compact deterministic menu
+# overlay. Keep this separate from planner/inferred menus: customer truth may be dense,
+# but generated suggestions should not force tiny menu posters.
+MAX_COMPACT_MENU_DETAIL_FACTS = 18
+MAX_COMPACT_MENU_TEXT_FACTS = 30
 # A generated background-only composite writes its raw background and overlaid
 # preview together (sub-second). A preview newer than its raw by more than this
 # window was edited/regenerated apart from the raw → final export honors the
@@ -625,7 +630,12 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
     # Fail closed when the combined critical facts exceed one flyer's legible capacity.
     # The menu-line helpers deliberately do NOT truncate, so an over-long menu reaches
     # this guard and routes to manual instead of silently dropping items 11+.
-    if len(selected) > MAX_DETAIL_FACTS:
+    detail_cap = (
+        MAX_COMPACT_MENU_DETAIL_FACTS
+        if _compact_menu_overlay_allowed(project, menu_items)
+        else MAX_DETAIL_FACTS
+    )
+    if len(selected) > detail_cap:
         raise FlyerRenderError("critical text facts do not fit")
     return selected
 
@@ -767,6 +777,31 @@ def _locked_menu_item_lines(project: FlyerProject) -> list[str]:
     return items
 
 
+def _compact_menu_overlay_allowed(project: FlyerProject, menu_items: list[str] | None = None) -> bool:
+    """Allow a denser deterministic overlay only for grounded customer/source menus.
+
+    Planner-generated names (`source=hermes_inferred`) keep the old ten-row fail-closed
+    contract; they are suggestions, not customer truth. The production dessert case is
+    the opposite: every item/price pair came from customer text and must be shown.
+    """
+    items = menu_items if menu_items is not None else _menu_item_lines(project)
+    if len(items) <= MAX_DETAIL_FACTS or len(items) > MAX_COMPACT_MENU_DETAIL_FACTS:
+        return False
+    grouped: dict[int, dict[str, str]] = {}
+    for fact in project.locked_facts:
+        match = re.match(r"^item:(\d+):(name|price)$", fact.fact_id)
+        if not match or not str(fact.value or "").strip():
+            continue
+        grouped.setdefault(int(match.group(1)), {})[match.group(2)] = getattr(fact, "source", "")
+    named = [index for index in sorted(grouped) if grouped[index].get("name")]
+    if len(named) != len(items):
+        return False
+    return all(
+        all(source and source != "hermes_inferred" for source in grouped[index].values())
+        for index in named
+    )
+
+
 def _same_text(left: str, right: str) -> bool:
     norm_left = re.sub(r"[^a-z0-9]+", " ", (left or "").lower()).strip()
     norm_right = re.sub(r"[^a-z0-9]+", " ", (right or "").lower()).strip()
@@ -817,7 +852,12 @@ def collect_text_facts(project: FlyerProject) -> list[FlyerTextFact]:
         add("promotion_end", "Promotion end", promotion_end_text)
     for idx, clause in enumerate(_detail_clauses(project), start=1):
         add(f"detail_{idx:03d}", "Detail", clause)
-    if len(facts) > MAX_TEXT_FACTS:
+    text_cap = (
+        MAX_COMPACT_MENU_TEXT_FACTS
+        if _compact_menu_overlay_allowed(project)
+        else MAX_TEXT_FACTS
+    )
+    if len(facts) > text_cap:
         raise FlyerRenderError("critical text facts do not fit")
     fact_ids = [fact.fact_id for fact in facts]
     if len(fact_ids) != len(set(fact_ids)):
@@ -1905,7 +1945,10 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                 draw.text((box_x0 + 22, y), ln, font=f, fill=color)
                 y += int(getattr(f, "size", 18) * 1.2)
 
-            panel = (margin, int(height * 0.56), width - margin, height - margin)
+            items = list(menu_payload["items"])
+            compact_menu = len(items) > MAX_DETAIL_FACTS
+            panel_top_ratio = 0.50 if compact_menu else 0.56
+            panel = (margin, int(height * panel_top_ratio), width - margin, height - margin)
             draw.rounded_rectangle((panel[0] + 8, panel[1] + 8, panel[2] + 8, panel[3] + 8), radius=28, fill=(0, 0, 0, 75))
             draw.rounded_rectangle(panel, radius=28, fill=(255, 247, 222, 246), outline=(179, 37, 47, 238), width=4)
             px0, py0, px1, py1 = panel
@@ -1913,8 +1956,11 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
             # (item cards are self-evidently a menu). `_font` already renders the
             # actual fact text in its own script (Telugu/Indic) via _has_telugu.
             # Localizing facts captured in the wrong language is an intake concern.
-            items = list(menu_payload["items"])
-            cols = 2 if width >= 900 and len(items) > 3 else 1
+            cols = 3 if compact_menu and width >= 900 else (2 if width >= 900 and len(items) > 3 else 1)
+            if len(items) > MAX_COMPACT_MENU_DETAIL_FACTS:
+                raise FlyerRenderError(
+                    f"menu overlay cannot fit all {len(items)} items (drew 0)"
+                )
             gap = 16
             card_w = (px1 - px0 - 56 - gap * (cols - 1)) // cols
             # Size cards so the full allowed item count (MAX_DETAIL_FACTS = 10, i.e.
@@ -1922,22 +1968,28 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
             # (66), the footer reserve (58), and the 10px inter-row gaps from the
             # available height before dividing by rows. Min 50 lets 5 rows fit.
             rows = (len(items) + cols - 1) // cols
-            card_h_raw = ((py1 - py0 - 116) - 12 * (rows - 1)) // max(1, rows)
-            min_card_h = 86 if rows <= 3 else 58
+            top_pad = 24 if compact_menu else 34
+            row_gap = 8 if compact_menu else 12
+            footer_reserve = 48 if compact_menu else 62
+            card_h_raw = ((py1 - py0 - top_pad - footer_reserve - 20) - row_gap * (rows - 1)) // max(1, rows)
+            min_card_h = 46 if compact_menu else (86 if rows <= 3 else 58)
             card_h = max(min_card_h, min(128, card_h_raw))
-            if rows >= 5:
+            if compact_menu:
+                item_font = _font(ImageFont, max(17, int(width * 0.018)), bold=True)
+                price_font = _font(ImageFont, max(18, int(width * 0.020)), bold=True)
+            elif rows >= 5:
                 item_font = _font(ImageFont, max(21, int(width * 0.026)), bold=True)
                 price_font = _font(ImageFont, max(22, int(width * 0.028)), bold=True)
             elif rows >= 4:
                 item_font = _font(ImageFont, max(23, int(width * 0.029)), bold=True)
                 price_font = _font(ImageFont, max(24, int(width * 0.031)), bold=True)
-            start_y = py0 + 34
+            start_y = py0 + top_pad
             for idx, item in enumerate(items):
                 col = idx % cols
                 row = idx // cols
                 x = px0 + 28 + col * (card_w + gap)
-                cy = start_y + row * (card_h + 12)
-                if cy + card_h > py1 - 62:
+                cy = start_y + row * (card_h + row_gap)
+                if cy + card_h > py1 - footer_reserve:
                     # Fail closed instead of silently dropping items. Under the
                     # background-only contract the overlay is the SOLE source of
                     # item facts (the model draws none), and `write_text_manifest`
@@ -2042,23 +2094,28 @@ with Image.open(src) as img:
         y=by0+18
         for f,c,ln in card:
             draw.text((bx0+22,y), ln, font=f, fill=c); y += int(getattr(f,"size",18)*1.2)
-        panel=(margin,int(height*.56),width-margin,height-margin)
+        compact=len(items)>10
+        panel=(margin,int(height*(.50 if compact else .56)),width-margin,height-margin)
         draw.rounded_rectangle((panel[0]+8,panel[1]+8,panel[2]+8,panel[3]+8), radius=28, fill=(0,0,0,75))
         draw.rounded_rectangle(panel, radius=28, fill=(255,247,222,246), outline=(179,37,47,238), width=4)
-        px0,py0,px1,py1=panel; cols=2 if width>=900 and len(items)>3 else 1; gap=16
+        px0,py0,px1,py1=panel; cols=3 if compact and width>=900 else (2 if width>=900 and len(items)>3 else 1); gap=16
+        if len(items)>18: raise SystemExit(f"menu overlay cannot fit all {len(items)} items (drew 0)")
         cardw=(px1-px0-56-gap*(cols-1))//cols; rows=(len(items)+cols-1)//cols
-        rawh=((py1-py0-116)-12*(rows-1))//max(1,rows); cardh=max(86 if rows<=3 else 58,min(128,rawh))
-        if rows>=5:
+        top_pad=24 if compact else 34; row_gap=8 if compact else 12; footer_reserve=48 if compact else 62
+        rawh=((py1-py0-top_pad-footer_reserve-20)-row_gap*(rows-1))//max(1,rows); cardh=max(46 if compact else (86 if rows<=3 else 58),min(128,rawh))
+        if compact:
+            itemf=font(max(17,int(width*.018)),True); pricef=font(max(18,int(width*.020)),True)
+        elif rows>=5:
             itemf=font(max(21,int(width*.026)),True); pricef=font(max(22,int(width*.028)),True)
         elif rows>=4:
             itemf=font(max(23,int(width*.029)),True); pricef=font(max(24,int(width*.031)),True)
         def split_price(item):
             m=re.search(r"(.+?)\\s+(\\$\\s*\\d+(?:\\.\\d{1,2})?)$", str(item).strip())
             return (str(item).strip(),"") if not m else (re.sub(r"\\bfor$","",m.group(1).strip(),flags=re.I).strip(), m.group(2).replace(" ",""))
-        start=py0+34
+        start=py0+top_pad
         for idx,item in enumerate(items):
-            col=idx%cols; row=idx//cols; x=px0+28+col*(cardw+gap); cy=start+row*(cardh+12)
-            if cy+cardh > py1-62: raise SystemExit(f"menu overlay cannot fit all {len(items)} items (drew {idx})")
+            col=idx%cols; row=idx//cols; x=px0+28+col*(cardw+gap); cy=start+row*(cardh+row_gap)
+            if cy+cardh > py1-footer_reserve: raise SystemExit(f"menu overlay cannot fit all {len(items)} items (drew {idx})")
             draw.rounded_rectangle((x+5,cy+5,x+cardw+5,cy+cardh+5), radius=18, fill=(0,0,0,45))
             draw.rounded_rectangle((x,cy,x+cardw,cy+cardh), radius=18, fill=(255,253,244,245), outline=(223,176,72,235), width=3)
             name,price=split_price(item); pbox=draw.textbbox((0,0),price,font=pricef); pw=pbox[2]-pbox[0]
