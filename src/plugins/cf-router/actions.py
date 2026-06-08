@@ -1246,7 +1246,15 @@ _PROPOSAL_REQUEST_VERB = re.compile(
 )
 _PROPOSAL_REQUEST_OBJECT = re.compile(
     r"\b(?:proposal menus?|menu proposals?|proposal|proposals|"
-    r"menu options?|options?)\b",
+    r"sample menus?|combination menus?|combinations? menus?|"
+    r"menu options?|options?|packages?|menus?)\b",
+    re.IGNORECASE,
+)
+_PROPOSAL_MENU_CONSTRAINT = re.compile(
+    r"\bmenu\b.{0,80}\b(?:should|must|need|needs|contain|include|exclude|avoid|no|not)\b"
+    r"|\b(?:add|include|exclude|avoid|remove|more)\b.{0,80}\b"
+    r"(?:appetizers?|starters?|mains?|entrees?|veg|vegetarian|non[\s-]?veg|"
+    r"non[\s-]?vegetarian|beef|pork|chicken|mutton|goat|fish|menu)\b",
     re.IGNORECASE,
 )
 _PROPOSAL_PASSIVE_WAIT = re.compile(
@@ -1281,6 +1289,8 @@ def is_proposal_request(text: str) -> bool:
         return False
     if _PROPOSAL_PASSIVE_WAIT.search(normalized):
         return False
+    if _PROPOSAL_MENU_CONSTRAINT.search(normalized):
+        return True
     for obj in _PROPOSAL_REQUEST_OBJECT.finditer(normalized):
         window = normalized[max(0, obj.start() - 80):obj.start()]
         if _PROPOSAL_REQUEST_VERB.search(window):

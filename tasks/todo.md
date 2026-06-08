@@ -1,5 +1,36 @@
 # Backlog — pending items
 
+## Active - Catering menu-grounded proposal routing (2026-06-08)
+
+**Drift-check tag:** extends-Hermes
+
+**New primitives introduced:** none. This uses existing cf-router/F7 active-lead routing plus the existing deterministic `create-catering-proposal-options` script.
+
+**Hermes-first analysis**
+
+| Domain | Hermes skill found? | Decision |
+|---|---|---|
+| WhatsApp ingress and sender identity | Hermes gateway + cf-router already receive messages and resolve sender context | use it |
+| Active Catering lead routing | existing F7 primary-mode path owns active-lead suppression/proposal branching | extend priority only for sample-menu requests |
+| Menu-grounded proposal generation | existing `creative_catering_proposals` skill + `create-catering-proposal-options` script render from stored menu | use it |
+| Customer-facing freeform menu advice | no freeform LLM route is acceptable for active Catering proposals | fail/route deterministic only |
+
+Awesome Hermes Agent ecosystem check: not applicable for this emergency live bug; the in-tree Hermes Catering skill/script already provides the needed menu-grounded proposal path.
+
+- [x] Diagnose live L0016 failure: first F7 lead creation preserved only headcount; second "two sample menus mix n match" missed proposal routing and fell through to generic LLM, which invented off-menu Western items.
+- [x] Add red regressions for the exact birthday catering request and active-lead sample-menu follow-up.
+- [x] Fix deterministic extraction/routing with minimal scope and no Flyer edits.
+- [x] Verify proposal output uses stored menu only and no generic LLM suggestions.
+- [x] Run focused Catering/router tests and static checks.
+
+Review/verification:
+- Red tests reproduced the incident class: active lead "Can you create two sample menus mix n match" was not a proposal request; "Menu should not contain beef and pork..." also did not route to proposals; initial birthday inquiry only forwarded headcount.
+- Fix: F7 now extracts obvious month/day date, veg/non-veg split/count notes, and requested sample-menu count; active-lead sample-menu/menu-constraint language routes to `invoke_create_catering_proposals`; initial proposal requests generate menu-grounded options after lead creation when lead id is available. Clarification-state lookup is fail-soft so it cannot preempt core F7 routing.
+- Local Windows-safe route tests: `tests/test_cf_router_new_inquiry_after_finalized.py -q` -> `4 passed`.
+- Local focused Catering sweep: `276 passed, 170 skipped`.
+- Linux temp-tree tests on VPS using `/tmp/pr418-ci-venv`: `tests/test_create_catering_proposal_options.py tests/test_cf_router_plugin.py tests/test_cf_router_new_inquiry_after_finalized.py -q` -> `176 passed`.
+- Static checks: `py_compile` passed for `src/plugins/cf-router/{hooks,actions}.py` and `src/agents/catering/scripts/create-catering-proposal-options`; `git diff --check` passed.
+
 ## Active - Flyer idea request must not auto-generate (2026-06-08)
 
 **Drift-check tag:** extends-Hermes

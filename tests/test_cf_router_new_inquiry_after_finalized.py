@@ -102,5 +102,188 @@ def test_strong_new_inquiry_after_customer_finalized_creates_new_lead(tmp_path):
     assert create_calls[0]["customer_phone"] == "+19045550104"
     assert create_calls[0]["customer_name"] == ""
     assert create_calls[0]["raw_inquiry"].startswith("Need catering for 80")
-    assert create_calls[0]["extracted_fields"] == {"headcount": 80}
+    assert create_calls[0]["extracted_fields"]["headcount"] == 80
+    assert set(create_calls[0]["extracted_fields"]["dietary_restrictions"]) == {"veg", "non-veg"}
     assert not any(kind == "proposal" for kind, _payload in calls)
+
+
+def test_birthday_catering_inquiry_preserves_date_and_veg_split(tmp_path):
+    hooks_mod, actions_mod = _load_plugin_modules()
+    state = tmp_path / "state"
+    state.mkdir()
+    actions_mod.LEADS_PATH = state / "catering-leads.json"
+    actions_mod.PROPOSALS_PATH = state / "catering-proposals.json"
+    actions_mod.MENU_PENDING_PATH = state / "catering-menu-pending.json"
+    actions_mod.CONFIG_PATH = tmp_path / "config.yaml"
+    actions_mod.ROSTER_PATH = tmp_path / "roster.json"
+    actions_mod.LOG_PATH = tmp_path / "decisions.log"
+    actions_mod.THROTTLE_PATH = state / "cf-router-throttle.json"
+    actions_mod.LEADS_PATH.write_text(
+        json.dumps({"leads": [], "next_lead_seq": 16}),
+        encoding="utf-8",
+    )
+    actions_mod.PROPOSALS_PATH.write_text(
+        json.dumps({"sets": [], "next_sequence": 1}), encoding="utf-8",
+    )
+
+    calls: list[tuple[str, object]] = []
+    actions_mod.is_owner_chat = lambda _chat_id: False
+    actions_mod.is_employee_chat = lambda _chat_id: False
+    actions_mod.lid_to_phone_via_identify_sender = (
+        lambda _chat_id: ("+17329837841", "customer")
+    )
+    actions_mod.get_revenue_route_clarification = lambda _chat_id: None
+    actions_mod.trigger_create_catering_lead = (
+        lambda **kw: calls.append(("create", kw)) or (True, '{"lead_id":"L0016"}')
+    )
+    actions_mod.invoke_create_catering_proposals = (
+        lambda *args: calls.append(("proposal", args)) or 0
+    )
+    actions_mod.audit_intercepted = lambda **kw: calls.append(("audit", kw))
+
+    text = (
+        "Bro, I have my daughter birthday coming up on July 12, I'd like you "
+        "to help me with catering for 80 people. 60 people non vegetarians "
+        "and 20 vegetarians, please suggest me 3 sample combinations menus "
+        "to choose from. I hope you could give me best rate."
+    )
+    result = hooks_mod.pre_gateway_dispatch(SimpleNamespace(
+        text=text,
+        chat_id="201975216009469@lid",
+        message_id="msg-birthday-catering",
+    ))
+
+    assert result == {
+        "action": "skip",
+        "reason": "cf-router F7 primary: catering inquiry routed deterministically",
+    }
+    create_calls = [payload for kind, payload in calls if kind == "create"]
+    assert len(create_calls) == 1
+    fields = create_calls[0]["extracted_fields"]
+    assert fields["headcount"] == 80
+    assert fields["event_date"].endswith("-07-12")
+    assert set(fields["dietary_restrictions"]) == {"veg", "non-veg"}
+    assert "60 non-veg" in fields["notes"]
+    assert "20 veg" in fields["notes"]
+    assert "3 sample" in fields["notes"]
+    proposal_calls = [payload for kind, payload in calls if kind == "proposal"]
+    assert len(proposal_calls) == 1
+    assert proposal_calls[0][0] == "L0016"
+    assert proposal_calls[0][3] == text
+
+
+def test_active_lead_sample_menu_request_invokes_menu_grounded_proposals(tmp_path):
+    hooks_mod, actions_mod = _load_plugin_modules()
+    state = tmp_path / "state"
+    state.mkdir()
+    actions_mod.LEADS_PATH = state / "catering-leads.json"
+    actions_mod.PROPOSALS_PATH = state / "catering-proposals.json"
+    actions_mod.MENU_PENDING_PATH = state / "catering-menu-pending.json"
+    actions_mod.CONFIG_PATH = tmp_path / "config.yaml"
+    actions_mod.ROSTER_PATH = tmp_path / "roster.json"
+    actions_mod.LOG_PATH = tmp_path / "decisions.log"
+    actions_mod.THROTTLE_PATH = state / "cf-router-throttle.json"
+    actions_mod.LEADS_PATH.write_text(json.dumps({
+        "leads": [{
+            "lead_id": "L0016",
+            "owner_approval_code": "#GWXSR",
+            "status": "AWAITING_OWNER_APPROVAL",
+            "customer_phone": "+17329837841",
+            "customer_lid": None,
+            "created_at": "2026-06-08T08:24:09-04:00",
+        }],
+        "next_lead_seq": 17,
+    }), encoding="utf-8")
+    actions_mod.PROPOSALS_PATH.write_text(
+        json.dumps({"sets": [], "next_sequence": 1}), encoding="utf-8",
+    )
+
+    calls: list[tuple[str, object]] = []
+    actions_mod.is_owner_chat = lambda _chat_id: False
+    actions_mod.is_employee_chat = lambda _chat_id: False
+    actions_mod.lid_to_phone_via_identify_sender = (
+        lambda _chat_id: ("+17329837841", "customer")
+    )
+    actions_mod.get_revenue_route_clarification = lambda _chat_id: None
+    actions_mod.invoke_create_catering_proposals = (
+        lambda *args: calls.append(("proposal", args)) or 0
+    )
+    actions_mod.send_canonical_followup_reply = (
+        lambda *args: calls.append(("reply", args)) or True
+    )
+    actions_mod.audit_intercepted = lambda **kw: calls.append(("audit", kw))
+
+    text = "Can you create two sample menus mix n match."
+    assert actions_mod.is_proposal_request(text) is True
+    result = hooks_mod.pre_gateway_dispatch(SimpleNamespace(
+        text=text,
+        chat_id="201975216009469@lid",
+        message_id="msg-sample-menus",
+    ))
+
+    assert result == {
+        "action": "skip",
+        "reason": "cf-router F7 proposal request for L0016",
+    }
+    assert [kind for kind, _payload in calls].count("proposal") == 1
+    assert not any(kind == "reply" for kind, _payload in calls)
+
+
+def test_active_lead_menu_constraints_regenerate_proposals_not_owner_wait_reply(tmp_path):
+    hooks_mod, actions_mod = _load_plugin_modules()
+    state = tmp_path / "state"
+    state.mkdir()
+    actions_mod.LEADS_PATH = state / "catering-leads.json"
+    actions_mod.PROPOSALS_PATH = state / "catering-proposals.json"
+    actions_mod.MENU_PENDING_PATH = state / "catering-menu-pending.json"
+    actions_mod.CONFIG_PATH = tmp_path / "config.yaml"
+    actions_mod.ROSTER_PATH = tmp_path / "roster.json"
+    actions_mod.LOG_PATH = tmp_path / "decisions.log"
+    actions_mod.THROTTLE_PATH = state / "cf-router-throttle.json"
+    actions_mod.LEADS_PATH.write_text(json.dumps({
+        "leads": [{
+            "lead_id": "L0016",
+            "owner_approval_code": "#GWXSR",
+            "status": "AWAITING_OWNER_APPROVAL",
+            "customer_phone": "+17329837841",
+            "customer_lid": None,
+            "created_at": "2026-06-08T08:24:09-04:00",
+        }],
+        "next_lead_seq": 17,
+    }), encoding="utf-8")
+    actions_mod.PROPOSALS_PATH.write_text(
+        json.dumps({"sets": [], "next_sequence": 1}), encoding="utf-8",
+    )
+
+    calls: list[tuple[str, object]] = []
+    actions_mod.is_owner_chat = lambda _chat_id: False
+    actions_mod.is_employee_chat = lambda _chat_id: False
+    actions_mod.lid_to_phone_via_identify_sender = (
+        lambda _chat_id: ("+17329837841", "customer")
+    )
+    actions_mod.get_revenue_route_clarification = lambda _chat_id: None
+    actions_mod.invoke_create_catering_proposals = (
+        lambda *args: calls.append(("proposal", args)) or 0
+    )
+    actions_mod.send_canonical_followup_reply = (
+        lambda *args: calls.append(("reply", args)) or True
+    )
+    actions_mod.audit_intercepted = lambda **kw: calls.append(("audit", kw))
+
+    text = (
+        "Menu should not contain beef and pork. Menu should contain both veg "
+        "and non-veg options. Add more appetizers, mains."
+    )
+    assert actions_mod.is_proposal_request(text) is True
+    result = hooks_mod.pre_gateway_dispatch(SimpleNamespace(
+        text=text,
+        chat_id="201975216009469@lid",
+        message_id="msg-menu-constraints",
+    ))
+
+    assert result == {
+        "action": "skip",
+        "reason": "cf-router F7 proposal request for L0016",
+    }
+    assert [kind for kind, _payload in calls].count("proposal") == 1
+    assert not any(kind == "reply" for kind, _payload in calls)
