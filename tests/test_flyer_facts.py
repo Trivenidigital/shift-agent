@@ -319,6 +319,26 @@ def test_extract_text_facts_locks_exact_dessert_graduation_suffix_price_pairs(mo
     assert all(by_id[f"item:{idx}:price"].required is True for idx in range(len(expected)))
 
 
+def test_extract_text_facts_keeps_final_suffix_price_when_intake_notes_duplicate_raw(monkeypatch):
+    """Bare render passes raw WhatsApp text plus intake fields. The intake extractor
+    collapses notes to one line; if facts.py appends that duplicate to raw, the
+    raw final suffix-price line becomes a giant segment and the last item is lost."""
+    from agents.flyer import facts as facts_module
+
+    monkeypatch.setattr(facts_module, "build_hermes_semantic_brief_provider", lambda: None)
+    collapsed_notes = " ".join(DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF.split())
+
+    facts = facts_module.extract_text_facts(
+        FlyerRequestFields(notes=collapsed_notes),
+        DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF,
+        message_id="m-dessert-graduation",
+    )
+    by_id = facts_module.facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert by_id["item:13:name"].value == "Khalakhandh - 100 count"
+    assert by_id["item:13:price"].value == "$100"
+
+
 def test_extract_text_facts_no_price_thali_request_creates_no_price_facts(monkeypatch):
     from agents.flyer import facts as facts_module
 

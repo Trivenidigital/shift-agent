@@ -1750,10 +1750,14 @@ Review/verification:
 - [x] Add failing regressions for wrong-brand QA causing the second bare render attempt to disable saved brand assets.
 - [x] Keep reference assets and explicit customer facts intact; only saved customer brand assets are disabled on the retry.
 - [x] Run focused Flyer renderer/bare-render/visual-QA tests and compile/diff checks.
-- [ ] Deploy via tarball, run smoke, then rerun the exact no-send grounded dessert flow.
+- [x] Deploy via tarball, run smoke, then rerun the exact no-send grounded dessert flow.
+- [x] Follow-up root cause from no-send pixel inspection: bare-path intake notes duplicated the raw request as one collapsed line, so the final suffix-price row was not locked.
+- [ ] Add/deploy the narrow facts dedupe fix, rerun no-send grounded dessert flow, and inspect pixels again.
 
 Review/verification:
 - Red tests before fix: `test_wrong_brand_qa_retries_bare_render_without_saved_brand_assets` failed because the retry project lacked `render:disable_brand_assets`; `test_render_control_fact_disables_saved_customer_brand_assets` failed because the renderer still included `logo: B0001`.
 - Green focused tests: `tests/test_flyer_pr3_wiring.py` -> 39 passed; `tests/test_flyer_renderer.py` -> 119 passed; `tests/test_flyer_visual_qa.py` -> 141 passed.
 - Broader Flyer checks: `tests/test_flyer_facts.py tests/test_flyer_visible_contract.py tests/test_flyer_create_project.py` -> 124 passed; `tests/test_flyer_generate_concepts.py tests/test_flyer_skill_driven_scene.py` -> 43 passed.
 - Static checks: `python -m py_compile src/agents/flyer/bare_render.py src/agents/flyer/render.py src/agents/flyer/visual_qa.py src/agents/flyer/facts.py` passed; `git diff --check` passed.
+- Deploy: `deploy-20260608-033619-a8227f62` completed and post-deploy smoke passed; `hermes-gateway` active; staging commit `a8227f62c283adbf17665c03e1d9e142e6783a85`.
+- No-send probe after PR #484: `render_grounded` returned `send`, but visual inspection of `C:\Testing\flyer-quality-grounded-pr484.png` showed only 13 dessert items; session facts confirmed `Khalakhandh - 100 count $100` was not locked.
