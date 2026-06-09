@@ -4758,6 +4758,51 @@ def test_active_customer_start_trial_cta_returns_ready_not_new_intake(monkeypatc
     assert "Start Free Trial" not in sent["message"]
 
 
+def test_cancelled_customer_start_trial_cta_restarts_intake(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    customer = {
+        "customer_id": "CUST0007",
+        "business_name": "Lakshmi's Kitchen",
+        "status": "cancelled",
+        "primary_chat_id": "17329837841@s.whatsapp.net",
+        "public_phone": "+17329837841",
+    }
+    sent = {}
+    calls = {}
+
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    def fake_intake(**kwargs):
+        calls["intake"] = kwargs
+        return (
+            True,
+            "intake",
+            {
+                "handled": True,
+                "reply_text": "Flyer Studio\n------------\nChoose a plan by replying 1, 2, 3, 4:",
+                "action": "onboarding",
+            },
+        )
+
+    monkeypatch.setattr(actions, "trigger_flyer_intake", fake_intake)
+    def fake_send(_chat_id, text, **_kwargs):
+        sent["message"] = text
+        return True, "mid-1", ""
+
+    monkeypatch.setattr(actions, "send_flyer_text", fake_send)
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks._try_flyer_campaign_cta_intercept(
+        "Start Free Trial",
+        "17329837841@s.whatsapp.net",
+        {"message_id": "restart-cta"},
+    )
+
+    assert result == {"action": "skip", "reason": "cf-router flyer intake started: start_trial"}
+    assert calls["intake"]["start_source"] == "start_trial"
+    assert "Choose a plan" in sent["message"]
+
+
 def test_active_customer_stale_onboarding_non_flyer_gets_ready_reply(monkeypatch):
     hooks, actions = _load_plugin_modules()
     customer = {

@@ -1,5 +1,35 @@
 # Backlog — pending items
 
+## Active - Flyer cancelled customer restart (2026-06-09)
+
+**Drift-check tag:** extends-Hermes
+
+**New primitives introduced:** none. This is a local Flyer account lifecycle fix using existing Hermes/Flyer WhatsApp onboarding, customer JSON state, duplicate-phone guard, and dashboard deactivation.
+
+**Hermes-first analysis**
+
+| Domain | Hermes skill found? | Decision |
+|---|---|---|
+| WhatsApp campaign/onboarding ingress | Hermes gateway + cf-router already start Flyer onboarding from `Start Free Trial` | use it; no router rewrite |
+| Customer account state | existing Flyer `customers.json` and `FlyerCustomerProfile.status` own trial/active/cancelled lifecycle | extend local lifecycle transition only |
+| Duplicate phone protection | existing `FlyerCustomerStore.new_customer()` correctly blocks duplicate phone ownership | keep guard; recover same cancelled row instead of creating duplicate |
+| Dashboard deactivation | existing dashboard soft-cancels and preserves history | preserve history; add restart behavior in onboarding confirm |
+
+Awesome Hermes Agent ecosystem check: not applicable for this local Flyer account lifecycle bug; the substrate already routes and stores state correctly, but cancelled-account restart handling is missing.
+
+- [x] Reproduce from live transcript: cancelled customer can enter onboarding and reaches duplicate-phone block on `CONFIRM`.
+- [x] Add failing regression for same cancelled sender restarting Free Trial with the preserved phone number.
+- [x] Reactivate/update the cancelled customer row instead of creating a duplicate or dead-ending.
+- [x] Run focused onboarding/router verification.
+
+**Review / verification**
+
+- Red tests first: cancelled same-sender `CONFIRM` stayed in `confirming_summary` with duplicate-phone copy; cancelled `Start Free Trial` CTA routed to `flyer customer not active`.
+- Green focused tests: onboarding restart + duplicate block + CTA contrast set passed.
+- Full onboarding suite: `tests/test_flyer_onboarding.py` (78 passed).
+- Compile/diff: `py_compile` passed for `src/agents/flyer/onboarding.py` and `src/plugins/cf-router/hooks.py`; `git diff --check` passed.
+- Known local harness issue: full `tests/test_cf_router_flyer_routing.py` still has unrelated Windows `fcntl` audit failures; focused routing cases for this behavior pass.
+
 ## Active - Flyer OpenRouter image token cap (2026-06-09)
 
 **Drift-check tag:** extends-Hermes

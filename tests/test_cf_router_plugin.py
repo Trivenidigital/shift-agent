@@ -2769,6 +2769,41 @@ class TestF7PrimaryMode:
         mock_create.assert_not_called()
         assert "waiting for payment confirmation" in mock_send.call_args.args[1].lower()
 
+    def test_flyer_campaign_start_trial_restarts_cancelled_customer_intake(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "employee")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value={"customer_id": "CUST0004", "status": "cancelled", "business_name": "Lakshmi"}), \
+             patch.object(actions_mod, "trigger_flyer_intake",
+                          return_value=(True, "intake", {
+                              "handled": True,
+                              "reply_text": "Flyer Studio\n------------\nChoose a plan by replying 1, 2, 3, 4:",
+                              "action": "onboarding",
+                          })) as mock_intake, \
+             patch.object(actions_mod, "trigger_flyer_onboarding") as mock_onboarding, \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_create, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-restart", "")) as mock_send:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="Start Free Trial",
+                    chat_id="201975216009469@lid",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer intake started: start_trial",
+        }
+        mock_intake.assert_called_once()
+        assert mock_intake.call_args.kwargs["start_source"] == "start_trial"
+        mock_onboarding.assert_not_called()
+        mock_create.assert_not_called()
+        assert "choose a plan" in mock_send.call_args.args[1].lower()
+
     def test_flyer_campaign_cta_suspended_customer_does_not_restart_onboarding(self, mods, state_env):
         hooks_mod, actions_mod = mods
         _seed_config(state_env, flyer_enabled=True)

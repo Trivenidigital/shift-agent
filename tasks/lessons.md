@@ -1,5 +1,11 @@
 # Lessons
 
+## 2026-06-09 - Flyer deactivation must have a restart path
+
+- Dashboard deactivation sets `status="cancelled"` but preserves the phone namespace. A later `Start Free Trial` can start onboarding and then fail at confirmation if cancelled records are still treated only as duplicate-phone conflicts.
+- Do not describe deactivation as a fresh-customer reset. Same-sender restart should either reactivate the preserved customer row or be blocked up front with clear operator guidance; it must not dead-end after collecting account details.
+- Tests need the full path: cancelled customer -> campaign/onboarding start -> plan selection -> summary confirm with the same WhatsApp/authorized phone.
+
 ## 2026-06-09 - Flyer image calls must not reserve unnecessary text tokens
 
 - OpenRouter image responses return image payloads; a high text `max_tokens` cap can fail the request at budget validation before image generation starts.

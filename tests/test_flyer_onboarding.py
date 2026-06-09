@@ -1110,6 +1110,68 @@ def test_duplicate_confirm_for_different_customer_stays_blocked(tmp_path):
     assert len(updated.onboarding_sessions) == 1
 
 
+def test_cancelled_same_sender_confirm_restarts_existing_trial_account(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 6, 9, tzinfo=timezone.utc)
+    cancelled_customer = _trial_customer(
+        customer_id="CUST0001",
+        business_name="Lakshmi's Kitchen",
+        phone="+17329837841",
+        now=now,
+    ).model_copy(update={
+        "status": "cancelled",
+        "notes": "Deactivated by Cockpit: restart path test",
+        "updated_at": now,
+    })
+    store = FlyerCustomerStore(
+        next_customer_sequence=2,
+        customers=[cancelled_customer],
+        onboarding_sessions=[FlyerOnboardingSession(
+            chat_id="17329837841@s.whatsapp.net",
+            sender_phone="+17329837841",
+            status="confirming_summary",
+            started_at=now,
+            updated_at=now,
+            last_message_id="summary",
+            business_name="Lakshmi's Kitchen",
+            business_address="90 Brybar Dr St.Augustine FL 32095",
+            public_phone="+17329837841",
+            business_whatsapp_number="+17329837841",
+            authorized_request_number="+17329837841",
+            business_category="restaurant",
+            preferred_language="en",
+            plan_id="trial",
+        )],
+    )
+    state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+
+    result = handle_onboarding_message(
+        state_path=state_path,
+        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+17329837841",
+        message_id="confirm-restart",
+        text="CONFIRM",
+        now=now,
+    )
+
+    assert result.handled is True
+    assert result.next_status == "trial"
+    assert result.customer_id == "CUST0001"
+    assert result.customer_created is False
+    assert "Free trial active for CUST0001" in result.reply_text
+    assert "belongs to another Flyer Studio account" not in result.reply_text
+    updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert len(updated.customers) == 1
+    customer = updated.customers[0]
+    assert customer.customer_id == "CUST0001"
+    assert customer.status == "trial"
+    assert customer.business_address == "90 Brybar Dr St.Augustine FL 32095"
+    assert customer.current_period_start == now
+    assert customer.current_period_end is not None
+    assert updated.onboarding_sessions[0].status == "trial"
+    assert updated.onboarding_sessions[0].customer_id == "CUST0001"
+
+
 def test_reply_button_trial_phrase_starts_free_trial_onboarding(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 16, tzinfo=timezone.utc)

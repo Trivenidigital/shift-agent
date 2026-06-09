@@ -2836,6 +2836,8 @@ def _try_flyer_campaign_cta_intercept(text: str, chat_id: str, event: Any) -> Op
         if source == "start_trial":
             return _send_flyer_active_customer_trial_link_recovery(chat_id, customer, role=role)
         return _send_flyer_active_customer_ready(chat_id, customer, role=role)
+    if customer and customer.get("status") == "cancelled" and source == "start_trial":
+        return _start_flyer_intake(text, chat_id, event, source=source, original_text=text)
     if customer:
         reply = actions.flyer_customer_not_active_reply(customer)
         ack_ok, mid, err = actions.send_flyer_text(

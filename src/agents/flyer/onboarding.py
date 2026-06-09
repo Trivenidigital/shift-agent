@@ -197,6 +197,51 @@ def handle_onboarding_message(
             existing = _find_same_sender_duplicate_customer(store, session, sender_phone, chat_id)
             if existing is None:
                 existing = _find_named_duplicate_customer(store, session)
+            if (
+                existing
+                and existing.status == "cancelled"
+                and _session_phone_conflicts_only_customer(store, session, sender_phone, existing.customer_id)
+            ):
+                customer = _restart_cancelled_customer_from_session(
+                    customer=existing,
+                    session=session,
+                    sender_phone=sender_phone,
+                    chat_id=chat_id,
+                    now=now,
+                    payment_provider=payment_provider,
+                    payment_checkout_url_template=payment_checkout_url_template,
+                )
+                store.customers = [
+                    customer if row.customer_id == customer.customer_id else row
+                    for row in store.customers
+                ]
+                customer_id = customer.customer_id
+                customer_created = False
+                session = session.model_copy(update={
+                    "status": customer.status,
+                    "updated_at": now,
+                    "customer_id": customer.customer_id,
+                })
+                _replace_session(store, session)
+                if customer.status == "trial":
+                    include_trial_starter_brief = (
+                        not _has_trailing_flyer_request_after_confirm(normalized_text)
+                        and store.claim_starter_prompt_send(customer.customer_id)
+                    )
+                write_customer_store(state_path, store)
+                return OnboardingResult(
+                    True,
+                    _reply_for_session(
+                        session,
+                        tiers=tiers,
+                        customer_id=customer_id,
+                        store=store,
+                        include_starter_brief=include_trial_starter_brief,
+                    ),
+                    session.status,
+                    customer_id,
+                    customer_created,
+                )
             if existing and existing.status in {"active", "trial", "payment_pending"}:
                 if existing.status in {"active", "trial"}:
                     _connect_recovered_sender(
@@ -571,6 +616,99 @@ def _find_named_duplicate_customer(
     if not _business_names_match(session.business_name, customer.business_name):
         return None
     return customer
+
+
+def _session_phone_conflicts_only_customer(
+    store: FlyerCustomerStore,
+    session: FlyerOnboardingSession,
+    sender_phone: Optional[str],
+    customer_id: str,
+) -> bool:
+    conflict_ids: set[str] = set()
+    for phone in (
+        session.public_phone,
+        session.business_whatsapp_number,
+        session.authorized_request_number,
+        _phone_or_none(sender_phone),
+    ):
+        if phone:
+            conflict_ids.update(store.customer_ids_for_phone(str(phone)))
+    return bool(conflict_ids) and conflict_ids.issubset({customer_id})
+
+
+def _restart_cancelled_customer_from_session(
+    *,
+    customer: FlyerCustomerProfile,
+    session: FlyerOnboardingSession,
+    sender_phone: Optional[str],
+    chat_id: str,
+    now: datetime,
+    payment_provider: str,
+    payment_checkout_url_template: str,
+) -> FlyerCustomerProfile:
+    status = "trial" if session.plan_id == "trial" else "payment_pending"
+    checkout_url = _checkout_url(
+        template=payment_checkout_url_template,
+        customer_id=customer.customer_id,
+        plan_id=session.plan_id,
+        chat_id=chat_id,
+    )
+    notes = customer.notes.strip()
+    restart_note = "Restarted by onboarding after deactivation"
+    notes = f"{notes}\n{restart_note}".strip() if notes else restart_note
+    updates: dict[str, object] = {
+        "business_name": session.business_name,
+        "business_address": session.business_address,
+        "primary_chat_id": chat_id,
+        "onboarded_by_phone": _phone_or_none(sender_phone),
+        "public_phone": E164Phone.from_any(str(session.public_phone or ""), country_code="US"),
+        "business_whatsapp_number": E164Phone.from_any(str(session.business_whatsapp_number or ""), country_code="US"),
+        "authorized_request_numbers": [E164Phone.from_any(str(session.authorized_request_number or ""), country_code="US")],
+        "business_category": session.business_category,
+        "preferred_language": session.preferred_language,
+        "plan_id": session.plan_id,
+        "status": status,
+        "updated_at": now,
+        "billing_provider": payment_provider if payment_provider in {"manual", "stripe", "razorpay", "other"} else "manual",
+        "payment_checkout_url": checkout_url,
+        "payment_reference": "",
+        "payment_amount_cents": None,
+        "payment_currency": "USD",
+        "pending_plan_id": "",
+        "pending_plan_checkout_url": "",
+        "notes": notes[-1000:],
+    }
+    pending_assets = list(session.pending_brand_assets)
+    if pending_assets:
+        existing_assets = list(customer.brand_assets)
+        existing_hashes = {asset.sha256 for asset in existing_assets}
+        for asset in pending_assets:
+            if asset.sha256 in existing_hashes:
+                continue
+            if asset.active:
+                existing_assets = [
+                    old.model_copy(update={"active": False})
+                    if old.kind == asset.kind and old.active else old
+                    for old in existing_assets
+                ]
+            existing_assets.append(asset)
+            existing_hashes.add(asset.sha256)
+        updates["brand_assets"] = existing_assets
+    if status == "trial":
+        updates.update({
+            "activated_at": now,
+            "plan_started_at": now,
+            "current_period_start": now,
+            "current_period_end": _add_one_month(now),
+        })
+    else:
+        updates.update({
+            "activated_at": None,
+            "plan_started_at": None,
+            "current_period_start": None,
+            "current_period_end": None,
+        })
+    return customer.model_copy(update=updates)
 
 
 def _business_names_match(left: str, right: str) -> bool:
