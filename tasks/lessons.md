@@ -1,5 +1,11 @@
 # Lessons
 
+## 2026-06-09 - Flyer image calls must not reserve unnecessary text tokens
+
+- OpenRouter image responses return image payloads; a high text `max_tokens` cap can fail the request at budget validation before image generation starts.
+- Provider 402 errors that mention affordable token budget should be treated as request-shaping bugs first, not only account-credit incidents.
+- Image renderer token caps need a low safe default plus an operator override, so future provider/account limits degrade through configuration instead of customer-visible fail-closed replies.
+
 ## 2026-06-09 - Flyer intake extraction must degrade before schema boundaries
 
 - Regex-derived Flyer fields are untrusted producer output. Sanitize and clamp them before constructing Pydantic models so extraction mistakes cannot hard-crash a render path.

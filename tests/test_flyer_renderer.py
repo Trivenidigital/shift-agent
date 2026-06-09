@@ -1902,13 +1902,48 @@ def test_openrouter_image_renderer_posts_modalities_and_writes_data_url(tmp_path
     )
     assert len(requests) == 1
     assert requests[0][2]["modalities"] == ["image", "text"]
-    assert requests[0][2]["max_tokens"] == 4096
+    assert requests[0][2]["max_tokens"] == 1024
     assert requests[0][2]["image_config"]["aspect_ratio"] == "4:5"
     prompt = requests[0][2]["messages"][0]["content"]
     assert "Controlled customer copy" in prompt
     assert "$7.99" in prompt
     assert "recurring schedule" in prompt
     assert specs[0].path.read_bytes().startswith(b"\x89PNG")
+
+
+def test_openrouter_image_renderer_honors_low_max_tokens_env_override(tmp_path, monkeypatch):
+    project = _complete_project()
+    requests = []
+
+    class _Resp:
+        def __enter__(self):
+            png = base64.b64encode(_png_bytes()).decode("ascii")
+            body = {"choices": [{"message": {"images": [{"image_url": {"url": f"data:image/png;base64,{png}"}}]}}]}
+            self._body = json.dumps(body).encode("utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    def _fake_urlopen(req, timeout):
+        requests.append((req, timeout, json.loads(req.data.decode("utf-8"))))
+        return _Resp()
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("FLYER_OPENROUTER_IMAGE_MAX_TOKENS", "768")
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _fake_urlopen)
+
+    render_concept_previews(
+        project,
+        tmp_path,
+        model="openai/gpt-5-image",
+        quality="medium",
+    )
+
+    assert requests[0][2]["max_tokens"] == 768
 
 
 def test_openrouter_image_renderer_retries_incomplete_chunk_read(tmp_path, monkeypatch):
@@ -2545,7 +2580,7 @@ def test_source_edit_preview_calls_openrouter_with_reference_image(tmp_path, mon
     assert req.headers["Authorization"] == "Bearer sk-or-test"
     assert payload["model"] == "openai/gpt-5.4-image-2"
     assert payload["modalities"] == ["image", "text"]
-    assert payload["max_tokens"] == 4096
+    assert payload["max_tokens"] == 1024
     content = payload["messages"][0]["content"]
     assert content[0]["type"] == "text"
     assert "Remove extra 08:00" in content[0]["text"]

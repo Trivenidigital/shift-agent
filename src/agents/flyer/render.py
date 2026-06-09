@@ -123,7 +123,10 @@ FONT_CANDIDATES = [
 
 OPENROUTER_IMAGE_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 180
-OPENROUTER_IMAGE_MAX_TOKENS = 4096
+OPENROUTER_IMAGE_MAX_TOKENS = 1024
+OPENROUTER_IMAGE_MAX_TOKENS_ENV = "FLYER_OPENROUTER_IMAGE_MAX_TOKENS"
+OPENROUTER_IMAGE_MIN_MAX_TOKENS = 256
+OPENROUTER_IMAGE_MAX_MAX_TOKENS = 4096
 OPENAI_IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits"
 OPENAI_IMAGE_EDIT_TIMEOUT_SEC = 180
 def _flyer_state_root() -> Path:
@@ -263,6 +266,17 @@ def _read_env_value(name: str) -> str:
         except OSError:
             continue
     return ""
+
+
+def _openrouter_image_max_tokens() -> int:
+    raw = _read_env_value(OPENROUTER_IMAGE_MAX_TOKENS_ENV)
+    if not raw:
+        return OPENROUTER_IMAGE_MAX_TOKENS
+    try:
+        value = int(raw)
+    except ValueError:
+        return OPENROUTER_IMAGE_MAX_TOKENS
+    return max(OPENROUTER_IMAGE_MIN_MAX_TOKENS, min(value, OPENROUTER_IMAGE_MAX_MAX_TOKENS))
 
 
 def _wrap(draw, text: str, font, max_width: int) -> list[str]:
@@ -2206,7 +2220,7 @@ def _openrouter_image_bytes(project: FlyerProject, *, concept_id: str, output_fo
         "model": model,
         "messages": [{"role": "user", "content": _image_message_content(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction, scene_direction=scene_direction)}],
         "modalities": ["image", "text"],
-        "max_tokens": OPENROUTER_IMAGE_MAX_TOKENS,
+        "max_tokens": _openrouter_image_max_tokens(),
         "stream": False,
         "image_config": {
             "aspect_ratio": _aspect_ratio(size),
@@ -2283,7 +2297,7 @@ def _openrouter_source_edit_bytes(
             ],
         }],
         "modalities": ["image", "text"],
-        "max_tokens": OPENROUTER_IMAGE_MAX_TOKENS,
+        "max_tokens": _openrouter_image_max_tokens(),
         "stream": False,
         "image_config": {
             "aspect_ratio": _aspect_ratio(size),

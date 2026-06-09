@@ -1,5 +1,36 @@
 # Backlog — pending items
 
+## Active - Flyer OpenRouter image token cap (2026-06-09)
+
+**Drift-check tag:** extends-Hermes
+
+**New primitives introduced:** none. This is a local Flyer renderer request-budget hardening fix using the existing Hermes/Flyer WhatsApp ingress, bare flyer dispatch, OpenRouter image renderer, QA, and fail-closed paths.
+
+**Hermes-first analysis**
+
+| Domain | Hermes skill found? | Decision |
+|---|---|---|
+| WhatsApp ingress/routing | Hermes gateway + cf-router route the sale-event brief correctly to bare Flyer generation | use it; no router change |
+| Flyer field extraction | existing Flyer intake fix now preserves the sale brief without schema crash | use it; no extractor change |
+| Image rendering provider call | existing Flyer OpenRouter renderer owns the rejected request payload | harden local renderer payload only |
+| QA/fail-closed delivery | existing visual QA and fail-closed customer copy behaved correctly after provider rejection | do not change QA/customer copy |
+
+Awesome Hermes Agent ecosystem check: not applicable for this emergency provider-payload bug; the required behavior is local Flyer renderer request shaping before the existing OpenRouter image call.
+
+- [x] Ground diagnosis in live deployed logs: `OUTCOME=failclosed` at `stage=generate_poster` with OpenRouter HTTP 402 due `max_tokens=4096` and affordable budget around 1.3k tokens.
+- [x] Add failing regression that OpenRouter image payloads use a low/default configurable token cap.
+- [x] Lower/configure the OpenRouter image `max_tokens` cap for concept and source-edit image calls.
+- [x] Run focused Flyer renderer verification, compile, and diff checks.
+- [x] Commit, tarball deploy to `main-vps`, and verify deployed runtime reports the new cap.
+
+**Review / verification**
+
+- Red tests first: OpenRouter concept payload still sent `max_tokens=4096` and ignored `FLYER_OPENROUTER_IMAGE_MAX_TOKENS`.
+- Green focused/adjacent tests: `tests/test_flyer_renderer.py tests/test_flyer_pr3_wiring.py tests/test_flyer_create_project.py` (212 passed).
+- Compile/diff: `py_compile` passed for `src/agents/flyer/render.py`; `git diff --check` passed.
+- Deploy: tarball deploy completed on `main-vps`; deployed renderer helper returned `1024`; `hermes-gateway` active; `shift-agent-smoke-test.sh` passed.
+- Known non-blocking deploy posture: production pilot readiness remains blocked by muted Pushover credentials; this is pre-existing and unrelated to Flyer rendering.
+
 ## Active - Flyer bare render field extraction clamp (2026-06-09)
 
 **Drift-check tag:** extends-Hermes
