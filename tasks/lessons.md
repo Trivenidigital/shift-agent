@@ -1,5 +1,11 @@
 # Lessons
 
+## 2026-06-09 - Flyer intake extraction must degrade before schema boundaries
+
+- Regex-derived Flyer fields are untrusted producer output. Sanitize and clamp them before constructing Pydantic models so extraction mistakes cannot hard-crash a render path.
+- A `flyer for X` phrase is not enough evidence that `X` is a business/event name; if the capture spans most of the brief or contains offer mechanics, numeric dates, purchase thresholds, or lucky-draw details, drop it and let registered customer profile hydration ground the business identity.
+- Render failures that happen before image generation are not model/credit/QA failures. Trace the path to the first schema boundary before attributing customer-visible retry messages to image generation.
+
 ## 2026-06-08 - Flyer idea requests are help intent, even with active projects
 
 - Generic requests such as `Can you suggest me some flyer ideas` are not flyer briefs and must not send the processing ack or create/regenerate a project.

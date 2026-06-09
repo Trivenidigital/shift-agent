@@ -1,13 +1,8 @@
 """Pure intake-field extraction + customer-hydration helpers for Flyer Studio.
 
-Lifted verbatim out of `scripts/create-flyer-project` so the request->fields
-logic is importable and unit-testable in-process. No behavior change: the
-function/constant bodies are exact copies of the script originals. Their only
-non-stdlib dependency is `FlyerRequestFields` from the platform schemas.
-
-`_explicit_english_only` and `_headline_case_label` are private helpers that the
-moved functions call; they travel with the move so the extraction logic remains
-self-contained and byte-identical in behavior.
+Lifted out of `scripts/create-flyer-project` so the request->fields logic is
+importable and unit-testable in-process. Their only non-stdlib dependency is
+`FlyerRequestFields` from the platform schemas.
 """
 from __future__ import annotations
 
@@ -128,6 +123,59 @@ def _invalid_venue(value: str) -> bool:
         or clean in {"and", "or", "the bottom", "bottom", "top", "end", "customer profile"}
         or clean.startswith(("phone ", "phone number", "contact ", "address and phone"))
     )
+
+
+def _schema_max_length(field_name: str) -> int | None:
+    field = FlyerRequestFields.model_fields.get(field_name)
+    if field is None:
+        return None
+    for meta in field.metadata:
+        max_length = getattr(meta, "max_length", None)
+        if isinstance(max_length, int):
+            return max_length
+    return None
+
+
+def _clamp_schema_string(field_name: str, value):
+    if value is None or not isinstance(value, str):
+        return value
+    max_length = _schema_max_length(field_name)
+    if max_length is None or len(value) <= max_length:
+        return value
+    return value[:max_length].rstrip()
+
+
+def _request_fields(**kwargs) -> FlyerRequestFields:
+    for field_name in (
+        "event_or_business_name",
+        "event_time",
+        "venue_or_location",
+        "contact_info",
+        "style_preference",
+        "notes",
+    ):
+        if field_name in kwargs:
+            kwargs[field_name] = _clamp_schema_string(field_name, kwargs[field_name])
+    return FlyerRequestFields(**kwargs)
+
+
+def _looks_like_overcaptured_name(name: str, text: str) -> bool:
+    clean = re.sub(r"\s+", " ", name or "").strip()
+    if not clean:
+        return False
+    detailish = bool(re.search(
+        r"\b(?:address|all|coupon|customer|customers|draw|eligible|include|logo|"
+        r"lucky|phone|purchase|purchases|saved|sale|starting)\b|"
+        r"\$\s*\d|\b\d{1,2}/\d{1,2}(?:-\d{1,2}/\d{1,2})?\b",
+        clean,
+        flags=re.IGNORECASE,
+    ))
+    if len(clean) > 120:
+        return True
+    if detailish and len(clean) > 80:
+        return True
+    source = re.sub(r"\s+", " ", text or "").strip()
+    return detailish and len(clean) > 60 and len(clean) >= int(max(len(source), 1) * 0.65)
 
 
 def _explicit_english_only(text: str) -> bool:
@@ -320,8 +368,10 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
             formats.append(value)
 
     event_name = _normalize_event_name(event_name, text)
+    if _looks_like_overcaptured_name(event_name, text):
+        event_name = ""
 
-    return FlyerRequestFields(
+    return _request_fields(
         event_or_business_name=event_name or None,
         event_date=date_value,
         event_time=time_value,

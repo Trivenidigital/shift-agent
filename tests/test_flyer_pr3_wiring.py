@@ -43,6 +43,8 @@ RAW = "Make a Memorial Day flyer for Non Veg Combo $49.99 and Veg Combo $39.99."
 class _FakeCustomer:
     status = "active"
     business_name = "Lakshmi's Kitchen"
+    business_address = "90 Bry Bar"
+    public_phone = "+17325550104"
     customer_id = "CUST0001"
     # E.164 so FlyerProject.customer_phone (a strict E164 field) accepts the routable phone.
     business_whatsapp_number = "+17325550104"
@@ -63,10 +65,10 @@ class _FakeBrief:
     background_brief = "A textless patriotic cookout background, central area clear."
 
 
-def _install_common(monkeypatch, *, brief_result=None, brief_spy=None):
+def _install_common(monkeypatch, *, brief_result=None, brief_spy=None, use_real_intake=False):
     """Stub out resolve_customer + locked-fact build + intake fields + QA so each test
     isolates the wiring. Returns a dict of call recorders the test asserts on."""
-    rec = {"cd_render": [], "legacy_poster": [], "audits": [], "brief_calls": []}
+    rec = {"cd_render": [], "legacy_poster": [], "legacy_projects": [], "audits": [], "brief_calls": []}
 
     monkeypatch.setattr(br, "resolve_customer", lambda *a, **k: _FakeCustomer())
     # locked facts: a fixed list (the wiring is what's under test, not facts.py).
@@ -82,9 +84,10 @@ def _install_common(monkeypatch, *, brief_result=None, brief_spy=None):
 
     # intake fields — a REAL FlyerRequestFields (the project model validates it). Only
     # event_or_business_name is consulted by the conflict gate (left empty ⇒ no conflict).
-    fake_fields = schemas.FlyerRequestFields()
-    monkeypatch.setattr(br, "_intake_fields",
-                        lambda: types.SimpleNamespace(_extract_fields=lambda *a, **k: fake_fields))
+    if not use_real_intake:
+        fake_fields = schemas.FlyerRequestFields()
+        monkeypatch.setattr(br, "_intake_fields",
+                            lambda: types.SimpleNamespace(_extract_fields=lambda *a, **k: fake_fields))
 
     # CD render + legacy poster: record-and-return so we can prove which path ran.
     def _fake_cd_render(project, background_brief):
@@ -93,6 +96,7 @@ def _install_common(monkeypatch, *, brief_result=None, brief_spy=None):
 
     def _fake_legacy_poster(project, *, strict_note="", raw_bg_dest=None, scene_direction=None):
         rec["legacy_poster"].append(strict_note)
+        rec["legacy_projects"].append(project)
         rec.setdefault("scene_direction", []).append(scene_direction)
         return b"LEGACY_PNG"
 
@@ -176,6 +180,48 @@ def test_flag_off_clean_render_has_no_render_detail(monkeypatch):
     rec = _install_common(monkeypatch)
     status, payload = br.render_grounded(CHAT_ID, RAW, message_id="mok", sender_phone=SENDER)
     assert status == br.SEND and payload == b"LEGACY_PNG"
+
+
+def test_flag_off_anniversary_sale_overcapture_uses_registered_identity(monkeypatch):
+    """Regression for 2026-06-09 live failure: `flyer for ...` captured the
+    whole multi-line sale brief as event_or_business_name, then Pydantic raised
+    on the 160-char max before the renderer was reached."""
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, raising=False)
+    monkeypatch.delenv(br.CREATIVE_DIRECTOR_ALLOWLIST_ENV, raising=False)
+    rec = _install_common(monkeypatch, use_real_intake=True)
+    raw = (
+        "Flyer for sale event as part of anniversary sale starting 6/7-6/9\n"
+        "Include saved address phone and logo\n"
+        "All customers purchases over $50 are eligible for lucky draw and receive a prize coupon"
+    )
+
+    status, payload = br.render_grounded(CHAT_ID, raw, message_id="msale", sender_phone=SENDER)
+
+    assert status == br.SEND
+    assert payload == b"LEGACY_PNG"
+    project = rec["legacy_projects"][0]
+    assert project.fields.event_or_business_name == "Lakshmi's Kitchen"
+    assert "eligible for lucky draw" in project.fields.notes
+
+
+def test_intake_request_fields_clamps_schema_strings_before_validation():
+    IF = br._intake_fields()
+
+    fields = IF._request_fields(
+        event_or_business_name="A" * 220,
+        event_time="B" * 100,
+        venue_or_location="C" * 260,
+        contact_info="D" * 220,
+        style_preference="E" * 520,
+        notes="F" * 2050,
+    )
+
+    assert len(fields.event_or_business_name) == 160
+    assert len(fields.event_time) == 80
+    assert len(fields.venue_or_location) == 240
+    assert len(fields.contact_info) == 200
+    assert len(fields.style_preference) == 500
+    assert len(fields.notes) == 2000
 
 
 def test_wrong_brand_qa_retries_bare_render_without_saved_brand_assets(monkeypatch):

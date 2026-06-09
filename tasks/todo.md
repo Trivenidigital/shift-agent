@@ -1,5 +1,36 @@
 # Backlog — pending items
 
+## Active - Flyer bare render field extraction clamp (2026-06-09)
+
+**Drift-check tag:** extends-Hermes
+
+**New primitives introduced:** none. This is a local Flyer intake hardening fix using existing Hermes/Flyer WhatsApp ingress, registered customer identity, field schema, locked facts, render, and QA paths.
+
+**Hermes-first analysis**
+
+| Domain | Hermes skill found? | Decision |
+|---|---|---|
+| WhatsApp ingress/routing | Hermes gateway + cf-router already route the approved bare flyer brief correctly | use it; no router change |
+| Customer identity and saved profile | existing Flyer customer store + locked profile facts already ground the business name/address/phone/logo | use it; hydrate missing fields from the registered profile |
+| Field extraction | existing Flyer deterministic intake extractor owns lightweight text fields | harden local extractor only |
+| Rendering/QA | existing bare renderer, OpenRouter image call, and QA gates were not reached in this failure | do not touch renderer/model/QA |
+
+Awesome Hermes Agent ecosystem check: not applicable for this emergency extractor/schema-boundary bug; the required behavior is local Flyer field sanitation before existing Hermes/Flyer rendering.
+
+- [x] Ground diagnosis in deployed path: `render_grounded` calls `_extract_fields` before render, and `_extract_fields` can construct an overlong `event_or_business_name`.
+- [x] Add regression for the numeric-date anniversary sale brief that previously over-captured the whole request as a business/event name.
+- [x] Drop implausible `flyer for ...` over-captures so registered customer hydration supplies the real business identity.
+- [x] Clamp schema-bound string fields before `FlyerRequestFields` construction to prevent future extractor bugs from crashing render.
+- [x] Run focused Flyer intake/render tests, compile checks, and diff checks.
+- [x] Document verification results here.
+
+**Review / verification**
+
+- Red tests first: exact sale brief failed with `ValidationError` at `FlyerRequestFields(event_or_business_name=...)`; partial-overcapture variant also failed the desired registered-identity assertion.
+- Green focused tests: `tests/test_flyer_pr3_wiring.py` (41 passed), `tests/test_flyer_create_project.py` (51 passed), `tests/test_flyer_iteration.py tests/test_flyer_facts.py` (56 passed), `tests/test_flyer_renderer.py tests/test_flyer_schemas.py` (212 passed).
+- Compile/diff: `py_compile` passed for edited Flyer modules/scripts; `git diff --check` passed.
+- Broader `test_flyer_*.py` pass: 2,007 passed, 1 skipped, 23 failed in cf-router replay harnesses due pre-existing `safe_io` stub import errors for `flock`/`ndjson_append`, before this extractor/render path is reached.
+
 ## Active - Flyer idea request must not auto-generate (2026-06-08)
 
 **Drift-check tag:** extends-Hermes

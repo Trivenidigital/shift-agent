@@ -876,6 +876,20 @@ def test_create_project_hydrates_missing_contact_from_trial_customer(tmp_path, m
     assert project["fields"]["contact_info"] in projects_path.read_text(encoding="utf-8")
 
 
+def test_extract_fields_drops_anniversary_sale_overcaptured_name(monkeypatch):
+    module = _load_script(monkeypatch)
+    raw_request = (
+        "Flyer for sale event as part of anniversary sale starting 6/7-6/9\n"
+        "Include saved address phone and logo\n"
+        "All customers purchases over $50 are eligible for lucky draw and receive a prize coupon"
+    )
+
+    fields = module._extract_fields(raw_request, now=datetime(2026, 6, 9, tzinfo=timezone.utc))
+
+    assert fields.event_or_business_name is None
+    assert "eligible for lucky draw" in fields.notes
+
+
 def test_fresh_meats_product_promo_is_ready_without_event_or_contact(tmp_path, monkeypatch):
     """Real customer regression: a product/brand promo brief with a logo
     should not be treated as an event requiring date/time/contact.

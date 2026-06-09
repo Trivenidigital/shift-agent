@@ -1006,6 +1006,9 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
     if verdict == "conflict":
         return (CONFLICT, {"stated": (fields.event_or_business_name or "").strip(),
                            "registered": getattr(customer, "business_name", "")})
+    hydrate_fields = getattr(IF, "_hydrate_fields_from_customer", None)
+    if hydrate_fields is not None:
+        fields = hydrate_fields(fields, customer=customer)
 
     flyer_cfg = _load_flyer_cfg()
     locked_facts = _build_locked_facts(customer, fields, raw_text, message_id or "", flyer_cfg)
@@ -1457,6 +1460,9 @@ def render_iteration(chat_id: str, raw_text: str, *, message_id: str | None = No
             return (ITERATION_UNCLEAR, None)
         IF = _intake_fields()
         fields = IF._extract_fields(raw_text, now=datetime.now(timezone.utc))
+        hydrate_fields = getattr(IF, "_hydrate_fields_from_customer", None)
+        if hydrate_fields is not None:
+            fields = hydrate_fields(fields, customer=customer)
         flyer_cfg = _load_flyer_cfg()
         new_facts = _build_locked_facts(customer, fields, raw_text, message_id or "", flyer_cfg)
         new_project = _build_transient_project(customer, fields, new_facts, raw_text, message_id, chat_id)
