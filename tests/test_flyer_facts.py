@@ -485,6 +485,25 @@ def test_campaign_title_strips_trailing_medium_word():
     assert by_id["campaign_title"].value == "Weekend Combo"
 
 
+def test_campaign_title_drops_instruction_only_fragments():
+    from agents.flyer.facts import extract_text_facts, facts_by_id
+
+    raw_request = (
+        "Create multiple page flyer with all the South Indian veg and non veg items "
+        "that we offer from breakfast, snacks, curries, rice items"
+    )
+    fields = FlyerRequestFields(
+        event_or_business_name="Multiple Page",
+        notes=raw_request,
+    )
+
+    facts = extract_text_facts(fields, raw_request, message_id="m-instruction-title")
+    by_id = facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert "campaign_title" not in by_id
+    assert "business_name" not in by_id
+
+
 def test_combo_occasion_becomes_campaign_title_not_generic_combo_labels():
     from agents.flyer.facts import extract_text_facts, facts_by_id
 

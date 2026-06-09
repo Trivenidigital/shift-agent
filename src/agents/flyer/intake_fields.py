@@ -178,6 +178,33 @@ def _looks_like_overcaptured_name(name: str, text: str) -> bool:
     return detailish and len(clean) > 60 and len(clean) >= int(max(len(source), 1) * 0.65)
 
 
+_INSTRUCTION_EVENT_NAME_TOKENS = {
+    "create",
+    "make",
+    "generate",
+    "design",
+    "need",
+    "new",
+    "flyer",
+    "flier",
+    "poster",
+    "banner",
+    "multiple",
+    "multi",
+    "page",
+    "pages",
+    "single",
+}
+
+
+def _looks_like_instruction_event_name(name: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
+    if not normalized:
+        return False
+    tokens = normalized.split()
+    return bool(tokens) and all(token in _INSTRUCTION_EVENT_NAME_TOKENS for token in tokens)
+
+
 def _explicit_english_only(text: str) -> bool:
     lower = (text or "").lower()
     return bool(
@@ -416,6 +443,8 @@ def _normalize_event_name(event_name: str, text: str) -> str:
         return "Weekend Breakfast Specials" if has_recurring_days else "Breakfast Specials"
     if "menu" in lower_text and not name:
         return "Menu Specials"
+    if _looks_like_instruction_event_name(name):
+        return ""
     return _headline_case_label(name)
 
 

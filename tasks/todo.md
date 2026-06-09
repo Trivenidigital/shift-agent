@@ -1881,3 +1881,18 @@ Review/verification:
 - No-send probe after PR #484: `render_grounded` returned `send`, but visual inspection of `C:\Testing\flyer-quality-grounded-pr484.png` showed only 13 dessert items; session facts confirmed `Khalakhandh - 100 count $100` was not locked.
 - Deploy: `deploy-20260608-035609-a39c9a7d` completed and post-deploy smoke passed; staging commit `a39c9a7d0219ef20d02efd8ad52c523991e39339`.
 - No-send probe after PR #485: `render_grounded` returned `send`; `C:\Testing\flyer-quality-grounded-pr485.png` showed all 14 item/price rows, but visibly rendered internal brand asset ID `(B0002)` under the business logo.
+
+## Flyer Instruction-Only Title Filter - 2026-06-09
+
+- Drift-check tag: extends-Hermes
+- Hermes-first analysis: Hermes/Flyer already owns WhatsApp ingress, account profile hydration, intake, facts, and rendering. This hotfix only hardens the existing Flyer parser/fact/renderer boundaries so customer instruction words cannot become visible poster titles.
+- [x] Reproduce from `C:\Testing\1.png` and `C:\Testing\2.png`: `Create` and `Multiple Page` were extracted as title/identity values.
+- [x] Add failing regressions for intake, facts, and renderer fallback.
+- [x] Implement narrow instruction-only fragment filters in `intake_fields`, `create-flyer-project`, `facts`, and `render`.
+- [x] Verify the exact screenshot prompts now produce no extracted event name, no locked campaign title, and no text-derived business name.
+- [x] Run focused Flyer parser/facts/renderer/create-project checks.
+
+Review/verification:
+- Red tests before fix: `test_intake_drops_instruction_words_as_event_names`, `test_collect_text_facts_drops_instruction_field_title_fallbacks`, and `test_campaign_title_drops_instruction_only_fragments` failed with `Create` / `Multiple Page` leaking into extracted facts.
+- Green tests: `python -m pytest tests\test_flyer_pr3_wiring.py tests\test_flyer_renderer.py tests\test_flyer_facts.py` -> 207 passed; `python -m pytest tests\test_flyer_create_project.py` -> 51 passed.
+- Static checks: `python -m py_compile src\agents\flyer\intake_fields.py src\agents\flyer\render.py src\agents\flyer\facts.py src\agents\flyer\scripts\create-flyer-project` passed; `git diff --check` passed.

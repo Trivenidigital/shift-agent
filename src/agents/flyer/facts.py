@@ -154,13 +154,45 @@ _DEGENERATE_TITLES = {
 }
 
 
+_INSTRUCTION_TITLE_TOKENS = {
+    "create",
+    "make",
+    "generate",
+    "design",
+    "need",
+    "new",
+    "flyer",
+    "flier",
+    "poster",
+    "banner",
+    "multiple",
+    "multi",
+    "page",
+    "pages",
+    "single",
+    "please",
+}
+
+
+def _looks_like_instruction_title_fragment(value: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+    if not normalized:
+        return False
+    tokens = normalized.split()
+    return bool(tokens) and all(token in _INSTRUCTION_TITLE_TOKENS for token in tokens)
+
+
 def _normalize_campaign_title(value: str) -> str:
     clean = _clean(value)
     if not clean:
         return ""
     clean = re.sub(r"\s+\b(?:flyer|flier|poster|banner)\b\s*$", "", clean, flags=re.IGNORECASE).strip(" .")
     # Drop a degenerate title (a bare article/determiner, or a 1-char fragment).
-    if clean.casefold() in _DEGENERATE_TITLES or len(re.sub(r"[^a-z0-9]", "", clean.casefold())) <= 1:
+    if (
+        clean.casefold() in _DEGENERATE_TITLES
+        or _looks_like_instruction_title_fragment(clean)
+        or len(re.sub(r"[^a-z0-9]", "", clean.casefold())) <= 1
+    ):
         return ""
     return clean
 
@@ -684,10 +716,15 @@ def extract_text_facts(
     campaign_title = _normalize_campaign_title(semantic_brief.campaign_title or event_or_campaign)
     if _norm(campaign_title) == _norm(profile_business_name):
         campaign_title = ""
-    if _looks_like_instruction_fragment(campaign_title):
+    if _looks_like_instruction_fragment(campaign_title) or _looks_like_instruction_title_fragment(campaign_title):
         campaign_title = ""
     text_business = ""
-    if allow_text_identity and event_or_campaign and not _looks_like_instruction_fragment(event_or_campaign):
+    if (
+        allow_text_identity
+        and event_or_campaign
+        and not _looks_like_instruction_fragment(event_or_campaign)
+        and not _looks_like_instruction_title_fragment(event_or_campaign)
+    ):
         text_business = _business_title_from_text(event_or_campaign)
     for item in [
         _fact("business_name", "Business", text_business, "customer_text", message_id=message_id) if text_business else None,

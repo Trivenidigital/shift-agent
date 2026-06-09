@@ -822,6 +822,33 @@ def _same_text(left: str, right: str) -> bool:
     return bool(norm_left and norm_left == norm_right)
 
 
+_INSTRUCTION_TITLE_TOKENS = {
+    "create",
+    "make",
+    "generate",
+    "design",
+    "need",
+    "new",
+    "flyer",
+    "flier",
+    "poster",
+    "banner",
+    "multiple",
+    "multi",
+    "page",
+    "pages",
+    "single",
+}
+
+
+def _instruction_title_fragment(value: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+    if not normalized:
+        return False
+    tokens = normalized.split()
+    return bool(tokens) and all(token in _INSTRUCTION_TITLE_TOKENS for token in tokens)
+
+
 def _display_title(project: FlyerProject) -> str:
     business = fact_value(project, "business_name", fallback="")
     for value in (
@@ -830,7 +857,7 @@ def _display_title(project: FlyerProject) -> str:
         project.fields.event_or_business_name or "",
     ):
         clean = _clean_fact_text(value)
-        if clean and not _same_text(clean, business):
+        if clean and not _same_text(clean, business) and not _instruction_title_fragment(clean):
             return clean
     return "Specials"
 

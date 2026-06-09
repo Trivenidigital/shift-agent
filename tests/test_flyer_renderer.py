@@ -438,6 +438,29 @@ def test_collect_text_facts_falls_back_to_fields_when_locked_slot_missing():
     assert facts["contact"] == "+17329837841"
 
 
+def test_collect_text_facts_drops_instruction_field_title_fallbacks():
+    for poisoned_title in ("Create", "Multiple Page"):
+        project = _complete_project().model_copy(update={
+            "fields": FlyerRequestFields(
+                event_or_business_name=poisoned_title,
+                venue_or_location="St Johns FL",
+                contact_info="+17329837841",
+                notes="Create flyer with menu details.",
+            ),
+            "locked_facts": [
+                FlyerLockedFact(fact_id="business_name", label="Business", value="MK kitchen", source="customer_profile"),
+                FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile"),
+                FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+            ],
+        })
+
+        facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+
+        assert facts["brand"] == "MK kitchen"
+        assert facts["title"] == "Specials"
+        assert poisoned_title not in facts.values()
+
+
 def test_collect_text_facts_uses_locked_reference_items_before_raw_request():
     project = _complete_project().model_copy(update={
         "raw_request": "Create a flyer from this attached menu.",

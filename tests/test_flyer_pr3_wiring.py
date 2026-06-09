@@ -18,6 +18,7 @@ visual QA are all monkeypatched. Path setup mirrors test_flyer_creative_director
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import types
@@ -202,6 +203,31 @@ def test_flag_off_anniversary_sale_overcapture_uses_registered_identity(monkeypa
     project = rec["legacy_projects"][0]
     assert project.fields.event_or_business_name == "Lakshmi's Kitchen"
     assert "eligible for lucky draw" in project.fields.notes
+
+
+def test_intake_drops_instruction_words_as_event_names():
+    IF = br._intake_fields()
+
+    village = IF._extract_fields(
+        (
+            "Create flyer with a traditional village kitchen.\n"
+            "We serve all the traditional South Indian veg and non veg items - breakfast, snacks, "
+            "vegetables curries, non- veg curries and rice items.\n"
+            "Pick any 3 veg curries/ 2 Non-veg curries for 15$\n"
+            "Any 2 breakfast items for 9.99$\n"
+            "Any Indian snack box for 5$\n"
+            "Veg rice items-12$\n"
+            "Non-veg rice item-14$"
+        ),
+        now=datetime(2026, 6, 9, tzinfo=timezone.utc),
+    )
+    multi = IF._extract_fields(
+        "Create multiple page flyer with all the South Indian veg and non veg items that we offer from breakfast, snacks, curries, rice items",
+        now=datetime(2026, 6, 9, tzinfo=timezone.utc),
+    )
+
+    assert village.event_or_business_name is None
+    assert multi.event_or_business_name is None
 
 
 def test_intake_request_fields_clamps_schema_strings_before_validation():
