@@ -256,41 +256,100 @@ class SidecarReferenceExtractionProvider(ReferenceExtractionProvider):
 
 
 def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[FlyerLockedFact]:
-    facts: list[FlyerLockedFact] = []
+    items: list[dict[str, str]] = []
+    pricing_facts: list[FlyerLockedFact] = []
+    seen_names: set[str] = set()
+    seen_pricing: set[str] = set()
     pattern = re.compile(
         r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*(?:-|:)?\s*\$\s*(?P<price>\d+(?:\.\d{2})?)\b(?P<tail>[^\n\r,;]*)",
         flags=re.IGNORECASE,
     )
+    bullet_item = re.compile(
+        r"^\s*(?:[-*]|\u2022|\d+[.)])\s+(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60})\s*$",
+        flags=re.IGNORECASE,
+    )
     promo_tail = re.compile(r"^\s*(?:off|discount|save|coupon|credit|cashback|%|\bpercent\b)", flags=re.IGNORECASE)
     promo_name = re.compile(r"^(?:save|coupon|discount|offer|deal|special|weekend special|cashback|credit)\b", flags=re.IGNORECASE)
+    shared_price_name = re.compile(r"^(?:any|all|every|each)\b", flags=re.IGNORECASE)
+
+    def clean(value: str) -> str:
+        return " ".join((value or "").strip(" .,:;-").split())
+
+    def add_item_name(name: str, price: str = "") -> None:
+        name = clean(name)
+        name = re.sub(r"^(?:and|with|include|includes)\s+", "", name, flags=re.IGNORECASE).strip()
+        if not name or promo_name.search(name):
+            return
+        key = name.lower()
+        if key in seen_names:
+            if price:
+                for item in items:
+                    if item["name"].lower() == key and not item.get("price"):
+                        item["price"] = price
+                        break
+            return
+        seen_names.add(key)
+        item = {"name": name}
+        if price:
+            item["price"] = price
+        items.append(item)
+
+    def add_pricing(value: str) -> None:
+        value = clean(value)
+        if not value:
+            return
+        key = value.lower()
+        if key in seen_pricing:
+            return
+        seen_pricing.add(key)
+        fact_id = "pricing_structure" if not pricing_facts else f"offer:{len(pricing_facts) - 1}"
+        label = "Pricing" if fact_id == "pricing_structure" else "Offer"
+        pricing_facts.append(FlyerLockedFact(
+            fact_id=fact_id,
+            label=label,
+            value=value,
+            source=source,
+            required=True,
+            source_asset_id=asset.asset_id,
+            source_sha256=asset.sha256,
+        ))
+
     for line in (text or "").splitlines():
+        bullet_match = bullet_item.match(line)
+        if bullet_match and "$" not in line:
+            add_item_name(bullet_match.group("name"))
+            continue
         for match in pattern.finditer(line):
             if promo_tail.search(match.group("tail") or ""):
                 continue
-            name = " ".join(match.group("name").strip(" .,:;-").split())
-            name = re.sub(r"^(?:and|with|include|includes)\s+", "", name, flags=re.IGNORECASE).strip()
-            if not name or promo_name.search(name):
+            name = clean(match.group("name"))
+            if shared_price_name.search(name):
+                add_pricing(line)
                 continue
-            idx = len(facts) // 2
             price = f"${match.group('price')}"
-            facts.append(FlyerLockedFact(
-                fact_id=f"item:{idx}:name",
-                label="Item",
-                value=name,
-                source=source,
-                required=True,
-                source_asset_id=asset.asset_id,
-                source_sha256=asset.sha256,
-            ))
+            add_item_name(name, price)
+    facts: list[FlyerLockedFact] = []
+    for idx, item in enumerate(items):
+        facts.append(FlyerLockedFact(
+            fact_id=f"item:{idx}:name",
+            label="Item",
+            value=item["name"],
+            source=source,
+            required=True,
+            source_asset_id=asset.asset_id,
+            source_sha256=asset.sha256,
+        ))
+        if item.get("price"):
             facts.append(FlyerLockedFact(
                 fact_id=f"item:{idx}:price",
                 label="Price",
-                value=price,
+                value=item["price"],
                 source=source,
                 required=True,
                 source_asset_id=asset.asset_id,
                 source_sha256=asset.sha256,
             ))
+    facts.extend(pricing_facts)
     return facts
 
 
@@ -500,6 +559,14 @@ def extract_reference(
         )
     source = "reference_ocr" if provider.provider_name == "sidecar" else "reference_vision"
     facts = _facts_from_text(text, asset=asset, source=source)
+    has_pricing_fact = any(
+        fact.fact_id == "pricing_structure"
+        or fact.fact_id.startswith("offer:")
+        or (fact.fact_id.startswith("item:") and fact.fact_id.endswith(":price"))
+        for fact in facts
+    )
+    if role == "menu_reference" and not has_pricing_fact:
+        facts = []
     return FlyerReferenceExtraction(
         asset_id=asset.asset_id,
         role=role,

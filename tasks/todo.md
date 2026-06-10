@@ -1,5 +1,41 @@
 # Backlog — pending items
 
+## Active - Flyer reference-use fallback (2026-06-10)
+
+**Drift-check tag:** extends-Hermes
+
+**New primitives introduced:** none. This stays inside existing Flyer reference extraction, locked facts, project creation, and manual-review gates.
+
+**Hermes-first analysis**
+
+| Domain | Hermes skill found? | Decision |
+|---|---|---|
+| WhatsApp/media ingestion and sender identity | Hermes gateway/cf-router already receive the image and sender context | use it |
+| Vision text extraction from reference flyer | existing Flyer reference extractor uses Hermes/OpenRouter vision provider and sidecar tests | use it |
+| Customer-visible fact locking | existing `FlyerLockedFact` + merge priority own truth and provenance | extend deterministic parsing only |
+| Reference-as-inspiration fallback | no separate Hermes skill needed; project creation already has profile/text facts and manual-review gates | fix the local gate so inspiration does not dead-end |
+
+Awesome Hermes Agent ecosystem check: official Skills Hub and awesome-hermes-agent were checked on 2026-06-10; no external skill is needed because the vision/substrate already succeeds and the gap is the local deterministic parser/fallback contract.
+
+- [x] Add red regression for Triveni-style bulleted snack reference text with a standalone `ANY 2 SNACKS $9.99` combo price.
+- [x] Add red project-flow regression proving an `old_flyer_reference` low-confidence/zero-fact extraction does not put a usable reference-inspiration project into manual review.
+- [x] Extend reference extraction parsing for bulleted item lists plus shared/combo prices without inventing per-item prices.
+- [x] Narrow the reference failure gate so "use as reference" can proceed from customer brief/profile facts, while true menu extraction failures still queue manual review.
+- [x] Run focused reference/project/fact tests and document results here.
+- [x] Commit the fix from the clean worktree.
+- [ ] Build and deploy the tarball to `main-vps`.
+- [ ] Run post-deploy smoke and incident-shaped verification.
+
+Review/verification:
+- Red tests reproduced the failure: Triveni-style bulleted snacks + `ANY 2 SNACKS $9.99` produced incomplete facts, and an `old_flyer_reference` low-confidence extraction dead-ended a usable brief into manual review.
+- Fix: reference extraction now captures bullet/list item names and preserves `ANY ... $X` shared pricing as `pricing_structure` instead of cloning the price onto every item.
+- Fix: low-confidence `old_flyer_reference` no longer queues manual review when locked customer/profile facts already contain a concrete campaign/headline/offer/item to render; strict `menu_reference` still requires item prices or shared-pricing facts and remains low-confidence without them.
+- Review follow-up: added regressions so named combo menu items like `Non Veg Combo $49.99` stay item/price facts, and bullet-only strict menu references still fail closed.
+- Verification: `python -m pytest tests/test_flyer_reference_extract.py tests/test_flyer_create_project.py tests/test_flyer_facts.py -q` -> `109 passed`.
+- Broader Flyer workflow check: `python -m pytest tests/test_flyer_reference_extract.py tests/test_flyer_create_project.py tests/test_flyer_facts.py tests/test_flyer_workflow.py -q` -> `167 passed`.
+- Static checks: `git diff --check` passed; `python -m py_compile src/agents/flyer/reference_extract.py src/agents/flyer/scripts/create-flyer-project` passed.
+- Pre-deploy live status: latest `main-vps` deploy tarball before this fix was `deploy-20260610-012849-0de0fa04.tgz`; `hermes-gateway` was active.
+
 ## Active - Catering menu-grounded proposal routing (2026-06-08)
 
 **Drift-check tag:** extends-Hermes

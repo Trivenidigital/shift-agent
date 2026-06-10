@@ -1020,6 +1020,62 @@ def test_create_project_records_reference_extraction_provider_failure(monkeypatc
     assert project["status"] == "manual_edit_required"
 
 
+def test_create_project_reference_inspiration_low_confidence_does_not_dead_end(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    reference = tmp_path / "snacks.png"
+    reference.write_bytes(b"fake image bytes")
+    _write_customer(
+        customers_path,
+        category="Indian restaurant",
+        phone="+17329837841",
+        business_name="Lakshmi's Kitchen",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="17329837841@s.whatsapp.net",
+    )
+
+    class NoPriceReferenceProvider:
+        provider_name = "fake_vision"
+
+        def extract_text(self, _asset, _raw_request):
+            return "Tuesday Night Snack Specials\nOnion Pakoda\nMirchi Bajji\nSamosa", "ok"
+
+    monkeypatch.setattr(
+        module,
+        "build_reference_extraction_provider",
+        lambda: NoPriceReferenceProvider(),
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--chat-id", "17329837841@s.whatsapp.net",
+        "--message-id", "m-reference-inspiration",
+        "--raw-request", (
+            "Create a festive flyer for Lakshmi's Kitchen. "
+            "Headline: Tuesday Night Snack Specials. Use as reference."
+        ),
+        "--reference-media-path", str(reference),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+        "--asset-dir", str(asset_dir),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    facts = {fact["fact_id"]: fact for fact in project["locked_facts"]}
+
+    assert project["reference_extractions"][0]["role"] == "old_flyer_reference"
+    assert project["reference_extractions"][0]["status"] == "low_confidence"
+    assert project["status"] == "intake_started"
+    assert project["manual_review"]["status"] == "none"
+    assert facts["business_name"]["value"] == "Lakshmi's Kitchen"
+    assert facts["headline"]["value"] == "Tuesday Night Snack Specials"
+
+
 def test_create_project_image_reference_extracts_locked_menu_facts(monkeypatch, tmp_path, capsys):
     module = _load_script(monkeypatch)
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))

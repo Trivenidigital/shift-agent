@@ -67,6 +67,91 @@ def test_sidecar_provider_extracts_items_and_prices(tmp_path, monkeypatch):
     assert {"Idly", "$7", "Dosa", "$8"}.issubset(values)
 
 
+def test_reference_extract_captures_bulleted_items_and_shared_combo_price(tmp_path, monkeypatch):
+    from agents.flyer.reference_extract import ReferenceExtractionProvider, extract_reference
+
+    class SnackReferenceProvider(ReferenceExtractionProvider):
+        provider_name = "test_vision"
+
+        def extract_text(self, _asset, _raw_request):
+            return (
+                "Tuesday Night Snack Specials\n"
+                "- Onion Pakoda\n"
+                "- Mirchi Bajji\n"
+                "- Cut Mirchi\n"
+                "- Punugulu\n"
+                "- Samosa\n"
+                "ANY 2 SNACKS $9.99"
+            ), "ok"
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+
+    result = extract_reference(
+        _asset(tmp_path),
+        raw_request="Tuesday Night Snack Specials. Use as reference.",
+        provider=SnackReferenceProvider(),
+    )
+
+    by_id = {fact.fact_id: fact for fact in result.extracted_facts}
+    assert result.status == "ok", result.detail
+    assert [by_id[f"item:{idx}:name"].value for idx in range(5)] == [
+        "Onion Pakoda",
+        "Mirchi Bajji",
+        "Cut Mirchi",
+        "Punugulu",
+        "Samosa",
+    ]
+    assert by_id["pricing_structure"].value == "ANY 2 SNACKS $9.99"
+    assert not any(fact.fact_id.startswith("item:") and fact.fact_id.endswith(":price") for fact in result.extracted_facts)
+
+
+def test_reference_extract_keeps_named_combos_as_item_prices(tmp_path, monkeypatch):
+    from agents.flyer.reference_extract import ReferenceExtractionProvider, extract_reference
+
+    class ComboMenuProvider(ReferenceExtractionProvider):
+        provider_name = "test_vision"
+
+        def extract_text(self, _asset, _raw_request):
+            return "Non Veg Combo $49.99\nVeg Combo $39.99", "ok"
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+
+    result = extract_reference(
+        _asset(tmp_path),
+        raw_request="Extract item names and prices from attached sample flyer",
+        provider=ComboMenuProvider(),
+    )
+
+    by_id = {fact.fact_id: fact for fact in result.extracted_facts}
+    assert result.status == "ok", result.detail
+    assert by_id["item:0:name"].value == "Non Veg Combo"
+    assert by_id["item:0:price"].value == "$49.99"
+    assert by_id["item:1:name"].value == "Veg Combo"
+    assert by_id["item:1:price"].value == "$39.99"
+    assert "pricing_structure" not in by_id
+
+
+def test_menu_reference_with_bullet_items_but_no_prices_stays_low_confidence(tmp_path, monkeypatch):
+    from agents.flyer.reference_extract import ReferenceExtractionProvider, extract_reference
+
+    class UnpricedMenuProvider(ReferenceExtractionProvider):
+        provider_name = "test_vision"
+
+        def extract_text(self, _asset, _raw_request):
+            return "- Onion Pakoda\n- Mirchi Bajji\n- Samosa", "ok"
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+
+    result = extract_reference(
+        _asset(tmp_path),
+        raw_request="Extract item names and prices from attached sample flyer",
+        provider=UnpricedMenuProvider(),
+    )
+
+    assert result.status == "low_confidence"
+    assert result.extracted_facts == []
+
+
 def test_low_confidence_reference_does_not_return_facts(tmp_path, monkeypatch):
     from agents.flyer.reference_extract import ReferenceExtractionProvider, extract_reference
 
