@@ -258,6 +258,7 @@ class SidecarReferenceExtractionProvider(ReferenceExtractionProvider):
 def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[FlyerLockedFact]:
     items: list[dict[str, str]] = []
     pricing_facts: list[FlyerLockedFact] = []
+    campaign_title = ""
     seen_names: set[str] = set()
     seen_pricing: set[str] = set()
     pattern = re.compile(
@@ -265,12 +266,17 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
         flags=re.IGNORECASE,
     )
     bullet_item = re.compile(
-        r"^\s*(?:[-*]|\u2022|\d+[.)])\s+(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60})\s*$",
+        r"^\s*(?:[-*]|\u2022|\u2605|\u2606|\u25cf|\u25aa|\u2023|\u27a4|>>?|[»›]|\d+[.)])\s+(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60})\s*$",
         flags=re.IGNORECASE,
     )
     promo_tail = re.compile(r"^\s*(?:off|discount|save|coupon|credit|cashback|%|\bpercent\b)", flags=re.IGNORECASE)
     promo_name = re.compile(r"^(?:save|coupon|discount|offer|deal|special|weekend special|cashback|credit)\b", flags=re.IGNORECASE)
     shared_price_name = re.compile(r"^(?:any|all|every|each)\b", flags=re.IGNORECASE)
+    price_only = re.compile(r"^\s*\$\s*(\d+(?:\.\d{1,2})?)\s*$")
+    campaign_heading = re.compile(
+        r"\b(?:specials?|sale|offer|menu|night|snacks?|breakfast|lunch|dinner|combo|thali|buffet)\b",
+        flags=re.IGNORECASE,
+    )
 
     def clean(value: str) -> str:
         return " ".join((value or "").strip(" .,:;-").split())
@@ -314,10 +320,35 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
             source_sha256=asset.sha256,
         ))
 
+    def maybe_campaign_title(line: str) -> None:
+        nonlocal campaign_title
+        if campaign_title:
+            return
+        value = clean(line)
+        if not value or "$" in value or len(value) > 80:
+            return
+        if bullet_item.match(line) or shared_price_name.search(value):
+            return
+        if campaign_heading.search(value):
+            campaign_title = value
+
+    pending_shared_price_name = ""
     for line in (text or "").splitlines():
+        clean_line = clean(line)
+        if pending_shared_price_name:
+            price_match = price_only.match(line)
+            if price_match:
+                add_pricing(f"{pending_shared_price_name} ${price_match.group(1)}")
+                pending_shared_price_name = ""
+                continue
+            pending_shared_price_name = ""
+        maybe_campaign_title(line)
         bullet_match = bullet_item.match(line)
         if bullet_match and "$" not in line:
             add_item_name(bullet_match.group("name"))
+            continue
+        if clean_line and shared_price_name.search(clean_line) and "$" not in clean_line:
+            pending_shared_price_name = clean_line
             continue
         for match in pattern.finditer(line):
             if promo_tail.search(match.group("tail") or ""):
@@ -329,6 +360,16 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
             price = f"${match.group('price')}"
             add_item_name(name, price)
     facts: list[FlyerLockedFact] = []
+    if campaign_title:
+        facts.append(FlyerLockedFact(
+            fact_id="campaign_title",
+            label="Campaign",
+            value=campaign_title,
+            source=source,
+            required=True,
+            source_asset_id=asset.asset_id,
+            source_sha256=asset.sha256,
+        ))
     for idx, item in enumerate(items):
         facts.append(FlyerLockedFact(
             fact_id=f"item:{idx}:name",
@@ -567,12 +608,19 @@ def extract_reference(
     )
     if role == "menu_reference" and not has_pricing_fact:
         facts = []
+    has_menu_fact = any(
+        fact.fact_id == "pricing_structure"
+        or fact.fact_id.startswith("offer:")
+        or fact.fact_id.startswith("item:")
+        for fact in facts
+    )
+    ok = status == "ok" and bool(facts) and has_menu_fact
     return FlyerReferenceExtraction(
         asset_id=asset.asset_id,
         role=role,
         provider=provider.provider_name,
-        status="ok" if status == "ok" and facts else "low_confidence",
+        status="ok" if ok else "low_confidence",
         extracted_facts=facts,
-        detail="" if status == "ok" and facts else "no high-confidence item/price facts extracted",
+        detail="" if ok else "no high-confidence item/price facts extracted",
         extracted_at=datetime.now(timezone.utc),
     )

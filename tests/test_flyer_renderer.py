@@ -32,7 +32,7 @@ from agents.flyer.render import (  # noqa: E402
     write_text_manifest,
 )
 import agents.flyer.render as render_module  # noqa: E402
-from schemas import FlyerAsset, FlyerConcept, FlyerLockedFact, FlyerManualReview, FlyerProject, FlyerRequestFields, FlyerRevision  # noqa: E402
+from schemas import FlyerAsset, FlyerConcept, FlyerLockedFact, FlyerManualReview, FlyerProject, FlyerReferenceExtraction, FlyerRequestFields, FlyerRevision  # noqa: E402
 
 
 def _complete_project() -> FlyerProject:
@@ -153,6 +153,89 @@ def _dessert_graduation_project() -> FlyerProject:
                 allow_text_identity=False,
             ),
         ),
+    )
+
+
+TRIVENI_TUESDAY_SNACK_ITEMS = [
+    "Punugulu",
+    "Egg Bonda",
+    "Mysore Bonda",
+    "Mysore Bajji",
+    "Masala Vada",
+    "Mirapakaya Bajji",
+    "Onion Samosa",
+    "Onion Pakoda",
+    "Veg Noodles",
+    "Egg Noodles",
+]
+
+
+def _triveni_shared_price_reference_project() -> FlyerProject:
+    now = datetime(2026, 6, 10, tzinfo=timezone.utc)
+    locked_facts = [
+        FlyerLockedFact(
+            fact_id="business_name",
+            label="Business",
+            value="Lakshmi's Kitchen",
+            source="customer_profile",
+            required=True,
+        ),
+        FlyerLockedFact(
+            fact_id="campaign_title",
+            label="Campaign",
+            value="Tuesday Night Specials",
+            source="reference_vision",
+            required=True,
+        ),
+        FlyerLockedFact(
+            fact_id="location",
+            label="Location",
+            value="90 Brybar Dr St Johns FL",
+            source="customer_profile",
+            required=True,
+        ),
+        FlyerLockedFact(
+            fact_id="contact_phone",
+            label="Contact",
+            value="+17329837841",
+            source="customer_profile",
+            required=True,
+        ),
+        FlyerLockedFact(
+            fact_id="pricing_structure",
+            label="Pricing",
+            value="Any 2 Snacks $9.99",
+            source="reference_vision",
+            required=True,
+        ),
+    ]
+    locked_facts.extend(
+        FlyerLockedFact(
+            fact_id=f"item:{idx}:name",
+            label="Item",
+            value=name,
+            source="reference_vision",
+            required=True,
+        )
+        for idx, name in enumerate(TRIVENI_TUESDAY_SNACK_ITEMS)
+    )
+    return FlyerProject(
+        project_id="F0144",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="wamid.triveni-reference",
+        raw_request="Lakshmi's kitchen, same content, but I'd like you to use Lakshmi's kitchen theme",
+        fields=FlyerRequestFields(
+            event_or_business_name="Lakshmi's kitchen, same content, but I'd like you to use Lakshmi's kitchen theme",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            notes="use as reference",
+            preferred_language="en",
+            style_preference="Lakshmi's Kitchen theme",
+        ),
+        locked_facts=locked_facts,
     )
 
 
@@ -436,6 +519,110 @@ def test_collect_text_facts_falls_back_to_fields_when_locked_slot_missing():
     assert facts["title"] == "Lakshmis Kitchn"
     assert facts["location"] == "St Johns FL"
     assert facts["contact"] == "+17329837841"
+
+
+def test_collect_text_facts_drops_instruction_field_title_fallbacks():
+    for poisoned_title in ("Create", "Multiple Page"):
+        project = _complete_project().model_copy(update={
+            "fields": FlyerRequestFields(
+                event_or_business_name=poisoned_title,
+                venue_or_location="St Johns FL",
+                contact_info="+17329837841",
+                notes="Create flyer with menu details.",
+            ),
+            "locked_facts": [
+                FlyerLockedFact(fact_id="business_name", label="Business", value="MK kitchen", source="customer_profile"),
+                FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile"),
+                FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+            ],
+        })
+
+        facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+
+        assert facts["brand"] == "MK kitchen"
+        assert facts["title"] == "Specials"
+        assert poisoned_title not in facts.values()
+
+
+def test_triveni_shared_price_reference_menu_uses_hero_offer_layout():
+    """Production quality regression for the Tuesday snack reference flyer.
+
+    This is not a conventional `Samosa $4.99` menu. It is a snack list plus a
+    shared combo price. The renderer must treat the shared price as the main
+    deal and still render every item once without inventing per-item prices.
+    """
+    project = _triveni_shared_price_reference_project()
+
+    assert render_module._compact_menu_overlay_allowed(project) is True
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    details = [text for fact_id, text in facts.items() if fact_id.startswith("detail_")]
+    payload = _menu_overlay_payload(project)
+
+    assert facts["title"] == "Tuesday Night Specials"
+    assert "Any 2 Snacks $9.99" in details
+    assert len([item for item in details if item in TRIVENI_TUESDAY_SNACK_ITEMS]) == 10
+    assert payload["items"] == TRIVENI_TUESDAY_SNACK_ITEMS
+    assert payload["shared_offer_text"] == "Any 2 Snacks $9.99"
+    assert payload["shared_offer_label"] == "Any 2 Snacks"
+    assert payload["shared_offer_price"] == "$9.99"
+    assert not any("$9.99" in item for item in payload["items"])
+
+
+def test_triveni_shared_price_reference_overlay_renders_without_fit_failure(tmp_path):
+    from PIL import Image
+
+    source = tmp_path / "background.png"
+    target = tmp_path / "triveni-shared-price.png"
+    Image.new("RGB", (1080, 1350), (82, 42, 30)).save(source)
+
+    apply_critical_text_overlay(
+        _triveni_shared_price_reference_project(),
+        source,
+        target,
+        size=(1080, 1350),
+        output_format="concept_preview",
+    )
+
+    assert inspect_rendered_asset(
+        target,
+        expected_width=1080,
+        expected_height=1350,
+        mime_type="image/png",
+    ).ok is True
+
+
+def test_triveni_shared_price_reference_overlay_avoids_menu_table_look(tmp_path):
+    from PIL import Image
+
+    source = tmp_path / "background.png"
+    target = tmp_path / "triveni-shared-price.png"
+    Image.new("RGB", (1080, 1350), (82, 42, 30)).save(source)
+
+    apply_critical_text_overlay(
+        _triveni_shared_price_reference_project(),
+        source,
+        target,
+        size=(1080, 1350),
+        output_format="concept_preview",
+    )
+
+    with Image.open(target).convert("RGB") as img:
+        width, height = img.size
+        title_region = img.crop((40, 30, int(width * 0.60), int(height * 0.24)))
+        item_region = img.crop((40, int(height * 0.42), width - 40, height - 70))
+        title_pixels = list(title_region.getdata())
+        pixels = list(item_region.getdata())
+    title_near_white = sum(1 for r, g, b in title_pixels if r > 225 and g > 218 and b > 195)
+    near_white = sum(1 for r, g, b in pixels if r > 225 and g > 218 and b > 195)
+    gold_outline = sum(1 for r, g, b in pixels if r > 210 and 140 < g < 230 and b < 120)
+    title_near_white_ratio = title_near_white / max(1, len(title_pixels))
+    near_white_ratio = near_white / max(1, len(pixels))
+    gold_outline_ratio = gold_outline / max(1, len(pixels))
+
+    assert title_near_white_ratio < 0.30
+    assert near_white_ratio < 0.45
+    assert gold_outline_ratio < 0.05
 
 
 def test_collect_text_facts_uses_locked_reference_items_before_raw_request():
@@ -1418,6 +1605,53 @@ def test_system_overlay_fallback_draws_menu_schedule(tmp_path, monkeypatch):
     assert dark_pixels > 80
 
 
+def test_system_overlay_fallback_shared_price_reference_uses_poster_layout(tmp_path, monkeypatch):
+    from PIL import Image
+
+    source = tmp_path / "background.png"
+    target = tmp_path / "overlay.png"
+    Image.new("RGB", (1080, 1350), (82, 42, 30)).save(source)
+
+    real_exists = render_module.Path.exists
+    real_run = render_module.subprocess.run
+
+    def fake_exists(path):
+        if path.as_posix().endswith("/usr/bin/python3"):
+            return True
+        return real_exists(path)
+
+    def run_with_current_python(args, **kwargs):
+        if args[:2] == ["/usr/bin/python3", "-c"]:
+            args = [sys.executable, "-c", args[2], args[3]]
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(render_module, "_load_pillow", lambda: None)
+    monkeypatch.setattr(render_module.Path, "exists", fake_exists)
+    monkeypatch.setattr(render_module.subprocess, "run", run_with_current_python)
+
+    render_module._apply_critical_text_overlay(
+        _triveni_shared_price_reference_project(),
+        source,
+        target,
+        size=(1080, 1350),
+        output_format="whatsapp_image",
+    )
+
+    with Image.open(target).convert("RGB") as img:
+        width, height = img.size
+        title_region = img.crop((40, 30, int(width * 0.60), int(height * 0.24)))
+        item_region = img.crop((40, int(height * 0.42), width - 40, height - 70))
+        title_pixels = list(title_region.getdata())
+        pixels = list(item_region.getdata())
+    title_near_white = sum(1 for r, g, b in title_pixels if r > 225 and g > 218 and b > 195)
+    near_white = sum(1 for r, g, b in pixels if r > 225 and g > 218 and b > 195)
+    gold_outline = sum(1 for r, g, b in pixels if r > 210 and 140 < g < 230 and b < 120)
+
+    assert title_near_white / max(1, len(title_pixels)) < 0.30
+    assert near_white / max(1, len(pixels)) < 0.45
+    assert gold_outline / max(1, len(pixels)) < 0.05
+
+
 def test_menu_overlay_uses_large_lightweight_poster_panels(tmp_path):
     from PIL import Image
 
@@ -2298,6 +2532,47 @@ def test_direct_poster_prompt_extracts_items_and_prices_from_sample_reference(mo
     assert "read the attached reference image" in prompt
     assert "visible item names and prices" in prompt
     assert "Do not replace them with generic grocery categories" in prompt
+
+
+def test_reference_with_materialized_facts_uses_textless_overlay_not_model_text(monkeypatch):
+    monkeypatch.setattr("agents.flyer.render._project_reference_assets", lambda project: project.assets)
+    base = _triveni_shared_price_reference_project()
+    reference_asset = FlyerAsset(
+        asset_id="A0001",
+        kind="reference_image",
+        source="whatsapp",
+        path="/opt/shift-agent/state/flyer/assets/triveni-reference.jpg",
+        mime_type="image/jpeg",
+        sha256="a" * 64,
+        original_message_id="wamid.reference",
+        received_at=base.created_at,
+    )
+    project = base.model_copy(update={
+        "assets": [reference_asset],
+        "raw_request": "Extract items and prices from this sample flyer and use Lakshmi's Kitchen theme.",
+        "reference_extractions": [
+            FlyerReferenceExtraction(
+                asset_id="A0001",
+                role="menu_reference",
+                provider="test_vision",
+                status="ok",
+                extracted_facts=[
+                    fact for fact in base.locked_facts
+                    if fact.source == "reference_vision"
+                ],
+                extracted_at=base.created_at,
+            )
+        ],
+    })
+
+    assert render_module._needs_reference_extraction(project) is False
+    assert render_module._background_only_eligible(project) is True
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "decorative BACKGROUND image only" in prompt
+    assert "Use the attached reference image for visual style only" in prompt
+    assert "Render the following text exactly" not in prompt
 
 
 def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path, monkeypatch):

@@ -94,12 +94,63 @@ def test_reference_extract_captures_bulleted_items_and_shared_combo_price(tmp_pa
 
     by_id = {fact.fact_id: fact for fact in result.extracted_facts}
     assert result.status == "ok", result.detail
+    assert by_id["campaign_title"].value == "Tuesday Night Snack Specials"
     assert [by_id[f"item:{idx}:name"].value for idx in range(5)] == [
         "Onion Pakoda",
         "Mirchi Bajji",
         "Cut Mirchi",
         "Punugulu",
         "Samosa",
+    ]
+    assert by_id["pricing_structure"].value == "ANY 2 SNACKS $9.99"
+    assert not any(fact.fact_id.startswith("item:") and fact.fact_id.endswith(":price") for fact in result.extracted_facts)
+
+
+def test_reference_extract_captures_real_star_bullets_and_split_combo_price(tmp_path, monkeypatch):
+    from agents.flyer.reference_extract import ReferenceExtractionProvider, extract_reference
+
+    class RealSnackReferenceProvider(ReferenceExtractionProvider):
+        provider_name = "test_vision"
+
+        def extract_text(self, _asset, _raw_request):
+            return (
+                "Tuesday Night Specials\n"
+                "★ Punugulu\n"
+                "★ Egg Bonda\n"
+                "★ Mysore Bonda\n"
+                "★ Mysore Bajji\n"
+                "★ Masala Vada\n"
+                "★ Mirapakaya Bajji\n"
+                "★ Onion Samosa\n"
+                "★ Onion Pakoda\n"
+                "★ Veg Noodles\n"
+                "★ Egg Noodles\n"
+                "ANY 2 SNACKS\n"
+                "$9.99"
+            ), "ok"
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+
+    result = extract_reference(
+        _asset(tmp_path),
+        raw_request="Use as reference.",
+        provider=RealSnackReferenceProvider(),
+    )
+
+    by_id = {fact.fact_id: fact for fact in result.extracted_facts}
+    assert result.status == "ok", result.detail
+    assert by_id["campaign_title"].value == "Tuesday Night Specials"
+    assert [by_id[f"item:{idx}:name"].value for idx in range(10)] == [
+        "Punugulu",
+        "Egg Bonda",
+        "Mysore Bonda",
+        "Mysore Bajji",
+        "Masala Vada",
+        "Mirapakaya Bajji",
+        "Onion Samosa",
+        "Onion Pakoda",
+        "Veg Noodles",
+        "Egg Noodles",
     ]
     assert by_id["pricing_structure"].value == "ANY 2 SNACKS $9.99"
     assert not any(fact.fact_id.startswith("item:") and fact.fact_id.endswith(":price") for fact in result.extracted_facts)
