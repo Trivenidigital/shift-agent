@@ -40,6 +40,11 @@ Review/verification:
 - Visual QA: `python -m pytest tests/test_flyer_visual_qa.py -q` -> `142 passed`.
 - PR3 wiring: `python -m pytest tests/test_flyer_pr3_wiring.py -q` -> `39 passed`.
 - Static checks: `python -m py_compile src\agents\flyer\render.py src\agents\flyer\reference_extract.py` passed; `git diff --check` passed.
+- Live failure follow-up: fresh screenshot `C:\Testing\1.png` at 2026-06-11 15:17 showed production was still on the sibling/title-only path: old cream item boxes, tiny shared price, and changed item names. VPS marker check confirmed the installed `/opt/shift-agent/flyer_render.py` lacked `shared_snack_poster` before this deploy.
+- Commit: `dd9bdeb0a884d70abf8a9ae605a053bdcac565f9` (`fix(flyer): improve reference shared price poster quality`).
+- Deploy: built `shift-agent-deploy.tgz` from `dd9bdeb0` with focused gates already green, copied to `main-vps`, and deployed as `deploy-20260611-152030-dd9bdeb0`; deploy smoke ended with `Deploy deploy-20260611-152030-dd9bdeb0 complete`.
+- Post-deploy markers: `/opt/shift-agent/flyer_render.py` now contains `shared_snack_poster` and `_has_materialized_reference_menu_facts`; `/opt/shift-agent/flyer_reference_extract.py` contains `campaign_title`; `hermes-gateway` is active.
+- VPS no-send render proof: system-Python runtime rendered `/tmp/flyer-quality-deploy-proof.png` using installed `flyer_render.py`; copied locally to `C:\Testing\flyer-quality-deploy-proof-dd9bdeb.png`. Metrics: `near_white_title=0.015837585034013606`, `near_white_items=0.03661570827489481`, `gold_outline=0.021231416549789623`; all guards true.
 - Correction after inspecting `C:\Testing\1.png`: the prior local sample was fact-correct but still too close to the rejected WhatsApp preview. It had a large cream title block and menu-table/card treatment, and the bare/reference route could still ask the image model to render request/reference text.
 - Red verification: `python -m pytest tests/test_flyer_renderer.py -q -k "avoids_menu_table_look"` failed on `title_near_white_ratio == 0.6214755639097744`, proving the title area was still dominated by a cream card.
 - Red verification: after removing the cream title card, the same test failed on `gold_outline_ratio == 0.06634502103786816`, proving the lower snack area was still dominated by outlined row boxes.
