@@ -1243,6 +1243,87 @@ def test_bare_flyer_intent_outranks_stale_catering_lead_when_legacy_generation_o
     assert catering_replies == []
 
 
+def test_attached_same_flyer_same_content_theme_routes_primary_not_bare(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    text = (
+        "I'd like you to create same flyer for Lakshmi's kitchen, same content, "
+        "but I'd like you to use Lakshmi's kitchen theme."
+    )
+    primary_calls: list[dict[str, object]] = []
+    bare_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: False)
+    monkeypatch.setattr(actions, "is_flyer_workflow_enabled", lambda: True, raising=False)
+    monkeypatch.setattr(actions, "begin_flyer_intent_shadow", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "finalize_flyer_intent_shadow", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "reset_flyer_intent_shadow", lambda _token: None)
+    monkeypatch.setattr(actions, "finalize_flyer_intake_bypass_shadow", lambda **_kwargs: None)
+    monkeypatch.setattr(actions, "consume_pending_flyer_intake_bypass_token", lambda: None)
+    monkeypatch.setattr(actions, "reset_flyer_intake_bypass_shadow", lambda _token: None)
+    monkeypatch.setattr(actions, "mark_cf_router_inbound_seen", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(actions, "is_owner_chat", lambda _chat_id: False)
+    monkeypatch.setattr(actions, "is_employee_chat", lambda _chat_id: False)
+    monkeypatch.setattr(actions, "is_verified_employee_chat", lambda _chat_id: False)
+    monkeypatch.setattr(actions, "flyer_campaign_cta_text", lambda _text: "")
+    monkeypatch.setattr(hooks, "_try_flyer_account_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_sample_prompt_request_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_regulated_account_guard", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_intake_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_source_vs_new_choice_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_reference_scope_authorization_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_existing_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_active_project_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_delivery_state_guard", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hooks, "_try_flyer_onboarding_intercept", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {
+        "customer_id": "CUST0001",
+        "status": "trial",
+        "business_name": "Lakshmi's Kitchen",
+    })
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "recent_bare_flyer_for_chat", lambda _chat_id: False, raising=False)
+    monkeypatch.setattr(actions, "detect_bare_price_revision_apply", lambda _text: None, raising=False)
+    monkeypatch.setattr(actions, "is_flyer_edit_of_existing", lambda _text: False, raising=False)
+    monkeypatch.setattr(actions, "classify_catering", lambda _text: (False, []))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    def fake_primary(text_arg, chat_id, event, **kwargs):
+        primary_calls.append({
+            "text": text_arg,
+            "chat_id": chat_id,
+            "media_path": kwargs.get("media_path"),
+            "force_new": kwargs.get("force_new"),
+        })
+        return {"action": "skip", "reason": "cf-router flyer primary: reference media path"}
+
+    def fake_spawn(chat_id, brief, **kwargs):
+        bare_calls.append({"chat_id": chat_id, "brief": brief, **kwargs})
+        return True
+
+    monkeypatch.setattr(hooks, "_try_flyer_primary_intercept", fake_primary)
+    monkeypatch.setattr(actions, "spawn_bare_flyer_render_and_send", fake_spawn, raising=False)
+
+    assert actions.is_reference_concept_adaptation_request(text, has_media=True) is True
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text=text,
+        chat_id="201975216009469@lid",
+        message_id="live-same-flyer-same-content-theme",
+        media_path="/opt/shift-agent/.hermes/image_cache/triveni-reference.jpg",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer primary: reference media path"}
+    assert primary_calls == [{
+        "text": text,
+        "chat_id": "201975216009469@lid",
+        "media_path": "/opt/shift-agent/.hermes/image_cache/triveni-reference.jpg",
+        "force_new": True,
+    }]
+    assert bare_calls == []
+
+
 def test_graduation_discount_service_brief_dispatches_bare_not_starter(monkeypatch):
     hooks, actions = _load_plugin_modules()
     text = (

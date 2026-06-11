@@ -1889,7 +1889,11 @@ _REFERENCE_CONCEPT_ADAPTATION_RE = re.compile(
     r"|"
     r"\b(?:make|create|design|generate)\s+(?:a\s+)?(?:new\s+)?"
     r"(?:flyer|flier|poster|banner|creative|graphic)\s+"
-    r"(?:similar\s+to|inspired\s+by)\s+(?:this|the|attached|uploaded)\b",
+    r"(?:similar\s+to|inspired\s+by)\s+(?:this|the|attached|uploaded)\b"
+    r"|"
+    r"\b(?:make|create|design|generate)\s+(?:a\s+|the\s+)?same\s+"
+    r"(?:flyer|flier|poster|banner|creative|graphic)\b"
+    r"(?=[\s\S]{0,180}\b(?:same\s+content|theme|style|look)\b)",
     re.IGNORECASE,
 )
 
