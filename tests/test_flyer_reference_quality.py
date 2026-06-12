@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platform"))
 
 from agents.flyer.reference_extract import _facts_from_text  # noqa: E402
-from agents.flyer.render import _integrated_poster_eligible, _needs_reference_extraction  # noqa: E402
+from agents.flyer.render import _background_only_eligible, _integrated_poster_eligible, _needs_reference_extraction  # noqa: E402
 from agents.flyer.visual_qa import _near_duplicate_item_blockers  # noqa: E402
 from schemas import (  # noqa: E402
     FlyerAsset,
@@ -80,7 +80,7 @@ def test_reference_extraction_materializes_two_column_snack_items(tmp_path, monk
     ]
 
 
-def test_style_only_reference_menu_with_materialized_facts_can_use_integrated_poster(tmp_path, monkeypatch):
+def test_style_only_reference_menu_with_materialized_facts_uses_overlay_not_integrated_poster(tmp_path, monkeypatch):
     asset = _asset(tmp_path, monkeypatch)
     facts = _facts_from_text(_street_snack_text(), asset=asset, source="reference_vision")
     project = FlyerProject(
@@ -119,7 +119,8 @@ def test_style_only_reference_menu_with_materialized_facts_can_use_integrated_po
     monkeypatch.setattr("agents.flyer.render._project_reference_assets", lambda _project: project.assets)
 
     assert _needs_reference_extraction(project) is False
-    assert _integrated_poster_eligible(project) is True
+    assert _integrated_poster_eligible(project) is False
+    assert _background_only_eligible(project) is True
 
 
 def test_visual_qa_blocks_near_duplicate_snack_item_typo():

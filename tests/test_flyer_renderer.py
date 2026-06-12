@@ -2631,6 +2631,47 @@ def test_reference_with_materialized_facts_uses_textless_overlay_not_model_text(
     assert "Render the following text exactly" not in prompt
 
 
+def test_style_only_reference_with_materialized_facts_stays_background_overlay(monkeypatch):
+    monkeypatch.setattr("agents.flyer.render._project_reference_assets", lambda project: project.assets)
+    base = _triveni_shared_price_reference_project()
+    reference_asset = FlyerAsset(
+        asset_id="A0001",
+        kind="reference_image",
+        source="whatsapp",
+        path="/opt/shift-agent/state/flyer/assets/triveni-reference.jpg",
+        mime_type="image/jpeg",
+        sha256="a" * 64,
+        original_message_id="wamid.reference",
+        received_at=base.created_at,
+    )
+    project = base.model_copy(update={
+        "assets": [reference_asset],
+        "raw_request": "Use as reference. Same flyer for Lakshmi's Kitchen, same content, Lakshmi's Kitchen theme.",
+        "reference_extractions": [
+            FlyerReferenceExtraction(
+                asset_id="A0001",
+                role="menu_reference",
+                provider="test_vision",
+                status="ok",
+                extracted_facts=[
+                    fact for fact in base.locked_facts
+                    if fact.source == "reference_vision"
+                ],
+                extracted_at=base.created_at,
+            )
+        ],
+    })
+
+    assert render_module._needs_reference_extraction(project) is False
+    assert render_module._integrated_poster_eligible(project) is False
+    assert render_module._background_only_eligible(project) is True
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "decorative BACKGROUND image only" in prompt
+    assert "Render the following text exactly" not in prompt
+
+
 def test_style_only_reference_image_is_sent_to_model_for_art_direction(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr("agents.flyer.render._project_reference_assets", lambda project: project.assets)

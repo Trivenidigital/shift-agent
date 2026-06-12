@@ -1135,6 +1135,8 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
         getattr(asset, "kind", "") == "reference_image"
         for asset in _project_reference_assets(project)
     )
+    if reference_menu:
+        return False
     if has_reference_image and not reference_menu:
         return False
     items = _menu_item_lines(project)
