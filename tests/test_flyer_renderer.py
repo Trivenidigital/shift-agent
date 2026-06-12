@@ -2348,6 +2348,7 @@ def test_simple_english_typed_menu_can_opt_into_integrated_poster_prompt(monkeyp
     assert "complete, finished customer-ready poster flyer" in prompt
     assert "Build a full restaurant/menu poster" in prompt
     assert "Item cards must look like designed menu tiles" in prompt
+    assert "keep every footer character at least 6% of the canvas height above the bottom edge" in prompt
     assert "Render the following text exactly" in prompt
     assert "Dosa - $6.99" in prompt
     assert "Idli - $5.99" in prompt
@@ -2407,6 +2408,7 @@ def test_english_combo_offer_can_opt_into_integrated_poster_prompt(monkeypatch):
     prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
 
     assert "Build a complete finished poster flyer" in prompt
+    assert "keep every footer character at least 6% of the canvas height above the bottom edge" in prompt
     assert "Render the following text exactly" in prompt
     assert "Memorial Day Weekend Meal Combos" in prompt
     assert "Non Veg Combo: $49.99" in prompt

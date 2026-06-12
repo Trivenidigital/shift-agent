@@ -1172,6 +1172,11 @@ def _background_only_eligible(project: FlyerProject) -> bool:
 
 def _poster_layout_requirements(project: FlyerProject) -> str:
     plan = _poster_copy_plan(project)
+    footer_safe_area = (
+        "\n- Put location/contact in a dedicated footer band with generous bottom padding; "
+        "keep every footer character at least 6% of the canvas height above the bottom edge "
+        "so WhatsApp/status previews never crop the phone number."
+    )
     if _background_only_eligible(project):
         # Reserved-zone background contract (P1 slice 2): exact text is composited
         # deterministically as overlay panels, so the model produces only the
@@ -1223,6 +1228,7 @@ def _poster_layout_requirements(project: FlyerProject) -> str:
                 "- If a service line is listed without a price, show it as a service label without a price, dash, or placeholder.\n"
                 "- Keep text large, high-contrast, and centered inside its designed panels; avoid tiny text blocks and generic lower-third captions.\n"
                 "- Keep the visual language category-safe for the stated business type; avoid restaurant/grocery and cultural-celebration styling unless the customer explicitly asks for it."
+                f"{footer_safe_area}"
             )
         return (
             "- Build a full restaurant/menu poster with a premium/editorial restaurant-advertisement finish, not an ordinary menu template or background template.\n"
@@ -1234,11 +1240,13 @@ def _poster_layout_requirements(project: FlyerProject) -> str:
             "- If there is only one item/price, make it the single typographic offer lockup and use food photos as unlabeled supporting imagery. Do not repeat the same item/price in multiple panels.\n"
             "- Match the attached reference flyer's dense premium retail hierarchy when a reference is provided, but remove ordinary template clutter: fewer borders, better spacing, sharp food photography, and phone-readable type.\n"
             "- Keep text large, high-contrast, and intentionally placed; avoid tiny text blocks, generic lower-third captions, and over-framed template sections."
+            f"{footer_safe_area}"
         )
     return (
         "- Build a complete finished poster flyer, not a blank background.\n"
         "- Use a clear brand masthead, large headline, offer/details section, visual proof imagery, and footer contact/action area.\n"
         "- Keep all required customer text large, high-contrast, and readable on a phone screen."
+        f"{footer_safe_area}"
     )
 
 
