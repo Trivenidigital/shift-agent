@@ -1,5 +1,12 @@
 # Lessons
 
+## 2026-06-12 - Flyer exact-text QA failures need an exact-text fallback, not customer-visible failure
+
+- When a premium integrated poster fails only because the image model misspelled or omitted locked menu text, do not loosen visual QA and do not immediately tell the customer "couldn't finish automatically."
+- Preserve the strict QA gate, then retry through the deterministic exact-text overlay/background path so required facts are rendered by code rather than by the image model.
+- Keep the fallback scoped to text/source-leak blockers the deterministic renderer can eliminate, such as missing required visible facts, duplicated item lists, near-duplicate item spellings, and copied wrong phone numbers. Wrong brand, placeholder leakage, unsafe claims, and other trust blockers must still fail closed if the deterministic fallback does not pass QA.
+- Regression tests for Flyer Studio generation should simulate the actual WhatsApp failure shape: integrated render fails exact-text QA, autorepair does not solve it, exact overlay fallback passes, and the project reaches approval without manual review.
+
 ## 2026-06-08 - Active Catering proposal turns must not fall through to generic LLM
 
 - A customer asking for catering menu combinations must never receive freeform LLM menu invention. In the live failure, an active Catering lead follow-up (`create two sample menus mix n match`) missed the deterministic proposal-request classifier and the generic LLM suggested Western/off-menu items including beef/tacos for an Indian restaurant.

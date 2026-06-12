@@ -202,6 +202,37 @@ def _render_with_brand_assets_disabled(render_call):
             os.environ["FLYER_DISABLE_BRAND_ASSETS"] = previous
 
 
+def _render_with_integrated_poster_disabled(render_call):
+    previous = os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER")
+    os.environ["FLYER_ALLOW_INTEGRATED_POSTER"] = "0"
+    try:
+        return render_call()
+    finally:
+        if previous is None:
+            os.environ.pop("FLYER_ALLOW_INTEGRATED_POSTER", None)
+        else:
+            os.environ["FLYER_ALLOW_INTEGRATED_POSTER"] = previous
+
+
+def _qa_failed_exact_text_recoverable(reports) -> bool:
+    blockers = [
+        str(blocker or "").strip()
+        for report in reports
+        for blocker in getattr(report, "blockers", []) or []
+        if str(blocker or "").strip()
+    ]
+    if not blockers:
+        return False
+    recoverable_prefixes = (
+        "missing required visible fact:",
+        "missing required visible item count:",
+        "duplicate item visible:",
+        "near-duplicate item visible:",
+        "unverified phone number visible:",
+    )
+    return all(blocker.startswith(recoverable_prefixes) for blocker in blockers)
+
+
 def _draft_manual_review_detail(exc: Exception, *, attempts: int, retryable_match: bool) -> str:
     payload = {
         "stage": "draft_render_concept_previews",
@@ -546,10 +577,21 @@ def main() -> int:
         has_reference_image = any(
             getattr(asset, "kind", "") == "reference_image" for asset in (project.assets or [])
         )
+        manual_reason_code = str(getattr(getattr(project, "manual_review", None), "reason_code", "") or "")
+        visual_qa_retry_without_source_marker = (
+            project.status == "manual_edit_required"
+            and manual_reason_code == "visual_qa_failed"
+            and not has_source_edit_marker
+            and not _has_source_edit_template(project)
+        )
         source_edit_requested = (
             has_source_edit_marker
             or _has_source_edit_template(project)
-            or (project.status == "manual_edit_required" and has_reference_image)
+            or (
+                project.status == "manual_edit_required"
+                and has_reference_image
+                and not visual_qa_retry_without_source_marker
+            )
         )
         if source_edit_requested:
             # P0-5: render_source_edit_preview raises FlyerRenderError when the
@@ -928,6 +970,59 @@ def main() -> int:
                         assets = repair_assets
                         qa_reports = repair_qa_reports
                         failed_qa = []
+        if failed_qa and not source_edit_requested and _qa_failed_exact_text_recoverable(failed_qa):
+            fallback_specs = []
+            fallback_assets = []
+            fallback_qa_reports = []
+            fallback_failed_qa = []
+            fallback_error = ""
+            try:
+                fallback_specs = _render_with_integrated_poster_disabled(lambda: render_concept_previews(
+                    current,
+                    asset_dir,
+                    model="deterministic-renderer",
+                    quality="medium",
+                    concept_count=cfg.flyer.concept_count,
+                ))
+                fallback_assets = build_asset_manifest(
+                    fallback_specs,
+                    first_asset_number=next_asset_number(current),
+                    source="rendered",
+                    original_message_id=current.original_message_id,
+                )
+                for asset, spec in zip(fallback_assets, fallback_specs):
+                    _write_sidecar_visual_qa_fixture(current, spec.path)
+                    report = run_visual_qa(
+                        current,
+                        spec.path,
+                        output_format=spec.output_format,
+                        asset_id=asset.asset_id,
+                    )
+                    write_visual_qa_report(report, spec.path)
+                    fallback_qa_reports.append(report)
+                fallback_failed_qa = [
+                    report for report in fallback_qa_reports if report.status != "passed"
+                ]
+            except Exception as exc:
+                fallback_error = f"{exc.__class__.__name__}: {str(exc)[:400]}"
+            if fallback_error or fallback_failed_qa:
+                preserve_paths = {
+                    candidate
+                    for spec in specs
+                    for candidate in _render_artifact_candidates(spec)
+                }
+                _cleanup_render_artifacts(fallback_specs, preserve_paths=preserve_paths)
+            else:
+                preserve_paths = {
+                    candidate
+                    for spec in fallback_specs
+                    for candidate in _render_artifact_candidates(spec)
+                }
+                _cleanup_render_artifacts(specs, preserve_paths=preserve_paths)
+                specs = fallback_specs
+                assets = fallback_assets
+                qa_reports = fallback_qa_reports
+                failed_qa = []
         revisions = [
             revision.model_copy(update={"applied": True})
             if (
