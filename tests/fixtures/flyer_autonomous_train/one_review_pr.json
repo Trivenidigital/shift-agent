@@ -1,0 +1,33 @@
+{
+  "number": 140,
+  "title": "test: one reviewer only",
+  "author": "codex-worker",
+  "metadata_source": "offline_fixture",
+  "collected_at": "2026-05-21T00:00:00Z",
+  "metadata_trusted_for_merge": false,
+  "base": "main",
+  "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "is_open": true,
+  "behind_origin_main": false,
+  "category": "golden_fixture_tests",
+  "changed_files": ["tests/fixtures/flyer_golden/live_customer_message_shapes.json"],
+  "touched_subsystems": ["flyer-golden-fixtures"],
+  "reviewers": [
+    {
+      "login": "structural-reviewer",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "is_stale": false,
+      "is_author": false
+    }
+  ],
+  "findings": [],
+  "verification": [
+    {
+      "name": "focused pytest",
+      "state": "passed",
+      "commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ]
+}

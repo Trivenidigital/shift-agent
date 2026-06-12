@@ -89,6 +89,11 @@ jobs:
       - name: Generate types from committed openapi.json
         run: npm run generate:types
 
+      - name: Verify committed schema.ts is in sync
+        run: |
+          git diff --exit-code -- src/api/schema.ts \
+            || (echo "::error::Committed schema.ts is stale. Run npm run generate:types in web/frontend and commit the result." && exit 1)
+
       - name: Typecheck
         run: npm run typecheck
 

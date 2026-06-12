@@ -1,0 +1,14 @@
+{
+  "id": "F0151",
+  "title": "stale event date - an already-passed event date must block before delivery (P1-2)",
+  "request": "Diwali sale flyer at Lakshmis Kitchen on May 1.",
+  "profile": {"business_name": "Lakshmis Kitchen", "public_phone": "+1 732 983 7841", "business_address": "90 Brybar Dr", "event_date": "2026-05-01"},
+  "config": {"creative_planner": {"enabled": false, "enabled_categories": []}},
+  "expect": {
+    "visual_qa": {
+      "status": "failed",
+      "ocr_text": "Lakshmis Kitchen Diwali Sale May 1 Call +1 732 983 7841",
+      "must_include_blockers": ["event date is in the past"]
+    }
+  }
+}

@@ -51,7 +51,7 @@ def _append_best_effort(line: str, log_path: Path) -> None:
 def log_config_load_failed_best_effort(
     config_path: Path,
     exc: BaseException,
-    log_path: Path = _LOG_PATH_DEFAULT,
+    log_path: Optional[Path] = None,
 ) -> None:
     """Append a config_load_failed row. NEVER raises.
 
@@ -72,7 +72,7 @@ def log_config_load_failed_best_effort(
                          else "<unknown>")[:80] or "<unknown>",
         )
         line = TypeAdapter(ConfigLoadFailed).dump_json(entry).decode("utf-8")
-        _append_best_effort(line, log_path)
+        _append_best_effort(line, log_path or _LOG_PATH_DEFAULT)
     except Exception:
         pass  # never let audit-emission shadow the primary error
 
@@ -83,7 +83,7 @@ def log_quote_sent_lead_missing_best_effort(
     customer_phone_at_approve: str,
     outbound_message_id: str,
     detail: str = "",
-    log_path: Path = _LOG_PATH_DEFAULT,
+    log_path: Optional[Path] = None,
 ) -> None:
     """Best-effort emission of state-vs-outbound divergence audit row.
     Same swallow-all-errors contract as log_config_load_failed_best_effort.
@@ -103,7 +103,7 @@ def log_quote_sent_lead_missing_best_effort(
             detail=detail[:500],
         )
         line = TypeAdapter(CateringQuoteSentLeadMissing).dump_json(entry).decode("utf-8")
-        _append_best_effort(line, log_path)
+        _append_best_effort(line, log_path or _LOG_PATH_DEFAULT)
     except Exception:
         pass
 

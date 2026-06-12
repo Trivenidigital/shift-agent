@@ -2,6 +2,12 @@
 
 # Flyer Studio Production Readiness Backlog
 
+> ⚠️ **SUPERSEDED (2026-05-30) — HISTORICAL.** This 2026-05-19 backlog and its
+> "60-65% production-ready" verdict badly lag the code: P0-1…P0-7 are shipped +
+> deployed (`deploy-20260530-030230-7e524c2e`, smoke-green). **Single source of
+> truth: [`docs/flyer-studio-current-state.md`](../docs/flyer-studio-current-state.md).**
+> Verify against `origin/main`, not this doc, before proposing Flyer work.
+
 **Date:** 2026-05-19
 **Validated code baseline:** `66cb0f3 fix(flyer): harden qa-blocking project facts`
 **Current verdict:** QA hotfix is real and necessary, but Flyer Studio is still about **60-65% production-ready**, not 90%.

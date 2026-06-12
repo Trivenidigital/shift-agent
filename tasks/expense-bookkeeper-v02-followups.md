@@ -9,6 +9,8 @@ None are blockers for the v0.1 ship; each has a stated rationale for deferral.
 
 ### V02-1 — Generic null-byte / control-char defense across `ExpenseLead` string fields
 
+**Status:** done in PR #393. `ExpenseLead` now applies the shared blank/control-char validator to `sender_lid`, `qbo_account`, and `rejection_reason` when present, while preserving `None`.
+
 **From:** reviewer-b MED (Stage 2 plan review of audit-bug fix)
 **Currently defended:** `original_message_id`, `sender_phone` (BUG-3 + BUG-2 v1.1 shared validator)
 **Currently UNdefended:** `sender_lid`, `qbo_account`, `rejection_reason`
@@ -67,14 +69,18 @@ re.compile(r'\bcode_verifier=[A-Za-z0-9_\-\.]{16,}', re.IGNORECASE),
 
 ### V02-7 — Pre-existing dispatcher regex inconsistency
 
+**Status:** done. Dispatcher, cf-router, catering apply/finalize, audit schema, replay-helper approval-code regex surfaces, and generator `_CODE_ALPHA` literals now use canonical `#[A-HJKMNPQR-Z2-9]{5}` / `ABCDEFGHJKMNPQRSTUVWXYZ23456789` with a static parity test in `tests/test_schemas.py`.
+
 **From:** reviewer-a (multiple stages)
-**Current:** `dispatch_shift_agent/SKILL.md:79` uses `#[A-HJ-NP-Z2-9]{5}` while canonical alphabet in `schemas.py:843` is `#[A-HJKMNPQR-Z2-9]{5}`. Both are functionally restrictive enough; the dispatcher's regex is stricter near the seam (excludes `K`/`M`).
+**Current:** closed. Historical `dispatch_shift_agent/SKILL.md` and adjacent code/doc surfaces used `#[A-HJ-NP-Z2-9]{5}` while canonical `ProposalCode` uses `#[A-HJKMNPQR-Z2-9]{5}`.
 
 **Why deferred:** needs a scoped pass across all dispatcher mentions + handler skills + tests, not piggybacking on a 1-line jq fix.
 
 **Action for v0.2:** unify to canonical regex everywhere; one PR, ~5 file edits, mostly tests.
 
 ### V02-8 — jq syntax-validity assertion in audit test
+
+**Status:** done. `tests/test_expense_bookkeeper_guardrails.py` now extracts each dispatcher Step-3 jq lookup and runs it against a minimal matching JSON fixture on Linux, skipping when `jq` is unavailable.
 
 **From:** reviewer-e LOW (Stage 2 audit-fix plan review)
 **Current:** `test_audit_bug1_dispatcher_skill_includes_expense_jq_lookup` is a string-presence + ordering test. A subtle filter typo (missing paren) would pass the test but fail at runtime.

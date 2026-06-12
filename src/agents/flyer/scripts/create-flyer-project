@@ -17,13 +17,97 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 sys.path.insert(0, str(SRC_ROOT))
 
-from schemas import FlyerAsset, FlyerCustomerStore, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerRequestFields  # noqa: E402
+from schemas import Config, FlyerAsset, FlyerConfig, FlyerCustomerStore, FlyerManualReview, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerReferenceExtraction, FlyerRequestFields, FlyerSourceContractExtracted  # noqa: E402
 from safe_io import FileLock, atomic_write_text  # noqa: E402
+try:
+    from safe_io import load_yaml_model as _load_yaml_model  # type: ignore  # noqa: E402
+except Exception:
+    _load_yaml_model = None  # type: ignore
+try:
+    # Audit emission for FlyerSourceContractExtracted uses ndjson_append + flock
+    # the same way parse-menu-photo does. Tests stub safe_io down to FileLock +
+    # atomic_write_text, so these may be absent under test; degrade audit-only.
+    from safe_io import flock as _safe_flock  # type: ignore  # noqa: E402
+    from safe_io import ndjson_append as _safe_ndjson_append  # type: ignore  # noqa: E402
+except Exception:
+    _safe_flock = None  # type: ignore
+    _safe_ndjson_append = None  # type: ignore
+from pydantic import TypeAdapter  # noqa: E402
+try:
+    from flyer_manual_queue import make_manual_review  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.manual_queue import make_manual_review  # noqa: E402
+try:
+    from agents.flyer.facts import (  # noqa: E402
+        DEFAULT_REQUIRED_FACT_IDS,
+        extract_text_facts,
+        merge_locked_facts,
+        missing_required_facts,
+        profile_locked_facts,
+        source_contract_locked_facts,
+        _populate_forbidden_substrings,
+    )
+except ImportError:
+    from flyer_facts import (  # type: ignore  # noqa: E402
+        DEFAULT_REQUIRED_FACT_IDS,
+        extract_text_facts,
+        merge_locked_facts,
+        missing_required_facts,
+        profile_locked_facts,
+        source_contract_locked_facts,
+        _populate_forbidden_substrings,
+    )
+try:
+    from flyer_reference_extract import build_reference_extraction_provider, classify_reference_role, extract_reference  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.reference_extract import build_reference_extraction_provider, classify_reference_role, extract_reference  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 CUSTOMERS_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 ASSET_DIR = Path("/opt/shift-agent/state/flyer/assets")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+
+
+def _emit_source_contract_extracted_audit(
+    *,
+    extraction: FlyerReferenceExtraction,
+    project_id: str,
+    now: datetime,
+) -> None:
+    """Emit the FlyerSourceContractExtracted audit row via the existing
+    ndjson_append chokepoint. Mirrors `parse-menu-photo:_log`. Best-effort:
+    audit failures must not block project creation, but the operator loses
+    observability into source-contract extraction frequency / quality.
+    """
+    if _safe_flock is None or _safe_ndjson_append is None:
+        # Test environment stubbed safe_io without the audit helpers — skip.
+        return
+    try:
+        contract = extraction.source_contract
+        entry = FlyerSourceContractExtracted(
+            type="flyer_source_contract_extracted",
+            ts=now,
+            project_id=project_id,
+            asset_id=extraction.asset_id,
+            asset_sha256="",  # populated below if asset known
+            role=extraction.role,
+            status=extraction.status,
+            headings_count=len(contract.required_headings) if contract else 0,
+            sections_count=len(contract.sections) if contract else 0,
+            replacements_count=len(contract.requested_replacements) if contract else 0,
+            forbidden_substrings_count=len(contract.forbidden_substrings) if contract else 0,
+            confidence=float(contract.confidence) if contract else 0.0,
+            provider=extraction.provider,
+        )
+        adapter = TypeAdapter(FlyerSourceContractExtracted)
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _safe_flock(LOG_PATH):
+            _safe_ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+    except Exception:
+        # Audit best-effort. Do not block project creation on a log failure.
+        pass
 MONTHS = {
     "jan": 1, "january": 1,
     "feb": 2, "february": 2,
@@ -65,12 +149,27 @@ def _has_any(text: str, terms: tuple[str, ...]) -> bool:
 
 
 def _is_product_or_brand_promo(text: str) -> bool:
+    """True when the request asks for a product/brand promo flyer.
+
+    Pre-fix this matched bare `brand`/`branding`, which incorrectly
+    poisoned exact-edit requests like `replace Triveni branding with
+    Lakshmi's Kitchen branding` into grocery-product styling. Brand/
+    branding edit verbs are now scoped to phrases that combine a brand
+    cue with an explicit promo/product cue.
+    """
     lower = text.lower()
-    return bool(re.search(
-        r"\b(?:hero image|tagline|badge|badges|certified|brand|branding|"
+    if re.search(
+        r"\b(?:hero image|tagline|badge|badges|certified|"
         r"product|featuring|premium|organic-style|organic style|grocery aesthetic)\b",
         lower,
-    ))
+    ):
+        return True
+    # `brand-forward product promo` / `brand promo` etc. still count.
+    if re.search(r"\bbrand(?:-|\s+)forward\b", lower):
+        return True
+    if re.search(r"\bbrand(?:ing)?\s+(?:promo|promotion|forward|focus)\b", lower):
+        return True
+    return False
 
 
 def _style_for_request(text: str) -> str:
@@ -112,9 +211,52 @@ def _invalid_venue(value: str) -> bool:
     clean = re.sub(r"\s+", " ", value or "").strip(" .,:;").lower()
     return (
         not clean
+        or "$" in clean
+        or (
+            re.search(r"\b\d+(?:\.\d{1,2})?\b", clean)
+            and re.search(r"\b(?:and|or|item|items?|price|priced|include)\b", clean)
+        )
         or clean in {"and", "or", "the bottom", "bottom", "top", "end", "customer profile"}
         or clean.startswith(("phone ", "phone number", "contact ", "address and phone"))
     )
+
+
+def _explicit_english_only(text: str) -> bool:
+    lower = (text or "").lower()
+    return bool(
+        re.search(r"\b(?:language\s*:\s*)?english\s+only\b", lower)
+        or re.search(r"\b(?:do\s+not|don't|dont|no)\s+use\s+(?:telugu|hindi|tamil|malayalam|kannada|gujarati|marathi|punjabi|regional)", lower)
+        or "no regional indian language" in lower
+        or "no regional languages" in lower
+    )
+
+
+def _normalize_recurring_time(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", value or "").strip(" .")
+    normalized = re.sub(
+        r"\b(every|monday|tuesday|wednesday|thursday|friday|saturday|sunday|from|to)\b",
+        lambda match: match.group(1).capitalize()
+        if match.group(1).lower() in {
+            "every",
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        }
+        else match.group(1).lower(),
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        r"\b(am|pm)\b",
+        lambda match: match.group(1).upper(),
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    return normalized
 
 
 def _load_store(path: Path) -> FlyerProjectStore:
@@ -127,14 +269,36 @@ def _write_store(path: Path, store: FlyerProjectStore) -> None:
     atomic_write_text(path, store.model_dump_json(indent=2))
 
 
+def _load_flyer_config(path: Path) -> FlyerConfig | None:
+    """Best-effort config load for config-gated extraction features.
+
+    Local/unit invocations often do not have /opt/shift-agent/config.yaml; in
+    that case project creation stays byte-identical to the pre-config path.
+    Production has the config, and explicit --config-path failures should surface
+    through the normal Config validation path rather than silently disabling a
+    feature the operator enabled.
+    """
+    if not path.exists():
+        return None
+    if _load_yaml_model is not None:
+        return _load_yaml_model(path, Config).flyer
+    import yaml
+    return Config.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")) or {}).flyer
+
+
 def _load_customer_store(path: Path) -> FlyerCustomerStore:
     if not path.exists():
         return FlyerCustomerStore()
     return FlyerCustomerStore.model_validate(json.loads(path.read_text(encoding="utf-8")))
 
 
-def _find_customer_for_project(customer_phone: str, customers_path: Path):
-    return _load_customer_store(customers_path).find_customer_by_phone(customer_phone)
+def _find_customer_for_sender(
+    *,
+    customer_phone: str,
+    chat_id: str,
+    customers_path: Path,
+):
+    return _load_customer_store(customers_path).find_customer_by_sender(customer_phone, chat_id)
 
 
 def _hydrate_fields_from_customer(
@@ -152,7 +316,7 @@ def _hydrate_fields_from_customer(
         updates["venue_or_location"] = customer.business_address
     if not (fields.contact_info or "").strip():
         updates["contact_info"] = str(customer.public_phone)
-    if fields.preferred_language == "en" and customer.preferred_language != "en":
+    if fields.preferred_language == "en" and customer.preferred_language != "en" and not _explicit_english_only(fields.notes or ""):
         updates["preferred_language"] = customer.preferred_language
     if not updates:
         return fields
@@ -171,7 +335,7 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
     formats: list[str] = []
 
     event_match = re.search(
-        r"\b(?:need|create|make|generate)?\s*(?:a\s+)?(?:flyer|flier|poster|banner)\s+for\s+(.+?)(?=,|\s+\b(?:every|daily|weekly|from|any|include|with|promoting|offering|featuring|advertising|announcing)\b|\s+(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b|\.|$)",
+        r"\b(?:need|create|make|generate)?\s*(?:a\s+)?(?:flyer|flier|poster|banner)\s+for\s+(.+?)(?=,\s*(?:every|any|include|includes|with|from)\b|\s+\b(?:promoting|offering|featuring|advertising|announcing|every|any|include|includes|with|from)\b|\s+(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b|\.|$)",
         text,
         flags=re.IGNORECASE,
     )
@@ -213,19 +377,18 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
             candidate = datetime(year + 1, month, day, tzinfo=timezone.utc).date()
         date_value = candidate.isoformat()
 
-    schedule_match = re.search(
-        r"\b((?:every\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
-        r"(?:\s+(?:and|to|-)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))*"
-        r"\s+from\s+\d{1,2}(?::\d{2})?\s*(?:AM|PM)?\s+(?:to|-)\s+\d{1,2}(?::\d{2})?\s*(?:AM|PM))\b",
+    recurring_time_match = re.search(
+        r"\b(every\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+        r"\s+from\s+\d{1,2}(?::\d{2})?\s*(?:AM|PM)?\s+(?:to|-)\s+"
+        r"\d{1,2}(?::\d{2})?\s*(?:AM|PM))\b",
         text,
         flags=re.IGNORECASE,
     )
-    if schedule_match:
-        schedule = " ".join(schedule_match.group(1).split())
-        time_value = schedule[:1].upper() + schedule[1:]
-        time_value = re.sub(r"\b(am|pm)\b", lambda m: m.group(1).upper(), time_value, flags=re.IGNORECASE)
-    time_match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b", text, flags=re.IGNORECASE)
-    if time_match and not time_value:
+    if recurring_time_match:
+        time_value = _normalize_recurring_time(recurring_time_match.group(1))
+    else:
+        time_match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b", text, flags=re.IGNORECASE)
+    if not recurring_time_match and time_match:
         hour = int(time_match.group(1))
         minute = int(time_match.group(2) or "00")
         meridiem = time_match.group(3).upper()
@@ -280,7 +443,9 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
         event_name = ""
     if "uploaded template/reference" in lower and event_name.lower() in {"flyer", "create flyer", "uploaded flyer template"}:
         event_name = ""
-    if "telugu" in lower:
+    if _explicit_english_only(text):
+        language = "en"
+    elif "telugu" in lower:
         language = "te"
     elif "hindi" in lower:
         language = "hi"
@@ -342,6 +507,26 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
 
 def _normalize_event_name(event_name: str, text: str) -> str:
     name = re.sub(r"^\s*(?:a|an|the)\s+", "", (event_name or "").strip(" ."), flags=re.IGNORECASE)
+    help_match = re.search(
+        r"\bhelp\s+me\s+with\s+(.+?)\s+(?:flyer|flier|poster|banner)\b",
+        name,
+        flags=re.IGNORECASE,
+    )
+    if help_match:
+        name = help_match.group(1).strip(" .")
+    name = re.sub(
+        r"^(?:i[?'’]?d\s+like\s+you\s+to\s+)?(?:help\s+me\s+with\s+)?",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    ).strip(" .")
+    name = re.sub(
+        r"\s+\bon\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b$",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    ).strip(" .")
+    name = re.sub(r"\s+\b(?:flyer|flier|poster|banner)\b$", "", name, flags=re.IGNORECASE).strip(" .")
     lower_text = text.lower()
     lower_name = name.lower()
     has_recurring_days = bool(re.search(
@@ -352,7 +537,14 @@ def _normalize_event_name(event_name: str, text: str) -> str:
         return "Weekend Breakfast Specials" if has_recurring_days else "Breakfast Specials"
     if "menu" in lower_text and not name:
         return "Menu Specials"
-    return name
+    return _headline_case_label(name)
+
+
+def _headline_case_label(value: str) -> str:
+    value = (value or "").strip()
+    if not value or value != value.lower():
+        return value
+    return re.sub(r"\b[a-z]", lambda match: match.group(0).upper(), value)
 
 
 def _copy_reference_asset(
@@ -382,34 +574,131 @@ def _copy_reference_asset(
     )
 
 
+def _has_reference_inspiration_fallback_facts(locked_facts) -> bool:
+    """True when a failed old-reference read can still proceed truthfully.
+
+    "Use as reference" is visual inspiration. If the customer/profile facts
+    already contain a concrete campaign/headline/offer/item to render, a
+    reference OCR/parser miss must not dead-end the project.
+    """
+    useful_fact_ids = {
+        "campaign_title",
+        "headline",
+        "tagline",
+        "pricing_structure",
+        "schedule",
+        "promotion_end",
+    }
+    for fact in locked_facts or []:
+        fact_id = str(getattr(fact, "fact_id", "") or "")
+        source = str(getattr(fact, "source", "") or "")
+        value = str(getattr(fact, "value", "") or "").strip()
+        if not value or source not in {"customer_text", "customer_profile"}:
+            continue
+        if fact_id in useful_fact_ids or fact_id.startswith(("offer:", "item:")):
+            return True
+    return False
+
+
+def _reference_failure_requires_manual_review(extraction, *, locked_facts=None) -> bool:
+    if extraction.status not in {"provider_unavailable", "unsupported", "low_confidence"}:
+        return False
+    if extraction.status == "unsupported":
+        return True
+    if extraction.role == "old_flyer_reference" and _has_reference_inspiration_fallback_facts(locked_facts):
+        return False
+    return extraction.role in {"menu_reference", "old_flyer_reference", "source_edit_template", "unsupported"}
+
+
+def _manual_reason_for_reference_failure(extraction) -> str:
+    if extraction.role == "source_edit_template" and extraction.status == "provider_unavailable":
+        return "source_edit_provider_unavailable"
+    return f"reference_{extraction.status}"
+
+
+def _initial_reference_extraction(asset: FlyerAsset, *, raw_request: str, now: datetime) -> FlyerReferenceExtraction:
+    role = classify_reference_role(raw_request, asset)
+    mime = (asset.mime_type or "").lower()
+    if role == "unsupported" or not mime.startswith("image/"):
+        return FlyerReferenceExtraction(
+            asset_id=asset.asset_id,
+            role=role,
+            provider="not_run",
+            status="unsupported",
+            detail=f"unsupported reference media type: {asset.mime_type}",
+            extracted_at=now,
+        )
+    if role not in {"menu_reference", "old_flyer_reference", "source_edit_template"}:
+        return FlyerReferenceExtraction(
+            asset_id=asset.asset_id,
+            role=role,
+            provider="not_run",
+            status="not_run",
+            detail="reference extraction not required for this role",
+            extracted_at=now,
+        )
+    return FlyerReferenceExtraction(
+        asset_id=asset.asset_id,
+        role=role,
+        provider="not_run",
+        status="not_run",
+        detail="reference extraction pending",
+        extracted_at=now,
+    )
+
+
+def _needs_reference_extraction(extraction: FlyerReferenceExtraction) -> bool:
+    return (
+        extraction.role in {"menu_reference", "old_flyer_reference", "source_edit_template"}
+        and extraction.status == "not_run"
+    )
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--customer-phone", required=True)
+    p.add_argument("--chat-id", default="")
     p.add_argument("--message-id", required=True)
     p.add_argument("--raw-request", required=True)
     p.add_argument("--reference-media-path", default="")
+    p.add_argument("--defer-reference-extraction", action="store_true")
     p.add_argument("--manual-edit-required", action="store_true")
     p.add_argument("--state-path", default=str(STATE_PATH))
     p.add_argument("--customer-state-path", default=str(CUSTOMERS_PATH))
     p.add_argument("--asset-dir", default=str(ASSET_DIR))
+    p.add_argument("--config-path", default=str(CONFIG_PATH))
     args = p.parse_args()
 
     state_path = Path(args.state_path)
+    flyer_cfg = _load_flyer_config(Path(args.config_path))
+    project: FlyerProject | None = None
+    pending_reference_asset: FlyerAsset | None = None
+    should_extract_reference = False
     with FileLock(Path(str(state_path) + ".lock")):
         store = _load_store(state_path)
-        for project in store.projects:
-            if project.original_message_id == args.message_id:
-                print(project.model_dump_json())
+        for existing in store.projects:
+            if existing.original_message_id == args.message_id:
+                print(existing.model_dump_json())
                 return 0
 
         now = datetime.now(timezone.utc)
-        customer = _find_customer_for_project(args.customer_phone, Path(args.customer_state_path))
+        customer = _find_customer_for_sender(
+            customer_phone=args.customer_phone,
+            chat_id=args.chat_id,
+            customers_path=Path(args.customer_state_path),
+        )
+        project_chat_id = args.chat_id
+        if not project_chat_id and customer is not None:
+            project_chat_id = str(getattr(customer, "primary_chat_id", "") or "")
         fields = _hydrate_fields_from_customer(
             _extract_fields(args.raw_request, now=now),
             customer=customer,
         )
         project_id = f"F{store.next_sequence:04d}"
         reference_asset = None
+        reference_extractions = []
+        manual_review = FlyerManualReview()
+        reference_manual_required = False
         if args.reference_media_path:
             reference_asset = _copy_reference_asset(
                 Path(args.reference_media_path),
@@ -418,17 +707,77 @@ def main() -> int:
                 asset_dir=Path(args.asset_dir),
                 now=now,
             )
+            if reference_asset is not None:
+                extraction = _initial_reference_extraction(reference_asset, raw_request=args.raw_request, now=now)
+                reference_extractions.append(extraction)
+                if _reference_failure_requires_manual_review(extraction):
+                    reference_manual_required = True
+                    manual_review = make_manual_review(
+                        reason_code=f"reference_{extraction.status}",
+                        detail=extraction.detail,
+                        queued_at=now,
+                    )
+                elif _needs_reference_extraction(extraction) and not args.defer_reference_extraction:
+                    pending_reference_asset = reference_asset
+                    should_extract_reference = True
+        profile_facts = []
+        if customer is not None and customer.status in {"trial", "active"}:
+            profile_facts = profile_locked_facts(customer, raw_request=args.raw_request, message_id=args.message_id)
+        reference_owns_items = any(_needs_reference_extraction(extraction) for extraction in reference_extractions)
+        text_fact_cfg = None if reference_owns_items else flyer_cfg
+        locked_facts = merge_locked_facts(
+            profile_facts,
+            extract_text_facts(
+                fields,
+                args.raw_request,
+                message_id=args.message_id,
+                profile_business_name=(customer.business_name if customer is not None else ""),
+                allow_text_identity=not bool(profile_facts),
+                cfg=text_fact_cfg,
+            ),
+        )
+        # P0-2 missing-required-fact gate: if extraction (customer text + profile +
+        # reference) did not surface every required fact slot, queue for manual
+        # review rather than rendering a project the system knows is incomplete.
+        # Reference-failure / source-edit gates above take precedence (they have
+        # more specific reason codes); only fire if none of those already queued.
+        # `missing_required_facts` accepts any object with `locked_facts`; we
+        # build a lightweight shim so we don't have to construct the full
+        # FlyerProject just to check.
+        _facts_shim = type("P", (), {"locked_facts": locked_facts})()
+        missing_ids = missing_required_facts(_facts_shim, required_ids=DEFAULT_REQUIRED_FACT_IDS)
+        missing_required_fact_queue = bool(
+            missing_ids
+            and not args.manual_edit_required
+            and not reference_manual_required
+        )
+        if args.manual_edit_required and not reference_manual_required:
+            manual_review = make_manual_review(
+                reason_code="source_edit_provider_unavailable",
+                detail="authorized source-edit queued for manual review",
+                queued_at=now,
+            )
+        elif missing_required_fact_queue:
+            manual_review = make_manual_review(
+                reason_code="missing_required_facts",
+                detail=f"missing required fact slots: {', '.join(missing_ids)}",
+                queued_at=now,
+            )
+        status = "manual_edit_required" if args.manual_edit_required or reference_manual_required or missing_required_fact_queue else "intake_started"
         project = FlyerProject(
             project_id=project_id,
-            status="manual_edit_required" if args.manual_edit_required else "intake_started",
+            status=status,
             customer_phone=args.customer_phone,
-            customer_id=customer.customer_id if customer else "",
-            chat_id=customer.primary_chat_id if customer else "",
+            customer_id=customer.customer_id if customer is not None else "",
+            chat_id=project_chat_id,
             created_at=now,
             updated_at=now,
             original_message_id=args.message_id,
             raw_request=args.raw_request,
             fields=fields,
+            locked_facts=locked_facts,
+            reference_extractions=reference_extractions,
+            manual_review=manual_review,
             assets=[reference_asset] if reference_asset else [],
         )
         store.projects.append(project)
@@ -441,7 +790,69 @@ def main() -> int:
             customer_phone=args.customer_phone,
             original_message_id=args.message_id,
         )
-        print(project.model_dump_json())
+    if not should_extract_reference or pending_reference_asset is None or project is None:
+        if project is not None:
+            print(project.model_dump_json())
+        return 0
+
+    extraction = extract_reference(
+        pending_reference_asset,
+        raw_request=args.raw_request,
+        provider=build_reference_extraction_provider(),
+    )
+    # Operator observability: emit FlyerSourceContractExtracted regardless of
+    # success/provider-unavailable/low-confidence. Operator needs to see all
+    # extraction attempts so they can spot provider-availability regressions
+    # without grepping for absence-of-success.
+    if extraction.role == "source_edit_template":
+        _emit_source_contract_extracted_audit(
+            extraction=extraction,
+            project_id=project.project_id,
+            now=datetime.now(timezone.utc),
+        )
+    # Convert source-contract into locked facts + populate forbidden substrings
+    # before the merge so the project carries source-derived requirements and
+    # the negative-assertion list reaches QA via reference_extractions[N].source_contract.
+    source_facts = []
+    if extraction.source_contract is not None:
+        _populate_forbidden_substrings(extraction.source_contract)
+        source_facts = source_contract_locked_facts(
+            extraction.source_contract,
+            asset=pending_reference_asset,
+            message_id=args.message_id,
+        )
+    now = datetime.now(timezone.utc)
+    with FileLock(Path(str(state_path) + ".lock")):
+        store = _load_store(state_path)
+        for idx, current in enumerate(store.projects):
+            if current.project_id != project.project_id:
+                continue
+            reference_extractions = [
+                extraction if item.asset_id == extraction.asset_id else item
+                for item in current.reference_extractions
+            ]
+            locked_facts = merge_locked_facts(
+                current.locked_facts,
+                extraction.extracted_facts,
+                source_facts,
+            )
+            updates = {
+                "reference_extractions": reference_extractions,
+                "locked_facts": locked_facts,
+                "updated_at": now,
+            }
+            if _reference_failure_requires_manual_review(extraction, locked_facts=current.locked_facts):
+                updates["status"] = "manual_edit_required"
+                updates["manual_review"] = make_manual_review(
+                    reason_code=_manual_reason_for_reference_failure(extraction),
+                    detail=extraction.detail,
+                    queued_at=now,
+                )
+            store.projects[idx] = current.model_copy(update=updates)
+            _write_store(state_path, store)
+            print(store.projects[idx].model_dump_json())
+            return 0
+    print(project.model_dump_json())
     return 0
 
 

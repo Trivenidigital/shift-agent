@@ -40,9 +40,7 @@ import os
 import re
 import sys
 import unicodedata
-import urllib.error
-import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -54,6 +52,7 @@ from safe_io import (  # noqa: E402
     load_model, flock, assert_load_status_clean, LoadStatusError,
     load_yaml_model,
 )
+from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402  # PR-ε: chokepoint consolidation
 from schemas import (  # noqa: E402
     Config, CateringLeadStore,
     CateringLeadStatusChange, CateringOwnerDecision, CateringQuoteSent,
@@ -77,11 +76,9 @@ from pydantic import TypeAdapter, ValidationError  # noqa: E402
 # defaults to deployed location). Hides the override from operator-typo
 # risk in normal usage; tests use monkeypatch.setenv.
 CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
-LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
-LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
-LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
-BRIDGE_URL = "http://127.0.0.1:3000/send"
-BRIDGE_TIMEOUT = 10
+LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
+LEADS_LOCK = Path(os.environ.get("SHIFT_AGENT_LEADS_LOCK", str(LEADS_PATH) + ".lock"))
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
 
 # PR-B v3 — drafted-quote stdin caps and Unicode strip categories.
 # 8KB stdin read cap is generous (LLM drafts run ~300-500 chars in practice);
@@ -96,25 +93,6 @@ _STRIP_UNICODE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn"})
 _MARKDOWN_DELIM_RE = re.compile(r"[*_~`]+")
 
 
-def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
-    payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
-    req = urllib.request.Request(
-        BRIDGE_URL, data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            doc = json.loads(body)
-            mid = doc.get("id") or doc.get("messageId") or ""
-            if not mid:
-                return False, f"empty messageId: {body[:200]}"
-            return True, mid
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
-        return False, f"{type(e).__name__}: {e}"
-
-
 def _normalize_quote_text(s: str) -> str:
     """PR-B v3 — strip control/format Unicode + markdown delimiters; cap length.
 
@@ -125,15 +103,16 @@ def _normalize_quote_text(s: str) -> str:
     - LLM emitting markdown when prompted for plain prose
     - Runaway output exceeding WhatsApp message limits
     """
+    normalized = unicodedata.normalize("NFC", s).replace("\r\n", "\n").replace("\r", "\n")
     chars = []
-    for ch in unicodedata.normalize("NFC", s):
+    for ch in normalized:
         if ch == "\n":
             chars.append(ch)
             continue
         if unicodedata.category(ch) in _STRIP_UNICODE_CATEGORIES:
             continue
         chars.append(ch)
-    out = "".join(chars).replace("\r\n", "\n").replace("\r", "\n")
+    out = "".join(chars)
     out = _MARKDOWN_DELIM_RE.sub("", out)
     return out[:_QUOTE_OUTPUT_CAP_CHARS]
 
@@ -212,7 +191,7 @@ def _emit_quote_skill_failed_best_effort(lead_id: str, code: str,
     LOG_PATH writer holds it; deployed-pattern drift caught at PR review.
     """
     try:
-        ts = customer_now().isoformat()
+        ts = datetime.now(timezone.utc).isoformat()
         entry = CateringQuoteSkillFailed(
             type="catering_quote_skill_failed", ts=ts,
             lead_id=lead_id, code=code, reason=reason, detail=detail[:2000],
@@ -407,7 +386,7 @@ def main() -> int:
     try:
         cfg = load_yaml_model(CONFIG_PATH, Config)
     except (FileNotFoundError, RuntimeError, ValidationError) as e:
-        log_config_load_failed_best_effort(CONFIG_PATH, e)
+        log_config_load_failed_best_effort(CONFIG_PATH, e, log_path=LOG_PATH)
         sys.stderr.write(f"config load failed: {type(e).__name__}: {e}\n")
         return EXIT_SCHEMA_VIOLATION
 
@@ -830,6 +809,7 @@ def main() -> int:
                 customer_phone_at_approve=customer_phone_pre_bridge or "",
                 outbound_message_id=mid_or_err,
                 detail=divergence_msg[:500],
+                log_path=LOG_PATH,
             )
             try:
                 import subprocess as _sp
@@ -896,9 +876,87 @@ def main() -> int:
             ),
         )
 
+    # Slice-2 catering deposit caller (PR feat/commerce-slice2-catering-deposit-caller).
+    # Hook fires AFTER LEADS_LOCK releases (above `with FileLock(LEADS_LOCK):`
+    # block dedented at line 875) — critical: subprocess MUST NOT run inside
+    # parent flock or it self-deadlocks re-acquiring the same lock
+    # (Reviewer A BLOCKER-1 fix from design review).
+    #
+    # The hook is best-effort: a deposit failure NEVER rolls back the quote
+    # send. Customer has the quote; deposit link is a follow-up.
+    # See tasks/hermes-commerce-slice2-catering-deposit-caller-design.md §2.
+    _maybe_invoke_deposit_hook(
+        cfg=cfg,
+        lead=store.leads[matched_idx],
+        lead_id=lead_id_for_output,
+    )
+
     print(json.dumps({"lead_id": lead_id_for_output, "new_status": "SENT_TO_CUSTOMER",
                       "outbound_sent": True, "outbound_message_id": mid_or_err}))
     return EXIT_OK
+
+
+def _maybe_invoke_deposit_hook(cfg, lead, lead_id: str) -> None:
+    """Slice-2 post-send hook: if the lead crosses the deposit threshold,
+    subprocess-invoke catering-mint-deposit. NEVER raises; failures are
+    journald-logged and best-effort audited.
+
+    Imports the threshold predicate from src/agents/catering/deposit.py.
+    Resolves the deposit script via /usr/local/bin (deployed path) with a
+    fallback to the repo path for in-place test runs.
+    """
+    import subprocess
+    # Try /opt/shift-agent (deployed VPS layout — deploy script installs
+    # deposit.py there) then fall back to the repo path for in-place test
+    # runs. The /opt/shift-agent path is already on sys.path (line 47 above).
+    try:
+        from deposit import _should_mint_deposit  # type: ignore
+    except ImportError:
+        # Fallback for in-repo test invocations: walk to src/agents/catering
+        try:
+            _repo_root = Path(__file__).resolve().parent.parent.parent.parent.parent
+            sys.path.insert(0, str(_repo_root / "src" / "agents" / "catering"))
+            from deposit import _should_mint_deposit  # type: ignore
+        except ImportError as e:
+            sys.stderr.write(
+                f"WARN: catering deposit helper import failed (non-fatal); "
+                f"skipping deposit hook for {lead_id}: {e}\n"
+            )
+            return
+    if not _should_mint_deposit(cfg, lead):
+        return
+    script_paths = [
+        Path("/usr/local/bin/catering-mint-deposit"),
+        Path(__file__).resolve().parent / "catering-mint-deposit",
+    ]
+    script_path = next((p for p in script_paths if p.exists()), None)
+    if script_path is None:
+        sys.stderr.write(
+            f"WARN: catering-mint-deposit binary not found in any of "
+            f"{[str(p) for p in script_paths]}; skipping deposit for {lead_id}\n"
+        )
+        return
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script_path), "--lead-id", lead_id],
+            capture_output=True, text=True, timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            sys.stderr.write(
+                f"catering-mint-deposit lead_id={lead_id} exit={result.returncode} "
+                f"stderr={result.stderr[:500]}\n"
+            )
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(
+            f"catering-mint-deposit lead_id={lead_id} TIMED OUT after 30s; "
+            f"deposit will need operator re-invocation\n"
+        )
+    except Exception as e:  # noqa: BLE001 — hook is best-effort
+        sys.stderr.write(
+            f"WARN: catering-mint-deposit hook failed (non-fatal): "
+            f"{type(e).__name__}: {e}\n"
+        )
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ pytest.skip(
 ) if os.name != "posix" else None
 pytest.importorskip("fcntl")
 
+import safe_io as safe_io_mod
 from safe_io import (
     FileLock, atomic_write_text, atomic_write_json,
     safe_load_json, ndjson_append, sweep_orphan_temps, validate_phone_input,
@@ -67,10 +68,16 @@ def test_atomic_write_text_uses_600_by_default(tmp_path):
 def test_atomic_write_text_skips_dir_fsync_when_os_name_not_posix(tmp_path, monkeypatch):
     """BUG-FLYER-QA-005: Windows raises PermissionError when os.open is called on
     a directory. The parent-directory fsync block must be gated on
-    os.name == 'posix'. This simulates Windows on Linux CI by monkeypatching
-    os.name; the test passes if no PermissionError leaks and the file content
-    is correct."""
-    monkeypatch.setattr(os, "name", "nt")
+    os.name == 'posix'. Simulate Windows inside safe_io only; patching the
+    process-wide os.name makes pathlib instantiate WindowsPath on Linux before
+    the function reaches the branch under test."""
+    class WindowsOsProxy:
+        name = "nt"
+
+        def __getattr__(self, attr):
+            return getattr(os, attr)
+
+    monkeypatch.setattr(safe_io_mod, "os", WindowsOsProxy())
     target = tmp_path / "x.txt"
     atomic_write_text(target, "hello")
     assert target.read_text(encoding="utf-8") == "hello"

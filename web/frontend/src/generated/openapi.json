@@ -4,6 +4,11 @@
       "AuthStatus": {
         "description": "Public \u2014 drives login screen tab visibility. No sensitive data.",
         "properties": {
+          "auth_bypass_enabled": {
+            "default": false,
+            "title": "Auth Bypass Enabled",
+            "type": "boolean"
+          },
           "pushover_configured": {
             "title": "Pushover Configured",
             "type": "boolean"
@@ -72,6 +77,27 @@
           "file"
         ],
         "title": "Body_import_csv_roster_import_csv_post",
+        "type": "object"
+      },
+      "Body_operator_upload_flyer_operator_uploads_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 300,
+            "minLength": 5,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file",
+          "reason"
+        ],
+        "title": "Body_operator_upload_flyer_operator_uploads_post",
         "type": "object"
       },
       "CampaignSendBody": {
@@ -489,6 +515,19 @@
         "title": "ExtendTrialBody",
         "type": "object"
       },
+      "FlagWarnTierBody": {
+        "description": "Operator's optional context note. Empty is acceptable \u2014 the flag\nitself is the signal; ts + flagged_by_operator_id always traceable.",
+        "properties": {
+          "note": {
+            "default": "",
+            "maxLength": 500,
+            "title": "Note",
+            "type": "string"
+          }
+        },
+        "title": "FlagWarnTierBody",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -500,6 +539,127 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "ManualQueueAssignBody": {
+        "properties": {
+          "admin_id": {
+            "maxLength": 60,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9 ._@-]{1,60}$",
+            "title": "Admin Id",
+            "type": "string"
+          },
+          "by": {
+            "maxLength": 60,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9 ._@-]{1,60}$",
+            "title": "By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "admin_id",
+          "by"
+        ],
+        "title": "ManualQueueAssignBody",
+        "type": "object"
+      },
+      "ManualQueueBreakGlassBody": {
+        "properties": {
+          "reason": {
+            "maxLength": 300,
+            "minLength": 5,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "ManualQueueBreakGlassBody",
+        "type": "object"
+      },
+      "ManualQueueClaimBody": {
+        "description": "Self-reported admin handle for claim/unclaim coordination (not an\nauthenticated identity \u2014 the cockpit shares one owner login).",
+        "properties": {
+          "admin_id": {
+            "maxLength": 60,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9 ._@-]{1,60}$",
+            "title": "Admin Id",
+            "type": "string"
+          },
+          "force": {
+            "default": false,
+            "title": "Force",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "admin_id"
+        ],
+        "title": "ManualQueueClaimBody",
+        "type": "object"
+      },
+      "ManualQueueClaimNextBody": {
+        "description": "Self-reported admin handle for the atomic claim-next throughput action.",
+        "properties": {
+          "admin_id": {
+            "maxLength": 60,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9 ._@-]{1,60}$",
+            "title": "Admin Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "admin_id"
+        ],
+        "title": "ManualQueueClaimNextBody",
+        "type": "object"
+      },
+      "ManualQueueCloseNoSendBody": {
+        "description": "Operator-close request body. `force=True` bypasses the freshness\nguard; the agent helper `enforce_close_freshness_guard` accepts force\nOR a documented bypass token in the reason string.",
+        "properties": {
+          "force": {
+            "default": false,
+            "title": "Force",
+            "type": "boolean"
+          },
+          "reason": {
+            "maxLength": 300,
+            "minLength": 5,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "ManualQueueCloseNoSendBody",
+        "type": "object"
+      },
+      "ManualQueueCompleteBody": {
+        "properties": {
+          "operator_asset_path": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Operator Asset Path",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 300,
+            "minLength": 5,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "operator_asset_path"
+        ],
+        "title": "ManualQueueCompleteBody",
         "type": "object"
       },
       "MeResponse": {
@@ -528,6 +688,56 @@
           "expires_at"
         ],
         "title": "MeResponse",
+        "type": "object"
+      },
+      "OrderTransitionBody": {
+        "additionalProperties": false,
+        "description": "Cockpit staff-action request. `expected_from_status` is the status the\noperator saw when they clicked (optimistic-concurrency token); `cause` is\nrequired for a cancel (the operator's reason) and optional otherwise.",
+        "properties": {
+          "cause": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Cause",
+            "type": "string"
+          },
+          "expected_from_status": {
+            "enum": [
+              "pending_payment",
+              "awaiting_approval",
+              "paid",
+              "preparing",
+              "ready",
+              "out_for_delivery",
+              "completed",
+              "cancelled",
+              "voided",
+              "refunded"
+            ],
+            "title": "Expected From Status",
+            "type": "string"
+          },
+          "to_status": {
+            "enum": [
+              "pending_payment",
+              "awaiting_approval",
+              "paid",
+              "preparing",
+              "ready",
+              "out_for_delivery",
+              "completed",
+              "cancelled",
+              "voided",
+              "refunded"
+            ],
+            "title": "To Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "to_status",
+          "expected_from_status"
+        ],
+        "title": "OrderTransitionBody",
         "type": "object"
       },
       "OtpRequestResponse": {
@@ -1176,6 +1386,128 @@
         ]
       }
     },
+    "/commerce/orders": {
+      "get": {
+        "operationId": "list_orders_commerce_orders_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Orders Commerce Orders Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Orders",
+        "tags": [
+          "commerce"
+        ]
+      }
+    },
+    "/commerce/orders/{order_id}": {
+      "get": {
+        "operationId": "get_order_commerce_orders__order_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "order_id",
+            "required": true,
+            "schema": {
+              "title": "Order Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Order Commerce Orders  Order Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Order",
+        "tags": [
+          "commerce"
+        ]
+      }
+    },
+    "/commerce/orders/{order_id}/transition": {
+      "post": {
+        "description": "Apply an owner-initiated Slice-C status transition.\n\nOwner-only (require_fresh_otp step-up). No provider/POS/customer-send calls.\nScope-gated to SLICE_C_ALLOWED_TRANSITIONS; the optimistic-concurrency\nguard (`expected_from_status`) and the shared FileLock live in the\n`order_state` primitive. Every refusal is audited; on the happy path the\nupdated order is returned.",
+        "operationId": "transition_order_commerce_orders__order_id__transition_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "order_id",
+            "required": true,
+            "schema": {
+              "title": "Order Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrderTransitionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Transition Order Commerce Orders  Order Id  Transition Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Transition Order",
+        "tags": [
+          "commerce"
+        ]
+      }
+    },
     "/config": {
       "get": {
         "operationId": "get_config_config_get",
@@ -1811,6 +2143,56 @@
         ]
       }
     },
+    "/flyer/customers/{customer_id}/deactivate": {
+      "post": {
+        "operationId": "customer_deactivate_flyer_customers__customer_id__deactivate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "customer_id",
+            "required": true,
+            "schema": {
+              "title": "Customer Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReasonBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Customer Deactivate",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
     "/flyer/customers/{customer_id}/extend-trial": {
       "post": {
         "operationId": "extend_trial_flyer_customers__customer_id__extend_trial_post",
@@ -1930,6 +2312,594 @@
         ]
       }
     },
+    "/flyer/health": {
+      "get": {
+        "description": "Read-only flyer provider + platform-runtime health.\n\nSurfaces gateway / bridge / paired / cockpit deploy plus OpenRouter\n(generation + vision) and configured source-edit posture. Never returns\nsecret values or prefixes - only key_present + key_source.\nOpenRouter missing = red (blocks generation); source-edit missing = yellow\n(degraded; routes to manual review).",
+        "operationId": "flyer_health_flyer_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Flyer Health",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/manual-queue": {
+      "get": {
+        "operationId": "manual_queue_flyer_manual_queue_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Manual Queue",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/manual-queue/claim-next": {
+      "post": {
+        "operationId": "manual_queue_claim_next_flyer_manual_queue_claim_next_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualQueueClaimNextBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manual Queue Claim Next",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/manual-queue/{project_id}/action-preview": {
+      "get": {
+        "operationId": "manual_queue_action_preview_endpoint_flyer_manual_queue__project_id__action_preview_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "action",
+            "required": true,
+            "schema": {
+              "title": "Action",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manual Queue Action Preview Endpoint",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/manual-queue/{project_id}/assign": {
+      "post": {
+        "operationId": "manual_queue_assign_flyer_manual_queue__project_id__assign_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualQueueAssignBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manual Queue Assign",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/manual-queue/{project_id}/break-glass": {
+      "post": {
+        "operationId": "manual_queue_break_glass_flyer_manual_queue__project_id__break_glass_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualQueueBreakGlassBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manual Queue Break Glass",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/manual-queue/{project_id}/claim": {
+      "post": {
+        "operationId": "manual_queue_claim_flyer_manual_queue__project_id__claim_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualQueueClaimBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manual Queue Claim",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/manual-queue/{project_id}/close-no-send": {
+      "post": {
+        "operationId": "manual_queue_close_no_send_flyer_manual_queue__project_id__close_no_send_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualQueueCloseNoSendBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manual Queue Close No Send",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/manual-queue/{project_id}/complete": {
+      "post": {
+        "operationId": "manual_queue_complete_flyer_manual_queue__project_id__complete_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualQueueCompleteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manual Queue Complete",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/manual-queue/{project_id}/detail": {
+      "get": {
+        "operationId": "manual_queue_detail_flyer_manual_queue__project_id__detail_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manual Queue Detail",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/manual-queue/{project_id}/resend-status": {
+      "post": {
+        "operationId": "manual_queue_resend_status_flyer_manual_queue__project_id__resend_status_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manual Queue Resend Status",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/manual-queue/{project_id}/unclaim": {
+      "post": {
+        "operationId": "manual_queue_unclaim_flyer_manual_queue__project_id__unclaim_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualQueueClaimBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manual Queue Unclaim",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/operator-uploads": {
+      "post": {
+        "description": "Upload an approved operator/designer asset to operator-uploads/.\n\nP0-2: replaces the SCP-then-type-absolute-path UX with a cockpit\nmultipart upload. The returned `asset_path` is what the complete\nendpoint expects; the operator does not type or see the file system\nlayout.",
+        "operationId": "operator_upload_flyer_operator_uploads_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_operator_upload_flyer_operator_uploads_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Operator Upload",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/operator-uploads/{filename}": {
+      "get": {
+        "description": "Serve a cockpit-uploaded file back to the operator for preview before\nthey commit Complete. Read-only; auth (not OTP) gated. Filename must\nmatch the server-generated pattern so the operator cannot probe\narbitrary files under operator-uploads/.",
+        "operationId": "operator_upload_media_flyer_operator_uploads__filename__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "title": "Filename",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Operator Upload Media",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
     "/flyer/projects": {
       "get": {
         "operationId": "projects_flyer_projects_get",
@@ -1976,6 +2946,107 @@
           }
         },
         "summary": "Projects",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/projects/{project_id}/assets/{asset_id}": {
+      "get": {
+        "description": "Serve a project asset's bytes for thumbnail/preview rendering (P0-3).\n\nAuthorization: project + asset_id pair must exist in the live store.\nPath is validated by the FlyerAsset schema to be under\n/opt/shift-agent/state/flyer/, so we additionally ensure the resolved\nfile is under the flyer state root before serving.",
+        "operationId": "project_asset_media_flyer_projects__project_id__assets__asset_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Project Asset Media",
+        "tags": [
+          "flyer"
+        ]
+      }
+    },
+    "/flyer/projects/{project_id}/flag": {
+      "post": {
+        "description": "POST /flyer/projects/{project_id}/flag \u2014 operator flags a\ndelivered_with_warning project for follow-up. Audit-only; no state\nmutation. 404 if missing, 409 if not in delivered_with_warning state.",
+        "operationId": "flag_warn_tier_project_flyer_projects__project_id__flag_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FlagWarnTierBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Flag Warn Tier Project",
         "tags": [
           "flyer"
         ]

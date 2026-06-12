@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Backfill manual_review.reason_code for legacy Flyer projects.
+
+Default is dry-run (prints proposed classifications without modifying state).
+Pass --apply to write the changes. Idempotent: re-running after apply finds zero
+candidates because each project now has a non-default reason_code.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import sys
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT))
+
+from schemas import FlyerProjectStore  # noqa: E402
+from safe_io import FileLock, atomic_write_text  # noqa: E402
+try:
+    from flyer_manual_queue import backfill_manual_reasons  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.manual_queue import backfill_manual_reasons  # noqa: E402
+
+
+STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
+
+
+def _load(path: Path) -> FlyerProjectStore:
+    if not path.exists():
+        return FlyerProjectStore()
+    return FlyerProjectStore.model_validate(json.loads(path.read_text(encoding="utf-8")))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--state-path", default=str(STATE_PATH))
+    parser.add_argument("--apply", action="store_true", help="write the proposed changes; otherwise dry-run")
+    args = parser.parse_args()
+
+    state_path = Path(args.state_path)
+    if args.apply:
+        with FileLock(Path(str(state_path) + ".lock")):
+            store = _load(state_path)
+            result = backfill_manual_reasons(store, apply=True)
+            store = FlyerProjectStore.model_validate(store.model_dump())
+            atomic_write_text(state_path, store.model_dump_json(indent=2))
+    else:
+        store = _load(state_path)
+        result = backfill_manual_reasons(store, apply=False)
+    print(json.dumps(result, default=str))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

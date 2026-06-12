@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""catering-mint-deposit — Agent #2 deposit-link minter (slice-2 commit 2).
+
+Invoked as a subprocess by apply-catering-owner-decision AFTER its FileLock
+(LEADS_LOCK) releases, post-SENT_TO_CUSTOMER persistence. Mints a slice-1
+commerce_payment_link intent on a synthetic CommerceCart, sends the link to
+the customer, and writes the catering_deposit_link_sent audit row with
+cross-reference fields per reconciliation invariant #4.
+
+Usage:
+  catering-mint-deposit --lead-id L0007
+
+Exit codes:
+  0  — OK (success OR in-script no-op for threshold-not-met / already-minted)
+  2  — invalid input (missing --lead-id, threshold violation that callers
+       should be aware of, deposit amount below minimum, etc.)
+  4  — lead not found
+  5  — schema violation (config / state file load failed)
+  6  — bridge unreachable (customer never saw the link)
+
+Design: tasks/hermes-commerce-slice2-catering-deposit-caller-design.md
+PRD: tasks/hermes-commerce-prd-v2.md (slice-2 caller invariants §7 + §10)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, "/opt/shift-agent")
+# Repo-relative fallback for in-repo test runs (deployed VPS already has
+# /opt/shift-agent on sys.path above). Walk up from /src/agents/catering/scripts/
+# to repo root then add src/platform + src/agents/catering.
+_THIS = Path(__file__).resolve()
+_REPO_ROOT = _THIS.parent.parent.parent.parent.parent  # scripts/<file> -> catering -> agents -> src -> repo
+sys.path.insert(0, str(_REPO_ROOT / "src" / "platform"))
+sys.path.insert(0, str(_REPO_ROOT / "src" / "agents" / "catering"))
+
+from safe_io import (  # noqa: E402
+    FileLock, atomic_write_json, customer_now,
+    load_model, load_yaml_model,
+)
+from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402
+from schemas import (  # noqa: E402
+    Config, CateringLeadStore,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
+    EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN,
+)
+from pydantic import ValidationError  # noqa: E402
+
+from commerce import cart as commerce_cart  # noqa: E402
+from commerce import order_state as commerce_order  # noqa: E402
+from commerce import payment_link as commerce_payment_link  # noqa: E402
+from commerce.exceptions import CommerceCheckoutUrlUnrenderable  # noqa: E402
+
+# Import the catering deposit helpers from the same agent package
+from deposit import (  # noqa: E402
+    _should_mint_deposit,
+    _compute_deposit_amount_cents,
+    _render_customer_reply,
+    _render_unconfigured_reply,
+    BRIDGE_PREFIX,
+)
+
+
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
+LEADS_LOCK = Path(os.environ.get("SHIFT_AGENT_LEADS_LOCK", "/opt/shift-agent/state/catering-leads.json.lock"))
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+COMMERCE_CARTS_PATH = Path(os.environ.get("COMMERCE_CARTS_PATH", "/opt/shift-agent/state/commerce/carts.json"))
+COMMERCE_ORDERS_PATH = Path(os.environ.get("COMMERCE_ORDERS_PATH", "/opt/shift-agent/state/commerce/orders.json"))
+COMMERCE_INTENTS_PATH = Path(os.environ.get("COMMERCE_INTENTS_PATH", "/opt/shift-agent/state/commerce/payment_intents.json"))
+COMMERCE_REFERENCES_PATH = Path(os.environ.get("COMMERCE_REFERENCES_PATH", "/opt/shift-agent/state/commerce/payment_references.json"))
+
+
+def _emit_deposit_link_sent(
+    *,
+    lead_id: str,
+    commerce_order_id: str,
+    commerce_payment_intent_id: str,
+    amount_cents: int,
+    url_status: str,
+    outbound_message_id: str,
+    now: datetime,
+) -> None:
+    """Emit catering_deposit_link_sent audit row via the commerce.audit chokepoint."""
+    from commerce.audit import emit
+    emit(
+        LOG_PATH,
+        {
+            "type": "catering_deposit_link_sent",
+            "ts": now.isoformat(),
+            "lead_id": lead_id,
+            "commerce_order_id": commerce_order_id,
+            "commerce_payment_intent_id": commerce_payment_intent_id,
+            "amount_cents": amount_cents,
+            "url_status": url_status,
+            "outbound_message_id": outbound_message_id,
+        },
+    )
+
+
+def _emit_deposit_link_failed(
+    *,
+    lead_id: str,
+    reason: str,
+    detail: str = "",
+    commerce_order_id: str = "",
+    commerce_payment_intent_id: str = "",
+    now: Optional[datetime] = None,
+) -> None:
+    """Best-effort: emit catering_deposit_link_failed; swallow errors."""
+    from commerce.audit import emit
+    try:
+        emit(
+            LOG_PATH,
+            {
+                "type": "catering_deposit_link_failed",
+                "ts": (now or datetime.now(timezone.utc)).isoformat(),
+                "lead_id": lead_id,
+                "reason": reason,
+                "detail": detail[:500],
+                "commerce_order_id": commerce_order_id,
+                "commerce_payment_intent_id": commerce_payment_intent_id,
+            },
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort by contract
+        sys.stderr.write(f"WARN: failed to emit catering_deposit_link_failed: {e}\n")
+
+
+def _notify_owner_best_effort(priority: int, title: str, body: str) -> None:
+    """Pushover P1 on money-adjacent silent failure (Reviewer B HIGH-2)."""
+    try:
+        subprocess.run(
+            ["/usr/local/bin/shift-agent-notify-owner",
+             "--priority", str(priority), "--title", title, body],
+            check=False, timeout=10,
+        )
+    except Exception as e:  # noqa: BLE001 — notification is best-effort
+        sys.stderr.write(
+            f"WARN: shift-agent-notify-owner failed (non-fatal): "
+            f"{type(e).__name__}: {e}\n"
+        )
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--lead-id", required=True, help="catering lead ID (e.g. L0007)")
+    args = ap.parse_args()
+
+    # Load config
+    try:
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        sys.stderr.write(f"config load failed: {type(e).__name__}: {e}\n")
+        return EXIT_SCHEMA_VIOLATION
+
+    with FileLock(LEADS_LOCK):
+        store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+        if status not in ("ok", "missing"):
+            sys.stderr.write(f"leads file load status={status!r}; refusing\n")
+            return EXIT_SCHEMA_VIOLATION
+
+        matched_idx = next(
+            (i for i, l in enumerate(store.leads) if l.lead_id == args.lead_id),
+            None,
+        )
+        if matched_idx is None:
+            sys.stderr.write(f"lead_id {args.lead_id!r} not found\n")
+            return EXIT_NOT_FOUND
+
+        lead = store.leads[matched_idx]
+
+        # Reviewer A HIGH-2: re-check idempotency AFTER acquiring lock so a
+        # parallel manual invocation can't interleave between the post-send
+        # hook's invocation and ours.
+        if lead.deposit_payment_intent_id:
+            print(json.dumps({"lead_id": lead.lead_id, "noop": "already_minted"}))
+            return EXIT_OK
+
+        if not _should_mint_deposit(cfg, lead):
+            # Not an error — just doesn't apply (threshold not met, etc.)
+            print(json.dumps({"lead_id": lead.lead_id, "noop": "threshold_not_met"}))
+            return EXIT_OK
+
+        deposit_amount_cents = _compute_deposit_amount_cents(
+            lead.quote_total_usd, cfg.catering.deposit_pct,
+        )
+        if deposit_amount_cents <= 0:
+            _emit_deposit_link_failed(lead_id=lead.lead_id, reason="zero_amount",
+                                       detail=f"quote_total_usd={lead.quote_total_usd}")
+            return EXIT_INVALID_INPUT
+        if deposit_amount_cents < cfg.commerce.minimum_deposit_cents:
+            _emit_deposit_link_failed(
+                lead_id=lead.lead_id, reason="below_minimum",
+                detail=f"{deposit_amount_cents}<min={cfg.commerce.minimum_deposit_cents}",
+            )
+            return EXIT_INVALID_INPUT
+
+        # Build synthetic cart with isolated chat_id (Reviewer B HIGH-1 + A MEDIUM-1)
+        synthetic_chat_id = f"catering_deposit_{lead.lead_id}@s.whatsapp.net"
+        # PR reviewer B-MEDIUM-1: wrap in try/except so oversize deposit_amount_cents
+        # (which would trip CommerceCartItem.unit_price_cents le=10_000_000_000)
+        # produces a clean cart_build_failed audit row instead of an uncaught
+        # ValidationError that exits the script with traceback.
+        try:
+            cart_result = commerce_cart.add_item(
+                state_path=COMMERCE_CARTS_PATH,
+                decisions_log_path=LOG_PATH,
+                sender_phone=str(lead.customer_phone),
+                sender_lid=None,
+                chat_id=synthetic_chat_id,
+                sku=f"CATERING-DEPOSIT-{lead.lead_id}",
+                display_name=f"Catering deposit for {lead.customer_name or 'event'}"[:200],
+                quantity=1,
+                unit="each",
+                unit_price_cents=deposit_amount_cents,
+                currency="USD",
+            )
+        except ValidationError as e:
+            _emit_deposit_link_failed(
+                lead_id=lead.lead_id, reason="cart_build_failed",
+                detail=f"ValidationError: {str(e)[:400]}",
+            )
+            return EXIT_SCHEMA_VIOLATION
+        if not cart_result.ok:
+            _emit_deposit_link_failed(
+                lead_id=lead.lead_id, reason="cart_build_failed", detail=cart_result.detail,
+            )
+            return EXIT_SCHEMA_VIOLATION
+
+        order_result = commerce_order.create(
+            state_path=COMMERCE_ORDERS_PATH,
+            decisions_log_path=LOG_PATH,
+            cart=cart_result.cart,
+            cart_state_path=COMMERCE_CARTS_PATH,
+        )
+        if not order_result.ok:
+            _emit_deposit_link_failed(
+                lead_id=lead.lead_id, reason="order_create_failed",
+                detail=order_result.detail,
+            )
+            return EXIT_SCHEMA_VIOLATION
+
+        intent_result = commerce_payment_link.mint(
+            intent_state_path=COMMERCE_INTENTS_PATH,
+            decisions_log_path=LOG_PATH,
+            order_id=order_result.order.order_id,
+            originating_message_id=f"catering_deposit_{lead.lead_id}",
+            amount_cents=deposit_amount_cents,
+            currency="USD",
+            chat_id=synthetic_chat_id,
+            checkout_url_template=cfg.commerce.payment_checkout_url_template,
+        )
+        if not intent_result.ok:
+            # PR reviewer B-MEDIUM-2: cancel the order so it doesn't sit as an
+            # orphan in the commerce ledger. The cart was built, the order was
+            # created, but no intent exists — without cancellation the order
+            # would accumulate as silent drift until the §12a watchdog catches
+            # it. Best-effort: if cancel itself fails we still audit the original
+            # intent_mint_failed.
+            try:
+                commerce_order.cancel(
+                    state_path=COMMERCE_ORDERS_PATH,
+                    decisions_log_path=LOG_PATH,
+                    order_id=order_result.order.order_id,
+                    reason="intent_mint_failed_orphan_cleanup",
+                    actor="cron",
+                )
+            except Exception as cancel_err:  # noqa: BLE001 — best-effort cleanup
+                sys.stderr.write(
+                    f"WARN: order cancel-on-intent-fail failed (non-fatal): "
+                    f"{type(cancel_err).__name__}: {cancel_err}\n"
+                )
+            _emit_deposit_link_failed(
+                lead_id=lead.lead_id, reason="intent_mint_failed",
+                detail=intent_result.detail,
+                commerce_order_id=order_result.order.order_id,
+            )
+            return EXIT_SCHEMA_VIOLATION
+
+        # Attempted/sent/failed triple (Reviewer A MEDIUM-3 from slice-1 review)
+        commerce_payment_link.mark_attempted(
+            intent_state_path=COMMERCE_INTENTS_PATH,
+            decisions_log_path=LOG_PATH,
+            intent_id=intent_result.intent.intent_id,
+        )
+
+        url = intent_result.intent.checkout_url
+        try:
+            commerce_payment_link.assert_payment_url_renderable(url)
+            reply_body = _render_customer_reply(
+                lead, deposit_amount_cents, cfg.catering.deposit_pct, url,
+            )
+            url_status = "configured"
+        except CommerceCheckoutUrlUnrenderable:
+            reply_body = _render_unconfigured_reply(lead)
+            url_status = "unconfigured"
+
+        target_jid = f"{str(lead.customer_phone).lstrip('+')}@s.whatsapp.net"
+        ok, mid_or_err = _bridge_post(target_jid, BRIDGE_PREFIX + reply_body)
+        if not ok:
+            # Reviewer A BLOCKER-2: emit failed BEFORE void so the triple holds
+            commerce_payment_link.emit_payment_link_failed(
+                decisions_log_path=LOG_PATH,
+                intent_id=intent_result.intent.intent_id,
+                order_id=order_result.order.order_id,
+                reason=f"bridge_send_failed: {mid_or_err[:150]}",
+            )
+            commerce_payment_link.void(
+                intent_state_path=COMMERCE_INTENTS_PATH,
+                decisions_log_path=LOG_PATH,
+                intent_id=intent_result.intent.intent_id,
+                reason="customer_send_failed",
+                actor="caller",  # Reviewer A HIGH-3 + B HIGH-3
+            )
+            # Slice-2.5 ledger-cleanliness fix (operator-flagged from
+            # 2026-05-29 deploy smoke). Parallel to the intent_mint_failed
+            # cleanup ~30 lines above: cancel the orphan order so it doesn't
+            # sit in `pending_payment` accumulating drift. Operator re-
+            # invocation will mint a fresh intent against a NEW order_id;
+            # without this, the prior order persists as ledger noise that
+            # only the §12a freshness watchdog (slice 3) would notice.
+            try:
+                commerce_order.cancel(
+                    state_path=COMMERCE_ORDERS_PATH,
+                    decisions_log_path=LOG_PATH,
+                    order_id=order_result.order.order_id,
+                    reason="bridge_send_failed_orphan_cleanup",
+                    actor="cron",  # order_state.cancel actor is Literal[customer|operator|cron]
+                )
+            except Exception as cancel_err:  # noqa: BLE001 — best-effort cleanup
+                sys.stderr.write(
+                    f"WARN: order cancel-on-bridge-fail failed (non-fatal): "
+                    f"{type(cancel_err).__name__}: {cancel_err}\n"
+                )
+            _emit_deposit_link_failed(
+                lead_id=lead.lead_id, reason="bridge_send_failed",
+                detail=mid_or_err[:500],
+                commerce_order_id=order_result.order.order_id,
+                commerce_payment_intent_id=intent_result.intent.intent_id,
+            )
+            _notify_owner_best_effort(
+                priority=1,
+                title=f"Catering deposit bridge fail (lead {lead.lead_id})",
+                body=(
+                    f"Deposit mint succeeded for lead {lead.lead_id} "
+                    f"(${deposit_amount_cents/100:.2f}) but WhatsApp bridge POST "
+                    f"failed: {mid_or_err[:200]}. Intent voided. "
+                    f"Re-invoke: catering-mint-deposit --lead-id {lead.lead_id}"
+                ),
+            )
+            return EXIT_DEPENDENCY_DOWN
+
+        commerce_payment_link.mark_sent(
+            intent_state_path=COMMERCE_INTENTS_PATH,
+            decisions_log_path=LOG_PATH,
+            intent_id=intent_result.intent.intent_id,
+        )
+
+        now = customer_now(cfg.customer.timezone)
+        new_lead = lead.model_copy(update={
+            "deposit_required": True,
+            "deposit_amount_cents": deposit_amount_cents,
+            "deposit_commerce_order_id": order_result.order.order_id,
+            "deposit_payment_intent_id": intent_result.intent.intent_id,
+            "deposit_status": "awaiting_payment" if url_status == "configured" else "unconfigured",
+            "deposit_minted_at": now,
+            "updated_at": now,
+        })
+        store.leads[matched_idx] = new_lead
+        atomic_write_json(LEADS_PATH, store)
+
+        _emit_deposit_link_sent(
+            lead_id=lead.lead_id,
+            commerce_order_id=order_result.order.order_id,
+            commerce_payment_intent_id=intent_result.intent.intent_id,
+            amount_cents=deposit_amount_cents,
+            url_status=url_status,
+            outbound_message_id=mid_or_err,
+            now=now,
+        )
+
+    print(json.dumps({
+        "lead_id": lead.lead_id,
+        "deposit_amount_cents": deposit_amount_cents,
+        "commerce_order_id": order_result.order.order_id,
+        "commerce_payment_intent_id": intent_result.intent.intent_id,
+        "url_status": url_status,
+        "outbound_message_id": mid_or_err,
+    }))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

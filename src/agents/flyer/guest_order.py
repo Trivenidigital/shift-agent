@@ -11,6 +11,19 @@ from typing import Optional
 from schemas import E164Phone, FlyerGuestOrder, FlyerGuestOrderStore
 
 try:
+    from agents.flyer.payment_state import (
+        activation_event_state,
+        normalize_payment_provider,
+        normalize_payment_reference,
+    )
+except ModuleNotFoundError:
+    from flyer_payment_state import (  # type: ignore
+        activation_event_state,
+        normalize_payment_provider,
+        normalize_payment_reference,
+    )
+
+try:
     if os.name == "nt":
         raise ModuleNotFoundError("use simple atomic write fallback on Windows")
     from safe_io import atomic_write_text  # type: ignore
@@ -52,6 +65,7 @@ def start_guest_order(
     fallback_checkout_url_template: str = "",
     unit_price_cents: int = 400,
     currency: str = "USD",
+    payment_provider: str = "manual",
     now: Optional[datetime] = None,
 ) -> GuestOrderResult:
     now = now or datetime.now(timezone.utc)
@@ -82,6 +96,7 @@ def start_guest_order(
         now=now,
         unit_price_cents=unit_price_cents,
         currency=currency,
+        payment_provider=payment_provider,
         checkout_url=checkout_url,
     )
     store.orders.append(order)
@@ -94,30 +109,69 @@ def activate_guest_order(
     state_path: Path,
     order_id: str = "",
     sender_phone: str = "",
+    provider: str = "manual",
     payment_reference: str,
+    amount_cents: Optional[int] = None,
+    currency: str = "",
     now: Optional[datetime] = None,
 ) -> GuestOrderResult:
     now = now or datetime.now(timezone.utc)
+    provider = normalize_payment_provider(provider)
+    if not provider:
+        return GuestOrderResult(False, True, "", detail="invalid_provider")
     store = load_guest_order_store(state_path)
     order = store.find_order_by_id(order_id) if order_id else store.find_open_order_by_sender(sender_phone)
     if order is None:
         return GuestOrderResult(False, True, "", detail="guest_order_not_found")
-    payment_reference = " ".join((payment_reference or "").split())
+    expected_amount = order.unit_price_cents * max(1, order.flyer_count_purchased)
+    expected_currency = (order.currency or "USD").upper()
+    check_currency = (currency or expected_currency).upper()
+    if check_currency != expected_currency:
+        return GuestOrderResult(False, True, "", order.order_id, order.status, detail="currency_mismatch")
+    if amount_cents is not None and amount_cents != expected_amount:
+        return GuestOrderResult(False, True, "", order.order_id, order.status, detail="amount_mismatch")
+    if provider != "manual" and amount_cents is None:
+        return GuestOrderResult(False, True, "", order.order_id, order.status, detail="amount_cents_required")
+    payment_reference = normalize_payment_reference(payment_reference)
     if not payment_reference:
         return GuestOrderResult(False, True, "", order.order_id, order.status, detail="payment_reference_required")
+    event_state = activation_event_state(
+        provider=provider,
+        payment_reference=payment_reference,
+        amount_cents=amount_cents,
+        currency=check_currency,
+        expected_amount_cents=expected_amount,
+        expected_currency=expected_currency,
+    )
+    if event_state != "payment_confirmed":
+        return GuestOrderResult(False, True, "", order.order_id, order.status, detail="payment_not_confirmed")
     if any(
-        other.payment_reference == payment_reference and other.order_id != order.order_id
+        other.payment_reference == payment_reference
+        and other.payment_provider == provider
+        and other.order_id != order.order_id
         for other in store.orders
         if other.payment_reference
     ):
         return GuestOrderResult(False, True, "", order.order_id, order.status, detail="payment_reference_already_used")
     if order.status == "paid":
+        replay_amount = amount_cents if amount_cents is not None else order.payment_amount_cents
+        same = (
+            order.payment_provider == provider
+            and order.payment_reference == payment_reference
+            and (order.payment_amount_cents == replay_amount or (order.payment_amount_cents is None and replay_amount == expected_amount))
+            and (order.currency or "USD").upper() == check_currency
+        )
+        if not same:
+            return GuestOrderResult(False, True, "", order.order_id, order.status, detail="payment_reference_replay_mismatch")
         return GuestOrderResult(True, True, _reply_for_order(order), order.order_id, order.status, order.payment_checkout_url)
     if order.status not in {"pending_payment"}:
         return GuestOrderResult(False, True, "", order.order_id, order.status, detail=f"cannot_activate_{order.status}")
     updated = order.model_copy(update={
         "status": "paid",
+        "payment_provider": provider,
+        "payment_state": "payment_confirmed",
         "payment_reference": payment_reference,
+        "payment_amount_cents": amount_cents if amount_cents is not None else expected_amount,
         "paid_at": now,
         "updated_at": now,
     })
@@ -217,6 +271,11 @@ def consume_guest_order(
 
 def find_paid_guest_order(*, state_path: Path, sender_phone: str, chat_id: str) -> Optional[FlyerGuestOrder]:
     return load_guest_order_store(state_path).find_paid_order_by_sender(sender_phone, chat_id)
+
+
+def find_reserved_guest_order(*, state_path: Path, sender_phone: str, chat_id: str, project_id: str) -> Optional[FlyerGuestOrder]:
+    store = load_guest_order_store(state_path)
+    return _find_reserved_guest_order(store, sender_phone=sender_phone, chat_id=chat_id, project_id=project_id)
 
 
 def _reply_for_order(order: FlyerGuestOrder) -> str:
@@ -320,12 +379,15 @@ def _find_reserved_guest_order(
 def _checkout_url(template: str, *, order_id: str, chat_id: str, amount_cents: int, currency: str) -> str:
     if not template:
         return ""
-    return template.format(
-        order_id=order_id,
-        customer_id=order_id,
-        plan_id="quick_flyer",
-        chat_id=chat_id,
-        amount_cents=amount_cents,
-        price_usd=f"{amount_cents / 100:.2f}",
-        currency=currency,
-    )
+    try:
+        return template.format(
+            order_id=order_id,
+            customer_id=order_id,
+            plan_id="quick_flyer",
+            chat_id=chat_id,
+            amount_cents=amount_cents,
+            price_usd=f"{amount_cents / 100:.2f}",
+            currency=currency,
+        )
+    except (KeyError, IndexError, ValueError):
+        return ""

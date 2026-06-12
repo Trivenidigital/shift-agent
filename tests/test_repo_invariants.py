@@ -85,3 +85,20 @@ def test_no_sha256_chain_path_in_log_decision_direct():
         "See PR #20: chain was removed; if re-introducing, do it at the "
         "safe_io.ndjson_append chokepoint, not back in log-decision-direct."
     )
+
+
+def test_send_path_ci_runs_dynamic_non_flyer_suite_and_agent_changes():
+    workflow = (REPO_ROOT / ".github" / "workflows" / "send-path-ci.yml").read_text(encoding="utf-8")
+
+    assert '"src/agents/**"' in workflow
+    assert '"tools/**"' in workflow
+    assert "find tests -maxdepth 1 -type f -name 'test_*.py' ! -name 'test_flyer*'" in workflow
+    assert "test_bridge_send_harness.py \\" not in workflow
+    assert "test_shift_reconcile.py" not in workflow
+
+
+def test_cockpit_ci_checks_committed_typegen_schema():
+    workflow = (REPO_ROOT / ".github" / "workflows" / "cockpit-ci.yml").read_text(encoding="utf-8")
+
+    assert "npm run generate:types" in workflow
+    assert "git diff --exit-code -- src/api/schema.ts" in workflow

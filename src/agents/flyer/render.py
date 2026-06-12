@@ -141,7 +141,7 @@ TEXT_MANIFEST_SCHEMA_VERSION = 1
 # flyer legibly. The binding output is the square 1080x1080 Instagram post in the final
 # package, which holds ~10 menu rows; the taller preview/PDF fit more, but a flyer that
 # can't render at every delivered size must route to manual, not ship a partial set.
-MAX_DETAIL_FACTS = 12
+MAX_DETAIL_FACTS = 10
 MAX_TEXT_FACTS = 16
 # Explicit customer-supplied item/price menus can use the compact deterministic menu
 # overlay. Keep this separate from planner/inferred menus: customer truth may be dense,
@@ -1032,7 +1032,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
         lines.append(f"Contact: {plan.contact}")
     if plan.items:
         lines.append(f"Menu items to feature - exactly {len(plan.items)} items:")
-        lines.append(f"Create exactly {len(plan.items)} menu item names. Each listed item must appear once and only once; do not duplicate any item.")
+        lines.append(f"Create exactly {len(plan.items)} menu item cards. Each listed item must appear once and only once; use the exact item name and do not duplicate any item.")
         for name, price in plan.items:
             if price:
                 lines.append(f"- {name} - {price}")
@@ -1137,10 +1137,7 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
     if has_reference_image and not reference_menu:
         return False
     items = _menu_item_lines(project)
-    if reference_menu:
-        if len(items) > 12:
-            return False
-    elif len(items) > 3:
+    if reference_menu and len(items) > 12:
         return False
     if len(items) > 10 and not _compact_menu_overlay_allowed(project, items):
         return False
@@ -1228,9 +1225,10 @@ def _poster_layout_requirements(project: FlyerProject) -> str:
                 "- Keep the visual language category-safe for the stated business type; avoid restaurant/grocery and cultural-celebration styling unless the customer explicitly asks for it."
             )
         return (
-            "- Build a premium/editorial restaurant advertisement, not an ordinary menu template or background template.\n"
+            "- Build a full restaurant/menu poster with a premium/editorial restaurant-advertisement finish, not an ordinary menu template or background template.\n"
             "- Use product-specific close-up food imagery based on the listed menu items.\n"
             "- Use one strong hero food image, a confident brand masthead, a large high-impact promo title, a typographic offer lockup, a supporting menu list, and a restrained footer for location/contact.\n"
+            "- Item cards must look like designed menu tiles; include item cards with food imagery and prices where provided while avoiding cluttered coupon-grid styling.\n"
             "- Avoid boxed menu table layouts, large bordered rows, coupon-grid compositions, and default menu-card templates unless the customer explicitly asks for a menu-board style.\n"
             "- Keep item names and prices paired in clean typography; use minimal separators and spacing instead of heavy boxes.\n"
             "- If there is only one item/price, make it the single typographic offer lockup and use food photos as unlabeled supporting imagery. Do not repeat the same item/price in multiple panels.\n"
@@ -1250,7 +1248,7 @@ def _reference_extraction_instruction(project: FlyerProject) -> str:
         return "- none"
     if _style_only_reference_requested(project):
         return (
-            "- Use the attached source/reference image only for source content extraction and broad visual inspiration: "
+            "- Use the attached reference image for visual style only and source content extraction/broad inspiration: "
             "palette, cuisine/category, motifs, and layout density.\n"
             "- Do NOT copy, preserve, or render the source/reference business name, logo, masthead, address, phone, "
             "slogan, item-board text, or price text unless it matches the controlled customer copy above."

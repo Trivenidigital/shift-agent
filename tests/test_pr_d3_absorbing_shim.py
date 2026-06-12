@@ -229,7 +229,7 @@ def test_atomic_write_json_round_trip_drops_reserved_keys(tmp_path):
     # in the input dict (simulates PR-B1-written data being re-read here).
     raw_lead = {**_minimum_lead_dict(), "voice_quality": "good", "quote_source": "llm"}
     lead = CateringLead.model_validate(raw_lead)  # shim strips on read
-    store = CateringLeadStore(leads=[lead])
+    store = CateringLeadStore(leads=[lead.model_dump(mode="json")])
 
     leads_path = tmp_path / "catering-leads.json"
     atomic_write_json(leads_path, store)

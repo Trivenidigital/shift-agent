@@ -17,6 +17,7 @@ try:
         activate_guest_order,
         consume_guest_order,
         find_paid_guest_order,
+        find_reserved_guest_order,
         release_guest_order,
         reserve_guest_order,
         start_guest_order,
@@ -26,6 +27,7 @@ except ModuleNotFoundError:
         activate_guest_order,
         consume_guest_order,
         find_paid_guest_order,
+        find_reserved_guest_order,
         release_guest_order,
         reserve_guest_order,
         start_guest_order,
@@ -53,16 +55,17 @@ STATE_PATH = Path("/opt/shift-agent/state/flyer/guest_orders.json")
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
 
 
-def _load_flyer_config(path: Path) -> tuple[int, str, str]:
+def _load_flyer_config(path: Path) -> tuple[int, str, str, str]:
     try:
         cfg = load_yaml_model(path, Config)
         return (
             cfg.flyer.quick_flyer_price_cents,
             cfg.flyer.quick_flyer_checkout_url_template,
             cfg.flyer.payment_checkout_url_template,
+            cfg.flyer.payment_provider,
         )
     except Exception:
-        return 400, "", ""
+        return 400, "", "", "manual"
 
 
 def _emit(result) -> int:
@@ -87,18 +90,22 @@ def main() -> int:
     mode.add_argument("--release", action="store_true")
     mode.add_argument("--consume", action="store_true")
     mode.add_argument("--find-paid", action="store_true")
+    mode.add_argument("--find-reserved", action="store_true")
     p.add_argument("--sender-phone", default="")
     p.add_argument("--chat-id", default="")
     p.add_argument("--message-id", default="")
     p.add_argument("--order-id", default="")
+    p.add_argument("--provider", default="")
     p.add_argument("--payment-reference", default="")
+    p.add_argument("--amount-cents", type=int, default=None)
+    p.add_argument("--currency", default="")
     p.add_argument("--project-id", default="")
     p.add_argument("--state-path", default=str(STATE_PATH))
     p.add_argument("--config-path", default=str(CONFIG_PATH))
     args = p.parse_args()
 
     state_path = Path(args.state_path)
-    price_cents, checkout_template, fallback_template = _load_flyer_config(Path(args.config_path))
+    price_cents, checkout_template, fallback_template, config_provider = _load_flyer_config(Path(args.config_path))
     with FileLock(Path(str(state_path) + ".lock")):
         try:
             if args.start:
@@ -110,6 +117,7 @@ def main() -> int:
                     checkout_url_template=checkout_template,
                     fallback_checkout_url_template=fallback_template,
                     unit_price_cents=price_cents,
+                    payment_provider=config_provider,
                 )
             elif args.activate:
                 if not " ".join((args.payment_reference or "").split()):
@@ -127,7 +135,10 @@ def main() -> int:
                     state_path=state_path,
                     order_id=args.order_id,
                     sender_phone=args.sender_phone,
+                    provider=args.provider or config_provider,
                     payment_reference=args.payment_reference,
+                    amount_cents=args.amount_cents,
+                    currency=args.currency,
                 )
             elif args.reserve:
                 result = reserve_guest_order(
@@ -150,7 +161,7 @@ def main() -> int:
                     chat_id=args.chat_id,
                     project_id=args.project_id,
                 )
-            else:
+            elif args.find_paid:
                 order = find_paid_guest_order(
                     state_path=state_path,
                     sender_phone=args.sender_phone,
@@ -165,6 +176,26 @@ def main() -> int:
                     "paid_order": True,
                     "order_id": order.order_id,
                     "status": order.status,
+                    "remaining": order.remaining(),
+                }))
+                return 0
+            else:
+                order = find_reserved_guest_order(
+                    state_path=state_path,
+                    sender_phone=args.sender_phone,
+                    chat_id=args.chat_id,
+                    project_id=args.project_id,
+                )
+                if order is None:
+                    print(json.dumps({"ok": False, "handled": True, "reserved_order": False}))
+                    return 2
+                print(json.dumps({
+                    "ok": True,
+                    "handled": True,
+                    "reserved_order": True,
+                    "order_id": order.order_id,
+                    "status": order.status,
+                    "reserved_project_id": order.reserved_project_id,
                     "remaining": order.remaining(),
                 }))
                 return 0

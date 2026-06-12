@@ -1,0 +1,19 @@
+{
+  "topic": "flyer-marketing-agent-design-2026-06-05",
+  "task_text": "Flyer Studio marketing-agent architecture (rev3.1). Two clarifications: (1) exact source-preserving edits do NOT collapse into the textless-background path — they use the verified source-edit path or danger/manual-queue when impossible, never recreated-and-mislabeled; only new/source-inspired work uses textless-background+overlay. (2) raw-request spans are validation evidence only — deterministic code materializes a validated span into FlyerLockedFact(source=customer_text) before render; overlay never renders directly from skill-provided spans. Builds on rev3 (skill returns structure not fact-authority; deterministic required-fact-set; one creative brain; QA send-path migration; oracle send-rate to define; Hermes skills/plugins/prompt_builder research).",
+  "completed_at": "2026-06-05T02:10:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 9,
+  "hermes_step_count": 7,
+  "files_to_read_first": [
+    "src/agents/flyer/render.py (render_source_edit_preview, apply_critical_text_overlay, _image_prompt)",
+    "src/agents/flyer/scripts/generate-flyer-concepts (source-edit lane; run_visual_qa blocking)",
+    "src/agents/flyer/facts.py (FlyerLockedFact source=customer_text materialization, profile_locked_facts)",
+    "src/agents/flyer/skills/flyer_generation/SKILL.md (rewrite to creative-director guidance)",
+    "src/agents/flyer/skills/flyer_dispatcher/SKILL.md (handled-before-skill bypass)",
+    "src/agents/flyer/campaign_scene_prompts.py (Python festival keyword buckets to retire)",
+    "src/agents/flyer/creative_planner.py (item-only; materialize_inferred; promote_inferred_to_confirmed)",
+    "tests/flyer_oracle/oracle.py (GateResult truth|delivery|commercial; send-rate to define)",
+    "src/platform/schemas.py (FlyerCustomerProfile, FlyerBrandKit, FlyerLockedFact, FlyerCustomerStore)"
+  ]
+}

@@ -17,9 +17,9 @@ from schemas import (
 )
 
 try:
-    from agents.flyer.starter_briefs import starter_brief_message  # type: ignore
+    from agents.flyer.starter_briefs import starter_brief_message, starter_idea_choices, starter_idea_choices_message  # type: ignore
 except ModuleNotFoundError:
-    from flyer_starter_briefs import starter_brief_message  # type: ignore
+    from flyer_starter_briefs import starter_brief_message, starter_idea_choices, starter_idea_choices_message  # type: ignore
 
 try:
     from safe_io import atomic_write_text  # type: ignore
@@ -55,6 +55,9 @@ class IntakeResult:
     creation_mode: str = ""
     customer_id: str = ""
     reference_media_path: str = ""
+    brief_source: str = ""
+    brief_approved_at: str = ""
+    brief_approved_message_id: str = ""
 
 
 def load_customer_store(path: Path) -> FlyerCustomerStore:
@@ -93,10 +96,41 @@ def handle_intake_message(
     store = load_customer_store(state_path)
     normalized_text = " ".join((text or "").split())
     session = store.find_intake_session(chat_id, sender_phone)
-    customer = store.find_customer_by_phone(sender_phone)
+    customer = store.find_customer_by_sender(sender_phone, chat_id)
 
     if start_source:
         source = _normalize_source(start_source)
+        if start_source in {"sample_idea", "starter_idea"} and customer and customer.status in {"trial", "active"}:
+            session = FlyerIntakeSession(
+                chat_id=chat_id,
+                sender_phone=_phone_or_none(sender_phone),
+                status="choosing_sample_idea",
+                source=source,
+                started_at=now,
+                updated_at=now,
+                last_message_id=message_id,
+                original_text=original_text or normalized_text,
+                preferred_language=customer.preferred_language,
+                creation_mode="sample",
+                mode_prompt_version="brief_builder_v1",
+                reference_media_path=media_path or "",
+                reference_media_message_id=message_id if media_path else "",
+            )
+            store.replace_intake_session(session)
+            write_customer_store(state_path, store)
+            return IntakeResult(
+                True,
+                starter_idea_choices_message(
+                    customer.business_category,
+                    business_name=customer.business_name,
+                    language=customer.preferred_language,
+                ),
+                "choose_sample_idea",
+                source=source,
+                preferred_language=customer.preferred_language,
+                creation_mode="sample",
+                customer_id=customer.customer_id,
+            )
         session = FlyerIntakeSession(
             chat_id=chat_id,
             sender_phone=_phone_or_none(sender_phone),
@@ -129,6 +163,7 @@ def handle_intake_message(
         session = session.model_copy(update={
             "preferred_language": language,
             "status": "choosing_mode",
+            "mode_prompt_version": "brief_builder_v1",
             "last_message_id": message_id,
             "updated_at": now,
             **media_update,
@@ -145,7 +180,7 @@ def handle_intake_message(
         )
 
     if session.status == "choosing_mode":
-        mode = parse_mode_choice(normalized_text)
+        mode = parse_mode_choice(normalized_text, prompt_version=session.mode_prompt_version)
         if not mode:
             session = session.model_copy(update={"last_message_id": message_id, "updated_at": now, **media_update})
             store.replace_intake_session(session)
@@ -175,13 +210,43 @@ def handle_intake_message(
                 preferred_language=session.preferred_language,
                 creation_mode=mode,
             )
+        if mode == "sample":
+            session = session.model_copy(update={
+                "creation_mode": "sample",
+                "status": "choosing_sample_idea",
+                "last_message_id": message_id,
+                "updated_at": now,
+                **media_update,
+            })
+            store.replace_intake_session(session)
+            write_customer_store(state_path, store)
+            return IntakeResult(
+                True,
+                starter_idea_choices_message(
+                    customer.business_category if customer else "",
+                    business_name=customer.business_name if customer else "",
+                    language=session.preferred_language,
+                ),
+                "choose_sample_idea",
+                source=session.source,
+                preferred_language=session.preferred_language,
+                creation_mode=mode,
+                customer_id=customer.customer_id if customer else "",
+            )
         if mode == "text":
             include_starter = bool(
                 customer
                 and customer.status in {"trial", "active"}
                 and store.claim_starter_prompt_send(customer.customer_id)
             )
-            store.discard_intake_session(session)
+            session = session.model_copy(update={
+                "creation_mode": "text",
+                "status": "text_awaiting_brief",
+                "last_message_id": message_id,
+                "updated_at": now,
+                **media_update,
+            })
+            store.replace_intake_session(session)
             write_customer_store(state_path, store)
             return IntakeResult(
                 True,
@@ -211,6 +276,80 @@ def handle_intake_message(
             source=session.source,
             preferred_language=session.preferred_language,
             creation_mode=mode,
+        )
+
+    if session.status == "text_awaiting_brief":
+        if _is_cancel_reply(text):
+            store.discard_intake_session(session)
+            write_customer_store(state_path, store)
+            return IntakeResult(True, _brief_cancelled_reply(), "brief_cancelled")
+        raw_request = _build_pending_brief_request(session, customer, text, source="text")
+        session = session.model_copy(update={
+            "brief_raw_request": raw_request,
+            "brief_display_request": _visible_reply_text(text),
+            "brief_source": "text",
+            "status": "brief_pending_approval",
+            "last_message_id": message_id,
+            "updated_at": now,
+            **media_update,
+        })
+        store.replace_intake_session(session)
+        write_customer_store(state_path, store)
+        return IntakeResult(
+            True,
+            _brief_preview_reply(session, customer),
+            "brief_preview",
+            source=session.source,
+            preferred_language=session.preferred_language,
+            creation_mode="text",
+            customer_id=customer.customer_id if customer else "",
+        )
+
+    if session.status == "choosing_sample_idea":
+        choice = _parse_sample_choice(text)
+        if choice is None:
+            session = session.model_copy(update={"last_message_id": message_id, "updated_at": now, **media_update})
+            store.replace_intake_session(session)
+            write_customer_store(state_path, store)
+            return IntakeResult(
+                True,
+                starter_idea_choices_message(
+                    customer.business_category if customer else "",
+                    business_name=customer.business_name if customer else "",
+                    language=session.preferred_language,
+                ),
+                "choose_sample_idea",
+                source=session.source,
+                preferred_language=session.preferred_language,
+                creation_mode="sample",
+                customer_id=customer.customer_id if customer else "",
+            )
+        ideas = starter_idea_choices(
+            customer.business_category if customer else "",
+            business_name=customer.business_name if customer else "",
+            language=session.preferred_language,
+        )
+        selected = ideas[choice]
+        raw_request = _build_pending_brief_request(session, customer, selected, source="sample")
+        session = session.model_copy(update={
+            "brief_raw_request": raw_request,
+            "brief_display_request": selected,
+            "brief_source": "sample",
+            "status": "brief_pending_approval",
+            "last_message_id": message_id,
+            "updated_at": now,
+            **media_update,
+        })
+        store.replace_intake_session(session)
+        write_customer_store(state_path, store)
+        return IntakeResult(
+            True,
+            _brief_preview_reply(session, customer),
+            "brief_preview",
+            source=session.source,
+            preferred_language=session.preferred_language,
+            creation_mode="sample",
+            customer_id=customer.customer_id if customer else "",
         )
 
     if session.status == "guided_collecting_goal":
@@ -268,19 +407,74 @@ def handle_intake_message(
             "updated_at": now,
             **media_update,
         })
-        raw_request = _synthesize_request(session)
-        store.discard_intake_session(session)
+        raw_request = _synthesize_request(session, customer)
+        session = session.model_copy(update={
+            "brief_raw_request": raw_request,
+            "brief_display_request": _guided_display_request(session),
+            "brief_source": "guided",
+            "status": "brief_pending_approval",
+        })
+        store.replace_intake_session(session)
         write_customer_store(state_path, store)
         return IntakeResult(
             True,
-            "",
-            "create_project",
-            raw_request=raw_request,
+            _brief_preview_reply(session, customer),
+            "brief_preview",
             source=session.source,
             preferred_language=session.preferred_language,
             creation_mode="guided",
             customer_id=customer.customer_id if customer else "",
             reference_media_path=session.reference_media_path,
+        )
+
+    if session.status == "brief_pending_approval":
+        if _is_cancel_reply(text):
+            store.discard_intake_session(session)
+            write_customer_store(state_path, store)
+            return IntakeResult(True, _brief_cancelled_reply(), "brief_cancelled")
+        if _is_approve_reply(text):
+            approved_at = now.isoformat()
+            session = session.model_copy(update={
+                "brief_approved_at": now,
+                "brief_approved_message_id": message_id,
+                "last_message_id": message_id,
+                "updated_at": now,
+            })
+            store.replace_intake_session(session)
+            write_customer_store(state_path, store)
+            return IntakeResult(
+                True,
+                "",
+                "create_project",
+                raw_request=session.brief_raw_request,
+                source=session.source,
+                preferred_language=session.preferred_language,
+                creation_mode=session.creation_mode,
+                customer_id=customer.customer_id if customer else "",
+                reference_media_path=session.reference_media_path,
+                brief_source=session.brief_source,
+                brief_approved_at=approved_at,
+                brief_approved_message_id=message_id,
+            )
+        session = session.model_copy(update={
+            "brief_raw_request": _apply_brief_edit(session.brief_raw_request, text),
+            "brief_display_request": _apply_brief_edit(session.brief_display_request, text),
+            "last_message_id": message_id,
+            "updated_at": now,
+            **media_update,
+        })
+        store.replace_intake_session(session)
+        write_customer_store(state_path, store)
+        return IntakeResult(
+            True,
+            _brief_preview_reply(session, customer),
+            "brief_preview",
+            source=session.source,
+            preferred_language=session.preferred_language,
+            creation_mode=session.creation_mode,
+            customer_id=customer.customer_id if customer else "",
+            reference_media_path=session.reference_media_path,
+            brief_source=session.brief_source,
         )
 
     return IntakeResult(False, "")
@@ -291,16 +485,123 @@ def parse_language_choice(text: str) -> str:
     for code, _label, aliases in LANGUAGES:
         if choice in aliases:
             return code
+    tokens = choice.split()
+    matched_codes = {
+        code
+        for code, _label, aliases in LANGUAGES
+        if any(alias in tokens for alias in aliases if not alias.isdigit())
+    }
+    filler = {
+        "please", "pls", "plz", "use", "choose", "select", "pick", "i", "want",
+        "prefer", "preferred", "language", "my", "would", "like", "to", "as",
+        "in", "send",
+    }
+    if any(token.isdigit() for token in tokens):
+        filler.update({"option", "choice", "reply", "number"})
+    language_aliases = {
+        alias
+        for _code, _label, aliases in LANGUAGES
+        for alias in aliases
+        if not alias.isdigit()
+    }
+    numeric = _single_option_number(tokens)
+    if numeric:
+        for code, _label, aliases in LANGUAGES:
+            if numeric in aliases:
+                if matched_codes and matched_codes != {code}:
+                    return ""
+                allowed = set(filler) | language_aliases | {numeric}
+                if all(token in allowed or token.isdigit() for token in tokens):
+                    return code
+                return ""
+    if len(matched_codes) != 1:
+        return ""
+    if all(token in filler or token in language_aliases for token in tokens):
+        return next(iter(matched_codes))
     return ""
 
 
-def parse_mode_choice(text: str) -> str:
+def parse_mode_choice(text: str, *, prompt_version: str = "brief_builder_v1") -> str:
     choice = " ".join((text or "").lower().split())
-    if choice in {"1", "guide", "guided", "guide me", "agent", "agent mode", "guided mode", "step by step", "self guided", "self-guided"}:
-        return "guided"
-    if choice in {"2", "text", "text mode", "type", "i'll type", "ill type", "i will type", "manual"}:
-        return "text"
+    normalized = re.sub(r"[^a-z0-9]+", " ", choice).strip()
+    if prompt_version != "brief_builder_v1":
+        mode_aliases = {
+            "guided": {"1", "guide", "guided", "guide me", "agent", "agent mode", "guided mode", "step by step", "self guided", "self-guided"},
+            "text": {"2", "text", "text mode", "type", "i'll type", "ill type", "i will type", "manual"},
+        }
+    else:
+        mode_aliases = {
+            "sample": {"1", "sample", "samples", "idea", "ideas", "pick an idea", "starter", "starter idea"},
+            "guided": {"2", "guide", "guided", "guide me", "agent", "agent mode", "guided mode", "step by step", "self guided", "self-guided"},
+            "text": {"3", "text", "text mode", "type", "i'll type", "ill type", "i will type", "manual"},
+        }
+    for mode, aliases in mode_aliases.items():
+        if choice in aliases or normalized in {re.sub(r"[^a-z0-9]+", " ", alias).strip() for alias in aliases}:
+            return mode
+    tokens = normalized.split()
+    normalized_aliases = {
+        mode: {
+            re.sub(r"[^a-z0-9]+", " ", alias).strip()
+            for alias in aliases
+            if not alias.isdigit()
+        }
+        for mode, aliases in mode_aliases.items()
+    }
+    matched_modes = {
+        mode
+        for mode, aliases in normalized_aliases.items()
+        if any(_contains_phrase(normalized, alias) for alias in aliases)
+    }
+    filler = {
+        "please", "pls", "plz", "i", "want", "would", "like", "to", "use",
+        "choose", "select", "pick", "option", "choice", "reply", "number",
+        "mode", "it", "myself", "me", "for", "with", "go", "let", "do",
+    }
+    all_alias_tokens = {
+        token
+        for aliases in normalized_aliases.values()
+        for alias in aliases
+        for token in alias.split()
+    }
+    numeric = _single_option_number(tokens)
+    if numeric:
+        for mode, aliases in mode_aliases.items():
+            if numeric in aliases:
+                if matched_modes and matched_modes != {mode}:
+                    return ""
+                allowed = set(filler) | all_alias_tokens | {numeric}
+                if all(token in allowed or token.isdigit() for token in tokens):
+                    return mode
+                return ""
+    if len(matched_modes) != 1:
+        return ""
+    matched_mode = next(iter(matched_modes))
+    alias_tokens = {
+        token
+        for alias in normalized_aliases[matched_mode]
+        for token in alias.split()
+    }
+    if all(token in filler or token in alias_tokens or token.isdigit() for token in tokens):
+        return matched_mode
     return ""
+
+
+def _single_option_number(tokens: list[str]) -> str:
+    numbers = [token for token in tokens if token.isdigit()]
+    if len(numbers) != 1:
+        return ""
+    if len(tokens) == 1 or any(token in {"option", "choice", "reply", "number"} for token in tokens):
+        return numbers[0]
+    return ""
+
+
+def _contains_phrase(normalized_text: str, normalized_phrase: str) -> bool:
+    if not normalized_phrase:
+        return False
+    return bool(re.search(
+        rf"(?<![a-z0-9]){re.escape(normalized_phrase)}(?![a-z0-9])",
+        normalized_text,
+    ))
 
 
 def language_label(code: str) -> str:
@@ -371,10 +672,11 @@ def _mode_prompt(language: str, *, prefix: str = "") -> str:
         "",
         "How would you like to create your flyer?",
         "",
-        "1. Guide me step by step",
-        "2. I'll type my request",
+        "1. Pick an idea",
+        "2. Guide me step by step",
+        "3. I'll type my request",
         "",
-        "Reply 1 or 2.",
+        "Reply 1, 2, or 3.",
     ])
     return "\n".join(lines)
 
@@ -431,7 +733,12 @@ def _onboarding_handoff_reply(source: str, mode: str) -> str:
         lead = "I will set up your free trial first so I can save your business details."
     else:
         lead = "I will set up your Flyer Studio account first so I can save your business details."
-    mode_line = "After setup, I will guide you step by step." if mode == "guided" else "After setup, you can type your flyer request in one message."
+    if mode == "guided":
+        mode_line = "After setup, I will guide you step by step."
+    elif mode == "sample":
+        mode_line = "After setup, I will show sample ideas you can pick from."
+    else:
+        mode_line = "After setup, you can type your flyer request in one message."
     return (
         "Flyer Studio\n"
         "------------\n"
@@ -504,7 +811,7 @@ def _customer_location_contact(customer: Optional[FlyerCustomerProfile]) -> str:
     return f"{customer.business_address}. Contact: {customer.public_phone}"
 
 
-def _synthesize_request(session: FlyerIntakeSession) -> str:
+def _synthesize_request(session: FlyerIntakeSession, customer: Optional[FlyerCustomerProfile]) -> str:
     assets = session.style_assets
     if assets.strip().lower() in {"skip", "none", "no"}:
         assets = "Use saved logo/assets if available"
@@ -517,10 +824,139 @@ def _synthesize_request(session: FlyerIntakeSession) -> str:
     reference_note = ""
     if session.reference_media_path:
         reference_note = " Attached reference/sample flyer is available; extract any requested visible items, prices, and layout cues from it."
+    profile_note = _profile_instruction(customer)
     return (
-        f"Create a professional flyer. Promotion: {session.goal}. "
+        f"Create a professional flyer for {_business_name(customer)}. Promotion: {session.goal}. "
         f"Schedule: {schedule}. Items/offers/prices/key message: {session.items}. "
         f"Location/contact: {location}. Style/assets: {assets}.{reference_note} "
+        f"{profile_note} "
         f"Preferred flyer language: {language_label(session.preferred_language)}. "
         "Make the flyer polished, customer-attracting, and ready for WhatsApp and social media."
     )
+
+
+def _visible_reply_text(text: str) -> str:
+    lines = [
+        line for line in (text or "").splitlines()
+        if not line.strip().startswith("[shift-agent-sender")
+    ]
+    return " ".join(" ".join(lines).split())
+
+
+def _is_approve_reply(text: str) -> bool:
+    visible = re.sub(r"[^a-z0-9 ]+", " ", _visible_reply_text(text).lower())
+    visible = " ".join(visible.split())
+    return visible in {
+        "approve",
+        "approved",
+        "yes",
+        "yes create it",
+        "yes start",
+        "go ahead",
+        "looks good",
+        "ok",
+        "okay",
+        "start",
+        "create it",
+    }
+
+
+def _is_cancel_reply(text: str) -> bool:
+    visible = re.sub(r"[^a-z0-9 ]+", " ", _visible_reply_text(text).lower())
+    visible = " ".join(visible.split())
+    return visible in {"cancel", "stop", "never mind", "nevermind"}
+
+
+def _parse_sample_choice(text: str) -> Optional[int]:
+    visible = _visible_reply_text(text).lower()
+    match = re.search(r"\b(?:option\s*)?([12])\b", visible)
+    if not match:
+        return None
+    return int(match.group(1)) - 1
+
+
+def _build_pending_brief_request(
+    session: FlyerIntakeSession,
+    customer: Optional[FlyerCustomerProfile],
+    request_text: str,
+    *,
+    source: str,
+) -> str:
+    request = _required_or_original(_visible_reply_text(request_text), "flyer request")
+    reference_note = ""
+    if session.reference_media_path:
+        reference_note = " Uploaded reference image/template is attached. Use it when designing this flyer."
+    return (
+        f"Create a professional flyer for {_business_name(customer)}. "
+        f"Customer request: {request}. "
+        f"{_profile_instruction(customer)} "
+        f"Preferred flyer language: {language_label(session.preferred_language)}. "
+        f"Brief source: {source}.{reference_note}"
+    )
+
+
+def _brief_preview_reply(
+    session: FlyerIntakeSession,
+    customer: Optional[FlyerCustomerProfile],
+) -> str:
+    request = (session.brief_display_request or _customer_visible_request_from_raw(session.brief_raw_request)).strip()
+    if len(request) > 900:
+        request = f"{request[:897].rstrip()}..."
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        "I will create this flyer:\n\n"
+        f"Business: {_business_name(customer)}\n"
+        f"Request: {request}\n"
+        f"Language: {language_label(session.preferred_language)}\n\n"
+        "Reply APPROVE to start, or tell me what to change."
+    )
+
+
+def _brief_cancelled_reply() -> str:
+    return (
+        "Flyer Studio\n"
+        "------------\n"
+        "No problem. I stopped this flyer request. Send a new flyer request whenever you are ready."
+    )
+
+
+def _apply_brief_edit(raw_request: str, edit_text: str) -> str:
+    edit = _visible_reply_text(edit_text).strip()
+    if not edit:
+        return raw_request
+    return f"{raw_request} Customer update before generation: {edit}."
+
+
+def _customer_visible_request_from_raw(raw_request: str) -> str:
+    text = " ".join((raw_request or "").split())
+    match = re.search(r"Customer request:\s*(.+?)(?:\.\s+(?:Use saved|Preferred flyer language|Brief source)|$)", text)
+    if match:
+        return match.group(1).strip()
+    text = re.sub(r"\bPreferred flyer language:\s*[^.]+\.?", "", text)
+    text = re.sub(r"\bBrief source:\s*[^.]+\.?", "", text)
+    text = re.sub(r"\bUse saved business name, address, phone, and logo\.?", "", text)
+    return " ".join(text.split()).strip()
+
+
+def _guided_display_request(session: FlyerIntakeSession) -> str:
+    parts = [
+        f"Promotion: {session.goal}",
+        f"Schedule: {session.schedule}",
+        f"Items/offers: {session.items}",
+        f"Location/contact: {session.location_contact}",
+        f"Style/assets: {session.style_assets}",
+    ]
+    return ". ".join(part for part in parts if part.strip())
+
+
+def _business_name(customer: Optional[FlyerCustomerProfile]) -> str:
+    if customer and customer.business_name:
+        return customer.business_name
+    return "this business"
+
+
+def _profile_instruction(customer: Optional[FlyerCustomerProfile]) -> str:
+    if customer:
+        return "Use saved business name, address, phone, and logo."
+    return "Use the business details provided by the customer."

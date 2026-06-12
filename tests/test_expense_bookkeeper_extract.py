@@ -16,11 +16,14 @@ import os
 os.environ.setdefault("EXPENSE_RECEIPTS_DIR", "/tmp/test/")
 
 import importlib.util
+import json
 import platform
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 pytestmark = pytest.mark.skipif(
@@ -58,6 +61,23 @@ def extract_mod():
 def _empty_store(extract_mod):
     """Build an empty ExpenseLeadStore for code-generator input."""
     return extract_mod.ExpenseLeadStore(leads=[], last_id=0)
+
+
+def _write_config(tmp_path):
+    cfg = {
+        "schema_version": 1,
+        "customer": {"name": "Test", "location_id": "loc_t",
+                     "timezone": "America/New_York"},
+        "owner": {"name": "Owner", "phone": "+19045550100",
+                  "self_chat_jid": "19045550100@s.whatsapp.net"},
+        "limits": {},
+        "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "x@y"},
+        "expense_bookkeeper": {"enabled": True, "qbo_client_mode": "mock"},
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    return path
 
 
 # ───────────────────────────────────────────────────
@@ -140,6 +160,7 @@ def test_multi_receipt_batch_generates_distinct_codes(extract_mod, monkeypatch):
 
     store = _empty_store(extract_mod)
     codes: list[str] = []
+    monkeypatch.setenv("EXPENSE_RECEIPTS_DIR", "/tmp/test/")
     for i in range(1, 6):
         code = extract_mod._generate_unique_code(store)
         # Mint a fake AWAITING lead with the generated code so the next
@@ -165,3 +186,68 @@ def test_multi_receipt_batch_generates_distinct_codes(extract_mod, monkeypatch):
         f"the AAAAA collision; got: {codes}"
     )
     assert len(set(codes)) == 5
+
+
+def test_orphan_flags_persist_before_vision_error_early_return(extract_mod, monkeypatch, tmp_path):
+    state = tmp_path / "state" / "expense-bookkeeper"
+    receipts = state / "receipts"
+    logs = tmp_path / "logs"
+    receipts.mkdir(parents=True)
+    logs.mkdir()
+    image = tmp_path / "receipt.jpg"
+    image.write_bytes(b"fake jpeg bytes")
+
+    extract_mod.CONFIG_PATH = _write_config(tmp_path)
+    extract_mod.LEADS_PATH = state / "leads.json"
+    extract_mod.LOG_PATH = logs / "decisions.log"
+    extract_mod.RECEIPTS_DIR = receipts
+    monkeypatch.setenv("EXPENSE_RECEIPTS_DIR", str(receipts) + "/")
+    monkeypatch.setattr(extract_mod, "_call_vision", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("vision down")))
+
+    old_approved = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    extract_mod.LEADS_PATH.write_text(json.dumps({
+        "schema_version": 1,
+        "last_id": 1,
+        "leads": [{
+            "expense_id": "E0001",
+            "original_message_id": "wa_old",
+            "sender_phone": "+19045550100",
+            "received_at": "2026-04-29T12:00:00+00:00",
+            "image_path": str(receipts / "E0001.jpg"),
+            "image_phash": "a" * 16,
+            "image_byte_hash": "b" * 64,
+            "owner_approval_code": "#A47C2",
+            "extracted_total_cents": 23450,
+            "owner_confirmed_total_cents": 23450,
+            "owner_approval_received_at": old_approved,
+            "status": "APPROVED_PENDING_PUSH",
+        }],
+    }), encoding="utf-8")
+
+    sys.argv = [
+        str(EXTRACT_SCRIPT),
+        "--image-path", str(image),
+        "--source-image-id", "wa_new",
+        "--owner-phone", "+19045550100",
+    ]
+    rc = extract_mod.main()
+
+    assert rc == extract_mod.EXIT_DEPENDENCY_DOWN
+    data = json.loads(extract_mod.LEADS_PATH.read_text(encoding="utf-8"))
+    assert data["leads"][0]["reconcile_required"] is True
+    orphan_count = sum(
+        1 for line in extract_mod.LOG_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip() and json.loads(line)["type"] == "expense_orphan_detected"
+    )
+    assert orphan_count == 1
+
+    copied = receipts / "E0002.jpg"
+    if copied.exists():
+        copied.unlink()
+    rc = extract_mod.main()
+    assert rc == extract_mod.EXIT_DEPENDENCY_DOWN
+    orphan_count_after = sum(
+        1 for line in extract_mod.LOG_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip() and json.loads(line)["type"] == "expense_orphan_detected"
+    )
+    assert orphan_count_after == orphan_count

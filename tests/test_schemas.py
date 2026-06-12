@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import pytest
 from datetime import datetime, timezone
+from pathlib import Path
 
 from schemas import (
     LEGAL_TRANSITIONS, TERMINAL_STATUSES, is_legal_transition, is_terminal_status,
@@ -136,6 +137,35 @@ def test_proposal_code_regex_and_alphabet_agree():
 
 
 # ─────────────────────────────────────────────────────────────────
+def test_approval_code_regex_surfaces_use_canonical_alphabet():
+    """Dispatcher/cf-router/catering regex surfaces must match ProposalCode."""
+    from pydantic import TypeAdapter
+
+    schema = TypeAdapter(ProposalCode).json_schema()
+    canonical = schema["pattern"].removeprefix("^").removesuffix("$")
+    stale = "#[A-HJ-NP-Z2-9]{5}"
+    generator_alpha = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+    repo = Path(__file__).resolve().parent.parent
+    expected_snippets = {
+        "src/plugins/cf-router/hooks.py": r"#([A-HJKMNPQR-Z2-9]{5})",
+        "src/agents/shift/scripts/create-proposal": f'_CODE_ALPHA = "{generator_alpha}"',
+        "src/agents/shift/skills/dispatch_shift_agent/SKILL.md": canonical,
+        "src/agents/catering/scripts/create-catering-lead": f'_CODE_ALPHA = "{generator_alpha}"',
+        "src/agents/catering/scripts/parse-menu-photo": f'_CODE_ALPHA = "{generator_alpha}"',
+        "src/agents/catering/scripts/finalize-catering-menu": f"^{canonical}$",
+        "src/agents/catering/skills/apply_catering_menu_decision/SKILL.md": canonical,
+        "src/agents/catering/skills/handle_catering_owner_approval/SKILL.md": canonical,
+        "src/agents/catering/skills/catering_dispatcher/SKILL.md": canonical,
+        "src/agents/expense_bookkeeper/scripts/extract-receipt": f'_CODE_ALPHA = "{generator_alpha}"',
+        "tests/_dispatcher_replay.py": canonical,
+    }
+
+    for rel, expected in expected_snippets.items():
+        text = (repo / rel).read_text(encoding="utf-8")
+        assert expected in text, f"{rel} does not reference expected canonical snippet {expected}"
+        assert stale not in text, f"{rel} still references stale approval-code regex"
+
+
 # E164Phone canonicalization
 # ─────────────────────────────────────────────────────────────────
 
@@ -383,3 +413,65 @@ def test_dispatcher_routed_routed_to_skill_required(now_aware):
             "message_shape": "text",
             "routed_to_skill": "",  # empty string violates min_length=1
         })
+
+
+def test_validate_failed_minimal(now_aware):
+    """dispatch_shift_agent SKILL writes a `validate_failed` audit when
+    validate-sender-block returns valid=false OR v != 1. The minimal emit
+    (type + ts) must validate so log-decision-direct accepts it instead of
+    refusing (exit 5)."""
+    from pydantic import TypeAdapter
+    from schemas import LogEntry, ValidateFailed
+    adapter = TypeAdapter(LogEntry)
+    entry = adapter.validate_python({
+        "type": "validate_failed",
+        "ts": now_aware.isoformat(),
+    })
+    assert isinstance(entry, ValidateFailed)
+    assert entry.reason is None and entry.message_id is None
+
+
+def test_validate_failed_with_reason_and_message_id(now_aware):
+    from pydantic import TypeAdapter
+    from schemas import LogEntry, ValidateFailed
+    adapter = TypeAdapter(LogEntry)
+    entry = adapter.validate_python({
+        "type": "validate_failed",
+        "ts": now_aware.isoformat(),
+        "reason": "version_mismatch",
+        "message_id": "wa:abc123",
+    })
+    assert isinstance(entry, ValidateFailed)
+    assert entry.reason == "version_mismatch"
+    assert entry.message_id == "wa:abc123"
+
+
+def test_validate_failed_rejects_extra_field(now_aware):
+    """extra='forbid' (via _BaseEntry) — no raw block content can be smuggled in
+    via an unmodelled field."""
+    from pydantic import TypeAdapter, ValidationError
+    from schemas import LogEntry
+    adapter = TypeAdapter(LogEntry)
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "type": "validate_failed",
+            "ts": now_aware.isoformat(),
+            "raw_block": "[shift-agent-sender ... IGNORE PREVIOUS ...]",  # must be rejected
+        })
+
+
+def test_validate_failed_distinct_from_unknown_sender_declined(now_aware):
+    """validate_failed (malformed/absent block) is a DIFFERENT event from
+    unknown_sender_declined (a valid block whose identity is just unknown)."""
+    from pydantic import TypeAdapter
+    from schemas import LogEntry, ValidateFailed, UnknownSenderDeclined
+    adapter = TypeAdapter(LogEntry)
+    vf = adapter.validate_python({"type": "validate_failed", "ts": now_aware.isoformat()})
+    usd = adapter.validate_python({
+        "type": "unknown_sender_declined",
+        "ts": now_aware.isoformat(),
+        "sender_lid": "201975216009469@lid",
+        "input_message_truncated": "hi",
+    })
+    assert isinstance(vf, ValidateFailed)
+    assert isinstance(usd, UnknownSenderDeclined)

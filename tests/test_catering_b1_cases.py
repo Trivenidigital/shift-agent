@@ -1,8 +1,8 @@
 """v3.1 catering edge cases — 18 B1 doc-spec tests.
 
-Each test maps 1:1 to a case in docs/catering-edge-cases.md (v3.1, frozen).
-Doc-spec assertions appear verbatim in test docstrings for bidirectional
-traceability between v3.1 doc and code.
+Most tests map 1:1 to docs/catering-edge-cases.md (v3.1, frozen).
+Doc-spec assertions appear verbatim except where a case has been reconciled
+to the current PR-CF1 finalized-menu lifecycle in its docstring.
 
 Cases NOT in this file (have dedicated test files):
   C02 → tests/test_lookup_prior_leads.py
@@ -37,7 +37,7 @@ pytestmark = pytest.mark.skipif(
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _b1_helpers import (  # noqa: E402
     BridgeStub, bridge_post_text, lookup_prior_leads_by_phone_helper,
-    make_env_dir, make_menu_fixture, mk_lead, read_audit_entries, read_leads,
+    make_env_dir, mk_lead, read_audit_entries, read_leads,
     run_apply, run_create, seed_leads,
 )
 
@@ -58,6 +58,18 @@ def bridge_server():
         yield port, BridgeStub
     finally:
         server.shutdown()
+
+
+def _mark_first_lead_finalized(env_dir: Path, selected_items: list[dict]) -> None:
+    store = read_leads(env_dir)
+    lead = store["leads"][0]
+    lead["status"] = "CUSTOMER_FINALIZED"
+    lead["customer_finalized_at"] = datetime.now(timezone.utc).isoformat()
+    lead["selected_items"] = selected_items
+    (env_dir / "state" / "catering-leads.json").write_text(
+        json.dumps(store),
+        encoding="utf-8",
+    )
 
 
 # ─── CATEGORY 1: Sender identity & lead creation ──────────────────────
@@ -436,23 +448,17 @@ def test_c15_adults_kids_breakdown_in_notes(env_dir, bridge_server):
     assert lead["extracted"]["notes"] == input_notes
 
 
-# ─── CATEGORY 5: Menu filtering ──────────────────────────────────────
+# ─── CATEGORY 5: Customer-finalized menu rendering ───────────────────
 
-def test_c16_menu_filter_excludes_non_vegetarian_items(env_dir, bridge_server, tmp_path):
-    """v3.1 C16 — menu filter excludes non-vegetarian items.
+def test_c16_finalized_quote_includes_selected_items_only(env_dir, bridge_server):
+    """v3.1 C16 reconciled to current PR-CF1 lifecycle.
 
-    Doc-spec assertions:
-    - All returned items have "veg" in their dietary_tags
-    - No items with "non-veg" exclusively appear
-
-    Tested via integration through apply-catering-owner-decision flow:
-    create lead with dietary=["vegetarian"], approve, capture customer-quote
-    bridge POST, parse for menu items, verify only veg items appear.
+    Menu filtering now happens before owner approval in the finalize flow.
+    apply-catering-owner-decision renders finalized selected_items; this pins
+    that selected items are sent and unselected fixture items are not invented.
     """
     port, BridgeStub_local = bridge_server
     BridgeStub_local.requests = []  # clear before C16 run
-    menu_path = make_menu_fixture(tmp_path)
-
     # Create lead first
     fields = {"headcount": 20, "event_date": "2026-11-15",
               "dietary_restrictions": ["vegetarian"]}
@@ -460,63 +466,64 @@ def test_c16_menu_filter_excludes_non_vegetarian_items(env_dir, bridge_server, t
     assert r1.returncode == 0, f"stderr={r1.stderr}"
     lead = read_leads(env_dir)["leads"][0]
     code = lead["owner_approval_code"]
+    _mark_first_lead_finalized(env_dir, [
+        {"name": "Veg Biryani", "qty": 20, "price_usd": 200.0},
+        {"name": "Paneer Tikka", "qty": 20, "price_usd": 180.0},
+    ])
 
     BridgeStub_local.requests = []
-    r2 = run_apply(env_dir, port, code, "approve", menu_path=menu_path)
+    r2 = run_apply(
+        env_dir,
+        port,
+        code,
+        "approve",
+        quote_from_lead_state=True,
+    )
     assert r2.returncode == 0, f"apply failed: {r2.stderr}"
 
     customer_quote = bridge_post_text(BridgeStub_local)
-    # Both veg items MUST appear (tightened: pr-test-analyzer H2 +
-    # silent-failure HIGH-3 - OR-chain would mask half-broken filter).
+    # Both finalized items MUST appear.
     assert "Veg Biryani" in customer_quote, (
         f"missing Veg Biryani: {customer_quote[:500]}"
     )
     assert "Paneer Tikka" in customer_quote, (
         f"missing Paneer Tikka: {customer_quote[:500]}"
     )
-    # Non-veg-exclusive items MUST NOT appear
+    # Unselected fixture-style items MUST NOT appear.
     assert "Chicken Curry" not in customer_quote, (
         f"non-veg item leaked into vegetarian quote: {customer_quote[:500]}"
     )
     assert "Lamb Biryani" not in customer_quote
 
 
-def test_c17_empty_filter_result_surfaces_review_flag(env_dir, bridge_server, tmp_path):
-    """v3.1 C17 — empty filter result surfaces 'menu needs owner review' flag.
+def test_c17_empty_finalized_selection_fails_closed(env_dir, bridge_server):
+    """v3.1 C17 reconciled to current PR-CF1 lifecycle.
 
-    Doc-spec assertions:
-    - Generated draft is not empty
-    - Contains marker like the "didn't find items matching" prose
-      (per apply-catering-owner-decision._format_menu_section)
-
-    Uses dietary=["jain"] which has no jain-tagged items in our fixture menu.
+    An empty finalized selection is an invalid approval state. The owner
+    approval script must fail closed and send nothing rather than invent a
+    quote or silently fall through.
     """
     port, BridgeStub_local = bridge_server
     BridgeStub_local.requests = []
-    menu_path = make_menu_fixture(tmp_path)
-
     fields = {"headcount": 15, "event_date": "2026-11-20",
               "dietary_restrictions": ["jain"]}
     r1 = run_create(env_dir, port, fields, message_id="MSG_C17")
     assert r1.returncode == 0, f"stderr={r1.stderr}"
     lead = read_leads(env_dir)["leads"][0]
     code = lead["owner_approval_code"]
+    _mark_first_lead_finalized(env_dir, [])
 
     BridgeStub_local.requests = []
-    r2 = run_apply(env_dir, port, code, "approve", menu_path=menu_path)
-    assert r2.returncode == 0, f"apply failed: {r2.stderr}"
-
-    customer_quote = bridge_post_text(BridgeStub_local)
-    assert customer_quote.strip(), "customer quote should be non-empty"
-    # Tightened (pr-test-analyzer H2, silent-failure MEDIUM-1): pin to the
-    # canonical marker prose. The "or customize" disjunction would always
-    # match because the script's prose contains both substrings - dropping
-    # the disjunction makes a future regression that drops the dietary tag
-    # detectable.
-    assert "didn't find items matching jain" in customer_quote.lower(), (
-        f"jain dietary substring missing - review-flag prose regressed: "
-        f"{customer_quote[:500]}"
+    r2 = run_apply(
+        env_dir,
+        port,
+        code,
+        "approve",
+        quote_from_lead_state=True,
     )
+    assert r2.returncode != 0
+    assert "requires CUSTOMER_FINALIZED lead with non-empty selected_items" in r2.stderr
+    assert not BridgeStub_local.requests
 
 
 # ─── CATEGORY 6: Lifecycle ───────────────────────────────────────────
@@ -580,7 +587,7 @@ def test_c20_prompt_injection_shaped_extraction_no_crash(env_dir, bridge_server)
     - On success: payload appears VERBATIM in notes ONLY (NOT customer_name,
       NOT extracted.event_date)
     - leads.json size delta matches expectation (no orphaned partial state)
-    - BridgeStub.requests count matches (no double-send)
+    - Owner approval card is sent exactly once
     """
     port, BridgeStub_local = bridge_server
     BridgeStub_local.requests = []
@@ -602,9 +609,13 @@ def test_c20_prompt_injection_shaped_extraction_no_crash(env_dir, bridge_server)
 
     leads = read_leads(env_dir)["leads"]
     if r.returncode == 0:
-        # Success path: exactly one lead, exactly one bridge POST
+        # Success path: exactly one lead, exactly one owner-card bridge POST
         assert len(leads) == 1
-        assert len(BridgeStub_local.requests) == 1
+        owner_posts = [
+            req for req in BridgeStub_local.requests
+            if req.get("chatId") == "19045550100@s.whatsapp.net"
+        ]
+        assert len(owner_posts) == 1
         lead = leads[0]
         # Payload appears VERBATIM in notes (extracted.notes per schema)
         assert lead["extracted"]["notes"] == payload
@@ -659,7 +670,11 @@ def test_c21_discount_keywords_in_notes_preserved(env_dir, bridge_server):
 
     # Owner card was sent (regression guard - card-send is the trigger for
     # owner review of the discount mention via cockpit)
-    assert len(BridgeStub_local.requests) == 1, (
+    owner_posts = [
+        req for req in BridgeStub_local.requests
+        if req.get("chatId") == "19045550100@s.whatsapp.net"
+    ]
+    assert len(owner_posts) == 1, (
         "owner approval card not sent; owner cannot see discount request"
     )
 

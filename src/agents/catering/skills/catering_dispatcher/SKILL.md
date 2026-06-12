@@ -83,7 +83,7 @@ Apply this matrix in priority order:
 a 5-char approval code matching a non-terminal catering lead:
 - Delegate to `handle_catering_owner_approval` with the code + the message text.
 
-To check: grep for `#[A-HJ-NP-Z2-9]{5}` in message_text. If a code is found,
+To check: grep for `#[A-HJKMNPQR-Z2-9]{5}` in message_text. If a code is found,
 look it up:
 ```
 cat /opt/shift-agent/state/catering-leads.json | jq -r '.leads[] | select(.owner_approval_code == "<CODE>" and .status == "AWAITING_OWNER_APPROVAL") | .lead_id'

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -16,15 +17,20 @@ sys.path.insert(0, str(SRC_ROOT))
 
 from schemas import FlyerAssetsDelivered, FlyerCustomerStore, FlyerDeliveryFailed, FlyerPlanTier, FlyerProjectStore, is_flyer_transition_allowed  # noqa: E402
 try:
-    from flyer_render import validate_text_manifest_file  # type: ignore  # noqa: E402
+    from flyer_render import FINAL_FORMAT_PIXEL_SHAPES, png_pixel_dimensions, validate_text_manifest_file  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import validate_text_manifest_file  # noqa: E402
+    from agents.flyer.render import FINAL_FORMAT_PIXEL_SHAPES, png_pixel_dimensions, validate_text_manifest_file  # noqa: E402
+try:
+    from flyer_visual_qa import validate_visual_qa_report  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.visual_qa import validate_visual_qa_report  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 CUSTOMER_STATE_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
-TRIAL_UPGRADE_LINK = "https://wa.me/918522041562?text=START%20FREE%20TRIAL%20-%20I%20want%20to%20try%20Flyer%20Studio"
+CREATE_ANOTHER_FLYER_LINK = "https://wa.me/918522041562?text=CREATE%20ANOTHER%20FLYER"
+UPGRADE_PLAN_LINK = "https://wa.me/918522041562?text=UPGRADE%20PLAN%20-%20show%20Flyer%20Studio%20plans"
 FINAL_KIND_TO_FORMAT = {
     "final_whatsapp_image": "whatsapp_image",
     "final_instagram_post": "instagram_post",
@@ -40,7 +46,33 @@ FINAL_KIND_TO_CAPTION = {
 
 
 def _load_runtime_io():
-    from safe_io import FileLock, atomic_write_text, bridge_post, bridge_send_media, ndjson_append  # type: ignore
+    try:
+        from safe_io import FileLock, atomic_write_text, bridge_post, bridge_send_media, ndjson_append  # type: ignore
+    except ModuleNotFoundError:
+        class FileLock:  # type: ignore[no-redef]
+            def __init__(self, _path: Path) -> None:
+                pass
+
+            def __enter__(self) -> "FileLock":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+        def atomic_write_text(path: Path, text: str) -> None:  # type: ignore[no-redef]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+        def ndjson_append(path: Path, line: str) -> None:  # type: ignore[no-redef]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+
+        def bridge_post(*_args, **_kwargs):  # type: ignore[no-redef]
+            return False, "", "bridge unavailable", "bridge_unavailable"
+
+        def bridge_send_media(*_args, **_kwargs):  # type: ignore[no-redef]
+            return False, "", "bridge unavailable", "bridge_unavailable"
     return FileLock, atomic_write_text, bridge_post, bridge_send_media, ndjson_append
 
 
@@ -55,6 +87,11 @@ def _write_store(state_path: Path, store: FlyerProjectStore) -> None:
         state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
     else:
         atomic_write_text(state_path, store.model_dump_json(indent=2))
+
+
+def _append_delivery_audit(log_path: Path, entry_json: str, *, FileLock, ndjson_append) -> None:
+    with FileLock(Path(str(log_path) + ".lock")):
+        ndjson_append(log_path, entry_json)
 
 
 def _load_customer_store(path: Path) -> FlyerCustomerStore:
@@ -72,18 +109,20 @@ def _trial_upsell_message(customer) -> str:
             "Flyer Studio\n------------\n"
             "Your 3 free sample flyers are complete. To keep creating flyers, choose a plan: "
             "$49.99/month for 30, $69.99/month for 60, or $199/month unlimited.\n"
-            f"Start here: {TRIAL_UPGRADE_LINK}"
+            f"Upgrade plan: {UPGRADE_PLAN_LINK}"
         )
     if remaining == 1:
         return (
             "Flyer Studio\n------------\n"
             "Second sample done. You have 1 free sample flyer left. "
-            f"Paid plans start at $49.99/month for 30 flyers: {TRIAL_UPGRADE_LINK}"
+            f"Create another flyer: {CREATE_ANOTHER_FLYER_LINK}\n"
+            f"Upgrade plan: {UPGRADE_PLAN_LINK}"
         )
     return (
         "Flyer Studio\n------------\n"
-        f"Your sample flyer is ready. You have {remaining} free sample flyers left. "
-        f"Upgrade anytime: {TRIAL_UPGRADE_LINK}"
+        f"Your sample flyer is ready. You have {remaining} free sample flyers left.\n\n"
+        f"Create another flyer: {CREATE_ANOTHER_FLYER_LINK}\n"
+        f"Upgrade plan: {UPGRADE_PLAN_LINK}"
     )
 
 
@@ -98,15 +137,35 @@ def _trial_upsell_for_project(project, customer_state_path: Path) -> str:
     return _trial_upsell_message(customer)
 
 
+def _asset_format_shape_mismatch(asset) -> bool:
+    """True when an asset claims a fixed-shape channel format but its actual PNG
+    pixel shape does not match it — i.e. the format-truthfulness caption gate
+    fires. Pillow-free so it holds even when the render-time PIL dimension check
+    was skipped (Pillow absent in the Hermes venv)."""
+    expected_shape = FINAL_FORMAT_PIXEL_SHAPES.get(FINAL_KIND_TO_FORMAT.get(getattr(asset, "kind", ""), ""))
+    if expected_shape is None:
+        return False
+    return png_pixel_dimensions(getattr(asset, "path", "")) != expected_shape
+
+
 def _caption_for_asset(asset, fallback: str = "") -> str:
-    return FINAL_KIND_TO_CAPTION.get(getattr(asset, "kind", ""), fallback or "Your final flyer package is ready.")
+    kind = getattr(asset, "kind", "")
+    caption = FINAL_KIND_TO_CAPTION.get(kind, fallback or "Your final flyer package is ready.")
+    if _asset_format_shape_mismatch(asset):
+        # Format-truthfulness gate: never tell the customer a file is an
+        # "Instagram story"/"post" unless it actually matches that channel's
+        # pixel shape.
+        return fallback or "Your final flyer package is ready."
+    return caption
 
 
 def _resolve_project_assets(project):
     if project.status != "finalizing_assets":
         raise SystemExit(f"project must be finalizing_assets before delivery, got {project.status}")
-    if len(project.final_asset_ids) != 4:
-        raise SystemExit(f"project must have 4 final assets before delivery, got {len(project.final_asset_ids)}")
+    if not project.final_asset_ids:
+        raise SystemExit("project has no final assets ready for delivery")
+    if len(set(project.final_asset_ids)) != len(project.final_asset_ids):
+        raise SystemExit("project final asset ids contain duplicates")
     by_id = {asset.asset_id: asset for asset in project.assets}
     missing_ids = [asset_id for asset_id in project.final_asset_ids if asset_id not in by_id]
     if missing_ids:
@@ -114,8 +173,10 @@ def _resolve_project_assets(project):
     project_assets = [by_id[asset_id] for asset_id in project.final_asset_ids]
     kinds = {asset.kind for asset in project_assets}
     expected_kinds = set(FINAL_KIND_TO_FORMAT)
-    if kinds != expected_kinds:
+    if not kinds <= expected_kinds:
         raise SystemExit(f"final asset kinds mismatch: {sorted(kinds)}")
+    if "final_whatsapp_image" not in kinds:
+        raise SystemExit("final package must include final_whatsapp_image before delivery")
     return project_assets
 
 
@@ -127,9 +188,9 @@ def _pending_project_assets(project):
     return [asset for asset in project_assets if asset.delivery_status != "sent"]
 
 
-def audit_uncertain_delivery_block(log_path: Path, project, uncertain_assets, ndjson_append) -> None:
+def audit_uncertain_delivery_block(log_path: Path, project, uncertain_assets, append_audit) -> None:
     for asset in uncertain_assets:
-        ndjson_append(log_path, FlyerDeliveryFailed(
+        append_audit(FlyerDeliveryFailed(
             type="flyer_delivery_failed",
             ts=datetime.now(timezone.utc),
             project_id=project.project_id,
@@ -140,16 +201,46 @@ def audit_uncertain_delivery_block(log_path: Path, project, uncertain_assets, nd
         ).model_dump_json())
 
 
-def _pending_project_assets_or_audit_block(project, log_path: Path, ndjson_append):
+def _pending_project_assets_or_audit_block(project, log_path: Path, append_audit):
     project_assets = _resolve_project_assets(project)
     uncertain_assets = [asset for asset in project_assets if asset.delivery_status == "uncertain"]
     if uncertain_assets:
-        audit_uncertain_delivery_block(log_path, project, uncertain_assets, ndjson_append)
+        audit_uncertain_delivery_block(log_path, project, uncertain_assets, append_audit)
         raise SystemExit(
             "uncertain delivery requires operator reconciliation before retry: "
             + ",".join(asset.asset_id for asset in uncertain_assets)
         )
     return [asset for asset in project_assets if asset.delivery_status != "sent"]
+
+
+def _final_asset_delivery_complete(project) -> bool:
+    project_assets = _resolve_project_assets(project)
+    return bool(project_assets) and all(
+        asset.delivery_status == "sent" and bool(asset.outbound_message_id)
+        for asset in project_assets
+    )
+
+
+def _incomplete_final_delivery_assets(project) -> list:
+    return [
+        asset for asset in _resolve_project_assets(project)
+        if asset.delivery_status != "sent" or not asset.outbound_message_id
+    ]
+
+
+def _audit_incomplete_final_delivery_assets(project, append_audit) -> str:
+    incomplete = _incomplete_final_delivery_assets(project)
+    for asset in incomplete:
+        append_audit(FlyerDeliveryFailed(
+            type="flyer_delivery_failed",
+            ts=datetime.now(timezone.utc),
+            project_id=project.project_id,
+            customer_phone=project.customer_phone,
+            asset_id=asset.asset_id,
+            status="blocked",
+            error="final delivery incomplete before delivered transition",
+        ).model_dump_json())
+    return ",".join(asset.asset_id for asset in incomplete)
 
 
 def _record_asset_delivery(
@@ -160,48 +251,59 @@ def _record_asset_delivery(
     status: str,
     outbound_message_id: str = "",
     error: str = "",
+    FileLock=None,
 ) :
-    store = _load_store(state_path)
-    now = datetime.now(timezone.utc)
-    for pidx, project in enumerate(store.projects):
-        if project.project_id != project_id:
-            continue
-        updated_assets = []
-        updated_project = project
-        for asset in project.assets:
-            if asset.asset_id != asset_id:
-                updated_assets.append(asset)
+    if FileLock is None:
+        try:
+            from safe_io import FileLock as FileLock  # type: ignore
+        except Exception:
+            FileLock = None
+
+    def _update_delivery():
+        store = _load_store(state_path)
+        now = datetime.now(timezone.utc)
+        for pidx, project in enumerate(store.projects):
+            if project.project_id != project_id:
                 continue
-            update = {
-                "delivery_status": status,
-                "delivery_attempt_count": asset.delivery_attempt_count + 1,
-                "delivery_error": error,
-            }
-            if status == "sent":
-                update["outbound_message_id"] = outbound_message_id
-                update["delivered_at"] = now
-            updated_assets.append(asset.model_copy(update=update))
-        updated_project = project.model_copy(update={"assets": updated_assets, "updated_at": now})
-        store.projects[pidx] = updated_project
-        _write_store(state_path, store)
-        return updated_project
-    raise SystemExit(f"project not found: {project_id}")
+            updated_assets = []
+            updated_project = project
+            for asset in project.assets:
+                if asset.asset_id != asset_id:
+                    updated_assets.append(asset)
+                    continue
+                update = {
+                    "delivery_status": status,
+                    "delivery_attempt_count": asset.delivery_attempt_count + 1,
+                    "delivery_error": error,
+                }
+                if status == "sent":
+                    update["outbound_message_id"] = outbound_message_id
+                    update["delivered_at"] = now
+                updated_assets.append(asset.model_copy(update=update))
+            updated_project = project.model_copy(update={"assets": updated_assets, "updated_at": now})
+            store.projects[pidx] = updated_project
+            _write_store(state_path, store)
+            return updated_project
+        raise SystemExit(f"project not found: {project_id}")
+
+    if FileLock is None:
+        return _update_delivery()
+    with FileLock(Path(str(state_path) + ".lock")):
+        return _update_delivery()
 
 
-def main() -> int:
-    p = argparse.ArgumentParser()
-    p.add_argument("--jid", required=True)
-    p.add_argument("--project-id", default="")
-    p.add_argument("--state-path", default=str(STATE_PATH))
-    p.add_argument("--customer-state-path", default=str(CUSTOMER_STATE_PATH))
-    p.add_argument("--log-path", default=str(LOG_PATH))
-    p.add_argument("--asset", action="append", default=[])
-    p.add_argument("--caption", default="Your final flyer package is ready.")
-    p.add_argument("--allow-unverified-asset", action="store_true")
-    p.add_argument("--break-glass-reason", default="")
-    p.add_argument("--dry-run-bridge", action="store_true")
-    args = p.parse_args()
-    FileLock, atomic_write_text, bridge_post, bridge_send_media, ndjson_append = _load_runtime_io()
+def _project_delivery_lock_path(state_path: Path, project_id: str) -> Path:
+    safe_project_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", project_id) or "unknown"
+    return state_path.with_name(f"{state_path.name}.{safe_project_id}.delivery.lock")
+
+
+def _run_delivery(args, *, FileLock, atomic_write_text, bridge_post, bridge_send_media, ndjson_append) -> int:
+    append_audit = lambda entry_json: _append_delivery_audit(  # noqa: E731
+        Path(args.log_path),
+        entry_json,
+        FileLock=FileLock,
+        ndjson_append=ndjson_append,
+    )
 
     assets = [Path(asset) for asset in args.asset]
     project = None
@@ -216,18 +318,27 @@ def main() -> int:
         if project is None:
             raise SystemExit(f"project not found: {args.project_id}")
         project_assets = _resolve_project_assets(project)
-        pending_project_assets = _pending_project_assets_or_audit_block(project, log_path, ndjson_append)
+        pending_project_assets = _pending_project_assets_or_audit_block(project, log_path, append_audit)
         project_snapshot = {
             "version": project.version,
             "status": project.status,
             "final_asset_ids": list(project.final_asset_ids),
         }
         assets.extend(Path(asset.path) for asset in pending_project_assets)
-    if not assets:
+    if not assets and project is None:
         raise SystemExit("no assets to send; pass --asset or --project-id")
+    if not assets and project is not None and not _final_asset_delivery_complete(project):
+        asset_ids = _audit_incomplete_final_delivery_assets(project, append_audit)
+        print(json.dumps({"failure": "final_delivery_incomplete", "asset_ids": asset_ids}))
+        return 2
+    if project is None and not args.allow_unverified_asset:
+        raise SystemExit("direct --asset sends require --allow-unverified-asset and break-glass reason")
+    if args.allow_sidecar_visual_qa and not args.dry_run_bridge:
+        raise SystemExit("--allow-sidecar-visual-qa is only allowed with --dry-run-bridge")
 
     failures = []
     outbound_ids = []
+    path_to_project_asset = {str(Path(asset.path)): asset for asset in pending_project_assets} if project is not None else {}
     if args.allow_unverified_asset:
         if project is not None:
             raise SystemExit("--allow-unverified-asset is only for direct operator --asset sends")
@@ -252,26 +363,48 @@ def main() -> int:
             for asset in pending_project_assets if project is not None
         }
         for asset in assets:
+            expected_output_format = expected_formats.get(str(asset)) or None
             result = validate_text_manifest_file(
                 asset,
                 project_id=project.project_id if project is not None else None,
                 project_version=project.version if project is not None else None,
-                output_format=expected_formats.get(str(asset)) or None,
+                output_format=expected_output_format,
             )
             if not result.ok:
                 if project is not None:
-                    ndjson_append(log_path, FlyerDeliveryFailed(
+                    project_asset = path_to_project_asset.get(str(asset))
+                    append_audit(FlyerDeliveryFailed(
                         type="flyer_delivery_failed",
                         ts=datetime.now(timezone.utc),
                         project_id=project.project_id,
                         customer_phone=project.customer_phone,
-                        asset_id=asset.name,
-                        status=0,
+                        asset_id=project_asset.asset_id if project_asset is not None else asset.name,
+                        status="blocked",
                         error="text_qa_failed: " + "; ".join(result.blockers),
                     ).model_dump_json())
                 print(json.dumps({"text_qa_failed": str(asset), "blockers": result.blockers}))
                 return 2
-    path_to_project_asset = {str(Path(asset.path)): asset for asset in pending_project_assets} if project is not None else {}
+            if project is not None and expected_output_format:
+                visual = validate_visual_qa_report(
+                    asset,
+                    project_id=project.project_id,
+                    project_version=project.version,
+                    output_format=expected_output_format,
+                    allow_sidecar=args.allow_sidecar_visual_qa,
+                )
+                if not visual.ok:
+                    project_asset = next((row for row in pending_project_assets if Path(row.path) == Path(asset)), None)
+                    append_audit(FlyerDeliveryFailed(
+                        type="flyer_delivery_failed",
+                        ts=datetime.now(timezone.utc),
+                        project_id=project.project_id,
+                        customer_phone=project.customer_phone,
+                        asset_id=project_asset.asset_id if project_asset is not None else asset.name,
+                        status="blocked",
+                        error="visual_qa_failed: " + "; ".join(visual.blockers),
+                    ).model_dump_json())
+                    print(json.dumps({"visual_qa_failed": str(asset), "blockers": visual.blockers}))
+                    return 2
     for asset in assets:
         if args.dry_run_bridge:
             ok, mid, err, status = True, f"dry-run:{asset.name}", "", 200
@@ -289,16 +422,18 @@ def main() -> int:
                     status=delivery_status,
                     outbound_message_id="",
                     error=err,
+                    FileLock=FileLock,
                 )
             failures.append({"asset": str(asset), "status": status, "error": err})
             if project is not None:
-                ndjson_append(log_path, FlyerDeliveryFailed(
+                project_asset = path_to_project_asset.get(str(asset))
+                append_audit(FlyerDeliveryFailed(
                     type="flyer_delivery_failed",
                     ts=datetime.now(timezone.utc),
                     project_id=project.project_id,
                     customer_phone=project.customer_phone,
-                    asset_id=asset.name,
-                    status=status,
+                    asset_id=project_asset.asset_id if project_asset is not None else asset.name,
+                    status=str(status),
                     error=err,
                 ).model_dump_json())
         else:
@@ -310,12 +445,15 @@ def main() -> int:
                     status="sent",
                     outbound_message_id=mid,
                     error="",
+                    FileLock=FileLock,
                 )
             outbound_ids.append(mid)
     if failures:
         print(json.dumps({"failures": failures, "sent_before_failure": outbound_ids}))
         return 2
     if project is not None:
+        delivered_audit_asset_ids = [asset.asset_id for asset in project_assets]
+        delivered_audit_outbound_ids = list(outbound_ids)
         with FileLock(Path(str(state_path) + ".lock")):
             store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
             for idx, existing in enumerate(store.projects):
@@ -326,32 +464,49 @@ def main() -> int:
                         or existing.status != project_snapshot["status"]
                         or list(existing.final_asset_ids) != project_snapshot["final_asset_ids"]
                     ):
-                        ndjson_append(log_path, FlyerDeliveryFailed(
+                        append_audit(FlyerDeliveryFailed(
                             type="flyer_delivery_failed",
                             ts=datetime.now(timezone.utc),
                             project_id=project.project_id,
                             customer_phone=project.customer_phone,
                             asset_id="final_package",
-                            status=0,
+                            status="blocked",
                             error="project changed during delivery; sent_message_ids=" + ",".join(outbound_ids),
                         ).model_dump_json())
                         print(json.dumps({"failure": "project_changed_during_delivery", "sent_before_failure": outbound_ids}))
                         return 2
                     if not is_flyer_transition_allowed(existing.status, "delivered"):
                         raise SystemExit(f"invalid transition {existing.status}->delivered")
+                    incomplete = _incomplete_final_delivery_assets(existing)
+                    if incomplete:
+                        asset_ids = _audit_incomplete_final_delivery_assets(existing, append_audit)
+                        print(json.dumps({"failure": "final_delivery_incomplete", "asset_ids": asset_ids}))
+                        return 2
+                    existing_assets_by_id = {asset.asset_id: asset for asset in existing.assets}
+                    delivered_assets = [
+                        existing_assets_by_id[asset_id]
+                        for asset_id in existing.final_asset_ids
+                        if asset_id in existing_assets_by_id
+                    ]
+                    delivered_audit_asset_ids = [asset.asset_id for asset in delivered_assets]
+                    delivered_audit_outbound_ids = [
+                        asset.outbound_message_id
+                        for asset in delivered_assets
+                        if asset.outbound_message_id
+                    ]
                     store.projects[idx] = existing.model_copy(update={
                         "status": "delivered",
                         "updated_at": datetime.now(timezone.utc),
                     })
                     atomic_write_text(state_path, store.model_dump_json(indent=2))
                     break
-        ndjson_append(log_path, FlyerAssetsDelivered(
+        append_audit(FlyerAssetsDelivered(
             type="flyer_assets_delivered",
             ts=datetime.now(timezone.utc),
             project_id=project.project_id,
             customer_phone=project.customer_phone,
-            asset_ids=[asset.asset_id for asset in project_assets],
-            outbound_message_ids=outbound_ids,
+            asset_ids=delivered_audit_asset_ids,
+            outbound_message_ids=delivered_audit_outbound_ids,
         ).model_dump_json())
     trial_upsell_message_id = ""
     trial_upsell_error = ""
@@ -366,13 +521,61 @@ def main() -> int:
                     trial_upsell_message_id = mid
                 else:
                     trial_upsell_error = err
+    # Format-truthfulness observability: surface any asset whose channel-specific
+    # caption was downgraded because its file shape didn't match the claimed
+    # format (e.g. an operator-uploaded asset that bypassed render_final_package).
+    # Closes the silent-failure surface of the caption gate (§12b).
+    format_truthfulness_downgrades = [
+        asset.asset_id for asset in pending_project_assets if _asset_format_shape_mismatch(asset)
+    ]
+    for asset_id in format_truthfulness_downgrades:
+        print(
+            f"flyer_format_truthfulness_downgrade project_id={project.project_id} asset_id={asset_id}",
+            file=sys.stderr,
+        )
     print(json.dumps({
         "sent": len(assets),
         "message_ids": outbound_ids,
         "trial_upsell_message_id": trial_upsell_message_id,
         "trial_upsell_error": trial_upsell_error,
+        "format_truthfulness_downgrades": format_truthfulness_downgrades,
     }))
     return 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--jid", required=True)
+    p.add_argument("--project-id", default="")
+    p.add_argument("--state-path", default=str(STATE_PATH))
+    p.add_argument("--customer-state-path", default=str(CUSTOMER_STATE_PATH))
+    p.add_argument("--log-path", default=str(LOG_PATH))
+    p.add_argument("--asset", action="append", default=[])
+    p.add_argument("--caption", default="Your final flyer package is ready.")
+    p.add_argument("--allow-unverified-asset", action="store_true")
+    p.add_argument("--allow-sidecar-visual-qa", action="store_true")
+    p.add_argument("--break-glass-reason", default="")
+    p.add_argument("--dry-run-bridge", action="store_true")
+    args = p.parse_args()
+    FileLock, atomic_write_text, bridge_post, bridge_send_media, ndjson_append = _load_runtime_io()
+    if args.project_id:
+        with FileLock(_project_delivery_lock_path(Path(args.state_path), args.project_id)):
+            return _run_delivery(
+                args,
+                FileLock=FileLock,
+                atomic_write_text=atomic_write_text,
+                bridge_post=bridge_post,
+                bridge_send_media=bridge_send_media,
+                ndjson_append=ndjson_append,
+            )
+    return _run_delivery(
+        args,
+        FileLock=FileLock,
+        atomic_write_text=atomic_write_text,
+        bridge_post=bridge_post,
+        bridge_send_media=bridge_send_media,
+        ndjson_append=ndjson_append,
+    )
 
 
 if __name__ == "__main__":

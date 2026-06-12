@@ -376,3 +376,38 @@ def test_smoke_reports_pilot_readiness_non_blocking():
     assert "/usr/local/bin/pilot-readiness-check --text" in text
     snippet = text[text.index("/usr/local/bin/pilot-readiness-check --text"):]
     assert "|| true" in snippet[:200]
+
+
+# ── Pushover out-of-band alert readiness (sick-call escalation + deploy alerts).
+# Schema already rejects EMPTY keys; pilot-readiness additionally flags
+# placeholder + MUTED_ (dev/rehearsal) keys that pass schema but aren't pilot-ready.
+
+def test_alerting_pushover_real_keys_pass(tmp_path: Path):
+    config_path, roster_path, state_dir = _arrange(
+        tmp_path, config=_base_config(), roster=_base_roster(), menu=_base_menu()
+    )
+    checks = _report(_run(config_path, roster_path, state_dir))["checks"]
+    assert any(c["id"] == "alerting.pushover" and c["status"] == "pass" for c in checks), checks
+
+
+def test_alerting_pushover_placeholder_blocks(tmp_path: Path):
+    cfg = _base_config()
+    cfg["alerting"]["pushover_user_key"] = "placeholder"
+    config_path, roster_path, state_dir = _arrange(
+        tmp_path, config=cfg, roster=_base_roster(), menu=_base_menu()
+    )
+    checks = _report(_run(config_path, roster_path, state_dir))["checks"]
+    assert any(c["id"] == "alerting.pushover" and c["status"] == "fail" for c in checks), checks
+
+
+def test_alerting_pushover_muted_blocks(tmp_path: Path):
+    cfg = _base_config()
+    cfg["alerting"]["pushover_user_key"] = "MUTED_20260501T161536Z"
+    cfg["alerting"]["pushover_app_token"] = "MUTED_20260501T161536Z"
+    config_path, roster_path, state_dir = _arrange(
+        tmp_path, config=cfg, roster=_base_roster(), menu=_base_menu()
+    )
+    checks = _report(_run(config_path, roster_path, state_dir))["checks"]
+    row = next(c for c in checks if c["id"] == "alerting.pushover")
+    assert row["status"] == "fail", row
+    assert "muted" in row["message"].lower()

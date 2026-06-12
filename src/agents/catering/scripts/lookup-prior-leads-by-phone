@@ -200,7 +200,7 @@ def _normalize_aware(dt: datetime, *, source: str) -> datetime:
 def lookup_prior_leads_by_phone(
     customer_phone: str,
     *,
-    leads_path: Path = LEADS_PATH,
+    leads_path: Optional[Path] = None,
     now: Optional[datetime] = None,
 ) -> dict:
     """C02 contract — see module docstring.
@@ -214,7 +214,8 @@ def lookup_prior_leads_by_phone(
     if canonical is None:
         raise ValueError(f"invalid phone: {customer_phone!r}")
 
-    store, status = _read_leads_with_lock_timeout(leads_path)
+    effective_leads_path = leads_path or LEADS_PATH
+    store, status = _read_leads_with_lock_timeout(effective_leads_path)
     if status == LOOKUP_STATUS_MISSING_FILE:
         return _empty_result(LOOKUP_STATUS_MISSING_FILE)
     if status == LOOKUP_STATUS_LOCK_TIMEOUT:
@@ -224,7 +225,7 @@ def lookup_prior_leads_by_phone(
         # corrupt (parse-level) so SKILL preamble can route differently.
         return _empty_result(LOOKUP_STATUS_IO_ERROR)
     if status == LOOKUP_STATUS_CORRUPT:
-        raise RuntimeError(f"leads-store corrupt at {leads_path}")
+        raise RuntimeError(f"leads-store corrupt at {effective_leads_path}")
     assert store is not None  # noqa: S101 — invariant: status==ok ⇒ store
 
     matches = [l for l in store.leads if l.customer_phone == canonical]

@@ -10,7 +10,7 @@ the verb, call the deterministic state writer, and report back.
 
 ## Step 1 — Parse the owner's reply
 
-Extract the confirmation code: `#[A-HJ-NP-Z2-9]{5}` from the message_text.
+Extract the confirmation code: `#[A-HJKMNPQR-Z2-9]{5}` from the message_text.
 
 Determine the verb (case-insensitive):
 - "yes", "apply", "approve", "go", "ok" → **yes**

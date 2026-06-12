@@ -1,0 +1,16 @@
+{
+  "topic": "commerce-slice-c-staff-actions-design",
+  "task_text": "Design (design-only, no implementation) Commerce Slice C staff actions / order status transitions: transition matrix, authority matrix (against the actual single-user cockpit auth), audit row shapes, write-safety/locking/concurrency, customer-visible effects (none), payment/POS boundaries, UI plan, tests planned, operator gates. Recommend the smallest safe Slice C. Codex review (5 lenses incl. write-safety/concurrency) before any build.",
+  "completed_at": "2026-05-30T20:50:29Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 4,
+  "hermes_step_count": 5,
+  "files_to_read_first": [
+    "src/platform/commerce/order_state.py",
+    "src/platform/commerce/audit.py",
+    "src/platform/schemas.py",
+    "web/backend/app/auth.py",
+    "web/backend/app/routers/commerce.py",
+    "web/backend/app/routers/flyer.py"
+  ]
+}

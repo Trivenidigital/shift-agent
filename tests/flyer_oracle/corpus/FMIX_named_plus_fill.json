@@ -1,0 +1,19 @@
+{
+  "id": "F0141",
+  "title": "mixed: customer names 2 items + asks 8 total - planner fills 6",
+  "request": "weekend South Indian flyer, include Idli and Vada, 8 items total, any item at $8.99",
+  "profile": {"business_name": "Lakshmis Kitchen", "public_phone": "+1 732 983 7841", "business_address": "90 Brybar Dr"},
+  "config": {"creative_planner": {"enabled": true, "enabled_categories": ["restaurant", "menu", "south indian"]}},
+  "planner_offers": ["Masala Dosa", "Pongal", "Upma", "Poori", "Kesari Bath", "Pesarattu", "Rava Dosa", "Set Dosa"],
+  "expect": {
+    "locked_facts": [
+      {"fact_id": "item:0:name", "value": "Idli", "source": "customer_text"},
+      {"fact_id": "item:1:name", "value": "Vada", "source": "customer_text"}
+    ],
+    "allowed_inferred": 6,
+    "expected_total_items": 8,
+    "pricing_model": "flat",
+    "flat_price": "$8.99",
+    "flat_price_source": "customer_text"
+  }
+}

@@ -43,6 +43,28 @@ def test_guest_order_starts_pending_payment_with_four_dollar_link(tmp_path):
     assert store.orders[0].sender_phone == "+17329837841"
 
 
+
+def test_guest_order_malformed_checkout_template_fails_closed(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+
+    result = start_guest_order(
+        state_path=state,
+        sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="cta-bad-template",
+        checkout_url_template="https://pay.example/quick/{missing_placeholder}",
+        now=now,
+    )
+
+    assert result.ok is True
+    assert result.status == "pending_payment"
+    assert result.payment_checkout_url == ""
+    assert "Payment link is not configured yet" in result.reply_text
+    store = load_guest_order_store(state)
+    assert store.orders[0].payment_checkout_url == ""
+    assert store.orders[0].payment_state == "checkout_missing"
+
 def test_guest_order_activation_then_single_use_consumes_order(tmp_path):
     state = tmp_path / "guest_orders.json"
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)
@@ -62,6 +84,7 @@ def test_guest_order_activation_then_single_use_consumes_order(tmp_path):
     )
     assert active.ok is True
     assert "Payment received" in active.reply_text
+    assert load_guest_order_store(state).orders[0].payment_state == "payment_confirmed"
     assert find_paid_guest_order(
         state_path=state,
         sender_phone="+17329837841",
@@ -417,6 +440,44 @@ def test_guest_order_cli_dry_flow(tmp_path):
     assert '"status": "paid"' in release.stdout
 
 
+def test_guest_order_cli_finds_reserved_project(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    script = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "scripts" / "manage-flyer-guest-order"
+    common = ["--state-path", str(state), "--config-path", str(tmp_path / "missing.yaml")]
+
+    subprocess.run(
+        [sys.executable, str(script), "--start",
+         "--sender-phone", "+17329837841",
+         "--chat-id", "17329837841@s.whatsapp.net",
+         "--message-id", "cta-1", *common],
+        capture_output=True, text=True, check=True,
+    )
+    subprocess.run(
+        [sys.executable, str(script), "--activate",
+         "--order-id", "GUEST0001",
+         "--payment-reference", "manual-test", *common],
+        capture_output=True, text=True, check=True,
+    )
+    subprocess.run(
+        [sys.executable, str(script), "--reserve",
+         "--sender-phone", "+17329837841",
+         "--chat-id", "17329837841@s.whatsapp.net",
+         "--project-id", "F0020", *common],
+        capture_output=True, text=True, check=True,
+    )
+
+    found = subprocess.run(
+        [sys.executable, str(script), "--find-reserved",
+         "--sender-phone", "+17329837841",
+         "--chat-id", "17329837841@s.whatsapp.net",
+         "--project-id", "F0020", *common],
+        capture_output=True, text=True, check=True,
+    )
+
+    assert '"reserved_order": true' in found.stdout
+    assert '"reserved_project_id": "F0020"' in found.stdout
+
+
 def test_guest_order_cli_consume_idempotent_on_replay(tmp_path):
     """BUG-FLYER-QA-001 end-to-end: a second --consume for the same project_id
     must exit 0 through the subprocess layer (not just in-process). This
@@ -512,3 +573,288 @@ def test_guest_order_cli_rejects_activation_without_payment_reference(tmp_path):
     doc = json.loads(activate.stdout)
     assert doc["detail"] == "payment_reference_required"
     assert load_guest_order_store(state).orders[0].status == "pending_payment"
+
+def test_guest_order_duplicate_reference_is_provider_scoped(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+
+    start_guest_order(
+        state_path=state,
+        sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="cta-1",
+        unit_price_cents=4999,
+        currency="USD",
+        now=now,
+    )
+    start_guest_order(
+        state_path=state,
+        sender_phone="+17329837842",
+        chat_id="17329837842@s.whatsapp.net",
+        message_id="cta-2",
+        unit_price_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    first = activate_guest_order(
+        state_path=state,
+        order_id="GUEST0001",
+        provider="stripe",
+        payment_reference="pay_ref_shared",
+        amount_cents=4999,
+        currency="USD",
+        now=now,
+    )
+    second = activate_guest_order(
+        state_path=state,
+        order_id="GUEST0002",
+        provider="razorpay",
+        payment_reference="pay_ref_shared",
+        amount_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    assert first.ok is True
+    assert second.ok is True
+
+
+def test_guest_order_duplicate_reference_compares_normalized_values(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+
+    start_guest_order(
+        state_path=state,
+        sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="cta-1",
+        unit_price_cents=4999,
+        currency="USD",
+        now=now,
+    )
+    start_guest_order(
+        state_path=state,
+        sender_phone="+17329837842",
+        chat_id="17329837842@s.whatsapp.net",
+        message_id="cta-2",
+        unit_price_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    first = activate_guest_order(
+        state_path=state,
+        order_id="GUEST0001",
+        provider="  STRIPE  ",
+        payment_reference="  pi_dupe  ",
+        amount_cents=4999,
+        currency="USD",
+        now=now,
+    )
+    duplicate = activate_guest_order(
+        state_path=state,
+        order_id="GUEST0002",
+        provider="stripe",
+        payment_reference="pi_dupe",
+        amount_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    assert first.ok is True
+    assert duplicate.ok is False
+    assert duplicate.detail == "payment_reference_already_used"
+
+
+def test_guest_order_paid_replay_requires_matching_payment_reference(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+
+    start_guest_order(
+        state_path=state,
+        sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="cta-1",
+        unit_price_cents=4999,
+        currency="USD",
+        now=now,
+    )
+    activate_guest_order(
+        state_path=state,
+        order_id="GUEST0001",
+        provider="stripe",
+        payment_reference="pi_1",
+        amount_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    replay = activate_guest_order(
+        state_path=state,
+        order_id="GUEST0001",
+        provider="stripe",
+        payment_reference="pi_2",
+        amount_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    assert replay.ok is False
+    assert replay.detail == "payment_reference_replay_mismatch"
+
+
+def test_guest_order_activation_rejects_amount_mismatch(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+
+    start_guest_order(
+        state_path=state,
+        sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="cta-1",
+        unit_price_cents=6999,
+        currency="USD",
+        now=now,
+    )
+
+    active = activate_guest_order(
+        state_path=state,
+        order_id="GUEST0001",
+        provider="stripe",
+        payment_reference="pi_bad_amount",
+        amount_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    assert active.ok is False
+    assert active.detail == "amount_mismatch"
+
+
+def test_guest_order_activation_rejects_currency_mismatch(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+
+    start_guest_order(
+        state_path=state,
+        sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="cta-1",
+        unit_price_cents=4999,
+        currency="INR",
+        now=now,
+    )
+
+    active = activate_guest_order(
+        state_path=state,
+        order_id="GUEST0001",
+        provider="razorpay",
+        payment_reference="rzp_1",
+        amount_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    assert active.ok is False
+    assert active.detail == "currency_mismatch"
+
+
+def test_guest_order_activation_rejects_invalid_provider(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+
+    start_guest_order(
+        state_path=state,
+        sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="cta-1",
+        unit_price_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    active = activate_guest_order(
+        state_path=state,
+        order_id="GUEST0001",
+        provider="unknown",
+        payment_reference="bad_provider",
+        amount_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    assert active.ok is False
+    assert active.detail == "invalid_provider"
+
+
+def test_guest_order_activation_normalizes_provider_and_payment_reference(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    now = datetime(2026, 5, 24, tzinfo=timezone.utc)
+
+    start_guest_order(
+        state_path=state,
+        sender_phone="+17329837841",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="cta-1",
+        unit_price_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    active = activate_guest_order(
+        state_path=state,
+        order_id="GUEST0001",
+        provider="  STRIPE ",
+        payment_reference="  pi_norm_1 ",
+        amount_cents=4999,
+        currency="USD",
+        now=now,
+    )
+
+    assert active.ok is True
+    store = load_guest_order_store(state)
+    assert store.orders[0].payment_provider == "stripe"
+    assert store.orders[0].payment_reference == "pi_norm_1"
+
+
+def test_guest_order_cli_rejects_activation_amount_mismatch(tmp_path):
+    state = tmp_path / "guest_orders.json"
+    script = Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer" / "scripts" / "manage-flyer-guest-order"
+    subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--start",
+            "--sender-phone", "+17329837841",
+            "--chat-id", "17329837841@s.whatsapp.net",
+            "--message-id", "cta-1",
+            "--state-path", str(state),
+            "--config-path", str(tmp_path / "missing.yaml"),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    activate = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--activate",
+            "--order-id", "GUEST0001",
+            "--provider", "stripe",
+            "--payment-reference", "pi_bad_amount",
+            "--amount-cents", "9999",
+            "--currency", "USD",
+            "--state-path", str(state),
+            "--config-path", str(tmp_path / "missing.yaml"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert activate.returncode == 2
+    doc = json.loads(activate.stdout)
+    assert doc["detail"] == "amount_mismatch"

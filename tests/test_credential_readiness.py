@@ -255,6 +255,20 @@ def test_connected_candidates_are_candidate_only_not_false_unset(tmp_path: Path)
     assert qbo["configured_status"] == "candidate_only"
 
 
+def test_payment_mcp_candidates_include_stripe_and_razorpay(tmp_path: Path):
+    report = cr.build_report(
+        cr.ReadinessOptions(
+            hermes_home=tmp_path / ".hermes",
+            hermes_install_root=tmp_path / "install",
+            env_paths=[],
+            today=cr.parse_date("2026-05-27"),
+        )
+    )
+    names = {row["name"] for row in report["connectors"] if row["domain"] == "payments"}
+    assert "Stripe MCP" in names
+    assert "Razorpay MCP" in names
+
+
 def test_connector_status_distinguishes_partial_and_complete_env_sets(tmp_path: Path):
     partial_env = tmp_path / ".partial.env"
     partial_env.write_text("QUICKBOOKS_CLIENT_ID=id-only\nPAYPAL_ACCESS_TOKEN=token-only\n", encoding="utf-8")
@@ -448,6 +462,24 @@ def test_deploy_validates_cf_router_after_install_not_in_preinstall_foundation_g
     gate_start = pre_install.index("credential-minimized-readiness")
     gate_block = pre_install[gate_start : gate_start + 500]
     assert "--validate-plugin" not in gate_block
+
+
+def test_deploy_compliance_timezone_uses_hermes_venv_and_warns_on_fallback():
+    deploy = REPO_ROOT / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
+    text = deploy.read_text(encoding="utf-8")
+    assert 'customer_tz=$("${VENV_PY:-/usr/local/lib/hermes-agent/venv/bin/python}"' in text
+    assert "python3 -c \"import yaml" not in text
+    assert "WARN: unable to read customer.timezone" in text
+
+
+def test_deploy_install_artifacts_failure_uses_rollback_path():
+    deploy = REPO_ROOT / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
+    text = deploy.read_text(encoding="utf-8")
+    assert 'if ! install_artifacts "$STAGING"; then' in text
+    block = text[text.index('if ! install_artifacts "$STAGING"; then') : text.index("# Pre-restart cf-router compile gate")]
+    assert '"$0" rollback "$PREV_TAG"' in block
+    assert 'rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"' in block
+    assert "shift-agent-notify-owner" in block
 
 
 def test_smoke_runs_readiness_report_non_strict_only():

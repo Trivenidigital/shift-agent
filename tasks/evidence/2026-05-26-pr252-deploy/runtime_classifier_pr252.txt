@@ -1,0 +1,13 @@
+=== PR-beta positive cases (expect True) ===
+  OK 'where is my flyer'                                     -> True
+  OK 'did you send my flyer'                                 -> True
+  OK 'send my flyer'                                         -> True
+  OK 'approve'                                               -> True
+  OK 'I approve'                                             -> True
+
+=== PR-beta negative cases (expect False) ===
+  OK 'send now'                                              -> False
+  OK 'approve this concept'                                  -> False
+  OK 'Create a flyer with our address'                       -> False
+
+OVERALL: GREEN

@@ -1,0 +1,18 @@
+{
+  "topic": "pr-zeta-1b-plan-2026-05-26",
+  "task_text": "PR-ζ.1b full cf-router callsite migration + allowlist removal + manual_queue basename fix + flat-rename regression test",
+  "completed_at": "2026-05-26T19:50:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 7,
+  "hermes_step_count": 6,
+  "files_to_read_first": [
+    "src/plugins/cf-router/hooks.py",
+    "src/plugins/cf-router/actions.py",
+    "src/platform/safe_io.py",
+    "src/agents/flyer/action_registry.py",
+    "src/agents/shift/scripts/shift-agent-deploy.sh",
+    "tests/test_send_chokepoint_null_context_allowlist.py",
+    "tests/test_safe_io_bridge_post.py",
+    "tasks/audits/pr-zeta-1b-blockers-2026-05-26.md"
+  ]
+}

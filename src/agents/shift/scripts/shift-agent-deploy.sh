@@ -49,6 +49,12 @@ install_artifacts() {
     if [ ! -f src/platform/scripts/check-hermes-config-yaml ]; then
         rm -f /usr/local/bin/check-hermes-config-yaml
     fi
+    if [ ! -f src/platform/scripts/check-commerce-webhook-subscription ]; then
+        rm -f /usr/local/bin/check-commerce-webhook-subscription
+    fi
+    if [ ! -f src/platform/scripts/check-commerce-stripe-livemode ]; then
+        rm -f /usr/local/bin/check-commerce-stripe-livemode
+    fi
 
     # Python modules — flat layout at /opt/shift-agent/ matches scripts' sys.path
     install -m 644 src/platform/schemas.py /opt/shift-agent/schemas.py
@@ -74,6 +80,45 @@ install_artifacts() {
         install -m 644 src/platform/check_hermes_config_yaml.py /opt/shift-agent/check_hermes_config_yaml.py
     else
         rm -f /opt/shift-agent/check_hermes_config_yaml.py
+    fi
+    # Commerce webhook-subscription deploy-gate module (slice-3.5). Imported by
+    # the check-commerce-webhook-subscription wrapper. Guarded for rollback
+    # compatibility with tarballs that predate this module.
+    if [ -f src/platform/commerce_webhook_gate.py ]; then
+        install -m 644 src/platform/commerce_webhook_gate.py /opt/shift-agent/commerce_webhook_gate.py
+    else
+        rm -f /opt/shift-agent/commerce_webhook_gate.py
+    fi
+    # Commerce Stripe livemode-match deploy-gate module (slice-3.1). Imported by
+    # the check-commerce-stripe-livemode wrapper. Guarded for rollback
+    # compatibility with tarballs that predate this module.
+    if [ -f src/platform/commerce_livemode_gate.py ]; then
+        install -m 644 src/platform/commerce_livemode_gate.py /opt/shift-agent/commerce_livemode_gate.py
+    else
+        rm -f /opt/shift-agent/commerce_livemode_gate.py
+    fi
+
+    # Commerce primitives package (PR #321, slice 1 library-only).
+    # Guarded for rollback compatibility with tarballs that predate the package.
+    # Library-only: no scripts here, no dispatcher row, no caller wiring —
+    # modules sit dormant on disk until slice-2 callers wire them. Schema +
+    # LogEntry additions ship via schemas.py install above.
+    if [ -d src/platform/commerce ]; then
+        install -d /opt/shift-agent/commerce
+        install -m 644 src/platform/commerce/*.py /opt/shift-agent/commerce/
+    else
+        rm -rf /opt/shift-agent/commerce
+    fi
+
+    # Catering deposit helper module (PR feat/commerce-slice2-catering-deposit-caller).
+    # catering-mint-deposit + apply-catering-owner-decision's deposit hook both
+    # import `deposit._should_mint_deposit` etc. Without this install line the
+    # imports silently fail on the VPS (script paths are /usr/local/bin/, not
+    # the repo layout) — PR reviewer B-BLOCKER-1 fix. Guarded for rollback.
+    if [ -f src/agents/catering/deposit.py ]; then
+        install -m 644 src/agents/catering/deposit.py /opt/shift-agent/deposit.py
+    else
+        rm -f /opt/shift-agent/deposit.py
     fi
 
     # Templates — Shift-Agent message templates (idempotent: shared dir filled by multiple agents below)
@@ -205,11 +250,19 @@ install_artifacts() {
         install -m 644 src/agents/compliance/templates/* /opt/shift-agent/templates/
     fi
     if compgen -G "src/agents/compliance/systemd/*.service" > /dev/null; then
-        # TZ templating: read cfg.customer.timezone via PyYAML (yq is not
-        # installed on srilu; PyYAML IS — already used by render-coverage-
-        # template + schemas validation). Default to America/New_York if
-        # config missing or unparseable (matches Triveni's reference customer).
-        customer_tz=$(python3 -c "import yaml; print(yaml.safe_load(open('/opt/shift-agent/config.yaml'))['customer']['timezone'])" 2>/dev/null || echo "America/New_York")
+        # TZ templating: read cfg.customer.timezone through the Hermes venv,
+        # not system python. If extraction fails, warn before using the
+        # reference-customer fallback timezone.
+        customer_tz=$("${VENV_PY:-/usr/local/lib/hermes-agent/venv/bin/python}" - <<'PY' 2>/dev/null || true
+import yaml
+with open('/opt/shift-agent/config.yaml', encoding='utf-8') as f:
+    print(yaml.safe_load(f)['customer']['timezone'])
+PY
+)
+        if [ -z "$customer_tz" ]; then
+            echo "WARN: unable to read customer.timezone from /opt/shift-agent/config.yaml via Hermes venv; defaulting compliance timers to America/New_York" >&2
+            customer_tz="America/New_York"
+        fi
         for svc_src in src/agents/compliance/systemd/*.service; do
             svc_name=$(basename "$svc_src")
             sed "s|@CUSTOMER_TZ@|${customer_tz}|g" "$svc_src" \
@@ -249,6 +302,21 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_render.py
     fi
+    if [ -f src/agents/flyer/intake_fields.py ]; then
+        install -m 644 src/agents/flyer/intake_fields.py /opt/shift-agent/flyer_intake_fields.py
+    else
+        rm -f /opt/shift-agent/flyer_intake_fields.py
+    fi
+    if [ -f src/agents/flyer/bare_render.py ]; then
+        install -m 644 src/agents/flyer/bare_render.py /opt/shift-agent/flyer_bare_render.py
+    else
+        rm -f /opt/shift-agent/flyer_bare_render.py
+    fi
+    if [ -f src/agents/flyer/campaign_scene_prompts.py ]; then
+        install -m 644 src/agents/flyer/campaign_scene_prompts.py /opt/shift-agent/flyer_campaign_scene_prompts.py
+    else
+        rm -f /opt/shift-agent/flyer_campaign_scene_prompts.py
+    fi
     if [ -f src/agents/flyer/workflow.py ]; then
         install -m 644 src/agents/flyer/workflow.py /opt/shift-agent/flyer_workflow.py
     else
@@ -274,6 +342,31 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_recovery.py
     fi
+    if [ -f src/agents/flyer/customer_copy_policy.py ]; then
+        install -m 644 src/agents/flyer/customer_copy_policy.py /opt/shift-agent/flyer_customer_copy_policy.py
+    else
+        rm -f /opt/shift-agent/flyer_customer_copy_policy.py
+    fi
+    if [ -f src/agents/flyer/intent.py ]; then
+        install -m 644 src/agents/flyer/intent.py /opt/shift-agent/flyer_intent.py
+    else
+        rm -f /opt/shift-agent/flyer_intent.py
+    fi
+    if [ -f src/agents/flyer/intent_training.py ]; then
+        install -m 644 src/agents/flyer/intent_training.py /opt/shift-agent/flyer_intent_training.py
+    else
+        rm -f /opt/shift-agent/flyer_intent_training.py
+    fi
+    if [ -f src/agents/flyer/action_registry.py ]; then
+        install -m 644 src/agents/flyer/action_registry.py /opt/shift-agent/flyer_action_registry.py
+    else
+        rm -f /opt/shift-agent/flyer_action_registry.py
+    fi
+    if [ -f src/agents/flyer/payment_state.py ]; then
+        install -m 644 src/agents/flyer/payment_state.py /opt/shift-agent/flyer_payment_state.py
+    else
+        rm -f /opt/shift-agent/flyer_payment_state.py
+    fi
     if [ -f src/agents/flyer/account.py ]; then
         install -m 644 src/agents/flyer/account.py /opt/shift-agent/flyer_account.py
     else
@@ -284,13 +377,46 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_guest_order.py
     fi
-    for flyer_module in facts reference_extract visual_qa semantic_brief campaign_scene_prompts creative_planner creative_firewall; do
-        if [ -f "src/agents/flyer/${flyer_module}.py" ]; then
-            install -m 644 "src/agents/flyer/${flyer_module}.py" "/opt/shift-agent/flyer_${flyer_module}.py"
-        else
-            rm -f "/opt/shift-agent/flyer_${flyer_module}.py"
-        fi
-    done
+    if [ -f src/agents/flyer/facts.py ]; then
+        install -m 644 src/agents/flyer/facts.py /opt/shift-agent/flyer_facts.py
+    else
+        rm -f /opt/shift-agent/flyer_facts.py
+    fi
+    if [ -f src/agents/flyer/creative_planner.py ]; then
+        install -m 644 src/agents/flyer/creative_planner.py /opt/shift-agent/flyer_creative_planner.py
+    else
+        rm -f /opt/shift-agent/flyer_creative_planner.py
+    fi
+    if [ -f src/agents/flyer/creative_firewall.py ]; then
+        install -m 644 src/agents/flyer/creative_firewall.py /opt/shift-agent/flyer_creative_firewall.py
+    else
+        rm -f /opt/shift-agent/flyer_creative_firewall.py
+    fi
+    if [ -f src/agents/flyer/reference_extract.py ]; then
+        install -m 644 src/agents/flyer/reference_extract.py /opt/shift-agent/flyer_reference_extract.py
+    else
+        rm -f /opt/shift-agent/flyer_reference_extract.py
+    fi
+    if [ -f src/agents/flyer/semantic_brief.py ]; then
+        install -m 644 src/agents/flyer/semantic_brief.py /opt/shift-agent/flyer_semantic_brief.py
+    else
+        rm -f /opt/shift-agent/flyer_semantic_brief.py
+    fi
+    if [ -f src/agents/flyer/visual_qa.py ]; then
+        install -m 644 src/agents/flyer/visual_qa.py /opt/shift-agent/flyer_visual_qa.py
+    else
+        rm -f /opt/shift-agent/flyer_visual_qa.py
+    fi
+    if [ -f src/agents/flyer/visible_contract.py ]; then
+        install -m 644 src/agents/flyer/visible_contract.py /opt/shift-agent/flyer_visible_contract.py
+    else
+        rm -f /opt/shift-agent/flyer_visible_contract.py
+    fi
+    if [ -f src/agents/flyer/manual_queue.py ]; then
+        install -m 644 src/agents/flyer/manual_queue.py /opt/shift-agent/flyer_manual_queue.py
+    else
+        rm -f /opt/shift-agent/flyer_manual_queue.py
+    fi
     if [ -d src/agents/flyer/scripts ] && compgen -G "src/agents/flyer/scripts/*" > /dev/null; then
         install -m 755 src/agents/flyer/scripts/* /usr/local/bin/
         for flyer_binary in \
@@ -309,6 +435,10 @@ install_artifacts() {
             flyer-delivery-report \
             flyer-recovery-watchdog \
             flyer-recovery-preflight \
+            flyer-manual-queue \
+            flyer-source-edit-sla-watchdog \
+            flyer-intent-training-export \
+            bare-flyer-render-and-send \
             smoke-flyer-quality; do
             if [ ! -f "src/agents/flyer/scripts/${flyer_binary}" ]; then
                 rm -f "/usr/local/bin/${flyer_binary}"
@@ -332,8 +462,12 @@ install_artifacts() {
             /usr/local/bin/flyer-delivery-report \
             /usr/local/bin/flyer-recovery-watchdog \
             /usr/local/bin/flyer-recovery-preflight \
+            /usr/local/bin/flyer-manual-queue \
+            /usr/local/bin/flyer-source-edit-sla-watchdog \
+            /usr/local/bin/flyer-intent-training-export \
             /usr/local/bin/send-flyer-campaign \
             /usr/local/bin/send-flyer-package \
+            /usr/local/bin/bare-flyer-render-and-send \
             /usr/local/bin/smoke-flyer-quality
     fi
     if compgen -G "src/agents/flyer/systemd/*.service" > /dev/null; then
@@ -490,6 +624,7 @@ PY
     systemctl enable --now catering-pattern-report.timer 2>/dev/null || true
     systemctl enable --now eod-reconcile.timer 2>/dev/null || true
     systemctl enable --now send-routing-accuracy-summary.timer 2>/dev/null || true
+    systemctl enable --now flyer-source-edit-sla-watchdog.timer 2>/dev/null || true
     systemctl enable --now prune-expense-receipts.timer 2>/dev/null || true
     # Agent #13 Compliance Calendar (PR-Agent13-v0.1)
     systemctl enable --now check-compliance-deadlines.timer 2>/dev/null || true
@@ -541,6 +676,34 @@ list_deploys() {
     else
         echo "(no deploys recorded)"
     fi
+}
+
+active_flyer_generation_pids() {
+    pgrep -f '/usr/local/bin/generate-flyer-concepts|/usr/local/bin/finalize-flyer-assets|/usr/local/bin/send-flyer-package' 2>/dev/null || true
+}
+
+wait_for_flyer_generation_drain() {
+    local timeout_sec="${FLYER_DEPLOY_DRAIN_TIMEOUT_SEC:-900}"
+    local poll_sec="${FLYER_DEPLOY_DRAIN_POLL_SEC:-10}"
+    local elapsed=0
+    local pids=""
+
+    while true; do
+        pids=$(active_flyer_generation_pids | tr '
+' ' ' | sed 's/[[:space:]]*$//')
+        if [ -z "$pids" ]; then
+            return 0
+        fi
+        if [ "$elapsed" -ge "$timeout_sec" ]; then
+            echo "FAIL: active Flyer generation still running after ${timeout_sec}s; refusing gateway restart" >&2
+            # shellcheck disable=SC2086  # intentionally expands PID list for ps.
+            ps -fp $pids >&2 || true
+            return 1
+        fi
+        echo "Waiting for active Flyer generation before gateway restart: pids=$pids elapsed=${elapsed}s/${timeout_sec}s"
+        sleep "$poll_sec"
+        elapsed=$((elapsed + poll_sec))
+    done
 }
 
 case "$ACTION" in
@@ -760,7 +923,20 @@ case "$ACTION" in
                 || tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src
         fi
 
-        install_artifacts "$STAGING"
+        if ! install_artifacts "$STAGING"; then
+            echo "FAIL: install_artifacts gate failed - rolling back to $PREV_TAG" >&2
+            if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                "$0" rollback "$PREV_TAG"
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            else
+                /usr/local/bin/shift-agent-notify-owner \
+                    --title "Deploy FAILED during install_artifacts, no prior tarball" \
+                    --priority 2 \
+                    "Deploy $NEW_TAG failed during install_artifacts. Files may be partially installed while services still run old in-memory code. No prior tarball to roll back to - SSH immediately." 2>/dev/null || true
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            fi
+            exit 1
+        fi
 
         # Pre-restart cf-router compile gate: hooks.py is imported by the
         # gateway at startup, so a syntax error can make systemctl restart
@@ -840,6 +1016,129 @@ PY
             exit 1
         fi
 
+        # Determine ONCE whether commerce is active-for-Stripe on this VPS. Both
+        # the webhook-subscription gate (slice-3.5) and the livemode gate
+        # (slice-3.1) use this to decide whether a MISSING gate script (pre-gate
+        # or rollback tarball) is a hard-fail (commerce live on Stripe — a
+        # money-safety gate must not be silently dropped) or a safe WARN-skip
+        # (dormant/non-commerce). Probe errors (pre-commerce schema, unparseable
+        # config) are treated as not-active.
+        if "$VENV_PY" - <<'PY'
+import sys, yaml
+sys.path.insert(0, "/opt/shift-agent")
+try:
+    from schemas import CommerceConfig
+    raw = (yaml.safe_load(open("/opt/shift-agent/config.yaml")) or {}).get("commerce") or {}
+    cfg = CommerceConfig.model_validate(raw if isinstance(raw, dict) else {})
+    active = bool(cfg.enabled and cfg.provider == "stripe")
+except Exception:
+    active = False
+raise SystemExit(0 if active else 1)
+PY
+        then
+            COMMERCE_ACTIVE_STRIPE=1
+        else
+            COMMERCE_ACTIVE_STRIPE=0
+        fi
+
+        # Pre-restart commerce webhook-subscription gate (slice-3.5). Dormant-safe:
+        # exits 0 (and prints a one-line "not applicable" note) unless
+        # commerce.enabled && commerce.provider == "stripe". When commerce IS
+        # actively Stripe, it asserts the Stripe webhook subscription is
+        # registered; if missing it fails closed — without the subscription,
+        # Stripe payment_intent.succeeded events silently 404 and a paying
+        # customer is never confirmed (slice-3 §13.5 A-LOW-1).
+        #
+        # Prefer the staging source copy so the FIRST deploy that introduces the
+        # gate still runs it; fall back to the installed /usr/local/bin copy only
+        # for rollback-tarball compatibility. Run via $VENV_PY so the wrapper's
+        # `from schemas import CommerceConfig` resolves (pydantic lives there).
+        COMMERCE_WEBHOOK_GATE="$STAGING/src/platform/scripts/check-commerce-webhook-subscription"
+        [ -x "$COMMERCE_WEBHOOK_GATE" ] || COMMERCE_WEBHOOK_GATE=/usr/local/bin/check-commerce-webhook-subscription
+        if [ ! -x "$COMMERCE_WEBHOOK_GATE" ]; then
+            # Gate script absent => pre-gate (older) tarball or malformed deploy.
+            # Skipping is safe ONLY if commerce is not active-for-Stripe (probed
+            # once above). HARD-FAIL if active so a rollback cannot silently drop
+            # the money-safety gate while Stripe is live (Codex review 2026-05-29,
+            # escalated finding #3); WARN-skip when dormant (older-build compat).
+            if [ "$COMMERCE_ACTIVE_STRIPE" = 1 ]; then
+                echo "FATAL: commerce is active for Stripe but the webhook-subscription gate script is absent from staging and /usr/local/bin — refusing to deploy/restart (a rollback must not drop the money-safety gate while Stripe is live)." >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    "$0" rollback "$PREV_TAG"
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED: commerce gate missing while Stripe active" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG: commerce active for Stripe but the webhook-subscription gate script is missing from the tarball. New files installed but service still on OLD code. SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            else
+                echo "WARN: commerce webhook-subscription gate script not found (pre-gate tarball); commerce is not active-for-Stripe on this VPS so skipping is safe. If you later enable Stripe, redeploy a current tarball so the gate runs." >&2
+            fi
+        else
+            if ! "$VENV_PY" "$COMMERCE_WEBHOOK_GATE" --config /opt/shift-agent/config.yaml; then
+                echo "FAIL: pre-restart commerce webhook-subscription gate — refusing to restart hermes-gateway" >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    "$0" rollback "$PREV_TAG"
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED at commerce webhook gate, no prior tarball" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG failed the commerce webhook-subscription gate (commerce active for Stripe but the subscription is missing). New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            fi
+        fi
+
+        # Pre-restart commerce Stripe livemode-match gate (slice-3.1). Dormant-safe:
+        # exits 0 unless commerce.enabled && commerce.provider == "stripe". When
+        # active, asserts the Stripe API key's account livemode matches
+        # commerce.stripe_livemode_expected — catches the "live key in test config"
+        # (or vice versa) footgun before a customer pays (§13.5 B-MEDIUM-1).
+        # Fail-closed on mismatch (exit 1) or key/API error (exit 2). Reads
+        # STRIPE_API_KEY from .env itself and calls api.stripe.com via urllib (no
+        # SDK); never logs the key. Same staging-preference + absent-handling as
+        # the webhook gate above.
+        COMMERCE_LIVEMODE_GATE="$STAGING/src/platform/scripts/check-commerce-stripe-livemode"
+        [ -x "$COMMERCE_LIVEMODE_GATE" ] || COMMERCE_LIVEMODE_GATE=/usr/local/bin/check-commerce-stripe-livemode
+        if [ ! -x "$COMMERCE_LIVEMODE_GATE" ]; then
+            if [ "$COMMERCE_ACTIVE_STRIPE" = 1 ]; then
+                echo "FATAL: commerce is active for Stripe but the livemode-match gate script is absent from staging and /usr/local/bin — refusing to deploy/restart (a rollback must not drop the money-safety gate while Stripe is live)." >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    "$0" rollback "$PREV_TAG"
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED: commerce livemode gate missing while Stripe active" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG: commerce active for Stripe but the livemode-match gate script is missing from the tarball. New files installed but service still on OLD code. SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            else
+                echo "WARN: commerce Stripe livemode-match gate script not found (pre-gate tarball); commerce is not active-for-Stripe on this VPS so skipping is safe. If you later enable Stripe, redeploy a current tarball so the gate runs." >&2
+            fi
+        else
+            if ! "$VENV_PY" "$COMMERCE_LIVEMODE_GATE" --config /opt/shift-agent/config.yaml; then
+                echo "FAIL: pre-restart commerce Stripe livemode-match gate — refusing to restart hermes-gateway" >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    "$0" rollback "$PREV_TAG"
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED at commerce livemode gate, no prior tarball" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG failed the commerce Stripe livemode-match gate (key mode != stripe_livemode_expected, or Stripe unreachable). New files installed but service still on OLD code. No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            fi
+        fi
+
         # Hermes runtime permission gate: run the same targeted preflight that
         # hermes-gateway.service runs at ExecStartPre. This catches ownership
         # issues before restart and avoids the old broad recursive chown over
@@ -859,7 +1158,14 @@ PY
             exit 1
         fi
 
-        # Restart services (in order: tail-logger first, gateway last)
+        # Restart services (in order: tail-logger first, gateway last).
+        # Do not cut off long Flyer image generation/source-edit jobs mid-flight;
+        # a restart sends SIGTERM through the gateway process tree and can turn a
+        # real customer request into exit=-15 plus a failed WhatsApp ack.
+        if ! wait_for_flyer_generation_drain; then
+            /usr/local/bin/shift-agent-notify-owner                 --title "Deploy paused: active Flyer generation"                 --priority 2                 "Deploy $NEW_TAG refused to restart Hermes while Flyer generation was still active. Retry after the active job drains." 2>/dev/null || true
+            exit 1
+        fi
         systemctl restart shift-agent-tail-logger.timer 2>/dev/null || true
         systemctl restart shift-agent-health.timer 2>/dev/null || true
         systemctl restart hermes-gateway
@@ -872,13 +1178,15 @@ PY
         # restart cleared the stale module cache.
         #
         # Unit-presence-gated so VPSes without the cockpit installed aren't
-        # affected. Inside the gate: restart --wait + /health probe so a real
-        # cockpit failure fails the deploy + rolls back instead of being
-        # masked by `|| true` — the silent-failure mode this hook exists to
-        # prevent. Mirrors the rotate-jwt-secret.sh pattern.
+        # affected. Inside the gate: restart + /health probe so a real cockpit
+        # failure fails the deploy + rolls back instead of being masked by
+        # `|| true` — the silent-failure mode this hook exists to prevent.
+        # Do not use `systemctl restart --wait` here: on main-vps it can hang
+        # even after the unit is active and no jobs remain; the HTTP health
+        # probe below is the readiness check.
         if systemctl list-unit-files shift-agent-cockpit.service >/dev/null 2>&1; then
             cockpit_fail_reason=""
-            if ! systemctl restart --wait shift-agent-cockpit.service; then
+            if ! systemctl restart shift-agent-cockpit.service; then
                 cockpit_fail_reason="restart"
             else
                 cockpit_healthy=0
@@ -890,6 +1198,32 @@ PY
                     sleep 1
                 done
                 [ "$cockpit_healthy" -ne 1 ] && cockpit_fail_reason="health probe"
+                # Per-route mount probe for the manual-queue surface. The route
+                # uses a conditional import (flyer_manual_queue vs
+                # agents.flyer.manual_queue) that fails silently if either
+                # module is missing — /health alone wouldn't catch that.
+                # 401/403 here is success: it proves the route is mounted and
+                # the import resolved; connection-refused or 5xx is the fail
+                # mode we care about. Run only after /health passed so we
+                # don't mask a plain restart fail.
+                #
+                # URL note (S2 deploy regression, fixed here): the cockpit
+                # uvicorn at port 8081 serves routes at /flyer/... directly.
+                # The /api/ prefix is added externally by Caddy when proxying
+                # browser requests; it is NOT part of the uvicorn path. The
+                # initial S2 deploy script used /api/flyer/manual-queue and
+                # would return 404 on every subsequent deploy, blocking it.
+                if [ "$cockpit_healthy" -eq 1 ] && [ -z "$cockpit_fail_reason" ]; then
+                    manual_queue_code=$(curl -s -o /dev/null --max-time 2 -w '%{http_code}' http://127.0.0.1:8081/flyer/manual-queue || echo "000")
+                    case "$manual_queue_code" in
+                        200|401|403)
+                            : # route mounted (auth gate is the only thing in our way)
+                            ;;
+                        *)
+                            cockpit_fail_reason="manual-queue route probe (got $manual_queue_code)"
+                            ;;
+                    esac
+                fi
             fi
             if [ -n "$cockpit_fail_reason" ]; then
                 echo "FAIL: cockpit $cockpit_fail_reason failed after restart — rolling back" >&2
@@ -992,7 +1326,7 @@ PY
         # cascaded into another rollback — we're already in rollback.
         if systemctl list-unit-files shift-agent-cockpit.service >/dev/null 2>&1; then
             cockpit_fail_reason=""
-            if ! systemctl restart --wait shift-agent-cockpit.service; then
+            if ! systemctl restart shift-agent-cockpit.service; then
                 cockpit_fail_reason="restart"
             else
                 cockpit_healthy=0

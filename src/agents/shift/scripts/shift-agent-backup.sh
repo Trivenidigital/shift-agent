@@ -20,7 +20,9 @@ STAMP=$(date +%F-%H%M)
 TAR_PATH=$BACKUP_DIR/$STAMP.tar.gz
 GPG_PATH=$TAR_PATH.gpg
 SESSION_COPY=$(mktemp -d /tmp/shift-session.XXXXXX)
+SNAPSHOT_COPY=$(mktemp -d /tmp/shift-backup-snapshot.XXXXXX)
 TAR_ERRORS=$(mktemp /tmp/backup-tar-errors.XXXXXX)
+TAR_MANIFEST=$(mktemp /tmp/backup-tar-manifest.XXXXXX)
 
 mkdir -p "$BACKUP_DIR"
 
@@ -74,7 +76,7 @@ fi
 # ─── Cleanup trap ───
 cleanup() {
     local exit_code=$?
-    rm -rf "$SESSION_COPY" "$TAR_ERRORS"
+    rm -rf "$SESSION_COPY" "$SNAPSHOT_COPY" "$TAR_ERRORS" "$TAR_MANIFEST"
     rm -f "$TAR_PATH"  # only if still present (gpg success removes it)
     # Restart the tail-logger timer, alert loudly on failure
     if ! systemctl start shift-agent-tail-logger.timer 2>/dev/null; then
@@ -89,7 +91,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ─── Stop tail-logger service AND timer to pause audit capture ───
-systemctl stop shift-agent-tail-logger.timer
+systemctl stop shift-agent-tail-logger.timer 2>/dev/null || true
 # Also wait for any in-flight run to finish
 systemctl stop shift-agent-tail-logger.service 2>/dev/null || true
 # Belt + suspenders: poll until no shift-agent-tail-logger process exists
@@ -105,7 +107,6 @@ if [ -d /root/.hermes/whatsapp/session ]; then
     cp -a /root/.hermes/whatsapp/session "$SESSION_COPY/"
 fi
 
-# ─── Tar the snapshot + agent state ───
 # Required files we'll verify-per-file in the archive
 REQUIRED_PATHS=(
     "opt/shift-agent/config.yaml"
@@ -114,7 +115,48 @@ REQUIRED_PATHS=(
     "opt/shift-agent/logs"
 )
 
-tar_cmd=(tar czf "$TAR_PATH" -C /)
+# ─── Snapshot agent state before tar ───
+# Runtime writers can update /opt/shift-agent/state while tar is reading it,
+# which makes GNU tar exit non-zero with "file changed as we read it". Copy the
+# live tree once, then tar the stable snapshot while preserving archive paths.
+copy_into_snapshot() {
+    local rel="$1"
+    local src="/$rel"
+    local dest="$SNAPSHOT_COPY/$rel"
+    mkdir -p "$(dirname "$dest")"
+    if [ -d "$src" ]; then
+        mkdir -p "$dest"
+        if command -v rsync >/dev/null 2>&1; then
+            set +e
+            rsync -a --delete "$src/" "$dest/"
+            local rc=$?
+            set -e
+            # 24 = source files vanished during transfer. That is acceptable
+            # for live logs/state because the snapshot remains self-consistent.
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 24 ]; then
+                return "$rc"
+            fi
+        else
+            cp -a "$src/." "$dest/"
+        fi
+    else
+        cp -a "$src" "$dest"
+    fi
+}
+
+for p in "${REQUIRED_PATHS[@]}"; do
+    if ! copy_into_snapshot "$p"; then
+        echo "ERROR: snapshot copy failed for $p" >&2
+        /usr/local/bin/shift-agent-notify-owner \
+            --title "Backup FAILED (snapshot)" \
+            --priority 2 \
+            "Nightly backup could not snapshot $p before tar."
+        exit 1
+    fi
+done
+
+# ─── Tar the stable snapshot + session snapshot ───
+tar_cmd=(tar czf "$TAR_PATH" -C "$SNAPSHOT_COPY")
 for p in "${REQUIRED_PATHS[@]}"; do
     tar_cmd+=("$p")
 done
@@ -135,10 +177,11 @@ fi
 
 # Per-file presence check — anchored exact-match, no substring leniency
 MISSING=()
+tar -tzf "$TAR_PATH" >"$TAR_MANIFEST"
 for p in "${REQUIRED_PATHS[@]}"; do
     # tar uses trailing / for directories; accept either form
-    if ! tar -tzf "$TAR_PATH" 2>/dev/null | grep -Fxq "$p" \
-       && ! tar -tzf "$TAR_PATH" 2>/dev/null | grep -Fxq "$p/"; then
+    if ! grep -Fxq "$p" "$TAR_MANIFEST" \
+       && ! grep -Fxq "$p/" "$TAR_MANIFEST"; then
         MISSING+=("$p")
     fi
 done

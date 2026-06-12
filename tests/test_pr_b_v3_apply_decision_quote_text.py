@@ -48,6 +48,16 @@ if platform.system() != "Windows":
 else:
     apply_mod = None  # type: ignore[assignment]
 
+def _load_apply_module_with_env(monkeypatch, **env: str):
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    module_name = f"apply_decision_env_{abs(hash(tuple(sorted(env.items()))))}"
+    loader = importlib.machinery.SourceFileLoader(module_name, str(_APPLY))
+    spec = importlib.util.spec_from_loader(module_name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
 
 # ──────────────── _normalize_quote_text ────────────────
 
@@ -114,6 +124,49 @@ def test_normalize_unicode_passthrough():
 
 
 # ──────────────── _truth_guard_check ────────────────
+
+
+def test_leads_path_override_derives_matching_lock_path(monkeypatch, tmp_path):
+    leads_path = tmp_path / "state" / "catering-leads.json"
+    module = _load_apply_module_with_env(
+        monkeypatch,
+        SHIFT_AGENT_LEADS_PATH=str(leads_path),
+    )
+    assert module.LEADS_PATH == leads_path
+    assert module.LEADS_LOCK == Path(str(leads_path) + ".lock")
+
+
+def test_config_failure_audit_uses_overridden_log_path(monkeypatch, tmp_path):
+    log_path = tmp_path / "logs" / "decisions.log"
+    module = _load_apply_module_with_env(
+        monkeypatch,
+        SHIFT_AGENT_LOG_PATH=str(log_path),
+    )
+    captured = []
+
+    def fail_load_config(*_args, **_kwargs):
+        raise RuntimeError("bad config")
+
+    def capture_config_failure(config_path, exc, *, log_path=None):
+        captured.append(log_path)
+
+    monkeypatch.setattr(module, "load_yaml_model", fail_load_config)
+    monkeypatch.setattr(module, "log_config_load_failed_best_effort", capture_config_failure)
+    monkeypatch.setattr(sys, "argv", [
+        "apply-catering-owner-decision",
+        "--code", "#ABCDE",
+        "--decision", "approve",
+        "--sender-role", "owner",
+    ])
+
+    assert module.main() == module.EXIT_SCHEMA_VIOLATION
+    assert captured == [log_path]
+
+
+def test_state_divergence_audit_callsite_passes_overridden_log_path():
+    source = _APPLY.read_text(encoding="utf-8")
+    assert "log_quote_sent_lead_missing_best_effort(" in source
+    assert "log_path=LOG_PATH" in source
 
 
 def _make_lead(headcount=None, event_date=None):
@@ -238,8 +291,11 @@ def test_emit_skill_failed_does_not_raise_on_invalid_reason(tmp_path, capsys):
 
 def test_emit_skill_failed_does_not_raise_on_disk_error(tmp_path, capsys):
     """Best-effort contract: write failure → WARN, no raise."""
-    bad_path = tmp_path / "nonexistent" / "subdir" / "decisions.log"
-    with patch.object(apply_mod, "LOG_PATH", bad_path):
+    log_path = tmp_path / "decisions.log"
+    with (
+        patch.object(apply_mod, "LOG_PATH", log_path),
+        patch.object(apply_mod, "ndjson_append", side_effect=OSError("disk full")),
+    ):
         apply_mod._emit_quote_skill_failed_best_effort(
             "L1", "#ABCDE", "truth_guard_failed", "test",
         )

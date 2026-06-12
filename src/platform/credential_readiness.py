@@ -165,6 +165,20 @@ CONNECTOR_CANDIDATES: tuple[ConnectorCandidate, ...] = (
         env_names=("STRIPE_SECRET_KEY",),
     ),
     ConnectorCandidate(
+        name="Razorpay MCP",
+        domain="payments",
+        source_url="https://github.com/razorpay/razorpay-mcp-server",
+        credential_class="write_rail",
+        maturity="official",
+        market_state="stable",
+        auth_modes=("local_oauth", "restricted_api_key"),
+        deployment_status="candidate",
+        last_verified="2026-05-27",
+        freshness_days=14,
+        notes="India billing rail candidate; use MCP connector posture before custom API work.",
+        env_names=("RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"),
+    ),
+    ConnectorCandidate(
         name="Square MCP Server",
         domain="pos_payments",
         source_url="https://github.com/square/square-mcp-server",
@@ -553,7 +567,7 @@ AGENT_CAPABILITIES: tuple[AgentCapability, ...] = (
 
 CREDENTIAL_REQUIREMENTS: tuple[CredentialRequirement, ...] = (
     CredentialRequirement("OPENROUTER_API_KEY", "api_key", "Current production model/vision gate."),
-    CredentialRequirement("OPENAI_API_KEY", "api_key", "Flyer Studio source-preserving image edit gate."),
+    CredentialRequirement("OPENAI_API_KEY", "api_key", "Optional direct-OpenAI Flyer Studio source-edit fallback."),
     CredentialRequirement("KIMI_API_KEY", "api_key", "Optional provider."),
     CredentialRequirement("AIRTABLE_API_KEY", "pat", "Airtable connected mode."),
     CredentialRequirement("NOTION_API_KEY", "api_key", "Notion connected mode."),

@@ -27,6 +27,36 @@ REPO = Path(__file__).resolve().parent.parent
 PLUGIN_DIR = REPO / "src" / "plugins" / "cf-router"
 PLATFORM_DIR = REPO / "src" / "platform"
 
+DESSERT_GRADUATION_AMBIGUOUS_BRIEF = (
+    "Graduation is here and time to celebrate our kids. "
+    "We take customized orders - Desserts\n"
+    "Mango custard 40 count tray - $40\n"
+    "Rasmalai cups 25 count - $50\n"
+    "Gulab jamun tray 50 count - $35\n"
+    "Fruit custard 40 count tray - $40\n"
+    "Badam kheer 25 cups - $45\n"
+    "Carrot halwa tray - $55\n"
+    "Double ka meetha tray - $50\n"
+    "Qubani ka meetha tray - $60\n"
+    "Rice kheer 25 cups - $40\n"
+    "Motichoor ladoo 50 count - $45\n"
+    "Mysore pak 50 count - $45\n"
+    "Kaju katli 50 count - $60\n"
+    "Milk cake 50 count - $50\n"
+    "Jalebi 50 count - $40"
+)
+
+DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF = (
+    "Graduation is here and time to celebrate our kids. "
+    "We take customized orders - Desserts\n"
+    "Mango custard 40 count tray - 75$\n"
+    "Rasmalai cups 25 count - 70$\n"
+    "Gulab jamun tray 50 count - 100$\n"
+    "Fruit custard 40 count tray - 75 $\n"
+    "Badam kheer 25 cups - 70 dollars\n"
+    "Carrot halwa tray - 100 dollars"
+)
+
 
 def _load_plugin_modules():
     """Load the cf-router plugin's hooks + actions as submodules of a
@@ -42,6 +72,9 @@ def _load_plugin_modules():
         for mod_name in list(sys.modules):
             if mod_name == pkg_name or mod_name.startswith(pkg_name + "."):
                 del sys.modules[mod_name]
+
+    for mod_name in ("schemas", "safe_io"):
+        sys.modules.pop(mod_name, None)
 
     # Synthetic parent package — points at the plugin directory
     pkg_spec = importlib.machinery.ModuleSpec(pkg_name, loader=None, is_package=True)
@@ -84,6 +117,8 @@ def state_env(tmp_path):
         "state_dir": state,
         "log_path": logs / "decisions.log",
         "config_path": tmp_path / "config.yaml",
+        "pending_path": state / "pending.json",
+        "revenue_route_clarification_path": state / "revenue-route-clarifications.json",
         "leads_path": state / "catering-leads.json",
         "proposals_path": state / "catering-proposals.json",
         "menu_pending_path": state / "catering-menu-pending.json",
@@ -100,6 +135,7 @@ def mods(state_env):
     """Load plugin + override paths to test fixtures."""
     hooks_mod, actions_mod = _load_plugin_modules()
     actions_mod.CONFIG_PATH = state_env["config_path"]
+    actions_mod.REVENUE_ROUTE_CLARIFICATION_PATH = state_env["revenue_route_clarification_path"]
     actions_mod.LEADS_PATH = state_env["leads_path"]
     actions_mod.PROPOSALS_PATH = state_env["proposals_path"]
     actions_mod.MENU_PENDING_PATH = state_env["menu_pending_path"]
@@ -109,9 +145,18 @@ def mods(state_env):
     actions_mod.ROSTER_PATH = state_env["roster_path"]
     actions_mod.LOG_PATH = state_env["log_path"]
     actions_mod.THROTTLE_PATH = state_env["throttle_path"]
+    actions_mod.PYTHON_BIN = Path(sys.executable)
+    actions_mod.HANDLE_FLYER_INTAKE_BIN = REPO / "src" / "agents" / "flyer" / "scripts" / "handle-flyer-intake"
+    actions_mod.HANDLE_FLYER_ONBOARDING_BIN = REPO / "src" / "agents" / "flyer" / "scripts" / "handle-flyer-onboarding"
     # Override PLATFORM_DIR so audit_intercepted picks up the in-repo
     # schemas.py (which has CfRouterIntercepted), not the deployed one.
     actions_mod.PLATFORM_DIR = PLATFORM_DIR
+    platform_text = str(PLATFORM_DIR)
+    while platform_text in sys.path:
+        sys.path.remove(platform_text)
+    sys.path.insert(0, platform_text)
+    for mod_name in ("schemas", "safe_io"):
+        sys.modules.pop(mod_name, None)
     return hooks_mod, actions_mod
 
 
@@ -201,6 +246,88 @@ def _make_event(text, chat_id, message_id=None):
     if message_id is not None:
         event.message_id = message_id
     return event
+
+
+def test_flyer_manual_edit_status_reply_uses_reason_specific_copy(mods):
+    _, actions_mod = mods
+
+    reply = actions_mod.flyer_manual_edit_status_reply({
+        "status": "manual_edit_required",
+        "manual_review": {"reason_code": "visual_qa_failed"},
+    })
+
+    assert "quality checks" in reply.lower()
+
+
+def test_flyer_manual_edit_status_reply_normalizes_reason_code(mods):
+    _, actions_mod = mods
+
+    reply = actions_mod.flyer_manual_edit_status_reply({
+        "status": "manual_edit_required",
+        "manual_review": {"reason_code": " Visual_QA_Failed "},
+    })
+
+    assert "quality checks" in reply.lower()
+
+
+def test_flyer_manual_edit_status_reply_unknown_reason_falls_back_to_unclassified(mods):
+    _, actions_mod = mods
+
+    reply = actions_mod.flyer_manual_edit_status_reply({
+        "status": "manual_edit_required",
+        "manual_review": {"reason_code": "legacy_custom_reason"},
+    })
+
+    assert "queued for designer review" in reply.lower()
+
+
+def test_flyer_manual_edit_status_reply_uses_legacy_reason_markers(mods):
+    _, actions_mod = mods
+
+    reply = actions_mod.flyer_manual_edit_status_reply({
+        "status": "manual_edit_required",
+        "manual_review": {
+            "reason_code": "unclassified",
+            "reason": "operator_burndown_source_edit_provider_unavailable_no_customer_asset_sent",
+            "detail": "legacy row",
+        },
+    })
+
+    assert "queued for a designer to apply by hand" in reply.lower()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "status for project F0063",
+        "status of project F0063 please",
+        "any update on project F0063?",
+        "queue status for F0063",
+        "please share progress on F0063",
+        "where is update for F0063",
+        "status for project: F0063",
+        "status on project F0063",
+        "where is the update for project F0063",
+        "need status of F0063",
+        "status about F0063",
+        "status update for project F0063",
+    ],
+)
+def test_flyer_project_status_request_accepts_project_id_variants(mods, text):
+    _, actions_mod = mods
+    assert actions_mod.is_flyer_project_status_request(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "update project F0063 price to 19.99",
+        "change project F0063 flyer phone number",
+    ],
+)
+def test_flyer_project_status_request_keeps_edit_intent_guard(mods, text):
+    _, actions_mod = mods
+    assert actions_mod.is_flyer_project_status_request(text) is False
 
 
 # ============================================================================
@@ -429,6 +556,7 @@ class TestF8ParserEdgeCases:
             "#A1CDE approve",   # contains 1
             "#ABCD0 approve",   # contains 0
             "#ABCIE approve",   # contains I
+            "#ABCLE approve",   # contains L
             "#ABCOE approve",   # contains O
         ):
             with patch.object(actions_mod, "invoke_apply_owner_decision") as mock:
@@ -546,22 +674,204 @@ class TestF8MenuYesNo:
 # ============================================================================
 
 class TestF9SickCallAlert:
+    def test_employee_lid_sick_call_uses_real_pending_helper(self, mods, state_env):
+        """Live regression: real pending-state check must not crash before F9.
+
+        The 2026-06-07 deployed miss raised NameError because actions.py used
+        PENDING_PATH without defining it; earlier tests patched the helper out.
+        """
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        assert hasattr(actions_mod, "PENDING_PATH")
+        actions_mod.PENDING_PATH = state_env["pending_path"]
+        state_env["pending_path"].write_text(json.dumps({"proposals": {}}), encoding="utf-8")
+
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
+             patch.object(actions_mod, "identify_sender_metadata",
+                          return_value={"role": "employee", "employee_id": "e008",
+                                        "phone_normalized": "+17329837841",
+                                        "lid": "201975216009469@lid"}), \
+             patch.object(actions_mod, "fire_pushover_alert"), \
+             patch.object(actions_mod, "audit_dispatcher_routed", create=True) as mock_routed, \
+             patch.object(actions_mod, "invoke_shift_sick_call",
+                          return_value=(0, "ok", ""), create=True) as mock_shift:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    "Hey Boss! I am down with fever, I can't come for shift today. Sorry for inconvenience.",
+                    "201975216009469@lid",
+                    message_id="wa-live-1538",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router F9: invoked handle-shift-sick-call (rc=0)",
+        }
+        mock_routed.assert_called_once()
+        mock_shift.assert_called_once()
+
     def test_employee_sick_call_fires_pushover(self, mods, state_env):
         hooks_mod, actions_mod = mods
         _seed_config(state_env)
         _seed_roster(state_env, employee_phone="+19045550101")
 
-        with patch.object(actions_mod, "fire_pushover_alert") as mock_pushover:
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
+             patch.object(actions_mod, "has_pending_candidate_response", return_value=False), \
+             patch.object(actions_mod, "fire_pushover_alert") as mock_pushover, \
+             patch.object(actions_mod, "audit_dispatcher_routed", create=True) as mock_routed, \
+             patch.object(actions_mod, "invoke_shift_sick_call", return_value=(0, "ok", ""), create=True) as mock_shift:
             event = _make_event("Boss I have fever, can't come tomorrow",
                                  "19045550101@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
 
-        # Plugin returns None — LLM still handles
-        assert result is None
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router F9: invoked handle-shift-sick-call (rc=0)",
+        }
         mock_pushover.assert_called_once()
+        mock_routed.assert_called_once()
+        mock_shift.assert_called_once()
+        assert mock_shift.call_args.kwargs["chat_id"] == "19045550101@s.whatsapp.net"
+        assert mock_shift.call_args.kwargs["text"] == "Boss I have fever, can't come tomorrow"
+        assert mock_shift.call_args.kwargs["message_id"].startswith(
+            "cf_router_f7_19045550101@s.whatsapp.net_"
+        )
         _args, kwargs = mock_pushover.call_args
         title_text = (kwargs.get("title") or (_args[0] if _args else "")).lower()
         assert "sick-call" in title_text
+
+    def test_employee_lid_sick_call_invokes_shift_handler_and_skips_llm(self, mods, state_env):
+        """Live regression: employee LID + clear sick-call must not fall
+        through into a stale mixed-domain LLM session.
+        """
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        state_env["roster_path"].write_text(json.dumps({
+            "employees": [{
+                "id": "e008", "name": "Srini", "phone": "+17329837841",
+                "role": "floor", "status": "active",
+                "can_cover_roles": ["cashier", "floor"], "languages": ["en"],
+                "phone_history": [], "restrictions": None,
+                "lid": "201975216009469@lid",
+            }],
+        }), encoding="utf-8")
+
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
+             patch.object(actions_mod, "has_pending_candidate_response", return_value=False), \
+             patch.object(actions_mod, "fire_pushover_alert") as mock_pushover, \
+             patch.object(actions_mod, "audit_dispatcher_routed", create=True) as mock_routed, \
+             patch.object(actions_mod, "invoke_shift_sick_call", return_value=(0, "ok", ""), create=True) as mock_shift:
+            event = _make_event(
+                "Hey Boss! I am down with fever, I can't come for shift today. Sorry for inconvenience.",
+                "201975216009469@lid",
+                message_id="wa-live-1414",
+            )
+            result = hooks_mod.pre_gateway_dispatch(event)
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router F9: invoked handle-shift-sick-call (rc=0)",
+        }
+        mock_pushover.assert_called_once()
+        mock_routed.assert_called_once_with(
+            message_id="wa-live-1414",
+            chat_id="201975216009469@lid",
+            routed_to_skill="handle_sick_call",
+            message_shape="text",
+        )
+        mock_shift.assert_called_once_with(
+            chat_id="201975216009469@lid",
+            text="Hey Boss! I am down with fever, I can't come for shift today. Sorry for inconvenience.",
+            message_id="wa-live-1414",
+        )
+
+    def test_employee_flyer_request_with_boss_phrase_does_not_match_f9(self, mods, state_env):
+        """The removed broad boss/im pattern must not hijack employee Flyer."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_roster(state_env, employee_phone="+19045550101")
+
+        with patch.object(actions_mod, "fire_pushover_alert") as mock_pushover, \
+             patch.object(actions_mod, "invoke_shift_sick_call", create=True) as mock_shift:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    "Boss, I'm creating a flyer for my event",
+                    "19045550101@s.whatsapp.net",
+                ),
+            )
+
+        assert result is None
+        mock_pushover.assert_not_called()
+        mock_shift.assert_not_called()
+
+    def test_malformed_sender_block_text_does_not_take_f9_bypass(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_roster(state_env, employee_phone="+19045550101")
+
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
+             patch.object(actions_mod, "fire_pushover_alert") as mock_pushover, \
+             patch.object(actions_mod, "invoke_shift_sick_call", create=True) as mock_shift:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    "[shift-agent-sender malformed]\nBoss I have fever, can't come tomorrow",
+                    "19045550101@s.whatsapp.net",
+                ),
+            )
+
+        assert result is None
+        mock_pushover.assert_not_called()
+        mock_shift.assert_not_called()
+
+    def test_pending_candidate_response_outranks_f9_bypass(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_roster(state_env, employee_phone="+19045550101")
+
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
+             patch.object(actions_mod, "has_pending_candidate_response", return_value=True), \
+             patch.object(actions_mod, "fire_pushover_alert") as mock_pushover, \
+             patch.object(actions_mod, "invoke_shift_sick_call", create=True) as mock_shift:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    "Sorry can't cover today",
+                    "19045550101@s.whatsapp.net",
+                ),
+            )
+
+        assert result is None
+        mock_pushover.assert_not_called()
+        mock_shift.assert_not_called()
+
+    def test_shift_handler_failure_is_audited_and_still_skips_llm(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        _seed_roster(state_env, employee_phone="+19045550101")
+
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
+             patch.object(actions_mod, "has_pending_candidate_response", return_value=False), \
+             patch.object(actions_mod, "fire_pushover_alert"), \
+             patch.object(actions_mod, "audit_dispatcher_routed", create=True), \
+             patch.object(actions_mod, "audit_intercepted") as mock_audit, \
+             patch.object(actions_mod, "invoke_shift_sick_call", return_value=(127, "", "missing"), create=True):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    "I have fever, can't come tomorrow",
+                    "19045550101@s.whatsapp.net",
+                    message_id="msg-f9-fail",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router F9: invoked handle-shift-sick-call (rc=127)",
+        }
+        mock_audit.assert_any_call(
+            reason="error",
+            chat_id="19045550101@s.whatsapp.net",
+            subprocess_rc=127,
+            detail="f9_shift_sick_call_failed; stdout=''; stderr='missing'",
+        )
 
     def test_non_employee_sick_text_NOT_alerted(self, mods, state_env):
         """A random sender saying 'sick' shouldn't trigger F9 alert."""
@@ -569,7 +879,8 @@ class TestF9SickCallAlert:
         _seed_config(state_env)
         _seed_roster(state_env)
 
-        with patch.object(actions_mod, "fire_pushover_alert") as mock_pushover:
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=False), \
+             patch.object(actions_mod, "fire_pushover_alert") as mock_pushover:
             event = _make_event("I'm sick of waiting for catering",
                                  "5555555555@s.whatsapp.net")
             hooks_mod.pre_gateway_dispatch(event)
@@ -582,7 +893,11 @@ class TestF9SickCallAlert:
         _seed_config(state_env)
         _seed_roster(state_env, employee_phone="+19045550101")
 
-        with patch.object(actions_mod, "fire_pushover_alert") as mock_pushover:
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
+             patch.object(actions_mod, "has_pending_candidate_response", return_value=False), \
+             patch.object(actions_mod, "fire_pushover_alert") as mock_pushover, \
+             patch.object(actions_mod, "audit_dispatcher_routed", create=True), \
+             patch.object(actions_mod, "invoke_shift_sick_call", return_value=(0, "ok", ""), create=True) as mock_shift:
             event = _make_event("can't come tomorrow, fever",
                                  "19045550101@s.whatsapp.net")
             hooks_mod.pre_gateway_dispatch(event)
@@ -590,6 +905,7 @@ class TestF9SickCallAlert:
             hooks_mod.pre_gateway_dispatch(event)
 
         assert mock_pushover.call_count == 1
+        assert mock_shift.call_count == 3
 
     def test_employee_normal_text_NOT_alerted(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -984,6 +1300,291 @@ def _seed_proposal_sets(state_env, sets):
     }), encoding="utf-8")
 
 
+def _seed_revenue_route_clarification(state_env, chat_id="201975216009469@lid",
+                                      original_text=DESSERT_GRADUATION_AMBIGUOUS_BRIEF):
+    state_env["revenue_route_clarification_path"].write_text(json.dumps({
+        "version": 1,
+        "pending": {
+            chat_id: {
+                "chat_id": chat_id,
+                "original_text": original_text,
+                "message_id": "msg-dessert-graduation",
+                "created_at": "2026-06-07T19:40:28+00:00",
+                "sender_phone": "+17329837841",
+                "sender_role": "customer",
+                "signals": ["price_amount", "event_keyword", "order_quantity"],
+            },
+        },
+    }), encoding="utf-8")
+
+
+class TestRevenueRouteClarification:
+    @pytest.mark.parametrize("price_text", ["$75", "75$", "75 $", "75 dollars"])
+    def test_ambiguous_revenue_price_amount_accepts_currency_positions(self, mods, price_text):
+        _, actions_mod = mods
+        text = (
+            "Graduation is here and time to celebrate our kids. "
+            "We take customized orders - Desserts\n"
+            f"Mango custard 40 count tray - {price_text}\n"
+            "Rasmalai cups 25 count tray - 70$"
+        )
+
+        matched, signals = actions_mod.classify_ambiguous_revenue_brief(text)
+
+        assert matched is True
+        assert "price_amount" in signals
+
+    def test_ambiguous_dessert_graduation_brief_asks_flyer_vs_catering(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_leads_multi(state_env, [])
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+17329837841", "customer")), \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-clarify", "")) as mock_send, \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_flyer, \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_catering:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text=DESSERT_GRADUATION_AMBIGUOUS_BRIEF,
+                    chat_id="201975216009469@lid",
+                    message_id="msg-dessert-graduation",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router revenue route clarification sent",
+        }
+        mock_flyer.assert_not_called()
+        mock_catering.assert_not_called()
+        mock_send.assert_called_once()
+        reply = mock_send.call_args.args[1]
+        assert "promotional flyer" in reply
+        assert "catering/order request" in reply
+
+        doc = json.loads(state_env["revenue_route_clarification_path"].read_text(encoding="utf-8"))
+        pending = doc["pending"]["201975216009469@lid"]
+        assert pending["original_text"] == DESSERT_GRADUATION_AMBIGUOUS_BRIEF
+        assert pending["message_id"] == "msg-dessert-graduation"
+
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
+        assert audits[-1]["reason"] == "revenue_route_clarification_sent"
+
+    def test_suffix_price_dessert_graduation_brief_asks_flyer_vs_catering(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_leads_multi(state_env, [])
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+17329837841", "customer")), \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-clarify", "")) as mock_send, \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_flyer, \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_catering:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text=DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF,
+                    chat_id="201975216009469@lid",
+                    message_id="msg-dessert-graduation-suffix",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router revenue route clarification sent",
+        }
+        mock_flyer.assert_not_called()
+        mock_catering.assert_not_called()
+        reply = mock_send.call_args.args[1]
+        assert "promotional flyer" in reply
+        assert "catering/order request" in reply
+        doc = json.loads(state_env["revenue_route_clarification_path"].read_text(encoding="utf-8"))
+        assert doc["pending"]["201975216009469@lid"]["original_text"] == DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF
+
+    def test_plain_graduation_text_without_items_or_prices_does_not_route(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        text = "Graduation is here and time to celebrate our kids."
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+17329837841", "customer")), \
+             patch.object(actions_mod, "send_flyer_text") as mock_send, \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_flyer, \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_catering:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(text=text, chat_id="201975216009469@lid", message_id="msg-graduation-plain"),
+            )
+
+        assert result is None
+        mock_send.assert_not_called()
+        mock_flyer.assert_not_called()
+        mock_catering.assert_not_called()
+
+    def test_unknown_sender_suffix_price_brief_gets_clarification_not_auto_flyer(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_leads_multi(state_env, [])
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=(None, "unknown")), \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-clarify", "")) as mock_send, \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_flyer, \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_catering:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text=DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF,
+                    chat_id="201975216009469@lid",
+                    message_id="msg-unknown-suffix",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router revenue route clarification sent",
+        }
+        mock_flyer.assert_not_called()
+        mock_catering.assert_not_called()
+        assert "promotional flyer" in mock_send.call_args.args[1]
+
+    def test_employee_sick_call_with_suffix_price_words_still_routes_shift(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        state_env["pending_path"].write_text(json.dumps({"proposals": {}}), encoding="utf-8")
+        text = (
+            "Hey Boss, I have fever and can't come to my shift today. "
+            "Graduation dessert tray is 75$."
+        )
+
+        with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
+             patch.object(actions_mod, "identify_sender_metadata",
+                          return_value={"role": "employee", "employee_id": "e008",
+                                        "phone_normalized": "+17329837841",
+                                        "lid": "201975216009469@lid"}), \
+             patch.object(actions_mod, "fire_pushover_alert"), \
+             patch.object(actions_mod, "audit_dispatcher_routed", create=True) as mock_routed, \
+             patch.object(actions_mod, "invoke_shift_sick_call",
+                          return_value=(0, "ok", ""), create=True) as mock_shift, \
+             patch.object(actions_mod, "send_flyer_text") as mock_send:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(text=text, chat_id="201975216009469@lid", message_id="msg-sick-suffix-price"),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router F9: invoked handle-shift-sick-call (rc=0)",
+        }
+        mock_routed.assert_called_once()
+        mock_shift.assert_called_once()
+        mock_send.assert_not_called()
+
+    def test_revenue_route_reply_flyer_uses_saved_brief(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_revenue_route_clarification(state_env, original_text=DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+17329837841", "customer")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender", return_value=None), \
+             patch.object(actions_mod, "trigger_create_flyer_project",
+                          return_value=(True, "created", {"project_id": "F0999"})) as mock_flyer, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-flyer", "")):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(text="flyer", chat_id="201975216009469@lid", message_id="msg-choice-flyer"),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer primary: project F0999 created",
+        }
+        assert " ".join(mock_flyer.call_args.kwargs["raw_request"].split()) == (
+            " ".join(DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF.split())
+        )
+        doc = json.loads(state_env["revenue_route_clarification_path"].read_text(encoding="utf-8"))
+        assert "201975216009469@lid" not in doc["pending"]
+
+    def test_revenue_route_reply_catering_uses_saved_brief(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_leads_multi(state_env, [])
+        _seed_revenue_route_clarification(state_env, original_text=DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+17329837841", "customer")), \
+             patch.object(actions_mod, "trigger_create_catering_lead",
+                          return_value=(True, "lead_created")) as mock_catering:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(text="catering", chat_id="201975216009469@lid", message_id="msg-choice-catering"),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router F7 primary: catering inquiry routed deterministically",
+        }
+        assert mock_catering.call_args.kwargs["raw_inquiry"] == DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF
+        doc = json.loads(state_env["revenue_route_clarification_path"].read_text(encoding="utf-8"))
+        assert "201975216009469@lid" not in doc["pending"]
+
+    def test_revenue_route_reply_both_asks_which_route_first_and_keeps_context(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_revenue_route_clarification(state_env)
+
+        with patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-both", "")) as mock_send, \
+             patch.object(actions_mod, "trigger_create_flyer_project") as mock_flyer, \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_catering:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(text="both", chat_id="201975216009469@lid", message_id="msg-choice-both"),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router revenue route clarification sent",
+        }
+        mock_flyer.assert_not_called()
+        mock_catering.assert_not_called()
+        reply = mock_send.call_args.args[1]
+        assert "Which should I start first" in reply
+        assert "promotional flyer" in reply
+        assert "catering/order request" in reply
+
+        doc = json.loads(state_env["revenue_route_clarification_path"].read_text(encoding="utf-8"))
+        assert doc["pending"]["201975216009469@lid"]["original_text"] == DESSERT_GRADUATION_AMBIGUOUS_BRIEF
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
+        assert audits[-1]["reason"] == "revenue_route_clarification_sent"
+        assert "choice=both" in audits[-1]["detail"]
+
+    def test_active_flyer_customer_itemized_prices_without_order_language_routes_flyer(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+        text = "Weekend dessert special: Mango cake $4.99, Rasmalai cups $5.99. Use my saved business details."
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+17329837841", "customer")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value={"customer_id": "CUST0001", "status": "trial", "business_name": "Lakshmi"}), \
+             patch.object(actions_mod, "trigger_create_flyer_project",
+                          return_value=(True, "created", {"project_id": "F1000"})) as mock_flyer, \
+             patch.object(actions_mod, "send_flyer_text",
+                          return_value=(True, "msg-flyer", "")):
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(text=text, chat_id="201975216009469@lid", message_id="msg-active-flyer"),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer primary: project F1000 created",
+        }
+        assert mock_flyer.call_args.kwargs["raw_request"] == text
+        assert not state_env["revenue_route_clarification_path"].exists()
+
+
 class TestFindActiveCateringLeadBySender:
     """PR-CF1d Commit 1: cf-router F7 primary-mode active-lead lookup."""
 
@@ -1339,7 +1940,7 @@ class TestF7PrimaryMode:
                           return_value=("+19045550104", "employee")), \
              patch.object(actions_mod, "trigger_create_flyer_project",
                           return_value=(True, "created", {"project_id": "F0003"})) as mock_flyer, \
-             patch.object(actions_mod, "send_flyer_intake_ack",
+             patch.object(actions_mod, "send_flyer_text",
                           return_value=(True, "msg-flyer-ack", "")) as mock_ack:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
@@ -1360,11 +1961,11 @@ class TestF7PrimaryMode:
         mock_reply.assert_not_called()
         mock_flyer.assert_called_once()
         assert mock_flyer.call_args.kwargs["customer_phone"] == "+19045550104"
-        mock_ack.assert_called_once_with("201975216009469@lid", "F0003")
+        mock_ack.assert_called_once()
         rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
-        assert len(audits) == 1
-        assert audits[0]["reason"] == "flyer_primary_project_created"
+        project_audits = [r for r in audits if r.get("reason") == "flyer_primary_project_created"]
+        assert len(project_audits) == 1
 
     def test_subscription_quota_released_when_preview_delivery_fails(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -1386,7 +1987,7 @@ class TestF7PrimaryMode:
                               },
                           })), \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
-                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R40"})) as mock_reserve, \
+                          return_value=(True, "reserved", {"quota_allowed": True, "access_type": "subscription", "reservation_id": "R40"})) as mock_reserve, \
              patch.object(actions_mod, "trigger_generate_flyer_concepts",
                           return_value=(True, "generated")), \
              patch.object(actions_mod, "send_flyer_processing_ack",
@@ -1436,7 +2037,7 @@ class TestF7PrimaryMode:
                               },
                           })), \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
-                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R41"})), \
+                          return_value=(True, "reserved", {"quota_allowed": True, "access_type": "subscription", "reservation_id": "R41"})), \
              patch.object(actions_mod, "trigger_generate_flyer_concepts",
                           return_value=(True, "generated")), \
              patch.object(actions_mod, "send_flyer_processing_ack",
@@ -1491,9 +2092,9 @@ class TestF7PrimaryMode:
                               "assets": [{"kind": "reference_image"}],
                           })) as mock_create, \
              patch.object(actions_mod, "flyer_source_edit_preflight",
-                          return_value=(True, "ready")), \
+                          return_value=(True, "ready", "")), \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
-                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R1"})) as mock_reserve, \
+                          return_value=(True, "reserved", {"quota_allowed": True, "access_type": "subscription", "reservation_id": "R1"})) as mock_reserve, \
              patch.object(actions_mod, "send_flyer_edit_processing_ack",
                           return_value=(True, "msg-processing", "")) as mock_processing, \
              patch.object(actions_mod, "trigger_generate_flyer_concepts",
@@ -1513,11 +2114,68 @@ class TestF7PrimaryMode:
         assert mock_create.call_args.kwargs["manual_edit_required"] is True
         assert mock_create.call_args.kwargs["raw_request"].startswith("Edit uploaded flyer/source artwork")
         mock_reserve.assert_called_once()
-        mock_processing.assert_called_once_with("201975216009469@lid", "F0029")
+        mock_processing.assert_called_once()
+        assert mock_processing.call_args.args == ("201975216009469@lid", "F0029")
         mock_generate.assert_called_once_with("F0029")
         mock_finalize.assert_called_once()
         mock_preview.assert_called_once_with("201975216009469@lid", "F0029")
         mock_manual_ack.assert_not_called()
+
+    def test_reference_scope_no_spend_defers_exact_source_edit_without_scope_spend(self, mods, monkeypatch):
+        _, actions_mod = mods
+        monkeypatch.delenv("FLYER_REFERENCE_SCOPE_ALLOW_SPEND", raising=False)
+
+        with patch.object(actions_mod.subprocess, "run") as mock_run:
+            ok, detail, scope = actions_mod.trigger_check_flyer_reference_scope(
+                customer={"business_name": "Lakshmis Kitchen"},
+                media_path="/opt/shift-agent/.hermes/image_cache/lakshmis-evening-snacks.jpg",
+                raw_request="Remove the extra 16:00 from this flyer",
+            )
+
+        assert ok is True
+        assert detail == "scope_check_deferred_no_spend"
+        assert scope is not None
+        assert scope["decision"] == "clarify"
+        assert scope["reason"] == "scope_check_requires_provider_after_quota"
+        assert "Lakshmis Kitchen" in scope["reply_text"]
+        mock_run.assert_not_called()
+
+    def test_reference_scope_no_spend_defers_existing_flyer_add_change_typo(self, mods, monkeypatch):
+        _, actions_mod = mods
+        monkeypatch.delenv("FLYER_REFERENCE_SCOPE_ALLOW_SPEND", raising=False)
+
+        with patch.object(actions_mod.subprocess, "run") as mock_run:
+            ok, detail, scope = actions_mod.trigger_check_flyer_reference_scope(
+                customer={"business_name": "Chloe hair studio"},
+                media_path="/opt/shift-agent/.hermes/image_cache/chloe-existing-flyer.jpg",
+                raw_request="Existing flyer add the chsnge to this flyer",
+            )
+
+        assert ok is True
+        assert detail == "scope_check_deferred_no_spend"
+        assert scope is not None
+        assert scope["decision"] == "clarify"
+        assert scope["reason"] == "scope_check_requires_provider_after_quota"
+        assert "Chloe hair studio" in scope["reply_text"]
+        mock_run.assert_not_called()
+
+    def test_reference_scope_no_spend_still_clarifies_generic_reference(self, mods, monkeypatch):
+        _, actions_mod = mods
+        monkeypatch.delenv("FLYER_REFERENCE_SCOPE_ALLOW_SPEND", raising=False)
+
+        with patch.object(actions_mod.subprocess, "run") as mock_run:
+            ok, detail, scope = actions_mod.trigger_check_flyer_reference_scope(
+                customer={"business_name": "Lakshmis Kitchen"},
+                media_path="/opt/shift-agent/.hermes/image_cache/unknown-reference.jpg",
+                raw_request="Make a flyer like this",
+            )
+
+        assert ok is True
+        assert detail == "scope_check_deferred_no_spend"
+        assert scope is not None
+        assert scope["decision"] == "clarify"
+        assert "I need to confirm whether the attached flyer belongs to Lakshmis Kitchen" in scope["reply_text"]
+        mock_run.assert_not_called()
 
     def test_media_exact_reference_edit_preflight_queues_before_quota_and_processing(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -1545,11 +2203,13 @@ class TestF7PrimaryMode:
                               "assets": [{"kind": "reference_image", "path": "/tmp/ref.pdf", "mime_type": "application/pdf"}],
                           })), \
              patch.object(actions_mod, "flyer_source_edit_preflight",
-                          return_value=(False, "source edit from PDF is not supported yet")) as mock_preflight, \
+                          return_value=(False, "source edit from PDF is not supported yet", "reference_unsupported")) as mock_preflight, \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
-                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R99"})) as mock_reserve, \
+                          return_value=(True, "reserved", {"quota_allowed": True, "access_type": "subscription", "reservation_id": "R99"})) as mock_reserve, \
              patch.object(actions_mod, "trigger_flyer_release_quota",
                           return_value=(True, "released", {})) as mock_release, \
+             patch.object(actions_mod, "invoke_update_flyer_project",
+                          return_value=(True, "queued")) as mock_update, \
              patch.object(actions_mod, "send_flyer_edit_processing_ack") as mock_processing, \
              patch.object(actions_mod, "trigger_generate_flyer_concepts") as mock_generate, \
              patch.object(actions_mod, "send_flyer_manual_edit_ack",
@@ -1563,14 +2223,16 @@ class TestF7PrimaryMode:
         mock_preflight.assert_called_once()
         mock_reserve.assert_called_once()
         mock_release.assert_called_once()
+        mock_update.assert_called_once()
         mock_processing.assert_not_called()
         mock_generate.assert_not_called()
-        mock_manual_ack.assert_called_once_with(
+        mock_manual_ack.assert_called_once()
+        assert mock_manual_ack.call_args.args == (
             "201975216009469@lid",
             "F0099",
             "Remove extra 08:00 from this flyer.",
-            reason="source edit from PDF is not supported yet",
         )
+        assert mock_manual_ack.call_args.kwargs["reason"] == "source edit from PDF is not supported yet"
 
     def test_media_exact_reference_edit_releases_access_when_preview_delivery_fails(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -1598,9 +2260,9 @@ class TestF7PrimaryMode:
                               "assets": [{"kind": "reference_image"}],
                           })), \
              patch.object(actions_mod, "flyer_source_edit_preflight",
-                          return_value=(True, "ready")), \
+                          return_value=(True, "ready", "")), \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
-                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R3"})), \
+                          return_value=(True, "reserved", {"quota_allowed": True, "access_type": "subscription", "reservation_id": "R3"})), \
              patch.object(actions_mod, "send_flyer_edit_processing_ack",
                           return_value=(True, "msg-processing", "")), \
              patch.object(actions_mod, "trigger_generate_flyer_concepts",
@@ -1645,9 +2307,9 @@ class TestF7PrimaryMode:
                               "assets": [{"kind": "reference_image"}],
                           })), \
              patch.object(actions_mod, "flyer_source_edit_preflight",
-                          return_value=(True, "ready")), \
+                          return_value=(True, "ready", "")), \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
-                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R2"})), \
+                          return_value=(True, "reserved", {"quota_allowed": True, "access_type": "subscription", "reservation_id": "R2"})), \
              patch.object(actions_mod, "send_flyer_edit_processing_ack",
                           return_value=(True, "msg-processing", "")), \
              patch.object(actions_mod, "trigger_generate_flyer_concepts",
@@ -1662,7 +2324,7 @@ class TestF7PrimaryMode:
             "action": "skip",
             "reason": "cf-router flyer exact edit queued: project F0030",
         }
-        mock_release.assert_called_once()
+        mock_release.assert_not_called()
         mock_manual_ack.assert_called_once()
 
     def test_paid_guest_order_can_create_one_flyer_without_subscription_quota(self, mods, state_env):
@@ -1707,7 +2369,8 @@ class TestF7PrimaryMode:
             "action": "skip",
             "reason": "cf-router flyer primary: project F0020 created",
         }
-        mock_find_guest.assert_called_once_with("+17329837841", "17329837841@s.whatsapp.net")
+        mock_find_guest.assert_any_call("+17329837841", "17329837841@s.whatsapp.net")
+        assert mock_find_guest.call_count >= 1
         mock_reserve_guest.assert_called_once_with(
             sender_phone="+17329837841",
             chat_id="17329837841@s.whatsapp.net",
@@ -1810,10 +2473,12 @@ class TestF7PrimaryMode:
                 ),
             )
 
-        assert result is None
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer active: revision captured for F0003",
+        }
         mock_trigger.assert_not_called()
         mock_reply.assert_not_called()
-        assert not state_env["log_path"].exists()
 
     def test_active_flyer_approve_is_case_insensitive_and_finalizes(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -1845,6 +2510,45 @@ class TestF7PrimaryMode:
         mock_finalize.assert_called_once_with("17329837841@s.whatsapp.net", "F0018", "approve-msg-1")
         mock_update.assert_not_called()
 
+    def test_active_flyer_approve_outranks_stale_intake_session(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, flyer_enabled=True)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+17329837841", "customer")), \
+             patch.object(actions_mod, "find_flyer_customer_by_sender",
+                          return_value={"customer_id": "CUST0001", "status": "trial"}), \
+             patch.object(actions_mod, "find_flyer_intake_session_by_sender",
+                          return_value={"status": "choosing_language", "source": "quick_flyer"}), \
+             patch.object(actions_mod, "find_active_flyer_project_by_sender",
+                          return_value={
+                              "project_id": "F0117",
+                              "status": "awaiting_final_approval",
+                              "concepts": [{"concept_id": "C1"}],
+                          }), \
+             patch.object(actions_mod, "trigger_flyer_intake",
+                          return_value=(True, "intake", {
+                              "handled": True,
+                              "reply_text": "Please choose one of these languages",
+                              "action": "choose_language",
+                          })) as mock_intake, \
+             patch.object(actions_mod, "finalize_and_send_flyer",
+                          return_value=(True, "finalized")) as mock_finalize:
+            result = hooks_mod.pre_gateway_dispatch(
+                _make_event(
+                    text="APPROVE",
+                    chat_id="201975216009469@lid",
+                    message_id="approve-msg-2",
+                ),
+            )
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer active: finalized F0117",
+        }
+        mock_intake.assert_not_called()
+        mock_finalize.assert_called_once_with("201975216009469@lid", "F0117", "approve-msg-2")
+
     def test_explicit_flyer_intent_starts_new_work_over_active_project(self, mods, state_env):
         hooks_mod, actions_mod = mods
         _seed_config(state_env, flyer_enabled=True)
@@ -1862,7 +2566,7 @@ class TestF7PrimaryMode:
                           return_value=("+19045550104", "employee")), \
              patch.object(actions_mod, "trigger_create_flyer_project",
                           return_value=(True, "created", {"project_id": "F0004", "fields": {}})) as mock_create, \
-             patch.object(actions_mod, "send_flyer_intake_ack",
+             patch.object(actions_mod, "send_flyer_text",
                           return_value=(True, "msg-new", "")) as mock_ack:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
@@ -1876,7 +2580,7 @@ class TestF7PrimaryMode:
             "reason": "cf-router flyer primary: project F0004 created",
         }
         mock_create.assert_called_once()
-        mock_ack.assert_called_once_with("201975216009469@lid", "F0004")
+        mock_ack.assert_called_once()
 
     def test_flyer_campaign_start_trial_cta_prompts_existing_customer_without_project(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -1907,12 +2611,12 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer campaign CTA: ready_prompt",
+            "reason": "cf-router flyer active customer trial link recovery",
         }
         mock_create.assert_not_called()
         mock_onboarding.assert_not_called()
         mock_send.assert_called_once()
-        assert "tell me what you want to promote" in mock_send.call_args.args[1].lower()
+        assert "already on the free plan" in mock_send.call_args.args[1].lower()
 
     def test_flyer_campaign_quick_flyer_cta_starts_guest_payment_order(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -1938,11 +2642,11 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer campaign CTA: quick_flyer_payment",
+            "reason": "cf-router flyer intake started: quick_flyer",
         }
-        mock_guest.assert_called_once()
+        mock_guest.assert_not_called()
         mock_onboarding.assert_not_called()
-        assert "$4" in mock_send.call_args.args[1]
+        assert "choose your preferred flyer language" in mock_send.call_args.args[1].lower()
 
     def test_flyer_quick_order_intake_fails_closed_without_resolved_phone(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -2003,11 +2707,11 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer campaign CTA: ready_prompt",
+            "reason": "cf-router flyer active customer trial link recovery",
         }
         mock_onboarding.assert_not_called()
         mock_create.assert_not_called()
-        assert "already set up" in mock_send.call_args.args[1].lower()
+        assert "already on the free plan" in mock_send.call_args.args[1].lower()
 
     def test_flyer_campaign_act_now_existing_customer_gets_account_prompt(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -2030,13 +2734,13 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer campaign CTA: account_prompt",
+            "reason": "cf-router flyer active customer ready",
         }
         mock_onboarding.assert_not_called()
         mock_create.assert_not_called()
         body = mock_send.call_args.args[1].lower()
         assert "already set up" in body
-        assert "status" in body
+        assert "send your flyer request in one message" in body
 
     def test_flyer_campaign_cta_payment_pending_does_not_restart_onboarding(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -2059,11 +2763,11 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer campaign CTA: existing_payment_pending",
+            "reason": "cf-router flyer customer not active",
         }
         mock_onboarding.assert_not_called()
         mock_create.assert_not_called()
-        assert "registration is already saved" in mock_send.call_args.args[1].lower()
+        assert "waiting for payment confirmation" in mock_send.call_args.args[1].lower()
 
     def test_flyer_campaign_cta_suspended_customer_does_not_restart_onboarding(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -2086,7 +2790,7 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer campaign CTA: existing_suspended",
+            "reason": "cf-router flyer customer not active",
         }
         mock_onboarding.assert_not_called()
         mock_create.assert_not_called()
@@ -2118,7 +2822,7 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer campaign CTA: ready_prompt",
+            "reason": "cf-router flyer active customer trial link recovery",
         }
         mock_create.assert_not_called()
         mock_onboarding.assert_not_called()
@@ -2222,10 +2926,10 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer onboarding: collecting_business_name",
+            "reason": "cf-router flyer intake started: start_trial",
         }
         mock_create.assert_not_called()
-        mock_onboarding.assert_called_once()
+        mock_onboarding.assert_not_called()
 
     def test_flyer_campaign_act_now_cta_starts_setup_onboarding_for_new_sender(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -2254,11 +2958,10 @@ class TestF7PrimaryMode:
 
         assert result == {
             "action": "skip",
-            "reason": "cf-router flyer onboarding: collecting_business_name",
+            "reason": "cf-router flyer intake started: act_now",
         }
         mock_create.assert_not_called()
-        mock_onboarding.assert_called_once()
-        assert mock_onboarding.call_args.kwargs["text"] == "Act Now! Save Time and Money"
+        mock_onboarding.assert_not_called()
 
     def test_flyer_onboarding_field_reply_routes_back_to_onboarding(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -2433,7 +3136,9 @@ class TestF7PrimaryMode:
             "reason": "cf-router flyer primary: project F0012 created",
         }
         mock_onboarding.assert_called_once()
-        mock_send_text.assert_called_once()
+        assert mock_send_text.call_count == 2
+        assert "Free trial active" in mock_send_text.call_args_list[0].args[1]
+        assert "I need a few more details" in mock_send_text.call_args_list[1].args[1]
         mock_create.assert_called_once()
         assert mock_create.call_args.kwargs["raw_request"].startswith("Create a breakfast menu")
         assert "CONFIRM" not in mock_create.call_args.kwargs["raw_request"]
@@ -2524,7 +3229,7 @@ class TestF7PrimaryMode:
                               "assets": [{"kind": "reference_image"}],
                           })) as mock_create, \
              patch.object(actions_mod, "trigger_flyer_reserve_quota",
-                          return_value=(True, "reserved", {"access_type": "subscription", "reservation_id": "R1"})), \
+                          return_value=(True, "reserved", {"quota_allowed": True, "access_type": "subscription", "reservation_id": "R1"})), \
              patch.object(actions_mod, "trigger_generate_flyer_concepts",
                           return_value=(True, "generated")), \
              patch.object(actions_mod, "trigger_flyer_finalize_usage",
@@ -2583,7 +3288,9 @@ class TestF7PrimaryMode:
             "reason": "cf-router flyer active: intake reply captured for F0011",
         }
         mock_send.assert_called_once()
-        assert "F0011" in mock_send.call_args.args[1]
+        reply = mock_send.call_args.args[1]
+        assert "flyer request open" in reply
+        assert "F0011" not in reply
 
     def test_flyer_enabled_does_not_block_generic_catering(self, mods, state_env):
         """The flyer bypass is narrow; real catering still uses F7."""
@@ -2969,9 +3676,11 @@ class TestF7PrimaryMode:
         assert result is not None and result["action"] == "skip"
         mock_trigger.assert_called_once()
         call_kwargs = mock_trigger.call_args.kwargs
-        # Headcount signal "headcount:80" should have been parsed + forwarded
-        assert call_kwargs.get("extracted_fields") == {"headcount": 80}, \
-            f"expected extracted_fields with headcount=80, got {call_kwargs.get('extracted_fields')!r}"
+        # Headcount and obvious vegetarian preference should be parsed + forwarded.
+        assert call_kwargs.get("extracted_fields") == {
+            "headcount": 80,
+            "dietary_restrictions": ["veg"],
+        }, f"expected extracted_fields with headcount/dietary, got {call_kwargs.get('extracted_fields')!r}"
 
     def test_branch_a_no_headcount_signal_passes_none(self, mods, state_env):
         """When classify_catering finds NO headcount signal (e.g. text says

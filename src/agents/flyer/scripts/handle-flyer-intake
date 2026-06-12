@@ -77,6 +77,9 @@ def main() -> int:
         "creation_mode": result.creation_mode,
         "customer_id": result.customer_id,
         "reference_media_path": result.reference_media_path,
+        "brief_source": result.brief_source,
+        "brief_approved_at": result.brief_approved_at,
+        "brief_approved_message_id": result.brief_approved_message_id,
     }))
     return 0
 

@@ -64,6 +64,14 @@ DECISIONS_LOG = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH",
                                      "/opt/shift-agent/logs/decisions.log"))
 
 
+def _customer_now(tz_name: str) -> datetime:
+    """Tz-aware datetime in customer tz, with SHIFT_AGENT_NOW_OVERRIDE for tests."""
+    override = os.environ.get("SHIFT_AGENT_NOW_OVERRIDE", "")
+    if override:
+        return datetime.fromisoformat(override)
+    return customer_now(tz_name)
+
+
 def _emit_invariant(check_name: str, detail: str) -> None:
     entry = InvariantViolation(
         type="invariant_violation",
@@ -117,7 +125,11 @@ def main() -> int:
             next_renewal = None
             deleted = True
         else:
-            match.renewal_date = match.renewal_date + timedelta(days=match.recurrence_days)
+            candidate = match.renewal_date + timedelta(days=match.recurrence_days)
+            today = _customer_now(cfg.customer.timezone).date()
+            while candidate <= today:
+                candidate = candidate + timedelta(days=match.recurrence_days)
+            match.renewal_date = candidate
             next_renewal = match.renewal_date
             deleted = False
 
@@ -155,7 +167,7 @@ def main() -> int:
     if not args.dry_run:
         entry = ComplianceItemMarkedDone(
             type="compliance_item_marked_done",
-            ts=customer_now(cfg.customer.timezone),
+            ts=_customer_now(cfg.customer.timezone),
             item_id=args.item_id,
             completed_renewal_date=completed,
             next_renewal_date=next_renewal,

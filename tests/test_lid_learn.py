@@ -16,7 +16,7 @@ pytestmark = pytest.mark.skipif(
     reason="lid-learn depends on safe_io which uses fcntl (Linux only)",
 )
 
-SCRIPT = Path(__file__).resolve().parent.parent / "src" / "scripts" / "shift-agent-lid-learn"
+SCRIPT = Path(__file__).resolve().parent.parent / "src" / "agents" / "shift" / "scripts" / "shift-agent-lid-learn"
 
 
 @pytest.fixture

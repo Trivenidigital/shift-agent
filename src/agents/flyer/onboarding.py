@@ -25,9 +25,9 @@ from schemas import (
 )
 
 try:
-    from agents.flyer.starter_briefs import starter_brief_message  # type: ignore
+    from agents.flyer.starter_briefs import starter_brief_message, starter_idea_choices_message  # type: ignore
 except ModuleNotFoundError:
-    from flyer_starter_briefs import starter_brief_message  # type: ignore
+    from flyer_starter_briefs import starter_brief_message, starter_idea_choices_message  # type: ignore
 
 try:
     from safe_io import atomic_write_text  # type: ignore
@@ -254,7 +254,22 @@ def handle_onboarding_message(
         customer_created = True
         session = session.model_copy(update={"status": customer.status, "updated_at": now, "customer_id": customer.customer_id})
         _replace_session(store, session)
-        if customer.status == "trial" and session.creation_mode == "guided":
+        if customer.status == "trial" and session.creation_mode == "sample":
+            include_trial_starter_brief = False
+            store.claim_starter_prompt_send(customer.customer_id)
+            store.replace_intake_session(FlyerIntakeSession(
+                chat_id=chat_id,
+                sender_phone=_phone_or_none(sender_phone),
+                status="choosing_sample_idea",
+                source="new_flyer",
+                started_at=now,
+                updated_at=now,
+                last_message_id=message_id,
+                preferred_language=session.preferred_language,
+                creation_mode="sample",
+                mode_prompt_version="brief_builder_v1",
+            ))
+        elif customer.status == "trial" and session.creation_mode == "guided":
             include_trial_starter_brief = False
             store.replace_intake_session(FlyerIntakeSession(
                 chat_id=chat_id,
@@ -266,6 +281,7 @@ def handle_onboarding_message(
                 last_message_id=message_id,
                 preferred_language=session.preferred_language,
                 creation_mode="guided",
+                mode_prompt_version="brief_builder_v1",
             ))
         elif customer.status == "trial":
             include_trial_starter_brief = (
@@ -681,7 +697,7 @@ def _payment_reply(customer_id: str, plan_id: str, checkout_url: str) -> str:
     payment_line = (
         f"Pay here: {checkout_url}"
         if checkout_url
-        else "Payment link is pending. We will send a secure Stripe/Razorpay link shortly."
+        else "Payment link is not configured yet. Your registration is saved; payment can be confirmed once the checkout link is ready."
     )
     return (
         "Flyer Studio\n------------\n"
@@ -723,6 +739,19 @@ def _trial_active_reply(
             "Guided Mode is ready.\n"
             "First, what are you promoting? Example: weekend sale, breakfast specials, grand opening, class, service offer."
         )
+    elif creation_mode == "sample":
+        idea_message = starter_idea_choices_message(
+            customer.business_category if customer else "",
+            business_name=customer.business_name if customer else "",
+            language=language,
+        ) if customer else "Flyer Studio\n------------\nPick a sample idea to start.\n\nReply 1 or 2. I will show the final brief before generating."
+        _header, _sep, body = idea_message.partition("------------\n")
+        body = body if body else idea_message
+        reply = (
+            "Flyer Studio\n------------\n"
+            f"Free trial active for {customer_id}. You have 3 free sample flyers.\n\n"
+            f"{body}"
+        )
     elif creation_mode == "text":
         reply = (
             "Flyer Studio\n------------\n"
@@ -737,7 +766,7 @@ def _trial_active_reply(
             f"Free trial active for {customer_id}. You have 3 free sample flyers.\n"
             "Send your first flyer request now. After each sample, I will show the paid onboarding link and plans."
         )
-    if include_starter_brief and creation_mode != "guided" and customer and customer.status in {"trial", "active"}:
+    if include_starter_brief and creation_mode not in {"guided", "sample"} and customer and customer.status in {"trial", "active"}:
         reply = f"{reply}\n\n{starter_brief_message(customer.business_category, business_name=customer.business_name, include_opt_out_hint=True)}"
     return reply
 
@@ -933,7 +962,10 @@ def _is_skip_optional_reply(text: str) -> bool:
 def _checkout_url(*, template: str, customer_id: str, plan_id: str, chat_id: str) -> str:
     if not template:
         return ""
-    return template.format(customer_id=customer_id, plan_id=plan_id, chat_id=chat_id)
+    try:
+        return template.format(customer_id=customer_id, plan_id=plan_id, chat_id=chat_id)
+    except (KeyError, IndexError, ValueError):
+        return ""
 
 
 def _is_trial_start(text: str) -> bool:

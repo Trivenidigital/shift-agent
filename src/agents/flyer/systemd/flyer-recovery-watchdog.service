@@ -1,6 +1,7 @@
 [Unit]
 Description=Flyer Studio recovery watchdog
 After=hermes-gateway.service
+OnFailure=flyer-recovery-watchdog-failure.service
 
 [Service]
 Type=oneshot

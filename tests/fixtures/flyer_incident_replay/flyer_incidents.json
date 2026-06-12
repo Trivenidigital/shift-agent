@@ -1,0 +1,94 @@
+[
+  {
+    "id": "F0065-evening-snacks-new-over-active",
+    "mode": "fresh_new_over_active",
+    "text": "I'd like you to help me with evening snacks flier from 4 PM to 7 PM. Include 5 top South Indian snack items. Its Wednesday through Saturday event",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "customer": {"customer_id": "CUST0001", "status": "trial", "business_name": "Lakshmis Kitchn", "business_address": "90 Brybar Dr St Johns FL", "phone": "+17329837841", "primary_chat_id": "17329837841@lid"},
+    "active_project": {"project_id": "F0064", "customer_phone": "+17329837841", "status": "awaiting_final_approval", "raw_request": "Create old breakfast dosa flyer", "fields": {"event_or_business_name": "Old Breakfast Special", "contact_info": "+17329837841"}, "concepts": [{"concept_id": "C1"}], "revisions": []},
+    "expect": {"route": "new_project", "business_name": "Lakshmis Kitchn", "campaign_title": "Evening Snacks", "primary_audit_reason": "flyer_primary_failed", "must_audit": ["flyer_active_project_bypassed", "flyer_primary_failed"], "forbidden_calls": ["invoke_update_flyer_project"], "duplicate_initial_ack": false}
+  },
+  {
+    "id": "F0063-source-reference-co-owner-asks-source-new",
+    "mode": "reference_scope_choice",
+    "text": "use as reference",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "pending": {"choice": "use_reference", "source_organization": "Triveni Express", "original_intent": "exact_source_edit", "customer": {"customer_id": "CUST0001", "business_name": "Lakshmis Kitchn"}, "created_at": 1770000000},
+    "expect": {"route": "source_new_clarification", "must_send_contains": ["Reply SOURCE", "Reply NEW"], "forbidden_calls": ["trigger_create_flyer_project"]}
+  },
+  {
+    "id": "F0063-any-update-on-source-new-pending",
+    "mode": "source_new_status_check",
+    "text": "any update?",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "pending": {"status": "awaiting_source_vs_new_choice", "customer": {"customer_id": "CUST0001"}},
+    "expect": {"route": "source_new_status", "must_send_contains": ["Reply SOURCE", "Reply NEW"], "forbidden_calls": ["trigger_create_flyer_project", "invoke_update_flyer_project"]}
+  },
+  {
+    "id": "F0063-source-choice-queues-manual-edit",
+    "mode": "source_choice",
+    "text": "SOURCE",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "pending": {"choice": "source", "raw_request": "Edit uploaded flyer. Change only the phone number.", "media_path": "/tmp/source.png", "customer": {"customer_id": "CUST0001"}},
+    "expect": {"route": "manual_edit_queued", "manual_review_reason_code": "source_edit_provider_unavailable", "must_send_contains": ["careful flyer edit"], "forbidden_calls": ["trigger_generate_flyer_concepts"]}
+  },
+  {
+    "id": "F0065-approve-after-preview-final-qa-fails",
+    "mode": "approve_final_qa_failure",
+    "text": "APPROVE",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "active_project": {"project_id": "F0065", "customer_phone": "+17329837841", "status": "awaiting_final_approval", "fields": {"event_or_business_name": "Evening Snacks", "contact_info": "+17329837841"}, "concepts": [{"concept_id": "C1"}], "manual_review": {"status": "queued", "reason_code": "visual_qa_failed"}},
+    "expect": {"route": "finalize_failed", "must_audit": ["flyer_primary_failed"], "self_eval_incident": "preview_approved_final_qa_failed", "active_customer_risk": true}
+  },
+  {
+    "id": "vague-create-flyer-clarifies-without-project",
+    "mode": "vague_start",
+    "text": "create flyer",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "customer": {"customer_id": "CUST0001", "status": "trial", "starter_prompt_preferences": {"mode": "off"}},
+    "expect": {"route": "clarification", "forbidden_calls": ["trigger_create_flyer_project", "invoke_update_flyer_project"]}
+  },
+  {
+    "id": "small-revision-make-it-red-stays-revision",
+    "mode": "active_revision",
+    "text": "make it red",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "active_project": {"project_id": "F0066", "customer_phone": "+17329837841", "status": "awaiting_final_approval", "fields": {"event_or_business_name": "Weekend Sale", "contact_info": "+17329837841"}, "concepts": [{"concept_id": "C1"}], "revisions": []},
+    "expect": {"route": "revision", "forbidden_calls": ["trigger_create_flyer_project"], "must_call": ["invoke_update_flyer_project"]}
+  },
+  {
+    "id": "status-check-does-not-create-or-revise",
+    "mode": "active_status",
+    "text": "status?",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "active_project": {"project_id": "F0067", "customer_phone": "+17329837841", "status": "manual_edit_required", "fields": {"event_or_business_name": "Weekend Sale"}, "manual_review": {"status": "queued", "reason_code": "source_edit_provider_unavailable"}, "concepts": []},
+    "expect": {"route": "status_reply", "forbidden_calls": ["trigger_create_flyer_project", "invoke_update_flyer_project", "trigger_generate_flyer_concepts"]}
+  },
+  {
+    "id": "status-check-where-is-the-update-flyer-stays-status",
+    "mode": "active_status",
+    "text": "Where is the update flyer?",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "active_project": {"project_id": "F0069", "customer_phone": "+17329837841", "status": "manual_edit_required", "fields": {"event_or_business_name": "Weekend Sale"}, "manual_review": {"status": "queued", "reason_code": "source_edit_provider_unavailable"}, "concepts": []},
+    "expect": {"route": "status_reply", "forbidden_calls": ["trigger_create_flyer_project", "invoke_update_flyer_project", "trigger_generate_flyer_concepts"]}
+  },
+  {
+    "id": "complete-red-sale-poster-is-new-not-revision-control",
+    "mode": "fresh_new_over_active",
+    "text": "Make a new red sale poster for Diwali sweets Friday 5 PM to 9 PM",
+    "chat_id": "17329837841@lid",
+    "resolved_identity": {"phone": "+17329837841", "role": "customer"},
+    "customer": {"customer_id": "CUST0001", "status": "trial", "business_name": "Lakshmis Kitchn", "business_address": "90 Brybar Dr St Johns FL", "phone": "+17329837841", "primary_chat_id": "17329837841@lid"},
+    "active_project": {"project_id": "F0068", "customer_phone": "+17329837841", "status": "awaiting_final_approval", "raw_request": "Old flyer", "fields": {"event_or_business_name": "Old Flyer", "contact_info": "+17329837841"}, "concepts": [{"concept_id": "C1"}], "revisions": []},
+    "expect": {"route": "new_project", "forbidden_calls": ["invoke_update_flyer_project"], "duplicate_initial_ack": false}
+  }
+]

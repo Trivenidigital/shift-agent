@@ -1,0 +1,19 @@
+{
+  "topic": "hermes-commerce-portfolio-reconciliation",
+  "task_text": "Hermes Commerce portfolio reconciliation: map every PRD capability to existing portfolio owner (Catering / Inventory / VIP / Cash & AR / Flyer / Multi-Location / backlog #23/#24/#25 / v3 #30/#32/#33/#34/#36) and decide what Commerce primitives own vs. what stays with existing agents. Lock the four shared primitives: commerce_catalog, commerce_cart, commerce_order_state, commerce_payment_link.",
+  "completed_at": "2026-05-28T22:22:56Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 2,
+  "hermes_step_count": 15,
+  "files_to_read_first": [
+    "AGENTS.md",
+    "tasks/lessons.md",
+    "docs/hermes-alignment.md",
+    "docs/portfolio.md",
+    "src/agents/shift/skills/dispatch_shift_agent/SKILL.md",
+    "src/platform/schemas.py (FlyerGuestOrder l.898, LogEntry variants l.2535+)",
+    "src/platform/safe_io.py (atomic_write_json l.247, ndjson_append l.263, load_yaml_model l.335)",
+    "src/agents/flyer/guest_order.py (canonical commerce-primitive precedent)",
+    "src/agents/catering/scripts/* (deterministic-script pattern)"
+  ]
+}

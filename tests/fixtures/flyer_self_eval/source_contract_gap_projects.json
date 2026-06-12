@@ -1,0 +1,121 @@
+{
+  "projects": [
+    {
+      "project_id": "F9201",
+      "status": "manual_edit_required",
+      "customer_phone": "+17329837841",
+      "created_at": "2026-05-20T09:00:00Z",
+      "updated_at": "2026-05-20T09:00:00Z",
+      "original_message_id": "m-F9201",
+      "raw_request": "Please edit this uploaded flyer. Do not change anything else.",
+      "manual_review": {
+        "status": "queued",
+        "reason": "source edit provider unavailable",
+        "reason_code": "source_edit_provider_unavailable",
+        "detail": "OPENAI_API_KEY=sk-fixture-secret should not print",
+        "queued_at": "2026-05-20T09:00:00Z"
+      },
+      "assets": [],
+      "reference_extractions": [],
+      "qa_reports": [],
+      "final_asset_ids": []
+    },
+    {
+      "project_id": "F9202",
+      "status": "awaiting_final_approval",
+      "customer_phone": "+17329837841",
+      "created_at": "2026-05-20T09:10:00Z",
+      "updated_at": "2026-05-20T09:10:00Z",
+      "original_message_id": "m-F9202",
+      "raw_request": "Use this uploaded flyer. Do not change anything else. Replace Triveni Express with Lakshmi's Kitchen.",
+      "manual_review": {"status": "none", "reason": "", "reason_code": "unclassified"},
+      "assets": [
+        {
+          "asset_id": "A0001",
+          "kind": "reference_image",
+          "source": "whatsapp",
+          "path": "/opt/shift-agent/state/flyer/projects/F9202/ref.png",
+          "mime_type": "image/png",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "received_at": "2026-05-20T09:10:00Z"
+        }
+      ],
+      "reference_extractions": [],
+      "qa_reports": [],
+      "final_asset_ids": []
+    },
+    {
+      "project_id": "F9203",
+      "status": "awaiting_final_approval",
+      "customer_phone": "+17329837841",
+      "created_at": "2026-05-20T09:20:00Z",
+      "updated_at": "2026-05-20T09:20:00Z",
+      "original_message_id": "m-F9203",
+      "raw_request": "Edit uploaded flyer/source artwork. Customer requested: replace Triveni Express with Lakshmi's Kitchen.",
+      "manual_review": {"status": "none", "reason": "", "reason_code": "unclassified"},
+      "assets": [
+        {"asset_id": "A0001", "kind": "reference_image", "source": "whatsapp", "path": "/opt/shift-agent/state/flyer/projects/F9203/ref.png", "mime_type": "image/png", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "received_at": "2026-05-20T09:20:00Z"},
+        {"asset_id": "A0002", "kind": "concept_preview", "source": "generated", "path": "/opt/shift-agent/state/flyer/projects/F9203/preview.png", "mime_type": "image/png", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "received_at": "2026-05-20T09:21:00Z"}
+      ],
+      "locked_facts": [
+        {"fact_id": "source_heading:0", "label": "Source heading", "value": "Monday Thali Specials", "source": "reference_vision", "required": true},
+        {"fact_id": "replacement:0:new", "label": "Required replacement text", "value": "Lakshmi's Kitchen", "source": "customer_text", "required": true}
+      ],
+      "reference_extractions": [
+        {
+          "asset_id": "A0001",
+          "role": "source_edit_template",
+          "provider": "test",
+          "status": "succeeded",
+          "extracted_facts": [],
+          "source_contract": {
+            "required_headings": ["Monday Thali Specials"],
+            "required_text": ["Sides: salad, raita, papad"],
+            "sections": [],
+            "requested_replacements": {"Triveni Express": "Lakshmi's Kitchen"},
+            "forbidden_substrings": ["Triveni Express"],
+            "preserve_layout": true,
+            "preserve_unmentioned_text": true,
+            "confidence": 0.9
+          }
+        }
+      ],
+      "qa_reports": [
+        {"project_id": "F9203", "asset_id": "A0002", "artifact_path": "/opt/shift-agent/state/flyer/projects/F9203/preview.png", "artifact_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "project_version": 1, "output_format": "concept_preview", "provider": "source-contract-qa", "qa_source": "ocr_vision", "status": "passed", "blockers": [], "warnings": ["source contract verified"], "extracted_text": "Monday Thali Specials", "checked_at": "2026-05-20T09:22:00Z"}
+      ],
+      "final_asset_ids": []
+    },
+    {
+      "project_id": "F9204",
+      "status": "awaiting_final_approval",
+      "customer_phone": "+17329837841",
+      "created_at": "2026-05-20T09:30:00Z",
+      "updated_at": "2026-05-20T09:30:00Z",
+      "original_message_id": "m-F9204",
+      "raw_request": "Edit uploaded flyer/source artwork.",
+      "manual_review": {"status": "none", "reason": "", "reason_code": "unclassified"},
+      "assets": [{"asset_id": "A0001", "kind": "reference_image", "source": "whatsapp", "path": "/opt/shift-agent/state/flyer/projects/F9204/ref.png", "mime_type": "image/png", "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "received_at": "2026-05-20T09:30:00Z"}],
+      "locked_facts": [],
+      "reference_extractions": [
+        {"asset_id": "A0001", "role": "source_edit_template", "provider": "test", "status": "succeeded", "extracted_facts": [], "source_contract": {"required_text": ["Sides: salad, raita, papad"], "requested_replacements": {"Triveni Express": "Lakshmi's Kitchen"}, "preserve_layout": true, "preserve_unmentioned_text": true, "confidence": 0.9}}
+      ],
+      "qa_reports": [],
+      "final_asset_ids": []
+    },
+    {
+      "project_id": "F9205",
+      "status": "awaiting_final_approval",
+      "customer_phone": "+17329837841",
+      "created_at": "2026-05-20T09:40:00Z",
+      "updated_at": "2026-05-20T09:40:00Z",
+      "original_message_id": "m-F9205",
+      "raw_request": "Edit uploaded flyer/source artwork.",
+      "manual_review": {"status": "none", "reason": "", "reason_code": "unclassified"},
+      "assets": [{"asset_id": "A0001", "kind": "reference_image", "source": "whatsapp", "path": "/opt/shift-agent/state/flyer/projects/F9205/ref.png", "mime_type": "image/png", "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "received_at": "2026-05-20T09:40:00Z"}, {"asset_id": "A0002", "kind": "concept_preview", "source": "generated", "path": "/opt/shift-agent/state/flyer/projects/F9205/preview.png", "mime_type": "image/png", "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "received_at": "2026-05-20T09:41:00Z"}],
+      "locked_facts": [{"fact_id": "source_required_text:0", "label": "Source required text", "value": "Sides: salad, raita, papad", "source": "reference_vision", "required": true}, {"fact_id": "replacement:0:new", "label": "Required replacement text", "value": "Lakshmi's Kitchen", "source": "customer_text", "required": true}],
+      "reference_extractions": [{"asset_id": "A0001", "role": "source_edit_template", "provider": "test", "status": "succeeded", "extracted_facts": [], "source_contract": {"required_text": ["Sides: salad, raita, papad"], "requested_replacements": {"Triveni Express": "Lakshmi's Kitchen"}, "forbidden_substrings": ["Triveni Express"], "preserve_layout": true, "preserve_unmentioned_text": true, "confidence": 0.9}}],
+      "qa_reports": [{"project_id": "F9205", "asset_id": "A0002", "artifact_path": "/opt/shift-agent/state/flyer/projects/F9205/preview.png", "artifact_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "project_version": 1, "output_format": "concept_preview", "provider": "openrouter-vision", "qa_source": "ocr_vision", "status": "passed", "blockers": [], "warnings": [], "extracted_text": "Lakshmi's Kitchen Sides: salad, raita, papad Triveni Express", "checked_at": "2026-05-20T09:42:00Z"}],
+      "final_asset_ids": []
+    }
+  ]
+}

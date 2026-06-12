@@ -49,11 +49,11 @@ def fixture_dir(tmp_path):
         "backup": {"gpg_recipient_email": "x@y"},
         "eod": {
             "eod_time": "23:00",
-            # Tight catchup window so the past_catchup test can use a same-day
+            # Minimum-valid catchup window so the past_catchup test can use a same-day
             # override. With a 60-min catchup, "past catchup" would require
             # spilling into the next calendar day, breaking same-day
             # target_dt math in self_gate_window_state.
-            "catchup_window_minutes": 5,
+            "catchup_window_minutes": 15,
             "pushover_priority": 0,
             "pushover_only_if_unresolved": False,
         },
@@ -186,8 +186,8 @@ def test_force_resnap_alone_refused(fixture_dir):
 def test_self_gate_outside_window_skips(fixture_dir):
     """now_override past target+catchup_min → past_catchup, no work.
 
-    With fixture's catchup_window_minutes=5 and eod_time=23:00, anything past
-    23:05 same-day is past catchup. Use 23:30 to be safely past."""
+    With fixture's catchup_window_minutes=15 and eod_time=23:00, anything past
+    23:15 same-day is past catchup. Use 23:30 to be safely past."""
     r = _run(
         fixture_dir, args=(),  # no --force
         now_override="2026-04-30T23:30:00-04:00",

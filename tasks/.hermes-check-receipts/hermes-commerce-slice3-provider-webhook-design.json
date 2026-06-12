@@ -1,0 +1,18 @@
+{
+  "topic": "hermes-commerce-slice3-provider-webhook-design",
+  "task_text": "Hermes Commerce slice-3 design: real payment-provider integration (Stripe per-order Payment Links) + webhook receiver (Hermes-native webhook-subscriptions SKILL, NOT custom daemon) + commerce_payment_confirmed reconciler SKILL. Per new lesson rule, leverages installed Hermes substrate (webhook-subscriptions + native-mcp) rather than custom code.",
+  "completed_at": "2026-05-29T18:46:46Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 5,
+  "hermes_step_count": 12,
+  "files_to_read_first": [
+    "/root/.hermes/skills/devops/webhook-subscriptions/SKILL.md (deployed Hermes webhook platform)",
+    "/root/.hermes/skills/mcp/native-mcp/SKILL.md (deployed Hermes MCP client)",
+    "tasks/hermes-commerce-prd-v2.md (slice-3 scope envelope §12)",
+    "tasks/hermes-commerce-slice2-catering-deposit-caller-design.md (caller contract carryforward)",
+    "tasks/lessons.md (2026-05-29 Hermes-first-for-payment-substrate rule)",
+    "src/platform/commerce/payment_link.py (slice-1 primitive — emit_payment_link_failed, register_reference, void, mark_attempted/sent)",
+    "src/platform/schemas.py (CommercePaymentIntent.provider Literal already includes 'stripe' — no schema change needed)",
+    "src/agents/catering/scripts/catering-mint-deposit (slice-2 caller — will switch from placeholder to stripe mode)"
+  ]
+}

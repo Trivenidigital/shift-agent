@@ -1,0 +1,10 @@
+{
+  "deploy_marker": "deploy-20260521-000000-cccccccc",
+  "bridge_status": "disconnected",
+  "gateway_status": "active",
+  "cockpit_status": "healthy",
+  "open_prs": [],
+  "merged_not_deployed": [{"number": 158, "title": "flyer brief builder intake", "customer_risk_label": "lifecycle"}],
+  "host_supplied_source_edit_posture": "unset",
+  "replay_summary": {"total": 11, "passed": 11, "failed_ids": []}
+}

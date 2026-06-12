@@ -495,7 +495,12 @@ def main() -> int:
 
     # Load items (recovery: corrupt → InvariantViolation + heartbeat-only mode)
     try:
-        items_file, _ = load_model(ITEMS_PATH, ComplianceItemsFile)
+        raw_items, item_status = safe_load_json(ITEMS_PATH, default=None)
+        if item_status in {"missing", "empty"}:
+            raise FileNotFoundError(f"{ITEMS_PATH} {item_status}")
+        if item_status.startswith("corrupt") or item_status.startswith("oserror"):
+            raise RuntimeError(f"{ITEMS_PATH}: {item_status}")
+        items_file = ComplianceItemsFile.model_validate(raw_items)
     except (RuntimeError, FileNotFoundError) as e:
         _emit_invariant("compliance_items_file_load",
                         f"{ITEMS_PATH}: {type(e).__name__}: {e}")

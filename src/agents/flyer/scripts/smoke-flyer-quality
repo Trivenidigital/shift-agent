@@ -19,9 +19,26 @@ sys.path.insert(0, str(SRC_ROOT))
 
 from schemas import Config, FlyerConcept, FlyerProject, FlyerProjectStore, FlyerRequestFields  # noqa: E402
 try:
-    from flyer_render import build_asset_manifest, inspect_rendered_asset, render_concept_previews, render_final_package, validate_text_manifest_file  # type: ignore  # noqa: E402
+    from flyer_render import build_asset_manifest, build_image_generation_prompt, inspect_rendered_asset, render_concept_previews, render_final_package, validate_text_manifest_file  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import build_asset_manifest, inspect_rendered_asset, render_concept_previews, render_final_package, validate_text_manifest_file  # noqa: E402
+    from agents.flyer.render import build_asset_manifest, build_image_generation_prompt, inspect_rendered_asset, render_concept_previews, render_final_package, validate_text_manifest_file  # noqa: E402
+try:
+    from flyer_visual_qa import run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.visual_qa import run_visual_qa, write_visual_qa_report  # noqa: E402
+
+
+def _concept_prompt_metadata(project: FlyerProject, *, concept_id: str) -> str:
+    prompt = build_image_generation_prompt(
+        project,
+        concept_id=concept_id,
+        output_format="concept_preview",
+        size=(1080, 1350),
+    )
+    if len(prompt) <= 4000:
+        return prompt
+    suffix = "\n[truncated metadata; renderer used the full structured prompt]"
+    return prompt[: 4000 - len(suffix)] + suffix
 
 
 def _project() -> FlyerProject:
@@ -52,6 +69,49 @@ def _load_config(path: Path) -> Config:
         return Config.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
 
 
+_CI_ENV_VARS = ("GITHUB_ACTIONS", "CI", "BUILDKITE", "JENKINS_URL")
+
+
+def _looks_like_ci() -> tuple[bool, str]:
+    """Detect common CI markers so --real-model --allow-spend cannot accidentally
+    run in a build pipeline. Tightens the existing --allow-spend gate; does NOT
+    relax it. Returns (is_ci, first_matched_var).
+    """
+    for name in _CI_ENV_VARS:
+        value = os.environ.get(name, "").strip().lower()
+        if value and value not in ("0", "false", "no", ""):
+            return True, name
+    return False, ""
+
+
+def _key_posture(name: str) -> dict:
+    """Best-effort posture of a provider key for spend-mode output. Reports
+    presence + which env source matched. Never returns the value itself."""
+    process_value = os.environ.get(name, "").strip()
+    if process_value:
+        return {"present": "PLACEHOLDER" not in process_value.upper(), "source": "process_env"}
+    for source, path_str in (
+        ("hermes_env", os.environ.get("HERMES_ENV_PATH", "/root/.hermes/.env")),
+        ("agent_env", os.environ.get("SHIFT_AGENT_ENV_PATH", "/opt/shift-agent/.env")),
+    ):
+        path = Path(path_str)
+        if not path.exists():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, raw = line.split("=", 1)
+                if key.strip() == name:
+                    raw = raw.strip().strip('"').strip("'")
+                    if raw:
+                        return {"present": "PLACEHOLDER" not in raw.upper(), "source": source}
+        except OSError:
+            continue
+    return {"present": False, "source": None}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", default="")
@@ -66,6 +126,22 @@ def main() -> int:
         print(json.dumps({"ok": False, "error": "--real-model requires --allow-spend"}))
         return 2
 
+    # P0-7 belt-and-suspenders: refuse to spend in a CI/build pipeline even if
+    # the operator passed --allow-spend. Most accidental spend events arise from
+    # someone copying a working env into a build secret; the existing
+    # FLYER_GOLDEN_ALLOW_SPEND env in pytest is one half of the gate, this is
+    # the other. Operator can set ALLOW_SPEND_IN_CI=1 to override (documented
+    # path; not the default).
+    if args.real_model and args.allow_spend and os.environ.get("ALLOW_SPEND_IN_CI", "").lower() not in ("1", "true", "yes"):
+        is_ci, var_name = _looks_like_ci()
+        if is_ci:
+            print(json.dumps({
+                "ok": False,
+                "error": f"refusing --real-model in CI environment ({var_name} is set)",
+                "remedy": "unset CI markers, or set ALLOW_SPEND_IN_CI=1 if intentional",
+            }))
+            return 3
+
     temp_root = Path(args.output_dir) if args.output_dir else Path(tempfile.mkdtemp(prefix="flyer-quality-smoke-"))
     temp_root.mkdir(parents=True, exist_ok=True)
     os.environ["FLYER_STATE_ROOT"] = str(temp_root)
@@ -75,11 +151,28 @@ def main() -> int:
     model = "deterministic-renderer"
     quality = "low"
     spend_mode = "none"
+    posture = {
+        "provider": "deterministic",
+        "openrouter_key": {"present": False, "source": None},
+        "source_edit_provider": "not_checked",
+        "source_edit_key": {"present": False, "source": None},
+    }
     if args.real_model:
         cfg = _load_config(Path(args.config_path))
         model = cfg.flyer.draft_image_model
         quality = cfg.flyer.draft_image_quality
+        source_edit_provider = cfg.flyer.resolve_source_edit_render_provider()
+        source_edit_key_name = {
+            "openrouter": "OPENROUTER_API_KEY",
+            "openai": "OPENAI_API_KEY",
+        }.get(source_edit_provider.provider, "")
         spend_mode = "real-model"
+        posture = {
+            "provider": "openrouter",
+            "openrouter_key": _key_posture("OPENROUTER_API_KEY"),
+            "source_edit_provider": f"{source_edit_provider.provider}/{source_edit_provider.model}",
+            "source_edit_key": _key_posture(source_edit_key_name) if source_edit_key_name else {"present": False, "source": None},
+        }
 
     try:
         project = _project()
@@ -94,6 +187,17 @@ def main() -> int:
                 project_version=project.version,
                 output_format=spec.output_format,
             )
+            concept_visual_qa = {"ok": True, "status": "not_run", "qa_source": ""}
+            if args.real_model:
+                qa_report = run_visual_qa(
+                    project,
+                    spec.path,
+                    output_format=spec.output_format,
+                    asset_id=f"{project.project_id}-{spec.concept_id}",
+                    allow_sidecar=False,
+                )
+                write_visual_qa_report(qa_report, spec.path)
+                concept_visual_qa = {"ok": qa_report.status == "passed", "status": qa_report.status, "qa_source": qa_report.qa_source}
             diagnostics.append({
                 "path": str(spec.path),
                 "width": report.width,
@@ -101,8 +205,9 @@ def main() -> int:
                 "size_bytes": report.size_bytes,
                 "blockers": report.blockers,
                 "text_qa": {"ok": text_report.ok, "blockers": text_report.blockers},
+                "visual_qa": concept_visual_qa,
             })
-            ok = ok and report.ok and text_report.ok
+            ok = ok and report.ok and text_report.ok and concept_visual_qa["ok"]
         final_diagnostics = []
         send_dry_run = {"ok": True}
         stale_sidecar_check = {"ok": True}
@@ -114,7 +219,7 @@ def main() -> int:
                     title="Best Design",
                     style_summary="Smoke concept",
                     preview_asset_id=preview_assets[0].asset_id,
-                    prompt=project.raw_request,
+                    prompt=_concept_prompt_metadata(project, concept_id="C1"),
                     created_at=datetime.now(timezone.utc),
                     selected_at=datetime.now(timezone.utc),
                 )
@@ -148,6 +253,21 @@ def main() -> int:
                 source="rendered",
                 original_message_id="smoke-quality-approve",
             )
+            for asset, spec in zip(final_assets, final_specs):
+                allow_sidecar_visual_qa = not args.real_model
+                if allow_sidecar_visual_qa:
+                    (Path(str(spec.path) + ".ocr.txt")).write_text(
+                        "Thursday Dosa Night Special Triveni Pineville +1 704 324 3322 Non-veg combo $16.99",
+                        encoding="utf-8",
+                    )
+                qa_report = run_visual_qa(
+                    project,
+                    spec.path,
+                    output_format=spec.output_format,
+                    asset_id=asset.asset_id,
+                    allow_sidecar=allow_sidecar_visual_qa,
+                )
+                write_visual_qa_report(qa_report, spec.path)
             project = project.model_copy(update={
                 "assets": [*preview_assets, *final_assets],
                 "final_asset_ids": [asset.asset_id for asset in final_assets],
@@ -156,16 +276,19 @@ def main() -> int:
             log_path = temp_root / "decisions.log"
             state_path.write_text(FlyerProjectStore(projects=[project]).model_dump_json(indent=2), encoding="utf-8")
             send_script = Path(__file__).with_name("send-flyer-package")
+            send_cmd = [
+                sys.executable,
+                str(send_script),
+                "--jid", "smoke@s.whatsapp.net",
+                "--project-id", project.project_id,
+                "--state-path", str(state_path),
+                "--log-path", str(log_path),
+                "--dry-run-bridge",
+            ]
+            if not args.real_model:
+                send_cmd.append("--allow-sidecar-visual-qa")
             proc = subprocess.run(
-                [
-                    sys.executable,
-                    str(send_script),
-                    "--jid", "smoke@s.whatsapp.net",
-                    "--project-id", project.project_id,
-                    "--state-path", str(state_path),
-                    "--log-path", str(log_path),
-                    "--dry-run-bridge",
-                ],
+                send_cmd,
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -213,6 +336,7 @@ def main() -> int:
             "mode": spend_mode,
             "model": model,
             "quality": quality,
+            "posture": posture,
             "concept_count": len(specs),
             "output_dir": str(temp_root),
             "assets": diagnostics,

@@ -106,7 +106,7 @@ def _run_check(fixture_dir, *, args=(), now_override=None, render_bin=None):
     )
 
 
-def _run_mark(fixture_dir, *, item_id, actor="owner", dry_run=False):
+def _run_mark(fixture_dir, *, item_id, actor="owner", dry_run=False, now_override=None):
     env = {
         **os.environ,
         "SHIFT_AGENT_CONFIG_PATH": str(fixture_dir / "config.yaml"),
@@ -119,6 +119,8 @@ def _run_mark(fixture_dir, *, item_id, actor="owner", dry_run=False):
             "--item-id", item_id, "--actor", actor]
     if dry_run:
         args.append("--dry-run")
+    if now_override:
+        env["SHIFT_AGENT_NOW_OVERRIDE"] = now_override
     return subprocess.run(args, env=env, capture_output=True, text=True, timeout=15)
 
 
@@ -440,6 +442,25 @@ class TestMarkDone:
         )
         assert items["items"][0]["renewal_date"] == "2027-09-01"
 
+    def test_overdue_recurring_item_rolls_forward_to_future(self, fixture_dir):
+        items = json.loads((fixture_dir / "state" / "compliance-items.json").read_text())
+        items["items"][0]["renewal_date"] = "2026-05-01"
+        items["items"][0]["recurrence_days"] = 7
+        (fixture_dir / "state" / "compliance-items.json").write_text(json.dumps(items))
+
+        r = _run_mark(
+            fixture_dir,
+            item_id="health_inspect_houston",
+            now_override="2026-05-31T09:00:00-04:00",
+        )
+
+        assert r.returncode == 0
+        out = json.loads(r.stdout)
+        assert out["completed"] == "2026-05-01"
+        assert out["next"] == "2026-06-05"
+        items_after = json.loads((fixture_dir / "state" / "compliance-items.json").read_text())
+        assert items_after["items"][0]["renewal_date"] == "2026-06-05"
+
     def test_one_shot_delete(self, fixture_dir):
         items = json.loads((fixture_dir / "state" / "compliance-items.json").read_text())
         items["items"].append({
@@ -600,9 +621,9 @@ class TestDateMath:
         # 30-gate should defer (8 days late > 7 max)
         deferred_gates = sorted(set(d["gate_days"] for d in defer))
         assert 30 in deferred_gates
-        # 14, 7, 3, 1 gates should fire (within window from today's perspective)
+        # Future gates should not fire before their ideal dates.
         fired_gates = sorted(set(c["gate_days"] for c in fire))
-        assert 14 in fired_gates  # ideal 8/18, days_late=-8 actually... wait recompute
+        assert 14 not in fired_gates
 
     def test_prune_sentinel_drops_unknown_items(self):
         m = self._import_module()

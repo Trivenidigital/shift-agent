@@ -35,8 +35,6 @@ import json
 import os
 import re
 import sys
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,6 +45,7 @@ from safe_io import (  # noqa: E402
     FileLock, ndjson_append, atomic_write_json, customer_now,
     load_model, flock, load_yaml_model,
 )
+from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402  # PR-ε: chokepoint consolidation
 from audit_helpers import scan_expense_orphan_pushes  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 from schemas import (  # noqa: E402
@@ -74,8 +73,6 @@ LEADS_PATH = Path("/opt/shift-agent/state/expense-bookkeeper/leads.json")
 LEADS_LOCK = Path("/opt/shift-agent/state/expense-bookkeeper/leads.json.lock")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 TEMPLATE_DIR = Path("/opt/shift-agent/templates")
-BRIDGE_URL = "http://127.0.0.1:3000/send"
-BRIDGE_TIMEOUT = 10
 # Mock-QBO ledger persistence (cross-process undo support, E2E Layer B fix
 # 2026-05-01). Only consulted when cfg.qbo_client_mode == "mock". Production
 # RealQBOClient owns its own server-side ledger and ignores this path.
@@ -172,25 +169,6 @@ def parse_owner_message(text: str) -> dict | None:
 # ─────────────────────────────────────────────────────────────────
 # Bridge helpers
 # ─────────────────────────────────────────────────────────────────
-
-def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
-    payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
-    req = urllib.request.Request(
-        BRIDGE_URL, data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            doc = json.loads(body)
-            mid = doc.get("id") or doc.get("messageId") or ""
-            if not mid:
-                return False, f"empty messageId"
-            return True, mid
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
-        return False, f"{type(e).__name__}: {e}"
-
 
 def _render_template(name: str, **fields) -> str:
     """Tiny mustache-ish renderer — replaces {{key}} with values."""
@@ -436,11 +414,6 @@ def _handle_approve(parsed, owner_phone, owner_jid, sender_phone, raw_message,
 def _push_to_qbo(lead: ExpenseLead, owner_jid: str,
                  cfg: Config, customer_tz: str) -> int:
     """External push step. Lead has owner_confirmed_total_cents set."""
-    client = make_qbo_client(
-        cfg.expense_bookkeeper,
-        customer_timezone=customer_tz,
-        state_path=MOCK_QBO_STATE_PATH,
-    )
     push_total = lead.owner_confirmed_total_cents or 0
 
     _log(ExpensePushAttempted(
@@ -454,6 +427,11 @@ def _push_to_qbo(lead: ExpenseLead, owner_jid: str,
     ))
 
     try:
+        client = make_qbo_client(
+            cfg.expense_bookkeeper,
+            customer_timezone=customer_tz,
+            state_path=MOCK_QBO_STATE_PATH,
+        )
         result = client.push_expense(lead)
     except QBOPushError as e:
         # Sanitize error before audit-write
@@ -690,22 +668,21 @@ def _handle_undo(parsed, owner_phone, owner_lid, owner_jid, sender_phone,
         )
         return EXIT_SCHEMA_VIOLATION
 
-    # Lock released for QBO call
-    client = make_qbo_client(
-        cfg.expense_bookkeeper,
-        customer_timezone=customer_tz,
-        state_path=MOCK_QBO_STATE_PATH,
-    )
     try:
+        client = make_qbo_client(
+            cfg.expense_bookkeeper,
+            customer_timezone=customer_tz,
+            state_path=MOCK_QBO_STATE_PATH,
+        )
         client.void_transaction(tx_id)
     except QBOPushError as e:
-        redacted = redact_qbo_error(e)
+        redacted = f"void: {redact_qbo_error(e)}"[:200]
         _log(ExpensePushFailed(
             ts=datetime.now(timezone.utc),
             type="expense_push_failed",
             expense_id=eid,
             error_class=e.error_class,
-            error_message_redacted=f"void: {redacted}",
+            error_message_redacted=redacted,
         ))
         _bridge_post(
             owner_jid,

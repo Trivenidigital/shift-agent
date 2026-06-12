@@ -24,6 +24,31 @@ from schemas import (
 )
 
 try:
+    from agents.flyer.action_registry import (
+        action_requires_confirmation,
+        get_account_action_definition,
+        normalize_account_command_text,
+    )
+    from agents.flyer.payment_state import (
+        activation_event_state,
+        build_plan_payment_request,
+        normalize_payment_provider,
+        normalize_payment_reference,
+    )
+except ModuleNotFoundError:
+    from flyer_action_registry import (  # type: ignore
+        action_requires_confirmation,
+        get_account_action_definition,
+        normalize_account_command_text,
+    )
+    from flyer_payment_state import (  # type: ignore
+        activation_event_state,
+        build_plan_payment_request,
+        normalize_payment_provider,
+        normalize_payment_reference,
+    )
+
+try:
     from safe_io import atomic_write_text  # type: ignore
 except ModuleNotFoundError:
     def atomic_write_text(path: Path, text: str) -> None:  # type: ignore[no-redef]
@@ -53,10 +78,26 @@ ACCOUNT_COMMAND_RE = re.compile(
     r"bring back sample prompts|show examples again|bring back examples|"
     r"add (?:authorized )?(?:number|auth)|add authorized number|"
     r"remove authorized number|remove number|"
+    r"update business name|change business name|set business name|"
     r"update phone|update business phone|"
     r"update whatsapp|update business whatsapp|"
-    r"change plan|confirm update"
+    r"change plan|upgrade plan|upgrade to|downgrade to|switch to|switch plan|"
+    r"move me to|select plan|choose plan|show flyer studio plans|confirm update"
     r")\b",
+    re.IGNORECASE,
+)
+
+NATURAL_PLAN_CHANGE_RE = re.compile(
+    r"^\s*(?:"
+    r"i\s+(?:want|would\s+like|need)\s+|"
+    r"(?:please\s+)?(?:upgrade|downgrade|switch|move|start|select|choose)(?:\s+me)?\s+"
+    r")(?:(?:my|our)\s+)?(?:flyer\s+studio\s+)?(?:plan\s+)?(?:to\s+)?(?P<value>.+)$",
+    re.IGNORECASE,
+)
+
+PLAN_VALUE_MARKER_RE = re.compile(
+    r"\b(?:starter|growth|unlimited|plan|flyers?/month|60\s+flyers?|30\s+flyers?|"
+    r"unlimited\s+flyers?|49\.99|69\.99|199(?:\.99)?)\b",
     re.IGNORECASE,
 )
 
@@ -91,7 +132,12 @@ def write_customer_store(path: Path, store: FlyerCustomerStore) -> None:
 
 
 def is_account_command(text: str) -> bool:
-    return bool(ACCOUNT_COMMAND_RE.search(_visible_message_text(text)))
+    body = _visible_message_text(text)
+    return bool(
+        ACCOUNT_COMMAND_RE.search(body)
+        or _parse_natural_plan_change(body)
+        or normalize_account_command_text(body)
+    )
 
 
 def handle_account_command(
@@ -114,6 +160,10 @@ def handle_account_command(
     if customer is None:
         return AccountResult(False, False, "", detail="customer_not_found")
     body = " ".join(_visible_message_text(text).split())
+    semantic_match = normalize_account_command_text(body, tiers)
+    direct_plan_command = body.lower().startswith(("change plan", "upgrade plan"))
+    if semantic_match and not direct_plan_command:
+        body = semantic_match.command_text
     lower = body.lower()
     preference_mode: Optional[str] = None
     if STARTER_PROMPT_OFF_RE.search(lower):
@@ -155,6 +205,14 @@ def handle_account_command(
         return AccountResult(True, True, _status_reply(customer, tiers), customer.customer_id, customer.status)
     if lower == "help":
         return AccountResult(True, True, _help_reply(customer), customer.customer_id, customer.status)
+    if _is_plan_menu_request(lower):
+        return AccountResult(
+            True,
+            True,
+            _plan_menu_reply(customer, tiers, is_admin=customer.is_account_admin(sender_phone, chat_id, sender_role)),
+            customer.customer_id,
+            customer.status,
+        )
     if lower == "confirm update":
         return _confirm_pending_update(
             store=store,
@@ -180,6 +238,9 @@ def handle_account_command(
     command, value = _parse_mutating_command(body)
     if not command:
         return AccountResult(False, False, "", customer.customer_id, customer.status, detail="not_account_command")
+    action = get_account_action_definition(command)
+    if action is None or action.effect == "read":
+        return AccountResult(False, False, "", customer.customer_id, customer.status, detail="unsupported_account_action")
     if not customer.is_account_admin(sender_phone, chat_id, sender_role):
         _audit_account_update(
             audit_log_path,
@@ -190,6 +251,14 @@ def handle_account_command(
             allowed=False,
             reason="admin_required",
         )
+        if command == "change_plan":
+            return AccountResult(
+                True,
+                True,
+                _plan_change_admin_required_reply(customer),
+                customer.customer_id,
+                customer.status,
+            )
         return AccountResult(
             True,
             True,
@@ -198,7 +267,7 @@ def handle_account_command(
             customer.status,
         )
 
-    if command in {"remove_authorized", "update_whatsapp", "change_plan"}:
+    if action_requires_confirmation(command):
         requested_by = _phone_or_none(sender_phone)
         customer = customer.model_copy(update={
             "pending_account_command": command,
@@ -249,7 +318,11 @@ def handle_account_command(
         allowed=True,
         reason=reason,
     )
-    return AccountResult(True, True, reply, updated.customer_id, updated.status)
+    # PR-ζ F8 2026-05-26: propagate `reason` to AccountResult.detail so the
+    # downstream manage-flyer-account JSON output carries the
+    # "plan_change_requested" signal; cf-router/hooks.py:1738 reads this to
+    # decide whether to construct an ActionExecutionContext for the send.
+    return AccountResult(True, True, reply, updated.customer_id, updated.status, detail=reason)
 
 
 def claim_starter_prompt_send(*, state_path: Path, customer_id: str) -> AccountResult:
@@ -296,10 +369,12 @@ def activate_customer(
 ) -> AccountResult:
     now = now or datetime.now(timezone.utc)
     tiers = plan_tiers or FlyerPlanTier.default_tiers()
-    if provider not in {"manual", "stripe", "razorpay", "other"}:
+    provider = normalize_payment_provider(provider)
+    if not provider:
         return AccountResult(False, True, "", customer_id, detail="invalid_provider")
-    currency = (currency or "USD").upper()
-    if not payment_reference.strip():
+    payment_reference = normalize_payment_reference(payment_reference)
+    currency = (currency or "USD").strip().upper()
+    if not payment_reference:
         return AccountResult(False, True, "", customer_id, detail="payment_reference_required")
     if provider != "manual" and amount_cents is None:
         return AccountResult(False, True, "", customer_id, detail="amount_cents_required")
@@ -331,8 +406,12 @@ def activate_customer(
                 and record.currency == currency
             )
             if same:
+                if other.status not in {"active", "trial"}:
+                    return AccountResult(False, True, "", other.customer_id, other.status, detail="payment_reference_replay_not_active")
                 _audit_activation(audit_log_path, other, provider, payment_reference, amount_cents, currency, idempotent=True)
                 return AccountResult(True, True, _activation_reply(other, tiers), other.customer_id, other.status)
+            if other.customer_id == customer.customer_id:
+                return AccountResult(False, True, "", customer.customer_id, customer.status, detail="payment_reference_replay_mismatch")
             return AccountResult(False, True, "", customer.customer_id, customer.status, detail="payment_reference_already_used")
 
     target_plan = customer.plan_id
@@ -357,6 +436,16 @@ def activate_customer(
     expected_cents = tier.price_cents()
     if provider != "manual" and amount_cents != expected_cents:
         return AccountResult(False, True, "", customer.customer_id, customer.status, detail="amount_mismatch")
+    event_state = activation_event_state(
+        provider=provider,
+        payment_reference=payment_reference,
+        amount_cents=amount_cents,
+        currency=currency,
+        expected_amount_cents=expected_cents,
+        expected_currency=tier.currency,
+    )
+    if event_state != "payment_confirmed":
+        return AccountResult(False, True, "", customer.customer_id, customer.status, detail="payment_not_confirmed")
     period_start = now
     period_end = _add_one_month(period_start)
     update = {
@@ -390,6 +479,9 @@ def activate_customer(
             "pending_plan_id": "",
             "pending_plan_checkout_url": "",
             "pending_plan_requested_at": None,
+            "pending_plan_payment_state": "",
+            "pending_plan_amount_cents": None,
+            "pending_plan_currency": currency,
         })
     customer = customer.model_copy(update=update)
     _replace_customer(store, customer)
@@ -498,6 +590,9 @@ def _usage_event(
 
 def _parse_mutating_command(text: str) -> tuple[str, str]:
     lower = text.lower()
+    for prefix in ("update business name", "change business name", "set business name"):
+        if lower.startswith(prefix):
+            return "update_business_name", _strip_account_value_prefix(text[len(prefix):].strip())
     for prefix in ("add authorized number", "add number", "add auth"):
         if lower.startswith(prefix):
             return "add_authorized", text[len(prefix):].strip()
@@ -510,9 +605,37 @@ def _parse_mutating_command(text: str) -> tuple[str, str]:
     for prefix in ("update business whatsapp", "update whatsapp"):
         if lower.startswith(prefix):
             return "update_whatsapp", text[len(prefix):].strip()
-    if lower.startswith("change plan"):
-        return "change_plan", text[len("change plan"):].strip()
+    for prefix in ("change plan", "upgrade plan"):
+        if lower.startswith(prefix):
+            return "change_plan", _strip_account_value_prefix(text[len(prefix):].strip())
+    natural_plan = _parse_natural_plan_change(text)
+    if natural_plan:
+        return "change_plan", natural_plan
     return "", ""
+
+
+def _is_plan_menu_request(lower: str) -> bool:
+    cleaned = lower.strip(" .!,:;")
+    return (
+        cleaned == "upgrade plan"
+        or cleaned.startswith("upgrade plan -")
+        or cleaned == "upgrade plan show flyer studio plans"
+        or cleaned == "show flyer studio plans"
+    )
+
+
+def _strip_account_value_prefix(value: str) -> str:
+    return re.sub(r"^(?:to|as|is|:|-)\s+", "", value.strip(), flags=re.IGNORECASE).strip()
+
+
+def _parse_natural_plan_change(text: str) -> str:
+    match = NATURAL_PLAN_CHANGE_RE.match(text or "")
+    if not match:
+        return ""
+    value = _strip_account_value_prefix(match.group("value"))
+    if not PLAN_VALUE_MARKER_RE.search(value):
+        return ""
+    return value
 
 
 def _confirm_pending_update(**kwargs: object) -> AccountResult:
@@ -524,6 +647,9 @@ def _confirm_pending_update(**kwargs: object) -> AccountResult:
     chat_id: str = kwargs["chat_id"]  # type: ignore[assignment]
     if not customer.pending_account_command:
         return AccountResult(True, True, "Flyer Studio\n------------\nNo pending account update.", customer.customer_id, customer.status)
+    action = get_account_action_definition(customer.pending_account_command)
+    if action is None or not action.requires_confirmation:
+        return AccountResult(True, True, "Flyer Studio\n------------\nThat pending account update is no longer supported. Please send the request again.", customer.customer_id, customer.status)
     if not customer.is_account_admin(sender_phone, chat_id, sender_role):
         return AccountResult(True, True, "Flyer Studio\n------------\nOnly the business WhatsApp number or account owner can confirm this update.", customer.customer_id, customer.status)
     if customer.pending_account_requested_by and _phone_or_none(sender_phone) != customer.pending_account_requested_by:
@@ -617,13 +743,30 @@ def _apply_account_update(
             "authorized_request_numbers": numbers,
             "updated_at": now,
         }), "Flyer Studio\n------------\nBusiness WhatsApp number updated.", "business_whatsapp_updated"
+    if command == "update_business_name":
+        name = " ".join(value.split()).strip()
+        if not name:
+            raise ValueError("Please include the new business name.")
+        return customer.model_copy(update={
+            "business_name": name,
+            "updated_at": now,
+        }), "Flyer Studio\n------------\nBusiness name updated.", "business_name_updated"
     if command == "change_plan":
         plan_id = _parse_plan_choice(value, tiers)
         url = _checkout_url(payment_checkout_url_template, customer.customer_id, plan_id, chat_id)
+        payment = build_plan_payment_request(
+            plan_id=plan_id,
+            checkout_url=url,
+            provider=payment_provider,
+            tiers=tiers,
+        )
         return customer.model_copy(update={
             "pending_plan_id": plan_id,
             "pending_plan_checkout_url": url,
             "pending_plan_requested_at": now,
+            "pending_plan_payment_state": payment.state,
+            "pending_plan_amount_cents": payment.amount_cents,
+            "pending_plan_currency": payment.currency,
             "updated_at": now,
         }), _pending_plan_reply(plan_id, url, payment_provider), "plan_change_requested"
     raise ValueError(f"unsupported account command: {command}")
@@ -661,6 +804,34 @@ def _help_reply(customer: FlyerCustomerProfile) -> str:
     )
 
 
+def _plan_menu_reply(customer: FlyerCustomerProfile, tiers: list[FlyerPlanTier], *, is_admin: bool) -> str:
+    paid_tiers = [tier for tier in tiers if tier.plan_id != "trial"]
+    lines = []
+    for tier in paid_tiers:
+        price = f"{tier.monthly_price_usd:.2f}".rstrip("0").rstrip(".")
+        quota = "unlimited flyers/month" if tier.included_flyers is None else f"{tier.included_flyers} flyers/month"
+        lines.append(f"{tier.label} - ${price}/month - {quota}")
+    message = (
+        "Flyer Studio\n------------\n"
+        f"Plans for {customer.business_name}:\n"
+        + "\n".join(lines)
+        + f"\n\nCurrent plan: {customer.plan_id}.\n"
+    )
+    if is_admin:
+        commands = ", ".join(f"CHANGE PLAN {tier.plan_id.upper()}" for tier in paid_tiers)
+        return message + f"Reply {commands}."
+    return message + _plan_change_admin_required_reply(customer).split("------------\n", 1)[1]
+
+
+def _plan_change_admin_required_reply(customer: FlyerCustomerProfile) -> str:
+    return (
+        "Flyer Studio\n------------\n"
+        "Plan changes must be requested from the business WhatsApp number "
+        f"{customer.business_whatsapp_number} or the account owner.\n\n"
+        "This chat can still request flyers for the business."
+    )
+
+
 def _activation_reply(customer: FlyerCustomerProfile, tiers: list[FlyerPlanTier]) -> str:
     remaining = customer.quota_remaining(tiers)
     quota = "unlimited flyers/month" if remaining is None else f"{remaining} flyers remaining this month"
@@ -688,8 +859,15 @@ def _quota_blocked_reply(customer: FlyerCustomerProfile, tiers: list[FlyerPlanTi
 
 
 def _pending_plan_reply(plan_id: str, url: str, provider: str) -> str:
-    pay = f"Pay here: {url}" if url else f"We will send a secure {provider} payment link shortly."
-    return f"Flyer Studio\n------------\nPlan change requested: {plan_id}.\n{pay}\nYour current plan remains active until payment is confirmed."
+    del provider
+    pay = f"Pay here: {url}" if url else "Payment link is not configured yet. I saved this plan request for checkout setup."
+    # PR-ζ 2026-05-26: avoid the verb "confirmed" — it's in
+    # FORBIDDEN_COMPLETION_VERBS (customer_copy_policy.py:85). With PR-ζ
+    # lint applied to this reply (via the change_plan callsite migration),
+    # the prior "until payment is confirmed" phrasing would refuse every
+    # legitimate plan-change reply. The new wording carries the same
+    # meaning without tripping the lint.
+    return f"Flyer Studio\n------------\nPlan change requested: {plan_id}.\n{pay}\nYour current plan stays active until we receive payment."
 
 
 def _roll_period(customer: FlyerCustomerProfile, now: datetime) -> FlyerCustomerProfile:
@@ -748,7 +926,10 @@ def _parse_plan_choice(text: str, tiers: list[FlyerPlanTier]) -> str:
 def _checkout_url(template: str, customer_id: str, plan_id: str, chat_id: str) -> str:
     if not template:
         return ""
-    return template.format(customer_id=customer_id, plan_id=plan_id, chat_id=chat_id)
+    try:
+        return template.format(customer_id=customer_id, plan_id=plan_id, chat_id=chat_id)
+    except (KeyError, IndexError, ValueError):
+        return ""
 
 
 def _phone_or_none(text: Optional[str]) -> Optional[str]:

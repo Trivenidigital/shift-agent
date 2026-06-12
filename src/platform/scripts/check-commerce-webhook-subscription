@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""check-commerce-webhook-subscription — deploy-time commerce webhook gate.
+
+Thin wrapper that prepends staging + /opt/shift-agent to sys.path so the
+commerce_webhook_gate module (and the schemas it imports) resolve whether the
+script is run from the staging tarball (preferred, so the first deploy that
+introduces the gate still runs it) or from the installed /usr/local/bin copy.
+Mirrors src/platform/scripts/check-hermes-config-yaml.
+
+Exit codes: 0 pass/skip (dormant-safe), 1 active-but-missing (fail-closed),
+2 config unreadable/parse error. See
+tasks/commerce-slice3.5-webhook-subscription-gate-design.md.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+
+def _add_import_roots() -> None:
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[1],            # .../src/platform when run from staging or checkout
+        Path("/opt/shift-agent"),   # installed location
+    ]
+    try:
+        candidates.append(here.parents[3] / "src" / "platform")
+    except IndexError:
+        pass
+    roots: list[str] = []
+    for c in candidates:
+        s = str(c)
+        if c.exists() and s not in sys.path and s not in roots:
+            roots.append(s)
+    sys.path[:0] = roots
+
+
+_add_import_roots()
+
+from commerce_webhook_gate import main as _main  # noqa: E402
+
+
+def main(argv: list[str] | None = None) -> int:
+    return _main(argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -124,6 +124,20 @@ def _customer_now(tz: str) -> datetime:
     return customer_now(tz)
 
 
+def _customer_today_str(tz: str) -> str:
+    """Override-aware customer date string.
+
+    customer_today_str() reads the wall clock directly and ignores
+    SHIFT_AGENT_NOW_OVERRIDE, whereas _customer_now() honors it. Using the
+    non-override version for the idempotency date desynced today_str from the
+    now_local cutoff under override (recovery-window rehearsal/tests), so the
+    recent-BriefAttempted scan matched on the wrong date and could not detect a
+    stranded attempt. Derive the date from _customer_now() so the date and the
+    cutoff always agree. Production (no override) is unaffected — both resolve
+    to the real wall-clock date."""
+    return _customer_now(tz).strftime("%Y-%m-%d")
+
+
 def _check_disabled() -> bool:
     return DISABLED_FLAG.exists()
 
@@ -255,7 +269,12 @@ def _aggregate_yesterday(cfg: Config) -> tuple[dict, bool]:
 
 def _aggregate_today(cfg: Config) -> tuple[dict, bool]:
     """Return (today_dict, degraded_mode)."""
-    today_str = customer_today_str(cfg.customer.timezone)
+    # Use the override-aware wrapper (not raw customer_today_str): the content
+    # date must match the send/idempotency date, which derives from
+    # _customer_now() and honors SHIFT_AGENT_NOW_OVERRIDE. The raw version reads
+    # the wall clock and ignored the override, desyncing today_date + the
+    # "shifts today" roster lookup from the rest of the brief under override.
+    today_str = _customer_today_str(cfg.customer.timezone)
     out = {
         "today_date": today_str,
         "shifts_today": [],
@@ -687,7 +706,7 @@ def main() -> int:
         sys.stderr.write(f"{e}\n")
         return EXIT_GENERIC_ERROR
 
-    today_str = customer_today_str(cfg.customer.timezone)
+    today_str = _customer_today_str(cfg.customer.timezone)
 
     if _check_disabled():
         # Global Shift Agent disable flag — also silences brief

@@ -1,0 +1,51 @@
+{
+  "number": 143,
+  "title": "test: blocker-severity findings reject same as high/medium",
+  "author": "codex-worker",
+  "metadata_source": "offline_fixture",
+  "collected_at": "2026-05-21T00:00:00Z",
+  "metadata_trusted_for_merge": false,
+  "base": "main",
+  "head_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "base_sha": "855b161000000000000000000000000000000000",
+  "is_open": true,
+  "behind_origin_main": false,
+  "category": "golden_fixture_tests",
+  "changed_files": ["tests/fixtures/flyer_golden/live_customer_message_shapes.json"],
+  "touched_subsystems": ["flyer-golden-fixtures"],
+  "reviewers": [
+    {
+      "login": "structural-reviewer",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "is_stale": false,
+      "is_author": false
+    },
+    {
+      "login": "truthfulness-reviewer",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "is_stale": false,
+      "is_author": false
+    }
+  ],
+  "findings": [
+    {
+      "severity": "Blocker",
+      "status": "open",
+      "commit_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "title": "fixture intentionally violates schema"
+    }
+  ],
+  "verification": [
+    {
+      "name": "focused pytest",
+      "state": "passed",
+      "commit_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ],
+  "urgent_customer_visible": false,
+  "merged_not_deployed": false
+}

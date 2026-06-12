@@ -430,6 +430,8 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
             value = value[street_match.start():street_match.end()].upper()
         if bullet_item.match(line) or shared_price_name.search(value):
             return
+        if promo_name.search(value):
+            return
         if campaign_heading.search(value):
             if not campaign_title or campaign_title_rank(value) > campaign_title_rank(campaign_title):
                 campaign_title = value
@@ -481,7 +483,6 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
             or any(snack in item_pricing_text for snack in ("punugulu", "bonda", "mirchi", "pakora", "samosa", "lollipop"))
         )
     ):
-        campaign_title = "STREET SNACK SPECIALS"
         add_schedule("EVERY TUESDAY NIGHT")
     facts: list[FlyerLockedFact] = []
     if campaign_title:

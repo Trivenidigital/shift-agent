@@ -40,21 +40,10 @@ while IFS= read -r vps; do
         exit 1
     }
 
-    # Wait for smoke clear: poll up to 3 × 30s
-    for i in 1 2 3; do
-        ssh "$vps" 'tail -1 /var/log/shift-agent/last-deploy-status.txt 2>/dev/null || echo PENDING' \
-            > "$SMOKE_OUT" 2>&1
-        STATUS=$(cat "$SMOKE_OUT" | tr -d '[:space:]')
-        if [ "$STATUS" = "OK" ]; then
-            echo "$vps: smoke OK"
-            break
-        fi
-        if [ "$i" -eq 3 ]; then
-            echo "ABORT: $vps smoke unclear after 90s (status=$STATUS)" >&2
-            exit 1
-        fi
-        sleep 30
-    done
+    # shift-agent-deploy.sh is synchronous and exits non-zero if its smoke gate
+    # fails or rolls back. A zero exit here is the smoke-clear signal; do not
+    # poll a sidecar status file that the deploy script does not own/write.
+    echo "$vps: deploy + smoke OK"
 
     # 2-min cooldown only AFTER smoke clear (NOT in the polling loop)
     echo "$vps: cooldown 120s before next VPS"

@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-from datetime import datetime, timezone
+import os
+import re
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
@@ -12,17 +16,432 @@ SRC_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 
-from schemas import Config, FlyerConcept, FlyerProjectStore  # noqa: E402
-from safe_io import FileLock, atomic_write_text, load_yaml_model  # noqa: E402
+from schemas import (  # noqa: E402
+    Config,
+    FlyerAutoRepairAttempted,
+    FlyerAutoRepairAttemptStore,
+    FlyerAutoRepairExhausted,
+    FlyerAutoRepairSkipped,
+    FlyerAutoRepairSucceeded,
+    FlyerConcept,
+    FlyerManualReview,
+    FlyerProjectStore,
+    FlyerReferenceExtraction,
+    FlyerRepairAttempt,
+    FlyerSourceContractExtracted,
+    FlyerWarningSummary,
+    FlyerWarnTierDelivered,
+    is_flyer_transition_allowed,
+)
+from safe_io import FileLock, atomic_write_text, load_yaml_model, ndjson_append  # noqa: E402
 try:
-    from flyer_render import build_asset_manifest, next_asset_number, render_concept_previews, render_source_edit_preview  # type: ignore  # noqa: E402
+    from flyer_customer_copy_policy import build_warn_tier_customer_text  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import build_asset_manifest, next_asset_number, render_concept_previews, render_source_edit_preview  # noqa: E402
+    from agents.flyer.customer_copy_policy import build_warn_tier_customer_text  # noqa: E402
+try:
+    from flyer_manual_queue import make_manual_review  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.manual_queue import make_manual_review  # noqa: E402
+try:
+    from flyer_facts import merge_locked_facts, source_contract_locked_facts, _populate_forbidden_substrings  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.facts import merge_locked_facts, source_contract_locked_facts, _populate_forbidden_substrings  # noqa: E402
+try:
+    from flyer_reference_extract import build_reference_extraction_provider, extract_reference  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.reference_extract import build_reference_extraction_provider, extract_reference  # noqa: E402
+try:
+    from flyer_render import FlyerRenderError, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_source_edit_preview  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.render import FlyerRenderError, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_source_edit_preview  # noqa: E402
+try:
+    from flyer_visual_qa import run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.visual_qa import run_visual_qa, write_visual_qa_report  # noqa: E402
+try:
+    from flyer_recovery import classify_flyer_qa_for_autorepair, plan_flyer_autorepair, repair_instruction_is_safe  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.recovery import classify_flyer_qa_for_autorepair, plan_flyer_autorepair, repair_instruction_is_safe  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 ASSET_DIR = Path("/opt/shift-agent/state/flyer/assets")
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+AUDIT_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+AUTOREPAIR_STATE_PATH = Path("/opt/shift-agent/state/flyer/autorepair_attempts.json")
+REFERENCE_BLOCKING_ROLES = {"menu_reference", "old_flyer_reference", "source_edit_template", "unsupported"}
+REFERENCE_BLOCKING_STATUSES = {"provider_unavailable", "unsupported", "low_confidence"}
+REFERENCE_PENDING_ROLES = {"menu_reference", "old_flyer_reference", "source_edit_template"}
+
+
+def _failed_required_reference_extractions(project) -> list:
+    return [
+        extraction
+        for extraction in project.reference_extractions
+        if extraction.role in REFERENCE_BLOCKING_ROLES and extraction.status in REFERENCE_BLOCKING_STATUSES
+    ]
+
+
+def _pending_required_reference_extractions(project) -> list:
+    return [
+        extraction
+        for extraction in project.reference_extractions
+        if extraction.role in REFERENCE_PENDING_ROLES and extraction.status == "not_run"
+    ]
+
+
+def _has_source_edit_template(project) -> bool:
+    return any(
+        extraction.role == "source_edit_template" and extraction.status == "ok"
+        for extraction in project.reference_extractions
+    )
+
+
+def _asset_for_extraction(project, extraction):
+    return next((asset for asset in project.assets if asset.asset_id == extraction.asset_id), None)
+
+
+_DRAFT_RETRYABLE_TOKENS = (
+    "timeout",
+    "timed out",
+    "502",
+    "503",
+    "504",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "connection reset",
+)
+
+_DRAFT_EARLY_STATUSES = {
+    "intake_started",
+    "collecting_required_info",
+    "awaiting_assets",
+    "generating_concepts",
+    "revising_design",
+}
+
+
+_VISUAL_QA_ERROR_TOKENS = (
+    "quality check",
+    "failed quality",
+    "critical text facts do not fit",
+    "text manifest validation failed",
+    "missing critical text facts",
+    "missing required flyer fields",
+)
+
+_DEPENDENCY_MISSING_ERROR_TOKENS = (
+    "pillow is required",
+    "pillow is unavailable",
+    "modulenotfounderror",
+    "no module named",
+    "importerror",
+)
+
+
+def _draft_error_is_visual_qa(detail_lower: str) -> bool:
+    return any(tok in detail_lower for tok in _VISUAL_QA_ERROR_TOKENS)
+
+
+def _draft_error_is_dependency_missing(detail_lower: str) -> bool:
+    return any(tok in detail_lower for tok in _DEPENDENCY_MISSING_ERROR_TOKENS)
+
+
+def _draft_error_retryable(detail_lower: str) -> bool:
+    return any(tok in detail_lower for tok in _DRAFT_RETRYABLE_TOKENS) or bool(
+        re.search(r"\bhttp\s+5\d{2}\b|\b5\d{2}\b", detail_lower)
+    )
+
+
+def _source_edit_error_is_provider_unavailable(detail_lower: str) -> bool:
+    key_or_config_tokens = (
+        "api_key is missing",
+        "api key is missing",
+        "api_key missing",
+        "api key missing",
+        "missing api_key",
+        "missing api key",
+        "missing or placeholder",
+        "placeholder api",
+        "not configured",
+        "manual review",
+        "unsupported source edit provider",
+    )
+    return any(tok in detail_lower for tok in key_or_config_tokens)
+
+
+def _mentions_saved_brand_assets(project) -> bool:
+    text = f"{getattr(project, 'raw_request', '')} {getattr(getattr(project, 'fields', None), 'notes', '')}".casefold()
+    return any(token in text for token in (
+        "saved logo",
+        "saved business name",
+        "brand asset",
+        "use logo",
+        "use the logo",
+    ))
+
+
+def _qa_failed_missing_business_name(reports) -> bool:
+    for report in reports:
+        for blocker in getattr(report, "blockers", []) or []:
+            if str(blocker).strip().casefold() == "missing required visible fact: business_name":
+                return True
+    return False
+
+
+def _render_with_brand_assets_disabled(render_call):
+    previous = os.environ.get("FLYER_DISABLE_BRAND_ASSETS")
+    os.environ["FLYER_DISABLE_BRAND_ASSETS"] = "1"
+    try:
+        return render_call()
+    finally:
+        if previous is None:
+            os.environ.pop("FLYER_DISABLE_BRAND_ASSETS", None)
+        else:
+            os.environ["FLYER_DISABLE_BRAND_ASSETS"] = previous
+
+
+def _draft_manual_review_detail(exc: Exception, *, attempts: int, retryable_match: bool) -> str:
+    payload = {
+        "stage": "draft_render_concept_previews",
+        "attempts": attempts,
+        "retryable_match": bool(retryable_match),
+        "error_class": exc.__class__.__name__,
+        "error": str(exc)[:260],
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    return encoded[:500]
+
+
+def _sha256_hex(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8", errors="replace")).hexdigest()
+
+
+def _concept_prompt_metadata(project, *, concept_id: str, source_edit_requested: bool = False) -> str:
+    if source_edit_requested:
+        prompt = build_source_edit_generation_prompt(project)
+    else:
+        prompt = build_image_generation_prompt(
+            project,
+            concept_id=concept_id,
+            output_format="concept_preview",
+            size=(1080, 1350),
+        )
+    if len(prompt) <= 4000:
+        return prompt
+    suffix = "\n[truncated metadata; renderer used the full structured prompt]"
+    return prompt[: 4000 - len(suffix)] + suffix
+
+
+def _audit_append(path: Path, entry) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(Path(str(path) + ".lock")):
+            ndjson_append(path, entry.model_dump_json())
+    except Exception:
+        # Audit rows must not block the existing manual-review fail-closed path.
+        return
+
+
+def _load_autorepair_store(path: Path) -> FlyerAutoRepairAttemptStore:
+    if not path.exists():
+        return FlyerAutoRepairAttemptStore()
+    return FlyerAutoRepairAttemptStore.model_validate(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _write_autorepair_store(path: Path, store: FlyerAutoRepairAttemptStore) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, store.model_dump_json(indent=2))
+
+
+def _render_artifact_candidates(spec) -> list[Path]:
+    path = Path(spec.path)
+    return [
+        path,
+        Path(str(path) + ".text.json"),
+        Path(str(path) + ".qa.json"),
+        Path(str(path) + ".ocr.txt"),
+        path.with_name(f"{path.stem}.raw.png"),
+        path.with_suffix(path.suffix + ".raw.png"),
+    ]
+
+
+def _cleanup_render_artifacts(specs, *, preserve_paths: set[Path] | None = None) -> None:
+    preserve = {path.resolve() for path in (preserve_paths or set())}
+    for spec in specs:
+        for candidate in _render_artifact_candidates(spec):
+            if candidate.resolve() in preserve:
+                continue
+            candidate.unlink(missing_ok=True)
+
+
+def _attempt_budget_used(store: FlyerAutoRepairAttemptStore, *, project_id: str, project_version: int, qa_blocker_hash: str) -> int:
+    return sum(
+        1
+        for attempt in store.attempts
+        if attempt.project_id == project_id
+        and attempt.project_version == project_version
+        and attempt.qa_blocker_hash == qa_blocker_hash
+        and attempt.mode == "hermes_regenerate"
+        and attempt.status in {"attempted", "succeeded", "exhausted", "stale"}
+    )
+
+
+def _mark_stale_attempts(store: FlyerAutoRepairAttemptStore, *, now: datetime, stale_minutes: int) -> FlyerAutoRepairAttemptStore:
+    cutoff = now - timedelta(minutes=stale_minutes)
+    changed = False
+    attempts = []
+    for attempt in store.attempts:
+        if attempt.status == "attempted" and attempt.started_at < cutoff:
+            attempts.append(attempt.model_copy(update={
+                "status": "stale",
+                "completed_at": now,
+                "detail": (attempt.detail or "attempt stale after process interruption")[:1000],
+            }))
+            changed = True
+        else:
+            attempts.append(attempt)
+    return store.model_copy(update={"attempts": attempts}) if changed else store
+
+
+def _append_attempt_status(store_path: Path, attempt: FlyerRepairAttempt) -> None:
+    with FileLock(Path(str(store_path) + ".lock")):
+        store = _load_autorepair_store(store_path)
+        replaced = False
+        for idx, existing in enumerate(store.attempts):
+            if existing.attempt_id == attempt.attempt_id:
+                store.attempts[idx] = attempt
+                replaced = True
+                break
+        if not replaced:
+            store.attempts.append(attempt)
+        _write_autorepair_store(store_path, store)
+
+
+# FLYER_QA_ALLOW_SIDECAR=1 is smoke/test-only â€” must not be enabled in production runtime.
+def _write_sidecar_visual_qa_fixture(project, artifact_path: Path) -> None:
+    if os.environ.get("FLYER_QA_ALLOW_SIDECAR") != "1":
+        return
+    sidecar = Path(str(artifact_path) + ".ocr.txt")
+    if sidecar.exists():
+        return
+    lines: list[str] = []
+    seen: set[str] = set()
+    for fact in project.locked_facts:
+        value = " ".join((fact.value or "").split())
+        key = value.casefold()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        lines.append(value)
+    if lines:
+        atomic_write_text(sidecar, "\n".join(lines) + "\n")
+
+
+def _manual_reason_for_reference_failure(extraction: FlyerReferenceExtraction) -> str:
+    if extraction.role == "source_edit_template" and extraction.status == "provider_unavailable":
+        return "source_edit_provider_unavailable"
+    return f"reference_{extraction.status}"
+
+
+def _emit_source_contract_extracted_audit(
+    audit_log_path: Path,
+    *,
+    extraction: FlyerReferenceExtraction,
+    project_id: str,
+    asset_sha256: str,
+    now: datetime,
+) -> None:
+    if extraction.role != "source_edit_template":
+        return
+    try:
+        contract = extraction.source_contract
+        entry = FlyerSourceContractExtracted(
+            ts=now,
+            project_id=project_id,
+            asset_id=extraction.asset_id,
+            asset_sha256=asset_sha256,
+            role=extraction.role,
+            status=extraction.status,
+            headings_count=len(contract.required_headings) if contract else 0,
+            sections_count=len(contract.sections) if contract else 0,
+            replacements_count=len(contract.requested_replacements) if contract else 0,
+            forbidden_substrings_count=len(contract.forbidden_substrings) if contract else 0,
+            confidence=float(contract.confidence) if contract else 0.0,
+            provider=extraction.provider,
+        )
+        audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(Path(str(audit_log_path) + ".lock")):
+            ndjson_append(audit_log_path, entry.model_dump_json())
+    except Exception:
+        # Audit is observability-only; do not block customer work on log I/O.
+        pass
+
+
+def _persist_reference_extraction_results(
+    state_path: Path,
+    project_id: str,
+    extractions: list[FlyerReferenceExtraction],
+    *,
+    audit_log_path: Path,
+):
+    now = datetime.now(timezone.utc)
+    with FileLock(Path(str(state_path) + ".lock")):
+        store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+        for idx, current in enumerate(store.projects):
+            if current.project_id != project_id:
+                continue
+            replacements = {extraction.asset_id: extraction for extraction in extractions}
+            reference_extractions = [
+                replacements.get(item.asset_id, item)
+                for item in current.reference_extractions
+            ]
+            source_fact_lists = []
+            for extraction in extractions:
+                asset = _asset_for_extraction(current, extraction)
+                if extraction.source_contract is not None and asset is not None:
+                    _populate_forbidden_substrings(extraction.source_contract)
+                    source_fact_lists.append(source_contract_locked_facts(
+                        extraction.source_contract,
+                        asset=asset,
+                        message_id=current.original_message_id,
+                    ))
+                _emit_source_contract_extracted_audit(
+                    audit_log_path,
+                    extraction=extraction,
+                    project_id=project_id,
+                    asset_sha256=str(getattr(asset, "sha256", "") or "") if asset is not None else "",
+                    now=now,
+                )
+            locked_facts = merge_locked_facts(
+                current.locked_facts,
+                *(extraction.extracted_facts for extraction in extractions),
+                *source_fact_lists,
+            )
+            failed = [
+                extraction
+                for extraction in extractions
+                if extraction.role in REFERENCE_BLOCKING_ROLES and extraction.status in REFERENCE_BLOCKING_STATUSES
+            ]
+            updates = {
+                "reference_extractions": reference_extractions,
+                "locked_facts": locked_facts,
+                "updated_at": now,
+            }
+            if failed:
+                first = failed[0]
+                updates["status"] = "manual_edit_required"
+                updates["manual_review"] = make_manual_review(
+                    reason_code=_manual_reason_for_reference_failure(first),
+                    detail=first.detail,
+                    queued_at=now,
+                )
+            updated = current.model_copy(update=updates)
+            store.projects[idx] = updated
+            atomic_write_text(state_path, store.model_dump_json(indent=2))
+            return updated, failed
+    raise SystemExit(f"project not found while persisting reference extraction: {project_id}")
 
 
 def main() -> int:
@@ -31,9 +450,13 @@ def main() -> int:
     p.add_argument("--state-path", default=str(STATE_PATH))
     p.add_argument("--asset-dir", default=str(ASSET_DIR))
     p.add_argument("--config-path", default=str(CONFIG_PATH))
+    p.add_argument("--audit-log-path", default=str(AUDIT_LOG_PATH))
+    p.add_argument("--autorepair-state-path", default=str(AUTOREPAIR_STATE_PATH))
     args = p.parse_args()
 
     state_path = Path(args.state_path)
+    audit_log_path = Path(args.audit_log_path)
+    autorepair_state_path = Path(args.autorepair_state_path)
     cfg = load_yaml_model(Path(args.config_path), Config)
     with FileLock(Path(str(state_path) + ".lock")):
         store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
@@ -48,79 +471,590 @@ def main() -> int:
     if project is None:
         raise SystemExit(f"project not found: {args.project_id}")
 
+    pending_reference_extractions = _pending_required_reference_extractions(project)
+    if pending_reference_extractions:
+        provider = build_reference_extraction_provider()
+        extracted: list[FlyerReferenceExtraction] = []
+        now = datetime.now(timezone.utc)
+        for pending in pending_reference_extractions:
+            asset = _asset_for_extraction(project, pending)
+            if asset is None:
+                extracted.append(FlyerReferenceExtraction(
+                    asset_id=pending.asset_id,
+                    role=pending.role,
+                    provider="not_run",
+                    status="provider_unavailable",
+                    detail="reference asset is unavailable on this server",
+                    extracted_at=now,
+                ))
+                continue
+            extracted.append(extract_reference(asset, raw_request=project.raw_request, provider=provider))
+        project, failed = _persist_reference_extraction_results(
+            state_path,
+            args.project_id,
+            extracted,
+            audit_log_path=audit_log_path,
+        )
+        if failed:
+            print(json.dumps({
+                "project_id": args.project_id,
+                "reference_extraction_failed": [item.model_dump(mode="json") for item in failed],
+            }))
+            return 2
+
+    failed_reference_extractions = _failed_required_reference_extractions(project)
+    if failed_reference_extractions:
+        now = datetime.now(timezone.utc)
+        first = failed_reference_extractions[0]
+        manual = make_manual_review(
+            reason_code=_manual_reason_for_reference_failure(first),
+            detail=first.detail,
+            queued_at=now,
+        )
+        with FileLock(Path(str(state_path) + ".lock")):
+            store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+            for idx, current in enumerate(store.projects):
+                if current.project_id == args.project_id:
+                    store.projects[idx] = current.model_copy(update={
+                        "status": "manual_edit_required",
+                        "manual_review": manual,
+                        "updated_at": now,
+                    })
+                    break
+            atomic_write_text(state_path, store.model_dump_json(indent=2))
+        print(json.dumps({
+            "project_id": args.project_id,
+            "reference_extraction_failed": [item.model_dump(mode="json") for item in failed_reference_extractions],
+        }))
+        return 2
+
     asset_dir = Path(args.asset_dir)
     with FileLock(asset_dir / f".{args.project_id}.generate.lock"):
+        # P0-5: source-edit detection must require an explicit raw_request
+        # marker OR (manual_edit_required AND a reference_image asset). The
+        # bare `status == "manual_edit_required"` disjunct previously caught
+        # projects queued for OTHER reasons (e.g. missing_required_facts
+        # from S4) and pushed them down the source-edit renderer path, which
+        # then failed inside `_source_edit_reference_asset` and rewrote
+        # manual_review with a misleading provider/quality reason_code,
+        # losing the original context.
+        raw_lower = (project.raw_request or "").lower()
+        has_source_edit_marker = (
+            "edit uploaded flyer/source artwork" in raw_lower
+            or "authorized flyer/source artwork update" in raw_lower
+        )
+        has_reference_image = any(
+            getattr(asset, "kind", "") == "reference_image" for asset in (project.assets or [])
+        )
         source_edit_requested = (
-            project.status == "manual_edit_required"
-            or "edit uploaded flyer/source artwork" in (project.raw_request or "").lower()
-            or "authorized flyer/source artwork update" in (project.raw_request or "").lower()
+            has_source_edit_marker
+            or _has_source_edit_template(project)
+            or (project.status == "manual_edit_required" and has_reference_image)
         )
         if source_edit_requested:
-            specs = [
-                render_source_edit_preview(
-                    project,
-                    asset_dir,
-                    model=cfg.flyer.edit_image_model,
-                    quality=cfg.flyer.edit_image_quality,
+            # P0-5: render_source_edit_preview raises FlyerRenderError when the
+            # provider key is missing or the image edit endpoint fails. The cf-
+            # router preflight catches this at routing time, but operator CLI
+            # invocations and retries bypass that gate. Catch here so the
+            # project lands in manual_edit_required with the typed reason_code
+            # instead of crashing the script (which would leave the project
+            # mid-transition with no manual_review row).
+            try:
+                source_edit_provider = cfg.flyer.resolve_source_edit_render_provider()
+                specs = [
+                    render_source_edit_preview(
+                        project,
+                        asset_dir,
+                        provider=source_edit_provider.provider,
+                        model=source_edit_provider.model,
+                        quality=source_edit_provider.quality,
+                    )
+                ]
+            except FlyerRenderError as exc:
+                now = datetime.now(timezone.utc)
+                detail = str(exc)
+                lower = detail.lower()
+                # Quality-check failures are structural (wrong dimensions /
+                # mime / corrupt bytes) â€” not transient. Map to
+                # `visual_qa_failed` so operator triage doesn't waste time on
+                # provider retries. Provider key / endpoint failures map to
+                # `source_edit_provider_unavailable`. Transient HTTP/5xx and
+                # timeout-shaped errors stay in `provider_timeout` even when
+                # the provider name appears in the error text.
+                if _draft_error_is_visual_qa(lower):
+                    reason_code = "visual_qa_failed"
+                elif _draft_error_is_dependency_missing(lower):
+                    reason_code = "dependency_missing"
+                elif _draft_error_retryable(lower):
+                    reason_code = "provider_timeout"
+                elif _source_edit_error_is_provider_unavailable(lower):
+                    reason_code = "source_edit_provider_unavailable"
+                else:
+                    reason_code = "provider_timeout"
+                manual = make_manual_review(
+                    reason_code=reason_code,
+                    detail=detail[:500],
+                    queued_at=now,
                 )
-            ]
+                with FileLock(Path(str(state_path) + ".lock")):
+                    store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+                    for idx, current in enumerate(store.projects):
+                        if current.project_id == args.project_id:
+                            store.projects[idx] = current.model_copy(update={
+                                "status": "manual_edit_required",
+                                "manual_review": manual,
+                                "updated_at": now,
+                            })
+                            break
+                    atomic_write_text(state_path, store.model_dump_json(indent=2))
+                print(json.dumps({
+                    "project_id": args.project_id,
+                    "source_edit_failed": detail[:500],
+                    "manual_review_reason_code": reason_code,
+                }))
+                return 2
         else:
-            specs = render_concept_previews(
-                project,
-                asset_dir,
-                model=cfg.flyer.draft_image_model,
-                quality=cfg.flyer.draft_image_quality,
-                concept_count=cfg.flyer.concept_count,
-            )
+            draft_provider = cfg.flyer.resolve_draft_render_provider()
+            specs = []
+            retryable_match = False
+            for attempt in range(2):
+                try:
+                    specs = render_concept_previews(
+                        project,
+                        asset_dir,
+                        model=draft_provider.model,
+                        quality=draft_provider.quality,
+                        concept_count=cfg.flyer.concept_count,
+                    )
+                    break
+                except Exception as exc:
+                    detail_lower = str(exc).lower()
+                    retryable_match = _draft_error_retryable(detail_lower)
+                    if attempt == 0 and retryable_match and not _draft_error_is_visual_qa(detail_lower):
+                        time.sleep(0.35)
+                        continue
+                    now = datetime.now(timezone.utc)
+                    if _draft_error_is_visual_qa(detail_lower):
+                        reason_code = "visual_qa_failed"
+                    elif _draft_error_is_dependency_missing(detail_lower):
+                        reason_code = "dependency_missing"
+                    else:
+                        reason_code = "provider_timeout"
+                    manual = make_manual_review(
+                        reason_code=reason_code,
+                        detail=_draft_manual_review_detail(exc, attempts=attempt + 1, retryable_match=retryable_match),
+                        queued_at=now,
+                    )
+                    with FileLock(Path(str(state_path) + ".lock")):
+                        store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+                        for idx, current in enumerate(store.projects):
+                            if current.project_id != args.project_id:
+                                continue
+                            existing = current.manual_review
+                            if getattr(existing, "status", "none") == "queued":
+                                break
+                            updates = {"manual_review": manual, "updated_at": now}
+                            if current.status in _DRAFT_EARLY_STATUSES:
+                                updates["status"] = "manual_edit_required"
+                            store.projects[idx] = current.model_copy(update=updates)
+                            break
+                        atomic_write_text(state_path, store.model_dump_json(indent=2))
+                    print(json.dumps({
+                        "project_id": args.project_id,
+                        "draft_render_failed": str(exc)[:260],
+                        "manual_review_reason_code": reason_code,
+                        "attempts": attempt + 1,
+                        "retryable_match": bool(retryable_match),
+                    }))
+                    return 2
 
         with FileLock(Path(str(state_path) + ".lock")):
             store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
             current = store.projects[snapshot_idx]
             if current.project_id != args.project_id or current.version != snapshot_version:
-                for spec in specs:
-                    spec.path.unlink(missing_ok=True)
-                    raw = spec.path.with_name(f"{spec.path.stem}.raw.png")
-                    raw.unlink(missing_ok=True)
+                _cleanup_render_artifacts(specs)
                 raise SystemExit("project changed while rendering; refusing to overwrite newer flyer state")
-            now = datetime.now(timezone.utc)
+
+        now = datetime.now(timezone.utc)
+        assets = build_asset_manifest(
+            specs,
+            first_asset_number=next_asset_number(current),
+            source="rendered",
+            original_message_id=current.original_message_id,
+        )
+        concept_meta = [
+            ("C1", "Best Design", "Best-quality flyer direction for this request"),
+            ("C2", "Cultural Celebration", "Warm regional motifs with clean type"),
+            ("C3", "Modern Social", "Instagram-first layout with crisp hierarchy"),
+        ]
+        concepts = [
+            FlyerConcept(
+                concept_id=concept_id,
+                title=title,
+                style_summary=summary,
+                preview_asset_id=asset.asset_id,
+                prompt=_concept_prompt_metadata(
+                    current,
+                    concept_id=concept_id,
+                    source_edit_requested=source_edit_requested,
+                ),
+                created_at=now,
+            )
+            for asset, (concept_id, title, summary) in zip(assets, concept_meta)
+        ]
+        one_shot = len(concepts) == 1
+        qa_reports = []
+        for asset, spec in zip(assets, specs):
+            _write_sidecar_visual_qa_fixture(current, spec.path)
+            report = run_visual_qa(
+                current,
+                spec.path,
+                output_format=spec.output_format,
+                asset_id=asset.asset_id,
+            )
+            write_visual_qa_report(report, spec.path)
+            qa_reports.append(report)
+        failed_qa = [report for report in qa_reports if report.status != "passed"]
+        if (
+            failed_qa
+            and _qa_failed_missing_business_name(failed_qa)
+            and _mentions_saved_brand_assets(current)
+            and os.environ.get("FLYER_DISABLE_BRAND_ASSETS") != "1"
+        ):
+            _cleanup_render_artifacts(specs)
+            specs = _render_with_brand_assets_disabled(lambda: render_concept_previews(
+                current,
+                asset_dir,
+                model=draft_provider.model,
+                quality=draft_provider.quality,
+                concept_count=cfg.flyer.concept_count,
+            ))
             assets = build_asset_manifest(
                 specs,
                 first_asset_number=next_asset_number(current),
                 source="rendered",
                 original_message_id=current.original_message_id,
             )
-            concept_meta = [
-                ("C1", "Best Design", "Best-quality flyer direction for this request"),
-                ("C2", "Cultural Celebration", "Warm regional motifs with clean type"),
-                ("C3", "Modern Social", "Instagram-first layout with crisp hierarchy"),
-            ]
-            concepts = [
-                FlyerConcept(
-                    concept_id=concept_id,
-                    title=title,
-                    style_summary=summary,
-                    preview_asset_id=asset.asset_id,
-                    prompt=current.raw_request,
-                    created_at=now,
+            qa_reports = []
+            for asset, spec in zip(assets, specs):
+                _write_sidecar_visual_qa_fixture(current, spec.path)
+                report = run_visual_qa(
+                    current,
+                    spec.path,
+                    output_format=spec.output_format,
+                    asset_id=asset.asset_id,
                 )
-                for asset, (concept_id, title, summary) in zip(assets, concept_meta)
-            ]
-            one_shot = len(concepts) == 1
-            revisions = [
-                revision.model_copy(update={"applied": True})
-                if (not revision.applied and revision.resulting_version == current.version)
-                else revision
-                for revision in current.revisions
-            ]
+                write_visual_qa_report(report, spec.path)
+                qa_reports.append(report)
+            failed_qa = [report for report in qa_reports if report.status != "passed"]
+        pending_success_attempt = None
+        pending_success_entry = None
+        if failed_qa and not source_edit_requested:
+            blockers = [blocker for report in failed_qa for blocker in report.blockers]
+            blocker_hash = _sha256_hex("\n".join(blockers))
+            decision = classify_flyer_qa_for_autorepair(blockers, current)
+            skip_detail = ""
+            if not cfg.flyer.recovery.auto_repair_enabled:
+                skip_detail = "auto_repair_disabled"
+            elif decision.decision != "hermes_plan_eligible":
+                skip_detail = f"{decision.decision}:{decision.reason}"
+            else:
+                with FileLock(Path(str(autorepair_state_path) + ".lock")):
+                    attempt_store = _load_autorepair_store(autorepair_state_path)
+                    attempt_store = _mark_stale_attempts(
+                        attempt_store,
+                        now=now,
+                        stale_minutes=cfg.flyer.recovery.auto_repair_attempt_stale_minutes,
+                    )
+                    _write_autorepair_store(autorepair_state_path, attempt_store)
+                    used = _attempt_budget_used(
+                        attempt_store,
+                        project_id=current.project_id,
+                        project_version=current.version,
+                        qa_blocker_hash=blocker_hash,
+                    )
+                if used >= cfg.flyer.recovery.max_auto_repair_attempts:
+                    skip_detail = "budget_exhausted"
+            if skip_detail:
+                _audit_append(audit_log_path, FlyerAutoRepairSkipped(
+                    ts=now,
+                    attempt_id=f"{current.project_id}-v{current.version}-skip-{int(now.timestamp())}",
+                    project_id=current.project_id,
+                    project_version=current.version,
+                    qa_blocker_hash=blocker_hash,
+                    repair_instruction_hash="0" * 64,
+                    detail=skip_detail,
+                    generated_asset_ids=[],
+                ))
+            else:
+                rendered_text = "\n".join(getattr(report, "extracted_text", "") for report in failed_qa)
+                plan = plan_flyer_autorepair(
+                    project=current,
+                    blockers=blockers,
+                    rendered_text=rendered_text,
+                    model=cfg.flyer.prompt_model
+                    if cfg.flyer.prompt_model != "default_hermes_gateway"
+                    else cfg.flyer.conversation_model,
+                )
+                repair_instruction = str(plan.get("repair_instruction") or "").strip()
+                if plan.get("action") != "regenerate_with_instruction" or not repair_instruction:
+                    _audit_append(audit_log_path, FlyerAutoRepairSkipped(
+                        ts=now,
+                        attempt_id=f"{current.project_id}-v{current.version}-skip-{int(now.timestamp())}",
+                        project_id=current.project_id,
+                        project_version=current.version,
+                        qa_blocker_hash=blocker_hash,
+                        repair_instruction_hash="0" * 64,
+                        detail=str(plan.get("reason") or plan.get("action") or "planner_declined")[:1000],
+                        generated_asset_ids=[],
+                    ))
+                elif not repair_instruction_is_safe(repair_instruction):
+                    _audit_append(audit_log_path, FlyerAutoRepairSkipped(
+                        ts=now,
+                        attempt_id=f"{current.project_id}-v{current.version}-skip-{int(now.timestamp())}",
+                        project_id=current.project_id,
+                        project_version=current.version,
+                        qa_blocker_hash=blocker_hash,
+                        repair_instruction_hash=_sha256_hex(repair_instruction),
+                        detail="planner_unsafe_or_empty_instruction",
+                        generated_asset_ids=[],
+                    ))
+                else:
+                    instruction_hash = _sha256_hex(repair_instruction)
+                    attempt_id = f"{current.project_id}-v{current.version}-{blocker_hash[:12]}-1"
+                    attempt = FlyerRepairAttempt(
+                        attempt_id=attempt_id,
+                        project_id=current.project_id,
+                        project_version=current.version,
+                        status="attempted",
+                        qa_blocker_hash=blocker_hash,
+                        repair_instruction_hash=instruction_hash,
+                        repair_instruction=repair_instruction,
+                        started_at=now,
+                        detail="; ".join(blockers)[:1000],
+                    )
+                    _append_attempt_status(autorepair_state_path, attempt)
+                    _audit_append(audit_log_path, FlyerAutoRepairAttempted(
+                        ts=now,
+                        attempt_id=attempt_id,
+                        project_id=current.project_id,
+                        project_version=current.version,
+                        qa_blocker_hash=blocker_hash,
+                        repair_instruction_hash=instruction_hash,
+                        detail=attempt.detail,
+                        generated_asset_ids=[],
+                    ))
+                    repair_specs = []
+                    repair_assets = []
+                    repair_qa_reports = []
+                    repair_failed_qa = []
+                    repair_error = ""
+                    try:
+                        repair_specs = render_concept_previews(
+                            current,
+                            asset_dir,
+                            model=draft_provider.model,
+                            quality=draft_provider.quality,
+                            concept_count=cfg.flyer.concept_count,
+                            repair_instruction=repair_instruction,
+                        )
+                        repair_assets = build_asset_manifest(
+                            repair_specs,
+                            first_asset_number=next_asset_number(current),
+                            source="rendered",
+                            original_message_id=current.original_message_id,
+                        )
+                        for asset, spec in zip(repair_assets, repair_specs):
+                            _write_sidecar_visual_qa_fixture(current, spec.path)
+                            report = run_visual_qa(
+                                current,
+                                spec.path,
+                                output_format=spec.output_format,
+                                asset_id=asset.asset_id,
+                            )
+                            write_visual_qa_report(report, spec.path)
+                            repair_qa_reports.append(report)
+                        repair_failed_qa = [report for report in repair_qa_reports if report.status != "passed"]
+                    except Exception as exc:
+                        repair_error = f"{exc.__class__.__name__}: {str(exc)[:400]}"
+                    completed = datetime.now(timezone.utc)
+                    if repair_error or repair_failed_qa:
+                        preserve_paths = {
+                            candidate
+                            for spec in specs
+                            for candidate in _render_artifact_candidates(spec)
+                        }
+                        _cleanup_render_artifacts(repair_specs, preserve_paths=preserve_paths)
+                        detail = repair_error or "; ".join(blocker for report in repair_failed_qa for blocker in report.blockers)[:1000]
+                        exhausted = attempt.model_copy(update={
+                            "status": "exhausted",
+                            "completed_at": completed,
+                            "detail": detail[:1000],
+                        })
+                        _append_attempt_status(autorepair_state_path, exhausted)
+                        _audit_append(audit_log_path, FlyerAutoRepairExhausted(
+                            ts=completed,
+                            attempt_id=attempt_id,
+                            project_id=current.project_id,
+                            project_version=current.version,
+                            qa_blocker_hash=blocker_hash,
+                            repair_instruction_hash=instruction_hash,
+                            detail=exhausted.detail,
+                            generated_asset_ids=[],
+                        ))
+                    else:
+                        pending_success_attempt = attempt.model_copy(update={
+                            "status": "succeeded",
+                            "completed_at": completed,
+                            "generated_asset_ids": [asset.asset_id for asset in repair_assets],
+                        })
+                        pending_success_entry = FlyerAutoRepairSucceeded(
+                            ts=completed,
+                            attempt_id=attempt_id,
+                            project_id=current.project_id,
+                            project_version=current.version,
+                            qa_blocker_hash=blocker_hash,
+                            repair_instruction_hash=instruction_hash,
+                            detail="repair_qa_passed",
+                            generated_asset_ids=pending_success_attempt.generated_asset_ids,
+                        )
+                        preserve_paths = {
+                            candidate
+                            for repair_spec in repair_specs
+                            for candidate in _render_artifact_candidates(repair_spec)
+                        }
+                        _cleanup_render_artifacts(specs, preserve_paths=preserve_paths)
+                        specs = repair_specs
+                        assets = repair_assets
+                        qa_reports = repair_qa_reports
+                        failed_qa = []
+        revisions = [
+            revision.model_copy(update={"applied": True})
+            if (
+                not revision.applied
+                and revision.resulting_version is not None
+                and revision.resulting_version <= current.version
+            )
+            else revision
+            for revision in current.revisions
+        ]
+        with FileLock(Path(str(state_path) + ".lock")):
+            store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+            latest = store.projects[snapshot_idx]
+            if latest.project_id != args.project_id or latest.version != snapshot_version:
+                if pending_success_attempt is not None:
+                    stale = pending_success_attempt.model_copy(update={
+                        "status": "stale",
+                        "completed_at": datetime.now(timezone.utc),
+                        "detail": "project changed before repaired assets could be committed",
+                    })
+                    _append_attempt_status(autorepair_state_path, stale)
+                _cleanup_render_artifacts(specs)
+                raise SystemExit("project changed while rendering; refusing to overwrite newer flyer state")
+            if failed_qa:
+                # P0 #2 — severity branch. Strict state-machine: severity label
+                # → exactly one state-write + audit row. No conditional logic
+                # beyond this map (Hermes-as-brain invariant).
+                #   - Any report with severity == "block" → manual_edit_required
+                #     (existing path; preserved bit-for-bit).
+                #   - All failed reports severity == "warn" → delivered_with_warning
+                #     (new path; cf-router drives the send via the post-subprocess
+                #     branch in Commit 4).
+                has_block_severity = any(
+                    getattr(r, "severity", "block") == "block" for r in failed_qa
+                )
+                if not has_block_severity:
+                    if not is_flyer_transition_allowed(current.status, "delivered_with_warning"):
+                        raise SystemExit(
+                            f"warn-tier transition not allowed from {current.status} "
+                            "to delivered_with_warning; refusing partial write"
+                        )
+                    all_blockers = [b for r in failed_qa for b in r.blockers]
+                    # asset_id for the audit row must be non-empty (schema
+                    # min_length=1). Use the first failed report's asset_id;
+                    # fall back to a deterministic sentinel if absent.
+                    warn_asset_id = ""
+                    for r in failed_qa:
+                        if r.asset_id:
+                            warn_asset_id = r.asset_id
+                            break
+                    if not warn_asset_id:
+                        warn_asset_id = "concept_preview_warn"
+                    customer_text = build_warn_tier_customer_text(all_blockers, current)
+                    customer_text_sha = hashlib.sha256(
+                        customer_text.encode("utf-8")
+                    ).hexdigest()
+                    warning_payload = FlyerWarningSummary(
+                        severity="warn",
+                        blockers=all_blockers,
+                        customer_text=customer_text,
+                        customer_text_sha256=customer_text_sha,
+                        delivered_at=now,
+                        asset_id=warn_asset_id,
+                    )
+                    store.projects[snapshot_idx] = current.model_copy(update={
+                        "status": "delivered_with_warning",
+                        "assets": [*current.assets, *assets],
+                        "qa_reports": [*current.qa_reports, *qa_reports],
+                        "warning": warning_payload,
+                        # P0 #2 — clear any stale manual_review payload that
+                        # may have come in from a prior manual_edit_required
+                        # → generating_concepts re-entry. cf-router's status
+                        # formatters (actions.py:2103, 2182) still read
+                        # manual_review on transitions; leaving stale data
+                        # would leak operator-review copy onto the
+                        # delivered_with_warning surface. Mirrors the existing
+                        # pass-path reset below.
+                        "manual_review": FlyerManualReview(),
+                        "updated_at": now,
+                    })
+                    atomic_write_text(state_path, store.model_dump_json(indent=2))
+                    _audit_append(audit_log_path, FlyerWarnTierDelivered(
+                        ts=now,
+                        project_id=args.project_id,
+                        asset_id=warn_asset_id,
+                        severity="warn",
+                        blockers=all_blockers,
+                        customer_text_sha256=customer_text_sha,
+                    ))
+                    print(json.dumps({
+                        "project_id": args.project_id,
+                        "delivered_with_warning": True,
+                        "warning_blockers": all_blockers,
+                    }))
+                    return 0
+                manual = make_manual_review(
+                    reason_code="visual_qa_failed",
+                    detail="; ".join(blocker for report in failed_qa for blocker in report.blockers)[:500],
+                    queued_at=now,
+                )
+                store.projects[snapshot_idx] = current.model_copy(update={
+                    "status": "manual_edit_required",
+                    "assets": [*current.assets, *assets],
+                    "qa_reports": [*current.qa_reports, *qa_reports],
+                    "manual_review": manual,
+                    "updated_at": now,
+                })
+                atomic_write_text(state_path, store.model_dump_json(indent=2))
+                print(json.dumps({
+                    "project_id": args.project_id,
+                    "visual_qa_failed": [report.model_dump(mode="json") for report in failed_qa],
+                }))
+                return 2
             store.projects[snapshot_idx] = current.model_copy(update={
                 "status": "awaiting_final_approval" if one_shot else "awaiting_concept_selection",
                 "concepts": concepts,
                 "selected_concept_id": "C1" if one_shot else None,
                 "assets": [*current.assets, *assets],
+                "qa_reports": [*current.qa_reports, *qa_reports],
                 "revisions": revisions,
+                "manual_review": FlyerManualReview(),
                 "updated_at": now,
             })
             atomic_write_text(state_path, store.model_dump_json(indent=2))
+            if pending_success_attempt is not None and pending_success_entry is not None:
+                _append_attempt_status(autorepair_state_path, pending_success_attempt)
+                _audit_append(audit_log_path, pending_success_entry)
             print(json.dumps({"project_id": args.project_id, "concept_count": len(concepts)}))
             return 0
 

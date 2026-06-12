@@ -1,0 +1,18 @@
+{
+  "topic": "hermes-commerce-prd-v2",
+  "task_text": "Re-issue the Hermes Commerce Agent PRD as extends-Hermes: four shared primitives (commerce_catalog, commerce_cart, commerce_order_state, commerce_payment_link) callable by existing portfolio agents; binding money-moving invariants; full compliance matrix; deterministic/LLM boundary; deterministic state machine; LogEntry variant enumeration; dispatcher posture; handoff workflow; test plan. Slice 1 ships library-only with placeholder payment-link.",
+  "completed_at": "2026-05-28T22:27:57Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 2,
+  "hermes_step_count": 15,
+  "files_to_read_first": [
+    "tasks/hermes-commerce-portfolio-reconciliation.md (upstream gate)",
+    "AGENTS.md",
+    "docs/hermes-alignment.md",
+    "src/agents/shift/skills/dispatch_shift_agent/SKILL.md",
+    "src/platform/schemas.py (FlyerGuestOrder l.898, LogEntry variants l.2535+)",
+    "src/platform/safe_io.py (atomic_write_json l.247, ndjson_append l.263)",
+    "src/agents/flyer/guest_order.py (canonical precedent)",
+    "tasks/lessons.md (2026-05-25 payment-reference immutability)"
+  ]
+}

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -263,6 +264,13 @@ print(json.dumps({{"rc": rc, "stdout": buf.getvalue(), "notify_calls": notify_ca
         capture_output=True,
         text=True,
         timeout=15,
+        # send-path-test-harness: canonical safe_io.BRIDGE_URL -> stub (via env)
+        # + opt past the pytest guard. The wrapper loads the real
+        # create-catering-proposal-options script (allowlisted caller); stub
+        # port (not :3000) keeps the live-bridge tripwire dormant.
+        env={**os.environ,
+             "HERMES_BRIDGE_URL": f"http://127.0.0.1:{bridge_port}/send",
+             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1"},
     )
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     parsed = json.loads(lines[-1]) if lines else {"rc": -1, "stdout": ""}
@@ -373,6 +381,35 @@ def test_auto_generates_two_grounded_options_from_menu(bridge_server, env_dir):
     assert "Option 2: Premium Celebration Menu" in body
     assert "$" not in body
     assert "price" not in body.lower()
+
+
+def test_auto_generate_sample_menus_never_invents_off_menu_western_items(bridge_server, env_dir):
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+
+    result, parsed = _run_script(
+        env_dir,
+        port,
+        request_text="Can you create two sample menus mix n match.",
+        auto_generate=True,
+    )
+
+    assert parsed["rc"] == 0, result.stderr
+    sent = [s for s in _read_store(env_dir)["sets"] if s["status"] == "SENT"]
+    assert len(sent) == 1
+    item_names = {name for option in sent[0]["options"] for name in option["item_names"]}
+    assert item_names <= {item["name"] for item in DEFAULT_MENU}
+    body = stub.requests[0]["message"]
+    for invented in [
+        "Stuffed Mushrooms",
+        "Spring Rolls",
+        "Grilled Salmon",
+        "Vegetarian Tacos",
+        "Beef",
+        "Panna Cotta",
+    ]:
+        assert invented not in body
 
 
 def test_auto_generation_allows_three_only_when_requested(bridge_server, env_dir):

@@ -136,6 +136,11 @@ def _run(fixture_dir, bridge_port=None, args=("--force",), now_override=None,
     }
     if bridge_port is not None:
         env["HERMES_BRIDGE_URL"] = f"http://127.0.0.1:{bridge_port}/send"
+        # send-path-test-harness: opt past the pytest bridge guard so the send
+        # reaches the local stub (env inherits PYTEST_CURRENT_TEST). send-daily-brief
+        # is an allowlisted null-context caller; stub port (not :3000) keeps the
+        # live-bridge tripwire dormant.
+        env["SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS"] = "1"
     if now_override is not None:
         env["SHIFT_AGENT_NOW_OVERRIDE"] = now_override
     if notify_owner_stub is not None:
@@ -355,6 +360,50 @@ def test_uncertain_send_after_crash_does_not_resend(fixture_dir, bridge_server):
     assert len(sent) == 0
 
 
+def test_force_resend_overrides_uncertain_and_resends(fixture_dir, bridge_server):
+    """Contract: --force-resend INTENTIONALLY bypasses the uncertain-send guard.
+    A recent stranded brief_attempted does NOT block; the brief IS (re)sent."""
+    port, _ = bridge_server
+    log_path = fixture_dir / "logs" / "decisions.log"
+    now = datetime(2026, 4, 28, 7, 5, 0, tzinfo=timezone(__import__("datetime").timedelta(hours=-4)))
+    five_min_ago = (now - __import__("datetime").timedelta(minutes=5)).isoformat()
+    log_path.write_text(json.dumps({
+        "type": "brief_attempted", "ts": five_min_ago,
+        "brief_date": "2026-04-28", "attempt_id": "stranded123",
+        "word_count": 50, "sections_included": ["yesterday", "today_outlook", "alerts"],
+        "source_count": 0, "degraded_mode": False, "catchup_minutes_late": 0,
+    }) + "\n", encoding="utf-8")
+    r = _run(
+        fixture_dir, bridge_port=port,
+        args=("--force", "--force-resend"),
+        now_override="2026-04-28T07:05:00-04:00",
+    )
+    assert r.returncode == 0
+    log = _read_log(fixture_dir)
+    # force-resend bypasses the uncertain guard → a brief IS sent
+    assert any(e["type"] == "brief_sent" for e in log), f"expected brief_sent with --force-resend; log={log}"
+    assert not any(
+        e["type"] == "brief_skipped" and e.get("reason") == "send_uncertain" for e in log
+    ), "must NOT skip for send_uncertain when --force-resend is given"
+
+
+def test_force_with_no_recent_attempt_sends(fixture_dir, bridge_server):
+    """Contract: a normal --force run with NO recent stranded attempt sends
+    (the uncertain guard only blocks when a recent orphan exists)."""
+    port, _ = bridge_server
+    r = _run(
+        fixture_dir, bridge_port=port,
+        args=("--force",),
+        now_override="2026-04-28T07:05:00-04:00",
+    )
+    assert r.returncode == 0
+    log = _read_log(fixture_dir)
+    assert any(e["type"] == "brief_sent" for e in log), f"expected brief_sent; log={log}"
+    assert not any(
+        e["type"] == "brief_skipped" and e.get("reason") == "send_uncertain" for e in log
+    )
+
+
 def test_brief_text_contains_template_sections(fixture_dir, bridge_server):
     port, BridgeStub = bridge_server
     _run(fixture_dir, bridge_port=port, args=("--force", "--dry-run"))
@@ -381,3 +430,23 @@ def test_quiet_day_brief_says_quiet(fixture_dir, bridge_server):
     port, _ = bridge_server
     r = _run(fixture_dir, bridge_port=port, args=("--force", "--dry-run"))
     assert "Quiet day" in r.stdout or "0 sick calls" in r.stdout
+
+
+def test_today_aggregation_honors_now_override(fixture_dir):
+    """Regression: _aggregate_today must derive today's date from the
+    override-aware clock. A shift scheduled on the OVERRIDE date (not the wall-
+    clock date) must appear in the brief — proving the content date honors
+    SHIFT_AGENT_NOW_OVERRIDE and stays in sync with the send/idempotency date.
+
+    Before the fix, _aggregate_today used raw customer_today_str() (wall clock),
+    so roster.schedule.get(today) missed the overridden date and rendered
+    'No shifts scheduled'."""
+    roster = json.loads((fixture_dir / "roster.json").read_text())
+    roster["schedule"] = {
+        "2026-04-28": [{"employee_id": "e001", "shift": "09:00-17:00", "role": "cashier"}]
+    }
+    (fixture_dir / "roster.json").write_text(json.dumps(roster), encoding="utf-8")
+    r = _run(fixture_dir, args=("--force", "--dry-run"),
+             now_override="2026-04-28T07:05:00-04:00")
+    assert r.returncode == 0, r.stderr
+    assert "1 scheduled shift" in r.stdout  # used override date 2026-04-28, not wall clock

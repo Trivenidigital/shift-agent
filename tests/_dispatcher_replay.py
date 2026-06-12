@@ -64,7 +64,7 @@ NO_HANDLER_FOUND = "<no-handler-found>"
 #   2. Update fixtures + mock to reflect any new priority rules
 #   3. Update SKILL_MD_KNOWN_SHA256 below to the new hash
 #   4. Document the change in the commit message
-SKILL_MD_KNOWN_SHA256 = "01e6bc46b767d4b30f5a2b6cf6fd975dbdae2d829461a25f55d46eb07a30d14b"
+SKILL_MD_KNOWN_SHA256 = "4f5ee8ac079fb0924137270dce54e094f56ff1677c6b49b699b7903da186be3a"
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -315,7 +315,7 @@ def mock_llm_priority_order(skill_md: str, input_payload: dict) -> tuple[str, st
 
     # Extract code if present.
     import re
-    code_match = re.search(r"#[A-HJ-NP-Z2-9]{5}", body)
+    code_match = re.search(r"#[A-HJKMNPQR-Z2-9]{5}", body)
     code = code_match.group(0) if code_match else None
 
     # Priority 1: code matches catering-menu-pending — owner-only since
@@ -363,6 +363,37 @@ def mock_llm_priority_order(skill_md: str, input_payload: dict) -> tuple[str, st
         r.get("approval_code") == code for r in state.get("pending.json", [])
     ):
         return ("→ handle_owner_command", "handle_owner_command")
+
+    # Priority 6: employee candidate response outranks absence intent because a
+    # pending sent proposal is an active Shift state-machine reply.
+    def _has_pending_candidate_response() -> bool:
+        emp_id = identity.get("employee_id")
+        if not emp_id:
+            return False
+        pending = state.get("pending.json", [])
+        if isinstance(pending, dict):
+            pending_rows = list((pending.get("proposals") or {}).values())
+        else:
+            pending_rows = pending
+        return any(
+            isinstance(r, dict)
+            and r.get("candidate_employee_id") == emp_id
+            and r.get("status") == "sent"
+            for r in pending_rows
+        )
+
+    if role == "employee" and not code and _has_pending_candidate_response():
+        return ("→ handle_candidate_response", "handle_candidate_response")
+
+    absence_patterns = [
+        re.compile(r"\b(?:sick|fever|cough|cold|stomach|headache|vomit|migraine|flu|food\s*poisoning)\b", re.IGNORECASE),
+        re.compile(r"\b(?:can'?t|cannot|won'?t|unable\s+to)\s+(?:come|make\s+it|work|attend)\b", re.IGNORECASE),
+        re.compile(r"\b(?:not\s+feeling|feeling\s+(?:unwell|bad|ill|under\s+the\s+weather))\b", re.IGNORECASE),
+        re.compile(r"\b(?:family\s+emergency|personal\s+emergency|hospital|doctor|emergency\s+room|er\b)\b", re.IGNORECASE),
+        re.compile(r"\b(?:miss(?:ing)?|skip(?:ping)?|cover|coverage)\s+(?:my\s+)?(?:shift|today|tomorrow|tonight|evening|morning)\b", re.IGNORECASE),
+    ]
+    if role == "employee" and any(p.search(body) for p in absence_patterns):
+        return ("→ handle_sick_call", "handle_sick_call")
 
     def _has_active_flyer_project_for_sender() -> bool:
         phone = identity.get("phone_normalized") or sender_block.get("phone")
@@ -541,14 +572,8 @@ def mock_llm_priority_order(skill_md: str, input_payload: dict) -> tuple[str, st
     if role == "owner" and not code:
         return ("→ handle_owner_command (text only)", "handle_owner_command")
 
-    # Priority 13: text-only employee → sick_call (or candidate_response if pending proposal).
+    # Priority 13: text-only employee → sick_call.
     if role == "employee":
-        # Subcase: pending proposal for this employee.
-        emp_id = identity.get("employee_id")
-        if emp_id and any(
-            r.get("employee_id") == emp_id for r in state.get("pending.json", [])
-        ):
-            return ("→ handle_candidate_response", "handle_candidate_response")
         return ("→ handle_sick_call", "handle_sick_call")
 
     # Priority 14: anything from unknown → decline.

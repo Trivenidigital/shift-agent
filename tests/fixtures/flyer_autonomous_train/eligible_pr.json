@@ -1,0 +1,48 @@
+{
+  "number": 139,
+  "title": "test: add source-contract golden fixtures",
+  "author": "codex-worker",
+  "metadata_source": "offline_fixture",
+  "collected_at": "2026-05-21T00:00:00Z",
+  "metadata_trusted_for_merge": false,
+  "base": "main",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_sha": "855b161000000000000000000000000000000000",
+  "is_open": true,
+  "behind_origin_main": false,
+  "category": "golden_fixture_tests",
+  "changed_files": [
+    "tests/fixtures/flyer_golden/live_customer_message_shapes.json",
+    "tests/test_flyer_golden_scenarios.py"
+  ],
+  "touched_subsystems": ["flyer-golden-fixtures"],
+  "previous_run_touched_subsystems": ["cf-router-hooks"],
+  "reviewers": [
+    {
+      "login": "structural-reviewer",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "is_stale": false,
+      "is_author": false
+    },
+    {
+      "login": "truthfulness-reviewer",
+      "role": "autonomous",
+      "state": "approved",
+      "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "is_stale": false,
+      "is_author": false
+    }
+  ],
+  "findings": [],
+  "verification": [
+    {
+      "name": "focused pytest",
+      "state": "passed",
+      "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "urgent_customer_visible": false,
+  "merged_not_deployed": false
+}

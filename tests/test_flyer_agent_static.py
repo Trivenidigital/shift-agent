@@ -43,10 +43,13 @@ def test_flyer_dispatcher_documents_state_machine_and_approval():
     assert "bridge_send_media" in skill or "send-flyer-package" in skill
 
 
-def test_flyer_generation_skill_documents_controlled_direct_generation():
+def test_flyer_generation_skill_documents_creative_director():
     skill = (FLYER / "skills" / "flyer_generation" / "SKILL.md").read_text(encoding="utf-8")
-    assert "Use controlled direct generation" in skill
-    assert "structured flyer facts" in skill
-    assert "complete finished" in skill and "poster" in skill
-    assert "server-side compositor may still be used for deterministic fallback" in skill
-    assert "Telugu" in skill
+    # Rewritten for the Marketing Agent (PR #449): flyer_generation is the Creative
+    # Director that emits ONE structured FlyerBrief; commercial facts are referenced
+    # by fact id (never invented), the background is textless, offers stay grouped.
+    assert "Creative Director" in skill
+    assert "FlyerBrief" in skill
+    assert "fact_refs" in skill
+    assert "offer_groups" in skill
+    assert "TEXTLESS" in skill or "textless" in skill

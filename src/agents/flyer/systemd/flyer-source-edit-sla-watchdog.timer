@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Flyer source-edit SLA watchdog every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Persistent=false
+Unit=flyer-source-edit-sla-watchdog.service
+
+[Install]
+WantedBy=timers.target

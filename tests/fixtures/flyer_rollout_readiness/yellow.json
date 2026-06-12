@@ -1,0 +1,10 @@
+{
+  "deploy_marker": "deploy-20260521-000000-bbbbbbbb",
+  "bridge_status": "connected",
+  "gateway_status": "active",
+  "cockpit_status": "healthy",
+  "open_prs": [{"number": 154, "title": "Fix Flyer schedule through day ranges", "customer_risk": false, "customer_risk_label": "none"}],
+  "merged_not_deployed": [],
+  "host_supplied_source_edit_posture": "manual_review",
+  "replay_summary": {"total": 11, "passed": 11, "failed_ids": []}
+}

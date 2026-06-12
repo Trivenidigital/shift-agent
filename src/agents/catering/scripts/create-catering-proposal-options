@@ -7,8 +7,6 @@ import json
 import re
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +23,7 @@ from safe_io import (  # noqa: E402
     load_model,
     ndjson_append,
 )
+from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402  # PR-ε: chokepoint consolidation
 from schemas import (  # noqa: E402
     CateringLeadStore,
     CateringProposalGenerationFailed,
@@ -44,8 +43,6 @@ MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 LOG_LOCK = Path("/opt/shift-agent/logs/decisions.log.lock")
 NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
-BRIDGE_URL = "http://127.0.0.1:3000/send"
-BRIDGE_TIMEOUT = 10
 BRIDGE_PREFIX = "\u2695 *Catering Agent*\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
 NO_PRICE_RE = re.compile(r"""
     \$\s*\d+
@@ -228,26 +225,6 @@ def _render_body(options: list[CateringProposalOption], menu_items: dict[str, Me
     body = BRIDGE_PREFIX + "\n\n".join(rendered)
     _assert_no_forbidden_customer_text(body)
     return body
-
-
-def _bridge_post(jid: str, message: str) -> tuple[bool, str]:
-    payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
-    req = urllib.request.Request(
-        BRIDGE_URL,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=BRIDGE_TIMEOUT) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            doc = json.loads(body)
-            message_id = doc.get("id") or doc.get("messageId") or ""
-            if not message_id:
-                return False, f"empty message id: {body[:200]}"
-            return True, message_id
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as e:
-        return False, f"{type(e).__name__}: {e}"
 
 
 def _append_audit(entry) -> None:

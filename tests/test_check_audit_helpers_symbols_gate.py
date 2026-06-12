@@ -62,6 +62,8 @@ def test_rollback_target_gate_exists():
     text = p.read_text(encoding="utf-8")
     assert "PR-D2_ROLLBACK_TARGET_OK" in text
     assert "EXPECTED_SHA" in text
+    assert "${PREV_SHA%$EXPECTED_SHA}" in text
+    assert "${PREV_SHA#$EXPECTED_SHA}" not in text
     # Must use the two-step ssh-to-file Windows pattern
     assert ".pr_d2_gate.txt" in text or "OUT_FILE" in text
 

@@ -1,0 +1,168 @@
+=== Hermes pin gate ===
+OK: shift-agent patches verified against pinned Hermes 1e71b718.
+=== Hermes config.yaml shape gate ===
+WARN: Hermes version drift expected=0.14.0 current=unknown (informational; commit-hash pin is authoritative)
+OK: /root/.hermes/config.yaml shape gate passed (clean).
+OK: /root/.hermes/config.yaml shape gate passed.
+=== Credential-minimized Hermes foundation gate ===
+Credential-Minimized Hermes Readiness
+============================================
+Strict foundation: OK
+
+Foundation skills:
+  productivity/maps: present (live)
+  productivity/ocr-and-documents: present (live)
+  mcp/native-mcp: present (live)
+
+Plugin cf-router: present (enabled=True, compile=True)
+
+WhatsApp bridge: not_checked
+
+Credentials:
+  OPENROUTER_API_KEY: env_present (api_key)
+  OPENAI_API_KEY: unset (api_key)
+  KIMI_API_KEY: unset (api_key)
+  AIRTABLE_API_KEY: unset (pat)
+  NOTION_API_KEY: unset (api_key)
+  GOOGLE_APPLICATION_CREDENTIALS: unset (oauth)
+  STRIPE_SECRET_KEY: unset (write_rail)
+  SQUARE_ACCESS_TOKEN: unset (write_rail)
+  QUICKBOOKS_CLIENT_ID: unset (oauth)
+  QUICKBOOKS_CLIENT_SECRET: unset (oauth)
+  QUICKBOOKS_REFRESH_TOKEN: unset (oauth)
+  QUICKBOOKS_REALM_ID: unset (oauth)
+  QUICKBOOKS_ENVIRONMENT: unset (oauth)
+  PAYPAL_ACCESS_TOKEN: unset (write_rail)
+  PAYPAL_CLIENT_ID: unset (write_rail)
+  CLOVER_CLIENT_ID: unset (oauth)
+  CLOVER_CLIENT_SECRET: unset (oauth)
+  TOAST_CLIENT_ID: unset (oauth)
+  TOAST_CLIENT_SECRET: unset (oauth)
+  DOCUSIGN_CLIENT_ID: unset (oauth)
+  DOCUSIGN_CLIENT_SECRET: unset (oauth)
+  INFOBIP_API_KEY: unset (api_key)
+  YELP_API_KEY: unset (api_key)
+  GOOGLE_MAPS_API_KEY: unset (api_key)
+  FACEBOOK_APP_ID: unset (oauth)
+  PLAID_CLIENT_ID: unset (oauth)
+  PLAID_SECRET: unset (oauth)
+
+Connector candidates: 28 total, 0 stale
+
+Agent modes:
+  connected_required: 7
+  manual_export: 21
+  no_key_ready: 10
+  retired_or_folded: 3
+=== state-file migration check ===
+send-counter.json: already current (no-op)
+seen-ids.json: already current (no-op)
+OK: all state files current; no migration needed
+=== Env symlink integrity gate ===
+OK: env symlink intact (/root/.hermes/.env)
+Deploying deploy-20260526-124624-08ac3952 (prev rollback target: deploy-20260526-123009-ee14fdd8)
+✓ deploy gate: all 14 required project SKILLs present
+vision-auth-smoke: ok (14 chars)
+✓ deploy gate: vision auth smoke passed
+=== Shift Agent smoke test ===
+✓ All scripts present + executable
+✓ Hermes runtime permissions verified
+✓ WhatsApp bridge exposes /send-media and /send-cta
+✓ Python modules importable (incl. safe_io chokepoint symbols)
+Flyer quality deterministic smoke passed
+Flyer deferred reference extraction smoke passed
+Flyer delivery report smoke passed
+Flyer recovery smoke passed
+Flyer manual-queue triage smoke passed
+Flyer source-edit SLA watchdog smoke passed
+Flyer intent training export CLI smoke passed
+Credential-Minimized Hermes Readiness
+============================================
+Strict foundation: OK
+
+Foundation skills:
+  productivity/maps: present (live)
+  productivity/ocr-and-documents: present (live)
+  mcp/native-mcp: present (live)
+
+Plugin cf-router: present (enabled=True, compile=True)
+
+WhatsApp bridge: not_checked
+
+Credentials:
+  OPENROUTER_API_KEY: env_present (api_key)
+  OPENAI_API_KEY: unset (api_key)
+  KIMI_API_KEY: unset (api_key)
+  AIRTABLE_API_KEY: unset (pat)
+  NOTION_API_KEY: unset (api_key)
+  GOOGLE_APPLICATION_CREDENTIALS: unset (oauth)
+  STRIPE_SECRET_KEY: unset (write_rail)
+  SQUARE_ACCESS_TOKEN: unset (write_rail)
+  QUICKBOOKS_CLIENT_ID: unset (oauth)
+  QUICKBOOKS_CLIENT_SECRET: unset (oauth)
+  QUICKBOOKS_REFRESH_TOKEN: unset (oauth)
+  QUICKBOOKS_REALM_ID: unset (oauth)
+  QUICKBOOKS_ENVIRONMENT: unset (oauth)
+  PAYPAL_ACCESS_TOKEN: unset (write_rail)
+  PAYPAL_CLIENT_ID: unset (write_rail)
+  CLOVER_CLIENT_ID: unset (oauth)
+  CLOVER_CLIENT_SECRET: unset (oauth)
+  TOAST_CLIENT_ID: unset (oauth)
+  TOAST_CLIENT_SECRET: unset (oauth)
+  DOCUSIGN_CLIENT_ID: unset (oauth)
+  DOCUSIGN_CLIENT_SECRET: unset (oauth)
+  INFOBIP_API_KEY: unset (api_key)
+  YELP_API_KEY: unset (api_key)
+  GOOGLE_MAPS_API_KEY: unset (api_key)
+  FACEBOOK_APP_ID: unset (oauth)
+  PLAID_CLIENT_ID: unset (oauth)
+  PLAID_SECRET: unset (oauth)
+
+Connector candidates: 28 total, 0 stale
+
+Agent modes:
+  connected_required: 7
+  manual_export: 21
+  no_key_ready: 10
+  retired_or_folded: 3
+Production pilot readiness: READY
+Passed: 16  Failed: 0
+
+OK config.schema: config.yaml validates
+OK customer.name: customer.name set
+OK customer.location_id: customer.location_id set
+OK owner.phone: owner.phone set
+OK owner.self_chat_jid: owner.self_chat_jid set
+OK catering.enabled: catering enabled
+OK daily_brief.enabled: daily brief enabled
+OK daily_brief.sections: daily brief includes alerts
+OK roster.schema: roster.json validates
+OK roster.location_id_match: roster.location.id matches customer.location_id
+OK roster.location_name_match: roster.location.name matches customer.location_id token
+OK roster.location_label: roster.location label is production
+OK roster.active_employees: 6 active employees
+OK roster.schedule: 23 scheduled shifts
+OK catering.menu.schema: catering-menu.json validates
+OK catering.menu.items: 78 available menu items
+✓ cf-router plugin compiles + actions importable + classifier sanity
+✓ closest-location.py importable + CLI parses
+✓ check-compliance-deadlines.py importable + CLI parses
+✓ compliance heartbeat fresh (0h old)
+✓ mark-compliance-item-done.py importable + CLI parses
+✓ creative_catering_proposals SKILL present
+config ok: customer=Triveni, tz=America/New_York
+✓ config.yaml validates
+✓ Hermes config.yaml shape gate (smoke-side)
+roster ok: 8 employees, 5 days scheduled
+✓ roster.json validates
+✓ identify-sender recognizes owner
+✓ render-coverage-template works
+⚠  Pushover credentials muted (key=MUTED_20260501T161536Z) — skipping channel probe (dev VPS)
+✓ systemd units enabled
+✓ systemd units verified (incl. expense-bookkeeper if installed)
+catering schema + transition table validated
+✓ catering schema + transition table
+⚠  Agent #21 venv (/opt/shift-agent/venv/) absent — skipping expense-bookkeeper smoke checks
+
+=== All smoke checks passed ===
+Deploy deploy-20260526-124624-08ac3952 complete.
