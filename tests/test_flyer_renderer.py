@@ -626,12 +626,14 @@ def test_triveni_shared_price_reference_overlay_avoids_menu_table_look(tmp_path)
 
 
 def test_triveni_shared_price_reference_overlay_has_premium_poster_hierarchy(tmp_path):
-    from PIL import Image
+    from PIL import Image, ImageDraw
 
     background = (82, 42, 30)
     source = tmp_path / "background.png"
     target = tmp_path / "triveni-shared-price.png"
-    Image.new("RGB", (1080, 1350), background).save(source)
+    with Image.new("RGB", (1080, 1350), background) as src_img:
+        ImageDraw.Draw(src_img).rectangle((540, 80, 1040, 280), fill=(255, 255, 255))
+        src_img.save(source)
 
     apply_critical_text_overlay(
         _triveni_shared_price_reference_project(),
@@ -643,14 +645,18 @@ def test_triveni_shared_price_reference_overlay_has_premium_poster_hierarchy(tmp
 
     with Image.open(target).convert("RGB") as img:
         width, height = img.size
+        source_header_region = img.crop((int(width * 0.50), int(height * 0.06), width - 40, int(height * 0.24)))
         middle_region = img.crop((40, int(height * 0.46), width - 40, int(height * 0.68)))
         bottom_strip = img.crop((0, int(height * 0.82), width, height))
+        source_header_pixels = list(source_header_region.getdata())
         middle_pixels = list(middle_region.getdata())
         bottom_pixels = list(bottom_strip.getdata())
 
+    leaked_source_header = sum(1 for r, g, b in source_header_pixels if r > 225 and g > 225 and b > 225)
     middle_changed = sum(1 for pixel in middle_pixels if pixel != background)
     dark_bottom = sum(1 for r, g, b in bottom_pixels if r < 45 and g < 35 and b < 35)
 
+    assert leaked_source_header / max(1, len(source_header_pixels)) < 0.02
     assert middle_changed / max(1, len(middle_pixels)) > 0.12
     assert dark_bottom / max(1, len(bottom_pixels)) < 0.45
 
@@ -1636,11 +1642,13 @@ def test_system_overlay_fallback_draws_menu_schedule(tmp_path, monkeypatch):
 
 
 def test_system_overlay_fallback_shared_price_reference_uses_poster_layout(tmp_path, monkeypatch):
-    from PIL import Image
+    from PIL import Image, ImageDraw
 
     source = tmp_path / "background.png"
     target = tmp_path / "overlay.png"
-    Image.new("RGB", (1080, 1350), (82, 42, 30)).save(source)
+    with Image.new("RGB", (1080, 1350), (82, 42, 30)) as src_img:
+        ImageDraw.Draw(src_img).rectangle((540, 80, 1040, 280), fill=(255, 255, 255))
+        src_img.save(source)
 
     real_exists = render_module.Path.exists
     real_run = render_module.subprocess.run
@@ -1670,20 +1678,24 @@ def test_system_overlay_fallback_shared_price_reference_uses_poster_layout(tmp_p
     with Image.open(target).convert("RGB") as img:
         width, height = img.size
         title_region = img.crop((40, 30, int(width * 0.60), int(height * 0.24)))
+        source_header_region = img.crop((int(width * 0.50), int(height * 0.06), width - 40, int(height * 0.24)))
         item_region = img.crop((40, int(height * 0.42), width - 40, height - 70))
         middle_region = img.crop((40, int(height * 0.46), width - 40, int(height * 0.68)))
         bottom_strip = img.crop((0, int(height * 0.82), width, height))
         title_pixels = list(title_region.getdata())
+        source_header_pixels = list(source_header_region.getdata())
         pixels = list(item_region.getdata())
         middle_pixels = list(middle_region.getdata())
         bottom_pixels = list(bottom_strip.getdata())
     title_near_white = sum(1 for r, g, b in title_pixels if r > 225 and g > 218 and b > 195)
+    leaked_source_header = sum(1 for r, g, b in source_header_pixels if r > 225 and g > 225 and b > 225)
     near_white = sum(1 for r, g, b in pixels if r > 225 and g > 218 and b > 195)
     gold_outline = sum(1 for r, g, b in pixels if r > 210 and 140 < g < 230 and b < 120)
     middle_changed = sum(1 for pixel in middle_pixels if pixel != (82, 42, 30))
     dark_bottom = sum(1 for r, g, b in bottom_pixels if r < 45 and g < 35 and b < 35)
 
     assert title_near_white / max(1, len(title_pixels)) < 0.30
+    assert leaked_source_header / max(1, len(source_header_pixels)) < 0.02
     assert near_white / max(1, len(pixels)) < 0.45
     assert gold_outline / max(1, len(pixels)) < 0.05
     assert middle_changed / max(1, len(middle_pixels)) > 0.12

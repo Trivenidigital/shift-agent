@@ -2150,6 +2150,12 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
             if box_y1 > int(height * 0.50):
                 raise FlyerRenderError("critical text overlay does not fit")
             if shared_snack_poster:
+                # Style-only references often carry a bright source masthead.
+                # Mask the header deterministically before drawing the real
+                # customer copy so OCR misses cannot ship copied source branding.
+                mask_y1 = int(height * 0.335)
+                draw.rectangle((0, 0, width, mask_y1), fill=(8, 5, 6, 224))
+                draw.rectangle((0, mask_y1 - 18, width, mask_y1), fill=(8, 5, 6, 150))
                 y = box_y0 + 10
                 for f, color, ln in card_lines:
                     if getattr(f, "size", 18) >= title_font.size:
@@ -2420,6 +2426,7 @@ with Image.open(src) as img:
         bh=sum(int(getattr(f,"size",18)*1.2) for f,_c,_t in card)+34; by1=by0+bh
         if by1 > int(height*.50): raise SystemExit("critical text overlay does not fit")
         if shared_snack_poster:
+            my1=int(height*.335); draw.rectangle((0,0,width,my1),fill=(8,5,6,224)); draw.rectangle((0,my1-18,width,my1),fill=(8,5,6,150))
             y=by0+10
             for f,c,ln in card:
                 if getattr(f,"size",18) >= tf.size: color=(255,226,130,255)
