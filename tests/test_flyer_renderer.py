@@ -2678,7 +2678,14 @@ def test_style_only_reference_image_is_sent_to_model_for_art_direction(tmp_path,
     assert "For this reference-only request" in content[0]["text"]
     image_parts = [part for part in content if part.get("type") == "image_url"]
     assert len(image_parts) == 1
-    assert image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
+    data_url = image_parts[0]["image_url"]["url"]
+    assert data_url.startswith("data:image/png;base64,")
+    sent_bytes = base64.b64decode(data_url.split(",", 1)[1])
+    assert sent_bytes != reference.read_bytes()
+    from PIL import Image
+    with Image.open(io.BytesIO(sent_bytes)) as proxied:
+        assert proxied.size[0] <= 192
+        assert proxied.size[1] < 320
 
 
 def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path, monkeypatch):

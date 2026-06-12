@@ -1785,6 +1785,35 @@ def _project_reference_assets(project: FlyerProject):
     ]
 
 
+def _style_reference_proxy_bytes(path: Path) -> tuple[str, bytes] | None:
+    """Return a non-readable reference proxy for visual art direction only.
+
+    Style-only reference requests are allowed to borrow palette, density, and
+    cuisine cues, but the image model must not receive readable source flyer
+    text or logos it can copy into the generated background.
+    """
+    pil = _load_pillow()
+    if pil is None:
+        return None
+    Image, _ImageDraw, _ImageFont = pil
+    try:
+        from PIL import ImageFilter  # type: ignore
+        with Image.open(path) as ref:
+            ref = ref.convert("RGB")
+            if ref.width <= 0 or ref.height <= 0:
+                return None
+            target_w = min(192, max(72, ref.width // 7))
+            target_h = max(72, int(ref.height * (target_w / ref.width)))
+            resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+            proxy = ref.resize((target_w, target_h), resample=resample)
+            proxy = proxy.filter(ImageFilter.GaussianBlur(radius=max(2.5, target_w * 0.035)))
+            buf = io.BytesIO()
+            proxy.save(buf, format="PNG", optimize=True)
+            return "image/png", buf.getvalue()
+    except Exception:
+        return None
+
+
 def _image_message_content(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, repair_instruction: str = "", scene_direction=None):
     prompt = _image_prompt(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction, scene_direction=scene_direction)
     parts: list[dict] = [{"type": "text", "text": prompt}]
@@ -1802,7 +1831,14 @@ def _image_message_content(project: FlyerProject, *, concept_id: str, output_for
         mime = asset.mime_type or mimetypes.guess_type(str(path))[0] or "image/png"
         if not mime.startswith("image/"):
             continue
-        data_url = f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+        if _style_only_reference_requested(project) and asset.kind == "reference_image":
+            proxy = _style_reference_proxy_bytes(path)
+            if proxy is None:
+                continue
+            mime, image_bytes = proxy
+        else:
+            image_bytes = path.read_bytes()
+        data_url = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
         parts.append({"type": "image_url", "image_url": {"url": data_url}})
     return parts if len(parts) > 1 else prompt
 
