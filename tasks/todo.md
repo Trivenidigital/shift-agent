@@ -1931,7 +1931,7 @@ Review/verification:
 - [x] Add failing regression for reference-style snack flyer quality floor.
 - [x] Implement the narrow quality-floor change.
 - [x] Verify locally with focused tests, visual artifact inspection, compile, and diff checks.
-- [ ] Commit, deploy, and run production smoke if code changes are made.
+- [x] Commit, deploy, and run production smoke if code changes are made.
 
 Review/verification:
 - Root cause 1: style-only reference requests told the model to match the reference flyer but did not attach the reference image in `_image_message_content`, so the model invented a generic food background.
@@ -1940,3 +1940,7 @@ Review/verification:
 - Red tests: reference image payload test returned plain text content; shared-price hierarchy test found 0 changed middle pixels; exact-text fallback test saw `deterministic-renderer`/`medium`.
 - Green tests: `python -m pytest tests/test_flyer_renderer.py tests/test_flyer_generate_concepts.py tests/test_flyer_reference_quality.py -q` -> 166 passed, 8 warnings.
 - Broader gate: `python -m pytest tests/test_flyer_reference_quality.py tests/test_flyer_renderer.py tests/test_flyer_schemas.py tests/test_flyer_create_project.py tests/test_cf_router_flyer_routing.py tests/test_flyer_reference_extract.py tests/test_flyer_visual_qa.py tests/test_flyer_generate_concepts.py -q` -> 833 passed, 8 warnings. `py_compile` and `git diff --check` passed. Local visual probe written to `C:\Testing\flyer-prod-quality-overlay.png`.
+- Rollout follow-up: production replay exposed two more customer-quality blockers before final send: direct integrated poster mode could still omit/misspell reference-derived facts, and readable source flyer text could leak into the generated background. Added style-reference proxying, source-header masking, and forced materialized style-only reference facts through the deterministic overlay renderer.
+- Final verification: focused route/proxy/mask tests passed; broad Flyer gate passed `834 passed, 10 warnings`; `py_compile` for renderer/generator and `git diff --check` passed.
+- Deploy: final runtime commit `cbaa3fc6` deployed to `main-vps` as `deploy-20260612-223837-cbaa3fc6`; deploy smoke passed and post-deploy health returned HTTP 200 `{"ok":true}` with both services active. Pilot readiness remains blocked only by the unrelated muted Pushover credentials warning.
+- Production recovery: regenerated `F0152` as asset `A0013` (`sha256=3b82c78828ebdbf0a591beb86e8202cdebce5194ccbd030740b9d157c053c337`), QA passed with no blockers/warnings, preview copied to `C:\Testing\f0152-prod-grade-cbaa3fc7.png`, and sent to `201975216009469@lid` with outbound message `3EB042F6F0A2D9F02F886F` at `2026-06-12T22:42:33Z`.
