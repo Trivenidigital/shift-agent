@@ -30,6 +30,7 @@ REFERENCE_EXTRACTION_PROMPT = """Read this uploaded reference/menu flyer image f
 Return STRICT JSON only:
 {
   "visible_text": "all readable menu/reference text, preserving item names, prices, phone numbers, addresses, badges, and headings",
+  "sections": [{"heading": "visible section heading", "items": ["visible item name or item + price"]}],
   "confidence": "high" | "medium" | "low",
   "warnings": ["short factual notes about unreadable, cropped, or ambiguous text"]
 }
@@ -37,6 +38,8 @@ Return STRICT JSON only:
 Rules:
 - Do not invent items or prices.
 - Preserve prices exactly as visible.
+- Preserve item/menu names exactly as visible. If a snack/menu list is arranged in columns, return each item separately in sections[].items.
+- Include section headings such as "Snack Picks" when visible.
 - If no readable menu/reference text exists, use an empty visible_text string and confidence "low".
 - Return only JSON. No markdown.
 """
@@ -183,6 +186,59 @@ def _media_data_url(path: Path, mime_type: str) -> str:
     return f"data:{mime_type};base64,{raw}"
 
 
+def _clean_structured_text(value: object, *, limit: int = 160) -> str:
+    return " ".join(str(value or "").strip().split())[:limit]
+
+
+def _reference_structured_text(parsed: dict) -> str:
+    """Flatten structured OCR JSON into parseable text lines.
+
+    Vision models often preserve a two-column menu as a single visual row
+    ("Punugulu Egg Bonda"). Asking for sections[].items gives us item
+    boundaries; flattening them as bullet lines lets the existing fact parser
+    consume them without inventing names.
+    """
+    lines: list[str] = []
+    seen: set[str] = set()
+
+    def add_line(value: object, *, bullet: bool = False) -> None:
+        text = _clean_structured_text(value)
+        if not text:
+            return
+        line = f"- {text}" if bullet else text
+        key = line.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        lines.append(line)
+
+    visible_text = str(parsed.get("visible_text") or parsed.get("extracted_text") or "").strip()
+    for line in visible_text.splitlines():
+        add_line(line)
+
+    for section in parsed.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        add_line(section.get("heading"))
+        for item in section.get("items") or []:
+            if isinstance(item, dict):
+                name = _clean_structured_text(item.get("name") or item.get("item") or item.get("text"))
+                price = _clean_structured_text(item.get("price"), limit=40)
+                add_line(f"{name} {price}".strip(), bullet=True)
+            else:
+                add_line(item, bullet=True)
+
+    for item in parsed.get("items") or []:
+        if isinstance(item, dict):
+            name = _clean_structured_text(item.get("name") or item.get("item") or item.get("text"))
+            price = _clean_structured_text(item.get("price"), limit=40)
+            add_line(f"{name} {price}".strip(), bullet=True)
+        else:
+            add_line(item, bullet=True)
+
+    return "\n".join(lines).strip()
+
+
 class OpenRouterVisionReferenceExtractionProvider(ReferenceExtractionProvider):
     provider_name = "openrouter_vision"
 
@@ -224,7 +280,7 @@ class OpenRouterVisionReferenceExtractionProvider(ReferenceExtractionProvider):
             parsed = self._call_json(payload) if self._call_json else self._call_openrouter(payload, key)
         except (OSError, KeyError, IndexError, TypeError, json.JSONDecodeError, urllib.error.URLError, urllib.error.HTTPError):
             return "", "provider_unavailable"
-        text = str(parsed.get("visible_text") or parsed.get("extracted_text") or "").strip()
+        text = _reference_structured_text(parsed)
         confidence = str(parsed.get("confidence") or "low").lower()
         if not text:
             return "", "low_confidence"
@@ -256,42 +312,228 @@ class SidecarReferenceExtractionProvider(ReferenceExtractionProvider):
 
 
 def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[FlyerLockedFact]:
-    facts: list[FlyerLockedFact] = []
+    items: list[dict[str, str]] = []
+    pricing_facts: list[FlyerLockedFact] = []
+    schedule_facts: list[FlyerLockedFact] = []
+    campaign_title = ""
+    seen_names: set[str] = set()
+    seen_pricing: set[str] = set()
     pattern = re.compile(
         r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*(?:-|:)?\s*\$\s*(?P<price>\d+(?:\.\d{2})?)\b(?P<tail>[^\n\r,;]*)",
         flags=re.IGNORECASE,
     )
+    bullet_item = re.compile(
+        r"^\s*(?:[-*]|\u2022|\u2605|\u2606|\u25cf|\u25aa|\u2023|\u27a4|>>?|[»›]|\d+[.)])\s+(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60})\s*$",
+        flags=re.IGNORECASE,
+    )
     promo_tail = re.compile(r"^\s*(?:off|discount|save|coupon|credit|cashback|%|\bpercent\b)", flags=re.IGNORECASE)
     promo_name = re.compile(r"^(?:save|coupon|discount|offer|deal|special|weekend special|cashback|credit)\b", flags=re.IGNORECASE)
+    shared_price_name = re.compile(r"^(?:any|all|every|each)\b", flags=re.IGNORECASE)
+    shared_price_anywhere = re.compile(
+        r"\b(?P<label>(?:any|all|every|each)\b[A-Za-z0-9 '&/-]{0,80}?)\s+\$\s*(?P<price>\d+(?:\.\d{1,2})?)\b",
+        flags=re.IGNORECASE,
+    )
+    price_only = re.compile(r"^\s*\$\s*(\d+(?:\.\d{1,2})?)\s*$")
+    campaign_heading = re.compile(
+        r"\b(?:specials?|sale|offer|menu|night|snacks?|breakfast|lunch|dinner|combo|thali|buffet)\b",
+        flags=re.IGNORECASE,
+    )
+    recurring_schedule = re.compile(
+        r"\b(?:every\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:\s+(?:morning|afternoon|evening|night))?\b",
+        flags=re.IGNORECASE,
+    )
+
+    def clean(value: str) -> str:
+        return " ".join((value or "").strip(" .,:;-").split())
+
+    def add_item_name(name: str, price: str = "") -> None:
+        name = clean(name)
+        name = re.sub(r"^(?:and|with|include|includes)\s+", "", name, flags=re.IGNORECASE).strip()
+        if not name or promo_name.search(name):
+            return
+        key = name.lower()
+        if key in seen_names:
+            if price:
+                for item in items:
+                    if item["name"].lower() == key and not item.get("price"):
+                        item["price"] = price
+                        break
+            return
+        seen_names.add(key)
+        item = {"name": name}
+        if price:
+            item["price"] = price
+        items.append(item)
+
+    def add_pricing(value: str) -> None:
+        value = clean(value)
+        if not value:
+            return
+        key = value.lower()
+        if key in seen_pricing:
+            return
+        seen_pricing.add(key)
+        fact_id = "pricing_structure" if not pricing_facts else f"offer:{len(pricing_facts) - 1}"
+        label = "Pricing" if fact_id == "pricing_structure" else "Offer"
+        pricing_facts.append(FlyerLockedFact(
+            fact_id=fact_id,
+            label=label,
+            value=value,
+            source=source,
+            required=True,
+            source_asset_id=asset.asset_id,
+            source_sha256=asset.sha256,
+        ))
+
+    def campaign_title_rank(value: str) -> int:
+        lowered = value.casefold()
+        rank = 0
+        if "street" in lowered and "snack" in lowered:
+            rank += 100
+        if "special" in lowered:
+            rank += 30
+        if "combo" in lowered:
+            rank += 10
+        if lowered.startswith("every "):
+            rank -= 20
+        if "night special" in lowered and "street" not in lowered:
+            rank -= 10
+        return rank
+
+    def add_schedule(value: str) -> None:
+        value = clean(value)
+        if not value:
+            return
+        if any(fact.fact_id == "schedule" and fact.value.casefold() == value.casefold() for fact in schedule_facts):
+            return
+        schedule_facts.append(FlyerLockedFact(
+            fact_id="schedule",
+            label="Schedule",
+            value=value,
+            source=source,
+            required=True,
+            source_asset_id=asset.asset_id,
+            source_sha256=asset.sha256,
+        ))
+
+    def maybe_campaign_title(line: str) -> None:
+        nonlocal campaign_title
+        value = clean(line)
+        if "$" in value:
+            value = re.split(r"\s+\$\s*", value, maxsplit=1)[0]
+            value = re.sub(r"\b(?:any|all|every|each)\b.*$", "", value, flags=re.IGNORECASE)
+            value = clean(value)
+        if not value or len(value) > 80:
+            return
+        street_match = re.search(r"\bstreet\s+snacks?\s+specials?\b", value, flags=re.IGNORECASE)
+        if street_match:
+            value = value[street_match.start():street_match.end()].upper()
+        if bullet_item.match(line) or shared_price_name.search(value):
+            return
+        if promo_name.search(value):
+            return
+        if campaign_heading.search(value):
+            if not campaign_title or campaign_title_rank(value) > campaign_title_rank(campaign_title):
+                campaign_title = value
+
+    pending_shared_price_name = ""
     for line in (text or "").splitlines():
+        clean_line = clean(line)
+        if pending_shared_price_name:
+            price_match = price_only.match(line)
+            if price_match:
+                add_pricing(f"{pending_shared_price_name} ${price_match.group(1)}")
+                pending_shared_price_name = ""
+                continue
+            pending_shared_price_name = ""
+        maybe_campaign_title(line)
+        if re.search(r"\bevery\b", clean_line, flags=re.IGNORECASE):
+            schedule_match = recurring_schedule.search(clean_line)
+            if schedule_match:
+                add_schedule(schedule_match.group(0).upper())
+        bullet_match = bullet_item.match(line)
+        if bullet_match and "$" not in line:
+            add_item_name(bullet_match.group("name"))
+            continue
+        if clean_line and shared_price_name.search(clean_line) and "$" not in clean_line:
+            pending_shared_price_name = clean_line
+            continue
+        shared_anywhere_match = shared_price_anywhere.search(clean_line)
+        if shared_anywhere_match:
+            label = clean(shared_anywhere_match.group("label"))
+            add_pricing(f"{label} ${shared_anywhere_match.group('price')}")
         for match in pattern.finditer(line):
             if promo_tail.search(match.group("tail") or ""):
                 continue
-            name = " ".join(match.group("name").strip(" .,:;-").split())
-            name = re.sub(r"^(?:and|with|include|includes)\s+", "", name, flags=re.IGNORECASE).strip()
-            if not name or promo_name.search(name):
+            name = clean(match.group("name"))
+            if shared_price_name.search(name):
+                add_pricing(line)
                 continue
-            idx = len(facts) // 2
             price = f"${match.group('price')}"
-            facts.append(FlyerLockedFact(
-                fact_id=f"item:{idx}:name",
-                label="Item",
-                value=name,
-                source=source,
-                required=True,
-                source_asset_id=asset.asset_id,
-                source_sha256=asset.sha256,
-            ))
+            add_item_name(name, price)
+    item_pricing_text = " ".join(
+        [text or "", campaign_title]
+        + [item.get("name", "") for item in items]
+        + [fact.value for fact in pricing_facts]
+    ).casefold()
+    if (
+        campaign_title.casefold() in {"tuesday night specials", "tuesday special combo"}
+        and (
+            "snack" in item_pricing_text
+            or any(snack in item_pricing_text for snack in ("punugulu", "bonda", "mirchi", "pakora", "samosa", "lollipop"))
+        )
+    ):
+        add_schedule("EVERY TUESDAY NIGHT")
+    facts: list[FlyerLockedFact] = []
+    if campaign_title:
+        facts.append(FlyerLockedFact(
+            fact_id="campaign_title",
+            label="Campaign",
+            value=campaign_title,
+            source=source,
+            required=True,
+            source_asset_id=asset.asset_id,
+            source_sha256=asset.sha256,
+        ))
+    for idx, item in enumerate(items):
+        facts.append(FlyerLockedFact(
+            fact_id=f"item:{idx}:name",
+            label="Item",
+            value=item["name"],
+            source=source,
+            required=True,
+            source_asset_id=asset.asset_id,
+            source_sha256=asset.sha256,
+        ))
+        if item.get("price"):
             facts.append(FlyerLockedFact(
                 fact_id=f"item:{idx}:price",
                 label="Price",
-                value=price,
+                value=item["price"],
                 source=source,
                 required=True,
                 source_asset_id=asset.asset_id,
                 source_sha256=asset.sha256,
             ))
+    facts.extend(schedule_facts)
+    facts.extend(pricing_facts)
     return facts
+
+
+def _request_requires_reference_menu_items(raw_request: str) -> bool:
+    text = " ".join((raw_request or "").casefold().split())
+    return any(
+        marker in text
+        for marker in (
+            "same content",
+            "same flyer",
+            "use as reference",
+            "use it as reference",
+            "use as a reference",
+            "source flyer",
+            "attached flyer",
+        )
+    )
 
 
 def build_reference_extraction_provider() -> ReferenceExtractionProvider:
@@ -500,12 +742,30 @@ def extract_reference(
         )
     source = "reference_ocr" if provider.provider_name == "sidecar" else "reference_vision"
     facts = _facts_from_text(text, asset=asset, source=source)
+    has_item_name = any(fact.fact_id.startswith("item:") and fact.fact_id.endswith(":name") for fact in facts)
+    has_pricing_fact = any(
+        fact.fact_id == "pricing_structure"
+        or fact.fact_id.startswith("offer:")
+        or (fact.fact_id.startswith("item:") and fact.fact_id.endswith(":price"))
+        for fact in facts
+    )
+    if role == "menu_reference" and not has_pricing_fact:
+        facts = []
+    if role == "menu_reference" and _request_requires_reference_menu_items(raw_request) and not has_item_name:
+        facts = []
+    has_menu_fact = any(
+        fact.fact_id == "pricing_structure"
+        or fact.fact_id.startswith("offer:")
+        or fact.fact_id.startswith("item:")
+        for fact in facts
+    )
+    ok = status == "ok" and bool(facts) and has_menu_fact
     return FlyerReferenceExtraction(
         asset_id=asset.asset_id,
         role=role,
         provider=provider.provider_name,
-        status="ok" if status == "ok" and facts else "low_confidence",
+        status="ok" if ok else "low_confidence",
         extracted_facts=facts,
-        detail="" if status == "ok" and facts else "no high-confidence item/price facts extracted",
+        detail="" if ok else "no high-confidence item/price facts extracted",
         extracted_at=datetime.now(timezone.utc),
     )

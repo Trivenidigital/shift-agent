@@ -231,6 +231,34 @@ def _explicit_english_only(text: str) -> bool:
     )
 
 
+def _normalize_recurring_time(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", value or "").strip(" .")
+    normalized = re.sub(
+        r"\b(every|monday|tuesday|wednesday|thursday|friday|saturday|sunday|from|to)\b",
+        lambda match: match.group(1).capitalize()
+        if match.group(1).lower() in {
+            "every",
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        }
+        else match.group(1).lower(),
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        r"\b(am|pm)\b",
+        lambda match: match.group(1).upper(),
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    return normalized
+
+
 def _load_store(path: Path) -> FlyerProjectStore:
     if not path.exists():
         return FlyerProjectStore()
@@ -307,7 +335,7 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
     formats: list[str] = []
 
     event_match = re.search(
-        r"\b(?:need|create|make|generate)?\s*(?:a\s+)?(?:flyer|flier|poster|banner)\s+for\s+(.+?)(?=\s+\b(?:promoting|offering|featuring|advertising|announcing)\b|\s+(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b|\.|$)",
+        r"\b(?:need|create|make|generate)?\s*(?:a\s+)?(?:flyer|flier|poster|banner)\s+for\s+(.+?)(?=,\s*(?:every|any|include|includes|with|from)\b|\s+\b(?:promoting|offering|featuring|advertising|announcing|every|any|include|includes|with|from)\b|\s+(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b|\.|$)",
         text,
         flags=re.IGNORECASE,
     )
@@ -349,8 +377,18 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
             candidate = datetime(year + 1, month, day, tzinfo=timezone.utc).date()
         date_value = candidate.isoformat()
 
-    time_match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b", text, flags=re.IGNORECASE)
-    if time_match:
+    recurring_time_match = re.search(
+        r"\b(every\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+        r"\s+from\s+\d{1,2}(?::\d{2})?\s*(?:AM|PM)?\s+(?:to|-)\s+"
+        r"\d{1,2}(?::\d{2})?\s*(?:AM|PM))\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if recurring_time_match:
+        time_value = _normalize_recurring_time(recurring_time_match.group(1))
+    else:
+        time_match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b", text, flags=re.IGNORECASE)
+    if not recurring_time_match and time_match:
         hour = int(time_match.group(1))
         minute = int(time_match.group(2) or "00")
         meridiem = time_match.group(3).upper()
@@ -536,11 +574,39 @@ def _copy_reference_asset(
     )
 
 
-def _reference_failure_requires_manual_review(extraction) -> bool:
+def _has_reference_inspiration_fallback_facts(locked_facts) -> bool:
+    """True when a failed old-reference read can still proceed truthfully.
+
+    "Use as reference" is visual inspiration. If the customer/profile facts
+    already contain a concrete campaign/headline/offer/item to render, a
+    reference OCR/parser miss must not dead-end the project.
+    """
+    useful_fact_ids = {
+        "campaign_title",
+        "headline",
+        "tagline",
+        "pricing_structure",
+        "schedule",
+        "promotion_end",
+    }
+    for fact in locked_facts or []:
+        fact_id = str(getattr(fact, "fact_id", "") or "")
+        source = str(getattr(fact, "source", "") or "")
+        value = str(getattr(fact, "value", "") or "").strip()
+        if not value or source not in {"customer_text", "customer_profile"}:
+            continue
+        if fact_id in useful_fact_ids or fact_id.startswith(("offer:", "item:")):
+            return True
+    return False
+
+
+def _reference_failure_requires_manual_review(extraction, *, locked_facts=None) -> bool:
     if extraction.status not in {"provider_unavailable", "unsupported", "low_confidence"}:
         return False
     if extraction.status == "unsupported":
         return True
+    if extraction.role == "old_flyer_reference" and _has_reference_inspiration_fallback_facts(locked_facts):
+        return False
     return extraction.role in {"menu_reference", "old_flyer_reference", "source_edit_template", "unsupported"}
 
 
@@ -621,6 +687,9 @@ def main() -> int:
             chat_id=args.chat_id,
             customers_path=Path(args.customer_state_path),
         )
+        project_chat_id = args.chat_id
+        if not project_chat_id and customer is not None:
+            project_chat_id = str(getattr(customer, "primary_chat_id", "") or "")
         fields = _hydrate_fields_from_customer(
             _extract_fields(args.raw_request, now=now),
             customer=customer,
@@ -700,7 +769,7 @@ def main() -> int:
             status=status,
             customer_phone=args.customer_phone,
             customer_id=customer.customer_id if customer is not None else "",
-            chat_id=args.chat_id,
+            chat_id=project_chat_id,
             created_at=now,
             updated_at=now,
             original_message_id=args.message_id,
@@ -772,7 +841,7 @@ def main() -> int:
                 "locked_facts": locked_facts,
                 "updated_at": now,
             }
-            if _reference_failure_requires_manual_review(extraction):
+            if _reference_failure_requires_manual_review(extraction, locked_facts=current.locked_facts):
                 updates["status"] = "manual_edit_required"
                 updates["manual_review"] = make_manual_review(
                     reason_code=_manual_reason_for_reference_failure(extraction),

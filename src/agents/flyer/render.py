@@ -690,12 +690,14 @@ def _menu_item_lines(project: FlyerProject) -> list[str]:
     if not text:
         return []
     body = _strip_request_instruction_prefix(text)
+    explicit_item_list = False
     match = re.search(
-        r"\bitems?\b\s*(?:to include in the flyer\s*)?[\"“”']?(.+?)(?:[\"“”']?\s*\.\s*(?:timings?|time)\b|$)",
+        r"\bitems?\b\s*(?:to include in the flyer\s*)?\s*:?\s*[\"“”']?(.+?)(?:[\"“”']?\s*\.\s*(?:timings?|time)\b|[\"“”']?\s*$)",
         text,
         flags=re.IGNORECASE,
     )
     if match:
+        explicit_item_list = True
         body = _strip_request_instruction_prefix(match.group(1))
     pairs = re.findall(
         r"([A-Za-z][A-Za-z '&/-]{1,60}?)\s*\$\s*(\d+(?:\.\d{1,2})?)",
@@ -730,6 +732,21 @@ def _menu_item_lines(project: FlyerProject) -> list[str]:
             continue
         seen.add(key)
         items.append(line)
+    if not items and explicit_item_list:
+        for token in re.split(r",|;|\n|•", body):
+            clean_name = re.sub(r"^\s*(?:and|include|items?)\s*:?\s*", "", token, flags=re.IGNORECASE)
+            clean_name = re.sub(r"\s+", " ", clean_name).strip(" ,.-\"':")
+            if not clean_name or len(clean_name) < 2:
+                continue
+            if re.search(r"\$|\d", clean_name):
+                continue
+            if len(clean_name.split()) > 5 or len(clean_name) > 48:
+                continue
+            key = _normalize_fact_text(clean_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(clean_name)
     if _context_has(_category_context(project), SALON_CATEGORY_TERMS) and "other hair services" in body.lower():
         line = "Other hair services available"
         key = _normalize_fact_text(line)
@@ -785,7 +802,19 @@ def _compact_menu_overlay_allowed(project: FlyerProject, menu_items: list[str] |
     the opposite: every item/price pair came from customer text and must be shown.
     """
     items = menu_items if menu_items is not None else _menu_item_lines(project)
-    if len(items) <= MAX_DETAIL_FACTS or len(items) > MAX_COMPACT_MENU_DETAIL_FACTS:
+    if not items or len(items) > MAX_COMPACT_MENU_DETAIL_FACTS:
+        return False
+    structured_extra_count = sum(
+        1
+        for fact in project.locked_facts
+        if str(getattr(fact, "value", "") or "").strip()
+        and (
+            fact.fact_id == "pricing_structure"
+            or fact.fact_id == "promotion_end"
+            or fact.fact_id.startswith("offer:")
+        )
+    )
+    if len(items) <= MAX_DETAIL_FACTS and len(items) + structured_extra_count <= MAX_DETAIL_FACTS:
         return False
     grouped: dict[int, dict[str, str]] = {}
     for fact in project.locked_facts:
@@ -808,6 +837,34 @@ def _same_text(left: str, right: str) -> bool:
     return bool(norm_left and norm_left == norm_right)
 
 
+_INSTRUCTION_TITLE_TOKENS = {
+    "create",
+    "make",
+    "generate",
+    "design",
+    "need",
+    "new",
+    "flyer",
+    "flier",
+    "poster",
+    "banner",
+    "multiple",
+    "multi",
+    "page",
+    "pages",
+    "single",
+    "please",
+}
+
+
+def _instruction_title_fragment(value: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+    if not normalized:
+        return False
+    tokens = normalized.split()
+    return bool(tokens) and all(token in _INSTRUCTION_TITLE_TOKENS for token in tokens)
+
+
 def _display_title(project: FlyerProject) -> str:
     business = fact_value(project, "business_name", fallback="")
     for value in (
@@ -816,7 +873,7 @@ def _display_title(project: FlyerProject) -> str:
         project.fields.event_or_business_name or "",
     ):
         clean = _clean_fact_text(value)
-        if clean and not _same_text(clean, business):
+        if clean and not _same_text(clean, business) and not _instruction_title_fragment(clean):
             return clean
     return "Specials"
 
@@ -875,6 +932,22 @@ def _fact_lines(project: FlyerProject) -> list[str]:
     return lines
 
 
+def _shared_price_offer_parts(details: list[str]) -> tuple[str, str, str]:
+    for detail in details:
+        match = re.search(
+            r"^(?P<label>(?:any|all|every|each)\b.{0,80}?)\s+(?P<price>\$\s*\d+(?:\.\d{1,2})?)\s*$",
+            detail,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        label = _clean_fact_text(match.group("label"))
+        price = re.sub(r"\s+", "", match.group("price"))
+        if label and price:
+            return f"{label} {price}", label, price
+    return "", "", ""
+
+
 def _menu_overlay_payload(project: FlyerProject) -> dict[str, object]:
     # P0-2: must mirror collect_text_facts() so the drawn image matches the
     # text manifest S5 will OCR-validate against. Same locked-fact preference
@@ -886,12 +959,16 @@ def _menu_overlay_payload(project: FlyerProject) -> dict[str, object]:
     # required fact, not just items. Exclude anything already shown as a menu item.
     item_norms = {_normalize_fact_text(i) for i in items}
     extras = [c for c in _detail_clauses(project) if _normalize_fact_text(c) not in item_norms]
+    shared_offer_text, shared_offer_label, shared_offer_price = _shared_price_offer_parts(extras)
     return {
         "business": _display_business_name(project),
         "title": _display_title(project),
         "schedule": schedule,
         "items": items,
         "extras": extras,
+        "shared_offer_text": shared_offer_text,
+        "shared_offer_label": shared_offer_label,
+        "shared_offer_price": shared_offer_price,
         "location": fact_value(project, "location", fallback=project.fields.venue_or_location) or "",
         "contact": fact_value(project, "contact_phone", fallback=project.fields.contact_info) or "",
     }
@@ -938,6 +1015,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
             "Render the following text exactly. Do not summarize, paraphrase, invent, or omit these customer facts.",
             "Title is the campaign/product/service headline; Business/brand is the account identity.",
             "Do not add delivery, catering, payment, ordering-channel, or service-availability claims unless they appear below.",
+            "Do not add secondary brand names, business category subtitles, taglines, slogans, freshness/availability claims, or extra promotional copy unless they appear below.",
         ]
     business_name = _display_business_name(project)
     if business_name:
@@ -955,9 +1033,12 @@ def _poster_copy_block(project: FlyerProject) -> str:
         lines.append(f"Contact: {plan.contact}")
     if plan.items:
         lines.append(f"Menu items to feature - exactly {len(plan.items)} items:")
-        lines.append(f"Create exactly {len(plan.items)} menu item cards. Each listed item must appear once and only once; do not duplicate any item card.")
+        lines.append(f"Create exactly {len(plan.items)} menu item cards. Each listed item must appear once and only once; use the exact item name and do not duplicate any item.")
         for name, price in plan.items:
-            lines.append(f"- {name} - {price}")
+            if price:
+                lines.append(f"- {name} - {price}")
+            else:
+                lines.append(f"- {name}")
     if plan.detail_lines:
         lines.append("Offer details:")
         for detail in plan.detail_lines:
@@ -980,6 +1061,26 @@ def _request_asks_reference_extraction(project: FlyerProject) -> bool:
     ))
 
 
+def _has_materialized_reference_menu_facts(project: FlyerProject) -> bool:
+    def is_menu_fact(fact) -> bool:
+        fact_id = str(getattr(fact, "fact_id", "") or "")
+        return (
+            fact_id == "pricing_structure"
+            or fact_id.startswith("offer:")
+            or fact_id.startswith("item:")
+        )
+
+    for extraction in getattr(project, "reference_extractions", []) or []:
+        if getattr(extraction, "status", "") != "ok":
+            continue
+        if any(is_menu_fact(fact) for fact in getattr(extraction, "extracted_facts", []) or []):
+            return True
+    return any(
+        str(getattr(fact, "source", "") or "").startswith("reference_") and is_menu_fact(fact)
+        for fact in getattr(project, "locked_facts", []) or []
+    )
+
+
 def _needs_reference_extraction(project: FlyerProject) -> bool:
     """A reference IMAGE is attached AND the request asks to read its items/prices
     out of the image — so that copy isn't in `collect_text_facts()` and only the
@@ -994,6 +1095,8 @@ def _needs_reference_extraction(project: FlyerProject) -> bool:
         getattr(asset, "kind", "") == "reference_image"
         for asset in _project_reference_assets(project)
     )
+    if has_reference_image and _has_materialized_reference_menu_facts(project):
+        return False
     return has_reference_image and _request_asks_reference_extraction(project)
 
 
@@ -1027,13 +1130,18 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
         return False
     if not _is_food_or_grocery_project(project):
         return False
+    reference_menu = _style_only_reference_requested(project) and _has_materialized_reference_menu_facts(project)
     has_reference_image = any(
         getattr(asset, "kind", "") == "reference_image"
         for asset in _project_reference_assets(project)
     )
-    if has_reference_image:
+    if reference_menu:
+        return False
+    if has_reference_image and not reference_menu:
         return False
     items = _menu_item_lines(project)
+    if reference_menu and len(items) > 12:
+        return False
     if len(items) > 10 and not _compact_menu_overlay_allowed(project, items):
         return False
     plan = _poster_copy_plan(project)
@@ -1067,6 +1175,11 @@ def _background_only_eligible(project: FlyerProject) -> bool:
 
 def _poster_layout_requirements(project: FlyerProject) -> str:
     plan = _poster_copy_plan(project)
+    footer_safe_area = (
+        "\n- Put location/contact in a dedicated footer band with generous bottom padding; "
+        "keep every footer character at least 6% of the canvas height above the bottom edge "
+        "so WhatsApp/status previews never crop the phone number."
+    )
     if _background_only_eligible(project):
         # Reserved-zone background contract (P1 slice 2): exact text is composited
         # deterministically as overlay panels, so the model produces only the
@@ -1079,6 +1192,15 @@ def _poster_layout_requirements(project: FlyerProject) -> str:
             "- Reserve visually calm, low-detail zones in the upper-left and along the bottom for "
             "those overlay panels; keep the rich hero imagery in the center and right.\n"
         )
+        if _style_only_reference_requested(project):
+            reserve += (
+                "- Do not draw ornamental frames, corner flourishes, border lines, blank menu panels, "
+                "card rectangles, signboards, badges, fake logos, or price-sticker shapes from the source/reference. "
+                "Leave reserved zones as natural negative space, not visible empty boxes.\n"
+                "- Use full-bleed editorial food photography across the canvas. Reserved zones should be "
+                "soft-focus or darkened natural food/restaurant background, not flat blank beige/green columns "
+                "or large empty color blocks.\n"
+            )
         if plan.items:
             if not _is_food_or_grocery_project(project):
                 return reserve + (
@@ -1088,7 +1210,7 @@ def _poster_layout_requirements(project: FlyerProject) -> str:
                 )
             return reserve + (
                 "- Use appetizing food photography and a premium restaurant ambiance (warm lighting, "
-                "garnished dishes, tasteful gold/green/red accents, ornamental texture).\n"
+                "garnished dishes, tasteful gold/green/red accents, subtle texture).\n"
                 "- Use product-specific close-up food imagery based on the listed menu items. "
                 "Avoid generic buffet, dining-family, or unrelated stock-food scenes.\n"
                 "- Match the attached reference flyer's premium retail feel (palette, density, motifs) "
@@ -1109,19 +1231,25 @@ def _poster_layout_requirements(project: FlyerProject) -> str:
                 "- If a service line is listed without a price, show it as a service label without a price, dash, or placeholder.\n"
                 "- Keep text large, high-contrast, and centered inside its designed panels; avoid tiny text blocks and generic lower-third captions.\n"
                 "- Keep the visual language category-safe for the stated business type; avoid restaurant/grocery and cultural-celebration styling unless the customer explicitly asks for it."
+                f"{footer_safe_area}"
             )
         return (
-            "- Build a full restaurant/menu poster, not a background template.\n"
+            "- Build a full restaurant/menu poster with a premium/editorial restaurant-advertisement finish, not an ordinary menu template or background template.\n"
             "- Use product-specific close-up food imagery based on the listed menu items.\n"
-            "- Use a brand masthead at the top, a large high-impact promo title, item cards with food imagery and prices, and a footer for location/contact.\n"
-            "- Item cards must look like designed menu tiles, with each item name and price paired together.\n"
-            "- Match the attached reference flyer's dense premium retail hierarchy when a reference is provided: bold headline, food photography, gold/green/red accents, ornamental separators, and phone-readable cards.\n"
-            "- Keep text large, high-contrast, and centered inside its designed panels; avoid tiny text blocks and generic lower-third captions."
+            "- Use one strong hero food image, a confident brand masthead, a large high-impact promo title, a typographic offer lockup, a supporting menu list, and a restrained footer for location/contact.\n"
+            "- Item cards must look like designed menu tiles; include item cards with food imagery and prices where provided while avoiding cluttered coupon-grid styling.\n"
+            "- Avoid boxed menu table layouts, large bordered rows, coupon-grid compositions, and default menu-card templates unless the customer explicitly asks for a menu-board style.\n"
+            "- Keep item names and prices paired in clean typography; use minimal separators and spacing instead of heavy boxes.\n"
+            "- If there is only one item/price, make it the single typographic offer lockup and use food photos as unlabeled supporting imagery. Do not repeat the same item/price in multiple panels.\n"
+            "- Match the attached reference flyer's dense premium retail hierarchy when a reference is provided, but remove ordinary template clutter: fewer borders, better spacing, sharp food photography, and phone-readable type.\n"
+            "- Keep text large, high-contrast, and intentionally placed; avoid tiny text blocks, generic lower-third captions, and over-framed template sections."
+            f"{footer_safe_area}"
         )
     return (
         "- Build a complete finished poster flyer, not a blank background.\n"
         "- Use a clear brand masthead, large headline, offer/details section, visual proof imagery, and footer contact/action area.\n"
         "- Keep all required customer text large, high-contrast, and readable on a phone screen."
+        f"{footer_safe_area}"
     )
 
 
@@ -1129,6 +1257,13 @@ def _reference_extraction_instruction(project: FlyerProject) -> str:
     refs = _project_reference_assets(project)
     if not refs:
         return "- none"
+    if _style_only_reference_requested(project):
+        return (
+            "- Use the attached reference image for visual style only and source content extraction/broad inspiration: "
+            "palette, cuisine/category, motifs, and layout density.\n"
+            "- Do NOT copy, preserve, or render the source/reference business name, logo, masthead, address, phone, "
+            "slogan, item-board text, or price text unless it matches the controlled customer copy above."
+        )
     if _background_only_eligible(project):
         # Background-only eligible (English + reference already extracted): the
         # deterministic overlay owns all text, so the model must NOT recreate any
@@ -1358,13 +1493,18 @@ def _brand_asset_prompt(project: FlyerProject) -> str:
     active_assets = [*_active_brand_assets(project), *_project_reference_assets(project)]
     if not active_assets:
         return "- none"
+    style_only = _style_only_reference_requested(project)
     return "\n".join(
-        f"- {_brand_asset_prompt_label(asset)}; notes={_sanitize_visual_context(getattr(asset, 'notes', '') or 'none')}"
+        f"- {_brand_asset_prompt_label(asset, style_only=style_only)}; notes={_sanitize_visual_context(getattr(asset, 'notes', '') or 'none')}"
         for asset in active_assets[-4:]
     )
 
 
-def _brand_asset_prompt_label(asset: FlyerAsset) -> str:
+def _brand_asset_prompt_label(asset: FlyerAsset, *, style_only: bool = False) -> str:
+    if style_only and asset.kind in {"template", "reference_image"}:
+        return "style/content reference only (do not copy source branding or text)"
+    if style_only and asset.kind == "logo" and not _looks_like_owned_logo_asset(asset):
+        return "style reference only (do not copy source branding or text)"
     if asset.kind == "logo":
         return "saved logo reference"
     if asset.kind == "template":
@@ -1372,6 +1512,36 @@ def _brand_asset_prompt_label(asset: FlyerAsset) -> str:
     if asset.kind == "reference_image":
         return "uploaded reference image"
     return f"{str(asset.kind).replace('_', ' ')} reference"
+
+
+def _style_only_reference_requested(project: FlyerProject) -> bool:
+    text = f"{project.raw_request or ''} {project.fields.notes or ''}".lower()
+    return any(
+        marker in text
+        for marker in (
+            "customer chose path 2",
+            "use as reference",
+            "only as a reference",
+            "reference/inspiration",
+            "do not copy the source flyer branding",
+            "do not copy another business",
+        )
+    )
+
+
+def _looks_like_owned_logo_asset(asset: FlyerAsset) -> bool:
+    notes = str(getattr(asset, "notes", "") or "").lower()
+    return not re.search(r"\b(?:theme|style|reference|sample|redesign|going forward)\b", notes)
+
+
+def _generation_brand_assets(project: FlyerProject):
+    assets = _active_brand_assets(project)
+    if not _style_only_reference_requested(project):
+        return assets
+    return [
+        asset for asset in assets
+        if asset.kind == "logo" and _looks_like_owned_logo_asset(asset)
+    ]
 
 
 def _project_disables_saved_brand_assets(project: FlyerProject) -> bool:
@@ -1565,7 +1735,7 @@ def _design_direction(project: FlyerProject, concept_id: str) -> str:
         return "modern digital marketing services flyer, crisp business visuals, clear service offer cards, contemporary agency layout"
     if _is_food_or_grocery_project(project):
         style_by_concept = {
-            "C1": "premium ethnic grocery or restaurant poster, bold food photography, tasteful retail hierarchy",
+            "C1": "premium/editorial restaurant advertisement, magazine-quality food advertising, bold appetizing hero photography, restrained typography, tasteful retail hierarchy",
             "C2": "warm cultural food promotion with regional motifs only when they fit the customer, elegant food spread, refined community-event look",
             "C3": "modern social-media food creative, crisp editorial layout, bright promotional palette, restaurant-quality design",
         }
@@ -1575,7 +1745,7 @@ def _design_direction(project: FlyerProject, concept_id: str) -> str:
 
 def _quality_bar(project: FlyerProject) -> str:
     if _is_food_or_grocery_project(project):
-        return "- Strong hierarchy, appetizing food visuals when food is relevant, tasteful cultural warmth only when it fits the customer, no empty beige space."
+        return "- Strong hierarchy, magazine-quality food advertising, one strong hero food image when food is relevant, restrained typography, and no ordinary menu template, boxed menu table, large bordered rows, or empty beige space."
     return "- Strong hierarchy, category-appropriate service visuals, modern local-business polish, and category-safe styling unless a different theme is explicitly requested."
 
 
@@ -1617,18 +1787,60 @@ def _project_reference_assets(project: FlyerProject):
     ]
 
 
+def _style_reference_proxy_bytes(path: Path) -> tuple[str, bytes] | None:
+    """Return a non-readable reference proxy for visual art direction only.
+
+    Style-only reference requests are allowed to borrow palette, density, and
+    cuisine cues, but the image model must not receive readable source flyer
+    text or logos it can copy into the generated background.
+    """
+    pil = _load_pillow()
+    if pil is None:
+        return None
+    Image, _ImageDraw, _ImageFont = pil
+    try:
+        from PIL import ImageFilter  # type: ignore
+        with Image.open(path) as ref:
+            ref = ref.convert("RGB")
+            if ref.width <= 0 or ref.height <= 0:
+                return None
+            target_w = min(192, max(72, ref.width // 7))
+            target_h = max(72, int(ref.height * (target_w / ref.width)))
+            resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+            proxy = ref.resize((target_w, target_h), resample=resample)
+            proxy = proxy.filter(ImageFilter.GaussianBlur(radius=max(2.5, target_w * 0.035)))
+            buf = io.BytesIO()
+            proxy.save(buf, format="PNG", optimize=True)
+            return "image/png", buf.getvalue()
+    except Exception:
+        return None
+
+
 def _image_message_content(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, repair_instruction: str = "", scene_direction=None):
     prompt = _image_prompt(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction, scene_direction=scene_direction)
     parts: list[dict] = [{"type": "text", "text": prompt}]
-    brand_assets = _active_brand_assets(project)
+    brand_assets = _generation_brand_assets(project)
     refs = _project_reference_assets(project)
+    if _style_only_reference_requested(project):
+        # Style-only means "do not copy source branding/text", not "hide the
+        # reference from the art director." The prompt and QA already enforce
+        # text/source-brand safety; the model still needs the uploaded flyer to
+        # match hierarchy, palette, cuisine cues, and density.
+        refs = [asset for asset in refs if asset.kind == "reference_image"]
     selected_assets = [*brand_assets[-1:], *refs[-1:]] if refs else [*brand_assets[-2:]]
     for asset in selected_assets:
         path = Path(asset.path)
         mime = asset.mime_type or mimetypes.guess_type(str(path))[0] or "image/png"
         if not mime.startswith("image/"):
             continue
-        data_url = f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+        if _style_only_reference_requested(project) and asset.kind == "reference_image":
+            proxy = _style_reference_proxy_bytes(path)
+            if proxy is None:
+                continue
+            mime, image_bytes = proxy
+        else:
+            image_bytes = path.read_bytes()
+        data_url = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
         parts.append({"type": "image_url", "image_url": {"url": data_url}})
     return parts if len(parts) > 1 else prompt
 
@@ -1685,6 +1897,12 @@ def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str,
     reference_instruction = _reference_preservation_instruction(project)
     sanitized_style = _sanitize_visual_context(project.fields.style_preference or "festive, clean, professional")
     visual_context = _visual_prompt_context(project)
+    if _style_only_reference_requested(project):
+        brand_quality_line = "- Use only the registered customer identity and controlled customer copy as identity source."
+        reference_quality_line = "- For this reference-only request, do NOT preserve source/reference branding or text; treat references as inspiration only."
+    else:
+        brand_quality_line = "- If customer brand assets are listed, preserve the business identity and use the active logo/template as the visual reference."
+        reference_quality_line = "- If an uploaded reference image/template is attached, preserve its visual identity and offer category but replace stale readable facts with the controlled customer copy above."
     _business = _sanitize_visual_context(
         fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or ""
     )
@@ -1730,7 +1948,7 @@ Autonomous repair instruction:
             )
     else:
         text_contract_line = (
-            "- The final image must already contain the finished flyer text, menu item cards, prices, "
+            "- The final image must already contain the finished flyer text, menu items, prices, "
             "schedule, location, and contact when those facts are provided."
         )
         if _integrated_poster_eligible(project):
@@ -1776,8 +1994,8 @@ Quality bar:
 {_quality_bar(project)}
 - High contrast and readable on a phone screen.
 {text_contract_line}
-- If customer brand assets are listed, preserve the business identity and use the active logo/template as the visual reference.
-- If an uploaded reference image/template is attached, preserve its visual identity and offer category but replace stale readable facts with the controlled customer copy above.
+{brand_quality_line}
+{reference_quality_line}
 - If there is no one-time date, present the recurring schedule clearly instead of inventing a date.
 - Avoid QR codes, fake logos, watermarks, unreadable microtext, and placeholder glyph boxes.
 {language_block}
@@ -1804,6 +2022,12 @@ def build_image_generation_prompt(
 def _reference_preservation_instruction(project: FlyerProject) -> str:
     if not [*_active_brand_assets(project), *_project_reference_assets(project)]:
         return "- none"
+    if _style_only_reference_requested(project):
+        return (
+            "- Treat attached images/templates as style/content inspiration only, not as identity source.\n"
+            "- Use the registered customer business identity and controlled customer copy as the only text/brand source.\n"
+            "- Do not preserve, copy, or render source/reference business names, logos, mastheads, addresses, phone numbers, slogans, prices, or menu-board text."
+        )
     return (
         "- Use the attached image/logo/template as source of truth for visual identity.\n"
         "- Do not redesign from scratch.\n"
@@ -1907,7 +2131,7 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
         menu_payload = _menu_overlay_payload(project)
         if menu_payload["items"]:
             margin = max(28, int(width * 0.038))
-            title_font = _font(ImageFont, max(46, int(width * 0.062)), bold=True, text=str(menu_payload["title"]))
+            title_font = _font(ImageFont, max(42, int(width * 0.056)), bold=True, text=str(menu_payload["title"]))
             item_font = _font(ImageFont, max(28, int(width * 0.034)), bold=True)
             price_font = _font(ImageFont, max(30, int(width * 0.038)), bold=True)
             small_font = _font(ImageFont, max(19, int(width * 0.021)))
@@ -1920,7 +2144,13 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
             biz_font = _font(ImageFont, max(24, int(width * 0.030)), bold=True)
             business = str(menu_payload.get("business") or "").strip()
             title_text = str(menu_payload["title"]).strip()
-            box_x0, box_y0, box_x1 = margin, int(height * 0.026), int(width * 0.68)
+            shared_offer_text = str(menu_payload.get("shared_offer_text") or "").strip()
+            shared_offer_label = str(menu_payload.get("shared_offer_label") or "").strip()
+            shared_offer_price = str(menu_payload.get("shared_offer_price") or "").strip()
+            items = list(menu_payload["items"])
+            has_item_prices = any(_split_item_price(item)[1] for item in items)
+            shared_snack_poster = bool(shared_offer_price and items and not has_item_prices)
+            box_x0, box_y0, box_x1 = margin, int(height * 0.026), int(width * (0.58 if shared_offer_price else 0.68))
             inner_w = box_x1 - box_x0 - 44
             card_lines: list[tuple[object, tuple[int, int, int, int], str]] = []
             # Every required visible fact is fully wrapped — NO silent line caps
@@ -1949,26 +2179,137 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                     continue
                 if _same_text(value, title_text) or (business and _same_text(value, business)):
                     continue
+                if shared_offer_text and _same_text(value, shared_offer_text):
+                    continue
                 for ln in _wrap(draw, value, small_font, inner_w):
                     card_lines.append((small_font, (255, 236, 205, 250), ln))
             content_h = sum(int(getattr(f, "size", 18) * 1.2) for f, _c, _t in card_lines)
             box_y1 = box_y0 + content_h + 34
             if box_y1 > int(height * 0.50):
                 raise FlyerRenderError("critical text overlay does not fit")
-            draw.rounded_rectangle((box_x0 + 7, box_y0 + 7, box_x1 + 7, box_y1 + 7), radius=24, fill=(0, 0, 0, 70))
-            draw.rounded_rectangle((box_x0, box_y0, box_x1, box_y1), radius=24, fill=(255, 248, 224, 248), outline=(179, 37, 47, 235), width=3)
-            y = box_y0 + 18
-            for f, color, ln in card_lines:
-                if color[0] > 240 and color[1] > 200:
-                    color = (128, 22, 34, 255)
-                elif color[0] > 240:
-                    color = (50, 66, 42, 255)
-                draw.text((box_x0 + 22, y), ln, font=f, fill=color)
-                y += int(getattr(f, "size", 18) * 1.2)
+            if shared_snack_poster:
+                # Style-only references often carry a bright source masthead.
+                # Mask the header deterministically before drawing the real
+                # customer copy so OCR misses cannot ship copied source branding.
+                mask_y1 = int(height * 0.335)
+                draw.rectangle((0, 0, width, mask_y1), fill=(8, 5, 6, 224))
+                draw.rectangle((0, mask_y1 - 18, width, mask_y1), fill=(8, 5, 6, 150))
+                y = box_y0 + 10
+                for f, color, ln in card_lines:
+                    if getattr(f, "size", 18) >= title_font.size:
+                        text_color = (255, 226, 130, 255)
+                    elif getattr(f, "size", 18) >= biz_font.size:
+                        text_color = (255, 248, 222, 255)
+                    else:
+                        text_color = (255, 232, 174, 255)
+                    draw.text((box_x0 + 10 + 4, y + 4), ln, font=f, fill=(45, 8, 12, 190))
+                    draw.text((box_x0 + 10, y), ln, font=f, fill=text_color)
+                    y += int(getattr(f, "size", 18) * 1.2)
+            else:
+                draw.rounded_rectangle((box_x0 + 7, box_y0 + 7, box_x1 + 7, box_y1 + 7), radius=24, fill=(0, 0, 0, 70))
+                draw.rounded_rectangle((box_x0, box_y0, box_x1, box_y1), radius=24, fill=(255, 248, 224, 248), outline=(179, 37, 47, 235), width=3)
+                y = box_y0 + 18
+                for f, color, ln in card_lines:
+                    if color[0] > 240 and color[1] > 200:
+                        color = (128, 22, 34, 255)
+                    elif color[0] > 240:
+                        color = (50, 66, 42, 255)
+                    draw.text((box_x0 + 22, y), ln, font=f, fill=color)
+                    y += int(getattr(f, "size", 18) * 1.2)
+            if shared_offer_price and not shared_snack_poster:
+                badge_x0 = max(box_x1 + 18, int(width * 0.60))
+                badge_x1 = width - margin
+                badge_y0 = box_y0
+                badge_y1 = max(box_y1, badge_y0 + int(height * 0.115))
+                if badge_x1 - badge_x0 < int(width * 0.22) or badge_y1 > int(height * 0.50):
+                    raise FlyerRenderError("critical text overlay does not fit")
+                label_font = _font(ImageFont, max(22, int(width * 0.025)), bold=True, text=shared_offer_label)
+                badge_price_font = _font(ImageFont, max(56, int(width * 0.072)), bold=True, text=shared_offer_price)
+                draw.rounded_rectangle((badge_x0 + 5, badge_y0 + 5, badge_x1 + 5, badge_y1 + 5), radius=18, fill=(0, 0, 0, 72))
+                draw.rounded_rectangle((badge_x0, badge_y0, badge_x1, badge_y1), radius=18, fill=(92, 13, 24, 232), outline=(246, 214, 132, 230), width=2)
+                label_lines = _wrap(draw, shared_offer_label, label_font, badge_x1 - badge_x0 - 40)
+                label_y = badge_y0 + 18
+                for line in label_lines:
+                    draw.text((badge_x0 + 20, label_y), line, font=label_font, fill=(255, 242, 204, 255))
+                    label_y += int(label_font.size * 1.08)
+                price_bbox = draw.textbbox((0, 0), shared_offer_price, font=badge_price_font)
+                price_w = price_bbox[2] - price_bbox[0]
+                price_x = badge_x0 + max(20, (badge_x1 - badge_x0 - price_w) // 2)
+                draw.text((price_x + 2, badge_y1 - badge_price_font.size - 19 + 2), shared_offer_price, font=badge_price_font, fill=(0, 0, 0, 130))
+                draw.text((price_x, badge_y1 - badge_price_font.size - 19), shared_offer_price, font=badge_price_font, fill=(255, 255, 246, 255))
 
-            items = list(menu_payload["items"])
-            compact_menu = len(items) > MAX_DETAIL_FACTS
-            panel_top_ratio = 0.50 if compact_menu else 0.56
+            if shared_offer_price and not has_item_prices:
+                menu_panel = (margin, int(height * 0.405), int(width * 0.585), int(height * 0.875))
+                px0, py0, px1, py1 = menu_panel
+                draw.rounded_rectangle((px0 + 7, py0 + 7, px1 + 7, py1 + 7), radius=24, fill=(0, 0, 0, 68))
+                draw.rounded_rectangle(menu_panel, radius=24, fill=(18, 9, 9, 182), outline=(232, 184, 84, 210), width=2)
+                content_x0 = px0 + 22
+                content_x1 = px1 - 22
+                section_font = _font(ImageFont, max(22, int(width * 0.024)), bold=True, text="Snack Picks")
+                cols = 2 if width >= 900 and len(items) > 4 else 1
+                gap = 18
+                rows = (len(items) + cols - 1) // cols
+                top_pad = 72
+                row_gap = 8
+                col_w = (content_x1 - content_x0 - gap * (cols - 1)) // cols
+                row_h = ((py1 - py0 - top_pad - 22) - row_gap * (rows - 1)) // max(1, rows)
+                if row_h < 42:
+                    raise FlyerRenderError(f"menu overlay cannot fit all {len(items)} items (drew 0)")
+                item_font = _font(ImageFont, max(20, min(int(width * 0.027), row_h - 8)), bold=True)
+                heading_y = py0 + 18
+                draw.text((content_x0, heading_y), "Snack Picks", font=section_font, fill=(255, 225, 142, 255))
+                rule_y = heading_y + section_font.size + 8
+                draw.line((content_x0, rule_y, content_x1, rule_y), fill=(232, 184, 84, 145), width=2)
+                start_y = py0 + top_pad
+                for idx, item in enumerate(items):
+                    col = idx % cols
+                    row = idx // cols
+                    x = content_x0 + col * (col_w + gap)
+                    cy = start_y + row * (row_h + row_gap)
+                    if cy + row_h > py1 - 18:
+                        raise FlyerRenderError(f"menu overlay cannot fit all {len(items)} items (drew {idx})")
+                    name, _price = _split_item_price(item)
+                    name_lines = _wrap(draw, name, item_font, col_w - 34)
+                    name_y = cy + max(0, (row_h - len(name_lines) * int(item_font.size * 1.03)) // 2)
+                    dot_y = name_y + int(item_font.size * 0.48)
+                    draw.ellipse((x, dot_y - 5, x + 10, dot_y + 5), fill=(245, 207, 94, 255))
+                    for ln in name_lines:
+                        draw.text((x + 20 + 2, name_y + 2), ln, font=item_font, fill=(0, 0, 0, 130))
+                        draw.text((x + 20, name_y), ln, font=item_font, fill=(255, 247, 226, 255))
+                        name_y += int(item_font.size * 1.03)
+
+                deal_x0 = int(width * 0.61)
+                deal_y0 = int(height * 0.535)
+                deal_x1 = width - margin
+                deal_y1 = int(height * 0.775)
+                draw.rounded_rectangle((deal_x0 + 8, deal_y0 + 8, deal_x1 + 8, deal_y1 + 8), radius=24, fill=(0, 0, 0, 80))
+                draw.rounded_rectangle((deal_x0, deal_y0, deal_x1, deal_y1), radius=24, fill=(92, 13, 24, 232), outline=(246, 214, 132, 230), width=3)
+                draw.line((deal_x0 + 28, deal_y0 + 70, deal_x1 - 28, deal_y0 + 70), fill=(246, 214, 132, 210), width=2)
+                deal_label_font = _font(ImageFont, max(24, int(width * 0.028)), bold=True, text=shared_offer_label)
+                deal_price_font = _font(ImageFont, max(70, int(width * 0.083)), bold=True, text=shared_offer_price)
+                label_y = deal_y0 + 24
+                for line in _wrap(draw, shared_offer_label.upper(), deal_label_font, deal_x1 - deal_x0 - 56):
+                    draw.text((deal_x0 + 28, label_y), line, font=deal_label_font, fill=(255, 242, 204, 255))
+                    label_y += int(deal_label_font.size * 1.06)
+                price_bbox = draw.textbbox((0, 0), shared_offer_price, font=deal_price_font)
+                price_w = price_bbox[2] - price_bbox[0]
+                price_x = deal_x0 + max(24, (deal_x1 - deal_x0 - price_w) // 2)
+                price_y = deal_y1 - deal_price_font.size - 26
+                draw.text((price_x + 3, price_y + 3), shared_offer_price, font=deal_price_font, fill=(0, 0, 0, 145))
+                draw.text((price_x, price_y), shared_offer_price, font=deal_price_font, fill=(255, 255, 246, 255))
+
+                footer = " | ".join(str(v) for v in (menu_payload["location"], menu_payload["contact"]) if v)
+                if footer:
+                    footer_y0 = int(height * 0.935)
+                    footer_y1 = height - margin
+                    draw.rounded_rectangle((margin, footer_y0, width - margin, footer_y1), radius=16, fill=(18, 9, 9, 155), outline=(232, 184, 84, 110), width=1)
+                    footer_bbox = draw.textbbox((0, 0), footer, font=small_font)
+                    footer_y = footer_y0 + max(4, (footer_y1 - footer_y0 - (footer_bbox[3] - footer_bbox[1])) // 2)
+                    draw.text((margin + 18, footer_y), footer, font=small_font, fill=(255, 232, 176, 245))
+                img.save(target, format="PNG", optimize=True)
+                return
+            compact_menu = len(items) > MAX_DETAIL_FACTS or bool(shared_offer_price and len(items) >= 8)
+            panel_top_ratio = 0.42 if shared_offer_price and len(items) >= 8 else (0.50 if compact_menu else 0.56)
             panel = (margin, int(height * panel_top_ratio), width - margin, height - margin)
             draw.rounded_rectangle((panel[0] + 8, panel[1] + 8, panel[2] + 8, panel[3] + 8), radius=28, fill=(0, 0, 0, 75))
             draw.rounded_rectangle(panel, radius=28, fill=(255, 247, 222, 246), outline=(179, 37, 47, 238), width=4)
@@ -1983,6 +2324,8 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                     f"menu overlay cannot fit all {len(items)} items (drew 0)"
                 )
             gap = 16
+            if shared_offer_price and not has_item_prices:
+                cols = 2 if width >= 900 and len(items) > 4 else 1
             card_w = (px1 - px0 - 56 - gap * (cols - 1)) // cols
             # Size cards so the full allowed item count (MAX_DETAIL_FACTS = 10, i.e.
             # up to 5 two-column rows) fits the panel: subtract the start offset
@@ -2004,6 +2347,8 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
             elif rows >= 4:
                 item_font = _font(ImageFont, max(23, int(width * 0.029)), bold=True)
                 price_font = _font(ImageFont, max(24, int(width * 0.031)), bold=True)
+            if shared_offer_price and not has_item_prices:
+                item_font = _font(ImageFont, max(27, int(width * 0.030)), bold=True)
             start_y = py0 + top_pad
             for idx, item in enumerate(items):
                 col = idx % cols
@@ -2026,13 +2371,17 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                 name, price = _split_item_price(item)
                 price_bbox = draw.textbbox((0, 0), price, font=price_font)
                 price_w = price_bbox[2] - price_bbox[0]
-                text_w = max(160, card_w - price_w - 56)
+                text_w = max(160, card_w - price_w - 56) if price else card_w - 74
                 name_lines = _wrap(draw, name, item_font, text_w)
                 name_y = cy + max(18, (card_h - len(name_lines) * int(item_font.size * 1.05)) // 2)
+                if not price:
+                    dot_y = cy + card_h // 2
+                    draw.ellipse((x + 22, dot_y - 6, x + 34, dot_y + 6), fill=(180, 42, 50, 255))
                 for ln in name_lines:
-                    draw.text((x + 22, name_y), ln, font=item_font, fill=(64, 42, 32, 255))
+                    draw.text((x + (46 if not price else 22), name_y), ln, font=item_font, fill=(64, 42, 32, 255))
                     name_y += int(item_font.size * 1.05)
-                draw.text((x + card_w - 22 - price_w, cy + (card_h - price_font.size) // 2), price, font=price_font, fill=(150, 24, 38, 255))
+                if price:
+                    draw.text((x + card_w - 22 - price_w, cy + (card_h - price_font.size) // 2), price, font=price_font, fill=(150, 24, 38, 255))
             footer = " | ".join(str(v) for v in (menu_payload["location"], menu_payload["contact"]) if v)
             if footer:
                 draw.text((px0 + 28, py1 - 44), footer, font=small_font, fill=(54, 65, 48, 255))
@@ -2097,9 +2446,12 @@ with Image.open(src) as img:
     if menu.get("items"):
         biz=str(menu.get("business") or "").strip(); title=str(menu.get("title") or "").strip(); schedule=str(menu.get("schedule") or "").strip()
         items=list(menu.get("items") or []); footer=" | ".join(str(v) for v in (menu.get("location"),menu.get("contact")) if v)
-        tf=font(max(46,int(width*.062)),True,title); bf=font(max(24,int(width*.030)),True,biz)
+        shared_text=str(menu.get("shared_offer_text") or "").strip(); shared_label=str(menu.get("shared_offer_label") or "").strip(); shared_price=str(menu.get("shared_offer_price") or "").strip()
+        has_prices=any(re.search(r"\$\s*\d",str(item)) for item in items)
+        shared_snack_poster=bool(shared_price and items and not has_prices)
+        tf=font(max(42,int(width*.056)),True,title); bf=font(max(24,int(width*.030)),True,biz)
         sf=font(max(19,int(width*.021)),False); itemf=font(max(28,int(width*.034)),True); pricef=font(max(30,int(width*.038)),True)
-        bx0,by0,bx1=margin,int(height*.026),int(width*.68); inner=bx1-bx0-44
+        bx0,by0,bx1=margin,int(height*.026),int(width*(.58 if shared_price else .68)); inner=bx1-bx0-44
         card=[]
         if biz and biz.lower()!=title.lower():
             for ln in wrap(draw,biz,bf,inner): card.append((bf,(50,66,42,255),ln))
@@ -2107,19 +2459,81 @@ with Image.open(src) as img:
         if schedule:
             for ln in wrap(draw,schedule,sf,inner): card.append((sf,(128,22,34,255),ln))
         for extra in menu.get("extras") or []:
+            if shared_text and str(extra).strip().lower()==shared_text.lower(): continue
             for ln in wrap(draw,str(extra),sf,inner): card.append((sf,(50,66,42,255),ln))
         bh=sum(int(getattr(f,"size",18)*1.2) for f,_c,_t in card)+34; by1=by0+bh
         if by1 > int(height*.50): raise SystemExit("critical text overlay does not fit")
-        draw.rounded_rectangle((bx0+7,by0+7,bx1+7,by1+7), radius=24, fill=(0,0,0,70))
-        draw.rounded_rectangle((bx0,by0,bx1,by1), radius=24, fill=(255,248,224,248), outline=(179,37,47,235), width=3)
-        y=by0+18
-        for f,c,ln in card:
-            draw.text((bx0+22,y), ln, font=f, fill=c); y += int(getattr(f,"size",18)*1.2)
-        compact=len(items)>10
-        panel=(margin,int(height*(.50 if compact else .56)),width-margin,height-margin)
+        if shared_snack_poster:
+            my1=int(height*.335); draw.rectangle((0,0,width,my1),fill=(8,5,6,224)); draw.rectangle((0,my1-18,width,my1),fill=(8,5,6,150))
+            y=by0+10
+            for f,c,ln in card:
+                if getattr(f,"size",18) >= tf.size: color=(255,226,130,255)
+                elif getattr(f,"size",18) >= bf.size: color=(255,248,222,255)
+                else: color=(255,232,174,255)
+                draw.text((bx0+14,y+4), ln, font=f, fill=(45,8,12,190))
+                draw.text((bx0+10,y), ln, font=f, fill=color)
+                y += int(getattr(f,"size",18)*1.2)
+        else:
+            draw.rounded_rectangle((bx0+7,by0+7,bx1+7,by1+7), radius=24, fill=(0,0,0,70))
+            draw.rounded_rectangle((bx0,by0,bx1,by1), radius=24, fill=(255,248,224,248), outline=(179,37,47,235), width=3)
+            y=by0+18
+            for f,c,ln in card:
+                draw.text((bx0+22,y), ln, font=f, fill=c); y += int(getattr(f,"size",18)*1.2)
+        if shared_price and not shared_snack_poster:
+            gx0=max(bx1+18,int(width*.60)); gx1=width-margin; gy0=by0; gy1=max(by1,gy0+int(height*.115))
+            if gx1-gx0 < int(width*.22) or gy1 > int(height*.50): raise SystemExit("critical text overlay does not fit")
+            lf=font(max(22,int(width*.025)),True,shared_label); pf=font(max(56,int(width*.072)),True,shared_price)
+            draw.rounded_rectangle((gx0+5,gy0+5,gx1+5,gy1+5), radius=18, fill=(0,0,0,72))
+            draw.rounded_rectangle((gx0,gy0,gx1,gy1), radius=18, fill=(92,13,24,232), outline=(246,214,132,230), width=2)
+            ly=gy0+18
+            for ln in wrap(draw,shared_label,lf,gx1-gx0-40):
+                draw.text((gx0+20,ly),ln,font=lf,fill=(255,242,204,255)); ly += int(lf.size*1.08)
+            pbox=draw.textbbox((0,0),shared_price,font=pf); pw=pbox[2]-pbox[0]; px=gx0+max(20,(gx1-gx0-pw)//2)
+            draw.text((px+2,gy1-pf.size-17),shared_price,font=pf,fill=(0,0,0,130))
+            draw.text((px,gy1-pf.size-19),shared_price,font=pf,fill=(255,255,246,255))
+        if shared_price and not has_prices:
+            panel=(margin,int(height*.405),int(width*.585),int(height*.875))
+            px0,py0,px1,py1=panel
+            draw.rounded_rectangle((px0+7,py0+7,px1+7,py1+7), radius=24, fill=(0,0,0,68))
+            draw.rounded_rectangle(panel, radius=24, fill=(18,9,9,182), outline=(232,184,84,210), width=2)
+            cx0=px0+22; cx1=px1-22; secf=font(max(22,int(width*.024)),True,"Snack Picks")
+            cols=2 if width>=900 and len(items)>4 else 1; gap=18; rows=(len(items)+cols-1)//cols; top_pad=72; row_gap=8
+            colw=(cx1-cx0-gap*(cols-1))//cols; rowh=((py1-py0-top_pad-22)-row_gap*(rows-1))//max(1,rows)
+            if rowh < 42: raise SystemExit(f"menu overlay cannot fit all {len(items)} items (drew 0)")
+            itemf=font(max(20,min(int(width*.027),rowh-8)),True)
+            hy=py0+18; draw.text((cx0,hy),"Snack Picks",font=secf,fill=(255,225,142,255))
+            ry=hy+secf.size+8; draw.line((cx0,ry,cx1,ry),fill=(232,184,84,145),width=2)
+            start=py0+top_pad
+            for idx,item in enumerate(items):
+                col=idx%cols; row=idx//cols; x=cx0+col*(colw+gap); cy=start+row*(rowh+row_gap)
+                if cy+rowh > py1-18: raise SystemExit(f"menu overlay cannot fit all {len(items)} items (drew {idx})")
+                name=str(item).strip(); lines2=wrap(draw,name,itemf,colw-34); ny=cy+max(0,(rowh-len(lines2)*int(itemf.size*1.03))//2); dy=ny+int(itemf.size*.48)
+                draw.ellipse((x,dy-5,x+10,dy+5),fill=(245,207,94,255))
+                for ln in lines2:
+                    draw.text((x+22,ny+2),ln,font=itemf,fill=(0,0,0,130)); draw.text((x+20,ny),ln,font=itemf,fill=(255,247,226,255)); ny += int(itemf.size*1.03)
+            dx0=int(width*.61); dy0=int(height*.535); dx1=width-margin; dy1=int(height*.775)
+            draw.rounded_rectangle((dx0+8,dy0+8,dx1+8,dy1+8), radius=24, fill=(0,0,0,80))
+            draw.rounded_rectangle((dx0,dy0,dx1,dy1), radius=24, fill=(92,13,24,232), outline=(246,214,132,230), width=3)
+            draw.line((dx0+28,dy0+70,dx1-28,dy0+70), fill=(246,214,132,210), width=2)
+            lf=font(max(24,int(width*.028)),True,shared_label); pf=font(max(70,int(width*.083)),True,shared_price)
+            ly=dy0+24
+            for ln in wrap(draw,shared_label.upper(),lf,dx1-dx0-56):
+                draw.text((dx0+28,ly),ln,font=lf,fill=(255,242,204,255)); ly += int(lf.size*1.06)
+            pbox=draw.textbbox((0,0),shared_price,font=pf); pw=pbox[2]-pbox[0]; px=dx0+max(24,(dx1-dx0-pw)//2); py=dy1-pf.size-26
+            draw.text((px+3,py+3),shared_price,font=pf,fill=(0,0,0,145))
+            draw.text((px,py),shared_price,font=pf,fill=(255,255,246,255))
+            if footer:
+                fy0=int(height*.935); fy1=height-margin
+                draw.rounded_rectangle((margin,fy0,width-margin,fy1), radius=16, fill=(18,9,9,155), outline=(232,184,84,110), width=1)
+                fbox=draw.textbbox((0,0),footer,font=sf); fy=fy0+max(4,(fy1-fy0-(fbox[3]-fbox[1]))//2)
+                draw.text((margin+18,fy),footer,font=sf,fill=(255,232,176,245))
+            target.parent.mkdir(parents=True, exist_ok=True); img.save(target, format="PNG", optimize=True); raise SystemExit(0)
+        compact=len(items)>10 or bool(shared_price and len(items)>=8)
+        panel=(margin,int(height*(.42 if shared_price and len(items)>=8 else (.50 if compact else .56))),width-margin,height-margin)
         draw.rounded_rectangle((panel[0]+8,panel[1]+8,panel[2]+8,panel[3]+8), radius=28, fill=(0,0,0,75))
         draw.rounded_rectangle(panel, radius=28, fill=(255,247,222,246), outline=(179,37,47,238), width=4)
         px0,py0,px1,py1=panel; cols=3 if compact and width>=900 else (2 if width>=900 and len(items)>3 else 1); gap=16
+        if shared_price and not has_prices: cols=2 if width>=900 and len(items)>4 else 1
         if len(items)>18: raise SystemExit(f"menu overlay cannot fit all {len(items)} items (drew 0)")
         cardw=(px1-px0-56-gap*(cols-1))//cols; rows=(len(items)+cols-1)//cols
         top_pad=24 if compact else 34; row_gap=8 if compact else 12; footer_reserve=48 if compact else 62
@@ -2130,6 +2544,7 @@ with Image.open(src) as img:
             itemf=font(max(21,int(width*.026)),True); pricef=font(max(22,int(width*.028)),True)
         elif rows>=4:
             itemf=font(max(23,int(width*.029)),True); pricef=font(max(24,int(width*.031)),True)
+        if shared_price and not has_prices: itemf=font(max(27,int(width*.030)),True)
         def split_price(item):
             m=re.search(r"(.+?)\\s+(\\$\\s*\\d+(?:\\.\\d{1,2})?)$", str(item).strip())
             return (str(item).strip(),"") if not m else (re.sub(r"\\bfor$","",m.group(1).strip(),flags=re.I).strip(), m.group(2).replace(" ",""))
@@ -2140,10 +2555,12 @@ with Image.open(src) as img:
             draw.rounded_rectangle((x+5,cy+5,x+cardw+5,cy+cardh+5), radius=18, fill=(0,0,0,45))
             draw.rounded_rectangle((x,cy,x+cardw,cy+cardh), radius=18, fill=(255,253,244,245), outline=(223,176,72,235), width=3)
             name,price=split_price(item); pbox=draw.textbbox((0,0),price,font=pricef); pw=pbox[2]-pbox[0]
-            name_lines=wrap(draw,name,itemf,max(160,cardw-pw-56)); ny=cy+max(10,(cardh-len(name_lines)*int(itemf.size*1.05))//2)
+            name_lines=wrap(draw,name,itemf,max(160,cardw-pw-56) if price else cardw-74); ny=cy+max(10,(cardh-len(name_lines)*int(itemf.size*1.05))//2)
+            if not price:
+                dy=cy+cardh//2; draw.ellipse((x+22,dy-6,x+34,dy+6),fill=(180,42,50,255))
             for ln in name_lines:
-                draw.text((x+22,ny),ln,font=itemf,fill=(64,42,32,255)); ny += int(itemf.size*1.05)
-            draw.text((x+cardw-22-pw,cy+(cardh-pricef.size)//2),price,font=pricef,fill=(150,24,38,255))
+                draw.text((x+(46 if not price else 22),ny),ln,font=itemf,fill=(64,42,32,255)); ny += int(itemf.size*1.05)
+            if price: draw.text((x+cardw-22-pw,cy+(cardh-pricef.size)//2),price,font=pricef,fill=(150,24,38,255))
         if footer: draw.text((px0+28,py1-44),footer,font=sf,fill=(54,65,48,255))
         target.parent.mkdir(parents=True, exist_ok=True); img.save(target, format="PNG", optimize=True); raise SystemExit(0)
     panel_h=min(int(height*.60),max(int(height*.24),58+len(lines)*max(30,int(width*.032))))

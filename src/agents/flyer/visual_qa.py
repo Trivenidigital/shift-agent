@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import base64
+import difflib
 import hashlib
 import json
 import mimetypes
@@ -857,6 +858,63 @@ def _item_price_pair_blockers(project: FlyerProject, raw_text: str) -> list[str]
     return blockers
 
 
+def _near_duplicate_item_blockers(project: FlyerProject, raw_text: str) -> list[str]:
+    item_re = re.compile(r"^item:(?P<index>\d+):name$")
+    expected: list[tuple[str, str]] = []
+    for fact in getattr(project, "locked_facts", []) or []:
+        if not item_re.match(str(getattr(fact, "fact_id", "") or "")):
+            continue
+        value = str(getattr(fact, "value", "") or "").strip()
+        norm = re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+        if value and norm:
+            expected.append((value, norm))
+    if not expected:
+        return []
+
+    expected_by_norm = {norm: value for value, norm in expected}
+    exact_counts = {norm: 0 for _value, norm in expected}
+    blockers: list[str] = []
+    seen_bad: set[str] = set()
+    skip_line = re.compile(
+        r"\b(?:specials?|snacks?|contact|kitchen|address|street|every|tuesday|price|menu)\b|[$+@]|\d{3,}",
+        flags=re.IGNORECASE,
+    )
+    for raw_line in (raw_text or "").splitlines():
+        line = re.sub(r"^[\s\-*•★●▪‣➤>]+", "", raw_line).strip()
+        if not line or skip_line.search(line):
+            # Keep exact menu-item lines even if they contain "snack/special" etc.
+            norm_for_exact = re.sub(r"[^a-z0-9]+", " ", line.casefold()).strip()
+            if norm_for_exact not in expected_by_norm:
+                continue
+        norm = re.sub(r"[^a-z0-9]+", " ", line.casefold()).strip()
+        if not norm:
+            continue
+        if norm in exact_counts:
+            exact_counts[norm] += 1
+            continue
+        for expected_value, expected_norm in expected:
+            if abs(len(norm) - len(expected_norm)) > 8:
+                continue
+            expected_tokens = expected_norm.split()
+            norm_tokens = norm.split()
+            if not expected_tokens or not norm_tokens:
+                continue
+            # Require token overlap so unrelated short labels do not trip the
+            # sequence-ratio check.
+            if expected_tokens[-1] not in norm_tokens and not set(expected_tokens).intersection(norm_tokens):
+                continue
+            if difflib.SequenceMatcher(None, norm, expected_norm).ratio() >= 0.78:
+                key = f"{expected_norm}\0{norm}"
+                if key not in seen_bad:
+                    seen_bad.add(key)
+                    blockers.append(f"near-duplicate item visible: expected {expected_value} but saw {line}")
+                break
+    for expected_value, expected_norm in expected:
+        if exact_counts.get(expected_norm, 0) > 1:
+            blockers.append(f"duplicate item visible: {expected_value}")
+    return blockers
+
+
 def _inferred_item_coverage_blockers(project: FlyerProject, raw_text: str) -> list[str]:
     """Intent-aware QA (bounded-creative-planner slice 3): every planner-inferred
     item (source='hermes_inferred') that the project committed to MUST be rendered.
@@ -1150,6 +1208,8 @@ _BLOCK_TIER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^missing required visible fact: item:\d+:name$"), "missing_item_name"),
     (re.compile(r"^item price mismatch: item:\d+ expected "), "item_price_mismatch"),
     (re.compile(r"^duplicate item price visible: item:\d+ "), "duplicate_item_price"),
+    (re.compile(r"^near-duplicate item visible: "), "near_duplicate_item"),
+    (re.compile(r"^duplicate item visible: "), "duplicate_item"),
     (re.compile(r"^internal asset id visible: "), "internal_asset_id"),
     # bounded-creative-planner: a committed inferred item that did not render is a
     # block-tier intent failure (explicit, not implicit-via-default; Codex r5 #2).
@@ -1512,6 +1572,7 @@ def run_visual_qa(
         ):
             blockers.append(f"missing required visible fact: {fact.fact_id}")
     blockers.extend(_item_price_pair_blockers(project, extracted_text))
+    blockers.extend(_near_duplicate_item_blockers(project, extracted_text))
     blockers.extend(_unexpected_phone_blockers(project, extracted_text))
     # Source-contract negative-assertion gate: any value in
     # forbidden_substrings (populated upstream from brand/phone/address

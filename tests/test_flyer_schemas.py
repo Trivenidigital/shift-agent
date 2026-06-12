@@ -61,7 +61,7 @@ def test_flyer_config_defaults_are_safe_and_cost_bounded():
     assert cfg.concept_count == 1
     assert cfg.max_revision_rounds == 6
     assert cfg.draft_image_model == "deterministic-renderer"
-    assert cfg.draft_image_quality == "low"
+    assert cfg.draft_image_quality == "high"
     assert cfg.final_image_model == "deterministic-renderer"
     assert cfg.final_image_quality == "high"
     assert cfg.edit_image_model == "gpt-image-1"
@@ -80,7 +80,7 @@ def test_flyer_config_defaults_are_safe_and_cost_bounded():
     assert cfg.source_edit_provider_policy.emergency_fallback.provider == "manual_review"
     assert cfg.resolve_draft_render_provider().provider == "local"
     assert cfg.resolve_draft_render_provider().model == "deterministic-renderer"
-    assert cfg.resolve_draft_render_provider().quality == "low"
+    assert cfg.resolve_draft_render_provider().quality == "high"
     assert cfg.resolve_final_render_provider().model == "deterministic-renderer"
     assert cfg.resolve_source_edit_render_provider().provider == "manual_review"
     assert cfg.resolve_source_edit_render_provider().model == "manual_review"

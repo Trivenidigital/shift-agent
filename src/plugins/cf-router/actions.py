@@ -1889,7 +1889,11 @@ _REFERENCE_CONCEPT_ADAPTATION_RE = re.compile(
     r"|"
     r"\b(?:make|create|design|generate)\s+(?:a\s+)?(?:new\s+)?"
     r"(?:flyer|flier|poster|banner|creative|graphic)\s+"
-    r"(?:similar\s+to|inspired\s+by)\s+(?:this|the|attached|uploaded)\b",
+    r"(?:similar\s+to|inspired\s+by)\s+(?:this|the|attached|uploaded)\b"
+    r"|"
+    r"\b(?:make|create|design|generate)\s+(?:a\s+|the\s+)?same\s+"
+    r"(?:flyer|flier|poster|banner|creative|graphic)\b"
+    r"(?=[\s\S]{0,180}\b(?:same\s+content|theme|style|look)\b)",
     re.IGNORECASE,
 )
 
@@ -2636,6 +2640,27 @@ def _flyer_account_phones(phone: Optional[str], chat_id: str) -> set[str]:
     return account_phones
 
 
+def _flyer_direct_account_phones(phone: Optional[str], chat_id: str, customer: Optional[dict] = None) -> set[str]:
+    """Phones directly owned by the Flyer account.
+
+    Excludes authorized_request_numbers. Legacy projects that predate
+    customer_id/chat_id binding may still be matched by public/business phones,
+    but active routing must not attach an orphan project just because a sender is
+    listed as an authorized requester on another account.
+    """
+    direct_phones: set[str] = set()
+    canonical_sender = _canonical_phone(phone) or phone
+    if canonical_sender:
+        direct_phones.add(canonical_sender)
+    customer = customer if customer is not None else find_flyer_customer_by_sender(phone, chat_id)
+    if customer:
+        for key in ("public_phone", "business_whatsapp_number", "onboarded_by_phone"):
+            canonical = _canonical_phone(customer.get(key))
+            if canonical:
+                direct_phones.add(canonical)
+    return direct_phones
+
+
 def _load_flyer_projects() -> list[dict]:
     if not FLYER_PROJECTS_PATH.exists():
         return []
@@ -2664,12 +2689,34 @@ def find_active_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> O
         account_phones = _flyer_account_phones(phone, chat_id)
         if not account_phones:
             return None
-        matches = [
-            row for row in _load_flyer_projects()
-            if isinstance(row, dict)
-            and row.get("customer_phone") in account_phones
-            and row.get("status") not in terminal
-        ]
+        customer = find_flyer_customer_by_sender(phone, chat_id)
+        customer_id = str((customer or {}).get("customer_id") or "")
+        direct_account_phones = _flyer_direct_account_phones(phone, chat_id, customer)
+        account_chat_ids = {chat_id} if chat_id else set()
+        if customer:
+            primary_chat_id = str(customer.get("primary_chat_id") or "")
+            if primary_chat_id:
+                account_chat_ids.add(primary_chat_id)
+        matches = []
+        for row in _load_flyer_projects():
+            if not isinstance(row, dict) or row.get("status") in terminal:
+                continue
+            row_customer_id = str(row.get("customer_id") or "")
+            row_chat_id = str(row.get("chat_id") or "")
+            row_phone = _canonical_phone(row.get("customer_phone")) or str(row.get("customer_phone") or "")
+            if row_customer_id:
+                if customer_id and row_customer_id == customer_id:
+                    matches.append(row)
+                continue
+            if row_chat_id:
+                if row_chat_id in account_chat_ids:
+                    matches.append(row)
+                continue
+            if customer_id and row_phone in direct_account_phones:
+                matches.append(row)
+                continue
+            if not customer_id and row_phone in account_phones:
+                matches.append(row)
         if not matches:
             return None
         return max(matches, key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""))
@@ -3357,6 +3404,10 @@ def _looks_like_campaign_title_scope(label: str) -> bool:
         r"\bcafe style\b",
         r"\bbiryani bazaar\b",
         r"\bkitchen essentials\b",
+        r"\bdosa\b",
+        r"\bspecial\b",
+        r"\bmenu\b",
+        r"\bcombo\b",
         r"\bdiwali\b",
         r"\bholiday\b",
         r"\bfestival\b",
@@ -3498,7 +3549,7 @@ def _detect_requested_location(raw_request: str, allowed_labels: list[str]) -> s
         if label and re.search(rf"\b{re.escape(label.lower())}\b", lower):
             return label
     explicit = re.search(
-        r"\b(?:for|at|in|location|branch|store)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2})\b",
+        r"\b(?:at|in|location|branch|store)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2})\b",
         text,
     )
     if explicit:

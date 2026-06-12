@@ -1264,6 +1264,192 @@ def test_generate_retries_without_saved_brand_assets_when_business_name_missing(
     assert persisted["assets"][-1]["path"].endswith("F0001-C1-retry.png")
 
 
+def test_generate_exact_text_qa_failure_uses_overlay_fallback_before_manual_review(monkeypatch, tmp_path, capsys):
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import Config, FlyerVisualQAReport
+
+    monkeypatch.setattr(module, "load_yaml_model", lambda *_args, **_kwargs: Config.model_validate({
+        "schema_version": 1,
+        "customer": {"name": "Triveni", "location_id": "loc_pineville_01", "timezone": "America/New_York"},
+        "owner": {"name": "Owner", "phone": "+19045550000"},
+        "limits": {},
+        "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "owner@example.com"},
+        "flyer": {
+            "enabled": True,
+            "draft_image_model": "openrouter/premium-poster-model",
+            "draft_image_quality": "high",
+            "concept_count": 1,
+        },
+    }))
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    now = datetime(2026, 6, 12, tzinfo=timezone.utc).isoformat()
+    project = {
+        "project_id": "F0152",
+        "status": "manual_edit_required",
+        "customer_phone": "+17329837841",
+        "customer_id": "CUST0001",
+        "created_at": now,
+        "updated_at": now,
+        "original_message_id": "wamid.f0152",
+        "raw_request": "Use as reference. Street snack specials for Lakshmi's Kitchen.",
+        "fields": {
+            "event_or_business_name": "Lakshmi's Kitchen",
+            "venue_or_location": "90 Brybar Dr St Johns FL",
+            "contact_info": "+1 732 983 7841",
+            "notes": "Customer chose path 2: use the source flyer only as a reference/inspiration.",
+        },
+        "locked_facts": [
+            {"fact_id": "business_name", "label": "Business", "value": "Lakshmi's Kitchen", "source": "customer_profile", "required": True},
+            {"fact_id": "campaign_title", "label": "Campaign", "value": "STREET SNACK SPECIALS", "source": "reference_vision", "required": True},
+            {"fact_id": "pricing_structure", "label": "Pricing", "value": "ANY 2 SNACKS $9.99", "source": "reference_vision", "required": True},
+            {"fact_id": "item:0:name", "label": "Item", "value": "Punugulu", "source": "reference_vision", "required": True},
+            {"fact_id": "item:1:name", "label": "Item", "value": "Egg Bonda", "source": "reference_vision", "required": True},
+            {"fact_id": "item:2:name", "label": "Item", "value": "Aloo Bonda", "source": "reference_vision", "required": True},
+            {"fact_id": "item:3:name", "label": "Item", "value": "Veg Lollipop", "source": "reference_vision", "required": True},
+            {"fact_id": "item:4:name", "label": "Item", "value": "Mirchi Bhajji", "source": "reference_vision", "required": True},
+            {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr St Johns FL", "source": "customer_profile", "required": True},
+            {"fact_id": "contact_phone", "label": "Contact", "value": "+1 732 983 7841", "source": "customer_profile", "required": True},
+        ],
+        "reference_extractions": [],
+        "assets": [{
+            "asset_id": "A0001",
+            "kind": "reference_image",
+            "source": "whatsapp",
+            "path": str(asset_dir / "F0152-reference.jpg"),
+            "mime_type": "image/jpeg",
+            "sha256": "a" * 64,
+            "original_message_id": "wamid.ref",
+            "received_at": now,
+        }],
+        "manual_review": {
+            "status": "queued",
+            "reason": "visual_qa_failed",
+            "reason_code": "visual_qa_failed",
+            "detail": "unverified phone number visible: 614 956-1099",
+            "queued_at": now,
+        },
+    }
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 153,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    render_calls = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        mode = module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER", "")
+        render_calls.append({
+            "mode": mode,
+            "model": kwargs.get("model"),
+            "quality": kwargs.get("quality"),
+        })
+        suffix = "fallback" if mode == "0" else "integrated"
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(
+            path=path,
+            kind="concept_preview",
+            output_format="concept_preview",
+            width=1080,
+            height=1350,
+            concept_id="C1",
+        )]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        fallback = "fallback" in Path(artifact_path).name
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id,
+            asset_id=asset_id,
+            artifact_path=str(artifact_path),
+            artifact_sha256="d" * 64,
+            project_version=project_obj.version,
+            output_format=output_format,
+            provider="test",
+            qa_source="ocr_vision",
+            status="passed" if fallback else "failed",
+            blockers=[] if fallback else [
+                "missing required visible fact: item:2:name",
+                "near-duplicate item visible: expected Veg Lollipop but saw Veg Lolipop",
+            ],
+            extracted_text="Lakshmi's Kitchen\nSTREET SNACK SPECIALS" if fallback else "Veg Lolipop",
+            checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(
+        module,
+        "render_source_edit_preview",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("visual_qa_failed reference-inspiration retry must not enter source-edit renderer")
+        ),
+    )
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        module,
+        "classify_flyer_qa_for_autorepair",
+        lambda *_args, **_kwargs: types.SimpleNamespace(decision="hard_stop", reason="customer_trust_risk"),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0152",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+
+    assert out["project_id"] == "F0152"
+    assert render_calls == [
+        {"mode": "1", "model": "openrouter/premium-poster-model", "quality": "high"},
+        {"mode": "0", "model": "openrouter/premium-poster-model", "quality": "high"},
+    ]
+    assert module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER") == "1"
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["manual_review"]["status"] == "none"
+    assert persisted["assets"][-1]["path"].endswith("F0152-C1-fallback.png")
+
+
+def test_exact_text_fallback_guard_includes_source_text_leakage(monkeypatch):
+    module = _load_script(monkeypatch)
+    from schemas import FlyerVisualQAReport
+
+    report = FlyerVisualQAReport(
+        project_id="F0152",
+        asset_id="A0004",
+        artifact_path="/tmp/F0152-C1-preview.png",
+        artifact_sha256="e" * 64,
+        project_version=1,
+        output_format="concept_preview",
+        provider="test",
+        qa_source="ocr_vision",
+        status="failed",
+        blockers=[
+            "duplicate item visible: Punugulu",
+            "unverified phone number visible: 614 956-1099",
+        ],
+        checked_at=datetime.now(timezone.utc),
+    )
+    unsafe = report.model_copy(update={
+        "blockers": ["visible wrong brand text: Indian Cafe & Bakery"],
+    })
+
+    assert module._qa_failed_exact_text_recoverable([report]) is True
+    assert module._qa_failed_exact_text_recoverable([unsafe]) is False
+
+
 def test_generate_marks_superseded_revision_applied_before_approval(monkeypatch, tmp_path, capsys):
     module = _load_script(monkeypatch)
     from agents.flyer.render import RenderedAssetSpec

@@ -1,5 +1,106 @@
 # Backlog — pending items
 
+## Active - Flyer reference shared-price quality fix (2026-06-10)
+
+**Drift-check tag:** extends-Hermes
+
+**New primitives introduced:** none. This stays inside the existing Flyer reference extraction, locked facts, deterministic renderer overlay, and visual QA/text-manifest contract.
+
+**Hermes-first analysis**
+
+| Domain | Hermes skill found? | Decision |
+|---|---|---|
+| WhatsApp/media ingress and sender identity | Hermes gateway/cf-router already own inbound media and identity context | use it |
+| Vision/reference text extraction | existing Flyer reference extractor already turns the uploaded flyer into locked facts | use it |
+| Customer-visible truth | existing `FlyerLockedFact`, text manifest, and visual QA contract own exact business/item/price facts | use it |
+| Shared-price flyer layout quality | no external Hermes skill is needed; the gap is local deterministic overlay composition for exact shared-price menus | extend the local renderer only |
+
+Awesome Hermes Agent ecosystem check: Hermes Skills Hub was checked on 2026-06-10 and currently loads the public skills catalog shell; no maintained external skill is needed for deterministic Flyer overlay composition. The broader awesome-hermes-agent/community search did not surface a Flyer-specific exact-text compositor; this is an in-tree renderer fix.
+
+- [x] Add red regression for the real Triveni/Lakshmi shape: 10 reference snack item names plus one `Any 2 Snacks $9.99` shared-price fact.
+- [x] Prove the current renderer either fit-fails or treats the shared price as a tiny auxiliary line instead of a hero deal.
+- [x] Keep the other session's title-guard baseline so raw customer instructions cannot become the visible title.
+- [x] Implement the narrow deterministic shared-price menu layout: large title, large shared-price badge, all snack names once, no per-item invented prices, phone-readable item tiles.
+- [x] Generate a local no-send visual sample for inspection.
+- [x] Run focused renderer/reference/fact tests plus compile/diff checks.
+- [x] Re-check the actual rejected WhatsApp screenshot at `C:\Testing\1.png` and treat thumbnail composition as the quality bar.
+- [x] Add red visual regression for shared-price references that blocks the large cream title-card and gold outlined menu-table treatment.
+- [x] Route materialized reference facts back to the textless/background-only prompt so model-visible request/reference text cannot repaint the old masthead or raw instruction copy.
+- [x] Generate a replacement no-send sample and WhatsApp-scale thumbnail for inspection.
+- [x] Rerun renderer/reference/fact/create-project, visual QA, PR3 wiring, compile, and diff checks.
+
+Review/verification:
+- Investigation: live `main-vps` reported staged commit `7f9c4682902d17ca4a68649f3b1d9f5e9b7597ba`, not the quoted title-filter deploy; local branch graph shows the parser/fallback and title-filter fixes are sibling branches. This quality branch starts from the deployed parser/fallback branch and will stack the title guard before the layout fix.
+- Root cause: the successful reference parse yields exactly 10 item-name facts and one shared `pricing_structure` fact. `_compact_menu_overlay_allowed()` only enables dense layout when `len(items) > 10`, so the Triveni shape falls outside the compact path even though total required detail lines exceed the normal cap.
+- Red verification: `python -m pytest tests/test_flyer_renderer.py -q -k "instruction_field_title or triveni_shared_price"` failed on `title == "Create"`, `_compact_menu_overlay_allowed(project) is False`, and `FlyerRenderError: critical text facts do not fit`.
+- Red verification: `python -m pytest tests/test_flyer_reference_extract.py -q -k "bulleted_items_and_shared_combo_price or real_star_bullets"` failed on missing `campaign_title`, decorative `★` bullet misses, and split combo price producing `low_confidence`.
+- Green focused verification: `python -m pytest tests/test_flyer_renderer.py tests/test_flyer_reference_extract.py -q -k "instruction_field_title or triveni_shared_price or bulleted_items_and_shared_combo_price or real_star_bullets"` -> `5 passed, 133 deselected`.
+- Visual sample: `C:\Testing\flyer-reference-quality-triveni.png` renders `Tuesday Night Specials`, a large `Any 2 Snacks / $9.99` badge, all 10 snack names once, no per-item invented prices, and passed `inspect_rendered_asset` with no blockers.
+- Focused suite: `python -m pytest tests/test_flyer_renderer.py tests/test_flyer_reference_extract.py tests/test_flyer_facts.py tests/test_flyer_create_project.py -q` -> `232 passed`.
+- Visual QA: `python -m pytest tests/test_flyer_visual_qa.py -q` -> `142 passed`.
+- PR3 wiring: `python -m pytest tests/test_flyer_pr3_wiring.py -q` -> `39 passed`.
+- Static checks: `python -m py_compile src\agents\flyer\render.py src\agents\flyer\reference_extract.py` passed; `git diff --check` passed.
+- Live failure follow-up: fresh screenshot `C:\Testing\1.png` at 2026-06-11 15:17 showed production was still on the sibling/title-only path: old cream item boxes, tiny shared price, and changed item names. VPS marker check confirmed the installed `/opt/shift-agent/flyer_render.py` lacked `shared_snack_poster` before this deploy.
+- Commit: `dd9bdeb0a884d70abf8a9ae605a053bdcac565f9` (`fix(flyer): improve reference shared price poster quality`).
+- Deploy: built `shift-agent-deploy.tgz` from `dd9bdeb0` with focused gates already green, copied to `main-vps`, and deployed as `deploy-20260611-152030-dd9bdeb0`; deploy smoke ended with `Deploy deploy-20260611-152030-dd9bdeb0 complete`.
+- Post-deploy markers: `/opt/shift-agent/flyer_render.py` now contains `shared_snack_poster` and `_has_materialized_reference_menu_facts`; `/opt/shift-agent/flyer_reference_extract.py` contains `campaign_title`; `hermes-gateway` is active.
+- VPS no-send render proof: system-Python runtime rendered `/tmp/flyer-quality-deploy-proof.png` using installed `flyer_render.py`; copied locally to `C:\Testing\flyer-quality-deploy-proof-dd9bdeb.png`. Metrics: `near_white_title=0.015837585034013606`, `near_white_items=0.03661570827489481`, `gold_outline=0.021231416549789623`; all guards true.
+- Live content failure follow-up: fresh screenshot `C:\Testing\1.png` at 2026-06-11 15:52 proved the visual quality path was fixed but content was wrong. The message text was `create same flyer ... same content ... use Lakshmi's kitchen theme`; cf-router did not classify that as reference adaptation, so it bypassed reference extraction and spawned `bare-flyer-render-and-send`, letting the image model invent Indian sweets.
+- Router fix: `is_reference_concept_adaptation_request()` now treats attached-media `create/make/design/generate same flyer` requests with `same content`, `theme`, `style`, or `look` as reference-adaptation work, sending them to the primary media/reference path instead of bare render.
+- Red/green verification: `python -m pytest tests/test_cf_router_flyer_routing.py -q -k "same_flyer_same_content"` first failed on detector false, then passed after the regex fix.
+- Focused router verification: `python -m pytest tests/test_cf_router_flyer_routing.py -q -k "reference or same_flyer_same_content or bare_flyer_intent or media_exact_reference_edit"` -> `37 passed`.
+- Post-router broader checks: `python -m pytest tests/test_flyer_renderer.py tests/test_flyer_reference_extract.py tests/test_flyer_facts.py tests/test_flyer_create_project.py -q` -> `235 passed`; `python -m pytest tests/test_flyer_pr3_wiring.py -q` -> `39 passed`; `py_compile` and `git diff --check` passed.
+- Commit/deploy: `0ec92041adf225d0d0f4e00aff8d54ccb4c2ac78` (`fix(flyer): route same-content references through extraction`) deployed to `main-vps` as `deploy-20260611-155909-0ec92041`; deploy smoke ended with `Deploy deploy-20260611-155909-0ec92041 complete`.
+- Live detector proof: importing `/root/.hermes/plugins/cf-router/actions.py` on `main-vps` returns `detect=True` and `exact=False` for the exact live phrase `create same flyer ... same content ... use Lakshmi's kitchen theme`; `hermes-gateway` is active.
+- Correction after inspecting `C:\Testing\1.png`: the prior local sample was fact-correct but still too close to the rejected WhatsApp preview. It had a large cream title block and menu-table/card treatment, and the bare/reference route could still ask the image model to render request/reference text.
+- Red verification: `python -m pytest tests/test_flyer_renderer.py -q -k "avoids_menu_table_look"` failed on `title_near_white_ratio == 0.6214755639097744`, proving the title area was still dominated by a cream card.
+- Red verification: after removing the cream title card, the same test failed on `gold_outline_ratio == 0.06634502103786816`, proving the lower snack area was still dominated by outlined row boxes.
+- Fix: shared-price menus with item names but no per-item prices now use a dark poster title, large `Any 2 Snacks / $9.99` badge, and a softer two-column snack list without cream title/menu-table blocks. The subprocess fallback renderer mirrors the same branch.
+- Fix: references with already-materialized item/shared-price facts now skip the "read the reference image" prompt path and use the background-only/textless overlay contract, preventing the model from repainting source mastheads or customer instruction copy.
+- Visual sample: `C:\Testing\flyer-reference-quality-triveni-v2.png`; WhatsApp-scale check: `C:\Testing\flyer-reference-quality-triveni-v2-thumb.png`.
+- Green focused verification: `python -m pytest tests/test_flyer_renderer.py -q -k "avoids_menu_table_look or materialized_facts or triveni_shared_price_reference_overlay_renders_without_fit_failure or triveni_shared_price_reference_menu_uses_hero_offer_layout"` -> `4 passed, 120 deselected`.
+- Fallback renderer verification: `python -m pytest tests/test_flyer_renderer.py -q -k "system_overlay_fallback"` -> `3 passed, 122 deselected`.
+- Focused suite: `python -m pytest tests/test_flyer_renderer.py tests/test_flyer_reference_extract.py tests/test_flyer_facts.py tests/test_flyer_create_project.py -q` -> `235 passed`.
+- Visual QA: `python -m pytest tests/test_flyer_visual_qa.py -q` -> `142 passed`.
+- PR3 wiring: `python -m pytest tests/test_flyer_pr3_wiring.py -q` -> `39 passed`.
+- Static checks: `python -m py_compile src\agents\flyer\render.py src\agents\flyer\reference_extract.py` passed; `git diff --check` passed.
+
+## Active - Flyer reference-use fallback (2026-06-10)
+
+**Drift-check tag:** extends-Hermes
+
+**New primitives introduced:** none. This stays inside existing Flyer reference extraction, locked facts, project creation, and manual-review gates.
+
+**Hermes-first analysis**
+
+| Domain | Hermes skill found? | Decision |
+|---|---|---|
+| WhatsApp/media ingestion and sender identity | Hermes gateway/cf-router already receive the image and sender context | use it |
+| Vision text extraction from reference flyer | existing Flyer reference extractor uses Hermes/OpenRouter vision provider and sidecar tests | use it |
+| Customer-visible fact locking | existing `FlyerLockedFact` + merge priority own truth and provenance | extend deterministic parsing only |
+| Reference-as-inspiration fallback | no separate Hermes skill needed; project creation already has profile/text facts and manual-review gates | fix the local gate so inspiration does not dead-end |
+
+Awesome Hermes Agent ecosystem check: official Skills Hub and awesome-hermes-agent were checked on 2026-06-10; no external skill is needed because the vision/substrate already succeeds and the gap is the local deterministic parser/fallback contract.
+
+- [x] Add red regression for Triveni-style bulleted snack reference text with a standalone `ANY 2 SNACKS $9.99` combo price.
+- [x] Add red project-flow regression proving an `old_flyer_reference` low-confidence/zero-fact extraction does not put a usable reference-inspiration project into manual review.
+- [x] Extend reference extraction parsing for bulleted item lists plus shared/combo prices without inventing per-item prices.
+- [x] Narrow the reference failure gate so "use as reference" can proceed from customer brief/profile facts, while true menu extraction failures still queue manual review.
+- [x] Run focused reference/project/fact tests and document results here.
+- [x] Commit the fix from the clean worktree.
+- [ ] Build and deploy the tarball to `main-vps`.
+- [ ] Run post-deploy smoke and incident-shaped verification.
+
+Review/verification:
+- Red tests reproduced the failure: Triveni-style bulleted snacks + `ANY 2 SNACKS $9.99` produced incomplete facts, and an `old_flyer_reference` low-confidence extraction dead-ended a usable brief into manual review.
+- Fix: reference extraction now captures bullet/list item names and preserves `ANY ... $X` shared pricing as `pricing_structure` instead of cloning the price onto every item.
+- Fix: low-confidence `old_flyer_reference` no longer queues manual review when locked customer/profile facts already contain a concrete campaign/headline/offer/item to render; strict `menu_reference` still requires item prices or shared-pricing facts and remains low-confidence without them.
+- Review follow-up: added regressions so named combo menu items like `Non Veg Combo $49.99` stay item/price facts, and bullet-only strict menu references still fail closed.
+- Verification: `python -m pytest tests/test_flyer_reference_extract.py tests/test_flyer_create_project.py tests/test_flyer_facts.py -q` -> `109 passed`.
+- Broader Flyer workflow check: `python -m pytest tests/test_flyer_reference_extract.py tests/test_flyer_create_project.py tests/test_flyer_facts.py tests/test_flyer_workflow.py -q` -> `167 passed`.
+- Static checks: `git diff --check` passed; `python -m py_compile src/agents/flyer/reference_extract.py src/agents/flyer/scripts/create-flyer-project` passed.
+- Pre-deploy live status: latest `main-vps` deploy tarball before this fix was `deploy-20260610-012849-0de0fa04.tgz`; `hermes-gateway` was active.
+
 ## Active - Catering menu-grounded proposal routing (2026-06-08)
 
 **Drift-check tag:** extends-Hermes
@@ -1820,3 +1921,26 @@ Review/verification:
 - No-send probe after PR #484: `render_grounded` returned `send`, but visual inspection of `C:\Testing\flyer-quality-grounded-pr484.png` showed only 13 dessert items; session facts confirmed `Khalakhandh - 100 count $100` was not locked.
 - Deploy: `deploy-20260608-035609-a39c9a7d` completed and post-deploy smoke passed; staging commit `a39c9a7d0219ef20d02efd8ad52c523991e39339`.
 - No-send probe after PR #485: `render_grounded` returned `send`; `C:\Testing\flyer-quality-grounded-pr485.png` showed all 14 item/price rows, but visibly rendered internal brand asset ID `(B0002)` under the business logo.
+
+## Flyer Production-Grade Reference Quality - 2026-06-12
+
+- Drift-check tag: extends-Hermes
+- Hermes-first analysis: Hermes already owns WhatsApp media ingress, reference image retention, vision/OCR extraction, structured facts, audit, approval workflow, and delivery. Net-new scope here is a Flyer-specific quality policy and renderer/prompt path that preserves reference-poster hierarchy while keeping exact text deterministic.
+- [x] Compare `C:\Testing\ref.png`, `C:\Testing\gpt.png`, and `C:\Testing\gen.png` for visible quality gap.
+- [x] Trace the current reference-snack render path and identify where poster hierarchy is lost.
+- [x] Add failing regression for reference-style snack flyer quality floor.
+- [x] Implement the narrow quality-floor change.
+- [x] Verify locally with focused tests, visual artifact inspection, compile, and diff checks.
+- [x] Commit, deploy, and run production smoke if code changes are made.
+
+Review/verification:
+- Root cause 1: style-only reference requests told the model to match the reference flyer but did not attach the reference image in `_image_message_content`, so the model invented a generic food background.
+- Root cause 2: shared-price snack flyers used the exact-text overlay as a full-width bottom strip, preserving facts but losing premium poster hierarchy.
+- Root cause 3: exact-text QA fallback downgraded to `deterministic-renderer`; it should use the configured image model with integrated poster disabled so exact text is composited over real food art.
+- Red tests: reference image payload test returned plain text content; shared-price hierarchy test found 0 changed middle pixels; exact-text fallback test saw `deterministic-renderer`/`medium`.
+- Green tests: `python -m pytest tests/test_flyer_renderer.py tests/test_flyer_generate_concepts.py tests/test_flyer_reference_quality.py -q` -> 166 passed, 8 warnings.
+- Broader gate: `python -m pytest tests/test_flyer_reference_quality.py tests/test_flyer_renderer.py tests/test_flyer_schemas.py tests/test_flyer_create_project.py tests/test_cf_router_flyer_routing.py tests/test_flyer_reference_extract.py tests/test_flyer_visual_qa.py tests/test_flyer_generate_concepts.py -q` -> 833 passed, 8 warnings. `py_compile` and `git diff --check` passed. Local visual probe written to `C:\Testing\flyer-prod-quality-overlay.png`.
+- Rollout follow-up: production replay exposed two more customer-quality blockers before final send: direct integrated poster mode could still omit/misspell reference-derived facts, and readable source flyer text could leak into the generated background. Added style-reference proxying, source-header masking, and forced materialized style-only reference facts through the deterministic overlay renderer.
+- Final verification: focused route/proxy/mask tests passed; broad Flyer gate passed `834 passed, 10 warnings`; `py_compile` for renderer/generator and `git diff --check` passed.
+- Deploy: final runtime commit `cbaa3fc6` deployed to `main-vps` as `deploy-20260612-223837-cbaa3fc6`; deploy smoke passed and post-deploy health returned HTTP 200 `{"ok":true}` with both services active. Pilot readiness remains blocked only by the unrelated muted Pushover credentials warning.
+- Production recovery: regenerated `F0152` as asset `A0013` (`sha256=3b82c78828ebdbf0a591beb86e8202cdebce5194ccbd030740b9d157c053c337`), QA passed with no blockers/warnings, preview copied to `C:\Testing\f0152-prod-grade-cbaa3fc7.png`, and sent to `201975216009469@lid` with outbound message `3EB042F6F0A2D9F02F886F` at `2026-06-12T22:42:33Z`.

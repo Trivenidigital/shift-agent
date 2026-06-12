@@ -165,6 +165,25 @@ def _normalize_campaign_title(value: str) -> str:
     return clean
 
 
+def _replaceable_customer_text_campaign_title(value: str) -> bool:
+    """Generic semantic-brief titles should not shadow source-flyer titles.
+
+    A customer can explicitly name a campaign, but brief generation also creates
+    fallback titles such as "Lakshmi's Kitchen Menu" from the account/business
+    name. When a reference flyer supplies a concrete campaign title, that source
+    title is more faithful than the generic fallback.
+    """
+    clean = _normalize_campaign_title(value)
+    if not clean:
+        return True
+    if _looks_like_instruction_fragment(clean):
+        return True
+    lowered = clean.casefold()
+    if re.search(r"\b(?:menu|flyer|flier|poster|banner)\b$", lowered) and len(clean.split()) <= 6:
+        return True
+    return False
+
+
 def _explicit_business_override(raw_request: str, profile_business_name: str) -> str:
     text = " ".join((raw_request or "").split())
     patterns = [
@@ -900,6 +919,15 @@ def merge_locked_facts(*fact_lists: Iterable[FlyerLockedFact]) -> list[FlyerLock
             if item_pattern.match(fact.fact_id):
                 continue
             current = merged.get(fact.fact_id)
+            if (
+                fact.fact_id == "campaign_title"
+                and current is not None
+                and getattr(current, "source", "") == "customer_text"
+                and str(getattr(fact, "source", "") or "").startswith("reference_")
+                and _replaceable_customer_text_campaign_title(current.value)
+            ):
+                merged[fact.fact_id] = fact
+                continue
             if current is None or priority.get(fact.source, 99) < priority.get(current.source, 99):
                 merged[fact.fact_id] = fact
 

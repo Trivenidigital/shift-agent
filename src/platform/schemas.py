@@ -934,7 +934,7 @@ class FlyerConfig(BaseModel):
     conversation_model: str = Field(default="default_hermes_gateway", min_length=1, max_length=120)
     prompt_model: str = Field(default="default_hermes_gateway", min_length=1, max_length=120)
     draft_image_model: str = Field(default="deterministic-renderer", min_length=1, max_length=120)
-    draft_image_quality: FlyerImageQuality = "low"
+    draft_image_quality: FlyerImageQuality = "high"
     final_image_model: str = Field(default="deterministic-renderer", min_length=1, max_length=120)
     final_image_quality: FlyerImageQuality = "high"
     edit_image_model: str = Field(default="gpt-image-1", min_length=1, max_length=120)
