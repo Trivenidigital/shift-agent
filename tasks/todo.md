@@ -1921,3 +1921,22 @@ Review/verification:
 - No-send probe after PR #484: `render_grounded` returned `send`, but visual inspection of `C:\Testing\flyer-quality-grounded-pr484.png` showed only 13 dessert items; session facts confirmed `Khalakhandh - 100 count $100` was not locked.
 - Deploy: `deploy-20260608-035609-a39c9a7d` completed and post-deploy smoke passed; staging commit `a39c9a7d0219ef20d02efd8ad52c523991e39339`.
 - No-send probe after PR #485: `render_grounded` returned `send`; `C:\Testing\flyer-quality-grounded-pr485.png` showed all 14 item/price rows, but visibly rendered internal brand asset ID `(B0002)` under the business logo.
+
+## Flyer Production-Grade Reference Quality - 2026-06-12
+
+- Drift-check tag: extends-Hermes
+- Hermes-first analysis: Hermes already owns WhatsApp media ingress, reference image retention, vision/OCR extraction, structured facts, audit, approval workflow, and delivery. Net-new scope here is a Flyer-specific quality policy and renderer/prompt path that preserves reference-poster hierarchy while keeping exact text deterministic.
+- [x] Compare `C:\Testing\ref.png`, `C:\Testing\gpt.png`, and `C:\Testing\gen.png` for visible quality gap.
+- [x] Trace the current reference-snack render path and identify where poster hierarchy is lost.
+- [x] Add failing regression for reference-style snack flyer quality floor.
+- [x] Implement the narrow quality-floor change.
+- [x] Verify locally with focused tests, visual artifact inspection, compile, and diff checks.
+- [ ] Commit, deploy, and run production smoke if code changes are made.
+
+Review/verification:
+- Root cause 1: style-only reference requests told the model to match the reference flyer but did not attach the reference image in `_image_message_content`, so the model invented a generic food background.
+- Root cause 2: shared-price snack flyers used the exact-text overlay as a full-width bottom strip, preserving facts but losing premium poster hierarchy.
+- Root cause 3: exact-text QA fallback downgraded to `deterministic-renderer`; it should use the configured image model with integrated poster disabled so exact text is composited over real food art.
+- Red tests: reference image payload test returned plain text content; shared-price hierarchy test found 0 changed middle pixels; exact-text fallback test saw `deterministic-renderer`/`medium`.
+- Green tests: `python -m pytest tests/test_flyer_renderer.py tests/test_flyer_generate_concepts.py tests/test_flyer_reference_quality.py -q` -> 166 passed, 8 warnings.
+- Broader gate: `python -m pytest tests/test_flyer_reference_quality.py tests/test_flyer_renderer.py tests/test_flyer_schemas.py tests/test_flyer_create_project.py tests/test_cf_router_flyer_routing.py tests/test_flyer_reference_extract.py tests/test_flyer_visual_qa.py tests/test_flyer_generate_concepts.py -q` -> 833 passed, 8 warnings. `py_compile` and `git diff --check` passed. Local visual probe written to `C:\Testing\flyer-prod-quality-overlay.png`.

@@ -1780,7 +1780,13 @@ def _image_message_content(project: FlyerProject, *, concept_id: str, output_for
     prompt = _image_prompt(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction, scene_direction=scene_direction)
     parts: list[dict] = [{"type": "text", "text": prompt}]
     brand_assets = _generation_brand_assets(project)
-    refs = [] if _style_only_reference_requested(project) else _project_reference_assets(project)
+    refs = _project_reference_assets(project)
+    if _style_only_reference_requested(project):
+        # Style-only means "do not copy source branding/text", not "hide the
+        # reference from the art director." The prompt and QA already enforce
+        # text/source-brand safety; the model still needs the uploaded flyer to
+        # match hierarchy, palette, cuisine cues, and density.
+        refs = [asset for asset in refs if asset.kind == "reference_image"]
     selected_assets = [*brand_assets[-1:], *refs[-1:]] if refs else [*brand_assets[-2:]]
     for asset in selected_assets:
         path = Path(asset.path)
@@ -2157,7 +2163,7 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                         color = (50, 66, 42, 255)
                     draw.text((box_x0 + 22, y), ln, font=f, fill=color)
                     y += int(getattr(f, "size", 18) * 1.2)
-            if shared_offer_price:
+            if shared_offer_price and not shared_snack_poster:
                 badge_x0 = max(box_x1 + 18, int(width * 0.60))
                 badge_x1 = width - margin
                 badge_y0 = box_y0
@@ -2180,49 +2186,73 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                 draw.text((price_x, badge_y1 - badge_price_font.size - 19), shared_offer_price, font=badge_price_font, fill=(255, 255, 246, 255))
 
             if shared_offer_price and not has_item_prices:
-                panel = (0, int(height * 0.695), width, height)
-                draw.rectangle(panel, fill=(12, 8, 7, 188))
-                px0, py0, px1, py1 = panel
-                content_x0 = margin + 16
-                content_x1 = width - margin - 16
+                menu_panel = (margin, int(height * 0.405), int(width * 0.585), int(height * 0.875))
+                px0, py0, px1, py1 = menu_panel
+                draw.rounded_rectangle((px0 + 7, py0 + 7, px1 + 7, py1 + 7), radius=24, fill=(0, 0, 0, 68))
+                draw.rounded_rectangle(menu_panel, radius=24, fill=(18, 9, 9, 182), outline=(232, 184, 84, 210), width=2)
+                content_x0 = px0 + 22
+                content_x1 = px1 - 22
                 section_font = _font(ImageFont, max(22, int(width * 0.024)), bold=True, text="Snack Picks")
                 cols = 2 if width >= 900 and len(items) > 4 else 1
-                gap = 28
+                gap = 18
                 rows = (len(items) + cols - 1) // cols
-                footer_reserve = 44
-                top_pad = 56
-                row_gap = 6
+                top_pad = 72
+                row_gap = 8
                 col_w = (content_x1 - content_x0 - gap * (cols - 1)) // cols
-                row_h = ((py1 - py0 - top_pad - footer_reserve - 8) - row_gap * (rows - 1)) // max(1, rows)
-                if row_h < 36:
+                row_h = ((py1 - py0 - top_pad - 22) - row_gap * (rows - 1)) // max(1, rows)
+                if row_h < 42:
                     raise FlyerRenderError(f"menu overlay cannot fit all {len(items)} items (drew 0)")
-                item_font = _font(ImageFont, max(20, min(int(width * 0.028), row_h - 7)), bold=True)
+                item_font = _font(ImageFont, max(20, min(int(width * 0.027), row_h - 8)), bold=True)
                 heading_y = py0 + 18
-                draw.line((content_x0, py0 + 1, content_x1, py0 + 1), fill=(232, 184, 84, 210), width=2)
                 draw.text((content_x0, heading_y), "Snack Picks", font=section_font, fill=(255, 225, 142, 255))
                 rule_y = heading_y + section_font.size + 8
-                draw.line((content_x0, rule_y, content_x1, rule_y), fill=(232, 184, 84, 120), width=1)
+                draw.line((content_x0, rule_y, content_x1, rule_y), fill=(232, 184, 84, 145), width=2)
                 start_y = py0 + top_pad
                 for idx, item in enumerate(items):
                     col = idx % cols
                     row = idx // cols
                     x = content_x0 + col * (col_w + gap)
                     cy = start_y + row * (row_h + row_gap)
-                    if cy + row_h > py1 - footer_reserve:
+                    if cy + row_h > py1 - 18:
                         raise FlyerRenderError(f"menu overlay cannot fit all {len(items)} items (drew {idx})")
                     name, _price = _split_item_price(item)
                     name_lines = _wrap(draw, name, item_font, col_w - 34)
                     name_y = cy + max(0, (row_h - len(name_lines) * int(item_font.size * 1.03)) // 2)
                     dot_y = name_y + int(item_font.size * 0.48)
-                    draw.ellipse((x, dot_y - 4, x + 8, dot_y + 4), fill=(245, 207, 94, 255))
+                    draw.ellipse((x, dot_y - 5, x + 10, dot_y + 5), fill=(245, 207, 94, 255))
                     for ln in name_lines:
                         draw.text((x + 20 + 2, name_y + 2), ln, font=item_font, fill=(0, 0, 0, 130))
                         draw.text((x + 20, name_y), ln, font=item_font, fill=(255, 247, 226, 255))
                         name_y += int(item_font.size * 1.03)
+
+                deal_x0 = int(width * 0.61)
+                deal_y0 = int(height * 0.535)
+                deal_x1 = width - margin
+                deal_y1 = int(height * 0.775)
+                draw.rounded_rectangle((deal_x0 + 8, deal_y0 + 8, deal_x1 + 8, deal_y1 + 8), radius=24, fill=(0, 0, 0, 80))
+                draw.rounded_rectangle((deal_x0, deal_y0, deal_x1, deal_y1), radius=24, fill=(92, 13, 24, 232), outline=(246, 214, 132, 230), width=3)
+                draw.line((deal_x0 + 28, deal_y0 + 70, deal_x1 - 28, deal_y0 + 70), fill=(246, 214, 132, 210), width=2)
+                deal_label_font = _font(ImageFont, max(24, int(width * 0.028)), bold=True, text=shared_offer_label)
+                deal_price_font = _font(ImageFont, max(70, int(width * 0.083)), bold=True, text=shared_offer_price)
+                label_y = deal_y0 + 24
+                for line in _wrap(draw, shared_offer_label.upper(), deal_label_font, deal_x1 - deal_x0 - 56):
+                    draw.text((deal_x0 + 28, label_y), line, font=deal_label_font, fill=(255, 242, 204, 255))
+                    label_y += int(deal_label_font.size * 1.06)
+                price_bbox = draw.textbbox((0, 0), shared_offer_price, font=deal_price_font)
+                price_w = price_bbox[2] - price_bbox[0]
+                price_x = deal_x0 + max(24, (deal_x1 - deal_x0 - price_w) // 2)
+                price_y = deal_y1 - deal_price_font.size - 26
+                draw.text((price_x + 3, price_y + 3), shared_offer_price, font=deal_price_font, fill=(0, 0, 0, 145))
+                draw.text((price_x, price_y), shared_offer_price, font=deal_price_font, fill=(255, 255, 246, 255))
+
                 footer = " | ".join(str(v) for v in (menu_payload["location"], menu_payload["contact"]) if v)
                 if footer:
-                    draw.line((content_x0, py1 - 45, content_x1, py1 - 45), fill=(232, 184, 84, 95), width=1)
-                    draw.text((content_x0, py1 - 32), footer, font=small_font, fill=(255, 232, 176, 245))
+                    footer_y0 = int(height * 0.935)
+                    footer_y1 = height - margin
+                    draw.rounded_rectangle((margin, footer_y0, width - margin, footer_y1), radius=16, fill=(18, 9, 9, 155), outline=(232, 184, 84, 110), width=1)
+                    footer_bbox = draw.textbbox((0, 0), footer, font=small_font)
+                    footer_y = footer_y0 + max(4, (footer_y1 - footer_y0 - (footer_bbox[3] - footer_bbox[1])) // 2)
+                    draw.text((margin + 18, footer_y), footer, font=small_font, fill=(255, 232, 176, 245))
                 img.save(target, format="PNG", optimize=True)
                 return
             compact_menu = len(items) > MAX_DETAIL_FACTS or bool(shared_offer_price and len(items) >= 8)
@@ -2395,7 +2425,7 @@ with Image.open(src) as img:
             y=by0+18
             for f,c,ln in card:
                 draw.text((bx0+22,y), ln, font=f, fill=c); y += int(getattr(f,"size",18)*1.2)
-        if shared_price:
+        if shared_price and not shared_snack_poster:
             gx0=max(bx1+18,int(width*.60)); gx1=width-margin; gy0=by0; gy1=max(by1,gy0+int(height*.115))
             if gx1-gx0 < int(width*.22) or gy1 > int(height*.50): raise SystemExit("critical text overlay does not fit")
             lf=font(max(22,int(width*.025)),True,shared_label); pf=font(max(56,int(width*.072)),True,shared_price)
@@ -2408,26 +2438,41 @@ with Image.open(src) as img:
             draw.text((px+2,gy1-pf.size-17),shared_price,font=pf,fill=(0,0,0,130))
             draw.text((px,gy1-pf.size-19),shared_price,font=pf,fill=(255,255,246,255))
         if shared_price and not has_prices:
-            panel=(0,int(height*.695),width,height)
-            draw.rectangle(panel, fill=(12,8,7,188))
-            px0,py0,px1,py1=panel; cx0=margin+16; cx1=width-margin-16; secf=font(max(22,int(width*.024)),True,"Snack Picks")
-            cols=2 if width>=900 and len(items)>4 else 1; gap=28; rows=(len(items)+cols-1)//cols; footer_reserve=44; top_pad=56; row_gap=6
-            colw=(cx1-cx0-gap*(cols-1))//cols; rowh=((py1-py0-top_pad-footer_reserve-8)-row_gap*(rows-1))//max(1,rows)
-            if rowh < 36: raise SystemExit(f"menu overlay cannot fit all {len(items)} items (drew 0)")
-            itemf=font(max(20,min(int(width*.028),rowh-7)),True)
-            hy=py0+18; draw.line((cx0,py0+1,cx1,py0+1),fill=(232,184,84,210),width=2); draw.text((cx0,hy),"Snack Picks",font=secf,fill=(255,225,142,255))
-            ry=hy+secf.size+8; draw.line((cx0,ry,cx1,ry),fill=(232,184,84,120),width=1)
+            panel=(margin,int(height*.405),int(width*.585),int(height*.875))
+            px0,py0,px1,py1=panel
+            draw.rounded_rectangle((px0+7,py0+7,px1+7,py1+7), radius=24, fill=(0,0,0,68))
+            draw.rounded_rectangle(panel, radius=24, fill=(18,9,9,182), outline=(232,184,84,210), width=2)
+            cx0=px0+22; cx1=px1-22; secf=font(max(22,int(width*.024)),True,"Snack Picks")
+            cols=2 if width>=900 and len(items)>4 else 1; gap=18; rows=(len(items)+cols-1)//cols; top_pad=72; row_gap=8
+            colw=(cx1-cx0-gap*(cols-1))//cols; rowh=((py1-py0-top_pad-22)-row_gap*(rows-1))//max(1,rows)
+            if rowh < 42: raise SystemExit(f"menu overlay cannot fit all {len(items)} items (drew 0)")
+            itemf=font(max(20,min(int(width*.027),rowh-8)),True)
+            hy=py0+18; draw.text((cx0,hy),"Snack Picks",font=secf,fill=(255,225,142,255))
+            ry=hy+secf.size+8; draw.line((cx0,ry,cx1,ry),fill=(232,184,84,145),width=2)
             start=py0+top_pad
             for idx,item in enumerate(items):
                 col=idx%cols; row=idx//cols; x=cx0+col*(colw+gap); cy=start+row*(rowh+row_gap)
-                if cy+rowh > py1-footer_reserve: raise SystemExit(f"menu overlay cannot fit all {len(items)} items (drew {idx})")
+                if cy+rowh > py1-18: raise SystemExit(f"menu overlay cannot fit all {len(items)} items (drew {idx})")
                 name=str(item).strip(); lines2=wrap(draw,name,itemf,colw-34); ny=cy+max(0,(rowh-len(lines2)*int(itemf.size*1.03))//2); dy=ny+int(itemf.size*.48)
-                draw.ellipse((x,dy-4,x+8,dy+4),fill=(245,207,94,255))
+                draw.ellipse((x,dy-5,x+10,dy+5),fill=(245,207,94,255))
                 for ln in lines2:
                     draw.text((x+22,ny+2),ln,font=itemf,fill=(0,0,0,130)); draw.text((x+20,ny),ln,font=itemf,fill=(255,247,226,255)); ny += int(itemf.size*1.03)
+            dx0=int(width*.61); dy0=int(height*.535); dx1=width-margin; dy1=int(height*.775)
+            draw.rounded_rectangle((dx0+8,dy0+8,dx1+8,dy1+8), radius=24, fill=(0,0,0,80))
+            draw.rounded_rectangle((dx0,dy0,dx1,dy1), radius=24, fill=(92,13,24,232), outline=(246,214,132,230), width=3)
+            draw.line((dx0+28,dy0+70,dx1-28,dy0+70), fill=(246,214,132,210), width=2)
+            lf=font(max(24,int(width*.028)),True,shared_label); pf=font(max(70,int(width*.083)),True,shared_price)
+            ly=dy0+24
+            for ln in wrap(draw,shared_label.upper(),lf,dx1-dx0-56):
+                draw.text((dx0+28,ly),ln,font=lf,fill=(255,242,204,255)); ly += int(lf.size*1.06)
+            pbox=draw.textbbox((0,0),shared_price,font=pf); pw=pbox[2]-pbox[0]; px=dx0+max(24,(dx1-dx0-pw)//2); py=dy1-pf.size-26
+            draw.text((px+3,py+3),shared_price,font=pf,fill=(0,0,0,145))
+            draw.text((px,py),shared_price,font=pf,fill=(255,255,246,255))
             if footer:
-                draw.line((cx0,py1-45,cx1,py1-45),fill=(232,184,84,95),width=1)
-                draw.text((cx0,py1-32),footer,font=sf,fill=(255,232,176,245))
+                fy0=int(height*.935); fy1=height-margin
+                draw.rounded_rectangle((margin,fy0,width-margin,fy1), radius=16, fill=(18,9,9,155), outline=(232,184,84,110), width=1)
+                fbox=draw.textbbox((0,0),footer,font=sf); fy=fy0+max(4,(fy1-fy0-(fbox[3]-fbox[1]))//2)
+                draw.text((margin+18,fy),footer,font=sf,fill=(255,232,176,245))
             target.parent.mkdir(parents=True, exist_ok=True); img.save(target, format="PNG", optimize=True); raise SystemExit(0)
         compact=len(items)>10 or bool(shared_price and len(items)>=8)
         panel=(margin,int(height*(.42 if shared_price and len(items)>=8 else (.50 if compact else .56))),width-margin,height-margin)

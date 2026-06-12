@@ -625,6 +625,36 @@ def test_triveni_shared_price_reference_overlay_avoids_menu_table_look(tmp_path)
     assert gold_outline_ratio < 0.05
 
 
+def test_triveni_shared_price_reference_overlay_has_premium_poster_hierarchy(tmp_path):
+    from PIL import Image
+
+    background = (82, 42, 30)
+    source = tmp_path / "background.png"
+    target = tmp_path / "triveni-shared-price.png"
+    Image.new("RGB", (1080, 1350), background).save(source)
+
+    apply_critical_text_overlay(
+        _triveni_shared_price_reference_project(),
+        source,
+        target,
+        size=(1080, 1350),
+        output_format="concept_preview",
+    )
+
+    with Image.open(target).convert("RGB") as img:
+        width, height = img.size
+        middle_region = img.crop((40, int(height * 0.46), width - 40, int(height * 0.68)))
+        bottom_strip = img.crop((0, int(height * 0.82), width, height))
+        middle_pixels = list(middle_region.getdata())
+        bottom_pixels = list(bottom_strip.getdata())
+
+    middle_changed = sum(1 for pixel in middle_pixels if pixel != background)
+    dark_bottom = sum(1 for r, g, b in bottom_pixels if r < 45 and g < 35 and b < 35)
+
+    assert middle_changed / max(1, len(middle_pixels)) > 0.12
+    assert dark_bottom / max(1, len(bottom_pixels)) < 0.45
+
+
 def test_collect_text_facts_uses_locked_reference_items_before_raw_request():
     project = _complete_project().model_copy(update={
         "raw_request": "Create a flyer from this attached menu.",
@@ -1641,15 +1671,23 @@ def test_system_overlay_fallback_shared_price_reference_uses_poster_layout(tmp_p
         width, height = img.size
         title_region = img.crop((40, 30, int(width * 0.60), int(height * 0.24)))
         item_region = img.crop((40, int(height * 0.42), width - 40, height - 70))
+        middle_region = img.crop((40, int(height * 0.46), width - 40, int(height * 0.68)))
+        bottom_strip = img.crop((0, int(height * 0.82), width, height))
         title_pixels = list(title_region.getdata())
         pixels = list(item_region.getdata())
+        middle_pixels = list(middle_region.getdata())
+        bottom_pixels = list(bottom_strip.getdata())
     title_near_white = sum(1 for r, g, b in title_pixels if r > 225 and g > 218 and b > 195)
     near_white = sum(1 for r, g, b in pixels if r > 225 and g > 218 and b > 195)
     gold_outline = sum(1 for r, g, b in pixels if r > 210 and 140 < g < 230 and b < 120)
+    middle_changed = sum(1 for pixel in middle_pixels if pixel != (82, 42, 30))
+    dark_bottom = sum(1 for r, g, b in bottom_pixels if r < 45 and g < 35 and b < 35)
 
     assert title_near_white / max(1, len(title_pixels)) < 0.30
     assert near_white / max(1, len(pixels)) < 0.45
     assert gold_outline / max(1, len(pixels)) < 0.05
+    assert middle_changed / max(1, len(middle_pixels)) > 0.12
+    assert dark_bottom / max(1, len(bottom_pixels)) < 0.45
 
 
 def test_menu_overlay_uses_large_lightweight_poster_panels(tmp_path):
@@ -2573,6 +2611,56 @@ def test_reference_with_materialized_facts_uses_textless_overlay_not_model_text(
     assert "decorative BACKGROUND image only" in prompt
     assert "Use the attached reference image for visual style only" in prompt
     assert "Render the following text exactly" not in prompt
+
+
+def test_style_only_reference_image_is_sent_to_model_for_art_direction(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setattr("agents.flyer.render._project_reference_assets", lambda project: project.assets)
+    base = _triveni_shared_price_reference_project()
+    reference = tmp_path / "assets" / "street-snack-reference.png"
+    reference.parent.mkdir()
+    reference.write_bytes(_png_bytes())
+    reference_asset = FlyerAsset(
+        asset_id="A0001",
+        kind="reference_image",
+        source="whatsapp",
+        path=str(reference),
+        mime_type="image/png",
+        sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
+        original_message_id="wamid.reference",
+        received_at=base.created_at,
+    )
+    project = base.model_copy(update={
+        "assets": [reference_asset],
+        "raw_request": "Use as reference. Same flyer for Lakshmi's Kitchen, same content, Lakshmi's Kitchen theme.",
+        "reference_extractions": [
+            FlyerReferenceExtraction(
+                asset_id="A0001",
+                role="menu_reference",
+                provider="test_vision",
+                status="ok",
+                extracted_facts=[
+                    fact for fact in base.locked_facts
+                    if fact.source == "reference_vision"
+                ],
+                extracted_at=base.created_at,
+            )
+        ],
+    })
+
+    content = _image_message_content(
+        project,
+        concept_id="C1",
+        output_format="concept_preview",
+        size=(1080, 1350),
+    )
+
+    assert isinstance(content, list)
+    assert content[0]["type"] == "text"
+    assert "For this reference-only request" in content[0]["text"]
+    image_parts = [part for part in content if part.get("type") == "image_url"]
+    assert len(image_parts) == 1
+    assert image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
 def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path, monkeypatch):

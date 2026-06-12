@@ -980,8 +980,8 @@ def main() -> int:
                 fallback_specs = _render_with_integrated_poster_disabled(lambda: render_concept_previews(
                     current,
                     asset_dir,
-                    model="deterministic-renderer",
-                    quality="medium",
+                    model=draft_provider.model,
+                    quality=draft_provider.quality,
                     concept_count=cfg.flyer.concept_count,
                 ))
                 fallback_assets = build_asset_manifest(

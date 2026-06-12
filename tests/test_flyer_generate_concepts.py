@@ -1267,7 +1267,22 @@ def test_generate_retries_without_saved_brand_assets_when_business_name_missing(
 def test_generate_exact_text_qa_failure_uses_overlay_fallback_before_manual_review(monkeypatch, tmp_path, capsys):
     module = _load_script(monkeypatch)
     from agents.flyer.render import RenderedAssetSpec
-    from schemas import FlyerVisualQAReport
+    from schemas import Config, FlyerVisualQAReport
+
+    monkeypatch.setattr(module, "load_yaml_model", lambda *_args, **_kwargs: Config.model_validate({
+        "schema_version": 1,
+        "customer": {"name": "Triveni", "location_id": "loc_pineville_01", "timezone": "America/New_York"},
+        "owner": {"name": "Owner", "phone": "+19045550000"},
+        "limits": {},
+        "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "owner@example.com"},
+        "flyer": {
+            "enabled": True,
+            "draft_image_model": "openrouter/premium-poster-model",
+            "draft_image_quality": "high",
+            "concept_count": 1,
+        },
+    }))
 
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
@@ -1327,11 +1342,15 @@ def test_generate_exact_text_qa_failure_uses_overlay_fallback_before_manual_revi
         "projects": [project],
     }), encoding="utf-8")
 
-    render_modes = []
+    render_calls = []
 
-    def fake_render(project_obj, output_dir, **_kwargs):
+    def fake_render(project_obj, output_dir, **kwargs):
         mode = module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER", "")
-        render_modes.append(mode)
+        render_calls.append({
+            "mode": mode,
+            "model": kwargs.get("model"),
+            "quality": kwargs.get("quality"),
+        })
         suffix = "fallback" if mode == "0" else "integrated"
         path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
         path.write_bytes(f"rendered-{suffix}".encode("ascii"))
@@ -1393,7 +1412,10 @@ def test_generate_exact_text_qa_failure_uses_overlay_fallback_before_manual_revi
     persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
 
     assert out["project_id"] == "F0152"
-    assert render_modes == ["1", "0"]
+    assert render_calls == [
+        {"mode": "1", "model": "openrouter/premium-poster-model", "quality": "high"},
+        {"mode": "0", "model": "openrouter/premium-poster-model", "quality": "high"},
+    ]
     assert module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER") == "1"
     assert persisted["status"] == "awaiting_final_approval"
     assert persisted["manual_review"]["status"] == "none"
