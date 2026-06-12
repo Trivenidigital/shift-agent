@@ -14,6 +14,7 @@ Environment=HERMES_HOME=/root/.hermes
 # lacks this dir; without the override, Hermes logs "Node.js not installed
 # or bridge not configured" and refuses to start the WhatsApp adapter.
 Environment=PATH=/root/.hermes/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=FLYER_ALLOW_INTEGRATED_POSTER=1
 EnvironmentFile=/opt/shift-agent/.env
 
 # Targeted permissions guard. Runs with elevated privileges even though the

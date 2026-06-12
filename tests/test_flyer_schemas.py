@@ -52,10 +52,10 @@ def test_flyer_config_defaults_are_safe_and_cost_bounded():
     assert cfg.enabled is False
     assert cfg.concept_count == 1
     assert cfg.max_revision_rounds == 6
-    assert cfg.draft_image_model == "gpt-image-1-mini"
-    assert cfg.draft_image_quality == "low"
-    assert cfg.final_image_model == "gpt-image-1.5"
-    assert cfg.final_image_quality == "medium"
+    assert cfg.draft_image_model == "deterministic-renderer"
+    assert cfg.draft_image_quality == "high"
+    assert cfg.final_image_model == "deterministic-renderer"
+    assert cfg.final_image_quality == "high"
     assert cfg.edit_image_model == "gpt-image-1"
     assert cfg.edit_image_quality == "medium"
     assert [(t.plan_id, t.monthly_price_usd, t.included_flyers) for t in cfg.plan_tiers] == [
@@ -102,6 +102,24 @@ def test_flyer_recovery_config_rejects_unknown_fields():
                 "unexpected": True,
             }
         })
+
+
+def test_flyer_recovery_config_accepts_autonomous_worker_modes():
+    cfg = FlyerConfig.model_validate({
+        "recovery": {
+            "mode": "worker_draft",
+            "enable_timer": True,
+            "worker_runner": "codex",
+            "worker_repo_path": "/opt/shift-agent-source",
+            "worker_auto_run": True,
+            "max_worker_runs_per_run": 1,
+        }
+    })
+
+    assert cfg.recovery.mode == "worker_draft"
+    assert cfg.recovery.worker_runner == "codex"
+    assert cfg.recovery.worker_auto_run is True
+    assert cfg.recovery.max_worker_runs_per_run == 1
 
 
 def test_flyer_recovery_audit_variants_dispatch_through_log_entry():
@@ -417,4 +435,6 @@ def test_workflow_status_literal_contains_requested_states():
         "finalizing_assets",
         "delivered",
         "completed",
+        "closed_no_send",
+        "delivered_with_warning",
     }

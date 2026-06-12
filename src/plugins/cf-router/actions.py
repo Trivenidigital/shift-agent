@@ -1174,9 +1174,15 @@ def find_active_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> O
         return None
     terminal = {"completed"}
     try:
-        account_phones = {_canonical_phone(phone) or phone}
+        exact_phone = _canonical_phone(phone) or phone
+        account_phones = {exact_phone}
         customer = find_flyer_customer_by_sender(phone, chat_id)
+        customer_id = str((customer or {}).get("customer_id") or "")
+        account_chat_ids = {chat_id} if chat_id else set()
         if customer:
+            primary_chat_id = str(customer.get("primary_chat_id") or "")
+            if primary_chat_id:
+                account_chat_ids.add(primary_chat_id)
             for key in ("public_phone", "business_whatsapp_number", "onboarded_by_phone"):
                 value = customer.get(key)
                 canonical = _canonical_phone(value)
@@ -1191,12 +1197,23 @@ def find_active_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> O
         projects = store.get("projects", [])
         if not isinstance(projects, list):
             return None
-        matches = [
-            row for row in projects
-            if isinstance(row, dict)
-            and row.get("customer_phone") in account_phones
-            and row.get("status") not in terminal
-        ]
+        matches = []
+        for row in projects:
+            if not isinstance(row, dict) or row.get("status") in terminal:
+                continue
+            row_customer_id = str(row.get("customer_id") or "")
+            row_chat_id = str(row.get("chat_id") or "")
+            row_phone = _canonical_phone(row.get("customer_phone")) or str(row.get("customer_phone") or "")
+            if row_customer_id:
+                if customer_id and row_customer_id == customer_id:
+                    matches.append(row)
+                continue
+            if row_chat_id:
+                if row_chat_id in account_chat_ids:
+                    matches.append(row)
+                continue
+            if not customer_id and exact_phone and row_phone == exact_phone:
+                matches.append(row)
         if not matches:
             return None
         return max(matches, key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""))
@@ -1478,9 +1495,14 @@ def _detect_requested_location(raw_request: str, allowed_labels: list[str]) -> s
         if label and re.search(rf"\b{re.escape(label.lower())}\b", lower):
             return label
     explicit = re.search(
-        r"\b(?:for|at|in|location|branch|store)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2})\b",
+        r"\b(?:at|in|location|branch|store)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2})\b",
         text,
     )
+    if not explicit:
+        explicit = re.search(
+            r"\bfor\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2})\s+(?:location|branch|store)\b",
+            text,
+        )
     if explicit:
         candidate = explicit.group(1).strip()
         if candidate.lower() not in {"a", "the", "this", "my", "your"}:

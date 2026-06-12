@@ -138,8 +138,67 @@ def test_create_project_hydrates_missing_contact_from_trial_customer(tmp_path, m
     assert project["fields"]["contact_info"] == "+19802005022"
     assert project["fields"]["venue_or_location"] == "90 Bry Bar"
     assert project["fields"]["notes"].startswith("Create a flyer for breakfast menu")
+    assert project["customer_id"] == "CUST0001"
+    assert project["chat_id"] == "84593927557152@lid"
     assert module.FlyerProject.model_validate(project).fields.missing_required_fields() == []
     assert project["fields"]["contact_info"] in projects_path.read_text(encoding="utf-8")
+
+
+def test_create_project_extracts_lakshmi_dosa_special_without_wrong_business_bleed(tmp_path, monkeypatch, capsys):
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    customers_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_customer_sequence": 2,
+        "customers": [{
+            "customer_id": "CUST0001",
+            "business_name": "Lakshmi's Kitchen",
+            "business_address": "90 Brybar Dr St Johns FL",
+            "primary_chat_id": "201975216009469@lid",
+            "onboarded_by_phone": "+17329837841",
+            "public_phone": "+17329837841",
+            "business_whatsapp_number": "+17329837841",
+            "authorized_request_numbers": ["+17329837841"],
+            "business_category": "Indian restaurant",
+            "preferred_language": "mixed",
+            "plan_id": "trial",
+            "status": "trial",
+            "created_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "updated_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "activated_at": datetime(2026, 5, 17, tzinfo=timezone.utc).isoformat(),
+            "monthly_flyers_used": 0,
+            "billing_provider": "manual",
+            "payment_currency": "USD",
+        }],
+        "onboarding_sessions": [],
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--message-id", "lakshmi-dosa-brief",
+        "--raw-request", (
+            "Create a flyer for Dosa special night, every Thursday from 7 to 10 PM, "
+            "any dosa $6.99, include all special dosas"
+        ),
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    fields = project["fields"]
+
+    assert project["customer_id"] == "CUST0001"
+    assert project["chat_id"] == "201975216009469@lid"
+    assert fields["event_or_business_name"] == "Dosa special night"
+    assert fields["event_time"] == "Every Thursday from 7 to 10 PM"
+    assert fields["venue_or_location"] == "90 Brybar Dr St Johns FL"
+    assert fields["contact_info"] == "+17329837841"
+    assert "$6.99" in fields["notes"]
+    assert "Triveni" not in json.dumps(project)
+    assert module.FlyerProject.model_validate(project).fields.missing_required_fields() == []
 
 
 def test_fresh_meats_product_promo_is_ready_without_event_or_contact(tmp_path, monkeypatch):

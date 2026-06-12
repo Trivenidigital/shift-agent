@@ -1181,6 +1181,167 @@ def test_unlimited_location_gate_blocks_other_location_copy():
     ) == ""
 
 
+def test_food_campaign_terms_do_not_trip_location_scope_gate():
+    actions = _load_actions()
+    customer = {
+        "plan_id": "unlimited",
+        "allowed_location_labels": ["Lakshmi's Kitchen"],
+        "location_restriction_enabled": True,
+        "business_address": "Lakshmi's Kitchen, St Johns FL",
+    }
+
+    block = actions.flyer_location_block_message(
+        customer,
+        "Create a flyer for Dosa special night, every Thursday from 7 to 10 PM, any dosa $6.99",
+    )
+
+    assert block == ""
+
+
+def test_active_project_lookup_ignores_unbound_orphan_project(tmp_path):
+    actions = _load_actions()
+    customer_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    actions.FLYER_CUSTOMERS_PATH = customer_path
+    actions.FLYER_PROJECTS_PATH = projects_path
+    customer_path.write_text(
+        """
+{
+  "schema_version": 1,
+  "next_customer_sequence": 2,
+  "next_brand_asset_sequence": 1,
+  "customers": [
+    {
+      "customer_id": "CUST0001",
+      "business_name": "Lakshmi's Kitchen",
+      "business_address": "90 Brybar Dr St Johns FL",
+      "primary_chat_id": "201975216009469@lid",
+      "onboarded_by_phone": "+17329837841",
+      "public_phone": "+17329837841",
+      "business_whatsapp_number": "+17329837841",
+      "authorized_request_numbers": ["+19045550104"],
+      "business_category": "Indian Restaurant",
+      "preferred_language": "mixed",
+      "plan_id": "unlimited",
+      "status": "active",
+      "created_at": "2026-05-17T03:06:00Z",
+      "updated_at": "2026-05-17T03:06:00Z"
+    }
+  ],
+  "onboarding_sessions": []
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    projects_path.write_text(
+        """
+{
+  "schema_version": 1,
+  "next_sequence": 4,
+  "projects": [
+    {
+      "project_id": "F0003",
+      "customer_id": "",
+      "customer_phone": "+19045550104",
+      "chat_id": "",
+      "status": "awaiting_final_approval",
+      "raw_request": "Need flyer for Ugadi Specials March 29 11 AM at Triveni Pineville.",
+      "updated_at": "2026-05-28T01:26:21Z"
+    }
+  ]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    active = actions.find_active_flyer_project_by_sender("+17329837841", "201975216009469@lid")
+
+    assert active is None
+
+
+def test_active_lakshmi_dosa_brief_reaches_generation_not_setup(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    text = (
+        "Create a flyer for Dosa special night, every Thursday from 7 to 10 PM, "
+        "any dosa $6.99, include all special dosas"
+    )
+    customer = {
+        "customer_id": "CUST0001",
+        "business_name": "Lakshmi's Kitchen",
+        "business_address": "90 Brybar Dr St Johns FL",
+        "primary_chat_id": "201975216009469@lid",
+        "onboarded_by_phone": "+17329837841",
+        "public_phone": "+17329837841",
+        "business_whatsapp_number": "+17329837841",
+        "authorized_request_numbers": ["+17329837841"],
+        "business_category": "Indian Restaurant",
+        "preferred_language": "mixed",
+        "plan_id": "unlimited",
+        "status": "active",
+        "allowed_location_labels": ["Lakshmi's Kitchen"],
+        "location_restriction_enabled": True,
+    }
+    calls = {}
+
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "mark_cf_router_inbound_seen", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(actions, "is_owner_chat", lambda _chat_id: False)
+    monkeypatch.setattr(actions, "is_employee_chat", lambda _chat_id: False)
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: customer)
+    monkeypatch.setattr(actions, "find_flyer_intake_session_by_sender", lambda _phone, _chat_id: {"status": "choosing_mode"})
+    monkeypatch.setattr(actions, "trigger_flyer_intake", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("detailed active-customer brief must not restart setup")))
+    monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: None)
+
+    def fake_create_project(**kwargs):
+        calls["create"] = kwargs
+        return True, "project_id=F9002", {
+            "project_id": "F9002",
+            "customer_id": "CUST0001",
+            "customer_phone": kwargs["customer_phone"],
+            "status": "intake_started",
+            "raw_request": kwargs["raw_request"],
+            "fields": {
+                "event_or_business_name": "Dosa special night",
+                "event_time": "Every Thursday 7 PM to 10 PM",
+                "venue_or_location": "90 Brybar Dr St Johns FL",
+                "contact_info": "+17329837841",
+                "notes": kwargs["raw_request"],
+            },
+            "concepts": [],
+            "revisions": [],
+        }
+
+    monkeypatch.setattr(actions, "trigger_create_flyer_project", fake_create_project)
+    monkeypatch.setattr(actions, "flyer_project_has_required_fields", lambda _project: True)
+    monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_args, **_kwargs: ("quota", None))
+    monkeypatch.setattr(actions, "send_flyer_processing_ack", lambda _chat_id, _project_id: (True, "processing-mid", ""))
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts", lambda project_id: calls.setdefault("generated", project_id) and (True, "generated"))
+    monkeypatch.setattr(hooks, "_send_preview_then_finalize_access", lambda *_args, **_kwargs: (True, "preview-mid", ""))
+
+    def fake_send_text(_chat_id, message):
+        assert "Choose your preferred flyer language" not in message
+        assert "How would you like to create your flyer" not in message
+        calls.setdefault("texts", []).append(message)
+        return True, "text-mid", ""
+
+    monkeypatch.setattr(actions, "send_flyer_text", fake_send_text)
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
+
+    result = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text=text,
+        chat_id="201975216009469@lid",
+        message_id="lakshmi-dosa-1",
+    ))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer primary: project F9002 created"}
+    assert calls["create"]["customer_phone"] == "+17329837841"
+    assert "Dosa special night" in calls["create"]["raw_request"]
+    assert calls["generated"] == "F9002"
+    assert calls.get("texts", []) == []
+
+
 def test_flyer_customer_lookup_matches_owned_account_numbers(tmp_path):
     actions = _load_actions()
     path = tmp_path / "customers.json"
@@ -1263,8 +1424,8 @@ def test_active_project_lookup_uses_latest_project_across_account_numbers(tmp_pa
   "schema_version": 1,
   "next_sequence": 20,
   "projects": [
-    {"project_id": "F0013", "customer_phone": "+17329837841", "status": "awaiting_final_approval", "updated_at": "2026-05-17T16:04:52Z"},
-    {"project_id": "F0019", "customer_phone": "+19045550104", "status": "delivered", "updated_at": "2026-05-17T19:23:10Z"}
+    {"project_id": "F0013", "customer_id": "CUST0001", "customer_phone": "+17329837841", "status": "awaiting_final_approval", "updated_at": "2026-05-17T16:04:52Z"},
+    {"project_id": "F0019", "customer_id": "CUST0001", "customer_phone": "+19045550104", "status": "delivered", "updated_at": "2026-05-17T19:23:10Z"}
   ]
 }
 """.strip(),

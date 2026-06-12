@@ -133,14 +133,16 @@ def _load_customer_store(path: Path) -> FlyerCustomerStore:
     return FlyerCustomerStore.model_validate(json.loads(path.read_text(encoding="utf-8")))
 
 
+def _find_customer_for_project(customer_phone: str, customers_path: Path):
+    return _load_customer_store(customers_path).find_customer_by_phone(customer_phone)
+
+
 def _hydrate_fields_from_customer(
     fields: FlyerRequestFields,
     *,
-    customer_phone: str,
-    customers_path: Path,
+    customer,
 ) -> FlyerRequestFields:
     """Fill missing flyer facts from the registered Flyer Studio account."""
-    customer = _load_customer_store(customers_path).find_customer_by_phone(customer_phone)
     if customer is None or customer.status not in {"trial", "active"}:
         return fields
     updates: dict[str, object] = {}
@@ -169,7 +171,7 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
     formats: list[str] = []
 
     event_match = re.search(
-        r"\b(?:need|create|make|generate)?\s*(?:a\s+)?(?:flyer|flier|poster|banner)\s+for\s+(.+?)(?=\s+\b(?:promoting|offering|featuring|advertising|announcing)\b|\s+(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b|\.|$)",
+        r"\b(?:need|create|make|generate)?\s*(?:a\s+)?(?:flyer|flier|poster|banner)\s+for\s+(.+?)(?=,|\s+\b(?:every|daily|weekly|from|any|include|with|promoting|offering|featuring|advertising|announcing)\b|\s+(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b|\.|$)",
         text,
         flags=re.IGNORECASE,
     )
@@ -211,8 +213,19 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
             candidate = datetime(year + 1, month, day, tzinfo=timezone.utc).date()
         date_value = candidate.isoformat()
 
+    schedule_match = re.search(
+        r"\b((?:every\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+        r"(?:\s+(?:and|to|-)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))*"
+        r"\s+from\s+\d{1,2}(?::\d{2})?\s*(?:AM|PM)?\s+(?:to|-)\s+\d{1,2}(?::\d{2})?\s*(?:AM|PM))\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if schedule_match:
+        schedule = " ".join(schedule_match.group(1).split())
+        time_value = schedule[:1].upper() + schedule[1:]
+        time_value = re.sub(r"\b(am|pm)\b", lambda m: m.group(1).upper(), time_value, flags=re.IGNORECASE)
     time_match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b", text, flags=re.IGNORECASE)
-    if time_match:
+    if time_match and not time_value:
         hour = int(time_match.group(1))
         minute = int(time_match.group(2) or "00")
         meridiem = time_match.group(3).upper()
@@ -390,10 +403,10 @@ def main() -> int:
                 return 0
 
         now = datetime.now(timezone.utc)
+        customer = _find_customer_for_project(args.customer_phone, Path(args.customer_state_path))
         fields = _hydrate_fields_from_customer(
             _extract_fields(args.raw_request, now=now),
-            customer_phone=args.customer_phone,
-            customers_path=Path(args.customer_state_path),
+            customer=customer,
         )
         project_id = f"F{store.next_sequence:04d}"
         reference_asset = None
@@ -409,6 +422,8 @@ def main() -> int:
             project_id=project_id,
             status="manual_edit_required" if args.manual_edit_required else "intake_started",
             customer_phone=args.customer_phone,
+            customer_id=customer.customer_id if customer else "",
+            chat_id=customer.primary_chat_id if customer else "",
             created_at=now,
             updated_at=now,
             original_message_id=args.message_id,

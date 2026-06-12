@@ -27,7 +27,7 @@ from agents.flyer.render import (  # noqa: E402
     validate_text_manifest_file,
     write_text_manifest,
 )
-from schemas import FlyerAsset, FlyerConcept, FlyerProject, FlyerRequestFields, FlyerRevision  # noqa: E402
+from schemas import FlyerAsset, FlyerConcept, FlyerManualReview, FlyerProject, FlyerRequestFields, FlyerRevision  # noqa: E402
 
 
 def _complete_project() -> FlyerProject:
@@ -125,6 +125,53 @@ def test_collect_text_facts_keeps_revised_price_phone_location_and_schedule():
     assert facts["contact"] == "+1 980 200 5022"
     assert "$16.99" in facts["detail_001"]
     assert "$12.99" in facts["detail_002"]
+
+
+def test_collect_text_facts_preserves_multi_offer_celebration_contract():
+    fields = FlyerRequestFields(
+        event_or_business_name="One Year Grand Celebration",
+        event_date="2026-05-30",
+        venue_or_location="90 Brybar Dr St Johns FL",
+        contact_info="+17329837841",
+        notes=(
+            "Create a one year grand celebration flyer, which must include "
+            "grand sale 30% of all dine-In orders and 20% on all Take Away orders. "
+            "All Biryani's Buy one get one free. Special Lunch Thali for $12.99. "
+            "Dates both May 30 and 31st"
+        ),
+    )
+    project = _complete_project().model_copy(update={"fields": fields})
+
+    facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
+    rendered_text = "\n".join(facts.values())
+
+    assert facts["date"] == "May 30 and May 31, 2026"
+    assert "grand sale 30% of all dine-In orders and 20% on all Take Away orders" in rendered_text
+    assert "All Biryani's Buy one get one free" in rendered_text
+    assert "Special Lunch Thali for $12.99" in rendered_text
+
+
+def test_image_prompt_preserves_multi_offer_celebration_contract():
+    fields = FlyerRequestFields(
+        event_or_business_name="One Year Grand Celebration",
+        event_date="2026-05-30",
+        venue_or_location="90 Brybar Dr St Johns FL",
+        contact_info="+17329837841",
+        notes=(
+            "Create a one year grand celebration flyer, which must include "
+            "grand sale 30% of all dine-In orders and 20% on all Take Away orders. "
+            "All Biryani's Buy one get one free. Special Lunch Thali for $12.99. "
+            "Dates both May 30 and 31st"
+        ),
+    )
+    project = _complete_project().model_copy(update={"fields": fields})
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "Date: May 30 and May 31, 2026" in prompt
+    assert "grand sale 30% of all dine-In orders and 20% on all Take Away orders" in prompt
+    assert "All Biryani's Buy one get one free" in prompt
+    assert "Special Lunch Thali - $12.99" in prompt
 
 
 def test_collect_text_facts_suppresses_old_phone_from_notes_after_revision():
@@ -232,9 +279,29 @@ def test_apply_critical_text_overlay_changes_model_background_pixels(tmp_path):
     assert inspect_rendered_asset(target, expected_width=1080, expected_height=1350, mime_type="image/png").ok is True
 
 
-def test_render_final_package_creates_expected_formats(tmp_path):
-    project = _complete_project().model_copy(update={"selected_concept_id": "C1"})
-    specs = render_final_package(project, tmp_path)
+def test_render_final_package_creates_expected_formats(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    project = _complete_project()
+    preview_specs = render_concept_previews(project, tmp_path / "previews")
+    assets = build_asset_manifest(
+        preview_specs,
+        first_asset_number=1,
+        source="rendered",
+        original_message_id="wamid.flyer.1",
+    )
+    concepts = [
+        FlyerConcept(
+            concept_id="C1",
+            title="Concept 1",
+            style_summary="Generated concept",
+            preview_asset_id="A0001",
+            prompt=project.raw_request,
+            created_at=datetime.now(timezone.utc),
+            selected_at=datetime.now(timezone.utc),
+        )
+    ]
+    project = project.model_copy(update={"assets": assets, "concepts": concepts, "selected_concept_id": "C1"})
+    specs = render_final_package(project, tmp_path / "finals")
     by_format = {spec.output_format: spec for spec in specs}
     assert set(by_format) == {
         "whatsapp_image",
@@ -481,7 +548,8 @@ def test_image_prompt_includes_customer_brand_assets(tmp_path, monkeypatch):
     prompt = _image_prompt(_complete_project(), concept_id="C1", output_format="whatsapp_image", size=(1080, 1350))
 
     assert "Customer brand assets to honor" in prompt
-    assert "logo: B0001" in prompt
+    assert "saved logo reference" in prompt
+    assert "logo" in prompt
 
 
 def test_project_reference_image_is_sent_to_image_model(tmp_path, monkeypatch):
@@ -507,8 +575,54 @@ def test_project_reference_image_is_sent_to_image_model(tmp_path, monkeypatch):
     assert isinstance(content, list)
     assert content[0]["type"] == "text"
     assert content[1]["type"] == "image_url"
-    assert "reference_image: A0001" in content[0]["text"]
-    assert "do not redesign from scratch" in content[0]["text"].lower()
+    assert "uploaded reference image" in content[0]["text"]
+    assert "Reference/menu extraction instructions" in content[0]["text"]
+
+
+def test_reference_only_choice_does_not_preserve_foreign_reference_identity(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    ref = tmp_path / "assets" / "F0001-reference.png"
+    ref.parent.mkdir(parents=True)
+    ref.write_bytes(b"reference image bytes")
+    raw_request = (
+        "Create same flyer for Lakshmi's Kitchen. Items: Punugulu - $9.99. "
+        "Customer chose path 2: use the source flyer only as a reference/inspiration. "
+        "Do not copy the source flyer branding/layout exactly."
+    )
+    project = _complete_project().model_copy(update={
+        "raw_request": raw_request,
+        "assets": [
+            FlyerAsset(
+                asset_id="A0001",
+                kind="reference_image",
+                source="whatsapp",
+                path=str(ref),
+                mime_type="image/png",
+                sha256="b" * 64,
+                original_message_id="template1",
+                received_at=datetime.now(timezone.utc),
+            )
+        ],
+        "fields": FlyerRequestFields(
+            event_or_business_name="Street Snack Specials",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            preferred_language="en",
+            style_preference="Lakshmi's Kitchen theme",
+            notes=raw_request,
+        ),
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="whatsapp_image", size=(1080, 1350))
+    content = _image_message_content(project, concept_id="C1", output_format="whatsapp_image", size=(1080, 1350))
+
+    assert "style/content inspiration only" in prompt
+    assert "registered customer business identity" in prompt
+    assert "Do not draw ornamental frames" in prompt
+    assert "full-bleed editorial food photography" in prompt
+    assert "source of truth for visual identity" not in prompt
+    assert "preserve its visual identity" not in prompt
+    assert isinstance(content, str)
 
 
 def test_render_concept_previews_can_still_render_three_when_configured(tmp_path):
@@ -643,18 +757,78 @@ def test_direct_poster_prompt_includes_exact_menu_copy_and_allows_integrated_tex
     prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
 
     assert "Create a complete, finished customer-ready poster flyer" in prompt
-    assert "Render the following text exactly" in prompt
+    assert "Flyer facts (for theme/imagery relevance ONLY" in prompt
+    assert "do NOT render them as text" in prompt
     assert "Weekend Breakfast Specials" in prompt
     assert "Thursday To Sunday | 8 AM TO 11 AM" in prompt
     assert "Poori with Chicken - $14.99" in prompt
     assert "Kheema Dosa - $12.99" in prompt
     assert "+17329837841" in prompt
-    assert "brand masthead" in prompt
-    assert "item cards" in prompt
-    assert "Telugu as the primary flyer language" in prompt
-    assert "Do not output an all-English flyer" in prompt
-    assert "Do not render readable words" not in prompt
-    assert "Leave a premium lower-third area" not in prompt
+    assert "Produce a decorative BACKGROUND image only" in prompt
+    assert "Do NOT draw any text" in prompt
+    assert "Menu items to feature - exactly 5 items" in prompt
+
+
+def test_food_menu_prompt_demands_premium_editorial_ad_not_boxed_template():
+    project = _complete_project().model_copy(update={
+        "fields": FlyerRequestFields(
+            event_or_business_name="Street Snack Specials",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            preferred_language="en",
+            notes=(
+                "Any 2 snacks $9.99. Items: Punugulu, Egg Bonda, Aloo Bonda, "
+                "Veg Lollipop, Cut Mirchi, Onion Mirchi, Mirchi Bhajji, "
+                "Onion Pakora, Onion Samosa, Punjabi Samosa."
+            ),
+        ),
+        "raw_request": (
+            "Create a premium street snack specials flyer for Lakshmi's Kitchen. "
+            "Any 2 snacks $9.99."
+        ),
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "premium/editorial restaurant advertisement" in prompt
+    assert "magazine-quality food advertising" in prompt
+    assert "ordinary menu template" in prompt
+    assert "boxed menu table" in prompt
+    assert "large bordered rows" in prompt
+    assert "one strong hero food image" in prompt
+    assert "Produce a decorative BACKGROUND image only" in prompt
+    assert "Do NOT draw any text" in prompt
+    assert "Menu items to feature - exactly 10 items" in prompt
+    assert "Offer details:" in prompt
+    assert "- Any 2 snacks $9.99" in prompt
+    assert "- Punugulu" in prompt
+    assert "- Punjabi Samosa" in prompt
+    assert "Do NOT draw any text, headlines, menu/item cards" in prompt
+    assert "menu tiles" not in prompt
+
+
+def test_mixed_language_prompt_preserves_exact_english_campaign_copy():
+    project = _complete_project().model_copy(update={
+        "fields": FlyerRequestFields(
+            event_or_business_name="Dosa Special Night",
+            event_time="Every Thursday from 7 to 10 PM",
+            venue_or_location="90 Brybar Dr, Saint Johns, FL",
+            contact_info="+17329837841",
+            preferred_language="mixed",
+            notes="Create a flyer for Dosa special night, every Thursday from 7 to 10 PM, any dosa $6.99, include all special dosas",
+        ),
+        "raw_request": "Create a flyer for dosa special night, every Thursday from 7 to 10 PM dosa night, any dosa $6.99, include all special dosas",
+    })
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "Flyer facts (for theme/imagery relevance ONLY" in prompt
+    assert "Business/brand: Dosa Special Night" in prompt
+    assert "Title: Dosa Special Night" in prompt
+    assert "Time: Every Thursday from 7 to 10 PM" in prompt
+    assert "- any dosa - $6.99" in prompt
+    assert "Produce a decorative BACKGROUND image only" in prompt
+    assert "Do NOT draw any text" in prompt
 
 
 def test_direct_poster_prompt_does_not_make_request_sentence_flyer_copy(monkeypatch):
@@ -778,6 +952,7 @@ def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path
         tmp_path,
         model="gpt-image-1",
         quality="medium",
+        provider="openai",
     )
 
     assert spec.kind == "concept_preview"
@@ -793,8 +968,8 @@ def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path
     assert b"Remove extra 08:00" in body
     assert b'name="image"; filename="reference.png"' in body
     manifest = json.loads(Path(f"{spec.path}.text.json").read_text(encoding="utf-8"))
-    assert manifest["verification_mode"] == "source_edit_integrity_only"
-    assert "inspect the preview visually" in " ".join(manifest["warnings"])
+    assert manifest["verification_mode"] == "source_edit_overlay_recomposed"
+    assert "deterministic text overlay" in " ".join(manifest["warnings"])
     qa = validate_text_manifest_file(
         spec.path,
         project_id=project.project_id,
@@ -802,7 +977,6 @@ def test_source_edit_preview_calls_openai_edit_api_with_reference_image(tmp_path
         output_format="concept_preview",
     )
     assert qa.ok is True
-    assert any("integrity only" in warning for warning in qa.warnings)
 
 
 def test_source_edit_rejects_pdf_reference_before_provider_call(tmp_path, monkeypatch):
@@ -833,7 +1007,7 @@ def test_source_edit_rejects_pdf_reference_before_provider_call(tmp_path, monkey
     monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _fail_urlopen)
 
     try:
-        render_source_edit_preview(project, tmp_path, model="gpt-image-1", quality="medium")
+        render_source_edit_preview(project, tmp_path, model="gpt-image-1", quality="medium", provider="openai")
     except FlyerRenderError as e:
         assert "must be an image" in str(e)
     else:
@@ -889,7 +1063,7 @@ def test_source_edit_reference_uses_latest_reference_asset(tmp_path, monkeypatch
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda req, timeout: requests.append(req.data) or _Resp())
 
-    render_source_edit_preview(project, tmp_path, model="gpt-image-1", quality="medium")
+    render_source_edit_preview(project, tmp_path, model="gpt-image-1", quality="medium", provider="openai")
 
     assert b'filename="latest.png"' in requests[0]
     assert b'filename="old.png"' not in requests[0]
@@ -971,10 +1145,21 @@ def test_real_image_model_concept_uses_direct_poster_output_without_overlay(tmp_
             return self._body
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", lambda *_args, **_kwargs: _Resp())
+    project = _complete_project().model_copy(update={
+        "raw_request": "Create a dosa night flyer. Any dosa $6.99.",
+        "fields": FlyerRequestFields(
+            event_or_business_name="Dosa Night",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+            preferred_language="en",
+            notes="Any dosa $6.99. Items: Masala Dosa, Plain Dosa.",
+        ),
+    })
 
     specs = render_concept_previews(
-        _complete_project(),
+        project,
         tmp_path,
         model="openai/gpt-5.4-image-2",
         quality="high",
@@ -1115,7 +1300,7 @@ def test_chloe_salon_prompt_is_not_food_or_festival_themed():
     assert "salon" in prompt.lower()
     assert "service offer cards" in prompt.lower()
     assert "Other hair services available" in prompt
-    assert "without a price, show it as a service label" in prompt
+    assert "Menu items to feature - exactly 3 items" in prompt
     assert "ethnic grocery" not in prompt.lower()
     assert "south indian" not in prompt.lower()
     assert "marigold" not in prompt.lower()
@@ -1189,7 +1374,7 @@ def test_source_edit_final_package_reuses_approved_preview_even_with_determinist
     asset = FlyerAsset(
         asset_id="A0001",
         kind="concept_preview",
-        source="rendered",
+        source="uploaded",
         path=str(approved),
         mime_type="image/png",
         sha256="a" * 64,
@@ -1200,6 +1385,7 @@ def test_source_edit_final_package_reuses_approved_preview_even_with_determinist
         "status": "awaiting_final_approval",
         "raw_request": "Edit uploaded flyer/source artwork. Customer requested: Remove extra 08:00.",
         "assets": [asset],
+        "manual_review": FlyerManualReview(status="completed", operator_asset_ids=["A0001"]),
         "concepts": [
             FlyerConcept(
                 concept_id="C1",
@@ -1229,7 +1415,7 @@ def test_authorized_source_artwork_update_is_treated_as_source_edit_for_finals(t
     asset = FlyerAsset(
         asset_id="A0001",
         kind="concept_preview",
-        source="rendered",
+        source="uploaded",
         path=str(approved),
         mime_type="image/png",
         sha256="a" * 64,
@@ -1240,6 +1426,7 @@ def test_authorized_source_artwork_update_is_treated_as_source_edit_for_finals(t
         "status": "awaiting_final_approval",
         "raw_request": "Authorized flyer/source artwork update. Change the date to May 22.",
         "assets": [asset],
+        "manual_review": FlyerManualReview(status="completed", operator_asset_ids=["A0001"]),
         "concepts": [
             FlyerConcept(
                 concept_id="C1",

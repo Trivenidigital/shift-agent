@@ -284,6 +284,13 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_guest_order.py
     fi
+    for flyer_module in facts reference_extract visual_qa semantic_brief campaign_scene_prompts creative_planner creative_firewall; do
+        if [ -f "src/agents/flyer/${flyer_module}.py" ]; then
+            install -m 644 "src/agents/flyer/${flyer_module}.py" "/opt/shift-agent/flyer_${flyer_module}.py"
+        else
+            rm -f "/opt/shift-agent/flyer_${flyer_module}.py"
+        fi
+    done
     if [ -d src/agents/flyer/scripts ] && compgen -G "src/agents/flyer/scripts/*" > /dev/null; then
         install -m 755 src/agents/flyer/scripts/* /usr/local/bin/
         for flyer_binary in \
