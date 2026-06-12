@@ -2350,6 +2350,8 @@ def test_simple_english_typed_menu_can_opt_into_integrated_poster_prompt(monkeyp
     assert "Item cards must look like designed menu tiles" in prompt
     assert "keep every footer character at least 6% of the canvas height above the bottom edge" in prompt
     assert "Render the following text exactly" in prompt
+    assert "Do not add secondary brand names" in prompt
+    assert "freshness/availability claims" in prompt
     assert "Dosa - $6.99" in prompt
     assert "Idli - $5.99" in prompt
     assert "decorative BACKGROUND image only" not in prompt
@@ -2410,6 +2412,8 @@ def test_english_combo_offer_can_opt_into_integrated_poster_prompt(monkeypatch):
     assert "Build a complete finished poster flyer" in prompt
     assert "keep every footer character at least 6% of the canvas height above the bottom edge" in prompt
     assert "Render the following text exactly" in prompt
+    assert "Do not add secondary brand names" in prompt
+    assert "freshness/availability claims" in prompt
     assert "Memorial Day Weekend Meal Combos" in prompt
     assert "Non Veg Combo: $49.99" in prompt
     assert "Veg Combo: $39.99" in prompt

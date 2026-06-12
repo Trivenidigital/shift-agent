@@ -1015,6 +1015,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
             "Render the following text exactly. Do not summarize, paraphrase, invent, or omit these customer facts.",
             "Title is the campaign/product/service headline; Business/brand is the account identity.",
             "Do not add delivery, catering, payment, ordering-channel, or service-availability claims unless they appear below.",
+            "Do not add secondary brand names, business category subtitles, taglines, slogans, freshness/availability claims, or extra promotional copy unless they appear below.",
         ]
     business_name = _display_business_name(project)
     if business_name:
