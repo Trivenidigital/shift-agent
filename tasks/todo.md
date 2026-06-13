@@ -1977,10 +1977,11 @@ Review/verification:
 - [x] Replace flat top text treatment with a premium brand ribbon/accent treatment.
 - [x] Add regressions and renderer masks for fake model/source text leaking through the left content column and bottom/footer deck.
 - [x] Verify focused renderer tests and broad flyer gate locally after each mask.
-- [ ] Regenerate `F0155`, inspect raw output, send corrected preview, and deploy.
+- [x] Regenerate `F0155`, inspect raw output, send corrected preview, and deploy.
 
 ## Review
 
-- Root cause: deployed `49b6661e` improved the masthead/offer treatment, but the model-generated background still contained faint fake template text in controlled-copy zones: the left content column (`HEADLINE` and item-name ghosts) and then the bottom/footer deck (`COMBO-PRICE`). That makes the WhatsApp preview still read as low-grade/template-like.
-- Fix in progress: before drawing the snack list panel, the shared-price reference overlay now applies a fully opaque mask over the full left content column; before drawing the footer, it applies a fully opaque warm dark-brown mask over the full bottom deck. Both masks are mirrored in the embedded fallback renderer.
-- Verification so far: focused renderer tests passed (`3 passed`), syntax/diff checks passed, and the broader flyer regression gate passed (`837 passed, 19 warnings`).
+- Root cause: deployed `49b6661e` improved the masthead/offer treatment, but the model-generated background still contained faint fake template text in controlled-copy zones: the left content column (`HEADLINE` and item-name ghosts) and then the bottom/footer deck (`COMBO-PRICE`). That made the WhatsApp preview still read as low-grade/template-like.
+- Fix: commits `022d2563` and `a95198fd` now apply fully opaque masks to the shared-price reference overlay's left content column and bottom/footer deck, mirrored in the embedded fallback renderer.
+- Verification: focused renderer tests passed (`3 passed`), syntax/diff checks passed, broader flyer regression gate passed (`837 passed, 19 warnings`), and the full deploy builder passed (`3569 passed, 894 skipped, 67 warnings`).
+- Deploy/send: `a95198fd` is live as `deploy-20260613-190657-a95198fd`; services are active and cockpit health returned HTTP 200. Regenerated `F0155` as asset `A0006` (`sha256=1392485bfb4bc03f75e978fad9be1bf532d61400e71b24aea74ce495e62a43d8`), copied raw preview to `C:\Testing\F0155-opaque-mask-a95198f.png`, visually inspected it, and sent it to `201975216009469@lid` with outbound message `3EB03378662B769496F8DB` at `2026-06-13T19:10:34Z`.
