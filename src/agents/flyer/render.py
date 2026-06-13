@@ -2266,6 +2266,31 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                     draw.rectangle((0, 0, width, height), fill=(0, 0, 0, 44))
                     top_h = int(height * 0.325)
                     draw.rectangle((0, 0, width, top_h), fill=(5, 8, 6, 255))
+                    # Add visible brand/retail energy to the thumbnail-critical
+                    # top third. A flat black header with plain text reads as a
+                    # template even when the food hero below is good.
+                    for i, alpha in enumerate((210, 156, 104)):
+                        inset = i * 16
+                        draw.arc((22 + inset, 60 + inset, 298 - inset, 282 - inset), 190, 332, fill=(190, 24, 26, alpha), width=14)
+                        draw.arc((width - 298 + inset, 60 + inset, width - 22 - inset, 282 - inset), 208, 350, fill=(190, 24, 26, alpha), width=14)
+                    for x0, flip in ((50, 1), (width - 50, -1)):
+                        for idx in range(6):
+                            y0 = 66 + idx * 25
+                            x1 = x0 + flip * (92 + idx * 13)
+                            draw.line((x0, y0, x1, y0 + 10), fill=(232, 172, 58, 118), width=3)
+                    mast_x0 = int(width * 0.17)
+                    mast_x1 = int(width * 0.83)
+                    mast_y0 = int(height * 0.030)
+                    mast_y1 = int(height * 0.112)
+                    draw.rounded_rectangle((mast_x0 + 7, mast_y0 + 7, mast_x1 + 7, mast_y1 + 7), radius=28, fill=(0, 0, 0, 110))
+                    draw.rounded_rectangle((mast_x0, mast_y0, mast_x1, mast_y1), radius=28, fill=(248, 244, 224, 248), outline=(232, 184, 84, 235), width=3)
+                    seal_r = int((mast_y1 - mast_y0) * 0.34)
+                    seal_cx = mast_x0 + seal_r + 26
+                    seal_cy = (mast_y0 + mast_y1) // 2
+                    draw.ellipse((seal_cx - seal_r, seal_cy - seal_r, seal_cx + seal_r, seal_cy + seal_r), fill=(18, 63, 42, 255), outline=(210, 154, 45, 255), width=3)
+                    seal_font = _font(ImageFont, max(16, int(width * 0.020)), bold=True, text="LK")
+                    seal_bbox = draw.textbbox((0, 0), "LK", font=seal_font)
+                    draw.text((seal_cx - (seal_bbox[2] - seal_bbox[0]) // 2, seal_cy - (seal_bbox[3] - seal_bbox[1]) // 2 - 2), "LK", font=seal_font, fill=(255, 231, 142, 255))
                     draw.rectangle((0, top_h - 28, width, top_h), fill=(122, 18, 18, 150))
                     draw.line((margin, top_h - 86, width - margin, top_h - 86), fill=(235, 178, 58, 230), width=4)
                     draw.line((margin, top_h - 18, width - margin, top_h - 18), fill=(235, 178, 58, 230), width=4)
@@ -2274,21 +2299,22 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                     headline_font = _font(ImageFont, max(58, int(width * 0.070)), bold=True, text=headline_text)
                     schedule_font = _font(ImageFont, max(24, int(width * 0.030)), bold=True, text=schedule_text)
 
-                    y = int(height * 0.040)
                     if business:
                         for line in _wrap(draw, business, brand_font, width - margin * 2):
                             bbox = draw.textbbox((0, 0), line, font=brand_font)
-                            x = (width - (bbox[2] - bbox[0])) // 2
-                            draw.text((x + 3, y + 3), line, font=brand_font, fill=(40, 6, 8, 160))
-                            draw.text((x, y), line, font=brand_font, fill=(255, 236, 172, 255))
-                            y += int(brand_font.size * 1.12)
+                            x = mast_x0 + 88 + max(12, (mast_x1 - mast_x0 - 104 - (bbox[2] - bbox[0])) // 2)
+                            y = mast_y0 + max(6, (mast_y1 - mast_y0 - (bbox[3] - bbox[1])) // 2) - 2
+                            draw.text((x + 2, y + 2), line, font=brand_font, fill=(190, 155, 87, 110))
+                            draw.text((x, y), line, font=brand_font, fill=(26, 68, 45, 255))
+                            break
                     if schedule_text:
                         bbox = draw.textbbox((0, 0), schedule_text, font=schedule_font)
                         x = (width - (bbox[2] - bbox[0])) // 2
-                        draw.text((x + 2, y + 8 + 2), schedule_text, font=schedule_font, fill=(0, 0, 0, 160))
-                        draw.text((x, y + 8), schedule_text, font=schedule_font, fill=(255, 244, 214, 255))
+                        schedule_y = int(height * 0.122)
+                        draw.text((x + 2, schedule_y + 2), schedule_text, font=schedule_font, fill=(0, 0, 0, 160))
+                        draw.text((x, schedule_y), schedule_text, font=schedule_font, fill=(255, 244, 214, 255))
                     headline_lines = _wrap(draw, headline_text, headline_font, width - margin * 2)
-                    headline_y = int(height * 0.145)
+                    headline_y = int(height * 0.170)
                     for line in headline_lines[:2]:
                         bbox = draw.textbbox((0, 0), line, font=headline_font)
                         x = (width - (bbox[2] - bbox[0])) // 2
@@ -2630,18 +2656,32 @@ with Image.open(src) as img:
                 if "STREET" not in headline and "SNACK" in shared_label.upper(): headline="STREET SNACK SPECIALS"
                 combo=title.upper(); sched=schedule.upper()
                 draw.rectangle((0,0,width,height),fill=(0,0,0,44))
-                th=int(height*.325); draw.rectangle((0,0,width,th),fill=(5,8,6,255)); draw.rectangle((0,th-28,width,th),fill=(122,18,18,150))
+                th=int(height*.325); draw.rectangle((0,0,width,th),fill=(5,8,6,255))
+                for i,alpha in enumerate((210,156,104)):
+                    ins=i*16
+                    draw.arc((22+ins,60+ins,298-ins,282-ins),190,332,fill=(190,24,26,alpha),width=14)
+                    draw.arc((width-298+ins,60+ins,width-22-ins,282-ins),208,350,fill=(190,24,26,alpha),width=14)
+                for x0,flip in ((50,1),(width-50,-1)):
+                    for idx in range(6):
+                        y0=66+idx*25; x1=x0+flip*(92+idx*13); draw.line((x0,y0,x1,y0+10),fill=(232,172,58,118),width=3)
+                mx0=int(width*.17); mx1=int(width*.83); my0=int(height*.030); my1=int(height*.112)
+                draw.rounded_rectangle((mx0+7,my0+7,mx1+7,my1+7),radius=28,fill=(0,0,0,110))
+                draw.rounded_rectangle((mx0,my0,mx1,my1),radius=28,fill=(248,244,224,248),outline=(232,184,84,235),width=3)
+                sr=int((my1-my0)*.34); scx=mx0+sr+26; scy=(my0+my1)//2
+                draw.ellipse((scx-sr,scy-sr,scx+sr,scy+sr),fill=(18,63,42,255),outline=(210,154,45,255),width=3)
+                skf=font(max(16,int(width*.020)),True,"LK"); sb=draw.textbbox((0,0),"LK",font=skf)
+                draw.text((scx-(sb[2]-sb[0])//2,scy-(sb[3]-sb[1])//2-2),"LK",font=skf,fill=(255,231,142,255))
+                draw.rectangle((0,th-28,width,th),fill=(122,18,18,150))
                 draw.line((margin,th-86,width-margin,th-86),fill=(235,178,58,230),width=4); draw.line((margin,th-18,width-margin,th-18),fill=(235,178,58,230),width=4)
                 bf=font(max(31,int(width*.039)),True,biz); hf=font(max(58,int(width*.070)),True,headline); scf=font(max(24,int(width*.030)),True,sched)
-                y=int(height*.040)
                 if biz:
                     for ln in wrap(draw,biz,bf,width-margin*2):
-                        box=draw.textbbox((0,0),ln,font=bf); x=(width-(box[2]-box[0]))//2
-                        draw.text((x+3,y+3),ln,font=bf,fill=(40,6,8,160)); draw.text((x,y),ln,font=bf,fill=(255,236,172,255)); y += int(bf.size*1.12)
+                        box=draw.textbbox((0,0),ln,font=bf); x=mx0+88+max(12,(mx1-mx0-104-(box[2]-box[0]))//2); y=my0+max(6,(my1-my0-(box[3]-box[1]))//2)-2
+                        draw.text((x+2,y+2),ln,font=bf,fill=(190,155,87,110)); draw.text((x,y),ln,font=bf,fill=(26,68,45,255)); break
                 if sched:
                     box=draw.textbbox((0,0),sched,font=scf); x=(width-(box[2]-box[0]))//2
-                    draw.text((x+2,y+10),sched,font=scf,fill=(0,0,0,160)); draw.text((x,y+8),sched,font=scf,fill=(255,244,214,255))
-                hy=int(height*.145)
+                    sy=int(height*.122); draw.text((x+2,sy+2),sched,font=scf,fill=(0,0,0,160)); draw.text((x,sy),sched,font=scf,fill=(255,244,214,255))
+                hy=int(height*.170)
                 for ln in wrap(draw,headline,hf,width-margin*2)[:2]:
                     box=draw.textbbox((0,0),ln,font=hf); x=(width-(box[2]-box[0]))//2
                     draw.text((x+4,hy+4),ln,font=hf,fill=(0,0,0,190)); draw.text((x,hy),ln,font=hf,fill=(255,220,92,255)); hy += int(hf.size*1.08)

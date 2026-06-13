@@ -1964,3 +1964,15 @@ Review/verification:
 - Fix: `a06f8434` is live on `main-vps` as `deploy-20260613-011731-a06f8434`. The shared-price reference path now renders a premium poster layout with a dominant street-snack headline, exact snack list, food hero background, red/gold bottom deal band, and fully opaque source-text mask.
 - Verification: deploy builder passed `3568 passed, 894 skipped`; focused flyer gate passed `836 passed`; post-deploy services were active and cockpit health returned HTTP 200.
 - Production recovery: regenerated `F0152` as asset `A0014` (`sha256=f52994e643a4b3ccf71710627403dad8e7a3667391099fc1e9cc542d1c339579`), copied raw preview to `C:\Testing\f0152-premium-layout-a06f8434.png`, visually inspected it, and sent it to `201975216009469@lid` with outbound message `3EB0716B759ECEE060592B` at `2026-06-13T01:24:19Z`.
+
+# 2026-06-13 - Flyer thumbnail premium-energy hotfix
+
+**Drift-check tag:** extends-Hermes
+
+## Checklist
+
+- [x] Confirm `C:\Testing\7.png` maps to live project `F0155`, not stale `F0152`.
+- [x] Copy and inspect raw production asset `F0155-C1-preview.png`; root issue is flat black masthead/plain overlay energy in WhatsApp thumbnail.
+- [x] Add a failing renderer regression requiring branded masthead energy.
+- [ ] Replace flat top text treatment with a premium brand ribbon/accent treatment.
+- [ ] Regenerate `F0155`, inspect raw output, send corrected preview, and deploy.
