@@ -2322,6 +2322,11 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                         draw.text((x, headline_y), line, font=headline_font, fill=(255, 220, 92, 255))
                         headline_y += int(headline_font.size * 1.08)
 
+                    left_column_x1 = int(width * 0.50)
+                    left_column_y0 = top_h + 12
+                    left_column_y1 = int(height * 0.755)
+                    draw.rectangle((0, left_column_y0, left_column_x1, left_column_y1), fill=(3, 12, 8, 238))
+
                     panel_x0 = margin
                     panel_y0 = int(height * 0.365)
                     panel_x1 = int(width * 0.475)
@@ -2685,6 +2690,7 @@ with Image.open(src) as img:
                 for ln in wrap(draw,headline,hf,width-margin*2)[:2]:
                     box=draw.textbbox((0,0),ln,font=hf); x=(width-(box[2]-box[0]))//2
                     draw.text((x+4,hy+4),ln,font=hf,fill=(0,0,0,190)); draw.text((x,hy),ln,font=hf,fill=(255,220,92,255)); hy += int(hf.size*1.08)
+                draw.rectangle((0,th+12,int(width*.50),int(height*.755)),fill=(3,12,8,238))
                 px0=margin; py0=int(height*.365); px1=int(width*.475); py1=int(height*.735)
                 draw.rounded_rectangle((px0+8,py0+8,px1+8,py1+8),radius=22,fill=(0,0,0,95))
                 draw.rounded_rectangle((px0,py0,px1,py1),radius=22,fill=(6,13,9,205),outline=(232,184,84,230),width=3)

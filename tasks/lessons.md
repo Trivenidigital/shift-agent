@@ -4,7 +4,8 @@
 
 - A flyer can be technically cleaner and still look unchanged to the operator/customer if the WhatsApp thumbnail is dominated by flat black blocks and generic overlay panels.
 - For premium reference-style food flyers, the masthead must look like a designed brand lockup/ribbon and the top area needs visible visual energy (gold/red accents, texture, motifs) even when the source text is masked.
-- Regression tests should inspect the thumbnail-critical regions: top masthead, side accent energy, offer band, and source-text masking. Text-fact QA plus a full-size raw image inspection is not enough.
+- Background-only image generation can still paint fake flyer words into food art; deterministic overlays must mask any text-bearing reserved regions before drawing controlled copy.
+- Regression tests should inspect the thumbnail-critical regions: top masthead, side accent energy, offer band, and source/model-text masking. Text-fact QA plus a full-size raw image inspection is not enough.
 
 ## 2026-06-13 - Flyer factual safety must not downgrade premium composition
 
