@@ -1975,12 +1975,12 @@ Review/verification:
 - [x] Copy and inspect raw production asset `F0155-C1-preview.png`; root issue is flat black masthead/plain overlay energy in WhatsApp thumbnail.
 - [x] Add a failing renderer regression requiring branded masthead energy.
 - [x] Replace flat top text treatment with a premium brand ribbon/accent treatment.
-- [x] Add a regression and renderer mask for fake model/source text leaking through the left content column.
-- [x] Verify focused renderer tests and broad flyer gate locally.
+- [x] Add regressions and renderer masks for fake model/source text leaking through the left content column and bottom/footer deck.
+- [x] Verify focused renderer tests and broad flyer gate locally after each mask.
 - [ ] Regenerate `F0155`, inspect raw output, send corrected preview, and deploy.
 
 ## Review
 
-- Root cause: deployed `49b6661e` improved the masthead/offer treatment, but the model-generated background still contained faint fake template text in the left content column (`HEADLINE` and item-name ghosts) behind the deterministic list. That makes the WhatsApp preview still read as low-grade/template-like.
-- Fix in progress: before drawing the snack list panel, the shared-price reference overlay now applies an opaque dark mask over the full left content column. The same mask is mirrored in the embedded fallback renderer.
-- Verification so far: focused renderer tests passed (`3 passed`), syntax/diff checks passed, and the broader flyer regression gate passed (`837 passed, 18 warnings`).
+- Root cause: deployed `49b6661e` improved the masthead/offer treatment, but the model-generated background still contained faint fake template text in controlled-copy zones: the left content column (`HEADLINE` and item-name ghosts) and then the bottom/footer deck (`COMBO-PRICE`). That makes the WhatsApp preview still read as low-grade/template-like.
+- Fix in progress: before drawing the snack list panel, the shared-price reference overlay now masks the full left content column; before drawing the footer, it masks the full bottom deck with a warm dark-brown fill. Both masks are mirrored in the embedded fallback renderer.
+- Verification so far: focused renderer tests passed (`3 passed`), syntax/diff checks passed, and the broader flyer regression gate passed (`837 passed, 19 warnings`).

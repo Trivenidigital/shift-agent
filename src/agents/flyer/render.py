@@ -2391,6 +2391,8 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                     draw.text((price_x + 5, price_y + 5), shared_offer_price, font=price_font_big, fill=(0, 0, 0, 185))
                     draw.text((price_x, price_y), shared_offer_price, font=price_font_big, fill=(255, 218, 82, 255))
 
+                    draw.rectangle((0, band_y1, width, height), fill=(52, 24, 17, 242))
+
                     if footer:
                         footer_y0 = int(height * 0.928)
                         footer_y1 = height - margin
@@ -2718,6 +2720,7 @@ with Image.open(src) as img:
                     draw.text((margin+13,by0+69),ln,font=lf,fill=(0,0,0,180)); draw.text((margin+10,by0+66),ln,font=lf,fill=(255,244,205,255))
                 pbox=draw.textbbox((0,0),shared_price,font=pf); pw=pbox[2]-pbox[0]; px=width-margin-pw-24; py=by0+max(24,(by1-by0-pf.size)//2)
                 draw.text((px+5,py+5),shared_price,font=pf,fill=(0,0,0,185)); draw.text((px,py),shared_price,font=pf,fill=(255,218,82,255))
+                draw.rectangle((0,by1,width,height),fill=(52,24,17,242))
                 if footer:
                     fy0=int(height*.928); fy1=height-margin; ff=font(max(19,int(width*.022)),True,footer)
                     draw.rounded_rectangle((margin,fy0,width-margin,fy1),radius=16,fill=(7,10,8,190),outline=(232,184,84,135),width=1)
