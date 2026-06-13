@@ -1,5 +1,11 @@
 # Lessons
 
+## 2026-06-13 - Flyer thumbnails need branded energy, not just exact text
+
+- A flyer can be technically cleaner and still look unchanged to the operator/customer if the WhatsApp thumbnail is dominated by flat black blocks and generic overlay panels.
+- For premium reference-style food flyers, the masthead must look like a designed brand lockup/ribbon and the top area needs visible visual energy (gold/red accents, texture, motifs) even when the source text is masked.
+- Regression tests should inspect the thumbnail-critical regions: top masthead, side accent energy, offer band, and source-text masking. Text-fact QA plus a full-size raw image inspection is not enough.
+
 ## 2026-06-13 - Flyer factual safety must not downgrade premium composition
 
 - Passing OCR/fact QA is not the same as a sellable flyer. The 2026-06-13 Lakshmi's Kitchen replay preserved all locked facts but shipped a low-energy deterministic template with a dead header, cramped list, and buried offer.

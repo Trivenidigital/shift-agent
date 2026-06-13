@@ -646,7 +646,7 @@ def test_triveni_shared_price_reference_overlay_has_premium_poster_hierarchy(tmp
 
     with Image.open(target).convert("RGB") as img:
         width, height = img.size
-        left_source_region = img.crop((40, int(height * 0.05), 220, int(height * 0.13)))
+        left_source_region = img.crop((40, int(height * 0.16), 170, int(height * 0.24)))
         source_header_region = img.crop((int(width * 0.50), int(height * 0.06), width - 40, int(height * 0.24)))
         middle_region = img.crop((40, int(height * 0.46), width - 40, int(height * 0.68)))
         bottom_strip = img.crop((0, int(height * 0.82), width, height))
@@ -655,12 +655,12 @@ def test_triveni_shared_price_reference_overlay_has_premium_poster_hierarchy(tmp
         middle_pixels = list(middle_region.getdata())
         bottom_pixels = list(bottom_strip.getdata())
 
-    left_source_mean = tuple(sum(channel) / max(1, len(left_source_pixels)) for channel in zip(*left_source_pixels))
+    left_source_leak = sum(1 for r, g, b in left_source_pixels if r > 190 and g > 190 and b > 190)
     leaked_source_header = sum(1 for r, g, b in source_header_pixels if r > 225 and g > 225 and b > 225)
     middle_changed = sum(1 for pixel in middle_pixels if pixel != background)
     dark_bottom = sum(1 for r, g, b in bottom_pixels if r < 45 and g < 35 and b < 35)
 
-    assert left_source_mean[0] < 30 and left_source_mean[1] < 30 and left_source_mean[2] < 30
+    assert left_source_leak / max(1, len(left_source_pixels)) < 0.02
     assert leaked_source_header / max(1, len(source_header_pixels)) < 0.02
     assert middle_changed / max(1, len(middle_pixels)) > 0.12
     assert dark_bottom / max(1, len(bottom_pixels)) < 0.45
@@ -694,6 +694,38 @@ def test_triveni_shared_price_reference_overlay_uses_bottom_deal_band(tmp_path):
     assert changed / max(1, len(pixels)) > 0.70
     assert premium_red / max(1, len(pixels)) > 0.18
     assert premium_gold / max(1, len(pixels)) > 0.01
+
+
+def test_triveni_shared_price_reference_overlay_has_branded_masthead_energy(tmp_path):
+    from PIL import Image
+
+    background = (82, 42, 30)
+    source = tmp_path / "background.png"
+    target = tmp_path / "triveni-shared-price.png"
+    Image.new("RGB", (1080, 1350), background).save(source)
+
+    apply_critical_text_overlay(
+        _triveni_shared_price_reference_project(),
+        source,
+        target,
+        size=(1080, 1350),
+        output_format="concept_preview",
+    )
+
+    with Image.open(target).convert("RGB") as img:
+        width, height = img.size
+        masthead = img.crop((int(width * 0.16), int(height * 0.025), int(width * 0.84), int(height * 0.105)))
+        top_sides = img.crop((0, int(height * 0.02), width, int(height * 0.18)))
+        masthead_pixels = list(masthead.getdata())
+        side_pixels = list(top_sides.getdata())
+
+    ivory = sum(1 for r, g, b in masthead_pixels if r > 205 and g > 190 and b > 155)
+    red_energy = sum(1 for r, g, b in side_pixels if r > 125 and g < 70 and b < 60)
+    gold_energy = sum(1 for r, g, b in side_pixels if r > 190 and 120 < g < 225 and b < 115)
+
+    assert ivory / max(1, len(masthead_pixels)) > 0.18
+    assert red_energy / max(1, len(side_pixels)) > 0.004
+    assert gold_energy / max(1, len(side_pixels)) > 0.006
 
 
 def test_collect_text_facts_uses_locked_reference_items_before_raw_request():
@@ -1713,18 +1745,25 @@ def test_system_overlay_fallback_shared_price_reference_uses_poster_layout(tmp_p
     with Image.open(target).convert("RGB") as img:
         width, height = img.size
         title_region = img.crop((40, 30, int(width * 0.60), int(height * 0.24)))
+        masthead = img.crop((int(width * 0.16), int(height * 0.025), int(width * 0.84), int(height * 0.105)))
+        top_sides = img.crop((0, int(height * 0.02), width, int(height * 0.18)))
         source_header_region = img.crop((int(width * 0.50), int(height * 0.06), width - 40, int(height * 0.24)))
         item_region = img.crop((40, int(height * 0.42), width - 40, height - 70))
         middle_region = img.crop((40, int(height * 0.46), width - 40, int(height * 0.68)))
         bottom_strip = img.crop((0, int(height * 0.82), width, height))
         deal_band = img.crop((40, int(height * 0.745), width - 40, int(height * 0.905)))
         title_pixels = list(title_region.getdata())
+        masthead_pixels = list(masthead.getdata())
+        side_pixels = list(top_sides.getdata())
         source_header_pixels = list(source_header_region.getdata())
         pixels = list(item_region.getdata())
         middle_pixels = list(middle_region.getdata())
         bottom_pixels = list(bottom_strip.getdata())
         deal_pixels = list(deal_band.getdata())
     title_near_white = sum(1 for r, g, b in title_pixels if r > 225 and g > 218 and b > 195)
+    ivory = sum(1 for r, g, b in masthead_pixels if r > 205 and g > 190 and b > 155)
+    red_energy = sum(1 for r, g, b in side_pixels if r > 125 and g < 70 and b < 60)
+    masthead_gold_energy = sum(1 for r, g, b in side_pixels if r > 190 and 120 < g < 225 and b < 115)
     leaked_source_header = sum(1 for r, g, b in source_header_pixels if r > 225 and g > 225 and b > 225)
     near_white = sum(1 for r, g, b in pixels if r > 225 and g > 218 and b > 195)
     gold_outline = sum(1 for r, g, b in pixels if r > 210 and 140 < g < 230 and b < 120)
@@ -1735,6 +1774,9 @@ def test_system_overlay_fallback_shared_price_reference_uses_poster_layout(tmp_p
     deal_changed = sum(1 for pixel in deal_pixels if pixel != (82, 42, 30))
 
     assert title_near_white / max(1, len(title_pixels)) < 0.30
+    assert ivory / max(1, len(masthead_pixels)) > 0.18
+    assert red_energy / max(1, len(side_pixels)) > 0.004
+    assert masthead_gold_energy / max(1, len(side_pixels)) > 0.006
     assert leaked_source_header / max(1, len(source_header_pixels)) < 0.02
     assert near_white / max(1, len(pixels)) < 0.45
     assert gold_outline / max(1, len(pixels)) < 0.12
