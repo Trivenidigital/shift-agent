@@ -1954,6 +1954,13 @@ Review/verification:
 - [x] Confirm `gen.png` was generated after the previous production deploy, so this is a live product issue, not a stale screenshot.
 - [x] Add a renderer regression that blocks the weak shared-price reference composition.
 - [x] Replace the shared-price reference overlay with a premium poster layout that keeps exact locked facts.
-- [ ] Regenerate the Lakshmi's Kitchen preview and visually inspect the raw output, not only the WhatsApp thumbnail.
-- [ ] Run focused flyer tests and deploy builder gate.
-- [ ] Commit, merge to `main`, push, deploy, and record the deployed tag.
+- [x] Regenerate the Lakshmi's Kitchen preview and visually inspect the raw output, not only the WhatsApp thumbnail.
+- [x] Run focused flyer tests and deploy builder gate.
+- [x] Commit, merge to `main`, push, deploy, and record the deployed tag.
+
+## Review
+
+- Root cause: the 2026-06-12 exact-facts fix made the reference path safe, but still allowed the shared-price snack flyer to ship as a low-energy deterministic template. The follow-up also exposed a translucent header mask that let source/model text ghost through the top-left reserved area.
+- Fix: `a06f8434` is live on `main-vps` as `deploy-20260613-011731-a06f8434`. The shared-price reference path now renders a premium poster layout with a dominant street-snack headline, exact snack list, food hero background, red/gold bottom deal band, and fully opaque source-text mask.
+- Verification: deploy builder passed `3568 passed, 894 skipped`; focused flyer gate passed `836 passed`; post-deploy services were active and cockpit health returned HTTP 200.
+- Production recovery: regenerated `F0152` as asset `A0014` (`sha256=f52994e643a4b3ccf71710627403dad8e7a3667391099fc1e9cc542d1c339579`), copied raw preview to `C:\Testing\f0152-premium-layout-a06f8434.png`, visually inspected it, and sent it to `201975216009469@lid` with outbound message `3EB0716B759ECEE060592B` at `2026-06-13T01:24:19Z`.
