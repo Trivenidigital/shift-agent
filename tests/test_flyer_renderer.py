@@ -622,7 +622,7 @@ def test_triveni_shared_price_reference_overlay_avoids_menu_table_look(tmp_path)
 
     assert title_near_white_ratio < 0.30
     assert near_white_ratio < 0.45
-    assert gold_outline_ratio < 0.05
+    assert gold_outline_ratio < 0.12
 
 
 def test_triveni_shared_price_reference_overlay_has_premium_poster_hierarchy(tmp_path):
@@ -659,6 +659,36 @@ def test_triveni_shared_price_reference_overlay_has_premium_poster_hierarchy(tmp
     assert leaked_source_header / max(1, len(source_header_pixels)) < 0.02
     assert middle_changed / max(1, len(middle_pixels)) > 0.12
     assert dark_bottom / max(1, len(bottom_pixels)) < 0.45
+
+
+def test_triveni_shared_price_reference_overlay_uses_bottom_deal_band(tmp_path):
+    from PIL import Image
+
+    background = (82, 42, 30)
+    source = tmp_path / "background.png"
+    target = tmp_path / "triveni-shared-price.png"
+    Image.new("RGB", (1080, 1350), background).save(source)
+
+    apply_critical_text_overlay(
+        _triveni_shared_price_reference_project(),
+        source,
+        target,
+        size=(1080, 1350),
+        output_format="concept_preview",
+    )
+
+    with Image.open(target).convert("RGB") as img:
+        width, height = img.size
+        deal_band = img.crop((40, int(height * 0.745), width - 40, int(height * 0.905)))
+        pixels = list(deal_band.getdata())
+
+    premium_red = sum(1 for r, g, b in pixels if r > 95 and g < 72 and b < 72)
+    premium_gold = sum(1 for r, g, b in pixels if r > 185 and 120 < g < 220 and b < 110)
+    changed = sum(1 for pixel in pixels if pixel != background)
+
+    assert changed / max(1, len(pixels)) > 0.70
+    assert premium_red / max(1, len(pixels)) > 0.18
+    assert premium_gold / max(1, len(pixels)) > 0.01
 
 
 def test_collect_text_facts_uses_locked_reference_items_before_raw_request():
@@ -1682,24 +1712,32 @@ def test_system_overlay_fallback_shared_price_reference_uses_poster_layout(tmp_p
         item_region = img.crop((40, int(height * 0.42), width - 40, height - 70))
         middle_region = img.crop((40, int(height * 0.46), width - 40, int(height * 0.68)))
         bottom_strip = img.crop((0, int(height * 0.82), width, height))
+        deal_band = img.crop((40, int(height * 0.745), width - 40, int(height * 0.905)))
         title_pixels = list(title_region.getdata())
         source_header_pixels = list(source_header_region.getdata())
         pixels = list(item_region.getdata())
         middle_pixels = list(middle_region.getdata())
         bottom_pixels = list(bottom_strip.getdata())
+        deal_pixels = list(deal_band.getdata())
     title_near_white = sum(1 for r, g, b in title_pixels if r > 225 and g > 218 and b > 195)
     leaked_source_header = sum(1 for r, g, b in source_header_pixels if r > 225 and g > 225 and b > 225)
     near_white = sum(1 for r, g, b in pixels if r > 225 and g > 218 and b > 195)
     gold_outline = sum(1 for r, g, b in pixels if r > 210 and 140 < g < 230 and b < 120)
     middle_changed = sum(1 for pixel in middle_pixels if pixel != (82, 42, 30))
     dark_bottom = sum(1 for r, g, b in bottom_pixels if r < 45 and g < 35 and b < 35)
+    premium_red = sum(1 for r, g, b in deal_pixels if r > 95 and g < 72 and b < 72)
+    premium_gold = sum(1 for r, g, b in deal_pixels if r > 185 and 120 < g < 220 and b < 110)
+    deal_changed = sum(1 for pixel in deal_pixels if pixel != (82, 42, 30))
 
     assert title_near_white / max(1, len(title_pixels)) < 0.30
     assert leaked_source_header / max(1, len(source_header_pixels)) < 0.02
     assert near_white / max(1, len(pixels)) < 0.45
-    assert gold_outline / max(1, len(pixels)) < 0.05
+    assert gold_outline / max(1, len(pixels)) < 0.12
     assert middle_changed / max(1, len(middle_pixels)) > 0.12
     assert dark_bottom / max(1, len(bottom_pixels)) < 0.45
+    assert deal_changed / max(1, len(deal_pixels)) > 0.70
+    assert premium_red / max(1, len(deal_pixels)) > 0.18
+    assert premium_gold / max(1, len(deal_pixels)) > 0.01
 
 
 def test_menu_overlay_uses_large_lightweight_poster_panels(tmp_path):
@@ -2347,6 +2385,19 @@ def test_simple_english_typed_menu_defaults_to_background_overlay():
     assert "decorative BACKGROUND image only" in prompt
     assert "Do NOT draw any text" in prompt
     assert "Build a full restaurant/menu poster" not in prompt
+
+
+def test_shared_price_reference_background_prompt_matches_premium_overlay_zones():
+    project = _triveni_shared_price_reference_project()
+
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert "decorative BACKGROUND image only" in prompt
+    assert "premium Indian street-snack poster BACKGROUND" in prompt
+    assert "top third dark and text-free" in prompt
+    assert "left-middle calm enough for a snack list overlay" in prompt
+    assert "bottom fifth calm enough for a red/gold combo-price band overlay" in prompt
+    assert "strongest food hero cluster in the center/right and lower-right" in prompt
 
 
 def test_simple_english_typed_menu_can_opt_into_integrated_poster_prompt(monkeypatch):

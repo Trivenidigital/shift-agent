@@ -1208,6 +1208,18 @@ def _poster_layout_requirements(project: FlyerProject) -> str:
                     "- Keep the visual language category-safe for the stated business type; avoid "
                     "restaurant/grocery and cultural-celebration styling unless the customer explicitly asks for it."
                 )
+            shared_offer_text, _shared_offer_label, shared_offer_price = _shared_price_offer_parts(plan.detail_lines)
+            has_item_prices = any(price for _name, price in plan.items)
+            if shared_offer_text and shared_offer_price and not has_item_prices:
+                return reserve + (
+                    "- Build a premium Indian street-snack poster BACKGROUND: dark green/charcoal restaurant texture, "
+                    "warm gold/red accents, chili/spice energy, and appetizing close-up snack photography.\n"
+                    "- Keep the top third dark and text-free for a large headline overlay, keep the left-middle "
+                    "calm enough for a snack list overlay, and keep the bottom fifth calm enough for a red/gold "
+                    "combo-price band overlay.\n"
+                    "- Put the strongest food hero cluster in the center/right and lower-right; avoid blank flat "
+                    "color fields, empty black blocks, generic buffet scenes, and visible text/signage."
+                )
             return reserve + (
                 "- Use appetizing food photography and a premium restaurant ambiance (warm lighting, "
                 "garnished dishes, tasteful gold/green/red accents, subtle texture).\n"
@@ -2239,6 +2251,126 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                 draw.text((price_x, badge_y1 - badge_price_font.size - 19), shared_offer_price, font=badge_price_font, fill=(255, 255, 246, 255))
 
             if shared_offer_price and not has_item_prices:
+                if shared_snack_poster:
+                    # Exact-text safety cannot force this customer-visible path
+                    # into a debug-looking template. Use a poster composition
+                    # close to the reference class: dominant headline, snack
+                    # list, large bottom deal band, and trim-safe footer.
+                    headline_text = title_text.upper()
+                    if "STREET" not in headline_text and "SNACK" in shared_offer_label.upper():
+                        headline_text = "STREET SNACK SPECIALS"
+                    combo_text = title_text.upper()
+                    schedule_text = str(menu_payload.get("schedule") or "").strip().upper()
+                    footer = " | ".join(str(v) for v in (menu_payload["location"], menu_payload["contact"]) if v)
+
+                    draw.rectangle((0, 0, width, height), fill=(0, 0, 0, 44))
+                    top_h = int(height * 0.325)
+                    draw.rectangle((0, 0, width, top_h), fill=(5, 8, 6, 216))
+                    draw.rectangle((0, top_h - 28, width, top_h), fill=(122, 18, 18, 150))
+                    draw.line((margin, top_h - 86, width - margin, top_h - 86), fill=(235, 178, 58, 230), width=4)
+                    draw.line((margin, top_h - 18, width - margin, top_h - 18), fill=(235, 178, 58, 230), width=4)
+
+                    brand_font = _font(ImageFont, max(31, int(width * 0.039)), bold=True, text=business)
+                    headline_font = _font(ImageFont, max(58, int(width * 0.070)), bold=True, text=headline_text)
+                    schedule_font = _font(ImageFont, max(24, int(width * 0.030)), bold=True, text=schedule_text)
+
+                    y = int(height * 0.040)
+                    if business:
+                        for line in _wrap(draw, business, brand_font, width - margin * 2):
+                            bbox = draw.textbbox((0, 0), line, font=brand_font)
+                            x = (width - (bbox[2] - bbox[0])) // 2
+                            draw.text((x + 3, y + 3), line, font=brand_font, fill=(40, 6, 8, 160))
+                            draw.text((x, y), line, font=brand_font, fill=(255, 236, 172, 255))
+                            y += int(brand_font.size * 1.12)
+                    if schedule_text:
+                        bbox = draw.textbbox((0, 0), schedule_text, font=schedule_font)
+                        x = (width - (bbox[2] - bbox[0])) // 2
+                        draw.text((x + 2, y + 8 + 2), schedule_text, font=schedule_font, fill=(0, 0, 0, 160))
+                        draw.text((x, y + 8), schedule_text, font=schedule_font, fill=(255, 244, 214, 255))
+                    headline_lines = _wrap(draw, headline_text, headline_font, width - margin * 2)
+                    headline_y = int(height * 0.145)
+                    for line in headline_lines[:2]:
+                        bbox = draw.textbbox((0, 0), line, font=headline_font)
+                        x = (width - (bbox[2] - bbox[0])) // 2
+                        draw.text((x + 4, headline_y + 4), line, font=headline_font, fill=(0, 0, 0, 190))
+                        draw.text((x, headline_y), line, font=headline_font, fill=(255, 220, 92, 255))
+                        headline_y += int(headline_font.size * 1.08)
+
+                    panel_x0 = margin
+                    panel_y0 = int(height * 0.365)
+                    panel_x1 = int(width * 0.475)
+                    panel_y1 = int(height * 0.735)
+                    draw.rounded_rectangle((panel_x0 + 8, panel_y0 + 8, panel_x1 + 8, panel_y1 + 8), radius=22, fill=(0, 0, 0, 95))
+                    draw.rounded_rectangle((panel_x0, panel_y0, panel_x1, panel_y1), radius=22, fill=(6, 13, 9, 205), outline=(232, 184, 84, 230), width=3)
+                    section_font = _font(ImageFont, max(22, int(width * 0.026)), bold=True, text="Snack Picks")
+                    content_x0 = panel_x0 + 30
+                    content_x1 = panel_x1 - 24
+                    heading_y = panel_y0 + 18
+                    draw.text((content_x0 + 2, heading_y + 2), "Snack Picks", font=section_font, fill=(0, 0, 0, 160))
+                    draw.text((content_x0, heading_y), "Snack Picks", font=section_font, fill=(255, 216, 92, 255))
+                    rule_y = heading_y + section_font.size + 8
+                    draw.line((content_x0, rule_y, content_x1, rule_y), fill=(232, 184, 84, 170), width=2)
+
+                    rows = len(items)
+                    row_area_top = rule_y + 13
+                    row_area_bottom = panel_y1 - 16
+                    row_h = (row_area_bottom - row_area_top) // max(1, rows)
+                    if row_h < 31:
+                        raise FlyerRenderError(f"menu overlay cannot fit all {len(items)} items (drew 0)")
+                    item_font = _font(ImageFont, max(21, min(int(width * 0.030), row_h - 2)), bold=True)
+                    for idx, item in enumerate(items):
+                        y0_item = row_area_top + idx * row_h
+                        name, _price = _split_item_price(item)
+                        name_lines = _wrap(draw, name, item_font, content_x1 - content_x0 - 42)
+                        if len(name_lines) > 2:
+                            raise FlyerRenderError(f"menu overlay cannot fit all {len(items)} items (drew {idx})")
+                        text_y = y0_item + max(0, (row_h - len(name_lines) * int(item_font.size * 0.98)) // 2)
+                        dot_y = text_y + int(item_font.size * 0.47)
+                        draw.regular_polygon((content_x0 + 9, dot_y, 7), n_sides=5, rotation=-90, fill=(245, 196, 52, 255))
+                        for ln in name_lines:
+                            draw.text((content_x0 + 30 + 2, text_y + 2), ln, font=item_font, fill=(0, 0, 0, 170))
+                            draw.text((content_x0 + 30, text_y), ln, font=item_font, fill=(255, 255, 246, 255))
+                            text_y += int(item_font.size * 0.98)
+
+                    band_y0 = int(height * 0.755)
+                    band_y1 = int(height * 0.910)
+                    draw.rounded_rectangle((0, band_y0 + 10, width, band_y1 + 10), radius=8, fill=(0, 0, 0, 120))
+                    draw.rectangle((0, band_y0, width, band_y1), fill=(111, 13, 21, 236))
+                    draw.rectangle((0, band_y0, width, band_y0 + 20), fill=(236, 170, 54, 238))
+                    draw.rectangle((0, band_y1 - 20, width, band_y1), fill=(236, 170, 54, 238))
+
+                    label_font = _font(ImageFont, max(33, int(width * 0.040)), bold=True, text=shared_offer_label)
+                    price_font_big = _font(ImageFont, max(76, int(width * 0.092)), bold=True, text=shared_offer_price)
+                    combo_font = _font(ImageFont, max(26, int(width * 0.032)), bold=True, text=combo_text)
+                    combo_y = band_y0 + 20
+                    if combo_text:
+                        combo_lines = _wrap(draw, combo_text, combo_font, int(width * 0.48))
+                        for line in combo_lines[:1]:
+                            draw.text((margin + 10 + 2, combo_y + 2), line, font=combo_font, fill=(0, 0, 0, 170))
+                            draw.text((margin + 10, combo_y), line, font=combo_font, fill=(255, 225, 121, 255))
+                    label_lines = _wrap(draw, shared_offer_label.upper(), label_font, int(width * 0.52))
+                    label_y = band_y0 + 66
+                    for line in label_lines[:1]:
+                        draw.text((margin + 10 + 3, label_y + 3), line, font=label_font, fill=(0, 0, 0, 180))
+                        draw.text((margin + 10, label_y), line, font=label_font, fill=(255, 244, 205, 255))
+                    price_bbox = draw.textbbox((0, 0), shared_offer_price, font=price_font_big)
+                    price_w = price_bbox[2] - price_bbox[0]
+                    price_x = width - margin - price_w - 24
+                    price_y = band_y0 + max(24, (band_y1 - band_y0 - price_font_big.size) // 2)
+                    draw.text((price_x + 5, price_y + 5), shared_offer_price, font=price_font_big, fill=(0, 0, 0, 185))
+                    draw.text((price_x, price_y), shared_offer_price, font=price_font_big, fill=(255, 218, 82, 255))
+
+                    if footer:
+                        footer_y0 = int(height * 0.928)
+                        footer_y1 = height - margin
+                        footer_font = _font(ImageFont, max(19, int(width * 0.022)), bold=True, text=footer)
+                        draw.rounded_rectangle((margin, footer_y0, width - margin, footer_y1), radius=16, fill=(7, 10, 8, 190), outline=(232, 184, 84, 135), width=1)
+                        footer_bbox = draw.textbbox((0, 0), footer, font=footer_font)
+                        footer_y = footer_y0 + max(4, (footer_y1 - footer_y0 - (footer_bbox[3] - footer_bbox[1])) // 2)
+                        draw.text((margin + 18, footer_y), footer, font=footer_font, fill=(255, 239, 190, 250))
+                    img.save(target, format="PNG", optimize=True)
+                    return
+
                 menu_panel = (margin, int(height * 0.405), int(width * 0.585), int(height * 0.875))
                 px0, py0, px1, py1 = menu_panel
                 draw.rounded_rectangle((px0 + 7, py0 + 7, px1 + 7, py1 + 7), radius=24, fill=(0, 0, 0, 68))
@@ -2492,6 +2624,60 @@ with Image.open(src) as img:
             draw.text((px+2,gy1-pf.size-17),shared_price,font=pf,fill=(0,0,0,130))
             draw.text((px,gy1-pf.size-19),shared_price,font=pf,fill=(255,255,246,255))
         if shared_price and not has_prices:
+            if shared_snack_poster:
+                footer=" | ".join(str(v) for v in (menu.get("location"),menu.get("contact")) if v)
+                headline=title.upper()
+                if "STREET" not in headline and "SNACK" in shared_label.upper(): headline="STREET SNACK SPECIALS"
+                combo=title.upper(); sched=schedule.upper()
+                draw.rectangle((0,0,width,height),fill=(0,0,0,44))
+                th=int(height*.325); draw.rectangle((0,0,width,th),fill=(5,8,6,216)); draw.rectangle((0,th-28,width,th),fill=(122,18,18,150))
+                draw.line((margin,th-86,width-margin,th-86),fill=(235,178,58,230),width=4); draw.line((margin,th-18,width-margin,th-18),fill=(235,178,58,230),width=4)
+                bf=font(max(31,int(width*.039)),True,biz); hf=font(max(58,int(width*.070)),True,headline); scf=font(max(24,int(width*.030)),True,sched)
+                y=int(height*.040)
+                if biz:
+                    for ln in wrap(draw,biz,bf,width-margin*2):
+                        box=draw.textbbox((0,0),ln,font=bf); x=(width-(box[2]-box[0]))//2
+                        draw.text((x+3,y+3),ln,font=bf,fill=(40,6,8,160)); draw.text((x,y),ln,font=bf,fill=(255,236,172,255)); y += int(bf.size*1.12)
+                if sched:
+                    box=draw.textbbox((0,0),sched,font=scf); x=(width-(box[2]-box[0]))//2
+                    draw.text((x+2,y+10),sched,font=scf,fill=(0,0,0,160)); draw.text((x,y+8),sched,font=scf,fill=(255,244,214,255))
+                hy=int(height*.145)
+                for ln in wrap(draw,headline,hf,width-margin*2)[:2]:
+                    box=draw.textbbox((0,0),ln,font=hf); x=(width-(box[2]-box[0]))//2
+                    draw.text((x+4,hy+4),ln,font=hf,fill=(0,0,0,190)); draw.text((x,hy),ln,font=hf,fill=(255,220,92,255)); hy += int(hf.size*1.08)
+                px0=margin; py0=int(height*.365); px1=int(width*.475); py1=int(height*.735)
+                draw.rounded_rectangle((px0+8,py0+8,px1+8,py1+8),radius=22,fill=(0,0,0,95))
+                draw.rounded_rectangle((px0,py0,px1,py1),radius=22,fill=(6,13,9,205),outline=(232,184,84,230),width=3)
+                cx0=px0+30; cx1=px1-24; secf=font(max(22,int(width*.026)),True,"Snack Picks"); shy=py0+18
+                draw.text((cx0+2,shy+2),"Snack Picks",font=secf,fill=(0,0,0,160)); draw.text((cx0,shy),"Snack Picks",font=secf,fill=(255,216,92,255))
+                ry=shy+secf.size+8; draw.line((cx0,ry,cx1,ry),fill=(232,184,84,170),width=2)
+                rows=len(items); rat=ry+13; rab=py1-16; rowh=(rab-rat)//max(1,rows)
+                if rowh < 31: raise SystemExit(f"menu overlay cannot fit all {len(items)} items (drew 0)")
+                itf=font(max(21,min(int(width*.030),rowh-2)),True)
+                for idx,item in enumerate(items):
+                    iy=rat+idx*rowh; name=str(item).strip(); lines2=wrap(draw,name,itf,cx1-cx0-42)
+                    if len(lines2)>2: raise SystemExit(f"menu overlay cannot fit all {len(items)} items (drew {idx})")
+                    ty=iy+max(0,(rowh-len(lines2)*int(itf.size*.98))//2); dy=ty+int(itf.size*.47)
+                    draw.ellipse((cx0+2,dy-7,cx0+16,dy+7),fill=(245,196,52,255))
+                    for ln in lines2:
+                        draw.text((cx0+32,ty+2),ln,font=itf,fill=(0,0,0,170)); draw.text((cx0+30,ty),ln,font=itf,fill=(255,255,246,255)); ty += int(itf.size*.98)
+                by0=int(height*.755); by1=int(height*.910)
+                draw.rounded_rectangle((0,by0+10,width,by1+10),radius=8,fill=(0,0,0,120))
+                draw.rectangle((0,by0,width,by1),fill=(111,13,21,236)); draw.rectangle((0,by0,width,by0+20),fill=(236,170,54,238)); draw.rectangle((0,by1-20,width,by1),fill=(236,170,54,238))
+                lf=font(max(33,int(width*.040)),True,shared_label); pf=font(max(76,int(width*.092)),True,shared_price); cf=font(max(26,int(width*.032)),True,combo)
+                if combo:
+                    for ln in wrap(draw,combo,cf,int(width*.48))[:1]:
+                        draw.text((margin+12,by0+22),ln,font=cf,fill=(0,0,0,170)); draw.text((margin+10,by0+20),ln,font=cf,fill=(255,225,121,255))
+                for ln in wrap(draw,shared_label.upper(),lf,int(width*.52))[:1]:
+                    draw.text((margin+13,by0+69),ln,font=lf,fill=(0,0,0,180)); draw.text((margin+10,by0+66),ln,font=lf,fill=(255,244,205,255))
+                pbox=draw.textbbox((0,0),shared_price,font=pf); pw=pbox[2]-pbox[0]; px=width-margin-pw-24; py=by0+max(24,(by1-by0-pf.size)//2)
+                draw.text((px+5,py+5),shared_price,font=pf,fill=(0,0,0,185)); draw.text((px,py),shared_price,font=pf,fill=(255,218,82,255))
+                if footer:
+                    fy0=int(height*.928); fy1=height-margin; ff=font(max(19,int(width*.022)),True,footer)
+                    draw.rounded_rectangle((margin,fy0,width-margin,fy1),radius=16,fill=(7,10,8,190),outline=(232,184,84,135),width=1)
+                    fb=draw.textbbox((0,0),footer,font=ff); fy=fy0+max(4,(fy1-fy0-(fb[3]-fb[1]))//2)
+                    draw.text((margin+18,fy),footer,font=ff,fill=(255,239,190,250))
+                target.parent.mkdir(parents=True, exist_ok=True); img.save(target, format="PNG", optimize=True); raise SystemExit(0)
             panel=(margin,int(height*.405),int(width*.585),int(height*.875))
             px0,py0,px1,py1=panel
             draw.rounded_rectangle((px0+7,py0+7,px1+7,py1+7), radius=24, fill=(0,0,0,68))
