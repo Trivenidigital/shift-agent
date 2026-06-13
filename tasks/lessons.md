@@ -1,5 +1,11 @@
 # Lessons
 
+## 2026-06-13 - Flyer factual safety must not downgrade premium composition
+
+- Passing OCR/fact QA is not the same as a sellable flyer. The 2026-06-13 Lakshmi's Kitchen replay preserved all locked facts but shipped a low-energy deterministic template with a dead header, cramped list, and buried offer.
+- For reference-inspired flyers, exact text should be composited by code over a premium poster composition: large campaign headline, visible food hero, designed list treatment, dominant offer band, and trim-safe contact/footer.
+- Regression tests must assert premium composition geometry for representative flyers, not only absence of table styling or presence of all facts. A test that allows a small mid-page coupon and empty top half will miss the product failure customers notice immediately.
+
 ## 2026-06-12 - Flyer exact-text QA failures need an exact-text fallback, not customer-visible failure
 
 - When a premium integrated poster fails only because the image model misspelled or omitted locked menu text, do not loosen visual QA and do not immediately tell the customer "couldn't finish automatically."

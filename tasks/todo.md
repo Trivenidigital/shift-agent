@@ -1944,3 +1944,16 @@ Review/verification:
 - Final verification: focused route/proxy/mask tests passed; broad Flyer gate passed `834 passed, 10 warnings`; `py_compile` for renderer/generator and `git diff --check` passed.
 - Deploy: final runtime commit `cbaa3fc6` deployed to `main-vps` as `deploy-20260612-223837-cbaa3fc6`; deploy smoke passed and post-deploy health returned HTTP 200 `{"ok":true}` with both services active. Pilot readiness remains blocked only by the unrelated muted Pushover credentials warning.
 - Production recovery: regenerated `F0152` as asset `A0013` (`sha256=3b82c78828ebdbf0a591beb86e8202cdebce5194ccbd030740b9d157c053c337`), QA passed with no blockers/warnings, preview copied to `C:\Testing\f0152-prod-grade-cbaa3fc7.png`, and sent to `201975216009469@lid` with outbound message `3EB042F6F0A2D9F02F886F` at `2026-06-12T22:42:33Z`.
+# 2026-06-13 - Flyer premium reference layout hotfix
+
+**Drift-check tag:** extends-Hermes
+
+## Checklist
+
+- [x] Reproduce the customer-reported `C:\Testing\gen.png` quality failure.
+- [x] Confirm `gen.png` was generated after the previous production deploy, so this is a live product issue, not a stale screenshot.
+- [x] Add a renderer regression that blocks the weak shared-price reference composition.
+- [x] Replace the shared-price reference overlay with a premium poster layout that keeps exact locked facts.
+- [ ] Regenerate the Lakshmi's Kitchen preview and visually inspect the raw output, not only the WhatsApp thumbnail.
+- [ ] Run focused flyer tests and deploy builder gate.
+- [ ] Commit, merge to `main`, push, deploy, and record the deployed tag.
