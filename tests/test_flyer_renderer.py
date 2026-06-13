@@ -632,6 +632,7 @@ def test_triveni_shared_price_reference_overlay_has_premium_poster_hierarchy(tmp
     source = tmp_path / "background.png"
     target = tmp_path / "triveni-shared-price.png"
     with Image.new("RGB", (1080, 1350), background) as src_img:
+        ImageDraw.Draw(src_img).rectangle((40, 60, 240, 300), fill=(225, 225, 225))
         ImageDraw.Draw(src_img).rectangle((540, 80, 1040, 280), fill=(255, 255, 255))
         src_img.save(source)
 
@@ -645,17 +646,21 @@ def test_triveni_shared_price_reference_overlay_has_premium_poster_hierarchy(tmp
 
     with Image.open(target).convert("RGB") as img:
         width, height = img.size
+        left_source_region = img.crop((40, int(height * 0.05), 220, int(height * 0.13)))
         source_header_region = img.crop((int(width * 0.50), int(height * 0.06), width - 40, int(height * 0.24)))
         middle_region = img.crop((40, int(height * 0.46), width - 40, int(height * 0.68)))
         bottom_strip = img.crop((0, int(height * 0.82), width, height))
+        left_source_pixels = list(left_source_region.getdata())
         source_header_pixels = list(source_header_region.getdata())
         middle_pixels = list(middle_region.getdata())
         bottom_pixels = list(bottom_strip.getdata())
 
+    left_source_mean = tuple(sum(channel) / max(1, len(left_source_pixels)) for channel in zip(*left_source_pixels))
     leaked_source_header = sum(1 for r, g, b in source_header_pixels if r > 225 and g > 225 and b > 225)
     middle_changed = sum(1 for pixel in middle_pixels if pixel != background)
     dark_bottom = sum(1 for r, g, b in bottom_pixels if r < 45 and g < 35 and b < 35)
 
+    assert left_source_mean[0] < 30 and left_source_mean[1] < 30 and left_source_mean[2] < 30
     assert leaked_source_header / max(1, len(source_header_pixels)) < 0.02
     assert middle_changed / max(1, len(middle_pixels)) > 0.12
     assert dark_bottom / max(1, len(bottom_pixels)) < 0.45

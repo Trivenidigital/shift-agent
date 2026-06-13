@@ -2265,7 +2265,7 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
 
                     draw.rectangle((0, 0, width, height), fill=(0, 0, 0, 44))
                     top_h = int(height * 0.325)
-                    draw.rectangle((0, 0, width, top_h), fill=(5, 8, 6, 216))
+                    draw.rectangle((0, 0, width, top_h), fill=(5, 8, 6, 255))
                     draw.rectangle((0, top_h - 28, width, top_h), fill=(122, 18, 18, 150))
                     draw.line((margin, top_h - 86, width - margin, top_h - 86), fill=(235, 178, 58, 230), width=4)
                     draw.line((margin, top_h - 18, width - margin, top_h - 18), fill=(235, 178, 58, 230), width=4)
@@ -2630,7 +2630,7 @@ with Image.open(src) as img:
                 if "STREET" not in headline and "SNACK" in shared_label.upper(): headline="STREET SNACK SPECIALS"
                 combo=title.upper(); sched=schedule.upper()
                 draw.rectangle((0,0,width,height),fill=(0,0,0,44))
-                th=int(height*.325); draw.rectangle((0,0,width,th),fill=(5,8,6,216)); draw.rectangle((0,th-28,width,th),fill=(122,18,18,150))
+                th=int(height*.325); draw.rectangle((0,0,width,th),fill=(5,8,6,255)); draw.rectangle((0,th-28,width,th),fill=(122,18,18,150))
                 draw.line((margin,th-86,width-margin,th-86),fill=(235,178,58,230),width=4); draw.line((margin,th-18,width-margin,th-18),fill=(235,178,58,230),width=4)
                 bf=font(max(31,int(width*.039)),True,biz); hf=font(max(58,int(width*.070)),True,headline); scf=font(max(24,int(width*.030)),True,sched)
                 y=int(height*.040)
