@@ -2325,7 +2325,7 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                     left_column_x1 = int(width * 0.50)
                     left_column_y0 = top_h + 12
                     left_column_y1 = int(height * 0.755)
-                    draw.rectangle((0, left_column_y0, left_column_x1, left_column_y1), fill=(3, 12, 8, 238))
+                    draw.rectangle((0, left_column_y0, left_column_x1, left_column_y1), fill=(3, 12, 8, 255))
 
                     panel_x0 = margin
                     panel_y0 = int(height * 0.365)
@@ -2391,7 +2391,7 @@ def apply_critical_text_overlay(project: FlyerProject, source: Path | str, targe
                     draw.text((price_x + 5, price_y + 5), shared_offer_price, font=price_font_big, fill=(0, 0, 0, 185))
                     draw.text((price_x, price_y), shared_offer_price, font=price_font_big, fill=(255, 218, 82, 255))
 
-                    draw.rectangle((0, band_y1, width, height), fill=(52, 24, 17, 242))
+                    draw.rectangle((0, band_y1, width, height), fill=(52, 24, 17, 255))
 
                     if footer:
                         footer_y0 = int(height * 0.928)
@@ -2692,7 +2692,7 @@ with Image.open(src) as img:
                 for ln in wrap(draw,headline,hf,width-margin*2)[:2]:
                     box=draw.textbbox((0,0),ln,font=hf); x=(width-(box[2]-box[0]))//2
                     draw.text((x+4,hy+4),ln,font=hf,fill=(0,0,0,190)); draw.text((x,hy),ln,font=hf,fill=(255,220,92,255)); hy += int(hf.size*1.08)
-                draw.rectangle((0,th+12,int(width*.50),int(height*.755)),fill=(3,12,8,238))
+                draw.rectangle((0,th+12,int(width*.50),int(height*.755)),fill=(3,12,8,255))
                 px0=margin; py0=int(height*.365); px1=int(width*.475); py1=int(height*.735)
                 draw.rounded_rectangle((px0+8,py0+8,px1+8,py1+8),radius=22,fill=(0,0,0,95))
                 draw.rounded_rectangle((px0,py0,px1,py1),radius=22,fill=(6,13,9,205),outline=(232,184,84,230),width=3)
@@ -2720,7 +2720,7 @@ with Image.open(src) as img:
                     draw.text((margin+13,by0+69),ln,font=lf,fill=(0,0,0,180)); draw.text((margin+10,by0+66),ln,font=lf,fill=(255,244,205,255))
                 pbox=draw.textbbox((0,0),shared_price,font=pf); pw=pbox[2]-pbox[0]; px=width-margin-pw-24; py=by0+max(24,(by1-by0-pf.size)//2)
                 draw.text((px+5,py+5),shared_price,font=pf,fill=(0,0,0,185)); draw.text((px,py),shared_price,font=pf,fill=(255,218,82,255))
-                draw.rectangle((0,by1,width,height),fill=(52,24,17,242))
+                draw.rectangle((0,by1,width,height),fill=(52,24,17,255))
                 if footer:
                     fy0=int(height*.928); fy1=height-margin; ff=font(max(19,int(width*.022)),True,footer)
                     draw.rounded_rectangle((margin,fy0,width-margin,fy1),radius=16,fill=(7,10,8,190),outline=(232,184,84,135),width=1)

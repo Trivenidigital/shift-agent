@@ -633,7 +633,7 @@ def test_triveni_shared_price_reference_overlay_has_premium_poster_hierarchy(tmp
     target = tmp_path / "triveni-shared-price.png"
     with Image.new("RGB", (1080, 1350), background) as src_img:
         ImageDraw.Draw(src_img).rectangle((40, 60, 240, 300), fill=(225, 225, 225))
-        ImageDraw.Draw(src_img).rectangle((70, 455, 380, 490), fill=(245, 245, 235))
+        ImageDraw.Draw(src_img).rectangle((70, 455, 380, 490), fill=(112, 118, 90))
         ImageDraw.Draw(src_img).rectangle((540, 80, 1040, 280), fill=(255, 255, 255))
         ImageDraw.Draw(src_img).rectangle((80, 1230, 390, 1270), fill=(245, 245, 235))
         src_img.save(source)
@@ -650,7 +650,7 @@ def test_triveni_shared_price_reference_overlay_has_premium_poster_hierarchy(tmp
         width, height = img.size
         left_source_region = img.crop((40, int(height * 0.16), 170, int(height * 0.24)))
         left_column_ghost_region = img.crop((70, int(height * 0.335), 380, int(height * 0.360)))
-        bottom_ghost_region = img.crop((80, int(height * 0.912), 390, int(height * 0.940)))
+        bottom_ghost_region = img.crop((80, int(height * 0.912), 390, int(height * 0.925)))
         source_header_region = img.crop((int(width * 0.50), int(height * 0.06), width - 40, int(height * 0.24)))
         middle_region = img.crop((40, int(height * 0.46), width - 40, int(height * 0.68)))
         bottom_strip = img.crop((0, int(height * 0.82), width, height))
@@ -662,14 +662,18 @@ def test_triveni_shared_price_reference_overlay_has_premium_poster_hierarchy(tmp
         bottom_pixels = list(bottom_strip.getdata())
 
     left_source_leak = sum(1 for r, g, b in left_source_pixels if r > 190 and g > 190 and b > 190)
+    left_column_mask_miss = sum(1 for pixel in left_column_ghost_pixels if pixel != (3, 12, 8))
     left_column_ghost_leak = sum(1 for r, g, b in left_column_ghost_pixels if r > 190 and g > 190 and b > 190)
+    bottom_mask_miss = sum(1 for pixel in bottom_ghost_pixels if pixel != (52, 24, 17))
     bottom_ghost_leak = sum(1 for r, g, b in bottom_ghost_pixels if r > 190 and g > 190 and b > 190)
     leaked_source_header = sum(1 for r, g, b in source_header_pixels if r > 225 and g > 225 and b > 225)
     middle_changed = sum(1 for pixel in middle_pixels if pixel != background)
     dark_bottom = sum(1 for r, g, b in bottom_pixels if r < 45 and g < 35 and b < 35)
 
     assert left_source_leak / max(1, len(left_source_pixels)) < 0.02
+    assert left_column_mask_miss == 0
     assert left_column_ghost_leak / max(1, len(left_column_ghost_pixels)) < 0.02
+    assert bottom_mask_miss == 0
     assert bottom_ghost_leak / max(1, len(bottom_ghost_pixels)) < 0.02
     assert leaked_source_header / max(1, len(source_header_pixels)) < 0.02
     assert middle_changed / max(1, len(middle_pixels)) > 0.12
