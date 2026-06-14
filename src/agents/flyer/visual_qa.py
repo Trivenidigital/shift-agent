@@ -226,6 +226,58 @@ def _unexpected_phone_blockers(project: FlyerProject, extracted_text: str) -> li
     return blockers
 
 
+_PRICE_RE = re.compile(r"\$\s?\d[\d,]*(?:\.\d{1,2})?")
+_PROMO_PHRASE_RE = re.compile(
+    r"\b(limited[\s-]?time(?:\s+deal)?|today\s+only|special\s+combo|special\s+deal|"
+    r"lunch\s+offer|dinner\s+offer|grand\s+sale|flat\s+\d*\s*off|buy\s+\d+\s+get|"
+    r"\d+\s*%\s*off|\bfree\b)\b",
+    re.IGNORECASE,
+)
+
+
+def _norm_price(tok: str) -> str:
+    return re.sub(r"\s+", "", tok).replace(",", "")
+
+
+def _locked_price_set(project: FlyerProject) -> set[str]:
+    out: set[str] = set()
+    for fact in project.locked_facts:
+        for m in _PRICE_RE.findall(fact.value or ""):
+            out.add(_norm_price(m))
+    return out
+
+
+def _has_offer_fact(project: FlyerProject) -> bool:
+    for fact in project.locked_facts:
+        fid = fact.fact_id.lower()
+        if fid.startswith("offer") or "offer" in (fact.label or "").lower() \
+           or fid in {"pricing_structure", "promotion_end"} or "pric" in fid:
+            return True
+    return False
+
+
+def _fabricated_offer_price_blockers(project: FlyerProject, extracted_text: str) -> list[str]:
+    """Slice 1: flag $-prices and promo claims in OCR not backed by locked_facts.
+    Anchored on numbers (low false-positive); reworded legit offers with a locked
+    price still pass. Non-dollar promo wording blocks only when NO offer fact exists.
+
+    Price-check gate: only activated when the project has at least one locked price
+    fact. If the customer provided no prices, the AI was given creative latitude on
+    pricing and we should not flag those prices as fabricated."""
+    blockers: list[str] = []
+    locked = _locked_price_set(project)
+    if locked:
+        # Only flag unexpected prices when at least one price is locked.
+        # Projects with no locked prices gave the AI creative latitude.
+        for tok in _PRICE_RE.findall(extracted_text or ""):
+            if _norm_price(tok) not in locked:
+                blockers.append(f"fabricated price visible: {tok.strip()}")
+    if not _has_offer_fact(project):
+        for m in _PROMO_PHRASE_RE.finditer(extracted_text or ""):
+            blockers.append(f"fabricated offer claim visible: {m.group(0).strip()}")
+    return blockers
+
+
 def _past_event_date_blockers(project: FlyerProject) -> list[str]:
     """P1-2: a flyer must not advertise an event date that has already passed. The locked
     event_date drives the rendered date; if it is before the flyer's creation date the
@@ -1217,6 +1269,10 @@ _BLOCK_TIER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # bounded-creative-planner slice 5b: the customer asked for N items but the planner
     # contribution leaves the project short of N — the literal request is not satisfied.
     (re.compile(r"^requested item count not satisfied: "), "intent_count_unsatisfied"),
+    # Slice 1: fabricated $-prices or promo claims not backed by locked facts are
+    # customer-harmful (misleading prices/promotions) — fail closed to manual.
+    (re.compile(r"^fabricated price visible: "), "fabricated_price"),
+    (re.compile(r"^fabricated offer claim visible: "), "fabricated_offer"),
     (re.compile(r"placeholder|unreadable|garbled", re.IGNORECASE), "quality_note_corruption"),
 )
 
@@ -1574,6 +1630,7 @@ def run_visual_qa(
     blockers.extend(_item_price_pair_blockers(project, extracted_text))
     blockers.extend(_near_duplicate_item_blockers(project, extracted_text))
     blockers.extend(_unexpected_phone_blockers(project, extracted_text))
+    blockers.extend(_fabricated_offer_price_blockers(project, extracted_text))
     # Source-contract negative-assertion gate: any value in
     # forbidden_substrings (populated upstream from brand/phone/address
     # replacements) must NOT appear in the OCR text. Reuses the same
