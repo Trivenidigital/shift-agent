@@ -499,12 +499,17 @@ def test_flyer_generation_scripts_resolve_draft_and_final_provider_policy():
 
     assert "source_edit_provider = cfg.flyer.resolve_source_edit_render_provider()" in generate
     assert "provider=source_edit_provider.provider" in generate
-    assert "model=source_edit_provider.model" in generate
+    # 2026-06-14 (4c): the model still originates from the provider resolver but
+    # is routed through the kill-switch helper so FLYER_INTEGRATED_KILLSWITCH=1
+    # forces the deterministic renderer. The policy that matters here is "model
+    # comes from *_provider.model, not the deprecated config field".
+    assert "model=_effective_render_model(source_edit_provider.model)" in generate
     assert "quality=source_edit_provider.quality" in generate
     assert "cfg.flyer.edit_image_model" not in generate
 
     assert "draft_provider = cfg.flyer.resolve_draft_render_provider()" in generate
-    assert "model=draft_provider.model" in generate
+    assert "draft_model = _effective_render_model(draft_provider.model)" in generate
+    assert "model=draft_model" in generate
     assert "quality=draft_provider.quality" in generate
     assert "cfg.flyer.draft_image_model" not in generate
 

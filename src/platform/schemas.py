@@ -4421,6 +4421,25 @@ class FlyerVisibleContractChecked(_BaseEntry):
     project_id: str = Field(default="", max_length=80)
 
 
+class FlyerIntegratedRefereeUnavailableFallback(_BaseEntry):
+    """Records that the concept-path visual-QA referee could not verify a render
+    (status='provider_unavailable' — OCR/vision down) and the orchestrator routed
+    to the deterministic-overlay fallback instead of shipping an unverified
+    integrated flyer (2026-06-14 integrated safety net).
+
+    Anti-silent marker (operator requirement): the deterministic-overlay path is
+    safe-by-construction (overlay draws EXACT locked text → cannot fabricate), so
+    it needs no OCR re-verification. This row plus the matching
+    'integrated_referee_unavailable_fallback' note inside the persisted QA report
+    make the silent quality degradation observable.
+
+    LOG-ONLY; never alters behavior beyond the fallback the orchestrator already
+    decided to run."""
+    type: Literal["flyer_integrated_referee_unavailable_fallback"] = "flyer_integrated_referee_unavailable_fallback"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -5767,6 +5786,8 @@ LogEntry = Annotated[
         Annotated[FlyerCreativeDirectorRouted, Tag("flyer_creative_director_routed")],
         # 2026-06-07 — post-render visible-contract referee outcome (metrics)
         Annotated[FlyerVisibleContractChecked, Tag("flyer_visible_contract_checked")],
+        # 2026-06-14 — integrated referee-unavailable → deterministic fallback (anti-silent)
+        Annotated[FlyerIntegratedRefereeUnavailableFallback, Tag("flyer_integrated_referee_unavailable_fallback")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
