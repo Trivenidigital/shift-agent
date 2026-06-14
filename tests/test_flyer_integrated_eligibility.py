@@ -400,3 +400,106 @@ def test_case8_flag_off_excluded(monkeypatch):
     monkeypatch.delenv("FLYER_ALLOW_INTEGRATED_POSTER", raising=False)
     project = _base_food_project()
     assert render_module._integrated_poster_eligible(project) is False
+
+
+# ---------------------------------------------------------------------------
+# FIX A: integrated prompt honors regional-language CONTENT
+# ---------------------------------------------------------------------------
+
+def test_integrated_telugu_content_prompt_uses_regional_instruction(monkeypatch):
+    """An integrated-eligible project whose CONTENT is actual Telugu script must
+    get the regional/Telugu instruction in its prompt, NOT the English-only line.
+
+    Branching on regional-script-in-content (not preferred_language) is what
+    keeps the English-content-with-te-profile case English while flipping the
+    genuinely-Telugu-content case to the regional instruction.
+    """
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    # Real Telugu script in the menu facts: "దోస" (dosa), "ఇడ్లీ" (idli)
+    project = _base_food_project(
+        raw_request="లక్ష్మీ కిచెన్ మెనూ - దోస $6.99; ఇడ్లీ $5.99",
+        fields=FlyerRequestFields(
+            event_or_business_name="Lakshmi's Kitchen",
+            contact_info="+17329837841",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            preferred_language="te",
+            notes="దోస $6.99; ఇడ్లీ $5.99",
+        ),
+        locked_facts=[
+            FlyerLockedFact(
+                fact_id="business_name",
+                label="Business",
+                value="Lakshmi's Kitchen",
+                source="customer_profile",
+                required=True,
+            ),
+            FlyerLockedFact(
+                fact_id="contact_phone",
+                label="Contact",
+                value="+17329837841",
+                source="customer_profile",
+                required=True,
+            ),
+            FlyerLockedFact(
+                fact_id="location",
+                label="Location",
+                value="90 Brybar Dr St Johns FL",
+                source="customer_profile",
+                required=True,
+            ),
+            FlyerLockedFact(
+                fact_id="item:0:name",
+                label="Item",
+                value="దోస",
+                source="customer_text",
+                required=True,
+            ),
+        ],
+    )
+    # Sanity: this project is integrated-eligible AND its content has regional script
+    assert render_module._integrated_poster_eligible(project) is True
+    assert render_module._has_regional_script(project.raw_request) is True
+
+    prompt = render_module._image_prompt(
+        project, concept_id="C1", output_format="concept_preview", size=(1080, 1350)
+    )
+
+    assert "Reflect Telugu / South-Indian cultural styling in the imagery" in prompt
+    assert "Use English text only" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# FIX B: eligibility never raises on a dense plain-notes project
+# ---------------------------------------------------------------------------
+
+def test_dense_plain_notes_project_is_ineligible_and_does_not_raise(monkeypatch):
+    """A dense (>10 items) PLAIN-NOTES project (no structured item:N facts) used to
+    overflow _detail_clauses' MAX_DETAIL_FACTS cap and raise FlyerRenderError from
+    inside _integrated_poster_eligible. The predicate must instead return False
+    (falls back to background-only) and never throw.
+    """
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    notes_16 = (
+        "Dosa $6.99; Idli $5.99; Vada $4.99; Sambar Rice $7.99; Pongal $5.99; "
+        "Upma $4.99; Curd Rice $5.49; Lemon Rice $5.49; Poha $4.99; Pesarattu $5.49; "
+        "Medu Vada $4.49; Rava Dosa $7.99; Onion Uttapam $7.49; Masala Dosa $7.99; "
+        "Set Dosa $6.49; Mysore Masala Dosa $8.49"
+    )
+    project = _base_food_project(
+        raw_request=notes_16,
+        fields=FlyerRequestFields(
+            event_or_business_name="Lakshmi's Kitchen",
+            contact_info="+17329837841",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            preferred_language="en",
+            notes=notes_16,
+        ),
+    )
+    # Sanity: items come from plain notes only (no structured item:N facts), >10,
+    # and compact overlay is NOT allowed (so _detail_clauses would raise).
+    items = render_module._menu_item_lines(project)
+    assert len(items) >= 16
+    assert render_module._compact_menu_overlay_allowed(project, items) is False
+
+    # Must return False cleanly — not raise.
+    assert render_module._integrated_poster_eligible(project) is False

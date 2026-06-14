@@ -1125,7 +1125,14 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
     )
     if has_reference_image and not reference_menu:
         return False
-    plan = _poster_copy_plan(project)
+    try:
+        plan = _poster_copy_plan(project)
+    except FlyerRenderError:
+        # A dense plain-notes project (>10 items with no structured item:N facts)
+        # overflows _detail_clauses' MAX_DETAIL_FACTS cap and raises. An eligibility
+        # predicate must never throw — such a project is cleanly ineligible and
+        # falls back to the background-only path (today's behavior before widening).
+        return False
     if not (plan.items or plan.detail_lines or plan.title):
         return False
     return True
@@ -1945,10 +1952,30 @@ Autonomous repair instruction:
             "schedule, location, and contact when those facts are provided."
         )
         if _integrated_poster_eligible(project):
-            language_block = (
-                "- Use English text only for this typed menu poster. Do not add Telugu, Hindi, "
-                "or other regional-language text unless the customer explicitly requested it."
+            # Branch on whether the CONTENT carries regional script (not the profile
+            # language): an English-content menu with a localized profile language
+            # still wants the English-only instruction, while a project whose facts
+            # are actually in Telugu/regional script must NOT be told English-only —
+            # that would produce an English flyer for a regional-language customer.
+            _content = " ".join(
+                str(value or "")
+                for value in (
+                    project.raw_request,
+                    getattr(project.fields, "notes", ""),
+                    *(fact.value for fact in project.locked_facts),
+                )
             )
+            if _has_regional_script(_content):
+                # Mirror the background-only regional language_block wording.
+                language_block = (
+                    "- Reflect Telugu / South-Indian cultural styling in the imagery, motifs, and palette "
+                    "ONLY — do NOT render any text, script, or words; all flyer text is composited separately."
+                )
+            else:
+                language_block = (
+                    "- Use English text only for this typed menu poster. Do not add Telugu, Hindi, "
+                    "or other regional-language text unless the customer explicitly requested it."
+                )
         else:
             language_block = _language_constraint_hint(project)
     return f"""Create a complete, finished customer-ready poster flyer for WhatsApp delivery.
