@@ -57,3 +57,11 @@ def test_nondollar_promo_passes_when_offer_fact_exists():
 def test_fabrication_is_block_tier():
     p = _proj([("business_name", "Business", "Lakshmi's Kitchen")])
     assert visual_qa.classify_qa_severity(["fabricated price visible: $3.99"], project=p) == "block"
+
+
+def test_no_price_facts_creative_latitude_no_block():
+    # Deviation pin: a project with only non-price facts gives the AI creative
+    # latitude on pricing, so $-prices in the OCR must NOT be flagged fabricated.
+    p = _proj([("business_name", "Business", "Lakshmi's Kitchen")])
+    b = visual_qa._fabricated_offer_price_blockers(p, "Lakshmi's Kitchen\nChicken Biryani $16.99")
+    assert not any(x.startswith("fabricated price visible: ") for x in b)

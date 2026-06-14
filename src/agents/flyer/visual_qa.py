@@ -226,7 +226,13 @@ def _unexpected_phone_blockers(project: FlyerProject, extracted_text: str) -> li
     return blockers
 
 
-_PRICE_RE = re.compile(r"\$\s?\d[\d,]*(?:\.\d{1,2})?")
+# Left-boundary guard mirrors _PRICE_AMOUNT_RE: a "$"-price embedded in a garbled
+# alnum/decimal run (e.g. OCR gluing "id3$4.99") must not false-fire as a price.
+_PRICE_RE = re.compile(r"(?<![a-z0-9.])\$\s?\d[\d,]*(?:\.\d{1,2})?", re.IGNORECASE)
+# Slice-1 deferral: the bare `\bfree\b` term can false-positive on a brand name
+# containing "free" on no-offer projects. Acceptable for Slice 1 — a false-positive
+# only triggers a safe retry/deterministic-fallback, never a wrong customer flyer.
+# Revisit in Slice 2.
 _PROMO_PHRASE_RE = re.compile(
     r"\b(limited[\s-]?time(?:\s+deal)?|today\s+only|special\s+combo|special\s+deal|"
     r"lunch\s+offer|dinner\s+offer|grand\s+sale|flat\s+\d*\s*off|buy\s+\d+\s+get|"
@@ -269,9 +275,13 @@ def _fabricated_offer_price_blockers(project: FlyerProject, extracted_text: str)
     if locked:
         # Only flag unexpected prices when at least one price is locked.
         # Projects with no locked prices gave the AI creative latitude.
+        seen: set[str] = set()
         for tok in _PRICE_RE.findall(extracted_text or ""):
-            if _norm_price(tok) not in locked:
-                blockers.append(f"fabricated price visible: {tok.strip()}")
+            normalized = _norm_price(tok)
+            if normalized in locked or normalized in seen:
+                continue
+            seen.add(normalized)
+            blockers.append(f"fabricated price visible: {tok.strip()}")
     if not _has_offer_fact(project):
         for m in _PROMO_PHRASE_RE.finditer(extracted_text or ""):
             blockers.append(f"fabricated offer claim visible: {m.group(0).strip()}")
