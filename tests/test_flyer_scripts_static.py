@@ -595,3 +595,69 @@ def test_active_revision_failure_gets_clarification_not_false_noted_message():
     assert '"project_id": updated.project_id' in update
     assert "if revision_requires_clarification:" in update
     assert "return 0" in update
+
+
+# ===========================================================================
+# 2026-06-14 (R2) — kill-switch TOTALITY guard.
+# Every generative render call in generate-flyer-concepts MUST route its model
+# through the FLYER_INTEGRATED_KILLSWITCH helper. This AST test fails if a
+# future 7th call site passes a raw *_provider.model / config model that would
+# silently bypass the panic switch.
+# ===========================================================================
+import ast as _ast
+
+
+def _kwarg_routes_through_killswitch(model_node) -> bool:
+    """True when a `model=` argument value is kill-switch-aware:
+
+    - a call to `_effective_render_model(...)`, or
+    - the once-resolved `draft_model` name (which is itself assigned from
+      `_effective_render_model(draft_provider.model)`).
+    """
+    # model=_effective_render_model(...)
+    if isinstance(model_node, _ast.Call):
+        func = model_node.func
+        if isinstance(func, _ast.Name) and func.id == "_effective_render_model":
+            return True
+    # model=draft_model
+    if isinstance(model_node, _ast.Name) and model_node.id == "draft_model":
+        return True
+    return False
+
+
+def test_killswitch_totality_every_generative_render_routes_model_through_helper():
+    source = (SCRIPTS / "generate-flyer-concepts").read_text(encoding="utf-8")
+    tree = _ast.parse(source)
+
+    guarded_callees = {"render_concept_previews", "render_source_edit_preview"}
+    offenders = []
+    seen = 0
+    # Verify the once-resolved kill-switch variable is actually defined that way,
+    # so accepting bare `draft_model` is sound.
+    assert "draft_model = _effective_render_model(draft_provider.model)" in source
+
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Call):
+            continue
+        func = node.func
+        # render functions are called bare (imported names), not as attributes
+        callee = func.id if isinstance(func, _ast.Name) else getattr(func, "attr", "")
+        if callee not in guarded_callees:
+            continue
+        seen += 1
+        model_kw = next((kw for kw in node.keywords if kw.arg == "model"), None)
+        if model_kw is None:
+            offenders.append((callee, node.lineno, "missing model= kwarg"))
+            continue
+        if not _kwarg_routes_through_killswitch(model_kw.value):
+            rendered = _ast.dump(model_kw.value)
+            offenders.append((callee, node.lineno, f"model= bypasses kill-switch: {rendered}"))
+
+    # Sanity: there ARE generative render call sites to guard (guards against a
+    # silently-passing test if the names ever change).
+    assert seen >= 3, f"expected >=3 generative render call sites, found {seen}"
+    assert not offenders, (
+        "kill-switch bypass detected — every render_concept_previews / "
+        "render_source_edit_preview call must pass model=_effective_render_model(...) "
+        f"or model=draft_model:\n{offenders}"
+    )

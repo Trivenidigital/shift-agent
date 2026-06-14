@@ -3119,3 +3119,170 @@ def test_4c_killswitch_forces_deterministic_model_in_render(monkeypatch, tmp_pat
 
     assert module.main() == 0
     assert seen_models == ["deterministic-renderer"]
+
+
+def test_R3_fabrication_retry_fails_and_fallback_raises_goes_manual_not_warn(monkeypatch, tmp_path, capsys):
+    """R3 fail-closed coupling: when a fabrication-ONLY block survives the
+    bounded repair retry AND the deterministic-overlay fallback itself raises,
+    the project must land in manual_edit_required (rc 2) — NEVER warn-tier
+    delivery of the unverified/fabricating render.
+
+    The fabrication QA report carries a REAL severity='block' (not the helper
+    default), so this asserts the genuine block-severity path drives the
+    fail-closed outcome rather than a fixture artifact."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import FlyerVisualQAReport
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    render_calls = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        # The deterministic-overlay fallback runs under FLYER_ALLOW_INTEGRATED_POSTER=0.
+        if module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER") == "0":
+            render_calls.append("fallback")
+            raise module.FlyerRenderError("deterministic overlay could not fit required facts")
+        suffix = "repaired" if kwargs.get("repair_instruction") else "first"
+        render_calls.append(suffix)
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        # Every integrated/repaired render keeps fabricating a price → REAL block.
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id,
+            asset_id=asset_id,
+            artifact_path=str(artifact_path),
+            artifact_sha256="c" * 64,
+            project_version=project_obj.version,
+            output_format=output_format,
+            provider="test",
+            qa_source="ocr_vision",
+            status="failed",
+            blockers=["fabricated price visible: $3.99"],
+            severity="block",
+            checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    # Keep the recovery.py autorepair loop out — this is the separate retry-first path.
+    monkeypatch.setattr(
+        module, "classify_flyer_qa_for_autorepair",
+        lambda *_a, **_k: types.SimpleNamespace(decision="manual_required", reason="not_autorepair"),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    rc = module.main()
+    assert rc == 2
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    # Fail-closed to manual; NOT delivered_with_warning.
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["status"] != "delivered_with_warning"
+    assert persisted["manual_review"]["status"] == "queued"
+    assert persisted["manual_review"]["reason_code"] == "visual_qa_failed"
+    # Coupling proof: the bounded retry ran (one repaired attempt) AND the
+    # deterministic-overlay fallback was attempted and raised.
+    assert "repaired" in render_calls
+    assert "fallback" in render_calls
+    out = json.loads(capsys.readouterr().out)
+    assert "visual_qa_failed" in out
+
+
+def _byte_identical_food_project(project_id="F0001"):
+    """A representative English food project that renders via the deterministic
+    (pure-Pillow) path — no generative API call — so output is reproducible."""
+    from schemas import FlyerProject, FlyerRequestFields, FlyerLockedFact
+    now = datetime(2026, 6, 14, tzinfo=timezone.utc)
+    return FlyerProject(
+        project_id=project_id,
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        customer_id="CUST0001",
+        created_at=now,
+        updated_at=now,
+        original_message_id=f"wamid.{project_id}",
+        raw_request="Weekend snack specials for Lakshmi Kitchen. Dosa, Idli, Vada.",
+        fields=FlyerRequestFields(
+            event_or_business_name="Lakshmi Kitchen",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+1 732 983 7841",
+            preferred_language="en",
+            notes="Dosa $6.99; Idli $5.99; Vada $4.99",
+            style_preference="warm festive south-indian, premium readable",
+        ),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+1 732 983 7841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Dosa", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$6.99", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:name", label="Item", value="Idli", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:price", label="Price", value="$5.99", source="customer_text", required=True),
+        ],
+    )
+
+
+def test_task5_killswitch_resolves_to_deterministic_renderer(monkeypatch):
+    """Task 5 (part 1): under FLYER_INTEGRATED_KILLSWITCH=1 the script's
+    _effective_render_model collapses ANY configured generative model to the pure
+    deterministic renderer — the panic-switch contract."""
+    module = _load_script(monkeypatch)
+    monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", "1")
+    assert module._effective_render_model("google/gemini-3.1-flash-image-preview") == "deterministic-renderer"
+    assert module._effective_render_model("openrouter/premium-poster-model") == "deterministic-renderer"
+    # Switch off → configured model passes through unchanged.
+    monkeypatch.delenv("FLYER_INTEGRATED_KILLSWITCH", raising=False)
+    assert module._effective_render_model("google/gemini-3.1-flash-image-preview") == "google/gemini-3.1-flash-image-preview"
+
+
+def test_task5_killswitch_render_is_byte_identical_to_direct_deterministic(monkeypatch, tmp_path):
+    """Task 5 (part 2): rendering with the kill-switch-resolved model produces
+    output BYTE-IDENTICAL to rendering with model='deterministic-renderer'
+    directly. Proves the panic switch reverts to deterministic output with no
+    drift (no generative call, no timestamp/nonce in the PNG)."""
+    module = _load_script(monkeypatch)
+    import hashlib
+    from agents.flyer.render import render_concept_previews
+
+    # The model the script WOULD have used; the kill-switch must collapse it.
+    monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", "1")
+    resolved = module._effective_render_model("google/gemini-3.1-flash-image-preview")
+    assert resolved == "deterministic-renderer"
+
+    out_killswitch = tmp_path / "ks"
+    out_direct = tmp_path / "direct"
+    out_killswitch.mkdir()
+    out_direct.mkdir()
+
+    specs_ks = render_concept_previews(
+        _byte_identical_food_project("F0001"), out_killswitch, model=resolved, concept_count=1,
+    )
+    specs_direct = render_concept_previews(
+        _byte_identical_food_project("F0001"), out_direct, model="deterministic-renderer", concept_count=1,
+    )
+
+    sha_ks = hashlib.sha256(Path(specs_ks[0].path).read_bytes()).hexdigest()
+    sha_direct = hashlib.sha256(Path(specs_direct[0].path).read_bytes()).hexdigest()
+    assert sha_ks == sha_direct, (
+        "kill-switch render diverged from direct deterministic render: "
+        f"{sha_ks} != {sha_direct}"
+    )
