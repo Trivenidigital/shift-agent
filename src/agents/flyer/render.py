@@ -1119,6 +1119,13 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
     if not _is_food_or_grocery_project(project):
         return False
     reference_menu = _style_only_reference_requested(project) and _has_materialized_reference_menu_facts(project)
+    if reference_menu:
+        # Slice 1 narrowing: style-only / reference-menu uploaded-flyer cases STAY on
+        # the deterministic overlay path to preserve the 2026-06-10 "use-as-reference"
+        # fidelity fix (test_flyer_reference_quality F0151). Integrating these would
+        # let the model recompose the borrowed flyer's text instead of overlaying the
+        # exact materialized facts.
+        return False
     has_reference_image = any(
         getattr(asset, "kind", "") == "reference_image"
         for asset in _project_reference_assets(project)

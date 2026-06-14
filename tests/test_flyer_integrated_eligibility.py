@@ -204,19 +204,23 @@ def test_case3_telugu_food_project_eligible(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Case 4: Reference-menu project with materialized facts → eligible (True)
+# Case 4: Reference-menu project stays on overlay (Slice 1) → NOT eligible (False)
 # ---------------------------------------------------------------------------
 
-def test_case4_reference_menu_materialized_facts_eligible(monkeypatch):
-    """Widened: reference-menu (style-only + materialized facts) no longer excluded.
+def test_case4_reference_menu_materialized_facts_stays_on_overlay(monkeypatch):
+    """Slice 1 narrowing: style-only / reference-menu uploaded-flyer cases STAY on
+    the deterministic overlay path (NOT integrated).
 
     _reference_menu is True only when:
       - _style_only_reference_requested is True  (request contains "use as reference")
       - _has_materialized_reference_menu_facts is True (locked_facts with reference_ source
         or reference_extractions with status=ok containing menu facts)
 
-    In this state the items are already in locked_facts — the overlay CAN render them,
-    and the integrated path has them in the prompt too. No extraction-pending risk.
+    Even though the items are already materialized in locked_facts, routing these to the
+    integrated path would let the model recompose the borrowed flyer's text instead of
+    overlaying the exact facts — conflicting with the deployed 2026-06-10
+    "use-as-reference -> overlay" fidelity fix (test_flyer_reference_quality F0151). So
+    reference-menus remain excluded from the integrated poster path for Slice 1.
     """
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     # _style_only_reference_requested requires one of the marker phrases
@@ -281,9 +285,9 @@ def test_case4_reference_menu_materialized_facts_eligible(monkeypatch):
     # Sanity-check the predicates this case depends on
     assert render_module._style_only_reference_requested(project) is True
     assert render_module._has_materialized_reference_menu_facts(project) is True
-    # No reference_image ASSET so has_reference_image is False — avoids the
-    # "raw reference image without materialized facts" exclusion path.
-    assert render_module._integrated_poster_eligible(project) is True
+    # Reference-menu is short-circuited to the overlay path (Slice 1 narrowing) — even
+    # with materialized facts and no raw reference_image asset, it is NOT integrated.
+    assert render_module._integrated_poster_eligible(project) is False
 
 
 # ---------------------------------------------------------------------------
