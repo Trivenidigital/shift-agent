@@ -1116,6 +1116,10 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
         return False
     if _is_source_edit_project(project):
         return False
+    # Machine-read elements (QR codes, barcodes) must be composited deterministically
+    # (Slice 1 guard; no QR fact type exists yet).
+    if any((getattr(f, "fact_id", "") or "").strip().lower() in {"qr", "qr_code", "barcode"} for f in project.locked_facts):
+        return False
     if not _is_food_or_grocery_project(project):
         return False
     reference_menu = _style_only_reference_requested(project) and _has_materialized_reference_menu_facts(project)
