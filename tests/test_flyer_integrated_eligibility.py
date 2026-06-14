@@ -408,7 +408,10 @@ def test_case8_flag_off_excluded(monkeypatch):
 
 def test_integrated_telugu_content_prompt_uses_regional_instruction(monkeypatch):
     """An integrated-eligible project whose CONTENT is actual Telugu script must
-    get the regional/Telugu instruction in its prompt, NOT the English-only line.
+    get a RENDER-FAITHFULLY regional instruction in its prompt — NOT the
+    English-only line, and NOT the background-only "do NOT render any text /
+    composited separately" wording (the model renders the text on the integrated
+    path, so suppressing it would ship a textless Telugu flyer).
 
     Branching on regional-script-in-content (not preferred_language) is what
     keeps the English-content-with-te-profile case English while flipping the
@@ -464,8 +467,19 @@ def test_integrated_telugu_content_prompt_uses_regional_instruction(monkeypatch)
         project, concept_id="C1", output_format="concept_preview", size=(1080, 1350)
     )
 
-    assert "Reflect Telugu / South-Indian cultural styling in the imagery" in prompt
+    # Must NOT be the English-only instruction.
     assert "Use English text only" not in prompt
+    # Must NOT be the background-only suppression wording (the integrated model
+    # renders the text — suppressing it would ship a textless Telugu flyer).
+    assert "do NOT render any text" not in prompt
+    assert "composited separately" not in prompt
+    # Must instruct rendering Telugu faithfully.
+    assert "Telugu" in prompt
+    assert (
+        "primary flyer language" in prompt
+        or "valid Telugu script" in prompt
+        or "faithfully" in prompt
+    )
 
 
 # ---------------------------------------------------------------------------

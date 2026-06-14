@@ -1966,11 +1966,17 @@ Autonomous repair instruction:
                 )
             )
             if _has_regional_script(_content):
-                # Mirror the background-only regional language_block wording.
-                language_block = (
-                    "- Reflect Telugu / South-Indian cultural styling in the imagery, motifs, and palette "
-                    "ONLY — do NOT render any text, script, or words; all flyer text is composited separately."
+                # Integrated path: the MODEL renders the text, so instruct it to render
+                # the regional-language text faithfully (NOT suppress it — that would ship
+                # a textless flyer for a Telugu customer). _telugu_hint already returns the
+                # correct "primary flyer language / valid Telugu script / no missing-glyph
+                # boxes" wording; the `or` fallback covers regional-script content with a
+                # non-te/mixed profile language.
+                _regional = _telugu_hint(project) or (
+                    "Render the customer's regional-language text (e.g. Telugu) faithfully in valid script; "
+                    "do not convert it to English and do not produce missing-glyph boxes. Keep item names and prices readable."
                 )
+                language_block = "- " + _regional
             else:
                 language_block = (
                     "- Use English text only for this typed menu poster. Do not add Telugu, Hindi, "
