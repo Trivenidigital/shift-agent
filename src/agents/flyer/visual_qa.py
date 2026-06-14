@@ -1503,13 +1503,20 @@ def _openrouter_key() -> str:
     )
 
 
+# Locked-fact regional detection requires ≥2 consecutive Indic characters so a
+# single stray glyph (e.g. an accented char inside an English value) does NOT
+# force regional OCR routing. Distinct from the module-level REGIONAL_SCRIPT_RE
+# (single-char) used for the English-only contract check, which must stay strict.
+REGIONAL_WORD_RE = re.compile(r"[ऀ-ॿ਀-੿઀-૿஀-௿ఀ-౿ಀ-೿ഀ-ൿ]{2,}")
+
+
 def _project_is_regional(project: "FlyerProject") -> bool:
-    """Return True if the project targets a regional/Indic language or contains Indic script in locked facts."""
+    """Return True if the project targets a regional/Indic language or contains an Indic word in locked facts."""
     lang = (getattr(project.fields, "preferred_language", None) or "").strip().lower()
     if lang in {"te", "hi", "ml", "ta", "kn", "gu", "mr", "pa", "mixed"}:
         return True
     for fact in project.locked_facts:
-        if REGIONAL_SCRIPT_RE.search(fact.value or ""):
+        if REGIONAL_WORD_RE.search(fact.value or ""):
             return True
     return False
 

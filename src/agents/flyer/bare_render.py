@@ -862,7 +862,8 @@ def _run_visible_contract_gate(image_bytes: bytes, project):
     try:
         Path(tmp).write_bytes(image_bytes)
         try:
-            extracted, _provider, _qa_source, notes = VQ._vision_text(Path(tmp))
+            ocr_model = VQ.REGIONAL_QA_MODEL if VQ._project_is_regional(project) else VQ.VISION_QA_MODEL
+            extracted, _provider, _qa_source, notes = VQ._vision_text(Path(tmp), model=ocr_model)
         except Exception as e:  # noqa: BLE001
             extracted, reason = "", f"vision_error:{type(e).__name__}"
         if not extracted:

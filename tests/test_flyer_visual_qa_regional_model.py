@@ -287,3 +287,43 @@ def test_flyer_regional_qa_model_env_override_is_honored(tmp_path, monkeypatch):
     assert used_model == custom_regional, (
         f"FLYER_REGIONAL_QA_MODEL override not honored: expected {custom_regional!r}, got {used_model!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 6: _project_is_regional predicate — single Indic char must NOT trigger
+# ---------------------------------------------------------------------------
+
+
+def test_single_indic_char_in_fact_is_not_regional():
+    """FIX 2: a lone stray Indic glyph in an English fact must NOT route to regional."""
+    # chr(0x0C24) is a single Telugu letter embedded in otherwise-English text.
+    project = _make_project(
+        preferred_language="en",
+        facts=[
+            ("business_name", "Business", "Store " + chr(0x0C24) + " Special"),
+            ("headline", "Headline", "Weekly Deal"),
+        ],
+    )
+    assert _vqa_module._project_is_regional(project) is False
+
+
+def test_indic_word_in_fact_is_regional():
+    """FIX 2: a real Telugu word (>=2 consecutive Indic chars) routes to regional."""
+    # "తాజా" = "Fresh" in Telugu (4 consecutive Indic chars).
+    telugu_word = chr(0x0C24) + chr(0x0C3E) + chr(0x0C1C) + chr(0x0C3E)
+    project = _make_project(
+        preferred_language="en",
+        facts=[
+            ("business_name", "Business", telugu_word),
+            ("headline", "Headline", "Weekly Deal"),
+        ],
+    )
+    assert _vqa_module._project_is_regional(project) is True
+
+
+def test_preferred_language_branch_unchanged():
+    """FIX 2: the preferred_language regional branch is unaffected by the fact tightening."""
+    project = _make_project(preferred_language="hi")  # default English-only facts
+    assert _vqa_module._project_is_regional(project) is True
+    english = _make_project(preferred_language="en")
+    assert _vqa_module._project_is_regional(english) is False
