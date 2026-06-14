@@ -1450,6 +1450,7 @@ def classify_qa_severity(
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 60
 VISION_QA_MODEL = os.environ.get("FLYER_VISUAL_QA_MODEL") or os.environ.get("VISION_MODEL") or "openai/gpt-4o-mini"
+REGIONAL_QA_MODEL = os.environ.get("FLYER_REGIONAL_QA_MODEL") or "google/gemini-2.5-flash"
 VISION_QA_PROMPT = """Read this generated flyer/poster image as OCR/vision QA.
 
 Return STRICT JSON only:
@@ -1502,7 +1503,18 @@ def _openrouter_key() -> str:
     )
 
 
-def _vision_text(path: Path) -> tuple[str, str, str, list[str]]:
+def _project_is_regional(project: "FlyerProject") -> bool:
+    """Return True if the project targets a regional/Indic language or contains Indic script in locked facts."""
+    lang = (getattr(project.fields, "preferred_language", None) or "").strip().lower()
+    if lang in {"te", "hi", "ml", "ta", "kn", "gu", "mr", "pa", "mixed"}:
+        return True
+    for fact in project.locked_facts:
+        if REGIONAL_SCRIPT_RE.search(fact.value or ""):
+            return True
+    return False
+
+
+def _vision_text(path: Path, *, model: str = VISION_QA_MODEL) -> tuple[str, str, str, list[str]]:
     key = _openrouter_key()
     if not key or "PLACEHOLDER" in key:
         return "", "unavailable", "ocr_vision", ["OPENROUTER_API_KEY missing"]
@@ -1514,7 +1526,7 @@ def _vision_text(path: Path) -> tuple[str, str, str, list[str]]:
         return "", "unavailable", "ocr_vision", [f"unsupported OCR media type: {mime}"]
     raw = base64.b64encode(path.read_bytes()).decode("ascii")
     payload = {
-        "model": VISION_QA_MODEL,
+        "model": model,
         "messages": [{
             "role": "user",
             "content": [
@@ -1576,7 +1588,8 @@ def run_visual_qa(
     extracted_text, provider, qa_source = _sidecar_text(artifact, allow_sidecar=allow_sidecar)
     provider_notes: list[str] = []
     if not extracted_text:
-        extracted_text, provider, qa_source, provider_notes = _vision_text(artifact)
+        ocr_model = REGIONAL_QA_MODEL if _project_is_regional(project) else VISION_QA_MODEL
+        extracted_text, provider, qa_source, provider_notes = _vision_text(artifact, model=ocr_model)
     blockers: list[str] = []
     if not extracted_text:
         _early_blockers = ["ocr/vision text unavailable for generated artifact", *provider_notes]
