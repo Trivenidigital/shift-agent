@@ -1101,30 +1101,18 @@ def _needs_reference_extraction(project: FlyerProject) -> bool:
 
 
 def _integrated_poster_eligible(project: FlyerProject) -> bool:
-    """Cases where the image model should compose the full poster.
+    """Cases where the image model composes the full poster (Slice 1: PRIMARY path).
 
-    Bare Flyer Studio opts into this for normal typed English food/grocery
-    flyers because the customer-quality baseline is a designed poster, not a
-    textless image plus pasted lower-third copy. Localized text and reference-
-    image extraction stay on the safer non-integrated paths.
+    Integrated generation is now the primary path for food/grocery flyers of any
+    item count and any language; the post-render referee + deterministic fallback
+    catch failures (e.g. fabricated facts, garbled regional glyphs). The remaining
+    exclusions are structural: reference-extraction-pending (facts not yet
+    materialized), source-edits, non-food, and raw reference IMAGES whose menu
+    facts are not materialized (nothing verifiable to render).
     """
     if os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER", "").strip() != "1":
         return False
     if _needs_reference_extraction(project):
-        return False
-    language = (project.fields.preferred_language or "en").strip().lower()
-    text = " ".join(
-        str(value or "")
-        for value in (
-            project.raw_request,
-            getattr(project.fields, "notes", ""),
-            *(fact.value for fact in project.locked_facts),
-        )
-    )
-    if language != "en" and (
-        _has_regional_script(text)
-        or re.search(r"\b(?:in|use|using|language\s*:?)\s+(?:telugu|hindi|tamil|malayalam|kannada|gujarati|marathi|punjabi)\b", text.casefold())
-    ):
         return False
     if _is_source_edit_project(project):
         return False
@@ -1135,14 +1123,7 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
         getattr(asset, "kind", "") == "reference_image"
         for asset in _project_reference_assets(project)
     )
-    if reference_menu:
-        return False
     if has_reference_image and not reference_menu:
-        return False
-    items = _menu_item_lines(project)
-    if reference_menu and len(items) > 12:
-        return False
-    if len(items) > 10 and not _compact_menu_overlay_allowed(project, items):
         return False
     plan = _poster_copy_plan(project)
     if not (plan.items or plan.detail_lines or plan.title):
