@@ -4440,6 +4440,62 @@ class FlyerIntegratedRefereeUnavailableFallback(_BaseEntry):
     project_version: int = Field(ge=1)
 
 
+class FlyerIntegratedAttempted(_BaseEntry):
+    """Spec §6 integrated-path observability. Emitted once when an integrated
+    concept render is first attempted (NOT emitted when the kill-switch forces
+    the deterministic renderer — no integrated attempt is made in that case).
+
+    LOG-ONLY; week-1 fleet monitoring counts attempts as the denominator for
+    integrated pass-rate / fallback-rate / manual-rate."""
+    type: Literal["flyer_integrated_attempted"] = "flyer_integrated_attempted"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+
+
+class FlyerIntegratedPassed(_BaseEntry):
+    """Spec §6 integrated-path observability. Emitted when an integrated render
+    passes visual QA and is kept (no fallback). `attempts` records how many
+    integrated render passes it took (1 = clean first pass; >1 = passed after a
+    bounded fabrication corrective retry).
+
+    LOG-ONLY."""
+    type: Literal["flyer_integrated_passed"] = "flyer_integrated_passed"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+    attempts: int = Field(default=1, ge=1)
+
+
+class FlyerIntegratedFellBackDeterministic(_BaseEntry):
+    """Spec §6 integrated-path observability. Emitted on each path where the
+    orchestrator abandons the integrated render and ships the deterministic
+    overlay instead. `reason` discriminates WHY:
+
+      - retries_exhausted  : fabrication corrective retries (x2) all still blocked
+      - referee_unavailable : QA referee/OCR could not verify the integrated render
+      - generation_error    : integrated render raised before/while producing output
+      - fabrication         : fabrication block routed straight to the overlay
+
+    LOG-ONLY; complements FlyerIntegratedRefereeUnavailableFallback (kept for
+    the anti-silent QA-report note path) — this is the unified §6 counter."""
+    type: Literal["flyer_integrated_fell_back_deterministic"] = "flyer_integrated_fell_back_deterministic"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+    reason: Literal["retries_exhausted", "referee_unavailable", "generation_error", "fabrication"]
+
+
+class FlyerIntegratedManualReview(_BaseEntry):
+    """Spec §6 integrated-path observability. Emitted when the project ends in
+    manual_edit_required from the concept-render path (neither integrated pass
+    nor a shippable deterministic fallback). `reason_code` mirrors the
+    FlyerManualReview reason_code written to state.
+
+    LOG-ONLY."""
+    type: Literal["flyer_integrated_manual_review"] = "flyer_integrated_manual_review"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+    reason_code: str = Field(default="", max_length=80)
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -5788,6 +5844,11 @@ LogEntry = Annotated[
         Annotated[FlyerVisibleContractChecked, Tag("flyer_visible_contract_checked")],
         # 2026-06-14 — integrated referee-unavailable → deterministic fallback (anti-silent)
         Annotated[FlyerIntegratedRefereeUnavailableFallback, Tag("flyer_integrated_referee_unavailable_fallback")],
+        # 2026-06-14 — spec §6 integrated-path observability (fleet week-1 monitoring)
+        Annotated[FlyerIntegratedAttempted, Tag("flyer_integrated_attempted")],
+        Annotated[FlyerIntegratedPassed, Tag("flyer_integrated_passed")],
+        Annotated[FlyerIntegratedFellBackDeterministic, Tag("flyer_integrated_fell_back_deterministic")],
+        Annotated[FlyerIntegratedManualReview, Tag("flyer_integrated_manual_review")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
