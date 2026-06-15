@@ -1391,6 +1391,15 @@ def main() -> int:
         # integrated flyer). Track whether that case stays unresolved so the
         # final state machine can force manual review instead.
         referee_unavailable_unresolved = referee_unavailable_fallback
+        # 2026-06-15 fail-closed: when the content-miss recovery path was TAKEN
+        # (the content corrective retry ran and still blocked → content_fallback_
+        # reason is truthy), a content-deficient flyer must NOT ship-with-warning
+        # if the deterministic-overlay fallback ALSO fails QA. Track it the same
+        # way as referee_unavailable_unresolved: True now, cleared only when the
+        # overlay fallback ships; if it survives to the state machine, force
+        # manual. (A plain warn that never went through content recovery keeps
+        # content_fallback_reason == "" → stays a normal warn-tier delivery.)
+        content_recovery_unresolved = bool(content_fallback_reason)
         # §6: resolve the single deterministic-fallback reason for this run.
         # Priority: referee-unavailable > fabrication-retry outcome > a residual
         # fabrication blocker that bypassed the fabrication-only retry (mixed
@@ -1506,6 +1515,9 @@ def main() -> int:
                 failed_qa = []
                 # Fallback shipped — the referee-unavailable case is resolved.
                 referee_unavailable_unresolved = False
+                # Fallback shipped (overlay rendered all names/schedule) — the
+                # content-miss recovery is resolved too.
+                content_recovery_unresolved = False
                 # 4b observable marker (anti-silent): only when this fallback was
                 # taken because the concept-path referee was UNAVAILABLE. Emit an
                 # audit row AND stamp the note into the persisted QA reports so the
@@ -1582,6 +1594,13 @@ def main() -> int:
                 # fallback could not ship) must go to manual — never warn-tier
                 # delivery of the unverified integrated render.
                 if referee_unavailable_unresolved:
+                    has_block_severity = True
+                # 2026-06-15 fail-closed: a content-miss recovery that ran the
+                # corrective retry AND the deterministic-overlay fallback, with
+                # both still failing QA, must go to manual — never ship a
+                # content-deficient flyer as delivered_with_warning, even when the
+                # residual blockers are warn-tier only (e.g. missing schedule).
+                if content_recovery_unresolved:
                     has_block_severity = True
                 if not has_block_severity:
                     if not is_flyer_transition_allowed(current.status, "delivered_with_warning"):

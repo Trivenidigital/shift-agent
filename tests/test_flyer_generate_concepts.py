@@ -3646,6 +3646,94 @@ def test_content_miss_retry_fails_then_deterministic_overlay_ships_not_manual(mo
     assert fell[0]["reason"] == "retries_exhausted"
 
 
+def test_content_miss_warn_only_survives_retry_and_fallback_forces_manual_not_warn(monkeypatch, tmp_path, capsys):
+    """Fail-closed gap (Codex): a WARN-ONLY content-recoverable residual
+    ('missing required visible fact: schedule', warn-tier) that survives BOTH the
+    content corrective retry AND the deterministic-overlay fallback (fallback QA
+    still warn-fails) must go to manual_edit_required — NEVER delivered_with_warning.
+    Without the content_recovery_unresolved force-manual, the warn-tier residual
+    would ship a content-deficient flyer with a warning."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import FlyerVisualQAReport
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    render_calls = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        if module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER") == "0":
+            render_calls.append("fallback")
+            suffix = "fallback"
+        elif kwargs.get("repair_instruction"):
+            render_calls.append("content_retry")
+            suffix = "content_retry"
+        else:
+            render_calls.append("first")
+            suffix = "first"
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        # EVERY render (first, content_retry, AND the deterministic overlay
+        # fallback) still drops the schedule — a WARN-ONLY residual that never
+        # recovers. severity="warn" so the state machine would, absent the fix,
+        # take the delivered_with_warning branch.
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id,
+            asset_id=asset_id,
+            artifact_path=str(artifact_path),
+            artifact_sha256="e" * 64,
+            project_version=project_obj.version,
+            output_format=output_format,
+            provider="test",
+            qa_source="ocr_vision",
+            status="failed",
+            blockers=["missing required visible fact: schedule"],
+            severity="warn",
+            extracted_text="Lakshmi Kitchen\nPunugulu\nEgg Bonda",
+            checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        module, "classify_flyer_qa_for_autorepair",
+        lambda *_a, **_k: types.SimpleNamespace(decision="manual_required", reason="not_autorepair"),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    rc = module.main()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    # The content-recovery path ran retry + overlay fallback; both still failed.
+    assert render_calls == ["first", "content_retry", "fallback"]
+    # Fail-closed: forced to manual, NOT delivered_with_warning.
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["status"] != "delivered_with_warning"
+    assert persisted["manual_review"]["status"] == "queued"
+    assert persisted.get("warning") in (None, {}) or persisted["warning"] is None
+    assert rc == 2
+
+
 def test_content_miss_retry_succeeds_keeps_integrated_no_fallback(monkeypatch, tmp_path, capsys):
     """The content corrective retry PASSES on attempt 1 → keep the beautiful
     integrated render, no deterministic fallback. Emits flyer_integrated_passed
