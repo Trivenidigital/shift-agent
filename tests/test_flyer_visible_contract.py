@@ -320,7 +320,7 @@ def _arm(monkeypatch, tmp_path):
 
 def _patch_vision(monkeypatch, text, notes=None):
     from agents.flyer import visual_qa as VQ
-    monkeypatch.setattr(VQ, "_vision_text", lambda _p: (text, "openrouter", "ocr_vision", notes or []))
+    monkeypatch.setattr(VQ, "_vision_text", lambda _p, *, model=None: (text, "openrouter", "ocr_vision", notes or []))
 
 
 def test_gate_blocks_on_violation_when_armed(monkeypatch, tmp_path):
@@ -351,13 +351,62 @@ def test_gate_passes_clean_and_logs_pass(monkeypatch, tmp_path):
     assert "pass" in (tmp_path / "decisions.log").read_text(encoding="utf-8")
 
 
+def _capture_vision_model(monkeypatch, text):
+    """Patch _vision_text to record the `model` kwarg it was called with."""
+    from agents.flyer import visual_qa as VQ
+    captured = {}
+
+    def _fake(_p, *, model=None):
+        captured["model"] = model
+        return (text, "openrouter", "ocr_vision", [])
+
+    monkeypatch.setattr(VQ, "_vision_text", _fake)
+    return captured
+
+
+def _regional_project(facts, *, preferred_language="en", phone="+17329837841"):
+    from schemas import FlyerRequestFields
+    has_name = any(getattr(f, "fact_id", "") == "business_name" for f in facts)
+    if not has_name:
+        facts = [_fact("business_name", BNAME, label="Business")] + facts
+    return FlyerProject(
+        project_id="F9100", status="awaiting_final_approval", customer_phone=phone,
+        created_at=NOW, updated_at=NOW, original_message_id="m-vc-regional",
+        raw_request="Create a flyer.",
+        fields=FlyerRequestFields(preferred_language=preferred_language),  # type: ignore[arg-type]
+        locked_facts=facts,
+    )
+
+
+def test_gate_uses_regional_model_for_telugu_project(monkeypatch, tmp_path):
+    # FIX 1: the visible-contract gate's OCR must route through the regional model
+    # for a regional (Telugu) project, not the weak English default.
+    from agents.flyer import visual_qa as VQ
+    BR = _arm(monkeypatch, tmp_path)
+    captured = _capture_vision_model(monkeypatch, f"{BNAME} Special $8.99 Location 90 Brybar Dr Contact +17329837841")
+    p = _regional_project([_fact("item:0:price", "$8.99", label="Price")], preferred_language="te")
+    BR.run_visual_qa(b"png-bytes", p)
+    assert captured.get("model") == VQ.REGIONAL_QA_MODEL
+    assert captured.get("model") != VQ.VISION_QA_MODEL
+
+
+def test_gate_uses_default_model_for_english_project(monkeypatch, tmp_path):
+    # English project: the gate's OCR stays on the default vision model.
+    from agents.flyer import visual_qa as VQ
+    BR = _arm(monkeypatch, tmp_path)
+    captured = _capture_vision_model(monkeypatch, f"{BNAME} Special $8.99 Location 90 Brybar Dr Contact +17329837841")
+    p = _regional_project([_fact("item:0:price", "$8.99", label="Price")], preferred_language="en")
+    BR.run_visual_qa(b"png-bytes", p)
+    assert captured.get("model") == VQ.VISION_QA_MODEL
+
+
 def test_gate_not_invoked_when_flag_off(monkeypatch, tmp_path):
     from agents.flyer import visual_qa as VQ
     from agents.flyer import bare_render as BR
     monkeypatch.delenv("FLYER_VISIBLE_CONTRACT", raising=False)
     monkeypatch.setenv("FLYER_BARE_SKIP_VISUAL_QA", "1")
     called = {"n": 0}
-    monkeypatch.setattr(VQ, "_vision_text", lambda _p: (called.__setitem__("n", called["n"] + 1), ("x", "p", "s", []))[1])
+    monkeypatch.setattr(VQ, "_vision_text", lambda _p, *, model=None: (called.__setitem__("n", called["n"] + 1), ("x", "p", "s", []))[1])
     p = _project([_fact("item:0:price", "$8.99", label="Price")])
     ok, blockers = BR.run_visual_qa(b"png-bytes", p)
     assert ok is True

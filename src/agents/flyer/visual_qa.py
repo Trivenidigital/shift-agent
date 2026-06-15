@@ -226,6 +226,100 @@ def _unexpected_phone_blockers(project: FlyerProject, extracted_text: str) -> li
     return blockers
 
 
+# Left-boundary guard mirrors _PRICE_AMOUNT_RE: a "$"-price embedded in a garbled
+# alnum/decimal run (e.g. OCR gluing "id3$4.99") must not false-fire as a price.
+_PRICE_RE = re.compile(r"(?<![a-z0-9.])\$\s?\d[\d,]*(?:\.\d{1,2})?", re.IGNORECASE)
+# Slice-1 deferral: the bare `\bfree\b` term can false-positive on a brand name
+# containing "free" on no-offer projects. Acceptable for Slice 1 — a false-positive
+# only triggers a safe retry/deterministic-fallback, never a wrong customer flyer.
+# Revisit in Slice 2.
+_PROMO_PHRASE_RE = re.compile(
+    r"\b(limited[\s-]?time(?:\s+deal)?|today\s+only|special\s+combo|special\s+deal|"
+    r"lunch\s+offer|dinner\s+offer|grand\s+sale|flat\s+\d*\s*off|buy\s+\d+\s+get|"
+    r"\d+\s*%\s*off|\bfree\b)\b",
+    re.IGNORECASE,
+)
+
+
+def _norm_price(tok: str) -> str:
+    return re.sub(r"\s+", "", tok).replace(",", "")
+
+
+def _locked_price_set(project: FlyerProject) -> set[str]:
+    out: set[str] = set()
+    for fact in project.locked_facts:
+        for m in _PRICE_RE.findall(fact.value or ""):
+            out.add(_norm_price(m))
+    return out
+
+
+# Fact ids (exact, or `offer:<n>` family) that authorize a promo/offer claim.
+# A plain `item:<n>:price` is a menu price, NOT an offer authorization, so it is
+# deliberately excluded — fabricated non-dollar promo banners must still block on
+# a priced menu that has no real offer fact (Codex FIX 2).
+_OFFER_FACT_IDS = {
+    "offer",
+    "promo",
+    "promotion",
+    "promotion_end",
+    "discount",
+    "deal",
+    "coupon",
+    "sale",
+}
+# Promo terms that, if present in a `pricing_structure` fact's label or value,
+# upgrade it from a plain pricing descriptor to a promo authorization.
+_PRICING_STRUCTURE_PROMO_RE = re.compile(
+    r"offer|promo|discount|deal|sale|combo|free|bogo|buy\b.*\bget\b|%\s*off|limited[\s-]?time",
+    re.IGNORECASE,
+)
+
+
+def _has_offer_fact(project: FlyerProject) -> bool:
+    """True only when the project carries a genuine offer/promo authorization.
+
+    Counts ONLY the canonical offer/promo fact ids (`offer`, `offer:<n>`,
+    `promo`, `promotion`, `promotion_end`, `discount`, `deal`, `coupon`,
+    `sale`). A `pricing_structure` fact authorizes promos ONLY when its label or
+    value carries a promo term. Plain `item:<n>:price` facts and arbitrary
+    `"pric"` substrings do NOT count (Codex FIX 2)."""
+    for fact in project.locked_facts:
+        fid = fact.fact_id.lower()
+        if fid in _OFFER_FACT_IDS or fid.startswith("offer:"):
+            return True
+        if fid == "pricing_structure" and _PRICING_STRUCTURE_PROMO_RE.search(
+            f"{fact.label or ''} {fact.value or ''}"
+        ):
+            return True
+    return False
+
+
+def _fabricated_offer_price_blockers(project: FlyerProject, extracted_text: str) -> list[str]:
+    """Slice 1: flag $-prices and promo claims in OCR not backed by locked_facts.
+    Anchored on numbers (low false-positive); reworded legit offers with a locked
+    price still pass. Non-dollar promo wording blocks only when NO offer fact exists.
+
+    Price-check gate: only activated when the project has at least one locked price
+    fact. If the customer provided no prices, the AI was given creative latitude on
+    pricing and we should not flag those prices as fabricated."""
+    blockers: list[str] = []
+    locked = _locked_price_set(project)
+    if locked:
+        # Only flag unexpected prices when at least one price is locked.
+        # Projects with no locked prices gave the AI creative latitude.
+        seen: set[str] = set()
+        for tok in _PRICE_RE.findall(extracted_text or ""):
+            normalized = _norm_price(tok)
+            if normalized in locked or normalized in seen:
+                continue
+            seen.add(normalized)
+            blockers.append(f"fabricated price visible: {tok.strip()}")
+    if not _has_offer_fact(project):
+        for m in _PROMO_PHRASE_RE.finditer(extracted_text or ""):
+            blockers.append(f"fabricated offer claim visible: {m.group(0).strip()}")
+    return blockers
+
+
 def _past_event_date_blockers(project: FlyerProject) -> list[str]:
     """P1-2: a flyer must not advertise an event date that has already passed. The locked
     event_date drives the rendered date; if it is before the flyer's creation date the
@@ -1217,6 +1311,10 @@ _BLOCK_TIER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # bounded-creative-planner slice 5b: the customer asked for N items but the planner
     # contribution leaves the project short of N — the literal request is not satisfied.
     (re.compile(r"^requested item count not satisfied: "), "intent_count_unsatisfied"),
+    # Slice 1: fabricated $-prices or promo claims not backed by locked facts are
+    # customer-harmful (misleading prices/promotions) — fail closed to manual.
+    (re.compile(r"^fabricated price visible: "), "fabricated_price"),
+    (re.compile(r"^fabricated offer claim visible: "), "fabricated_offer"),
     (re.compile(r"placeholder|unreadable|garbled", re.IGNORECASE), "quality_note_corruption"),
 )
 
@@ -1384,6 +1482,7 @@ def classify_qa_severity(
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 60
 VISION_QA_MODEL = os.environ.get("FLYER_VISUAL_QA_MODEL") or os.environ.get("VISION_MODEL") or "openai/gpt-4o-mini"
+REGIONAL_QA_MODEL = os.environ.get("FLYER_REGIONAL_QA_MODEL") or "google/gemini-2.5-flash"
 VISION_QA_PROMPT = """Read this generated flyer/poster image as OCR/vision QA.
 
 Return STRICT JSON only:
@@ -1436,7 +1535,25 @@ def _openrouter_key() -> str:
     )
 
 
-def _vision_text(path: Path) -> tuple[str, str, str, list[str]]:
+# Locked-fact regional detection requires ≥2 consecutive Indic characters so a
+# single stray glyph (e.g. an accented char inside an English value) does NOT
+# force regional OCR routing. Distinct from the module-level REGIONAL_SCRIPT_RE
+# (single-char) used for the English-only contract check, which must stay strict.
+REGIONAL_WORD_RE = re.compile(r"[ऀ-ॿ਀-੿઀-૿஀-௿ఀ-౿ಀ-೿ഀ-ൿ]{2,}")
+
+
+def _project_is_regional(project: "FlyerProject") -> bool:
+    """Return True if the project targets a regional/Indic language or contains an Indic word in locked facts."""
+    lang = (getattr(project.fields, "preferred_language", None) or "").strip().lower()
+    if lang in {"te", "hi", "ml", "ta", "kn", "gu", "mr", "pa", "mixed"}:
+        return True
+    for fact in project.locked_facts:
+        if REGIONAL_WORD_RE.search(fact.value or ""):
+            return True
+    return False
+
+
+def _vision_text(path: Path, *, model: str = VISION_QA_MODEL) -> tuple[str, str, str, list[str]]:
     key = _openrouter_key()
     if not key or "PLACEHOLDER" in key:
         return "", "unavailable", "ocr_vision", ["OPENROUTER_API_KEY missing"]
@@ -1448,7 +1565,7 @@ def _vision_text(path: Path) -> tuple[str, str, str, list[str]]:
         return "", "unavailable", "ocr_vision", [f"unsupported OCR media type: {mime}"]
     raw = base64.b64encode(path.read_bytes()).decode("ascii")
     payload = {
-        "model": VISION_QA_MODEL,
+        "model": model,
         "messages": [{
             "role": "user",
             "content": [
@@ -1510,7 +1627,8 @@ def run_visual_qa(
     extracted_text, provider, qa_source = _sidecar_text(artifact, allow_sidecar=allow_sidecar)
     provider_notes: list[str] = []
     if not extracted_text:
-        extracted_text, provider, qa_source, provider_notes = _vision_text(artifact)
+        ocr_model = REGIONAL_QA_MODEL if _project_is_regional(project) else VISION_QA_MODEL
+        extracted_text, provider, qa_source, provider_notes = _vision_text(artifact, model=ocr_model)
     blockers: list[str] = []
     if not extracted_text:
         _early_blockers = ["ocr/vision text unavailable for generated artifact", *provider_notes]
@@ -1574,6 +1692,7 @@ def run_visual_qa(
     blockers.extend(_item_price_pair_blockers(project, extracted_text))
     blockers.extend(_near_duplicate_item_blockers(project, extracted_text))
     blockers.extend(_unexpected_phone_blockers(project, extracted_text))
+    blockers.extend(_fabricated_offer_price_blockers(project, extracted_text))
     # Source-contract negative-assertion gate: any value in
     # forbidden_substrings (populated upstream from brand/phone/address
     # replacements) must NOT appear in the OCR text. Reuses the same

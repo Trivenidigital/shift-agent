@@ -2913,7 +2913,7 @@ def test_text_defect_note_blocker_is_block_tier():
 def test_run_visual_qa_blocks_on_duplicate_text_note(tmp_path, monkeypatch):
     # Integration: a duplicate-text quality note from the vision path fails QA closed.
     from agents.flyer import visual_qa as vq
-    monkeypatch.setattr(vq, "_vision_text", lambda artifact: (
+    monkeypatch.setattr(vq, "_vision_text", lambda artifact, *, model=None: (
         "Lakshmis Kitchen Lakshmis Kitchen Idli $8.99 Call +1 732 983 7841", "openrouter", "ocr_vision",
         ["business name appears duplicated"]))
     artifact = tmp_path / "flyer.png"

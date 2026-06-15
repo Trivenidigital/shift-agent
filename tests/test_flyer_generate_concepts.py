@@ -654,6 +654,59 @@ def test_generate_source_edit_provider_unavailable_queues_manual_review(monkeypa
     assert "OPENAI_API_KEY" in persisted["manual_review"]["detail"]
 
 
+def test_fix5_source_edit_under_killswitch_routes_to_manual_without_render(monkeypatch, tmp_path, capsys):
+    """FIX 5: source-edit has no deterministic renderer (render.py dispatches it
+    by provider API). Under FLYER_INTEGRATED_KILLSWITCH=1, passing
+    model='deterministic-renderer' to render_source_edit_preview would error.
+    Instead the script must route the project straight to manual_edit_required
+    WITHOUT attempting any source-edit render/API call."""
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", "1")
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0001-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    project = _project_with_pending_reference(reference)
+    project["raw_request"] = "edit uploaded flyer/source artwork: change phone to +17329837841"
+    project["reference_extractions"][0]["provider"] = "openai"
+    project["reference_extractions"][0]["status"] = "ok"
+    project["reference_extractions"][0]["detail"] = "extracted"
+    state_path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_sequence": 2,
+        "projects": [project],
+    }), encoding="utf-8")
+
+    def explode_source_edit(*_args, **_kwargs):
+        raise AssertionError("render_source_edit_preview must not run under the kill-switch")
+
+    monkeypatch.setattr(module, "render_source_edit_preview", explode_source_edit)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0001",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    rc = module.main()
+    assert rc == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["source_edit_killswitch_manual"] is True
+    assert out["manual_review_reason"] == "killswitch_source_edit_manual"
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["manual_review"]["status"] == "queued"
+    # reason_code stays within the FlyerManualReviewReason enum; the kill-switch
+    # marker lives in the human-readable reason/detail fields.
+    assert persisted["manual_review"]["reason_code"] == "operator_request"
+    assert persisted["manual_review"]["reason"] == "killswitch_source_edit_manual"
+    assert "killswitch_source_edit_manual" in persisted["manual_review"]["detail"]
+
+
 def test_generate_source_edit_provider_http_error_queues_provider_timeout(monkeypatch, tmp_path, capsys):
     """Source-edit provider HTTP/5xx errors are transient provider failures,
     not missing-provider configuration. They should land in the retry/provider
@@ -2676,3 +2729,1202 @@ def test_generate_concepts_warn_tier_state_write_does_not_send(monkeypatch, tmp_
     assert module.main() == 0
     # The whole point: zero outbound bridge calls from the script
     assert bridge_calls == []
+
+
+# ===========================================================================
+# 2026-06-14 — integrated safety net (4a / 4b / 4c)
+# Unit-level tests for the pure/decidable helpers + integration tests for the
+# two new orchestration paths (provider_unavailable fallback, fabrication retry).
+# ===========================================================================
+
+
+def _qa_report(monkeypatch_module, *, status="failed", blockers=None, asset_id="A0001", path="/tmp/F0001-C1.png"):
+    from schemas import FlyerVisualQAReport
+    return FlyerVisualQAReport(
+        project_id="F0001",
+        asset_id=asset_id,
+        artifact_path=path,
+        artifact_sha256="a" * 64,
+        project_version=1,
+        output_format="concept_preview",
+        provider="test",
+        qa_source="ocr_vision",
+        status=status,
+        blockers=list(blockers or []),
+        checked_at=datetime(2026, 6, 14, tzinfo=timezone.utc),
+    )
+
+
+# --- 4a part 1: _qa_failed_exact_text_recoverable now covers fabrication -----
+
+def test_qa_recoverable_true_for_fabrication_price_only(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=["fabricated price visible: $3.99"])
+    assert module._qa_failed_exact_text_recoverable([report]) is True
+
+
+def test_qa_recoverable_true_for_fabrication_offer_only(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=["fabricated offer claim visible: Limited Time Deal"])
+    assert module._qa_failed_exact_text_recoverable([report]) is True
+
+
+def test_qa_recoverable_true_for_fabrication_mixed_with_existing_recoverable(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=[
+        "fabricated price visible: $3.99",
+        "missing required visible fact: business_name",
+    ])
+    assert module._qa_failed_exact_text_recoverable([report]) is True
+
+
+def test_qa_recoverable_false_for_fabrication_mixed_with_unrecoverable(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=[
+        "fabricated price visible: $3.99",
+        "visible wrong brand text: Indian Cafe",
+    ])
+    assert module._qa_failed_exact_text_recoverable([report]) is False
+
+
+def test_qa_recoverable_preserves_existing_true_case(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=["missing required visible fact: contact_phone"])
+    assert module._qa_failed_exact_text_recoverable([report]) is True
+
+
+def test_qa_recoverable_preserves_existing_false_case(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=["visible wrong business name: Foo"])
+    assert module._qa_failed_exact_text_recoverable([report]) is False
+
+
+# --- 4a: _qa_failed_is_fabrication_only ------------------------------------
+
+def test_fabrication_only_true_for_price_and_offer(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=[
+        "fabricated price visible: $3.99",
+        "fabricated offer claim visible: Buy One Get One",
+    ])
+    assert module._qa_failed_is_fabrication_only([report]) is True
+
+
+def test_fabrication_only_false_when_mixed_with_missing_fact(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=[
+        "fabricated price visible: $3.99",
+        "missing required visible fact: business_name",
+    ])
+    assert module._qa_failed_is_fabrication_only([report]) is False
+
+
+def test_fabrication_only_false_when_no_blockers(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, status="provider_unavailable", blockers=[])
+    assert module._qa_failed_is_fabrication_only([report]) is False
+
+
+# --- 4b: _qa_has_provider_unavailable --------------------------------------
+
+def test_provider_unavailable_true_when_any_report_unavailable(monkeypatch):
+    module = _load_script(monkeypatch)
+    ok = _qa_report(module, status="failed", blockers=["x"])
+    unavail = _qa_report(module, status="provider_unavailable", blockers=[])
+    assert module._qa_has_provider_unavailable([ok, unavail]) is True
+
+
+def test_provider_unavailable_false_when_none_unavailable(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, status="failed", blockers=["x"])
+    assert module._qa_has_provider_unavailable([report]) is False
+
+
+# --- 4c: _effective_render_model kill-switch --------------------------------
+
+def test_effective_render_model_passthrough_without_killswitch(monkeypatch):
+    module = _load_script(monkeypatch)
+    monkeypatch.delenv("FLYER_INTEGRATED_KILLSWITCH", raising=False)
+    assert module._effective_render_model("openrouter/premium-poster-model") == "openrouter/premium-poster-model"
+
+
+def test_effective_render_model_forces_deterministic_with_killswitch(monkeypatch):
+    module = _load_script(monkeypatch)
+    monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", "1")
+    assert module._effective_render_model("openrouter/premium-poster-model") == "deterministic-renderer"
+    assert module._effective_render_model("any-model") == "deterministic-renderer"
+
+
+def test_effective_render_model_killswitch_off_value_passes_through(monkeypatch):
+    module = _load_script(monkeypatch)
+    monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", "0")
+    assert module._effective_render_model("some-model") == "some-model"
+
+
+def _premium_config_loader():
+    from schemas import Config
+    return lambda *_args, **_kwargs: Config.model_validate({
+        "schema_version": 1,
+        "customer": {"name": "Triveni", "location_id": "loc_pineville_01", "timezone": "America/New_York"},
+        "owner": {"name": "Owner", "phone": "+19045550000"},
+        "limits": {},
+        "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "owner@example.com"},
+        "flyer": {
+            "enabled": True,
+            "draft_image_model": "openrouter/premium-poster-model",
+            "draft_image_quality": "high",
+            "concept_count": 1,
+        },
+    })
+
+
+def _basic_food_project_dict(project_id, asset_dir, *, status="generating_concepts"):
+    now = datetime(2026, 6, 14, tzinfo=timezone.utc).isoformat()
+    return {
+        "project_id": project_id,
+        "status": status,
+        "customer_phone": "+17329837841",
+        "customer_id": "CUST0001",
+        "created_at": now,
+        "updated_at": now,
+        "original_message_id": f"wamid.{project_id}",
+        "raw_request": "Snack specials for Lakshmi Kitchen. Punugulu, Egg Bonda.",
+        "fields": {
+            "event_or_business_name": "Lakshmi Kitchen",
+            "venue_or_location": "90 Brybar Dr St Johns FL",
+            "contact_info": "+1 732 983 7841",
+            "notes": "Punugulu; Egg Bonda",
+        },
+        "locked_facts": [
+            {"fact_id": "business_name", "label": "Business", "value": "Lakshmi Kitchen", "source": "customer_profile", "required": True},
+            {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr St Johns FL", "source": "customer_profile", "required": True},
+            {"fact_id": "contact_phone", "label": "Contact", "value": "+1 732 983 7841", "source": "customer_profile", "required": True},
+            {"fact_id": "item:0:name", "label": "Item", "value": "Punugulu", "source": "customer_text", "required": True},
+            {"fact_id": "item:1:name", "label": "Item", "value": "Egg Bonda", "source": "customer_text", "required": True},
+        ],
+        "reference_extractions": [],
+        "assets": [],
+    }
+
+
+def test_4b_referee_unavailable_routes_to_deterministic_fallback_with_marker(monkeypatch, tmp_path, capsys):
+    """4b: when the concept-path referee is provider_unavailable (OCR/vision down)
+    the script must route to the deterministic-overlay fallback (safe-by-
+    construction) instead of going to manual with no marker. The fallback ships
+    even though its own re-QA is also provider_unavailable, AND the run emits the
+    observable marker in qa_reports + an audit row."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    render_models = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        # FIX 1: the referee-unavailable fallback no longer toggles
+        # FLYER_ALLOW_INTEGRATED_POSTER — it renders with the PURE deterministic
+        # model. Detect the fallback by the model kwarg instead of the env.
+        render_models.append(kwargs.get("model"))
+        is_fallback = kwargs.get("model") == "deterministic-renderer"
+        suffix = "fallback" if is_fallback else "integrated"
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        return _qa_report(module, status="provider_unavailable", blockers=[],
+                          asset_id=asset_id, path=str(artifact_path))
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["manual_review"]["status"] == "none"
+    assert persisted["assets"][-1]["path"].endswith("F0001-C1-fallback.png")
+    # FIX 1: the referee-unavailable fallback render MUST be the pure deterministic
+    # renderer (Pillow only, no model call) — safe-by-construction with no QA.
+    assert "deterministic-renderer" in render_models
+    marker = "integrated_referee_unavailable_fallback"
+    assert any(marker in (r.get("blockers") or []) for r in persisted["qa_reports"])
+    audit_rows = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert any(r.get("type") == "flyer_integrated_referee_unavailable_fallback" for r in audit_rows)
+
+
+def test_4b_referee_unavailable_falls_closed_when_overlay_blocks(monkeypatch, tmp_path, capsys):
+    """4b: a genuine block-tier failure on the deterministic overlay still falls
+    closed to manual even though we entered via the referee-unavailable route."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        # FIX 1: the referee-unavailable fallback renders with the pure
+        # deterministic model — detect it via the model kwarg.
+        is_fallback = kwargs.get("model") == "deterministic-renderer"
+        suffix = "fallback" if is_fallback else "integrated"
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        if "fallback" in Path(artifact_path).name:
+            return _qa_report(module, status="failed",
+                              blockers=["missing required visible fact: business_name"],
+                              asset_id=asset_id, path=str(artifact_path))
+        return _qa_report(module, status="provider_unavailable", blockers=[],
+                          asset_id=asset_id, path=str(artifact_path))
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 2
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+
+
+def test_4a_fabrication_only_retry_first_succeeds_before_fallback(monkeypatch, tmp_path, capsys):
+    """4a retry-first: a fabrication-only block triggers ONE corrective re-render
+    with a repair instruction. If the re-render passes QA, it ships without ever
+    invoking the deterministic-overlay fallback."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    render_kwargs = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        render_kwargs.append(kwargs)
+        if module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER") == "0":
+            raise AssertionError("deterministic-overlay fallback must not run when retry succeeds")
+        has_repair = bool(kwargs.get("repair_instruction"))
+        suffix = "repaired" if has_repair else "first"
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        repaired = "repaired" in Path(artifact_path).name
+        return _qa_report(
+            module,
+            status="passed" if repaired else "failed",
+            blockers=[] if repaired else ["fabricated price visible: $3.99"],
+            asset_id=asset_id, path=str(artifact_path),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        module, "classify_flyer_qa_for_autorepair",
+        lambda *_a, **_k: types.SimpleNamespace(decision="manual_required", reason="not_autorepair"),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["manual_review"]["status"] == "none"
+    assert persisted["assets"][-1]["path"].endswith("F0001-C1-repaired.png")
+    assert len(render_kwargs) == 2
+    assert render_kwargs[1].get("repair_instruction")
+
+
+def test_4a_fabrication_retry_fails_then_deterministic_fallback_ships(monkeypatch, tmp_path, capsys):
+    """4a (x2 bound): when persistent fabrication survives BOTH bounded
+    corrective retries, the run proceeds to the deterministic-overlay fallback.
+    Render budget is strictly bounded: initial + TWO repaired attempts + the
+    fallback = exactly 2 corrective renders (no infinite loop)."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    render_calls = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        if module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER") == "0":
+            suffix = "fallback"
+        elif kwargs.get("repair_instruction"):
+            suffix = "repaired"
+        else:
+            suffix = "first"
+        render_calls.append(suffix)
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        name = Path(artifact_path).name
+        if "fallback" in name:
+            return _qa_report(module, status="passed", blockers=[], asset_id=asset_id, path=str(artifact_path))
+        return _qa_report(module, status="failed",
+                          blockers=["fabricated price visible: $3.99"],
+                          asset_id=asset_id, path=str(artifact_path))
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        module, "classify_flyer_qa_for_autorepair",
+        lambda *_a, **_k: types.SimpleNamespace(decision="manual_required", reason="not_autorepair"),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["assets"][-1]["path"].endswith("F0001-C1-fallback.png")
+    # Exactly initial + TWO corrective retries + the deterministic fallback.
+    assert render_calls == ["first", "repaired", "repaired", "fallback"]
+    assert render_calls.count("repaired") == 2  # x2 bound, never more
+
+
+def test_4c_killswitch_forces_deterministic_model_in_render(monkeypatch, tmp_path, capsys):
+    """4c: with FLYER_INTEGRATED_KILLSWITCH=1 the draft render is invoked with
+    model='deterministic-renderer' regardless of the configured premium model."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", "1")
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    seen_models = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        seen_models.append(kwargs.get("model"))
+        path = Path(output_dir) / f"{project_obj.project_id}-C1.png"
+        path.write_bytes(b"rendered")
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        return _qa_report(module, status="passed", blockers=[], asset_id=asset_id, path=str(artifact_path))
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    assert seen_models == ["deterministic-renderer"]
+
+
+def test_R3_fabrication_retry_fails_and_fallback_raises_goes_manual_not_warn(monkeypatch, tmp_path, capsys):
+    """R3 fail-closed coupling: when a fabrication-ONLY block survives the
+    bounded repair retry AND the deterministic-overlay fallback itself raises,
+    the project must land in manual_edit_required (rc 2) — NEVER warn-tier
+    delivery of the unverified/fabricating render.
+
+    The fabrication QA report carries a REAL severity='block' (not the helper
+    default), so this asserts the genuine block-severity path drives the
+    fail-closed outcome rather than a fixture artifact."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import FlyerVisualQAReport
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    render_calls = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        # The deterministic-overlay fallback runs under FLYER_ALLOW_INTEGRATED_POSTER=0.
+        if module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER") == "0":
+            render_calls.append("fallback")
+            raise module.FlyerRenderError("deterministic overlay could not fit required facts")
+        suffix = "repaired" if kwargs.get("repair_instruction") else "first"
+        render_calls.append(suffix)
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        # Every integrated/repaired render keeps fabricating a price → REAL block.
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id,
+            asset_id=asset_id,
+            artifact_path=str(artifact_path),
+            artifact_sha256="c" * 64,
+            project_version=project_obj.version,
+            output_format=output_format,
+            provider="test",
+            qa_source="ocr_vision",
+            status="failed",
+            blockers=["fabricated price visible: $3.99"],
+            severity="block",
+            checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    # Keep the recovery.py autorepair loop out — this is the separate retry-first path.
+    monkeypatch.setattr(
+        module, "classify_flyer_qa_for_autorepair",
+        lambda *_a, **_k: types.SimpleNamespace(decision="manual_required", reason="not_autorepair"),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    rc = module.main()
+    assert rc == 2
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    # Fail-closed to manual; NOT delivered_with_warning.
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["status"] != "delivered_with_warning"
+    assert persisted["manual_review"]["status"] == "queued"
+    assert persisted["manual_review"]["reason_code"] == "visual_qa_failed"
+    # Coupling proof: the bounded retry ran (one repaired attempt) AND the
+    # deterministic-overlay fallback was attempted and raised.
+    assert "repaired" in render_calls
+    assert "fallback" in render_calls
+    out = json.loads(capsys.readouterr().out)
+    assert "visual_qa_failed" in out
+
+
+def test_fix4_mixed_missing_and_fabricated_skips_legacy_autorepair(monkeypatch, tmp_path, capsys):
+    """FIX 4: a MIXED `missing fact + fabricated offer` failure must NOT enter the
+    legacy recovery.py autorepair loop (whose LLM repair_instruction is not
+    guaranteed to remove fabrications). It also is not fabrication-only, so it
+    skips the bounded fabrication retry and flows straight to the
+    deterministic-overlay fallback — which renders only the exact locked facts,
+    so it cannot reproduce the fabrication. Here the overlay re-QA passes, so the
+    project ships safely with NO autorepair audit row ever emitted."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    render_calls = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        # The deterministic-overlay fallback runs under FLYER_ALLOW_INTEGRATED_POSTER=0.
+        is_fallback = module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER") == "0"
+        suffix = "fallback" if is_fallback else (
+            "repaired" if kwargs.get("repair_instruction") else "integrated"
+        )
+        render_calls.append(suffix)
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        name = Path(artifact_path).name
+        if "fallback" in name:
+            # The deterministic overlay carries only exact locked facts → clean.
+            return _qa_report(module, status="passed", blockers=[],
+                              asset_id=asset_id, path=str(artifact_path))
+        # Integrated render: a MIXED failure (one missing fact + one fabrication).
+        return _qa_report(
+            module,
+            status="failed",
+            blockers=[
+                "missing required visible fact: business_name",
+                "fabricated offer claim visible: Limited Time Deal",
+            ],
+            asset_id=asset_id,
+            path=str(artifact_path),
+        )
+
+    # Guard: the legacy autorepair planner/classifier must NEVER be invoked for
+    # this mixed fabrication-bearing set.
+    def _boom_classify(*_a, **_k):
+        raise AssertionError("legacy autorepair classifier must not run for a fabrication-bearing set")
+
+    def _boom_plan(*_a, **_k):
+        raise AssertionError("legacy autorepair planner must not run for a fabrication-bearing set")
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(module, "classify_flyer_qa_for_autorepair", _boom_classify, raising=False)
+    monkeypatch.setattr(module, "plan_flyer_autorepair", _boom_plan, raising=False)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    # Routed to the deterministic-overlay fallback (NOT the legacy autorepair re-render).
+    assert "fallback" in render_calls
+    assert "repaired" not in render_calls
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["manual_review"]["status"] == "none"
+    # No legacy autorepair audit rows of ANY kind were emitted.
+    audit_types = [json.loads(line)["type"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert "flyer_autorepair_attempted" not in audit_types
+    assert "flyer_autorepair_skipped" not in audit_types
+    assert "flyer_autorepair_succeeded" not in audit_types
+
+
+def _byte_identical_food_project(project_id="F0001"):
+    """A representative English food project that renders via the deterministic
+    (pure-Pillow) path — no generative API call — so output is reproducible."""
+    from schemas import FlyerProject, FlyerRequestFields, FlyerLockedFact
+    now = datetime(2026, 6, 14, tzinfo=timezone.utc)
+    return FlyerProject(
+        project_id=project_id,
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        customer_id="CUST0001",
+        created_at=now,
+        updated_at=now,
+        original_message_id=f"wamid.{project_id}",
+        raw_request="Weekend snack specials for Lakshmi Kitchen. Dosa, Idli, Vada.",
+        fields=FlyerRequestFields(
+            event_or_business_name="Lakshmi Kitchen",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+1 732 983 7841",
+            preferred_language="en",
+            notes="Dosa $6.99; Idli $5.99; Vada $4.99",
+            style_preference="warm festive south-indian, premium readable",
+        ),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+1 732 983 7841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Dosa", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$6.99", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:name", label="Item", value="Idli", source="customer_text", required=True),
+            FlyerLockedFact(fact_id="item:1:price", label="Price", value="$5.99", source="customer_text", required=True),
+        ],
+    )
+
+
+def test_task5_killswitch_resolves_to_deterministic_renderer(monkeypatch):
+    """Task 5 (part 1): under FLYER_INTEGRATED_KILLSWITCH=1 the script's
+    _effective_render_model collapses ANY configured generative model to the pure
+    deterministic renderer — the panic-switch contract."""
+    module = _load_script(monkeypatch)
+    monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", "1")
+    assert module._effective_render_model("google/gemini-3.1-flash-image-preview") == "deterministic-renderer"
+    assert module._effective_render_model("openrouter/premium-poster-model") == "deterministic-renderer"
+    # Switch off → configured model passes through unchanged.
+    monkeypatch.delenv("FLYER_INTEGRATED_KILLSWITCH", raising=False)
+    assert module._effective_render_model("google/gemini-3.1-flash-image-preview") == "google/gemini-3.1-flash-image-preview"
+
+
+def test_task5_killswitch_render_is_byte_identical_to_direct_deterministic(monkeypatch, tmp_path):
+    """Task 5 (part 2): rendering with the kill-switch-resolved model produces
+    output BYTE-IDENTICAL to rendering with model='deterministic-renderer'
+    directly. Proves the panic switch reverts to deterministic output with no
+    drift (no generative call, no timestamp/nonce in the PNG)."""
+    module = _load_script(monkeypatch)
+    import hashlib
+    from agents.flyer.render import render_concept_previews
+
+    # The model the script WOULD have used; the kill-switch must collapse it.
+    monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", "1")
+    resolved = module._effective_render_model("google/gemini-3.1-flash-image-preview")
+    assert resolved == "deterministic-renderer"
+
+    out_killswitch = tmp_path / "ks"
+    out_direct = tmp_path / "direct"
+    out_killswitch.mkdir()
+    out_direct.mkdir()
+
+    specs_ks = render_concept_previews(
+        _byte_identical_food_project("F0001"), out_killswitch, model=resolved, concept_count=1,
+    )
+    specs_direct = render_concept_previews(
+        _byte_identical_food_project("F0001"), out_direct, model="deterministic-renderer", concept_count=1,
+    )
+
+    sha_ks = hashlib.sha256(Path(specs_ks[0].path).read_bytes()).hexdigest()
+    sha_direct = hashlib.sha256(Path(specs_direct[0].path).read_bytes()).hexdigest()
+    assert sha_ks == sha_direct, (
+        "kill-switch render diverged from direct deterministic render: "
+        f"{sha_ks} != {sha_direct}"
+    )
+
+
+def test_4a_fabrication_retry_passes_on_attempt_2_stops_early(monkeypatch, tmp_path, capsys):
+    """4a (x2 bound): attempt 1 still fabricates, attempt 2 passes QA → keep the
+    attempt-2 render and STOP. No third corrective render, no deterministic
+    fallback. Proves the loop is bounded AND stops early on success."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    render_calls = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        if module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER") == "0":
+            raise AssertionError("fallback must not run when retry attempt 2 passes")
+        if kwargs.get("repair_instruction"):
+            render_calls.append("repaired")
+            n = render_calls.count("repaired")
+            suffix = f"repaired{n}"
+        else:
+            render_calls.append("first")
+            suffix = "first"
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        name = Path(artifact_path).name
+        # first + repaired1 still fabricate; repaired2 passes.
+        if "repaired2" in name:
+            return _qa_report(module, status="passed", blockers=[], asset_id=asset_id, path=str(artifact_path))
+        return _qa_report(module, status="failed",
+                          blockers=["fabricated price visible: $3.99"],
+                          asset_id=asset_id, path=str(artifact_path))
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        module, "classify_flyer_qa_for_autorepair",
+        lambda *_a, **_k: types.SimpleNamespace(decision="manual_required", reason="not_autorepair"),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["manual_review"]["status"] == "none"
+    # Attempt 2's render is kept; no third corrective render, no fallback.
+    assert persisted["assets"][-1]["path"].endswith("F0001-C1-repaired2.png")
+    assert render_calls == ["first", "repaired", "repaired"]
+    assert render_calls.count("repaired") == 2
+
+
+# ---------------------------------------------------------------------------
+# Spec §6 — integrated-path observability audit rows
+# ---------------------------------------------------------------------------
+
+def _audit_rows(audit_path):
+    return [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+
+def _audit_types(audit_path):
+    return [r.get("type") for r in _audit_rows(audit_path)]
+
+
+def test_obs_clean_integrated_pass_emits_attempted_and_passed(monkeypatch, tmp_path, capsys):
+    """§6: a clean integrated render (QA passes first time) emits exactly
+    flyer_integrated_attempted then flyer_integrated_passed (attempts=1)."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        path = Path(output_dir) / f"{project_obj.project_id}-C1.png"
+        path.write_bytes(b"rendered")
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        return _qa_report(module, status="passed", blockers=[], asset_id=asset_id, path=str(artifact_path))
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    rows = _audit_rows(audit_path)
+    row_types = [r.get("type") for r in rows]
+    assert "flyer_integrated_attempted" in row_types
+    assert "flyer_integrated_passed" in row_types
+    assert "flyer_integrated_fell_back_deterministic" not in row_types
+    assert "flyer_integrated_manual_review" not in row_types
+    passed = next(r for r in rows if r["type"] == "flyer_integrated_passed")
+    assert passed["attempts"] == 1
+    assert passed["project_id"] == "F0001"
+
+
+def test_obs_kill_switch_suppresses_integrated_rows(monkeypatch, tmp_path, capsys):
+    """§6: with the kill-switch ON no integrated row is emitted (no integrated
+    attempt is made)."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", "1")
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        path = Path(output_dir) / f"{project_obj.project_id}-C1.png"
+        path.write_bytes(b"rendered")
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        return _qa_report(module, status="passed", blockers=[], asset_id=asset_id, path=str(artifact_path))
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    row_types = _audit_types(audit_path) if audit_path.exists() else []
+    assert "flyer_integrated_attempted" not in row_types
+    assert "flyer_integrated_passed" not in row_types
+
+
+def test_obs_fabrication_fallback_emits_attempted_and_fell_back_reason(monkeypatch, tmp_path, capsys):
+    """§6: persistent fabrication → deterministic fallback emits
+    flyer_integrated_attempted + flyer_integrated_fell_back_deterministic with
+    reason=retries_exhausted (retries ran and all blocked). No passed row."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        if module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER") == "0":
+            suffix = "fallback"
+        elif kwargs.get("repair_instruction"):
+            suffix = "repaired"
+        else:
+            suffix = "first"
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        if "fallback" in Path(artifact_path).name:
+            return _qa_report(module, status="passed", blockers=[], asset_id=asset_id, path=str(artifact_path))
+        return _qa_report(module, status="failed",
+                          blockers=["fabricated price visible: $3.99"],
+                          asset_id=asset_id, path=str(artifact_path))
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        module, "classify_flyer_qa_for_autorepair",
+        lambda *_a, **_k: types.SimpleNamespace(decision="manual_required", reason="not_autorepair"),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    rows = _audit_rows(audit_path)
+    row_types = [r["type"] for r in rows]
+    assert "flyer_integrated_attempted" in row_types
+    assert "flyer_integrated_passed" not in row_types
+    fell = next(r for r in rows if r["type"] == "flyer_integrated_fell_back_deterministic")
+    assert fell["reason"] == "retries_exhausted"
+    assert fell["project_id"] == "F0001"
+
+
+def test_obs_manual_outcome_emits_attempted_and_manual_review(monkeypatch, tmp_path, capsys):
+    """§6: an integrated render that ends in manual_edit_required emits
+    flyer_integrated_attempted + flyer_integrated_manual_review (reason_code),
+    and NO passed / fell_back rows. Uses a REAL severity='block' QA + a fallback
+    render that raises so the project fails closed to manual."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import FlyerVisualQAReport
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        if module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER") == "0":
+            raise module.FlyerRenderError("deterministic overlay could not fit required facts")
+        suffix = "repaired" if kwargs.get("repair_instruction") else "first"
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id,
+            asset_id=asset_id,
+            artifact_path=str(artifact_path),
+            artifact_sha256="c" * 64,
+            project_version=project_obj.version,
+            output_format=output_format,
+            provider="test",
+            qa_source="ocr_vision",
+            status="failed",
+            blockers=["fabricated price visible: $3.99"],
+            severity="block",
+            checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        module, "classify_flyer_qa_for_autorepair",
+        lambda *_a, **_k: types.SimpleNamespace(decision="manual_required", reason="not_autorepair"),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 2
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    rows = _audit_rows(audit_path)
+    row_types = [r["type"] for r in rows]
+    assert "flyer_integrated_attempted" in row_types
+    assert "flyer_integrated_manual_review" in row_types
+    assert "flyer_integrated_passed" not in row_types
+    mr = next(r for r in rows if r["type"] == "flyer_integrated_manual_review")
+    assert mr["reason_code"] == "visual_qa_failed"
+    assert mr["project_id"] == "F0001"
+
+
+def test_fix7_initial_generation_error_falls_back_to_deterministic_not_manual(monkeypatch, tmp_path, capsys):
+    """FIX 7: when the INITIAL integrated render raises a generation/provider error
+    (API/transport — provider_timeout class) on both attempts, the script must
+    render the pure deterministic fallback (model='deterministic-renderer') and
+    ship it — NOT route straight to manual. Emits flyer_integrated_fell_back_
+    deterministic with reason='generation_error'."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    render_models = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        model = kwargs.get("model")
+        render_models.append(model)
+        # The integrated (generative) model fails with a transient provider error
+        # on every attempt; only the deterministic fallback produces a render.
+        if model != "deterministic-renderer":
+            raise RuntimeError("OpenRouter image HTTP 503: service unavailable")
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-fallback.png"
+        path.write_bytes(b"deterministic")
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        # The deterministic fallback render is clean.
+        return _qa_report(module, status="passed", blockers=[],
+                          asset_id=asset_id, path=str(artifact_path))
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(module.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    # Shipped via the deterministic fallback, NOT routed to manual.
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["status"] != "manual_edit_required"
+    assert persisted["manual_review"]["status"] == "none"
+    assert persisted["assets"][-1]["path"].endswith("F0001-C1-fallback.png")
+    # The generative model was attempted (and failed) before the deterministic fallback ran.
+    assert "deterministic-renderer" in render_models
+    assert any(m != "deterministic-renderer" for m in render_models)
+    rows = _audit_rows(audit_path)
+    row_types = [r["type"] for r in rows]
+    assert "flyer_integrated_attempted" in row_types
+    assert "flyer_integrated_manual_review" not in row_types
+    fell = [r for r in rows if r["type"] == "flyer_integrated_fell_back_deterministic"]
+    assert len(fell) == 1
+    assert fell[0]["reason"] == "generation_error"
+
+
+def test_fix7_initial_dependency_missing_still_goes_manual(monkeypatch, tmp_path, capsys):
+    """FIX 7 boundary: a dependency-missing error (Pillow unavailable) must STILL
+    route to manual — the deterministic renderer cannot run either, so there is no
+    safe fallback. No deterministic render is attempted."""
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    render_models = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        render_models.append(kwargs.get("model"))
+        raise RuntimeError("Pillow is required but unavailable: No module named 'PIL'")
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", lambda *_a, **_k: None)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 2
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["manual_review"]["reason_code"] == "dependency_missing"
+    # No deterministic fallback was attempted for a dependency-missing error.
+    assert "deterministic-renderer" not in render_models
+    row_types = _audit_types(audit_path)
+    assert "flyer_integrated_fell_back_deterministic" not in row_types
+
+
+def test_obs_referee_unavailable_fallback_emits_fell_back_reason(monkeypatch, tmp_path, capsys):
+    """§6: referee-unavailable → deterministic fallback emits
+    flyer_integrated_fell_back_deterministic with reason=referee_unavailable
+    (alongside the existing anti-silent referee-unavailable row)."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        # FIX 1: referee-unavailable fallback renders with the pure deterministic
+        # model — detect it via the model kwarg, not the env.
+        is_fallback = kwargs.get("model") == "deterministic-renderer"
+        suffix = "fallback" if is_fallback else "integrated"
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        return _qa_report(module, status="provider_unavailable", blockers=[],
+                          asset_id=asset_id, path=str(artifact_path))
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    rows = _audit_rows(audit_path)
+    row_types = [r["type"] for r in rows]
+    assert "flyer_integrated_attempted" in row_types
+    assert "flyer_integrated_referee_unavailable_fallback" in row_types
+    fell = next(r for r in rows if r["type"] == "flyer_integrated_fell_back_deterministic")
+    assert fell["reason"] == "referee_unavailable"

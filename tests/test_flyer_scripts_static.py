@@ -499,12 +499,17 @@ def test_flyer_generation_scripts_resolve_draft_and_final_provider_policy():
 
     assert "source_edit_provider = cfg.flyer.resolve_source_edit_render_provider()" in generate
     assert "provider=source_edit_provider.provider" in generate
-    assert "model=source_edit_provider.model" in generate
+    # 2026-06-14 (4c): the model still originates from the provider resolver but
+    # is routed through the kill-switch helper so FLYER_INTEGRATED_KILLSWITCH=1
+    # forces the deterministic renderer. The policy that matters here is "model
+    # comes from *_provider.model, not the deprecated config field".
+    assert "model=_effective_render_model(source_edit_provider.model)" in generate
     assert "quality=source_edit_provider.quality" in generate
     assert "cfg.flyer.edit_image_model" not in generate
 
     assert "draft_provider = cfg.flyer.resolve_draft_render_provider()" in generate
-    assert "model=draft_provider.model" in generate
+    assert "draft_model = _effective_render_model(draft_provider.model)" in generate
+    assert "model=draft_model" in generate
     assert "quality=draft_provider.quality" in generate
     assert "cfg.flyer.draft_image_model" not in generate
 
@@ -590,3 +595,201 @@ def test_active_revision_failure_gets_clarification_not_false_noted_message():
     assert '"project_id": updated.project_id' in update
     assert "if revision_requires_clarification:" in update
     assert "return 0" in update
+
+
+# ===========================================================================
+# 2026-06-14 (R2) — kill-switch TOTALITY guard.
+# Every generative render call in generate-flyer-concepts MUST route its model
+# through the FLYER_INTEGRATED_KILLSWITCH helper. This AST test fails if a
+# future 7th call site passes a raw *_provider.model / config model that would
+# silently bypass the panic switch.
+# ===========================================================================
+import ast as _ast
+
+
+def _kwarg_routes_through_killswitch(model_node) -> bool:
+    """True when a `model=` argument value is kill-switch-aware:
+
+    - a call to `_effective_render_model(...)`, or
+    - the once-resolved `draft_model` name (which is itself assigned from
+      `_effective_render_model(draft_provider.model)`).
+    """
+    # model=_effective_render_model(...)
+    if isinstance(model_node, _ast.Call):
+        func = model_node.func
+        if isinstance(func, _ast.Name) and func.id == "_effective_render_model":
+            return True
+    # model=draft_model
+    if isinstance(model_node, _ast.Name) and model_node.id == "draft_model":
+        return True
+    return False
+
+
+def test_killswitch_totality_every_generative_render_routes_model_through_helper():
+    source = (SCRIPTS / "generate-flyer-concepts").read_text(encoding="utf-8")
+    tree = _ast.parse(source)
+
+    guarded_callees = {"render_concept_previews", "render_source_edit_preview"}
+    offenders = []
+    seen = 0
+    # Verify the once-resolved kill-switch variable is actually defined that way,
+    # so accepting bare `draft_model` is sound.
+    assert "draft_model = _effective_render_model(draft_provider.model)" in source
+
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Call):
+            continue
+        func = node.func
+        # render functions are called bare (imported names), not as attributes
+        callee = func.id if isinstance(func, _ast.Name) else getattr(func, "attr", "")
+        if callee not in guarded_callees:
+            continue
+        seen += 1
+        model_kw = next((kw for kw in node.keywords if kw.arg == "model"), None)
+        if model_kw is None:
+            offenders.append((callee, node.lineno, "missing model= kwarg"))
+            continue
+        if not _kwarg_routes_through_killswitch(model_kw.value):
+            rendered = _ast.dump(model_kw.value)
+            offenders.append((callee, node.lineno, f"model= bypasses kill-switch: {rendered}"))
+
+    # Sanity: there ARE generative render call sites to guard (guards against a
+    # silently-passing test if the names ever change).
+    assert seen >= 3, f"expected >=3 generative render call sites, found {seen}"
+    assert not offenders, (
+        "kill-switch bypass detected — every render_concept_previews / "
+        "render_source_edit_preview call must pass model=_effective_render_model(...) "
+        f"or model=draft_model:\n{offenders}"
+    )
+
+
+# ===========================================================================
+# FIX 3 — kill-switch TOTALITY guard for bare_render.py's generative entry.
+# bare_render._generate_poster is a SECOND generative entry point (the live bare
+# flyer path). Its render_concept_previews call MUST also route the model
+# through _effective_render_model so FLYER_INTEGRATED_KILLSWITCH covers it.
+# ===========================================================================
+_BARE_RENDER = REPO / "src" / "agents" / "flyer" / "bare_render.py"
+
+
+def _bare_kwarg_routes_through_killswitch(model_node) -> bool:
+    """True when a bare_render `model=` argument is kill-switch-aware:
+
+    - a call to `_effective_render_model(...)`, or
+    - the once-resolved `render_model` name (assigned from
+      `_effective_render_model(GEN_MODEL)`).
+    """
+    if isinstance(model_node, _ast.Call):
+        func = model_node.func
+        if isinstance(func, _ast.Name) and func.id == "_effective_render_model":
+            return True
+    if isinstance(model_node, _ast.Name) and model_node.id == "render_model":
+        return True
+    return False
+
+
+def test_killswitch_totality_bare_render_routes_model_through_helper():
+    source = _BARE_RENDER.read_text(encoding="utf-8")
+    tree = _ast.parse(source)
+
+    # The once-resolved kill-switch variable must be defined that way, so
+    # accepting a bare `render_model` name is sound.
+    assert "render_model = _effective_render_model(GEN_MODEL)" in source
+
+    offenders = []
+    seen = 0
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Call):
+            continue
+        func = node.func
+        callee = func.id if isinstance(func, _ast.Name) else getattr(func, "attr", "")
+        if callee != "render_concept_previews":
+            continue
+        seen += 1
+        model_kw = next((kw for kw in node.keywords if kw.arg == "model"), None)
+        if model_kw is None:
+            offenders.append((callee, node.lineno, "missing model= kwarg"))
+            continue
+        if not _bare_kwarg_routes_through_killswitch(model_kw.value):
+            rendered = _ast.dump(model_kw.value)
+            offenders.append((callee, node.lineno, f"model= bypasses kill-switch: {rendered}"))
+
+    assert seen >= 1, "expected >=1 render_concept_previews call in bare_render.py"
+    assert not offenders, (
+        "kill-switch bypass detected in bare_render.py — render_concept_previews "
+        "must pass model=_effective_render_model(...) or model=render_model:\n"
+        f"{offenders}"
+    )
+
+
+# ===========================================================================
+# FIX 6 — kill-switch TOTALITY across ALL bare_render.py generative paths.
+# Every function that invokes a generative image model (_generate_image with a
+# model= kwarg, or render_concept_previews) MUST be kill-switch-aware: it either
+# routes the model through _effective_render_model/render_model (deterministic
+# substitution), OR it guards the call with _integrated_killswitch_active()
+# (deterministic substitution in a separate branch, or a safe short-circuit).
+# This catches a NEW generative entry point that calls GEN_MODEL directly with no
+# kill-switch handling.
+# ===========================================================================
+_GENERATIVE_CALLEES = {"_generate_image", "render_concept_previews"}
+
+
+def _call_is_generative(node) -> bool:
+    """A generative model call: render_concept_previews(...), or _generate_image(...)
+    that passes a model= kwarg (the _generate_image *definition* / non-model calls
+    are not generative invocations to guard)."""
+    func = node.func
+    callee = func.id if isinstance(func, _ast.Name) else getattr(func, "attr", "")
+    if callee == "render_concept_previews":
+        return True
+    if callee == "_generate_image":
+        return any(kw.arg == "model" for kw in node.keywords)
+    return False
+
+
+def _node_mentions_killswitch_or_effective_model(fn_node) -> bool:
+    """True when the function body references the kill-switch guard or the
+    effective-model helper (either form makes the generative call(s) safe)."""
+    for inner in _ast.walk(fn_node):
+        if isinstance(inner, _ast.Call):
+            f = inner.func
+            name = f.id if isinstance(f, _ast.Name) else getattr(f, "attr", "")
+            if name in ("_integrated_killswitch_active", "_effective_render_model"):
+                return True
+        # bare `render_model` name (assigned from _effective_render_model(GEN_MODEL))
+        if isinstance(inner, _ast.Name) and inner.id == "render_model":
+            return True
+    return False
+
+
+def test_killswitch_totality_all_bare_render_generative_paths_are_guarded():
+    source = _BARE_RENDER.read_text(encoding="utf-8")
+    tree = _ast.parse(source)
+
+    offenders = []
+    generative_fns = 0
+    for fn in _ast.walk(tree):
+        if not isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            continue
+        has_generative_call = any(
+            isinstance(n, _ast.Call) and _call_is_generative(n)
+            for n in _ast.walk(fn)
+        )
+        if not has_generative_call:
+            continue
+        generative_fns += 1
+        if not _node_mentions_killswitch_or_effective_model(fn):
+            offenders.append((fn.name, fn.lineno))
+
+    # Sanity: there ARE generative-bearing functions (guards against a silently
+    # passing test if names change): _generate_poster, _render_creative_director,
+    # render_unregistered.
+    assert generative_fns >= 3, (
+        f"expected >=3 generative-bearing functions in bare_render.py, found {generative_fns}"
+    )
+    assert not offenders, (
+        "kill-switch bypass: these bare_render.py functions invoke a generative "
+        "model without any _integrated_killswitch_active() guard or "
+        f"_effective_render_model/render_model routing:\n{offenders}"
+    )

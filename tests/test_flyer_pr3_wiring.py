@@ -332,6 +332,145 @@ def test_cd_render_uses_overlay_wrapper_not_pillow_only(monkeypatch):
     assert calls["public"] == 0    # Pillow-only public NOT used
 
 
+# ── FIX 3: kill-switch totality across the bare-render generative entry point ──
+
+
+def _fake_rmod_capturing(captured):
+    """A fake render module whose render_concept_previews records the model kwarg
+    and the FLYER_ALLOW_INTEGRATED_POSTER env seen at call time, and writes a
+    concept-preview spec so _generate_poster can read its bytes."""
+    from pathlib import Path as _P
+
+    def _render_concept_previews(project, output_dir, *, model, quality, concept_count,
+                                 repair_instruction="", scene_direction=None):
+        captured["model"] = model
+        captured["integrated_env"] = __import__("os").environ.get("FLYER_ALLOW_INTEGRATED_POSTER")
+        path = _P(output_dir) / "bare-C1-preview.png"
+        path.write_bytes(b"BAREPNG")
+        return [types.SimpleNamespace(path=str(path))]
+
+    def _raw_background_path(final):
+        return str(_P(final).with_suffix(".raw.png"))
+
+    return types.SimpleNamespace(
+        render_concept_previews=_render_concept_previews,
+        _raw_background_path=_raw_background_path,
+    )
+
+
+def test_fix3_bare_generate_poster_killswitch_forces_deterministic(monkeypatch):
+    # FIX 3: with FLYER_INTEGRATED_KILLSWITCH=1, _generate_poster must render with
+    # the pure deterministic renderer AND must NOT force the integrated poster on.
+    monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", "1")
+    monkeypatch.delenv("FLYER_ALLOW_INTEGRATED_POSTER", raising=False)
+    captured = {}
+    monkeypatch.setattr(br, "_render_mod", lambda: _fake_rmod_capturing(captured))
+
+    out = br._generate_poster(object())
+
+    assert out == b"BAREPNG"
+    assert captured["model"] == "deterministic-renderer"
+    # The integrated poster opt-in must NOT be forced on under the kill-switch.
+    assert captured["integrated_env"] != "1"
+
+
+def test_fix3_bare_generate_poster_no_killswitch_keeps_integrated(monkeypatch):
+    # Without the kill-switch the existing behavior is preserved: GEN_MODEL is
+    # used and FLYER_ALLOW_INTEGRATED_POSTER is forced on for the default draft.
+    monkeypatch.delenv("FLYER_INTEGRATED_KILLSWITCH", raising=False)
+    monkeypatch.delenv("FLYER_ALLOW_INTEGRATED_POSTER", raising=False)
+    captured = {}
+    monkeypatch.setattr(br, "_render_mod", lambda: _fake_rmod_capturing(captured))
+
+    out = br._generate_poster(object())
+
+    assert out == b"BAREPNG"
+    assert captured["model"] == br.GEN_MODEL
+    assert captured["integrated_env"] == "1"
+
+
+# ── FIX 6: kill-switch totality across the OTHER bare_render generative paths ──
+
+
+def test_fix6_creative_director_killswitch_does_not_call_image_model(monkeypatch):
+    # FIX 6: under FLYER_INTEGRATED_KILLSWITCH=1, _render_creative_director must
+    # NOT call the image model (_generate_image); it renders the complete flyer
+    # deterministically via render_concept_previews(model="deterministic-renderer").
+    monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", "1")
+
+    def _boom_generate_image(*_a, **_k):
+        raise AssertionError("_generate_image must not run under the kill-switch")
+
+    monkeypatch.setattr(br, "_generate_image", _boom_generate_image)
+    captured = {}
+    monkeypatch.setattr(br, "_render_mod", lambda: _fake_rmod_capturing(captured))
+
+    out = br._render_creative_director(object(), "a textless patriotic cookout background")
+
+    assert out == b"BAREPNG"
+    assert captured["model"] == "deterministic-renderer"
+
+
+def test_fix6_creative_director_no_killswitch_uses_image_model(monkeypatch):
+    # Without the kill-switch the existing CD behavior is preserved: the image
+    # model paints the textless background, then the overlay wrapper composites.
+    from pathlib import Path as _P
+    monkeypatch.delenv("FLYER_INTEGRATED_KILLSWITCH", raising=False)
+    calls = {"image": 0, "wrapper": 0}
+
+    def _gen_image(prompt, *, model):
+        calls["image"] += 1
+        assert model == br.GEN_MODEL
+        return b"RAWBG"
+
+    def _wrapper(project, source, target, *, size, output_format):
+        calls["wrapper"] += 1
+        _P(target).write_bytes(b"CDPNG")
+
+    monkeypatch.setattr(br, "_generate_image", _gen_image)
+    monkeypatch.setattr(br, "_render_mod", lambda: types.SimpleNamespace(
+        _apply_critical_text_overlay=_wrapper,
+    ))
+
+    out = br._render_creative_director(object(), "a textless patriotic cookout background")
+
+    assert out == b"CDPNG"
+    assert calls == {"image": 1, "wrapper": 1}
+
+
+def test_fix6_render_unregistered_killswitch_short_circuits_without_model(monkeypatch):
+    # FIX 6: render_unregistered has no grounded project to render deterministically,
+    # so under the kill-switch it short-circuits with a clear handled error instead
+    # of calling the image model. The caller catches it and replies apologetically.
+    monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", "1")
+
+    def _boom_generate_image(*_a, **_k):
+        raise AssertionError("_generate_image must not run under the kill-switch")
+
+    monkeypatch.setattr(br, "_generate_image", _boom_generate_image)
+
+    with pytest.raises(RuntimeError, match="FLYER_INTEGRATED_KILLSWITCH"):
+        br.render_unregistered("Grand opening at Joe's Diner, tacos $5")
+
+
+def test_fix6_render_unregistered_no_killswitch_calls_model(monkeypatch):
+    # Without the kill-switch render_unregistered uses the image model as before.
+    monkeypatch.delenv("FLYER_INTEGRATED_KILLSWITCH", raising=False)
+    calls = {"image": 0}
+
+    def _gen_image(prompt, *, model):
+        calls["image"] += 1
+        assert model == br.GEN_MODEL
+        return b"UNREGPNG"
+
+    monkeypatch.setattr(br, "_generate_image", _gen_image)
+
+    out = br.render_unregistered("Grand opening at Joe's Diner, tacos $5")
+
+    assert out == b"UNREGPNG"
+    assert calls["image"] == 1
+
+
 # ── (d) allowlisted + status="invalid" ⇒ fail-safe, legacy poster NOT called ──
 
 

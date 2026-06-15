@@ -24,6 +24,11 @@ from schemas import (  # noqa: E402
     FlyerAutoRepairSkipped,
     FlyerAutoRepairSucceeded,
     FlyerConcept,
+    FlyerIntegratedAttempted,
+    FlyerIntegratedFellBackDeterministic,
+    FlyerIntegratedManualReview,
+    FlyerIntegratedPassed,
+    FlyerIntegratedRefereeUnavailableFallback,
     FlyerManualReview,
     FlyerProjectStore,
     FlyerReferenceExtraction,
@@ -62,6 +67,10 @@ try:
     from flyer_recovery import classify_flyer_qa_for_autorepair, plan_flyer_autorepair, repair_instruction_is_safe  # type: ignore  # noqa: E402
 except ImportError:
     from agents.flyer.recovery import classify_flyer_qa_for_autorepair, plan_flyer_autorepair, repair_instruction_is_safe  # noqa: E402
+try:
+    from flyer_repair import build_repair_instruction  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.repair import build_repair_instruction  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
@@ -214,6 +223,24 @@ def _render_with_integrated_poster_disabled(render_call):
             os.environ["FLYER_ALLOW_INTEGRATED_POSTER"] = previous
 
 
+_DETERMINISTIC_RENDERER_MODEL = "deterministic-renderer"
+
+
+def _integrated_killswitch_active() -> bool:
+    return os.environ.get("FLYER_INTEGRATED_KILLSWITCH") == "1"
+
+
+def _effective_render_model(model: str) -> str:
+    """4c kill-switch: when FLYER_INTEGRATED_KILLSWITCH=1 force the pure-Pillow
+    deterministic renderer for every render in this script (draft + any final),
+    short-circuiting the integrated/generative path. Reverts to byte-identical
+    deterministic output as a panic switch. Otherwise the configured model is
+    used unchanged."""
+    if _integrated_killswitch_active():
+        return _DETERMINISTIC_RENDERER_MODEL
+    return model
+
+
 def _qa_failed_exact_text_recoverable(reports) -> bool:
     blockers = [
         str(blocker or "").strip()
@@ -229,8 +256,54 @@ def _qa_failed_exact_text_recoverable(reports) -> bool:
         "duplicate item visible:",
         "near-duplicate item visible:",
         "unverified phone number visible:",
+        # 2026-06-14 (4a): fabrication block-tier blockers are recoverable via
+        # the deterministic-overlay fallback — the overlay renders ONLY the exact
+        # locked facts, so it cannot reproduce a fabricated price/offer claim.
+        "fabricated price visible:",
+        "fabricated offer claim visible:",
     )
     return all(blocker.startswith(recoverable_prefixes) for blocker in blockers)
+
+
+_FABRICATION_BLOCKER_PREFIXES = (
+    "fabricated price visible:",
+    "fabricated offer claim visible:",
+)
+
+
+def _qa_failed_is_fabrication_only(reports) -> bool:
+    """4a retry-first gate: True when every failed-QA blocker is a fabrication
+    block-tier blocker (and there is at least one). Used to scope the single
+    corrective re-render to the fabrication-only case so it never entangles
+    with the recovery.py autorepair loop."""
+    blockers = [
+        str(blocker or "").strip()
+        for report in reports
+        for blocker in getattr(report, "blockers", []) or []
+        if str(blocker or "").strip()
+    ]
+    if not blockers:
+        return False
+    return all(blocker.startswith(_FABRICATION_BLOCKER_PREFIXES) for blocker in blockers)
+
+
+def _qa_failed_has_fabrication(reports) -> bool:
+    """§6 reason classifier: True when ANY failed-QA blocker is a fabrication
+    block-tier blocker. Distinguishes a fabrication-bearing fallback (mixed
+    recoverable set that bypassed the fabrication-only retry) from a purely
+    non-fabrication recoverable fallback (e.g. missing-fact only)."""
+    return any(
+        str(blocker or "").strip().startswith(_FABRICATION_BLOCKER_PREFIXES)
+        for report in reports
+        for blocker in getattr(report, "blockers", []) or []
+    )
+
+
+def _qa_has_provider_unavailable(reports) -> bool:
+    """4b gate: True when any failed-QA report's status is provider_unavailable
+    (the referee/OCR could not verify the render). Distinct from a real QA
+    failure — the render may be fine but is simply unverified."""
+    return any(getattr(report, "status", "") == "provider_unavailable" for report in reports)
 
 
 def _draft_manual_review_detail(exc: Exception, *, attempts: int, retryable_match: bool) -> str:
@@ -560,6 +633,12 @@ def main() -> int:
         return 2
 
     asset_dir = Path(args.asset_dir)
+    # Spec §6 integrated-path observability state. Defaults are safe for the
+    # source-edit path (no integrated render → no integrated rows emitted).
+    integrated_path_attempted = False
+    integrated_attempt_count = 1
+    integrated_fell_back_emitted = False
+    integrated_passed_emitted = False
     with FileLock(asset_dir / f".{args.project_id}.generate.lock"):
         # P0-5: source-edit detection must require an explicit raw_request
         # marker OR (manual_edit_required AND a reference_image asset). The
@@ -594,6 +673,39 @@ def main() -> int:
             )
         )
         if source_edit_requested:
+            # FIX 5: source-edit has NO deterministic renderer — render.py
+            # dispatches source-edit by PROVIDER (OpenRouter/OpenAI) and would
+            # call the API with model="deterministic-renderer", which errors.
+            # When the integrated kill-switch is engaged, route the source-edit
+            # straight to manual review (operator handles it) instead of
+            # attempting a broken deterministic source-edit render.
+            if _integrated_killswitch_active():
+                now = datetime.now(timezone.utc)
+                manual = make_manual_review(
+                    reason_code="operator_request",
+                    reason="killswitch_source_edit_manual",
+                    detail="killswitch_source_edit_manual: integrated kill-switch active; "
+                           "source-edit has no deterministic renderer — routed to manual review.",
+                    queued_at=now,
+                )
+                with FileLock(Path(str(state_path) + ".lock")):
+                    store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+                    for idx, current in enumerate(store.projects):
+                        if current.project_id == args.project_id:
+                            store.projects[idx] = current.model_copy(update={
+                                "status": "manual_edit_required",
+                                "manual_review": manual,
+                                "updated_at": now,
+                            })
+                            break
+                    atomic_write_text(state_path, store.model_dump_json(indent=2))
+                print(json.dumps({
+                    "project_id": args.project_id,
+                    "source_edit_killswitch_manual": True,
+                    "manual_review_reason_code": "operator_request",
+                    "manual_review_reason": "killswitch_source_edit_manual",
+                }))
+                return 2
             # P0-5: render_source_edit_preview raises FlyerRenderError when the
             # provider key is missing or the image edit endpoint fails. The cf-
             # router preflight catches this at routing time, but operator CLI
@@ -608,7 +720,7 @@ def main() -> int:
                         project,
                         asset_dir,
                         provider=source_edit_provider.provider,
-                        model=source_edit_provider.model,
+                        model=_effective_render_model(source_edit_provider.model),
                         quality=source_edit_provider.quality,
                     )
                 ]
@@ -657,6 +769,21 @@ def main() -> int:
                 return 2
         else:
             draft_provider = cfg.flyer.resolve_draft_render_provider()
+            # 4c kill-switch: resolve the effective draft model ONCE so every
+            # render in this script (initial draft, brand-assets retry, autorepair
+            # re-render, deterministic-overlay fallback) honors the panic switch.
+            draft_model = _effective_render_model(draft_provider.model)
+            # Spec §6 observability: an integrated concept render is being
+            # attempted whenever the effective model is NOT the deterministic
+            # renderer (i.e. the kill-switch is OFF). Emit once, up-front, so the
+            # row counts as the denominator even if the render itself then fails.
+            integrated_path_attempted = draft_model != _DETERMINISTIC_RENDERER_MODEL
+            if integrated_path_attempted:
+                _audit_append(audit_log_path, FlyerIntegratedAttempted(
+                    ts=datetime.now(timezone.utc),
+                    project_id=project.project_id,
+                    project_version=project.version,
+                ))
             specs = []
             retryable_match = False
             for attempt in range(2):
@@ -664,7 +791,7 @@ def main() -> int:
                     specs = render_concept_previews(
                         project,
                         asset_dir,
-                        model=draft_provider.model,
+                        model=draft_model,
                         quality=draft_provider.quality,
                         concept_count=cfg.flyer.concept_count,
                     )
@@ -682,6 +809,44 @@ def main() -> int:
                         reason_code = "dependency_missing"
                     else:
                         reason_code = "provider_timeout"
+                    # FIX 7: a generation/provider error (API/transport failure —
+                    # the provider_timeout class, NOT a visual_qa logic/validation
+                    # failure nor a missing dependency) on the INITIAL integrated
+                    # render should fall back to the pure deterministic renderer
+                    # rather than going straight to manual. The deterministic
+                    # renderer needs no provider, so it sidesteps the transient
+                    # failure; downstream QA still verifies it. Only when the
+                    # deterministic fallback ALSO fails do we route to manual.
+                    # (dependency_missing is excluded — if Pillow is unavailable
+                    # the deterministic renderer can't run either; visual_qa is
+                    # excluded — it is a logic/validation failure, not generation.)
+                    if (
+                        integrated_path_attempted
+                        and reason_code == "provider_timeout"
+                    ):
+                        try:
+                            specs = render_concept_previews(
+                                project,
+                                asset_dir,
+                                model=_effective_render_model(_DETERMINISTIC_RENDERER_MODEL),
+                                quality=draft_provider.quality,
+                                concept_count=cfg.flyer.concept_count,
+                            )
+                        except Exception:
+                            specs = []
+                        if specs:
+                            # Deterministic fallback produced a render — emit the
+                            # unified §6 fell-back counter (reason="generation_error")
+                            # and continue into the normal post-render QA/persist
+                            # flow, which verifies the deterministic output.
+                            integrated_fell_back_emitted = True
+                            _audit_append(audit_log_path, FlyerIntegratedFellBackDeterministic(
+                                ts=now,
+                                project_id=project.project_id,
+                                project_version=project.version,
+                                reason="generation_error",
+                            ))
+                            break
                     manual = make_manual_review(
                         reason_code=reason_code,
                         detail=_draft_manual_review_detail(exc, attempts=attempt + 1, retryable_match=retryable_match),
@@ -767,7 +932,7 @@ def main() -> int:
             specs = _render_with_brand_assets_disabled(lambda: render_concept_previews(
                 current,
                 asset_dir,
-                model=draft_provider.model,
+                model=draft_model,
                 quality=draft_provider.quality,
                 concept_count=cfg.flyer.concept_count,
             ))
@@ -791,7 +956,20 @@ def main() -> int:
             failed_qa = [report for report in qa_reports if report.status != "passed"]
         pending_success_attempt = None
         pending_success_entry = None
-        if failed_qa and not source_edit_requested:
+        # FIX 4: never route a fabrication-bearing failure through the legacy
+        # recovery.py autorepair loop. The legacy classifier marks a set eligible
+        # if ANY missing-copy blocker appears, without rejecting accompanying
+        # `fabricated ...` blockers — and its LLM repair_instruction is not
+        # guaranteed to REMOVE a fabrication. So a mixed `missing fact +
+        # fabricated offer` set must skip legacy autorepair and flow instead to
+        # the fabrication-aware retry (when fabrication-only) or straight to the
+        # deterministic-overlay fallback (when mixed), both of which are
+        # safe-by-construction against fabrications.
+        if (
+            failed_qa
+            and not source_edit_requested
+            and not _qa_failed_has_fabrication(failed_qa)
+        ):
             blockers = [blocker for report in failed_qa for blocker in report.blockers]
             blocker_hash = _sha256_hex("\n".join(blockers))
             decision = classify_flyer_qa_for_autorepair(blockers, current)
@@ -895,7 +1073,7 @@ def main() -> int:
                         repair_specs = render_concept_previews(
                             current,
                             asset_dir,
-                            model=draft_provider.model,
+                            model=draft_model,
                             quality=draft_provider.quality,
                             concept_count=cfg.flyer.concept_count,
                             repair_instruction=repair_instruction,
@@ -970,20 +1148,195 @@ def main() -> int:
                         assets = repair_assets
                         qa_reports = repair_qa_reports
                         failed_qa = []
-        if failed_qa and not source_edit_requested and _qa_failed_exact_text_recoverable(failed_qa):
+        # 4a (retry-first): if the ONLY remaining blockers are fabrication-type,
+        # attempt up to TWO corrective re-renders with a two-sided repair
+        # instruction (re-state authorized facts + remove fabricated claims)
+        # before falling back to the deterministic overlay. Operator's locked
+        # decision is x2 bounded attempts. Deliberately separate from the
+        # recovery.py autorepair loop above: no attempt-store accounting, no
+        # Hermes planner — a strictly-bounded best-effort pass. On success, keep
+        # the corrected render and stop; on a render error or a non-fabrication
+        # failure, stop retrying; if still fabrication-blocked after 2 attempts,
+        # leave the ORIGINAL failed_qa intact so the deterministic-overlay
+        # fallback (which fabrication blockers are now eligible for) handles it.
+        _FABRICATION_MAX_CORRECTIVE_ATTEMPTS = 2
+        # §6 fallback reason set by the fabrication retry loop (if it runs):
+        # "" = no fallback needed (a retry passed); "retries_exhausted" /
+        # "generation_error" = corrective attempts could not produce a passing
+        # render. Default "" so non-fabrication paths leave it unset.
+        fab_fallback_reason = ""
+        if (
+            failed_qa
+            and not source_edit_requested
+            and _qa_failed_is_fabrication_only(failed_qa)
+        ):
+            locked = {
+                f.fact_id: f.value
+                for f in current.locked_facts
+                if getattr(f, "required", False)
+            }
+            # The blockers to repair against; refreshed from each failed attempt
+            # so attempt 2 targets what attempt 1 still got wrong.
+            current_fab_failed = failed_qa
+            # §6 reason carried to the deterministic fallback if the retries do
+            # not produce a passing render: "retries_exhausted" when all bounded
+            # attempts still block, "generation_error" when a corrective render
+            # raised. Set to "" once a retry passes (no fallback needed).
+            fab_fallback_reason = "retries_exhausted"
+            for fab_attempt in range(1, _FABRICATION_MAX_CORRECTIVE_ATTEMPTS + 1):
+                fab_blockers = [blocker for report in current_fab_failed for blocker in report.blockers]
+                fab_instruction = build_repair_instruction(fab_blockers, locked)
+                fab_specs = []
+                fab_assets = []
+                fab_qa_reports = []
+                fab_failed_qa = []
+                fab_error = ""
+                try:
+                    fab_specs = render_concept_previews(
+                        current,
+                        asset_dir,
+                        model=draft_model,
+                        quality=draft_provider.quality,
+                        concept_count=cfg.flyer.concept_count,
+                        repair_instruction=fab_instruction,
+                    )
+                    fab_assets = build_asset_manifest(
+                        fab_specs,
+                        first_asset_number=next_asset_number(current),
+                        source="rendered",
+                        original_message_id=current.original_message_id,
+                    )
+                    for asset, spec in zip(fab_assets, fab_specs):
+                        _write_sidecar_visual_qa_fixture(current, spec.path)
+                        report = run_visual_qa(
+                            current,
+                            spec.path,
+                            output_format=spec.output_format,
+                            asset_id=asset.asset_id,
+                        )
+                        write_visual_qa_report(report, spec.path)
+                        fab_qa_reports.append(report)
+                    fab_failed_qa = [report for report in fab_qa_reports if report.status != "passed"]
+                except Exception as exc:
+                    fab_error = f"{exc.__class__.__name__}: {str(exc)[:400]}"
+                if not fab_error and not fab_failed_qa:
+                    # Retry passed QA — keep the corrected render and STOP.
+                    preserve_paths = {
+                        candidate
+                        for spec in fab_specs
+                        for candidate in _render_artifact_candidates(spec)
+                    }
+                    _cleanup_render_artifacts(specs, preserve_paths=preserve_paths)
+                    specs = fab_specs
+                    assets = fab_assets
+                    qa_reports = fab_qa_reports
+                    failed_qa = []
+                    fab_fallback_reason = ""  # passed → no fallback
+                    # Spec §6: integrated render passed after a corrective retry.
+                    # attempts = 1 (initial) + number of corrective attempts run.
+                    if integrated_path_attempted:
+                        integrated_attempt_count = 1 + fab_attempt
+                        integrated_passed_emitted = True
+                        _audit_append(audit_log_path, FlyerIntegratedPassed(
+                            ts=now,
+                            project_id=current.project_id,
+                            project_version=current.version,
+                            attempts=integrated_attempt_count,
+                        ))
+                    break
+                # Attempt failed: discard this attempt's artifacts (keep the
+                # original specs intact for the downstream fallback).
+                preserve_paths = {
+                    candidate
+                    for spec in specs
+                    for candidate in _render_artifact_candidates(spec)
+                }
+                _cleanup_render_artifacts(fab_specs, preserve_paths=preserve_paths)
+                if fab_error:
+                    # A corrective render raised — further fabrication retries
+                    # won't help. Stop; leave the ORIGINAL failed_qa for the
+                    # deterministic-overlay fallback (reason: generation_error).
+                    fab_fallback_reason = "generation_error"
+                    break
+                if not _qa_failed_is_fabrication_only(fab_failed_qa):
+                    # The failure is no longer fabrication-only — retries can't
+                    # help. Stop; leave the ORIGINAL failed_qa for the fallback.
+                    fab_fallback_reason = "retries_exhausted"
+                    break
+                # Still fabrication-only-blocked: refresh the target blockers and
+                # loop again (bounded by the range).
+                current_fab_failed = fab_failed_qa
+        # 4b: when the referee could not verify the concept render
+        # (status=provider_unavailable — OCR/vision down) route to the
+        # deterministic-overlay fallback, which is safe-by-construction (overlay
+        # draws EXACT locked text → cannot fabricate, so needs no OCR re-check).
+        # Record the decision so the (otherwise silent) quality degradation is
+        # observable: an audit row AND a note inside the persisted QA report.
+        referee_unavailable_fallback = (
+            bool(failed_qa)
+            and not source_edit_requested
+            and _qa_has_provider_unavailable(failed_qa)
+        )
+        # When we enter the fallback ONLY because the referee was unavailable, we
+        # must never let the leftover UNVERIFIED integrated reports flow into the
+        # downstream warn-tier delivery path (which would ship the unverified
+        # integrated flyer). Track whether that case stays unresolved so the
+        # final state machine can force manual review instead.
+        referee_unavailable_unresolved = referee_unavailable_fallback
+        # §6: resolve the single deterministic-fallback reason for this run.
+        # Priority: referee-unavailable > fabrication-retry outcome > a residual
+        # fabrication blocker that bypassed the fabrication-only retry (mixed
+        # recoverable set). Non-fabrication recoverable fallbacks (e.g.
+        # missing-fact only) are NOT a §6 integrated event → reason stays "".
+        if referee_unavailable_fallback:
+            integrated_fallback_reason = "referee_unavailable"
+        elif fab_fallback_reason:
+            integrated_fallback_reason = fab_fallback_reason
+        elif bool(failed_qa) and not source_edit_requested and _qa_failed_has_fabrication(failed_qa):
+            integrated_fallback_reason = "fabrication"
+        else:
+            integrated_fallback_reason = ""
+        if (
+            failed_qa
+            and not source_edit_requested
+            and (
+                _qa_failed_exact_text_recoverable(failed_qa)
+                or referee_unavailable_fallback
+            )
+        ):
             fallback_specs = []
             fallback_assets = []
             fallback_qa_reports = []
             fallback_failed_qa = []
             fallback_error = ""
             try:
-                fallback_specs = _render_with_integrated_poster_disabled(lambda: render_concept_previews(
-                    current,
-                    asset_dir,
-                    model=draft_provider.model,
-                    quality=draft_provider.quality,
-                    concept_count=cfg.flyer.concept_count,
-                ))
+                if referee_unavailable_fallback:
+                    # FIX 1: the referee is UNAVAILABLE — there is no QA to catch a
+                    # hallucinated model background, so the fallback MUST be the PURE
+                    # deterministic renderer (Pillow only, no model call). This is
+                    # truly safe-by-construction and needs no QA. Route the model
+                    # through _effective_render_model so the kill-switch stays a
+                    # no-op-consistent override (it resolves to deterministic too).
+                    fallback_specs = render_concept_previews(
+                        current,
+                        asset_dir,
+                        model=_effective_render_model(_DETERMINISTIC_RENDERER_MODEL),
+                        quality=draft_provider.quality,
+                        concept_count=cfg.flyer.concept_count,
+                    )
+                else:
+                    # Other fallback triggers (fabrication-retries-exhausted,
+                    # generation_error) — the referee IS available, so a model-
+                    # generated textless background + overlay is re-QA'd downstream
+                    # and a hallucinated background is caught. Keep the existing
+                    # background-only path.
+                    fallback_specs = _render_with_integrated_poster_disabled(lambda: render_concept_previews(
+                        current,
+                        asset_dir,
+                        model=draft_model,
+                        quality=draft_provider.quality,
+                        concept_count=cfg.flyer.concept_count,
+                    ))
                 fallback_assets = build_asset_manifest(
                     fallback_specs,
                     first_asset_number=next_asset_number(current),
@@ -1000,9 +1353,21 @@ def main() -> int:
                     )
                     write_visual_qa_report(report, spec.path)
                     fallback_qa_reports.append(report)
-                fallback_failed_qa = [
-                    report for report in fallback_qa_reports if report.status != "passed"
-                ]
+                # 4b: when we routed here because the referee was UNAVAILABLE
+                # (not because of a real QA failure), the deterministic overlay
+                # is safe-by-construction — accept it even if the re-QA is also
+                # provider_unavailable (still unverified). A genuine block-tier
+                # 'failed' on the overlay still falls closed to manual.
+                if referee_unavailable_fallback:
+                    fallback_failed_qa = [
+                        report
+                        for report in fallback_qa_reports
+                        if report.status not in ("passed", "provider_unavailable")
+                    ]
+                else:
+                    fallback_failed_qa = [
+                        report for report in fallback_qa_reports if report.status != "passed"
+                    ]
             except Exception as exc:
                 fallback_error = f"{exc.__class__.__name__}: {str(exc)[:400]}"
             if fallback_error or fallback_failed_qa:
@@ -1023,6 +1388,45 @@ def main() -> int:
                 assets = fallback_assets
                 qa_reports = fallback_qa_reports
                 failed_qa = []
+                # Fallback shipped — the referee-unavailable case is resolved.
+                referee_unavailable_unresolved = False
+                # 4b observable marker (anti-silent): only when this fallback was
+                # taken because the concept-path referee was UNAVAILABLE. Emit an
+                # audit row AND stamp the note into the persisted QA reports so the
+                # degradation shows up in qa_reports, per operator requirement.
+                if referee_unavailable_fallback:
+                    _MARKER = "integrated_referee_unavailable_fallback"
+                    stamped = []
+                    for report in qa_reports:
+                        notes = list(getattr(report, "blockers", []) or [])
+                        if _MARKER not in notes:
+                            notes.append(_MARKER)
+                        stamped.append(report.model_copy(update={"blockers": notes}))
+                    qa_reports = stamped
+                    _audit_append(audit_log_path, FlyerIntegratedRefereeUnavailableFallback(
+                        ts=now,
+                        project_id=current.project_id,
+                        project_version=current.version,
+                    ))
+                # §6: the integrated render was abandoned and the deterministic
+                # overlay shipped — emit the unified fell-back counter with the
+                # resolved reason. Only for genuine integrated attempts (kill-
+                # switch off) and recognized §6 reasons; a non-fabrication
+                # recoverable fallback leaves integrated_fallback_reason "".
+                # FIX 7: skip when a generation-error fell-back row was already
+                # emitted at the initial-render handler (no double count).
+                if (
+                    integrated_path_attempted
+                    and integrated_fallback_reason
+                    and not integrated_fell_back_emitted
+                ):
+                    integrated_fell_back_emitted = True
+                    _audit_append(audit_log_path, FlyerIntegratedFellBackDeterministic(
+                        ts=now,
+                        project_id=current.project_id,
+                        project_version=current.version,
+                        reason=integrated_fallback_reason,
+                    ))
         revisions = [
             revision.model_copy(update={"applied": True})
             if (
@@ -1058,6 +1462,11 @@ def main() -> int:
                 has_block_severity = any(
                     getattr(r, "severity", "block") == "block" for r in failed_qa
                 )
+                # 4b: an unresolved referee-unavailable case (deterministic
+                # fallback could not ship) must go to manual — never warn-tier
+                # delivery of the unverified integrated render.
+                if referee_unavailable_unresolved:
+                    has_block_severity = True
                 if not has_block_severity:
                     if not is_flyer_transition_allowed(current.status, "delivered_with_warning"):
                         raise SystemExit(
@@ -1131,6 +1540,16 @@ def main() -> int:
                     "updated_at": now,
                 })
                 atomic_write_text(state_path, store.model_dump_json(indent=2))
+                # §6: the concept-render path ended in manual review (no
+                # integrated pass, no shippable deterministic fallback). Mirror
+                # the reason_code written to state.
+                if integrated_path_attempted:
+                    _audit_append(audit_log_path, FlyerIntegratedManualReview(
+                        ts=now,
+                        project_id=current.project_id,
+                        project_version=current.version,
+                        reason_code=getattr(manual, "reason_code", "") or "visual_qa_failed",
+                    ))
                 print(json.dumps({
                     "project_id": args.project_id,
                     "visual_qa_failed": [report.model_dump(mode="json") for report in failed_qa],
@@ -1150,6 +1569,21 @@ def main() -> int:
             if pending_success_attempt is not None and pending_success_entry is not None:
                 _append_attempt_status(autorepair_state_path, pending_success_attempt)
                 _audit_append(audit_log_path, pending_success_entry)
+            # §6: integrated render reached the awaiting-approval terminal state.
+            # Emit "passed" UNLESS this run shipped the deterministic fallback
+            # (an integrated FELL-BACK row already covers that), or the
+            # fabrication-retry success path already emitted it.
+            if (
+                integrated_path_attempted
+                and not integrated_passed_emitted
+                and not integrated_fell_back_emitted
+            ):
+                _audit_append(audit_log_path, FlyerIntegratedPassed(
+                    ts=now,
+                    project_id=current.project_id,
+                    project_version=current.version,
+                    attempts=integrated_attempt_count,
+                ))
             print(json.dumps({"project_id": args.project_id, "concept_count": len(concepts)}))
             return 0
 
