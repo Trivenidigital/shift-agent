@@ -302,6 +302,11 @@ PY
     else
         rm -f /opt/shift-agent/flyer_render.py
     fi
+    if [ -f src/agents/flyer/repair.py ]; then
+        install -m 644 src/agents/flyer/repair.py /opt/shift-agent/flyer_repair.py
+    else
+        rm -f /opt/shift-agent/flyer_repair.py
+    fi
     if [ -f src/agents/flyer/intake_fields.py ]; then
         install -m 644 src/agents/flyer/intake_fields.py /opt/shift-agent/flyer_intake_fields.py
     else
