@@ -1,0 +1,66 @@
+{
+ "captured_at": "2026-06-15T02:12:49.593604+00:00",
+ "source": "/opt/shift-agent/state/flyer/projects.json",
+ "phase": "BEFORE (pre-activation baseline)",
+ "all": {
+  "total_flyers": 156,
+  "approved_flyers": 138,
+  "accepted_first_draft_n": 121,
+  "accepted_first_draft_pct_of_approved": 87.7,
+  "avg_revisions_per_approved": 0.5,
+  "avg_revisions_all": 0.45,
+  "max_revisions": 44,
+  "time_to_approval_hrs_median": 332.58,
+  "time_to_approval_hrs_mean": 285.26,
+  "time_to_approval_n": 138,
+  "time_to_approval_excluded": 0
+ },
+ "customer_excl_test": {
+  "total_flyers": 147,
+  "approved_flyers": 129,
+  "accepted_first_draft_n": 113,
+  "accepted_first_draft_pct_of_approved": 87.6,
+  "avg_revisions_per_approved": 0.53,
+  "avg_revisions_all": 0.47,
+  "max_revisions": 44,
+  "time_to_approval_hrs_median": 330.17,
+  "time_to_approval_hrs_mean": 288.02,
+  "time_to_approval_n": 129,
+  "time_to_approval_excluded": 0
+ },
+ "test_flyers_flagged": 9,
+ "segments_customer": [
+  {
+   "segment": "reference-based",
+   "n": 40,
+   "approved": 23,
+   "accepted_first_pct": 87.0,
+   "avg_revisions_approved": 0.22,
+   "tta_median_hrs": 242.5
+  },
+  {
+   "segment": "non-reference",
+   "n": 107,
+   "approved": 106,
+   "accepted_first_pct": 87.7,
+   "avg_revisions_approved": 0.59,
+   "tta_median_hrs": 337.99
+  },
+  {
+   "segment": "menu-heavy (>6 items)",
+   "n": 14,
+   "approved": 1,
+   "accepted_first_pct": 100.0,
+   "avg_revisions_approved": 0,
+   "tta_median_hrs": 6.45
+  },
+  {
+   "segment": "simple/promo (<=6 items)",
+   "n": 133,
+   "approved": 128,
+   "accepted_first_pct": 87.5,
+   "avg_revisions_approved": 0.53,
+   "tta_median_hrs": 332.58
+  }
+ ]
+}
