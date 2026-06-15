@@ -787,8 +787,24 @@ def _render_creative_director(project, background_brief: str) -> bytes:
     import tempfile
     from pathlib import Path as _Path
 
-    raw = _generate_image(background_brief, model=GEN_MODEL)
     rmod = _render_mod()
+    # FIX 6 — kill-switch totality: this is a generative entry point (the model
+    # paints the textless background). Under FLYER_INTEGRATED_KILLSWITCH=1, do NOT
+    # call the image model; render the COMPLETE flyer with the pure-Pillow
+    # deterministic renderer instead. The deterministic renderer draws every
+    # locked fact itself, so the facts-from-overlay-never-the-model invariant
+    # still holds (no model is involved at all). render_concept_previews routes
+    # model="deterministic-renderer" to the pure-Pillow path.
+    if _integrated_killswitch_active():
+        with tempfile.TemporaryDirectory() as _td:
+            specs = rmod.render_concept_previews(
+                project, _td,
+                model=_effective_render_model(GEN_MODEL),
+                quality="medium", concept_count=1,
+            )
+            return _Path(specs[0].path).read_bytes()
+
+    raw = _generate_image(background_brief, model=GEN_MODEL)
     with tempfile.TemporaryDirectory() as _td:
         bg = _Path(_td) / "cd_background.png"
         out = _Path(_td) / "cd_final.png"
@@ -1568,6 +1584,18 @@ def render_revision_apply(chat_id: str, raw_text: str):
 
 def render_unregistered(raw_text: str) -> bytes:
     """Unregistered / ambiguous sender: render from stated details only; no registered grounding."""
+    # FIX 6 — kill-switch totality: this is a generative entry point (full
+    # integrated poster painted by the model). It has NO FlyerProject / locked
+    # facts to render deterministically (unregistered/ambiguous sender, stated
+    # details only), so under FLYER_INTEGRATED_KILLSWITCH=1 there is no safe
+    # deterministic substitute — short-circuit with a clear handled error rather
+    # than call the image model. The caller (bare-flyer-render-and-send) already
+    # catches this and replies with the apologetic "try again shortly" message.
+    if _integrated_killswitch_active():
+        raise RuntimeError(
+            "FLYER_INTEGRATED_KILLSWITCH active: unregistered generative flyer render is disabled "
+            "(no grounded project to render deterministically)"
+        )
     prompt = (
         "Design a single complete, finished promotional flyer/poster as ONE integrated image. "
         "Render ALL text directly inside the image, large and legible, spelled correctly. "

@@ -809,6 +809,44 @@ def main() -> int:
                         reason_code = "dependency_missing"
                     else:
                         reason_code = "provider_timeout"
+                    # FIX 7: a generation/provider error (API/transport failure —
+                    # the provider_timeout class, NOT a visual_qa logic/validation
+                    # failure nor a missing dependency) on the INITIAL integrated
+                    # render should fall back to the pure deterministic renderer
+                    # rather than going straight to manual. The deterministic
+                    # renderer needs no provider, so it sidesteps the transient
+                    # failure; downstream QA still verifies it. Only when the
+                    # deterministic fallback ALSO fails do we route to manual.
+                    # (dependency_missing is excluded — if Pillow is unavailable
+                    # the deterministic renderer can't run either; visual_qa is
+                    # excluded — it is a logic/validation failure, not generation.)
+                    if (
+                        integrated_path_attempted
+                        and reason_code == "provider_timeout"
+                    ):
+                        try:
+                            specs = render_concept_previews(
+                                project,
+                                asset_dir,
+                                model=_effective_render_model(_DETERMINISTIC_RENDERER_MODEL),
+                                quality=draft_provider.quality,
+                                concept_count=cfg.flyer.concept_count,
+                            )
+                        except Exception:
+                            specs = []
+                        if specs:
+                            # Deterministic fallback produced a render — emit the
+                            # unified §6 fell-back counter (reason="generation_error")
+                            # and continue into the normal post-render QA/persist
+                            # flow, which verifies the deterministic output.
+                            integrated_fell_back_emitted = True
+                            _audit_append(audit_log_path, FlyerIntegratedFellBackDeterministic(
+                                ts=now,
+                                project_id=project.project_id,
+                                project_version=project.version,
+                                reason="generation_error",
+                            ))
+                            break
                     manual = make_manual_review(
                         reason_code=reason_code,
                         detail=_draft_manual_review_detail(exc, attempts=attempt + 1, retryable_match=retryable_match),
@@ -1375,7 +1413,13 @@ def main() -> int:
                 # resolved reason. Only for genuine integrated attempts (kill-
                 # switch off) and recognized §6 reasons; a non-fabrication
                 # recoverable fallback leaves integrated_fallback_reason "".
-                if integrated_path_attempted and integrated_fallback_reason:
+                # FIX 7: skip when a generation-error fell-back row was already
+                # emitted at the initial-render handler (no double count).
+                if (
+                    integrated_path_attempted
+                    and integrated_fallback_reason
+                    and not integrated_fell_back_emitted
+                ):
                     integrated_fell_back_emitted = True
                     _audit_append(audit_log_path, FlyerIntegratedFellBackDeterministic(
                         ts=now,

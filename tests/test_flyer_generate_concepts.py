@@ -3761,6 +3761,122 @@ def test_obs_manual_outcome_emits_attempted_and_manual_review(monkeypatch, tmp_p
     assert mr["project_id"] == "F0001"
 
 
+def test_fix7_initial_generation_error_falls_back_to_deterministic_not_manual(monkeypatch, tmp_path, capsys):
+    """FIX 7: when the INITIAL integrated render raises a generation/provider error
+    (API/transport — provider_timeout class) on both attempts, the script must
+    render the pure deterministic fallback (model='deterministic-renderer') and
+    ship it — NOT route straight to manual. Emits flyer_integrated_fell_back_
+    deterministic with reason='generation_error'."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    render_models = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        model = kwargs.get("model")
+        render_models.append(model)
+        # The integrated (generative) model fails with a transient provider error
+        # on every attempt; only the deterministic fallback produces a render.
+        if model != "deterministic-renderer":
+            raise RuntimeError("OpenRouter image HTTP 503: service unavailable")
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-fallback.png"
+        path.write_bytes(b"deterministic")
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        # The deterministic fallback render is clean.
+        return _qa_report(module, status="passed", blockers=[],
+                          asset_id=asset_id, path=str(artifact_path))
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(module.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    # Shipped via the deterministic fallback, NOT routed to manual.
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["status"] != "manual_edit_required"
+    assert persisted["manual_review"]["status"] == "none"
+    assert persisted["assets"][-1]["path"].endswith("F0001-C1-fallback.png")
+    # The generative model was attempted (and failed) before the deterministic fallback ran.
+    assert "deterministic-renderer" in render_models
+    assert any(m != "deterministic-renderer" for m in render_models)
+    rows = _audit_rows(audit_path)
+    row_types = [r["type"] for r in rows]
+    assert "flyer_integrated_attempted" in row_types
+    assert "flyer_integrated_manual_review" not in row_types
+    fell = [r for r in rows if r["type"] == "flyer_integrated_fell_back_deterministic"]
+    assert len(fell) == 1
+    assert fell[0]["reason"] == "generation_error"
+
+
+def test_fix7_initial_dependency_missing_still_goes_manual(monkeypatch, tmp_path, capsys):
+    """FIX 7 boundary: a dependency-missing error (Pillow unavailable) must STILL
+    route to manual — the deterministic renderer cannot run either, so there is no
+    safe fallback. No deterministic render is attempted."""
+    module = _load_script(monkeypatch)
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    render_models = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        render_models.append(kwargs.get("model"))
+        raise RuntimeError("Pillow is required but unavailable: No module named 'PIL'")
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", lambda *_a, **_k: None)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 2
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["manual_review"]["reason_code"] == "dependency_missing"
+    # No deterministic fallback was attempted for a dependency-missing error.
+    assert "deterministic-renderer" not in render_models
+    row_types = _audit_types(audit_path)
+    assert "flyer_integrated_fell_back_deterministic" not in row_types
+
+
 def test_obs_referee_unavailable_fallback_emits_fell_back_reason(monkeypatch, tmp_path, capsys):
     """§6: referee-unavailable → deterministic fallback emits
     flyer_integrated_fell_back_deterministic with reason=referee_unavailable
