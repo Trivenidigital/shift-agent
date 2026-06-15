@@ -2925,3 +2925,82 @@ def test_run_visual_qa_blocks_on_duplicate_text_note(tmp_path, monkeypatch):
     report = vq.run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=False)
     assert report.status == "failed"
     assert any("visible text defect reported by QA" in b for b in report.blockers)
+
+
+# --- negation-aware corruption-note matching (stop false-positive blocks) ----
+
+
+def test_corruption_note_blockers_skips_negated_clean_signals():
+    # The vision model commonly returns CLEAN notes that CONTAIN the keywords but
+    # NEGATE them — these must NOT become blockers (real F0159 false-positive).
+    from agents.flyer.visual_qa import _corruption_note_blockers
+    assert _corruption_note_blockers(["No unreadable or garbled text."]) == []
+    assert _corruption_note_blockers(["No visible placeholders."]) == []
+    assert _corruption_note_blockers(["No issues; no placeholders"]) == []
+    assert _corruption_note_blockers(["The flyer is free of placeholders."]) == []
+    assert _corruption_note_blockers(["Text does not appear unreadable."]) == []
+
+
+def test_corruption_note_blockers_still_flags_affirmative_defects():
+    # Genuine affirmative corruption notes MUST still block.
+    from agents.flyer.visual_qa import _corruption_note_blockers
+    assert _corruption_note_blockers(["text appears garbled"])
+    assert _corruption_note_blockers(["garbled text visible"])
+    assert _corruption_note_blockers(["placeholder [price] visible"])
+    assert _corruption_note_blockers(["unreadable microtext"])
+    assert _corruption_note_blockers(["text is garbled and unreadable"])
+
+
+def test_run_visual_qa_ignores_negated_corruption_clean_notes(tmp_path, monkeypatch):
+    # F0159 regression: a CLEAN flyer (coherent text, all required facts present)
+    # whose ONLY vision notes are NEGATED clean-signals must NOT be force-blocked.
+    from agents.flyer import visual_qa as vq
+    monkeypatch.setattr(vq, "_vision_text", lambda artifact, *, model=None: (
+        "Fresh Meats Premium Clean Chicken Clean bird. Strong life. $13.99",
+        "openrouter", "ocr_vision",
+        ["No unreadable or garbled text.", "No visible placeholders."],
+    ))
+    artifact = tmp_path / "flyer.png"
+    artifact.write_bytes(b"bytes")
+    report = vq.run_visual_qa(_project(), artifact, output_format="concept_preview", allow_sidecar=False)
+    # No corruption blocker from the negated clean-notes, and not block severity.
+    assert not any(("placeholder" in b.lower() or "unreadable" in b.lower() or "garbled" in b.lower())
+                   for b in report.blockers), report.blockers
+    assert report.severity != "block"
+    assert report.status in ("passed", "warn", "failed")
+    # The specific false-positive: status must be a clean pass here (all facts present).
+    assert report.status == "passed", report.blockers
+
+
+def test_run_visual_qa_blocks_on_affirmative_corruption_note(tmp_path, monkeypatch):
+    # The flip side: an AFFIRMATIVE corruption note still fails QA closed (block).
+    from agents.flyer import visual_qa as vq
+    monkeypatch.setattr(vq, "_vision_text", lambda artifact, *, model=None: (
+        "Fresh Meats Premium Clean Chicken Clean bird. Strong life. $13.99",
+        "openrouter", "ocr_vision",
+        ["text is garbled and unreadable"],
+    ))
+    artifact = tmp_path / "flyer.png"
+    artifact.write_bytes(b"bytes")
+    report = vq.run_visual_qa(_project(), artifact, output_format="concept_preview", allow_sidecar=False)
+    assert report.status == "failed"
+    assert report.severity == "block"
+    assert any(("garbled" in b.lower() or "unreadable" in b.lower()) for b in report.blockers)
+
+
+def test_placeholder_re_extracted_text_check_unchanged(tmp_path):
+    # The PLACEHOLDER_RE check (actual [price]/lorem in EXTRACTED TEXT) is a
+    # different, correct check and must STILL block — only the provider-NOTES
+    # keyword match became negation-aware.
+    from agents.flyer.visual_qa import PLACEHOLDER_RE, run_visual_qa
+    assert PLACEHOLDER_RE.search("Kheema Dosa [price]")
+    assert not PLACEHOLDER_RE.search("No visible placeholders.")
+    artifact = tmp_path / "flyer.png"
+    artifact.write_bytes(b"not really an image but has bytes")
+    (tmp_path / "flyer.png.ocr.txt").write_text(
+        "Fresh Meats Premium Clean Chicken Clean bird. Strong life. Kheema Dosa [price]",
+        encoding="utf-8",
+    )
+    report = run_visual_qa(_project(), artifact, output_format="concept_preview", allow_sidecar=True)
+    assert report.status == "failed"
+    assert any("placeholder" in b for b in report.blockers)
