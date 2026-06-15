@@ -1465,7 +1465,12 @@ def test_generate_exact_text_qa_failure_uses_overlay_fallback_before_manual_revi
     persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
 
     assert out["project_id"] == "F0152"
+    # 2026-06-15: a content-recoverable miss (missing item name + near-duplicate)
+    # now gets ONE integrated content corrective retry (mode=1, repair_instruction)
+    # BEFORE the deterministic-overlay fallback (mode=0). The retry here still
+    # misses → the overlay ships.
     assert render_calls == [
+        {"mode": "1", "model": "openrouter/premium-poster-model", "quality": "high"},
         {"mode": "1", "model": "openrouter/premium-poster-model", "quality": "high"},
         {"mode": "0", "model": "openrouter/premium-poster-model", "quality": "high"},
     ]
@@ -2799,6 +2804,36 @@ def test_qa_recoverable_preserves_existing_false_case(monkeypatch):
     assert module._qa_failed_exact_text_recoverable([report]) is False
 
 
+# --- 2026-06-15: inferred-item-not-rendered is recoverable (live F0157) ------
+
+def test_qa_recoverable_true_for_inferred_item_not_rendered(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=["inferred item not rendered: Idli"])
+    assert module._qa_failed_exact_text_recoverable([report]) is True
+
+
+def test_qa_recoverable_true_for_inferred_item_plus_missing_schedule(monkeypatch):
+    # The exact live F0157 shape: dropped item names + dropped schedule.
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=[
+        "inferred item not rendered: Idli",
+        "inferred item not rendered: Vada",
+        "missing required visible fact: schedule",
+    ])
+    assert module._qa_failed_exact_text_recoverable([report]) is True
+
+
+def test_qa_recoverable_false_for_inferred_item_mixed_with_unrecoverable(monkeypatch):
+    # A truly-non-recoverable blocker still poisons the set → False.
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=[
+        "inferred item not rendered: Idli",
+        "unverified phone number visible: +1 555 000 0000",  # recoverable
+        "visible wrong brand text: Indian Cafe",             # NOT recoverable
+    ])
+    assert module._qa_failed_exact_text_recoverable([report]) is False
+
+
 # --- 4a: _qa_failed_is_fabrication_only ------------------------------------
 
 def test_fabrication_only_true_for_price_and_offer(monkeypatch):
@@ -3516,6 +3551,176 @@ def test_4a_fabrication_retry_passes_on_attempt_2_stops_early(monkeypatch, tmp_p
     assert persisted["assets"][-1]["path"].endswith("F0001-C1-repaired2.png")
     assert render_calls == ["first", "repaired", "repaired"]
     assert render_calls.count("repaired") == 2
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-15 — content-miss auto-recover (live F0157): dropped item NAMES +
+# missing schedule must retry once then fall to the deterministic overlay, NOT
+# go straight to manual.
+# ---------------------------------------------------------------------------
+
+def test_content_miss_retry_fails_then_deterministic_overlay_ships_not_manual(monkeypatch, tmp_path, capsys):
+    """F0157 shape: the integrated render drops most item NAMES + the schedule
+    ('inferred item not rendered: ...' + 'missing required visible fact: schedule').
+    The ONE content corrective retry still misses → the deterministic-overlay
+    fallback (background-only + overlay renders EVERY name + schedule) ships.
+    Project ends awaiting_final_approval, NOT manual_edit_required, with a
+    fell_back audit row."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    render_calls = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        # The deterministic-overlay fallback runs under FLYER_ALLOW_INTEGRATED_POSTER=0.
+        if module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER") == "0":
+            render_calls.append("fallback")
+            suffix = "fallback"
+        elif kwargs.get("repair_instruction"):
+            render_calls.append("content_retry")
+            suffix = "content_retry"
+        else:
+            render_calls.append("first")
+            suffix = "first"
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        name = Path(artifact_path).name
+        if "fallback" in name:
+            # The deterministic overlay renders every name + schedule → clean.
+            return _qa_report(module, status="passed", blockers=[],
+                              asset_id=asset_id, path=str(artifact_path))
+        # The integrated first render AND the content retry both still drop names + schedule.
+        return _qa_report(module, status="failed",
+                          blockers=[
+                              "inferred item not rendered: Idli",
+                              "missing required visible fact: schedule",
+                          ],
+                          asset_id=asset_id, path=str(artifact_path))
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    # Keep the legacy recovery.py autorepair loop out of this path explicitly.
+    monkeypatch.setattr(
+        module, "classify_flyer_qa_for_autorepair",
+        lambda *_a, **_k: types.SimpleNamespace(decision="manual_required", reason="not_autorepair"),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    # Critical: NOT manual — the deterministic overlay shipped.
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["status"] != "manual_edit_required"
+    assert persisted["manual_review"]["status"] == "none"
+    assert persisted["assets"][-1]["path"].endswith("F0001-C1-fallback.png")
+    # The content retry ran ONCE, then the deterministic overlay fallback ran.
+    assert render_calls == ["first", "content_retry", "fallback"]
+    rows = _audit_rows(audit_path)
+    row_types = [r["type"] for r in rows]
+    assert "flyer_integrated_manual_review" not in row_types
+    fell = [r for r in rows if r["type"] == "flyer_integrated_fell_back_deterministic"]
+    assert len(fell) == 1
+    assert fell[0]["reason"] == "retries_exhausted"
+
+
+def test_content_miss_retry_succeeds_keeps_integrated_no_fallback(monkeypatch, tmp_path, capsys):
+    """The content corrective retry PASSES on attempt 1 → keep the beautiful
+    integrated render, no deterministic fallback. Emits flyer_integrated_passed
+    with attempts=2 (initial + 1 corrective)."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    render_calls = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        if module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER") == "0":
+            raise AssertionError("deterministic fallback must not run when the content retry passes")
+        if kwargs.get("repair_instruction"):
+            render_calls.append("content_retry")
+            suffix = "content_retry"
+        else:
+            render_calls.append("first")
+            suffix = "first"
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        name = Path(artifact_path).name
+        if "content_retry" in name:
+            return _qa_report(module, status="passed", blockers=[],
+                              asset_id=asset_id, path=str(artifact_path))
+        return _qa_report(module, status="failed",
+                          blockers=[
+                              "inferred item not rendered: Idli",
+                              "missing required visible fact: schedule",
+                          ],
+                          asset_id=asset_id, path=str(artifact_path))
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        module, "classify_flyer_qa_for_autorepair",
+        lambda *_a, **_k: types.SimpleNamespace(decision="manual_required", reason="not_autorepair"),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["manual_review"]["status"] == "none"
+    # The integrated (content-retry) render is kept; no deterministic fallback.
+    assert persisted["assets"][-1]["path"].endswith("F0001-C1-content_retry.png")
+    assert render_calls == ["first", "content_retry"]
+    rows = _audit_rows(audit_path)
+    row_types = [r["type"] for r in rows]
+    assert "flyer_integrated_fell_back_deterministic" not in row_types
+    passed = [r for r in rows if r["type"] == "flyer_integrated_passed"]
+    assert len(passed) == 1
+    assert passed[0]["attempts"] == 2
 
 
 # ---------------------------------------------------------------------------
