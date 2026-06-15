@@ -144,6 +144,24 @@ from pathlib import Path
 
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 GEN_MODEL = os.environ.get("FLYER_BARE_GEN_MODEL", "google/gemini-3-pro-image-preview")
+# FIX 3 — kill-switch TOTALITY across the bare-render generative entry point.
+# Mirrors generate-flyer-concepts._effective_render_model: when
+# FLYER_INTEGRATED_KILLSWITCH=1 every generative render in this module collapses
+# to the pure-Pillow deterministic renderer (the panic switch), short-circuiting
+# the integrated/generative poster path.
+_DETERMINISTIC_RENDERER_MODEL = "deterministic-renderer"
+
+
+def _integrated_killswitch_active() -> bool:
+    return os.environ.get("FLYER_INTEGRATED_KILLSWITCH") == "1"
+
+
+def _effective_render_model(model: str) -> str:
+    """Return the deterministic renderer when the kill-switch is engaged,
+    otherwise the configured model unchanged (mirrors the script helper)."""
+    if _integrated_killswitch_active():
+        return _DETERMINISTIC_RENDERER_MODEL
+    return model
 CUSTOMERS_PATH = Path(os.environ.get("FLYER_CUSTOMERS_PATH", "/opt/shift-agent/state/flyer/customers.json"))
 CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG", "/opt/shift-agent/config.yaml"))
 _ENV_PATHS = ["/root/.hermes/.env", "/opt/shift-agent/.env"]
@@ -714,9 +732,18 @@ def _generate_poster(project, *, strict_note: str = "", raw_bg_dest=None, scene_
     import tempfile
     from pathlib import Path as _Path
 
+    # FIX 3 — kill-switch totality: when engaged, force the pure deterministic
+    # renderer AND do NOT opt into the integrated poster (so render.py falls to
+    # the deterministic path). Otherwise keep the existing integrated behavior.
+    killswitch = _integrated_killswitch_active()
+    render_model = _effective_render_model(GEN_MODEL)
     had_integrated_env = "FLYER_ALLOW_INTEGRATED_POSTER" in _os.environ
     previous_integrated_env = _os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER", "")
-    if raw_bg_dest is None:
+    if killswitch:
+        # Deterministic render needs no integrated-poster opt-in; leaving it set
+        # would be a no-op for the deterministic path but we clear it for clarity.
+        _os.environ.pop("FLYER_ALLOW_INTEGRATED_POSTER", None)
+    elif raw_bg_dest is None:
         _os.environ["FLYER_ALLOW_INTEGRATED_POSTER"] = "1"
     else:
         _os.environ.pop("FLYER_ALLOW_INTEGRATED_POSTER", None)
@@ -724,7 +751,7 @@ def _generate_poster(project, *, strict_note: str = "", raw_bg_dest=None, scene_
     try:
         with tempfile.TemporaryDirectory() as _td:
             specs = rmod.render_concept_previews(
-                project, _td, model=GEN_MODEL, quality="medium", concept_count=1,
+                project, _td, model=render_model, quality="medium", concept_count=1,
                 repair_instruction=strict_note, scene_direction=scene_direction,
             )
             final = _Path(specs[0].path)

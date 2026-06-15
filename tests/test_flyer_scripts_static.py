@@ -661,3 +661,62 @@ def test_killswitch_totality_every_generative_render_routes_model_through_helper
         "render_source_edit_preview call must pass model=_effective_render_model(...) "
         f"or model=draft_model:\n{offenders}"
     )
+
+
+# ===========================================================================
+# FIX 3 — kill-switch TOTALITY guard for bare_render.py's generative entry.
+# bare_render._generate_poster is a SECOND generative entry point (the live bare
+# flyer path). Its render_concept_previews call MUST also route the model
+# through _effective_render_model so FLYER_INTEGRATED_KILLSWITCH covers it.
+# ===========================================================================
+_BARE_RENDER = REPO / "src" / "agents" / "flyer" / "bare_render.py"
+
+
+def _bare_kwarg_routes_through_killswitch(model_node) -> bool:
+    """True when a bare_render `model=` argument is kill-switch-aware:
+
+    - a call to `_effective_render_model(...)`, or
+    - the once-resolved `render_model` name (assigned from
+      `_effective_render_model(GEN_MODEL)`).
+    """
+    if isinstance(model_node, _ast.Call):
+        func = model_node.func
+        if isinstance(func, _ast.Name) and func.id == "_effective_render_model":
+            return True
+    if isinstance(model_node, _ast.Name) and model_node.id == "render_model":
+        return True
+    return False
+
+
+def test_killswitch_totality_bare_render_routes_model_through_helper():
+    source = _BARE_RENDER.read_text(encoding="utf-8")
+    tree = _ast.parse(source)
+
+    # The once-resolved kill-switch variable must be defined that way, so
+    # accepting a bare `render_model` name is sound.
+    assert "render_model = _effective_render_model(GEN_MODEL)" in source
+
+    offenders = []
+    seen = 0
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Call):
+            continue
+        func = node.func
+        callee = func.id if isinstance(func, _ast.Name) else getattr(func, "attr", "")
+        if callee != "render_concept_previews":
+            continue
+        seen += 1
+        model_kw = next((kw for kw in node.keywords if kw.arg == "model"), None)
+        if model_kw is None:
+            offenders.append((callee, node.lineno, "missing model= kwarg"))
+            continue
+        if not _bare_kwarg_routes_through_killswitch(model_kw.value):
+            rendered = _ast.dump(model_kw.value)
+            offenders.append((callee, node.lineno, f"model= bypasses kill-switch: {rendered}"))
+
+    assert seen >= 1, "expected >=1 render_concept_previews call in bare_render.py"
+    assert not offenders, (
+        "kill-switch bypass detected in bare_render.py — render_concept_previews "
+        "must pass model=_effective_render_model(...) or model=render_model:\n"
+        f"{offenders}"
+    )

@@ -332,6 +332,63 @@ def test_cd_render_uses_overlay_wrapper_not_pillow_only(monkeypatch):
     assert calls["public"] == 0    # Pillow-only public NOT used
 
 
+# ── FIX 3: kill-switch totality across the bare-render generative entry point ──
+
+
+def _fake_rmod_capturing(captured):
+    """A fake render module whose render_concept_previews records the model kwarg
+    and the FLYER_ALLOW_INTEGRATED_POSTER env seen at call time, and writes a
+    concept-preview spec so _generate_poster can read its bytes."""
+    from pathlib import Path as _P
+
+    def _render_concept_previews(project, output_dir, *, model, quality, concept_count,
+                                 repair_instruction="", scene_direction=None):
+        captured["model"] = model
+        captured["integrated_env"] = __import__("os").environ.get("FLYER_ALLOW_INTEGRATED_POSTER")
+        path = _P(output_dir) / "bare-C1-preview.png"
+        path.write_bytes(b"BAREPNG")
+        return [types.SimpleNamespace(path=str(path))]
+
+    def _raw_background_path(final):
+        return str(_P(final).with_suffix(".raw.png"))
+
+    return types.SimpleNamespace(
+        render_concept_previews=_render_concept_previews,
+        _raw_background_path=_raw_background_path,
+    )
+
+
+def test_fix3_bare_generate_poster_killswitch_forces_deterministic(monkeypatch):
+    # FIX 3: with FLYER_INTEGRATED_KILLSWITCH=1, _generate_poster must render with
+    # the pure deterministic renderer AND must NOT force the integrated poster on.
+    monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", "1")
+    monkeypatch.delenv("FLYER_ALLOW_INTEGRATED_POSTER", raising=False)
+    captured = {}
+    monkeypatch.setattr(br, "_render_mod", lambda: _fake_rmod_capturing(captured))
+
+    out = br._generate_poster(object())
+
+    assert out == b"BAREPNG"
+    assert captured["model"] == "deterministic-renderer"
+    # The integrated poster opt-in must NOT be forced on under the kill-switch.
+    assert captured["integrated_env"] != "1"
+
+
+def test_fix3_bare_generate_poster_no_killswitch_keeps_integrated(monkeypatch):
+    # Without the kill-switch the existing behavior is preserved: GEN_MODEL is
+    # used and FLYER_ALLOW_INTEGRATED_POSTER is forced on for the default draft.
+    monkeypatch.delenv("FLYER_INTEGRATED_KILLSWITCH", raising=False)
+    monkeypatch.delenv("FLYER_ALLOW_INTEGRATED_POSTER", raising=False)
+    captured = {}
+    monkeypatch.setattr(br, "_render_mod", lambda: _fake_rmod_capturing(captured))
+
+    out = br._generate_poster(object())
+
+    assert out == b"BAREPNG"
+    assert captured["model"] == br.GEN_MODEL
+    assert captured["integrated_env"] == "1"
+
+
 # ── (d) allowlisted + status="invalid" ⇒ fail-safe, legacy poster NOT called ──
 
 

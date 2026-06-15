@@ -673,6 +673,39 @@ def main() -> int:
             )
         )
         if source_edit_requested:
+            # FIX 5: source-edit has NO deterministic renderer — render.py
+            # dispatches source-edit by PROVIDER (OpenRouter/OpenAI) and would
+            # call the API with model="deterministic-renderer", which errors.
+            # When the integrated kill-switch is engaged, route the source-edit
+            # straight to manual review (operator handles it) instead of
+            # attempting a broken deterministic source-edit render.
+            if _integrated_killswitch_active():
+                now = datetime.now(timezone.utc)
+                manual = make_manual_review(
+                    reason_code="operator_request",
+                    reason="killswitch_source_edit_manual",
+                    detail="killswitch_source_edit_manual: integrated kill-switch active; "
+                           "source-edit has no deterministic renderer — routed to manual review.",
+                    queued_at=now,
+                )
+                with FileLock(Path(str(state_path) + ".lock")):
+                    store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+                    for idx, current in enumerate(store.projects):
+                        if current.project_id == args.project_id:
+                            store.projects[idx] = current.model_copy(update={
+                                "status": "manual_edit_required",
+                                "manual_review": manual,
+                                "updated_at": now,
+                            })
+                            break
+                    atomic_write_text(state_path, store.model_dump_json(indent=2))
+                print(json.dumps({
+                    "project_id": args.project_id,
+                    "source_edit_killswitch_manual": True,
+                    "manual_review_reason_code": "operator_request",
+                    "manual_review_reason": "killswitch_source_edit_manual",
+                }))
+                return 2
             # P0-5: render_source_edit_preview raises FlyerRenderError when the
             # provider key is missing or the image edit endpoint fails. The cf-
             # router preflight catches this at routing time, but operator CLI
@@ -885,7 +918,20 @@ def main() -> int:
             failed_qa = [report for report in qa_reports if report.status != "passed"]
         pending_success_attempt = None
         pending_success_entry = None
-        if failed_qa and not source_edit_requested:
+        # FIX 4: never route a fabrication-bearing failure through the legacy
+        # recovery.py autorepair loop. The legacy classifier marks a set eligible
+        # if ANY missing-copy blocker appears, without rejecting accompanying
+        # `fabricated ...` blockers — and its LLM repair_instruction is not
+        # guaranteed to REMOVE a fabrication. So a mixed `missing fact +
+        # fabricated offer` set must skip legacy autorepair and flow instead to
+        # the fabrication-aware retry (when fabrication-only) or straight to the
+        # deterministic-overlay fallback (when mixed), both of which are
+        # safe-by-construction against fabrications.
+        if (
+            failed_qa
+            and not source_edit_requested
+            and not _qa_failed_has_fabrication(failed_qa)
+        ):
             blockers = [blocker for report in failed_qa for blocker in report.blockers]
             blocker_hash = _sha256_hex("\n".join(blockers))
             decision = classify_flyer_qa_for_autorepair(blockers, current)
@@ -1226,13 +1272,33 @@ def main() -> int:
             fallback_failed_qa = []
             fallback_error = ""
             try:
-                fallback_specs = _render_with_integrated_poster_disabled(lambda: render_concept_previews(
-                    current,
-                    asset_dir,
-                    model=draft_model,
-                    quality=draft_provider.quality,
-                    concept_count=cfg.flyer.concept_count,
-                ))
+                if referee_unavailable_fallback:
+                    # FIX 1: the referee is UNAVAILABLE — there is no QA to catch a
+                    # hallucinated model background, so the fallback MUST be the PURE
+                    # deterministic renderer (Pillow only, no model call). This is
+                    # truly safe-by-construction and needs no QA. Route the model
+                    # through _effective_render_model so the kill-switch stays a
+                    # no-op-consistent override (it resolves to deterministic too).
+                    fallback_specs = render_concept_previews(
+                        current,
+                        asset_dir,
+                        model=_effective_render_model(_DETERMINISTIC_RENDERER_MODEL),
+                        quality=draft_provider.quality,
+                        concept_count=cfg.flyer.concept_count,
+                    )
+                else:
+                    # Other fallback triggers (fabrication-retries-exhausted,
+                    # generation_error) — the referee IS available, so a model-
+                    # generated textless background + overlay is re-QA'd downstream
+                    # and a hallucinated background is caught. Keep the existing
+                    # background-only path.
+                    fallback_specs = _render_with_integrated_poster_disabled(lambda: render_concept_previews(
+                        current,
+                        asset_dir,
+                        model=draft_model,
+                        quality=draft_provider.quality,
+                        concept_count=cfg.flyer.concept_count,
+                    ))
                 fallback_assets = build_asset_manifest(
                     fallback_specs,
                     first_asset_number=next_asset_number(current),

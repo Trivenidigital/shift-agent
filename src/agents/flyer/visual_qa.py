@@ -253,11 +253,43 @@ def _locked_price_set(project: FlyerProject) -> set[str]:
     return out
 
 
+# Fact ids (exact, or `offer:<n>` family) that authorize a promo/offer claim.
+# A plain `item:<n>:price` is a menu price, NOT an offer authorization, so it is
+# deliberately excluded — fabricated non-dollar promo banners must still block on
+# a priced menu that has no real offer fact (Codex FIX 2).
+_OFFER_FACT_IDS = {
+    "offer",
+    "promo",
+    "promotion",
+    "promotion_end",
+    "discount",
+    "deal",
+    "coupon",
+    "sale",
+}
+# Promo terms that, if present in a `pricing_structure` fact's label or value,
+# upgrade it from a plain pricing descriptor to a promo authorization.
+_PRICING_STRUCTURE_PROMO_RE = re.compile(
+    r"offer|promo|discount|deal|sale|combo|free|bogo|buy\b.*\bget\b|%\s*off|limited[\s-]?time",
+    re.IGNORECASE,
+)
+
+
 def _has_offer_fact(project: FlyerProject) -> bool:
+    """True only when the project carries a genuine offer/promo authorization.
+
+    Counts ONLY the canonical offer/promo fact ids (`offer`, `offer:<n>`,
+    `promo`, `promotion`, `promotion_end`, `discount`, `deal`, `coupon`,
+    `sale`). A `pricing_structure` fact authorizes promos ONLY when its label or
+    value carries a promo term. Plain `item:<n>:price` facts and arbitrary
+    `"pric"` substrings do NOT count (Codex FIX 2)."""
     for fact in project.locked_facts:
         fid = fact.fact_id.lower()
-        if fid.startswith("offer") or "offer" in (fact.label or "").lower() \
-           or fid in {"pricing_structure", "promotion_end"} or "pric" in fid:
+        if fid in _OFFER_FACT_IDS or fid.startswith("offer:"):
+            return True
+        if fid == "pricing_structure" and _PRICING_STRUCTURE_PROMO_RE.search(
+            f"{fact.label or ''} {fact.value or ''}"
+        ):
             return True
     return False
 
