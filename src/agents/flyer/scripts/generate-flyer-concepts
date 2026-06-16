@@ -995,9 +995,9 @@ def main() -> int:
         # `fabricated ...` blockers — and its LLM repair_instruction is not
         # guaranteed to REMOVE a fabrication. So a mixed `missing fact +
         # fabricated offer` set must skip legacy autorepair and flow instead to
-        # the fabrication-aware retry (when fabrication-only) or straight to the
-        # deterministic-overlay fallback (when mixed), both of which are
-        # safe-by-construction against fabrications.
+        # the fabrication-aware retry (when fabrication-only) or, when mixed,
+        # straight to manual review — fabrication is a hard-block per operator
+        # Option 4 and is NOT overlay-recoverable.
         if (
             failed_qa
             and not source_edit_requested
@@ -1312,9 +1312,10 @@ def main() -> int:
         # fallback below (now enabled for these blockers by the recoverable-set
         # change). Bounded to ONE attempt; deliberately separate from the
         # fabrication ×2 loop (which it must not disturb) and from the
-        # recovery.py autorepair loop. Fabrication-bearing sets are excluded:
-        # re-rendering a fabricating model risks re-fabricating, so those go
-        # straight to the deterministic overlay (FIX 4 / fabrication path).
+        # recovery.py autorepair loop. Fabrication-bearing sets are excluded
+        # here (and from the overlay fallback): per operator Option 4 a
+        # fabricated price/offer hard-blocks to manual after the bounded
+        # fabrication retry — it is never overlay-recovered.
         content_fallback_reason = ""
         if (
             failed_qa
@@ -1476,9 +1477,9 @@ def main() -> int:
                         concept_count=cfg.flyer.concept_count,
                     )
                 else:
-                    # Other fallback triggers (fabrication-retries-exhausted,
-                    # generation_error, content-miss dropped-names/schedule) — the
-                    # referee IS available, so a model-generated textless
+                    # Other fallback triggers (generation_error, content-miss
+                    # dropped-names/schedule/misspelling) — the referee IS
+                    # available, so a model-generated textless
                     # background + the deterministic overlay (which renders EVERY
                     # item name + the full schedule) is re-QA'd downstream and a
                     # hallucinated background is caught. Keep the existing
