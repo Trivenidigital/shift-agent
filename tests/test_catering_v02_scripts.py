@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -253,7 +254,9 @@ def _requests_to(requests: list[dict], chat_id: str) -> list[dict]:
 
 def test_create_lead_writes_state_and_sends_card(env_dir, bridge_server):
     port, BridgeStub = bridge_server
-    fields = {"headcount": 50, "event_date": "2026-06-15", "menu_preferences": ["vegetarian"]}
+    # Relative future date: the script rejects past event_dates, so a hardcoded
+    # literal is a calendar time-bomb (failed once "today" passed 2026-06-15).
+    fields = {"headcount": 50, "event_date": (date.today() + timedelta(days=30)).isoformat(), "menu_preferences": ["vegetarian"]}
     r = _run_create(env_dir, port, fields)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout.strip().splitlines()[-1])

@@ -358,6 +358,34 @@ def _text_defect_note_blockers(provider_notes: list[str]) -> list[str]:
     ]
 
 
+# Corruption-note matching (placeholder / unreadable / garbled). The vision model
+# commonly returns CLEAN-signal notes that CONTAIN these keywords but NEGATE them
+# ("No unreadable or garbled text.", "No visible placeholders.") — those mean the
+# flyer is fine and must NOT become block-tier blockers (real false-positive that
+# held clean F0159). Mirror _text_defect_note_blockers' negation approach: a note
+# is a corruption blocker only when it AFFIRMS a defect (keyword present AND no
+# nearby negation).
+_CORRUPTION_NOTE_RE = re.compile(r"placeholder|unreadable|garbled", re.IGNORECASE)
+_NEGATED_CORRUPTION_NOTE_RE = re.compile(
+    r"\b(?:no|not|without|none|n/?a|zero|doesn'?t|does\s+not|free\s+of)\b"
+    r".{0,40}\b(?:placeholder|unreadable|garbled)",
+    re.IGNORECASE,
+)
+
+
+def _corruption_note_blockers(provider_notes: list[str]) -> list[str]:
+    """A vision-QA note reporting placeholder/unreadable/garbled VISIBLE text is a
+    block-tier corruption defect (see _BLOCK_TIER_PATTERNS quality_note_corruption).
+    Negation-aware: a note that NEGATES the keyword ("No unreadable or garbled
+    text.", "free of placeholders") is a CLEAN signal, not a defect, and is
+    skipped — only affirmative defect notes become blockers."""
+    return [
+        note
+        for note in provider_notes
+        if _CORRUPTION_NOTE_RE.search(note) and not _NEGATED_CORRUPTION_NOTE_RE.search(note)
+    ]
+
+
 def _price_cents(value: str) -> int | None:
     match = re.search(r"\d+(?:[.,]\d{1,2})?", value or "")
     if not match:
@@ -1659,7 +1687,7 @@ def run_visual_qa(
     blockers.extend(_past_event_date_blockers(project))
     blockers.extend(_inferred_item_coverage_blockers(project, extracted_text))
     blockers.extend(_inferred_intent_count_blockers(project))
-    blockers.extend(note for note in provider_notes if "placeholder" in note.lower() or "unreadable" in note.lower() or "garbled" in note.lower())
+    blockers.extend(_corruption_note_blockers(provider_notes))
     blockers.extend(_text_defect_note_blockers(provider_notes))
     blockers.extend(visible_wrong_brand_blockers(project, extracted_text))
     skip_business_name_exact = _can_skip_exact_business_name(project, normalized, extracted_text)

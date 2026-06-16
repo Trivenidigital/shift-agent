@@ -208,6 +208,135 @@ def test_extract_text_facts_applies_generic_any_item_price_to_all_included_items
     assert all("price any" not in fact.value.lower() for fact in facts)
 
 
+def test_extract_text_facts_splits_colon_item_list_into_item_facts():
+    """Live F0164: a 'N items: a, b, c' colon list (no 'include' verb) must become
+    individual item:N:name facts (priced by the generic 'any item' price), NOT one
+    compound required offer:0 fact the referee can only exact-match."""
+    from agents.flyer.facts import extract_text_facts, facts_by_id
+
+    raw_request = (
+        "Create a flyer for Weekend Specials. Any item $7.99. "
+        "6 famous South Indian items: Idli, Dosa, Vada, Uttapam, Pongal, Sambar. "
+        "Available Saturday & Sunday, 4 PM-8 PM. Phone: +1 732-983-7841"
+    )
+    fields = FlyerRequestFields(
+        event_or_business_name="Weekend Specials",
+        contact_info="+17329837841",
+        notes=raw_request,
+    )
+
+    facts = extract_text_facts(fields, raw_request, message_id="m-f0164")
+    by_id = facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    assert [by_id[f"item:{idx}:name"].value for idx in range(6)] == [
+        "Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar",
+    ]
+    assert [by_id[f"item:{idx}:price"].value for idx in range(6)] == ["$7.99"] * 6
+    # The item list must NOT also be locked as a compound offer fact.
+    assert not any(f.fact_id.startswith("offer:") for f in facts), \
+        [f.fact_id for f in facts if f.fact_id.startswith("offer:")]
+
+
+def test_extract_text_facts_item_list_offer_is_not_locked_as_compound_offer(monkeypatch):
+    """When the semantic provider returns the item list AS an offer (live F0164:
+    offer='6 famous South Indian items: Idli, ...'), it must be split into item
+    facts, not locked as a compound required offer:0 the model can't exact-match."""
+    from agents.flyer import facts as facts_module
+    from agents.flyer.semantic_brief import FlyerSemanticBrief, FlyerSemanticOffer
+
+    def provider(_fields, _raw_request):
+        return FlyerSemanticBrief(
+            campaign_title="Weekend Specials",
+            pricing_structure="Any item $7.99",
+            offers=[FlyerSemanticOffer(
+                "6 famous South Indian items: Idli, Dosa, Vada, Uttapam, Pongal, Sambar"
+            )],
+        )
+
+    monkeypatch.setattr(facts_module, "build_hermes_semantic_brief_provider", lambda: provider)
+
+    raw = (
+        "Create a flyer for Weekend Specials. Any item $7.99. "
+        "6 famous South Indian items: Idli, Dosa, Vada, Uttapam, Pongal, Sambar."
+    )
+    facts = facts_module.extract_text_facts(
+        FlyerRequestFields(contact_info="+17329837841"), raw, message_id="m-f0164b",
+    )
+    by_id = facts_module.facts_by_id(type("P", (), {"locked_facts": facts})())
+
+    # No compound offer fact carrying the item list.
+    assert not any(f.fact_id.startswith("offer:") for f in facts), \
+        [f.fact_id for f in facts if f.fact_id.startswith("offer:")]
+    # The six items are individual item facts.
+    assert [by_id[f"item:{idx}:name"].value for idx in range(6)] == [
+        "Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar",
+    ]
+
+
+@pytest.mark.parametrize("offer_text", [
+    "Buy 2 items - get 1 free and free chai",        # dash, not a colon menu list
+    "Spend $20 on any items: get a free dessert and free chai",  # colon + benefit clause
+    "Free Masala Chai with any purchase above $12",  # plain offer
+])
+def test_extract_text_facts_offer_benefit_clause_is_not_split_into_items(monkeypatch, offer_text):
+    """Guard (Codex): an offer that merely contains 'items' + 'and' must NOT be
+    mistaken for an 'items: a, b, c' menu list and split. It stays offer:0."""
+    from agents.flyer import facts as facts_module
+    from agents.flyer.semantic_brief import FlyerSemanticBrief, FlyerSemanticOffer
+
+    def provider(_fields, _raw_request):
+        return FlyerSemanticBrief(campaign_title="Promo", offers=[FlyerSemanticOffer(offer_text)])
+
+    monkeypatch.setattr(facts_module, "build_hermes_semantic_brief_provider", lambda: provider)
+    facts = facts_module.extract_text_facts(
+        FlyerRequestFields(), f"Create a flyer. {offer_text}.", profile_business_name="Lakshmi's Kitchen",
+    )
+    by_id = facts_module.facts_by_id(type("P", (), {"locked_facts": facts})())
+    assert by_id["offer:0"].value == offer_text
+
+
+def test_extract_text_facts_item_list_with_free_and_with_members_still_splits(monkeypatch):
+    """Codex NIT: the benefit guard is per-member, so a clean menu where one dish
+    contains 'free' and another contains 'with' is NOT cross-matched as an offer."""
+    from agents.flyer import facts as facts_module
+    from agents.flyer.semantic_brief import FlyerSemanticBrief, FlyerSemanticOffer
+
+    def provider(_fields, _raw_request):
+        return FlyerSemanticBrief(
+            campaign_title="Breakfast",
+            offers=[FlyerSemanticOffer("3 items: Gluten Free Dosa, Poori with Aloo, Plain Idli")],
+        )
+
+    monkeypatch.setattr(facts_module, "build_hermes_semantic_brief_provider", lambda: provider)
+    raw = "Create a flyer for Breakfast. 3 items: Gluten Free Dosa, Poori with Aloo, Plain Idli."
+    facts = facts_module.extract_text_facts(FlyerRequestFields(), raw, profile_business_name="Lakshmi's Kitchen")
+    by_id = facts_module.facts_by_id(type("P", (), {"locked_facts": facts})())
+    assert not any(f.fact_id.startswith("offer:") for f in facts)
+    assert [by_id[f"item:{idx}:name"].value for idx in range(3)] == [
+        "Gluten Free Dosa", "Poori with Aloo", "Plain Idli",
+    ]
+
+
+def test_extract_text_facts_keeps_genuine_offer_not_an_item_list(monkeypatch):
+    """Guard: a real offer that is NOT an 'items: a, b, c' menu list must still
+    lock as offer:0 (the split must not swallow legitimate offers)."""
+    from agents.flyer import facts as facts_module
+    from agents.flyer.semantic_brief import FlyerSemanticBrief, FlyerSemanticOffer
+
+    def provider(_fields, _raw_request):
+        return FlyerSemanticBrief(
+            campaign_title="Weekend Snack Box",
+            pricing_structure="Any item $7.99",
+            offers=[FlyerSemanticOffer("Free Masala Chai with any purchase above $12")],
+        )
+
+    monkeypatch.setattr(facts_module, "build_hermes_semantic_brief_provider", lambda: provider)
+    raw = "Create a flyer for Weekend Snack Box, any item $7.99. Free Masala Chai with any purchase above $12."
+    facts = facts_module.extract_text_facts(FlyerRequestFields(), raw, profile_business_name="Lakshmi's Kitchen")
+    by_id = facts_module.facts_by_id(type("P", (), {"locked_facts": facts})())
+    assert by_id["offer:0"].value == "Free Masala Chai with any purchase above $12"
+
+
 def test_extract_text_facts_handles_compact_menu_price_shorthand():
     from agents.flyer.facts import extract_text_facts, facts_by_id
 

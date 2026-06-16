@@ -241,7 +241,45 @@ def _effective_render_model(model: str) -> str:
     return model
 
 
-def _qa_failed_exact_text_recoverable(reports) -> bool:
+_ITEM_PRICE_MISMATCH_RE = re.compile(r"^item price mismatch: item:(?P<index>\d+) expected ")
+
+
+def _qa_failed_exact_text_recoverable(reports, *, locked_fact_ids=None) -> bool:
+    """Operator Option 4 (2026-06-15 safety net): partition QA blockers into a
+    RECOVERABLE class (a corrective re-render and/or the deterministic overlay
+    can correct the rendered text from authoritative locked_facts) and a
+    DANGEROUS class that must HARD-BLOCK to manual review. Returns True only when
+    EVERY blocker is recoverable; a single dangerous (or unrecognized) blocker
+    poisons the set → manual.
+
+    RECOVERABLE — the deterministic overlay redraws EVERY name/price/fact from
+    locked_facts, so it cannot reproduce a missing/dropped/misspelled/duplicated
+    rendering of AUTHORIZED text:
+      - missing required visible fact / item count (incl. schedule, location)
+      - dropped item NAMES ("inferred item not rendered: ...", live F0157)
+      - duplicated / near-duplicated items
+      - vision-QA misspelling/duplication defects ("visible text defect reported
+        by QA: 'Uttap' ...", live F0160/F0162) — overlay redraws correct text
+      - item price mismatch ("item price mismatch: item:N expected …") — ONLY
+        when item:N:price is a LOCKED fact (operator 2026-06-16, live F0165).
+        Such a mismatch is the price-corollary of a dropped/mis-rendered item:
+        the overlay redraws item N at its EXACT locked price (the customer's own
+        stated price), so it can only ship that value — never a fabricated one.
+        Requires `locked_fact_ids`; if the expected price is NOT locked, it is
+        treated as DANGEROUS (hard-block).
+
+    DANGEROUS — deliberately NOT recoverable here, so they fall through to manual
+    review (operator: "wrong price/phone, fabricated offer remain hard-blocks").
+    These are money-/contact-sensitive — a wrong value reaching the customer is
+    real business harm, and a fabricating/mis-rendering model is a signal a human
+    should see (the brief or the locked facts themselves may be wrong):
+      - fabricated price / fabricated offer claim (not backed by locked_facts)
+      - unverified phone number visible (a phone that is NOT the registered one)
+    A fabrication-only set still gets the bounded fabrication corrective retry
+    upstream; only on its exhaustion does it reach here and hard-block to manual.
+    All classify as block-tier severity, so a surviving dangerous blocker routes
+    to manual_edit_required (never delivered_with_warning).
+    """
     blockers = [
         str(blocker or "").strip()
         for report in reports
@@ -250,19 +288,37 @@ def _qa_failed_exact_text_recoverable(reports) -> bool:
     ]
     if not blockers:
         return False
+    locked = set(locked_fact_ids or ())
     recoverable_prefixes = (
         "missing required visible fact:",
         "missing required visible item count:",
         "duplicate item visible:",
         "near-duplicate item visible:",
-        "unverified phone number visible:",
-        # 2026-06-14 (4a): fabrication block-tier blockers are recoverable via
-        # the deterministic-overlay fallback — the overlay renders ONLY the exact
-        # locked facts, so it cannot reproduce a fabricated price/offer claim.
-        "fabricated price visible:",
-        "fabricated offer claim visible:",
+        # 2026-06-15 (Option 4): a vision-QA misspelling/duplication defect
+        # ("visible text defect reported by QA: 'Uttap' ...", live F0160/F0162)
+        # is recoverable — the deterministic overlay redraws every name/price
+        # from locked_facts and so cannot reproduce a misspelling. Without this,
+        # ONE such blocker poisoned the whole set → straight to manual.
+        "visible text defect reported by QA:",
+        # 2026-06-15: a generative model that paints food photos + prices but
+        # drops most item NAMES ("inferred item not rendered: Idli/Vada/...") is
+        # recoverable via the deterministic overlay, which renders EVERY item
+        # name + the full schedule (live F0157).
+        "inferred item not rendered:",
     )
-    return all(blocker.startswith(recoverable_prefixes) for blocker in blockers)
+    for blocker in blockers:
+        if blocker.startswith(recoverable_prefixes):
+            continue
+        # 2026-06-16 (live F0165): an item price mismatch is recoverable ONLY when
+        # the expected price is a LOCKED item:N:price — then the deterministic
+        # overlay redraws item N at the customer's own stated price (never a
+        # fabricated one). If the expected price is not locked, fall through to
+        # DANGEROUS so it hard-blocks to manual.
+        match = _ITEM_PRICE_MISMATCH_RE.match(blocker)
+        if match and f"item:{match.group('index')}:price" in locked:
+            continue
+        return False
+    return True
 
 
 _FABRICATION_BLOCKER_PREFIXES = (
@@ -962,9 +1018,9 @@ def main() -> int:
         # `fabricated ...` blockers — and its LLM repair_instruction is not
         # guaranteed to REMOVE a fabrication. So a mixed `missing fact +
         # fabricated offer` set must skip legacy autorepair and flow instead to
-        # the fabrication-aware retry (when fabrication-only) or straight to the
-        # deterministic-overlay fallback (when mixed), both of which are
-        # safe-by-construction against fabrications.
+        # the fabrication-aware retry (when fabrication-only) or, when mixed,
+        # straight to manual review — fabrication is a hard-block per operator
+        # Option 4 and is NOT overlay-recoverable.
         if (
             failed_qa
             and not source_edit_requested
@@ -1157,8 +1213,10 @@ def main() -> int:
         # Hermes planner — a strictly-bounded best-effort pass. On success, keep
         # the corrected render and stop; on a render error or a non-fabrication
         # failure, stop retrying; if still fabrication-blocked after 2 attempts,
-        # leave the ORIGINAL failed_qa intact so the deterministic-overlay
-        # fallback (which fabrication blockers are now eligible for) handles it.
+        # leave the ORIGINAL failed_qa intact so the flyer HARD-BLOCKS to manual
+        # review (operator Option 4: fabrication is NOT overlay-recoverable — a
+        # fabricated price/offer must get human eyes, never an auto-shipped
+        # de-fabricated overlay).
         _FABRICATION_MAX_CORRECTIVE_ATTEMPTS = 2
         # §6 fallback reason set by the fabrication retry loop (if it runs):
         # "" = no fallback needed (a retry passed); "retries_exhausted" /
@@ -1266,6 +1324,108 @@ def main() -> int:
                 # Still fabrication-only-blocked: refresh the target blockers and
                 # loop again (bounded by the range).
                 current_fab_failed = fab_failed_qa
+        # 2026-06-15 content-miss corrective retry (retry-first, ONCE): when the
+        # integrated render is content-recoverable (every blocker is in the
+        # recoverable set — e.g. dropped item NAMES + missing schedule, live
+        # F0157) but is NOT a fabrication case, attempt ONE corrective re-render
+        # that explicitly re-states every item name + the full schedule + the
+        # required facts before falling back to the deterministic overlay. A
+        # passing retry keeps the BEAUTIFUL integrated render; a still-blocked
+        # retry leaves the ORIGINAL failed_qa for the deterministic-overlay
+        # fallback below (now enabled for these blockers by the recoverable-set
+        # change). Bounded to ONE attempt; deliberately separate from the
+        # fabrication ×2 loop (which it must not disturb) and from the
+        # recovery.py autorepair loop. Fabrication-bearing sets are excluded
+        # here (and from the overlay fallback): per operator Option 4 a
+        # fabricated price/offer hard-blocks to manual after the bounded
+        # fabrication retry — it is never overlay-recovered.
+        content_fallback_reason = ""
+        if (
+            failed_qa
+            and not source_edit_requested
+            and not fab_fallback_reason
+            and not _qa_has_provider_unavailable(failed_qa)
+            and not _qa_failed_has_fabrication(failed_qa)
+            and not _qa_failed_is_fabrication_only(failed_qa)
+            and _qa_failed_exact_text_recoverable(failed_qa, locked_fact_ids={f.fact_id for f in current.locked_facts})
+        ):
+            # Repair dict: ALL item names + prices + every required fact. Item
+            # NAMES are required=False today, so they are added explicitly here so
+            # build_repair_instruction's "render ONLY these exact facts" clause
+            # lists every item name and the full schedule the model must render.
+            content_locked = {
+                f.fact_id: f.value
+                for f in current.locked_facts
+                if getattr(f, "required", False)
+                or f.fact_id.startswith("item:")
+            }
+            content_blockers = [blocker for report in failed_qa for blocker in report.blockers]
+            content_instruction = build_repair_instruction(content_blockers, content_locked)
+            content_specs = []
+            content_assets = []
+            content_qa_reports = []
+            content_failed_qa = []
+            content_error = ""
+            content_fallback_reason = "retries_exhausted"
+            try:
+                content_specs = render_concept_previews(
+                    current,
+                    asset_dir,
+                    model=draft_model,
+                    quality=draft_provider.quality,
+                    concept_count=cfg.flyer.concept_count,
+                    repair_instruction=content_instruction,
+                )
+                content_assets = build_asset_manifest(
+                    content_specs,
+                    first_asset_number=next_asset_number(current),
+                    source="rendered",
+                    original_message_id=current.original_message_id,
+                )
+                for asset, spec in zip(content_assets, content_specs):
+                    _write_sidecar_visual_qa_fixture(current, spec.path)
+                    report = run_visual_qa(
+                        current,
+                        spec.path,
+                        output_format=spec.output_format,
+                        asset_id=asset.asset_id,
+                    )
+                    write_visual_qa_report(report, spec.path)
+                    content_qa_reports.append(report)
+                content_failed_qa = [report for report in content_qa_reports if report.status != "passed"]
+            except Exception as exc:
+                content_error = f"{exc.__class__.__name__}: {str(exc)[:400]}"
+            if not content_error and not content_failed_qa:
+                # Retry passed QA — keep the corrected (still-integrated) render.
+                preserve_paths = {
+                    candidate
+                    for spec in content_specs
+                    for candidate in _render_artifact_candidates(spec)
+                }
+                _cleanup_render_artifacts(specs, preserve_paths=preserve_paths)
+                specs = content_specs
+                assets = content_assets
+                qa_reports = content_qa_reports
+                failed_qa = []
+                content_fallback_reason = ""  # passed → no fallback
+                if integrated_path_attempted:
+                    integrated_attempt_count = 2  # initial + 1 corrective
+                    integrated_passed_emitted = True
+                    _audit_append(audit_log_path, FlyerIntegratedPassed(
+                        ts=now,
+                        project_id=current.project_id,
+                        project_version=current.version,
+                        attempts=integrated_attempt_count,
+                    ))
+            else:
+                # Retry failed (or raised): discard its artifacts, keep the
+                # ORIGINAL specs for the downstream deterministic-overlay fallback.
+                preserve_paths = {
+                    candidate
+                    for spec in specs
+                    for candidate in _render_artifact_candidates(spec)
+                }
+                _cleanup_render_artifacts(content_specs, preserve_paths=preserve_paths)
         # 4b: when the referee could not verify the concept render
         # (status=provider_unavailable — OCR/vision down) route to the
         # deterministic-overlay fallback, which is safe-by-construction (overlay
@@ -1283,24 +1443,39 @@ def main() -> int:
         # integrated flyer). Track whether that case stays unresolved so the
         # final state machine can force manual review instead.
         referee_unavailable_unresolved = referee_unavailable_fallback
+        # 2026-06-15 fail-closed: when the content-miss recovery path was TAKEN
+        # (the content corrective retry ran and still blocked → content_fallback_
+        # reason is truthy), a content-deficient flyer must NOT ship-with-warning
+        # if the deterministic-overlay fallback ALSO fails QA. Track it the same
+        # way as referee_unavailable_unresolved: True now, cleared only when the
+        # overlay fallback ships; if it survives to the state machine, force
+        # manual. (A plain warn that never went through content recovery keeps
+        # content_fallback_reason == "" → stays a normal warn-tier delivery.)
+        content_recovery_unresolved = bool(content_fallback_reason)
         # §6: resolve the single deterministic-fallback reason for this run.
         # Priority: referee-unavailable > fabrication-retry outcome > a residual
         # fabrication blocker that bypassed the fabrication-only retry (mixed
-        # recoverable set). Non-fabrication recoverable fallbacks (e.g.
-        # missing-fact only) are NOT a §6 integrated event → reason stays "".
+        # recoverable set) > content-miss retry outcome (dropped item names /
+        # missing schedule). Non-fabrication recoverable fallbacks that did NOT
+        # run the content retry are NOT a §6 integrated event → reason stays "".
         if referee_unavailable_fallback:
             integrated_fallback_reason = "referee_unavailable"
         elif fab_fallback_reason:
             integrated_fallback_reason = fab_fallback_reason
         elif bool(failed_qa) and not source_edit_requested and _qa_failed_has_fabrication(failed_qa):
             integrated_fallback_reason = "fabrication"
+        elif content_fallback_reason:
+            # Content-miss corrective retry ran and still blocked → the
+            # deterministic overlay ships. Reuse "retries_exhausted" (no schema
+            # change; semantically: the corrective retry was exhausted).
+            integrated_fallback_reason = content_fallback_reason
         else:
             integrated_fallback_reason = ""
         if (
             failed_qa
             and not source_edit_requested
             and (
-                _qa_failed_exact_text_recoverable(failed_qa)
+                _qa_failed_exact_text_recoverable(failed_qa, locked_fact_ids={f.fact_id for f in current.locked_facts})
                 or referee_unavailable_fallback
             )
         ):
@@ -1325,10 +1500,12 @@ def main() -> int:
                         concept_count=cfg.flyer.concept_count,
                     )
                 else:
-                    # Other fallback triggers (fabrication-retries-exhausted,
-                    # generation_error) — the referee IS available, so a model-
-                    # generated textless background + overlay is re-QA'd downstream
-                    # and a hallucinated background is caught. Keep the existing
+                    # Other fallback triggers (generation_error, content-miss
+                    # dropped-names/schedule/misspelling) — the referee IS
+                    # available, so a model-generated textless
+                    # background + the deterministic overlay (which renders EVERY
+                    # item name + the full schedule) is re-QA'd downstream and a
+                    # hallucinated background is caught. Keep the existing
                     # background-only path.
                     fallback_specs = _render_with_integrated_poster_disabled(lambda: render_concept_previews(
                         current,
@@ -1390,6 +1567,9 @@ def main() -> int:
                 failed_qa = []
                 # Fallback shipped — the referee-unavailable case is resolved.
                 referee_unavailable_unresolved = False
+                # Fallback shipped (overlay rendered all names/schedule) — the
+                # content-miss recovery is resolved too.
+                content_recovery_unresolved = False
                 # 4b observable marker (anti-silent): only when this fallback was
                 # taken because the concept-path referee was UNAVAILABLE. Emit an
                 # audit row AND stamp the note into the persisted QA reports so the
@@ -1466,6 +1646,13 @@ def main() -> int:
                 # fallback could not ship) must go to manual — never warn-tier
                 # delivery of the unverified integrated render.
                 if referee_unavailable_unresolved:
+                    has_block_severity = True
+                # 2026-06-15 fail-closed: a content-miss recovery that ran the
+                # corrective retry AND the deterministic-overlay fallback, with
+                # both still failing QA, must go to manual — never ship a
+                # content-deficient flyer as delivered_with_warning, even when the
+                # residual blockers are warn-tier only (e.g. missing schedule).
+                if content_recovery_unresolved:
                     has_block_severity = True
                 if not has_block_severity:
                     if not is_flyer_transition_allowed(current.status, "delivered_with_warning"):
