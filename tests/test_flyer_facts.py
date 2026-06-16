@@ -295,6 +295,28 @@ def test_extract_text_facts_offer_benefit_clause_is_not_split_into_items(monkeyp
     assert by_id["offer:0"].value == offer_text
 
 
+def test_extract_text_facts_item_list_with_free_and_with_members_still_splits(monkeypatch):
+    """Codex NIT: the benefit guard is per-member, so a clean menu where one dish
+    contains 'free' and another contains 'with' is NOT cross-matched as an offer."""
+    from agents.flyer import facts as facts_module
+    from agents.flyer.semantic_brief import FlyerSemanticBrief, FlyerSemanticOffer
+
+    def provider(_fields, _raw_request):
+        return FlyerSemanticBrief(
+            campaign_title="Breakfast",
+            offers=[FlyerSemanticOffer("3 items: Gluten Free Dosa, Poori with Aloo, Plain Idli")],
+        )
+
+    monkeypatch.setattr(facts_module, "build_hermes_semantic_brief_provider", lambda: provider)
+    raw = "Create a flyer for Breakfast. 3 items: Gluten Free Dosa, Poori with Aloo, Plain Idli."
+    facts = facts_module.extract_text_facts(FlyerRequestFields(), raw, profile_business_name="Lakshmi's Kitchen")
+    by_id = facts_module.facts_by_id(type("P", (), {"locked_facts": facts})())
+    assert not any(f.fact_id.startswith("offer:") for f in facts)
+    assert [by_id[f"item:{idx}:name"].value for idx in range(3)] == [
+        "Gluten Free Dosa", "Poori with Aloo", "Plain Idli",
+    ]
+
+
 def test_extract_text_facts_keeps_genuine_offer_not_an_item_list(monkeypatch):
     """Guard: a real offer that is NOT an 'items: a, b, c' menu list must still
     lock as offer:0 (the split must not swallow legitimate offers)."""

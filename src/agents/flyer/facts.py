@@ -504,11 +504,14 @@ def _item_list_names(text: str) -> list[str]:
     listing = match.group("list").strip()
     if not ("," in listing or re.search(r"\band\b", listing, flags=re.IGNORECASE)):
         return []
-    if _OFFER_BENEFIT_RE.search(listing):
-        return []
     listing = re.sub(r"\b(?:and|plus)\b", ",", listing, flags=re.IGNORECASE)
-    names = [part.strip() for part in re.split(r"[,;/]+", listing)]
-    return [name for name in names if name]
+    names = [part.strip() for part in re.split(r"[,;/]+", listing) if part.strip()]
+    # Offer/benefit clause → not a menu list. Checked PER MEMBER so a clean menu
+    # where one dish has "free" and another has "with" ("Gluten Free Dosa, Poori
+    # with Aloo") is not cross-matched (Codex NIT 2026-06-16).
+    if any(_OFFER_BENEFIT_RE.search(name) for name in names):
+        return []
+    return names
 
 
 def _item_name_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
