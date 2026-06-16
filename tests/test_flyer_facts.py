@@ -273,6 +273,28 @@ def test_extract_text_facts_item_list_offer_is_not_locked_as_compound_offer(monk
     ]
 
 
+@pytest.mark.parametrize("offer_text", [
+    "Buy 2 items - get 1 free and free chai",        # dash, not a colon menu list
+    "Spend $20 on any items: get a free dessert and free chai",  # colon + benefit clause
+    "Free Masala Chai with any purchase above $12",  # plain offer
+])
+def test_extract_text_facts_offer_benefit_clause_is_not_split_into_items(monkeypatch, offer_text):
+    """Guard (Codex): an offer that merely contains 'items' + 'and' must NOT be
+    mistaken for an 'items: a, b, c' menu list and split. It stays offer:0."""
+    from agents.flyer import facts as facts_module
+    from agents.flyer.semantic_brief import FlyerSemanticBrief, FlyerSemanticOffer
+
+    def provider(_fields, _raw_request):
+        return FlyerSemanticBrief(campaign_title="Promo", offers=[FlyerSemanticOffer(offer_text)])
+
+    monkeypatch.setattr(facts_module, "build_hermes_semantic_brief_provider", lambda: provider)
+    facts = facts_module.extract_text_facts(
+        FlyerRequestFields(), f"Create a flyer. {offer_text}.", profile_business_name="Lakshmi's Kitchen",
+    )
+    by_id = facts_module.facts_by_id(type("P", (), {"locked_facts": facts})())
+    assert by_id["offer:0"].value == offer_text
+
+
 def test_extract_text_facts_keeps_genuine_offer_not_an_item_list(monkeypatch):
     """Guard: a real offer that is NOT an 'items: a, b, c' menu list must still
     lock as offer:0 (the split must not swallow legitimate offers)."""

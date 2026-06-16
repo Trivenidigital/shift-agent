@@ -475,8 +475,17 @@ def _schedule_fact(text: str, *, message_id: str = "") -> FlyerLockedFact | None
 # referee match each name and the recovery/deterministic overlay redraw a
 # misspelled/dropped name — instead of fail-closing the whole flyer on one
 # un-matchable compound string (live F0164, 2026-06-16).
+# Delimiter is COLON-ONLY (operator spec "N items: a, b, c"). A hyphen/dash after
+# "items" is NOT accepted: "Buy 2 items - get 1 free and free chai" is an offer, not
+# a menu, and a dash delimiter would wrongly split it (Codex 2026-06-16).
 _ITEM_LIST_COLON_RE = re.compile(
-    r"\bitems?\s*[:–—-]\s+(?P<list>[A-Za-z][^.;\n]*)",
+    r"\bitems?\s*:\s+(?P<list>[A-Za-z][^.;\n]*)",
+    re.IGNORECASE,
+)
+# An offer/benefit clause (even after "items:") is NOT a menu list — keep it as an
+# offer. Catches "get 1 free", "buy ... get", "$/%", "N off/free", "free ... with".
+_OFFER_BENEFIT_RE = re.compile(
+    r"\$|%|\b\d+\s*(?:off|free)\b|\b(?:buy|spend|order|purchase)\b|\bget\b.*\bfree\b|\bfree\b.*\b(?:with|on|above|over)\b",
     re.IGNORECASE,
 )
 
@@ -485,15 +494,17 @@ def _item_list_names(text: str) -> list[str]:
     """Return the individual item names from a 'N items: a, b, c' colon list.
 
     Returns [] unless the text contains an ``items:``-introduced list with at least
-    two members (a comma or 'and'); a single trailing phrase is not a menu list, so
-    a genuine offer that merely mentions "items" is left untouched. Names are NOT
-    cleaned here — callers run them through ``add_item`` (which strips connectors,
-    rejects prices/identity, and dedups)."""
+    two members (a comma or 'and') AND the list reads like dish names rather than an
+    offer/benefit clause. A genuine offer that merely mentions "items" is left
+    untouched. Names are NOT cleaned here — callers run them through ``add_item``
+    (which strips connectors, rejects prices/identity, and dedups)."""
     match = _ITEM_LIST_COLON_RE.search(text or "")
     if not match:
         return []
     listing = match.group("list").strip()
     if not ("," in listing or re.search(r"\band\b", listing, flags=re.IGNORECASE)):
+        return []
+    if _OFFER_BENEFIT_RE.search(listing):
         return []
     listing = re.sub(r"\b(?:and|plus)\b", ",", listing, flags=re.IGNORECASE)
     names = [part.strip() for part in re.split(r"[,;/]+", listing)]
