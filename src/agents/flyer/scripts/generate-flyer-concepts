@@ -241,7 +241,10 @@ def _effective_render_model(model: str) -> str:
     return model
 
 
-def _qa_failed_exact_text_recoverable(reports) -> bool:
+_ITEM_PRICE_MISMATCH_RE = re.compile(r"^item price mismatch: item:(?P<index>\d+) expected ")
+
+
+def _qa_failed_exact_text_recoverable(reports, *, locked_fact_ids=None) -> bool:
     """Operator Option 4 (2026-06-15 safety net): partition QA blockers into a
     RECOVERABLE class (a corrective re-render and/or the deterministic overlay
     can correct the rendered text from authoritative locked_facts) and a
@@ -257,6 +260,13 @@ def _qa_failed_exact_text_recoverable(reports) -> bool:
       - duplicated / near-duplicated items
       - vision-QA misspelling/duplication defects ("visible text defect reported
         by QA: 'Uttap' ...", live F0160/F0162) — overlay redraws correct text
+      - item price mismatch ("item price mismatch: item:N expected …") — ONLY
+        when item:N:price is a LOCKED fact (operator 2026-06-16, live F0165).
+        Such a mismatch is the price-corollary of a dropped/mis-rendered item:
+        the overlay redraws item N at its EXACT locked price (the customer's own
+        stated price), so it can only ship that value — never a fabricated one.
+        Requires `locked_fact_ids`; if the expected price is NOT locked, it is
+        treated as DANGEROUS (hard-block).
 
     DANGEROUS — deliberately NOT recoverable here, so they fall through to manual
     review (operator: "wrong price/phone, fabricated offer remain hard-blocks").
@@ -267,8 +277,8 @@ def _qa_failed_exact_text_recoverable(reports) -> bool:
       - unverified phone number visible (a phone that is NOT the registered one)
     A fabrication-only set still gets the bounded fabrication corrective retry
     upstream; only on its exhaustion does it reach here and hard-block to manual.
-    All three classify as block-tier severity, so a surviving dangerous blocker
-    routes to manual_edit_required (never delivered_with_warning).
+    All classify as block-tier severity, so a surviving dangerous blocker routes
+    to manual_edit_required (never delivered_with_warning).
     """
     blockers = [
         str(blocker or "").strip()
@@ -278,6 +288,7 @@ def _qa_failed_exact_text_recoverable(reports) -> bool:
     ]
     if not blockers:
         return False
+    locked = set(locked_fact_ids or ())
     recoverable_prefixes = (
         "missing required visible fact:",
         "missing required visible item count:",
@@ -295,7 +306,19 @@ def _qa_failed_exact_text_recoverable(reports) -> bool:
         # name + the full schedule (live F0157).
         "inferred item not rendered:",
     )
-    return all(blocker.startswith(recoverable_prefixes) for blocker in blockers)
+    for blocker in blockers:
+        if blocker.startswith(recoverable_prefixes):
+            continue
+        # 2026-06-16 (live F0165): an item price mismatch is recoverable ONLY when
+        # the expected price is a LOCKED item:N:price — then the deterministic
+        # overlay redraws item N at the customer's own stated price (never a
+        # fabricated one). If the expected price is not locked, fall through to
+        # DANGEROUS so it hard-blocks to manual.
+        match = _ITEM_PRICE_MISMATCH_RE.match(blocker)
+        if match and f"item:{match.group('index')}:price" in locked:
+            continue
+        return False
+    return True
 
 
 _FABRICATION_BLOCKER_PREFIXES = (
@@ -1324,7 +1347,7 @@ def main() -> int:
             and not _qa_has_provider_unavailable(failed_qa)
             and not _qa_failed_has_fabrication(failed_qa)
             and not _qa_failed_is_fabrication_only(failed_qa)
-            and _qa_failed_exact_text_recoverable(failed_qa)
+            and _qa_failed_exact_text_recoverable(failed_qa, locked_fact_ids={f.fact_id for f in current.locked_facts})
         ):
             # Repair dict: ALL item names + prices + every required fact. Item
             # NAMES are required=False today, so they are added explicitly here so
@@ -1452,7 +1475,7 @@ def main() -> int:
             failed_qa
             and not source_edit_requested
             and (
-                _qa_failed_exact_text_recoverable(failed_qa)
+                _qa_failed_exact_text_recoverable(failed_qa, locked_fact_ids={f.fact_id for f in current.locked_facts})
                 or referee_unavailable_fallback
             )
         ):

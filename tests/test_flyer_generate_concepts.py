@@ -2902,6 +2902,63 @@ def test_qa_recoverable_false_for_inferred_item_mixed_with_unrecoverable(monkeyp
     assert module._qa_failed_exact_text_recoverable([report]) is False
 
 
+# --- 2026-06-16 (live F0165): item price mismatch is recoverable ONLY when the ---
+# --- expected price is a LOCKED item:N:price (overlay redraws the customer's ----
+# --- own stated price). Otherwise it stays a DANGEROUS hard-block. -------------
+
+def test_qa_recoverable_true_for_item_price_mismatch_when_price_locked(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=["item price mismatch: item:2 expected Vada $7.99"])
+    assert module._qa_failed_exact_text_recoverable(
+        [report], locked_fact_ids={"item:2:name", "item:2:price"}
+    ) is True
+
+
+def test_qa_recoverable_false_for_item_price_mismatch_when_price_not_locked(monkeypatch):
+    # Expected price is NOT a locked fact → cannot trust the overlay to redraw the
+    # right value → hard-block to manual.
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=["item price mismatch: item:2 expected Vada $7.99"])
+    assert module._qa_failed_exact_text_recoverable(
+        [report], locked_fact_ids={"item:2:name"}
+    ) is False
+
+
+def test_qa_recoverable_false_for_item_price_mismatch_without_locked_ids(monkeypatch):
+    # No locked_fact_ids supplied (conservative default) → not recoverable.
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=["item price mismatch: item:2 expected Vada $7.99"])
+    assert module._qa_failed_exact_text_recoverable([report]) is False
+
+
+def test_qa_recoverable_true_for_live_f0165_shape(monkeypatch):
+    # Exact live F0165: dropped items → missing item names + item price mismatch,
+    # all with locked item:N:price → recoverable → recover/overlay → ship.
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=[
+        "missing required visible fact: item:2:name",
+        "missing required visible fact: item:3:name",
+        "missing required visible fact: item:4:name",
+        "item price mismatch: item:2 expected Vada $7.99",
+        "item price mismatch: item:3 expected Uttapam $7.99",
+        "item price mismatch: item:4 expected Pongal $7.99",
+    ])
+    locked = {f"item:{i}:{k}" for i in range(6) for k in ("name", "price")}
+    assert module._qa_failed_exact_text_recoverable([report], locked_fact_ids=locked) is True
+
+
+def test_qa_recoverable_false_for_item_price_mismatch_mixed_with_fabrication(monkeypatch):
+    # Even with a locked expected price, a co-occurring fabricated price hard-blocks.
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=[
+        "item price mismatch: item:2 expected Vada $7.99",
+        "fabricated price visible: $19.99",
+    ])
+    assert module._qa_failed_exact_text_recoverable(
+        [report], locked_fact_ids={"item:2:price"}
+    ) is False
+
+
 # --- 4a: _qa_failed_is_fabrication_only ------------------------------------
 
 def test_fabrication_only_true_for_price_and_offer(monkeypatch):
