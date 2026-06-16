@@ -469,6 +469,37 @@ def _schedule_fact(text: str, *, message_id: str = "") -> FlyerLockedFact | None
     return None
 
 
+# A "N items: a, b, c" colon list (e.g. "6 famous South Indian items: Idli, Dosa,
+# Vada, Uttapam, Pongal, Sambar") is a MENU, not one offer. Splitting it into
+# individual item:N:name facts (instead of one compound required offer:0) lets the
+# referee match each name and the recovery/deterministic overlay redraw a
+# misspelled/dropped name — instead of fail-closing the whole flyer on one
+# un-matchable compound string (live F0164, 2026-06-16).
+_ITEM_LIST_COLON_RE = re.compile(
+    r"\bitems?\s*[:–—-]\s+(?P<list>[A-Za-z][^.;\n]*)",
+    re.IGNORECASE,
+)
+
+
+def _item_list_names(text: str) -> list[str]:
+    """Return the individual item names from a 'N items: a, b, c' colon list.
+
+    Returns [] unless the text contains an ``items:``-introduced list with at least
+    two members (a comma or 'and'); a single trailing phrase is not a menu list, so
+    a genuine offer that merely mentions "items" is left untouched. Names are NOT
+    cleaned here — callers run them through ``add_item`` (which strips connectors,
+    rejects prices/identity, and dedups)."""
+    match = _ITEM_LIST_COLON_RE.search(text or "")
+    if not match:
+        return []
+    listing = match.group("list").strip()
+    if not ("," in listing or re.search(r"\band\b", listing, flags=re.IGNORECASE)):
+        return []
+    listing = re.sub(r"\b(?:and|plus)\b", ",", listing, flags=re.IGNORECASE)
+    names = [part.strip() for part in re.split(r"[,;/]+", listing)]
+    return [name for name in names if name]
+
+
 def _item_name_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
     facts: list[FlyerLockedFact] = []
     seen: set[str] = set()
@@ -529,6 +560,9 @@ def _item_name_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact
         clause = re.sub(r"\b(?:and|plus)\b", ",", clause, flags=re.IGNORECASE)
         for part in re.split(r"[,;/]+", clause):
             add_item(part)
+    # "N items: a, b, c" colon list (no "include" verb) — live F0164.
+    for name in _item_list_names(text):
+        add_item(name)
     return facts
 
 
@@ -727,6 +761,13 @@ def extract_text_facts(
     offer_index = 0
     for offer in semantic_brief.offers:
         if not _semantic_offer_is_faithful(offer.text):
+            continue
+        if _item_list_names(offer.text):
+            # An item-list offer ("N items: a, b, c") is a MENU, not a compound
+            # offer. It is captured as individual item:N:name facts by
+            # _item_name_facts below (from the raw brief text). Locking it as a
+            # required offer:N would force the referee to exact-match an
+            # un-matchable compound string → fail-closed to manual (live F0164).
             continue
         item = _fact(f"offer:{offer_index}", "Offer", offer.text, "customer_text", message_id=message_id)
         if item:
