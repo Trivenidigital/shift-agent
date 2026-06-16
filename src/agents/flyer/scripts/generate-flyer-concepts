@@ -242,6 +242,34 @@ def _effective_render_model(model: str) -> str:
 
 
 def _qa_failed_exact_text_recoverable(reports) -> bool:
+    """Operator Option 4 (2026-06-15 safety net): partition QA blockers into a
+    RECOVERABLE class (a corrective re-render and/or the deterministic overlay
+    can correct the rendered text from authoritative locked_facts) and a
+    DANGEROUS class that must HARD-BLOCK to manual review. Returns True only when
+    EVERY blocker is recoverable; a single dangerous (or unrecognized) blocker
+    poisons the set → manual.
+
+    RECOVERABLE — the deterministic overlay redraws EVERY name/price/fact from
+    locked_facts, so it cannot reproduce a missing/dropped/misspelled/duplicated
+    rendering of AUTHORIZED text:
+      - missing required visible fact / item count (incl. schedule, location)
+      - dropped item NAMES ("inferred item not rendered: ...", live F0157)
+      - duplicated / near-duplicated items
+      - vision-QA misspelling/duplication defects ("visible text defect reported
+        by QA: 'Uttap' ...", live F0160/F0162) — overlay redraws correct text
+
+    DANGEROUS — deliberately NOT recoverable here, so they fall through to manual
+    review (operator: "wrong price/phone, fabricated offer remain hard-blocks").
+    These are money-/contact-sensitive — a wrong value reaching the customer is
+    real business harm, and a fabricating/mis-rendering model is a signal a human
+    should see (the brief or the locked facts themselves may be wrong):
+      - fabricated price / fabricated offer claim (not backed by locked_facts)
+      - unverified phone number visible (a phone that is NOT the registered one)
+    A fabrication-only set still gets the bounded fabrication corrective retry
+    upstream; only on its exhaustion does it reach here and hard-block to manual.
+    All three classify as block-tier severity, so a surviving dangerous blocker
+    routes to manual_edit_required (never delivered_with_warning).
+    """
     blockers = [
         str(blocker or "").strip()
         for report in reports
@@ -255,18 +283,16 @@ def _qa_failed_exact_text_recoverable(reports) -> bool:
         "missing required visible item count:",
         "duplicate item visible:",
         "near-duplicate item visible:",
-        "unverified phone number visible:",
-        # 2026-06-14 (4a): fabrication block-tier blockers are recoverable via
-        # the deterministic-overlay fallback — the overlay renders ONLY the exact
-        # locked facts, so it cannot reproduce a fabricated price/offer claim.
-        "fabricated price visible:",
-        "fabricated offer claim visible:",
+        # 2026-06-15 (Option 4): a vision-QA misspelling/duplication defect
+        # ("visible text defect reported by QA: 'Uttap' ...", live F0160/F0162)
+        # is recoverable — the deterministic overlay redraws every name/price
+        # from locked_facts and so cannot reproduce a misspelling. Without this,
+        # ONE such blocker poisoned the whole set → straight to manual.
+        "visible text defect reported by QA:",
         # 2026-06-15: a generative model that paints food photos + prices but
         # drops most item NAMES ("inferred item not rendered: Idli/Vada/...") is
         # recoverable via the deterministic overlay, which renders EVERY item
-        # name + the full schedule. Without this, ONE such blocker poisoned the
-        # whole set → straight to manual (live F0157). Now eligible for the
-        # content-miss corrective retry + deterministic-overlay fallback.
+        # name + the full schedule (live F0157).
         "inferred item not rendered:",
     )
     return all(blocker.startswith(recoverable_prefixes) for blocker in blockers)
@@ -1164,8 +1190,10 @@ def main() -> int:
         # Hermes planner — a strictly-bounded best-effort pass. On success, keep
         # the corrected render and stop; on a render error or a non-fabrication
         # failure, stop retrying; if still fabrication-blocked after 2 attempts,
-        # leave the ORIGINAL failed_qa intact so the deterministic-overlay
-        # fallback (which fabrication blockers are now eligible for) handles it.
+        # leave the ORIGINAL failed_qa intact so the flyer HARD-BLOCKS to manual
+        # review (operator Option 4: fabrication is NOT overlay-recoverable — a
+        # fabricated price/offer must get human eyes, never an auto-shipped
+        # de-fabricated overlay).
         _FABRICATION_MAX_CORRECTIVE_ATTEMPTS = 2
         # §6 fallback reason set by the fabrication retry loop (if it runs):
         # "" = no fallback needed (a retry passed); "retries_exhausted" /

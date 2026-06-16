@@ -1496,7 +1496,7 @@ def test_exact_text_fallback_guard_includes_source_text_leakage(monkeypatch):
         status="failed",
         blockers=[
             "duplicate item visible: Punugulu",
-            "unverified phone number visible: 614 956-1099",
+            "inferred item not rendered: Vada",
         ],
         checked_at=datetime.now(timezone.utc),
     )
@@ -2743,8 +2743,13 @@ def test_generate_concepts_warn_tier_state_write_does_not_send(monkeypatch, tmp_
 # ===========================================================================
 
 
-def _qa_report(monkeypatch_module, *, status="failed", blockers=None, asset_id="A0001", path="/tmp/F0001-C1.png"):
+def _qa_report(monkeypatch_module, *, status="failed", blockers=None, asset_id="A0001", path="/tmp/F0001-C1.png", severity=None):
     from schemas import FlyerVisualQAReport
+    # severity=None → schema default ("pass"). Failed reports built by these
+    # fixtures should set severity to match what run_visual_qa's
+    # classify_qa_severity would return in production (e.g. block-tier for a
+    # fabrication blocker) so the downstream state machine routes realistically.
+    extra = {} if severity is None else {"severity": severity}
     return FlyerVisualQAReport(
         project_id="F0001",
         asset_id=asset_id,
@@ -2757,30 +2762,45 @@ def _qa_report(monkeypatch_module, *, status="failed", blockers=None, asset_id="
         status=status,
         blockers=list(blockers or []),
         checked_at=datetime(2026, 6, 14, tzinfo=timezone.utc),
+        **extra,
     )
 
 
-# --- 4a part 1: _qa_failed_exact_text_recoverable now covers fabrication -----
+# --- Option 4 (2026-06-15 safety net): fabrication is a HARD-BLOCK, not -------
+# --- overlay-recoverable. Reverses the 2026-06-14 (4a) behavior per the -------
+# --- operator directive: "wrong price/phone, fabricated offer remain ----------
+# --- hard-blocks." A fabrication-bearing set therefore returns False so it ----
+# --- falls through to manual review (the fab-only corrective retry still runs --
+# --- upstream; only on its exhaustion does it reach here).
 
-def test_qa_recoverable_true_for_fabrication_price_only(monkeypatch):
+def test_qa_recoverable_false_for_fabrication_price_only(monkeypatch):
     module = _load_script(monkeypatch)
     report = _qa_report(module, blockers=["fabricated price visible: $3.99"])
-    assert module._qa_failed_exact_text_recoverable([report]) is True
+    assert module._qa_failed_exact_text_recoverable([report]) is False
 
 
-def test_qa_recoverable_true_for_fabrication_offer_only(monkeypatch):
+def test_qa_recoverable_false_for_fabrication_offer_only(monkeypatch):
     module = _load_script(monkeypatch)
     report = _qa_report(module, blockers=["fabricated offer claim visible: Limited Time Deal"])
-    assert module._qa_failed_exact_text_recoverable([report]) is True
+    assert module._qa_failed_exact_text_recoverable([report]) is False
 
 
-def test_qa_recoverable_true_for_fabrication_mixed_with_existing_recoverable(monkeypatch):
+def test_qa_recoverable_false_for_fabrication_mixed_with_recoverable(monkeypatch):
+    # Fabrication poisons an otherwise-recoverable set → hard-block to manual.
     module = _load_script(monkeypatch)
     report = _qa_report(module, blockers=[
         "fabricated price visible: $3.99",
         "missing required visible fact: business_name",
     ])
-    assert module._qa_failed_exact_text_recoverable([report]) is True
+    assert module._qa_failed_exact_text_recoverable([report]) is False
+
+
+def test_qa_recoverable_false_for_unverified_phone(monkeypatch):
+    # Operator: "wrong phone remains a hard-block." A phone that is not the
+    # registered one must go to manual, never an auto-shipped overlay.
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=["unverified phone number visible: +1 555 000 0000"])
+    assert module._qa_failed_exact_text_recoverable([report]) is False
 
 
 def test_qa_recoverable_false_for_fabrication_mixed_with_unrecoverable(monkeypatch):
@@ -2804,6 +2824,53 @@ def test_qa_recoverable_preserves_existing_false_case(monkeypatch):
     assert module._qa_failed_exact_text_recoverable([report]) is False
 
 
+# --- Option 4 (2026-06-15): vision-QA misspelling/duplication defects are -----
+# --- recoverable via the deterministic overlay (live F0160 "Uttap", F0162 -----
+# --- "Bihcken"). This is the change that converts the dense-menu manual-holds --
+# --- into recover → fallback → ship.
+
+def test_qa_recoverable_true_for_visible_text_defect_misspelling(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=[
+        "visible text defect reported by QA: The word 'Uttap' may be a misspelling of 'Uttapam'.",
+    ])
+    assert module._qa_failed_exact_text_recoverable([report]) is True
+
+
+def test_qa_recoverable_true_for_live_f0160_shape(monkeypatch):
+    # Exact live F0160 blocker shape: dropped item names + a misspelling +
+    # missing facts — all recoverable, no dangerous blocker → recover/fallback.
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=[
+        "inferred item not rendered: Uttapam",
+        "inferred item not rendered: Pongal",
+        "visible text defect reported by QA: The word 'Uttap' may be a misspelling of 'Uttapam'.",
+        "missing required visible fact: contact_phone",
+        "missing required visible fact: location",
+    ])
+    assert module._qa_failed_exact_text_recoverable([report]) is True
+
+
+def test_qa_recoverable_true_for_live_f0162_shape(monkeypatch):
+    # Exact live F0162 blocker shape: a misspelling + a missing offer fact.
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=[
+        "visible text defect reported by QA: The word 'Bihcken' appears to be misspelled and should likely be 'Chicken'.",
+        "missing required visible fact: offer:0",
+    ])
+    assert module._qa_failed_exact_text_recoverable([report]) is True
+
+
+def test_qa_recoverable_false_for_text_defect_mixed_with_fabrication(monkeypatch):
+    # A misspelling is recoverable, but a co-occurring fabrication hard-blocks.
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=[
+        "visible text defect reported by QA: 'Uttap' misspelling",
+        "fabricated offer claim visible: 50% OFF",
+    ])
+    assert module._qa_failed_exact_text_recoverable([report]) is False
+
+
 # --- 2026-06-15: inferred-item-not-rendered is recoverable (live F0157) ------
 
 def test_qa_recoverable_true_for_inferred_item_not_rendered(monkeypatch):
@@ -2824,11 +2891,12 @@ def test_qa_recoverable_true_for_inferred_item_plus_missing_schedule(monkeypatch
 
 
 def test_qa_recoverable_false_for_inferred_item_mixed_with_unrecoverable(monkeypatch):
-    # A truly-non-recoverable blocker still poisons the set → False.
+    # A truly-non-recoverable blocker still poisons the set → False. Both the
+    # unverified phone (now dangerous) AND the wrong-brand text are hard-blocks.
     module = _load_script(monkeypatch)
     report = _qa_report(module, blockers=[
         "inferred item not rendered: Idli",
-        "unverified phone number visible: +1 555 000 0000",  # recoverable
+        "unverified phone number visible: +1 555 000 0000",  # dangerous → hard-block
         "visible wrong brand text: Indian Cafe",             # NOT recoverable
     ])
     assert module._qa_failed_exact_text_recoverable([report]) is False
@@ -3120,11 +3188,12 @@ def test_4a_fabrication_only_retry_first_succeeds_before_fallback(monkeypatch, t
     assert render_kwargs[1].get("repair_instruction")
 
 
-def test_4a_fabrication_retry_fails_then_deterministic_fallback_ships(monkeypatch, tmp_path, capsys):
-    """4a (x2 bound): when persistent fabrication survives BOTH bounded
-    corrective retries, the run proceeds to the deterministic-overlay fallback.
-    Render budget is strictly bounded: initial + TWO repaired attempts + the
-    fallback = exactly 2 corrective renders (no infinite loop)."""
+def test_4a_fabrication_retry_fails_then_hard_blocks_to_manual(monkeypatch, tmp_path, capsys):
+    """Option 4 (2026-06-15): when persistent fabrication survives BOTH bounded
+    corrective retries, the run HARD-BLOCKS to manual review — it does NOT fall
+    back to the deterministic overlay (operator: "fabricated offer remains a
+    hard-block"). Render budget is strictly bounded: initial + TWO repaired
+    attempts, then manual (no fallback render, no infinite loop)."""
     module = _load_script(monkeypatch)
     from agents.flyer.render import RenderedAssetSpec
 
@@ -3158,8 +3227,9 @@ def test_4a_fabrication_retry_fails_then_deterministic_fallback_ships(monkeypatc
         name = Path(artifact_path).name
         if "fallback" in name:
             return _qa_report(module, status="passed", blockers=[], asset_id=asset_id, path=str(artifact_path))
+        # Production-accurate: a fabrication blocker is block-tier severity.
         return _qa_report(module, status="failed",
-                          blockers=["fabricated price visible: $3.99"],
+                          blockers=["fabricated price visible: $3.99"], severity="block",
                           asset_id=asset_id, path=str(artifact_path))
 
     monkeypatch.setattr(module, "render_concept_previews", fake_render)
@@ -3176,13 +3246,15 @@ def test_4a_fabrication_retry_fails_then_deterministic_fallback_ships(monkeypatc
         "--autorepair-state-path", str(tmp_path / "autorepair.json"),
     ])
 
-    assert module.main() == 0
+    assert module.main() == 2
     persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
-    assert persisted["status"] == "awaiting_final_approval"
-    assert persisted["assets"][-1]["path"].endswith("F0001-C1-fallback.png")
-    # Exactly initial + TWO corrective retries + the deterministic fallback.
-    assert render_calls == ["first", "repaired", "repaired", "fallback"]
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["manual_review"]["status"] == "queued"
+    assert persisted["manual_review"]["reason_code"] == "visual_qa_failed"
+    # Exactly initial + TWO corrective retries, then manual — NO fallback render.
+    assert render_calls == ["first", "repaired", "repaired"]
     assert render_calls.count("repaired") == 2  # x2 bound, never more
+    assert "fallback" not in render_calls  # fabrication is NOT overlay-recoverable
 
 
 def test_4c_killswitch_forces_deterministic_model_in_render(monkeypatch, tmp_path, capsys):
@@ -3228,11 +3300,12 @@ def test_4c_killswitch_forces_deterministic_model_in_render(monkeypatch, tmp_pat
     assert seen_models == ["deterministic-renderer"]
 
 
-def test_R3_fabrication_retry_fails_and_fallback_raises_goes_manual_not_warn(monkeypatch, tmp_path, capsys):
-    """R3 fail-closed coupling: when a fabrication-ONLY block survives the
-    bounded repair retry AND the deterministic-overlay fallback itself raises,
-    the project must land in manual_edit_required (rc 2) — NEVER warn-tier
-    delivery of the unverified/fabricating render.
+def test_R3_fabrication_block_severity_hard_blocks_to_manual_not_warn(monkeypatch, tmp_path, capsys):
+    """R3 fail-closed coupling (Option 4): a fabrication-ONLY block that survives
+    the bounded repair retry must land in manual_edit_required (rc 2) — NEVER
+    warn-tier delivery of the unverified/fabricating render, and NEVER an
+    auto-shipped deterministic overlay. Fabrication is a HARD-BLOCK: the
+    deterministic-overlay fallback is not even attempted.
 
     The fabrication QA report carries a REAL severity='block' (not the helper
     default), so this asserts the genuine block-severity path drives the
@@ -3255,10 +3328,12 @@ def test_R3_fabrication_retry_fails_and_fallback_raises_goes_manual_not_warn(mon
     render_calls = []
 
     def fake_render(project_obj, output_dir, **kwargs):
-        # The deterministic-overlay fallback runs under FLYER_ALLOW_INTEGRATED_POSTER=0.
+        # Option 4: the deterministic-overlay fallback (FLYER_ALLOW_INTEGRATED_
+        # POSTER=0) must NEVER run for a fabrication-bearing set. If it ever does,
+        # fail loudly so the regression is caught.
         if module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER") == "0":
             render_calls.append("fallback")
-            raise module.FlyerRenderError("deterministic overlay could not fit required facts")
+            raise AssertionError("fabrication must hard-block — overlay fallback must not be attempted")
         suffix = "repaired" if kwargs.get("repair_instruction") else "first"
         render_calls.append(suffix)
         path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
@@ -3301,27 +3376,26 @@ def test_R3_fabrication_retry_fails_and_fallback_raises_goes_manual_not_warn(mon
     rc = module.main()
     assert rc == 2
     persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
-    # Fail-closed to manual; NOT delivered_with_warning.
+    # Fail-closed to manual; NOT delivered_with_warning, NOT auto-shipped overlay.
     assert persisted["status"] == "manual_edit_required"
     assert persisted["status"] != "delivered_with_warning"
     assert persisted["manual_review"]["status"] == "queued"
     assert persisted["manual_review"]["reason_code"] == "visual_qa_failed"
-    # Coupling proof: the bounded retry ran (one repaired attempt) AND the
-    # deterministic-overlay fallback was attempted and raised.
+    # Coupling proof: the bounded retry ran; the overlay fallback was NOT attempted.
     assert "repaired" in render_calls
-    assert "fallback" in render_calls
+    assert "fallback" not in render_calls
     out = json.loads(capsys.readouterr().out)
     assert "visual_qa_failed" in out
 
 
 def test_fix4_mixed_missing_and_fabricated_skips_legacy_autorepair(monkeypatch, tmp_path, capsys):
-    """FIX 4: a MIXED `missing fact + fabricated offer` failure must NOT enter the
-    legacy recovery.py autorepair loop (whose LLM repair_instruction is not
-    guaranteed to remove fabrications). It also is not fabrication-only, so it
-    skips the bounded fabrication retry and flows straight to the
-    deterministic-overlay fallback — which renders only the exact locked facts,
-    so it cannot reproduce the fabrication. Here the overlay re-QA passes, so the
-    project ships safely with NO autorepair audit row ever emitted."""
+    """FIX 4 + Option 4: a MIXED `missing fact + fabricated offer` failure must
+    NOT enter the legacy recovery.py autorepair loop (whose LLM repair_instruction
+    is not guaranteed to remove fabrications). It is not fabrication-only, so it
+    skips the bounded fabrication retry too. Because it carries a fabrication
+    blocker it is NOT overlay-recoverable (Option 4: fabrication is a hard-block),
+    so it flows to manual_edit_required with NO autorepair audit row and WITHOUT
+    auto-shipping a deterministic overlay."""
     module = _load_script(monkeypatch)
     from agents.flyer.render import RenderedAssetSpec
 
@@ -3340,7 +3414,8 @@ def test_fix4_mixed_missing_and_fabricated_skips_legacy_autorepair(monkeypatch, 
     render_calls = []
 
     def fake_render(project_obj, output_dir, **kwargs):
-        # The deterministic-overlay fallback runs under FLYER_ALLOW_INTEGRATED_POSTER=0.
+        # Option 4: the deterministic-overlay fallback (FLYER_ALLOW_INTEGRATED_
+        # POSTER=0) must NEVER run for a fabrication-bearing set.
         is_fallback = module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER") == "0"
         suffix = "fallback" if is_fallback else (
             "repaired" if kwargs.get("repair_instruction") else "integrated"
@@ -3352,12 +3427,8 @@ def test_fix4_mixed_missing_and_fabricated_skips_legacy_autorepair(monkeypatch, 
                                   width=1080, height=1350, concept_id="C1")]
 
     def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
-        name = Path(artifact_path).name
-        if "fallback" in name:
-            # The deterministic overlay carries only exact locked facts → clean.
-            return _qa_report(module, status="passed", blockers=[],
-                              asset_id=asset_id, path=str(artifact_path))
         # Integrated render: a MIXED failure (one missing fact + one fabrication).
+        # Both blockers are block-tier severity in production.
         return _qa_report(
             module,
             status="failed",
@@ -3365,6 +3436,7 @@ def test_fix4_mixed_missing_and_fabricated_skips_legacy_autorepair(monkeypatch, 
                 "missing required visible fact: business_name",
                 "fabricated offer claim visible: Limited Time Deal",
             ],
+            severity="block",
             asset_id=asset_id,
             path=str(artifact_path),
         )
@@ -3390,13 +3462,14 @@ def test_fix4_mixed_missing_and_fabricated_skips_legacy_autorepair(monkeypatch, 
         "--autorepair-state-path", str(tmp_path / "autorepair.json"),
     ])
 
-    assert module.main() == 0
-    # Routed to the deterministic-overlay fallback (NOT the legacy autorepair re-render).
-    assert "fallback" in render_calls
+    assert module.main() == 2
+    # Hard-blocked to manual: NO legacy autorepair re-render AND NO overlay fallback.
+    assert render_calls == ["integrated"]
+    assert "fallback" not in render_calls
     assert "repaired" not in render_calls
     persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
-    assert persisted["status"] == "awaiting_final_approval"
-    assert persisted["manual_review"]["status"] == "none"
+    assert persisted["status"] == "manual_edit_required"
+    assert persisted["manual_review"]["status"] == "queued"
     # No legacy autorepair audit rows of ANY kind were emitted.
     audit_types = [json.loads(line)["type"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
     assert "flyer_autorepair_attempted" not in audit_types
@@ -3917,10 +3990,11 @@ def test_obs_kill_switch_suppresses_integrated_rows(monkeypatch, tmp_path, capsy
     assert "flyer_integrated_passed" not in row_types
 
 
-def test_obs_fabrication_fallback_emits_attempted_and_fell_back_reason(monkeypatch, tmp_path, capsys):
-    """§6: persistent fabrication → deterministic fallback emits
-    flyer_integrated_attempted + flyer_integrated_fell_back_deterministic with
-    reason=retries_exhausted (retries ran and all blocked). No passed row."""
+def test_obs_fabrication_hard_block_emits_attempted_and_manual_review(monkeypatch, tmp_path, capsys):
+    """§6 (Option 4): persistent fabrication → HARD-BLOCK to manual emits
+    flyer_integrated_attempted + flyer_integrated_manual_review. It does NOT emit
+    flyer_integrated_fell_back_deterministic (fabrication is not overlay-
+    recoverable) and no passed row."""
     module = _load_script(monkeypatch)
     from agents.flyer.render import RenderedAssetSpec
 
@@ -3952,7 +4026,7 @@ def test_obs_fabrication_fallback_emits_attempted_and_fell_back_reason(monkeypat
         if "fallback" in Path(artifact_path).name:
             return _qa_report(module, status="passed", blockers=[], asset_id=asset_id, path=str(artifact_path))
         return _qa_report(module, status="failed",
-                          blockers=["fabricated price visible: $3.99"],
+                          blockers=["fabricated price visible: $3.99"], severity="block",
                           asset_id=asset_id, path=str(artifact_path))
 
     monkeypatch.setattr(module, "render_concept_previews", fake_render)
@@ -3970,14 +4044,15 @@ def test_obs_fabrication_fallback_emits_attempted_and_fell_back_reason(monkeypat
         "--autorepair-state-path", str(tmp_path / "autorepair.json"),
     ])
 
-    assert module.main() == 0
+    assert module.main() == 2
     rows = _audit_rows(audit_path)
     row_types = [r["type"] for r in rows]
     assert "flyer_integrated_attempted" in row_types
     assert "flyer_integrated_passed" not in row_types
-    fell = next(r for r in rows if r["type"] == "flyer_integrated_fell_back_deterministic")
-    assert fell["reason"] == "retries_exhausted"
-    assert fell["project_id"] == "F0001"
+    assert "flyer_integrated_fell_back_deterministic" not in row_types
+    manual = next(r for r in rows if r["type"] == "flyer_integrated_manual_review")
+    assert manual["project_id"] == "F0001"
+    assert manual["reason_code"] == "visual_qa_failed"
 
 
 def test_obs_manual_outcome_emits_attempted_and_manual_review(monkeypatch, tmp_path, capsys):
