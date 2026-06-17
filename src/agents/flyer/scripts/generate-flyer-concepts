@@ -32,6 +32,7 @@ from schemas import (  # noqa: E402
     FlyerManualReview,
     FlyerPremiumRepairAttempted,
     FlyerPremiumRepairExhausted,
+    FlyerPremiumRepairSkipped,
     FlyerPremiumRepairSucceeded,
     FlyerProjectStore,
     FlyerReferenceExtraction,
@@ -1015,6 +1016,11 @@ def main() -> int:
             failed_qa = [report for report in qa_reports if report.status != "passed"]
         pending_success_attempt = None
         pending_success_entry = None
+        # Slice 2 observability: tagged copies of each FAILED repair-attempt QA
+        # report, persisted into qa_reports for visibility WITHOUT entering the
+        # final-state failed_qa / severity decision. Stays empty when the flag is
+        # OFF or no repair runs ⇒ byte-identical persistence.
+        premium_repair_attempt_reports = []
         # === Slice 2: premium image-to-image repair rung (flag-gated, ADDITIVE) ===
         # The FIRST recovery rung: when the integrated premium render fails QA with
         # a RECOVERABLE (non-fabrication, non-phone) text defect, edit the PRIOR
@@ -1042,11 +1048,11 @@ def main() -> int:
                 locked_fact_ids={f.fact_id for f in current.locked_facts},
             )
         ):
-            _audit_append(audit_log_path, FlyerPremiumRepairAttempted(
-                ts=now,
-                project_id=current.project_id,
-                project_version=current.version,
-            ))
+            # NOTE: FlyerPremiumRepairAttempted is emitted INSIDE the loop, only
+            # once a non-empty minimal-edit instruction is resolved (i.e. a real
+            # render is about to happen). A gate-passed-but-no-instruction case is
+            # a SKIP (reason="no_instruction"), not an attempt — so it never emits
+            # a phantom `attempted` with zero renders.
             # Repair dict: every required fact + ALL item names/prices, so
             # build_premium_repair_instruction can resolve each recoverable
             # blocker to its EXACT locked value (and the locked price for an
@@ -1061,6 +1067,13 @@ def main() -> int:
             premium_attempt = 0
             premium_exhausted_reason = "residual_recoverable_defect"
             premium_succeeded = False
+            # The blockers still failing after the LAST repair attempt's re-QA —
+            # surfaced on the exhausted row so the operator sees exactly what the
+            # repair could not fix (empty for generation_error / no-attempt).
+            premium_residual_blockers = []
+            # Whether the gate passed but no minimal-edit clause could be built
+            # (→ FlyerPremiumRepairSkipped reason="no_instruction", not exhausted).
+            premium_no_instruction = False
             # Every distinct repair render written across attempts (each at its own
             # repair{n}.png) so exhaustion can clean up ALL of them, never leaving
             # an orphaned earlier attempt on disk.
@@ -1068,9 +1081,23 @@ def main() -> int:
             for _ in range(2):
                 instruction = build_premium_repair_instruction(premium_blockers, premium_locked)
                 if not instruction:
-                    # No resolvable minimal-edit clause → repair can't help; leave
-                    # the original failed_qa for the existing ladder.
+                    # Gate passed but no resolvable minimal-edit clause → repair
+                    # can't help. On the FIRST attempt this is a skip (no render
+                    # was attempted); record it so the skip-reason branch reports
+                    # "no_instruction". Leave the original failed_qa for the ladder.
+                    if premium_attempt == 0:
+                        premium_no_instruction = True
                     break
+                if premium_attempt == 0:
+                    # First real render attempt is about to happen → the rung is
+                    # genuinely attempting a repair. Emit the denominator row now
+                    # (after the instruction resolved), so a no_instruction skip
+                    # never produces a phantom `attempted`.
+                    _audit_append(audit_log_path, FlyerPremiumRepairAttempted(
+                        ts=now,
+                        project_id=current.project_id,
+                        project_version=current.version,
+                    ))
                 premium_attempt += 1
                 repair_specs = []
                 repair_qa_reports = []
@@ -1128,6 +1155,22 @@ def main() -> int:
                 # so the exhaustion path can clean up every distinct repair file.
                 premium_all_repair_specs.extend(repair_specs)
                 repair_failed_qa = [r for r in repair_qa_reports if r.status != "passed"]
+                if repair_failed_qa:
+                    # OBSERVABILITY (does NOT affect the final-state decision):
+                    # persist a TAGGED copy of each FAILED attempt's QA report so
+                    # the operator can see per-attempt residuals in projects.json,
+                    # and record the residual blockers for the exhausted row. These
+                    # tagged reports are appended to qa_reports at persist time only;
+                    # failed_qa / severity stay based on the FINAL shipped render.
+                    for r in repair_failed_qa:
+                        premium_repair_attempt_reports.append(
+                            r.model_copy(update={
+                                "warnings": [*r.warnings, f"premium_repair_attempt:{premium_attempt}"],
+                            })
+                        )
+                    premium_residual_blockers = [
+                        blocker for report in repair_failed_qa for blocker in report.blockers
+                    ]
                 if not repair_failed_qa:
                     # PASS — the repaired PREMIUM render is clean. Keep it as the
                     # shipped specs; the run continues downstream as a normal pass.
@@ -1198,13 +1241,51 @@ def main() -> int:
                             candidate for spec in specs for candidate in _render_artifact_candidates(spec)
                         },
                     )
-                _audit_append(audit_log_path, FlyerPremiumRepairExhausted(
-                    ts=now,
-                    project_id=current.project_id,
-                    project_version=current.version,
-                    attempts=premium_attempt,
-                    reason=premium_exhausted_reason,
-                ))
+                if premium_no_instruction:
+                    # Gate passed but no minimal-edit clause could be built → no
+                    # render was attempted. This is a SKIP (no_instruction), not an
+                    # exhaustion (which implies attempts were made + failed).
+                    _audit_append(audit_log_path, FlyerPremiumRepairSkipped(
+                        ts=now,
+                        project_id=current.project_id,
+                        project_version=current.version,
+                        reason="no_instruction",
+                        blockers=premium_blockers,
+                    ))
+                else:
+                    _audit_append(audit_log_path, FlyerPremiumRepairExhausted(
+                        ts=now,
+                        project_id=current.project_id,
+                        project_version=current.version,
+                        attempts=premium_attempt,
+                        reason=premium_exhausted_reason,
+                        residual_blockers=premium_residual_blockers,
+                    ))
+        elif (
+            failed_qa
+            and not source_edit_requested
+            and _premium_repair_enabled(current)
+        ):
+            # OBSERVABILITY (Piece 3): the flag is ON and there is a QA failure but
+            # the repair gate above evaluated False — REPORT why so a flag-ON skip
+            # is not invisible (the F0168 wrong-brand case). This branch only reads
+            # the EXISTING gate's decision; it changes NOTHING about safety
+            # classification or what ships. Flag OFF ⇒ this elif is never reached
+            # ⇒ byte-identical.
+            skip_blockers = [blocker for report in failed_qa for blocker in report.blockers]
+            if _qa_failed_has_fabrication(failed_qa):
+                skip_reason = "fabrication"
+            else:
+                # Recoverable-text gate was False for a non-fabrication reason
+                # (e.g. "visible wrong business/brand: ...", unverified phone).
+                skip_reason = "non_recoverable"
+            _audit_append(audit_log_path, FlyerPremiumRepairSkipped(
+                ts=now,
+                project_id=current.project_id,
+                project_version=current.version,
+                reason=skip_reason,
+                blockers=skip_blockers,
+            ))
         # FIX 4: never route a fabrication-bearing failure through the legacy
         # recovery.py autorepair loop. The legacy classifier marks a set eligible
         # if ANY missing-copy blocker appears, without rejecting accompanying
@@ -1879,7 +1960,7 @@ def main() -> int:
                     store.projects[snapshot_idx] = current.model_copy(update={
                         "status": "delivered_with_warning",
                         "assets": [*current.assets, *assets],
-                        "qa_reports": [*current.qa_reports, *qa_reports],
+                        "qa_reports": [*current.qa_reports, *qa_reports, *premium_repair_attempt_reports],
                         "warning": warning_payload,
                         # P0 #2 — clear any stale manual_review payload that
                         # may have come in from a prior manual_edit_required
@@ -1915,7 +1996,7 @@ def main() -> int:
                 store.projects[snapshot_idx] = current.model_copy(update={
                     "status": "manual_edit_required",
                     "assets": [*current.assets, *assets],
-                    "qa_reports": [*current.qa_reports, *qa_reports],
+                    "qa_reports": [*current.qa_reports, *qa_reports, *premium_repair_attempt_reports],
                     "manual_review": manual,
                     "updated_at": now,
                 })
@@ -1940,7 +2021,7 @@ def main() -> int:
                 "concepts": concepts,
                 "selected_concept_id": "C1" if one_shot else None,
                 "assets": [*current.assets, *assets],
-                "qa_reports": [*current.qa_reports, *qa_reports],
+                "qa_reports": [*current.qa_reports, *qa_reports, *premium_repair_attempt_reports],
                 "revisions": revisions,
                 "manual_review": FlyerManualReview(),
                 "updated_at": now,

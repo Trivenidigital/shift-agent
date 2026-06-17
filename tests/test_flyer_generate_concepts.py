@@ -4820,3 +4820,211 @@ def test_premium_repair_non_flyer_render_error_does_not_crash_run(monkeypatch, t
     # The partial repair artifact was cleaned up (not left orphaned, not shipped).
     assert not (asset_dir / "F0001-C1-repair1.png").exists()
     assert "repair" not in Path(persisted["assets"][-1]["path"]).name
+
+
+# ===========================================================================
+# Slice 2 observability (2026-06-17): per-attempt QA persistence + residual
+# blockers + skip-reason. HARD CONSTRAINT: flag-OFF byte-identical; the
+# final-state decision (failed_qa / severity / ship / manual-vs-fallback) is
+# UNCHANGED — these only ADD audit rows + persist reports for visibility.
+# ===========================================================================
+
+PREMIUM_REPAIR_QA_MARKER = "premium_repair_attempt:"
+
+
+def test_failed_premium_repair_persists_attempt_qa_without_changing_final_state(monkeypatch, tmp_path, capsys):
+    """Piece 1: on a failed (exhausted) repair, the per-attempt repair QA reports
+    are PERSISTED into qa_reports (tagged), AND the final-state decision is
+    identical to the no-repair baseline (overlay ships, awaiting_final_approval)."""
+    module, render_calls, repair_calls, persisted, rows, rc = _run_premium_repair_case(
+        monkeypatch, tmp_path, repair_passes_on=None)
+    assert rc == 0
+    # The two repair-attempt QA reports are persisted + tagged distinguishably.
+    qa_reports = persisted["qa_reports"]
+    repair_reports = [
+        r for r in qa_reports
+        if any(str(w).startswith(PREMIUM_REPAIR_QA_MARKER) for w in r.get("warnings", []))
+    ]
+    assert len(repair_reports) == 2
+    # They are tagged with the attempt number and point at the distinct repair art.
+    assert {1, 2} == {
+        int(w.split(":", 1)[1])
+        for r in repair_reports for w in r["warnings"]
+        if w.startswith(PREMIUM_REPAIR_QA_MARKER)
+    }
+    assert all("C1-repair" in r["artifact_path"] for r in repair_reports)
+    # FINAL-STATE UNCHANGED: the overlay still ships, status unchanged. (Same as
+    # test_premium_repair_exhausts_then_falls_through_to_overlay.)
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["assets"][-1]["path"].endswith("F0001-C1-fallback.png")
+    # The SHIPPED render's QA report (the fallback) is present and is NOT a
+    # repair-attempt report — the repair reports did NOT enter the final-state
+    # decision (they are additive, tagged, for visibility only).
+    fallback_reports = [r for r in qa_reports if "fallback" in r["artifact_path"]]
+    assert len(fallback_reports) == 1
+    assert not any(str(w).startswith(PREMIUM_REPAIR_QA_MARKER) for w in fallback_reports[0].get("warnings", []))
+    assert fallback_reports[0]["status"] == "passed"
+
+
+def test_premium_repair_exhausted_carries_residual_blockers(monkeypatch, tmp_path, capsys):
+    """Piece 2: the exhausted row records residual_blockers = the blockers still
+    failing after the last repair attempt, so the operator sees exactly what the
+    repair could not fix."""
+    module, render_calls, repair_calls, persisted, rows, rc = _run_premium_repair_case(
+        monkeypatch, tmp_path, repair_passes_on=None)
+    assert rc == 0
+    exhausted = next(r for r in rows if r["type"] == "flyer_premium_repair_exhausted")
+    assert exhausted["reason"] == "residual_recoverable_defect"
+    # The residual blockers are exactly the recoverable blockers the fake QA kept
+    # returning for each failed repair attempt.
+    assert "missing required visible fact: item:1:name" in exhausted["residual_blockers"]
+    assert "near-duplicate item visible: expected Punugulu but saw Punuglu" in exhausted["residual_blockers"]
+
+
+def test_premium_repair_skipped_wrong_brand_emits_non_recoverable(monkeypatch, tmp_path, capsys):
+    """Piece 3 (F0168): flag ON + failed_qa with a wrong-brand blocker (gate
+    False, non-fabrication) → FlyerPremiumRepairSkipped(reason="non_recoverable")
+    carrying the wrong-brand blocker. No attempt/exhausted rows. Final state
+    UNCHANGED (manual hard-block, no repair calls)."""
+    module, render_calls, repair_calls, persisted, rows, rc = _run_premium_repair_case(
+        monkeypatch, tmp_path, repair_passes_on=1,
+        blockers=["visible wrong business name: Indian Cafe"], fail_severity="block")
+    # wrong-brand is a non-recoverable hard-block → manual (rc=2), unchanged by
+    # this observability work; the skip row only REPORTS that decision.
+    assert repair_calls == []
+    row_types = [r["type"] for r in rows]
+    assert "flyer_premium_repair_attempted" not in row_types
+    assert "flyer_premium_repair_exhausted" not in row_types
+    skipped = next(r for r in rows if r["type"] == "flyer_premium_repair_skipped")
+    assert skipped["reason"] == "non_recoverable"
+    assert "visible wrong business name: Indian Cafe" in skipped["blockers"]
+    # Final state UNCHANGED: wrong-brand hard-blocks to manual.
+    assert persisted["status"] == "manual_edit_required"
+
+
+def test_premium_repair_skipped_fabrication_emits_fabrication(monkeypatch, tmp_path, capsys):
+    """Piece 3: flag ON + fabrication-bearing failed_qa → skip reason
+    "fabrication" (the existing hard-block), no repair attempt, manual."""
+    fab_blockers = [
+        "missing required visible fact: item:1:name",
+        "fabricated price visible: $3.99",
+    ]
+    module, render_calls, repair_calls, persisted, rows, rc = _run_premium_repair_case(
+        monkeypatch, tmp_path, repair_passes_on=1, blockers=fab_blockers, fail_severity="block")
+    assert repair_calls == []
+    skipped = next(r for r in rows if r["type"] == "flyer_premium_repair_skipped")
+    assert skipped["reason"] == "fabrication"
+    assert "fabricated price visible: $3.99" in skipped["blockers"]
+    # Final state unchanged: fabrication hard-blocks to manual.
+    assert persisted["status"] == "manual_edit_required"
+
+
+def test_premium_repair_skipped_no_instruction(monkeypatch, tmp_path, capsys):
+    """Piece 3: flag ON + recoverable failed_qa but the locked facts cannot
+    resolve any minimal-edit clause → reason "no_instruction" (gate passed but
+    build_premium_repair_instruction returns empty). No repair render runs."""
+    # A misspelling blocker is recoverable, but with NO locked item names the
+    # instruction builder yields "" (no resolvable clause).
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import FlyerVisualQAReport
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", raising=False)
+
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    proj = _basic_food_project_dict("F0001", asset_dir)
+    # Strip locked item names + required facts so the instruction builder can't
+    # resolve a clause for the misspelling blocker.
+    proj["locked_facts"] = [
+        {"fact_id": "business_name", "label": "Business", "value": "Lakshmi Kitchen", "source": "customer_profile", "required": False},
+    ]
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2, "projects": [proj],
+    }), encoding="utf-8")
+
+    repair_calls = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        mode = module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER", "")
+        suffix = "fallback" if mode == "0" else "integrated"
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_repair(*a, **k):
+        repair_calls.append(1)
+        raise AssertionError("repair must NOT run when there is no instruction")
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        name = Path(artifact_path).name
+        status, blk = ("passed", []) if "fallback" in name else (
+            "failed", ["visible text defect reported by QA: 'Uttap' misspelling"])
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id, asset_id=asset_id, artifact_path=str(artifact_path),
+            artifact_sha256="d" * 64, project_version=project_obj.version, output_format=output_format,
+            provider="test", qa_source="ocr_vision", status=status, blockers=blk,
+            extracted_text="x", checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "render_repair_edit", fake_repair)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(module, "classify_flyer_qa_for_autorepair",
+                        lambda *_a, **_k: types.SimpleNamespace(decision="hard_stop", reason="customer_trust_risk"))
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    assert repair_calls == []
+    rows = _audit_rows(audit_path)
+    skipped = next(r for r in rows if r["type"] == "flyer_premium_repair_skipped")
+    assert skipped["reason"] == "no_instruction"
+
+
+def test_premium_repair_flag_off_emits_zero_new_observability_rows(monkeypatch, tmp_path, capsys):
+    """HARD CONSTRAINT (i): flag OFF ⇒ ZERO premium-repair rows of ANY kind
+    (attempted/succeeded/exhausted/skipped) and byte-identical fallback. Even for
+    a wrong-brand failure (which flag-ON would log as skipped), flag-OFF is
+    silent."""
+    module, render_calls, repair_calls, persisted, rows, rc = _run_premium_repair_case(
+        monkeypatch, tmp_path, repair_passes_on=1, flag=None,
+        blockers=["visible wrong business name: Indian Cafe"], fail_severity="block")
+    # rc reflects the EXISTING ladder's decision for wrong-brand (manual hard-
+    # block) — unchanged by this observability work; what matters is zero rows.
+    assert repair_calls == []
+    row_types = [r["type"] for r in rows]
+    for t in ("flyer_premium_repair_attempted", "flyer_premium_repair_succeeded",
+              "flyer_premium_repair_exhausted", "flyer_premium_repair_skipped"):
+        assert t not in row_types
+    # No repair-attempt QA reports leaked into qa_reports either.
+    for r in persisted["qa_reports"]:
+        assert not any(str(w).startswith(PREMIUM_REPAIR_QA_MARKER) for w in r.get("warnings", []))
+
+
+def test_premium_repair_audit_chain_is_complete_on_exhaustion(monkeypatch, tmp_path, capsys):
+    """Piece 4: a full exhausted run is traceable end-to-end with no gaps:
+    attempted → exhausted(+residual_blockers) → existing fell_back row."""
+    module, render_calls, repair_calls, persisted, rows, rc = _run_premium_repair_case(
+        monkeypatch, tmp_path, repair_passes_on=None)
+    assert rc == 0
+    row_types = [r["type"] for r in rows]
+    assert "flyer_premium_repair_attempted" in row_types
+    assert "flyer_premium_repair_exhausted" in row_types
+    # The existing integrated fell-back row also present (content-miss → overlay).
+    assert "flyer_integrated_fell_back_deterministic" in row_types
+    # attempted precedes exhausted.
+    assert row_types.index("flyer_premium_repair_attempted") < row_types.index("flyer_premium_repair_exhausted")
