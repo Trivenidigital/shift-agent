@@ -3936,10 +3936,22 @@ def render_repair_edit(
     repair_instruction: str,
     model: str,
     quality: str = "high",
+    output_name: str = "",
 ) -> RenderedAssetSpec:
     """Slice 2 premium repair: image-to-image edit of the PRIOR PREMIUM RENDER
     (``base_png``) with a scoped minimal-edit ``repair_instruction`` → ship the
     model's premium text VERBATIM.
+
+    The repair render is written to ``output_name`` (a bare filename) when given,
+    else the canonical ``<id>-C1-preview.png``. The ladder ALWAYS passes a
+    DISTINCT per-attempt name (e.g. ``<id>-C1-repair1.png``) so a failed/dangerous
+    repair NEVER overwrites the original integrated render at
+    ``<id>-C1-preview.png`` — the original stays byte-untouched for the existing
+    fallback ladder. A passing repair asset at this distinct name finalizes
+    identically to a normal integrated render (``render_final_package`` selects
+    the preview by ``asset.path`` and, finding no raw-background sidecar, exports
+    it directly with no overlay — the same ``direct_poster_source`` path the
+    integrated-poster-eligible flow already uses).
 
     Critically — and unlike ``render_source_edit_preview`` — this path does NOT
     composite the deterministic ``_apply_critical_text_overlay`` on top. The
@@ -3951,7 +3963,8 @@ def render_repair_edit(
     file size) and fail closed (cleanup + FlyerRenderError) on a bad render."""
     output_dir = Path(output_dir)
     concept_id = "C1"
-    path = output_dir / f"{project.project_id}-{concept_id}-preview.png"
+    name = output_name or f"{project.project_id}-{concept_id}-preview.png"
+    path = output_dir / name
     raw = _openrouter_repair_edit_bytes(
         project,
         base_image_path=base_png,

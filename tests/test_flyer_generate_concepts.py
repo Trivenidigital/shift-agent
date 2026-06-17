@@ -4408,9 +4408,13 @@ def _run_premium_repair_case(monkeypatch, tmp_path, *, repair_passes_on, flag="1
         return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
                                   width=1080, height=1350, concept_id="C1")]
 
-    def fake_repair(project_obj, base_png, output_dir, *, repair_instruction, model, quality="high"):
-        repair_calls.append({"base": str(base_png), "instruction": repair_instruction, "model": model, "quality": quality})
-        path = Path(output_dir) / f"{project_obj.project_id}-C1-preview.png"
+    def fake_repair(project_obj, base_png, output_dir, *, repair_instruction, model, quality="high", output_name=""):
+        repair_calls.append({"base": str(base_png), "instruction": repair_instruction, "model": model,
+                             "quality": quality, "output_name": output_name})
+        # Honor the distinct per-attempt name the ladder passes (BLOCKER-1 fix):
+        # repair renders MUST NOT land on <id>-C1-preview.png.
+        name = output_name or f"{project_obj.project_id}-C1-preview.png"
+        path = Path(output_dir) / name
         path.write_bytes(f"repaired-{len(repair_calls)}".encode("ascii"))
         return RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
                                  width=1080, height=1350, concept_id="C1")
@@ -4419,7 +4423,7 @@ def _run_premium_repair_case(monkeypatch, tmp_path, *, repair_passes_on, flag="1
         name = Path(artifact_path).name
         if "fallback" in name:
             status, blk = "passed", []
-        elif "preview" in name:
+        elif "repair" in name:
             # A repaired render. It passes only on the configured attempt index.
             idx = len(repair_calls)
             if repair_passes_on is not None and idx >= repair_passes_on:
@@ -4471,7 +4475,10 @@ def test_premium_repair_pass_ships_repaired_premium(monkeypatch, tmp_path, capsy
     # NO overlay (mode "0") render — the premium repaired render shipped.
     assert all(c["mode"] == "1" for c in render_calls)
     assert persisted["status"] == "awaiting_final_approval"
-    assert persisted["assets"][-1]["path"].endswith("F0001-C1-preview.png")
+    # The shipped asset is the DISTINCT repair render (BLOCKER-1 fix), NOT the
+    # original <id>-C1-preview.png path.
+    assert persisted["assets"][-1]["path"].endswith("F0001-C1-repair1.png")
+    assert not persisted["assets"][-1]["path"].endswith("C1-preview.png")
     row_types = [r["type"] for r in rows]
     assert "flyer_premium_repair_attempted" in row_types
     assert "flyer_premium_repair_succeeded" in row_types
@@ -4568,16 +4575,17 @@ def test_premium_repair_introducing_fabrication_is_discarded(monkeypatch, tmp_pa
         return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
                                   width=1080, height=1350, concept_id="C1")]
 
-    def fake_repair(project_obj, base_png, output_dir, *, repair_instruction, model, quality="high"):
+    def fake_repair(project_obj, base_png, output_dir, *, repair_instruction, model, quality="high", output_name=""):
         repair_calls.append(str(base_png))
-        path = Path(output_dir) / f"{project_obj.project_id}-C1-preview.png"
+        name = output_name or f"{project_obj.project_id}-C1-preview.png"
+        path = Path(output_dir) / name
         path.write_bytes(b"repaired")
         return RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
                                  width=1080, height=1350, concept_id="C1")
 
     def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
         name = Path(artifact_path).name
-        if "preview" in name:
+        if "repair" in name:
             # The repaired render INTRODUCED a fabrication (dangerous) → discard.
             status, blk = "failed", ["fabricated offer claim visible: 50% OFF"]
         elif "fallback" in name:
@@ -4617,5 +4625,114 @@ def test_premium_repair_introducing_fabrication_is_discarded(monkeypatch, tmp_pa
     assert exhausted["reason"] == "introduced_non_recoverable"
     # No fabricated flyer ships: original failed_qa (item miss only) was recoverable,
     # so the existing ladder overlay path ships the SAFE deterministic overlay.
-    # Critically the repaired (fabricating) preview was NOT shipped.
-    assert not persisted["assets"][-1]["path"].endswith("C1-preview.png")
+    # Critically the repaired (fabricating) render was NOT shipped (check the
+    # filename, not the full path — the tmp dir name may contain "repair").
+    assert "repair" not in Path(persisted["assets"][-1]["path"]).name
+
+
+def test_failed_premium_repair_leaves_original_preview_byte_identical(monkeypatch, tmp_path, capsys):
+    """BLOCKER-1 regression guard: after a FAILED repair (re-QA still failing →
+    fall-through to the existing ladder), the ORIGINAL <id>-C1-preview.png written
+    by the integrated render must be BYTE-IDENTICAL to before the repair attempt —
+    the repair writes to a DISTINCT repair{n}.png and never overwrites it."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import FlyerVisualQAReport
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", raising=False)
+
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    # The canonical original-integrated-render path + its exact byte content. The
+    # real render_concept_previews writes <id>-C1-preview.png; we mirror that and
+    # snapshot the bytes inside the FIRST integrated render call.
+    canonical_preview = asset_dir / "F0001-C1-preview.png"
+    ORIGINAL_BYTES = b"ORIGINAL-INTEGRATED-PREMIUM-RENDER-BYTES"
+    # Captured at the instant the overlay-fallback render fires — i.e. AFTER the
+    # repair rung exhausted but BEFORE the existing ladder cleans up the original.
+    # This is the precise window where a same-path-overwrite bug would have
+    # corrupted the original; capturing here makes the byte-identity check
+    # unconditional (the file legitimately disappears later when the overlay ships).
+    preview_at_fallback_time = {}
+    repair_calls = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        mode = module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER", "")
+        if mode == "0":
+            # deterministic-overlay fallback → a DIFFERENT file. Snapshot the
+            # original preview's bytes right now (repair has run + exhausted).
+            preview_at_fallback_time["exists"] = canonical_preview.exists()
+            preview_at_fallback_time["bytes"] = canonical_preview.read_bytes() if canonical_preview.exists() else None
+            path = Path(output_dir) / f"{project_obj.project_id}-C1-fallback.png"
+            path.write_bytes(b"overlay-fallback-bytes")
+        else:
+            # integrated render lands on the canonical preview path.
+            path = Path(output_dir) / f"{project_obj.project_id}-C1-preview.png"
+            path.write_bytes(ORIGINAL_BYTES)
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_repair(project_obj, base_png, output_dir, *, repair_instruction, model, quality="high", output_name=""):
+        repair_calls.append(output_name)
+        # Honor the distinct per-attempt name; MUST NOT be the canonical preview.
+        assert output_name and output_name != f"{project_obj.project_id}-C1-preview.png"
+        path = Path(output_dir) / output_name
+        path.write_bytes(f"REPAIR-ATTEMPT-{len(repair_calls)}-BYTES".encode("ascii"))
+        return RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                 width=1080, height=1350, concept_id="C1")
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        name = Path(artifact_path).name
+        if "fallback" in name:
+            status, blk = "passed", []
+        else:
+            # original integrated render + every repair render still fail (recoverable).
+            status, blk = "failed", ["missing required visible fact: item:1:name"]
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id, asset_id=asset_id, artifact_path=str(artifact_path),
+            artifact_sha256="d" * 64, project_version=project_obj.version, output_format=output_format,
+            provider="test", qa_source="ocr_vision", status=status, blockers=blk,
+            extracted_text="x", checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "render_repair_edit", fake_repair)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(module, "classify_flyer_qa_for_autorepair",
+                        lambda *_a, **_k: types.SimpleNamespace(decision="hard_stop", reason="customer_trust_risk"))
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    # The repair ran (and exhausted) — so the invariant is non-trivially tested.
+    assert len(repair_calls) == 2
+    assert all(n and n != "F0001-C1-preview.png" for n in repair_calls)
+    rows = _audit_rows(audit_path)
+    assert "flyer_premium_repair_exhausted" in [r["type"] for r in rows]
+    # The deterministic overlay shipped via the EXISTING ladder, untouched.
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "awaiting_final_approval"
+    # CORE ASSERTION (BLOCKER-1): at the moment the existing ladder took over (the
+    # overlay-fallback render fired), the original integrated preview was STILL ON
+    # DISK and BYTE-IDENTICAL to what the integrated render wrote — the bounded ×2
+    # repair never overwrote it (it wrote to distinct repair{n}.png paths). A
+    # same-path-overwrite bug would have replaced these bytes with REPAIR-ATTEMPT-*.
+    assert preview_at_fallback_time["exists"] is True
+    assert preview_at_fallback_time["bytes"] == ORIGINAL_BYTES
