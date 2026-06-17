@@ -4965,3 +4965,129 @@ def test_openrouter_image_edit_bytes_http_error_raises_render_error(tmp_path, mo
             quality="high",
         )
     assert "500" in str(exc.value)
+
+
+# --- Slice 2 Task 2: repair-edit render mode + flag ---------------------------
+
+
+def test_premium_repair_enabled_flag_gating(monkeypatch):
+    project = _english_project()
+    # OFF by default.
+    monkeypatch.delenv("FLYER_PREMIUM_REPAIR", raising=False)
+    monkeypatch.delenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", raising=False)
+    assert render_module._premium_repair_enabled(project) is False
+    # Anything other than exactly "1" is OFF.
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "true")
+    assert render_module._premium_repair_enabled(project) is False
+    # Flag == "1" with NO allowlist → global ON.
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
+    assert render_module._premium_repair_enabled(project) is True
+
+
+def test_premium_repair_enabled_allowlist_scopes_by_customer_phone(monkeypatch):
+    project = _english_project().model_copy(update={"customer_phone": "+17329837841"})
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
+    # Allowlist set but does NOT contain this sender → OFF.
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+19998887777")
+    assert render_module._premium_repair_enabled(project) is False
+    # Allowlist contains this sender (format-variant tolerant) → ON.
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "1 732-983-7841, +19998887777")
+    assert render_module._premium_repair_enabled(project) is True
+
+
+def _repair_project() -> FlyerProject:
+    return _complete_project().model_copy(update={
+        "customer_phone": "+17329837841",
+        "locked_facts": [
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Street Snack Specials", source="customer_text", required=True),
+        ],
+    })
+
+
+def test_render_repair_edit_writes_edit_bytes_without_overlay(tmp_path, monkeypatch):
+    """render_repair_edit ships the model's premium text verbatim — the written
+    preview is the model edit (NO deterministic overlay re-composed) and NO raw
+    background sidecar is produced (the preview IS the authoritative artifact)."""
+    project = _repair_project()
+    base_png = tmp_path / "F0001-C1-base.png"
+    base_png.write_bytes(_png_bytes(color=(12, 34, 56)))
+    # A distinctly-coloured edit so we can assert the preview derives from the
+    # edit bytes (not the base or a deterministic overlay composite).
+    edit_bytes = _png_bytes(color=(70, 180, 90))
+
+    edit_calls = []
+
+    def _fake_edit(*, base_image_path, mime, prompt, size, model, quality):
+        edit_calls.append({"base": Path(base_image_path), "mime": mime, "prompt": prompt, "size": size, "model": model, "quality": quality})
+        return edit_bytes
+
+    overlay_calls = []
+    monkeypatch.setattr(render_module, "_openrouter_image_edit_bytes", _fake_edit)
+    monkeypatch.setattr(render_module, "_apply_critical_text_overlay", lambda *a, **k: overlay_calls.append(1))
+    monkeypatch.setattr(render_module, "apply_critical_text_overlay", lambda *a, **k: overlay_calls.append(1))
+
+    spec = render_module.render_repair_edit(
+        project,
+        base_png,
+        tmp_path,
+        repair_instruction="Edit this exact flyer. Change ONLY: fix the spelling.",
+        model="google/gemini-3.1-flash-image-preview",
+        quality="high",
+    )
+
+    assert spec.kind == "concept_preview"
+    assert spec.concept_id == "C1"
+    assert spec.path == tmp_path / "F0001-C1-preview.png"
+    # NO deterministic overlay was applied (the model's premium text is preserved).
+    assert overlay_calls == []
+    # The preview is the model edit (1080x1350, derived from the green edit bytes,
+    # NOT a deterministic-overlay composite). Compare the dominant top-strip hue
+    # of the written preview to the edit bytes.
+    from PIL import Image
+    with Image.open(spec.path) as written, Image.open(io.BytesIO(edit_bytes)) as expected:
+        assert written.size == (1080, 1350)
+        wp = written.convert("RGB").resize((8, 8)).getpixel((4, 4))
+        ep = expected.convert("RGB").resize((8, 8)).getpixel((4, 4))
+        assert max(abs(a - b) for a, b in zip(wp, ep)) <= 12
+    # No raw-background sidecar (the repair preview is authoritative; unlike
+    # source-edit there is no overlay to re-apply per final format).
+    assert not render_module._raw_background_path(spec.path).exists()
+    # The base image (prior premium render) was the edit base, not the reference.
+    assert len(edit_calls) == 1
+    assert edit_calls[0]["base"] == base_png
+    assert edit_calls[0]["prompt"].startswith("Edit this exact flyer")
+    assert edit_calls[0]["size"] == (1080, 1350)
+    assert edit_calls[0]["model"] == "google/gemini-3.1-flash-image-preview"
+    # A text manifest was written alongside.
+    assert Path(f"{spec.path}.text.json").exists()
+
+
+def test_render_repair_edit_quality_failure_raises_and_cleans_up(tmp_path, monkeypatch):
+    project = _repair_project()
+    base_png = tmp_path / "F0001-C1-base.png"
+    base_png.write_bytes(_png_bytes())
+
+    # Valid PNG bytes (so the contained-write succeeds), but the quality check is
+    # forced to fail → render_repair_edit must fail-closed and leave no orphan.
+    monkeypatch.setattr(render_module, "_openrouter_image_edit_bytes", lambda **k: _png_bytes(size=(64, 64)))
+    monkeypatch.setattr(
+        render_module,
+        "inspect_rendered_asset",
+        lambda *a, **k: render_module.RenderedAssetQuality(False, ["blank or low-variance image"], []),
+    )
+
+    with pytest.raises(FlyerRenderError):
+        render_module.render_repair_edit(
+            project,
+            base_png,
+            tmp_path,
+            repair_instruction="x",
+            model="m",
+            quality="high",
+        )
+    # No orphan preview / manifest left behind.
+    assert not (tmp_path / "F0001-C1-preview.png").exists()
+    assert not Path(str(tmp_path / "F0001-C1-preview.png") + ".text.json").exists()
