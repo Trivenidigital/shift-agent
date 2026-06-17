@@ -5088,6 +5088,135 @@ def test_premium_repair_flag_off_emits_zero_new_observability_rows(monkeypatch, 
         assert not any(str(w).startswith(PREMIUM_REPAIR_QA_MARKER) for w in r.get("warnings", []))
 
 
+def _run_multi_concept_premium_repair_case(monkeypatch, tmp_path, *, per_concept_blockers, repair_passes_on, fail_severity="pass", strip_locked_items=False):
+    """Harness for the >50-AGGREGATED-blocker case (BLOCKER 4). Each
+    FlyerVisualQAReport itself caps at 50 blockers, but with concept_count=3 the
+    AGGREGATE across reports (failed_qa) can exceed 50 — which is what the emit
+    sites must cap. Renders 3 concepts; each report carries per_concept_blockers.
+    ``strip_locked_items`` removes the locked item names so the instruction builder
+    yields "" → the no_instruction skip path (which also emits aggregated blockers)."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import Config, FlyerVisualQAReport
+
+    monkeypatch.setattr(module, "load_yaml_model", lambda *_a, **_k: Config.model_validate({
+        "schema_version": 1,
+        "customer": {"name": "Triveni", "location_id": "loc_pineville_01", "timezone": "America/New_York"},
+        "owner": {"name": "Owner", "phone": "+19045550000"},
+        "limits": {},
+        "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "owner@example.com"},
+        "flyer": {"enabled": True, "draft_image_model": "openrouter/premium-poster-model",
+                  "draft_image_quality": "high", "concept_count": 3},
+    }))
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", raising=False)
+
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    proj = _basic_food_project_dict("F0001", asset_dir)
+    if strip_locked_items:
+        proj["locked_facts"] = [
+            {"fact_id": "business_name", "label": "Business", "value": "Lakshmi Kitchen",
+             "source": "customer_profile", "required": False},
+        ]
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2, "projects": [proj],
+    }), encoding="utf-8")
+
+    repair_calls = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        mode = module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER", "")
+        suffix = "fallback" if mode == "0" else "integrated"
+        specs = []
+        for cid in (("C1",) if mode == "0" else ("C1", "C2", "C3")):
+            path = Path(output_dir) / f"{project_obj.project_id}-{cid}-{suffix}.png"
+            path.write_bytes(f"rendered-{cid}-{suffix}".encode("ascii"))
+            specs.append(RenderedAssetSpec(path=path, kind="concept_preview",
+                                           output_format="concept_preview", width=1080, height=1350, concept_id=cid))
+        return specs
+
+    def fake_repair(project_obj, base_png, output_dir, *, repair_instruction, model, quality="high", output_name=""):
+        repair_calls.append(output_name)
+        path = Path(output_dir) / (output_name or f"{project_obj.project_id}-C1-preview.png")
+        path.write_bytes(f"repaired-{len(repair_calls)}".encode("ascii"))
+        return RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                 width=1080, height=1350, concept_id="C1")
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        name = Path(artifact_path).name
+        if "fallback" in name:
+            status, blk = "passed", []
+        elif "repair" in name:
+            idx = len(repair_calls)
+            status, blk = ("passed", []) if (repair_passes_on is not None and idx >= repair_passes_on) else ("failed", list(per_concept_blockers))
+        else:
+            status, blk = "failed", list(per_concept_blockers)
+        extra = {} if status == "passed" else {"severity": fail_severity}
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id, asset_id=asset_id, artifact_path=str(artifact_path),
+            artifact_sha256="d" * 64, project_version=project_obj.version, output_format=output_format,
+            provider="test", qa_source="ocr_vision", status=status, blockers=blk,
+            extracted_text="x", checked_at=datetime.now(timezone.utc), **extra,
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "render_repair_edit", fake_repair)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(module, "classify_flyer_qa_for_autorepair",
+                        lambda *_a, **_k: types.SimpleNamespace(decision="hard_stop", reason="customer_trust_risk"))
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+    rc = module.main()
+    rows = _audit_rows(audit_path) if audit_path.exists() else []
+    return rows, rc
+
+
+def test_premium_repair_skipped_caps_blockers_over_schema_limit(monkeypatch, tmp_path, capsys):
+    """BLOCKER 4: a failed_qa whose AGGREGATED blockers exceed the schema cap
+    (max_length=50) must NOT crash the FlyerPremiumRepairSkipped emit — the row is
+    produced, blockers sliced to 50. 3 concepts × 25 blockers (incl. a wrong-brand
+    → non-recoverable gate False) = 75 aggregated."""
+    per_concept = ["visible wrong business name: Indian Cafe"] + [
+        f"missing required visible fact: item:{i}:name" for i in range(24)
+    ]
+    rows, rc = _run_multi_concept_premium_repair_case(
+        monkeypatch, tmp_path, per_concept_blockers=per_concept, repair_passes_on=1, fail_severity="block")
+    # Did NOT crash; the skip row exists and its blockers are capped at 50.
+    skipped = next(r for r in rows if r["type"] == "flyer_premium_repair_skipped")
+    assert skipped["reason"] == "non_recoverable"
+    assert len(skipped["blockers"]) == 50
+
+
+def test_premium_repair_no_instruction_skip_caps_blockers_over_schema_limit(monkeypatch, tmp_path, capsys):
+    """BLOCKER 4: the no_instruction skip emits the AGGREGATED original blockers,
+    which with 3 concepts exceed the schema cap (max_length=50) → must NOT crash;
+    blockers sliced to 50. Uses recoverable misspelling blockers (gate passes) but
+    NO locked item names so the instruction builder yields "" → no_instruction."""
+    # 3 concepts × 25 recoverable (misspelling) blockers = 75 aggregated. With no
+    # locked item names, build_premium_repair_instruction returns "" → skip.
+    per_concept = [
+        f"visible text defect reported by QA: 'Uttap{i}' misspelling" for i in range(25)
+    ]
+    rows, rc = _run_multi_concept_premium_repair_case(
+        monkeypatch, tmp_path, per_concept_blockers=per_concept, repair_passes_on=None,
+        strip_locked_items=True)
+    skipped = next(r for r in rows if r["type"] == "flyer_premium_repair_skipped")
+    assert skipped["reason"] == "no_instruction"
+    assert len(skipped["blockers"]) == 50
+
+
 def test_premium_repair_audit_chain_is_complete_on_exhaustion(monkeypatch, tmp_path, capsys):
     """Piece 4: a full exhausted run is traceable end-to-end with no gaps:
     attempted → exhausted(+residual_blockers) → existing fell_back row."""

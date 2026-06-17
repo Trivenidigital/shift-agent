@@ -247,6 +247,15 @@ def _effective_render_model(model: str) -> str:
 
 _ITEM_PRICE_MISMATCH_RE = re.compile(r"^item price mismatch: item:(?P<index>\d+) expected ")
 
+# BLOCKER 4: FlyerPremiumRepairSkipped.blockers and
+# FlyerPremiumRepairExhausted.residual_blockers carry list[str] with
+# max_length=50. With concept_count up to 3 the AGGREGATED blockers across
+# reports can exceed 50 → a pydantic ValidationError on the audit emit would
+# alter the failure path. Slice every emitted blocker list to this cap so the
+# observability row is always produced (the cap is diagnostic-only; the full set
+# still drives the unchanged final-state decision via failed_qa).
+_PREMIUM_REPAIR_BLOCKER_CAP = 50
+
 
 def _qa_failed_exact_text_recoverable(reports, *, locked_fact_ids=None) -> bool:
     """Operator Option 4 (2026-06-15 safety net): partition QA blockers into a
@@ -1250,7 +1259,9 @@ def main() -> int:
                         project_id=current.project_id,
                         project_version=current.version,
                         reason="no_instruction",
-                        blockers=premium_blockers,
+                        # BLOCKER 4: cap to the schema max so >50 aggregated
+                        # blockers (concept_count up to 3) never crash the emit.
+                        blockers=premium_blockers[:_PREMIUM_REPAIR_BLOCKER_CAP],
                     ))
                 else:
                     _audit_append(audit_log_path, FlyerPremiumRepairExhausted(
@@ -1259,7 +1270,7 @@ def main() -> int:
                         project_version=current.version,
                         attempts=premium_attempt,
                         reason=premium_exhausted_reason,
-                        residual_blockers=premium_residual_blockers,
+                        residual_blockers=premium_residual_blockers[:_PREMIUM_REPAIR_BLOCKER_CAP],
                     ))
         elif (
             failed_qa
@@ -1284,7 +1295,9 @@ def main() -> int:
                 project_id=current.project_id,
                 project_version=current.version,
                 reason=skip_reason,
-                blockers=skip_blockers,
+                # BLOCKER 4: cap to the schema max so >50 aggregated blockers
+                # (concept_count up to 3) never crash the emit.
+                blockers=skip_blockers[:_PREMIUM_REPAIR_BLOCKER_CAP],
             ))
         # FIX 4: never route a fabrication-bearing failure through the legacy
         # recovery.py autorepair loop. The legacy classifier marks a set eligible
