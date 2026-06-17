@@ -373,6 +373,59 @@ def test_flyer_recovery_audit_variants_dispatch_through_log_entry():
     assert isinstance(adapter.validate_python(operator_action), FlyerRecoveryOperatorActionRequired)
 
 
+def test_flyer_premium_repair_audit_variants_dispatch_through_log_entry():
+    from schemas import (  # noqa: E402
+        FlyerPremiumRepairAttempted,
+        FlyerPremiumRepairExhausted,
+        FlyerPremiumRepairSucceeded,
+    )
+
+    now = datetime.now(timezone.utc).isoformat()
+    attempted = {
+        "type": "flyer_premium_repair_attempted",
+        "ts": now,
+        "project_id": "F0170",
+        "project_version": 3,
+    }
+    succeeded = {
+        "type": "flyer_premium_repair_succeeded",
+        "ts": now,
+        "project_id": "F0170",
+        "project_version": 3,
+        "attempts": 2,
+    }
+    exhausted = {
+        "type": "flyer_premium_repair_exhausted",
+        "ts": now,
+        "project_id": "F0170",
+        "project_version": 3,
+        "attempts": 2,
+        "reason": "residual_recoverable_defect",
+    }
+
+    adapter = TypeAdapter(LogEntry)
+    assert isinstance(adapter.validate_python(attempted), FlyerPremiumRepairAttempted)
+    assert isinstance(adapter.validate_python(succeeded), FlyerPremiumRepairSucceeded)
+    assert isinstance(adapter.validate_python(exhausted), FlyerPremiumRepairExhausted)
+    # attempts defaults to 1 and must be >= 1
+    default_attempts = adapter.validate_python({
+        "type": "flyer_premium_repair_succeeded",
+        "ts": now,
+        "project_id": "F0170",
+        "project_version": 3,
+    })
+    assert default_attempts.attempts == 1
+    # extra fields are forbidden (state-schema discipline)
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "type": "flyer_premium_repair_attempted",
+            "ts": now,
+            "project_id": "F0170",
+            "project_version": 3,
+            "unexpected": "x",
+        })
+
+
 def test_guest_order_store_tracks_payment_first_one_off_order():
     now = datetime.now(timezone.utc)
     store = FlyerGuestOrderStore()

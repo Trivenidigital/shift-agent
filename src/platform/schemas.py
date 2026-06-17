@@ -4496,6 +4496,58 @@ class FlyerIntegratedManualReview(_BaseEntry):
     reason_code: str = Field(default="", max_length=80)
 
 
+class FlyerPremiumRepairAttempted(_BaseEntry):
+    """Slice 2 (2026-06-17) premium image-to-image repair-loop observability.
+    Emitted once when the (flag-gated) premium repair rung is entered for a
+    recoverable, non-fabrication QA failure on the integrated premium render —
+    i.e. instead of falling straight to the deterministic-overlay floor, an
+    image-to-image edit of the PRIOR PREMIUM RENDER is attempted to fix only the
+    defective text while preserving the composition.
+
+    LOG-ONLY; the denominator for premium-repair success/exhaustion rate."""
+    type: Literal["flyer_premium_repair_attempted"] = "flyer_premium_repair_attempted"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+
+
+class FlyerPremiumRepairSucceeded(_BaseEntry):
+    """Slice 2 premium repair-loop observability. Emitted when an image-to-image
+    repair render passes the full visual-QA referee and is kept → the customer
+    receives the repaired PREMIUM render (not the flat deterministic overlay).
+    `attempts` records how many bounded repair edits it took (1 or 2).
+
+    LOG-ONLY."""
+    type: Literal["flyer_premium_repair_succeeded"] = "flyer_premium_repair_succeeded"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+    attempts: int = Field(default=1, ge=1)
+
+
+class FlyerPremiumRepairExhausted(_BaseEntry):
+    """Slice 2 premium repair-loop observability. Emitted when the bounded (×2)
+    repair edits did not produce a clean premium render — the orchestrator leaves
+    the ORIGINAL failed QA intact and falls through to the EXISTING recovery
+    ladder (legacy autorepair / content-miss retry / deterministic-overlay floor
+    / manual), exactly as it would with the flag OFF. `reason` discriminates WHY:
+
+      - residual_recoverable_defect : a repair render still had a recoverable
+        defect after the budget was spent
+      - generation_error            : a repair render raised (provider/transport)
+      - introduced_non_recoverable  : a repair render introduced a dangerous /
+        non-recoverable blocker → discarded (never shipped)
+
+    LOG-ONLY; never alters the downstream fallback the orchestrator already runs."""
+    type: Literal["flyer_premium_repair_exhausted"] = "flyer_premium_repair_exhausted"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+    attempts: int = Field(default=0, ge=0)
+    reason: Literal[
+        "residual_recoverable_defect",
+        "generation_error",
+        "introduced_non_recoverable",
+    ]
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -5849,6 +5901,10 @@ LogEntry = Annotated[
         Annotated[FlyerIntegratedPassed, Tag("flyer_integrated_passed")],
         Annotated[FlyerIntegratedFellBackDeterministic, Tag("flyer_integrated_fell_back_deterministic")],
         Annotated[FlyerIntegratedManualReview, Tag("flyer_integrated_manual_review")],
+        # 2026-06-17 — Slice 2 premium image-to-image repair-loop observability
+        Annotated[FlyerPremiumRepairAttempted, Tag("flyer_premium_repair_attempted")],
+        Annotated[FlyerPremiumRepairSucceeded, Tag("flyer_premium_repair_succeeded")],
+        Annotated[FlyerPremiumRepairExhausted, Tag("flyer_premium_repair_exhausted")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
