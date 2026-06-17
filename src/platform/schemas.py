@@ -4536,6 +4536,12 @@ class FlyerPremiumRepairExhausted(_BaseEntry):
       - introduced_non_recoverable  : a repair render introduced a dangerous /
         non-recoverable blocker → discarded (never shipped)
 
+    `residual_blockers` records the blockers STILL failing after the last repair
+    attempt (the exact defects the repair could not fix) so the operator can read
+    why it exhausted without re-deriving from per-attempt QA reports. Defaults to
+    empty for backward-compat with rows written before this field existed and for
+    the `generation_error` / no-attempt cases where no re-QA produced blockers.
+
     LOG-ONLY; never alters the downstream fallback the orchestrator already runs."""
     type: Literal["flyer_premium_repair_exhausted"] = "flyer_premium_repair_exhausted"
     project_id: str = Field(min_length=1, max_length=40)
@@ -4546,6 +4552,33 @@ class FlyerPremiumRepairExhausted(_BaseEntry):
         "generation_error",
         "introduced_non_recoverable",
     ]
+    residual_blockers: list[str] = Field(default_factory=list, max_length=50)
+
+
+class FlyerPremiumRepairSkipped(_BaseEntry):
+    """Slice 2 premium repair-loop observability (2026-06-17). Emitted ONLY when
+    the flag is ON, failed_qa exists, but the premium-repair gate evaluated False
+    — so the operator can see exactly WHY the repair did NOT fire (otherwise a
+    flag-ON skip is invisible: no attempted/succeeded/exhausted row). `reason`
+    classifies the gate decision:
+
+      - fabrication     : a fabricated price/offer (or unverified phone) is present
+                          → hard-block, never repaired (the existing safety gate).
+      - non_recoverable : the recoverable-text gate is False for a non-fabrication
+                          reason (e.g. "visible wrong business/brand: ...") — the
+                          F0168 case; `blockers` carries the offending blockers.
+      - no_instruction  : the gate passed but build_premium_repair_instruction
+                          produced no resolvable clause → repair can't help.
+
+    This REPORTS the existing gate's decision; it does NOT change the safety
+    classification or what ships. Flag OFF ⇒ NEVER emitted (byte-identical).
+
+    LOG-ONLY."""
+    type: Literal["flyer_premium_repair_skipped"] = "flyer_premium_repair_skipped"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+    reason: Literal["fabrication", "non_recoverable", "no_instruction"]
+    blockers: list[str] = Field(default_factory=list, max_length=50)
 
 
 class CateringLeadCreated(_BaseEntry):
@@ -5905,6 +5938,7 @@ LogEntry = Annotated[
         Annotated[FlyerPremiumRepairAttempted, Tag("flyer_premium_repair_attempted")],
         Annotated[FlyerPremiumRepairSucceeded, Tag("flyer_premium_repair_succeeded")],
         Annotated[FlyerPremiumRepairExhausted, Tag("flyer_premium_repair_exhausted")],
+        Annotated[FlyerPremiumRepairSkipped, Tag("flyer_premium_repair_skipped")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],

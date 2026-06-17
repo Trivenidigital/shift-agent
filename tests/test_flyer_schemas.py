@@ -426,6 +426,73 @@ def test_flyer_premium_repair_audit_variants_dispatch_through_log_entry():
         })
 
 
+def test_flyer_premium_repair_skipped_and_residual_blockers():
+    from schemas import FlyerPremiumRepairExhausted, FlyerPremiumRepairSkipped
+
+    now = datetime.now(timezone.utc).isoformat()
+    adapter = TypeAdapter(LogEntry)
+
+    # FlyerPremiumRepairSkipped — flag-ON observability of WHY the gate was False.
+    for reason in ("fabrication", "non_recoverable", "no_instruction"):
+        skipped = {
+            "type": "flyer_premium_repair_skipped",
+            "ts": now,
+            "project_id": "F0168",
+            "project_version": 2,
+            "reason": reason,
+            "blockers": ["visible wrong business name: Indian Cafe"],
+        }
+        parsed = adapter.validate_python(skipped)
+        assert isinstance(parsed, FlyerPremiumRepairSkipped)
+        assert parsed.reason == reason
+        assert parsed.blockers == ["visible wrong business name: Indian Cafe"]
+
+    # blockers defaults to empty list
+    parsed_default = adapter.validate_python({
+        "type": "flyer_premium_repair_skipped",
+        "ts": now,
+        "project_id": "F0168",
+        "project_version": 2,
+        "reason": "no_instruction",
+    })
+    assert parsed_default.blockers == []
+
+    # bad reason rejected
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "type": "flyer_premium_repair_skipped",
+            "ts": now,
+            "project_id": "F0168",
+            "project_version": 2,
+            "reason": "totally_unknown",
+        })
+
+    # FlyerPremiumRepairExhausted now carries residual_blockers (the blockers
+    # still failing after the last repair attempt) — defaults to empty for
+    # backward-compat with already-written rows.
+    exhausted = adapter.validate_python({
+        "type": "flyer_premium_repair_exhausted",
+        "ts": now,
+        "project_id": "F0170",
+        "project_version": 3,
+        "attempts": 2,
+        "reason": "residual_recoverable_defect",
+        "residual_blockers": ["missing required visible fact: item:1:name"],
+    })
+    assert isinstance(exhausted, FlyerPremiumRepairExhausted)
+    assert exhausted.residual_blockers == ["missing required visible fact: item:1:name"]
+    # backward-compat: an exhausted row WITHOUT residual_blockers still validates
+    exhausted_legacy = adapter.validate_python({
+        "type": "flyer_premium_repair_exhausted",
+        "ts": now,
+        "project_id": "F0170",
+        "project_version": 3,
+        "attempts": 0,
+        "reason": "generation_error",
+    })
+    assert exhausted_legacy.residual_blockers == []
+
+
 def test_guest_order_store_tracks_payment_first_one_off_order():
     now = datetime.now(timezone.utc)
     store = FlyerGuestOrderStore()
