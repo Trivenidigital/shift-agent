@@ -1026,9 +1026,11 @@ def main() -> int:
         pending_success_attempt = None
         pending_success_entry = None
         # Slice 2 observability: tagged copies of each FAILED repair-attempt QA
-        # report, persisted into qa_reports for visibility WITHOUT entering the
-        # final-state failed_qa / severity decision. Stays empty when the flag is
-        # OFF or no repair runs ⇒ byte-identical persistence.
+        # report, persisted into the dedicated FlyerProject.premium_repair_qa field
+        # (NOT qa_reports — keeps backfill_manual_reasons + other qa_reports consumers
+        # unaffected) for visibility, WITHOUT entering the final-state failed_qa /
+        # severity decision. Stays empty when the flag is OFF or no repair runs ⇒
+        # behaviorally byte-identical.
         premium_repair_attempt_reports = []
         # === Slice 2: premium image-to-image repair rung (flag-gated, ADDITIVE) ===
         # The FIRST recovery rung: when the integrated premium render fails QA with
@@ -1169,8 +1171,9 @@ def main() -> int:
                     # persist a TAGGED copy of each FAILED attempt's QA report so
                     # the operator can see per-attempt residuals in projects.json,
                     # and record the residual blockers for the exhausted row. These
-                    # tagged reports are appended to qa_reports at persist time only;
-                    # failed_qa / severity stay based on the FINAL shipped render.
+                    # tagged reports are written to premium_repair_qa (NOT qa_reports)
+                    # at persist time only; failed_qa / severity stay based on the
+                    # FINAL shipped render.
                     for r in repair_failed_qa:
                         premium_repair_attempt_reports.append(
                             r.model_copy(update={
