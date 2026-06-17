@@ -4353,3 +4353,269 @@ def test_obs_referee_unavailable_fallback_emits_fell_back_reason(monkeypatch, tm
     assert "flyer_integrated_referee_unavailable_fallback" in row_types
     fell = next(r for r in rows if r["type"] == "flyer_integrated_fell_back_deterministic")
     assert fell["reason"] == "referee_unavailable"
+
+
+# ===========================================================================
+# Slice 2 Task 4 — additive premium image-to-image repair rung (flag-gated)
+# ===========================================================================
+
+
+def _recoverable_blockers():
+    # Recoverable (non-fabrication, non-phone): a dropped item name + a near-dup.
+    return [
+        "missing required visible fact: item:1:name",
+        "near-duplicate item visible: expected Punugulu but saw Punuglu",
+    ]
+
+
+def _run_premium_repair_case(monkeypatch, tmp_path, *, repair_passes_on, flag="1", blockers=None, fail_severity="pass", capsys=None):
+    """Shared harness: an integrated render that fails QA with recoverable
+    blockers, then (flag-gated) the premium repair rung. ``repair_passes_on`` is
+    the 1-based attempt index whose repaired render passes QA (None = never).
+    Returns (module, render_calls, repair_calls, persisted, rows)."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import FlyerVisualQAReport
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    if flag is None:
+        monkeypatch.delenv("FLYER_PREMIUM_REPAIR", raising=False)
+    else:
+        monkeypatch.setenv("FLYER_PREMIUM_REPAIR", flag)
+    monkeypatch.delenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", raising=False)
+
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    blockers = blockers if blockers is not None else _recoverable_blockers()
+    render_calls = []
+    repair_calls = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        mode = module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER", "")
+        render_calls.append({"mode": mode, "model": kwargs.get("model"), "quality": kwargs.get("quality")})
+        suffix = "fallback" if mode == "0" else "integrated"
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_repair(project_obj, base_png, output_dir, *, repair_instruction, model, quality="high"):
+        repair_calls.append({"base": str(base_png), "instruction": repair_instruction, "model": model, "quality": quality})
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-preview.png"
+        path.write_bytes(f"repaired-{len(repair_calls)}".encode("ascii"))
+        return RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                 width=1080, height=1350, concept_id="C1")
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        name = Path(artifact_path).name
+        if "fallback" in name:
+            status, blk = "passed", []
+        elif "preview" in name:
+            # A repaired render. It passes only on the configured attempt index.
+            idx = len(repair_calls)
+            if repair_passes_on is not None and idx >= repair_passes_on:
+                status, blk = "passed", []
+            else:
+                status, blk = "failed", list(blockers)
+        else:
+            status, blk = "failed", list(blockers)
+        extra = {} if status == "passed" else {"severity": fail_severity}
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id, asset_id=asset_id, artifact_path=str(artifact_path),
+            artifact_sha256="d" * 64, project_version=project_obj.version, output_format=output_format,
+            provider="test", qa_source="ocr_vision", status=status, blockers=blk,
+            extracted_text="ok" if status == "passed" else "Punuglu", checked_at=datetime.now(timezone.utc),
+            **extra,
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "render_repair_edit", fake_repair)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(module, "classify_flyer_qa_for_autorepair",
+                        lambda *_a, **_k: types.SimpleNamespace(decision="hard_stop", reason="customer_trust_risk"))
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    rc = module.main()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    rows = _audit_rows(audit_path) if audit_path.exists() else []
+    return module, render_calls, repair_calls, persisted, rows, rc
+
+
+def test_premium_repair_pass_ships_repaired_premium(monkeypatch, tmp_path, capsys):
+    """Flag ON + recoverable defect → ONE premium repair edit that passes QA →
+    ship the repaired PREMIUM render (NOT the flat overlay) → awaiting_final_
+    approval + FlyerPremiumRepairSucceeded. No deterministic overlay render runs."""
+    module, render_calls, repair_calls, persisted, rows, rc = _run_premium_repair_case(
+        monkeypatch, tmp_path, repair_passes_on=1)
+    assert rc == 0
+    # Exactly ONE repair edit; the base was the prior integrated render.
+    assert len(repair_calls) == 1
+    assert repair_calls[0]["base"].endswith("F0001-C1-integrated.png")
+    assert repair_calls[0]["instruction"].startswith("Edit this exact flyer")
+    # NO overlay (mode "0") render — the premium repaired render shipped.
+    assert all(c["mode"] == "1" for c in render_calls)
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["assets"][-1]["path"].endswith("F0001-C1-preview.png")
+    row_types = [r["type"] for r in rows]
+    assert "flyer_premium_repair_attempted" in row_types
+    assert "flyer_premium_repair_succeeded" in row_types
+    assert "flyer_premium_repair_exhausted" not in row_types
+
+
+def test_premium_repair_exhausts_then_falls_through_to_overlay(monkeypatch, tmp_path, capsys):
+    """Flag ON + recoverable defect, repair never passes → bounded ×2 then
+    FlyerPremiumRepairExhausted → falls through to the EXISTING ladder, which
+    ships the deterministic overlay (mode "0")."""
+    module, render_calls, repair_calls, persisted, rows, rc = _run_premium_repair_case(
+        monkeypatch, tmp_path, repair_passes_on=None)
+    assert rc == 0
+    # Bounded ×2 repair edits, no more.
+    assert len(repair_calls) == 2
+    row_types = [r["type"] for r in rows]
+    assert "flyer_premium_repair_attempted" in row_types
+    assert "flyer_premium_repair_exhausted" in row_types
+    assert "flyer_premium_repair_succeeded" not in row_types
+    exhausted = next(r for r in rows if r["type"] == "flyer_premium_repair_exhausted")
+    assert exhausted["reason"] == "residual_recoverable_defect"
+    # The existing ladder ran AFTER exhaustion → deterministic overlay shipped.
+    assert any(c["mode"] == "0" for c in render_calls)
+    assert persisted["status"] == "awaiting_final_approval"
+    assert persisted["assets"][-1]["path"].endswith("F0001-C1-fallback.png")
+
+
+def test_premium_repair_flag_off_makes_zero_repair_calls(monkeypatch, tmp_path, capsys):
+    """Flag OFF → the premium repair rung is entirely skipped (byte-identical):
+    render_repair_edit is NEVER called and no premium-repair audit rows appear.
+    The existing ladder still recovers via the deterministic overlay."""
+    module, render_calls, repair_calls, persisted, rows, rc = _run_premium_repair_case(
+        monkeypatch, tmp_path, repair_passes_on=1, flag=None)
+    assert rc == 0
+    assert repair_calls == []
+    row_types = [r["type"] for r in rows]
+    assert "flyer_premium_repair_attempted" not in row_types
+    assert "flyer_premium_repair_succeeded" not in row_types
+    assert "flyer_premium_repair_exhausted" not in row_types
+    # Existing ladder shipped the overlay (mode "0"), unchanged.
+    assert any(c["mode"] == "0" for c in render_calls)
+    assert persisted["status"] == "awaiting_final_approval"
+
+
+def test_premium_repair_never_called_for_fabrication(monkeypatch, tmp_path, capsys):
+    """SAFETY: a fabrication-bearing failure must NEVER enter the repair loop
+    (it stays a hard-block). render_repair_edit is not called; no repair rows."""
+    fab_blockers = [
+        "missing required visible fact: item:1:name",
+        "fabricated price visible: $3.99",
+    ]
+    module, render_calls, repair_calls, persisted, rows, rc = _run_premium_repair_case(
+        monkeypatch, tmp_path, repair_passes_on=1, blockers=fab_blockers, fail_severity="block")
+    assert repair_calls == []
+    row_types = [r["type"] for r in rows]
+    assert "flyer_premium_repair_attempted" not in row_types
+    # Fabrication is a hard-block → manual review, NOT a shipped/overlaid flyer.
+    assert persisted["status"] == "manual_edit_required"
+
+
+def test_premium_repair_introducing_fabrication_is_discarded(monkeypatch, tmp_path, capsys):
+    """SAFETY: a repair that INTRODUCES a dangerous blocker (fabrication) on
+    re-QA must be discarded (never shipped) → FlyerPremiumRepairExhausted
+    (introduced_non_recoverable) → falls through to the existing hard-block /
+    manual path. No fabricated flyer is delivered."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import FlyerVisualQAReport
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", raising=False)
+
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    render_calls = []
+    repair_calls = []
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        mode = module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER", "")
+        render_calls.append({"mode": mode})
+        suffix = "fallback" if mode == "0" else "integrated"
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-{suffix}.png"
+        path.write_bytes(f"rendered-{suffix}".encode("ascii"))
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def fake_repair(project_obj, base_png, output_dir, *, repair_instruction, model, quality="high"):
+        repair_calls.append(str(base_png))
+        path = Path(output_dir) / f"{project_obj.project_id}-C1-preview.png"
+        path.write_bytes(b"repaired")
+        return RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                 width=1080, height=1350, concept_id="C1")
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        name = Path(artifact_path).name
+        if "preview" in name:
+            # The repaired render INTRODUCED a fabrication (dangerous) → discard.
+            status, blk = "failed", ["fabricated offer claim visible: 50% OFF"]
+        elif "fallback" in name:
+            status, blk = "passed", []
+        else:
+            status, blk = "failed", ["missing required visible fact: item:1:name"]
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id, asset_id=asset_id, artifact_path=str(artifact_path),
+            artifact_sha256="d" * 64, project_version=project_obj.version, output_format=output_format,
+            provider="test", qa_source="ocr_vision", status=status, blockers=blk,
+            severity="block" if status == "failed" else "pass",
+            extracted_text="x", checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "render_repair_edit", fake_repair)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(module, "classify_flyer_qa_for_autorepair",
+                        lambda *_a, **_k: types.SimpleNamespace(decision="hard_stop", reason="customer_trust_risk"))
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    assert module.main() == 0
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    rows = _audit_rows(audit_path)
+    row_types = [r["type"] for r in rows]
+    # The repair was attempted once, then discarded (dangerous introduced) → stop.
+    assert len(repair_calls) == 1
+    assert "flyer_premium_repair_attempted" in row_types
+    exhausted = next(r for r in rows if r["type"] == "flyer_premium_repair_exhausted")
+    assert exhausted["reason"] == "introduced_non_recoverable"
+    # No fabricated flyer ships: original failed_qa (item miss only) was recoverable,
+    # so the existing ladder overlay path ships the SAFE deterministic overlay.
+    # Critically the repaired (fabricating) preview was NOT shipped.
+    assert not persisted["assets"][-1]["path"].endswith("C1-preview.png")
