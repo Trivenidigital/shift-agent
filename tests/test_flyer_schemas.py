@@ -688,6 +688,37 @@ def test_project_defaults_and_revision_cap():
         FlyerProject.model_validate(too_many)
 
 
+def test_project_premium_repair_qa_field_defaults_empty_and_is_separate_from_qa_reports():
+    """BLOCKER 3: premium-repair attempt QA reports live in a DEDICATED field,
+    NOT in qa_reports (so backfill_manual_reasons + other qa_reports consumers are
+    unaffected). Defaults empty for backward-compat with existing on-disk state."""
+    project = FlyerProject.model_validate(_base_project_dict())
+    assert project.premium_repair_qa == []
+    assert project.qa_reports == []
+
+    with_repair_qa = _base_project_dict()
+    with_repair_qa["status"] = "awaiting_final_approval"
+    repair_report = {
+        "project_id": "F0001",
+        "asset_id": "A0002",
+        "artifact_path": "/opt/shift-agent/state/flyer/assets/F0001-C1-repair1.png",
+        "artifact_sha256": "a" * 64,
+        "project_version": 1,
+        "output_format": "concept_preview",
+        "provider": "test",
+        "qa_source": "ocr_vision",
+        "status": "failed",
+        "blockers": ["missing required visible fact: item:1:name"],
+        "warnings": ["premium_repair_attempt:1"],
+        "checked_at": datetime.now(timezone.utc),
+    }
+    proj2 = FlyerProject.model_validate({**with_repair_qa, "premium_repair_qa": [repair_report]})
+    assert len(proj2.premium_repair_qa) == 1
+    assert proj2.premium_repair_qa[0].status == "failed"
+    # The dedicated field does NOT leak into qa_reports.
+    assert proj2.qa_reports == []
+
+
 def test_brand_kit_and_assets_validate_paths_and_hashes():
     kit = FlyerBrandKit(
         customer_phone="+19045550123",

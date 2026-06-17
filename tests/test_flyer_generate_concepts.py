@@ -4834,18 +4834,19 @@ PREMIUM_REPAIR_QA_MARKER = "premium_repair_attempt:"
 
 def test_failed_premium_repair_persists_attempt_qa_without_changing_final_state(monkeypatch, tmp_path, capsys):
     """Piece 1: on a failed (exhausted) repair, the per-attempt repair QA reports
-    are PERSISTED into qa_reports (tagged), AND the final-state decision is
-    identical to the no-repair baseline (overlay ships, awaiting_final_approval)."""
+    are PERSISTED into the DEDICATED premium_repair_qa field (tagged), NOT
+    qa_reports, AND the final-state decision is identical to the no-repair
+    baseline (overlay ships, awaiting_final_approval)."""
     module, render_calls, repair_calls, persisted, rows, rc = _run_premium_repair_case(
         monkeypatch, tmp_path, repair_passes_on=None)
     assert rc == 0
-    # The two repair-attempt QA reports are persisted + tagged distinguishably.
-    qa_reports = persisted["qa_reports"]
-    repair_reports = [
-        r for r in qa_reports
-        if any(str(w).startswith(PREMIUM_REPAIR_QA_MARKER) for w in r.get("warnings", []))
-    ]
+    # The two repair-attempt QA reports are persisted to premium_repair_qa + tagged.
+    repair_reports = persisted["premium_repair_qa"]
     assert len(repair_reports) == 2
+    assert all(
+        any(str(w).startswith(PREMIUM_REPAIR_QA_MARKER) for w in r.get("warnings", []))
+        for r in repair_reports
+    )
     # They are tagged with the attempt number and point at the distinct repair art.
     assert {1, 2} == {
         int(w.split(":", 1)[1])
@@ -4853,17 +4854,89 @@ def test_failed_premium_repair_persists_attempt_qa_without_changing_final_state(
         if w.startswith(PREMIUM_REPAIR_QA_MARKER)
     }
     assert all("C1-repair" in r["artifact_path"] for r in repair_reports)
+    # BLOCKER 3: the repair-attempt reports do NOT leak into qa_reports (the real
+    # render QA stream that drives manual-eligibility).
+    qa_reports = persisted["qa_reports"]
+    assert not any(
+        any(str(w).startswith(PREMIUM_REPAIR_QA_MARKER) for w in r.get("warnings", []))
+        for r in qa_reports
+    )
     # FINAL-STATE UNCHANGED: the overlay still ships, status unchanged. (Same as
     # test_premium_repair_exhausts_then_falls_through_to_overlay.)
     assert persisted["status"] == "awaiting_final_approval"
     assert persisted["assets"][-1]["path"].endswith("F0001-C1-fallback.png")
-    # The SHIPPED render's QA report (the fallback) is present and is NOT a
-    # repair-attempt report — the repair reports did NOT enter the final-state
-    # decision (they are additive, tagged, for visibility only).
+    # The SHIPPED render's QA report (the fallback) is present in qa_reports and is
+    # NOT a repair-attempt report — the repair reports did NOT enter the final-
+    # state decision (they are additive, tagged, in a separate field).
     fallback_reports = [r for r in qa_reports if "fallback" in r["artifact_path"]]
     assert len(fallback_reports) == 1
-    assert not any(str(w).startswith(PREMIUM_REPAIR_QA_MARKER) for w in fallback_reports[0].get("warnings", []))
     assert fallback_reports[0]["status"] == "passed"
+
+
+def test_shipped_flyer_with_premium_repair_qa_not_made_manual_by_backfill(monkeypatch):
+    """BLOCKER 3: a SUCCESSFULLY-SHIPPED flyer (awaiting_final_approval) that
+    carries FAILED repair-attempt reports in the dedicated premium_repair_qa field
+    must NOT be re-queued to manual by backfill_manual_reasons (which scans only
+    qa_reports). Proves the field separation protects the manual-eligibility
+    invariant. A control project with a failed report in qa_reports IS a
+    candidate, confirming the scan still works."""
+    _load_script(monkeypatch)  # sets sys.path for schemas + manual_queue imports
+    from schemas import FlyerProjectStore
+    from agents.flyer.manual_queue import backfill_manual_reasons
+
+    now = datetime(2026, 6, 17, tzinfo=timezone.utc).isoformat()
+
+    def _failed_report(asset_id, artifact, *, tagged):
+        return {
+            "project_id": "F0001",
+            "asset_id": asset_id,
+            "artifact_path": artifact,
+            "artifact_sha256": "a" * 64,
+            "project_version": 1,
+            "output_format": "concept_preview",
+            "provider": "test",
+            "qa_source": "ocr_vision",
+            "status": "failed",
+            "blockers": ["missing required visible fact: item:1:name"],
+            "warnings": ["premium_repair_attempt:1"] if tagged else [],
+            "checked_at": now,
+        }
+
+    shipped = {
+        "project_id": "F0001",
+        "status": "awaiting_final_approval",
+        "customer_phone": "+17329837841",
+        "created_at": now,
+        "updated_at": now,
+        "original_message_id": "wamid.f0001",
+        "raw_request": "Snack specials for Lakshmi Kitchen.",
+        # The SHIPPED render QA passed; the FAILED repair-attempt reports live in
+        # the dedicated field — must NOT trigger manual re-queue.
+        "qa_reports": [{**_failed_report("A0003", "/x/F0001-C1-fallback.png", tagged=False), "status": "passed", "blockers": []}],
+        "premium_repair_qa": [_failed_report("A0002", "/x/F0001-C1-repair1.png", tagged=True)],
+        "manual_review": {"status": "none", "reason_code": "unclassified"},
+    }
+    # Control: a genuine QA-failed project IS still a backfill candidate.
+    control = {
+        "project_id": "F0002",
+        "status": "awaiting_final_approval",
+        "customer_phone": "+17329837841",
+        "created_at": now,
+        "updated_at": now,
+        "original_message_id": "wamid.f0002",
+        "raw_request": "Snack specials.",
+        "qa_reports": [_failed_report("A0001", "/x/F0002-C1-preview.png", tagged=False)],
+        "manual_review": {"status": "none", "reason_code": "unclassified"},
+    }
+    store = FlyerProjectStore.model_validate({
+        "schema_version": 1, "next_sequence": 3, "projects": [shipped, control],
+    })
+    result = backfill_manual_reasons(store, apply=False)
+    candidate_ids = {c["project_id"] for c in result["candidates"]}
+    # The shipped flyer with repair-attempt reports is NOT a candidate.
+    assert "F0001" not in candidate_ids
+    # The control (genuine failed qa_reports) IS — the scan still works.
+    assert "F0002" in candidate_ids
 
 
 def test_premium_repair_exhausted_carries_residual_blockers(monkeypatch, tmp_path, capsys):

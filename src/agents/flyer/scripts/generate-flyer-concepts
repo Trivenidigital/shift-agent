@@ -1960,7 +1960,12 @@ def main() -> int:
                     store.projects[snapshot_idx] = current.model_copy(update={
                         "status": "delivered_with_warning",
                         "assets": [*current.assets, *assets],
-                        "qa_reports": [*current.qa_reports, *qa_reports, *premium_repair_attempt_reports],
+                        "qa_reports": [*current.qa_reports, *qa_reports],
+                        # BLOCKER 3: repair-attempt QA reports live in a DEDICATED
+                        # field, NOT qa_reports, so a shipped flyer carrying FAILED
+                        # repair-attempt reports is never made manual-eligible by
+                        # backfill_manual_reasons (which scans qa_reports).
+                        "premium_repair_qa": [*current.premium_repair_qa, *premium_repair_attempt_reports],
                         "warning": warning_payload,
                         # P0 #2 — clear any stale manual_review payload that
                         # may have come in from a prior manual_edit_required
@@ -1996,7 +2001,8 @@ def main() -> int:
                 store.projects[snapshot_idx] = current.model_copy(update={
                     "status": "manual_edit_required",
                     "assets": [*current.assets, *assets],
-                    "qa_reports": [*current.qa_reports, *qa_reports, *premium_repair_attempt_reports],
+                    "qa_reports": [*current.qa_reports, *qa_reports],
+                    "premium_repair_qa": [*current.premium_repair_qa, *premium_repair_attempt_reports],
                     "manual_review": manual,
                     "updated_at": now,
                 })
@@ -2021,7 +2027,8 @@ def main() -> int:
                 "concepts": concepts,
                 "selected_concept_id": "C1" if one_shot else None,
                 "assets": [*current.assets, *assets],
-                "qa_reports": [*current.qa_reports, *qa_reports, *premium_repair_attempt_reports],
+                "qa_reports": [*current.qa_reports, *qa_reports],
+                "premium_repair_qa": [*current.premium_repair_qa, *premium_repair_attempt_reports],
                 "revisions": revisions,
                 "manual_review": FlyerManualReview(),
                 "updated_at": now,

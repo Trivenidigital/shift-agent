@@ -1936,6 +1936,15 @@ class FlyerProject(BaseModel):
     locked_facts: list[FlyerLockedFact] = Field(default_factory=list, max_length=100)
     reference_extractions: list[FlyerReferenceExtraction] = Field(default_factory=list, max_length=20)
     qa_reports: list[FlyerVisualQAReport] = Field(default_factory=list, max_length=100)
+    # Slice 2 observability (2026-06-17): tagged per-attempt PREMIUM-REPAIR QA
+    # reports, kept SEPARATE from qa_reports on purpose. qa_reports is the real
+    # render QA stream that drives manual-eligibility (backfill_manual_reasons
+    # treats any failed qa_reports entry as manual-eligible); putting FAILED
+    # repair-attempt reports there would wrongly re-queue a successfully-shipped
+    # flyer. This dedicated field keeps them visible in projects.json for
+    # diagnosis without polluting that invariant. Defaults empty (backward-compat
+    # + flag-off byte-identical).
+    premium_repair_qa: list[FlyerVisualQAReport] = Field(default_factory=list, max_length=100)
     manual_review: FlyerManualReview = Field(default_factory=FlyerManualReview)
     assets: list[FlyerAsset] = Field(default_factory=list, max_length=50)
     concepts: list[FlyerConcept] = Field(default_factory=list, max_length=3)
