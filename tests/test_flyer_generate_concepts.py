@@ -4736,3 +4736,87 @@ def test_failed_premium_repair_leaves_original_preview_byte_identical(monkeypatc
     # same-path-overwrite bug would have replaced these bytes with REPAIR-ATTEMPT-*.
     assert preview_at_fallback_time["exists"] is True
     assert preview_at_fallback_time["bytes"] == ORIGINAL_BYTES
+
+
+def test_premium_repair_non_flyer_render_error_does_not_crash_run(monkeypatch, tmp_path, capsys):
+    """BLOCKER-2 regression guard: render_repair_edit can raise a non-
+    FlyerRenderError (Pillow / manifest write) AFTER writing the distinct repair
+    file. The repair rung must catch ANY Exception → discard the repair artifact
+    → fall through to the existing ladder (NOT crash the whole run). The original
+    <id>-C1-preview.png is at a distinct path so it is never touched."""
+    module = _load_script(monkeypatch)
+    from agents.flyer.render import RenderedAssetSpec
+    from schemas import FlyerVisualQAReport
+
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", raising=False)
+
+    state_path = tmp_path / "projects.json"
+    audit_path = tmp_path / "decisions.log"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "next_sequence": 2,
+        "projects": [_basic_food_project_dict("F0001", asset_dir)],
+    }), encoding="utf-8")
+
+    overlay_shipped = {}
+
+    def fake_render(project_obj, output_dir, **kwargs):
+        mode = module.os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER", "")
+        if mode == "0":
+            overlay_shipped["ran"] = True
+            path = Path(output_dir) / f"{project_obj.project_id}-C1-fallback.png"
+            path.write_bytes(b"overlay-fallback-bytes")
+        else:
+            path = Path(output_dir) / f"{project_obj.project_id}-C1-preview.png"
+            path.write_bytes(b"ORIGINAL-INTEGRATED-BYTES")
+        return [RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview",
+                                  width=1080, height=1350, concept_id="C1")]
+
+    def boom_repair(project_obj, base_png, output_dir, *, repair_instruction, model, quality="high", output_name=""):
+        # Simulate a partial write THEN a non-FlyerRenderError (e.g. Pillow).
+        (Path(output_dir) / output_name).write_bytes(b"partial-repair-bytes")
+        raise RuntimeError("Pillow exploded mid-write")
+
+    def fake_qa(project_obj, artifact_path, *, output_format, asset_id="", allow_sidecar=None):
+        name = Path(artifact_path).name
+        status, blk = ("passed", []) if "fallback" in name else ("failed", ["missing required visible fact: item:1:name"])
+        return FlyerVisualQAReport(
+            project_id=project_obj.project_id, asset_id=asset_id, artifact_path=str(artifact_path),
+            artifact_sha256="d" * 64, project_version=project_obj.version, output_format=output_format,
+            provider="test", qa_source="ocr_vision", status=status, blockers=blk,
+            extracted_text="x", checked_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "render_repair_edit", boom_repair)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(module, "classify_flyer_qa_for_autorepair",
+                        lambda *_a, **_k: types.SimpleNamespace(decision="hard_stop", reason="customer_trust_risk"))
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0001",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+        "--audit-log-path", str(audit_path),
+        "--autorepair-state-path", str(tmp_path / "autorepair.json"),
+    ])
+
+    # The run completes (does NOT crash) despite the non-FlyerRenderError.
+    assert module.main() == 0
+    rows = _audit_rows(audit_path)
+    row_types = [r["type"] for r in rows]
+    assert "flyer_premium_repair_attempted" in row_types
+    exhausted = next(r for r in rows if r["type"] == "flyer_premium_repair_exhausted")
+    assert exhausted["reason"] == "generation_error"
+    # Fell through to the existing ladder → deterministic overlay shipped.
+    assert overlay_shipped.get("ran") is True
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "awaiting_final_approval"
+    # The partial repair artifact was cleaned up (not left orphaned, not shipped).
+    assert not (asset_dir / "F0001-C1-repair1.png").exists()
+    assert "repair" not in Path(persisted["assets"][-1]["path"]).name

@@ -1106,14 +1106,22 @@ def main() -> int:
                         )
                         write_visual_qa_report(report, spec.path)
                         repair_qa_reports.append(report)
-                except FlyerRenderError:
-                    # Generation/transport error on the repair edit → discard the
-                    # distinct repair artifact, stop, fall through to the existing
-                    # ladder. The original <id>-C1-preview.png is at a DIFFERENT
-                    # path so it is never touched.
+                except Exception:
+                    # ANY error during the repair edit — FlyerRenderError OR a
+                    # non-FlyerRenderError (Pillow in _write_generated_image_
+                    # contained, manifest write) raised AFTER the distinct file was
+                    # written — must NOT crash the run. Discard the distinct repair
+                    # artifact, stop, and fall through to the existing ladder. The
+                    # original <id>-C1-preview.png is at a DIFFERENT path so it is
+                    # never touched even on a mid-write crash.
                     _cleanup_render_artifacts(repair_specs, preserve_paths={
                         candidate for spec in specs for candidate in _render_artifact_candidates(spec)
                     })
+                    # The repair render may have been written before the failure but
+                    # not captured in repair_specs (e.g. manifest write raised after
+                    # the png landed) — clean the distinct path directly too.
+                    (asset_dir / repair_out_name).unlink(missing_ok=True)
+                    Path(str(asset_dir / repair_out_name) + ".text.json").unlink(missing_ok=True)
                     premium_exhausted_reason = "generation_error"
                     break
                 # This attempt produced a render on disk (un-shipped yet); track it
