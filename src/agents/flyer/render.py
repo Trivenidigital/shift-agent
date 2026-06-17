@@ -2933,29 +2933,35 @@ def _openrouter_image_bytes(project: FlyerProject, *, concept_id: str, output_fo
     return _decode_data_url(url)
 
 
-def _openrouter_source_edit_bytes(
-    project: FlyerProject,
+def _openrouter_image_edit_bytes(
     *,
+    base_image_path: Path | str,
+    mime: str,
+    prompt: str,
     size: tuple[int, int] | None,
     model: str,
     quality: str,
 ) -> bytes:
+    """Generic OpenRouter/gemini image-to-image edit: base64 the supplied base
+    image as the image_url part + ``prompt`` as the text part → edited image
+    bytes. The 3-retry urlopen + full response parsing + error handling extracted
+    from the original source-edit caller so the repair-edit path can reuse the
+    SAME proven gateway call. The caller owns *which* image + *what* prompt; this
+    helper owns the HTTP transaction only (no behavior change for source edit)."""
     api_key = _read_env_value("OPENROUTER_API_KEY")
     if not api_key or "PLACEHOLDER" in api_key.upper():
         raise FlyerRenderError("OPENROUTER_API_KEY is missing or placeholder")
-    reference = _source_edit_reference_asset(project)
-    reference_path = Path(reference.path)
-    mime = reference.mime_type or mimetypes.guess_type(str(reference_path))[0] or "image/png"
+    base_path = Path(base_image_path)
     data_url = (
         f"data:{mime};base64,"
-        + base64.b64encode(reference_path.read_bytes()).decode("ascii")
+        + base64.b64encode(base_path.read_bytes()).decode("ascii")
     )
     payload = {
         "model": model,
         "messages": [{
             "role": "user",
             "content": [
-                {"type": "text", "text": _source_edit_prompt(project)},
+                {"type": "text", "text": prompt},
                 {"type": "image_url", "image_url": {"url": data_url}},
             ],
         }],
@@ -3029,6 +3035,26 @@ def _openrouter_source_edit_bytes(
     if not url.startswith("data:image/"):
         raise FlyerRenderError("OpenRouter source edit response did not include base64 image data")
     return _decode_data_url(url)
+
+
+def _openrouter_source_edit_bytes(
+    project: FlyerProject,
+    *,
+    size: tuple[int, int] | None,
+    model: str,
+    quality: str,
+) -> bytes:
+    reference = _source_edit_reference_asset(project)
+    reference_path = Path(reference.path)
+    mime = reference.mime_type or mimetypes.guess_type(str(reference_path))[0] or "image/png"
+    return _openrouter_image_edit_bytes(
+        base_image_path=reference_path,
+        mime=mime,
+        prompt=_source_edit_prompt(project),
+        size=size,
+        model=model,
+        quality=quality,
+    )
 
 
 def _source_edit_reference_asset(project: FlyerProject) -> FlyerAsset:

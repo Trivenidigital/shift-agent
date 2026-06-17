@@ -12,6 +12,8 @@ import subprocess
 import sys
 import urllib.error
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platform"))
 
@@ -4868,3 +4870,98 @@ def test_flattened_runon_request_does_not_fail_render_graduation_live_2026_06_06
     # ...and the next layer up (image-prompt copy plan) also no longer raises.
     plan = _poster_copy_plan(project)
     assert plan.title == "2026 Graduation Party Special"
+
+
+# --- Slice 2 Task 1: generic OpenRouter image-edit helper ---------------------
+
+
+def test_openrouter_image_edit_bytes_posts_base_image_and_returns_decoded_bytes(tmp_path, monkeypatch):
+    """The extracted generic helper base64-encodes the supplied base image, sends
+    the prompt as the text part, and decodes the returned data-URL to bytes."""
+    base = tmp_path / "base.png"
+    base_bytes = _png_bytes(color=(10, 20, 30))
+    base.write_bytes(base_bytes)
+    out_bytes = _png_bytes(color=(40, 90, 50))
+    requests = []
+
+    class _Resp:
+        def __enter__(self):
+            data_url = "data:image/png;base64," + base64.b64encode(out_bytes).decode("ascii")
+            self._body = json.dumps({
+                "choices": [{"message": {"images": [{"image_url": {"url": data_url}}]}}],
+            }).encode("utf-8")
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self._body
+
+    def _fake_urlopen(req, timeout):
+        requests.append((req, timeout, json.loads(req.data.decode("utf-8"))))
+        return _Resp()
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _fake_urlopen)
+
+    result = render_module._openrouter_image_edit_bytes(
+        base_image_path=base,
+        mime="image/png",
+        prompt="Change ONLY the spelling.",
+        size=(1080, 1350),
+        model="google/gemini-3.1-flash-image-preview",
+        quality="high",
+    )
+
+    assert result == out_bytes
+    assert len(requests) == 1
+    req, timeout, payload = requests[0]
+    assert "openrouter.ai" in req.full_url
+    assert timeout == 180
+    assert req.headers["Authorization"] == "Bearer sk-or-test"
+    assert payload["model"] == "google/gemini-3.1-flash-image-preview"
+    assert payload["modalities"] == ["image", "text"]
+    assert payload["image_config"]["image_size"] == "2K"
+    # The prompt is the text part; the base image is the image_url part.
+    content = payload["messages"][0]["content"]
+    assert content[0] == {"type": "text", "text": "Change ONLY the spelling."}
+    expected_data_url = "data:image/png;base64," + base64.b64encode(base_bytes).decode("ascii")
+    assert content[1] == {"type": "image_url", "image_url": {"url": expected_data_url}}
+
+
+def test_openrouter_image_edit_bytes_missing_key_raises(tmp_path, monkeypatch):
+    base = tmp_path / "base.png"
+    base.write_bytes(_png_bytes())
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(render_module, "_read_env_value", lambda _name: "")
+    with pytest.raises(FlyerRenderError):
+        render_module._openrouter_image_edit_bytes(
+            base_image_path=base,
+            mime="image/png",
+            prompt="x",
+            size=(1080, 1350),
+            model="m",
+            quality="high",
+        )
+
+
+def test_openrouter_image_edit_bytes_http_error_raises_render_error(tmp_path, monkeypatch):
+    base = tmp_path / "base.png"
+    base.write_bytes(_png_bytes())
+
+    def _boom(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 500, "boom", {}, io.BytesIO(b"server error"))
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr("agents.flyer.render.urllib.request.urlopen", _boom)
+    with pytest.raises(FlyerRenderError) as exc:
+        render_module._openrouter_image_edit_bytes(
+            base_image_path=base,
+            mime="image/png",
+            prompt="x",
+            size=(1080, 1350),
+            model="m",
+            quality="high",
+        )
+    assert "500" in str(exc.value)
