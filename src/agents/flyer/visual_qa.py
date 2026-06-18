@@ -1447,6 +1447,26 @@ def _project_business_name(project: FlyerProject) -> str:
     return ""
 
 
+_BRAND_VARIANT_BLOCKER_RE = re.compile(r"^visible wrong business/brand: (?P<name>.+)$")
+
+
+def brand_blocker_name(blocker: str) -> str | None:
+    """Return the rendered brand text from a 'visible wrong business/brand: X'
+    blocker, or None if the blocker is not a brand-variant blocker. Mirrors the
+    regex used by classify_qa_severity's brand_variant spec."""
+    m = _BRAND_VARIANT_BLOCKER_RE.match(blocker or "")
+    return m.group("name") if m else None
+
+
+def is_own_brand_variant(extracted_name: str, project: FlyerProject) -> bool:
+    """True when extracted_name is an own-brand spelling variant of the project's
+    registered business_name (a recoverable text-fidelity defect — the
+    deterministic overlay redraws the registered name). False when it is a
+    structurally different business (hard-block) or no brand is known. Wraps the
+    brand-typo gate used by classify_qa_severity (operator decision 2026-05-28)."""
+    return _is_brand_typo(extracted_name, _project_business_name(project))
+
+
 def classify_qa_severity(
     blockers: list[str],
     *,

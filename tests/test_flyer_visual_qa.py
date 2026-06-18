@@ -3004,3 +3004,44 @@ def test_placeholder_re_extracted_text_check_unchanged(tmp_path):
     report = run_visual_qa(_project(), artifact, output_format="concept_preview", allow_sidecar=True)
     assert report.status == "failed"
     assert any("placeholder" in b for b in report.blockers)
+
+
+def test_brand_blocker_name_parses_live_format():
+    from agents.flyer.visual_qa import brand_blocker_name
+    assert brand_blocker_name("visible wrong business/brand: Laksmi'S Kitchen") == "Laksmi'S Kitchen"
+    assert brand_blocker_name("missing required visible fact: business_name") is None
+
+
+def _project_with_brand(name: str):
+    from schemas import FlyerProject, FlyerLockedFact
+    from datetime import datetime, timezone
+    return FlyerProject(
+        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        original_message_id="m-F0174", raw_request="x",
+        locked_facts=[FlyerLockedFact(fact_id="business_name", label="Business", value=name, source="customer_profile")],
+    )
+
+
+def test_is_own_brand_variant_true_for_own_brand_typo():
+    from agents.flyer.visual_qa import is_own_brand_variant
+    assert is_own_brand_variant("Laksmi'S Kitchen", _project_with_brand("Lakshmi's Kitchen")) is True
+
+
+def test_is_own_brand_variant_false_for_different_business():
+    from agents.flyer.visual_qa import is_own_brand_variant
+    assert is_own_brand_variant("Triveni Indian Cafe & Bakery", _project_with_brand("Lakshmi's Kitchen")) is False
+
+
+def test_is_own_brand_variant_false_when_no_registered_brand():
+    from agents.flyer.visual_qa import is_own_brand_variant
+    from schemas import FlyerProject
+    from datetime import datetime, timezone
+    proj = FlyerProject(
+        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        original_message_id="m", raw_request="x", locked_facts=[],
+    )
+    assert is_own_brand_variant("Anything", proj) is False
