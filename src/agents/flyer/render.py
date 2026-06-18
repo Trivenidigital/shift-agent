@@ -2846,7 +2846,7 @@ with Image.open(src) as img:
 
 
 def _apply_critical_text_overlay(project: FlyerProject, source: Path | str, target: Path | str, *, size: tuple[int, int], output_format: str) -> None:
-    if os.environ.get("FLYER_PREMIUM_OVERLAY") == "1" and _is_food_or_grocery_project(project):
+    if _premium_overlay_enabled(project) and _is_food_or_grocery_project(project):
         try:
             # Deferred import: avoids a module-load cycle. Try the FLAT deployed
             # module name first (the VPS installs premium_overlay.py as
@@ -2861,13 +2861,15 @@ def _apply_critical_text_overlay(project: FlyerProject, source: Path | str, targ
             premium_overlay.render_premium_overlay(project, source, target, size=size, output_format=output_format)
             return
         except FlyerRenderError:
-            # Intentional fail-closed (text can't fit / required fact missing) ->
-            # propagate so the funnel routes to manual. Do NOT silently fall back.
-            raise
+            # Intentional fit/coverage fail-closed (text can't fit / required fact
+            # missing) → degrade to legacy flat overlay rather than routing to manual.
+            # Fix C is strictly >= today's fallback: premium when it fits, flat when
+            # it can't, never manual-worse-than-flat.
+            logging.getLogger(__name__).info("premium overlay could not fit; degrading to flat overlay")
         except Exception:
             # UNEXPECTED premium-renderer bug must never break rendering entirely:
             # log and degrade to the known-good legacy overlay (still correct text, flat look).
-            logging.getLogger(__name__).exception("premium_overlay failed unexpectedly; falling back to legacy overlay")
+            logging.getLogger(__name__).exception("premium overlay failed unexpectedly; degrading to flat overlay")
     try:
         apply_critical_text_overlay(project, source, target, size=size, output_format=output_format)
         return
@@ -3104,6 +3106,8 @@ def _source_edit_reference_asset(project: FlyerProject) -> FlyerAsset:
 # ladder + deterministic-overlay floor). Mirrors bare_render's CD gate pattern.
 PREMIUM_REPAIR_ENABLED_ENV = "FLYER_PREMIUM_REPAIR"
 PREMIUM_REPAIR_ALLOWLIST_ENV = "FLYER_PREMIUM_REPAIR_ALLOWLIST"
+PREMIUM_OVERLAY_ENABLED_ENV = "FLYER_PREMIUM_OVERLAY"
+PREMIUM_OVERLAY_ALLOWLIST_ENV = "FLYER_PREMIUM_OVERLAY_ALLOWLIST"
 
 
 def _normalize_sender(value: str) -> str:
@@ -3133,6 +3137,26 @@ def _premium_repair_enabled(project: FlyerProject) -> bool:
     if os.environ.get(PREMIUM_REPAIR_ENABLED_ENV) != "1":
         return False
     allow = _premium_repair_allowlist()
+    if not allow:
+        return True
+    return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+
+
+def _premium_overlay_allowlist() -> set[str]:
+    """Parse FLYER_PREMIUM_OVERLAY_ALLOWLIST (comma-separated phones/LIDs) into a
+    normalized set. Empty/unset ⇒ empty set ⇒ no allowlist scoping (global)."""
+    raw = os.environ.get(PREMIUM_OVERLAY_ALLOWLIST_ENV, "") or ""
+    return {n for n in (_normalize_sender(p) for p in raw.split(",")) if n}
+
+
+def _premium_overlay_enabled(project: FlyerProject) -> bool:
+    """Fix C gate: flag == "1" AND, when the allowlist env is set, the
+    project's customer phone is in it. Flag "1" + no allowlist ⇒ global ON. OFF
+    for anything else (the branch is skipped → byte-identical legacy behavior).
+    Mirrors _premium_repair_enabled exactly."""
+    if os.environ.get(PREMIUM_OVERLAY_ENABLED_ENV) != "1":
+        return False
+    allow = _premium_overlay_allowlist()
     if not allow:
         return True
     return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
