@@ -76,3 +76,18 @@ def test_scrims_preserve_size_and_darken_bands():
     cx = out.getpixel((540, 675))                 # untouched centre
     top = out.getpixel((540, 20)); bot = out.getpixel((540, 1330))
     assert sum(top) < sum(cx) and sum(bot) < sum(cx)   # bands darker than centre
+
+
+# ---------------------------------------------------------------------------
+# Task 4: premium offer-seal primitive
+# ---------------------------------------------------------------------------
+from PIL import Image, ImageDraw
+from agents.flyer.premium_overlay import draw_offer_seal
+
+
+def test_offer_seal_draws_in_zone():
+    img = Image.new("RGB", (1080, 1350), (20, 20, 20))
+    draw = ImageDraw.Draw(img, "RGBA")
+    box = draw_offer_seal(draw, label="ANY ITEM", price="$7.99", width=1080, center=(540, 760))
+    assert box[0] >= 0 and box[2] <= 1080 and box[3] <= 1350     # within canvas
+    assert box[2] > box[0] and box[3] > box[1]                   # non-empty bbox

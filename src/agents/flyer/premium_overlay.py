@@ -152,3 +152,27 @@ def compose_scrims(img, *, top_frac=0.22, bottom_frac=0.32):
         for x in range(w):
             px[x, y] = (8, 4, 2, a)
     return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+
+
+# ---------------------------------------------------------------------------
+# Task 4: premium offer-seal primitive
+# ---------------------------------------------------------------------------
+
+def draw_offer_seal(draw, *, label, price, width, center):
+    """Draw a gold-bordered offer pill (label over price) centred at `center`.
+    Returns the seal bounding box (x0, y0, x1, y1)."""
+    lf = _premium_font("kicker", max(20, int(width * 0.022)))
+    pf = _premium_font("offer_price", max(54, int(width * 0.072)))
+    pl, pt, pr, pb = draw.textbbox((0, 0), price, font=pf)
+    pw, ph = pr - pl, pb - pt
+    pad = int(width * 0.03)
+    bw, bh = pw + pad * 2, ph + int(width * 0.05)
+    cx, cy = center
+    x0, y0 = cx - bw // 2, cy - bh // 2
+    x1, y1 = x0 + bw, y0 + bh
+    draw.rounded_rectangle((x0 + 5, y0 + 5, x1 + 5, y1 + 5), radius=22, fill=(0, 0, 0, 90))
+    draw.rounded_rectangle((x0, y0, x1, y1), radius=22, fill=(20, 8, 4, 150), outline=(236, 200, 115, 255), width=3)
+    ll, lt, lr, lb = draw.textbbox((0, 0), label, font=lf)
+    draw.text((cx - (lr - ll) // 2, y0 + int(bh * 0.16)), label, font=lf, fill=(240, 226, 196, 255))
+    draw.text((cx - pw // 2, y1 - ph - int(bh * 0.16)), price, font=pf, fill=(255, 233, 184, 255))
+    return (x0, y0, x1, y1)
