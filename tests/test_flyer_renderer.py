@@ -5185,3 +5185,61 @@ def test_build_image_generation_prompt_force_background_only_emits_textless_cont
     assert "full restaurant/menu poster" not in prompt, (
         "force_background_only=True must NOT emit the full-poster instruction"
     )
+
+
+# ---------------------------------------------------------------------------
+# Context-var gate tests (Codex round 2 — prompt-leak closure)
+# ---------------------------------------------------------------------------
+
+def _f0174_integrated_project():
+    from schemas import FlyerProject, FlyerLockedFact
+    from datetime import datetime, timezone
+    facts = [
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile"),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Weekend Specials", source="customer_text"),
+        FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Any item $7.99", source="customer_text"),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+        FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr", source="customer_profile"),
+    ]
+    for i, nm in enumerate(["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar"]):
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item{i}", value=nm, source="customer_text"))
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:price", label=f"Price{i}", value="$7.99", source="customer_text"))
+    return FlyerProject(
+        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 18, tzinfo=timezone.utc), updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        original_message_id="m", raw_request="Weekend Specials. Any item $7.99. Idli, Dosa, Vada, Uttapam, Pongal, Sambar.",
+        locked_facts=facts,
+    )
+
+
+def test_force_background_only_prompt_has_no_text_leak(monkeypatch):
+    import re
+    from agents.flyer import render as r
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    p = _f0174_integrated_project()
+    assert r._integrated_poster_eligible(p) is True  # integrated-eligible baseline
+    tok = r._FORCE_BACKGROUND_ONLY.set(True)
+    try:
+        prompt = r.build_image_generation_prompt(p, concept_id="C1", output_format="concept_preview", size=(1080, 1350), force_background_only=True)
+    finally:
+        r._FORCE_BACKGROUND_ONLY.reset(tok)
+    # "Create exactly" is the affirmative card-directive leak (not the prohibition in text_contract_line)
+    # "menu item cards" in the text_contract_line is correct ("do NOT render...menu item cards") — we
+    # check for the affirmative creation form instead: "Create exactly N menu item cards"
+    for leak in ["Create exactly", "full restaurant/menu poster", "complete integrated poster layout", "Item cards must look"]:
+        assert leak not in prompt, f"text leak under force: {leak!r}"
+    # The affirmative card-creation directive must not appear (the prohibition in text_contract_line is correct)
+    assert "Create exactly" not in prompt, "affirmative item-card directive leaked under force"
+    assert not re.search(r"-\s+\w[\w &'-]* - \$", prompt), "priced item row leaked under force"
+    assert ("do NOT render them as text" in prompt) or ("decorative BACKGROUND" in prompt)
+
+
+def test_genuine_background_only_prompt_unchanged(monkeypatch):
+    # force OFF + cvar unset: a genuine background-only project must KEEP the
+    # existing item-card directive (byte-identical — we did not touch bg-only).
+    from agents.flyer import render as r
+    monkeypatch.setattr(r, "_integrated_poster_eligible", lambda proj: False)  # => background_only_eligible True
+    p = _f0174_integrated_project()
+    assert r._FORCE_BACKGROUND_ONLY.get() is False
+    prompt = r.build_image_generation_prompt(p, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+    assert "menu item cards" in prompt  # bg-only directive preserved

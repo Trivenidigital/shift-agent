@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import base64
+import contextvars
 import hashlib
 import http.client
 import io
@@ -137,6 +138,14 @@ def _customers_path() -> Path:
 
 CUSTOMERS_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 DETERMINISTIC_MODEL_NAMES = {"", "deterministic-renderer", "pillow", "local-pillow"}
+
+# Context-var gate: set to True inside _render_model when force_background_only=True.
+# Every _background_only_eligible-gated site (including _integrated_poster_eligible,
+# which _background_only_eligible delegates to) honours this automatically — no
+# per-helper threading needed.
+_FORCE_BACKGROUND_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "flyer_force_background_only", default=False
+)
 TEXT_MANIFEST_SCHEMA_VERSION = 1
 # Total critical text facts (menu items + offer/pricing/promo clauses) that fit one
 # flyer legibly. The binding output is the square 1080x1080 Instagram post in the final
@@ -1033,13 +1042,20 @@ def _poster_copy_block(project: FlyerProject, *, force_background_only: bool = F
     if plan.contact:
         lines.append(f"Contact: {plan.contact}")
     if plan.items:
-        lines.append(f"Menu items to feature - exactly {len(plan.items)} items:")
-        lines.append(f"Create exactly {len(plan.items)} menu item cards. Each listed item must appear once and only once; use the exact item name and do not duplicate any item.")
-        for name, price in plan.items:
-            if price:
-                lines.append(f"- {name} - {price}")
-            else:
-                lines.append(f"- {name}")
+        if force_background_only or _FORCE_BACKGROUND_ONLY.get():
+            _names = ", ".join(name for name, _price in plan.items)
+            lines.append(
+                "Menu items (use ONLY to inform relevant background imagery and mood — do NOT "
+                f"draw them as text, menu cards, lists, or price tags): {_names}"
+            )
+        else:
+            lines.append(f"Menu items to feature - exactly {len(plan.items)} items:")
+            lines.append(f"Create exactly {len(plan.items)} menu item cards. Each listed item must appear once and only once; use the exact item name and do not duplicate any item.")
+            for name, price in plan.items:
+                if price:
+                    lines.append(f"- {name} - {price}")
+                else:
+                    lines.append(f"- {name}")
     if plan.detail_lines:
         lines.append("Offer details:")
         for detail in plan.detail_lines:
@@ -1111,6 +1127,8 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
     materialized), source-edits, non-food, and raw reference IMAGES whose menu
     facts are not materialized (nothing verifiable to render).
     """
+    if _FORCE_BACKGROUND_ONLY.get():
+        return False
     if os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER", "").strip() != "1":
         return False
     if _needs_reference_extraction(project):
@@ -3877,48 +3895,53 @@ def _render(project: FlyerProject, path: Path, *, concept_id: str, size: tuple[i
 
 
 def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> None:
-    if model.strip().lower() in DETERMINISTIC_MODEL_NAMES:
-        _render(project, path, concept_id=concept_id, size=size)
-        return
-    raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality, repair_instruction=repair_instruction, scene_direction=scene_direction, force_background_only=force_background_only)
-    raw_path = _raw_background_path(path)
-    raw_path.unlink(missing_ok=True)
-    if _integrated_poster_eligible(project) and not force_background_only:
-        _write_generated_image(raw, path, size=size)
-        return
-    # The prompt and the overlay MUST agree (same gate). For non-eligible flows
-    # (localized / reference-extraction) the model renders the text itself, so we
-    # must NOT composite the deterministic critical overlay on top — that would
-    # duplicate text and reintroduce untranslated/incomplete facts. Those flows
-    # keep the identity banner only (pre-overlay behavior). Background-only
-    # eligible flows get the full deterministic overlay (the P1 fix).
-    if not _background_only_eligible(project) and not force_background_only:
-        if size is None:
+    token = _FORCE_BACKGROUND_ONLY.set(True) if force_background_only else None
+    try:
+        if model.strip().lower() in DETERMINISTIC_MODEL_NAMES:
+            _render(project, path, concept_id=concept_id, size=size)
+            return
+        raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality, repair_instruction=repair_instruction, scene_direction=scene_direction, force_background_only=force_background_only)
+        raw_path = _raw_background_path(path)
+        raw_path.unlink(missing_ok=True)
+        if _integrated_poster_eligible(project) and not force_background_only:
             _write_generated_image(raw, path, size=size)
             return
-        _write_generated_image(raw, raw_path, size=size)
-        apply_exact_identity_overlay(project, raw_path, path, size=size)
-        return
-    # Background-only eligible: the model emitted a textless background; the
-    # critical overlay (brand + title + schedule + menu items/prices + footer)
-    # is the sole source of every required visible fact. `_apply_critical_text_
-    # overlay` carries the system-python3 Pillow fallback for VPSes whose Hermes
-    # venv lacks Pillow.
-    if size is None:
-        # PDF: composite the overlay on a PNG, then export to PDF (same pattern as
-        # render_final_package's primary PDF path) — else a textless background PDF.
-        pdf_px = (1275, 1650)
-        _write_generated_image(raw, raw_path, size=pdf_px)
-        overlaid = path.with_suffix(".overlaid.png")
-        overlaid.unlink(missing_ok=True)
-        try:
-            _apply_critical_text_overlay(project, raw_path, overlaid, size=pdf_px, output_format=output_format)
-            _export_from_source_image(overlaid, path, size=None)
-        finally:
+        # The prompt and the overlay MUST agree (same gate). For non-eligible flows
+        # (localized / reference-extraction) the model renders the text itself, so we
+        # must NOT composite the deterministic critical overlay on top — that would
+        # duplicate text and reintroduce untranslated/incomplete facts. Those flows
+        # keep the identity banner only (pre-overlay behavior). Background-only
+        # eligible flows get the full deterministic overlay (the P1 fix).
+        if not _background_only_eligible(project) and not force_background_only:
+            if size is None:
+                _write_generated_image(raw, path, size=size)
+                return
+            _write_generated_image(raw, raw_path, size=size)
+            apply_exact_identity_overlay(project, raw_path, path, size=size)
+            return
+        # Background-only eligible: the model emitted a textless background; the
+        # critical overlay (brand + title + schedule + menu items/prices + footer)
+        # is the sole source of every required visible fact. `_apply_critical_text_
+        # overlay` carries the system-python3 Pillow fallback for VPSes whose Hermes
+        # venv lacks Pillow.
+        if size is None:
+            # PDF: composite the overlay on a PNG, then export to PDF (same pattern as
+            # render_final_package's primary PDF path) — else a textless background PDF.
+            pdf_px = (1275, 1650)
+            _write_generated_image(raw, raw_path, size=pdf_px)
+            overlaid = path.with_suffix(".overlaid.png")
             overlaid.unlink(missing_ok=True)
-        return
-    _write_generated_image(raw, raw_path, size=size)
-    _apply_critical_text_overlay(project, raw_path, path, size=size, output_format=output_format)
+            try:
+                _apply_critical_text_overlay(project, raw_path, overlaid, size=pdf_px, output_format=output_format)
+                _export_from_source_image(overlaid, path, size=None)
+            finally:
+                overlaid.unlink(missing_ok=True)
+            return
+        _write_generated_image(raw, raw_path, size=size)
+        _apply_critical_text_overlay(project, raw_path, path, size=size, output_format=output_format)
+    finally:
+        if token is not None:
+            _FORCE_BACKGROUND_ONLY.reset(token)
 
 
 def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, model: str = "deterministic-renderer", quality: str = "low", concept_count: int = 1, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> list[RenderedAssetSpec]:
