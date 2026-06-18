@@ -5091,3 +5091,49 @@ def test_render_repair_edit_quality_failure_raises_and_cleans_up(tmp_path, monke
     # No orphan preview / manifest left behind.
     assert not (tmp_path / "F0001-C1-preview.png").exists()
     assert not Path(str(tmp_path / "F0001-C1-preview.png") + ".text.json").exists()
+
+
+def test_deterministic_recovery_enabled_respects_flag_and_allowlist(monkeypatch):
+    from agents.flyer import render as r
+    from schemas import FlyerProject
+    from datetime import datetime, timezone
+    proj = FlyerProject(
+        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        original_message_id="m", raw_request="x", locked_facts=[],
+    )
+    monkeypatch.delenv("FLYER_DETERMINISTIC_RECOVERY", raising=False)
+    assert r._deterministic_recovery_enabled(proj) is False
+    monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    assert r._deterministic_recovery_enabled(proj) is True
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+19999999999")
+    assert r._deterministic_recovery_enabled(proj) is False
+
+
+def test_force_background_only_uses_overlay_for_integrated_eligible(monkeypatch, tmp_path):
+    from agents.flyer import render as r
+    from schemas import FlyerProject, FlyerLockedFact
+    from datetime import datetime, timezone
+    import pathlib
+    proj = FlyerProject(
+        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        original_message_id="m", raw_request="Any item $7.99",
+        locked_facts=[FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile")],
+    )
+    monkeypatch.setattr(r, "_integrated_poster_eligible", lambda p: True)
+    monkeypatch.setattr(r, "_openrouter_image_bytes", lambda *a, **k: b"fakebgbytes")
+    monkeypatch.setattr(r, "_write_generated_image", lambda raw, path, *, size: pathlib.Path(path).write_bytes(raw))
+    calls = {"overlay": 0}
+    def fake_overlay(project, source, target, *, size, output_format):
+        calls["overlay"] += 1
+        pathlib.Path(target).write_bytes(b"overlaid")
+    monkeypatch.setattr(r, "_apply_critical_text_overlay", fake_overlay)
+    target = tmp_path / "F0174-C1.png"
+    r._render_model(proj, target, concept_id="C1", output_format="concept_preview",
+                    size=(1080, 1350), model="google/gemini-3.1-flash-image-preview",
+                    quality="high", force_background_only=True)
+    assert calls["overlay"] == 1

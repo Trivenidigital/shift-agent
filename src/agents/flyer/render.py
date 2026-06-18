@@ -999,9 +999,9 @@ def _poster_copy_plan(project: FlyerProject) -> PosterCopyPlan:
     )
 
 
-def _poster_copy_block(project: FlyerProject) -> str:
+def _poster_copy_block(project: FlyerProject, *, force_background_only: bool = False) -> str:
     plan = _poster_copy_plan(project)
-    if _background_only_eligible(project):
+    if _background_only_eligible(project) or force_background_only:
         lines = [
             "Flyer facts (for theme/imagery relevance ONLY — do NOT render them as text, words, "
             "menu lists, headlines, or price tags in the image; the system composites all exact "
@@ -1044,7 +1044,7 @@ def _poster_copy_block(project: FlyerProject) -> str:
         lines.append("Offer details:")
         for detail in plan.detail_lines:
             lines.append(f"- {detail}")
-    if not _background_only_eligible(project):
+    if not (_background_only_eligible(project) or force_background_only):
         # Only the integrated-text path renders these facts itself; the legibility
         # guidance is contradictory under the background-only (textless) contract.
         lines.append("If any required text cannot be rendered legibly, make the typography simpler and larger rather than dropping facts.")
@@ -1828,8 +1828,8 @@ def _style_reference_proxy_bytes(path: Path) -> tuple[str, bytes] | None:
         return None
 
 
-def _image_message_content(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, repair_instruction: str = "", scene_direction=None):
-    prompt = _image_prompt(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction, scene_direction=scene_direction)
+def _image_message_content(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False):
+    prompt = _image_prompt(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction, scene_direction=scene_direction, force_background_only=force_background_only)
     parts: list[dict] = [{"type": "text", "text": prompt}]
     brand_assets = _generation_brand_assets(project)
     refs = _project_reference_assets(project)
@@ -1904,7 +1904,7 @@ def _scene_block_from_visual_direction(scene_direction) -> str:
     return "\n".join(lines)
 
 
-def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, repair_instruction: str = "", scene_direction=None) -> str:
+def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> str:
     revision_block = _revision_notes_for_prompt(project)
     reference_instruction = _reference_preservation_instruction(project)
     sanitized_style = _sanitize_visual_context(project.fields.style_preference or "festive, clean, professional")
@@ -1937,7 +1937,7 @@ def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str,
 Autonomous repair instruction:
 - {_sanitize_visual_context(repair_instruction.strip())}
 """
-    if _background_only_eligible(project):
+    if _background_only_eligible(project) or force_background_only:
         text_contract_line = (
             "- Generate the decorative BACKGROUND image only — do NOT render flyer text, menu item "
             "cards, prices, schedule, location, or contact as words; the system composites all exact "
@@ -2010,7 +2010,7 @@ Output format: {output_format}; aspect ratio {_aspect_ratio(size)}.
 {campaign_scene_block}
 
 Controlled customer copy:
-{_poster_copy_block(project)}
+{_poster_copy_block(project, force_background_only=force_background_only)}
 
 Visual context for style and imagery:
 - theme/category: {_sanitize_visual_context(fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or visual_context or "local SMB promotion")}
@@ -2052,6 +2052,7 @@ def build_image_generation_prompt(
     output_format: str,
     size: tuple[int, int] | None,
     repair_instruction: str = "",
+    force_background_only: bool = False,
 ) -> str:
     return _image_prompt(
         project,
@@ -2059,6 +2060,7 @@ def build_image_generation_prompt(
         output_format=output_format,
         size=size,
         repair_instruction=repair_instruction,
+        force_background_only=force_background_only,
     )
 
 
@@ -2905,13 +2907,13 @@ def _decode_data_url(data_url: str) -> bytes:
         raise FlyerRenderError(f"image response base64 decode failed: {e}") from e
 
 
-def _openrouter_image_bytes(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None) -> bytes:
+def _openrouter_image_bytes(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> bytes:
     api_key = _read_env_value("OPENROUTER_API_KEY")
     if not api_key or "PLACEHOLDER" in api_key.upper():
         raise FlyerRenderError("OPENROUTER_API_KEY is missing or placeholder")
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": _image_message_content(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction, scene_direction=scene_direction)}],
+        "messages": [{"role": "user", "content": _image_message_content(project, concept_id=concept_id, output_format=output_format, size=size, repair_instruction=repair_instruction, scene_direction=scene_direction, force_background_only=force_background_only)}],
         "modalities": ["image", "text"],
         "max_tokens": OPENROUTER_IMAGE_MAX_TOKENS,
         "stream": False,
@@ -3155,6 +3157,22 @@ def _premium_overlay_enabled(project: FlyerProject) -> bool:
     for anything else (the branch is skipped → byte-identical legacy behavior).
     Mirrors _premium_repair_enabled exactly."""
     if os.environ.get(PREMIUM_OVERLAY_ENABLED_ENV) != "1":
+        return False
+    allow = _premium_overlay_allowlist()
+    if not allow:
+        return True
+    return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+
+
+PREMIUM_DETERMINISTIC_RECOVERY_ENV = "FLYER_DETERMINISTIC_RECOVERY"
+
+
+def _deterministic_recovery_enabled(project: FlyerProject) -> bool:
+    """Routing gate for integrated-fail -> deterministic recovery. Flag
+    FLYER_DETERMINISTIC_RECOVERY == "1" AND (the shared FLYER_PREMIUM_OVERLAY_ALLOWLIST
+    is empty => global, else project.customer_phone is in it). Independent of
+    FLYER_PREMIUM_OVERLAY (which separately controls premium-vs-flat overlay)."""
+    if os.environ.get(PREMIUM_DETERMINISTIC_RECOVERY_ENV) != "1":
         return False
     allow = _premium_overlay_allowlist()
     if not allow:
@@ -3858,14 +3876,14 @@ def _render(project: FlyerProject, path: Path, *, concept_id: str, size: tuple[i
         _render_with_system_pillow(project, path, concept_id=concept_id, size=size)
 
 
-def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None) -> None:
+def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> None:
     if model.strip().lower() in DETERMINISTIC_MODEL_NAMES:
         _render(project, path, concept_id=concept_id, size=size)
         return
-    raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality, repair_instruction=repair_instruction, scene_direction=scene_direction)
+    raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality, repair_instruction=repair_instruction, scene_direction=scene_direction, force_background_only=force_background_only)
     raw_path = _raw_background_path(path)
     raw_path.unlink(missing_ok=True)
-    if _integrated_poster_eligible(project):
+    if _integrated_poster_eligible(project) and not force_background_only:
         _write_generated_image(raw, path, size=size)
         return
     # The prompt and the overlay MUST agree (same gate). For non-eligible flows
@@ -3874,7 +3892,7 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
     # duplicate text and reintroduce untranslated/incomplete facts. Those flows
     # keep the identity banner only (pre-overlay behavior). Background-only
     # eligible flows get the full deterministic overlay (the P1 fix).
-    if not _background_only_eligible(project):
+    if not _background_only_eligible(project) and not force_background_only:
         if size is None:
             _write_generated_image(raw, path, size=size)
             return
@@ -3903,12 +3921,12 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
     _apply_critical_text_overlay(project, raw_path, path, size=size, output_format=output_format)
 
 
-def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, model: str = "deterministic-renderer", quality: str = "low", concept_count: int = 1, repair_instruction: str = "", scene_direction=None) -> list[RenderedAssetSpec]:
+def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, model: str = "deterministic-renderer", quality: str = "low", concept_count: int = 1, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> list[RenderedAssetSpec]:
     output_dir = Path(output_dir)
     specs: list[RenderedAssetSpec] = []
     for concept_id in ("C1", "C2", "C3")[:concept_count]:
         path = output_dir / f"{project.project_id}-{concept_id}-preview.png"
-        _render_model(project, path, concept_id=concept_id, output_format="concept_preview", size=(1080, 1350), model=model, quality=quality, repair_instruction=repair_instruction, scene_direction=scene_direction)
+        _render_model(project, path, concept_id=concept_id, output_format="concept_preview", size=(1080, 1350), model=model, quality=quality, repair_instruction=repair_instruction, scene_direction=scene_direction, force_background_only=force_background_only)
         quality_report = inspect_rendered_asset(path, expected_width=1080, expected_height=1350, mime_type="image/png")
         if not quality_report.ok:
             raise FlyerRenderError(f"rendered concept failed quality check: {quality_report.blockers}")
