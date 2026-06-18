@@ -2961,29 +2961,35 @@ def _openrouter_image_bytes(project: FlyerProject, *, concept_id: str, output_fo
     return _decode_data_url(url)
 
 
-def _openrouter_source_edit_bytes(
-    project: FlyerProject,
+def _openrouter_image_edit_bytes(
     *,
+    base_image_path: Path | str,
+    mime: str,
+    prompt: str,
     size: tuple[int, int] | None,
     model: str,
     quality: str,
 ) -> bytes:
+    """Generic OpenRouter/gemini image-to-image edit: base64 the supplied base
+    image as the image_url part + ``prompt`` as the text part → edited image
+    bytes. The 3-retry urlopen + full response parsing + error handling extracted
+    from the original source-edit caller so the repair-edit path can reuse the
+    SAME proven gateway call. The caller owns *which* image + *what* prompt; this
+    helper owns the HTTP transaction only (no behavior change for source edit)."""
     api_key = _read_env_value("OPENROUTER_API_KEY")
     if not api_key or "PLACEHOLDER" in api_key.upper():
         raise FlyerRenderError("OPENROUTER_API_KEY is missing or placeholder")
-    reference = _source_edit_reference_asset(project)
-    reference_path = Path(reference.path)
-    mime = reference.mime_type or mimetypes.guess_type(str(reference_path))[0] or "image/png"
+    base_path = Path(base_image_path)
     data_url = (
         f"data:{mime};base64,"
-        + base64.b64encode(reference_path.read_bytes()).decode("ascii")
+        + base64.b64encode(base_path.read_bytes()).decode("ascii")
     )
     payload = {
         "model": model,
         "messages": [{
             "role": "user",
             "content": [
-                {"type": "text", "text": _source_edit_prompt(project)},
+                {"type": "text", "text": prompt},
                 {"type": "image_url", "image_url": {"url": data_url}},
             ],
         }],
@@ -3059,6 +3065,26 @@ def _openrouter_source_edit_bytes(
     return _decode_data_url(url)
 
 
+def _openrouter_source_edit_bytes(
+    project: FlyerProject,
+    *,
+    size: tuple[int, int] | None,
+    model: str,
+    quality: str,
+) -> bytes:
+    reference = _source_edit_reference_asset(project)
+    reference_path = Path(reference.path)
+    mime = reference.mime_type or mimetypes.guess_type(str(reference_path))[0] or "image/png"
+    return _openrouter_image_edit_bytes(
+        base_image_path=reference_path,
+        mime=mime,
+        prompt=_source_edit_prompt(project),
+        size=size,
+        model=model,
+        quality=quality,
+    )
+
+
 def _source_edit_reference_asset(project: FlyerProject) -> FlyerAsset:
     for asset in reversed(project.assets):
         if asset.kind == "reference_image" and Path(asset.path).exists():
@@ -3067,6 +3093,75 @@ def _source_edit_reference_asset(project: FlyerProject) -> FlyerAsset:
                 raise FlyerRenderError(f"source edit reference must be an image, got {mime or 'unknown'}")
             return asset
     raise FlyerRenderError("source edit requires an uploaded reference image")
+
+
+# --- Slice 2: premium image-to-image repair-edit gate ------------------------
+# The gate env vars (read at call time, NOT import time, so tests + an operator
+# `export` take effect without a reimport). The flag MUST be exactly "1" for the
+# repair path to arm; when an allowlist env is ALSO set, the project's resolved
+# customer phone must be in it — otherwise (flag "1", no allowlist) the path is
+# global. Anything else is byte-identical legacy behavior (the existing recovery
+# ladder + deterministic-overlay floor). Mirrors bare_render's CD gate pattern.
+PREMIUM_REPAIR_ENABLED_ENV = "FLYER_PREMIUM_REPAIR"
+PREMIUM_REPAIR_ALLOWLIST_ENV = "FLYER_PREMIUM_REPAIR_ALLOWLIST"
+
+
+def _normalize_sender(value: str) -> str:
+    """Canonical comparison form for a phone/LID so the allowlist and the
+    project's customer phone match across format variants. Strips a chat-JID
+    suffix, a leading ``+``, internal phone punctuation/whitespace, and
+    case-folds. (Mirrors bare_render._normalize_sender.)"""
+    s = (value or "").strip()
+    if "@" in s:
+        s = s.split("@", 1)[0]
+    s = s.lstrip("+")
+    s = re.sub(r"[\s\-().]", "", s)
+    return s.casefold()
+
+
+def _premium_repair_allowlist() -> set[str]:
+    """Parse FLYER_PREMIUM_REPAIR_ALLOWLIST (comma-separated phones/LIDs) into a
+    normalized set. Empty/unset ⇒ empty set ⇒ no allowlist scoping (global)."""
+    raw = os.environ.get(PREMIUM_REPAIR_ALLOWLIST_ENV, "") or ""
+    return {n for n in (_normalize_sender(p) for p in raw.split(",")) if n}
+
+
+def _premium_repair_enabled(project: FlyerProject) -> bool:
+    """Slice 2 gate: flag == "1" AND, when the allowlist env is set, the
+    project's customer phone is in it. Flag "1" + no allowlist ⇒ global ON. OFF
+    for anything else (the entire repair rung is skipped → byte-identical)."""
+    if os.environ.get(PREMIUM_REPAIR_ENABLED_ENV) != "1":
+        return False
+    allow = _premium_repair_allowlist()
+    if not allow:
+        return True
+    return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+
+
+def _openrouter_repair_edit_bytes(
+    project: FlyerProject,
+    *,
+    base_image_path: Path | str,
+    repair_instruction: str,
+    size: tuple[int, int] | None,
+    model: str,
+    quality: str,
+) -> bytes:
+    """Image-to-image repair edit of the PRIOR PREMIUM RENDER. Unlike
+    _openrouter_source_edit_bytes (which edits the customer's reference artwork),
+    this edits the model's own prior premium render with a scoped minimal-edit
+    repair instruction so only the defective text changes while the composition
+    is preserved. The base image is always a managed PNG render → image/png."""
+    base_path = Path(base_image_path)
+    mime = mimetypes.guess_type(str(base_path))[0] or "image/png"
+    return _openrouter_image_edit_bytes(
+        base_image_path=base_path,
+        mime=mime,
+        prompt=repair_instruction,
+        size=size,
+        model=model,
+        quality=quality,
+    )
 
 
 def _source_edit_prompt(project: FlyerProject) -> str:
@@ -3856,6 +3951,77 @@ def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *,
         verification_mode="source_edit_overlay_recomposed",
         warnings=[
             "Source edit: customer artwork with the deterministic text overlay re-composed on top; required facts are declared and visual-QA-checked. Inspect the preview before approval."
+        ],
+    )
+    return RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview", width=1080, height=1350, concept_id=concept_id)
+
+
+def render_repair_edit(
+    project: FlyerProject,
+    base_png: Path | str,
+    output_dir: Path | str,
+    *,
+    repair_instruction: str,
+    model: str,
+    quality: str = "high",
+    output_name: str = "",
+) -> RenderedAssetSpec:
+    """Slice 2 premium repair: image-to-image edit of the PRIOR PREMIUM RENDER
+    (``base_png``) with a scoped minimal-edit ``repair_instruction`` → ship the
+    model's premium text VERBATIM.
+
+    The repair render is written to ``output_name`` (a bare filename) when given,
+    else the canonical ``<id>-C1-preview.png``. The ladder ALWAYS passes a
+    DISTINCT per-attempt name (e.g. ``<id>-C1-repair1.png``) so a failed/dangerous
+    repair NEVER overwrites the original integrated render at
+    ``<id>-C1-preview.png`` — the original stays byte-untouched for the existing
+    fallback ladder. A passing repair asset at this distinct name finalizes
+    identically to a normal integrated render (``render_final_package`` selects
+    the preview by ``asset.path`` and, finding no raw-background sidecar, exports
+    it directly with no overlay — the same ``direct_poster_source`` path the
+    integrated-poster-eligible flow already uses).
+
+    Critically — and unlike ``render_source_edit_preview`` — this path does NOT
+    composite the deterministic ``_apply_critical_text_overlay`` on top. The
+    repair's whole purpose is to preserve the model-rendered premium text/layout;
+    re-overlaying would defeat that (and re-introduce the flat-overlay look the
+    repair is meant to avoid). The edited render's correctness is verified by the
+    caller re-running the full referee (``run_visual_qa``); here we only run the
+    structural ``inspect_rendered_asset`` quality check (dimensions / non-blank /
+    file size) and fail closed (cleanup + FlyerRenderError) on a bad render."""
+    output_dir = Path(output_dir)
+    concept_id = "C1"
+    name = output_name or f"{project.project_id}-{concept_id}-preview.png"
+    path = output_dir / name
+    raw = _openrouter_repair_edit_bytes(
+        project,
+        base_image_path=base_png,
+        repair_instruction=repair_instruction,
+        size=(1080, 1350),
+        model=model,
+        quality=quality,
+    )
+    # Write the model's edited bytes directly as the preview (contained to the
+    # 4:5 canvas), preserving the premium text — NO deterministic overlay.
+    path.unlink(missing_ok=True)
+    _write_generated_image_contained(raw, path, size=(1080, 1350))
+    quality_report = inspect_rendered_asset(path, expected_width=1080, expected_height=1350, mime_type="image/png")
+    if not quality_report.ok:
+        # Fail-closed: clean up the orphan preview before propagating so a bad
+        # repair render leaves no stale png in asset_dir (the caller then falls
+        # through to the existing recovery ladder / deterministic-overlay floor).
+        path.unlink(missing_ok=True)
+        raise FlyerRenderError(f"repaired concept failed quality check: {quality_report.blockers}")
+    write_text_manifest(
+        project,
+        path,
+        output_format="concept_preview",
+        selected_concept_id=concept_id,
+        source_path=base_png,
+        warnings=[
+            "Premium repair: image-to-image edit of the prior premium render; the "
+            "model-rendered text is preserved (no deterministic overlay) and is "
+            "verified by the visual-QA referee. Inspect the preview before approval."
         ],
     )
     return RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview", width=1080, height=1350, concept_id=concept_id)
