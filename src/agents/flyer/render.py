@@ -14,6 +14,7 @@ import hashlib
 import http.client
 import io
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -2840,6 +2841,19 @@ with Image.open(src) as img:
 
 
 def _apply_critical_text_overlay(project: FlyerProject, source: Path | str, target: Path | str, *, size: tuple[int, int], output_format: str) -> None:
+    if os.environ.get("FLYER_PREMIUM_OVERLAY") == "1" and _is_food_or_grocery_project(project):
+        try:
+            from agents.flyer import premium_overlay  # deferred import: avoids a module-load cycle
+            premium_overlay.render_premium_overlay(project, source, target, size=size, output_format=output_format)
+            return
+        except FlyerRenderError:
+            # Intentional fail-closed (text can't fit / required fact missing) ->
+            # propagate so the funnel routes to manual. Do NOT silently fall back.
+            raise
+        except Exception:
+            # UNEXPECTED premium-renderer bug must never break rendering entirely:
+            # log and degrade to the known-good legacy overlay (still correct text, flat look).
+            logging.getLogger(__name__).exception("premium_overlay failed unexpectedly; falling back to legacy overlay")
     try:
         apply_critical_text_overlay(project, source, target, size=size, output_format=output_format)
         return

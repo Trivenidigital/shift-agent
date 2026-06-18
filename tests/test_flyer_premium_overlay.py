@@ -402,3 +402,47 @@ def test_two_col_pair_ink_gated_on_actual_paint(monkeypatch, tmp_path):
 
     with pytest.raises(render.FlyerRenderError):
         _po.render_premium_overlay(proj, _bg(tmp_path), tmp_path/"np.png", size=(1080, 1350), output_format="concept_preview")
+
+
+# ---------------------------------------------------------------------------
+# Task 6: FLYER_PREMIUM_OVERLAY flag wires render_premium_overlay into render path
+# ---------------------------------------------------------------------------
+
+def test_flag_off_uses_legacy_not_premium(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY", raising=False)
+    from agents.flyer import render, premium_overlay
+    called = {"premium": 0, "legacy": 0}
+    monkeypatch.setattr(premium_overlay, "render_premium_overlay",
+                        lambda *a, **k: called.__setitem__("premium", called["premium"] + 1))
+    monkeypatch.setattr(render, "apply_critical_text_overlay",
+                        lambda *a, **k: called.__setitem__("legacy", called["legacy"] + 1))
+    render._apply_critical_text_overlay(_project6(), _bg(tmp_path), tmp_path / "o.png",
+                                        size=(1080, 1350), output_format="concept_preview")
+    assert called == {"premium": 0, "legacy": 1}   # flag off -> legacy only, byte-identical path
+
+
+def test_flag_on_food_project_uses_premium(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    from agents.flyer import render, premium_overlay
+    called = {"premium": 0, "legacy": 0}
+    monkeypatch.setattr(premium_overlay, "render_premium_overlay",
+                        lambda *a, **k: called.__setitem__("premium", called["premium"] + 1))
+    monkeypatch.setattr(render, "apply_critical_text_overlay",
+                        lambda *a, **k: called.__setitem__("legacy", called["legacy"] + 1))
+    render._apply_critical_text_overlay(_project6(), _bg(tmp_path), tmp_path / "o.png",
+                                        size=(1080, 1350), output_format="concept_preview")
+    assert called == {"premium": 1, "legacy": 0}   # flag on + food -> premium
+
+
+def test_flag_on_premium_render_error_propagates_not_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    from agents.flyer import render, premium_overlay
+    legacy = {"n": 0}
+    monkeypatch.setattr(premium_overlay, "render_premium_overlay",
+                        lambda *a, **k: (_ for _ in ()).throw(render.FlyerRenderError("does not fit")))
+    monkeypatch.setattr(render, "apply_critical_text_overlay", lambda *a, **k: legacy.__setitem__("n", 1))
+    import pytest
+    with pytest.raises(render.FlyerRenderError):
+        render._apply_critical_text_overlay(_project6(), _bg(tmp_path), tmp_path / "o.png",
+                                            size=(1080, 1350), output_format="concept_preview")
+    assert legacy["n"] == 0   # fail-closed: do NOT silently fall back to legacy on FlyerRenderError
