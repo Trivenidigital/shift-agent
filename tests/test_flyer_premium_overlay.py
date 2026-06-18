@@ -436,18 +436,87 @@ def test_flag_on_food_project_uses_premium(tmp_path, monkeypatch):
     assert called == {"premium": 1, "legacy": 0}   # flag on + food -> premium
 
 
-def test_flag_on_premium_render_error_propagates_not_fallback(tmp_path, monkeypatch):
+def test_flag_on_premium_render_error_degrades_to_flat(tmp_path, monkeypatch):
+    """Follow-up 1: when render_premium_overlay raises FlyerRenderError (fit/coverage
+    fail-closed), _apply_critical_text_overlay must NOT re-raise — instead it falls
+    through to the legacy flat overlay. Fix C is strictly >= today's fallback:
+    premium when it fits, flat when it can't, never manual-worse-than-flat."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
     from agents.flyer import render, premium_overlay
     legacy = {"n": 0}
     monkeypatch.setattr(premium_overlay, "render_premium_overlay",
                         lambda *a, **k: (_ for _ in ()).throw(render.FlyerRenderError("does not fit")))
     monkeypatch.setattr(render, "apply_critical_text_overlay", lambda *a, **k: legacy.__setitem__("n", 1))
-    import pytest
-    with pytest.raises(render.FlyerRenderError):
-        render._apply_critical_text_overlay(_project6(), _bg(tmp_path), tmp_path / "o.png",
-                                            size=(1080, 1350), output_format="concept_preview")
-    assert legacy["n"] == 0   # fail-closed: do NOT silently fall back to legacy on FlyerRenderError
+    # Must NOT raise — must fall through to legacy flat overlay.
+    render._apply_critical_text_overlay(_project6(), _bg(tmp_path), tmp_path / "o.png",
+                                        size=(1080, 1350), output_format="concept_preview")
+    assert legacy["n"] == 1   # degraded to flat, NOT re-raised as manual
+
+
+# ---------------------------------------------------------------------------
+# Follow-up 2: FLYER_PREMIUM_OVERLAY allowlist (scope to phone/LID)
+# ---------------------------------------------------------------------------
+
+def test_allowlist_containing_project_phone_uses_premium(tmp_path, monkeypatch):
+    """flag on + FLYER_PREMIUM_OVERLAY_ALLOWLIST containing the project's
+    customer_phone → premium path is taken."""
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841,+19998887776")
+    from agents.flyer import render, premium_overlay
+    called = {"premium": 0, "legacy": 0}
+    monkeypatch.setattr(premium_overlay, "render_premium_overlay",
+                        lambda *a, **k: called.__setitem__("premium", called["premium"] + 1))
+    monkeypatch.setattr(render, "apply_critical_text_overlay",
+                        lambda *a, **k: called.__setitem__("legacy", called["legacy"] + 1))
+    render._apply_critical_text_overlay(_project6(), _bg(tmp_path), tmp_path / "o.png",
+                                        size=(1080, 1350), output_format="concept_preview")
+    assert called == {"premium": 1, "legacy": 0}  # in allowlist → premium
+
+
+def test_allowlist_not_containing_project_phone_uses_legacy(tmp_path, monkeypatch):
+    """flag on + allowlist set but NOT containing the project's phone → legacy flat
+    used (premium NOT called)."""
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+19998887776,+18881234567")
+    from agents.flyer import render, premium_overlay
+    called = {"premium": 0, "legacy": 0}
+    monkeypatch.setattr(premium_overlay, "render_premium_overlay",
+                        lambda *a, **k: called.__setitem__("premium", called["premium"] + 1))
+    monkeypatch.setattr(render, "apply_critical_text_overlay",
+                        lambda *a, **k: called.__setitem__("legacy", called["legacy"] + 1))
+    render._apply_critical_text_overlay(_project6(), _bg(tmp_path), tmp_path / "o.png",
+                                        size=(1080, 1350), output_format="concept_preview")
+    assert called == {"premium": 0, "legacy": 1}  # not in allowlist → legacy
+
+
+def test_flag_on_no_allowlist_uses_premium_globally(tmp_path, monkeypatch):
+    """flag on + no allowlist env set → global ON (premium for all food projects)."""
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    from agents.flyer import render, premium_overlay
+    called = {"premium": 0, "legacy": 0}
+    monkeypatch.setattr(premium_overlay, "render_premium_overlay",
+                        lambda *a, **k: called.__setitem__("premium", called["premium"] + 1))
+    monkeypatch.setattr(render, "apply_critical_text_overlay",
+                        lambda *a, **k: called.__setitem__("legacy", called["legacy"] + 1))
+    render._apply_critical_text_overlay(_project6(), _bg(tmp_path), tmp_path / "o.png",
+                                        size=(1080, 1350), output_format="concept_preview")
+    assert called == {"premium": 1, "legacy": 0}  # no allowlist → global ON
+
+
+def test_flag_off_allowlist_set_still_uses_legacy(tmp_path, monkeypatch):
+    """flag off → legacy used regardless of allowlist."""
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    from agents.flyer import render, premium_overlay
+    called = {"premium": 0, "legacy": 0}
+    monkeypatch.setattr(premium_overlay, "render_premium_overlay",
+                        lambda *a, **k: called.__setitem__("premium", called["premium"] + 1))
+    monkeypatch.setattr(render, "apply_critical_text_overlay",
+                        lambda *a, **k: called.__setitem__("legacy", called["legacy"] + 1))
+    render._apply_critical_text_overlay(_project6(), _bg(tmp_path), tmp_path / "o.png",
+                                        size=(1080, 1350), output_format="concept_preview")
+    assert called == {"premium": 0, "legacy": 1}  # flag off → legacy only
 
 
 # ---------------------------------------------------------------------------
