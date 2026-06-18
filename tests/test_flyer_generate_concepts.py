@@ -5242,3 +5242,72 @@ def test_integrated_fell_back_deterministic_accepts_qa_text_fidelity_reason():
         reason="qa_text_fidelity",
     )
     assert entry.reason == "qa_text_fidelity"
+
+
+# --- 2026-06-18: own-brand spelling variant is recoverable; truly different ----
+# --- business is dangerous; no project → brand blocker stays dangerous. --------
+
+def _project_lakshmi(monkeypatch_module, locked_fact_ids):
+    from schemas import FlyerProject, FlyerLockedFact
+    from datetime import datetime, timezone
+    facts = [FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile")]
+    for fid in locked_fact_ids:
+        if fid == "business_name":
+            continue
+        facts.append(FlyerLockedFact(fact_id=fid, label=fid, value="x", source="customer_text"))
+    return FlyerProject(
+        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        original_message_id="m-F0174", raw_request="Any item $7.99", locked_facts=facts,
+    )
+
+
+def test_qa_recoverable_true_for_own_brand_typo_with_project(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=["visible wrong business/brand: Laksmi'S Kitchen"])
+    proj = _project_lakshmi(module, {"business_name"})
+    assert module._qa_failed_exact_text_recoverable([report], project=proj) is True
+
+
+def test_qa_recoverable_false_for_different_business_with_project(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=["visible wrong business/brand: Triveni Indian Cafe & Bakery"])
+    proj = _project_lakshmi(module, {"business_name"})
+    assert module._qa_failed_exact_text_recoverable([report], project=proj) is False
+
+
+def test_qa_recoverable_brand_blocker_dangerous_when_no_project(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=["visible wrong business/brand: Laksmi'S Kitchen"])
+    assert module._qa_failed_exact_text_recoverable([report]) is False
+
+
+def test_qa_recoverable_f0174_replay_blocker_set(monkeypatch):
+    module = _load_script(monkeypatch)
+    blockers = [
+        "visible wrong business/brand: Laksmi'S Kitchen",
+        "missing required visible fact: business_name",
+        "item price mismatch: item:1 expected Dosa $7.99",
+        "item price mismatch: item:3 expected Uttapam $7.99",
+        "item price mismatch: item:4 expected Pongal $7.99",
+        "item price mismatch: item:5 expected Sambar $7.99",
+    ]
+    locked = {"business_name", "contact_phone", "location", "campaign_title", "pricing_structure", "schedule"}
+    for i in range(6):
+        locked.add(f"item:{i}:name")
+        locked.add(f"item:{i}:price")
+    report = _qa_report(module, blockers=blockers)
+    proj = _project_lakshmi(module, locked)
+    assert module._qa_failed_exact_text_recoverable([report], locked_fact_ids=locked, project=proj) is True
+
+
+def test_qa_recoverable_f0174_with_fabrication_added_is_dangerous(monkeypatch):
+    module = _load_script(monkeypatch)
+    blockers = [
+        "visible wrong business/brand: Laksmi'S Kitchen",
+        "fabricated price visible: $3.99",
+    ]
+    proj = _project_lakshmi(module, {"business_name"})
+    report = _qa_report(module, blockers=blockers)
+    assert module._qa_failed_exact_text_recoverable([report], project=proj) is False

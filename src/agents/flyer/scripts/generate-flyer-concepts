@@ -64,9 +64,9 @@ try:
 except ImportError:
     from agents.flyer.render import FlyerRenderError, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_repair_edit, render_source_edit_preview  # noqa: E402
 try:
-    from flyer_visual_qa import run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
+    from flyer_visual_qa import brand_blocker_name, is_own_brand_variant, run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.visual_qa import run_visual_qa, write_visual_qa_report  # noqa: E402
+    from agents.flyer.visual_qa import brand_blocker_name, is_own_brand_variant, run_visual_qa, write_visual_qa_report  # noqa: E402
 try:
     from flyer_recovery import classify_flyer_qa_for_autorepair, plan_flyer_autorepair, repair_instruction_is_safe  # type: ignore  # noqa: E402
 except ImportError:
@@ -257,7 +257,7 @@ _ITEM_PRICE_MISMATCH_RE = re.compile(r"^item price mismatch: item:(?P<index>\d+)
 _PREMIUM_REPAIR_BLOCKER_CAP = 50
 
 
-def _qa_failed_exact_text_recoverable(reports, *, locked_fact_ids=None) -> bool:
+def _qa_failed_exact_text_recoverable(reports, *, locked_fact_ids=None, project=None) -> bool:
     """Operator Option 4 (2026-06-15 safety net): partition QA blockers into a
     RECOVERABLE class (a corrective re-render and/or the deterministic overlay
     can correct the rendered text from authoritative locked_facts) and a
@@ -280,6 +280,10 @@ def _qa_failed_exact_text_recoverable(reports, *, locked_fact_ids=None) -> bool:
         stated price), so it can only ship that value — never a fabricated one.
         Requires `locked_fact_ids`; if the expected price is NOT locked, it is
         treated as DANGEROUS (hard-block).
+      - own-brand spelling variant ("visible wrong business/brand: X" where X is
+        a typo / case-variant of the project's registered business_name) —
+        recoverable text-fidelity defect; overlay redraws the correct registered
+        name. Requires `project`; without it the blocker is treated as DANGEROUS.
 
     DANGEROUS — deliberately NOT recoverable here, so they fall through to manual
     review (operator: "wrong price/phone, fabricated offer remain hard-blocks").
@@ -288,6 +292,9 @@ def _qa_failed_exact_text_recoverable(reports, *, locked_fact_ids=None) -> bool:
     should see (the brief or the locked facts themselves may be wrong):
       - fabricated price / fabricated offer claim (not backed by locked_facts)
       - unverified phone number visible (a phone that is NOT the registered one)
+      - truly different business visible ("visible wrong business/brand: X" where
+        X is a structurally different business, not a typo of the registered name)
+        — hard-block to manual regardless of `project`.
     A fabrication-only set still gets the bounded fabrication corrective retry
     upstream; only on its exhaustion does it reach here and hard-block to manual.
     All classify as block-tier severity, so a surviving dangerous blocker routes
@@ -322,6 +329,17 @@ def _qa_failed_exact_text_recoverable(reports, *, locked_fact_ids=None) -> bool:
     for blocker in blockers:
         if blocker.startswith(recoverable_prefixes):
             continue
+        # 2026-06-18: a "visible wrong business/brand: X" blocker is recoverable
+        # IFF X is an own-brand spelling variant of the project's registered
+        # business_name (text-fidelity defect; overlay redraws the correct name).
+        # Without `project` we cannot distinguish typo from a truly different
+        # business → fall through to DANGEROUS (conservative default unchanged
+        # for existing callers that don't pass project).
+        brand_name = brand_blocker_name(blocker)
+        if brand_name is not None:
+            if project is not None and is_own_brand_variant(brand_name, project):
+                continue
+            return False
         # 2026-06-16 (live F0165): an item price mismatch is recoverable ONLY when
         # the expected price is a LOCKED item:N:price — then the deterministic
         # overlay redraws item N at the customer's own stated price (never a
