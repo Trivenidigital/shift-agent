@@ -165,11 +165,12 @@ sys.path.insert(0, '/opt/shift-agent')
 import flyer_premium_overlay as po
 # Flat-name imports the renderer itself does at call time must resolve.
 import flyer_render, flyer_visual_qa  # noqa: F401
-# At least one role TTF must resolve to a real vendored font file (not the
-# system-DejaVu / Pillow-default fallback) at the deployed _FONT_DIR.
-hits = [r for r, fn in po._ROLE_FILES.items() if (po._FONT_DIR / fn).exists()]
-assert hits, f'no premium TTFs found at _FONT_DIR={po._FONT_DIR} (fonts bundle not installed?)'
-print(f'premium overlay flat-imports OK; {len(hits)} role TTFs present at {po._FONT_DIR}')
+# EVERY unique vendored role TTF must exist as a real file at the deployed
+# _FONT_DIR (require ALL, not just one — a partial/incomplete bundle must fail).
+unique = sorted(set(po._ROLE_FILES.values()))
+missing = [fn for fn in unique if not (po._FONT_DIR / fn).exists()]
+assert not missing, f'missing vendored premium TTFs at {po._FONT_DIR}: {missing}'
+print(f'premium overlay flat-imports OK; all {len(unique)} vendored TTFs present at {po._FONT_DIR}')
 " > /dev/null; then
     echo "FAIL: Fix C premium overlay flat-import or font-bundle missing — premium renderer would silently degrade"
     exit 1
@@ -183,11 +184,15 @@ if "$RENDER_PY" -c "import PIL" 2>/dev/null; then
 import sys
 sys.path.insert(0, '/opt/shift-agent')
 import flyer_premium_overlay as po
-for role in po._ROLE_FILES:
-    assert po._premium_font(role, 40) is not None, role
-print('premium fonts load OK under', sys.executable)
+from PIL import ImageFont
+# Load each unique vendored TTF DIRECTLY (NOT via _premium_font, which would
+# silently fall back to a system/default font on a corrupt/missing TTF and mask
+# the failure). A bad or absent TTF must raise here.
+for fn in sorted(set(po._ROLE_FILES.values())):
+    ImageFont.truetype(str(po._FONT_DIR / fn), size=40)
+print('all vendored premium TTFs load via ImageFont.truetype under', sys.executable)
 " > /dev/null; then
-        echo "FAIL: Fix C premium fonts present but fail to load under $RENDER_PY (corrupt TTF?)"
+        echo "FAIL: Fix C premium fonts present but fail to load under $RENDER_PY (corrupt/missing TTF?)"
         exit 1
     fi
     echo "✓ Fix C premium overlay imports flat + fonts present + load under $RENDER_PY"
