@@ -6,6 +6,7 @@ Later tasks add layout solver, scrims, offer seal, and the main renderer.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 _FONT_DIR = Path(__file__).resolve().parent / "fonts"
@@ -77,3 +78,52 @@ def _premium_font(role: str, size: int):
 
     # Final fallback — Pillow >= 10.1 supports size parameter.
     return ImageFont.load_default(size=size)
+
+
+# ---------------------------------------------------------------------------
+# Task 2: layout solver — pure function, no I/O
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PremiumLayout:
+    menu_mode: str        # "combo" | "name_rows" | "two_col" | "two_col_compact"
+    offer_mode: str       # "seal" | "inline" | "none"
+    menu_font_px: int
+    min_font_px: int
+
+
+def plan_premium_layout(items, *, shared_price, width: int = 1080) -> PremiumLayout:
+    """Map menu content metrics to a presentation spec.
+
+    Pure function — no I/O, no PIL drawing.  Later tasks consume the returned
+    ``PremiumLayout`` to drive the deterministic renderer.
+
+    Args:
+        items:        Sequence of ``(name, price)`` tuples.  ``price`` may be
+                      an empty string when all items share a single price.
+        shared_price: A single price string shown once (e.g. "All items $7.99")
+                      or ``None`` when items carry individual prices.
+        width:        Canvas width in pixels (default 1080); drives the mobile
+                      legibility floor calculation.
+
+    Returns:
+        A frozen ``PremiumLayout`` dataclass with mode + font decisions.
+    """
+    n = len(items)
+    has_item_prices = any(p for _name, p in items)
+    floor = max(20, int(width * 0.020))      # mobile legibility floor (~22px @1080)
+
+    if n <= 2:
+        mode = "combo"
+    elif shared_price and not has_item_prices:
+        mode = "name_rows"
+    elif n <= 8:
+        mode = "two_col"
+    else:
+        mode = "two_col_compact"
+
+    base = {"combo": 0.040, "name_rows": 0.034, "two_col": 0.030, "two_col_compact": 0.022}[mode]
+    font_px = max(floor, int(width * base))
+
+    offer = "seal" if (shared_price and not has_item_prices) else ("inline" if has_item_prices else "none")
+    return PremiumLayout(menu_mode=mode, offer_mode=offer, menu_font_px=font_px, min_font_px=floor)

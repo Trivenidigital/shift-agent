@@ -27,3 +27,36 @@ def test_variable_font_weight_axis_differentiates():
     wm = d.textlength("LAKSHMI", font=masthead)
     wt = d.textlength("LAKSHMI", font=title)
     assert wt > wm, f"expected Black(900) wider than Bold(700): {wt} vs {wm}"
+
+
+# ---------------------------------------------------------------------------
+# Task 2: premium layout solver
+# ---------------------------------------------------------------------------
+from agents.flyer.premium_overlay import plan_premium_layout, PremiumLayout
+
+
+def _items(n, price="$7.99"):
+    return [(f"Item{i}", price) for i in range(n)]
+
+
+def test_layout_two_items_uses_combo():
+    L = plan_premium_layout(_items(2), shared_price=None)
+    assert L.menu_mode == "combo"
+
+
+def test_layout_six_shared_price_uses_namerows_and_seal():
+    L = plan_premium_layout(_items(6, ""), shared_price="$7.99")
+    assert L.menu_mode == "name_rows"
+    assert L.offer_mode == "seal"
+
+
+def test_layout_six_distinct_prices_uses_two_col():
+    L = plan_premium_layout([("Dosa","$8.99"),("Idli","$5.99"),("Vada","$5.49"),
+                             ("Upma","$5.99"),("Bonda","$4.99"),("Pakora","$4.49")], shared_price=None)
+    assert L.menu_mode == "two_col"
+
+
+def test_layout_sixteen_items_compact_and_floor_enforced():
+    L = plan_premium_layout(_items(16), shared_price=None)
+    assert L.menu_mode == "two_col_compact"
+    assert L.menu_font_px >= L.min_font_px
