@@ -1960,6 +1960,11 @@ class FlyerProject(BaseModel):
     # on re-QA per design §9 Q3; cleared to None when severity returns to
     # 'pass' on the next QA pass.
     warning: Optional[FlyerWarningSummary] = None
+    # True once an integrated render was deterministically recovered — keeps
+    # draft+final on the background-only overlay path so render_final_package
+    # re-applies the overlay per output size instead of cropping the draft
+    # preview. Default False keeps existing projects.json byte-identical.
+    deterministic_recovery: bool = False
 
     @model_validator(mode="after")
     def _selected_concept_must_exist(self) -> "FlyerProject":

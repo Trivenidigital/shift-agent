@@ -1411,6 +1411,13 @@ def main() -> int:
                     ts=datetime.now(timezone.utc), project_id=current.project_id,
                     project_version=current.version, reason="qa_text_fidelity",
                 ))
+                # MAJOR-1 fix: persist deterministic_recovery=True so the
+                # downstream persist (line ~2180) writes the flag into
+                # projects.json. render_final_package reads this flag via
+                # _integrated_poster_eligible (which returns False for recovered
+                # projects) and re-applies _apply_critical_text_overlay per
+                # output size instead of cropping the draft 4:5 preview.
+                current = current.model_copy(update={"deterministic_recovery": True})
             else:
                 # BLOCKER 2 (det QA still fails): TERMINAL fail-closed to manual.
                 # Do NOT fall through to legacy ladders.

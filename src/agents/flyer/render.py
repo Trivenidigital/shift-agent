@@ -1129,6 +1129,8 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
     """
     if _FORCE_BACKGROUND_ONLY.get():
         return False
+    if getattr(project, "deterministic_recovery", False):
+        return False
     if os.environ.get("FLYER_ALLOW_INTEGRATED_POSTER", "").strip() != "1":
         return False
     if _needs_reference_extraction(project):
@@ -2072,14 +2074,19 @@ def build_image_generation_prompt(
     repair_instruction: str = "",
     force_background_only: bool = False,
 ) -> str:
-    return _image_prompt(
-        project,
-        concept_id=concept_id,
-        output_format=output_format,
-        size=size,
-        repair_instruction=repair_instruction,
-        force_background_only=force_background_only,
-    )
+    token = _FORCE_BACKGROUND_ONLY.set(True) if force_background_only else None
+    try:
+        return _image_prompt(
+            project,
+            concept_id=concept_id,
+            output_format=output_format,
+            size=size,
+            repair_instruction=repair_instruction,
+            force_background_only=force_background_only,
+        )
+    finally:
+        if token is not None:
+            _FORCE_BACKGROUND_ONLY.reset(token)
 
 
 def _reference_preservation_instruction(project: FlyerProject) -> str:

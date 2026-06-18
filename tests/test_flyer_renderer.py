@@ -5243,3 +5243,85 @@ def test_genuine_background_only_prompt_unchanged(monkeypatch):
     assert r._FORCE_BACKGROUND_ONLY.get() is False
     prompt = r.build_image_generation_prompt(p, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
     assert "menu item cards" in prompt  # bg-only directive preserved
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-1: deterministic_recovery flag keeps draft+final on overlay path
+# MAJOR-2: build_image_generation_prompt force param is self-sufficient
+# ---------------------------------------------------------------------------
+
+def test_deterministic_recovery_flag_disables_integrated_eligibility(monkeypatch):
+    """MAJOR-1: a project with deterministic_recovery=True must be ineligible for
+    integrated-poster mode AND eligible for background-only, EVEN when
+    FLYER_ALLOW_INTEGRATED_POSTER=1 and the cvar is unset.
+    This proves the persisted flag drives both draft and final export."""
+    from agents.flyer import render as r
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    # Base: no flag set — integrated eligible
+    p = _f0174_integrated_project()
+    assert r._FORCE_BACKGROUND_ONLY.get() is False
+    assert r._integrated_poster_eligible(p) is True
+    assert r._background_only_eligible(p) is False
+    # Set the persistent flag
+    p_recovered = p.model_copy(update={"deterministic_recovery": True})
+    # Must NOT be integrated-eligible, cvar still unset
+    assert r._FORCE_BACKGROUND_ONLY.get() is False
+    assert r._integrated_poster_eligible(p_recovered) is False
+    # Must be background-only eligible (overlay owns all text)
+    assert r._background_only_eligible(p_recovered) is True
+
+
+def test_build_image_generation_prompt_force_param_self_sufficient(monkeypatch):
+    """MAJOR-2: force_background_only=True on build_image_generation_prompt must
+    be sufficient to suppress integrated-poster text even WITHOUT the caller
+    manually setting _FORCE_BACKGROUND_ONLY.
+
+    Before the fix, _campaign_scene_block_for_project called _integrated_poster_eligible
+    which reads _FORCE_BACKGROUND_ONLY directly — so if the cvar was not set,
+    an integrated-eligible project routed to a non-family scene would emit
+    'complete integrated poster layout' even though force_background_only=True
+    was passed as a parameter.
+
+    We force a non-family scene context via monkeypatching _visual_prompt_context
+    so the storefront_service branch (where the bug manifests) is always selected,
+    independent of the project's default scene selection.
+    """
+    from agents.flyer import render as r
+    from agents.flyer.render import build_image_generation_prompt
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    p = _f0174_integrated_project()
+    # Confirm the project is integrated-eligible and cvar is NOT set by us
+    assert r._integrated_poster_eligible(p) is True
+    assert r._FORCE_BACKGROUND_ONLY.get() is False
+    # Force a non-family scene (storefront_service) so the bug path is exercised.
+    # Without this the _f0174 visual context happens to produce family_discovery which
+    # short-circuits the reserved_zone selection (and hides the bug).
+    monkeypatch.setattr(r, "_visual_prompt_context", lambda proj: "taco tuesday special items menu")
+    # Call WITHOUT manually setting the cvar — the param alone must suffice
+    prompt = build_image_generation_prompt(
+        p, concept_id="C1", output_format="concept_preview",
+        size=(1080, 1350), force_background_only=True,
+    )
+    assert "complete integrated poster layout" not in prompt, (
+        "force_background_only=True must suppress 'complete integrated poster layout' "
+        "even without the caller setting the cvar"
+    )
+    assert "Create exactly" not in prompt, (
+        "force_background_only=True must suppress the affirmative card-creation directive"
+    )
+    # And the textless contract IS present
+    assert ("do NOT render" in prompt) or ("decorative BACKGROUND" in prompt), (
+        "textless background contract must be present when force_background_only=True"
+    )
+
+
+def test_deterministic_recovery_default_false_byte_identical(monkeypatch):
+    """A fresh integrated-eligible project (no deterministic_recovery field) must
+    still be integrated-eligible — proves default=False changes nothing."""
+    from agents.flyer import render as r
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    p = _f0174_integrated_project()
+    # Default: deterministic_recovery is False (or absent)
+    assert getattr(p, "deterministic_recovery", False) is False
+    assert r._integrated_poster_eligible(p) is True
+    assert r._background_only_eligible(p) is False

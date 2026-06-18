@@ -5610,3 +5610,67 @@ def test_rung_render_exception_fails_closed_to_manual(monkeypatch, tmp_path, cap
     assert diag_found, (
         "Expected a JSON diagnostic line with 'deterministic_recovery_render_failed' key in stdout"
     )
+
+
+def test_rung_success_persists_deterministic_recovery_flag(monkeypatch, tmp_path):
+    """MAJOR-1: when the det-recovery rung succeeds (QA passes on the forced
+    background-only re-render), the persisted project in projects.json must have
+    deterministic_recovery == True so render_final_package re-applies the overlay
+    at EVERY aspect ratio instead of cropping the draft preview.
+
+    QA-fail and flag-off paths must NOT persist True (tested in the else branch).
+    """
+    import sys, types, json
+    module = _load_script(monkeypatch)
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    state_path = _f0174_state(tmp_path)
+    asset_dir = tmp_path / "assets"; asset_dir.mkdir()
+    monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    call_count = {"n": 0}
+
+    def fake_render(project, _dir, **kwargs):
+        call_count["n"] += 1
+        p = asset_dir / f"{project.project_id}-C1.png"
+        p.write_bytes(b"x")
+        return [types.SimpleNamespace(
+            path=p, kind="concept_preview", output_format="concept_preview",
+            width=1080, height=1350, concept_id="C1",
+        )]
+
+    def fake_qa(project, path, *, output_format, asset_id="A0001"):
+        from schemas import FlyerVisualQAReport
+        from datetime import datetime, timezone
+        # First call (integrated render) fails; second call (det recovery) passes
+        failed = call_count["n"] <= 1
+        return FlyerVisualQAReport(
+            project_id="F0174", asset_id=asset_id, artifact_path=str(path),
+            artifact_sha256="a" * 64, project_version=1, output_format=output_format,
+            provider="test", qa_source="ocr_vision",
+            status="failed" if failed else "passed",
+            severity="block" if failed else "pass",
+            blockers=list(_F0174_BLOCKERS) if failed else [],
+            checked_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *a, **k: None)
+    monkeypatch.setattr(module, "build_asset_manifest",
+                        lambda specs, **k: [types.SimpleNamespace(asset_id="A0001")])
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0174",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+    rc = module.main()
+    assert rc == 0, f"Expected exit 0 (success), got {rc}"
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted.get("deterministic_recovery") is True, (
+        "After a successful det-recovery rung, projects.json must carry "
+        "deterministic_recovery=True so render_final_package re-applies "
+        "the overlay at every aspect ratio."
+    )
+    # QA-fail path leaves flag absent/False — verified by test_rung_qa_fail_falls_through_to_manual
+    # Flag-off path leaves flag absent/False — verified by test_rung_flag_off_is_byte_identical_manual
