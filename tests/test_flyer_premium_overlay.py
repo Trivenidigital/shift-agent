@@ -2,6 +2,8 @@
 
 TDD: these tests must FAIL before premium_overlay.py exists, then PASS after.
 """
+import os
+import pytest
 from pathlib import Path
 from agents.flyer import premium_overlay as po
 
@@ -492,3 +494,23 @@ def test_background_prompt_unchanged_when_flag_off(monkeypatch):
                                  output_format="concept_preview", size=(1080, 1350))
     # The explicit zone sentence added by the flag must NOT appear when the flag is off.
     assert "top ~22%" not in p_off.lower()
+
+
+# ---------------------------------------------------------------------------
+# Task 8: QA-integration — premium overlay passes the REAL referee
+# Run with OPENROUTER_API_KEY set (on the VPS) to actually exercise the
+# referee; skipped in CI where no network key is present.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not os.environ.get("OPENROUTER_API_KEY"),
+                    reason="referee needs OPENROUTER_API_KEY (vision QA) — run on the box")
+def test_premium_overlay_passes_referee(tmp_path):
+    """End-to-end: render Template A then run the real visual_qa referee and
+    assert zero blockers.  Skipped automatically in CI (no OPENROUTER_API_KEY).
+    Run manually on the VPS with the key set to exercise the live OCR path."""
+    from agents.flyer.visual_qa import run_visual_qa
+    out = tmp_path / "qa.png"
+    proj = _project6()
+    po.render_premium_overlay(proj, _bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
+    report = run_visual_qa(proj, out, output_format="concept_preview")
+    assert report.blockers == [], f"referee blockers on premium render: {report.blockers}"
