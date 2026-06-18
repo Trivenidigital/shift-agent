@@ -4483,13 +4483,14 @@ class FlyerIntegratedFellBackDeterministic(_BaseEntry):
       - referee_unavailable : QA referee/OCR could not verify the integrated render
       - generation_error    : integrated render raised before/while producing output
       - fabrication         : fabrication block routed straight to the overlay
+      - qa_text_fidelity     : integrated render had only recoverable text-fidelity defects; re-rendered deterministically and shipped
 
     LOG-ONLY; complements FlyerIntegratedRefereeUnavailableFallback (kept for
     the anti-silent QA-report note path) — this is the unified §6 counter."""
     type: Literal["flyer_integrated_fell_back_deterministic"] = "flyer_integrated_fell_back_deterministic"
     project_id: str = Field(min_length=1, max_length=40)
     project_version: int = Field(ge=1)
-    reason: Literal["retries_exhausted", "referee_unavailable", "generation_error", "fabrication"]
+    reason: Literal["retries_exhausted", "referee_unavailable", "generation_error", "fabrication", "qa_text_fidelity"]
 
 
 class FlyerIntegratedManualReview(_BaseEntry):

@@ -5230,3 +5230,15 @@ def test_premium_repair_audit_chain_is_complete_on_exhaustion(monkeypatch, tmp_p
     assert "flyer_integrated_fell_back_deterministic" in row_types
     # attempted precedes exhausted.
     assert row_types.index("flyer_premium_repair_attempted") < row_types.index("flyer_premium_repair_exhausted")
+
+
+def test_integrated_fell_back_deterministic_accepts_qa_text_fidelity_reason():
+    from schemas import FlyerIntegratedFellBackDeterministic
+    from datetime import datetime, timezone
+    entry = FlyerIntegratedFellBackDeterministic(
+        ts=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        project_id="F0174",
+        project_version=1,
+        reason="qa_text_fidelity",
+    )
+    assert entry.reason == "qa_text_fidelity"
