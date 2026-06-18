@@ -60,9 +60,9 @@ try:
 except ImportError:
     from agents.flyer.reference_extract import build_reference_extraction_provider, extract_reference  # noqa: E402
 try:
-    from flyer_render import FlyerRenderError, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_repair_edit, render_source_edit_preview  # type: ignore  # noqa: E402
+    from flyer_render import FlyerRenderError, _deterministic_recovery_enabled, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_repair_edit, render_source_edit_preview  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import FlyerRenderError, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_repair_edit, render_source_edit_preview  # noqa: E402
+    from agents.flyer.render import FlyerRenderError, _deterministic_recovery_enabled, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_repair_edit, render_source_edit_preview  # noqa: E402
 try:
     from flyer_visual_qa import brand_blocker_name, is_own_brand_variant, run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
 except ImportError:
@@ -1320,6 +1320,55 @@ def main() -> int:
                 # (concept_count up to 3) never crash the emit.
                 blockers=skip_blockers[:_PREMIUM_REPAIR_BLOCKER_CAP],
             ))
+        # === Deterministic-recovery rung (FLYER_DETERMINISTIC_RECOVERY, scoped) ===
+        # Integrated render failed QA with ONLY recoverable text-fidelity defects
+        # (missing/dropped/misspelled facts, locked-price mismatch, own-brand spelling
+        # variant) -> re-render MODE 2 (textless bg + deterministic Fix C overlay,
+        # exact text by construction) + re-verify, BEFORE the legacy ladder. Dangerous
+        # defects (fabrication, unverified phone, truly different business) are excluded
+        # and fall through. Flag OFF => skipped => byte-identical. Independent of
+        # FLYER_PREMIUM_OVERLAY (premium-vs-flat overlay inside mode 2).
+        if (
+            failed_qa
+            and not source_edit_requested
+            and integrated_path_attempted
+            and _deterministic_recovery_enabled(current)
+            and not _qa_failed_has_fabrication(failed_qa)
+            and _qa_failed_exact_text_recoverable(
+                failed_qa,
+                locked_fact_ids={f.fact_id for f in current.locked_facts},
+                project=current,
+            )
+        ):
+            det_specs = []
+            try:
+                det_specs = render_concept_previews(
+                    current, asset_dir, model=draft_model, quality=draft_provider.quality,
+                    concept_count=cfg.flyer.concept_count, force_background_only=True,
+                )
+            except Exception:
+                det_specs = []
+            if det_specs:
+                det_assets = build_asset_manifest(
+                    det_specs, first_asset_number=next_asset_number(current),
+                    source="rendered", original_message_id=current.original_message_id,
+                )
+                det_qa_reports = []
+                for asset, spec in zip(det_assets, det_specs):
+                    _write_sidecar_visual_qa_fixture(current, spec.path)
+                    report = run_visual_qa(current, spec.path, output_format=spec.output_format, asset_id=asset.asset_id)
+                    write_visual_qa_report(report, spec.path)
+                    det_qa_reports.append(report)
+                det_failed_qa = [r for r in det_qa_reports if r.status != "passed"]
+                specs = det_specs
+                assets = det_assets
+                qa_reports = det_qa_reports
+                failed_qa = det_failed_qa
+                if not det_failed_qa:
+                    _audit_append(audit_log_path, FlyerIntegratedFellBackDeterministic(
+                        ts=datetime.now(timezone.utc), project_id=current.project_id,
+                        project_version=current.version, reason="qa_text_fidelity",
+                    ))
         # FIX 4: never route a fabrication-bearing failure through the legacy
         # recovery.py autorepair loop. The legacy classifier marks a set eligible
         # if ANY missing-copy blocker appears, without rejecting accompanying

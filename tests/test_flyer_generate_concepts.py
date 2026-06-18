@@ -5311,3 +5311,140 @@ def test_qa_recoverable_f0174_with_fabrication_added_is_dangerous(monkeypatch):
     proj = _project_lakshmi(module, {"business_name"})
     report = _qa_report(module, blockers=blockers)
     assert module._qa_failed_exact_text_recoverable([report], project=proj) is False
+
+
+def _f0174_state(tmp_path):
+    import json
+    from datetime import datetime, timezone
+    now = datetime(2026, 6, 18, tzinfo=timezone.utc).isoformat()
+    facts = [
+        {"fact_id": "business_name", "label": "Business", "value": "Lakshmi's Kitchen", "source": "customer_profile"},
+        {"fact_id": "contact_phone", "label": "Contact", "value": "+17329837841", "source": "customer_profile"},
+        {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr St Johns FL", "source": "customer_profile"},
+        {"fact_id": "campaign_title", "label": "Campaign", "value": "Weekend Specials", "source": "customer_text"},
+        {"fact_id": "pricing_structure", "label": "Pricing", "value": "Any item $7.99", "source": "customer_text"},
+        {"fact_id": "schedule", "label": "Schedule", "value": "Saturday & Sunday, 4 PM-8 PM", "source": "customer_text"},
+    ]
+    names = ["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar"]
+    for i, nm in enumerate(names):
+        facts.append({"fact_id": f"item:{i}:name", "label": f"Item {i}", "value": nm, "source": "customer_text"})
+        facts.append({"fact_id": f"item:{i}:price", "label": f"Price {i}", "value": "$7.99", "source": "customer_text"})
+    state_path = tmp_path / "projects.json"
+    state_path.write_text(json.dumps({"schema_version": 1, "next_sequence": 175, "projects": [{
+        "project_id": "F0174", "status": "generating_concepts", "customer_phone": "+17329837841",
+        "created_at": now, "updated_at": now, "original_message_id": "m-F0174",
+        "raw_request": "Weekend Specials. Any item $7.99. Idli, Dosa, Vada, Uttapam, Pongal, Sambar.",
+        "locked_facts": facts,
+    }]}), encoding="utf-8")
+    return state_path
+
+
+_F0174_BLOCKERS = [
+    "visible wrong business/brand: Laksmi'S Kitchen",
+    "missing required visible fact: business_name",
+    "item price mismatch: item:1 expected Dosa $7.99",
+]
+
+
+def test_rung_recovers_f0174_ships_on_qa_pass(monkeypatch, tmp_path, capsys):
+    import sys, types, json
+    module = _load_script(monkeypatch)
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    state_path = _f0174_state(tmp_path)
+    asset_dir = tmp_path / "assets"; asset_dir.mkdir()
+    monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state = {"n": 0, "forced": False}
+    def fake_render(project, _dir, **kwargs):
+        state["n"] += 1
+        if kwargs.get("force_background_only"):
+            state["forced"] = True
+        p = asset_dir / f"{project.project_id}-C1.png"; p.write_bytes(b"x")
+        return [types.SimpleNamespace(path=p, kind="concept_preview", output_format="concept_preview", width=1080, height=1350, concept_id="C1")]
+    def fake_qa(project, path, *, output_format, asset_id="A0001"):
+        from schemas import FlyerVisualQAReport
+        from datetime import datetime, timezone
+        failed = state["n"] <= 1
+        return FlyerVisualQAReport(project_id="F0174", asset_id=asset_id, artifact_path=str(path), artifact_sha256="a"*64,
+            project_version=1, output_format=output_format, provider="test", qa_source="ocr_vision",
+            status="failed" if failed else "passed", severity="block" if failed else "pass",
+            blockers=list(_F0174_BLOCKERS) if failed else [],
+            checked_at=datetime(2026, 6, 18, tzinfo=timezone.utc))
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *a, **k: None)
+    monkeypatch.setattr(module, "build_asset_manifest", lambda specs, **k: [types.SimpleNamespace(asset_id="A0001")])
+    monkeypatch.setattr(sys, "argv", ["generate-flyer-concepts", "--project-id", "F0174",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml")])
+    rc = module.main()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert state["forced"] is True
+    assert persisted["status"] != "manual_edit_required"
+    assert rc == 0
+
+
+def test_rung_qa_fail_falls_through_to_manual(monkeypatch, tmp_path):
+    import sys, types, json
+    module = _load_script(monkeypatch)
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    state_path = _f0174_state(tmp_path)
+    asset_dir = tmp_path / "assets"; asset_dir.mkdir()
+    monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    def fake_render(project, _dir, **kwargs):
+        p = asset_dir / f"{project.project_id}-C1.png"; p.write_bytes(b"x")
+        return [types.SimpleNamespace(path=p, kind="concept_preview", output_format="concept_preview", width=1080, height=1350, concept_id="C1")]
+    def fake_qa(project, path, *, output_format, asset_id="A0001"):
+        from schemas import FlyerVisualQAReport
+        from datetime import datetime, timezone
+        return FlyerVisualQAReport(project_id="F0174", asset_id=asset_id, artifact_path=str(path), artifact_sha256="a"*64,
+            project_version=1, output_format=output_format, provider="test", qa_source="ocr_vision",
+            status="failed", severity="block", blockers=list(_F0174_BLOCKERS), checked_at=datetime(2026, 6, 18, tzinfo=timezone.utc))
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *a, **k: None)
+    monkeypatch.setattr(module, "build_asset_manifest", lambda specs, **k: [types.SimpleNamespace(asset_id="A0001")])
+    monkeypatch.setattr(sys, "argv", ["generate-flyer-concepts", "--project-id", "F0174",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml")])
+    rc = module.main()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert rc == 2
+
+
+def test_rung_flag_off_is_byte_identical_manual(monkeypatch, tmp_path):
+    import sys, types, json
+    module = _load_script(monkeypatch)
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    state_path = _f0174_state(tmp_path)
+    asset_dir = tmp_path / "assets"; asset_dir.mkdir()
+    monkeypatch.delenv("FLYER_DETERMINISTIC_RECOVERY", raising=False)
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    seen = {"forced": False}
+    def fake_render(project, _dir, **kwargs):
+        if kwargs.get("force_background_only"):
+            seen["forced"] = True
+        p = asset_dir / f"{project.project_id}-C1.png"; p.write_bytes(b"x")
+        return [types.SimpleNamespace(path=p, kind="concept_preview", output_format="concept_preview", width=1080, height=1350, concept_id="C1")]
+    def fake_qa(project, path, *, output_format, asset_id="A0001"):
+        from schemas import FlyerVisualQAReport
+        from datetime import datetime, timezone
+        return FlyerVisualQAReport(project_id="F0174", asset_id=asset_id, artifact_path=str(path), artifact_sha256="a"*64,
+            project_version=1, output_format=output_format, provider="test", qa_source="ocr_vision",
+            status="failed", severity="block", blockers=list(_F0174_BLOCKERS), checked_at=datetime(2026, 6, 18, tzinfo=timezone.utc))
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *a, **k: None)
+    monkeypatch.setattr(module, "build_asset_manifest", lambda specs, **k: [types.SimpleNamespace(asset_id="A0001")])
+    monkeypatch.setattr(sys, "argv", ["generate-flyer-concepts", "--project-id", "F0174",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml")])
+    rc = module.main()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert seen["forced"] is False
+    assert persisted["status"] == "manual_edit_required"
+    assert rc == 2
