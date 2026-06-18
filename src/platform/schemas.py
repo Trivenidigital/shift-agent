@@ -1963,7 +1963,11 @@ class FlyerProject(BaseModel):
     # True once an integrated render was deterministically recovered — keeps
     # draft+final on the background-only overlay path so render_final_package
     # re-applies the overlay per output size instead of cropping the draft
-    # preview. Default False keeps existing projects.json byte-identical.
+    # preview. Accepted by-design additive state field (operator 2026-06-18):
+    # like premium_repair_qa it serializes a default key into project JSON on
+    # rewrite; flag-off BEHAVIOR is byte-identical (default False changes no
+    # code path). Required to persist the recovery decision across the separate
+    # final-export invocation.
     deterministic_recovery: bool = False
 
     @model_validator(mode="after")
