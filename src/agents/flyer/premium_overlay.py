@@ -127,3 +127,28 @@ def plan_premium_layout(items, *, shared_price, width: int = 1080) -> PremiumLay
 
     offer = "seal" if (shared_price and not has_item_prices) else ("inline" if has_item_prices else "none")
     return PremiumLayout(menu_mode=mode, offer_mode=offer, menu_font_px=font_px, min_font_px=floor)
+
+
+# ---------------------------------------------------------------------------
+# Task 3: gradient text-safe-zone scrims
+# ---------------------------------------------------------------------------
+
+def compose_scrims(img, *, top_frac=0.22, bottom_frac=0.32):
+    """Darken the top and bottom bands with vertical alpha gradients so overlaid
+    text is legible while the centre hero imagery stays visible. Returns a new RGB image."""
+    from PIL import Image
+    img = img.convert("RGB")
+    w, h = img.size
+    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    px = overlay.load()
+    top_h = int(h * top_frac)
+    bot_start = int(h * (1 - bottom_frac))
+    for y in range(top_h):                         # 0.82 -> 0 alpha downward
+        a = int(209 * (1 - y / max(1, top_h)))
+        for x in range(w):
+            px[x, y] = (8, 4, 2, a)
+    for y in range(bot_start, h):                  # 0 -> 0.92 alpha downward
+        a = int(235 * ((y - bot_start) / max(1, h - bot_start)))
+        for x in range(w):
+            px[x, y] = (8, 4, 2, a)
+    return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")

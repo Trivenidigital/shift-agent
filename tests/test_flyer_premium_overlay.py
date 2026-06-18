@@ -60,3 +60,19 @@ def test_layout_sixteen_items_compact_and_floor_enforced():
     L = plan_premium_layout(_items(16), shared_price=None)
     assert L.menu_mode == "two_col_compact"
     assert L.menu_font_px >= L.min_font_px
+
+
+# ---------------------------------------------------------------------------
+# Task 3: gradient text-safe-zone scrims
+# ---------------------------------------------------------------------------
+from PIL import Image
+from agents.flyer.premium_overlay import compose_scrims
+
+
+def test_scrims_preserve_size_and_darken_bands():
+    base = Image.new("RGB", (1080, 1350), (180, 180, 180))
+    out = compose_scrims(base, top_frac=0.22, bottom_frac=0.32)
+    assert out.size == (1080, 1350)
+    cx = out.getpixel((540, 675))                 # untouched centre
+    top = out.getpixel((540, 20)); bot = out.getpixel((540, 1330))
+    assert sum(top) < sum(cx) and sum(bot) < sum(cx)   # bands darker than centre
