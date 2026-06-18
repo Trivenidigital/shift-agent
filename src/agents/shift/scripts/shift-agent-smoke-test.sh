@@ -153,6 +153,12 @@ echo "✓ Python modules importable (incl. safe_io chokepoint symbols)"
 # install under the flat name, or the fonts/ bundle is absent, the premium
 # path silently degrades (or, pre-fix, dies on ImportError and falls back to
 # legacy) — i.e. Fix C would never actually run in production. Assert both.
+# premium_overlay imports CLEANLY without Pillow (PIL is lazy-imported only when
+# rendering, like flyer_render), so the module-import + flat-import + font-FILE
+# checks run under "$PY" (the Hermes venv: has pydantic, no Pillow). The font
+# LOAD (which needs Pillow) is verified separately under the Pillow-capable
+# python that actually renders flyers (/usr/bin/python3). Calling _premium_font
+# under "$PY" would false-fail (ModuleNotFoundError: PIL).
 if ! "$PY" -c "
 import sys
 sys.path.insert(0, '/opt/shift-agent')
@@ -161,19 +167,33 @@ import flyer_premium_overlay as po
 import flyer_render, flyer_visual_qa  # noqa: F401
 # At least one role TTF must resolve to a real vendored font file (not the
 # system-DejaVu / Pillow-default fallback) at the deployed _FONT_DIR.
-from pathlib import Path
 hits = [r for r, fn in po._ROLE_FILES.items() if (po._FONT_DIR / fn).exists()]
 assert hits, f'no premium TTFs found at _FONT_DIR={po._FONT_DIR} (fonts bundle not installed?)'
-# The loader must return a usable font object for every role without raising.
-for role in po._ROLE_FILES:
-    f = po._premium_font(role, 40)
-    assert f is not None
-print(f'premium fonts OK: {len(hits)} role TTFs at {po._FONT_DIR}')
+print(f'premium overlay flat-imports OK; {len(hits)} role TTFs present at {po._FONT_DIR}')
 " > /dev/null; then
     echo "FAIL: Fix C premium overlay flat-import or font-bundle missing — premium renderer would silently degrade"
     exit 1
 fi
-echo "✓ Fix C premium overlay imports flat + font bundle present"
+# Verify the vendored TTFs actually LOAD under the Pillow-capable render python.
+# Best-effort: if Pillow is unavailable there, warn (matches the existing
+# flyer-quality smoke's no-Pillow tolerance) rather than fail.
+RENDER_PY=/usr/bin/python3
+if "$RENDER_PY" -c "import PIL" 2>/dev/null; then
+    if ! "$RENDER_PY" -c "
+import sys
+sys.path.insert(0, '/opt/shift-agent')
+import flyer_premium_overlay as po
+for role in po._ROLE_FILES:
+    assert po._premium_font(role, 40) is not None, role
+print('premium fonts load OK under', sys.executable)
+" > /dev/null; then
+        echo "FAIL: Fix C premium fonts present but fail to load under $RENDER_PY (corrupt TTF?)"
+        exit 1
+    fi
+    echo "✓ Fix C premium overlay imports flat + fonts present + load under $RENDER_PY"
+else
+    echo "⚠  Pillow absent under $RENDER_PY — premium font-LOAD check skipped (imports + bundle verified)"
+fi
 
 # 2a. Credential-minimized readiness report. Informational only: the strict
 # external-foundation gate runs pre-install in shift-agent-deploy.sh, where a
