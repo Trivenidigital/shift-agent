@@ -1042,7 +1042,7 @@ def _poster_copy_block(project: FlyerProject, *, force_background_only: bool = F
     if plan.contact:
         lines.append(f"Contact: {plan.contact}")
     if plan.items:
-        if force_background_only or _FORCE_BACKGROUND_ONLY.get():
+        if force_background_only or _FORCE_BACKGROUND_ONLY.get() or getattr(project, "deterministic_recovery", False):
             _names = ", ".join(name for name, _price in plan.items)
             lines.append(
                 "Menu items (use ONLY to inform relevant background imagery and mood — do NOT "

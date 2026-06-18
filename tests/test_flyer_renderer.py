@@ -5325,3 +5325,20 @@ def test_deterministic_recovery_default_false_byte_identical(monkeypatch):
     assert getattr(p, "deterministic_recovery", False) is False
     assert r._integrated_poster_eligible(p) is True
     assert r._background_only_eligible(p) is False
+
+
+def test_deterministic_recovery_project_prompt_is_textless_without_force(monkeypatch):
+    """A persisted-recovered project (deterministic_recovery=True) rendered WITHOUT
+    force_background_only / cvar (a subsequent render/revision) must STILL produce a
+    textless prompt — no 'Create exactly N menu item cards' / priced rows."""
+    import re
+    from agents.flyer import render as r
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    p = _f0174_integrated_project().model_copy(update={"deterministic_recovery": True})
+    assert r._FORCE_BACKGROUND_ONLY.get() is False  # no transient force in play
+    prompt = r.build_image_generation_prompt(
+        p, concept_id="C1", output_format="concept_preview", size=(1080, 1350)
+    )
+    assert "Create exactly" not in prompt
+    assert not re.search(r"-\s+\w[\w &'-]* - \$", prompt), "priced item row leaked for recovered project"
+    assert ("do NOT render them as text" in prompt) or ("decorative BACKGROUND" in prompt)
