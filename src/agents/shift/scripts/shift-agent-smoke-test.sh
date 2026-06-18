@@ -113,6 +113,7 @@ import flyer_creative_firewall
 import flyer_reference_extract
 import flyer_semantic_brief
 import flyer_visual_qa
+import flyer_premium_overlay
 import flyer_manual_queue
 # PR-ζ.1b 2026-05-26 — verify flat-renamed allowlist entry matches the
 # deployed basename, verify stale entry removed, verify cf-router entries
@@ -144,6 +145,35 @@ if ! "$PY" /usr/local/bin/check-safe-io-symbols > /dev/null; then
     exit 1
 fi
 echo "✓ Python modules importable (incl. safe_io chokepoint symbols)"
+
+# 2.0a Fix C premium overlay — flat-import + font-bundle deploy gate.
+# The premium renderer (FLYER_PREMIUM_OVERLAY=1) imports flyer_render /
+# flyer_visual_qa / flyer_premium_overlay by their FLAT deployed names and
+# loads vendored TTFs from premium_overlay._FONT_DIR. If the module didn't
+# install under the flat name, or the fonts/ bundle is absent, the premium
+# path silently degrades (or, pre-fix, dies on ImportError and falls back to
+# legacy) — i.e. Fix C would never actually run in production. Assert both.
+if ! "$PY" -c "
+import sys
+sys.path.insert(0, '/opt/shift-agent')
+import flyer_premium_overlay as po
+# Flat-name imports the renderer itself does at call time must resolve.
+import flyer_render, flyer_visual_qa  # noqa: F401
+# At least one role TTF must resolve to a real vendored font file (not the
+# system-DejaVu / Pillow-default fallback) at the deployed _FONT_DIR.
+from pathlib import Path
+hits = [r for r, fn in po._ROLE_FILES.items() if (po._FONT_DIR / fn).exists()]
+assert hits, f'no premium TTFs found at _FONT_DIR={po._FONT_DIR} (fonts bundle not installed?)'
+# The loader must return a usable font object for every role without raising.
+for role in po._ROLE_FILES:
+    f = po._premium_font(role, 40)
+    assert f is not None
+print(f'premium fonts OK: {len(hits)} role TTFs at {po._FONT_DIR}')
+" > /dev/null; then
+    echo "FAIL: Fix C premium overlay flat-import or font-bundle missing — premium renderer would silently degrade"
+    exit 1
+fi
+echo "✓ Fix C premium overlay imports flat + font bundle present"
 
 # 2a. Credential-minimized readiness report. Informational only: the strict
 # external-foundation gate runs pre-install in shift-agent-deploy.sh, where a

@@ -2848,7 +2848,16 @@ with Image.open(src) as img:
 def _apply_critical_text_overlay(project: FlyerProject, source: Path | str, target: Path | str, *, size: tuple[int, int], output_format: str) -> None:
     if os.environ.get("FLYER_PREMIUM_OVERLAY") == "1" and _is_food_or_grocery_project(project):
         try:
-            from agents.flyer import premium_overlay  # deferred import: avoids a module-load cycle
+            # Deferred import: avoids a module-load cycle. Try the FLAT deployed
+            # module name first (the VPS installs premium_overlay.py as
+            # /opt/shift-agent/flyer_premium_overlay.py), then the package layout
+            # used by the repo + tests. Mirrors the try/except convention in
+            # generate-flyer-concepts. Without the flat branch this import would
+            # raise on the box and the premium path would never run in prod.
+            try:
+                import flyer_premium_overlay as premium_overlay  # box (flat layout)
+            except ImportError:
+                from agents.flyer import premium_overlay          # repo / tests
             premium_overlay.render_premium_overlay(project, source, target, size=size, output_format=output_format)
             return
         except FlyerRenderError:

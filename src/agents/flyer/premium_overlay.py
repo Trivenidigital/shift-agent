@@ -10,7 +10,27 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-_FONT_DIR = Path(__file__).resolve().parent / "fonts"
+# Font-bundle search path. The repo layout keeps the TTFs in a ``fonts/``
+# package directory next to this module; the deployed VPS layout FLATTENS this
+# module to ``/opt/shift-agent/flyer_premium_overlay.py`` and installs the
+# bundle alongside it at ``/opt/shift-agent/fonts/`` (see
+# shift-agent-deploy.sh). ``_FONT_DIR`` resolves to the first candidate that
+# actually exists so the loader works in BOTH layouts; ``_premium_font`` also
+# re-scans these candidates per call as a belt-and-suspenders fallback.
+_FONT_DIR_CANDIDATES = (
+    Path(__file__).resolve().parent / "fonts",   # repo / tests (package layout)
+    Path("/opt/shift-agent/fonts"),              # deployed VPS (flat layout)
+)
+
+
+def _resolve_font_dir() -> Path:
+    for candidate in _FONT_DIR_CANDIDATES:
+        if candidate.is_dir():
+            return candidate
+    return _FONT_DIR_CANDIDATES[0]
+
+
+_FONT_DIR = _resolve_font_dir()
 
 # Maps rendering role → vendored TTF filename.
 # All fonts are SIL OFL 1.1; see fonts/FONTS.md for source URLs + substitution notes.
@@ -59,7 +79,18 @@ def _premium_font(role: str, size: int):
     candidates: list[Path] = []
     fn = _ROLE_FILES.get(role)
     if fn:
-        candidates.append(_FONT_DIR / fn)
+        # Primary: the module-level ``_FONT_DIR`` (honored first so tests that
+        # monkeypatch it keep working). Then every other known bundle location
+        # so a flat-layout box still finds the TTF even if ``_FONT_DIR`` was
+        # resolved before the bundle was installed. De-dupe while preserving
+        # order.
+        seen: set[str] = set()
+        for base in (_FONT_DIR, *_FONT_DIR_CANDIDATES):
+            path = base / fn
+            key = str(path)
+            if key not in seen:
+                seen.add(key)
+                candidates.append(path)
     candidates += [Path(p) for p in _SYS_FALLBACKS]
 
     for path in candidates:
@@ -289,12 +320,20 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     """
     from PIL import Image, ImageDraw
     # Lazy import to avoid an import cycle (render imports flyer modules).
-    from agents.flyer import render
-    # Reuse the referee's OWN matching helpers so the fail-closed contract is
-    # identical to visual_qa by construction (never stricter, never looser):
-    # value-and-occurrence-aware text/phone/address/schedule/price matching plus
-    # per-row item name+price pairing.
-    from agents.flyer import visual_qa as vqa
+    # Try the FLAT deployed module names first (the VPS installs these modules
+    # to /opt/shift-agent/ as flyer_render.py / flyer_visual_qa.py), then fall
+    # back to the package layout used by the repo + tests. Mirrors the
+    # try/except convention in generate-flyer-concepts + render.py. Without the
+    # flat branch, the package import raises ImportError on the box and the
+    # FLYER_PREMIUM_OVERLAY path would never run in production.
+    try:
+        import flyer_render as render            # box (flat layout)
+        # Reuse the referee's OWN matching helpers so the fail-closed contract
+        # is identical to visual_qa by construction.
+        import flyer_visual_qa as vqa
+    except ImportError:
+        from agents.flyer import render          # repo / tests (package layout)
+        from agents.flyer import visual_qa as vqa
 
     source = Path(source)
     target = Path(target)
