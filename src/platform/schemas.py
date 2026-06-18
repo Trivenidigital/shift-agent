@@ -1936,6 +1936,15 @@ class FlyerProject(BaseModel):
     locked_facts: list[FlyerLockedFact] = Field(default_factory=list, max_length=100)
     reference_extractions: list[FlyerReferenceExtraction] = Field(default_factory=list, max_length=20)
     qa_reports: list[FlyerVisualQAReport] = Field(default_factory=list, max_length=100)
+    # Slice 2 observability (2026-06-17): tagged per-attempt PREMIUM-REPAIR QA
+    # reports, kept SEPARATE from qa_reports on purpose. qa_reports is the real
+    # render QA stream that drives manual-eligibility (backfill_manual_reasons
+    # treats any failed qa_reports entry as manual-eligible); putting FAILED
+    # repair-attempt reports there would wrongly re-queue a successfully-shipped
+    # flyer. This dedicated field keeps them visible in projects.json for
+    # diagnosis without polluting that invariant. Defaults empty (backward-compat
+    # + flag-off byte-identical).
+    premium_repair_qa: list[FlyerVisualQAReport] = Field(default_factory=list, max_length=100)
     manual_review: FlyerManualReview = Field(default_factory=FlyerManualReview)
     assets: list[FlyerAsset] = Field(default_factory=list, max_length=50)
     concepts: list[FlyerConcept] = Field(default_factory=list, max_length=3)
@@ -4496,6 +4505,91 @@ class FlyerIntegratedManualReview(_BaseEntry):
     reason_code: str = Field(default="", max_length=80)
 
 
+class FlyerPremiumRepairAttempted(_BaseEntry):
+    """Slice 2 (2026-06-17) premium image-to-image repair-loop observability.
+    Emitted once when the (flag-gated) premium repair rung is entered for a
+    recoverable, non-fabrication QA failure on the integrated premium render —
+    i.e. instead of falling straight to the deterministic-overlay floor, an
+    image-to-image edit of the PRIOR PREMIUM RENDER is attempted to fix only the
+    defective text while preserving the composition.
+
+    LOG-ONLY; the denominator for premium-repair success/exhaustion rate."""
+    type: Literal["flyer_premium_repair_attempted"] = "flyer_premium_repair_attempted"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+
+
+class FlyerPremiumRepairSucceeded(_BaseEntry):
+    """Slice 2 premium repair-loop observability. Emitted when an image-to-image
+    repair render passes the full visual-QA referee and is kept → the customer
+    receives the repaired PREMIUM render (not the flat deterministic overlay).
+    `attempts` records how many bounded repair edits it took (1 or 2).
+
+    LOG-ONLY."""
+    type: Literal["flyer_premium_repair_succeeded"] = "flyer_premium_repair_succeeded"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+    attempts: int = Field(default=1, ge=1)
+
+
+class FlyerPremiumRepairExhausted(_BaseEntry):
+    """Slice 2 premium repair-loop observability. Emitted when the bounded (×2)
+    repair edits did not produce a clean premium render — the orchestrator leaves
+    the ORIGINAL failed QA intact and falls through to the EXISTING recovery
+    ladder (legacy autorepair / content-miss retry / deterministic-overlay floor
+    / manual), exactly as it would with the flag OFF. `reason` discriminates WHY:
+
+      - residual_recoverable_defect : a repair render still had a recoverable
+        defect after the budget was spent
+      - generation_error            : a repair render raised (provider/transport)
+      - introduced_non_recoverable  : a repair render introduced a dangerous /
+        non-recoverable blocker → discarded (never shipped)
+
+    `residual_blockers` records the blockers STILL failing after the last repair
+    attempt (the exact defects the repair could not fix) so the operator can read
+    why it exhausted without re-deriving from per-attempt QA reports. Defaults to
+    empty for backward-compat with rows written before this field existed and for
+    the `generation_error` / no-attempt cases where no re-QA produced blockers.
+
+    LOG-ONLY; never alters the downstream fallback the orchestrator already runs."""
+    type: Literal["flyer_premium_repair_exhausted"] = "flyer_premium_repair_exhausted"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+    attempts: int = Field(default=0, ge=0)
+    reason: Literal[
+        "residual_recoverable_defect",
+        "generation_error",
+        "introduced_non_recoverable",
+    ]
+    residual_blockers: list[str] = Field(default_factory=list, max_length=50)
+
+
+class FlyerPremiumRepairSkipped(_BaseEntry):
+    """Slice 2 premium repair-loop observability (2026-06-17). Emitted ONLY when
+    the flag is ON, failed_qa exists, but the premium-repair gate evaluated False
+    — so the operator can see exactly WHY the repair did NOT fire (otherwise a
+    flag-ON skip is invisible: no attempted/succeeded/exhausted row). `reason`
+    classifies the gate decision:
+
+      - fabrication     : a fabricated price/offer (or unverified phone) is present
+                          → hard-block, never repaired (the existing safety gate).
+      - non_recoverable : the recoverable-text gate is False for a non-fabrication
+                          reason (e.g. "visible wrong business/brand: ...") — the
+                          F0168 case; `blockers` carries the offending blockers.
+      - no_instruction  : the gate passed but build_premium_repair_instruction
+                          produced no resolvable clause → repair can't help.
+
+    This REPORTS the existing gate's decision; it does NOT change the safety
+    classification or what ships. Flag OFF ⇒ NEVER emitted (byte-identical).
+
+    LOG-ONLY."""
+    type: Literal["flyer_premium_repair_skipped"] = "flyer_premium_repair_skipped"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+    reason: Literal["fabrication", "non_recoverable", "no_instruction"]
+    blockers: list[str] = Field(default_factory=list, max_length=50)
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -5849,6 +5943,11 @@ LogEntry = Annotated[
         Annotated[FlyerIntegratedPassed, Tag("flyer_integrated_passed")],
         Annotated[FlyerIntegratedFellBackDeterministic, Tag("flyer_integrated_fell_back_deterministic")],
         Annotated[FlyerIntegratedManualReview, Tag("flyer_integrated_manual_review")],
+        # 2026-06-17 — Slice 2 premium image-to-image repair-loop observability
+        Annotated[FlyerPremiumRepairAttempted, Tag("flyer_premium_repair_attempted")],
+        Annotated[FlyerPremiumRepairSucceeded, Tag("flyer_premium_repair_succeeded")],
+        Annotated[FlyerPremiumRepairExhausted, Tag("flyer_premium_repair_exhausted")],
+        Annotated[FlyerPremiumRepairSkipped, Tag("flyer_premium_repair_skipped")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],

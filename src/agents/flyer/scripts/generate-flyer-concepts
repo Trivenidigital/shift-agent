@@ -30,6 +30,10 @@ from schemas import (  # noqa: E402
     FlyerIntegratedPassed,
     FlyerIntegratedRefereeUnavailableFallback,
     FlyerManualReview,
+    FlyerPremiumRepairAttempted,
+    FlyerPremiumRepairExhausted,
+    FlyerPremiumRepairSkipped,
+    FlyerPremiumRepairSucceeded,
     FlyerProjectStore,
     FlyerReferenceExtraction,
     FlyerRepairAttempt,
@@ -56,9 +60,9 @@ try:
 except ImportError:
     from agents.flyer.reference_extract import build_reference_extraction_provider, extract_reference  # noqa: E402
 try:
-    from flyer_render import FlyerRenderError, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_source_edit_preview  # type: ignore  # noqa: E402
+    from flyer_render import FlyerRenderError, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_repair_edit, render_source_edit_preview  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import FlyerRenderError, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_source_edit_preview  # noqa: E402
+    from agents.flyer.render import FlyerRenderError, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_repair_edit, render_source_edit_preview  # noqa: E402
 try:
     from flyer_visual_qa import run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
 except ImportError:
@@ -68,9 +72,9 @@ try:
 except ImportError:
     from agents.flyer.recovery import classify_flyer_qa_for_autorepair, plan_flyer_autorepair, repair_instruction_is_safe  # noqa: E402
 try:
-    from flyer_repair import build_repair_instruction  # type: ignore  # noqa: E402
+    from flyer_repair import build_premium_repair_instruction, build_repair_instruction  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.repair import build_repair_instruction  # noqa: E402
+    from agents.flyer.repair import build_premium_repair_instruction, build_repair_instruction  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
@@ -242,6 +246,15 @@ def _effective_render_model(model: str) -> str:
 
 
 _ITEM_PRICE_MISMATCH_RE = re.compile(r"^item price mismatch: item:(?P<index>\d+) expected ")
+
+# BLOCKER 4: FlyerPremiumRepairSkipped.blockers and
+# FlyerPremiumRepairExhausted.residual_blockers carry list[str] with
+# max_length=50. With concept_count up to 3 the AGGREGATED blockers across
+# reports can exceed 50 → a pydantic ValidationError on the audit emit would
+# alter the failure path. Slice every emitted blocker list to this cap so the
+# observability row is always produced (the cap is diagnostic-only; the full set
+# still drives the unchanged final-state decision via failed_qa).
+_PREMIUM_REPAIR_BLOCKER_CAP = 50
 
 
 def _qa_failed_exact_text_recoverable(reports, *, locked_fact_ids=None) -> bool:
@@ -1012,6 +1025,283 @@ def main() -> int:
             failed_qa = [report for report in qa_reports if report.status != "passed"]
         pending_success_attempt = None
         pending_success_entry = None
+        # Slice 2 observability: tagged copies of each FAILED repair-attempt QA
+        # report, persisted into the dedicated FlyerProject.premium_repair_qa field
+        # (NOT qa_reports — keeps backfill_manual_reasons + other qa_reports consumers
+        # unaffected) for visibility, WITHOUT entering the final-state failed_qa /
+        # severity decision. Stays empty when the flag is OFF or no repair runs ⇒
+        # behaviorally byte-identical.
+        premium_repair_attempt_reports = []
+        # === Slice 2: premium image-to-image repair rung (flag-gated, ADDITIVE) ===
+        # The FIRST recovery rung: when the integrated premium render fails QA with
+        # a RECOVERABLE (non-fabrication, non-phone) text defect, edit the PRIOR
+        # PREMIUM RENDER in place (image-to-image) to fix only the defective text
+        # while preserving the composition — and ship PREMIUM, instead of falling
+        # to the flat deterministic overlay. Bounded ×2; re-QA each repair via the
+        # SAME authoritative referee. On success the repaired specs become the
+        # shipped specs and the run continues downstream as a normal integrated
+        # pass. On exhaustion the ORIGINAL failed_qa is left intact so the EXISTING
+        # ladder (legacy autorepair → content retry → overlay → manual) runs
+        # UNCHANGED. Flag OFF ⇒ this whole block is skipped ⇒ byte-identical.
+        #
+        # SAFETY: the gate REUSES _qa_failed_exact_text_recoverable + excludes
+        # _qa_failed_has_fabrication, so fabrication / unverified-phone NEVER enter
+        # the loop (they remain hard-blocks → manual). A repair that INTRODUCES a
+        # dangerous/non-recoverable blocker on re-QA is discarded (never shipped)
+        # and the run falls through to the existing hard-block path.
+        if (
+            failed_qa
+            and not source_edit_requested
+            and _premium_repair_enabled(current)
+            and not _qa_failed_has_fabrication(failed_qa)
+            and _qa_failed_exact_text_recoverable(
+                failed_qa,
+                locked_fact_ids={f.fact_id for f in current.locked_facts},
+            )
+        ):
+            # NOTE: FlyerPremiumRepairAttempted is emitted INSIDE the loop, only
+            # once a non-empty minimal-edit instruction is resolved (i.e. a real
+            # render is about to happen). A gate-passed-but-no-instruction case is
+            # a SKIP (reason="no_instruction"), not an attempt — so it never emits
+            # a phantom `attempted` with zero renders.
+            # Repair dict: every required fact + ALL item names/prices, so
+            # build_premium_repair_instruction can resolve each recoverable
+            # blocker to its EXACT locked value (and the locked price for an
+            # added/fixed item). ONLY locked values are ever emitted.
+            premium_locked = {
+                f.fact_id: f.value
+                for f in current.locked_facts
+                if getattr(f, "required", False) or f.fact_id.startswith("item:")
+            }
+            premium_base_png = Path(specs[0].path)
+            premium_blockers = [blocker for report in failed_qa for blocker in report.blockers]
+            premium_attempt = 0
+            premium_exhausted_reason = "residual_recoverable_defect"
+            premium_succeeded = False
+            # The blockers still failing after the LAST repair attempt's re-QA —
+            # surfaced on the exhausted row so the operator sees exactly what the
+            # repair could not fix (empty for generation_error / no-attempt).
+            premium_residual_blockers = []
+            # Whether the gate passed but no minimal-edit clause could be built
+            # (→ FlyerPremiumRepairSkipped reason="no_instruction", not exhausted).
+            premium_no_instruction = False
+            # Every distinct repair render written across attempts (each at its own
+            # repair{n}.png) so exhaustion can clean up ALL of them, never leaving
+            # an orphaned earlier attempt on disk.
+            premium_all_repair_specs = []
+            for _ in range(2):
+                instruction = build_premium_repair_instruction(premium_blockers, premium_locked)
+                if not instruction:
+                    # Gate passed but no resolvable minimal-edit clause → repair
+                    # can't help. On the FIRST attempt this is a skip (no render
+                    # was attempted); record it so the skip-reason branch reports
+                    # "no_instruction". Leave the original failed_qa for the ladder.
+                    if premium_attempt == 0:
+                        premium_no_instruction = True
+                    break
+                if premium_attempt == 0:
+                    # First real render attempt is about to happen → the rung is
+                    # genuinely attempting a repair. Emit the denominator row now
+                    # (after the instruction resolved), so a no_instruction skip
+                    # never produces a phantom `attempted`.
+                    _audit_append(audit_log_path, FlyerPremiumRepairAttempted(
+                        ts=now,
+                        project_id=current.project_id,
+                        project_version=current.version,
+                    ))
+                premium_attempt += 1
+                repair_specs = []
+                repair_qa_reports = []
+                # Write each repair attempt to a DISTINCT path so a failed/dangerous
+                # repair NEVER overwrites the original integrated render at
+                # <id>-C1-preview.png. The original specs + their files stay
+                # byte-untouched for the existing fallback ladder.
+                repair_out_name = f"{current.project_id}-C1-repair{premium_attempt}.png"
+                try:
+                    repair_spec = render_repair_edit(
+                        current,
+                        premium_base_png,
+                        asset_dir,
+                        repair_instruction=instruction,
+                        model=draft_model,
+                        quality=draft_provider.quality,
+                        output_name=repair_out_name,
+                    )
+                    repair_specs = [repair_spec]
+                    repair_assets = build_asset_manifest(
+                        repair_specs,
+                        first_asset_number=next_asset_number(current),
+                        source="rendered",
+                        original_message_id=current.original_message_id,
+                    )
+                    for asset, spec in zip(repair_assets, repair_specs):
+                        _write_sidecar_visual_qa_fixture(current, spec.path)
+                        report = run_visual_qa(
+                            current,
+                            spec.path,
+                            output_format=spec.output_format,
+                            asset_id=asset.asset_id,
+                        )
+                        write_visual_qa_report(report, spec.path)
+                        repair_qa_reports.append(report)
+                except Exception:
+                    # ANY error during the repair edit — FlyerRenderError OR a
+                    # non-FlyerRenderError (Pillow in _write_generated_image_
+                    # contained, manifest write) raised AFTER the distinct file was
+                    # written — must NOT crash the run. Discard the distinct repair
+                    # artifact, stop, and fall through to the existing ladder. The
+                    # original <id>-C1-preview.png is at a DIFFERENT path so it is
+                    # never touched even on a mid-write crash.
+                    _cleanup_render_artifacts(repair_specs, preserve_paths={
+                        candidate for spec in specs for candidate in _render_artifact_candidates(spec)
+                    })
+                    # The repair render may have been written before the failure but
+                    # not captured in repair_specs (e.g. manifest write raised after
+                    # the png landed) — clean the distinct path directly too.
+                    (asset_dir / repair_out_name).unlink(missing_ok=True)
+                    Path(str(asset_dir / repair_out_name) + ".text.json").unlink(missing_ok=True)
+                    premium_exhausted_reason = "generation_error"
+                    break
+                # This attempt produced a render on disk (un-shipped yet); track it
+                # so the exhaustion path can clean up every distinct repair file.
+                premium_all_repair_specs.extend(repair_specs)
+                repair_failed_qa = [r for r in repair_qa_reports if r.status != "passed"]
+                if repair_failed_qa:
+                    # OBSERVABILITY (does NOT affect the final-state decision):
+                    # persist a TAGGED copy of each FAILED attempt's QA report so
+                    # the operator can see per-attempt residuals in projects.json,
+                    # and record the residual blockers for the exhausted row. These
+                    # tagged reports are written to premium_repair_qa (NOT qa_reports)
+                    # at persist time only; failed_qa / severity stay based on the
+                    # FINAL shipped render.
+                    for r in repair_failed_qa:
+                        premium_repair_attempt_reports.append(
+                            r.model_copy(update={
+                                "warnings": [*r.warnings, f"premium_repair_attempt:{premium_attempt}"],
+                            })
+                        )
+                    premium_residual_blockers = [
+                        blocker for report in repair_failed_qa for blocker in report.blockers
+                    ]
+                if not repair_failed_qa:
+                    # PASS — the repaired PREMIUM render is clean. Keep it as the
+                    # shipped specs; the run continues downstream as a normal pass.
+                    # Clean up the ORIGINAL specs AND any earlier repair attempts,
+                    # preserving only the shipped (passing) repair render.
+                    preserve_paths = {
+                        candidate
+                        for spec in repair_specs
+                        for candidate in _render_artifact_candidates(spec)
+                    }
+                    _cleanup_render_artifacts(specs, preserve_paths=preserve_paths)
+                    _cleanup_render_artifacts(premium_all_repair_specs, preserve_paths=preserve_paths)
+                    specs = repair_specs
+                    assets = repair_assets
+                    qa_reports = repair_qa_reports
+                    failed_qa = []
+                    premium_succeeded = True
+                    if integrated_path_attempted:
+                        integrated_attempt_count = 1 + premium_attempt
+                        integrated_passed_emitted = True
+                        _audit_append(audit_log_path, FlyerIntegratedPassed(
+                            ts=now,
+                            project_id=current.project_id,
+                            project_version=current.version,
+                            attempts=integrated_attempt_count,
+                        ))
+                    _audit_append(audit_log_path, FlyerPremiumRepairSucceeded(
+                        ts=now,
+                        project_id=current.project_id,
+                        project_version=current.version,
+                        attempts=premium_attempt,
+                    ))
+                    break
+                # Still failing. A repair that INTRODUCED a dangerous (fabrication
+                # / unverified-phone) or otherwise non-recoverable blocker must be
+                # DISCARDED — never shipped — and stop (fall through to the
+                # existing hard-block / manual path with the ORIGINAL failed_qa).
+                repair_dangerous = _qa_failed_has_fabrication(repair_failed_qa) or not _qa_failed_exact_text_recoverable(
+                    repair_failed_qa,
+                    locked_fact_ids={f.fact_id for f in current.locked_facts},
+                )
+                if repair_dangerous:
+                    # Discard the dangerous repair render (never ship it) plus any
+                    # earlier repair attempts, keep the ORIGINAL specs for the
+                    # existing ladder/hard-block path.
+                    _cleanup_render_artifacts(premium_all_repair_specs, preserve_paths={
+                        candidate for spec in specs for candidate in _render_artifact_candidates(spec)
+                    })
+                    premium_exhausted_reason = "introduced_non_recoverable"
+                    break
+                # Still recoverable → re-target the RESIDUAL blockers and retry,
+                # chaining the edit on THIS attempt's repaired render (preserving
+                # the partial progress + composition). The next attempt writes to a
+                # NEW distinct path (repair{n+1}.png), so base and output never
+                # collide and the original specs stay the safe fallback if the
+                # budget then exhausts.
+                premium_base_png = Path(repair_spec.path)
+                premium_blockers = [blocker for report in repair_failed_qa for blocker in report.blockers]
+            if not premium_succeeded:
+                # Budget spent (or no resolvable clause / generation error) without
+                # a clean premium render → discard EVERY distinct repair artifact so
+                # the existing ladder rebuilds from the ORIGINAL specs untouched,
+                # then fall through unchanged.
+                if premium_all_repair_specs:
+                    _cleanup_render_artifacts(
+                        premium_all_repair_specs,
+                        preserve_paths={
+                            candidate for spec in specs for candidate in _render_artifact_candidates(spec)
+                        },
+                    )
+                if premium_no_instruction:
+                    # Gate passed but no minimal-edit clause could be built → no
+                    # render was attempted. This is a SKIP (no_instruction), not an
+                    # exhaustion (which implies attempts were made + failed).
+                    _audit_append(audit_log_path, FlyerPremiumRepairSkipped(
+                        ts=now,
+                        project_id=current.project_id,
+                        project_version=current.version,
+                        reason="no_instruction",
+                        # BLOCKER 4: cap to the schema max so >50 aggregated
+                        # blockers (concept_count up to 3) never crash the emit.
+                        blockers=premium_blockers[:_PREMIUM_REPAIR_BLOCKER_CAP],
+                    ))
+                else:
+                    _audit_append(audit_log_path, FlyerPremiumRepairExhausted(
+                        ts=now,
+                        project_id=current.project_id,
+                        project_version=current.version,
+                        attempts=premium_attempt,
+                        reason=premium_exhausted_reason,
+                        residual_blockers=premium_residual_blockers[:_PREMIUM_REPAIR_BLOCKER_CAP],
+                    ))
+        elif (
+            failed_qa
+            and not source_edit_requested
+            and _premium_repair_enabled(current)
+        ):
+            # OBSERVABILITY (Piece 3): the flag is ON and there is a QA failure but
+            # the repair gate above evaluated False — REPORT why so a flag-ON skip
+            # is not invisible (the F0168 wrong-brand case). This branch only reads
+            # the EXISTING gate's decision; it changes NOTHING about safety
+            # classification or what ships. Flag OFF ⇒ this elif is never reached
+            # ⇒ byte-identical.
+            skip_blockers = [blocker for report in failed_qa for blocker in report.blockers]
+            if _qa_failed_has_fabrication(failed_qa):
+                skip_reason = "fabrication"
+            else:
+                # Recoverable-text gate was False for a non-fabrication reason
+                # (e.g. "visible wrong business/brand: ...", unverified phone).
+                skip_reason = "non_recoverable"
+            _audit_append(audit_log_path, FlyerPremiumRepairSkipped(
+                ts=now,
+                project_id=current.project_id,
+                project_version=current.version,
+                reason=skip_reason,
+                # BLOCKER 4: cap to the schema max so >50 aggregated blockers
+                # (concept_count up to 3) never crash the emit.
+                blockers=skip_blockers[:_PREMIUM_REPAIR_BLOCKER_CAP],
+            ))
         # FIX 4: never route a fabrication-bearing failure through the legacy
         # recovery.py autorepair loop. The legacy classifier marks a set eligible
         # if ANY missing-copy blocker appears, without rejecting accompanying
@@ -1687,6 +1977,11 @@ def main() -> int:
                         "status": "delivered_with_warning",
                         "assets": [*current.assets, *assets],
                         "qa_reports": [*current.qa_reports, *qa_reports],
+                        # BLOCKER 3: repair-attempt QA reports live in a DEDICATED
+                        # field, NOT qa_reports, so a shipped flyer carrying FAILED
+                        # repair-attempt reports is never made manual-eligible by
+                        # backfill_manual_reasons (which scans qa_reports).
+                        "premium_repair_qa": [*current.premium_repair_qa, *premium_repair_attempt_reports],
                         "warning": warning_payload,
                         # P0 #2 — clear any stale manual_review payload that
                         # may have come in from a prior manual_edit_required
@@ -1723,6 +2018,7 @@ def main() -> int:
                     "status": "manual_edit_required",
                     "assets": [*current.assets, *assets],
                     "qa_reports": [*current.qa_reports, *qa_reports],
+                    "premium_repair_qa": [*current.premium_repair_qa, *premium_repair_attempt_reports],
                     "manual_review": manual,
                     "updated_at": now,
                 })
@@ -1748,6 +2044,7 @@ def main() -> int:
                 "selected_concept_id": "C1" if one_shot else None,
                 "assets": [*current.assets, *assets],
                 "qa_reports": [*current.qa_reports, *qa_reports],
+                "premium_repair_qa": [*current.premium_repair_qa, *premium_repair_attempt_reports],
                 "revisions": revisions,
                 "manual_review": FlyerManualReview(),
                 "updated_at": now,

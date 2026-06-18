@@ -302,6 +302,30 @@ PY
     else
         rm -f /opt/shift-agent/flyer_render.py
     fi
+    # Fix C premium deterministic renderer. Flat-renamed to match the
+    # try/except import convention (flyer_render.py, flyer_visual_qa.py, etc.):
+    # render.py + generate-flyer-concepts import it as `flyer_premium_overlay`.
+    # The font bundle below MUST be installed alongside it (premium_overlay's
+    # _FONT_DIR resolves /opt/shift-agent/fonts on the flat box).
+    if [ -f src/agents/flyer/premium_overlay.py ]; then
+        install -m 644 src/agents/flyer/premium_overlay.py /opt/shift-agent/flyer_premium_overlay.py
+    else
+        rm -f /opt/shift-agent/flyer_premium_overlay.py
+    fi
+    # Premium font bundle (SIL OFL 1.1 vendored TTFs + FONTS.md). Installed to
+    # /opt/shift-agent/fonts/ — the flat-layout location premium_overlay._FONT_DIR
+    # checks. Without these the premium renderer silently degrades to system
+    # DejaVu / Pillow default, defeating Fix C's typography. Guarded for rollback
+    # compatibility with tarballs that predate the bundle.
+    if [ -d src/agents/flyer/fonts ] && compgen -G "src/agents/flyer/fonts/*.ttf" > /dev/null; then
+        install -d -m 755 /opt/shift-agent/fonts
+        install -m 644 src/agents/flyer/fonts/*.ttf /opt/shift-agent/fonts/
+        if [ -f src/agents/flyer/fonts/FONTS.md ]; then
+            install -m 644 src/agents/flyer/fonts/FONTS.md /opt/shift-agent/fonts/FONTS.md
+        fi
+    else
+        rm -rf /opt/shift-agent/fonts
+    fi
     if [ -f src/agents/flyer/repair.py ]; then
         install -m 644 src/agents/flyer/repair.py /opt/shift-agent/flyer_repair.py
     else
