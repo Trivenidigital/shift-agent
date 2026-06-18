@@ -1960,6 +1960,15 @@ class FlyerProject(BaseModel):
     # on re-QA per design §9 Q3; cleared to None when severity returns to
     # 'pass' on the next QA pass.
     warning: Optional[FlyerWarningSummary] = None
+    # True once an integrated render was deterministically recovered — keeps
+    # draft+final on the background-only overlay path so render_final_package
+    # re-applies the overlay per output size instead of cropping the draft
+    # preview. Accepted by-design additive state field (operator 2026-06-18):
+    # like premium_repair_qa it serializes a default key into project JSON on
+    # rewrite; flag-off BEHAVIOR is byte-identical (default False changes no
+    # code path). Required to persist the recovery decision across the separate
+    # final-export invocation.
+    deterministic_recovery: bool = False
 
     @model_validator(mode="after")
     def _selected_concept_must_exist(self) -> "FlyerProject":
@@ -4483,13 +4492,14 @@ class FlyerIntegratedFellBackDeterministic(_BaseEntry):
       - referee_unavailable : QA referee/OCR could not verify the integrated render
       - generation_error    : integrated render raised before/while producing output
       - fabrication         : fabrication block routed straight to the overlay
+      - qa_text_fidelity     : integrated render had only recoverable text-fidelity defects; re-rendered deterministically and shipped
 
     LOG-ONLY; complements FlyerIntegratedRefereeUnavailableFallback (kept for
     the anti-silent QA-report note path) — this is the unified §6 counter."""
     type: Literal["flyer_integrated_fell_back_deterministic"] = "flyer_integrated_fell_back_deterministic"
     project_id: str = Field(min_length=1, max_length=40)
     project_version: int = Field(ge=1)
-    reason: Literal["retries_exhausted", "referee_unavailable", "generation_error", "fabrication"]
+    reason: Literal["retries_exhausted", "referee_unavailable", "generation_error", "fabrication", "qa_text_fidelity"]
 
 
 class FlyerIntegratedManualReview(_BaseEntry):

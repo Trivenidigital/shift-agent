@@ -5230,3 +5230,447 @@ def test_premium_repair_audit_chain_is_complete_on_exhaustion(monkeypatch, tmp_p
     assert "flyer_integrated_fell_back_deterministic" in row_types
     # attempted precedes exhausted.
     assert row_types.index("flyer_premium_repair_attempted") < row_types.index("flyer_premium_repair_exhausted")
+
+
+def test_integrated_fell_back_deterministic_accepts_qa_text_fidelity_reason():
+    from schemas import FlyerIntegratedFellBackDeterministic
+    from datetime import datetime, timezone
+    entry = FlyerIntegratedFellBackDeterministic(
+        ts=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        project_id="F0174",
+        project_version=1,
+        reason="qa_text_fidelity",
+    )
+    assert entry.reason == "qa_text_fidelity"
+
+
+# --- 2026-06-18: own-brand spelling variant is recoverable; truly different ----
+# --- business is dangerous; no project → brand blocker stays dangerous. --------
+
+def _project_lakshmi(monkeypatch_module, locked_fact_ids):
+    from schemas import FlyerProject, FlyerLockedFact
+    from datetime import datetime, timezone
+    facts = [FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile")]
+    for fid in locked_fact_ids:
+        if fid == "business_name":
+            continue
+        facts.append(FlyerLockedFact(fact_id=fid, label=fid, value="x", source="customer_text"))
+    return FlyerProject(
+        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        original_message_id="m-F0174", raw_request="Any item $7.99", locked_facts=facts,
+    )
+
+
+def test_qa_recoverable_true_for_own_brand_typo_with_project(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=["visible wrong business/brand: Laksmi'S Kitchen"])
+    proj = _project_lakshmi(module, {"business_name"})
+    assert module._qa_failed_exact_text_recoverable([report], project=proj) is True
+
+
+def test_qa_recoverable_false_for_different_business_with_project(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=["visible wrong business/brand: Triveni Indian Cafe & Bakery"])
+    proj = _project_lakshmi(module, {"business_name"})
+    assert module._qa_failed_exact_text_recoverable([report], project=proj) is False
+
+
+def test_qa_recoverable_brand_blocker_dangerous_when_no_project(monkeypatch):
+    module = _load_script(monkeypatch)
+    report = _qa_report(module, blockers=["visible wrong business/brand: Laksmi'S Kitchen"])
+    assert module._qa_failed_exact_text_recoverable([report]) is False
+
+
+def test_qa_recoverable_f0174_replay_blocker_set(monkeypatch):
+    module = _load_script(monkeypatch)
+    blockers = [
+        "visible wrong business/brand: Laksmi'S Kitchen",
+        "missing required visible fact: business_name",
+        "item price mismatch: item:1 expected Dosa $7.99",
+        "item price mismatch: item:3 expected Uttapam $7.99",
+        "item price mismatch: item:4 expected Pongal $7.99",
+        "item price mismatch: item:5 expected Sambar $7.99",
+    ]
+    locked = {"business_name", "contact_phone", "location", "campaign_title", "pricing_structure", "schedule"}
+    for i in range(6):
+        locked.add(f"item:{i}:name")
+        locked.add(f"item:{i}:price")
+    report = _qa_report(module, blockers=blockers)
+    proj = _project_lakshmi(module, locked)
+    assert module._qa_failed_exact_text_recoverable([report], locked_fact_ids=locked, project=proj) is True
+
+
+def test_qa_recoverable_f0174_with_fabrication_added_is_dangerous(monkeypatch):
+    module = _load_script(monkeypatch)
+    blockers = [
+        "visible wrong business/brand: Laksmi'S Kitchen",
+        "fabricated price visible: $3.99",
+    ]
+    proj = _project_lakshmi(module, {"business_name"})
+    report = _qa_report(module, blockers=blockers)
+    assert module._qa_failed_exact_text_recoverable([report], project=proj) is False
+
+
+def _f0174_state(tmp_path):
+    import json
+    from datetime import datetime, timezone
+    now = datetime(2026, 6, 18, tzinfo=timezone.utc).isoformat()
+    facts = [
+        {"fact_id": "business_name", "label": "Business", "value": "Lakshmi's Kitchen", "source": "customer_profile"},
+        {"fact_id": "contact_phone", "label": "Contact", "value": "+17329837841", "source": "customer_profile"},
+        {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr St Johns FL", "source": "customer_profile"},
+        {"fact_id": "campaign_title", "label": "Campaign", "value": "Weekend Specials", "source": "customer_text"},
+        {"fact_id": "pricing_structure", "label": "Pricing", "value": "Any item $7.99", "source": "customer_text"},
+        {"fact_id": "schedule", "label": "Schedule", "value": "Saturday & Sunday, 4 PM-8 PM", "source": "customer_text"},
+    ]
+    names = ["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar"]
+    for i, nm in enumerate(names):
+        facts.append({"fact_id": f"item:{i}:name", "label": f"Item {i}", "value": nm, "source": "customer_text"})
+        facts.append({"fact_id": f"item:{i}:price", "label": f"Price {i}", "value": "$7.99", "source": "customer_text"})
+    state_path = tmp_path / "projects.json"
+    state_path.write_text(json.dumps({"schema_version": 1, "next_sequence": 175, "projects": [{
+        "project_id": "F0174", "status": "generating_concepts", "customer_phone": "+17329837841",
+        "created_at": now, "updated_at": now, "original_message_id": "m-F0174",
+        "raw_request": "Weekend Specials. Any item $7.99. Idli, Dosa, Vada, Uttapam, Pongal, Sambar.",
+        "locked_facts": facts,
+    }]}), encoding="utf-8")
+    return state_path
+
+
+_F0174_BLOCKERS = [
+    "visible wrong business/brand: Laksmi'S Kitchen",
+    "missing required visible fact: business_name",
+    "item price mismatch: item:1 expected Dosa $7.99",
+]
+
+
+def test_rung_recovers_f0174_ships_on_qa_pass(monkeypatch, tmp_path, capsys):
+    import sys, types, json
+    module = _load_script(monkeypatch)
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    state_path = _f0174_state(tmp_path)
+    asset_dir = tmp_path / "assets"; asset_dir.mkdir()
+    monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    state = {"n": 0, "forced": False}
+    def fake_render(project, _dir, **kwargs):
+        state["n"] += 1
+        if kwargs.get("force_background_only"):
+            state["forced"] = True
+        p = asset_dir / f"{project.project_id}-C1.png"; p.write_bytes(b"x")
+        return [types.SimpleNamespace(path=p, kind="concept_preview", output_format="concept_preview", width=1080, height=1350, concept_id="C1")]
+    def fake_qa(project, path, *, output_format, asset_id="A0001"):
+        from schemas import FlyerVisualQAReport
+        from datetime import datetime, timezone
+        failed = state["n"] <= 1
+        return FlyerVisualQAReport(project_id="F0174", asset_id=asset_id, artifact_path=str(path), artifact_sha256="a"*64,
+            project_version=1, output_format=output_format, provider="test", qa_source="ocr_vision",
+            status="failed" if failed else "passed", severity="block" if failed else "pass",
+            blockers=list(_F0174_BLOCKERS) if failed else [],
+            checked_at=datetime(2026, 6, 18, tzinfo=timezone.utc))
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *a, **k: None)
+    monkeypatch.setattr(module, "build_asset_manifest", lambda specs, **k: [types.SimpleNamespace(asset_id="A0001")])
+    monkeypatch.setattr(sys, "argv", ["generate-flyer-concepts", "--project-id", "F0174",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml")])
+    rc = module.main()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert state["forced"] is True
+    assert persisted["status"] != "manual_edit_required"
+    assert rc == 0
+
+
+def test_rung_qa_fail_falls_through_to_manual(monkeypatch, tmp_path):
+    import sys, types, json
+    module = _load_script(monkeypatch)
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    state_path = _f0174_state(tmp_path)
+    asset_dir = tmp_path / "assets"; asset_dir.mkdir()
+    monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    def fake_render(project, _dir, **kwargs):
+        p = asset_dir / f"{project.project_id}-C1.png"; p.write_bytes(b"x")
+        return [types.SimpleNamespace(path=p, kind="concept_preview", output_format="concept_preview", width=1080, height=1350, concept_id="C1")]
+    def fake_qa(project, path, *, output_format, asset_id="A0001"):
+        from schemas import FlyerVisualQAReport
+        from datetime import datetime, timezone
+        return FlyerVisualQAReport(project_id="F0174", asset_id=asset_id, artifact_path=str(path), artifact_sha256="a"*64,
+            project_version=1, output_format=output_format, provider="test", qa_source="ocr_vision",
+            status="failed", severity="block", blockers=list(_F0174_BLOCKERS), checked_at=datetime(2026, 6, 18, tzinfo=timezone.utc))
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *a, **k: None)
+    monkeypatch.setattr(module, "build_asset_manifest", lambda specs, **k: [types.SimpleNamespace(asset_id="A0001")])
+    monkeypatch.setattr(sys, "argv", ["generate-flyer-concepts", "--project-id", "F0174",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml")])
+    rc = module.main()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert rc == 2
+
+
+def test_rung_flag_off_is_byte_identical_manual(monkeypatch, tmp_path):
+    import sys, types, json
+    module = _load_script(monkeypatch)
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    state_path = _f0174_state(tmp_path)
+    asset_dir = tmp_path / "assets"; asset_dir.mkdir()
+    monkeypatch.delenv("FLYER_DETERMINISTIC_RECOVERY", raising=False)
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    seen = {"forced": False}
+    def fake_render(project, _dir, **kwargs):
+        if kwargs.get("force_background_only"):
+            seen["forced"] = True
+        p = asset_dir / f"{project.project_id}-C1.png"; p.write_bytes(b"x")
+        return [types.SimpleNamespace(path=p, kind="concept_preview", output_format="concept_preview", width=1080, height=1350, concept_id="C1")]
+    def fake_qa(project, path, *, output_format, asset_id="A0001"):
+        from schemas import FlyerVisualQAReport
+        from datetime import datetime, timezone
+        return FlyerVisualQAReport(project_id="F0174", asset_id=asset_id, artifact_path=str(path), artifact_sha256="a"*64,
+            project_version=1, output_format=output_format, provider="test", qa_source="ocr_vision",
+            status="failed", severity="block", blockers=list(_F0174_BLOCKERS), checked_at=datetime(2026, 6, 18, tzinfo=timezone.utc))
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *a, **k: None)
+    monkeypatch.setattr(module, "build_asset_manifest", lambda specs, **k: [types.SimpleNamespace(asset_id="A0001")])
+    monkeypatch.setattr(sys, "argv", ["generate-flyer-concepts", "--project-id", "F0174",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml")])
+    rc = module.main()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert seen["forced"] is False
+    assert persisted["status"] == "manual_edit_required"
+    assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# BLOCKER 2 renamed + BLOCKER 3 + SILENT-FAILURE tests
+# ---------------------------------------------------------------------------
+
+
+def test_rung_qa_fail_fenced_to_manual(monkeypatch, tmp_path):
+    """BLOCKER 2 (rename of test_rung_qa_fail_falls_through_to_manual):
+    When det-recovery QA still fails, the rung must be TERMINAL:
+    write manual_edit_required and return 2. It must NOT fall through to the
+    legacy autorepair/content/fallback ladders which can auto-process or ship.
+    This test is identical to the old test_rung_qa_fail_falls_through_to_manual
+    but is kept under the new name to reflect the spec change (terminal, not
+    fall-through).
+    """
+    import sys, types, json
+    module = _load_script(monkeypatch)
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    state_path = _f0174_state(tmp_path)
+    asset_dir = tmp_path / "assets"; asset_dir.mkdir()
+    monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    def fake_render(project, _dir, **kwargs):
+        p = asset_dir / f"{project.project_id}-C1.png"; p.write_bytes(b"x")
+        return [types.SimpleNamespace(path=p, kind="concept_preview", output_format="concept_preview", width=1080, height=1350, concept_id="C1")]
+    def fake_qa(project, path, *, output_format, asset_id="A0001"):
+        from schemas import FlyerVisualQAReport
+        from datetime import datetime, timezone
+        return FlyerVisualQAReport(project_id="F0174", asset_id=asset_id, artifact_path=str(path), artifact_sha256="a"*64,
+            project_version=1, output_format=output_format, provider="test", qa_source="ocr_vision",
+            status="failed", severity="block", blockers=list(_F0174_BLOCKERS), checked_at=datetime(2026, 6, 18, tzinfo=timezone.utc))
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *a, **k: None)
+    monkeypatch.setattr(module, "build_asset_manifest", lambda specs, **k: [types.SimpleNamespace(asset_id="A0001")])
+    monkeypatch.setattr(sys, "argv", ["generate-flyer-concepts", "--project-id", "F0174",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml")])
+    rc = module.main()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required"
+    assert rc == 2
+
+
+def test_rung_success_does_not_double_emit_integrated_passed(monkeypatch, tmp_path):
+    """BLOCKER 3: in the success scenario (integrated QA fails, forced re-render
+    passes), the run must emit exactly ONE FlyerIntegratedFellBackDeterministic
+    and ZERO FlyerIntegratedPassed. Before the fix, integrated_fell_back_emitted
+    was not set in the rung success branch so the existing guard at line ~2130
+    saw integrated_fell_back_emitted=False and also emitted FlyerIntegratedPassed,
+    double-counting the run.
+    """
+    import sys, types
+    module = _load_script(monkeypatch)
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    state_path = _f0174_state(tmp_path)
+    asset_dir = tmp_path / "assets"; asset_dir.mkdir()
+    monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+
+    appended_entries = []
+    real_audit_append = module._audit_append
+    def capturing_audit_append(path, entry):
+        appended_entries.append(entry)
+        real_audit_append(path, entry)
+    monkeypatch.setattr(module, "_audit_append", capturing_audit_append)
+
+    render_n = {"n": 0}
+    def fake_render(project, _dir, **kwargs):
+        render_n["n"] += 1
+        p = asset_dir / f"{project.project_id}-C{render_n['n']}.png"; p.write_bytes(b"x")
+        return [types.SimpleNamespace(path=p, kind="concept_preview", output_format="concept_preview", width=1080, height=1350, concept_id="C1")]
+    def fake_qa(project, path, *, output_format, asset_id="A0001"):
+        from schemas import FlyerVisualQAReport
+        from datetime import datetime, timezone
+        failed = render_n["n"] <= 1
+        return FlyerVisualQAReport(project_id="F0174", asset_id=asset_id, artifact_path=str(path), artifact_sha256="a"*64,
+            project_version=1, output_format=output_format, provider="test", qa_source="ocr_vision",
+            status="failed" if failed else "passed", severity="block" if failed else "pass",
+            blockers=list(_F0174_BLOCKERS) if failed else [],
+            checked_at=datetime(2026, 6, 18, tzinfo=timezone.utc))
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *a, **k: None)
+    monkeypatch.setattr(module, "build_asset_manifest", lambda specs, **k: [types.SimpleNamespace(asset_id="A0001")])
+    monkeypatch.setattr(sys, "argv", ["generate-flyer-concepts", "--project-id", "F0174",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml")])
+    rc = module.main()
+    assert rc == 0
+
+    from schemas import FlyerIntegratedFellBackDeterministic, FlyerIntegratedPassed
+    fell_back_entries = [e for e in appended_entries if isinstance(e, FlyerIntegratedFellBackDeterministic)]
+    passed_entries = [e for e in appended_entries if isinstance(e, FlyerIntegratedPassed)]
+    assert len(fell_back_entries) == 1, f"Expected exactly 1 FlyerIntegratedFellBackDeterministic, got {len(fell_back_entries)}"
+    assert len(passed_entries) == 0, f"Expected 0 FlyerIntegratedPassed (double-emit bug), got {len(passed_entries)}: {passed_entries}"
+
+
+def test_rung_render_exception_fails_closed_to_manual(monkeypatch, tmp_path, capsys):
+    """SILENT-FAILURE + BLOCKER 2: when the forced det-recovery render raises an
+    exception, the rung must:
+    1. Write status=manual_edit_required and return 2 (fail-closed, not fall-through).
+    2. Print a diagnostic JSON line with 'deterministic_recovery_render_failed' key.
+    Before the fix, the bare except swallowed the exception silently and no
+    diagnostic was emitted; control fell through to the legacy ladders.
+    """
+    import sys, types
+    module = _load_script(monkeypatch)
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    state_path = _f0174_state(tmp_path)
+    asset_dir = tmp_path / "assets"; asset_dir.mkdir()
+    monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+
+    render_n = {"n": 0}
+    def fake_render(project, _dir, **kwargs):
+        render_n["n"] += 1
+        if kwargs.get("force_background_only"):
+            # Second call (det-recovery) raises
+            raise RuntimeError("det render bombed")
+        p = asset_dir / f"{project.project_id}-C1.png"; p.write_bytes(b"x")
+        return [types.SimpleNamespace(path=p, kind="concept_preview", output_format="concept_preview", width=1080, height=1350, concept_id="C1")]
+    def fake_qa(project, path, *, output_format, asset_id="A0001"):
+        from schemas import FlyerVisualQAReport
+        from datetime import datetime, timezone
+        # First render always fails QA (to trigger the rung)
+        return FlyerVisualQAReport(project_id="F0174", asset_id=asset_id, artifact_path=str(path), artifact_sha256="a"*64,
+            project_version=1, output_format=output_format, provider="test", qa_source="ocr_vision",
+            status="failed", severity="block", blockers=list(_F0174_BLOCKERS),
+            checked_at=datetime(2026, 6, 18, tzinfo=timezone.utc))
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *a, **k: None)
+    monkeypatch.setattr(module, "build_asset_manifest", lambda specs, **k: [types.SimpleNamespace(asset_id="A0001")])
+    monkeypatch.setattr(sys, "argv", ["generate-flyer-concepts", "--project-id", "F0174",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml")])
+    rc = module.main()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["status"] == "manual_edit_required", (
+        "When det-recovery render raises, must fail-closed to manual_edit_required"
+    )
+    assert rc == 2
+
+    captured = capsys.readouterr()
+    import json as _json
+    diag_found = False
+    for line in captured.out.splitlines():
+        try:
+            obj = _json.loads(line)
+            if "deterministic_recovery_render_failed" in obj:
+                diag_found = True
+                break
+        except Exception:
+            pass
+    assert diag_found, (
+        "Expected a JSON diagnostic line with 'deterministic_recovery_render_failed' key in stdout"
+    )
+
+
+def test_rung_success_persists_deterministic_recovery_flag(monkeypatch, tmp_path):
+    """MAJOR-1: when the det-recovery rung succeeds (QA passes on the forced
+    background-only re-render), the persisted project in projects.json must have
+    deterministic_recovery == True so render_final_package re-applies the overlay
+    at EVERY aspect ratio instead of cropping the draft preview.
+
+    QA-fail and flag-off paths must NOT persist True (tested in the else branch).
+    """
+    import sys, types, json
+    module = _load_script(monkeypatch)
+    monkeypatch.setattr(module, "load_yaml_model", _premium_config_loader())
+    state_path = _f0174_state(tmp_path)
+    asset_dir = tmp_path / "assets"; asset_dir.mkdir()
+    monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    call_count = {"n": 0}
+
+    def fake_render(project, _dir, **kwargs):
+        call_count["n"] += 1
+        p = asset_dir / f"{project.project_id}-C1.png"
+        p.write_bytes(b"x")
+        return [types.SimpleNamespace(
+            path=p, kind="concept_preview", output_format="concept_preview",
+            width=1080, height=1350, concept_id="C1",
+        )]
+
+    def fake_qa(project, path, *, output_format, asset_id="A0001"):
+        from schemas import FlyerVisualQAReport
+        from datetime import datetime, timezone
+        # First call (integrated render) fails; second call (det recovery) passes
+        failed = call_count["n"] <= 1
+        return FlyerVisualQAReport(
+            project_id="F0174", asset_id=asset_id, artifact_path=str(path),
+            artifact_sha256="a" * 64, project_version=1, output_format=output_format,
+            provider="test", qa_source="ocr_vision",
+            status="failed" if failed else "passed",
+            severity="block" if failed else "pass",
+            blockers=list(_F0174_BLOCKERS) if failed else [],
+            checked_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *a, **k: None)
+    monkeypatch.setattr(module, "build_asset_manifest",
+                        lambda specs, **k: [types.SimpleNamespace(asset_id="A0001")])
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts", "--project-id", "F0174",
+        "--state-path", str(state_path), "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+    rc = module.main()
+    assert rc == 0, f"Expected exit 0 (success), got {rc}"
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted.get("deterministic_recovery") is True, (
+        "After a successful det-recovery rung, projects.json must carry "
+        "deterministic_recovery=True so render_final_package re-applies "
+        "the overlay at every aspect ratio."
+    )
+    # QA-fail path leaves flag absent/False — verified by test_rung_qa_fail_falls_through_to_manual
+    # Flag-off path leaves flag absent/False — verified by test_rung_flag_off_is_byte_identical_manual

@@ -131,6 +131,14 @@ assert flyer_action_registry.PROJECT_ACTIONS, 'PR-ζ.1b: PROJECT_ACTIONS empty'
 _ = flyer_action_registry.build_action_context_for_command(
     flyer_action_registry.PROJECT_ACTIONS, 'intake.acknowledged',
 )
+# deterministic-recovery symbols + flag default (feat/flyer-deterministic-recovery-routing)
+import os as _os
+assert hasattr(flyer_render, '_deterministic_recovery_enabled'), \
+    'flyer_render._deterministic_recovery_enabled missing — deterministic-recovery routing broken'
+assert hasattr(flyer_visual_qa, 'is_own_brand_variant'), \
+    'flyer_visual_qa.is_own_brand_variant missing — brand-typo gate broken'
+assert _os.environ.get('FLYER_DETERMINISTIC_RECOVERY') in (None, '', '0', '1'), \
+    'FLYER_DETERMINISTIC_RECOVERY has unexpected value — must be unset, empty, 0, or 1'
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
 " > /dev/null; then
     echo "FAIL: Python modules don't import"
@@ -145,6 +153,7 @@ if ! "$PY" /usr/local/bin/check-safe-io-symbols > /dev/null; then
     exit 1
 fi
 echo "✓ Python modules importable (incl. safe_io chokepoint symbols)"
+echo "✓ deterministic-recovery symbols present + flag default safe"
 
 # 2.0a Fix C premium overlay — flat-import + font-bundle deploy gate.
 # The premium renderer (FLYER_PREMIUM_OVERLAY=1) imports flyer_render /

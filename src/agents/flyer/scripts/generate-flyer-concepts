@@ -60,13 +60,13 @@ try:
 except ImportError:
     from agents.flyer.reference_extract import build_reference_extraction_provider, extract_reference  # noqa: E402
 try:
-    from flyer_render import FlyerRenderError, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_repair_edit, render_source_edit_preview  # type: ignore  # noqa: E402
+    from flyer_render import FlyerRenderError, _deterministic_recovery_enabled, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_repair_edit, render_source_edit_preview  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import FlyerRenderError, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_repair_edit, render_source_edit_preview  # noqa: E402
+    from agents.flyer.render import FlyerRenderError, _deterministic_recovery_enabled, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_repair_edit, render_source_edit_preview  # noqa: E402
 try:
-    from flyer_visual_qa import run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
+    from flyer_visual_qa import brand_blocker_name, is_own_brand_variant, run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.visual_qa import run_visual_qa, write_visual_qa_report  # noqa: E402
+    from agents.flyer.visual_qa import brand_blocker_name, is_own_brand_variant, run_visual_qa, write_visual_qa_report  # noqa: E402
 try:
     from flyer_recovery import classify_flyer_qa_for_autorepair, plan_flyer_autorepair, repair_instruction_is_safe  # type: ignore  # noqa: E402
 except ImportError:
@@ -257,7 +257,7 @@ _ITEM_PRICE_MISMATCH_RE = re.compile(r"^item price mismatch: item:(?P<index>\d+)
 _PREMIUM_REPAIR_BLOCKER_CAP = 50
 
 
-def _qa_failed_exact_text_recoverable(reports, *, locked_fact_ids=None) -> bool:
+def _qa_failed_exact_text_recoverable(reports, *, locked_fact_ids=None, project=None) -> bool:
     """Operator Option 4 (2026-06-15 safety net): partition QA blockers into a
     RECOVERABLE class (a corrective re-render and/or the deterministic overlay
     can correct the rendered text from authoritative locked_facts) and a
@@ -280,6 +280,10 @@ def _qa_failed_exact_text_recoverable(reports, *, locked_fact_ids=None) -> bool:
         stated price), so it can only ship that value — never a fabricated one.
         Requires `locked_fact_ids`; if the expected price is NOT locked, it is
         treated as DANGEROUS (hard-block).
+      - own-brand spelling variant ("visible wrong business/brand: X" where X is
+        a typo / case-variant of the project's registered business_name) —
+        recoverable text-fidelity defect; overlay redraws the correct registered
+        name. Requires `project`; without it the blocker is treated as DANGEROUS.
 
     DANGEROUS — deliberately NOT recoverable here, so they fall through to manual
     review (operator: "wrong price/phone, fabricated offer remain hard-blocks").
@@ -288,6 +292,9 @@ def _qa_failed_exact_text_recoverable(reports, *, locked_fact_ids=None) -> bool:
     should see (the brief or the locked facts themselves may be wrong):
       - fabricated price / fabricated offer claim (not backed by locked_facts)
       - unverified phone number visible (a phone that is NOT the registered one)
+      - truly different business visible ("visible wrong business/brand: X" where
+        X is a structurally different business, not a typo of the registered name)
+        — hard-block to manual regardless of `project`.
     A fabrication-only set still gets the bounded fabrication corrective retry
     upstream; only on its exhaustion does it reach here and hard-block to manual.
     All classify as block-tier severity, so a surviving dangerous blocker routes
@@ -322,6 +329,17 @@ def _qa_failed_exact_text_recoverable(reports, *, locked_fact_ids=None) -> bool:
     for blocker in blockers:
         if blocker.startswith(recoverable_prefixes):
             continue
+        # 2026-06-18: a "visible wrong business/brand: X" blocker is recoverable
+        # IFF X is an own-brand spelling variant of the project's registered
+        # business_name (text-fidelity defect; overlay redraws the correct name).
+        # Without `project` we cannot distinguish typo from a truly different
+        # business → fall through to DANGEROUS (conservative default unchanged
+        # for existing callers that don't pass project).
+        brand_name = brand_blocker_name(blocker)
+        if brand_name is not None:
+            if project is not None and is_own_brand_variant(brand_name, project):
+                continue
+            return False
         # 2026-06-16 (live F0165): an item price mismatch is recoverable ONLY when
         # the expected price is a LOCKED item:N:price — then the deterministic
         # overlay redraws item N at the customer's own stated price (never a
@@ -1302,6 +1320,134 @@ def main() -> int:
                 # (concept_count up to 3) never crash the emit.
                 blockers=skip_blockers[:_PREMIUM_REPAIR_BLOCKER_CAP],
             ))
+        # === Deterministic-recovery rung (FLYER_DETERMINISTIC_RECOVERY, scoped) ===
+        # Integrated render failed QA with ONLY recoverable text-fidelity defects
+        # (missing/dropped/misspelled facts, locked-price mismatch, own-brand spelling
+        # variant) -> re-render MODE 2 (textless bg + deterministic Fix C overlay,
+        # exact text by construction) + re-verify, BEFORE the legacy ladder. Dangerous
+        # defects (fabrication, unverified phone, truly different business) are excluded
+        # and fall through. Flag OFF => skipped => byte-identical. Independent of
+        # FLYER_PREMIUM_OVERLAY (premium-vs-flat overlay inside mode 2).
+        if (
+            failed_qa
+            and not source_edit_requested
+            and integrated_path_attempted
+            and _deterministic_recovery_enabled(current)
+            and not _qa_failed_has_fabrication(failed_qa)
+            and _qa_failed_exact_text_recoverable(
+                failed_qa,
+                locked_fact_ids={f.fact_id for f in current.locked_facts},
+                project=current,
+            )
+        ):
+            det_specs = []
+            _det_render_exc: Exception | None = None
+            try:
+                det_specs = render_concept_previews(
+                    current, asset_dir, model=draft_model, quality=draft_provider.quality,
+                    concept_count=cfg.flyer.concept_count, force_background_only=True,
+                )
+            except Exception as exc:
+                _det_render_exc = exc
+                det_specs = []
+                # SILENT-FAILURE fix: emit observable diagnostic so journalctl
+                # surfaces the root cause (matches draft_render_failed convention).
+                print(json.dumps({
+                    "project_id": current.project_id,
+                    "deterministic_recovery_render_failed": str(exc)[:260],
+                }))
+            if not det_specs:
+                # BLOCKER 2: det render raised OR produced no specs → TERMINAL
+                # fail-closed to manual_edit_required. Do NOT fall through to
+                # legacy autorepair / content / fallback ladders.
+                now = datetime.now(timezone.utc)
+                manual = make_manual_review(
+                    reason_code="visual_qa_failed",
+                    detail=json.dumps({
+                        "stage": "deterministic_recovery",
+                        "render_failed": str(_det_render_exc)[:260] if _det_render_exc else "no_specs",
+                    }),
+                    queued_at=now,
+                )
+                with FileLock(Path(str(state_path) + ".lock")):
+                    store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+                    for idx, current_p in enumerate(store.projects):
+                        if current_p.project_id != args.project_id:
+                            continue
+                        store.projects[idx] = current_p.model_copy(update={
+                            "status": "manual_edit_required",
+                            "manual_review": manual,
+                            "updated_at": now,
+                        })
+                        break
+                    atomic_write_text(state_path, store.model_dump_json(indent=2))
+                print(json.dumps({
+                    "project_id": args.project_id,
+                    "deterministic_recovery_manual": "visual_qa_failed",
+                }))
+                return 2
+            det_assets = build_asset_manifest(
+                det_specs, first_asset_number=next_asset_number(current),
+                source="rendered", original_message_id=current.original_message_id,
+            )
+            det_qa_reports = []
+            for asset, spec in zip(det_assets, det_specs):
+                _write_sidecar_visual_qa_fixture(current, spec.path)
+                report = run_visual_qa(current, spec.path, output_format=spec.output_format, asset_id=asset.asset_id)
+                write_visual_qa_report(report, spec.path)
+                det_qa_reports.append(report)
+            det_failed_qa = [r for r in det_qa_reports if r.status != "passed"]
+            specs = det_specs
+            assets = det_assets
+            qa_reports = det_qa_reports
+            failed_qa = det_failed_qa
+            if not det_failed_qa:
+                # BLOCKER 3: set integrated_fell_back_emitted so the downstream
+                # FlyerIntegratedPassed guard (line ~2130) is correctly skipped —
+                # this run ships via the deterministic fallback, not as a normal
+                # integrated pass.
+                integrated_fell_back_emitted = True
+                _audit_append(audit_log_path, FlyerIntegratedFellBackDeterministic(
+                    ts=datetime.now(timezone.utc), project_id=current.project_id,
+                    project_version=current.version, reason="qa_text_fidelity",
+                ))
+                # MAJOR-1 fix: persist deterministic_recovery=True so the
+                # downstream persist (line ~2180) writes the flag into
+                # projects.json. render_final_package reads this flag via
+                # _integrated_poster_eligible (which returns False for recovered
+                # projects) and re-applies _apply_critical_text_overlay per
+                # output size instead of cropping the draft 4:5 preview.
+                current = current.model_copy(update={"deterministic_recovery": True})
+            else:
+                # BLOCKER 2 (det QA still fails): TERMINAL fail-closed to manual.
+                # Do NOT fall through to legacy ladders.
+                now = datetime.now(timezone.utc)
+                manual = make_manual_review(
+                    reason_code="visual_qa_failed",
+                    detail=json.dumps({
+                        "stage": "deterministic_recovery",
+                        "det_failed_qa": [r.model_dump(mode="json") for r in det_failed_qa],
+                    }),
+                    queued_at=now,
+                )
+                with FileLock(Path(str(state_path) + ".lock")):
+                    store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+                    for idx, current_p in enumerate(store.projects):
+                        if current_p.project_id != args.project_id:
+                            continue
+                        store.projects[idx] = current_p.model_copy(update={
+                            "status": "manual_edit_required",
+                            "manual_review": manual,
+                            "updated_at": now,
+                        })
+                        break
+                    atomic_write_text(state_path, store.model_dump_json(indent=2))
+                print(json.dumps({
+                    "project_id": args.project_id,
+                    "deterministic_recovery_manual": "visual_qa_failed",
+                    "visual_qa_failed": [r.model_dump(mode="json") for r in det_failed_qa],
+                }))
+                return 2
         # FIX 4: never route a fabrication-bearing failure through the legacy
         # recovery.py autorepair loop. The legacy classifier marks a set eligible
         # if ANY missing-copy blocker appears, without rejecting accompanying

@@ -5091,3 +5091,254 @@ def test_render_repair_edit_quality_failure_raises_and_cleans_up(tmp_path, monke
     # No orphan preview / manifest left behind.
     assert not (tmp_path / "F0001-C1-preview.png").exists()
     assert not Path(str(tmp_path / "F0001-C1-preview.png") + ".text.json").exists()
+
+
+def test_deterministic_recovery_enabled_respects_flag_and_allowlist(monkeypatch):
+    from agents.flyer import render as r
+    from schemas import FlyerProject
+    from datetime import datetime, timezone
+    proj = FlyerProject(
+        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        original_message_id="m", raw_request="x", locked_facts=[],
+    )
+    monkeypatch.delenv("FLYER_DETERMINISTIC_RECOVERY", raising=False)
+    assert r._deterministic_recovery_enabled(proj) is False
+    monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    assert r._deterministic_recovery_enabled(proj) is True
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+19999999999")
+    assert r._deterministic_recovery_enabled(proj) is False
+
+
+def test_force_background_only_uses_overlay_for_integrated_eligible(monkeypatch, tmp_path):
+    from agents.flyer import render as r
+    from schemas import FlyerProject, FlyerLockedFact
+    from datetime import datetime, timezone
+    import pathlib
+    proj = FlyerProject(
+        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        original_message_id="m", raw_request="Any item $7.99",
+        locked_facts=[FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile")],
+    )
+    monkeypatch.setattr(r, "_integrated_poster_eligible", lambda p: True)
+    monkeypatch.setattr(r, "_openrouter_image_bytes", lambda *a, **k: b"fakebgbytes")
+    monkeypatch.setattr(r, "_write_generated_image", lambda raw, path, *, size: pathlib.Path(path).write_bytes(raw))
+    calls = {"overlay": 0}
+    def fake_overlay(project, source, target, *, size, output_format):
+        calls["overlay"] += 1
+        pathlib.Path(target).write_bytes(b"overlaid")
+    monkeypatch.setattr(r, "_apply_critical_text_overlay", fake_overlay)
+    target = tmp_path / "F0174-C1.png"
+    r._render_model(proj, target, concept_id="C1", output_format="concept_preview",
+                    size=(1080, 1350), model="google/gemini-3.1-flash-image-preview",
+                    quality="high", force_background_only=True)
+    assert calls["overlay"] == 1
+
+
+def test_build_image_generation_prompt_force_background_only_emits_textless_contract(monkeypatch):
+    """BLOCKER 1: for an integrated-eligible project, build_image_generation_prompt(
+    force_background_only=True) must emit the textless background contract
+    ('Do NOT draw any text') and must NOT contain 'full restaurant/menu poster'.
+    Before the fix, _poster_layout_requirements() was called without
+    force_background_only, so an integrated-eligible project (where
+    _background_only_eligible() is False) fell into the full-poster branch and
+    baked garbled text into the supposedly-textless background.
+    """
+    from agents.flyer import render as r
+    from agents.flyer.render import build_image_generation_prompt
+    from schemas import FlyerProject, FlyerLockedFact, FlyerRequestFields
+    from datetime import datetime, timezone
+
+    proj = FlyerProject(
+        project_id="F0174",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        original_message_id="m-F0174",
+        raw_request="Weekend Specials. Any item $7.99. Idli, Dosa, Vada.",
+        fields=FlyerRequestFields(
+            event_or_business_name="Lakshmi's Kitchen",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+        ),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile"),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Idli", source="customer_text"),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$7.99", source="customer_text"),
+        ],
+    )
+    # Force this project into the integrated-eligible branch
+    # (_background_only_eligible will be False for it, which is the bug trigger)
+    monkeypatch.setattr(r, "_integrated_poster_eligible", lambda p: True)
+    monkeypatch.setattr(r, "_background_only_eligible", lambda p: False)
+
+    prompt = build_image_generation_prompt(proj, concept_id="C1", output_format="concept_preview", size=(1080, 1350), force_background_only=True)
+
+    assert "Do NOT draw any text" in prompt or "decorative BACKGROUND image only" in prompt, (
+        "force_background_only=True must emit the textless contract in the prompt"
+    )
+    assert "full restaurant/menu poster" not in prompt, (
+        "force_background_only=True must NOT emit the full-poster instruction"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Context-var gate tests (Codex round 2 — prompt-leak closure)
+# ---------------------------------------------------------------------------
+
+def _f0174_integrated_project():
+    from schemas import FlyerProject, FlyerLockedFact
+    from datetime import datetime, timezone
+    facts = [
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile"),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Weekend Specials", source="customer_text"),
+        FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Any item $7.99", source="customer_text"),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+        FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr", source="customer_profile"),
+    ]
+    for i, nm in enumerate(["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar"]):
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item{i}", value=nm, source="customer_text"))
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:price", label=f"Price{i}", value="$7.99", source="customer_text"))
+    return FlyerProject(
+        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 18, tzinfo=timezone.utc), updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        original_message_id="m", raw_request="Weekend Specials. Any item $7.99. Idli, Dosa, Vada, Uttapam, Pongal, Sambar.",
+        locked_facts=facts,
+    )
+
+
+def test_force_background_only_prompt_has_no_text_leak(monkeypatch):
+    import re
+    from agents.flyer import render as r
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    p = _f0174_integrated_project()
+    assert r._integrated_poster_eligible(p) is True  # integrated-eligible baseline
+    tok = r._FORCE_BACKGROUND_ONLY.set(True)
+    try:
+        prompt = r.build_image_generation_prompt(p, concept_id="C1", output_format="concept_preview", size=(1080, 1350), force_background_only=True)
+    finally:
+        r._FORCE_BACKGROUND_ONLY.reset(tok)
+    # "Create exactly" is the affirmative card-directive leak (not the prohibition in text_contract_line)
+    # "menu item cards" in the text_contract_line is correct ("do NOT render...menu item cards") — we
+    # check for the affirmative creation form instead: "Create exactly N menu item cards"
+    for leak in ["Create exactly", "full restaurant/menu poster", "complete integrated poster layout", "Item cards must look"]:
+        assert leak not in prompt, f"text leak under force: {leak!r}"
+    # The affirmative card-creation directive must not appear (the prohibition in text_contract_line is correct)
+    assert "Create exactly" not in prompt, "affirmative item-card directive leaked under force"
+    assert not re.search(r"-\s+\w[\w &'-]* - \$", prompt), "priced item row leaked under force"
+    assert ("do NOT render them as text" in prompt) or ("decorative BACKGROUND" in prompt)
+
+
+def test_genuine_background_only_prompt_unchanged(monkeypatch):
+    # force OFF + cvar unset: a genuine background-only project must KEEP the
+    # existing item-card directive (byte-identical — we did not touch bg-only).
+    from agents.flyer import render as r
+    monkeypatch.setattr(r, "_integrated_poster_eligible", lambda proj: False)  # => background_only_eligible True
+    p = _f0174_integrated_project()
+    assert r._FORCE_BACKGROUND_ONLY.get() is False
+    prompt = r.build_image_generation_prompt(p, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+    assert "menu item cards" in prompt  # bg-only directive preserved
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-1: deterministic_recovery flag keeps draft+final on overlay path
+# MAJOR-2: build_image_generation_prompt force param is self-sufficient
+# ---------------------------------------------------------------------------
+
+def test_deterministic_recovery_flag_disables_integrated_eligibility(monkeypatch):
+    """MAJOR-1: a project with deterministic_recovery=True must be ineligible for
+    integrated-poster mode AND eligible for background-only, EVEN when
+    FLYER_ALLOW_INTEGRATED_POSTER=1 and the cvar is unset.
+    This proves the persisted flag drives both draft and final export."""
+    from agents.flyer import render as r
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    # Base: no flag set — integrated eligible
+    p = _f0174_integrated_project()
+    assert r._FORCE_BACKGROUND_ONLY.get() is False
+    assert r._integrated_poster_eligible(p) is True
+    assert r._background_only_eligible(p) is False
+    # Set the persistent flag
+    p_recovered = p.model_copy(update={"deterministic_recovery": True})
+    # Must NOT be integrated-eligible, cvar still unset
+    assert r._FORCE_BACKGROUND_ONLY.get() is False
+    assert r._integrated_poster_eligible(p_recovered) is False
+    # Must be background-only eligible (overlay owns all text)
+    assert r._background_only_eligible(p_recovered) is True
+
+
+def test_build_image_generation_prompt_force_param_self_sufficient(monkeypatch):
+    """MAJOR-2: force_background_only=True on build_image_generation_prompt must
+    be sufficient to suppress integrated-poster text even WITHOUT the caller
+    manually setting _FORCE_BACKGROUND_ONLY.
+
+    Before the fix, _campaign_scene_block_for_project called _integrated_poster_eligible
+    which reads _FORCE_BACKGROUND_ONLY directly — so if the cvar was not set,
+    an integrated-eligible project routed to a non-family scene would emit
+    'complete integrated poster layout' even though force_background_only=True
+    was passed as a parameter.
+
+    We force a non-family scene context via monkeypatching _visual_prompt_context
+    so the storefront_service branch (where the bug manifests) is always selected,
+    independent of the project's default scene selection.
+    """
+    from agents.flyer import render as r
+    from agents.flyer.render import build_image_generation_prompt
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    p = _f0174_integrated_project()
+    # Confirm the project is integrated-eligible and cvar is NOT set by us
+    assert r._integrated_poster_eligible(p) is True
+    assert r._FORCE_BACKGROUND_ONLY.get() is False
+    # Force a non-family scene (storefront_service) so the bug path is exercised.
+    # Without this the _f0174 visual context happens to produce family_discovery which
+    # short-circuits the reserved_zone selection (and hides the bug).
+    monkeypatch.setattr(r, "_visual_prompt_context", lambda proj: "taco tuesday special items menu")
+    # Call WITHOUT manually setting the cvar — the param alone must suffice
+    prompt = build_image_generation_prompt(
+        p, concept_id="C1", output_format="concept_preview",
+        size=(1080, 1350), force_background_only=True,
+    )
+    assert "complete integrated poster layout" not in prompt, (
+        "force_background_only=True must suppress 'complete integrated poster layout' "
+        "even without the caller setting the cvar"
+    )
+    assert "Create exactly" not in prompt, (
+        "force_background_only=True must suppress the affirmative card-creation directive"
+    )
+    # And the textless contract IS present
+    assert ("do NOT render" in prompt) or ("decorative BACKGROUND" in prompt), (
+        "textless background contract must be present when force_background_only=True"
+    )
+
+
+def test_deterministic_recovery_default_false_byte_identical(monkeypatch):
+    """A fresh integrated-eligible project (no deterministic_recovery field) must
+    still be integrated-eligible — proves default=False changes nothing."""
+    from agents.flyer import render as r
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    p = _f0174_integrated_project()
+    # Default: deterministic_recovery is False (or absent)
+    assert getattr(p, "deterministic_recovery", False) is False
+    assert r._integrated_poster_eligible(p) is True
+    assert r._background_only_eligible(p) is False
+
+
+def test_deterministic_recovery_project_prompt_is_textless_without_force(monkeypatch):
+    """A persisted-recovered project (deterministic_recovery=True) rendered WITHOUT
+    force_background_only / cvar (a subsequent render/revision) must STILL produce a
+    textless prompt — no 'Create exactly N menu item cards' / priced rows."""
+    import re
+    from agents.flyer import render as r
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    p = _f0174_integrated_project().model_copy(update={"deterministic_recovery": True})
+    assert r._FORCE_BACKGROUND_ONLY.get() is False  # no transient force in play
+    prompt = r.build_image_generation_prompt(
+        p, concept_id="C1", output_format="concept_preview", size=(1080, 1350)
+    )
+    assert "Create exactly" not in prompt
+    assert not re.search(r"-\s+\w[\w &'-]* - \$", prompt), "priced item row leaked for recovered project"
+    assert ("do NOT render them as text" in prompt) or ("decorative BACKGROUND" in prompt)
