@@ -1341,34 +1341,106 @@ def main() -> int:
             )
         ):
             det_specs = []
+            _det_render_exc: Exception | None = None
             try:
                 det_specs = render_concept_previews(
                     current, asset_dir, model=draft_model, quality=draft_provider.quality,
                     concept_count=cfg.flyer.concept_count, force_background_only=True,
                 )
-            except Exception:
+            except Exception as exc:
+                _det_render_exc = exc
                 det_specs = []
-            if det_specs:
-                det_assets = build_asset_manifest(
-                    det_specs, first_asset_number=next_asset_number(current),
-                    source="rendered", original_message_id=current.original_message_id,
+                # SILENT-FAILURE fix: emit observable diagnostic so journalctl
+                # surfaces the root cause (matches draft_render_failed convention).
+                print(json.dumps({
+                    "project_id": current.project_id,
+                    "deterministic_recovery_render_failed": str(exc)[:260],
+                }))
+            if not det_specs:
+                # BLOCKER 2: det render raised OR produced no specs → TERMINAL
+                # fail-closed to manual_edit_required. Do NOT fall through to
+                # legacy autorepair / content / fallback ladders.
+                now = datetime.now(timezone.utc)
+                manual = make_manual_review(
+                    reason_code="visual_qa_failed",
+                    detail=json.dumps({
+                        "stage": "deterministic_recovery",
+                        "render_failed": str(_det_render_exc)[:260] if _det_render_exc else "no_specs",
+                    }),
+                    queued_at=now,
                 )
-                det_qa_reports = []
-                for asset, spec in zip(det_assets, det_specs):
-                    _write_sidecar_visual_qa_fixture(current, spec.path)
-                    report = run_visual_qa(current, spec.path, output_format=spec.output_format, asset_id=asset.asset_id)
-                    write_visual_qa_report(report, spec.path)
-                    det_qa_reports.append(report)
-                det_failed_qa = [r for r in det_qa_reports if r.status != "passed"]
-                specs = det_specs
-                assets = det_assets
-                qa_reports = det_qa_reports
-                failed_qa = det_failed_qa
-                if not det_failed_qa:
-                    _audit_append(audit_log_path, FlyerIntegratedFellBackDeterministic(
-                        ts=datetime.now(timezone.utc), project_id=current.project_id,
-                        project_version=current.version, reason="qa_text_fidelity",
-                    ))
+                with FileLock(Path(str(state_path) + ".lock")):
+                    store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+                    for idx, current_p in enumerate(store.projects):
+                        if current_p.project_id != args.project_id:
+                            continue
+                        store.projects[idx] = current_p.model_copy(update={
+                            "status": "manual_edit_required",
+                            "manual_review": manual,
+                            "updated_at": now,
+                        })
+                        break
+                    atomic_write_text(state_path, store.model_dump_json(indent=2))
+                print(json.dumps({
+                    "project_id": args.project_id,
+                    "deterministic_recovery_manual": "visual_qa_failed",
+                }))
+                return 2
+            det_assets = build_asset_manifest(
+                det_specs, first_asset_number=next_asset_number(current),
+                source="rendered", original_message_id=current.original_message_id,
+            )
+            det_qa_reports = []
+            for asset, spec in zip(det_assets, det_specs):
+                _write_sidecar_visual_qa_fixture(current, spec.path)
+                report = run_visual_qa(current, spec.path, output_format=spec.output_format, asset_id=asset.asset_id)
+                write_visual_qa_report(report, spec.path)
+                det_qa_reports.append(report)
+            det_failed_qa = [r for r in det_qa_reports if r.status != "passed"]
+            specs = det_specs
+            assets = det_assets
+            qa_reports = det_qa_reports
+            failed_qa = det_failed_qa
+            if not det_failed_qa:
+                # BLOCKER 3: set integrated_fell_back_emitted so the downstream
+                # FlyerIntegratedPassed guard (line ~2130) is correctly skipped —
+                # this run ships via the deterministic fallback, not as a normal
+                # integrated pass.
+                integrated_fell_back_emitted = True
+                _audit_append(audit_log_path, FlyerIntegratedFellBackDeterministic(
+                    ts=datetime.now(timezone.utc), project_id=current.project_id,
+                    project_version=current.version, reason="qa_text_fidelity",
+                ))
+            else:
+                # BLOCKER 2 (det QA still fails): TERMINAL fail-closed to manual.
+                # Do NOT fall through to legacy ladders.
+                now = datetime.now(timezone.utc)
+                manual = make_manual_review(
+                    reason_code="visual_qa_failed",
+                    detail=json.dumps({
+                        "stage": "deterministic_recovery",
+                        "det_failed_qa": [r.model_dump(mode="json") for r in det_failed_qa],
+                    }),
+                    queued_at=now,
+                )
+                with FileLock(Path(str(state_path) + ".lock")):
+                    store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+                    for idx, current_p in enumerate(store.projects):
+                        if current_p.project_id != args.project_id:
+                            continue
+                        store.projects[idx] = current_p.model_copy(update={
+                            "status": "manual_edit_required",
+                            "manual_review": manual,
+                            "updated_at": now,
+                        })
+                        break
+                    atomic_write_text(state_path, store.model_dump_json(indent=2))
+                print(json.dumps({
+                    "project_id": args.project_id,
+                    "deterministic_recovery_manual": "visual_qa_failed",
+                    "visual_qa_failed": [r.model_dump(mode="json") for r in det_failed_qa],
+                }))
+                return 2
         # FIX 4: never route a fabrication-bearing failure through the legacy
         # recovery.py autorepair loop. The legacy classifier marks a set eligible
         # if ANY missing-copy blocker appears, without rejecting accompanying

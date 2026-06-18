@@ -1173,14 +1173,14 @@ def _background_only_eligible(project: FlyerProject) -> bool:
     return not _needs_reference_extraction(project) and not _integrated_poster_eligible(project)
 
 
-def _poster_layout_requirements(project: FlyerProject) -> str:
+def _poster_layout_requirements(project: FlyerProject, *, force_background_only: bool = False) -> str:
     plan = _poster_copy_plan(project)
     footer_safe_area = (
         "\n- Put location/contact in a dedicated footer band with generous bottom padding; "
         "keep every footer character at least 6% of the canvas height above the bottom edge "
         "so WhatsApp/status previews never crop the phone number."
     )
-    if _background_only_eligible(project):
+    if _background_only_eligible(project) or force_background_only:
         # Reserved-zone background contract (P1 slice 2): exact text is composited
         # deterministically as overlay panels, so the model produces only the
         # decorative BACKGROUND and leaves calm reserved zones — it must NOT draw
@@ -1265,7 +1265,7 @@ def _poster_layout_requirements(project: FlyerProject) -> str:
     )
 
 
-def _reference_extraction_instruction(project: FlyerProject) -> str:
+def _reference_extraction_instruction(project: FlyerProject, *, force_background_only: bool = False) -> str:
     refs = _project_reference_assets(project)
     if not refs:
         return "- none"
@@ -1276,7 +1276,7 @@ def _reference_extraction_instruction(project: FlyerProject) -> str:
             "- Do NOT copy, preserve, or render the source/reference business name, logo, masthead, address, phone, "
             "slogan, item-board text, or price text unless it matches the controlled customer copy above."
         )
-    if _background_only_eligible(project):
+    if _background_only_eligible(project) or force_background_only:
         # Background-only eligible (English + reference already extracted): the
         # deterministic overlay owns all text, so the model must NOT recreate any
         # text from the reference — only borrow its visual style. Suppressing the
@@ -2017,10 +2017,10 @@ Visual context for style and imagery:
 - style: {sanitized_style}
 
 Layout requirements:
-{_poster_layout_requirements(project)}
+{_poster_layout_requirements(project, force_background_only=force_background_only)}
 
 Reference/menu extraction instructions:
-{_reference_extraction_instruction(project)}
+{_reference_extraction_instruction(project, force_background_only=force_background_only)}
 
 Customer brand assets to honor:
 {_brand_asset_prompt(project)}

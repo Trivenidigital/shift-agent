@@ -5137,3 +5137,51 @@ def test_force_background_only_uses_overlay_for_integrated_eligible(monkeypatch,
                     size=(1080, 1350), model="google/gemini-3.1-flash-image-preview",
                     quality="high", force_background_only=True)
     assert calls["overlay"] == 1
+
+
+def test_build_image_generation_prompt_force_background_only_emits_textless_contract(monkeypatch):
+    """BLOCKER 1: for an integrated-eligible project, build_image_generation_prompt(
+    force_background_only=True) must emit the textless background contract
+    ('Do NOT draw any text') and must NOT contain 'full restaurant/menu poster'.
+    Before the fix, _poster_layout_requirements() was called without
+    force_background_only, so an integrated-eligible project (where
+    _background_only_eligible() is False) fell into the full-poster branch and
+    baked garbled text into the supposedly-textless background.
+    """
+    from agents.flyer import render as r
+    from agents.flyer.render import build_image_generation_prompt
+    from schemas import FlyerProject, FlyerLockedFact, FlyerRequestFields
+    from datetime import datetime, timezone
+
+    proj = FlyerProject(
+        project_id="F0174",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        original_message_id="m-F0174",
+        raw_request="Weekend Specials. Any item $7.99. Idli, Dosa, Vada.",
+        fields=FlyerRequestFields(
+            event_or_business_name="Lakshmi's Kitchen",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+17329837841",
+        ),
+        locked_facts=[
+            FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile"),
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Idli", source="customer_text"),
+            FlyerLockedFact(fact_id="item:0:price", label="Price", value="$7.99", source="customer_text"),
+        ],
+    )
+    # Force this project into the integrated-eligible branch
+    # (_background_only_eligible will be False for it, which is the bug trigger)
+    monkeypatch.setattr(r, "_integrated_poster_eligible", lambda p: True)
+    monkeypatch.setattr(r, "_background_only_eligible", lambda p: False)
+
+    prompt = build_image_generation_prompt(proj, concept_id="C1", output_format="concept_preview", size=(1080, 1350), force_background_only=True)
+
+    assert "Do NOT draw any text" in prompt or "decorative BACKGROUND image only" in prompt, (
+        "force_background_only=True must emit the textless contract in the prompt"
+    )
+    assert "full restaurant/menu poster" not in prompt, (
+        "force_background_only=True must NOT emit the full-poster instruction"
+    )
