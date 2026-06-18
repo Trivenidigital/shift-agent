@@ -446,3 +446,49 @@ def test_flag_on_premium_render_error_propagates_not_fallback(tmp_path, monkeypa
         render._apply_critical_text_overlay(_project6(), _bg(tmp_path), tmp_path / "o.png",
                                             size=(1080, 1350), output_format="concept_preview")
     assert legacy["n"] == 0   # fail-closed: do NOT silently fall back to legacy on FlyerRenderError
+
+
+# ---------------------------------------------------------------------------
+# Task 7: text-safe-zone background prompt contract under FLYER_PREMIUM_OVERLAY
+# ---------------------------------------------------------------------------
+
+def _bg_only_project():
+    """A background-only-eligible food project.
+
+    _background_only_eligible returns True when:
+      - _needs_reference_extraction is False (no reference image assets), AND
+      - _integrated_poster_eligible is False (FLYER_ALLOW_INTEGRATED_POSTER != "1").
+
+    _project6() already satisfies both conditions when FLYER_ALLOW_INTEGRATED_POSTER
+    is unset (its default state in the test environment).  We monkeypatch
+    _background_only_eligible directly in the tests below to make the coupling
+    explicit and guard against future env-flag bleed-through.
+    """
+    return _project6()
+
+
+def test_background_prompt_has_textsafe_zones_when_flag_on(monkeypatch):
+    from agents.flyer import render
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    # Pin the eligibility predicate so the background-only branch is entered
+    # regardless of FLYER_ALLOW_INTEGRATED_POSTER state in CI.
+    monkeypatch.setattr(render, "_background_only_eligible", lambda _p: True)
+    monkeypatch.setattr(render, "_integrated_poster_eligible", lambda _p: False)
+    p = render._image_prompt(_bg_only_project(), concept_id="C1",
+                             output_format="concept_preview", size=(1080, 1350))
+    low = p.lower()
+    # The explicit safe-zone contract sentence must be present when the flag is on.
+    assert "top ~22%" in low and "bottom ~32%" in low
+    assert ("calm" in low or "uncluttered" in low)
+    assert "hero" in low
+
+
+def test_background_prompt_unchanged_when_flag_off(monkeypatch):
+    from agents.flyer import render
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY", raising=False)
+    monkeypatch.setattr(render, "_background_only_eligible", lambda _p: True)
+    monkeypatch.setattr(render, "_integrated_poster_eligible", lambda _p: False)
+    p_off = render._image_prompt(_bg_only_project(), concept_id="C1",
+                                 output_format="concept_preview", size=(1080, 1350))
+    # The explicit zone sentence added by the flag must NOT appear when the flag is off.
+    assert "top ~22%" not in p_off.lower()

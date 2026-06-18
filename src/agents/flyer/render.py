@@ -1944,6 +1944,11 @@ Autonomous repair instruction:
             "text into overlay panels afterwards. Leave the upper-left and lower areas visually "
             "calm/uncluttered so those panels read cleanly; keep hero imagery in the center and right."
         )
+        if os.environ.get("FLYER_PREMIUM_OVERLAY") == "1":
+            text_contract_line += (
+                " Keep the top ~22% and the bottom ~32% darker and visually calm/uncluttered "
+                "(negative space for a text overlay); place the hero food in the centre band."
+            )
         # Overlay owns ALL text → the language hint must NOT instruct text/script
         # rendering (that would reintroduce model-painted, garbled non-English text).
         # Reflect language/culture in IMAGERY only.
