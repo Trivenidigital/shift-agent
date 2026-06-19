@@ -2929,6 +2929,48 @@ with Image.open(src) as img:
 '''
 
 
+PREMIUM_OVERLAY_RENDERER = r'''
+import json, sys, traceback
+from pathlib import Path
+spec = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+for _p in reversed(spec.get("sys_path") or []):
+    if _p and _p not in sys.path:
+        sys.path.insert(0, _p)
+try:
+    from schemas import FlyerProject
+    try:
+        import flyer_premium_overlay as premium_overlay  # box (flat layout)
+    except ImportError:
+        from agents.flyer import premium_overlay          # repo / tests
+    project = FlyerProject.model_validate_json(spec["project_json"])
+except Exception as e:
+    sys.stderr.write(f"{type(e).__name__}: {e}")
+    sys.exit(1)  # import/serialization error -> unexpected
+try:
+    premium_overlay.render_premium_overlay(
+        project, Path(spec["source"]), Path(spec["target"]),
+        size=tuple(spec["size"]), output_format=spec["output_format"],
+    )
+except Exception as e:
+    # FlyerRenderError = intentional fit/coverage fail-closed -> exit 3 ;
+    # anything else = unexpected renderer crash -> exit 1.
+    sys.stderr.write(f"{type(e).__name__}: {e}")
+    sys.exit(3 if type(e).__name__ == "FlyerRenderError" else 1)
+sys.exit(0)
+'''
+
+
+def _classify_fail_closed_reason(message: str) -> str:
+    """Best-effort reason_class for an intentional FlyerRenderError fail-closed.
+    Telemetry only — the alert decision is by status, never by reason_class."""
+    low = (message or "").lower()
+    if "overflow" in low:
+        return "overflow"
+    if any(k in low for k in ("cover", "required fact", "missing", "not present")):
+        return "coverage"
+    return "fit"
+
+
 def _apply_critical_text_overlay(project: FlyerProject, source: Path | str, target: Path | str, *, size: tuple[int, int], output_format: str) -> None:
     if _premium_overlay_enabled(project) and _is_food_or_grocery_project(project):
         try:

@@ -5446,3 +5446,16 @@ def test_premium_overlay_outcome_contextvar_consume_and_alert():
         r.PremiumOverlayOutcome("premium_overlay_degraded_to_flat", "fit", "", "none", "concept_preview")
     ) is False
     assert r.premium_outcome_should_alert(None) is False
+
+
+def test_premium_overlay_renderer_string_and_classifier():
+    from agents.flyer import render as r
+    src = r.PREMIUM_OVERLAY_RENDERER
+    assert "model_validate_json" in src
+    assert "render_premium_overlay" in src
+    assert "sys_path" in src
+    assert "sys.exit(3" in src
+    assert "sys.exit(1" in src
+    assert r._classify_fail_closed_reason("required fact missing: schedule") == "coverage"
+    assert r._classify_fail_closed_reason("offer seal overflow") == "overflow"
+    assert r._classify_fail_closed_reason("text cannot fit the panel") == "fit"
