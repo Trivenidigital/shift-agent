@@ -328,6 +328,54 @@ def test_duplicate_prices_are_row_matched_not_collapsed(tmp_path):
     assert out.exists()
 
 
+# ---------------------------------------------------------------------------
+# Task TDD (Fix C v2): decorative gold rules flanking the title
+# ---------------------------------------------------------------------------
+
+def _v2_solid_bg(tmp_path):
+    p = tmp_path / "bg_v2.png"
+    Image.new("RGB", (1080, 1350), (40, 32, 28)).save(p)
+    return str(p)
+
+
+def _v2_project_6item():
+    from schemas import FlyerProject, FlyerLockedFact
+    from datetime import datetime, timezone
+    f = [
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Weekend Specials", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Any item $7.99", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="schedule", label="Schedule", value="Saturday & Sunday, 4 PM-8 PM", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+    ]
+    for i, nm in enumerate(["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar"]):
+        f.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item {i}", value=nm, source="customer_text", required=True))
+        f.append(FlyerLockedFact(fact_id=f"item:{i}:price", label=f"Price {i}", value="$7.99", source="customer_text", required=True))
+    return FlyerProject(
+        project_id="F0199",
+        status="intake_started",
+        customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        original_message_id="m",
+        raw_request="Weekend Specials any item $7.99",
+        locked_facts=f,
+    )
+
+
+def test_v2_title_renders_with_rules(tmp_path):
+    """Characterization guard: title restyle (decorative gold rules + dot) must
+    render without error and produce a valid image; _ink(title) coverage intact."""
+    out = tmp_path / "o.png"
+    po.render_premium_overlay(
+        _v2_project_6item(), _v2_solid_bg(tmp_path), out,
+        size=(1080, 1350), output_format="concept_preview",
+    )
+    assert out.exists()
+    assert Image.open(out).size == (1080, 1350)
+
+
 def test_combo_renders_item_prices(tmp_path):
     """NOT-FIXED#2: a 2-item combo WITH locked item prices must VISIBLY render
     each price (name+price pair), not assume it covered. Render succeeds only if

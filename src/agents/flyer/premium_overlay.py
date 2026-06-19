@@ -559,6 +559,39 @@ def render_premium_overlay(project, source, target, *, size, output_format):
             ty += int(title_px * 1.0)
         _ink(title)
 
+        # ---------------------------------------------------------------
+        # Decorative gold rules flanking the title (Fix C v2 Editorial).
+        # Mirrors compose_A() in fixc-v2-mockup-generator.py:
+        #   d.line((cx-250,rule_y, cx-90,rule_y), fill=GOLD, width=2)
+        #   d.line((cx+90, rule_y, cx+250,rule_y), fill=GOLD, width=2)
+        #   d.ellipse((cx-4,rule_y-4, cx+4,rule_y+4), fill=GOLD)
+        # Scale gap (90px) and reach (250px) from the 1080-wide reference.
+        # Placed 8px below the last title line (ty == title_anchor at this
+        # point) so the rules sit just beneath the headline.
+        # _EMBLEM_GOLD and cx_top are defined in the TOP ZONE block above.
+        # ---------------------------------------------------------------
+        _rule_gap   = max(40, int(width * 90 / 1080))   # ≈90px @1080
+        _rule_reach = max(80, int(width * 250 / 1080))  # ≈250px @1080
+        _rule_y = ty + 8  # 8px below last title line
+        _dot_r = 4        # 4px radius dot (8×8 bounding box)
+        if _rule_y < height - margin:   # safety: don't draw outside canvas
+            # left rule
+            draw.line(
+                (cx_top - _rule_reach, _rule_y, cx_top - _rule_gap, _rule_y),
+                fill=_EMBLEM_GOLD, width=2,
+            )
+            # right rule
+            draw.line(
+                (cx_top + _rule_gap, _rule_y, cx_top + _rule_reach, _rule_y),
+                fill=_EMBLEM_GOLD, width=2,
+            )
+            # center dot
+            draw.ellipse(
+                (cx_top - _dot_r, _rule_y - _dot_r,
+                 cx_top + _dot_r, _rule_y + _dot_r),
+                fill=_EMBLEM_GOLD,
+            )
+
     # Draw the seal AFTER the title so its gold border sits cleanly on top.
     if seal_h:
         box = draw_offer_seal(draw, label=seal_label, price=shared_offer_price,
