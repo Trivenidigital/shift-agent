@@ -690,6 +690,50 @@ def test_brand_monogram_from_business():
     assert po._brand_monogram("Taj Mahal Grill") == "TM"
 
 
+# ---------------------------------------------------------------------------
+# Task TDD (Fix C v2 Editorial Luxury): dot-leader 2-column menu — dynamic counts
+# ---------------------------------------------------------------------------
+
+def _v2_project_n_items(n):
+    """Mirror _v2_project_6item but with n items each having name + locked price."""
+    from schemas import FlyerProject, FlyerLockedFact
+    from datetime import datetime, timezone
+    f = [
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Weekend Specials", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Any item $7.99", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="schedule", label="Schedule", value="Saturday & Sunday, 4 PM-8 PM", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+    ]
+    for i in range(n):
+        f.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item {i}", value=f"Item{i + 1}", source="customer_text", required=True))
+        f.append(FlyerLockedFact(fact_id=f"item:{i}:price", label=f"Price {i}", value="$7.99", source="customer_text", required=True))
+    return FlyerProject(
+        project_id=f"F02{n:02d}",
+        status="intake_started",
+        customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        original_message_id="m",
+        raw_request="Weekend Specials any item $7.99",
+        locked_facts=f,
+    )
+
+
+@pytest.mark.parametrize("n", [2, 6, 16])
+def test_v2_menu_dynamic_counts_cover_or_failclose(tmp_path, n):
+    from agents.flyer import premium_overlay as po
+    from agents.flyer import render as r
+    proj = _v2_project_n_items(n)
+    out = tmp_path / f"o{n}.png"
+    try:
+        po.render_premium_overlay(proj, _v2_solid_bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
+    except r.FlyerRenderError:
+        return  # acceptable ONLY as fail-closed (never a silent drop)
+    assert out.exists()  # if it rendered, coverage passed (else it would have raised)
+
+
 @pytest.mark.skipif(not os.environ.get("OPENROUTER_API_KEY"),
                     reason="referee needs OPENROUTER_API_KEY (vision QA) — run on the box")
 def test_premium_overlay_passes_referee(tmp_path):

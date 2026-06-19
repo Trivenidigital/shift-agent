@@ -977,22 +977,34 @@ def _plan_menu_block(draw, items, layout, menu_px, min_px, safe_w, has_item_pric
 
         return block_h, _render
 
-    # two_col / two_col_compact: name (left) ... price (right) per column.
+    # two_col / two_col_compact: editorial dot-leader layout (Fix C v2).
+    # Name: Cormorant SemiBold (menu role) in IVORY; price: Playfair Bold
+    # (masthead role) in GOLD — right-aligned.  Dot leaders fill the gap.
+    # Mirrors compose_A() in fixc-v2-mockup-generator.py.
+    _EDL_IVORY = (244, 240, 232, 255)  # IVORY — approved mockup
+    _EDL_GOLD  = (208, 178, 110, 255)  # GOLD  — approved mockup
+    _EDL_DOT   = (150, 140, 120, 255)  # muted gold dot leader
+
     cols = 2
     rows_n = (len(items) + cols - 1) // cols
     col_gap = int(safe_w * 0.06)
     col_w = (safe_w - col_gap) // cols
 
-    # Preflight: shrink one shared font until EVERY row's name + price fits its
-    # column width (name wrapped to ≤2 lines, with room reserved for the price).
+    # Preflight: shrink one shared font size until EVERY row's name + price fits
+    # its column width with both fonts (name: Cormorant; price: Playfair Bold).
+    # Price font is scaled proportionally (price_px = px * 34/40 per mockup ratio).
     px = menu_px
     while True:
-        font = _premium_font("menu", px)
+        name_font = _premium_font("menu", px)
+        price_px  = max(min_px, int(px * 34 / 40))
+        price_font = _premium_font("masthead", price_px)
         ok = True
         max_name_lines = 1
         for name, price in items:
-            price_w = _text_w(draw, price, font) if price else 0
-            name_budget = col_w - (price_w + int(col_w * 0.06) if price else 0)
+            price_w = _text_w(draw, price, price_font) if price else 0
+            # gap between last name char and price: name_end + 14px + dots + 14px + price
+            leader_gap = 28 if price else 0  # 14px each side
+            name_budget = col_w - (price_w + leader_gap if price else 0)
             if name_budget <= int(col_w * 0.3):
                 ok = False
                 break
@@ -1000,7 +1012,7 @@ def _plan_menu_block(draw, items, layout, menu_px, min_px, safe_w, has_item_pric
             if not name_lines or len(name_lines) > 2:
                 ok = False
                 break
-            if any(_text_w(draw, ln, font) > name_budget for ln in name_lines):
+            if any(_text_w(draw, ln, name_font) > name_budget for ln in name_lines):
                 ok = False
                 break
             max_name_lines = max(max_name_lines, len(name_lines))
@@ -1012,42 +1024,71 @@ def _plan_menu_block(draw, items, layout, menu_px, min_px, safe_w, has_item_pric
             )
         px = max(min_px, px - 2)
 
-    used_line_h = int(px * 1.4) * max_name_lines
-    block_h = rows_n * used_line_h
+    # Row height: name font drives height; add a dot-leader row below the name
+    # baseline (mirrors compose_A yy2 = yy+44 for a 40px font).
+    name_row_h  = int(px * 1.4)
+    dot_row_off = max(30, int(px * 44 / 40))  # ≈44px @40px font
+    used_line_h = name_row_h * max_name_lines
+    block_h     = rows_n * used_line_h
 
     def _render(draw, *, x_left, y_top, width, safe_w):
+        # Recompute fonts inside the closure (captured px, price_px are correct).
+        nf = _premium_font("menu", px)
+        pf = _premium_font("masthead", price_px)
         out: list[str] = []
         for idx, (name, price) in enumerate(items):
             col = idx % cols
             row = idx // cols
-            cx0 = x_left + col * (col_w + col_gap)
+            cx0      = x_left + col * (col_w + col_gap)
             col_right = cx0 + col_w
-            cy = y_top + row * used_line_h
-            price_w = _text_w(draw, price, font) if price else 0
-            name_budget = col_w - (price_w + int(col_w * 0.06) if price else 0)
-            name_lines = _wrap_premium(draw, name, "menu", px, name_budget)
-            # Paint the name; verify each line stays within its name budget.
+            cy       = y_top + row * used_line_h
+            price_w  = _text_w(draw, price, pf) if price else 0
+            leader_gap = 28 if price else 0
+            name_budget = col_w - (price_w + leader_gap if price else 0)
+            name_lines  = _wrap_premium(draw, name, "menu", px, name_budget)
+
+            # Paint the name in IVORY (Cormorant); verify each line stays within budget.
             name_painted = bool(name_lines)
             ny = cy
+            last_name_w = 0
             for ln in name_lines:
-                if _text_w(draw, ln, font) > name_budget:
+                lw = _text_w(draw, ln, nf)
+                if lw > name_budget:
                     name_painted = False
                     break
-                draw.text((cx0 + 2, ny + 2 - _top(draw, ln, font)), ln, font=font, fill=_SHADOW)
-                draw.text((cx0, ny - _top(draw, ln, font)), ln, font=font, fill=_CREAM)
-                ny += int(px * 1.4)
-            # Paint the price right-aligned; verify it stays inside the column.
+                draw.text((cx0 + 2, ny + 2 - _top(draw, ln, nf)), ln, font=nf, fill=_SHADOW)
+                draw.text((cx0, ny - _top(draw, ln, nf)), ln, font=nf, fill=_EDL_IVORY)
+                last_name_w = lw
+                ny += name_row_h
+
+            # Paint the price in GOLD (Playfair Bold); right-aligned within column.
             price_painted = False
             if price:
                 px_x = col_right - price_w
                 if px_x >= cx0 + name_budget and col_right <= x_left + safe_w + 1:
-                    draw.text((px_x, cy - _top(draw, price, font)), price, font=font, fill=_GOLD)
+                    draw.text((px_x + 2, cy + 2 - _top(draw, price, pf)), price, font=pf, fill=_SHADOW)
+                    draw.text((px_x, cy - _top(draw, price, pf)), price, font=pf, fill=_EDL_GOLD)
                     price_painted = True
-            # INK ONLY WHAT WAS ACTUALLY PAINTED (ISSUE 2): the name when painted,
-            # and the single-row "name price" pair ONLY when BOTH were painted on
-            # this row (name and price share one visual row, so the combined line
-            # is faithful).  If the price didn't paint, do NOT ink the pair — the
-            # final _item_price_pair_blockers / coverage gate then fails closed.
+
+            # Dot leader: rendered at (cy + dot_row_off) between name end and price.
+            # Only when BOTH name and price were painted (mirrors compose_A logic).
+            if name_painted and price_painted:
+                lx = cx0 + last_name_w + 14   # 14px gap after name
+                rx = col_right - price_w - 14  # 14px gap before price
+                yy2 = cy + dot_row_off
+                if lx < rx and 0 < yy2 < (y_top + block_h + dot_row_off + 4):
+                    x = lx
+                    while x < rx:
+                        draw.ellipse(
+                            (x, yy2, x + 2, yy2 + 2),
+                            fill=_EDL_DOT,
+                        )
+                        x += 12
+
+            # INK ONLY WHAT WAS ACTUALLY PAINTED — name when painted, and the
+            # combined "name price" string ONLY when BOTH painted (so the
+            # _item_price_pair_blockers pairing check passes per-row without
+            # relying on a separately-inked price string).
             if name_painted:
                 out.append(name)
             if name_painted and price_painted:
