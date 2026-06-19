@@ -5379,3 +5379,49 @@ def test_background_only_food_hero_directive_absent_when_premium_overlay_off(mon
     assert "food-hero" not in low and "the food itself is the hero" not in low
     # the original background contract is still present (byte-identical path)
     assert ("do not draw any text" in low) or ("do not render" in low)
+
+
+# ---------------------------------------------------------------------------
+# Fix C v2.1 — W1 Restaurant-Promo single-hero background directive
+# ---------------------------------------------------------------------------
+
+def test_w1_scoped_prompt_is_restaurant_promo_single_hero(monkeypatch):
+    from agents.flyer import render as r
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    p = _f0174_integrated_project()
+    tok = r._FORCE_BACKGROUND_ONLY.set(True)
+    try:
+        prompt = r.build_image_generation_prompt(p, concept_id="C1", output_format="concept_preview", size=(1080, 1350), force_background_only=True)
+    finally:
+        r._FORCE_BACKGROUND_ONLY.reset(tok)
+    low = prompt.lower()
+    assert "one single" in low and "hero dish" in low
+    assert "cinematic" in low and ("warm" in low or "golden" in low)
+    assert "dominates the frame" in low
+    assert "spread of many separate dishes" in low
+    assert "vignette" in low
+    assert "no people" in low
+    assert ("do not draw any text" in low) or ("do not render" in low)
+    assert "close-up of the dish(es)" not in low
+    assert "reserve visually calm" not in low
+    # text-leak fix: hard wordless directive present; no "advertisement" cue
+    assert "absolutely no text" in low
+    assert "do not imitate an advertisement" in low
+
+
+def test_w1_flagoff_prompt_byte_identical(monkeypatch):
+    from agents.flyer import render as r
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY", raising=False)
+    p = _f0174_integrated_project()
+    tok = r._FORCE_BACKGROUND_ONLY.set(True)
+    try:
+        prompt = r.build_image_generation_prompt(p, concept_id="C1", output_format="concept_preview", size=(1080, 1350), force_background_only=True)
+    finally:
+        r._FORCE_BACKGROUND_ONLY.reset(tok)
+    low = prompt.lower()
+    assert "reserve visually calm" in low
+    assert "restaurant-promo" not in low and "hero dish" not in low and "vignette" not in low
+    assert ("do not draw any text" in low) or ("do not render" in low)
