@@ -1211,11 +1211,19 @@ def _poster_layout_requirements(project: FlyerProject, *, force_background_only:
             "composited afterwards into overlay panels.\n"
             "- Reserve visually calm, low-detail zones in the upper-left and along the bottom for "
             "those overlay panels; keep the rich hero imagery in the center and right.\n"
-            "- Compose a FOOD-HERO background: one large, appetizing close-up of the dish(es) as the "
-            "clear subject, with dramatic appetizing lighting and rich depth of field on an elegant "
-            "surface. No people, no faces, no hands, no diners, no family scene, no buffet, no generic "
-            "restaurant scene — the food itself is the hero.\n"
         )
+        # Fix C v2 (SCOPED, Codex MAJOR fix): the FOOD-HERO directive is added ONLY
+        # when the premium overlay is enabled for this project (FLYER_PREMIUM_OVERLAY
+        # + allowlist), so the background prompt stays byte-identical for every
+        # non-scoped flow even on the background-only path. W1 (this directive) and
+        # the W2 editorial overlay are scoped together; flag off ⇒ no change here.
+        if _premium_overlay_enabled(project):
+            reserve += (
+                "- Compose a FOOD-HERO background: one large, appetizing close-up of the dish(es) as the "
+                "clear subject, with dramatic appetizing lighting and rich depth of field on an elegant "
+                "surface. No people, no faces, no hands, no diners, no family scene, no buffet, no generic "
+                "restaurant scene — the food itself is the hero.\n"
+            )
         if _style_only_reference_requested(project):
             reserve += (
                 "- Do not draw ornamental frames, corner flourishes, border lines, blank menu panels, "
