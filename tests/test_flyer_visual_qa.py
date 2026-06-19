@@ -3006,6 +3006,34 @@ def test_placeholder_re_extracted_text_check_unchanged(tmp_path):
     assert any("placeholder" in b for b in report.blockers)
 
 
+def test_normalize_soft_text_folds_formatting():
+    from agents.flyer.visual_qa import _normalize_soft_text as N
+    assert N("4 PM–8 PM") == N("4 PM-8 PM") == N("4 PM — 8 PM")
+    assert N("Saturday & Sunday") == N("Saturday and Sunday")
+    assert N("4 PM") == N("4 p.m.") == N("4PM") == N("4pm")
+    assert N("WEEKEND   SPECIALS") == N("Weekend Specials")
+    assert N("Café") == N("Cafe")
+
+
+def test_normalize_soft_text_preserves_content():
+    from agents.flyer.visual_qa import _normalize_soft_text as N
+    assert N("Saturday") != N("Sunday")
+    assert N("4 PM-8 PM") != N("4 PM-9 PM")
+    assert N("Idli") != N("Idli Sambar")
+
+
+def test_schedule_endash_matches_hyphen_ocr():
+    from agents.flyer.visual_qa import _value_present_in, _normalize_text_for_match
+    ocr = _normalize_text_for_match("lakshmi's kitchen weekend specials saturday & sunday, 4 pm-8 pm")
+    assert _value_present_in(ocr, "Saturday & Sunday, 4 PM–8 PM", schedule_match=True) is True
+
+
+def test_descriptive_text_amp_and_accent_match():
+    from agents.flyer.visual_qa import _value_present_in, _normalize_text_for_match
+    ocr = _normalize_text_for_match("grand cafe and grill weekend")
+    assert _value_present_in(ocr, "Grand Café & Grill") is True
+
+
 def test_brand_blocker_name_parses_live_format():
     from agents.flyer.visual_qa import brand_blocker_name
     assert brand_blocker_name("visible wrong business/brand: Laksmi'S Kitchen") == "Laksmi'S Kitchen"
