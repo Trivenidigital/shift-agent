@@ -4542,6 +4542,34 @@ class FlyerPremiumRepairSucceeded(_BaseEntry):
     attempts: int = Field(default=1, ge=1)
 
 
+class FlyerPremiumOverlayOutcome(_BaseEntry):
+    """Flat-degrade observability (2026-06-19). Emitted once per premium-enabled
+    render recording whether the deterministic PREMIUM overlay actually shipped,
+    degraded to the flat overlay, or failed unexpectedly — and WHY. Ends the
+    silent premium->flat downgrade (premium raised in the PIL-less gateway venv
+    and was swallowed). `status` is the delivered-asset type; `reason_class`
+    drives alerting (only `premium_overlay_failed_unexpected` pages the
+    operator); `render_path` says how premium rendered (in_process vs the
+    /usr/bin/python3 subprocess escape hatch)."""
+    type: Literal["flyer_premium_overlay_outcome"] = "flyer_premium_overlay_outcome"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+    status: Literal[
+        "premium_overlay_delivered",
+        "premium_overlay_degraded_to_flat",
+        "premium_overlay_failed_unexpected",
+    ]
+    reason_class: Literal[
+        "none",
+        "fit", "coverage", "overflow",
+        "missing_pil", "import_error", "subprocess_failure",
+        "runtime_exception", "serialization_error",
+    ] = "none"
+    reason_detail: str = Field(default="", max_length=300)
+    render_path: Literal["in_process", "subprocess", "none"] = "none"
+    output_format: str = Field(default="", max_length=40)
+
+
 class FlyerPremiumRepairExhausted(_BaseEntry):
     """Slice 2 premium repair-loop observability. Emitted when the bounded (×2)
     repair edits did not produce a clean premium render — the orchestrator leaves
@@ -5958,6 +5986,8 @@ LogEntry = Annotated[
         Annotated[FlyerPremiumRepairSucceeded, Tag("flyer_premium_repair_succeeded")],
         Annotated[FlyerPremiumRepairExhausted, Tag("flyer_premium_repair_exhausted")],
         Annotated[FlyerPremiumRepairSkipped, Tag("flyer_premium_repair_skipped")],
+        # 2026-06-19 — flat-degrade observability (premium overlay outcome)
+        Annotated[FlyerPremiumOverlayOutcome, Tag("flyer_premium_overlay_outcome")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
