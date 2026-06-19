@@ -5406,6 +5406,9 @@ def test_w1_scoped_prompt_is_restaurant_promo_single_hero(monkeypatch):
     assert ("do not draw any text" in low) or ("do not render" in low)
     assert "close-up of the dish(es)" not in low
     assert "reserve visually calm" not in low
+    # text-leak fix: hard wordless directive present; no "advertisement" cue
+    assert "absolutely no text" in low
+    assert "do not imitate an advertisement" in low
 
 
 def test_w1_flagoff_prompt_byte_identical(monkeypatch):

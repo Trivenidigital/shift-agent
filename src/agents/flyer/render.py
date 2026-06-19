@@ -1216,12 +1216,15 @@ def _poster_layout_requirements(project: FlyerProject, *, force_background_only:
             # cinematic single-hero composition; the deterministic overlay's own gradient
             # scrims provide text legibility (validated). Scoped ⇒ flag-off byte-identical.
             reserve += (
-                "- Compose a RESTAURANT-PROMO hero food photograph: ONE single mouth-watering hero dish "
-                "(the featured food) as the bold subject that DOMINATES the frame, with warm golden cinematic "
-                "restaurant lighting, gentle steam and visible texture where appropriate, rich shallow depth of "
-                "field, on a rustic dark wood or slate surface with softly-lit restaurant ambiance behind. "
-                "Appetizing and vibrant, like a premium restaurant advertisement.\n"
-                "- Keep it cinematic and atmospheric with naturally darker, softer top and bottom edges (a gentle "
+                "- Compose a wordless HERO food photograph for the background: ONE single mouth-watering hero "
+                "dish (the featured food) as the bold subject that DOMINATES the frame, with warm golden "
+                "cinematic lighting, gentle steam and visible texture where appropriate, rich shallow depth of "
+                "field, on a rustic dark wood or slate surface with softly-lit ambiance behind. Appetizing, "
+                "vibrant, and atmospheric.\n"
+                "- This is a PHOTOGRAPH ONLY: absolutely NO text, letters, words, numbers, captions, signage, "
+                "menu boards, price tags, watermarks, or logos anywhere in the image — do not imitate an "
+                "advertisement layout; the exact text is composited afterwards into overlay panels.\n"
+                "- Cinematic and atmospheric, with naturally darker, softer top and bottom edges (a gentle "
                 "vignette) so the composited title and menu stay legible — but the hero dish still fills the frame; "
                 "do NOT leave empty flat bands or blank panels.\n"
                 "- No people, no faces, no hands, no diners, no family scene, no buffet, and no spread of many "
