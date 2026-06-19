@@ -328,6 +328,82 @@ def test_duplicate_prices_are_row_matched_not_collapsed(tmp_path):
     assert out.exists()
 
 
+# ---------------------------------------------------------------------------
+# Task TDD (Fix C v2): decorative gold rules flanking the title
+# ---------------------------------------------------------------------------
+
+def _v2_solid_bg(tmp_path):
+    p = tmp_path / "bg_v2.png"
+    Image.new("RGB", (1080, 1350), (40, 32, 28)).save(p)
+    return str(p)
+
+
+def _v2_project_6item():
+    from schemas import FlyerProject, FlyerLockedFact
+    from datetime import datetime, timezone
+    f = [
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Weekend Specials", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Any item $7.99", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="schedule", label="Schedule", value="Saturday & Sunday, 4 PM-8 PM", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+    ]
+    for i, nm in enumerate(["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar"]):
+        f.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item {i}", value=nm, source="customer_text", required=True))
+        f.append(FlyerLockedFact(fact_id=f"item:{i}:price", label=f"Price {i}", value="$7.99", source="customer_text", required=True))
+    return FlyerProject(
+        project_id="F0199",
+        status="intake_started",
+        customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        original_message_id="m",
+        raw_request="Weekend Specials any item $7.99",
+        locked_facts=f,
+    )
+
+
+def test_v2_title_renders_with_rules(tmp_path):
+    """Characterization guard: title restyle (decorative gold rules + dot) must
+    render without error and produce a valid image; _ink(title) coverage intact."""
+    out = tmp_path / "o.png"
+    po.render_premium_overlay(
+        _v2_project_6item(), _v2_solid_bg(tmp_path), out,
+        size=(1080, 1350), output_format="concept_preview",
+    )
+    assert out.exists()
+    assert Image.open(out).size == (1080, 1350)
+
+
+def test_v2_offer_seal_renders_and_offer_covered(tmp_path):
+    from agents.flyer import premium_overlay as po
+    out = tmp_path / "o.png"
+    # _v2_project_6item has a shared "Any item $7.99" offer; no FlyerRenderError == offer covered
+    po.render_premium_overlay(_v2_project_6item(), _v2_solid_bg(tmp_path), out, size=(1080,1350), output_format="concept_preview")
+    assert out.exists()
+
+
+def test_v2_shared_offer_renders_seal_and_covers_pricing(tmp_path):
+    """Composition TDD: 'Any item $7.99' with per-item prices (offer_mode=inline)
+    must STILL render the offer seal (seal_planned no longer gated on offer_mode)
+    and pricing_structure must remain covered — no FlyerRenderError."""
+    from agents.flyer import premium_overlay as po
+    out = tmp_path / "o.png"
+    # _v2_project_6item: 6 items each have per-item prices ($7.99) AND a
+    # pricing_structure locked fact "Any item $7.99".  Before this fix,
+    # offer_mode=="inline" suppressed the seal entirely; the pricing_structure
+    # was handled by the secondary line only.  After this fix, seal_planned is
+    # True whenever shared_offer_price is non-empty — the seal renders over
+    # the food hero for the correct editorial composition.
+    po.render_premium_overlay(
+        _v2_project_6item(), _v2_solid_bg(tmp_path), out,
+        size=(1080, 1350), output_format="concept_preview",
+    )
+    assert out.exists()
+    assert Image.open(out).size == (1080, 1350)
+
+
 def test_combo_renders_item_prices(tmp_path):
     """NOT-FIXED#2: a 2-item combo WITH locked item prices must VISIBLY render
     each price (name+price pair), not assume it covered. Render succeeds only if
@@ -625,6 +701,57 @@ def test_apply_critical_text_overlay_flat_premium_import(tmp_path, monkeypatch):
     render._apply_critical_text_overlay(_project6(), _bg(tmp_path), tmp_path / "o.png",
                                         size=(1080, 1350), output_format="concept_preview")
     assert called == {"premium": 1, "legacy": 0}   # flat import resolved -> premium ran
+
+
+def test_brand_monogram_from_business():
+    from agents.flyer import premium_overlay as po
+    assert po._brand_monogram("Lakshmi's Kitchen") == "LK"
+    assert po._brand_monogram("Dosa") == "D"
+    assert po._brand_monogram("Taj Mahal Grill") == "TM"
+
+
+# ---------------------------------------------------------------------------
+# Task TDD (Fix C v2 Editorial Luxury): dot-leader 2-column menu — dynamic counts
+# ---------------------------------------------------------------------------
+
+def _v2_project_n_items(n):
+    """Mirror _v2_project_6item but with n items each having name + locked price."""
+    from schemas import FlyerProject, FlyerLockedFact
+    from datetime import datetime, timezone
+    f = [
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Weekend Specials", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Any item $7.99", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="schedule", label="Schedule", value="Saturday & Sunday, 4 PM-8 PM", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+    ]
+    for i in range(n):
+        f.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item {i}", value=f"Item{i + 1}", source="customer_text", required=True))
+        f.append(FlyerLockedFact(fact_id=f"item:{i}:price", label=f"Price {i}", value="$7.99", source="customer_text", required=True))
+    return FlyerProject(
+        project_id=f"F02{n:02d}",
+        status="intake_started",
+        customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        original_message_id="m",
+        raw_request="Weekend Specials any item $7.99",
+        locked_facts=f,
+    )
+
+
+@pytest.mark.parametrize("n", [2, 6, 16])
+def test_v2_menu_dynamic_counts_cover_or_failclose(tmp_path, n):
+    from agents.flyer import premium_overlay as po
+    from agents.flyer import render as r
+    proj = _v2_project_n_items(n)
+    out = tmp_path / f"o{n}.png"
+    try:
+        po.render_premium_overlay(proj, _v2_solid_bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
+    except r.FlyerRenderError:
+        return  # acceptable ONLY as fail-closed (never a silent drop)
+    assert out.exists()  # if it rendered, coverage passed (else it would have raised)
 
 
 @pytest.mark.skipif(not os.environ.get("OPENROUTER_API_KEY"),

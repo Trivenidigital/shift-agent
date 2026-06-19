@@ -5342,3 +5342,40 @@ def test_deterministic_recovery_project_prompt_is_textless_without_force(monkeyp
     assert "Create exactly" not in prompt
     assert not re.search(r"-\s+\w[\w &'-]* - \$", prompt), "priced item row leaked for recovered project"
     assert ("do NOT render them as text" in prompt) or ("decorative BACKGROUND" in prompt)
+
+
+def test_background_only_prompt_requests_food_hero_no_people(monkeypatch):
+    # SCOPED: the food-hero directive appears only when the premium overlay is
+    # enabled (FLYER_PREMIUM_OVERLAY). Here the flag is on (empty allowlist ⇒ global).
+    from agents.flyer import render as r
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    p = _f0174_integrated_project()  # existing helper in this file
+    tok = r._FORCE_BACKGROUND_ONLY.set(True)
+    try:
+        prompt = r.build_image_generation_prompt(p, concept_id="C1", output_format="concept_preview", size=(1080, 1350), force_background_only=True)
+    finally:
+        r._FORCE_BACKGROUND_ONLY.reset(tok)
+    low = prompt.lower()
+    assert "no people" in low and ("no faces" in low or "no hands" in low)
+    assert "close-up" in low or "hero" in low
+    assert ("do not draw any text" in low) or ("do not render" in low)  # text guarantee retained
+
+
+def test_background_only_food_hero_directive_absent_when_premium_overlay_off(monkeypatch):
+    # Flag-off byte-identical: with FLYER_PREMIUM_OVERLAY unset, the background-only
+    # prompt must NOT gain the food-hero directive (the v2 scoping contract).
+    from agents.flyer import render as r
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY", raising=False)
+    p = _f0174_integrated_project()
+    tok = r._FORCE_BACKGROUND_ONLY.set(True)
+    try:
+        prompt = r.build_image_generation_prompt(p, concept_id="C1", output_format="concept_preview", size=(1080, 1350), force_background_only=True)
+    finally:
+        r._FORCE_BACKGROUND_ONLY.reset(tok)
+    low = prompt.lower()
+    assert "food-hero" not in low and "the food itself is the hero" not in low
+    # the original background contract is still present (byte-identical path)
+    assert ("do not draw any text" in low) or ("do not render" in low)

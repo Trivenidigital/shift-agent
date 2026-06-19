@@ -231,31 +231,98 @@ def _seal_geometry(draw, *, label, price, width):
 
 
 def _measure_offer_seal(draw, *, label, price, width):
-    """Return the seal pill height for the given label+price (for layout)."""
-    _bw, bh, *_rest = _seal_geometry(draw, label=label, price=price, width=width)
-    return bh
+    """Return the seal DIAMETER for the given label+price (for layout).
+
+    The seal is now a circle whose radius is ``max(bw, bh) // 2 + pad``;
+    this function returns the full diameter (2 × sr) so that callers
+    (``render_premium_overlay``) reserve the correct vertical band for the
+    seal and correctly position ``seal_cy`` and ``title_anchor``."""
+    bw, bh, *_rest = _seal_geometry(draw, label=label, price=price, width=width)
+    sr = max(bw, bh) // 2 + max(8, int(width * 0.010))
+    return sr * 2
 
 
 def draw_offer_seal(draw, *, label, price, width, center):
-    """Draw a gold-bordered offer pill (label over price) centred at `center`.
+    """Draw a prominent maroon+gold circular seal (label / price / "EACH") centred
+    at ``center`` — the Editorial Luxury focal element (Fix C v2).
 
-    The pill is sized from BOTH the label and the price (widest of the two,
-    label wrapped as needed) so a long label is never clipped.  Returns the
-    seal bounding box ``(x0, y0, x1, y1)``."""
+    Geometry: a circle whose radius is derived from the existing ``_seal_geometry``
+    sizing (keeps the label+price fit invariant).  Palette mirrors compose_A() in
+    fixc-v2-mockup-generator.py: maroon fill (120,24,28), GOLD ring (208,178,110),
+    IVORY price text (244,240,232).
+
+    Three text lines inside the circle, top→bottom:
+      • label   — letter-spaced small-caps (Cormorant / kicker font)  GOLD
+      • price   — large display (Playfair-Black / offer_price font)   IVORY
+      • "EACH"  — letter-spaced small-caps (Cormorant / kicker font)  GOLD
+
+    Returns the seal bounding box ``(x0, y0, x1, y1)``."""
+    _SEAL_MAROON = (120, 24, 28, 255)        # maroon fill — compose_A reference
+    _SEAL_GOLD   = (208, 178, 110, 255)      # GOLD — compose_A reference
+    _SEAL_IVORY  = (244, 240, 232, 255)      # IVORY — compose_A reference
+    _SEAL_SHADOW = (0, 0, 0, 120)            # drop shadow behind the circle
+
     bw, bh, label_lines, lf, pf, pw, ph, pad_x, pad_y, gap, label_h = _seal_geometry(
         draw, label=label, price=price, width=width
     )
     cx, cy = center
-    x0, y0 = cx - bw // 2, cy - bh // 2
-    x1, y1 = x0 + bw, y0 + bh
-    draw.rounded_rectangle((x0 + 5, y0 + 5, x1 + 5, y1 + 5), radius=22, fill=(0, 0, 0, 90))
-    draw.rounded_rectangle((x0, y0, x1, y1), radius=22, fill=(20, 8, 4, 150), outline=(236, 200, 115, 255), width=3)
-    ly = y0 + pad_y
-    for ln in label_lines:
-        ll, lt, lr, lb = draw.textbbox((0, 0), ln, font=lf)
-        draw.text((cx - (lr - ll) // 2, ly), ln, font=lf, fill=(240, 226, 196, 255))
-        ly += int(lf.size * 1.18)
-    draw.text((cx - pw // 2, y1 - ph - pad_y), price, font=pf, fill=(255, 233, 184, 255))
+    # Radius: half the larger dimension of the sized pill, with a minimum so
+    # the circle never collapses to a tiny dot.  The bounding box is square
+    # (2r × 2r) — larger than the pill when the pill is taller than it is wide.
+    sr = max(bw, bh) // 2 + max(8, int(width * 0.010))
+
+    x0, y0 = cx - sr, cy - sr
+    x1, y1 = cx + sr, cy + sr
+
+    # Drop shadow (offset 5,5 so the circle lifts off the food background).
+    draw.ellipse((x0 + 5, y0 + 5, x1 + 5, y1 + 5), fill=_SEAL_SHADOW)
+    # Maroon fill + gold ring — compose_A: fill=(120,24,28) outline=GOLD width=4
+    draw.ellipse((x0, y0, x1, y1), fill=_SEAL_MAROON, outline=_SEAL_GOLD, width=4)
+
+    # --- text layout inside the circle ---
+    # Vertical rhythm (mirrors compose_A offsets scaled from the 1080 reference):
+    #   label  at  cy - 58   (scaled: ~0.054 × height_1350)
+    #   price  at  cy - 28   (scaled: ~0.026 × height_1350)
+    #   "EACH" at  cy + 46   (scaled: ~0.034 × height_1350)
+    # We reproduce the offsets proportionally from the half-radius so they always
+    # sit inside the circle regardless of the actual sr.
+    label_cy_off  = int(sr * 0.60)   # label  top above cy
+    price_cy_off  = int(sr * 0.29)   # price  top above cy
+    each_cy_off   = int(sr * 0.48)   # "EACH" top below  cy
+
+    # Letter-spaced label (character-by-character, like center_spaced in compose_A).
+    def _draw_letter_spaced(text, font, fill, y_top, extra=4):
+        """Draw letter-spaced text centred at cx; returns nothing."""
+        chars = list(text.upper())
+        total_w = sum(
+            (draw.textbbox((0, 0), ch, font=font)[2] - draw.textbbox((0, 0), ch, font=font)[0]) + extra
+            for ch in chars
+        ) - extra
+        x = cx - total_w // 2
+        for ch in chars:
+            bl, bt, br, bb = draw.textbbox((0, 0), ch, font=font)
+            # shadow
+            draw.text((x + 1 - bl, y_top + 1 - bt), ch, font=font, fill=_SEAL_SHADOW)
+            draw.text((x - bl, y_top - bt), ch, font=font, fill=fill)
+            x += (br - bl) + extra
+
+    # Label — letter-spaced, GOLD, above price.
+    for i, ln in enumerate(label_lines):
+        _draw_letter_spaced(ln, lf, _SEAL_GOLD,
+                            cy - label_cy_off + i * int(lf.size * 1.18))
+
+    # Price — centred, IVORY, large Playfair-Black.
+    pl, pt, pr, pb = draw.textbbox((0, 0), price, font=pf)
+    _pw, _ph = pr - pl, pb - pt
+    price_x = cx - _pw // 2 - pl
+    price_y = cy - price_cy_off - pt
+    draw.text((price_x + 2, price_y + 2), price, font=pf, fill=_SEAL_SHADOW)
+    draw.text((price_x, price_y), price, font=pf, fill=_SEAL_IVORY)
+
+    # "EACH" — letter-spaced, GOLD, below price.
+    each_font = lf   # same kicker/Cormorant font at the same size
+    _draw_letter_spaced("EACH", each_font, _SEAL_GOLD, cy + each_cy_off)
+
     return (x0, y0, x1, y1)
 
 
@@ -430,33 +497,57 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     safe_w = width - margin * 2
 
     # ===================================================================
-    # TOP ZONE — kicker + gold rule + masthead (brand)
+    # TOP ZONE — editorial brand lockup: emblem ring + monogram + brand
+    #   Mirrors compose_A() in fixc-v2-mockup-generator.py:
+    #     • gold ellipse ring (cx±34, top 56→124 in a 1080×1350 canvas)
+    #     • monogram (brand initials) centred in the ring — Playfair-Black
+    #     • brand name below in letter-spaced small-caps — Cormorant/masthead
+    #   Palette: GOLD=(208,178,110,255)  IVORY=(244,240,232,255) (approved mockup)
+    #   Replaces old kicker + hairline; brand is still `_ink`'d (coverage kept).
     # ===================================================================
-    y = int(height * 0.045)
-    kicker_px = max(min_px, int(width * 0.020))
-    kicker_font = _premium_font("kicker", kicker_px)
-    # Decorative tracked all-caps kicker (never a required fact — required facts
-    # are drawn in their own zones). Uses the project category cue if present.
-    kicker_text = _editorial_kicker(project, render)
-    if kicker_text:
-        spaced = "  ".join(kicker_text.upper().split())
-        _draw_centered(draw, spaced, kicker_font, cy=y, width=width,
-                       fill=_GOLD, shadow_dy=2)
-        _ink(kicker_text)
-        y += int(kicker_px * 1.5)
+    _EMBLEM_GOLD  = (208, 178, 110, 255)   # approved mockup gold (≠ legacy _GOLD)
+    _EMBLEM_IVORY = (244, 240, 232, 255)   # approved mockup ivory
 
-    _draw_gold_rule(draw, cy=y, width=width)
-    y += max(10, int(height * 0.012))
+    cx_top = width // 2
+    # Scale ring geometry from the 1080-wide mockup reference.
+    ring_half = max(28, int(width * 0.0315))   # ≈34px @1080
+    ring_top  = int(height * 0.0415)           # ≈56px @1350
+    ring_bot  = ring_top + ring_half * 2       # ≈124px @1350 (height=68px)
 
+    draw.ellipse(
+        (cx_top - ring_half, ring_top, cx_top + ring_half, ring_bot),
+        outline=_EMBLEM_GOLD,
+        width=3,
+    )
+
+    # Monogram: Playfair-Black at ~38px; centred vertically inside the ring.
+    mono_px  = max(min_px, int(width * 0.0352))   # ≈38px @1080
+    mono_font = _premium_font("title", mono_px)    # "title" role → PlayfairDisplay-Black
+    monogram  = _brand_monogram(business) if business else ""
+    if monogram:
+        mono_cy = ring_top + (ring_bot - ring_top - mono_px) // 2
+        _draw_centered(draw, monogram, mono_font,
+                       cy=mono_cy, width=width,
+                       fill=_EMBLEM_GOLD, shadow=None)
+
+    # Brand name: letter-spaced small-caps below the ring.
+    y = ring_bot + max(10, int(height * 0.010))
     if business:
-        mast_px = max(min_px, int(width * 0.046))
-        mast_lines = _wrap_premium(draw, _spaced_caps(business), "masthead", mast_px, safe_w)
-        # Masthead is uppercased + letter-spaced; log the ORIGINAL value so the
-        # coverage check matches the locked fact regardless of case/spacing.
-        for ln in mast_lines:
-            _draw_centered(draw, ln, _premium_font("masthead", mast_px),
-                           cy=y, width=width, fill=_CREAM)
-            y += int(mast_px * 1.18)
+        brand_px   = max(min_px, int(width * 0.0315))   # ≈34px @1080
+        brand_font = _premium_font("masthead", brand_px)
+        brand_text = _spaced_caps(business)
+        # Inline letter-spacing: interleave extra thin spaces between characters
+        # to replicate the `center_spaced(..., extra=6)` effect in compose_A.
+        brand_spaced = " ".join(brand_text)        # thin space ≈ CSS letter-spacing
+        brand_lines  = _wrap_premium(draw, brand_spaced, "masthead", brand_px, safe_w)
+        for ln in brand_lines:
+            _draw_centered(draw, ln, brand_font,
+                           cy=y, width=width,
+                           fill=_EMBLEM_IVORY, shadow_dy=2)
+            y += int(brand_px * 1.18)
+        # INVARIANT: log the ORIGINAL business value so the coverage ledger
+        # (_covered / _value_present_in) sees the locked fact regardless of the
+        # display transformation (upper-casing, thin-space insertion, wrapping).
         _ink(business)
     top_zone_bottom = y
 
@@ -498,58 +589,145 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         _ink(drawn_text)
 
     # ===================================================================
-    # OFFER SEAL — gold pill between the title and the menu (seal mode).
-    # Sized from BOTH label and price; fails over to a secondary line if the
-    # zone is too small.  Only inks label+price when both are fully rendered.
+    # TITLE — Playfair-Black headline, anchored in the UPPER zone just
+    # below the brand/emblem block.  Mirrors compose_A() in the reference
+    # mockup where the title sits at y≈210 (upper third of a 1350-tall
+    # canvas), well above the food hero mid-section.
+    #
+    # Upper band: title_top just below top_zone_bottom; max_height gives
+    # about 32% of canvas height for the headline + rules, keeping the
+    # seal + menu free to float/fill the lower two-thirds.
     # ===================================================================
-    seal_label = (shared_offer_label or "OFFER").strip()
-    seal_planned = layout.offer_mode == "seal" and bool(shared_offer_price)
-    seal_h = 0
-    seal_cy = 0
-    if seal_planned:
-        seal_h = _measure_offer_seal(draw, label=seal_label, price=shared_offer_price, width=width)
-        seal_cy = menu_top - max(16, int(height * 0.018)) - seal_h // 2
-
-    # ===================================================================
-    # TITLE — Playfair-Black headline, anchored above the seal/menu.
-    # ===================================================================
-    title_anchor = (seal_cy - seal_h // 2 if seal_h else menu_top) - max(14, int(height * 0.016))
+    _title_gap   = max(8, int(height * 0.012))         # gap below brand block
+    title_top    = top_zone_bottom + _title_gap         # where title block starts
+    _upper_limit = title_top + max(0, int(height * 0.32) - title_top)  # upper band ceiling
+    title_bottom = title_top  # will be updated below if title is drawn
     if title:
         title_px = max(min_px, int(width * 0.072))
-        # Shrink-to-fit so the headline never collides with the top zone.
+        # Shrink-to-fit within the upper band so the headline never overruns
+        # into the food-hero middle section reserved for the seal.
         title_lines, title_px = _fit_title(
             draw, title, title_px, safe_w, min_px,
-            max_height=title_anchor - top_zone_bottom - 8,
+            max_height=_upper_limit - title_top - 8,
             line_factor=1.0,
         )
         if title_lines is None:
             raise render.FlyerRenderError("premium overlay does not fit")
         title_font = _premium_font("title", title_px)
-        block_h = len(title_lines) * int(title_px * 1.0)
-        ty = title_anchor - block_h
-        if ty < top_zone_bottom:
-            raise render.FlyerRenderError("premium overlay does not fit")
+        ty = title_top
         for ln in title_lines:
             _draw_centered(draw, ln, title_font, cy=ty, width=width,
                            fill=_TITLE_CREAM, shadow_dy=4)
             ty += int(title_px * 1.0)
         _ink(title)
+        title_bottom = ty  # bottom of last title line
+
+        # ---------------------------------------------------------------
+        # Decorative gold rules flanking the title (Fix C v2 Editorial).
+        # Mirrors compose_A() in fixc-v2-mockup-generator.py:
+        #   d.line((cx-250,rule_y, cx-90,rule_y), fill=GOLD, width=2)
+        #   d.line((cx+90, rule_y, cx+250,rule_y), fill=GOLD, width=2)
+        #   d.ellipse((cx-4,rule_y-4, cx+4,rule_y+4), fill=GOLD)
+        # Scale gap (90px) and reach (250px) from the 1080-wide reference.
+        # Placed 8px below the last title line so the rules sit just
+        # beneath the headline.
+        # _EMBLEM_GOLD and cx_top are defined in the TOP ZONE block above.
+        # ---------------------------------------------------------------
+        _rule_gap   = max(40, int(width * 90 / 1080))   # ≈90px @1080
+        _rule_reach = max(80, int(width * 250 / 1080))  # ≈250px @1080
+        _rule_y = title_bottom + 8  # 8px below last title line
+        _dot_r = 4        # 4px radius dot (8×8 bounding box)
+        if _rule_y < height - margin:   # safety: don't draw outside canvas
+            # left rule
+            draw.line(
+                (cx_top - _rule_reach, _rule_y, cx_top - _rule_gap, _rule_y),
+                fill=_EMBLEM_GOLD, width=2,
+            )
+            # right rule
+            draw.line(
+                (cx_top + _rule_gap, _rule_y, cx_top + _rule_reach, _rule_y),
+                fill=_EMBLEM_GOLD, width=2,
+            )
+            # center dot
+            draw.ellipse(
+                (cx_top - _dot_r, _rule_y - _dot_r,
+                 cx_top + _dot_r, _rule_y + _dot_r),
+                fill=_EMBLEM_GOLD,
+            )
+        title_bottom = _rule_y + _dot_r + 4  # include the rule+dot height
+
+    # ===================================================================
+    # OFFER SEAL — gold circle floating in the right-middle over the food
+    # hero, between the title block (upper) and the menu (lower).
+    #
+    # Change 1: seal_planned is True whenever shared_offer_price is
+    # non-empty, regardless of offer_mode.  The "Any item $7.99" hook must
+    # appear as the prominent visual accent even when items carry per-item
+    # prices (offer_mode=="inline").
+    #
+    # Change 2: seal floats at the vertical MIDPOINT of the gap between
+    # title_bottom (upper anchor) and menu_top (lower anchor), horizontally
+    # right-of-centre — mirroring compose_A() sx=W-175, sy=600.
+    #
+    # Fail-closed: if the seal cannot fit its band (box out-of-bounds), it
+    # is SKIPPED and the offer coverage falls through to the secondary line
+    # (Change 4).  FlyerRenderError is raised only if NEITHER the seal
+    # NOR the secondary line can cover the pricing_structure fact (Change 5).
+    # ===================================================================
+    seal_label = (shared_offer_label or "OFFER").strip()
+    # Change 1: show seal whenever there is a shared offer price — not
+    # gated on layout.offer_mode so "inline" briefs also get the seal.
+    seal_planned = bool(shared_offer_price)
+    seal_drawn = False   # set True only when draw_offer_seal succeeds in bounds
+    seal_h = 0
+    seal_cy = 0
+    if seal_planned:
+        seal_h = _measure_offer_seal(draw, label=seal_label, price=shared_offer_price, width=width)
+        # Change 2: float vertically in the gap between title_bottom and menu_top.
+        seal_cy = (title_bottom + menu_top) // 2
 
     # Draw the seal AFTER the title so its gold border sits cleanly on top.
+    # Placement: right side, mirroring compose_A() which places the seal at
+    # sx=W-175, sy=600 on a 1080×1350 canvas.  We offset cx so the right
+    # edge sits at (width - margin), keeping it inside the canvas.
     if seal_h:
-        box = draw_offer_seal(draw, label=seal_label, price=shared_offer_price,
-                              width=width, center=(width // 2, seal_cy))
-        if box[1] < top_zone_bottom or box[3] > menu_top or box[0] < 0 or box[2] > width:
-            raise render.FlyerRenderError("premium overlay does not fit")
-        # Ink the label, the price, AND their combined form (the pill stacks
-        # label directly above price, so the combined "label price" string is
-        # visibly present) — this covers a ``pricing_structure`` fact whose value
-        # is the whole "Any item ... $7.99" phrase.
-        _ink(seal_label)
-        _ink(shared_offer_price)
-        _ink(f"{seal_label} {shared_offer_price}")
-        if shared_offer_text:
-            _ink(shared_offer_text)
+        # seal_h is already the circle diameter (2×sr) returned by
+        # _measure_offer_seal, so the radius is simply half of that.
+        _seal_r_est = seal_h // 2
+        _seal_cx = width - margin - _seal_r_est
+        # Safety clamp: never let the seal overlap the left half of the canvas.
+        _seal_cx = max(width // 2 + _seal_r_est + margin, _seal_cx)
+        # PREFLIGHT (Codex BLOCKER fix): compute the seal's bounding box from its
+        # centre + radius and verify it fits BEFORE drawing any pixels. Drawing
+        # first and rejecting after would leave stray seal pixels on the flyer
+        # while the secondary line ALSO draws the offer (double-draw). The seal is
+        # a circle of radius _seal_r_est centred at (_seal_cx, seal_cy); a small
+        # pad covers the drop shadow.
+        _shadow_pad = max(4, int(width * 0.006))
+        _pf = (
+            _seal_cx - _seal_r_est,
+            seal_cy - _seal_r_est,
+            _seal_cx + _seal_r_est + _shadow_pad,
+            seal_cy + _seal_r_est + _shadow_pad,
+        )
+        # Fit: fully below title_bottom, above menu_top, within the canvas.
+        if (_pf[1] >= title_bottom and _pf[3] <= menu_top
+                and _pf[0] >= 0 and _pf[2] <= width):
+            draw_offer_seal(draw, label=seal_label, price=shared_offer_price,
+                            width=width, center=(_seal_cx, seal_cy))
+            # Ink the label, the price, AND their combined form (the circle
+            # stacks label directly above price, so the combined "label price"
+            # string is visibly present) — this covers a ``pricing_structure``
+            # fact whose value is the whole "Any item ... $7.99" phrase.
+            _ink(seal_label)
+            _ink(shared_offer_price)
+            _ink(f"{seal_label} {shared_offer_price}")
+            if shared_offer_text:
+                _ink(shared_offer_text)
+            seal_drawn = True
+        # If the seal did NOT fit, NO seal pixels were drawn and seal_drawn stays
+        # False — the secondary line path will place the offer (fail-closed
+        # fallback), with no stray seal and no double-draw.
 
     # ===================================================================
     # SECONDARY LINES — facts that no region above placed (offer-without-seal,
@@ -559,16 +737,21 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     # fix): we draw it only if ALL its wrapped lines fit the band — never
     # partially.  Required lines that cannot fit are caught by the coverage
     # check below (fail-closed); optional extras are simply skipped.
+    #
+    # Change 3: secondary lines now occupy the band BELOW the title block
+    # (title_bottom + gap) up to menu_top.  The seal floats right-of-centre
+    # in the same zone; secondary text is centred and typically short, so
+    # visual overlap is rare and the editorial composition is preserved.
     # ===================================================================
-    secondary_y = top_zone_bottom + max(6, int(height * 0.008))
+    secondary_y = title_bottom + max(6, int(height * 0.008))
     sec_px = max(min_px, int(width * 0.020))
     sec_font = _premium_font("footer", sec_px)
     sec_line_h = int(sec_px * 1.4)
 
     def _draw_secondary(text, *, fill) -> bool:
         """Draw a centred secondary block ONLY if the whole wrapped block fits
-        the band above the title; returns True (and inks it) if drawn, else
-        False with no pixels mutated."""
+        the band between title_bottom and menu_top; returns True (and inks it)
+        if drawn, else False with no pixels mutated."""
         nonlocal secondary_y
         if not text:
             return False
@@ -576,7 +759,7 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         if not lines:
             return False
         block_h = len(lines) * sec_line_h
-        if secondary_y + block_h > title_anchor:
+        if secondary_y + block_h > menu_top:
             return False  # whole block does not fit → draw nothing (no partial)
         for ln in lines:
             _draw_centered(draw, ln, sec_font, cy=secondary_y, width=width, fill=fill, shadow_dy=2)
@@ -588,11 +771,15 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     # must-fit lines.  This is what makes BLOCKER 1 safe: an unknown required
     # fact id (tagline / source_required_text:* / replacement:*:new / future)
     # is rendered rather than silently skipped; if it can't fit, the coverage
-    # check fails closed.  Offer-without-seal and promotion_end flow through the
-    # same path.  Use gold for offer-class facts, cream otherwise.  Item facts
-    # are excluded — they belong to the menu region and their coverage/pairing
-    # is enforced by the final gate (a stray secondary item line would corrupt
-    # the editorial layout).
+    # check fails closed.
+    #
+    # Change 4: offer-class facts are SKIPPED when the seal already drew
+    # them (seal_drawn=True) to avoid a duplicate "Any item $7.99" line.
+    # When the seal DID NOT draw (seal_drawn=False), the offer falls through
+    # to this secondary path as the coverage fallback (Change 5).
+    #
+    # Item facts are excluded — they belong to the menu region and their
+    # coverage/pairing is enforced by the final gate.
     _offer_norm = render._normalize_fact_text(shared_offer_text or f"{seal_label} {shared_offer_price}")
     for fid, label, value in required_facts:
         if re.match(r"^item:\d+:(name|price)$", fid):
@@ -601,6 +788,11 @@ def render_premium_overlay(project, source, target, *, size, output_format):
             continue
         is_offer = fid == "pricing_structure" or fid.startswith("offer:") \
             or render._normalize_fact_text(value) == _offer_norm
+        # Change 4: if the seal drew the offer, skip the secondary offer line
+        # to avoid duplication.  If the seal did NOT draw (seal_drawn=False),
+        # allow the secondary to handle it so the offer stays covered.
+        if is_offer and seal_drawn:
+            continue  # seal already covers this; do NOT double-draw
         _draw_secondary(value, fill=_GOLD if is_offer else _CREAM_SOFT)
 
     # Best-effort optional extras: assembly detail clauses that are NOT required
@@ -666,6 +858,27 @@ def render_premium_overlay(project, source, target, *, size, output_format):
 
 
 # --- Template-A draw/measure helpers ---------------------------------------
+
+def _brand_monogram(business: str) -> str:
+    """Return the 1–2 capital initials used in the emblem ring above the brand name.
+
+    Takes the first letter of each of the first two words (after stripping
+    non-alpha characters) in upper-case.  Single-word brands get a single
+    initial.  Short noise fragments from apostrophe-stripping (e.g. "s" in
+    "Lakshmi's") are excluded by requiring words of 2+ characters.
+
+    Examples:
+        "Lakshmi's Kitchen" → "LK"
+        "Dosa"              → "D"
+        "Taj Mahal Grill"   → "TM"
+    """
+    import re as _re
+    words = [w for w in _re.sub(r"[^A-Za-z ]", " ", business or "").split()
+             if len(w) >= 2]
+    if not words:
+        return ((business or "").strip()[:1] or "·").upper()
+    return "".join(w[0] for w in words[:2]).upper()
+
 
 def _spaced_caps(text: str) -> str:
     """Upper-case + single-space normalize for masthead letter-spacing feel."""
@@ -820,22 +1033,34 @@ def _plan_menu_block(draw, items, layout, menu_px, min_px, safe_w, has_item_pric
 
         return block_h, _render
 
-    # two_col / two_col_compact: name (left) ... price (right) per column.
+    # two_col / two_col_compact: editorial dot-leader layout (Fix C v2).
+    # Name: Cormorant SemiBold (menu role) in IVORY; price: Playfair Bold
+    # (masthead role) in GOLD — right-aligned.  Dot leaders fill the gap.
+    # Mirrors compose_A() in fixc-v2-mockup-generator.py.
+    _EDL_IVORY = (244, 240, 232, 255)  # IVORY — approved mockup
+    _EDL_GOLD  = (208, 178, 110, 255)  # GOLD  — approved mockup
+    _EDL_DOT   = (150, 140, 120, 255)  # muted gold dot leader
+
     cols = 2
     rows_n = (len(items) + cols - 1) // cols
     col_gap = int(safe_w * 0.06)
     col_w = (safe_w - col_gap) // cols
 
-    # Preflight: shrink one shared font until EVERY row's name + price fits its
-    # column width (name wrapped to ≤2 lines, with room reserved for the price).
+    # Preflight: shrink one shared font size until EVERY row's name + price fits
+    # its column width with both fonts (name: Cormorant; price: Playfair Bold).
+    # Price font is scaled proportionally (price_px = px * 34/40 per mockup ratio).
     px = menu_px
     while True:
-        font = _premium_font("menu", px)
+        name_font = _premium_font("menu", px)
+        price_px  = max(min_px, int(px * 34 / 40))
+        price_font = _premium_font("masthead", price_px)
         ok = True
         max_name_lines = 1
         for name, price in items:
-            price_w = _text_w(draw, price, font) if price else 0
-            name_budget = col_w - (price_w + int(col_w * 0.06) if price else 0)
+            price_w = _text_w(draw, price, price_font) if price else 0
+            # gap between last name char and price: name_end + 14px + dots + 14px + price
+            leader_gap = 28 if price else 0  # 14px each side
+            name_budget = col_w - (price_w + leader_gap if price else 0)
             if name_budget <= int(col_w * 0.3):
                 ok = False
                 break
@@ -843,7 +1068,7 @@ def _plan_menu_block(draw, items, layout, menu_px, min_px, safe_w, has_item_pric
             if not name_lines or len(name_lines) > 2:
                 ok = False
                 break
-            if any(_text_w(draw, ln, font) > name_budget for ln in name_lines):
+            if any(_text_w(draw, ln, name_font) > name_budget for ln in name_lines):
                 ok = False
                 break
             max_name_lines = max(max_name_lines, len(name_lines))
@@ -855,42 +1080,71 @@ def _plan_menu_block(draw, items, layout, menu_px, min_px, safe_w, has_item_pric
             )
         px = max(min_px, px - 2)
 
-    used_line_h = int(px * 1.4) * max_name_lines
-    block_h = rows_n * used_line_h
+    # Row height: name font drives height; add a dot-leader row below the name
+    # baseline (mirrors compose_A yy2 = yy+44 for a 40px font).
+    name_row_h  = int(px * 1.4)
+    dot_row_off = max(30, int(px * 44 / 40))  # ≈44px @40px font
+    used_line_h = name_row_h * max_name_lines
+    block_h     = rows_n * used_line_h
 
     def _render(draw, *, x_left, y_top, width, safe_w):
+        # Recompute fonts inside the closure (captured px, price_px are correct).
+        nf = _premium_font("menu", px)
+        pf = _premium_font("masthead", price_px)
         out: list[str] = []
         for idx, (name, price) in enumerate(items):
             col = idx % cols
             row = idx // cols
-            cx0 = x_left + col * (col_w + col_gap)
+            cx0      = x_left + col * (col_w + col_gap)
             col_right = cx0 + col_w
-            cy = y_top + row * used_line_h
-            price_w = _text_w(draw, price, font) if price else 0
-            name_budget = col_w - (price_w + int(col_w * 0.06) if price else 0)
-            name_lines = _wrap_premium(draw, name, "menu", px, name_budget)
-            # Paint the name; verify each line stays within its name budget.
+            cy       = y_top + row * used_line_h
+            price_w  = _text_w(draw, price, pf) if price else 0
+            leader_gap = 28 if price else 0
+            name_budget = col_w - (price_w + leader_gap if price else 0)
+            name_lines  = _wrap_premium(draw, name, "menu", px, name_budget)
+
+            # Paint the name in IVORY (Cormorant); verify each line stays within budget.
             name_painted = bool(name_lines)
             ny = cy
+            last_name_w = 0
             for ln in name_lines:
-                if _text_w(draw, ln, font) > name_budget:
+                lw = _text_w(draw, ln, nf)
+                if lw > name_budget:
                     name_painted = False
                     break
-                draw.text((cx0 + 2, ny + 2 - _top(draw, ln, font)), ln, font=font, fill=_SHADOW)
-                draw.text((cx0, ny - _top(draw, ln, font)), ln, font=font, fill=_CREAM)
-                ny += int(px * 1.4)
-            # Paint the price right-aligned; verify it stays inside the column.
+                draw.text((cx0 + 2, ny + 2 - _top(draw, ln, nf)), ln, font=nf, fill=_SHADOW)
+                draw.text((cx0, ny - _top(draw, ln, nf)), ln, font=nf, fill=_EDL_IVORY)
+                last_name_w = lw
+                ny += name_row_h
+
+            # Paint the price in GOLD (Playfair Bold); right-aligned within column.
             price_painted = False
             if price:
                 px_x = col_right - price_w
                 if px_x >= cx0 + name_budget and col_right <= x_left + safe_w + 1:
-                    draw.text((px_x, cy - _top(draw, price, font)), price, font=font, fill=_GOLD)
+                    draw.text((px_x + 2, cy + 2 - _top(draw, price, pf)), price, font=pf, fill=_SHADOW)
+                    draw.text((px_x, cy - _top(draw, price, pf)), price, font=pf, fill=_EDL_GOLD)
                     price_painted = True
-            # INK ONLY WHAT WAS ACTUALLY PAINTED (ISSUE 2): the name when painted,
-            # and the single-row "name price" pair ONLY when BOTH were painted on
-            # this row (name and price share one visual row, so the combined line
-            # is faithful).  If the price didn't paint, do NOT ink the pair — the
-            # final _item_price_pair_blockers / coverage gate then fails closed.
+
+            # Dot leader: rendered at (cy + dot_row_off) between name end and price.
+            # Only when BOTH name and price were painted (mirrors compose_A logic).
+            if name_painted and price_painted:
+                lx = cx0 + last_name_w + 14   # 14px gap after name
+                rx = col_right - price_w - 14  # 14px gap before price
+                yy2 = cy + dot_row_off
+                if lx < rx and 0 < yy2 < (y_top + block_h + dot_row_off + 4):
+                    x = lx
+                    while x < rx:
+                        draw.ellipse(
+                            (x, yy2, x + 2, yy2 + 2),
+                            fill=_EDL_DOT,
+                        )
+                        x += 12
+
+            # INK ONLY WHAT WAS ACTUALLY PAINTED — name when painted, and the
+            # combined "name price" string ONLY when BOTH painted (so the
+            # _item_price_pair_blockers pairing check passes per-row without
+            # relying on a separately-inked price string).
             if name_painted:
                 out.append(name)
             if name_painted and price_painted:
