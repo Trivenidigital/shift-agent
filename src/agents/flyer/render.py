@@ -2971,31 +2971,69 @@ def _classify_fail_closed_reason(message: str) -> str:
     return "fit"
 
 
+def _render_premium_overlay_with_fallback(project: FlyerProject, source: Path | str, target: Path | str, *, size: tuple[int, int], output_format: str) -> PremiumOverlayOutcome:
+    """Render the premium overlay in-process; on any import/runtime failure
+    (the PIL-less gateway venv) re-render in a /usr/bin/python3 subprocess that
+    HAS Pillow. Returns a PremiumOverlayOutcome; never raises (the caller owns
+    the flat fallback)."""
+    # 1) In-process attempt (the path tests + system-python contexts use).
+    try:
+        try:
+            import flyer_premium_overlay as premium_overlay  # box (flat layout)
+        except ImportError:
+            from agents.flyer import premium_overlay          # repo / tests
+        premium_overlay.render_premium_overlay(project, source, target, size=size, output_format=output_format)
+        return PremiumOverlayOutcome("premium_overlay_delivered", "none", "", "in_process", output_format)
+    except FlyerRenderError as e:
+        msg = str(e)
+        return PremiumOverlayOutcome("premium_overlay_degraded_to_flat", _classify_fail_closed_reason(msg), msg[:300], "none", output_format)
+    except Exception as e:
+        in_process_detail = f"{type(e).__name__}: {e}"  # expected on the box: ModuleNotFoundError: No module named 'PIL'
+
+    # 2) Subprocess recovery via /usr/bin/python3 (PIL-capable), mirrors the flat OVERLAY_RENDERER path.
+    if not Path("/usr/bin/python3").exists():
+        return PremiumOverlayOutcome("premium_overlay_failed_unexpected", "missing_pil", in_process_detail[:300], "none", output_format)
+    try:
+        project_json = project.model_dump_json()
+    except Exception as e:
+        return PremiumOverlayOutcome("premium_overlay_failed_unexpected", "serialization_error", f"{type(e).__name__}: {e}"[:300], "none", output_format)
+    spec = {
+        "project_json": project_json,
+        "source": str(source),
+        "target": str(target),
+        "size": list(size),
+        "output_format": output_format,
+        "sys_path": [p for p in sys.path if p],
+    }
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as fh:
+        json.dump(spec, fh)
+        spec_path = fh.name
+    try:
+        proc = subprocess.run(["/usr/bin/python3", "-c", PREMIUM_OVERLAY_RENDERER, spec_path], capture_output=True, text=True, timeout=60)
+    except Exception as e:
+        return PremiumOverlayOutcome("premium_overlay_failed_unexpected", "subprocess_failure", f"{type(e).__name__}: {e}"[:300], "none", output_format)
+    finally:
+        Path(spec_path).unlink(missing_ok=True)
+    if proc.returncode == 0:
+        return PremiumOverlayOutcome("premium_overlay_delivered", "none", in_process_detail[:300], "subprocess", output_format)
+    detail = (proc.stderr or proc.stdout or "").strip()
+    if proc.returncode == 3:
+        return PremiumOverlayOutcome("premium_overlay_degraded_to_flat", _classify_fail_closed_reason(detail), detail[:300], "none", output_format)
+    return PremiumOverlayOutcome("premium_overlay_failed_unexpected", "subprocess_failure", detail[:300], "none", output_format)
+
+
 def _apply_critical_text_overlay(project: FlyerProject, source: Path | str, target: Path | str, *, size: tuple[int, int], output_format: str) -> None:
     if _premium_overlay_enabled(project) and _is_food_or_grocery_project(project):
-        try:
-            # Deferred import: avoids a module-load cycle. Try the FLAT deployed
-            # module name first (the VPS installs premium_overlay.py as
-            # /opt/shift-agent/flyer_premium_overlay.py), then the package layout
-            # used by the repo + tests. Mirrors the try/except convention in
-            # generate-flyer-concepts. Without the flat branch this import would
-            # raise on the box and the premium path would never run in prod.
-            try:
-                import flyer_premium_overlay as premium_overlay  # box (flat layout)
-            except ImportError:
-                from agents.flyer import premium_overlay          # repo / tests
-            premium_overlay.render_premium_overlay(project, source, target, size=size, output_format=output_format)
+        outcome = _render_premium_overlay_with_fallback(project, source, target, size=size, output_format=output_format)
+        _PREMIUM_OVERLAY_OUTCOME.set(outcome)
+        if outcome.status == "premium_overlay_delivered":
             return
-        except FlyerRenderError:
-            # Intentional fit/coverage fail-closed (text can't fit / required fact
-            # missing) → degrade to legacy flat overlay rather than routing to manual.
-            # Fix C is strictly >= today's fallback: premium when it fits, flat when
-            # it can't, never manual-worse-than-flat.
-            logging.getLogger(__name__).info("premium overlay could not fit; degrading to flat overlay")
-        except Exception:
-            # UNEXPECTED premium-renderer bug must never break rendering entirely:
-            # log and degrade to the known-good legacy overlay (still correct text, flat look).
-            logging.getLogger(__name__).exception("premium overlay failed unexpectedly; degrading to flat overlay")
+        if outcome.status == "premium_overlay_failed_unexpected":
+            logging.getLogger(__name__).error(
+                "premium overlay failed unexpectedly (%s); degrading to flat overlay: %s",
+                outcome.reason_class, outcome.reason_detail,
+            )
+        # delivered -> returned above; degraded_to_flat / failed_unexpected -> fall through to the flat path below.
     try:
         apply_critical_text_overlay(project, source, target, size=size, output_format=output_format)
         return
