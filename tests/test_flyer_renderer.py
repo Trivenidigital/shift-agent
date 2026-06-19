@@ -5575,6 +5575,22 @@ def test_apply_premium_serialization_error(monkeypatch, tmp_path):
     assert out.status == "premium_overlay_failed_unexpected" and out.reason_class == "serialization_error"
 
 
+def test_apply_premium_tempfile_failure_is_failed_unexpected_not_raise(monkeypatch, tmp_path):
+    from agents.flyer import render as r
+    from agents.flyer import premium_overlay as po
+    _enable_premium(monkeypatch)
+    monkeypatch.setattr(po, "render_premium_overlay", lambda *a, **k: (_ for _ in ()).throw(ModuleNotFoundError("No module named 'PIL'")))
+    monkeypatch.setattr(r.Path, "exists", lambda self: True)
+    def _boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(r.tempfile, "NamedTemporaryFile", _boom)
+    monkeypatch.setattr(r, "apply_critical_text_overlay", lambda *a, **k: None)
+    # Must NOT raise; must record a failed_unexpected outcome and fall through to flat.
+    r._apply_critical_text_overlay(_premium_food_project(), tmp_path / "s.png", tmp_path / "t.png", size=(1080, 1350), output_format="concept_preview")
+    out = r.consume_premium_overlay_outcome()
+    assert out.status == "premium_overlay_failed_unexpected"
+
+
 def test_apply_flag_off_byte_identical(monkeypatch, tmp_path):
     from agents.flyer import render as r
     from agents.flyer import premium_overlay as po

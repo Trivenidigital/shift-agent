@@ -438,13 +438,14 @@ def _audit_append(path: Path, entry) -> None:
 
 
 def _alert_owner(message: str) -> None:
-    """Best-effort plain-text operator alert (Telegram-primary chokepoint).
-    Never blocks rendering/delivery; plain text avoids MarkdownV1 underscore
-    mangling of status tokens."""
+    """Best-effort, NON-BLOCKING plain-text operator alert (Telegram-primary
+    chokepoint). Fire-and-forget (detached) so a slow/hung notifier never blocks
+    the render/delivery path; plain text avoids MarkdownV1 underscore mangling of
+    status tokens."""
     try:
-        subprocess.run(
+        subprocess.Popen(
             ["/usr/local/bin/shift-agent-notify-owner", "--priority", "1", message],
-            capture_output=True, text=True, timeout=20,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
         )
     except Exception:
         return

@@ -3005,15 +3005,20 @@ def _render_premium_overlay_with_fallback(project: FlyerProject, source: Path | 
         "output_format": output_format,
         "sys_path": [p for p in sys.path if p],
     }
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as fh:
-        json.dump(spec, fh)
-        spec_path = fh.name
+    spec_path = None
     try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as fh:
+            spec_path = fh.name
+            json.dump(spec, fh)
         proc = subprocess.run(["/usr/bin/python3", "-c", PREMIUM_OVERLAY_RENDERER, spec_path], capture_output=True, text=True, timeout=60)
     except Exception as e:
         return PremiumOverlayOutcome("premium_overlay_failed_unexpected", "subprocess_failure", f"{type(e).__name__}: {e}"[:300], "none", output_format)
     finally:
-        Path(spec_path).unlink(missing_ok=True)
+        if spec_path:
+            try:
+                Path(spec_path).unlink(missing_ok=True)
+            except OSError:
+                pass
     if proc.returncode == 0:
         return PremiumOverlayOutcome("premium_overlay_delivered", "none", in_process_detail[:300], "subprocess", output_format)
     detail = (proc.stderr or proc.stdout or "").strip()
