@@ -254,9 +254,13 @@ proj = FlyerProject.model_validate({
 r._is_food_or_grocery_project = lambda p: True
 r._premium_overlay_enabled = lambda p: True
 r._apply_critical_text_overlay(proj, '$BG', '$OUT', size=(1080, 1350), output_format='concept_preview')
+import importlib.util as _ilu
+venv_has_pil = _ilu.find_spec('PIL') is not None
 out = r.consume_premium_overlay_outcome()
 assert out is not None, 'no premium outcome recorded (premium path did not run)'
 assert out.status == 'premium_overlay_delivered', f'premium did NOT render under gateway venv: {out.status} ({out.reason_class}: {out.reason_detail})'
+if not venv_has_pil:
+    assert out.render_path == 'subprocess', f'expected /usr/bin/python3 escape hatch under PIL-less venv, got render_path={out.render_path}'
 import os
 assert os.path.getsize('$OUT') > 0, 'premium render produced an empty file'
 print('premium renders premium under', sys.executable, 'via', out.render_path)
