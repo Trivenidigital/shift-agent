@@ -697,13 +697,24 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         _seal_cx = width - margin - _seal_r_est
         # Safety clamp: never let the seal overlap the left half of the canvas.
         _seal_cx = max(width // 2 + _seal_r_est + margin, _seal_cx)
-        _seal_box = draw_offer_seal(draw, label=seal_label, price=shared_offer_price,
-                                    width=width, center=(_seal_cx, seal_cy))
-        # Bounds check: seal must sit fully below title_bottom, above menu_top,
-        # and within the horizontal canvas.  If it doesn't fit, skip it and let
-        # the secondary line handle the offer coverage (fail-closed fallback).
-        if (_seal_box[1] >= title_bottom and _seal_box[3] <= menu_top
-                and _seal_box[0] >= 0 and _seal_box[2] <= width):
+        # PREFLIGHT (Codex BLOCKER fix): compute the seal's bounding box from its
+        # centre + radius and verify it fits BEFORE drawing any pixels. Drawing
+        # first and rejecting after would leave stray seal pixels on the flyer
+        # while the secondary line ALSO draws the offer (double-draw). The seal is
+        # a circle of radius _seal_r_est centred at (_seal_cx, seal_cy); a small
+        # pad covers the drop shadow.
+        _shadow_pad = max(4, int(width * 0.006))
+        _pf = (
+            _seal_cx - _seal_r_est,
+            seal_cy - _seal_r_est,
+            _seal_cx + _seal_r_est + _shadow_pad,
+            seal_cy + _seal_r_est + _shadow_pad,
+        )
+        # Fit: fully below title_bottom, above menu_top, within the canvas.
+        if (_pf[1] >= title_bottom and _pf[3] <= menu_top
+                and _pf[0] >= 0 and _pf[2] <= width):
+            draw_offer_seal(draw, label=seal_label, price=shared_offer_price,
+                            width=width, center=(_seal_cx, seal_cy))
             # Ink the label, the price, AND their combined form (the circle
             # stacks label directly above price, so the combined "label price"
             # string is visibly present) — this covers a ``pricing_structure``
@@ -714,8 +725,9 @@ def render_premium_overlay(project, source, target, *, size, output_format):
             if shared_offer_text:
                 _ink(shared_offer_text)
             seal_drawn = True
-        # If the seal did NOT fit, seal_drawn stays False and the secondary
-        # line path will place the offer (see Change 4 below).
+        # If the seal did NOT fit, NO seal pixels were drawn and seal_drawn stays
+        # False — the secondary line path will place the offer (fail-closed
+        # fallback), with no stray seal and no double-draw.
 
     # ===================================================================
     # SECONDARY LINES — facts that no region above placed (offer-without-seal,
