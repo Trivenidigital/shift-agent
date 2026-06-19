@@ -589,42 +589,38 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         _ink(drawn_text)
 
     # ===================================================================
-    # OFFER SEAL — gold pill between the title and the menu (seal mode).
-    # Sized from BOTH label and price; fails over to a secondary line if the
-    # zone is too small.  Only inks label+price when both are fully rendered.
+    # TITLE — Playfair-Black headline, anchored in the UPPER zone just
+    # below the brand/emblem block.  Mirrors compose_A() in the reference
+    # mockup where the title sits at y≈210 (upper third of a 1350-tall
+    # canvas), well above the food hero mid-section.
+    #
+    # Upper band: title_top just below top_zone_bottom; max_height gives
+    # about 32% of canvas height for the headline + rules, keeping the
+    # seal + menu free to float/fill the lower two-thirds.
     # ===================================================================
-    seal_label = (shared_offer_label or "OFFER").strip()
-    seal_planned = layout.offer_mode == "seal" and bool(shared_offer_price)
-    seal_h = 0
-    seal_cy = 0
-    if seal_planned:
-        seal_h = _measure_offer_seal(draw, label=seal_label, price=shared_offer_price, width=width)
-        seal_cy = menu_top - max(16, int(height * 0.018)) - seal_h // 2
-
-    # ===================================================================
-    # TITLE — Playfair-Black headline, anchored above the seal/menu.
-    # ===================================================================
-    title_anchor = (seal_cy - seal_h // 2 if seal_h else menu_top) - max(14, int(height * 0.016))
+    _title_gap   = max(8, int(height * 0.012))         # gap below brand block
+    title_top    = top_zone_bottom + _title_gap         # where title block starts
+    _upper_limit = title_top + max(0, int(height * 0.32) - title_top)  # upper band ceiling
+    title_bottom = title_top  # will be updated below if title is drawn
     if title:
         title_px = max(min_px, int(width * 0.072))
-        # Shrink-to-fit so the headline never collides with the top zone.
+        # Shrink-to-fit within the upper band so the headline never overruns
+        # into the food-hero middle section reserved for the seal.
         title_lines, title_px = _fit_title(
             draw, title, title_px, safe_w, min_px,
-            max_height=title_anchor - top_zone_bottom - 8,
+            max_height=_upper_limit - title_top - 8,
             line_factor=1.0,
         )
         if title_lines is None:
             raise render.FlyerRenderError("premium overlay does not fit")
         title_font = _premium_font("title", title_px)
-        block_h = len(title_lines) * int(title_px * 1.0)
-        ty = title_anchor - block_h
-        if ty < top_zone_bottom:
-            raise render.FlyerRenderError("premium overlay does not fit")
+        ty = title_top
         for ln in title_lines:
             _draw_centered(draw, ln, title_font, cy=ty, width=width,
                            fill=_TITLE_CREAM, shadow_dy=4)
             ty += int(title_px * 1.0)
         _ink(title)
+        title_bottom = ty  # bottom of last title line
 
         # ---------------------------------------------------------------
         # Decorative gold rules flanking the title (Fix C v2 Editorial).
@@ -633,13 +629,13 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         #   d.line((cx+90, rule_y, cx+250,rule_y), fill=GOLD, width=2)
         #   d.ellipse((cx-4,rule_y-4, cx+4,rule_y+4), fill=GOLD)
         # Scale gap (90px) and reach (250px) from the 1080-wide reference.
-        # Placed 8px below the last title line (ty == title_anchor at this
-        # point) so the rules sit just beneath the headline.
+        # Placed 8px below the last title line so the rules sit just
+        # beneath the headline.
         # _EMBLEM_GOLD and cx_top are defined in the TOP ZONE block above.
         # ---------------------------------------------------------------
         _rule_gap   = max(40, int(width * 90 / 1080))   # ≈90px @1080
         _rule_reach = max(80, int(width * 250 / 1080))  # ≈250px @1080
-        _rule_y = ty + 8  # 8px below last title line
+        _rule_y = title_bottom + 8  # 8px below last title line
         _dot_r = 4        # 4px radius dot (8×8 bounding box)
         if _rule_y < height - margin:   # safety: don't draw outside canvas
             # left rule
@@ -658,14 +654,42 @@ def render_premium_overlay(project, source, target, *, size, output_format):
                  cx_top + _dot_r, _rule_y + _dot_r),
                 fill=_EMBLEM_GOLD,
             )
+        title_bottom = _rule_y + _dot_r + 4  # include the rule+dot height
+
+    # ===================================================================
+    # OFFER SEAL — gold circle floating in the right-middle over the food
+    # hero, between the title block (upper) and the menu (lower).
+    #
+    # Change 1: seal_planned is True whenever shared_offer_price is
+    # non-empty, regardless of offer_mode.  The "Any item $7.99" hook must
+    # appear as the prominent visual accent even when items carry per-item
+    # prices (offer_mode=="inline").
+    #
+    # Change 2: seal floats at the vertical MIDPOINT of the gap between
+    # title_bottom (upper anchor) and menu_top (lower anchor), horizontally
+    # right-of-centre — mirroring compose_A() sx=W-175, sy=600.
+    #
+    # Fail-closed: if the seal cannot fit its band (box out-of-bounds), it
+    # is SKIPPED and the offer coverage falls through to the secondary line
+    # (Change 4).  FlyerRenderError is raised only if NEITHER the seal
+    # NOR the secondary line can cover the pricing_structure fact (Change 5).
+    # ===================================================================
+    seal_label = (shared_offer_label or "OFFER").strip()
+    # Change 1: show seal whenever there is a shared offer price — not
+    # gated on layout.offer_mode so "inline" briefs also get the seal.
+    seal_planned = bool(shared_offer_price)
+    seal_drawn = False   # set True only when draw_offer_seal succeeds in bounds
+    seal_h = 0
+    seal_cy = 0
+    if seal_planned:
+        seal_h = _measure_offer_seal(draw, label=seal_label, price=shared_offer_price, width=width)
+        # Change 2: float vertically in the gap between title_bottom and menu_top.
+        seal_cy = (title_bottom + menu_top) // 2
 
     # Draw the seal AFTER the title so its gold border sits cleanly on top.
-    # Placement: upper-right quadrant over the food hero, mirroring compose_A()
-    # in fixc-v2-mockup-generator.py which places the seal at sx=W-175, sy=600
-    # on a 1080×1350 canvas (proportional: cx ≈ width - width*175/1080).
-    # The circle radius sr is max(bw,bh)//2 + pad (≈96px @1080); we offset cx
-    # so the right edge sits at (width - margin), keeping it inside the canvas.
-    # The vertical centre seal_cy is unchanged (between title and menu band).
+    # Placement: right side, mirroring compose_A() which places the seal at
+    # sx=W-175, sy=600 on a 1080×1350 canvas.  We offset cx so the right
+    # edge sits at (width - margin), keeping it inside the canvas.
     if seal_h:
         # seal_h is already the circle diameter (2×sr) returned by
         # _measure_offer_seal, so the radius is simply half of that.
@@ -673,19 +697,25 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         _seal_cx = width - margin - _seal_r_est
         # Safety clamp: never let the seal overlap the left half of the canvas.
         _seal_cx = max(width // 2 + _seal_r_est + margin, _seal_cx)
-        box = draw_offer_seal(draw, label=seal_label, price=shared_offer_price,
-                              width=width, center=(_seal_cx, seal_cy))
-        if box[1] < top_zone_bottom or box[3] > menu_top or box[0] < 0 or box[2] > width:
-            raise render.FlyerRenderError("premium overlay does not fit")
-        # Ink the label, the price, AND their combined form (the pill stacks
-        # label directly above price, so the combined "label price" string is
-        # visibly present) — this covers a ``pricing_structure`` fact whose value
-        # is the whole "Any item ... $7.99" phrase.
-        _ink(seal_label)
-        _ink(shared_offer_price)
-        _ink(f"{seal_label} {shared_offer_price}")
-        if shared_offer_text:
-            _ink(shared_offer_text)
+        _seal_box = draw_offer_seal(draw, label=seal_label, price=shared_offer_price,
+                                    width=width, center=(_seal_cx, seal_cy))
+        # Bounds check: seal must sit fully below title_bottom, above menu_top,
+        # and within the horizontal canvas.  If it doesn't fit, skip it and let
+        # the secondary line handle the offer coverage (fail-closed fallback).
+        if (_seal_box[1] >= title_bottom and _seal_box[3] <= menu_top
+                and _seal_box[0] >= 0 and _seal_box[2] <= width):
+            # Ink the label, the price, AND their combined form (the circle
+            # stacks label directly above price, so the combined "label price"
+            # string is visibly present) — this covers a ``pricing_structure``
+            # fact whose value is the whole "Any item ... $7.99" phrase.
+            _ink(seal_label)
+            _ink(shared_offer_price)
+            _ink(f"{seal_label} {shared_offer_price}")
+            if shared_offer_text:
+                _ink(shared_offer_text)
+            seal_drawn = True
+        # If the seal did NOT fit, seal_drawn stays False and the secondary
+        # line path will place the offer (see Change 4 below).
 
     # ===================================================================
     # SECONDARY LINES — facts that no region above placed (offer-without-seal,
@@ -695,16 +725,21 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     # fix): we draw it only if ALL its wrapped lines fit the band — never
     # partially.  Required lines that cannot fit are caught by the coverage
     # check below (fail-closed); optional extras are simply skipped.
+    #
+    # Change 3: secondary lines now occupy the band BELOW the title block
+    # (title_bottom + gap) up to menu_top.  The seal floats right-of-centre
+    # in the same zone; secondary text is centred and typically short, so
+    # visual overlap is rare and the editorial composition is preserved.
     # ===================================================================
-    secondary_y = top_zone_bottom + max(6, int(height * 0.008))
+    secondary_y = title_bottom + max(6, int(height * 0.008))
     sec_px = max(min_px, int(width * 0.020))
     sec_font = _premium_font("footer", sec_px)
     sec_line_h = int(sec_px * 1.4)
 
     def _draw_secondary(text, *, fill) -> bool:
         """Draw a centred secondary block ONLY if the whole wrapped block fits
-        the band above the title; returns True (and inks it) if drawn, else
-        False with no pixels mutated."""
+        the band between title_bottom and menu_top; returns True (and inks it)
+        if drawn, else False with no pixels mutated."""
         nonlocal secondary_y
         if not text:
             return False
@@ -712,7 +747,7 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         if not lines:
             return False
         block_h = len(lines) * sec_line_h
-        if secondary_y + block_h > title_anchor:
+        if secondary_y + block_h > menu_top:
             return False  # whole block does not fit → draw nothing (no partial)
         for ln in lines:
             _draw_centered(draw, ln, sec_font, cy=secondary_y, width=width, fill=fill, shadow_dy=2)
@@ -724,11 +759,15 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     # must-fit lines.  This is what makes BLOCKER 1 safe: an unknown required
     # fact id (tagline / source_required_text:* / replacement:*:new / future)
     # is rendered rather than silently skipped; if it can't fit, the coverage
-    # check fails closed.  Offer-without-seal and promotion_end flow through the
-    # same path.  Use gold for offer-class facts, cream otherwise.  Item facts
-    # are excluded — they belong to the menu region and their coverage/pairing
-    # is enforced by the final gate (a stray secondary item line would corrupt
-    # the editorial layout).
+    # check fails closed.
+    #
+    # Change 4: offer-class facts are SKIPPED when the seal already drew
+    # them (seal_drawn=True) to avoid a duplicate "Any item $7.99" line.
+    # When the seal DID NOT draw (seal_drawn=False), the offer falls through
+    # to this secondary path as the coverage fallback (Change 5).
+    #
+    # Item facts are excluded — they belong to the menu region and their
+    # coverage/pairing is enforced by the final gate.
     _offer_norm = render._normalize_fact_text(shared_offer_text or f"{seal_label} {shared_offer_price}")
     for fid, label, value in required_facts:
         if re.match(r"^item:\d+:(name|price)$", fid):
@@ -737,6 +776,11 @@ def render_premium_overlay(project, source, target, *, size, output_format):
             continue
         is_offer = fid == "pricing_structure" or fid.startswith("offer:") \
             or render._normalize_fact_text(value) == _offer_norm
+        # Change 4: if the seal drew the offer, skip the secondary offer line
+        # to avoid duplication.  If the seal did NOT draw (seal_drawn=False),
+        # allow the secondary to handle it so the offer stays covered.
+        if is_offer and seal_drawn:
+            continue  # seal already covers this; do NOT double-draw
         _draw_secondary(value, fill=_GOLD if is_offer else _CREAM_SOFT)
 
     # Best-effort optional extras: assembly detail clauses that are NOT required
