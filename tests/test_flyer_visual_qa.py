@@ -3035,6 +3035,19 @@ def test_schedule_dropped_comma_matches():
     ocr = _normalize_text_for_match("saturday and sunday 4 pm-8 pm")  # OCR dropped the comma
     assert _value_present_in(ocr, "Saturday & Sunday, 4 PM–8 PM", schedule_match=True) is True
 
+
+def test_normalize_soft_text_keeps_range_vs_list_distinct():
+    from agents.flyer.visual_qa import _normalize_soft_text as N
+    assert N("Mon-Fri") != N("Mon, Fri")                 # range (dash) != list (comma)
+    assert N("4 PM–8 PM") == N("4 PM-8 PM")              # dash typographic variants equal
+    assert N("Saturday & Sunday, 4 PM–8 PM") == N("Saturday and Sunday 4 PM-8 PM")  # dropped list comma still folds
+
+
+def test_schedule_range_vs_list_still_fails():
+    from agents.flyer.visual_qa import _value_present_in, _normalize_text_for_match
+    # locked LIST "Mon, Fri" must NOT be satisfied by OCR RANGE "Mon-Fri"
+    assert _value_present_in(_normalize_text_for_match("mon-fri 9 am-5 pm"), "Mon, Fri 9 AM-5 PM", schedule_match=True) is False
+
 def test_schedule_endash_matches_hyphen_ocr():
     from agents.flyer.visual_qa import _value_present_in, _normalize_text_for_match
     ocr = _normalize_text_for_match("lakshmi's kitchen weekend specials saturday & sunday, 4 pm-8 pm")
