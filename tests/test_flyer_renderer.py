@@ -5342,3 +5342,18 @@ def test_deterministic_recovery_project_prompt_is_textless_without_force(monkeyp
     assert "Create exactly" not in prompt
     assert not re.search(r"-\s+\w[\w &'-]* - \$", prompt), "priced item row leaked for recovered project"
     assert ("do NOT render them as text" in prompt) or ("decorative BACKGROUND" in prompt)
+
+
+def test_background_only_prompt_requests_food_hero_no_people(monkeypatch):
+    from agents.flyer import render as r
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    p = _f0174_integrated_project()  # existing helper in this file
+    tok = r._FORCE_BACKGROUND_ONLY.set(True)
+    try:
+        prompt = r.build_image_generation_prompt(p, concept_id="C1", output_format="concept_preview", size=(1080, 1350), force_background_only=True)
+    finally:
+        r._FORCE_BACKGROUND_ONLY.reset(tok)
+    low = prompt.lower()
+    assert "no people" in low and ("no faces" in low or "no hands" in low)
+    assert "close-up" in low or "hero" in low
+    assert ("do not draw any text" in low) or ("do not render" in low)  # text guarantee retained

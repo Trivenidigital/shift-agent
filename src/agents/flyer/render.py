@@ -1211,6 +1211,10 @@ def _poster_layout_requirements(project: FlyerProject, *, force_background_only:
             "composited afterwards into overlay panels.\n"
             "- Reserve visually calm, low-detail zones in the upper-left and along the bottom for "
             "those overlay panels; keep the rich hero imagery in the center and right.\n"
+            "- Compose a FOOD-HERO background: one large, appetizing close-up of the dish(es) as the "
+            "clear subject, with dramatic appetizing lighting and rich depth of field on an elegant "
+            "surface. No people, no faces, no hands, no diners, no family scene, no buffet, no generic "
+            "restaurant scene — the food itself is the hero.\n"
         )
         if _style_only_reference_requested(project):
             reserve += (
