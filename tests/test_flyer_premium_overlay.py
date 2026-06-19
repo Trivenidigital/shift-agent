@@ -376,6 +376,14 @@ def test_v2_title_renders_with_rules(tmp_path):
     assert Image.open(out).size == (1080, 1350)
 
 
+def test_v2_offer_seal_renders_and_offer_covered(tmp_path):
+    from agents.flyer import premium_overlay as po
+    out = tmp_path / "o.png"
+    # _v2_project_6item has a shared "Any item $7.99" offer; no FlyerRenderError == offer covered
+    po.render_premium_overlay(_v2_project_6item(), _v2_solid_bg(tmp_path), out, size=(1080,1350), output_format="concept_preview")
+    assert out.exists()
+
+
 def test_combo_renders_item_prices(tmp_path):
     """NOT-FIXED#2: a 2-item combo WITH locked item prices must VISIBLY render
     each price (name+price pair), not assume it covered. Render succeeds only if

@@ -231,31 +231,98 @@ def _seal_geometry(draw, *, label, price, width):
 
 
 def _measure_offer_seal(draw, *, label, price, width):
-    """Return the seal pill height for the given label+price (for layout)."""
-    _bw, bh, *_rest = _seal_geometry(draw, label=label, price=price, width=width)
-    return bh
+    """Return the seal DIAMETER for the given label+price (for layout).
+
+    The seal is now a circle whose radius is ``max(bw, bh) // 2 + pad``;
+    this function returns the full diameter (2 × sr) so that callers
+    (``render_premium_overlay``) reserve the correct vertical band for the
+    seal and correctly position ``seal_cy`` and ``title_anchor``."""
+    bw, bh, *_rest = _seal_geometry(draw, label=label, price=price, width=width)
+    sr = max(bw, bh) // 2 + max(8, int(width * 0.010))
+    return sr * 2
 
 
 def draw_offer_seal(draw, *, label, price, width, center):
-    """Draw a gold-bordered offer pill (label over price) centred at `center`.
+    """Draw a prominent maroon+gold circular seal (label / price / "EACH") centred
+    at ``center`` — the Editorial Luxury focal element (Fix C v2).
 
-    The pill is sized from BOTH the label and the price (widest of the two,
-    label wrapped as needed) so a long label is never clipped.  Returns the
-    seal bounding box ``(x0, y0, x1, y1)``."""
+    Geometry: a circle whose radius is derived from the existing ``_seal_geometry``
+    sizing (keeps the label+price fit invariant).  Palette mirrors compose_A() in
+    fixc-v2-mockup-generator.py: maroon fill (120,24,28), GOLD ring (208,178,110),
+    IVORY price text (244,240,232).
+
+    Three text lines inside the circle, top→bottom:
+      • label   — letter-spaced small-caps (Cormorant / kicker font)  GOLD
+      • price   — large display (Playfair-Black / offer_price font)   IVORY
+      • "EACH"  — letter-spaced small-caps (Cormorant / kicker font)  GOLD
+
+    Returns the seal bounding box ``(x0, y0, x1, y1)``."""
+    _SEAL_MAROON = (120, 24, 28, 255)        # maroon fill — compose_A reference
+    _SEAL_GOLD   = (208, 178, 110, 255)      # GOLD — compose_A reference
+    _SEAL_IVORY  = (244, 240, 232, 255)      # IVORY — compose_A reference
+    _SEAL_SHADOW = (0, 0, 0, 120)            # drop shadow behind the circle
+
     bw, bh, label_lines, lf, pf, pw, ph, pad_x, pad_y, gap, label_h = _seal_geometry(
         draw, label=label, price=price, width=width
     )
     cx, cy = center
-    x0, y0 = cx - bw // 2, cy - bh // 2
-    x1, y1 = x0 + bw, y0 + bh
-    draw.rounded_rectangle((x0 + 5, y0 + 5, x1 + 5, y1 + 5), radius=22, fill=(0, 0, 0, 90))
-    draw.rounded_rectangle((x0, y0, x1, y1), radius=22, fill=(20, 8, 4, 150), outline=(236, 200, 115, 255), width=3)
-    ly = y0 + pad_y
-    for ln in label_lines:
-        ll, lt, lr, lb = draw.textbbox((0, 0), ln, font=lf)
-        draw.text((cx - (lr - ll) // 2, ly), ln, font=lf, fill=(240, 226, 196, 255))
-        ly += int(lf.size * 1.18)
-    draw.text((cx - pw // 2, y1 - ph - pad_y), price, font=pf, fill=(255, 233, 184, 255))
+    # Radius: half the larger dimension of the sized pill, with a minimum so
+    # the circle never collapses to a tiny dot.  The bounding box is square
+    # (2r × 2r) — larger than the pill when the pill is taller than it is wide.
+    sr = max(bw, bh) // 2 + max(8, int(width * 0.010))
+
+    x0, y0 = cx - sr, cy - sr
+    x1, y1 = cx + sr, cy + sr
+
+    # Drop shadow (offset 5,5 so the circle lifts off the food background).
+    draw.ellipse((x0 + 5, y0 + 5, x1 + 5, y1 + 5), fill=_SEAL_SHADOW)
+    # Maroon fill + gold ring — compose_A: fill=(120,24,28) outline=GOLD width=4
+    draw.ellipse((x0, y0, x1, y1), fill=_SEAL_MAROON, outline=_SEAL_GOLD, width=4)
+
+    # --- text layout inside the circle ---
+    # Vertical rhythm (mirrors compose_A offsets scaled from the 1080 reference):
+    #   label  at  cy - 58   (scaled: ~0.054 × height_1350)
+    #   price  at  cy - 28   (scaled: ~0.026 × height_1350)
+    #   "EACH" at  cy + 46   (scaled: ~0.034 × height_1350)
+    # We reproduce the offsets proportionally from the half-radius so they always
+    # sit inside the circle regardless of the actual sr.
+    label_cy_off  = int(sr * 0.60)   # label  top above cy
+    price_cy_off  = int(sr * 0.29)   # price  top above cy
+    each_cy_off   = int(sr * 0.48)   # "EACH" top below  cy
+
+    # Letter-spaced label (character-by-character, like center_spaced in compose_A).
+    def _draw_letter_spaced(text, font, fill, y_top, extra=4):
+        """Draw letter-spaced text centred at cx; returns nothing."""
+        chars = list(text.upper())
+        total_w = sum(
+            (draw.textbbox((0, 0), ch, font=font)[2] - draw.textbbox((0, 0), ch, font=font)[0]) + extra
+            for ch in chars
+        ) - extra
+        x = cx - total_w // 2
+        for ch in chars:
+            bl, bt, br, bb = draw.textbbox((0, 0), ch, font=font)
+            # shadow
+            draw.text((x + 1 - bl, y_top + 1 - bt), ch, font=font, fill=_SEAL_SHADOW)
+            draw.text((x - bl, y_top - bt), ch, font=font, fill=fill)
+            x += (br - bl) + extra
+
+    # Label — letter-spaced, GOLD, above price.
+    for i, ln in enumerate(label_lines):
+        _draw_letter_spaced(ln, lf, _SEAL_GOLD,
+                            cy - label_cy_off + i * int(lf.size * 1.18))
+
+    # Price — centred, IVORY, large Playfair-Black.
+    pl, pt, pr, pb = draw.textbbox((0, 0), price, font=pf)
+    _pw, _ph = pr - pl, pb - pt
+    price_x = cx - _pw // 2 - pl
+    price_y = cy - price_cy_off - pt
+    draw.text((price_x + 2, price_y + 2), price, font=pf, fill=_SEAL_SHADOW)
+    draw.text((price_x, price_y), price, font=pf, fill=_SEAL_IVORY)
+
+    # "EACH" — letter-spaced, GOLD, below price.
+    each_font = lf   # same kicker/Cormorant font at the same size
+    _draw_letter_spaced("EACH", each_font, _SEAL_GOLD, cy + each_cy_off)
+
     return (x0, y0, x1, y1)
 
 
@@ -593,9 +660,21 @@ def render_premium_overlay(project, source, target, *, size, output_format):
             )
 
     # Draw the seal AFTER the title so its gold border sits cleanly on top.
+    # Placement: upper-right quadrant over the food hero, mirroring compose_A()
+    # in fixc-v2-mockup-generator.py which places the seal at sx=W-175, sy=600
+    # on a 1080×1350 canvas (proportional: cx ≈ width - width*175/1080).
+    # The circle radius sr is max(bw,bh)//2 + pad (≈96px @1080); we offset cx
+    # so the right edge sits at (width - margin), keeping it inside the canvas.
+    # The vertical centre seal_cy is unchanged (between title and menu band).
     if seal_h:
+        # seal_h is already the circle diameter (2×sr) returned by
+        # _measure_offer_seal, so the radius is simply half of that.
+        _seal_r_est = seal_h // 2
+        _seal_cx = width - margin - _seal_r_est
+        # Safety clamp: never let the seal overlap the left half of the canvas.
+        _seal_cx = max(width // 2 + _seal_r_est + margin, _seal_cx)
         box = draw_offer_seal(draw, label=seal_label, price=shared_offer_price,
-                              width=width, center=(width // 2, seal_cy))
+                              width=width, center=(_seal_cx, seal_cy))
         if box[1] < top_zone_bottom or box[3] > menu_top or box[0] < 0 or box[2] > width:
             raise render.FlyerRenderError("premium overlay does not fit")
         # Ink the label, the price, AND their combined form (the pill stacks
