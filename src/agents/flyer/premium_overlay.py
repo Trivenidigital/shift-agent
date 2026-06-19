@@ -430,33 +430,57 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     safe_w = width - margin * 2
 
     # ===================================================================
-    # TOP ZONE — kicker + gold rule + masthead (brand)
+    # TOP ZONE — editorial brand lockup: emblem ring + monogram + brand
+    #   Mirrors compose_A() in fixc-v2-mockup-generator.py:
+    #     • gold ellipse ring (cx±34, top 56→124 in a 1080×1350 canvas)
+    #     • monogram (brand initials) centred in the ring — Playfair-Black
+    #     • brand name below in letter-spaced small-caps — Cormorant/masthead
+    #   Palette: GOLD=(208,178,110,255)  IVORY=(244,240,232,255) (approved mockup)
+    #   Replaces old kicker + hairline; brand is still `_ink`'d (coverage kept).
     # ===================================================================
-    y = int(height * 0.045)
-    kicker_px = max(min_px, int(width * 0.020))
-    kicker_font = _premium_font("kicker", kicker_px)
-    # Decorative tracked all-caps kicker (never a required fact — required facts
-    # are drawn in their own zones). Uses the project category cue if present.
-    kicker_text = _editorial_kicker(project, render)
-    if kicker_text:
-        spaced = "  ".join(kicker_text.upper().split())
-        _draw_centered(draw, spaced, kicker_font, cy=y, width=width,
-                       fill=_GOLD, shadow_dy=2)
-        _ink(kicker_text)
-        y += int(kicker_px * 1.5)
+    _EMBLEM_GOLD  = (208, 178, 110, 255)   # approved mockup gold (≠ legacy _GOLD)
+    _EMBLEM_IVORY = (244, 240, 232, 255)   # approved mockup ivory
 
-    _draw_gold_rule(draw, cy=y, width=width)
-    y += max(10, int(height * 0.012))
+    cx_top = width // 2
+    # Scale ring geometry from the 1080-wide mockup reference.
+    ring_half = max(28, int(width * 0.0315))   # ≈34px @1080
+    ring_top  = int(height * 0.0415)           # ≈56px @1350
+    ring_bot  = ring_top + ring_half * 2       # ≈124px @1350 (height=68px)
 
+    draw.ellipse(
+        (cx_top - ring_half, ring_top, cx_top + ring_half, ring_bot),
+        outline=_EMBLEM_GOLD,
+        width=3,
+    )
+
+    # Monogram: Playfair-Black at ~38px; centred vertically inside the ring.
+    mono_px  = max(min_px, int(width * 0.0352))   # ≈38px @1080
+    mono_font = _premium_font("title", mono_px)    # "title" role → PlayfairDisplay-Black
+    monogram  = _brand_monogram(business) if business else ""
+    if monogram:
+        mono_cy = ring_top + (ring_bot - ring_top - mono_px) // 2
+        _draw_centered(draw, monogram, mono_font,
+                       cy=mono_cy, width=width,
+                       fill=_EMBLEM_GOLD, shadow=None)
+
+    # Brand name: letter-spaced small-caps below the ring.
+    y = ring_bot + max(10, int(height * 0.010))
     if business:
-        mast_px = max(min_px, int(width * 0.046))
-        mast_lines = _wrap_premium(draw, _spaced_caps(business), "masthead", mast_px, safe_w)
-        # Masthead is uppercased + letter-spaced; log the ORIGINAL value so the
-        # coverage check matches the locked fact regardless of case/spacing.
-        for ln in mast_lines:
-            _draw_centered(draw, ln, _premium_font("masthead", mast_px),
-                           cy=y, width=width, fill=_CREAM)
-            y += int(mast_px * 1.18)
+        brand_px   = max(min_px, int(width * 0.0315))   # ≈34px @1080
+        brand_font = _premium_font("masthead", brand_px)
+        brand_text = _spaced_caps(business)
+        # Inline letter-spacing: interleave extra thin spaces between characters
+        # to replicate the `center_spaced(..., extra=6)` effect in compose_A.
+        brand_spaced = " ".join(brand_text)        # thin space ≈ CSS letter-spacing
+        brand_lines  = _wrap_premium(draw, brand_spaced, "masthead", brand_px, safe_w)
+        for ln in brand_lines:
+            _draw_centered(draw, ln, brand_font,
+                           cy=y, width=width,
+                           fill=_EMBLEM_IVORY, shadow_dy=2)
+            y += int(brand_px * 1.18)
+        # INVARIANT: log the ORIGINAL business value so the coverage ledger
+        # (_covered / _value_present_in) sees the locked fact regardless of the
+        # display transformation (upper-casing, thin-space insertion, wrapping).
         _ink(business)
     top_zone_bottom = y
 
@@ -666,6 +690,27 @@ def render_premium_overlay(project, source, target, *, size, output_format):
 
 
 # --- Template-A draw/measure helpers ---------------------------------------
+
+def _brand_monogram(business: str) -> str:
+    """Return the 1–2 capital initials used in the emblem ring above the brand name.
+
+    Takes the first letter of each of the first two words (after stripping
+    non-alpha characters) in upper-case.  Single-word brands get a single
+    initial.  Short noise fragments from apostrophe-stripping (e.g. "s" in
+    "Lakshmi's") are excluded by requiring words of 2+ characters.
+
+    Examples:
+        "Lakshmi's Kitchen" → "LK"
+        "Dosa"              → "D"
+        "Taj Mahal Grill"   → "TM"
+    """
+    import re as _re
+    words = [w for w in _re.sub(r"[^A-Za-z ]", " ", business or "").split()
+             if len(w) >= 2]
+    if not words:
+        return ((business or "").strip()[:1] or "·").upper()
+    return "".join(w[0] for w in words[:2]).upper()
+
 
 def _spaced_caps(text: str) -> str:
     """Upper-case + single-space normalize for masthead letter-spacing feel."""

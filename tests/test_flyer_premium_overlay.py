@@ -627,6 +627,13 @@ def test_apply_critical_text_overlay_flat_premium_import(tmp_path, monkeypatch):
     assert called == {"premium": 1, "legacy": 0}   # flat import resolved -> premium ran
 
 
+def test_brand_monogram_from_business():
+    from agents.flyer import premium_overlay as po
+    assert po._brand_monogram("Lakshmi's Kitchen") == "LK"
+    assert po._brand_monogram("Dosa") == "D"
+    assert po._brand_monogram("Taj Mahal Grill") == "TM"
+
+
 @pytest.mark.skipif(not os.environ.get("OPENROUTER_API_KEY"),
                     reason="referee needs OPENROUTER_API_KEY (vision QA) — run on the box")
 def test_premium_overlay_passes_referee(tmp_path):
