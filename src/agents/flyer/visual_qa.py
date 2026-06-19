@@ -109,6 +109,36 @@ def _normalize_text_for_match(text: str) -> str:
     return lowered
 
 
+def _normalize_soft_text(text: str) -> str:
+    """Formatting-equivalence normalizer for SCHEDULE + descriptive text ONLY.
+    Builds on _normalize_text_for_match and additionally folds punctuation/
+    spacing/abbreviation/accents that OCR varies — WITHOUT touching content
+    (digits, currency, day tokens, distinct words). NEVER used for price/phone
+    value comparison; business identity safety remains the _is_brand_typo gate.
+
+    Order + the hyphen distinction matter: a dash means RANGE ("4-8", "Mon-Fri")
+    and a comma means LIST ("Mon, Fri") — these are DIFFERENT facts and must not
+    be merged. So dash VARIANTS (en/em/minus/hyphen) fold to a single canonical
+    hyphen (typographic equivalence of the range marker), while every OTHER
+    punctuation char (comma, colon, `!`, period, middle-dot, …) folds to a space.
+    Thus "Mon-Fri" (range) and "Mon, Fri" (list) stay distinct, but "4 PM–8 PM"
+    matches "4 PM-8 PM". This cannot equate different CONTENT — distinct
+    words/digits/day-tokens still differ and `_text_value_present_in`'s word
+    boundaries still hold (Idli≠Idlisugar)."""
+    import unicodedata
+    s = _normalize_text_for_match(text)
+    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+    s = s.replace("&", " and ")
+    s = re.sub(r"\b([ap])\.m\.?", r"\1m", s)        # p.m./a.m. → pm/am (before period strip)
+    for d in "–—−‐":                                # en, em, minus, hyphen → canonical "-" (RANGE marker kept)
+        s = s.replace(d, "-")
+    s = re.sub(r"[^a-z0-9 -]+", " ", s)             # OTHER punctuation (comma, colon, !, period, ·) → space; hyphen kept
+    s = re.sub(r"\s*-\s*", "-", s)                  # collapse spaces around the range hyphen ("4 pm - 8 pm" → "4 pm-8 pm")
+    s = re.sub(r"(\d)\s+([ap]m)\b", r"\1\2", s)     # "4 pm" → "4pm"
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 def _looks_like_phone(value: str) -> bool:
     # Raised lower bound from 7 → 10 digits so short SKUs / order numbers can't
     # be treated as phones (the digits-only path is too permissive for 7-digit
@@ -475,8 +505,8 @@ def _address_value_present_in(normalized_text: str, fact_value: str) -> bool:
 
 
 def _schedule_value_present_in(normalized_text: str, fact_value: str) -> bool:
-    normalized_schedule_text = _normalize_text_for_match(normalized_text)
-    normalized_schedule_value = _normalize_text_for_match(fact_value)
+    normalized_schedule_text = _normalize_soft_text(normalized_text)
+    normalized_schedule_value = _normalize_soft_text(fact_value)
     if _text_value_present_in(normalized_schedule_text, normalized_schedule_value):
         return True
     match = re.fullmatch(
@@ -528,8 +558,9 @@ def _value_present_in(
         return _schedule_value_present_in(normalized_text, fact_value)
     if price_match:
         return _price_value_present_in(normalized_text, fact_value)
-    normalized_value = _normalize_text_for_match(fact_value)
-    return _text_value_present_in(normalized_text, normalized_value)
+    soft_text = _normalize_soft_text(normalized_text)
+    soft_value = _normalize_soft_text(fact_value)
+    return _text_value_present_in(soft_text, soft_value)
 
 
 def _tokens_present(normalized_text: str, value: str) -> bool:

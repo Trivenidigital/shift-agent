@@ -3006,6 +3006,60 @@ def test_placeholder_re_extracted_text_check_unchanged(tmp_path):
     assert any("placeholder" in b for b in report.blockers)
 
 
+def test_normalize_soft_text_folds_formatting():
+    from agents.flyer.visual_qa import _normalize_soft_text as N
+    assert N("4 PM–8 PM") == N("4 PM-8 PM") == N("4 PM — 8 PM")
+    assert N("Saturday & Sunday") == N("Saturday and Sunday")
+    assert N("4 PM") == N("4 p.m.") == N("4PM") == N("4pm")
+    assert N("WEEKEND   SPECIALS") == N("Weekend Specials")
+    assert N("Café") == N("Cafe")
+
+
+def test_normalize_soft_text_preserves_content():
+    from agents.flyer.visual_qa import _normalize_soft_text as N
+    assert N("Saturday") != N("Sunday")
+    assert N("4 PM-8 PM") != N("4 PM-9 PM")
+    assert N("Idli") != N("Idli Sambar")
+
+
+
+def test_normalize_soft_text_folds_general_punctuation():
+    from agents.flyer.visual_qa import _normalize_soft_text as N
+    assert N("Saturday & Sunday, 4 PM–8 PM") == N("Saturday and Sunday 4 PM-8 PM")  # dropped comma
+    assert N("Weekend Specials!") == N("Weekend Specials")
+    assert N("Open: 4 PM") == N("Open 4 PM")
+
+
+def test_schedule_dropped_comma_matches():
+    from agents.flyer.visual_qa import _value_present_in, _normalize_text_for_match
+    ocr = _normalize_text_for_match("saturday and sunday 4 pm-8 pm")  # OCR dropped the comma
+    assert _value_present_in(ocr, "Saturday & Sunday, 4 PM–8 PM", schedule_match=True) is True
+
+
+def test_normalize_soft_text_keeps_range_vs_list_distinct():
+    from agents.flyer.visual_qa import _normalize_soft_text as N
+    assert N("Mon-Fri") != N("Mon, Fri")                 # range (dash) != list (comma)
+    assert N("4 PM–8 PM") == N("4 PM-8 PM")              # dash typographic variants equal
+    assert N("Saturday & Sunday, 4 PM–8 PM") == N("Saturday and Sunday 4 PM-8 PM")  # dropped list comma still folds
+
+
+def test_schedule_range_vs_list_still_fails():
+    from agents.flyer.visual_qa import _value_present_in, _normalize_text_for_match
+    # locked LIST "Mon, Fri" must NOT be satisfied by OCR RANGE "Mon-Fri"
+    assert _value_present_in(_normalize_text_for_match("mon-fri 9 am-5 pm"), "Mon, Fri 9 AM-5 PM", schedule_match=True) is False
+
+def test_schedule_endash_matches_hyphen_ocr():
+    from agents.flyer.visual_qa import _value_present_in, _normalize_text_for_match
+    ocr = _normalize_text_for_match("lakshmi's kitchen weekend specials saturday & sunday, 4 pm-8 pm")
+    assert _value_present_in(ocr, "Saturday & Sunday, 4 PM–8 PM", schedule_match=True) is True
+
+
+def test_descriptive_text_amp_and_accent_match():
+    from agents.flyer.visual_qa import _value_present_in, _normalize_text_for_match
+    ocr = _normalize_text_for_match("grand cafe and grill weekend")
+    assert _value_present_in(ocr, "Grand Café & Grill") is True
+
+
 def test_brand_blocker_name_parses_live_format():
     from agents.flyer.visual_qa import brand_blocker_name
     assert brand_blocker_name("visible wrong business/brand: Laksmi'S Kitchen") == "Laksmi'S Kitchen"
@@ -3045,3 +3099,78 @@ def test_is_own_brand_variant_false_when_no_registered_brand():
         original_message_id="m", raw_request="x", locked_facts=[],
     )
     assert is_own_brand_variant("Anything", proj) is False
+
+
+# ---------- TASK 4: F0176 regression anchor ----------
+
+
+def test_f0176_endash_schedule_replay():
+    # F0176 (2026-06-19): fact had en-dash "4 PM–8 PM"; OCR returned hyphen → was a false manual.
+    from agents.flyer.visual_qa import _value_present_in, _normalize_text_for_match
+    ocr = _normalize_text_for_match(
+        "lakshmi's kitchen weekend specials saturday & sunday, 4 pm-8 pm "
+        "any item $7.99 idli $7.99 90 brybar dr st johns fl +17329837841"
+    )
+    assert _value_present_in(ocr, "Saturday & Sunday, 4 PM–8 PM", schedule_match=True) is True
+
+
+# ---------- TASK 5: formatting-equivalence pass (same meaning → pass) ----------
+
+import pytest
+
+
+@pytest.mark.parametrize("fact, ocr", [
+    ("Saturday & Sunday, 4 PM–8 PM", "saturday and sunday, 4 pm-8 pm"),
+    ("Mon–Fri 9 AM–5 PM",            "mon-fri 9 am-5 pm"),
+    ("4 p.m. to 8 p.m.",             "4 pm to 8 pm"),
+    ("Open 4PM",                     "open 4 pm"),
+])
+def test_schedule_formatting_variants_pass(fact, ocr):
+    from agents.flyer.visual_qa import _value_present_in as _V, _normalize_text_for_match as _Nt
+    assert _V(_Nt(ocr), fact, schedule_match=True) is True
+
+
+@pytest.mark.parametrize("fact, ocr", [
+    ("Grand Café & Grill", "grand cafe and grill"),
+    ("WEEKEND  SPECIALS",  "weekend specials"),
+])
+def test_descriptive_formatting_variants_pass(fact, ocr):
+    from agents.flyer.visual_qa import _value_present_in as _V, _normalize_text_for_match as _Nt
+    assert _V(_Nt(ocr), fact) is True
+
+
+# ---------- TASK 6: real-difference-still-fails + safety-strict ----------
+
+
+def test_schedule_wrong_day_or_time_fails():
+    from agents.flyer.visual_qa import _value_present_in as _V, _normalize_text_for_match as _Nt
+    assert _V(_Nt("friday & saturday, 4 pm-8 pm"), "Saturday & Sunday, 4 PM–8 PM", schedule_match=True) is False
+    assert _V(_Nt("saturday & sunday, 4 pm-9 pm"), "Saturday & Sunday, 4 PM–8 PM", schedule_match=True) is False
+
+
+def test_price_strict_unchanged():
+    from agents.flyer.visual_qa import _value_present_in as _V, _normalize_text_for_match as _Nt
+    assert _V(_Nt("dosa $9.99"), "$7.99", price_match=True) is False
+    assert _V(_Nt("dosa 7.99"),  "$7.99", price_match=True) is False  # currency dropped
+
+
+def test_phone_strict_unchanged():
+    from agents.flyer.visual_qa import _value_present_in as _V, _normalize_text_for_match as _Nt
+    assert _V(_Nt("call +1 732 983 7842"), "+17329837841", phone_match=True) is False  # wrong digit
+
+
+def test_descriptive_word_boundary_unchanged():
+    from agents.flyer.visual_qa import _value_present_in as _V, _normalize_text_for_match as _Nt
+    assert _V(_Nt("idlisugar special"), "Idli") is False  # no substring false-positive
+
+
+def test_business_identity_gate_unchanged():
+    from agents.flyer.visual_qa import is_own_brand_variant
+    proj = FlyerProject(
+        project_id="F0001", status="intake_started", customer_phone="+17329837841",
+        created_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        original_message_id="m", raw_request="x",
+        locked_facts=[FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile")],
+    )
+    assert is_own_brand_variant("Triveni Indian Cafe & Bakery", proj) is False
