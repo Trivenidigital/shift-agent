@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,6 +31,7 @@ from schemas import (  # noqa: E402
     FlyerIntegratedPassed,
     FlyerIntegratedRefereeUnavailableFallback,
     FlyerManualReview,
+    FlyerPremiumOverlayOutcome,
     FlyerPremiumRepairAttempted,
     FlyerPremiumRepairExhausted,
     FlyerPremiumRepairSkipped,
@@ -60,9 +62,9 @@ try:
 except ImportError:
     from agents.flyer.reference_extract import build_reference_extraction_provider, extract_reference  # noqa: E402
 try:
-    from flyer_render import FlyerRenderError, _deterministic_recovery_enabled, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_repair_edit, render_source_edit_preview  # type: ignore  # noqa: E402
+    from flyer_render import FlyerRenderError, _deterministic_recovery_enabled, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, consume_premium_overlay_outcome, next_asset_number, premium_outcome_should_alert, render_concept_previews, render_repair_edit, render_source_edit_preview  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import FlyerRenderError, _deterministic_recovery_enabled, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, next_asset_number, render_concept_previews, render_repair_edit, render_source_edit_preview  # noqa: E402
+    from agents.flyer.render import FlyerRenderError, _deterministic_recovery_enabled, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, consume_premium_overlay_outcome, next_asset_number, premium_outcome_should_alert, render_concept_previews, render_repair_edit, render_source_edit_preview  # noqa: E402
 try:
     from flyer_visual_qa import brand_blocker_name, is_own_brand_variant, run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
 except ImportError:
@@ -433,6 +435,43 @@ def _audit_append(path: Path, entry) -> None:
     except Exception:
         # Audit rows must not block the existing manual-review fail-closed path.
         return
+
+
+def _alert_owner(message: str) -> None:
+    """Best-effort plain-text operator alert (Telegram-primary chokepoint).
+    Never blocks rendering/delivery; plain text avoids MarkdownV1 underscore
+    mangling of status tokens."""
+    try:
+        subprocess.run(
+            ["/usr/local/bin/shift-agent-notify-owner", "--priority", "1", message],
+            capture_output=True, text=True, timeout=20,
+        )
+    except Exception:
+        return
+
+
+def _emit_premium_overlay_outcome(audit_log_path: Path, project) -> None:
+    """Consume the premium overlay outcome recorded during the last render and
+    make it explicit: one decisions.log row always; an operator alert ONLY for
+    unrecovered unexpected failures. No-op when premium did not run."""
+    outcome = consume_premium_overlay_outcome()
+    if outcome is None:
+        return
+    _audit_append(audit_log_path, FlyerPremiumOverlayOutcome(
+        ts=datetime.now(timezone.utc),
+        project_id=project.project_id,
+        project_version=project.version,
+        status=outcome.status,
+        reason_class=outcome.reason_class,
+        reason_detail=outcome.reason_detail,
+        render_path=outcome.render_path,
+        output_format=outcome.output_format,
+    ))
+    if premium_outcome_should_alert(outcome):
+        _alert_owner(
+            (f"Flyer premium overlay FAILED unexpectedly ({project.project_id}): "
+             f"{outcome.reason_class} - premium shipped FLAT. Detail: {outcome.reason_detail}")[:900]
+        )
 
 
 def _load_autorepair_store(path: Path) -> FlyerAutoRepairAttemptStore:
@@ -882,6 +921,7 @@ def main() -> int:
                         quality=draft_provider.quality,
                         concept_count=cfg.flyer.concept_count,
                     )
+                    _emit_premium_overlay_outcome(audit_log_path, project)
                     break
                 except Exception as exc:
                     detail_lower = str(exc).lower()
@@ -919,6 +959,7 @@ def main() -> int:
                                 quality=draft_provider.quality,
                                 concept_count=cfg.flyer.concept_count,
                             )
+                            _emit_premium_overlay_outcome(audit_log_path, project)
                         except Exception:
                             specs = []
                         if specs:
