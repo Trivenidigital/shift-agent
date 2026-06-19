@@ -3022,6 +3022,19 @@ def test_normalize_soft_text_preserves_content():
     assert N("Idli") != N("Idli Sambar")
 
 
+
+def test_normalize_soft_text_folds_general_punctuation():
+    from agents.flyer.visual_qa import _normalize_soft_text as N
+    assert N("Saturday & Sunday, 4 PM–8 PM") == N("Saturday and Sunday 4 PM-8 PM")  # dropped comma
+    assert N("Weekend Specials!") == N("Weekend Specials")
+    assert N("Open: 4 PM") == N("Open 4 PM")
+
+
+def test_schedule_dropped_comma_matches():
+    from agents.flyer.visual_qa import _value_present_in, _normalize_text_for_match
+    ocr = _normalize_text_for_match("saturday and sunday 4 pm-8 pm")  # OCR dropped the comma
+    assert _value_present_in(ocr, "Saturday & Sunday, 4 PM–8 PM", schedule_match=True) is True
+
 def test_schedule_endash_matches_hyphen_ocr():
     from agents.flyer.visual_qa import _value_present_in, _normalize_text_for_match
     ocr = _normalize_text_for_match("lakshmi's kitchen weekend specials saturday & sunday, 4 pm-8 pm")
