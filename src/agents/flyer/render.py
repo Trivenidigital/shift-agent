@@ -20,6 +20,7 @@ import mimetypes
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -146,6 +147,39 @@ DETERMINISTIC_MODEL_NAMES = {"", "deterministic-renderer", "pillow", "local-pill
 _FORCE_BACKGROUND_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "flyer_force_background_only", default=False
 )
+
+
+@dataclass
+class PremiumOverlayOutcome:
+    """How a single premium-enabled render resolved (set on a ContextVar, read
+    by the generate-flyer-concepts chokepoint). status/reason_class map 1:1 to
+    the FlyerPremiumOverlayOutcome audit variant."""
+    status: str          # premium_overlay_delivered | premium_overlay_degraded_to_flat | premium_overlay_failed_unexpected
+    reason_class: str    # none|fit|coverage|overflow|missing_pil|import_error|subprocess_failure|runtime_exception|serialization_error
+    reason_detail: str
+    render_path: str     # in_process | subprocess | none
+    output_format: str
+
+
+_PREMIUM_OVERLAY_OUTCOME: contextvars.ContextVar[PremiumOverlayOutcome | None] = contextvars.ContextVar(
+    "flyer_premium_overlay_outcome", default=None
+)
+
+
+def consume_premium_overlay_outcome() -> PremiumOverlayOutcome | None:
+    """Return the most-recent premium render outcome and clear it, so a later
+    render that does NOT run the premium overlay cannot inherit a stale value."""
+    outcome = _PREMIUM_OVERLAY_OUTCOME.get()
+    _PREMIUM_OVERLAY_OUTCOME.set(None)
+    return outcome
+
+
+def premium_outcome_should_alert(outcome: PremiumOverlayOutcome | None) -> bool:
+    """Page the operator only for unrecovered, unexpected premium failures.
+    Intentional fail-closed (fit/coverage/overflow) is normal product behavior."""
+    return bool(outcome) and outcome.status == "premium_overlay_failed_unexpected"
+
+
 TEXT_MANIFEST_SCHEMA_VERSION = 1
 # Total critical text facts (menu items + offer/pricing/promo clauses) that fit one
 # flyer legibly. The binding output is the square 1080x1080 Instagram post in the final

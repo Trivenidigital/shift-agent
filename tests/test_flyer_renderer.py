@@ -5425,3 +5425,24 @@ def test_w1_flagoff_prompt_byte_identical(monkeypatch):
     assert "reserve visually calm" in low
     assert "restaurant-promo" not in low and "hero dish" not in low and "vignette" not in low
     assert ("do not draw any text" in low) or ("do not render" in low)
+
+
+def test_premium_overlay_outcome_contextvar_consume_and_alert():
+    from agents.flyer import render as r
+    assert r.consume_premium_overlay_outcome() is None
+    out = r.PremiumOverlayOutcome(
+        status="premium_overlay_failed_unexpected", reason_class="subprocess_failure",
+        reason_detail="RuntimeError: boom", render_path="none", output_format="concept_preview",
+    )
+    r._PREMIUM_OVERLAY_OUTCOME.set(out)
+    got = r.consume_premium_overlay_outcome()
+    assert got is out
+    assert r.consume_premium_overlay_outcome() is None  # consume resets
+    assert r.premium_outcome_should_alert(out) is True
+    assert r.premium_outcome_should_alert(
+        r.PremiumOverlayOutcome("premium_overlay_delivered", "none", "", "subprocess", "concept_preview")
+    ) is False
+    assert r.premium_outcome_should_alert(
+        r.PremiumOverlayOutcome("premium_overlay_degraded_to_flat", "fit", "", "none", "concept_preview")
+    ) is False
+    assert r.premium_outcome_should_alert(None) is False
