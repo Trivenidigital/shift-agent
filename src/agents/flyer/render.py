@@ -1209,20 +1209,28 @@ def _poster_layout_requirements(project: FlyerProject, *, force_background_only:
             "- Produce a decorative BACKGROUND image only. Do NOT draw any text, headlines, "
             "menu/item cards, price tags, schedule, location, or contact — the exact text is "
             "composited afterwards into overlay panels.\n"
-            "- Reserve visually calm, low-detail zones in the upper-left and along the bottom for "
-            "those overlay panels; keep the rich hero imagery in the center and right.\n"
         )
-        # Fix C v2 (SCOPED, Codex MAJOR fix): the FOOD-HERO directive is added ONLY
-        # when the premium overlay is enabled for this project (FLYER_PREMIUM_OVERLAY
-        # + allowlist), so the background prompt stays byte-identical for every
-        # non-scoped flow even on the background-only path. W1 (this directive) and
-        # the W2 editorial overlay are scoped together; flag off ⇒ no change here.
         if _premium_overlay_enabled(project):
+            # Fix C v2.1 (SCOPED): Restaurant-Promo single-hero background. Replaces the
+            # reserved-zone banding (which yielded a flat multi-item spread → template) with a
+            # cinematic single-hero composition; the deterministic overlay's own gradient
+            # scrims provide text legibility (validated). Scoped ⇒ flag-off byte-identical.
             reserve += (
-                "- Compose a FOOD-HERO background: one large, appetizing close-up of the dish(es) as the "
-                "clear subject, with dramatic appetizing lighting and rich depth of field on an elegant "
-                "surface. No people, no faces, no hands, no diners, no family scene, no buffet, no generic "
-                "restaurant scene — the food itself is the hero.\n"
+                "- Compose a RESTAURANT-PROMO hero food photograph: ONE single mouth-watering hero dish "
+                "(the featured food) as the bold subject that DOMINATES the frame, with warm golden cinematic "
+                "restaurant lighting, gentle steam and visible texture where appropriate, rich shallow depth of "
+                "field, on a rustic dark wood or slate surface with softly-lit restaurant ambiance behind. "
+                "Appetizing and vibrant, like a premium restaurant advertisement.\n"
+                "- Keep it cinematic and atmospheric with naturally darker, softer top and bottom edges (a gentle "
+                "vignette) so the composited title and menu stay legible — but the hero dish still fills the frame; "
+                "do NOT leave empty flat bands or blank panels.\n"
+                "- No people, no faces, no hands, no diners, no family scene, no buffet, and no spread of many "
+                "separate dishes — ONE hero dish is the subject.\n"
+            )
+        else:
+            reserve += (
+                "- Reserve visually calm, low-detail zones in the upper-left and along the bottom for "
+                "those overlay panels; keep the rich hero imagery in the center and right.\n"
             )
         if _style_only_reference_requested(project):
             reserve += (
