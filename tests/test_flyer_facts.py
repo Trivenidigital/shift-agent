@@ -1311,3 +1311,20 @@ def test_reconcile_flat_price_from_source_still_drops_conflicting_price():
     out = _items_map(reconcile_priced_facts(facts, src))
     assert "Idlie" in out
     assert "Poori" not in out  # conflicting price suppressed, not rewritten
+
+
+def test_reconcile_flat_price_keeps_priced_expansion_items_not_in_brief():
+    # "N famous items, any item $X": the system expands item NAMES not literally
+    # in the brief, each at the flat price. The flat price applies to "any item",
+    # so these priced items are source-backed by price (name need not be in brief).
+    from agents.flyer.facts import reconcile_priced_facts
+    src = ("Create a flyer for Indo-Chinese specials. "
+           "Include 8 famous Indo-Chinese items. Any item priced at $9.99.")
+    facts = [
+        _lf("item:0:name", "Veg Manchurian"), _lf("item:0:price", "$9.99"),
+        _lf("item:1:name", "Hakka Noodles"), _lf("item:1:price", "$9.99"),
+        _lf("item:2:name", "Manchow Soup"), _lf("item:2:price", "$9.99"),
+    ]
+    out = _items_map(reconcile_priced_facts(facts, src))
+    assert set(out) == {"Veg Manchurian", "Hakka Noodles", "Manchow Soup"}
+    assert all(p == "$9.99" for p in out.values())

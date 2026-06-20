@@ -1099,7 +1099,11 @@ def reconcile_priced_facts(facts: list[FlyerLockedFact], source_text: str) -> li
         n, p = nname(name), _price_norm(price)
         if p and src_names_to_price.get(n) == p:
             return True
-        if flat_price and p == flat_price and n and n in src_blob:
+        # Flat-price briefs ("any item $X") apply the price to ANY item, including
+        # system-expanded names not literally in the brief (famous-path). An item
+        # AT the flat price is source-backed by price; a conflicting price (!= flat)
+        # still fails here and is suppressed.
+        if flat_price and p == flat_price:
             return True
         return False
 
