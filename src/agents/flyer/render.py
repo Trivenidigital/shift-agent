@@ -1151,6 +1151,54 @@ def _needs_reference_extraction(project: FlyerProject) -> bool:
     return has_reference_image and _request_asks_reference_extraction(project)
 
 
+# Deterministic-first content classifier (2026-06-20). Fact-dense flyers (menus,
+# price lists, combos, schedule+price) carry exact text the image model garbles
+# (~24% first-try success live); they render reliably via the deterministic
+# overlay instead. Pure heuristic over structured locked_facts — no model call.
+_FACT_ITEM_NAME_RE = re.compile(r"^item:\d+:name$")
+_FACT_ITEM_PRICE_RE = re.compile(r"^item:\d+:price$")
+_FACT_OFFER_RE = re.compile(r"^offer:\d+$")
+_FACT_CURRENCY_RE = re.compile(r"[$₹]\s*\d")  # $ or rupee followed by a digit
+
+
+def _is_fact_dense(project: FlyerProject) -> bool:
+    """True when the project carries fact-dense exact text (menu / multi-item /
+    price list / combo / schedule+price). Deterministic over locked_facts."""
+    facts = list(getattr(project, "locked_facts", []) or [])
+
+    def _fid(f):
+        return (getattr(f, "fact_id", "") or "")
+
+    def _has_currency(f):
+        return bool(f) and bool(_FACT_CURRENCY_RE.search(getattr(f, "value", "") or ""))
+
+    item_names = {_fid(f) for f in facts if _FACT_ITEM_NAME_RE.match(_fid(f))}
+    item_prices = [f for f in facts if _FACT_ITEM_PRICE_RE.match(_fid(f))]
+    offers = [f for f in facts if _FACT_OFFER_RE.match(_fid(f))]
+    pricing_structures = [f for f in facts if _fid(f) == "pricing_structure"]
+    offer_prices = [f for f in facts if _fid(f) == "offer_price"]
+    has_schedule = any(_fid(f) == "schedule" for f in facts)
+    # every currency-bearing price fact (used by the schedule+price branch)
+    currency_price_facts = item_prices + pricing_structures + offers + offer_prices
+
+    # (a) >=2 distinct menu items
+    if len(item_names) >= 2:
+        return True
+    # (b) >=2 item prices
+    if len(item_prices) >= 2:
+        return True
+    # (c) a currency-amount pricing structure (any of them; not a % discount)
+    if any(_has_currency(f) for f in pricing_structures):
+        return True
+    # (d) >=2 offers (combo / multi-offer)
+    if len(offers) >= 2:
+        return True
+    # (e) recurring schedule + any currency-amount price fact (incl. offer_price)
+    if has_schedule and any(_has_currency(f) for f in currency_price_facts):
+        return True
+    return False
+
+
 def _integrated_poster_eligible(project: FlyerProject) -> bool:
     """Cases where the image model composes the full poster (Slice 1: PRIMARY path).
 
@@ -1176,6 +1224,12 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
     if any((getattr(f, "fact_id", "") or "").strip().lower() in {"qr", "qr_code", "barcode"} for f in project.locked_facts):
         return False
     if not _is_food_or_grocery_project(project):
+        return False
+    # Deterministic-first routing (2026-06-20): fact-dense food flyers (menus,
+    # price lists, combos, schedule+price) skip integrated model-rendered text and
+    # render via the deterministic premium overlay (mode 2). Gated + allowlist-scoped
+    # via FLYER_DETERMINISTIC_FIRST; flag-off short-circuits -> byte-identical.
+    if _deterministic_first_enabled(project) and _is_fact_dense(project):
         return False
     reference_menu = _style_only_reference_requested(project) and _has_materialized_reference_menu_facts(project)
     if reference_menu:
@@ -3358,6 +3412,24 @@ def _deterministic_recovery_enabled(project: FlyerProject) -> bool:
     is empty => global, else project.customer_phone is in it). Independent of
     FLYER_PREMIUM_OVERLAY (which separately controls premium-vs-flat overlay)."""
     if os.environ.get(PREMIUM_DETERMINISTIC_RECOVERY_ENV) != "1":
+        return False
+    allow = _premium_overlay_allowlist()
+    if not allow:
+        return True
+    return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+
+
+DETERMINISTIC_FIRST_ENV = "FLYER_DETERMINISTIC_FIRST"
+
+
+def _deterministic_first_enabled(project: FlyerProject) -> bool:
+    """Routing gate for deterministic-first: fact-dense flyers skip integrated
+    model text and render via the deterministic overlay. Flag
+    FLYER_DETERMINISTIC_FIRST == "1" AND (the shared FLYER_PREMIUM_OVERLAY_ALLOWLIST
+    is empty => global, else project.customer_phone is in it). Independent of
+    FLYER_PREMIUM_OVERLAY / FLYER_DETERMINISTIC_RECOVERY. Mirrors
+    _deterministic_recovery_enabled exactly."""
+    if os.environ.get(DETERMINISTIC_FIRST_ENV) != "1":
         return False
     allow = _premium_overlay_allowlist()
     if not allow:

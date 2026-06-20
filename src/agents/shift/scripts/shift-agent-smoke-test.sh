@@ -275,6 +275,42 @@ else
     echo "⚠  Pillow absent under \$RENDER_PY — premium RENDER gate skipped (subprocess escape hatch unverifiable here)"
 fi
 
+# 2.0c Deterministic-first routing gate. With FLYER_DETERMINISTIC_FIRST=1 a
+# fact-dense food flyer must become integrated-INELIGIBLE (routes to the
+# deterministic mode-2 overlay); with the flag unset it must stay eligible
+# (byte-identical). Pure eligibility logic — no model call, no render.
+if ! FLYER_ALLOW_INTEGRATED_POSTER=1 "$PY" -c "
+import sys
+sys.path.insert(0, '/opt/shift-agent')
+import os
+import flyer_render as r
+from schemas import FlyerProject
+facts = [
+    {'fact_id':'business_name','label':'B','value':\"Lakshmi's Kitchen\",'required':True,'source':'customer_text'},
+    {'fact_id':'pricing_structure','label':'P','value':'Any item \$7.99','required':True,'source':'customer_text'},
+]
+for i, n in enumerate(['Idli','Dosa','Vada','Uttapam','Pongal','Sambar']):
+    facts.append({'fact_id':f'item:{i}:name','label':'I','value':n,'required':True,'source':'customer_text'})
+proj = FlyerProject.model_validate({
+    'project_id':'F9002','status':'generating_concepts','customer_phone':'+17329837841',
+    'customer_id':'CUST0001','created_at':'2026-06-20T00:00:00Z','updated_at':'2026-06-20T00:00:00Z',
+    'original_message_id':'wamid.F9002','raw_request':'Weekend Specials menu any item \$7.99',
+    'fields':{'event_or_business_name':'Weekend Specials','preferred_language':'en','notes':'menu'},
+    'locked_facts':facts,
+})
+assert r._is_fact_dense(proj) is True, 'fact-dense classifier failed on a menu'
+os.environ.pop('FLYER_DETERMINISTIC_FIRST', None)
+os.environ.pop('FLYER_PREMIUM_OVERLAY_ALLOWLIST', None)
+assert r._integrated_poster_eligible(proj) is True, 'flag-off should be byte-identical (integrated-eligible)'
+os.environ['FLYER_DETERMINISTIC_FIRST'] = '1'
+assert r._integrated_poster_eligible(proj) is False, 'flag-on dense should route to mode 2 (ineligible for integrated)'
+print('deterministic-first routing OK: dense+flag-on -> mode 2; flag-off unchanged')
+" > /dev/null; then
+    echo "FAIL: deterministic-first routing gate — dense flyer not routed to mode 2 under FLYER_DETERMINISTIC_FIRST, or flag-off not byte-identical"
+    exit 1
+fi
+echo "✓ deterministic-first routing: fact-dense -> mode 2 under flag; no-op when off"
+
 # 2a. Credential-minimized readiness report. Informational only: the strict
 # external-foundation gate runs pre-install in shift-agent-deploy.sh, where a
 # missing Hermes bundled skill can abort before app state changes. Post-restart

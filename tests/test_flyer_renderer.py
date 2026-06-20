@@ -5618,3 +5618,189 @@ def test_premium_subprocess_sys_path_excludes_venv_site_packages():
     assert _os.path.dirname(_os.path.abspath(_schemas.__file__)) in roots
     assert all("site-packages" not in p for p in roots)
     assert all("dist-packages" not in p for p in roots)
+
+
+def _df_project(facts, *, biz="Lakshmi's Kitchen", phone="+17329837841", notes=""):
+    """Build a food FlyerProject with the given locked_facts (dicts)."""
+    return FlyerProject.model_validate({
+        "project_id": "F9100",
+        "status": "generating_concepts",
+        "customer_phone": phone,
+        "customer_id": "CUST0001",
+        "created_at": "2026-06-20T00:00:00Z",
+        "updated_at": "2026-06-20T00:00:00Z",
+        "original_message_id": "wamid.df",
+        "raw_request": notes or biz,
+        "fields": {"event_or_business_name": biz, "preferred_language": "en", "notes": notes},
+        "locked_facts": facts,
+    })
+
+
+def _fact(fid, value, label="F"):
+    return {"fact_id": fid, "label": label, "value": value, "source": "customer_text", "required": True}
+
+
+def _weekend_project():  # F0179 Weekend Specials — dense (>=2 items + currency pricing_structure)
+    facts = [
+        _fact("business_name", "Lakshmi's Kitchen"),
+        _fact("campaign_title", "Weekend Specials"),
+        _fact("contact_phone", "+17329837841"),
+        _fact("location", "90 Brybar Dr St Johns FL"),
+        _fact("pricing_structure", "Any item $7.99"),
+        _fact("schedule", "Saturday & Sunday, 4 PM-8 PM"),
+    ]
+    for i, n in enumerate(["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar"]):
+        facts.append(_fact(f"item:{i}:name", n))
+    return _df_project(facts, notes="Weekend Specials menu, any item $7.99")
+
+
+def _combo_project():  # Veg/Non-Veg Combo — dense (>=2 offers)
+    facts = [
+        _fact("business_name", "Lakshmi's Kitchen"),
+        _fact("contact_phone", "+17329837841"),
+        _fact("offer:0", "Veg Combo $12.99"),
+        _fact("offer:1", "Non-Veg Combo $15.99"),
+    ]
+    return _df_project(facts, notes="Veg and Non-Veg combo meals")
+
+
+def _dessert_project():  # Festival Dessert — dense (>=2 items + >=2 item prices)
+    facts = [
+        _fact("business_name", "Lakshmi's Kitchen"),
+        _fact("contact_phone", "+17329837841"),
+        _fact("item:0:name", "Gulab Jamun"), _fact("item:0:price", "$5.99"),
+        _fact("item:1:name", "Kaju Katli"), _fact("item:1:price", "$6.99"),
+        _fact("item:2:name", "Rasmalai"), _fact("item:2:price", "$5.99"),
+    ]
+    return _df_project(facts, notes="Diwali festival sweets and desserts")
+
+
+def _sparse_project():  # sparse control — single creative flyer, no list/price
+    facts = [
+        _fact("business_name", "Lakshmi's Kitchen"),
+        _fact("campaign_title", "Now Hiring"),
+        _fact("contact_phone", "+17329837841"),
+    ]
+    return _df_project(facts, notes="Now hiring kitchen staff, apply in store")
+
+
+def test_is_fact_dense_weekend_specials():
+    assert render_module._is_fact_dense(_weekend_project()) is True
+
+
+def test_is_fact_dense_combo():
+    assert render_module._is_fact_dense(_combo_project()) is True
+
+
+def test_is_fact_dense_dessert():
+    assert render_module._is_fact_dense(_dessert_project()) is True
+
+
+def test_is_fact_dense_sparse_control():
+    assert render_module._is_fact_dense(_sparse_project()) is False
+
+
+def test_is_fact_dense_schedule_plus_currency_price():
+    p = _df_project([
+        _fact("business_name", "Lakshmi's Kitchen"),
+        _fact("pricing_structure", "Lunch Buffet $11.99"),
+        _fact("schedule", "Mon-Fri 11-3"),
+    ], notes="Lunch buffet weekday hours")
+    assert render_module._is_fact_dense(p) is True
+
+
+def test_is_fact_dense_single_percent_offer_is_sparse():
+    p = _df_project([
+        _fact("business_name", "Lakshmi's Kitchen"),
+        _fact("offer:0", "10% off everything this weekend"),
+    ], notes="grand opening 10% off")
+    assert render_module._is_fact_dense(p) is False
+
+
+def test_is_fact_dense_schedule_plus_offer_price():
+    # schedule + a currency offer_price (no items / no pricing_structure) -> dense
+    p = _df_project([
+        _fact("business_name", "Lakshmi's Kitchen"),
+        _fact("offer:0", "Weekend Special"),
+        _fact("offer_price", "$9.99"),
+        _fact("schedule", "Sat-Sun 4-8 PM"),
+    ], notes="weekend special deal")
+    assert render_module._is_fact_dense(p) is True
+
+
+def test_is_fact_dense_lone_offer_price_is_sparse():
+    # a single promo offer with a price but NO schedule / list -> sparse (stays integrated)
+    p = _df_project([
+        _fact("business_name", "Lakshmi's Kitchen"),
+        _fact("offer:0", "Diwali Special"),
+        _fact("offer_price", "$20"),
+    ], notes="diwali special")
+    assert render_module._is_fact_dense(p) is False
+
+
+def test_deterministic_first_enabled_flag_off(monkeypatch):
+    monkeypatch.delenv("FLYER_DETERMINISTIC_FIRST", raising=False)
+    assert render_module._deterministic_first_enabled(_weekend_project()) is False
+
+
+def test_deterministic_first_enabled_global_when_no_allowlist(monkeypatch):
+    monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    assert render_module._deterministic_first_enabled(_weekend_project()) is True
+
+
+def test_deterministic_first_enabled_allowlist_scoped(monkeypatch):
+    monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    assert render_module._deterministic_first_enabled(_weekend_project()) is True
+    other = _weekend_project().model_copy(update={"customer_phone": "+19998887777"})
+    assert render_module._deterministic_first_enabled(other) is False
+
+
+def _enable_integrated(monkeypatch):
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+
+
+def test_dense_flag_on_routes_to_mode2(monkeypatch):
+    _enable_integrated(monkeypatch)
+    monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
+    p = _weekend_project()
+    assert render_module._integrated_poster_eligible(p) is False     # not integrated
+    assert render_module._background_only_eligible(p) is True        # -> mode 2
+
+
+def test_sparse_flag_on_stays_integrated(monkeypatch):
+    _enable_integrated(monkeypatch)
+    monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
+    assert render_module._integrated_poster_eligible(_sparse_project()) is True
+
+
+def test_dense_flag_off_current_behavior(monkeypatch):
+    _enable_integrated(monkeypatch)
+    monkeypatch.delenv("FLYER_DETERMINISTIC_FIRST", raising=False)
+    assert render_module._integrated_poster_eligible(_weekend_project()) is True
+
+
+def test_flag_off_byte_identical_dense_and_sparse(monkeypatch):
+    _enable_integrated(monkeypatch)
+    monkeypatch.delenv("FLYER_DETERMINISTIC_FIRST", raising=False)
+    assert render_module._integrated_poster_eligible(_weekend_project()) is True
+    assert render_module._integrated_poster_eligible(_sparse_project()) is True
+
+
+def test_dense_flag_on_premium_overlay_interaction(monkeypatch):
+    _enable_integrated(monkeypatch)
+    monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    p = _weekend_project()
+    assert render_module._integrated_poster_eligible(p) is False
+    assert render_module._premium_overlay_enabled(p) is True
+
+
+def test_dense_flag_on_scoped_other_number_unaffected(monkeypatch):
+    _enable_integrated(monkeypatch)
+    monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    other = _weekend_project().model_copy(update={"customer_phone": "+19998887777"})
+    assert render_module._integrated_poster_eligible(other) is True   # still integrated
