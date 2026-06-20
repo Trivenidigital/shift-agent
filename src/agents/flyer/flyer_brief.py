@@ -48,6 +48,9 @@ class VisualDirection(BaseModel):
     palette: list[str] = Field(default_factory=list, max_length=20)
     motifs: list[str] = Field(default_factory=list, max_length=40)
     visual_subjects: list[str] = Field(default_factory=list, max_length=40)
+    # CD v2 (Slice A): a free-text overall mood/tone label ("Warm Restaurant
+    # Promo", "Festive") — visual taste only, no words/text instructions.
+    mood: str = Field(default="", max_length=120)
 
 
 class FactRef(BaseModel):
@@ -89,6 +92,21 @@ class FactRef(BaseModel):
         # any model-supplied (or omitted) value so a mislabel never fails the brief.
         self.provenance = "locked" if has_id else "customer_text"
         return self
+
+
+class MarketingHook(BaseModel):
+    """CD v2 (Slice A): the single headline marketing angle for the flyer.
+
+    Carries NO inline commercial value — the hook's text is always a ``FactRef``
+    (a locked-fact id or a verbatim customer-request span), so the deterministic
+    firewall keeps fact authority and no new invention vector is opened.
+    ``prominence`` is advisory layout emphasis only.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text_ref: FactRef
+    prominence: Literal["high", "medium", "low"] = "high"
 
 
 class OfferGroup(BaseModel):
@@ -137,3 +155,9 @@ class FlyerBrief(BaseModel):
     # Typed offer structure (Codex P1): one OfferGroup per distinct combo/offer/item
     # so the firewall can reject a brief that collapses two locked offers into one card.
     offer_groups: list[OfferGroup] = Field(default_factory=list, max_length=50)
+    # CD v2 (Slice A) creative fields — all optional/defaulted (backward compatible).
+    # Like every other commercial reference, these point to facts by ref/span only.
+    hero_ref: Optional[FactRef] = None
+    supporting_refs: list[FactRef] = Field(default_factory=list, max_length=40)
+    marketing_hook: Optional[MarketingHook] = None
+    offer_priority: Literal["high", "medium", "low"] = "medium"
