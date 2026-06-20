@@ -1108,9 +1108,12 @@ def test_price_first_brief_still_extracts_via_fallback():
     assert m.get("men haircut") == "$20" and m.get("perms") == "$80" and m.get("kids trim") == "$7"
 
 
-def _lf(fid, value, source="customer_text"):
+def _lf(fid, value, source="customer_text", required=True):
     from schemas import FlyerLockedFact
-    return FlyerLockedFact(fact_id=fid, label="L", value=value, source=source, required=True)
+    # hermes_inferred facts are advisory by schema rule (cannot be required).
+    if source == "hermes_inferred":
+        required = False
+    return FlyerLockedFact(fact_id=fid, label="L", value=value, source=source, required=required)
 
 
 def _ids(facts):
@@ -1224,3 +1227,31 @@ def test_reconcile_combo_live_shaped_drops_derived_items_keeps_rich_offers():
     assert out.get("offer:1", "").startswith("Non-Veg Combo")
     # ALL combo items suppressed (derived from rich priced offers / not source-backed)
     assert not any(k.startswith("item:") for k in out)
+
+
+def test_reconcile_exempts_hermes_inferred_items():
+    from agents.flyer.facts import reconcile_priced_facts
+    # inferred items are NOT in the brief by design; reconcile must keep them.
+    src = "Create a flyer for breakfast specials"
+    facts = [
+        _lf("item:0:name", "Idli", source="hermes_inferred"),
+        _lf("item:0:price", "$8.99", source="hermes_inferred"),
+        _lf("item:1:name", "Masala Dosa", source="hermes_inferred"),
+    ]
+    out = _ids(reconcile_priced_facts(facts, src))
+    assert out.get("item:0:name") == "Idli" and out.get("item:0:price") == "$8.99"
+    assert out.get("item:1:name") == "Masala Dosa"
+
+
+def test_reconcile_keeps_alacarte_item_named_inside_a_combo_offer():
+    from agents.flyer.facts import reconcile_priced_facts
+    # "Dosa $7.99" is a real standalone priced item; "dosa" also appears as a
+    # COMPONENT inside a combo offer. The standalone item must survive.
+    src = "Family Platter - $49.99: includes 4 dosa, sambar. Dosa - $7.99."
+    facts = [
+        _lf("offer:0", "Family Platter - $49.99: includes 4 dosa, sambar"),
+        _lf("item:0:name", "Dosa"), _lf("item:0:price", "$7.99"),
+    ]
+    out = _ids(reconcile_priced_facts(facts, src))
+    assert out.get("offer:0", "").startswith("Family Platter")
+    assert out.get("item:0:name") == "Dosa" and out.get("item:0:price") == "$7.99"

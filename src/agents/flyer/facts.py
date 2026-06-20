@@ -1100,7 +1100,7 @@ def reconcile_priced_facts(facts: list[FlyerLockedFact], source_text: str) -> li
     grouped: dict[str, dict[str, FlyerLockedFact]] = {}
     offers: list[FlyerLockedFact] = []
     others: list[FlyerLockedFact] = []
-    rich_priced_offer_blobs: list[str] = []
+    rich_priced_offer_subjects: set[tuple[str, str]] = set()
     for f in facts:
         m = item_re.match(f.fact_id)
         if m:
@@ -1108,7 +1108,14 @@ def reconcile_priced_facts(facts: list[FlyerLockedFact], source_text: str) -> li
         elif f.fact_id.startswith("offer:"):
             offers.append(f)
             if (not _offer_is_simple_priced_line(f.value)) and re.search(r"[$₹]\s*\d", f.value or ""):
-                rich_priced_offer_blobs.append(nname(f.value))
+                sub_tmp: dict[str, dict[str, str]] = {}
+                for sub in _item_price_facts(f.value):
+                    sm = item_re.match(sub.fact_id)
+                    if sm:
+                        sub_tmp.setdefault(sm.group("i"), {})[sm.group("k")] = sub.value
+                for rec in sub_tmp.values():
+                    if "name" in rec:
+                        rich_priced_offer_subjects.add((nname(rec["name"]), _price_norm(rec.get("price", ""))))
         else:
             others.append(f)
 
@@ -1119,11 +1126,16 @@ def reconcile_priced_facts(facts: list[FlyerLockedFact], source_text: str) -> li
         pf = grouped[idx].get("price")
         if nf is None:
             continue
+        # Inferred items are firewall-gated, not customer-source facts; reconcile
+        # does not police them. Keep as-is.
+        if getattr(nf, "source", "") == "hermes_inferred":
+            kept_items.append((nf, pf))
+            continue
         n = nname(nf.value)
         price = pf.value if pf else ""
         p = _price_norm(price)
-        # (1) combo-derived: name inside a rich PRICED offer -> offer canonical -> suppress.
-        if any(n and n in blob for blob in rich_priced_offer_blobs):
+        # (1) combo-derived: item IS a rich priced offer's OWN subject -> offer canonical -> suppress.
+        if p and (n, p) in rich_priced_offer_subjects:
             continue
         # (2) name-only item (no price): keep if source-backed by name; else drop (invented).
         if pf is None or not p:
