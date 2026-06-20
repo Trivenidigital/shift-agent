@@ -352,6 +352,39 @@ def test_only_offending_field_is_stripped():
     assert out.mood == ""
 
 
+# --- shared helper: scrub_ungrounded_commercial_taste -----------------------
+# The resolver's theme/mood firewall AND the advisory scene path both reuse this
+# single shared helper (no parallel commercial regex). Direct unit test for it.
+
+
+def test_scrub_ungrounded_commercial_taste_strips_ungrounded_keeps_clean():
+    from agents.flyer.flyer_brief_validator import scrub_ungrounded_commercial_taste
+
+    # empty allowed list (advisory path): any commercial value is ungrounded.
+    theme, mood = scrub_ungrounded_commercial_taste("$5 off", "festive and warm", [])
+    assert theme == ""                      # ungrounded commercial -> stripped
+    assert mood == "festive and warm"      # clean -> kept verbatim
+
+
+def test_scrub_ungrounded_commercial_taste_respects_grounded_values():
+    from agents.flyer.flyer_brief_validator import scrub_ungrounded_commercial_taste
+
+    # the commercial value IS in the allowed list -> grounded -> kept.
+    theme, mood = scrub_ungrounded_commercial_taste(
+        "$8.99 hero spotlight", "$3 off promo", ["$8.99"]
+    )
+    assert theme == "$8.99 hero spotlight"  # grounded -> kept
+    assert mood == ""                       # $3 not allowed -> stripped
+
+
+def test_scrub_ungrounded_commercial_taste_never_raises():
+    from agents.flyer.flyer_brief_validator import scrub_ungrounded_commercial_taste
+
+    # non-str inputs / odd allowed must not raise; result is safe.
+    theme, mood = scrub_ungrounded_commercial_taste(None, None, None)  # type: ignore[arg-type]
+    assert isinstance(theme, str) and isinstance(mood, str)
+
+
 # --- defaults / empties / never-raises --------------------------------------
 
 

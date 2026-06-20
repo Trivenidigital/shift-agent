@@ -361,6 +361,49 @@ def _first_ungrounded_commercial(text: str, allowed_values: Sequence[str]) -> st
     return ""
 
 
+def scrub_ungrounded_commercial_taste(
+    theme: str, mood: str, allowed_values: Sequence[str]
+) -> tuple[str, str]:
+    """Scrub a (theme_family, mood) pair of any UNGROUNDED commercial value.
+
+    ``theme_family`` and ``mood`` are VISUAL-TASTE strings (e.g. "South Indian
+    Weekend Feast", "warm and festive") — but a model could smuggle a fabricated
+    COMMERCIAL value through either (e.g. ``mood="$5 off"``), and these strings can
+    reach the image prompt. The strict ``fact_refs`` firewall never scans them, so
+    each is scanned here for the FIRST UNGROUNDED commercial value (one NOT present
+    in ``allowed_values``) via ``_first_ungrounded_commercial`` — the SAME single-
+    source-of-truth scanner the brief firewall uses, NO parallel commercial regex.
+    A field that carries an ungrounded commercial value is defaulted to ``""``; a
+    field whose only commercial value IS in ``allowed_values`` is GROUNDED and kept
+    (so ``"$8.99 hero"`` is not over-stripped). With an EMPTY ``allowed_values`` any
+    commercial value is ungrounded by definition (advisory scene themes carry no
+    grounded numbers), so all commercial taste is stripped.
+
+    Shared by the CD v2 deterministic resolver (``flyer_creative_resolver``) and the
+    advisory scene path (``flyer_context_builder.advise_scene_direction``).
+
+    NEVER raises: a non-str input coerces to ``""``; any scanner error fail-closes
+    the offending field to ``""`` rather than letting an unscanned value through."""
+    safe_theme = theme if isinstance(theme, str) else ""
+    safe_mood = mood if isinstance(mood, str) else ""
+    allowed = list(allowed_values or ())
+    if safe_theme and not _taste_value_is_clean(safe_theme, allowed):
+        safe_theme = ""
+    if safe_mood and not _taste_value_is_clean(safe_mood, allowed):
+        safe_mood = ""
+    return safe_theme, safe_mood
+
+
+def _taste_value_is_clean(value: str, allowed_values: Sequence[str]) -> bool:
+    """True iff ``value`` carries NO UNGROUNDED commercial value (safe to keep).
+    Guarded so any scanner error defaults to NOT-clean (fail-closed: strip the
+    field) rather than letting an unscanned value reach the image prompt."""
+    try:
+        return not _first_ungrounded_commercial(value, allowed_values)
+    except Exception:  # pragma: no cover - defensive: scanner error => strip the field
+        return False
+
+
 # ── textless-background firewall (Codex Finding 3) ──────────────────────────
 # background_brief / visual_direction are the TEXTLESS-background prompt: the model
 # must render NO words there (all visible text is overlaid deterministically from

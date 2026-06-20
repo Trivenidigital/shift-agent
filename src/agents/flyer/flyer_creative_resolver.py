@@ -48,23 +48,24 @@ try:  # sibling FlyerBrief — flat on the VPS, package-style in the repo tree
 except ImportError:  # pragma: no cover - import-path shim
     from agents.flyer.flyer_brief import FactRef, FlyerBrief
 
-# Reuse the brief firewall's EXISTING commercial-grounding scanner — single source
-# of truth, no parallel commercial regex here. ``_first_ungrounded_commercial(text,
-# allowed_values)`` returns the first commercial value in ``text`` that is NOT
-# grounded in ``allowed_values`` (overlay-rendered locked-fact values), or "" when
-# every commercial value is grounded / there is no commercial content. ``_norm_ws``
-# normalizes the locked values exactly the way the validator's call sites do, so the
-# grounding comparison matches the firewall's. Flat-on-VPS first, package-style
-# fallback (mirrors the FlyerBrief import above).
+# Reuse the brief firewall's SHARED commercial-taste scrubber — single source of
+# truth, no parallel commercial regex here. ``scrub_ungrounded_commercial_taste(
+# theme, mood, allowed_values)`` defaults a field to "" when it carries a commercial
+# value NOT grounded in ``allowed_values`` (overlay-rendered locked-fact values),
+# keeping grounded values verbatim; it wraps the firewall's
+# ``_first_ungrounded_commercial`` scanner and is ALSO reused by the advisory scene
+# path. ``_norm_ws`` normalizes the locked values exactly the way the validator's
+# call sites do, so the grounding comparison matches the firewall's. Flat-on-VPS
+# first, package-style fallback (mirrors the FlyerBrief import above).
 try:  # pragma: no cover - import-path shim
     from flyer_brief_validator import (  # type: ignore
-        _first_ungrounded_commercial,
         _norm_ws,
+        scrub_ungrounded_commercial_taste,
     )
 except ImportError:  # pragma: no cover - import-path shim
     from agents.flyer.flyer_brief_validator import (
-        _first_ungrounded_commercial,
         _norm_ws,
+        scrub_ungrounded_commercial_taste,
     )
 
 
@@ -220,29 +221,18 @@ def _resolve_offer_priority(
     return "high" if _pricing_structure_value(locked_facts) else "medium"
 
 
-def _commercial_is_clean(value: str, allowed_values: Sequence[str]) -> bool:
-    """True iff ``value`` carries NO UNGROUNDED commercial value (i.e. it is safe to
-    keep). Reuses the brief firewall's ``_first_ungrounded_commercial`` (single source
-    of truth — no parallel commercial regex). Guarded so any scanner error defaults to
-    NOT-clean (fail-closed: strip the field) rather than letting an unscanned value
-    through; the resolver itself never raises."""
-    try:
-        return not _first_ungrounded_commercial(value, allowed_values)
-    except Exception:  # pragma: no cover - defensive: scanner error ⇒ strip the field
-        return False
-
-
 def _resolve_theme_mood(
     brief: FlyerBrief, locked_facts: Sequence[FlyerLockedFact]
 ) -> tuple[str, str]:
     """Theme family + mood are VISUAL-TASTE strings — but a model could smuggle a
     fabricated COMMERCIAL value through either (e.g. ``mood="$5 off"``), which the
-    strict ``fact_refs`` firewall never scans. So each is scanned for an UNGROUNDED
-    commercial value (one NOT present in the locked facts) via the brief firewall's
-    ``_first_ungrounded_commercial``; a field that carries one is defaulted to "".
-    A field whose only commercial value IS a locked fact value is GROUNDED and kept
-    (so ``"$8.99 hero"`` is not over-stripped). Guarded so a missing visual_direction
-    or any scanner error never raises (it just yields the safe "" default)."""
+    strict ``fact_refs`` firewall never scans. So each is scrubbed of any UNGROUNDED
+    commercial value (one NOT present in the locked facts) via the SHARED
+    ``scrub_ungrounded_commercial_taste`` helper (single source of truth — same scan
+    the advisory scene path uses, no parallel commercial regex). A field whose only
+    commercial value IS a locked fact value is GROUNDED and kept (so ``"$8.99 hero"``
+    is not over-stripped). Guarded so a missing visual_direction or any scanner error
+    never raises (it just yields the safe "" default)."""
     try:
         vd = getattr(brief, "visual_direction", None)
         theme = (getattr(vd, "theme_family", None) or "") if vd is not None else ""
@@ -256,11 +246,7 @@ def _resolve_theme_mood(
         for f in locked_facts or ()
         if (getattr(f, "value", "") or "").strip()
     ]
-    if theme and not _commercial_is_clean(theme, allowed_values):
-        theme = ""
-    if mood and not _commercial_is_clean(mood, allowed_values):
-        mood = ""
-    return theme, mood
+    return scrub_ungrounded_commercial_taste(theme, mood, allowed_values)
 
 
 def resolve_creative_direction(

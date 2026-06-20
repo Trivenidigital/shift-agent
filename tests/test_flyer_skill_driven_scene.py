@@ -193,3 +193,88 @@ def test_image_prompt_without_scene_direction_uses_python_path():
     # fallback path: the skill scene marker is absent; facts still present
     assert "Hermes skill art direction" not in prompt
     assert "Lakshmi's Kitchen" in prompt
+
+
+# ── (7) advisory scene direction scrubs ungrounded commercial taste (Codex BLOCKER) ──
+# advise_scene_direction returns a RAW model-authored VisualDirection whose
+# theme_family/mood reach the image prompt — a model could smuggle a fabricated
+# commercial claim (e.g. theme_family="$5 off") into the scene. The advisory path
+# must scrub these AT THE SOURCE (the brain), same class the resolver's
+# _resolve_theme_mood closes for the CD v2 path. Themes are taste strings ("South
+# Indian Weekend Feast"), never commercial values, so any commercial value is
+# ungrounded by definition here and must be stripped to "".
+def test_advise_scene_direction_strips_ungrounded_commercial_theme(monkeypatch):
+    # The ungrounded-commercial theme_family ("$5 off") is scrubbed to "" at the
+    # source. Because the substantive-direction check then sees no real theme, the
+    # advisory path correctly FALLS BACK to the Python scene (returns None) rather
+    # than rendering a smuggled commercial claim — the smuggling path is closed.
+    monkeypatch.setattr(CB, "_build_user_message", lambda *a, **k: "USER MSG")
+    monkeypatch.setattr(CB, "_skill_body", lambda: "SKILL")
+    monkeypatch.setattr(CB, "_call_gateway", lambda sp, um: {
+        "visual_direction": {
+            "theme_family": "$5 off",
+            "mood": "festive and warm",
+            "palette": ["royal blue", "gold"],
+            "motifs": ["banana leaf"],
+            "visual_subjects": ["crispy dosa"],
+        },
+    })
+    assert CB.advise_scene_direction("req", [], {}) is None
+
+
+def test_advise_scene_direction_strips_commercial_theme_keeps_clean_mood(monkeypatch):
+    # When a LEGITIMATE theme is present, an ungrounded-commercial value smuggled into
+    # mood is stripped per-field while the theme + taste fields are kept verbatim.
+    monkeypatch.setattr(CB, "_build_user_message", lambda *a, **k: "USER MSG")
+    monkeypatch.setattr(CB, "_skill_body", lambda: "SKILL")
+    monkeypatch.setattr(CB, "_call_gateway", lambda sp, um: {
+        "visual_direction": {
+            "theme_family": "South Indian Weekend Feast",
+            "mood": "$5 off",
+            "palette": ["royal blue", "gold"],
+            "motifs": ["banana leaf"],
+            "visual_subjects": ["crispy dosa"],
+        },
+    })
+    vd = CB.advise_scene_direction("req", [], {})
+    assert vd is not None
+    assert vd.theme_family == "South Indian Weekend Feast"   # legitimate theme kept
+    assert vd.mood == ""                                       # ungrounded commercial -> stripped
+    # taste fields untouched
+    assert vd.palette == ["royal blue", "gold"]
+    assert vd.motifs == ["banana leaf"]
+    assert vd.visual_subjects == ["crispy dosa"]
+
+
+def test_advise_scene_direction_keeps_legitimate_theme_verbatim(monkeypatch):
+    monkeypatch.setattr(CB, "_build_user_message", lambda *a, **k: "USER MSG")
+    monkeypatch.setattr(CB, "_skill_body", lambda: "SKILL")
+    monkeypatch.setattr(CB, "_call_gateway", lambda sp, um: {
+        "visual_direction": {
+            "theme_family": "South Indian Weekend Feast",
+            "mood": "festive and warm",
+            "motifs": ["banana leaf"],
+            "visual_subjects": ["crispy dosa"],
+        },
+    })
+    vd = CB.advise_scene_direction("req", [], {})
+    assert vd is not None
+    assert vd.theme_family == "South Indian Weekend Feast"   # legitimate theme NOT stripped
+    assert vd.mood == "festive and warm"
+
+
+def test_advise_scene_direction_strips_ungrounded_commercial_mood(monkeypatch):
+    monkeypatch.setattr(CB, "_build_user_message", lambda *a, **k: "USER MSG")
+    monkeypatch.setattr(CB, "_skill_body", lambda: "SKILL")
+    monkeypatch.setattr(CB, "_call_gateway", lambda sp, um: {
+        "visual_direction": {
+            "theme_family": "South Indian Weekend Feast",
+            "mood": "$3 off promo",
+            "motifs": ["banana leaf"],
+            "visual_subjects": ["crispy dosa"],
+        },
+    })
+    vd = CB.advise_scene_direction("req", [], {})
+    assert vd is not None
+    assert vd.theme_family == "South Indian Weekend Feast"
+    assert vd.mood == ""                                       # ungrounded commercial -> stripped

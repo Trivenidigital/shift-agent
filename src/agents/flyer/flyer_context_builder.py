@@ -47,9 +47,17 @@ except ImportError:  # pragma: no cover - import-path shim
 try:  # sibling FlyerBrief / validator — flat on the VPS, package-style in repo
     from flyer_brief import FactRef, FlyerBrief, MarketingHook, VisualDirection  # type: ignore
     import flyer_brief_validator as _validator  # type: ignore
+    from flyer_brief_validator import (  # type: ignore
+        _norm_ws,
+        scrub_ungrounded_commercial_taste,
+    )
 except ImportError:  # pragma: no cover - import-path shim
     from agents.flyer.flyer_brief import FactRef, FlyerBrief, MarketingHook, VisualDirection
     from agents.flyer import flyer_brief_validator as _validator
+    from agents.flyer.flyer_brief_validator import (
+        _norm_ws,
+        scrub_ungrounded_commercial_taste,
+    )
 
 
 CREATIVE_DIRECTOR_ENABLED_ENV = "FLYER_CREATIVE_DIRECTOR_ENABLED"
@@ -545,6 +553,30 @@ def advise_scene_direction(
         if not isinstance(vd_raw, Mapping):
             return None
         vd = VisualDirection.model_validate(dict(vd_raw))
+        # Scrub ungrounded COMMERCIAL values from the model-authored theme_family /
+        # mood AT THE SOURCE (the brain) — these taste strings reach the image prompt,
+        # so a model could otherwise smuggle a fabricated commercial claim (e.g.
+        # theme_family="$5 off") into the scene. This closes the SAME class the CD v2
+        # resolver's _resolve_theme_mood closes, via the SHARED scanner (no parallel
+        # regex). Ground against the locked-fact values exactly as the resolver does,
+        # so a legitimately grounded number is not over-stripped; a scene theme carries
+        # no grounded numbers in practice, so any commercial value is stripped. Guarded
+        # so a scrub error never breaks the advisory path (it falls back to the raw vd).
+        try:
+            allowed_values = [
+                _norm_ws(getattr(f, "value", "") or "")
+                for f in locked_facts or ()
+                if (getattr(f, "value", "") or "").strip()
+            ]
+            scrubbed_theme, scrubbed_mood = scrub_ungrounded_commercial_taste(
+                vd.theme_family, vd.mood, allowed_values
+            )
+            if scrubbed_theme != vd.theme_family or scrubbed_mood != vd.mood:
+                vd = vd.model_copy(
+                    update={"theme_family": scrubbed_theme, "mood": scrubbed_mood}
+                )
+        except Exception:  # noqa: BLE001 — advisory only; a scrub error keeps the raw vd
+            pass
         # Require a SUBSTANTIVE direction — a theme AND at least one NON-EMPTY concrete subject/motif.
         # Check CLEANED values (render strips whitespace-only entries), so a partial like
         # ``{"theme_family": "x", "visual_subjects": [" "]}`` falls back to the richer Python scene
