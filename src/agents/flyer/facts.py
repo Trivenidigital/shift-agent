@@ -48,6 +48,16 @@ def _clean(value: str) -> str:
     return " ".join((value or "").strip(" .,:;").split())
 
 
+def _normalize_dashes(text: str) -> str:
+    """Fold dash variants (en/em/minus/figure/non-breaking-hyphen) to ASCII '-'
+    so name↔price patterns (which only accept ASCII '-'/':') match 'Name – $X'.
+    Same dash set as visual_qa._normalize_soft_text. Folds ONLY dashes — names,
+    prices, and all other content are untouched."""
+    for d in "–—−‐‑":
+        text = text.replace(d, "-")
+    return text
+
+
 def _fact(
     fact_id: str,
     label: str,
@@ -230,6 +240,7 @@ def profile_locked_facts(
 
 
 def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
+    text = _normalize_dashes(text or "")
     facts: list[FlyerLockedFact] = []
     category_suffix = ""
     if re.search(r"\bbiryani(?:'?s|s)?\b", text or "", flags=re.IGNORECASE):

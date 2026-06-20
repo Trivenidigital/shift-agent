@@ -1063,3 +1063,29 @@ def test_creative_planner_hallucinated_item_is_not_required():
     assert [f.value for f in facts] == ["Veg Manchurian"]
     assert all(f.required is False for f in facts)
     assert all(f.source == "hermes_inferred" for f in facts)
+
+
+def _items_map(facts):
+    """{name: price} from item:N facts."""
+    names, prices = {}, {}
+    for f in facts:
+        if f.fact_id.startswith("item:") and f.fact_id.endswith(":name"):
+            names[f.fact_id.split(":")[1]] = f.value
+        elif f.fact_id.startswith("item:") and f.fact_id.endswith(":price"):
+            prices[f.fact_id.split(":")[1]] = f.value
+    return {names[i]: prices.get(i) for i in names}
+
+
+def test_item_price_facts_en_dash_pairs_correctly():
+    from agents.flyer.facts import _item_price_facts
+    txt = "Gulab Jamun – $7.99 Rasmalai Tres Leches – $9.99 Apricot Delight – $8.99"
+    m = _items_map(_item_price_facts(txt, message_id="m"))
+    assert m.get("Gulab Jamun") == "$7.99"
+    assert m.get("Rasmalai Tres Leches") == "$9.99"
+    assert m.get("Apricot Delight") == "$8.99"
+
+
+def test_item_price_facts_em_dash_pairs_correctly():
+    from agents.flyer.facts import _item_price_facts
+    m = _items_map(_item_price_facts("Dosa — $6.99, Idli — $5.99", message_id="m"))
+    assert m.get("Dosa") == "$6.99" and m.get("Idli") == "$5.99"
