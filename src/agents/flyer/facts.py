@@ -58,6 +58,16 @@ def _normalize_dashes(text: str) -> str:
     return text
 
 
+# A complete-dish noun (combo/meal/platter/...) already names a full offering, so a
+# category_suffix ("Biryani") must NOT be appended to it — "Veg Combo" must stay
+# "Veg Combo", never become "Veg Combo Biryani" (which would fabricate a derived
+# item the customer never named).
+_COMPLETE_DISH_RE = re.compile(
+    r"\b(combo|meal|platter|thali|plate|set|special|offer|deal|bowl|wrap|roll)\b",
+    re.IGNORECASE,
+)
+
+
 def _fact(
     fact_id: str,
     label: str,
@@ -306,7 +316,7 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             "at", "each", "plate", "pc", "pcs", "piece", "pieces",
         }:
             return
-        if category_suffix and category_suffix.lower() not in lowered:
+        if category_suffix and category_suffix.lower() not in lowered and not _COMPLETE_DISH_RE.search(name):
             name = f"{name.title()} {category_suffix}"
         if name.lower() in {"a", "an", "the", "and", "with", "include", "includes", "for", "on", "at", "each", "plate", "pc", "pcs", "piece", "pieces"}:
             return

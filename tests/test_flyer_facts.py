@@ -1178,3 +1178,12 @@ def test_reconcile_never_mutates_prices_and_drops_conflict():
     out = _ids(reconcile_priced_facts(facts, src))
     assert out.get("item:0:price") == "$7.99"
     assert "$3.49" not in out.values()
+
+
+def test_category_suffix_not_appended_to_combo_names():
+    from agents.flyer.facts import _item_price_facts
+    txt = "Veg Combo - $39.99 Non-Veg Combo - $49.99 with biryani"
+    m = _items_map(_item_price_facts(txt, message_id="m"))
+    assert "Veg Combo" in m and m["Veg Combo"] == "$39.99"
+    assert "Non-Veg Combo" in m and m["Non-Veg Combo"] == "$49.99"
+    assert "Veg Combo Biryani" not in m and "Non-Veg Combo Biryani" not in m
