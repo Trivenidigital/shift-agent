@@ -14,12 +14,27 @@ from __future__ import annotations
 
 import json
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 from agents.flyer.flyer_art_director_oracle import (
     AXES,
     ArtDirectorScore,
     AxisScore,
     score_art_direction,
+    write_sidecar,
 )
+
+# Repo roots for subprocess CLI invocation. The CLI script imports the oracle via
+# its flat-VPS shim (from flyer_art_director_oracle import ...) with a package
+# fallback (from agents.flyer.flyer_art_director_oracle import ...); both src and
+# the flyer dir are placed on PYTHONPATH so either import resolves off-box.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_SRC_DIR = _REPO_ROOT / "src"
+_FLYER_DIR = _SRC_DIR / "agents" / "flyer"
+_SCORE_CLI = _SRC_DIR / "platform" / "scripts" / "score-flyer-art-direction"
 
 
 def _provider_returning(payload):
@@ -221,3 +236,109 @@ def test_unreadable_image_with_default_provider_never_raises(tmp_path):
     assert result.axes == {}
     assert result.composite == 0.0
     assert result.overall_critique != ""
+
+
+# ── Task C2: sidecar writer ─────────────────────────────────────────────────
+
+
+def test_write_sidecar_default_path_roundtrips(tmp_path):
+    """write_sidecar serializes every axis (score + critique), composite, and
+    overall_critique to <image>.artdirector.json next to the image; round-trips."""
+    image = tmp_path / "flyer.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")  # tiny PNG stub, not parsed
+    axes = {axis: AxisScore(score=idx + 2, critique=f"crit-{axis}") for idx, axis in enumerate(AXES)}
+    score = ArtDirectorScore(axes=axes, composite=5.5, overall_critique="solid but busy")
+
+    out = write_sidecar(str(image), score)
+
+    expected = Path(str(image) + ".artdirector.json")
+    assert Path(out) == expected
+    assert expected.exists()
+
+    loaded = json.loads(expected.read_text(encoding="utf-8"))
+    assert loaded["composite"] == 5.5
+    assert loaded["overall_critique"] == "solid but busy"
+    assert set(loaded["axes"].keys()) == set(AXES)
+    for axis in AXES:
+        assert loaded["axes"][axis]["score"] == axes[axis].score
+        assert loaded["axes"][axis]["critique"] == axes[axis].critique
+
+
+def test_write_sidecar_custom_out_path(tmp_path):
+    """An explicit out_path overrides the default <image>.artdirector.json."""
+    image = tmp_path / "flyer.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    out_path = tmp_path / "custom-score.json"
+    score = ArtDirectorScore(axes={}, composite=0.0, overall_critique="empty")
+
+    out = write_sidecar(str(image), score, out_path=str(out_path))
+
+    assert Path(out) == out_path
+    assert out_path.exists()
+    loaded = json.loads(out_path.read_text(encoding="utf-8"))
+    assert loaded["composite"] == 0.0
+    assert loaded["axes"] == {}
+    assert loaded["overall_critique"] == "empty"
+
+
+# ── Task C2: score-flyer-art-direction CLI ──────────────────────────────────
+
+
+def _cli_env():
+    """PYTHONPATH covering both the package import (src) and the flat-VPS import
+    (flyer dir), so the CLI's import shim resolves off-box. No API key is set, so
+    the default provider is None and the oracle returns a safe empty score."""
+    env = {**os.environ}
+    extra = os.pathsep.join((str(_SRC_DIR), str(_SRC_DIR / "platform"), str(_FLYER_DIR)))
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = extra + (os.pathsep + existing if existing else "")
+    # Ensure no key is visible — the no-key path is what this test exercises.
+    env.pop("OPENROUTER_API_KEY", None)
+    return env
+
+
+def test_cli_no_api_key_exits_zero_and_writes_sidecar(tmp_path):
+    """With NO API key, the CLI must NOT traceback: it exits 0, the oracle returns
+    a safe empty score (composite 0.0), and the sidecar is still written + parses.
+    No network is touched (default provider is None when no key is present)."""
+    image = tmp_path / "tmp.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")  # fake image; never decoded on the no-key path
+    out_path = tmp_path / "tmp.json"
+
+    result = subprocess.run(
+        [sys.executable, str(_SCORE_CLI), "--image", str(image), "--out", str(out_path)],
+        capture_output=True,
+        text=True,
+        env=_cli_env(),
+    )
+
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert "Traceback" not in result.stderr
+    assert "Traceback" not in result.stdout
+    assert out_path.exists()
+    loaded = json.loads(out_path.read_text(encoding="utf-8"))
+    assert loaded["composite"] == 0.0
+    assert loaded["axes"] == {}
+    # The safe score carries a non-empty note explaining the unavailable provider.
+    assert loaded["overall_critique"] != ""
+
+
+def test_cli_default_sidecar_path_no_api_key(tmp_path):
+    """Without --out, the CLI writes the default <image>.artdirector.json sidecar
+    and still exits 0 with no traceback on the no-key path."""
+    image = tmp_path / "tmp.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    result = subprocess.run(
+        [sys.executable, str(_SCORE_CLI), "--image", str(image)],
+        capture_output=True,
+        text=True,
+        env=_cli_env(),
+    )
+
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert "Traceback" not in result.stderr
+    expected = Path(str(image) + ".artdirector.json")
+    assert expected.exists()
+    loaded = json.loads(expected.read_text(encoding="utf-8"))
+    assert loaded["composite"] == 0.0

@@ -25,6 +25,7 @@ import mimetypes
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 # Reuse the deployed OpenRouter seam (flat layout on the VPS). We pull ONLY the
@@ -226,3 +227,57 @@ def score_art_direction(
     overall = doc.get("overall_critique")
     overall = overall.strip() if isinstance(overall, str) else ""
     return ArtDirectorScore(axes=axes, composite=composite, overall_critique=overall)
+
+
+def _sidecar_path(image_path: str) -> Path:
+    """Default sidecar location: <image>.artdirector.json, next to the rendered
+    image. Mirrors the visual-QA `<image>.qa.json` / render `<image>.text.json`
+    naming so all flyer sidecars sit alongside their artifact for version diffing.
+    """
+    return Path(str(image_path) + ".artdirector.json")
+
+
+def score_to_dict(score: ArtDirectorScore) -> dict:
+    """Plain JSON-serializable dict for an ArtDirectorScore. Every axis carries
+    its score + critique; composite + overall_critique sit at the top level."""
+    return {
+        "axes": {
+            axis: {"score": axis_score.score, "critique": axis_score.critique}
+            for axis, axis_score in score.axes.items()
+        },
+        "composite": score.composite,
+        "overall_critique": score.overall_critique,
+    }
+
+
+def write_sidecar(
+    image_path: str,
+    score: ArtDirectorScore,
+    *,
+    out_path: str | None = None,
+) -> str:
+    """Write an ArtDirectorScore as a sidecar JSON next to the rendered image.
+
+    DEV-ONLY. Default sidecar path is ``<image>.artdirector.json`` (override via
+    ``out_path``). Mirrors the visual-QA `.qa.json` writer: `json.dumps(...,
+    indent=2, ensure_ascii=False)` via `safe_io.atomic_write_text` when importable
+    (the deployed pattern), falling back to a plain tmp-write+replace off-box.
+    Returns the path written (as a string).
+    """
+    path = Path(out_path) if out_path else _sidecar_path(image_path)
+    text = json.dumps(score_to_dict(score), indent=2, ensure_ascii=False)
+    try:  # pragma: no cover - import shim mirrors sibling flyer modules
+        from safe_io import atomic_write_text  # type: ignore
+    except ImportError:  # pragma: no cover
+        try:
+            from platform.safe_io import atomic_write_text  # type: ignore
+        except ImportError:
+            atomic_write_text = None  # type: ignore
+    if atomic_write_text is not None:
+        atomic_write_text(path, text)
+    else:  # plain atomic-ish write when safe_io is unavailable (off-box dev)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(path)
+    return str(path)
