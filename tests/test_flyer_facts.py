@@ -1375,3 +1375,14 @@ def test_item_price_no_phantom_for_prompt_prefixed_flat_subject():
     names = [f.value for f in _item_price_facts("Create a flyer with any item $5 Free Gift", message_id="m")
              if f.fact_id.endswith(":name")]
     assert "Free Gift" not in names
+
+
+def test_item_price_no_phantom_when_duplicate_name_claims_segment():
+    # A repeated real item ("Samosa $2" again) is a duplicate, not garbage; it
+    # claims the segment's price, so the fallback must NOT mine the trailing
+    # "Free Gift" as a phantom priced item.
+    from agents.flyer.facts import _item_price_facts
+    facts = _item_price_facts("Samosa $2, Samosa $2 Free Gift", message_id="m")
+    names = [f.value for f in facts if f.fact_id.endswith(":name")]
+    assert "Free Gift" not in names
+    assert names.count("Samosa") == 1  # the duplicate is deduped, not re-added

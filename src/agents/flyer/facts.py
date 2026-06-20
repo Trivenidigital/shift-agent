@@ -318,8 +318,13 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
         name = re.sub(r"^(?:and|with|include|includes|feature|features|featuring)\s+", "", name, flags=re.IGNORECASE)
         name = re.sub(r"\b(\d+)\s*(count|counts|cups?|trays?|pcs?|pieces?)\b", r"\1 \2", name, flags=re.IGNORECASE)
         name = _clean(name.strip(" -:"))
-        if not name or name.lower() in seen:
+        if not name:
             return "rejected"
+        if name.lower() in seen:
+            # A real name-first pattern matched but repeats an already-captured
+            # item. It still CLAIMED the segment's price, so the fallback must not
+            # mine trailing words — treat as a claim (deduped, not re-added).
+            return "duplicate"
         # A flat-price subject ("any item", "price all items") claims the price for
         # the whole segment; the trailing phrase is not its own priced item. Detect
         # on the NORMALIZED name so prompt-prefixed inputs ("Create a flyer with any
@@ -378,13 +383,13 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             continue
         name_first_claimed = False
         for match in price_for_name.finditer(segment):
-            if add_item(match.group("name"), f"${match.group('price')}") in ("accepted", "flat_subject"):
+            if add_item(match.group("name"), f"${match.group('price')}") in ("accepted", "flat_subject", "duplicate"):
                 name_first_claimed = True
         for match in compact_name_before_price.finditer(segment):
-            if add_item(match.group("name"), f"${match.group('price')}") in ("accepted", "flat_subject"):
+            if add_item(match.group("name"), f"${match.group('price')}") in ("accepted", "flat_subject", "duplicate"):
                 name_first_claimed = True
         for match in name_before_price.finditer(segment):
-            if add_item(match.group("name"), f"${match.group('price')}") in ("accepted", "flat_subject"):
+            if add_item(match.group("name"), f"${match.group('price')}") in ("accepted", "flat_subject", "duplicate"):
                 name_first_claimed = True
         if name_first_claimed:
             # A name-first pattern PAIRED an item OR claimed the price via a
