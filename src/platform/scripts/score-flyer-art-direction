@@ -31,6 +31,11 @@ from pathlib import Path
 
 SRC_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, "/opt/shift-agent")
+# `src` itself must be on the path: the oracle transitively imports visual_qa,
+# whose fallback imports are `from agents.flyer.facts ...` / `agents.flyer.
+# semantic_brief ...` — package paths rooted at `src`. Without this, a bare CLI
+# invocation (no PYTHONPATH=src) tracebacks at import, BEFORE main()'s handling.
+sys.path.insert(0, str(SRC_ROOT))
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 sys.path.insert(0, str(SRC_ROOT / "agents" / "flyer"))
 

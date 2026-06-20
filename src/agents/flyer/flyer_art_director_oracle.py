@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import mimetypes
 import urllib.error
 import urllib.request
@@ -98,17 +99,20 @@ class ArtDirectorScore:
 def _clamp_score(value: Any) -> Optional[int]:
     """Coerce a model score to an int clamped to 1..10. Non-numeric → None (the
     caller treats the axis as missing). Bools are rejected (a stray True/False is
-    not a real score)."""
+    not a real score). Non-finite numbers (NaN / ±Infinity) are ALSO rejected:
+    json.loads accepts the literals NaN / Infinity, and a string "Infinity" /
+    "1e999" coerces to a non-finite float — int(round(nan)) raises ValueError and
+    int(round(inf)) raises OverflowError, so we must reject them up front and
+    coerce inside try/except so this helper NEVER raises."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, int):
-        number = value
-    elif isinstance(value, float):
-        number = int(round(value))
-    elif isinstance(value, str):
+    if isinstance(value, (int, float, str)):
         try:
-            number = int(round(float(value.strip())))
-        except (ValueError, AttributeError):
+            number_f = float(value.strip()) if isinstance(value, str) else float(value)
+            if not math.isfinite(number_f):  # NaN / ±Infinity → treat as missing
+                return None
+            number = int(round(number_f))
+        except (ValueError, OverflowError, TypeError, AttributeError):
             return None
     else:
         return None
@@ -215,18 +219,22 @@ def score_art_direction(
         if prov is None:
             return _safe_score("art-director oracle unavailable: no vision provider")
         response = prov(image_path, brief_summary)
+
+        doc = _to_document(response)
+        if doc is None:
+            return _safe_score("art-director oracle error: malformed model response")
+
+        # Parse INSIDE the try (defense in depth): _parse_axes / _clamp_score are
+        # hardened against non-finite scores, but keeping the whole parse here
+        # guarantees ANY unforeseen parse error still returns the safe score
+        # rather than raising — the oracle's contract is "NEVER raises".
+        axes = _parse_axes(doc.get("axes"))
+        composite = round(sum(a.score for a in axes.values()) / len(axes), 4) if axes else 0.0
+        overall = doc.get("overall_critique")
+        overall = overall.strip() if isinstance(overall, str) else ""
+        return ArtDirectorScore(axes=axes, composite=composite, overall_critique=overall)
     except Exception as exc:  # noqa: BLE001 - dev tool MUST never raise
         return _safe_score(f"art-director oracle error: {type(exc).__name__}")
-
-    doc = _to_document(response)
-    if doc is None:
-        return _safe_score("art-director oracle error: malformed model response")
-
-    axes = _parse_axes(doc.get("axes"))
-    composite = round(sum(a.score for a in axes.values()) / len(axes), 4) if axes else 0.0
-    overall = doc.get("overall_critique")
-    overall = overall.strip() if isinstance(overall, str) else ""
-    return ArtDirectorScore(axes=axes, composite=composite, overall_critique=overall)
 
 
 def _sidecar_path(image_path: str) -> Path:

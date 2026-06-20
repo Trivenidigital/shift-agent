@@ -238,6 +238,126 @@ def test_unreadable_image_with_default_provider_never_raises(tmp_path):
     assert result.overall_critique != ""
 
 
+# ── BLOCKER 2: non-finite scores never raise (NaN / Infinity) ────────────────
+
+import math  # noqa: E402  (kept local to the non-finite block for readability)
+
+
+def test_nan_score_axis_dropped_others_kept_never_raises():
+    """json.loads accepts the literal NaN. int(round(nan)) raises ValueError; the
+    coercion must instead reject the non-finite score (treat the axis as missing)
+    and NEVER raise. Other axes are kept; composite stays finite."""
+    raw = '{"axes": {"theme_clarity": {"score": NaN, "critique": "c1"}, '
+    raw += '"hook_prominence": {"score": 8, "critique": "c2"}}, '
+    raw += '"overall_critique": "o"}'
+    # sanity: the literal really does parse to a non-finite float
+    assert math.isnan(json.loads(raw)["axes"]["theme_clarity"]["score"])
+
+    provider = _provider_returning(raw)
+    result = score_art_direction("/tmp/flyer.png", provider=provider)
+
+    assert "theme_clarity" not in result.axes  # NaN dropped
+    assert result.axes["hook_prominence"].score == 8
+    assert result.composite == 8.0
+    assert math.isfinite(result.composite)
+
+
+def test_positive_infinity_score_axis_dropped_never_raises():
+    """int(round(inf)) raises OverflowError; the coercion must reject +Infinity."""
+    raw = '{"axes": {"theme_clarity": {"score": Infinity, "critique": "c1"}, '
+    raw += '"hook_prominence": {"score": 5, "critique": "c2"}}, '
+    raw += '"overall_critique": "o"}'
+    assert math.isinf(json.loads(raw)["axes"]["theme_clarity"]["score"])
+
+    provider = _provider_returning(raw)
+    result = score_art_direction("/tmp/flyer.png", provider=provider)
+
+    assert "theme_clarity" not in result.axes  # +Infinity dropped
+    assert result.axes["hook_prominence"].score == 5
+    assert result.composite == 5.0
+    assert math.isfinite(result.composite)
+
+
+def test_negative_infinity_score_axis_dropped_never_raises():
+    raw = '{"axes": {"theme_clarity": {"score": -Infinity, "critique": "c1"}, '
+    raw += '"hook_prominence": {"score": 6, "critique": "c2"}}, '
+    raw += '"overall_critique": "o"}'
+    assert math.isinf(json.loads(raw)["axes"]["theme_clarity"]["score"])
+
+    provider = _provider_returning(raw)
+    result = score_art_direction("/tmp/flyer.png", provider=provider)
+
+    assert "theme_clarity" not in result.axes  # -Infinity dropped
+    assert result.axes["hook_prominence"].score == 6
+    assert result.composite == 6.0
+
+
+def test_string_infinity_score_rejected_never_raises():
+    """A string score "Infinity" → float("Infinity") is non-finite → rejected
+    (axis dropped), never raises."""
+    payload = {
+        "axes": {
+            "theme_clarity": {"score": "Infinity", "critique": "c1"},
+            "hook_prominence": {"score": 7, "critique": "c2"},
+        },
+        "overall_critique": "o",
+    }
+    provider = _provider_returning(json.dumps(payload))
+    result = score_art_direction("/tmp/flyer.png", provider=provider)
+
+    assert "theme_clarity" not in result.axes
+    assert result.axes["hook_prominence"].score == 7
+    assert result.composite == 7.0
+
+
+def test_string_overflowing_exponent_score_rejected_never_raises():
+    """A string score "1e999" → float overflows to inf → non-finite → rejected."""
+    payload = {
+        "axes": {
+            "theme_clarity": {"score": "1e999", "critique": "c1"},
+            "hook_prominence": {"score": 4, "critique": "c2"},
+        },
+        "overall_critique": "o",
+    }
+    assert math.isinf(float("1e999"))  # sanity
+    provider = _provider_returning(json.dumps(payload))
+    result = score_art_direction("/tmp/flyer.png", provider=provider)
+
+    assert "theme_clarity" not in result.axes
+    assert result.axes["hook_prominence"].score == 4
+    assert result.composite == 4.0
+
+
+def test_string_nan_score_rejected_never_raises():
+    payload = {
+        "axes": {
+            "theme_clarity": {"score": "NaN", "critique": "c1"},
+            "hook_prominence": {"score": 3, "critique": "c2"},
+        },
+        "overall_critique": "o",
+    }
+    provider = _provider_returning(json.dumps(payload))
+    result = score_art_direction("/tmp/flyer.png", provider=provider)
+
+    assert "theme_clarity" not in result.axes
+    assert result.axes["hook_prominence"].score == 3
+    assert result.composite == 3.0
+
+
+def test_all_axes_non_finite_yields_safe_finite_composite():
+    """When every axis is non-finite, all are dropped; composite is a finite 0.0
+    (never NaN/inf), and the oracle never raises."""
+    raw = '{"axes": {"theme_clarity": {"score": NaN, "critique": "c"}, '
+    raw += '"hook_prominence": {"score": Infinity, "critique": "c"}}, '
+    raw += '"overall_critique": "o"}'
+    provider = _provider_returning(raw)
+    result = score_art_direction("/tmp/flyer.png", provider=provider)
+
+    assert result.axes == {}
+    assert result.composite == 0.0
+    assert math.isfinite(result.composite)
+
+
 # ── Task C2: sidecar writer ─────────────────────────────────────────────────
 
 
@@ -342,3 +462,51 @@ def test_cli_default_sidecar_path_no_api_key(tmp_path):
     assert expected.exists()
     loaded = json.loads(expected.read_text(encoding="utf-8"))
     assert loaded["composite"] == 0.0
+
+
+def _cli_env_without_src():
+    """A CLEANED environment WITHOUT `src` (or any flyer path) on PYTHONPATH and
+    with no OPENROUTER_API_KEY. This proves the CLI is self-contained on import:
+    its own sys.path header must put the repo `src/` dir on the path so that the
+    oracle's transitive imports (visual_qa → agents.flyer.facts /
+    agents.flyer.semantic_brief, which need `src`) resolve. A bare invocation must
+    therefore NOT traceback at import time, before main()'s error handling."""
+    env = {**os.environ}
+    # Set PYTHONPATH to something irrelevant — explicitly NOT containing src.
+    env["PYTHONPATH"] = str(tmp_irrelevant_dir())
+    env.pop("OPENROUTER_API_KEY", None)
+    return env
+
+
+def tmp_irrelevant_dir():
+    """A path guaranteed not to satisfy any flyer/platform import."""
+    return _REPO_ROOT / "tasks"
+
+
+def test_cli_self_contained_without_src_on_pythonpath(tmp_path):
+    """BLOCKER 1: a bare CLI invocation with `src` NOT on PYTHONPATH must still
+    import cleanly (the script must add the repo `src/` dir to sys.path itself).
+    Otherwise the oracle's transitive visual_qa fallback imports
+    (from agents.flyer.facts / agents.flyer.semantic_brief) traceback at import,
+    BEFORE main()'s error handling — violating 'CLI never tracebacks'.
+
+    Asserts: exit 0, NO traceback in stderr, sidecar written + parses."""
+    image = tmp_path / "tmp.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    out_path = tmp_path / "tmp.json"
+
+    result = subprocess.run(
+        [sys.executable, str(_SCORE_CLI), "--image", str(image), "--out", str(out_path)],
+        capture_output=True,
+        text=True,
+        env=_cli_env_without_src(),
+    )
+
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert "Traceback" not in result.stderr, result.stderr
+    assert "Traceback" not in result.stdout
+    assert out_path.exists()
+    loaded = json.loads(out_path.read_text(encoding="utf-8"))
+    assert loaded["composite"] == 0.0
+    assert loaded["axes"] == {}
+    assert loaded["overall_critique"] != ""
