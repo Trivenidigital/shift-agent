@@ -1226,6 +1226,12 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
         return False
     if not _is_food_or_grocery_project(project):
         return False
+    # Deterministic-first routing (2026-06-20): fact-dense food flyers (menus,
+    # price lists, combos, schedule+price) skip integrated model-rendered text and
+    # render via the deterministic premium overlay (mode 2). Gated + allowlist-scoped
+    # via FLYER_DETERMINISTIC_FIRST; flag-off short-circuits -> byte-identical.
+    if _deterministic_first_enabled(project) and _is_fact_dense(project):
+        return False
     reference_menu = _style_only_reference_requested(project) and _has_materialized_reference_menu_facts(project)
     if reference_menu:
         # Slice 1 narrowing: style-only / reference-menu uploaded-flyer cases STAY on

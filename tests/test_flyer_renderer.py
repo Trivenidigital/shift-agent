@@ -5734,3 +5734,52 @@ def test_deterministic_first_enabled_allowlist_scoped(monkeypatch):
     assert render_module._deterministic_first_enabled(_weekend_project()) is True
     other = _weekend_project().model_copy(update={"customer_phone": "+19998887777"})
     assert render_module._deterministic_first_enabled(other) is False
+
+
+def _enable_integrated(monkeypatch):
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+
+
+def test_dense_flag_on_routes_to_mode2(monkeypatch):
+    _enable_integrated(monkeypatch)
+    monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
+    p = _weekend_project()
+    assert render_module._integrated_poster_eligible(p) is False     # not integrated
+    assert render_module._background_only_eligible(p) is True        # -> mode 2
+
+
+def test_sparse_flag_on_stays_integrated(monkeypatch):
+    _enable_integrated(monkeypatch)
+    monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
+    assert render_module._integrated_poster_eligible(_sparse_project()) is True
+
+
+def test_dense_flag_off_current_behavior(monkeypatch):
+    _enable_integrated(monkeypatch)
+    monkeypatch.delenv("FLYER_DETERMINISTIC_FIRST", raising=False)
+    assert render_module._integrated_poster_eligible(_weekend_project()) is True
+
+
+def test_flag_off_byte_identical_dense_and_sparse(monkeypatch):
+    _enable_integrated(monkeypatch)
+    monkeypatch.delenv("FLYER_DETERMINISTIC_FIRST", raising=False)
+    assert render_module._integrated_poster_eligible(_weekend_project()) is True
+    assert render_module._integrated_poster_eligible(_sparse_project()) is True
+
+
+def test_dense_flag_on_premium_overlay_interaction(monkeypatch):
+    _enable_integrated(monkeypatch)
+    monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    p = _weekend_project()
+    assert render_module._integrated_poster_eligible(p) is False
+    assert render_module._premium_overlay_enabled(p) is True
+
+
+def test_dense_flag_on_scoped_other_number_unaffected(monkeypatch):
+    _enable_integrated(monkeypatch)
+    monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    other = _weekend_project().model_copy(update={"customer_phone": "+19998887777"})
+    assert render_module._integrated_poster_eligible(other) is True   # still integrated
