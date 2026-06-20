@@ -5717,6 +5717,27 @@ def test_is_fact_dense_single_percent_offer_is_sparse():
     assert render_module._is_fact_dense(p) is False
 
 
+def test_is_fact_dense_schedule_plus_offer_price():
+    # schedule + a currency offer_price (no items / no pricing_structure) -> dense
+    p = _df_project([
+        _fact("business_name", "Lakshmi's Kitchen"),
+        _fact("offer:0", "Weekend Special"),
+        _fact("offer_price", "$9.99"),
+        _fact("schedule", "Sat-Sun 4-8 PM"),
+    ], notes="weekend special deal")
+    assert render_module._is_fact_dense(p) is True
+
+
+def test_is_fact_dense_lone_offer_price_is_sparse():
+    # a single promo offer with a price but NO schedule / list -> sparse (stays integrated)
+    p = _df_project([
+        _fact("business_name", "Lakshmi's Kitchen"),
+        _fact("offer:0", "Diwali Special"),
+        _fact("offer_price", "$20"),
+    ], notes="diwali special")
+    assert render_module._is_fact_dense(p) is False
+
+
 def test_deterministic_first_enabled_flag_off(monkeypatch):
     monkeypatch.delenv("FLYER_DETERMINISTIC_FIRST", raising=False)
     assert render_module._deterministic_first_enabled(_weekend_project()) is False

@@ -1175,8 +1175,11 @@ def _is_fact_dense(project: FlyerProject) -> bool:
     item_names = {_fid(f) for f in facts if _FACT_ITEM_NAME_RE.match(_fid(f))}
     item_prices = [f for f in facts if _FACT_ITEM_PRICE_RE.match(_fid(f))]
     offers = [f for f in facts if _FACT_OFFER_RE.match(_fid(f))]
-    pricing_structure = next((f for f in facts if _fid(f) == "pricing_structure"), None)
+    pricing_structures = [f for f in facts if _fid(f) == "pricing_structure"]
+    offer_prices = [f for f in facts if _fid(f) == "offer_price"]
     has_schedule = any(_fid(f) == "schedule" for f in facts)
+    # every currency-bearing price fact (used by the schedule+price branch)
+    currency_price_facts = item_prices + pricing_structures + offers + offer_prices
 
     # (a) >=2 distinct menu items
     if len(item_names) >= 2:
@@ -1184,18 +1187,14 @@ def _is_fact_dense(project: FlyerProject) -> bool:
     # (b) >=2 item prices
     if len(item_prices) >= 2:
         return True
-    # (c) a currency-amount pricing structure (not a % discount)
-    if _has_currency(pricing_structure):
+    # (c) a currency-amount pricing structure (any of them; not a % discount)
+    if any(_has_currency(f) for f in pricing_structures):
         return True
     # (d) >=2 offers (combo / multi-offer)
     if len(offers) >= 2:
         return True
-    # (e) recurring schedule + any currency-amount price fact
-    if has_schedule and (
-        _has_currency(pricing_structure)
-        or any(_has_currency(f) for f in item_prices)
-        or any(_has_currency(f) for f in offers)
-    ):
+    # (e) recurring schedule + any currency-amount price fact (incl. offer_price)
+    if has_schedule and any(_has_currency(f) for f in currency_price_facts):
         return True
     return False
 
