@@ -5603,3 +5603,18 @@ def test_apply_flag_off_byte_identical(monkeypatch, tmp_path):
     assert premium_called["v"] is False
     assert flat["called"] is True
     assert r.consume_premium_overlay_outcome() is None
+
+
+def test_premium_subprocess_sys_path_excludes_venv_site_packages():
+    # Regression: the /usr/bin/python3 premium subprocess must receive ONLY the
+    # flat-module dir(s), NOT the parent venv's full sys.path. Passing the venv's
+    # site-packages poisoned the subprocess with ABI-specific compiled
+    # extensions (pydantic_core/PIL) → ModuleNotFoundError under /usr/bin/python3
+    # → premium silently degraded to flat (caught by the deploy smoke gate).
+    import os as _os
+    import schemas as _schemas
+    from agents.flyer import render as r
+    roots = r._premium_subprocess_sys_path()
+    assert _os.path.dirname(_os.path.abspath(_schemas.__file__)) in roots
+    assert all("site-packages" not in p for p in roots)
+    assert all("dist-packages" not in p for p in roots)
