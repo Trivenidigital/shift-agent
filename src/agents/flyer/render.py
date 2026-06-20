@@ -1151,6 +1151,55 @@ def _needs_reference_extraction(project: FlyerProject) -> bool:
     return has_reference_image and _request_asks_reference_extraction(project)
 
 
+# Deterministic-first content classifier (2026-06-20). Fact-dense flyers (menus,
+# price lists, combos, schedule+price) carry exact text the image model garbles
+# (~24% first-try success live); they render reliably via the deterministic
+# overlay instead. Pure heuristic over structured locked_facts — no model call.
+_FACT_ITEM_NAME_RE = re.compile(r"^item:\d+:name$")
+_FACT_ITEM_PRICE_RE = re.compile(r"^item:\d+:price$")
+_FACT_OFFER_RE = re.compile(r"^offer:\d+$")
+_FACT_CURRENCY_RE = re.compile(r"[$₹]\s*\d")  # $ or rupee followed by a digit
+
+
+def _is_fact_dense(project: FlyerProject) -> bool:
+    """True when the project carries fact-dense exact text (menu / multi-item /
+    price list / combo / schedule+price). Deterministic over locked_facts."""
+    facts = list(getattr(project, "locked_facts", []) or [])
+
+    def _fid(f):
+        return (getattr(f, "fact_id", "") or "")
+
+    def _has_currency(f):
+        return bool(f) and bool(_FACT_CURRENCY_RE.search(getattr(f, "value", "") or ""))
+
+    item_names = {_fid(f) for f in facts if _FACT_ITEM_NAME_RE.match(_fid(f))}
+    item_prices = [f for f in facts if _FACT_ITEM_PRICE_RE.match(_fid(f))]
+    offers = [f for f in facts if _FACT_OFFER_RE.match(_fid(f))]
+    pricing_structure = next((f for f in facts if _fid(f) == "pricing_structure"), None)
+    has_schedule = any(_fid(f) == "schedule" for f in facts)
+
+    # (a) >=2 distinct menu items
+    if len(item_names) >= 2:
+        return True
+    # (b) >=2 item prices
+    if len(item_prices) >= 2:
+        return True
+    # (c) a currency-amount pricing structure (not a % discount)
+    if _has_currency(pricing_structure):
+        return True
+    # (d) >=2 offers (combo / multi-offer)
+    if len(offers) >= 2:
+        return True
+    # (e) recurring schedule + any currency-amount price fact
+    if has_schedule and (
+        _has_currency(pricing_structure)
+        or any(_has_currency(f) for f in item_prices)
+        or any(_has_currency(f) for f in offers)
+    ):
+        return True
+    return False
+
+
 def _integrated_poster_eligible(project: FlyerProject) -> bool:
     """Cases where the image model composes the full poster (Slice 1: PRIMARY path).
 
