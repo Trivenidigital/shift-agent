@@ -1087,6 +1087,12 @@ def reconcile_priced_facts(facts: list[FlyerLockedFact], source_text: str) -> li
     for f in facts:
         if f.fact_id == "pricing_structure":
             flat_price = _price_norm(f.value)
+    if not flat_price:
+        # "any item $X" briefs attach the flat price per item without emitting a
+        # pricing_structure fact; recover the flat price from the source via the
+        # same detector extraction uses, so named-in-brief items at that price
+        # reconcile as source-backed.
+        flat_price = _price_norm(_generic_item_price(source_text or ""))
     src_blob = nname(source_text or "")
 
     def is_source_backed(name: str, price: str) -> bool:

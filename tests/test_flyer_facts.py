@@ -1279,3 +1279,35 @@ def test_reconcile_keeps_alacarte_item_named_inside_a_combo_offer():
     out = _ids(reconcile_priced_facts(facts, src))
     assert out.get("offer:0", "").startswith("Family Platter")
     assert out.get("item:0:name") == "Dosa" and out.get("item:0:price") == "$7.99"
+
+
+def test_reconcile_flat_price_from_source_when_no_pricing_structure_fact():
+    # "any item $X" briefs attach the flat price per item but may emit NO
+    # pricing_structure fact. reconcile must still recognize these as
+    # source-backed (name in brief + price == the flat price stated in source).
+    from agents.flyer.facts import reconcile_priced_facts
+    src = ("Include Idlie, Medhu Vada, Kheema Dosa, Poori. "
+           "Any item price is at $8.99. Saturday and Sunday only.")
+    facts = [
+        _lf("item:0:name", "Idlie"), _lf("item:0:price", "$8.99"),
+        _lf("item:1:name", "Medhu Vada"), _lf("item:1:price", "$8.99"),
+        _lf("item:2:name", "Kheema Dosa"), _lf("item:2:price", "$8.99"),
+        _lf("item:3:name", "Poori"), _lf("item:3:price", "$8.99"),
+    ]
+    out = _items_map(reconcile_priced_facts(facts, src))
+    assert set(out) == {"Idlie", "Medhu Vada", "Kheema Dosa", "Poori"}
+    assert all(p == "$8.99" for p in out.values())
+
+
+def test_reconcile_flat_price_from_source_still_drops_conflicting_price():
+    # Safety: even with a source flat price, an item at a DIFFERENT (non-source)
+    # price is NOT source-backed -> suppressed (never rewritten).
+    from agents.flyer.facts import reconcile_priced_facts
+    src = "Include Idlie, Poori. Any item price is at $8.99."
+    facts = [
+        _lf("item:0:name", "Idlie"), _lf("item:0:price", "$8.99"),
+        _lf("item:1:name", "Poori"), _lf("item:1:price", "$14.50"),  # conflicting, not in source
+    ]
+    out = _items_map(reconcile_priced_facts(facts, src))
+    assert "Idlie" in out
+    assert "Poori" not in out  # conflicting price suppressed, not rewritten
