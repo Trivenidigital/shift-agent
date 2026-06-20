@@ -45,10 +45,10 @@ except ImportError:  # pragma: no cover - import-path shim
     from agents.flyer.semantic_brief import OPENROUTER_URL, _openrouter_key
 
 try:  # sibling FlyerBrief / validator — flat on the VPS, package-style in repo
-    from flyer_brief import FlyerBrief, VisualDirection  # type: ignore
+    from flyer_brief import FactRef, FlyerBrief, MarketingHook, VisualDirection  # type: ignore
     import flyer_brief_validator as _validator  # type: ignore
 except ImportError:  # pragma: no cover - import-path shim
-    from agents.flyer.flyer_brief import FlyerBrief, VisualDirection
+    from agents.flyer.flyer_brief import FactRef, FlyerBrief, MarketingHook, VisualDirection
     from agents.flyer import flyer_brief_validator as _validator
 
 
@@ -176,7 +176,12 @@ def _build_user_message(
     """The USER message: just the DATA the SKILL body operates on — the raw
     request, the available locked-fact IDs (so the model references facts by ID,
     never by value), a short profile summary, and any source/project context.
-    Carries NO creative instructions — those live in the SKILL.md system prompt."""
+    Carries NO creative instructions — those live in the SKILL.md system prompt.
+
+    Plus a SHORT additive note for the CD v2 OPTIONAL creative fields (hero/
+    supporting/hook/offer_priority/mood). These are enhancement-only: the model
+    references commercial facts by id/span exactly like ``fact_refs`` (never inline
+    values), and OMITTING them is always fine — they default and never block."""
     fact_catalog = [
         {"fact_id": f.fact_id, "label": f.label, "source": f.source}
         for f in locked_facts or []
@@ -188,6 +193,17 @@ def _build_user_message(
             "business_profile": _profile_summary(business_profile),
             "source_summary": source_summary or "",
             "project_context": project_context or "",
+            # CD v2 (Slice A) — OPTIONAL enhancement fields; omit any you are unsure of.
+            "optional_creative_fields": {
+                "hero_ref": "the single most prominent offer/item, as a fact_id (or a "
+                            "verbatim raw_span of the request) — never an inline value",
+                "supporting_refs": "secondary offers/items, each a fact_id or raw_span",
+                "marketing_hook": "one headline angle: {text_ref: {fact_id|raw_span}, "
+                                  "prominence: high|medium|low} — text is a ref, not a value",
+                "offer_priority": "overall emphasis: high|medium|low (default medium)",
+                "visual_direction.mood": "free-text mood/tone label, e.g. 'Warm Restaurant "
+                                         "Promo' — visual taste only, no words/text in art",
+            },
         },
         ensure_ascii=False,
     )
@@ -317,6 +333,64 @@ def _call_gateway(system_prompt: str, user_message: str) -> Optional[Mapping[str
     return None  # pragma: no cover - loop always returns on the final iteration
 
 
+# CD v2 (Slice A) — the new OPTIONAL creative fields the brain may PROPOSE. They are
+# ENHANCEMENTS, never requirements: a model that omits OR malforms any of them must
+# never raise, never flip the brief to "invalid", and never disturb the rest of the
+# brief. So they are parsed SEPARATELY from the strict core ``model_validate`` —
+# pulled OUT of the raw model dict first (so a malformed value can't fail the core
+# parse), then each is rebuilt in its own try/except that DEFAULTS the offender
+# (None / [] / None / "medium" / "") rather than propagating the error.
+_CDV2_TOP_LEVEL_FIELDS = ("hero_ref", "supporting_refs", "marketing_hook", "offer_priority")
+
+
+def _coerce_cdv2_fields(brief: FlyerBrief, raw: Mapping[str, Any]) -> None:
+    """Populate the CD v2 enhancement fields on an already-validated ``brief`` from
+    the raw model dict, DEFENSIVELY. Each field is built in isolation: a malformed
+    value defaults the offending field (and is otherwise ignored), so no new field
+    can ever raise or invalidate the brief. ``mood`` was carried through the strict
+    core ``VisualDirection`` already (it has a safe ``str`` default); only an
+    out-of-shape value would have been stripped upstream, leaving the "" default.
+
+    Mutates ``brief`` in place; ``raw`` is the model's parsed JSON object."""
+    # hero_ref — a single FactRef (FactRef's validator RAISES on both/neither set).
+    hero = raw.get("hero_ref")
+    if hero is not None:
+        try:
+            brief.hero_ref = FactRef.model_validate(hero)
+        except (ValidationError, TypeError, ValueError):
+            brief.hero_ref = None  # offender defaults; brief unaffected
+
+    # supporting_refs — skip INDIVIDUAL malformed entries, keep the valid ones.
+    supporting = raw.get("supporting_refs")
+    if isinstance(supporting, list):
+        parsed_refs: list[FactRef] = []
+        for entry in supporting:
+            try:
+                parsed_refs.append(FactRef.model_validate(entry))
+            except (ValidationError, TypeError, ValueError):
+                continue  # drop just this entry, not the whole list
+        try:
+            brief.supporting_refs = parsed_refs
+        except (ValidationError, TypeError, ValueError):
+            brief.supporting_refs = []
+
+    # marketing_hook — a MarketingHook (raises if its required text_ref is missing/bad).
+    hook = raw.get("marketing_hook")
+    if hook is not None:
+        try:
+            brief.marketing_hook = MarketingHook.model_validate(hook)
+        except (ValidationError, TypeError, ValueError):
+            brief.marketing_hook = None
+
+    # offer_priority — a Literal enum; an out-of-enum value defaults to "medium".
+    priority = raw.get("offer_priority")
+    if priority is not None:
+        if priority in ("high", "medium", "low"):
+            brief.offer_priority = priority
+        else:
+            brief.offer_priority = "medium"
+
+
 def build_flyer_brief(
     raw_request: str,
     locked_facts: Sequence[FlyerLockedFact],
@@ -370,12 +444,34 @@ def build_flyer_brief(
             status="unavailable", reason=_GATEWAY_FAILURE["reason"] or "gateway_unreachable"
         )
 
+    # CD v2: the new OPTIONAL creative fields must NEVER fail the core parse, so pull
+    # them OUT of the raw dict before the strict ``model_validate`` and re-apply them
+    # defensively afterward (``_coerce_cdv2_fields``). A malformed new value then
+    # defaults its own field instead of flipping the whole brief to "unavailable".
+    # ``mood`` lives inside ``visual_direction`` (VisualDirection forbids extras), so
+    # strip it from there too; a malformed ``mood`` defaults to "" rather than failing
+    # the core VisualDirection parse.
+    core = dict(raw)
+    cdv2_raw: dict[str, Any] = {k: core.pop(k) for k in _CDV2_TOP_LEVEL_FIELDS if k in core}
+    vd = core.get("visual_direction")
+    if isinstance(vd, Mapping) and "mood" in vd:
+        vd = dict(vd)
+        cdv2_raw["__mood"] = vd.pop("mood")
+        core["visual_direction"] = vd
+
     try:
-        brief = FlyerBrief.model_validate(dict(raw))
+        brief = FlyerBrief.model_validate(core)
     except (ValidationError, TypeError, ValueError):
         # A response that does not shape into a FlyerBrief is an unreachable/garbled
         # brain, not a firewall rejection → unavailable (fail safe), not invalid.
         return BriefResult(status="unavailable", reason="brief_unparseable")
+
+    # Apply the CD v2 enhancement fields defensively (malformed → default, never fatal).
+    _coerce_cdv2_fields(brief, cdv2_raw)
+    mood = cdv2_raw.get("__mood")
+    if isinstance(mood, str):
+        brief.visual_direction.mood = mood
+    # (a non-str mood is simply ignored → keeps the "" default)
 
     result = _validator.validate(brief, locked_facts, raw_request)
     if not result.ok:
