@@ -1031,6 +1031,111 @@ def merge_locked_facts(*fact_lists: Iterable[FlyerLockedFact]) -> list[FlyerLock
     return result
 
 
+def _price_norm(value: str) -> str:
+    """Canonical currency-amount form for comparison ('$ 7.9' -> '7.90'); '' if none."""
+    m = re.search(r"\d+(?:\.\d+)?", value or "")
+    if not m:
+        return ""
+    return f"{float(m.group(0)):.2f}"
+
+
+def _offer_is_simple_priced_line(text: str) -> bool:
+    """True when an offer is just 'Name $price' (a menu line), False when it has
+    descriptive/combo content beyond the name+price (rich offer)."""
+    items = _item_price_facts(text or "")
+    if len([f for f in items if f.fact_id.endswith(":name")]) != 1:
+        return False
+    residual = re.sub(r"\$\s*\d+(?:\.\d{1,2})?", " ", _normalize_dashes(text or ""))
+    name = next((f.value for f in items if f.fact_id.endswith(":name")), "")
+    residual = residual.replace(name, " ")
+    residual = re.sub(r"[^a-z]+", " ", residual.lower()).strip()
+    return all(w in {"", "and", "the", "a", "for", "-"} for w in residual.split())
+
+
+def reconcile_priced_facts(facts: list[FlyerLockedFact], source_text: str) -> list[FlyerLockedFact]:
+    """SOURCE-BACKED-FIRST suppression pass over merged locked_facts. Removes
+    duplicate / derived / unsupported / conflicting PRICED facts so each priced
+    fact renders once and reconciles to the customer brief. SUPPRESSION ONLY —
+    never invents, infers, rewrites, or auto-corrects a price. (Design 2026-06-20.)"""
+    item_re = re.compile(r"^item:(?P<i>\d+):(?P<k>name|price)$")
+
+    def nname(v: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", _normalize_dashes(v or "").lower()).strip()
+
+    # Canonical source-backed priced items re-derived from the brief (dash-fixed).
+    src_names_to_price: dict[str, str] = {}
+    tmp: dict[str, dict[str, str]] = {}
+    for f in _item_price_facts(source_text or ""):
+        mm = item_re.match(f.fact_id)
+        if mm:
+            tmp.setdefault(mm.group("i"), {})[mm.group("k")] = f.value
+    for rec in tmp.values():
+        if "name" in rec:
+            src_names_to_price[nname(rec["name"])] = _price_norm(rec.get("price", ""))
+    flat_price = ""
+    for f in facts:
+        if f.fact_id == "pricing_structure":
+            flat_price = _price_norm(f.value)
+    src_blob = nname(source_text or "")
+
+    def is_source_backed(name: str, price: str) -> bool:
+        n, p = nname(name), _price_norm(price)
+        if p and src_names_to_price.get(n) == p:
+            return True
+        if flat_price and p == flat_price and n and n in src_blob:
+            return True
+        return False
+
+    grouped: dict[str, dict[str, FlyerLockedFact]] = {}
+    offers: list[FlyerLockedFact] = []
+    others: list[FlyerLockedFact] = []
+    for f in facts:
+        m = item_re.match(f.fact_id)
+        if m:
+            grouped.setdefault(m.group("i"), {})[m.group("k")] = f
+        elif f.fact_id.startswith("offer:"):
+            offers.append(f)
+        else:
+            others.append(f)
+
+    kept_items: list[tuple[FlyerLockedFact, FlyerLockedFact | None]] = []
+    kept_item_keys: set[tuple[str, str]] = set()
+    for idx in sorted(grouped, key=lambda s: int(s)):
+        nf = grouped[idx].get("name")
+        pf = grouped[idx].get("price")
+        if nf is None:
+            continue
+        name = nf.value
+        price = pf.value if pf else ""
+        n, p = nname(name), _price_norm(price)
+        # Keep only SOURCE-BACKED priced items (matched per-item name+price in the
+        # brief, OR flat-price + name-in-brief). This single gate subsumes the
+        # derived-over-split case: an item over-split from a rich combo/offer (e.g.
+        # "Non-Veg Combo Biryani $12.99") has no source-backed price → suppressed;
+        # a legitimate item whose name also appears in a name-list offer survives.
+        if not is_source_backed(name, price):
+            continue
+        kept_items.append((nf, pf))
+        kept_item_keys.add((n, p))
+
+    kept_offers: list[FlyerLockedFact] = []
+    for f in offers:
+        if _offer_is_simple_priced_line(f.value):
+            items = _item_price_facts(f.value)
+            nm = next((x.value for x in items if x.fact_id.endswith(":name")), "")
+            pr = next((x.value for x in items if x.fact_id.endswith(":price")), "")
+            if (nname(nm), _price_norm(pr)) in kept_item_keys:
+                continue
+        kept_offers.append(f)
+
+    result = list(others) + list(kept_offers)
+    for new_i, (nf, pf) in enumerate(kept_items):
+        result.append(nf.model_copy(update={"fact_id": f"item:{new_i}:name"}))
+        if pf is not None:
+            result.append(pf.model_copy(update={"fact_id": f"item:{new_i}:price"}))
+    return result
+
+
 def facts_by_id(project: FlyerProject | object) -> dict[str, FlyerLockedFact]:
     return {fact.fact_id: fact for fact in getattr(project, "locked_facts", [])}
 

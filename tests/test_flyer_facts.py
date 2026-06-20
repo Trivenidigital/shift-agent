@@ -1106,3 +1106,75 @@ def test_price_first_brief_still_extracts_via_fallback():
     from agents.flyer.facts import _item_price_facts
     m = _items_map(_item_price_facts("$20 men haircut, $80 perms, $7 kids trim", message_id="m"))
     assert m.get("men haircut") == "$20" and m.get("perms") == "$80" and m.get("kids trim") == "$7"
+
+
+def _lf(fid, value, source="customer_text"):
+    from schemas import FlyerLockedFact
+    return FlyerLockedFact(fact_id=fid, label="L", value=value, source=source, required=True)
+
+
+def _ids(facts):
+    return {f.fact_id: f.value for f in facts}
+
+
+def test_reconcile_dessert_drops_duplicate_offers_keeps_items():
+    from agents.flyer.facts import reconcile_priced_facts
+    src = "Gulab Jamun - $7.99 Rasmalai Tres Leches - $9.99 Apricot Delight - $8.99 Limited Weekend Special"
+    facts = [
+        _lf("business_name", "Lakshmi's Kitchen"),
+        _lf("offer:0", "Gulab Jamun - $7.99"),
+        _lf("offer:1", "Rasmalai Tres Leches - $9.99"),
+        _lf("offer:2", "Apricot Delight - $8.99"),
+        _lf("item:0:name", "Gulab Jamun"), _lf("item:0:price", "$7.99"),
+        _lf("item:1:name", "Rasmalai Tres Leches"), _lf("item:1:price", "$9.99"),
+        _lf("item:2:name", "Apricot Delight"), _lf("item:2:price", "$8.99"),
+    ]
+    out = _ids(reconcile_priced_facts(facts, src))
+    assert "offer:0" not in out and "offer:1" not in out and "offer:2" not in out
+    assert out.get("item:0:name") == "Gulab Jamun" and out.get("item:0:price") == "$7.99"
+    assert out.get("item:1:name") == "Rasmalai Tres Leches" and out.get("item:1:price") == "$9.99"
+    assert out.get("item:2:name") == "Apricot Delight" and out.get("item:2:price") == "$8.99"
+    assert out.get("business_name") == "Lakshmi's Kitchen"
+
+
+def test_reconcile_combo_keeps_offer_drops_derived_item():
+    from agents.flyer.facts import reconcile_priced_facts
+    src = ("Veg Combo - $39.99: includes 2 veg curries and dessert. "
+           "Non-Veg Combo - $49.99: includes 2 non-veg curries, biryani, dessert.")
+    facts = [
+        _lf("offer:0", "Veg Combo - $39.99: includes 2 veg curries and dessert"),
+        _lf("offer:1", "Non-Veg Combo - $49.99: includes 2 non-veg curries, biryani, dessert"),
+        _lf("item:0:name", "Non-Veg Combo Biryani"), _lf("item:0:price", "$12.99"),
+    ]
+    out = _ids(reconcile_priced_facts(facts, src))
+    assert out.get("offer:0", "").startswith("Veg Combo")
+    assert out.get("offer:1", "").startswith("Non-Veg Combo")
+    assert "item:0:name" not in out and "item:0:price" not in out
+
+
+def test_reconcile_flat_priced_items_survive():
+    from agents.flyer.facts import reconcile_priced_facts
+    src = "Any item $7.99. Idli, Dosa, Vada, Uttapam, Pongal, Sambar."
+    facts = [
+        _lf("pricing_structure", "Any item $7.99"),
+        _lf("offer:0", "Idli, Dosa, Vada, Uttapam, Pongal, Sambar"),
+        _lf("item:0:name", "Idli"), _lf("item:0:price", "$7.99"),
+        _lf("item:1:name", "Dosa"), _lf("item:1:price", "$7.99"),
+    ]
+    out = _ids(reconcile_priced_facts(facts, src))
+    assert out.get("pricing_structure") == "Any item $7.99"
+    assert out.get("offer:0", "").startswith("Idli")
+    assert out.get("item:0:name") == "Idli" and out.get("item:0:price") == "$7.99"
+    assert out.get("item:1:name") == "Dosa" and out.get("item:1:price") == "$7.99"
+
+
+def test_reconcile_never_mutates_prices_and_drops_conflict():
+    from agents.flyer.facts import reconcile_priced_facts
+    src = "Gulab Jamun - $7.99"
+    facts = [
+        _lf("item:0:name", "Gulab Jamun"), _lf("item:0:price", "$7.99"),
+        _lf("item:1:name", "Gulab Jamun"), _lf("item:1:price", "$3.49"),
+    ]
+    out = _ids(reconcile_priced_facts(facts, src))
+    assert out.get("item:0:price") == "$7.99"
+    assert "$3.49" not in out.values()
