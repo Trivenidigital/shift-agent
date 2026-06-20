@@ -1365,3 +1365,13 @@ def test_item_price_no_phantom_when_name_first_match_rejected():
     names = [f.value for f in _item_price_facts("any item $5 Free Gift", message_id="m")
              if f.fact_id.endswith(":name")]
     assert "Free Gift" not in names
+
+
+def test_item_price_no_phantom_for_prompt_prefixed_flat_subject():
+    # "Create a flyer with any item $5 Free Gift": add_item strips the prompt
+    # prefix and recognizes "any item" as a flat-price subject; the fallback must
+    # NOT then bind the trailing "Free Gift" as a phantom priced item.
+    from agents.flyer.facts import _item_price_facts
+    names = [f.value for f in _item_price_facts("Create a flyer with any item $5 Free Gift", message_id="m")
+             if f.fact_id.endswith(":name")]
+    assert "Free Gift" not in names
