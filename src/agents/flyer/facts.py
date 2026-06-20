@@ -338,12 +338,18 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             name = re.sub(r"[-:–—]+$", "", name).strip()
             add_item(name, f"${suffix_match.group('price')}")
             continue
+        before = len(facts)
         for match in price_for_name.finditer(segment):
             add_item(match.group("name"), f"${match.group('price')}")
         for match in compact_name_before_price.finditer(segment):
             add_item(match.group("name"), f"${match.group('price')}")
         for match in name_before_price.finditer(segment):
             add_item(match.group("name"), f"${match.group('price')}")
+        if len(facts) > before:
+            # A name-first pattern already paired item(s) in this segment; do NOT
+            # run the price-before-name fallback — it would re-claim an already
+            # paired price and bind a trailing no-price phrase as a phantom item.
+            continue
         for match in price_before_name.finditer(segment):
             name = match.group("name")
             name = re.split(r"\b(?:and|with|include|includes|plus|for|on|at)\b|[.!?]", name, maxsplit=1, flags=re.IGNORECASE)[0]

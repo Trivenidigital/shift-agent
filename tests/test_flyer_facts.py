@@ -1089,3 +1089,20 @@ def test_item_price_facts_em_dash_pairs_correctly():
     from agents.flyer.facts import _item_price_facts
     m = _items_map(_item_price_facts("Dosa — $6.99, Idli — $5.99", message_id="m"))
     assert m.get("Dosa") == "$6.99" and m.get("Idli") == "$5.99"
+
+
+def test_no_price_phrase_does_not_become_priced_item():
+    from agents.flyer.facts import _item_price_facts
+    txt = "Gulab Jamun - $7.99 Rasmalai Tres Leches - $9.99 Apricot Delight - $8.99 Limited Weekend Special"
+    m = _items_map(_item_price_facts(txt, message_id="m"))
+    assert m.get("Gulab Jamun") == "$7.99"
+    assert m.get("Rasmalai Tres Leches") == "$9.99"
+    assert m.get("Apricot Delight") == "$8.99"
+    assert "Limited Weekend Special" not in m
+    assert all("$8.99" != p or n == "Apricot Delight" for n, p in m.items())
+
+
+def test_price_first_brief_still_extracts_via_fallback():
+    from agents.flyer.facts import _item_price_facts
+    m = _items_map(_item_price_facts("$20 men haircut, $80 perms, $7 kids trim", message_id="m"))
+    assert m.get("men haircut") == "$20" and m.get("perms") == "$80" and m.get("kids trim") == "$7"
