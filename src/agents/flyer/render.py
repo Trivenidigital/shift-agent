@@ -2971,6 +2971,24 @@ def _classify_fail_closed_reason(message: str) -> str:
     return "fit"
 
 
+def _premium_subprocess_sys_path() -> list[str]:
+    """Import roots for the /usr/bin/python3 premium subprocess: ONLY the dir(s)
+    holding the flat-deployed modules (schemas + flyer_*). Deliberately EXCLUDES
+    the gateway venv's site-packages — those carry compiled extensions
+    (pydantic_core, PIL) built for the venv Python's ABI, which fail to import
+    under the system /usr/bin/python3 (ModuleNotFoundError:
+    pydantic_core._pydantic_core). The subprocess uses /usr/bin/python3's OWN
+    site-packages for pydantic + Pillow; it only needs our flat modules on path."""
+    import schemas as _schemas
+    roots: list[str] = []
+    for f in (getattr(_schemas, "__file__", None), __file__):
+        if f:
+            d = os.path.dirname(os.path.abspath(f))
+            if d and d not in roots:
+                roots.append(d)
+    return roots
+
+
 def _render_premium_overlay_with_fallback(project: FlyerProject, source: Path | str, target: Path | str, *, size: tuple[int, int], output_format: str) -> PremiumOverlayOutcome:
     """Render the premium overlay in-process; on any import/runtime failure
     (the PIL-less gateway venv) re-render in a /usr/bin/python3 subprocess that
@@ -3003,7 +3021,7 @@ def _render_premium_overlay_with_fallback(project: FlyerProject, source: Path | 
         "target": str(target),
         "size": list(size),
         "output_format": output_format,
-        "sys_path": [p for p in sys.path if p],
+        "sys_path": _premium_subprocess_sys_path(),
     }
     spec_path = None
     try:
