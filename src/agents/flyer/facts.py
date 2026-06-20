@@ -282,7 +282,17 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
     promo_name = re.compile(r"^(?:save|coupon|discount|offer|deal|special|cashback|credit)\b", flags=re.IGNORECASE)
     bad_context = re.compile(r"\b(?:create|make|generate|design|flyer|flier|poster|banner|promoting|promote|promotion)\b", flags=re.IGNORECASE)
 
-    def add_item(name: str, price: str) -> None:
+    # A name-first match whose NAME is a flat-price subject ("any item", "every
+    # item", ...) legitimately CLAIMS the segment's price for that subject — the
+    # trailing phrase ("...$5 Free Gift") is then a phantom. Such a rejected match
+    # must still suppress the price-before-name fallback. Distinct from a name-first
+    # match rejected as prompt-prefix/bad-context garbage, where the price belongs
+    # to the trailing REAL item and the fallback must run.
+    flat_price_subject = re.compile(
+        r"^(?:price\s+)?(?:any|every|each|all)\s+items?$", flags=re.IGNORECASE
+    )
+
+    def add_item(name: str, price: str) -> bool:
         name = _clean(name)
         original_name = name
         name = re.sub(
@@ -298,7 +308,7 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
         name = re.sub(r"\b(\d+)\s*(count|counts|cups?|trays?|pcs?|pieces?)\b", r"\1 \2", name, flags=re.IGNORECASE)
         name = _clean(name.strip(" -:"))
         if not name or name.lower() in seen:
-            return
+            return False
         lowered_original = original_name.lower()
         lowered = name.lower()
         if (
@@ -308,31 +318,31 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             or re.search(r"\b(?:add|set|use)\s+price\b|\bprice\s+(?:as|is|for)\b", lowered)
             or re.search(r"\bprice\s+(?:any|every|each|all)\s+items?\b", lowered)
         ):
-            return
+            return False
         if lowered in {
             "any item", "all item", "all items", "every item", "each item",
             "any items", "every items", "each items", "priced at",
             "a", "an", "the", "and", "with", "include", "includes", "for", "on",
             "at", "each", "plate", "pc", "pcs", "piece", "pieces",
         }:
-            return
+            return False
         if category_suffix and category_suffix.lower() not in lowered and not _COMPLETE_DISH_RE.search(name):
             name = f"{name.title()} {category_suffix}"
         if name.lower() in {"a", "an", "the", "and", "with", "include", "includes", "for", "on", "at", "each", "plate", "pc", "pcs", "piece", "pieces"}:
-            return
+            return False
         if name.lower() in {"any item", "all item", "all items", "every item", "each item", "priced at"}:
-            return
+            return False
         if promo_name.search(name) or bad_context.search(name):
-            return
+            return False
         if re.search(
             r"\b(?:morning|evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.*\b\d{1,2}\s*(?:am|pm)\b"
             r"|\b\d{1,2}\s*(?:am|pm)\b",
             lowered,
         ):
-            return
+            return False
         meaningful_words = [part for part in name.split() if part not in {"-", "–", "—"}]
         if len(meaningful_words) > 5:
-            return
+            return False
         seen.add(name.lower())
         name_fact = _fact(f"item:{len(seen)-1}:name", "Item", name, "customer_text", message_id=message_id)
         price_fact = _fact(f"item:{len(seen)-1}:price", "Price", price, "customer_text", message_id=message_id)
@@ -340,6 +350,7 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             facts.append(name_fact)
         if price_fact:
             facts.append(price_fact)
+        return True
 
     for segment in re.split(r"[\n\r,;]+", text or ""):
         suffix_match = suffix_price.search(segment)
@@ -348,17 +359,27 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             name = re.sub(r"[-:–—]+$", "", name).strip()
             add_item(name, f"${suffix_match.group('price')}")
             continue
-        before = len(facts)
+        name_first_claimed = False
         for match in price_for_name.finditer(segment):
-            add_item(match.group("name"), f"${match.group('price')}")
+            if add_item(match.group("name"), f"${match.group('price')}"):
+                name_first_claimed = True
         for match in compact_name_before_price.finditer(segment):
-            add_item(match.group("name"), f"${match.group('price')}")
+            if add_item(match.group("name"), f"${match.group('price')}"):
+                name_first_claimed = True
         for match in name_before_price.finditer(segment):
-            add_item(match.group("name"), f"${match.group('price')}")
-        if len(facts) > before:
-            # A name-first pattern already paired item(s) in this segment; do NOT
-            # run the price-before-name fallback — it would re-claim an already
-            # paired price and bind a trailing no-price phrase as a phantom item.
+            claimed = add_item(match.group("name"), f"${match.group('price')}")
+            # A name-first match whose name is a flat-price subject ("any item")
+            # claims the price even when add_item rejects the subject itself; the
+            # trailing phrase would be a phantom, so still suppress the fallback.
+            if claimed or flat_price_subject.match(_clean(match.group("name"))):
+                name_first_claimed = True
+        if name_first_claimed:
+            # A name-first pattern PAIRED an item (or claimed the price via a
+            # flat-price subject); do NOT run the price-before-name fallback — it
+            # would re-claim a paired price or bind a trailing no-price phrase as a
+            # phantom item. A name-first match rejected as prompt-prefix/bad-context
+            # garbage does NOT set this flag, so the fallback still recovers the real
+            # trailing item ("...$20 men haircut").
             continue
         for match in price_before_name.finditer(segment):
             name = match.group("name")
@@ -1093,7 +1114,6 @@ def reconcile_priced_facts(facts: list[FlyerLockedFact], source_text: str) -> li
         # same detector extraction uses, so named-in-brief items at that price
         # reconcile as source-backed.
         flat_price = _price_norm(_generic_item_price(source_text or ""))
-    src_blob = nname(source_text or "")
 
     def is_source_backed(name: str, price: str) -> bool:
         n, p = nname(name), _price_norm(price)
@@ -1118,8 +1138,15 @@ def reconcile_priced_facts(facts: list[FlyerLockedFact], source_text: str) -> li
         elif f.fact_id.startswith("offer:"):
             offers.append(f)
             if (not _offer_is_simple_priced_line(f.value)) and re.search(r"[$₹]\s*\d", f.value or ""):
+                # The offer's OWN priced subject is its headline (before the component
+                # list). Priced COMPONENTS inside ("includes Samosa $2") must NOT be
+                # added — else a legitimate standalone item gets wrongly suppressed.
+                headline = re.split(
+                    r":|\binclud(?:e|es|ing)\b|\bwith\b",
+                    f.value or "", maxsplit=1, flags=re.IGNORECASE,
+                )[0]
                 sub_tmp: dict[str, dict[str, str]] = {}
-                for sub in _item_price_facts(f.value):
+                for sub in _item_price_facts(headline):
                     sm = item_re.match(sub.fact_id)
                     if sm:
                         sub_tmp.setdefault(sm.group("i"), {})[sm.group("k")] = sub.value

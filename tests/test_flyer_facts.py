@@ -1328,3 +1328,40 @@ def test_reconcile_flat_price_keeps_priced_expansion_items_not_in_brief():
     out = _items_map(reconcile_priced_facts(facts, src))
     assert set(out) == {"Veg Manchurian", "Hakka Noodles", "Manchow Soup"}
     assert all(p == "$9.99" for p in out.values())
+
+
+def test_reconcile_rule1_matches_offer_headline_not_priced_components():
+    # A rich offer prices its components inline. A standalone item matching a
+    # COMPONENT (not the offer's headline subject) must NOT be suppressed by rule (1).
+    from agents.flyer.facts import reconcile_priced_facts
+    src = ("Family Platter - $49.99: includes Samosa $2 and Chai $1. "
+           "Samosa - $2.")
+    facts = [
+        _lf("offer:0", "Family Platter - $49.99: includes Samosa $2 and Chai $1"),
+        _lf("item:0:name", "Samosa"), _lf("item:0:price", "$2"),
+    ]
+    out = _items_map(reconcile_priced_facts(facts, src))
+    assert out.get("Samosa") == "$2"  # component-named standalone item survives
+
+
+def test_reconcile_rule1_still_suppresses_combo_headline_duplicate():
+    # Regression guard: a combo item duplicating the offer's HEADLINE subject is
+    # still suppressed (offer canonical).
+    from agents.flyer.facts import reconcile_priced_facts
+    src = "Veg Combo - $39.99: Includes 2 curries and dessert."
+    facts = [
+        _lf("offer:0", "Veg Combo - $39.99: Includes 2 curries and dessert"),
+        _lf("item:0:name", "Veg Combo"), _lf("item:0:price", "$39.99"),
+    ]
+    out = _items_map(reconcile_priced_facts(facts, src))
+    assert "Veg Combo" not in out  # headline duplicate suppressed; offer canonical
+
+
+def test_item_price_no_phantom_when_name_first_match_rejected():
+    # A name-first pattern matches a stopword name ("any item") that add_item
+    # rejects; the price_before_name fallback must NOT then bind the trailing
+    # phrase ("Free Gift") as a phantom priced item.
+    from agents.flyer.facts import _item_price_facts
+    names = [f.value for f in _item_price_facts("any item $5 Free Gift", message_id="m")
+             if f.fact_id.endswith(":name")]
+    assert "Free Gift" not in names
