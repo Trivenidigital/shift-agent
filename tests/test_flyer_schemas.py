@@ -1889,3 +1889,34 @@ def test_flyer_creative_director_routed_observability_fields_default_and_roundtr
     assert type(back).__name__ == "FlyerCreativeDirectorRouted"
     assert back.render_error == "FlyerRenderError"
     assert back.error_summary == "render_error:FlyerRenderError"
+
+
+def test_flyer_premium_overlay_outcome_dispatches_through_log_entry():
+    from datetime import datetime, timezone
+    from pydantic import TypeAdapter, ValidationError
+    from schemas import LogEntry, FlyerPremiumOverlayOutcome
+
+    now = datetime.now(timezone.utc).isoformat()
+    delivered = {
+        "type": "flyer_premium_overlay_outcome", "ts": now,
+        "project_id": "F0179", "project_version": 2,
+        "status": "premium_overlay_delivered", "reason_class": "none",
+        "reason_detail": "ModuleNotFoundError: No module named 'PIL'",
+        "render_path": "subprocess", "output_format": "concept_preview",
+    }
+    adapter = TypeAdapter(LogEntry)
+    parsed = adapter.validate_python(delivered)
+    assert isinstance(parsed, FlyerPremiumOverlayOutcome)
+    assert parsed.status == "premium_overlay_delivered"
+    assert parsed.render_path == "subprocess"
+
+    with pytest.raises(ValidationError):
+        adapter.validate_python({**delivered, "bogus": 1})
+    with pytest.raises(ValidationError):
+        adapter.validate_python({**delivered, "status": "premium_overlay_maybe"})
+    minimal = {
+        "type": "flyer_premium_overlay_outcome", "ts": now,
+        "project_id": "F0179", "project_version": 1,
+        "status": "premium_overlay_failed_unexpected", "reason_class": "subprocess_failure",
+    }
+    assert adapter.validate_python(minimal).render_path == "none"

@@ -5425,3 +5425,181 @@ def test_w1_flagoff_prompt_byte_identical(monkeypatch):
     assert "reserve visually calm" in low
     assert "restaurant-promo" not in low and "hero dish" not in low and "vignette" not in low
     assert ("do not draw any text" in low) or ("do not render" in low)
+
+
+def test_premium_overlay_outcome_contextvar_consume_and_alert():
+    from agents.flyer import render as r
+    assert r.consume_premium_overlay_outcome() is None
+    out = r.PremiumOverlayOutcome(
+        status="premium_overlay_failed_unexpected", reason_class="subprocess_failure",
+        reason_detail="RuntimeError: boom", render_path="none", output_format="concept_preview",
+    )
+    r._PREMIUM_OVERLAY_OUTCOME.set(out)
+    got = r.consume_premium_overlay_outcome()
+    assert got is out
+    assert r.consume_premium_overlay_outcome() is None  # consume resets
+    assert r.premium_outcome_should_alert(out) is True
+    assert r.premium_outcome_should_alert(
+        r.PremiumOverlayOutcome("premium_overlay_delivered", "none", "", "subprocess", "concept_preview")
+    ) is False
+    assert r.premium_outcome_should_alert(
+        r.PremiumOverlayOutcome("premium_overlay_degraded_to_flat", "fit", "", "none", "concept_preview")
+    ) is False
+    assert r.premium_outcome_should_alert(None) is False
+
+
+def test_premium_overlay_renderer_string_and_classifier():
+    from agents.flyer import render as r
+    src = r.PREMIUM_OVERLAY_RENDERER
+    assert "model_validate_json" in src
+    assert "render_premium_overlay" in src
+    assert "sys_path" in src
+    assert "sys.exit(3" in src
+    assert "sys.exit(1" in src
+    assert r._classify_fail_closed_reason("required fact missing: schedule") == "coverage"
+    assert r._classify_fail_closed_reason("offer seal overflow") == "overflow"
+    assert r._classify_fail_closed_reason("text cannot fit the panel") == "fit"
+
+
+class _FakeProc:
+    def __init__(self, returncode, stdout="", stderr=""):
+        self.returncode = returncode; self.stdout = stdout; self.stderr = stderr
+
+
+def _premium_food_project():
+    if "_f0174_integrated_project" in globals():
+        return _f0174_integrated_project()
+    return FlyerProject(
+        project_id="F0179",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        original_message_id="wamid.flyer.premium.degrade",
+        raw_request="weekend specials",
+        fields=FlyerRequestFields(event_or_business_name="Lakshmi's Kitchen"),
+    )
+
+
+def _enable_premium(monkeypatch):
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    from agents.flyer import render as r
+    monkeypatch.setattr(r, "_is_food_or_grocery_project", lambda p: True)
+
+
+def test_apply_premium_in_process_success(monkeypatch, tmp_path):
+    from agents.flyer import render as r
+    from agents.flyer import premium_overlay as po
+    _enable_premium(monkeypatch)
+    monkeypatch.setattr(po, "render_premium_overlay", lambda *a, **k: None)
+    called = {"flat": False, "sub": False}
+    monkeypatch.setattr(r, "apply_critical_text_overlay", lambda *a, **k: called.__setitem__("flat", True))
+    monkeypatch.setattr(r.subprocess, "run", lambda *a, **k: called.__setitem__("sub", True) or _FakeProc(0))
+    r._apply_critical_text_overlay(_premium_food_project(), tmp_path / "s.png", tmp_path / "t.png", size=(1080, 1350), output_format="concept_preview")
+    out = r.consume_premium_overlay_outcome()
+    assert out.status == "premium_overlay_delivered" and out.render_path == "in_process"
+    assert called["flat"] is False and called["sub"] is False
+
+
+def test_apply_premium_in_process_failclosed_degrades_flat(monkeypatch, tmp_path):
+    from agents.flyer import render as r
+    from agents.flyer import premium_overlay as po
+    _enable_premium(monkeypatch)
+    def _raise(*a, **k):
+        raise r.FlyerRenderError("required fact missing: schedule")
+    monkeypatch.setattr(po, "render_premium_overlay", _raise)
+    flat = {"called": False}
+    monkeypatch.setattr(r, "apply_critical_text_overlay", lambda *a, **k: flat.__setitem__("called", True))
+    r._apply_critical_text_overlay(_premium_food_project(), tmp_path / "s.png", tmp_path / "t.png", size=(1080, 1350), output_format="concept_preview")
+    out = r.consume_premium_overlay_outcome()
+    assert out.status == "premium_overlay_degraded_to_flat" and out.reason_class == "coverage"
+    assert flat["called"] is True
+
+
+def test_apply_premium_subprocess_recovers_on_import_error(monkeypatch, tmp_path):
+    from agents.flyer import render as r
+    from agents.flyer import premium_overlay as po
+    _enable_premium(monkeypatch)
+    def _no_pil(*a, **k):
+        raise ModuleNotFoundError("No module named 'PIL'")
+    monkeypatch.setattr(po, "render_premium_overlay", _no_pil)
+    monkeypatch.setattr(r.Path, "exists", lambda self: True)
+    monkeypatch.setattr(r.subprocess, "run", lambda *a, **k: _FakeProc(0))
+    flat = {"called": False}
+    monkeypatch.setattr(r, "apply_critical_text_overlay", lambda *a, **k: flat.__setitem__("called", True))
+    r._apply_critical_text_overlay(_premium_food_project(), tmp_path / "s.png", tmp_path / "t.png", size=(1080, 1350), output_format="concept_preview")
+    out = r.consume_premium_overlay_outcome()
+    assert out.status == "premium_overlay_delivered" and out.render_path == "subprocess"
+    assert "PIL" in out.reason_detail
+    assert flat["called"] is False
+
+
+def test_apply_premium_subprocess_failclosed_exit3(monkeypatch, tmp_path):
+    from agents.flyer import render as r
+    from agents.flyer import premium_overlay as po
+    _enable_premium(monkeypatch)
+    monkeypatch.setattr(po, "render_premium_overlay", lambda *a, **k: (_ for _ in ()).throw(ModuleNotFoundError("No module named 'PIL'")))
+    monkeypatch.setattr(r.Path, "exists", lambda self: True)
+    monkeypatch.setattr(r.subprocess, "run", lambda *a, **k: _FakeProc(3, stderr="FlyerRenderError: text cannot fit"))
+    monkeypatch.setattr(r, "apply_critical_text_overlay", lambda *a, **k: None)
+    r._apply_critical_text_overlay(_premium_food_project(), tmp_path / "s.png", tmp_path / "t.png", size=(1080, 1350), output_format="concept_preview")
+    out = r.consume_premium_overlay_outcome()
+    assert out.status == "premium_overlay_degraded_to_flat" and out.reason_class == "fit"
+
+
+def test_apply_premium_subprocess_unexpected_exit1(monkeypatch, tmp_path):
+    from agents.flyer import render as r
+    from agents.flyer import premium_overlay as po
+    _enable_premium(monkeypatch)
+    monkeypatch.setattr(po, "render_premium_overlay", lambda *a, **k: (_ for _ in ()).throw(ModuleNotFoundError("No module named 'PIL'")))
+    monkeypatch.setattr(r.Path, "exists", lambda self: True)
+    monkeypatch.setattr(r.subprocess, "run", lambda *a, **k: _FakeProc(1, stderr="RuntimeError: boom"))
+    monkeypatch.setattr(r, "apply_critical_text_overlay", lambda *a, **k: None)
+    r._apply_critical_text_overlay(_premium_food_project(), tmp_path / "s.png", tmp_path / "t.png", size=(1080, 1350), output_format="concept_preview")
+    out = r.consume_premium_overlay_outcome()
+    assert out.status == "premium_overlay_failed_unexpected" and out.reason_class == "subprocess_failure"
+
+
+def test_apply_premium_serialization_error(monkeypatch, tmp_path):
+    from agents.flyer import render as r
+    from agents.flyer import premium_overlay as po
+    _enable_premium(monkeypatch)
+    monkeypatch.setattr(po, "render_premium_overlay", lambda *a, **k: (_ for _ in ()).throw(ModuleNotFoundError("No module named 'PIL'")))
+    monkeypatch.setattr(r.Path, "exists", lambda self: True)
+    proj = _premium_food_project()
+    monkeypatch.setattr(type(proj), "model_dump_json", lambda self, *a, **k: (_ for _ in ()).throw(ValueError("nope")))
+    monkeypatch.setattr(r, "apply_critical_text_overlay", lambda *a, **k: None)
+    r._apply_critical_text_overlay(proj, tmp_path / "s.png", tmp_path / "t.png", size=(1080, 1350), output_format="concept_preview")
+    out = r.consume_premium_overlay_outcome()
+    assert out.status == "premium_overlay_failed_unexpected" and out.reason_class == "serialization_error"
+
+
+def test_apply_premium_tempfile_failure_is_failed_unexpected_not_raise(monkeypatch, tmp_path):
+    from agents.flyer import render as r
+    from agents.flyer import premium_overlay as po
+    _enable_premium(monkeypatch)
+    monkeypatch.setattr(po, "render_premium_overlay", lambda *a, **k: (_ for _ in ()).throw(ModuleNotFoundError("No module named 'PIL'")))
+    monkeypatch.setattr(r.Path, "exists", lambda self: True)
+    def _boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(r.tempfile, "NamedTemporaryFile", _boom)
+    monkeypatch.setattr(r, "apply_critical_text_overlay", lambda *a, **k: None)
+    # Must NOT raise; must record a failed_unexpected outcome and fall through to flat.
+    r._apply_critical_text_overlay(_premium_food_project(), tmp_path / "s.png", tmp_path / "t.png", size=(1080, 1350), output_format="concept_preview")
+    out = r.consume_premium_overlay_outcome()
+    assert out.status == "premium_overlay_failed_unexpected"
+
+
+def test_apply_flag_off_byte_identical(monkeypatch, tmp_path):
+    from agents.flyer import render as r
+    from agents.flyer import premium_overlay as po
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY", raising=False)
+    premium_called = {"v": False}
+    monkeypatch.setattr(po, "render_premium_overlay", lambda *a, **k: premium_called.__setitem__("v", True))
+    flat = {"called": False}
+    monkeypatch.setattr(r, "apply_critical_text_overlay", lambda *a, **k: flat.__setitem__("called", True))
+    r._apply_critical_text_overlay(_premium_food_project(), tmp_path / "s.png", tmp_path / "t.png", size=(1080, 1350), output_format="concept_preview")
+    assert premium_called["v"] is False
+    assert flat["called"] is True
+    assert r.consume_premium_overlay_outcome() is None

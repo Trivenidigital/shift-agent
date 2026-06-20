@@ -209,6 +209,72 @@ else
     echo "⚠  Pillow absent under $RENDER_PY — premium font-LOAD check skipped (imports + bundle verified)"
 fi
 
+# 2.0b Fix C premium overlay — RENDER gate under the gateway venv interpreter.
+# The gateway runs the flyer pipeline under a venv WITHOUT Pillow. After the
+# flat-degrade fix, the premium overlay must still RENDER (via the /usr/bin/python3
+# subprocess escape hatch) and report `premium_overlay_delivered` — NOT silently
+# fall back to flat. Build a textless background with the PIL-capable render python,
+# then drive _apply_critical_text_overlay under $PY and assert the recorded outcome.
+# The smoke project mirrors tests/test_flyer_premium_overlay.py::_project6 (the
+# known-good fixture proven by test_render_premium_overlay_writes_image) so a real
+# render delivers (passes its own fit + coverage), rather than fail-closing to flat.
+if "$RENDER_PY" -c "import PIL" 2>/dev/null; then
+    SMOKE_DIR="$(mktemp -d)"
+    BG="$SMOKE_DIR/bg.png"; OUT="$SMOKE_DIR/out.png"
+    "$RENDER_PY" -c "
+from PIL import Image
+Image.new('RGB', (1080, 1350), (70, 40, 20)).save('$BG')
+" > /dev/null 2>&1
+    if ! FLYER_PREMIUM_OVERLAY=1 FLYER_PREMIUM_OVERLAY_ALLOWLIST= "$PY" -c "
+import sys
+sys.path.insert(0, '/opt/shift-agent')
+import flyer_render as r
+from schemas import FlyerProject
+# Mirror tests/test_flyer_premium_overlay.py::_project6 (known-good fixture).
+facts = [
+    {'fact_id':'business_name','label':'Business','value':\"Lakshmi's Kitchen\",'required':True,'source':'customer_text'},
+    {'fact_id':'campaign_title','label':'Campaign','value':'Weekend Specials','required':True,'source':'customer_text'},
+    {'fact_id':'contact_phone','label':'Contact','value':'+17329837841','required':True,'source':'customer_text'},
+    {'fact_id':'location','label':'Location','value':'90 Brybar Dr St Johns FL','required':True,'source':'customer_text'},
+    {'fact_id':'pricing_structure','label':'Pricing','value':'Any item \$7.99','required':True,'source':'customer_text'},
+    {'fact_id':'schedule','label':'Schedule','value':'Saturday & Sunday, 4 PM-8 PM','required':True,'source':'customer_text'},
+]
+for i, n in enumerate(['Idli', 'Dosa', 'Vada', 'Uttapam', 'Pongal', 'Sambar']):
+    facts.append({'fact_id':f'item:{i}:name','label':'Item','value':n,'required':True,'source':'customer_text'})
+proj = FlyerProject.model_validate({
+    'project_id':'F9001','status':'generating_concepts','customer_phone':'+17329837841',
+    'customer_id':'CUST0001','created_at':'2026-06-18T00:00:00Z','updated_at':'2026-06-18T00:00:00Z',
+    'original_message_id':'wamid.F9001',
+    'raw_request':'Create a flyer for Weekend Specials. Any item \$7.99. Idli, Dosa, Vada, Uttapam, Pongal, Sambar. Sat & Sun 4-8 PM. +1 732-983-7841',
+    'fields':{'event_or_business_name':'Weekend Specials','preferred_language':'en'},
+    'locked_facts':facts,
+})
+# Smoke: force the premium/food path regardless of category heuristics or the
+# customer allowlist scoping — we are testing that premium RENDERS under \$PY.
+r._is_food_or_grocery_project = lambda p: True
+r._premium_overlay_enabled = lambda p: True
+r._apply_critical_text_overlay(proj, '$BG', '$OUT', size=(1080, 1350), output_format='concept_preview')
+import importlib.util as _ilu
+venv_has_pil = _ilu.find_spec('PIL') is not None
+out = r.consume_premium_overlay_outcome()
+assert out is not None, 'no premium outcome recorded (premium path did not run)'
+assert out.status == 'premium_overlay_delivered', f'premium did NOT render under gateway venv: {out.status} ({out.reason_class}: {out.reason_detail})'
+if not venv_has_pil:
+    assert out.render_path == 'subprocess', f'expected /usr/bin/python3 escape hatch under PIL-less venv, got render_path={out.render_path}'
+import os
+assert os.path.getsize('$OUT') > 0, 'premium render produced an empty file'
+print('premium renders premium under', sys.executable, 'via', out.render_path)
+" > /dev/null; then
+        echo "FAIL: premium overlay does NOT render premium under the gateway venv (\$PY) — would silently ship FLAT"
+        rm -rf "$SMOKE_DIR"
+        exit 1
+    fi
+    rm -rf "$SMOKE_DIR"
+    echo "✓ premium overlay renders premium under gateway venv path (\$PY via subprocess)"
+else
+    echo "⚠  Pillow absent under \$RENDER_PY — premium RENDER gate skipped (subprocess escape hatch unverifiable here)"
+fi
+
 # 2a. Credential-minimized readiness report. Informational only: the strict
 # external-foundation gate runs pre-install in shift-agent-deploy.sh, where a
 # missing Hermes bundled skill can abort before app state changes. Post-restart
