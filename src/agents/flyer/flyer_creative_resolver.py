@@ -14,8 +14,14 @@ Three load-bearing invariants:
      (``""`` / ``[]`` / fixed default prominence/priority), never an exception.
   3. **NEVER invents** — it SELECTS values that already exist in ``locked_facts``;
      a name / hook text is ALWAYS either ``""`` or a verbatim locked-fact value.
-     Theme / mood are pure taste (passthrough from ``visual_direction``) and carry
-     no commercial value, so they are not fact-validated.
+     Theme / mood are visual-taste strings: a model could otherwise smuggle a
+     fabricated COMMERCIAL value through them (e.g. ``mood="$5 off"``), which the
+     strict ``fact_refs`` firewall never scans. So they are validated to carry NO
+     UNGROUNDED commercial value — each is scanned with the SAME deterministic
+     commercial scanner the brief firewall uses (``_first_ungrounded_commercial``),
+     and a field that carries any commercial value NOT present in the locked facts
+     is defaulted to ``""``. A grounded number (one whose value IS a locked fact)
+     is kept, so legitimate taste like ``"$8.99 hero"`` is not over-stripped.
 
 This is SEPARATE from the strict anti-fabrication ``validate`` in
 ``flyer_brief_validator.py`` (the fact-authority firewall). That module owns
@@ -41,6 +47,25 @@ try:  # sibling FlyerBrief — flat on the VPS, package-style in the repo tree
     from flyer_brief import FactRef, FlyerBrief  # type: ignore
 except ImportError:  # pragma: no cover - import-path shim
     from agents.flyer.flyer_brief import FactRef, FlyerBrief
+
+# Reuse the brief firewall's EXISTING commercial-grounding scanner — single source
+# of truth, no parallel commercial regex here. ``_first_ungrounded_commercial(text,
+# allowed_values)`` returns the first commercial value in ``text`` that is NOT
+# grounded in ``allowed_values`` (overlay-rendered locked-fact values), or "" when
+# every commercial value is grounded / there is no commercial content. ``_norm_ws``
+# normalizes the locked values exactly the way the validator's call sites do, so the
+# grounding comparison matches the firewall's. Flat-on-VPS first, package-style
+# fallback (mirrors the FlyerBrief import above).
+try:  # pragma: no cover - import-path shim
+    from flyer_brief_validator import (  # type: ignore
+        _first_ungrounded_commercial,
+        _norm_ws,
+    )
+except ImportError:  # pragma: no cover - import-path shim
+    from agents.flyer.flyer_brief_validator import (
+        _first_ungrounded_commercial,
+        _norm_ws,
+    )
 
 
 # An item-name fact id: ``item:<N>:name`` (N is the item index). "First" item =
@@ -195,16 +220,47 @@ def _resolve_offer_priority(
     return "high" if _pricing_structure_value(locked_facts) else "medium"
 
 
-def _passthrough_theme_mood(brief: FlyerBrief) -> tuple[str, str]:
-    """Theme family + mood are pure taste — passthrough from visual_direction with
-    no fact validation. Guarded so a missing visual_direction never raises."""
+def _commercial_is_clean(value: str, allowed_values: Sequence[str]) -> bool:
+    """True iff ``value`` carries NO UNGROUNDED commercial value (i.e. it is safe to
+    keep). Reuses the brief firewall's ``_first_ungrounded_commercial`` (single source
+    of truth — no parallel commercial regex). Guarded so any scanner error defaults to
+    NOT-clean (fail-closed: strip the field) rather than letting an unscanned value
+    through; the resolver itself never raises."""
+    try:
+        return not _first_ungrounded_commercial(value, allowed_values)
+    except Exception:  # pragma: no cover - defensive: scanner error ⇒ strip the field
+        return False
+
+
+def _resolve_theme_mood(
+    brief: FlyerBrief, locked_facts: Sequence[FlyerLockedFact]
+) -> tuple[str, str]:
+    """Theme family + mood are VISUAL-TASTE strings — but a model could smuggle a
+    fabricated COMMERCIAL value through either (e.g. ``mood="$5 off"``), which the
+    strict ``fact_refs`` firewall never scans. So each is scanned for an UNGROUNDED
+    commercial value (one NOT present in the locked facts) via the brief firewall's
+    ``_first_ungrounded_commercial``; a field that carries one is defaulted to "".
+    A field whose only commercial value IS a locked fact value is GROUNDED and kept
+    (so ``"$8.99 hero"`` is not over-stripped). Guarded so a missing visual_direction
+    or any scanner error never raises (it just yields the safe "" default)."""
     try:
         vd = getattr(brief, "visual_direction", None)
         theme = (getattr(vd, "theme_family", None) or "") if vd is not None else ""
         mood = (getattr(vd, "mood", None) or "") if vd is not None else ""
-        return theme, mood
     except Exception:  # pragma: no cover - defensive: never raise
         return "", ""
+    # Normalize locked values exactly as the validator's call sites do, so the
+    # grounding comparison matches the brief firewall's behavior.
+    allowed_values = [
+        _norm_ws(getattr(f, "value", "") or "")
+        for f in locked_facts or ()
+        if (getattr(f, "value", "") or "").strip()
+    ]
+    if theme and not _commercial_is_clean(theme, allowed_values):
+        theme = ""
+    if mood and not _commercial_is_clean(mood, allowed_values):
+        mood = ""
+    return theme, mood
 
 
 def resolve_creative_direction(
@@ -218,7 +274,7 @@ def resolve_creative_direction(
     supporting_names = _resolve_supporting_names(brief, facts, hero_name)
     hook_text, hook_prominence = _resolve_hook(brief, facts)
     offer_priority = _resolve_offer_priority(brief, facts)
-    theme_family, mood = _passthrough_theme_mood(brief)
+    theme_family, mood = _resolve_theme_mood(brief, facts)
     return ResolvedCreativeDirection(
         hero_name=hero_name,
         supporting_names=supporting_names,

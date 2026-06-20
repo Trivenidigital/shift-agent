@@ -336,59 +336,91 @@ def _call_gateway(system_prompt: str, user_message: str) -> Optional[Mapping[str
 # CD v2 (Slice A) — the new OPTIONAL creative fields the brain may PROPOSE. They are
 # ENHANCEMENTS, never requirements: a model that omits OR malforms any of them must
 # never raise, never flip the brief to "invalid", and never disturb the rest of the
-# brief. So they are parsed SEPARATELY from the strict core ``model_validate`` —
-# pulled OUT of the raw model dict first (so a malformed value can't fail the core
-# parse), then each is rebuilt in its own try/except that DEFAULTS the offender
-# (None / [] / None / "medium" / "") rather than propagating the error.
+# brief. They are PRE-SANITIZED in the raw dict BEFORE a single ``FlyerBrief.
+# model_validate`` runs (Codex MAJOR fix): each CD v2 field is reduced to a form that
+# is GUARANTEED to satisfy the FlyerBrief schema constraints (or removed so it
+# defaults), so the one strict ``model_validate`` ENFORCES every constraint uniformly
+# — ``supporting_refs`` max_length=40, ``mood`` max_length=120 — instead of the old
+# pop-then-reassign path, which set the validated fields by attribute and thereby
+# bypassed those length constraints, letting over-length malformed values through.
 _CDV2_TOP_LEVEL_FIELDS = ("hero_ref", "supporting_refs", "marketing_hook", "offer_priority")
 
+# Schema caps mirrored from flyer_brief.py so the pre-sanitize CAPS the offending
+# field to a value the single ``model_validate`` accepts (a bare ``model_validate``
+# would RAISE on an over-length list/str, not truncate). Kept in sync with
+# FlyerBrief.supporting_refs (max_length=40) / VisualDirection.mood (max_length=120).
+_SUPPORTING_REFS_MAX = 40
+_MOOD_MAX_LEN = 120
 
-def _coerce_cdv2_fields(brief: FlyerBrief, raw: Mapping[str, Any]) -> None:
-    """Populate the CD v2 enhancement fields on an already-validated ``brief`` from
-    the raw model dict, DEFENSIVELY. Each field is built in isolation: a malformed
-    value defaults the offending field (and is otherwise ignored), so no new field
-    can ever raise or invalidate the brief. ``mood`` was carried through the strict
-    core ``VisualDirection`` already (it has a safe ``str`` default); only an
-    out-of-shape value would have been stripped upstream, leaving the "" default.
 
-    Mutates ``brief`` in place; ``raw`` is the model's parsed JSON object."""
-    # hero_ref — a single FactRef (FactRef's validator RAISES on both/neither set).
-    hero = raw.get("hero_ref")
-    if hero is not None:
-        try:
-            brief.hero_ref = FactRef.model_validate(hero)
-        except (ValidationError, TypeError, ValueError):
-            brief.hero_ref = None  # offender defaults; brief unaffected
+def _sanitize_cdv2_fields(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a COPY of the raw model dict with the CD v2 enhancement fields reduced
+    to forms that are GUARANTEED to satisfy the ``FlyerBrief`` schema — so a SINGLE
+    ``FlyerBrief.model_validate`` on the result enforces every constraint and never
+    raises on these fields (a malformed value is REMOVED so it defaults, an
+    over-length value is CAPPED). Pure: ``raw`` is not mutated.
 
-    # supporting_refs — skip INDIVIDUAL malformed entries, keep the valid ones.
-    supporting = raw.get("supporting_refs")
-    if isinstance(supporting, list):
-        parsed_refs: list[FactRef] = []
-        for entry in supporting:
-            try:
-                parsed_refs.append(FactRef.model_validate(entry))
-            except (ValidationError, TypeError, ValueError):
-                continue  # drop just this entry, not the whole list
-        try:
-            brief.supporting_refs = parsed_refs
-        except (ValidationError, TypeError, ValueError):
-            brief.supporting_refs = []
+      - ``hero_ref``: kept only if it constructs as a valid ``FactRef``; else removed
+        (→ default None).
+      - ``supporting_refs``: keep only entries that construct as a valid ``FactRef``,
+        then CAP to ``_SUPPORTING_REFS_MAX`` (so the list-length constraint holds).
+      - ``marketing_hook``: kept only if it constructs as a valid ``MarketingHook``;
+        else removed (→ default None).
+      - ``offer_priority``: kept only if ∈ {high, medium, low}; else removed
+        (→ default "medium").
+      - ``visual_direction.mood``: dropped if not a ``str``; otherwise TRUNCATED to
+        ``_MOOD_MAX_LEN`` (so the str-length constraint holds)."""
+    out: dict[str, Any] = dict(raw)
 
-    # marketing_hook — a MarketingHook (raises if its required text_ref is missing/bad).
-    hook = raw.get("marketing_hook")
-    if hook is not None:
-        try:
-            brief.marketing_hook = MarketingHook.model_validate(hook)
-        except (ValidationError, TypeError, ValueError):
-            brief.marketing_hook = None
+    # hero_ref — keep only a constructible FactRef; otherwise remove → default None.
+    if "hero_ref" in out:
+        hero = out["hero_ref"]
+        if hero is None or not _constructs(FactRef, hero):
+            out.pop("hero_ref", None)
 
-    # offer_priority — a Literal enum; an out-of-enum value defaults to "medium".
-    priority = raw.get("offer_priority")
-    if priority is not None:
-        if priority in ("high", "medium", "low"):
-            brief.offer_priority = priority
+    # supporting_refs — keep only constructible entries, then CAP to the schema max.
+    if "supporting_refs" in out:
+        supporting = out["supporting_refs"]
+        if isinstance(supporting, list):
+            valid = [e for e in supporting if _constructs(FactRef, e)]
+            out["supporting_refs"] = valid[:_SUPPORTING_REFS_MAX]
         else:
-            brief.offer_priority = "medium"
+            out.pop("supporting_refs", None)  # wrong type → default []
+
+    # marketing_hook — keep only a constructible MarketingHook; else remove → None.
+    if "marketing_hook" in out:
+        hook = out["marketing_hook"]
+        if hook is None or not _constructs(MarketingHook, hook):
+            out.pop("marketing_hook", None)
+
+    # offer_priority — keep only an in-enum value; else remove → default "medium".
+    if "offer_priority" in out:
+        if out["offer_priority"] not in ("high", "medium", "low"):
+            out.pop("offer_priority", None)
+
+    # visual_direction.mood — drop a non-str; truncate an over-length str to the cap.
+    vd = out.get("visual_direction")
+    if isinstance(vd, Mapping) and "mood" in vd:
+        vd = dict(vd)
+        mood = vd.get("mood")
+        if not isinstance(mood, str):
+            vd.pop("mood", None)  # wrong type → default ""
+        elif len(mood) > _MOOD_MAX_LEN:
+            vd["mood"] = mood[:_MOOD_MAX_LEN]
+        out["visual_direction"] = vd
+
+    return out
+
+
+def _constructs(model: type, value: Any) -> bool:
+    """True iff ``value`` constructs into ``model`` via ``model_validate`` without
+    raising. Used to pre-screen CD v2 sub-objects so the single ``FlyerBrief.
+    model_validate`` never raises on a malformed enhancement field."""
+    try:
+        model.model_validate(value)
+        return True
+    except (ValidationError, TypeError, ValueError):
+        return False
 
 
 def build_flyer_brief(
@@ -444,34 +476,21 @@ def build_flyer_brief(
             status="unavailable", reason=_GATEWAY_FAILURE["reason"] or "gateway_unreachable"
         )
 
-    # CD v2: the new OPTIONAL creative fields must NEVER fail the core parse, so pull
-    # them OUT of the raw dict before the strict ``model_validate`` and re-apply them
-    # defensively afterward (``_coerce_cdv2_fields``). A malformed new value then
-    # defaults its own field instead of flipping the whole brief to "unavailable".
-    # ``mood`` lives inside ``visual_direction`` (VisualDirection forbids extras), so
-    # strip it from there too; a malformed ``mood`` defaults to "" rather than failing
-    # the core VisualDirection parse.
-    core = dict(raw)
-    cdv2_raw: dict[str, Any] = {k: core.pop(k) for k in _CDV2_TOP_LEVEL_FIELDS if k in core}
-    vd = core.get("visual_direction")
-    if isinstance(vd, Mapping) and "mood" in vd:
-        vd = dict(vd)
-        cdv2_raw["__mood"] = vd.pop("mood")
-        core["visual_direction"] = vd
+    # CD v2: the new OPTIONAL creative fields must NEVER fail the parse OR bypass the
+    # FlyerBrief schema constraints. So PRE-SANITIZE them in the raw dict (malformed →
+    # removed so it defaults; over-length → capped) and then run a SINGLE strict
+    # ``FlyerBrief.model_validate`` over the WHOLE sanitized dict — that one validate
+    # enforces every constraint uniformly (``supporting_refs`` max_length=40, ``mood``
+    # max_length=120) instead of the old pop-then-attribute-assign path, which set the
+    # CD v2 fields by attribute and so bypassed those length constraints (Codex MAJOR).
+    sanitized = _sanitize_cdv2_fields(raw)
 
     try:
-        brief = FlyerBrief.model_validate(core)
+        brief = FlyerBrief.model_validate(sanitized)
     except (ValidationError, TypeError, ValueError):
         # A response that does not shape into a FlyerBrief is an unreachable/garbled
         # brain, not a firewall rejection → unavailable (fail safe), not invalid.
         return BriefResult(status="unavailable", reason="brief_unparseable")
-
-    # Apply the CD v2 enhancement fields defensively (malformed → default, never fatal).
-    _coerce_cdv2_fields(brief, cdv2_raw)
-    mood = cdv2_raw.get("__mood")
-    if isinstance(mood, str):
-        brief.visual_direction.mood = mood
-    # (a non-str mood is simply ignored → keeps the "" default)
 
     result = _validator.validate(brief, locked_facts, raw_request)
     if not result.ok:

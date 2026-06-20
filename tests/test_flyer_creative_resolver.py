@@ -291,6 +291,67 @@ def test_theme_family_and_mood_passthrough():
     assert out.mood == "Warm Restaurant Promo"
 
 
+# --- theme_family / mood: ungrounded-commercial firewall (FIX 1) ------------
+
+
+def test_mood_with_ungrounded_price_is_stripped_to_empty():
+    # A model could smuggle a fabricated commercial value via mood ("$5 off") — it
+    # is NOT a locked fact value, so the resolver must default mood to "".
+    facts = _two_item_facts()  # locked prices are $8.99 / $6.99, NOT $5
+    brief = _brief(
+        visual_direction=VisualDirection(mood="$5 off")
+    )
+    out = resolve_creative_direction(brief, facts)
+    assert out.mood == ""
+
+
+def test_theme_family_with_ungrounded_discount_is_stripped_to_empty():
+    facts = _two_item_facts()
+    brief = _brief(
+        visual_direction=VisualDirection(theme_family="Buy one get $3 off")
+    )
+    out = resolve_creative_direction(brief, facts)
+    assert out.theme_family == ""
+
+
+def test_mood_with_no_commercial_value_is_kept_verbatim():
+    facts = _two_item_facts()
+    brief = _brief(
+        visual_direction=VisualDirection(mood="Warm Restaurant Promo")
+    )
+    out = resolve_creative_direction(brief, facts)
+    assert out.mood == "Warm Restaurant Promo"
+
+
+def test_theme_mood_with_grounded_number_is_kept_not_overstripped():
+    # The ONLY commercial value in the theme/mood IS a locked fact value ($8.99),
+    # so it is grounded and must be kept (not over-stripped).
+    facts = _two_item_facts()  # item:0:price == "$8.99"
+    brief = _brief(
+        visual_direction=VisualDirection(
+            theme_family="$8.99 hero spotlight",
+            mood="$8.99 promo mood",
+        )
+    )
+    out = resolve_creative_direction(brief, facts)
+    assert out.theme_family == "$8.99 hero spotlight"
+    assert out.mood == "$8.99 promo mood"
+
+
+def test_only_offending_field_is_stripped():
+    # An ungrounded mood is stripped while a clean theme_family is kept (per-field).
+    facts = _two_item_facts()
+    brief = _brief(
+        visual_direction=VisualDirection(
+            theme_family="Festive Diwali",
+            mood="$5 off",
+        )
+    )
+    out = resolve_creative_direction(brief, facts)
+    assert out.theme_family == "Festive Diwali"
+    assert out.mood == ""
+
+
 # --- defaults / empties / never-raises --------------------------------------
 
 
@@ -387,3 +448,29 @@ def test_invariant_never_invents_only_selects_locked_values():
         assert out.hook_text == "" or out.hook_text in allowed
         for name in out.supporting_names:
             assert name in allowed
+
+
+def test_invariant_theme_mood_never_return_ungrounded_commercial():
+    """theme_family / mood are visual-taste strings — they must NEVER return an
+    ungrounded commercial value. A model trying to smuggle a fabricated commercial
+    value through either field has that field defaulted to ""."""
+    facts = _two_item_facts() + [
+        _fact("pricing_structure", "All $5"),
+        _fact("offer:0", "BOGO"),
+    ]
+    allowed = _all_fact_values(facts)
+    ungrounded_briefs = [
+        _brief(visual_direction=VisualDirection(mood="$9.99 off")),
+        _brief(visual_direction=VisualDirection(theme_family="50% off blowout")),
+        _brief(visual_direction=VisualDirection(mood="free dessert vibes")),
+        _brief(
+            visual_direction=VisualDirection(
+                theme_family="$3 off cashback", mood="buy one get $7 free"
+            )
+        ),
+    ]
+    for brief in ungrounded_briefs:
+        out = resolve_creative_direction(brief, facts)
+        # Each field is either "" or carries NO ungrounded commercial value.
+        for value in (out.theme_family, out.mood):
+            assert value == "" or value in allowed

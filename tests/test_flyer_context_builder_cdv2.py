@@ -251,3 +251,36 @@ def test_cdv2_malformed_supporting_ref_entry_is_skipped(monkeypatch):
     assert result.status == "ok", result.errors
     assert result.brief is not None
     assert [r.fact_id for r in result.brief.supporting_refs] == ["item:0:name", "item:1:name"]
+
+
+# ── (4) schema CONSTRAINTS are enforced (FIX 2 — Codex MAJOR) ────────────────
+
+
+def test_cdv2_supporting_refs_over_length_is_capped_to_40(monkeypatch):
+    """50 VALID supporting_refs entries must be CAPPED to the schema max_length=40 —
+    the pop-then-reapply path previously bypassed the FlyerBrief constraint. Status
+    stays ok and nothing raises."""
+    brief_json = _base_brief_json()
+    brief_json["supporting_refs"] = [{"fact_id": f"item:{i}:name"} for i in range(50)]
+    _arm(monkeypatch, brief_json)
+
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+
+    assert result.status == "ok", result.errors
+    assert result.brief is not None
+    assert len(result.brief.supporting_refs) <= 40
+    assert len(result.brief.supporting_refs) == 40  # capped, not dropped to []
+
+
+def test_cdv2_mood_over_length_is_constrained_to_120(monkeypatch):
+    """A mood longer than the schema max_length=120 must be enforced (capped or
+    dropped) so the over-length malformed value is never accepted. Status stays ok."""
+    brief_json = _base_brief_json()
+    brief_json["visual_direction"]["mood"] = "warm " * 60  # 300 chars, all benign
+    _arm(monkeypatch, brief_json)
+
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+
+    assert result.status == "ok", result.errors
+    assert result.brief is not None
+    assert len(result.brief.visual_direction.mood) <= 120
