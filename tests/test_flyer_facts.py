@@ -1202,13 +1202,19 @@ def test_reconcile_preserves_source_backed_name_only_items():
     assert out.get("item:2:name") == "Plain Idli"
 
 
-def test_reconcile_drops_name_only_item_not_in_source():
+def test_reconcile_keeps_name_only_items_regardless_of_source():
+    # reconcile polices PRICED facts only; name-only items (incl. planner "famous"
+    # expansions not literally in the brief) pass through untouched.
     from agents.flyer.facts import reconcile_priced_facts
-    src = "Dosa, Idli"
-    facts = [_lf("item:0:name", "Dosa"), _lf("item:1:name", "Fabricated Mystery Platter X")]
-    out = _ids(reconcile_priced_facts(facts, src))
-    assert out.get("item:0:name") == "Dosa"
-    assert "Fabricated Mystery Platter X" not in out.values()
+    facts = [
+        _lf("item:0:name", "Veg Manchurian"),
+        _lf("item:1:name", "Gobi Manchurian"),
+        _lf("item:2:name", "Plain Idli"),
+    ]
+    out = _ids(reconcile_priced_facts(facts, "Flyer, include 5 famous indo-chinese items"))
+    assert out.get("item:0:name") == "Veg Manchurian"
+    assert out.get("item:1:name") == "Gobi Manchurian"
+    assert out.get("item:2:name") == "Plain Idli"
 
 
 def test_reconcile_combo_live_shaped_drops_derived_items_keeps_rich_offers():

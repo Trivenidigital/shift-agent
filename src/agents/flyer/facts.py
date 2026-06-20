@@ -1137,10 +1137,11 @@ def reconcile_priced_facts(facts: list[FlyerLockedFact], source_text: str) -> li
         # (1) combo-derived: item IS a rich priced offer's OWN subject -> offer canonical -> suppress.
         if p and (n, p) in rich_priced_offer_subjects:
             continue
-        # (2) name-only item (no price): keep if source-backed by name; else drop (invented).
+        # (2) name-only item (no price): NOT a priced fact -> reconcile does not police
+        # it (planner/famous-path/menu names legitimately may not be in the brief text).
+        # Pass through untouched.
         if pf is None or not p:
-            if n and n in src_blob:
-                kept_items.append((nf, None))
+            kept_items.append((nf, pf))
             continue
         # (3) priced item: keep iff source-backed; else suppress (covers conflicting price).
         if not is_source_backed(nf.value, price):
