@@ -1187,3 +1187,40 @@ def test_category_suffix_not_appended_to_combo_names():
     assert "Veg Combo" in m and m["Veg Combo"] == "$39.99"
     assert "Non-Veg Combo" in m and m["Non-Veg Combo"] == "$49.99"
     assert "Veg Combo Biryani" not in m and "Non-Veg Combo Biryani" not in m
+
+
+def test_reconcile_preserves_source_backed_name_only_items():
+    from agents.flyer.facts import reconcile_priced_facts
+    src = "Gluten Free Dosa, Poori with Aloo, Plain Idli"
+    facts = [_lf("item:0:name", "Gluten Free Dosa"), _lf("item:1:name", "Poori with Aloo"), _lf("item:2:name", "Plain Idli")]
+    out = _ids(reconcile_priced_facts(facts, src))
+    assert out.get("item:0:name") == "Gluten Free Dosa"
+    assert out.get("item:1:name") == "Poori with Aloo"
+    assert out.get("item:2:name") == "Plain Idli"
+
+
+def test_reconcile_drops_name_only_item_not_in_source():
+    from agents.flyer.facts import reconcile_priced_facts
+    src = "Dosa, Idli"
+    facts = [_lf("item:0:name", "Dosa"), _lf("item:1:name", "Fabricated Mystery Platter X")]
+    out = _ids(reconcile_priced_facts(facts, src))
+    assert out.get("item:0:name") == "Dosa"
+    assert "Fabricated Mystery Platter X" not in out.values()
+
+
+def test_reconcile_combo_live_shaped_drops_derived_items_keeps_rich_offers():
+    from agents.flyer.facts import reconcile_priced_facts
+    src = ("Veg Combo - $39.99: includes 2 veg curries and dessert. "
+           "Non-Veg Combo - $49.99: includes 2 non-veg curries, biryani, dessert.")
+    facts = [
+        _lf("offer:0", "Veg Combo - $39.99: includes 2 veg curries and dessert"),
+        _lf("offer:1", "Non-Veg Combo - $49.99: includes 2 non-veg curries, biryani, dessert"),
+        _lf("item:0:name", "Veg Combo"), _lf("item:0:price", "$39.99"),
+        _lf("item:1:name", "Non-Veg Combo"), _lf("item:1:price", "$49.99"),
+        _lf("item:2:name", "Non-Veg Combo Biryani"), _lf("item:2:price", "$12.99"),
+    ]
+    out = _ids(reconcile_priced_facts(facts, src))
+    assert out.get("offer:0", "").startswith("Veg Combo")
+    assert out.get("offer:1", "").startswith("Non-Veg Combo")
+    # ALL combo items suppressed (derived from rich priced offers / not source-backed)
+    assert not any(k.startswith("item:") for k in out)

@@ -1066,7 +1066,8 @@ def reconcile_priced_facts(facts: list[FlyerLockedFact], source_text: str) -> li
     """SOURCE-BACKED-FIRST suppression pass over merged locked_facts. Removes
     duplicate / derived / unsupported / conflicting PRICED facts so each priced
     fact renders once and reconciles to the customer brief. SUPPRESSION ONLY —
-    never invents, infers, rewrites, or auto-corrects a price. (Design 2026-06-20.)"""
+    never invents, infers, rewrites, or auto-corrects a price. (Design 2026-06-20,
+    revised: rich-priced-offer-gated derived suppression + name-only preservation.)"""
     item_re = re.compile(r"^item:(?P<i>\d+):(?P<k>name|price)$")
 
     def nname(v: str) -> str:
@@ -1099,12 +1100,15 @@ def reconcile_priced_facts(facts: list[FlyerLockedFact], source_text: str) -> li
     grouped: dict[str, dict[str, FlyerLockedFact]] = {}
     offers: list[FlyerLockedFact] = []
     others: list[FlyerLockedFact] = []
+    rich_priced_offer_blobs: list[str] = []
     for f in facts:
         m = item_re.match(f.fact_id)
         if m:
             grouped.setdefault(m.group("i"), {})[m.group("k")] = f
         elif f.fact_id.startswith("offer:"):
             offers.append(f)
+            if (not _offer_is_simple_priced_line(f.value)) and re.search(r"[$₹]\s*\d", f.value or ""):
+                rich_priced_offer_blobs.append(nname(f.value))
         else:
             others.append(f)
 
@@ -1115,15 +1119,19 @@ def reconcile_priced_facts(facts: list[FlyerLockedFact], source_text: str) -> li
         pf = grouped[idx].get("price")
         if nf is None:
             continue
-        name = nf.value
+        n = nname(nf.value)
         price = pf.value if pf else ""
-        n, p = nname(name), _price_norm(price)
-        # Keep only SOURCE-BACKED priced items (matched per-item name+price in the
-        # brief, OR flat-price + name-in-brief). This single gate subsumes the
-        # derived-over-split case: an item over-split from a rich combo/offer (e.g.
-        # "Non-Veg Combo Biryani $12.99") has no source-backed price → suppressed;
-        # a legitimate item whose name also appears in a name-list offer survives.
-        if not is_source_backed(name, price):
+        p = _price_norm(price)
+        # (1) combo-derived: name inside a rich PRICED offer -> offer canonical -> suppress.
+        if any(n and n in blob for blob in rich_priced_offer_blobs):
+            continue
+        # (2) name-only item (no price): keep if source-backed by name; else drop (invented).
+        if pf is None or not p:
+            if n and n in src_blob:
+                kept_items.append((nf, None))
+            continue
+        # (3) priced item: keep iff source-backed; else suppress (covers conflicting price).
+        if not is_source_backed(nf.value, price):
             continue
         kept_items.append((nf, pf))
         kept_item_keys.add((n, p))
