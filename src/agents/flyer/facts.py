@@ -951,7 +951,7 @@ def extract_text_facts(
     facts.extend(item_name_facts)
     facts.extend(inferred_facts)  # offset above grounded ⇒ no same-index collision in merge
     facts.extend(inferred_price_facts)  # customer's flat price paired onto planner items
-    return merge_locked_facts(facts)
+    return reconcile_priced_facts(merge_locked_facts(facts), text)
 
 
 def merge_locked_facts(*fact_lists: Iterable[FlyerLockedFact]) -> list[FlyerLockedFact]:

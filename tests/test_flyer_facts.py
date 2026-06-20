@@ -1235,6 +1235,24 @@ def test_reconcile_combo_live_shaped_drops_derived_items_keeps_rich_offers():
     assert not any(k.startswith("item:") for k in out)
 
 
+def test_extract_text_facts_dessert_end_to_end_reconciled():
+    from agents.flyer.facts import extract_text_facts
+    from schemas import FlyerRequestFields
+    brief = ("Create a flyer for Festival Dessert Specials. Gulab Jamun – $7.99 "
+             "Rasmalai Tres Leches – $9.99 Apricot Delight – $8.99 Limited Weekend Special. "
+             "Available Friday through Sunday. Phone: +1 732-983-7841")
+    fields = FlyerRequestFields(event_or_business_name="Lakshmi's Kitchen", preferred_language="en", notes=brief)
+    facts = extract_text_facts(fields, brief, message_id="m", profile_business_name="Lakshmi's Kitchen", allow_text_identity=False)
+    m = _items_map(facts)
+    assert m.get("Gulab Jamun") == "$7.99"
+    assert m.get("Rasmalai Tres Leches") == "$9.99"
+    assert m.get("Apricot Delight") == "$8.99"
+    assert "Limited Weekend Special" not in m
+    simple_dups = [f for f in facts if f.fact_id.startswith("offer:") and "$" in f.value
+                   and any(n.lower() in f.value.lower() for n in ("Gulab Jamun", "Rasmalai Tres Leches", "Apricot Delight"))]
+    assert simple_dups == []
+
+
 def test_reconcile_exempts_hermes_inferred_items():
     from agents.flyer.facts import reconcile_priced_facts
     # inferred items are NOT in the brief by design; reconcile must keep them.
