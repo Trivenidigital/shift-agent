@@ -5715,3 +5715,22 @@ def test_is_fact_dense_single_percent_offer_is_sparse():
         _fact("offer:0", "10% off everything this weekend"),
     ], notes="grand opening 10% off")
     assert render_module._is_fact_dense(p) is False
+
+
+def test_deterministic_first_enabled_flag_off(monkeypatch):
+    monkeypatch.delenv("FLYER_DETERMINISTIC_FIRST", raising=False)
+    assert render_module._deterministic_first_enabled(_weekend_project()) is False
+
+
+def test_deterministic_first_enabled_global_when_no_allowlist(monkeypatch):
+    monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    assert render_module._deterministic_first_enabled(_weekend_project()) is True
+
+
+def test_deterministic_first_enabled_allowlist_scoped(monkeypatch):
+    monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    assert render_module._deterministic_first_enabled(_weekend_project()) is True
+    other = _weekend_project().model_copy(update={"customer_phone": "+19998887777"})
+    assert render_module._deterministic_first_enabled(other) is False

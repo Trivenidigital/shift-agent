@@ -3414,6 +3414,24 @@ def _deterministic_recovery_enabled(project: FlyerProject) -> bool:
     return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
 
 
+DETERMINISTIC_FIRST_ENV = "FLYER_DETERMINISTIC_FIRST"
+
+
+def _deterministic_first_enabled(project: FlyerProject) -> bool:
+    """Routing gate for deterministic-first: fact-dense flyers skip integrated
+    model text and render via the deterministic overlay. Flag
+    FLYER_DETERMINISTIC_FIRST == "1" AND (the shared FLYER_PREMIUM_OVERLAY_ALLOWLIST
+    is empty => global, else project.customer_phone is in it). Independent of
+    FLYER_PREMIUM_OVERLAY / FLYER_DETERMINISTIC_RECOVERY. Mirrors
+    _deterministic_recovery_enabled exactly."""
+    if os.environ.get(DETERMINISTIC_FIRST_ENV) != "1":
+        return False
+    allow = _premium_overlay_allowlist()
+    if not allow:
+        return True
+    return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+
+
 def _openrouter_repair_edit_bytes(
     project: FlyerProject,
     *,
