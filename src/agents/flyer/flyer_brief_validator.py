@@ -546,11 +546,134 @@ def _narrative_time_pressure_hit(text: str) -> str:
     return m.group(0).strip() if m else ""
 
 
+# ── SCHEDULE-GROUNDED temporal wording (FIX C, operator-approved firewall change) ─
+# ``scrub_campaign_narrative`` used to reject ALL scheduling/temporal references via
+# ``_scheduling_claim_hit`` — so a GROUNDED "this weekend" (when the flyer's schedule
+# IS the weekend) was scrubbed to the bland campaign_title. The operator's boundary:
+# reject scheduling/temporal claims ONLY when NOT grounded in the schedule fact; ALLOW
+# them when grounded. Pure time-pressure / urgency ("today only", "limited time", "act
+# now", "hurry", "while supplies last") stays ALWAYS-reject (it is urgency, NOT a
+# schedule reference) — handled by the SEPARATE ``_narrative_time_pressure_hit`` check.
+#
+# Grounding is a DAY-SET subset test: build a day-set from the narrative's temporal
+# tokens AND from the schedule, mapping ``weekend → {sat, sun}`` / ``weekday →
+# {mon..fri}`` plus explicit day names (full + abbrev) and day-RANGES ("Friday through
+# Sunday"). The narrative is GROUNDED iff it carries at least one temporal token and
+# EVERY temporal day it references is covered by the schedule's day-set. A narrative
+# day NOT in the schedule (e.g. "this Monday" vs a Sat/Sun schedule) is ungrounded →
+# reject. A narrative with NO resolvable temporal day is NOT grounded by this path
+# (the scheduling claim — e.g. a bare "available"/"book"/"until" — still rejects).
+
+_WEEKDAYS_ORDER = (
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+)
+# Canonical day name ← full or common abbreviation.
+_DAY_ALIASES = {
+    "monday": "monday", "mon": "monday",
+    "tuesday": "tuesday", "tue": "tuesday", "tues": "tuesday",
+    "wednesday": "wednesday", "wed": "wednesday", "weds": "wednesday",
+    "thursday": "thursday", "thu": "thursday", "thur": "thursday", "thurs": "thursday",
+    "friday": "friday", "fri": "friday",
+    "saturday": "saturday", "sat": "saturday",
+    "sunday": "sunday", "sun": "sunday",
+}
+_WEEKEND_DAYS = frozenset({"saturday", "sunday"})
+_WEEKDAY_DAYS = frozenset({"monday", "tuesday", "wednesday", "thursday", "friday"})
+# A single day token (full or abbrev), word-boundary anchored.
+_DAY_TOKEN_RE = re.compile(
+    r"\b(" + "|".join(sorted(_DAY_ALIASES, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
+# Category temporal words.
+_WEEKEND_WORD_RE = re.compile(r"\bweekends?\b", re.IGNORECASE)
+_WEEKDAY_WORD_RE = re.compile(r"\bweekdays?\b", re.IGNORECASE)
+# A day-RANGE: "<day> (through|thru|to|until|till|-|–|—) <day>" — inclusive span over
+# the weekday order (e.g. "Friday through Sunday" → fri, sat, sun).
+_DAY_RANGE_RE = re.compile(
+    r"\b(" + "|".join(sorted(_DAY_ALIASES, key=len, reverse=True)) + r")\b"
+    r"\s*(?:through|thru|to|until|till|til|[-–—])\s*"
+    r"\b(" + "|".join(sorted(_DAY_ALIASES, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
+# A TEMPORAL SCHEDULING phrase: a scheduling connector ("this"/"that"/"next"/"every"/
+# "each"/"all"/"this coming"/"come"/"on") immediately before a day / weekend / weekday
+# token — "this weekend", "this Monday", "every Saturday", "on Sunday". This is what
+# distinguishes a SCHEDULING reference (which is grounded-or-rejected against the
+# schedule) from a bare THEME word ("Weekend Feast of Family Favorites" — "weekend" as
+# an occasion theme, no connector → NOT a scheduling claim, never reaches this gate).
+_TEMPORAL_SCHEDULING_PHRASE_RE = re.compile(
+    r"\b(?:this|that|next|every|each|all|come|on)\s+(?:coming\s+)?"
+    r"(?:weekends?|weekdays?|"
+    + "|".join(sorted(_DAY_ALIASES, key=len, reverse=True))
+    + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _expand_day_range(start_day: str, end_day: str) -> set[str]:
+    """The inclusive set of canonical days from ``start_day`` to ``end_day`` over the
+    Mon..Sun order. Wraps if end precedes start (e.g. "Friday through Sunday" =
+    fri/sat/sun; "Sunday through Tuesday" wraps = sun/mon/tue). Unknown day → {}."""
+    s = _DAY_ALIASES.get(start_day.lower())
+    e = _DAY_ALIASES.get(end_day.lower())
+    if not s or not e:
+        return set()
+    si = _WEEKDAYS_ORDER.index(s)
+    ei = _WEEKDAYS_ORDER.index(e)
+    if si <= ei:
+        return set(_WEEKDAYS_ORDER[si : ei + 1])
+    # wrap-around span
+    return set(_WEEKDAYS_ORDER[si:]) | set(_WEEKDAYS_ORDER[: ei + 1])
+
+
+def _day_set(text: str) -> set[str]:
+    """The canonical day-set ``text`` resolves to: explicit day names (full/abbrev),
+    day-ranges ("Friday through Sunday"), and the category words weekend (→ sat,sun)
+    / weekday (→ mon..fri). Empty when ``text`` carries no resolvable temporal day.
+    Used for BOTH the narrative's temporal tokens and the schedule's day-set."""
+    if not text:
+        return set()
+    norm = _narrative_normalize(text)  # lowercase, hyphens→spaces (so "16-9" etc. safe)
+    days: set[str] = set()
+    # Ranges first (they subsume their endpoint day tokens, and that is fine — the
+    # single-token scan below only ADDS the same canonical days).
+    for m in _DAY_RANGE_RE.finditer(text):
+        days |= _expand_day_range(m.group(1), m.group(2))
+    for m in _DAY_TOKEN_RE.finditer(text):
+        canon = _DAY_ALIASES.get(m.group(1).lower())
+        if canon:
+            days.add(canon)
+    if _WEEKEND_WORD_RE.search(norm):
+        days |= _WEEKEND_DAYS
+    if _WEEKDAY_WORD_RE.search(norm):
+        days |= _WEEKDAY_DAYS
+    return days
+
+
+def _temporal_reference_is_schedule_grounded(narrative: str, schedule: str) -> bool:
+    """True iff EVERY temporal day the ``narrative`` references is covered by the
+    ``schedule``'s day-set (i.e. the narrative day-set is a NON-EMPTY subset of the
+    schedule day-set). A narrative with NO resolvable temporal day is NOT grounded by
+    this path (returns False) — its scheduling claim (a bare "available"/"book"/
+    "until") still rejects. Guarded: any error → not grounded (fail-closed → reject)."""
+    try:
+        narrative_days = _day_set(narrative)
+        if not narrative_days:
+            return False
+        schedule_days = _day_set(schedule)
+        if not schedule_days:
+            return False
+        return narrative_days <= schedule_days
+    except Exception:  # pragma: no cover - defensive: cannot prove grounded ⇒ reject
+        return False
+
+
 def scrub_campaign_narrative(
     narrative: str,
     *,
     allowed_values: Sequence[str],
     campaign_title: str,
+    schedule: str = "",
 ) -> str:
     """Scoped-scrub the model-authored ``campaign_narrative`` (CD v2 Slice B, B0.3).
 
@@ -569,14 +692,26 @@ def scrub_campaign_narrative(
             (FIX 1: the WORDS the numeric-only commercial scanner misses);
           * an UNGROUNDED genuine operational / delivery claim —
             ``_first_ungrounded_operational`` (PRECISE detector, grounding-aware);
-          * a scheduling / availability / booking claim — ``_scheduling_claim_hit``;
+          * an UNGROUNDED scheduling / availability / booking claim —
+            ``_scheduling_claim_hit`` (FIX C: reject ONLY when the claim's temporal
+            day-set is NOT covered by the ``schedule`` fact; a SCHEDULE-GROUNDED
+            temporal reference — e.g. "this weekend" when ``schedule`` is "Saturday &
+            Sunday" — is KEPT);
           * an explicit superlative / award / ranking token —
             ``_narrative_superlative_hit``;
           * an explicit time-pressure phrase ("today only" / "limited time" / …) —
-            ``_narrative_time_pressure_hit``;
+            ``_narrative_time_pressure_hit`` (ALWAYS reject — urgency, NOT a schedule
+            reference — independent of ``schedule``);
         (when ``campaign_title`` is itself empty/absent the reject default is ``""`` —
         there is nothing safe to show);
       - otherwise the ``narrative`` unchanged.
+
+    ``schedule`` (FIX C) is the value of the "schedule" locked fact (or "" when
+    absent). It grounds the narrative's temporal references: every day the narrative
+    names must be covered by the schedule's day-set (``weekend → {sat, sun}``,
+    ``weekday → {mon..fri}``, explicit day names + day-ranges) for the scheduling
+    reference to be KEPT. With ``schedule=""`` no temporal reference is grounded, so
+    the prior reject-all-scheduling behavior is preserved.
 
     A GROUNDED value is fine: "Everything at $7.99" survives when "$7.99" is in
     ``allowed_values`` (the commercial scan is grounding-aware); "Free delivery on
@@ -601,8 +736,23 @@ def scrub_campaign_narrative(
             return safe_title
         if _first_ungrounded_operational(safe_narrative, allowed):
             return safe_title
-        if _scheduling_claim_hit(safe_narrative):
-            return safe_title
+        # SCHEDULING/temporal references (FIX C): reject ONLY when NOT grounded in the
+        # ``schedule`` fact. The trigger is EITHER the existing scheduling-claim detector
+        # (``_scheduling_claim_hit``: "this weekend"/"available"/"book"/"until"/…) OR an
+        # explicit temporal scheduling PHRASE (connector + day/weekend/weekday, e.g.
+        # "this Monday"/"every Saturday" — which ``_scheduling_claim_hit`` does not catch
+        # for bare day names). A bare THEME word ("Weekend Feast of Family Favorites" —
+        # "weekend" with no connector) is NOT a scheduling claim and never reaches this
+        # gate. When triggered, the reference is KEPT iff its temporal day-set is covered
+        # by the ``schedule`` (e.g. "this weekend" + a Sat/Sun schedule); an ungrounded
+        # one (e.g. "this Monday" vs Sat/Sun, or a bare "available"/"book"/"until" with
+        # no resolvable day) rejects. Time-pressure / urgency is handled SEPARATELY below
+        # — ALWAYS reject regardless of schedule.
+        if _scheduling_claim_hit(safe_narrative) or _TEMPORAL_SCHEDULING_PHRASE_RE.search(
+            _narrative_normalize(safe_narrative)
+        ):
+            if not _temporal_reference_is_schedule_grounded(safe_narrative, schedule):
+                return safe_title
         if _narrative_superlative_hit(safe_narrative):
             return safe_title
         if _narrative_time_pressure_hit(safe_narrative):

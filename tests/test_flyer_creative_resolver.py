@@ -910,3 +910,175 @@ def test_scrub_narrative_trailing_s_allow_words_still_survive():
             phrase, allowed_values=allowed_values, campaign_title=_TITLE
         )
         assert out == phrase, f"trailing-s ALLOW phrase wrongly rejected: {phrase!r} -> {out!r}"
+
+
+# --- FIX C: scrub allows SCHEDULE-GROUNDED temporal wording -------------------
+#
+# Operator-approved firewall change: ``scrub_campaign_narrative`` rejected ALL
+# scheduling/temporal references (via ``_scheduling_claim_hit``), so a GROUNDED
+# "this weekend" (when the flyer's schedule IS the weekend) got scrubbed to the
+# bland campaign_title. New boundary: reject scheduling/temporal claims ONLY when
+# NOT grounded in the schedule fact; ALLOW them when grounded. Pure time-pressure /
+# urgency ("today only", "limited time", "act now", "hurry", "while supplies last")
+# stays ALWAYS-reject (it is urgency, not a schedule reference).
+
+
+def test_scrub_narrative_grounded_weekend_kept_friday_through_sunday():
+    """"this Weekend" + schedule "Available Friday through Sunday" → KEPT (the
+    weekend = sat+sun is covered by the schedule day-set)."""
+    out = scrub_campaign_narrative(
+        "Indulge in our Festival Dessert Specials this Weekend",
+        allowed_values=["$7.99"],
+        campaign_title=_TITLE,
+        schedule="Available Friday through Sunday",
+    )
+    assert out == "Indulge in our Festival Dessert Specials this Weekend"
+
+
+def test_scrub_narrative_grounded_weekend_kept_saturday_and_sunday():
+    """"This Weekend" + schedule "Saturday & Sunday, 4 PM-8 PM" → KEPT."""
+    out = scrub_campaign_narrative(
+        "Savor the Flavors of South India This Weekend",
+        allowed_values=["$7.99"],
+        campaign_title=_TITLE,
+        schedule="Saturday & Sunday, 4 PM-8 PM",
+    )
+    assert out == "Savor the Flavors of South India This Weekend"
+
+
+def test_scrub_narrative_ungrounded_day_scrubbed_to_title():
+    """"this Monday" + schedule "Saturday & Sunday" → SCRUBBED → title (Monday is
+    NOT in the schedule day-set)."""
+    out = scrub_campaign_narrative(
+        "Festive Specials this Monday",
+        allowed_values=["$7.99"],
+        campaign_title=_TITLE,
+        schedule="Saturday & Sunday",
+    )
+    assert out == _TITLE
+
+
+def test_scrub_narrative_time_pressure_always_rejects_regardless_of_schedule():
+    """"Order today only" + ANY schedule → SCRUBBED → title (time-pressure is
+    urgency, ALWAYS reject, independent of schedule)."""
+    for schedule in ("", "Saturday & Sunday", "Available Friday through Sunday"):
+        out = scrub_campaign_narrative(
+            "Order today only",
+            allowed_values=["$7.99"],
+            campaign_title=_TITLE,
+            schedule=schedule,
+        )
+        assert out == _TITLE, f"time-pressure leaked with schedule={schedule!r}: {out!r}"
+
+
+def test_scrub_narrative_limited_time_always_rejects():
+    """"limited time offer" → SCRUBBED → title even with a matching schedule."""
+    out = scrub_campaign_narrative(
+        "limited time offer",
+        allowed_values=["$7.99"],
+        campaign_title=_TITLE,
+        schedule="Saturday & Sunday",
+    )
+    assert out == _TITLE
+
+
+def test_scrub_narrative_schedule_param_defaults_empty_existing_behavior():
+    """With the default schedule="" the existing behavior is unchanged: an ungrounded
+    scheduling claim ("tables available this weekend") still rejects (nothing in the
+    schedule to ground it)."""
+    out = scrub_campaign_narrative(
+        "tables available this weekend",
+        allowed_values=["$7.99"],
+        campaign_title=_TITLE,
+    )
+    assert out == _TITLE
+
+
+def test_scrub_narrative_fix_c_allow_list_still_survives_with_schedule():
+    """The existing ALLOW list still survives unchanged when a schedule is supplied —
+    a grounded weekend schedule must not start rejecting clean evocative phrases."""
+    allowed_values = ["$7.99", "masala dosa", "idli sambar", "gulab jamun"]
+    for phrase in (
+        "Delicious Weekend Combos for Every Taste",
+        "One-Price Specials",
+        "Weekend Feast of Family Favorites",
+        "Authentic Classic Flavors",
+    ):
+        out = scrub_campaign_narrative(
+            phrase,
+            allowed_values=allowed_values,
+            campaign_title=_TITLE,
+            schedule="Saturday & Sunday",
+        )
+        assert out == phrase, f"ALLOW phrase wrongly rejected with schedule: {phrase!r} -> {out!r}"
+
+
+def test_scrub_narrative_fix_c_reject_classes_still_reject_with_schedule():
+    """SAFETY: a grounded schedule must NOT let through a fabricated price/%/discount,
+    a sale word, a superlative, or an ungrounded scheduling claim. Every existing
+    reject class still rejects even with a matching weekend schedule."""
+    allowed_values = ["$7.99", "masala dosa"]
+    for phrase in (
+        "$5 off",                      # ungrounded price
+        "50% off the menu",            # ungrounded percentage
+        "best biryani in town",        # superlative
+        "#1 South Indian spot",        # ranking
+        "award-winning dosa",          # award
+        "Weekend Discount Feast",      # sale word
+        "BOGO Dosa",                   # offer word
+        "Festive Specials this Monday",  # ungrounded day (not in sat/sun schedule)
+    ):
+        out = scrub_campaign_narrative(
+            phrase,
+            allowed_values=allowed_values,
+            campaign_title=_TITLE,
+            schedule="Saturday & Sunday",
+        )
+        assert out == _TITLE, f"reject class leaked with schedule: {phrase!r} -> {out!r}"
+
+
+def test_scrub_narrative_grounded_explicit_day_kept():
+    """An explicit day named in the schedule is grounded and kept; a day NOT in the
+    schedule rejects."""
+    out_ok = scrub_campaign_narrative(
+        "Join us this Saturday for the feast",
+        allowed_values=["$7.99"],
+        campaign_title=_TITLE,
+        schedule="Saturday & Sunday",
+    )
+    assert out_ok == "Join us this Saturday for the feast"
+    out_bad = scrub_campaign_narrative(
+        "Join us this Friday for the feast",
+        allowed_values=["$7.99"],
+        campaign_title=_TITLE,
+        schedule="Saturday & Sunday",
+    )
+    assert out_bad == _TITLE
+
+
+# --- FIX C: resolver passes the schedule locked fact into the narrative scrub --
+
+
+def test_resolver_schedule_grounded_weekend_narrative_survives():
+    """Resolver integration: a brief whose narrative is schedule-grounded "this
+    weekend" → resolved campaign_narrative == the brain's narrative (NOT the title),
+    because the resolver passes the "schedule" locked fact into the scrub."""
+    facts = _two_item_facts() + [
+        _fact("campaign_title", "Weekend Combo Special"),
+        _fact("schedule", "Saturday & Sunday, 4 PM-8 PM"),
+    ]
+    brief = _brief(campaign_narrative="Savor the Flavors of South India This Weekend")
+    out = resolve_creative_direction(brief, facts)
+    assert out.campaign_narrative == "Savor the Flavors of South India This Weekend"
+
+
+def test_resolver_ungrounded_day_narrative_defaults_to_title():
+    """Resolver integration: a narrative referencing a day NOT in the schedule fact
+    defaults to the campaign_title."""
+    facts = _two_item_facts() + [
+        _fact("campaign_title", "Weekend Combo Special"),
+        _fact("schedule", "Saturday & Sunday"),
+    ]
+    brief = _brief(campaign_narrative="Festive Specials this Monday")
+    out = resolve_creative_direction(brief, facts)
+    assert out.campaign_narrative == "Weekend Combo Special"

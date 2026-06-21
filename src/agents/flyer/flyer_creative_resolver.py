@@ -280,9 +280,16 @@ def _resolve_campaign_narrative(
         if (getattr(f, "value", "") or "").strip()
     ]
     title = _locked_value_by_id(locked_facts, "campaign_title") or ""
+    # FIX C: pass the "schedule" locked fact so a SCHEDULE-GROUNDED temporal reference
+    # in the narrative (e.g. "this weekend" when the schedule IS Sat/Sun) is KEPT,
+    # while an ungrounded day (or pure time-pressure) still defaults to the title.
+    schedule = _locked_value_by_id(locked_facts, "schedule") or ""
     try:
         return scrub_campaign_narrative(
-            narrative, allowed_values=allowed_values, campaign_title=title
+            narrative,
+            allowed_values=allowed_values,
+            campaign_title=title,
+            schedule=schedule,
         )
     except Exception:  # pragma: no cover - defensive: never raise (scrub fail-closes)
         return title
