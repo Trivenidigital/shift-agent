@@ -116,15 +116,41 @@ def _premium_font(role: str, size: int):
 # Task 2: layout solver — pure function, no I/O
 # ---------------------------------------------------------------------------
 
+# CD v2 (Slice B, B2.5): offer_priority → seal-scale multiplier. "medium" (and
+# any unknown / None value) maps to 1.0 so the DEFAULT path is byte-identical to
+# pre-CD-v2 output; "high" enlarges, "low" shrinks the seal.
+_OFFER_PRIORITY_SCALE: dict[str, float] = {"high": 1.18, "medium": 1.0, "low": 0.82}
+
+
+def _offer_priority_scale(offer_priority) -> float:
+    """Map an ``offer_priority`` string to a seal-size multiplier.
+
+    Guarded: any value that is not a recognised priority (including ``None``,
+    the default ``"medium"``, or malformed input) yields ``1.0`` — the byte-
+    identical-to-today scale.  Never raises."""
+    try:
+        return _OFFER_PRIORITY_SCALE.get((offer_priority or "").strip().lower(), 1.0)
+    except (AttributeError, TypeError):
+        return 1.0
+
+
 @dataclass(frozen=True)
 class PremiumLayout:
     menu_mode: str        # "combo" | "name_rows" | "two_col" | "two_col_compact"
     offer_mode: str       # "seal" | "inline" | "none"
     menu_font_px: int
     min_font_px: int
+    # CD v2 (Slice B, B2.5): offer-energy + message-clarity levers. Defaults
+    # (1.0 / "") reproduce the pre-CD-v2 PremiumLayout EXACTLY so flag-off /
+    # creative_direction-absent renders are byte-identical.
+    offer_scale: float = 1.0   # 1.0 == today's seal size (medium/None/default)
+    narrative: str = ""        # campaign_narrative to lead with, "" == none
 
 
-def plan_premium_layout(items, *, shared_price, width: int = 1080) -> PremiumLayout:
+def plan_premium_layout(
+    items, *, shared_price, width: int = 1080,
+    offer_priority=None, narrative: str = "",
+) -> PremiumLayout:
     """Map menu content metrics to a presentation spec.
 
     Pure function — no I/O, no PIL drawing.  Later tasks consume the returned
@@ -137,6 +163,11 @@ def plan_premium_layout(items, *, shared_price, width: int = 1080) -> PremiumLay
                       or ``None`` when items carry individual prices.
         width:        Canvas width in pixels (default 1080); drives the mobile
                       legibility floor calculation.
+        offer_priority: CD v2 offer-energy lever ("high"/"medium"/"low" or
+                      ``None``).  Maps to ``offer_scale``; default/medium/None
+                      => 1.0 (byte-identical seal).
+        narrative:    CD v2 campaign_narrative to lead with as a prominent top
+                      element.  "" (default) => no narrative (byte-identical).
 
     Returns:
         A frozen ``PremiumLayout`` dataclass with mode + font decisions.
@@ -158,7 +189,11 @@ def plan_premium_layout(items, *, shared_price, width: int = 1080) -> PremiumLay
     font_px = max(floor, int(width * base))
 
     offer = "seal" if (shared_price and not has_item_prices) else ("inline" if has_item_prices else "none")
-    return PremiumLayout(menu_mode=mode, offer_mode=offer, menu_font_px=font_px, min_font_px=floor)
+    return PremiumLayout(
+        menu_mode=mode, offer_mode=offer, menu_font_px=font_px, min_font_px=floor,
+        offer_scale=_offer_priority_scale(offer_priority),
+        narrative=(narrative or "").strip() if isinstance(narrative, str) else "",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -230,26 +265,43 @@ def _seal_geometry(draw, *, label, price, width):
     return bw, bh, label_lines, lf, pf, pw, ph, pad_x, pad_y, gap, label_h
 
 
-def _measure_offer_seal(draw, *, label, price, width):
+def _seal_radius(bw, bh, width, offer_scale=1.0):
+    """The seal circle radius from the sized pill + a min-pad.
+
+    Single source of truth shared by ``_measure_offer_seal`` and
+    ``draw_offer_seal`` so the reserved band and the drawn circle never drift.
+    ``offer_scale`` (CD v2, B2.5) scales the radius: 1.0 (default) is BYTE-
+    IDENTICAL to the pre-CD-v2 formula; >1.0 enlarges, <1.0 shrinks.  When the
+    scale is exactly 1.0 the original integer expression is used verbatim so the
+    seal geometry is unchanged to the pixel."""
+    base = max(bw, bh) // 2 + max(8, int(width * 0.010))
+    if offer_scale == 1.0:
+        return base
+    return int(round(base * offer_scale))
+
+
+def _measure_offer_seal(draw, *, label, price, width, offer_scale=1.0):
     """Return the seal DIAMETER for the given label+price (for layout).
 
     The seal is now a circle whose radius is ``max(bw, bh) // 2 + pad``;
     this function returns the full diameter (2 × sr) so that callers
     (``render_premium_overlay``) reserve the correct vertical band for the
-    seal and correctly position ``seal_cy`` and ``title_anchor``."""
+    seal and correctly position ``seal_cy`` and ``title_anchor``.  ``offer_scale``
+    (CD v2) scales the diameter; 1.0 == today (byte-identical)."""
     bw, bh, *_rest = _seal_geometry(draw, label=label, price=price, width=width)
-    sr = max(bw, bh) // 2 + max(8, int(width * 0.010))
-    return sr * 2
+    return _seal_radius(bw, bh, width, offer_scale) * 2
 
 
-def draw_offer_seal(draw, *, label, price, width, center):
+def draw_offer_seal(draw, *, label, price, width, center, offer_scale=1.0):
     """Draw a prominent maroon+gold circular seal (label / price / "EACH") centred
     at ``center`` — the Editorial Luxury focal element (Fix C v2).
 
     Geometry: a circle whose radius is derived from the existing ``_seal_geometry``
-    sizing (keeps the label+price fit invariant).  Palette mirrors compose_A() in
-    fixc-v2-mockup-generator.py: maroon fill (120,24,28), GOLD ring (208,178,110),
-    IVORY price text (244,240,232).
+    sizing (keeps the label+price fit invariant).  ``offer_scale`` (CD v2, B2.5)
+    scales the circle: 1.0 (default) is BYTE-IDENTICAL to the pre-CD-v2 seal;
+    "high" offer_priority passes >1.0 (larger/bolder), "low" passes <1.0.  Palette
+    mirrors compose_A() in fixc-v2-mockup-generator.py: maroon fill (120,24,28),
+    GOLD ring (208,178,110), IVORY price text (244,240,232).
 
     Three text lines inside the circle, top→bottom:
       • label   — letter-spaced small-caps (Cormorant / kicker font)  GOLD
@@ -269,7 +321,10 @@ def draw_offer_seal(draw, *, label, price, width, center):
     # Radius: half the larger dimension of the sized pill, with a minimum so
     # the circle never collapses to a tiny dot.  The bounding box is square
     # (2r × 2r) — larger than the pill when the pill is taller than it is wide.
-    sr = max(bw, bh) // 2 + max(8, int(width * 0.010))
+    # ``offer_scale`` scales it (1.0 == byte-identical to today).  The text
+    # offsets below are all derived from ``sr`` so they scale proportionally and
+    # the label+price always stays inside the (now larger/smaller) circle.
+    sr = _seal_radius(bw, bh, width, offer_scale)
 
     x0, y0 = cx - sr, cy - sr
     x1, y1 = cx + sr, cy + sr
@@ -407,6 +462,22 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     target.parent.mkdir(parents=True, exist_ok=True)
     width, height = size
 
+    # CD v2 (Slice B, B2.5): when a resolved creative direction is carried on the
+    # project (flag-on only; serialized FlyerProject field that survives into the
+    # /usr/bin/python3 overlay subprocess), lead with the MARKETING MESSAGE.
+    # ALL reads are guarded — a missing/None/malformed carrier yields the
+    # byte-identical-to-today values (narrative="", scale 1.0, no new pixels).
+    cd = getattr(project, "creative_direction", None)
+    cd_narrative = ""
+    cd_offer_priority = None
+    if isinstance(cd, dict):
+        _raw_narr = cd.get("campaign_narrative")
+        if isinstance(_raw_narr, str):
+            cd_narrative = _raw_narr.strip()
+        _raw_pri = cd.get("offer_priority")
+        if isinstance(_raw_pri, str):
+            cd_offer_priority = _raw_pri
+
     payload = render._menu_overlay_payload(project)
     business = str(payload.get("business") or "").strip()
     title = str(payload.get("title") or "").strip()
@@ -427,6 +498,8 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         items,
         shared_price=shared_offer_price or None,
         width=width,
+        offer_priority=cd_offer_priority,
+        narrative=cd_narrative,
     )
     min_px = layout.min_font_px
 
@@ -550,6 +623,47 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         # display transformation (upper-casing, thin-space insertion, wrapping).
         _ink(business)
     top_zone_bottom = y
+
+    # ===================================================================
+    # CD v2 (Slice B, B2.5) — CAMPAIGN NARRATIVE eyebrow.
+    #
+    # The message-clarity lever: when a resolved creative direction carries a
+    # ``campaign_narrative``, render it as a PROMINENT enlarged kicker/eyebrow
+    # directly below the brand lockup so the customer reads the MARKETING MESSAGE
+    # first.  Montserrat-Bold (kicker role), tracked small-caps, GOLD — visually
+    # distinct from the cream Playfair title below it.
+    #
+    # Best-effort + flag-off byte-identical:
+    #   • ``cd_narrative == ""`` (carrier absent / blank) ⇒ this whole block is a
+    #     no-op (NO pixels, top_zone_bottom unchanged) → byte-identical to today.
+    #   • The narrative is NEVER a required fact: if it cannot fit its bounded
+    #     band (shrink-to-floor fails), it is DROPPED — never raised, never
+    #     allowed to push a required fact off the canvas.
+    # ===================================================================
+    if cd_narrative:
+        _narr_gap = max(8, int(height * 0.010))
+        _narr_top = top_zone_bottom + _narr_gap
+        # Bounded band: keep the narrative in the upper ~26% so the Playfair
+        # title still has its own band below it. The narrative shrinks/drops
+        # before it would intrude on the title zone.
+        _narr_ceiling = max(_narr_top, int(height * 0.26))
+        _narr_px = max(min_px, int(width * 0.030))   # enlarged eyebrow (~32px @1080)
+        _narr_lines, _narr_px = _fit_role_block(
+            draw, cd_narrative, "kicker", _narr_px, safe_w, min_px,
+            max_height=max(0, _narr_ceiling - _narr_top),
+            line_factor=1.22, max_lines=3,
+        )
+        if _narr_lines:
+            _narr_font = _premium_font("kicker", _narr_px)
+            ny = _narr_top
+            for ln in _narr_lines:
+                _draw_centered(draw, ln, _narr_font, cy=ny, width=width,
+                               fill=_EMBLEM_GOLD, shadow_dy=2)
+                ny += int(_narr_px * 1.22)
+            # Log the ORIGINAL narrative so any future coverage check sees it;
+            # the narrative itself is optional, so this never gates fail-closed.
+            _ink(cd_narrative)
+            top_zone_bottom = ny
 
     # ===================================================================
     # FOOTER — schedule | location | contact (anchored to the bottom)
@@ -682,7 +796,11 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     seal_h = 0
     seal_cy = 0
     if seal_planned:
-        seal_h = _measure_offer_seal(draw, label=seal_label, price=shared_offer_price, width=width)
+        # CD v2 (B2.5): offer_priority scales the seal (1.0 == today). Sizing,
+        # band reservation and the drawn circle all use the SAME scale so they
+        # never drift.
+        seal_h = _measure_offer_seal(draw, label=seal_label, price=shared_offer_price,
+                                     width=width, offer_scale=layout.offer_scale)
         # Change 2: float vertically in the gap between title_bottom and menu_top.
         seal_cy = (title_bottom + menu_top) // 2
 
@@ -714,7 +832,8 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         if (_pf[1] >= title_bottom and _pf[3] <= menu_top
                 and _pf[0] >= 0 and _pf[2] <= width):
             draw_offer_seal(draw, label=seal_label, price=shared_offer_price,
-                            width=width, center=(_seal_cx, seal_cy))
+                            width=width, center=(_seal_cx, seal_cy),
+                            offer_scale=layout.offer_scale)
             # Ink the label, the price, AND their combined form (the circle
             # stacks label directly above price, so the combined "label price"
             # string is visibly present) — this covers a ``pricing_structure``
@@ -950,6 +1069,28 @@ def _fit_title(draw, text, start_px, max_width, min_px, *, max_height, line_fact
     # Last attempt at min_px:
     lines = _wrap_premium(draw, text, "title", min_px, max_width)
     if len(lines) * int(min_px * line_factor) <= max_height and len(lines) <= 4:
+        return lines, min_px
+    return None, start_px
+
+
+def _fit_role_block(draw, text, role, start_px, max_width, min_px, *, max_height, line_factor, max_lines):
+    """Role-generic shrink-to-fit for a short text block (CD v2 narrative eyebrow).
+
+    Like ``_fit_title`` but wraps/measures with the GIVEN *role*'s font (so a
+    kicker eyebrow is measured with the kicker font, not the title font).  Returns
+    ``(lines, font_px)`` if the wrapped block fits *max_width* × *max_height* in
+    ≤ *max_lines* lines, else ``(None, start_px)``.  Best-effort by contract — the
+    caller DROPS the block on ``None`` (the narrative is never a required fact)."""
+    if not text or max_height <= 0:
+        return None, start_px
+    px = start_px
+    while px >= min_px:
+        lines = _wrap_premium(draw, text, role, px, max_width)
+        if lines and len(lines) <= max_lines and len(lines) * int(px * line_factor) <= max_height:
+            return lines, px
+        px -= 2
+    lines = _wrap_premium(draw, text, role, min_px, max_width)
+    if lines and len(lines) <= max_lines and len(lines) * int(min_px * line_factor) <= max_height:
         return lines, min_px
     return None, start_px
 
