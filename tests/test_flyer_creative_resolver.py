@@ -858,3 +858,55 @@ def test_scrub_narrative_time_pressure_extended_set():
             phrase, allowed_values=allowed_values, campaign_title=_TITLE
         )
         assert out == _TITLE, f"time-pressure not caught: {phrase!r} -> {out!r}"
+
+
+# --- FIX (Codex BLOCKER residual): PLURAL / inflected sale WORDS reject ---------
+#
+# The singular sale-word set ("promo"/"promotion"/"sale"/"clearance"/"markdown"/
+# "discount") missed the plural forms, so a title like "Weekend Sales Event",
+# "Festival Promos", or "Holiday Promotions" survived into the prominently-
+# rendered narrative. The operator's reject list forbids them in any number.
+# Each sale word now matches an optional trailing ``s``.
+
+# Plural / inflected sale WORDS — each must default to the campaign_title.
+_FIX1_PLURAL_SALE_WORD_REJECTS = [
+    "Weekend Sales Event",
+    "Festival Promos",
+    "Holiday Promotions",
+    "Big Discounts",
+    "Final Clearances",
+    "Markdowns Galore",
+    "Combo Deals of the Day",
+]
+
+
+def test_scrub_narrative_plural_sale_words_reject_to_title():
+    """Plural / inflected sale WORDS reject the SAME as their singular form (the
+    prior singular-only set let "sales"/"promos"/"promotions"/"discounts"/
+    "clearances"/"markdowns" through)."""
+    allowed_values = ["$7.99", "masala dosa", "idli sambar"]
+    for phrase in _FIX1_PLURAL_SALE_WORD_REJECTS:
+        out = scrub_campaign_narrative(
+            phrase, allowed_values=allowed_values, campaign_title=_TITLE
+        )
+        assert out == _TITLE, f"plural sale word not caught: {phrase!r} -> {out!r}"
+
+
+def test_scrub_narrative_trailing_s_allow_words_still_survive():
+    """CRITICAL: ALLOW words that merely END in ``s`` (NOT sale words) MUST still
+    survive the optional-plural suffix — esp. "specials" (\\bsales?\\b must NOT
+    match inside it) and "desserts"/"treats"/"favorites"/"flavors"."""
+    allowed_values = ["$7.99", "masala dosa", "idli sambar", "gulab jamun"]
+    allow = [
+        "One-Price Specials",
+        "Festive Desserts",
+        "Weekend Treats",
+        "Family Favorites",
+        "Authentic Classic Flavors",
+        "Weekend Specials",  # the campaign_title — "specials" is not a sale word
+    ]
+    for phrase in allow:
+        out = scrub_campaign_narrative(
+            phrase, allowed_values=allowed_values, campaign_title=_TITLE
+        )
+        assert out == phrase, f"trailing-s ALLOW phrase wrongly rejected: {phrase!r} -> {out!r}"

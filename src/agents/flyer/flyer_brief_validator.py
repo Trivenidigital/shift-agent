@@ -486,10 +486,16 @@ _NARRATIVE_TIME_PRESSURE_RE = re.compile(
 # sale-word (operator ALLOW list: "Weekend Specials", "Clearance Specials" rejects
 # only on "clearance"); "combo"/"price"/"feast"/"treats"/"favorites"/"festive"/
 # "authentic" are NOT here so the grounded-evocative ALLOW list survives.
+# PLURALS (FIX — Codex BLOCKER residual): each sale word matches an optional
+# trailing ``s`` so the plural/inflected forms ("promos", "promotions", "sales",
+# "clearances", "markdowns", "discounts", "deals") reject the SAME as the singular.
+# The whole-word ``\b`` boundary keeps the ALLOW words that merely END in ``s``
+# alive: ``\bsales?\b`` does NOT match inside "specials"/"desserts"/"treats"/
+# "favorites"/"flavors" (no word boundary between "sale" and "s" there).
 _NARRATIVE_SALE_WORD_RE = re.compile(
-    r"\b(?:discount|discounted|deal|deals|promo|promotion|promotional|"
-    r"sale|clearance|markdown|bogo|"
-    r"buy\s+one\s+get|buy\s+1\s+get|combo\s+deal)\b"
+    r"\b(?:discounts?|discounted|deals?|promos?|promotions?|promotional|"
+    r"sales?|clearances?|markdowns?|bogo|"
+    r"buy\s+one\s+get|buy\s+1\s+get|combo\s+deals?)\b"
     r"|%\s*off|\bpercent\s+off\b|\bcents\s+off\b|\bdollars\s+off\b",
     re.IGNORECASE,
 )
