@@ -418,3 +418,108 @@ def test_bg_prompt_populated_carrier_differs_from_fixed(monkeypatch):
     }
     out_on = render_module._poster_layout_requirements(p_on, force_background_only=True)
     assert out_on != out_off
+
+
+# ── Slice B Task B2.x — creative_direction delivered to the overlay SUBPROCESS ─
+#
+# Because creative_direction is now Field(..., exclude=True), model_dump_json(project)
+# OMITS it (rollback-safe). The premium-overlay /usr/bin/python3 subprocess
+# reconstructs the project from spec["project_json"] (a model_dump_json), so it
+# would otherwise LOSE the carrier. These prove _render_premium_overlay_with_fallback
+# adds creative_direction to the spec dict separately, and the
+# PREMIUM_OVERLAY_RENDERER source reads it back onto the reconstructed project
+# BEFORE rendering.
+import json as _json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+
+def _premium_overlay_project(creative_direction=None) -> FlyerProject:
+    p = _project("+17329837841")
+    p.creative_direction = creative_direction
+    return p
+
+
+def _capture_subprocess_spec(monkeypatch):
+    """Drive _render_premium_overlay_with_fallback down its subprocess branch and
+    capture the spec dict written to the temp file. Returns a one-element list
+    populated with the parsed spec. The in-process attempt is forced to raise a
+    non-FlyerRenderError (PIL-less) so the subprocess path is taken; subprocess.run
+    is stubbed to read the spec file then return rc=0."""
+    captured: list[dict] = []
+
+    # Force the in-process premium overlay import/run to raise a generic Exception
+    # (mimics the PIL-less gateway venv) so we fall through to the subprocess path.
+    import agents.flyer.premium_overlay as _po
+    monkeypatch.setattr(_po, "render_premium_overlay",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("No module named 'PIL'")),
+                        raising=True)
+    # The fallback gates on Path("/usr/bin/python3").exists(); on Windows that's
+    # False so the subprocess branch would short-circuit. Narrowly override
+    # Path.exists to report True ONLY for that interpreter path, leaving every other
+    # filesystem check (temp spec file read/unlink) untouched.
+    _real_exists = Path.exists
+    _py3 = Path("/usr/bin/python3")  # normalized per-OS so the match works on Windows too
+
+    def _exists(self):
+        if self == _py3:
+            return True
+        return _real_exists(self)
+
+    monkeypatch.setattr(render_module.Path, "exists", _exists, raising=True)
+
+    def _fake_run(cmd, *a, **k):
+        spec_path = cmd[-1]
+        captured.append(_json.loads(Path(spec_path).read_text(encoding="utf-8")))
+
+        class _P:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+        return _P()
+
+    monkeypatch.setattr(render_module.subprocess, "run", _fake_run, raising=True)
+    return captured
+
+
+def test_subprocess_spec_includes_populated_creative_direction(monkeypatch, tmp_path):
+    """The premium-overlay subprocess spec carries creative_direction separately so
+    the subprocess gets it even though model_dump_json(project) now omits it."""
+    captured = _capture_subprocess_spec(monkeypatch)
+    cd = {"hero_name": "Dosa", "campaign_narrative": "X", "offer_priority": "high"}
+    project = _premium_overlay_project(creative_direction=cd)
+
+    # model_dump_json must NOT carry the key (exclude=True) — the very gap the spec closes.
+    assert "creative_direction" not in _json.loads(project.model_dump_json())
+
+    render_module._render_premium_overlay_with_fallback(
+        project, tmp_path / "src.png", tmp_path / "out.png",
+        size=(1080, 1350), output_format="concept_preview",
+    )
+    assert captured, "subprocess path not taken"
+    assert captured[0]["creative_direction"] == cd
+    # And the serialized project_json still omits the carrier (rollback-safe dump).
+    assert "creative_direction" not in _json.loads(captured[0]["project_json"])
+
+
+def test_subprocess_spec_creative_direction_none_when_absent(monkeypatch, tmp_path):
+    """No carrier => the spec's creative_direction is None (guarded, no crash)."""
+    captured = _capture_subprocess_spec(monkeypatch)
+    project = _premium_overlay_project(creative_direction=None)
+    render_module._render_premium_overlay_with_fallback(
+        project, tmp_path / "src.png", tmp_path / "out.png",
+        size=(1080, 1350), output_format="concept_preview",
+    )
+    assert captured, "subprocess path not taken"
+    assert captured[0]["creative_direction"] is None
+
+
+def test_renderer_source_reads_creative_direction_back_onto_project():
+    """The PREMIUM_OVERLAY_RENDERER body assigns creative_direction back onto the
+    reconstructed project BEFORE render_premium_overlay — string-scan guard so the
+    read-back cannot silently regress (the subprocess runs under /usr/bin/python3
+    which is hard to drive in-test)."""
+    src = render_module.PREMIUM_OVERLAY_RENDERER
+    assert "creative_direction" in src
+    assert "project.creative_direction = " in src
+    # The read-back must occur BEFORE the render_premium_overlay call.
+    assert src.index("project.creative_direction = ") < src.index("render_premium_overlay(")

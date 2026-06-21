@@ -3046,6 +3046,12 @@ try:
     except ImportError:
         from agents.flyer import premium_overlay          # repo / tests
     project = FlyerProject.model_validate_json(spec["project_json"])
+    # creative_direction is exclude=True on FlyerProject (rollback-safe: never in
+    # projects.json), so model_dump_json above OMITS it. Re-attach the carrier the
+    # parent delivered via the spec so the overlay leads with the marketing message.
+    _cd = spec.get("creative_direction")
+    if _cd is not None:
+        project.creative_direction = _cd
 except Exception as e:
     sys.stderr.write(f"{type(e).__name__}: {e}")
     sys.exit(1)  # import/serialization error -> unexpected
@@ -3120,6 +3126,11 @@ def _render_premium_overlay_with_fallback(project: FlyerProject, source: Path | 
         return PremiumOverlayOutcome("premium_overlay_failed_unexpected", "serialization_error", f"{type(e).__name__}: {e}"[:300], "none", output_format)
     spec = {
         "project_json": project_json,
+        # creative_direction is exclude=True (omitted from project_json above for
+        # rollback safety), so deliver the carrier to the subprocess SEPARATELY;
+        # the renderer re-attaches it to the reconstructed project. None/absent is
+        # fine (the renderer guards it).
+        "creative_direction": getattr(project, "creative_direction", None),
         "source": str(source),
         "target": str(target),
         "size": list(size),

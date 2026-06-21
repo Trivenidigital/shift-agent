@@ -1971,11 +1971,21 @@ class FlyerProject(BaseModel):
     deterministic_recovery: bool = False
     # Creative Director v2 (2026-06-21) — additive transient carrier for a
     # resolved creative direction (e.g. dataclasses.asdict(ResolvedCreativeDirection)).
-    # Mirrors deterministic_recovery: OPTIONAL, default None => NO data migration
-    # (existing rows load fine) and flag-off BEHAVIOR is byte-identical (default
-    # None changes no code path). Round-trips through model_dump_json() /
-    # model_validate_json() so it survives into the premium-overlay subprocess.
-    creative_direction: Optional[dict] = None
+    # OPTIONAL, default None => NO data migration (existing rows load fine) and
+    # flag-off BEHAVIOR is byte-identical (default None changes no code path).
+    #
+    # ROLLBACK SAFETY (exclude=True): unlike deterministic_recovery, this carrier
+    # is NEVER serialized — model_dump()/model_dump_json() OMIT it so it never
+    # lands in projects.json. That keeps a CODE rollback to the old
+    # extra="forbid" FlyerProject safe: an old schema (lacking this field) would
+    # REJECT an unknown `creative_direction` key on load. In-memory the attribute
+    # is still set + readable (exclude affects only serialization) — the
+    # in-process overlay + background-prompt builder read project.creative_direction
+    # as before. Delivery to the PIL-capable premium-overlay subprocess (which
+    # reconstructs the project from model_dump_json) is handled separately by
+    # passing creative_direction in the subprocess spec dict and re-attaching it
+    # there (see src/agents/flyer/render.py).
+    creative_direction: Optional[dict] = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
     def _selected_concept_must_exist(self) -> "FlyerProject":
