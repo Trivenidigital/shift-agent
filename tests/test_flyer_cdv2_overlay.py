@@ -330,8 +330,11 @@ def test_fix2_empty_narrative_single_attempt_byte_identical(tmp_path):
 # the hook_text the second sub-headline, the campaign_title a small kicker, and
 # the brand a small demoted lockup (NO dominant emblem ring).
 #
-#   NON-NEGOTIABLE invariant:  narrative_px > hook_px > title_px
-#                              AND brand_px <= title_px (brand demoted)
+#   NON-NEGOTIABLE invariant (PRESENT-TIERS, FIX 1): the HEADLINE dominates and the
+#   BRAND stays small; the kicker tier participates only WHEN PRESENT. With a kicker
+#   (narrative-present) the full chain narrative_px > hook_px > title_px >= brand_px
+#   holds; PROMOTED mode (title_px == 0, brand > 0) is NOT a failure — see
+#   _assert_present_tiers below.
 #
 # #1 SAFETY PROPERTY: every NON-message_first archetype (offer_first / event_first
 # / unknown / None / flag-off) MUST render BYTE-IDENTICAL to today — the
@@ -393,20 +396,21 @@ def test_message_first_unknown_archetype_byte_identical_to_noarch(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_message_first_type_hierarchy_invariant(tmp_path):
-    """The success contract: in message_first the computed font sizes MUST satisfy
-    narrative_px > hook_px > title_px AND brand_px <= title_px (brand demoted).
-    Sizes are exposed deterministically via po._LAST_LAYOUT_DEBUG (no pixel read)."""
+    """The success contract is PRESENT-TIERS (FIX 1): the HEADLINE dominates, the
+    BRAND stays small, and the kicker participates only WHEN PRESENT. In the
+    narrative-present case here (a real campaign_narrative) the kicker IS present, so
+    the full descending chain narrative_px > hook_px > title_px >= brand_px holds —
+    AND the present-tiers helper passes (it would also pass promoted mode where
+    title_px == 0). Sizes are exposed via po._LAST_LAYOUT_DEBUG (no pixel read)."""
     out = _render(_project(creative_direction=_CD_MF, pid="F0274"), tmp_path, "mf_hier.png")
     assert out.exists()
     dbg = po._LAST_LAYOUT_DEBUG
     assert dbg.get("archetype") == "message_first"
-    narrative_px = dbg["narrative_px"]
-    hook_px = dbg["hook_px"]
-    title_px = dbg["title_px"]
-    brand_px = dbg["brand_px"]
-    assert narrative_px > hook_px, (narrative_px, hook_px)
-    assert hook_px > title_px, (hook_px, title_px)
-    assert brand_px <= title_px, (brand_px, title_px)
+    # Narrative-present: the kicker participates → full descending chain.
+    assert dbg["narrative_px"] > dbg["hook_px"] > dbg["title_px"] >= dbg["brand_px"], dbg
+    # The present-tiers invariant (FIX 1) — promoted mode (title_px == 0, brand > 0)
+    # is NOT a failure under this form; here it reduces to the full chain.
+    _assert_present_tiers(dbg)
 
 
 def test_message_first_narrative_is_largest_within_band(tmp_path):
@@ -1009,3 +1013,155 @@ def test_message_first_empty_narrative_renders_premium_not_raised(tmp_path):
     assert out.exists() and Image.open(out).size == (1080, 1350)
     # No phantom drop records — there was no narrative to drop.
     assert po._LAST_NARRATIVE_DROP == []
+
+
+# ===========================================================================
+# CD v2 MAJOR FIX 1 — the asserted invariant is PRESENT-TIERS, not a literal
+# strict descending chain over all four tiers. In PROMOTED-title mode there is
+# NO kicker (title_px == 0) while the brand is small but > 0, so a naive
+# ``narrative_px > hook_px > title_px >= brand_px`` would falsely fail at
+# ``title_px(0) >= brand_px(>0)``. The real intent: the HEADLINE dominates and the
+# BRAND stays small; the kicker tier only participates WHEN PRESENT.
+#
+# PRESENT-TIERS invariant (what _compose_mf actually guarantees):
+#   • ALWAYS: narrative_px (headline) > 0; narrative_px > hook_px (when hook
+#     present); brand is SMALL (<= hook_px when hook present, else < narrative_px).
+#   • WHEN a kicker exists (title_px > 0, narrative-present mode):
+#       hook_px > title_px >= brand_px (the full descending chain).
+#   • WHEN promoted (title_px == 0): skip the kicker comparison; assert
+#       narrative_px > hook_px (if hook) > brand_px and brand small.
+# ===========================================================================
+
+
+def _assert_present_tiers(dbg):
+    """Assert the PRESENT-TIERS message-first invariant on a _LAST_LAYOUT_DEBUG
+    record (FIX 1): headline dominates, brand small, kicker only when present."""
+    narrative_px = dbg["narrative_px"]
+    hook_px = dbg["hook_px"]
+    title_px = dbg["title_px"]
+    brand_px = dbg["brand_px"]
+    # Headline is ALWAYS present and dominant.
+    assert narrative_px > 0, dbg
+    if hook_px > 0:
+        assert narrative_px > hook_px, (narrative_px, hook_px)
+    if title_px > 0:
+        # Narrative-present mode: the kicker participates — full descending chain.
+        assert hook_px > title_px >= brand_px, (hook_px, title_px, brand_px)
+    else:
+        # Promoted mode: no kicker. Headline > hook (if present) > small brand.
+        if hook_px > 0:
+            assert hook_px > brand_px, (hook_px, brand_px)
+            # Brand stays small — at most the hook tier.
+            assert brand_px <= hook_px, (brand_px, hook_px)
+        else:
+            assert narrative_px > brand_px, (narrative_px, brand_px)
+        # Brand is genuinely small relative to the headline either way.
+        assert brand_px < narrative_px, (brand_px, narrative_px)
+
+
+def test_message_first_present_tiers_invariant_promoted_mode(tmp_path):
+    """FIX 1: PROMOTED mode (empty narrative) is NOT a hierarchy failure. With no
+    kicker (title_px == 0) but a small brand (> 0) the PRESENT-TIERS invariant must
+    PASS: narrative_px (headline) > hook_px > brand_px, title_px == 0, brand small.
+    (The old over-strict ``title_px >= brand_px`` assertion failed here: 0 >= 25.)"""
+    out = _render(_project(creative_direction=_CD_MF_NO_NARRATIVE, pid="F0330"),
+                  tmp_path, "mf_present_tiers_promoted.png")
+    assert out.exists()
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert dbg.get("archetype") == "message_first"
+    # Promoted mode: no kicker, headline filled by the promoted title.
+    assert dbg["title_px"] == 0, dbg
+    assert dbg["narrative_px"] > dbg["hook_px"] > 0, dbg
+    # Brand is small (it is the ~0.024w demoted lockup) and below the hook tier.
+    assert 0 < dbg["brand_px"] <= dbg["hook_px"], dbg
+    assert dbg["brand_px"] < dbg["narrative_px"], dbg
+    _assert_present_tiers(dbg)
+
+
+def test_message_first_present_tiers_invariant_narrative_present(tmp_path):
+    """FIX 1: narrative-present mode keeps the FULL descending chain
+    narrative_px > hook_px > title_px >= brand_px (the kicker participates)."""
+    out = _render(_project(creative_direction=_CD_MF, pid="F0331"),
+                  tmp_path, "mf_present_tiers_narrative.png")
+    assert out.exists()
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert dbg["title_px"] > 0, dbg
+    assert dbg["narrative_px"] > dbg["hook_px"] > dbg["title_px"] >= dbg["brand_px"], dbg
+    _assert_present_tiers(dbg)
+
+
+# ===========================================================================
+# CD v2 MAJOR FIX 2 — promotion keys on _narrative_active (False when the
+# narrative is EMPTY *or* DROPPED-for-fit). This is INTENTIONAL: a message-first
+# poster must NEVER render without a message, so whenever no narrative is drawn
+# the campaign_title is PROMOTED to the headline → ALWAYS a non-empty headline.
+# A promoted title that itself cannot fit degrades to FLAT (a complete flyer) —
+# never a headline-less premium.
+# ===========================================================================
+
+
+def test_fix2_dropped_narrative_promotes_title_never_headline_less(tmp_path):
+    """INTENT LOCK (FIX 2): a NON-EMPTY narrative that is DROPPED for fit must not
+    leave a headline-less premium — the ladder falls to the bare attempt which
+    PROMOTES the campaign_title into the headline slot. We force the drop by stubbing
+    the headline fitter so the narrative over-consumes (steps 1+2 raise), while the
+    promoted-title bare attempt (step 3) fits normally. Result: narrative_px > 0
+    (the promoted title fills the headline), title kicker suppressed (title_px == 0),
+    and BOTH the hook + narrative drops are recorded — NEVER headline-less."""
+    real_fit_title = po._fit_title
+    narr = "South Indian Favorites at One Price"
+
+    def _greedy_title(draw, text, start_px, max_width, min_px, *, max_height, line_factor):
+        # Over-consume ONLY when fitting the NON-EMPTY NARRATIVE as the headline
+        # (steps 1+2). The PROMOTED title headline (bare attempt, step 3) fits
+        # normally via the real fitter, so promotion succeeds.
+        if text == narr:
+            return [f"NARR LINE {n}" for n in range(12)], max(start_px, min_px, 80)
+        return real_fit_title(draw, text, start_px, max_width, min_px,
+                              max_height=max_height, line_factor=line_factor)
+
+    import pytest as _pytest  # local alias to avoid shadowing module-level pytest
+    monkeypatch = _pytest.MonkeyPatch()
+    monkeypatch.setattr(po, "_fit_title", _greedy_title)
+    try:
+        facts = _base_facts()
+        facts = [f for f in facts if not f.fact_id.startswith("item:")]
+        names = ["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar",
+                 "Rasam", "Bonda", "Medu", "Kesari", "Upma", "Pesarattu"]
+        for i, nm in enumerate(names):
+            facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item {i}", value=nm, source="customer_text", required=True))
+            facts.append(FlyerLockedFact(fact_id=f"item:{i}:price", label=f"Price {i}", value=f"${5+i}.99", source="customer_text", required=True))
+        cd = dict(_CD_MF, campaign_narrative=narr)
+        out = tmp_path / "mf_dropped_narr_promotes.png"
+        # MUST NOT raise: the narrative drops, the title is promoted, premium renders.
+        po.render_premium_overlay(
+            _project(creative_direction=cd, facts=facts, pid="F0332"),
+            _bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
+    finally:
+        monkeypatch.undo()
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+    dbg = po._LAST_LAYOUT_DEBUG
+    # NEVER headline-less: the promoted title fills the headline slot.
+    assert dbg["narrative_px"] > 0, dbg
+    # The small kicker is suppressed (the title is the headline, not drawn twice).
+    assert dbg["title_px"] == 0, dbg
+    # The non-empty narrative WAS dropped for fit (ladder reached the bare attempt).
+    assert po._LAST_NARRATIVE_DROP == [True], po._LAST_NARRATIVE_DROP
+    assert po._LAST_HOOK_DROP == [True], po._LAST_HOOK_DROP
+    _assert_present_tiers(dbg)
+
+
+def test_fix2_genuinely_impossible_layout_degrades_to_flat_not_headline_less(tmp_path):
+    """INTENT LOCK (FIX 2): when even the promoted-title bare attempt cannot fit the
+    REQUIRED content (a genuinely impossible layout), the overlay DEGRADES TO FLAT
+    (raises FlyerRenderError) — a complete flyer downstream — and NEVER emits a
+    headline-less premium. 40 long required items overflow regardless of promotion."""
+    facts = [f for f in _base_facts() if not f.fact_id.startswith("item:")]
+    for i in range(40):
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label="Item", value=f"VeryLongDishNameNumber{i}", source="customer_text", required=True))
+    cd = dict(_CD_MF, campaign_narrative="Authentic Weekend Tiffin Festival")
+    with pytest.raises(render.FlyerRenderError):
+        po.render_premium_overlay(
+            _project(creative_direction=cd, facts=facts, pid="F0333"),
+            _bg(tmp_path), tmp_path / "mf_impossible.png", size=(1080, 1350),
+            output_format="concept_preview")

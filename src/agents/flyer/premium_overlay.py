@@ -1035,9 +1035,20 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     #   • brand lockup       -> SMALL demoted top text, NO dominant emblem ring (~0.024)
     #   • hero / menu / footer / seal -> retained from today's lower-zone logic
     #
-    # The unit-asserted invariant is ``narrative_px > hook_px > title_px`` AND
-    # ``brand_px <= title_px``. Sizes are exposed on ``_LAST_LAYOUT_DEBUG`` so the
-    # test reads them deterministically (no pixel reading).
+    # The unit-asserted invariant is PRESENT-TIERS (not a literal strict chain over
+    # all four tiers — in PROMOTED-title mode there is NO kicker so ``title_px == 0``
+    # while the brand is small but > 0, and ``title_px >= brand_px`` would falsely
+    # fail). The real intent: the HEADLINE dominates and the BRAND stays small; the
+    # kicker tier only participates WHEN PRESENT:
+    #   • ALWAYS: ``narrative_px (headline) > 0``; ``narrative_px > hook_px`` (when a
+    #     hook is present); the brand is SMALL (``brand_px <= hook_px`` with a hook,
+    #     else ``brand_px < narrative_px``).
+    #   • WHEN a kicker exists (``title_px > 0``, narrative-present mode): the FULL
+    #     descending chain ``narrative_px > hook_px > title_px >= brand_px``.
+    #   • WHEN promoted (``title_px == 0``): skip the kicker comparison —
+    #     ``narrative_px > hook_px`` (if hook) ``> brand_px`` and the brand stays small.
+    # Sizes are exposed on ``_LAST_LAYOUT_DEBUG`` so the test reads them
+    # deterministically (no pixel reading).
     #
     # Best-effort + fail-closed identical to ``_compose``: narrative/hook/title-
     # kicker are NEVER required facts (the campaign_title VALUE is still inked for
@@ -1132,8 +1143,20 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         # campaign_title is PROMOTED into the headline slot (and the redundant small
         # kicker below is SUPPRESSED so the title is never drawn twice). The brain
         # sometimes omits campaign_narrative (it is non-deterministic) → an empty
-        # narrative would otherwise render a headline-less A poster. ``promote_title``
-        # is True exactly when the headline carries the title (no narrative on-canvas).
+        # narrative would otherwise render a headline-less A poster.
+        #
+        # INTENT (Codex FIX 2 — keep this keying): ``_narrative_active`` is False
+        # whenever NO narrative will be DRAWN — i.e. the narrative is EMPTY *or* it
+        # was DROPPED-for-fit by the retry ladder (which re-enters here with
+        # ``include_narrative=False`` on the bare attempt). Keying promotion on
+        # "no narrative drawn" — not merely "narrative absent" — is DELIBERATE: a
+        # message-first poster must never render without a message, so a non-empty
+        # narrative dropped for fit ALSO promotes the title → there is ALWAYS a
+        # headline. If the promoted title itself cannot fit (dense layout) the headline
+        # draw below raises FlyerRenderError → the existing fail-closed degrade to FLAT
+        # (a complete flyer downstream), which is preferred over a headline-less
+        # premium. ``promote_title`` is True exactly when the headline carries the
+        # title (no narrative on-canvas, whether empty or dropped).
         _narrative_active = bool(cd_narrative) and include_narrative
         headline_text = cd_narrative if _narrative_active else title
         promote_title = (not _narrative_active) and bool(title)
@@ -1235,8 +1258,11 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         if title and not promote_title:
             # Clamp the brand to the kicker only when the kicker is the title's
             # carrier. When the title is PROMOTED to the headline there is no kicker
-            # (title_draw == 0); the brand keeps its own small demoted start size and
-            # the brand_px <= title_px invariant does not apply (title_px == 0).
+            # (title_draw == 0); the brand keeps its own small demoted start size. The
+            # PRESENT-TIERS invariant skips the kicker comparison in promoted mode —
+            # the brand is not measured against title_px (== 0) but stays SMALL on its
+            # own: brand_start_px is the demoted ~0.024w lockup (<= hook, < narrative),
+            # so the headline dominates and the brand stays small without a kicker.
             brand_draw = min(brand_start_px, title_draw)
         y = max(16, int(height * 0.018))
         if business:
@@ -1595,6 +1621,15 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     # The drop records are committed ONLY AFTER this bare attempt SUCCEEDS, keyed to
     # which best-effort tiers existed; if it RAISES (a genuine REQUIRED overflow) the
     # error propagates with NO drop record leaked (degrade-to-flat). (FIX 1 BLOCKER.)
+    #
+    # INTENT (Codex FIX 2 — never-headline-less): this bare attempt re-enters
+    # ``_compose_mf`` with ``include_narrative=False``, so ``_narrative_active`` is
+    # False and the REQUIRED campaign_title is PROMOTED into the headline slot. That
+    # is why dropping a NON-EMPTY narrative for fit here does NOT yield a headline-less
+    # poster — the promoted title fills the headline. If even the promoted-title
+    # headline cannot fit the required content, ``_compose_mf`` raises
+    # FlyerRenderError and the error propagates → the caller DEGRADES TO FLAT (a
+    # complete flyer), which is preferred over a headline-less premium.
     _compose_mf(include_narrative=False, include_hook=False)
     if cd_hook_text:
         _LAST_HOOK_DROP.append(True)
@@ -1620,11 +1655,20 @@ _LAST_HOOK_DROP: list[bool] = []
 
 # Observability for CD v2 Composition Phase 1, Task 2 (message-first A template):
 # records, per render_premium_overlay call, the COMPUTED type-scale font sizes for
-# the inverted hierarchy so a unit test can assert the contract
-# ``narrative_px > hook_px > title_px`` AND ``brand_px <= title_px`` deterministically
-# (no pixel reading). Populated ONLY on the message_first path; left EMPTY for every
-# non-message_first / flag-off render (so those stay a strict no-op + byte-identical).
-# Cleared at the top of each call. The production caller does not depend on it.
+# the inverted hierarchy so a unit test can assert the PRESENT-TIERS contract
+# deterministically (no pixel reading). The asserted invariant is NOT a literal
+# strict chain over all four tiers — in PROMOTED-title mode there is no kicker
+# (``title_px == 0``) while the brand is small but > 0. PRESENT-TIERS form:
+#   • ALWAYS: ``narrative_px (headline) > 0``; ``narrative_px > hook_px`` (with a
+#     hook); the brand stays SMALL (``brand_px <= hook_px`` with a hook, else
+#     ``brand_px < narrative_px``).
+#   • WHEN a kicker exists (``title_px > 0``): the full descending chain
+#     ``narrative_px > hook_px > title_px >= brand_px``.
+#   • WHEN promoted (``title_px == 0``): skip the kicker comparison —
+#     ``narrative_px > hook_px`` (if hook) ``> brand_px`` with the brand small.
+# Populated ONLY on the message_first path; left EMPTY for every non-message_first /
+# flag-off render (so those stay a strict no-op + byte-identical). Cleared at the
+# top of each call. The production caller does not depend on it.
 _LAST_LAYOUT_DEBUG: dict = {}
 
 
