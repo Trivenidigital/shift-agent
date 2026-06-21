@@ -311,6 +311,22 @@ PY
         rsync -a src/agents/flyer/skills/ /root/.hermes/skills/
         chown -R shift-agent:shift-agent /root/.hermes/skills/
     fi
+    # CD v2 brain SKILL → the ACTUAL runtime read path. flyer_context_builder.py
+    # (the Creative-Director brain) reads its governing system prompt from
+    # ``Path(__file__).resolve().parent / "skills" / "flyer_generation" / "SKILL.md"``
+    # — i.e. /opt/shift-agent/skills/flyer_generation/SKILL.md, NOT the Hermes
+    # dispatch copy under /root/.hermes/skills/ that the rsync above installs.
+    # Before 2026-06-21 the deploy never refreshed this path, so the brain read a
+    # stale pre-CD-v2 SKILL and could never emit campaign_narrative / hero_ref /
+    # marketing_hook / offer_priority (the live render came out headline-less and
+    # the cause was mis-attributed to brain nondeterminism). Install it to the
+    # brain's read path, mirroring the flat-module pattern below. The post-restart
+    # smoke gate (shift-agent-smoke-test.sh) asserts the installed copy carries the
+    # CD v2 fields so this can never silently regress again.
+    if [ -f src/agents/flyer/skills/flyer_generation/SKILL.md ]; then
+        install -d -m 755 /opt/shift-agent/skills/flyer_generation
+        install -m 644 src/agents/flyer/skills/flyer_generation/SKILL.md /opt/shift-agent/skills/flyer_generation/SKILL.md
+    fi
     if [ -f src/agents/flyer/render.py ]; then
         install -m 644 src/agents/flyer/render.py /opt/shift-agent/flyer_render.py
     else

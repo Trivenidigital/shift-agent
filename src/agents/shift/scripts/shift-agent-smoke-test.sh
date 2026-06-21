@@ -139,6 +139,24 @@ assert hasattr(flyer_visual_qa, 'is_own_brand_variant'), \
     'flyer_visual_qa.is_own_brand_variant missing — brand-typo gate broken'
 assert _os.environ.get('FLYER_DETERMINISTIC_RECOVERY') in (None, '', '0', '1'), \
     'FLYER_DETERMINISTIC_RECOVERY has unexpected value — must be unset, empty, 0, or 1'
+# CD v2 brain SKILL must be installed at the ACTUAL runtime read path with the
+# CD v2 output schema (2026-06-21 stale-SKILL-path fix). flyer_context_builder
+# (the Creative-Director brain) reads SKILL_MD_PATH = __file__.parent/skills/
+# flyer_generation/SKILL.md = /opt/shift-agent/skills/flyer_generation/SKILL.md,
+# NOT the Hermes dispatch copy under /root/.hermes/skills/. If the deploy doesn't
+# refresh that path the brain reads a stale pre-CD-v2 SKILL and can never emit
+# campaign_narrative/hero_ref/marketing_hook/offer_priority — the live render
+# came out headline-less and the cause was mis-attributed to brain nondeterminism.
+# Asserting via the brain's own SKILL_MD_PATH (not a hardcoded path) keeps this
+# gate drift-proof against any future change to where the brain reads.
+import flyer_context_builder as _fcb
+_cdv2_skill = _fcb.SKILL_MD_PATH
+assert _cdv2_skill.exists(), \
+    'CD v2 brain SKILL absent at runtime read path %s (deploy did not install it)' % _cdv2_skill
+_cdv2_body = _cdv2_skill.read_text(encoding='utf-8', errors='replace')
+for _cdv2_field in ('campaign_narrative', 'hero_ref', 'marketing_hook', 'offer_priority'):
+    assert _cdv2_field in _cdv2_body, \
+        'CD v2 brain SKILL at %s is stale — missing field %r' % (_cdv2_skill, _cdv2_field)
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
 " > /dev/null; then
     echo "FAIL: Python modules don't import"
