@@ -60,11 +60,13 @@ except ImportError:  # pragma: no cover - import-path shim
 try:  # pragma: no cover - import-path shim
     from flyer_brief_validator import (  # type: ignore
         _norm_ws,
+        scrub_campaign_narrative,
         scrub_ungrounded_commercial_taste,
     )
 except ImportError:  # pragma: no cover - import-path shim
     from agents.flyer.flyer_brief_validator import (
         _norm_ws,
+        scrub_campaign_narrative,
         scrub_ungrounded_commercial_taste,
     )
 
@@ -91,6 +93,12 @@ class ResolvedCreativeDirection:
     offer_priority: str  # "high"|"medium"|"low"
     theme_family: str
     mood: str
+    # CD v2 Slice B (B0.4): the validated model-authored marketing message rendered
+    # above the hero. Scoped-scrubbed (``scrub_campaign_narrative``): evocative-but-
+    # grounded marketing language survives; fabrication (ungrounded prices/discounts/
+    # claims, time-pressure, awards/rankings) defaults to the campaign_title (or ""
+    # when no campaign_title is locked).
+    campaign_narrative: str
 
 
 def _locked_value_by_id(
@@ -249,6 +257,37 @@ def _resolve_theme_mood(
     return scrub_ungrounded_commercial_taste(theme, mood, allowed_values)
 
 
+def _resolve_campaign_narrative(
+    brief: FlyerBrief, locked_facts: Sequence[FlyerLockedFact]
+) -> str:
+    """Resolve the model-authored ``campaign_narrative`` through the SCOPED scrub
+    (CD v2 Slice B, B0.4). Evocative-but-grounded marketing language survives;
+    fabrication defaults to the ``campaign_title`` locked-fact value (or "" when no
+    ``campaign_title`` is locked). Grounded against the SAME normalized locked-fact
+    values the theme/mood scrub uses (single source of truth). Guarded so a missing
+    field or any scanner error never raises (it yields the safe campaign_title / "")."""
+    try:
+        narrative = getattr(brief, "campaign_narrative", None) or ""
+    except Exception:  # pragma: no cover - defensive: never raise
+        narrative = ""
+    if not isinstance(narrative, str):  # pragma: no cover - schema guarantees str
+        narrative = ""
+    # Normalize locked values exactly as the theme/mood scrub does, so the
+    # narrative's grounding comparison matches the brief firewall's behavior.
+    allowed_values = [
+        _norm_ws(getattr(f, "value", "") or "")
+        for f in locked_facts or ()
+        if (getattr(f, "value", "") or "").strip()
+    ]
+    title = _locked_value_by_id(locked_facts, "campaign_title") or ""
+    try:
+        return scrub_campaign_narrative(
+            narrative, allowed_values=allowed_values, campaign_title=title
+        )
+    except Exception:  # pragma: no cover - defensive: never raise (scrub fail-closes)
+        return title
+
+
 def resolve_creative_direction(
     brief: FlyerBrief, locked_facts: Sequence[FlyerLockedFact]
 ) -> ResolvedCreativeDirection:
@@ -261,6 +300,7 @@ def resolve_creative_direction(
     hook_text, hook_prominence = _resolve_hook(brief, facts)
     offer_priority = _resolve_offer_priority(brief, facts)
     theme_family, mood = _resolve_theme_mood(brief, facts)
+    campaign_narrative = _resolve_campaign_narrative(brief, facts)
     return ResolvedCreativeDirection(
         hero_name=hero_name,
         supporting_names=supporting_names,
@@ -269,4 +309,5 @@ def resolve_creative_direction(
         offer_priority=offer_priority,
         theme_family=theme_family,
         mood=mood,
+        campaign_narrative=campaign_narrative,
     )

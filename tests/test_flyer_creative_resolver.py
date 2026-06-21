@@ -507,3 +507,249 @@ def test_invariant_theme_mood_never_return_ungrounded_commercial():
         # Each field is either "" or carries NO ungrounded commercial value.
         for value in (out.theme_family, out.mood):
             assert value == "" or value in allowed
+
+
+# --- B0.3: scrub_campaign_narrative (scoped-scrub narrative firewall) --------
+#
+# campaign_narrative is a model-authored marketing message that RENDERS prominently
+# (the only new fabrication surface in CD v2 Slice B). The scoped scrub (operator-
+# approved Option B) keeps evocative-but-grounded marketing language and rejects
+# fabrication; on reject it defaults to campaign_title.
+
+from agents.flyer.flyer_creative_resolver import scrub_campaign_narrative
+
+
+# The operator's ALLOW list — must SURVIVE unchanged when the facts are grounded.
+_ALLOW_NARRATIVES = [
+    "feast",
+    "favorites",
+    "celebration",
+    "weekend treats",
+    "family favorites",
+    "classic flavors",
+    "one-price specials",
+    "authentic flavors",
+    "festive desserts",
+    "South Indian Favorites at One Price",
+    "Weekend Feast of Family Favorites",
+    "Festive Dessert Celebration",
+    "Authentic Classic Flavors",
+    "One-Price Weekend Treats",
+]
+
+# The operator's REJECT list — each must default to campaign_title.
+_REJECT_NARRATIVES = [
+    "$5 off",
+    "50% off the menu",
+    "best biryani in town",
+    "#1 South Indian spot",
+    "award-winning dosa",
+    "voted top-rated",
+    "order today only",
+    "limited time offer",
+    "free delivery on all orders",
+    # an ungrounded scheduling claim
+    "tables available this weekend",
+]
+
+_TITLE = "Weekend Combo Special"
+
+
+def test_scrub_narrative_allow_phrases_survive_with_grounded_facts():
+    """EVERY operator ALLOW phrase survives unchanged when the price ($7.99) and
+    items are grounded locked-fact values. The scoped scrub keeps evocative-but-
+    grounded marketing language."""
+    # Grounded facts: price $7.99 + item names the marketing language can evoke.
+    allowed_values = ["$7.99", "masala dosa", "idli sambar", "gulab jamun"]
+    for phrase in _ALLOW_NARRATIVES:
+        out = scrub_campaign_narrative(
+            phrase, allowed_values=allowed_values, campaign_title=_TITLE
+        )
+        assert out == phrase, f"ALLOW phrase wrongly rejected: {phrase!r} -> {out!r}"
+
+
+def test_scrub_narrative_reject_classes_default_to_campaign_title():
+    """EVERY operator REJECT class (prices/discounts/percentages not in facts,
+    time-pressure, delivery/operational/scheduling claims, awards/rankings/
+    superlatives) defaults to campaign_title."""
+    allowed_values = ["$7.99", "masala dosa", "idli sambar"]
+    for phrase in _REJECT_NARRATIVES:
+        out = scrub_campaign_narrative(
+            phrase, allowed_values=allowed_values, campaign_title=_TITLE
+        )
+        assert out == _TITLE, f"REJECT phrase not caught: {phrase!r} -> {out!r}"
+
+
+def test_scrub_narrative_grounded_price_survives():
+    """A grounded price IS OK — "Everything at $7.99" survives when $7.99 is a
+    locked fact value."""
+    out = scrub_campaign_narrative(
+        "Everything at $7.99",
+        allowed_values=["$7.99"],
+        campaign_title=_TITLE,
+    )
+    assert out == "Everything at $7.99"
+
+
+def test_scrub_narrative_ungrounded_price_rejected():
+    """An ungrounded price ($9.99 not in facts) defaults to campaign_title even
+    though $7.99 IS grounded (token-anchored, not loose substring)."""
+    out = scrub_campaign_narrative(
+        "Everything at $9.99",
+        allowed_values=["$7.99"],
+        campaign_title=_TITLE,
+    )
+    assert out == _TITLE
+
+
+def test_scrub_narrative_empty_returns_empty():
+    """Empty / blank narrative returns "" (NOT the campaign_title)."""
+    assert scrub_campaign_narrative("", allowed_values=[], campaign_title=_TITLE) == ""
+    assert scrub_campaign_narrative("   ", allowed_values=[], campaign_title=_TITLE) == ""
+
+
+def test_scrub_narrative_reject_with_no_title_yields_empty():
+    """A fabricated narrative with NO campaign_title present defaults to "" (the
+    fallback is the title; an absent title means nothing safe to show)."""
+    out = scrub_campaign_narrative(
+        "best biryani in town", allowed_values=[], campaign_title=""
+    )
+    assert out == ""
+
+
+def test_scrub_narrative_clean_marketing_survives_no_facts():
+    """A clean evocative narrative with NO commercial content survives even with
+    NO grounded facts (it carries nothing to ground)."""
+    out = scrub_campaign_narrative(
+        "Festive Dessert Celebration",
+        allowed_values=[],
+        campaign_title=_TITLE,
+    )
+    assert out == "Festive Dessert Celebration"
+
+
+def test_scrub_narrative_superlative_phrase_set_specific_tokens():
+    """The explicit superlative / award / ranking tokens that the broad scanners
+    miss are each caught (best / finest / greatest / voted / top-rated / #1 /
+    number one / award-winning)."""
+    allowed_values = ["$7.99"]
+    for phrase in (
+        "the best in the city",
+        "the finest flavors anywhere",
+        "the greatest dosa ever",
+        "voted #1 by locals",
+        "number one rated spot",
+        "award-winning recipes",
+        "top-rated by everyone",
+    ):
+        out = scrub_campaign_narrative(
+            phrase, allowed_values=allowed_values, campaign_title=_TITLE
+        )
+        assert out == _TITLE, f"superlative not caught: {phrase!r} -> {out!r}"
+
+
+def test_scrub_narrative_time_pressure_phrase_set():
+    """The explicit time-pressure tokens are each caught (today only / limited
+    time / act now / hurry / while supplies last)."""
+    allowed_values = ["$7.99"]
+    for phrase in (
+        "order today only",
+        "limited time offer",
+        "act now and save",
+        "hurry in this weekend",
+        "while supplies last",
+    ):
+        out = scrub_campaign_narrative(
+            phrase, allowed_values=allowed_values, campaign_title=_TITLE
+        )
+        assert out == _TITLE, f"time-pressure not caught: {phrase!r} -> {out!r}"
+
+
+def test_scrub_narrative_grounded_delivery_phrase_survives():
+    """A delivery PHRASE that IS grounded in a locked fact survives (the scrub is
+    grounded-aware, not a blanket delivery ban)."""
+    out = scrub_campaign_narrative(
+        "Free delivery on all orders",
+        allowed_values=["free delivery on all orders"],
+        campaign_title=_TITLE,
+    )
+    assert out == "Free delivery on all orders"
+
+
+def test_scrub_narrative_never_raises_on_bad_input():
+    """Pure + never raises: a non-str narrative / non-str allowed_values entry /
+    non-str title never raise; a bad narrative defaults safely."""
+    # Non-str narrative coerces to "" (empty => "").
+    assert scrub_campaign_narrative(None, allowed_values=[], campaign_title=_TITLE) == ""  # type: ignore[arg-type]
+    assert scrub_campaign_narrative(123, allowed_values=[], campaign_title=_TITLE) == ""  # type: ignore[arg-type]
+    # Non-str allowed_values entries are tolerated.
+    out = scrub_campaign_narrative(
+        "Festive Dessert Celebration",
+        allowed_values=[None, 5, "$7.99"],  # type: ignore[list-item]
+        campaign_title=_TITLE,
+    )
+    assert out in ("Festive Dessert Celebration", _TITLE)
+    # Non-str title is tolerated.
+    out2 = scrub_campaign_narrative(
+        "best biryani in town", allowed_values=[], campaign_title=None  # type: ignore[arg-type]
+    )
+    assert out2 == ""
+
+
+# --- B0.4: resolver carries the validated campaign_narrative -----------------
+
+
+def test_resolver_carries_clean_narrative():
+    """A brief with a clean (grounded/evocative) narrative → resolved carries it
+    unchanged."""
+    facts = _two_item_facts() + [_fact("campaign_title", "Weekend Combo Special")]
+    brief = _brief(campaign_narrative="Weekend Feast of Family Favorites")
+    out = resolve_creative_direction(brief, facts)
+    assert out.campaign_narrative == "Weekend Feast of Family Favorites"
+
+
+def test_resolver_fabricated_narrative_defaults_to_campaign_title():
+    """A brief with a FABRICATED narrative → resolved carries the campaign_title
+    locked-fact value (the safe default)."""
+    facts = _two_item_facts() + [_fact("campaign_title", "Weekend Combo Special")]
+    brief = _brief(campaign_narrative="#1 award-winning biryani, 50% off today only")
+    out = resolve_creative_direction(brief, facts)
+    assert out.campaign_narrative == "Weekend Combo Special"
+
+
+def test_resolver_fabricated_narrative_no_title_yields_empty():
+    """A FABRICATED narrative with NO campaign_title fact → resolved carries ""
+    (nothing safe to show)."""
+    facts = _two_item_facts()  # no campaign_title fact
+    brief = _brief(campaign_narrative="best biryani in town, $5 off")
+    out = resolve_creative_direction(brief, facts)
+    assert out.campaign_narrative == ""
+
+
+def test_resolver_grounded_price_narrative_survives():
+    """A narrative whose only commercial value IS a grounded locked price survives
+    through the resolver."""
+    facts = [
+        _fact("pricing_structure", "$7.99"),
+        _fact("campaign_title", "One Price Weekend"),
+    ]
+    brief = _brief(campaign_narrative="Everything at $7.99")
+    out = resolve_creative_direction(brief, facts)
+    assert out.campaign_narrative == "Everything at $7.99"
+
+
+def test_resolver_default_brief_has_empty_narrative():
+    """A brief with no campaign_narrative → resolved carries "" (default)."""
+    facts = _two_item_facts() + [_fact("campaign_title", "Weekend Combo Special")]
+    brief = _brief()
+    out = resolve_creative_direction(brief, facts)
+    assert out.campaign_narrative == ""
+
+
+def test_resolver_narrative_never_raises_empty_facts():
+    """resolve_creative_direction stays pure / never raises with a narrative and
+    empty locked_facts (no campaign_title => narrative with any claim => "")."""
+    brief = _brief(campaign_narrative="best biryani in town")
+    out = resolve_creative_direction(brief, [])
+    assert isinstance(out, ResolvedCreativeDirection)
+    assert out.campaign_narrative == ""

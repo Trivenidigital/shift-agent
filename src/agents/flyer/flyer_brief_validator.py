@@ -404,6 +404,153 @@ def _taste_value_is_clean(value: str, allowed_values: Sequence[str]) -> bool:
         return False
 
 
+# ── scoped-scrub narrative firewall (CD v2 Slice B, Task B0.3) ──────────────
+# ``campaign_narrative`` is a model-authored marketing message that RENDERS
+# prominently above the hero — the ONLY new fabrication surface in CD v2 Slice B.
+# The operator approved Option B (a SCOPED scrub, NOT the full strict battery):
+# keep evocative-but-grounded marketing language ("South Indian Favorites at One
+# Price", "Weekend Feast of Family Favorites"), reject fabrication (prices/
+# discounts/percentages not in facts, "today only"/"limited time", delivery/
+# operational/scheduling claims, awards/rankings/superlatives), and on reject
+# DEFAULT to the campaign_title.
+#
+# Why a scoped composition and NOT the full ``validate`` battery (the whole point
+# of Option B): the render-reaching ``_operational_claim_hit`` /
+# ``_occasion_aware_operational_claim_hit`` HARD-LINE detector OVER-REJECTS the
+# operator's ALLOW list — it flags bare date/occasion-overlap words ("weekend" in
+# "Weekend Feast of Family Favorites", "One-Price Weekend Treats", "weekend
+# treats") and fail-closes when the broad classifier is absent. Marketing language
+# legitimately evokes the occasion, so the narrative MUST NOT be subjected to that
+# aggressive scan. Instead the scoped scrub composes the NARROWEST set that
+# satisfies the operator's exact ALLOW/REJECT lists, REUSING the existing scanners:
+#   - ``_first_ungrounded_commercial`` — prices / currency / bare prices /
+#     percentage-discounts / free-X offer phrases, token-anchored + GROUNDING-aware
+#     (so a grounded "$7.99" survives but "$5 off" / "50% off" / an ungrounded
+#     "$9.99" reject). This is the SAME single-source-of-truth commercial scanner
+#     ``scrub_ungrounded_commercial_taste`` uses — NO parallel commercial regex.
+#   - ``_first_ungrounded_operational`` — the PRECISE strict operational detector
+#     (genuine service/availability/hours/credential claims, NOT theme/celebration
+#     words), grounding-aware (so a grounded "free delivery" survives, an invented
+#     one rejects). The aggressive ``_operational_claim_hit`` is DELIBERATELY NOT
+#     used (it over-rejects the ALLOW list, per above).
+#   - ``_scheduling_claim_hit`` — scheduling/availability/booking claims ("tables
+#     available", "book now", "reserve", "until/till", "this/every weekend").
+#   - an EXPLICIT superlative/award/ranking + time-pressure phrase set
+#     (``_NARRATIVE_SUPERLATIVE_RE`` / ``_NARRATIVE_TIME_PRESSURE_RE``) for the
+#     specific REJECT tokens the broad scanners MISS without over-rejecting the
+#     ALLOW list: "best"/"#1"/"number one"/"voted"/"top-rated"/"finest"/"greatest"/
+#     "award-winning" and "today only"/"limited time"/"act now"/"hurry"/"while
+#     supplies last". These are required because the strict operational regex only
+#     catches "best <in town/seller/...>" (context-bound), so the operator's "best
+#     biryani in town" and bare superlatives would otherwise slip through — yet a
+#     blanket "best" ban is fine here (no ALLOW phrase contains any of these tokens,
+#     verified). The award/ranking subset DOUBLES the strict detector's coverage
+#     (intentional belt-and-suspenders; matching either rejects).
+#
+# REJECT → return campaign_title. The aggressive render-reaching scan, the strict
+# ``validate`` logic, and every existing scanner's behavior are UNCHANGED.
+
+# EXPLICIT superlative / award / ranking phrase set (the specific REJECT tokens the
+# strict operational detector misses out of context, e.g. bare "best", "#1",
+# "voted", "top-rated", "finest", "greatest"). Verified to NOT match any operator
+# ALLOW phrase (none contain these tokens). ``#1`` is matched without a leading
+# word-boundary (``\b`` does not anchor before ``#``).
+_NARRATIVE_SUPERLATIVE_RE = re.compile(
+    r"#\s*1\b"
+    r"|\b(?:best|finest|greatest|top[\s-]?rated|number\s+one|"
+    r"award[\s-]?winning|award[\s-]?winner|voted)\b",
+    re.IGNORECASE,
+)
+# EXPLICIT time-pressure phrase set ("today only" / "limited time" / "act now" /
+# "hurry" / "while supplies last" + a few close cousins). None appear in the ALLOW
+# list. The grounded-occasion words the ALLOW list DOES use ("weekend", "festive",
+# "celebration") are intentionally absent here.
+_NARRATIVE_TIME_PRESSURE_RE = re.compile(
+    r"\b(?:today\s+only|limited\s+time|act\s+now|hurry|"
+    r"while\s+supplies\s+last|last\s+chance|ends?\s+(?:today|tonight|soon))\b",
+    re.IGNORECASE,
+)
+
+
+def _narrative_superlative_hit(text: str) -> str:
+    """First explicit superlative / award / ranking token in ``text`` (the REJECT
+    tokens the strict operational detector misses out of context), or ""."""
+    if not text:
+        return ""
+    m = _NARRATIVE_SUPERLATIVE_RE.search(text)
+    return m.group(0).strip() if m else ""
+
+
+def _narrative_time_pressure_hit(text: str) -> str:
+    """First explicit time-pressure phrase in ``text`` ("today only" / "limited
+    time" / "act now" / "hurry" / "while supplies last"), or ""."""
+    if not text:
+        return ""
+    m = _NARRATIVE_TIME_PRESSURE_RE.search(text)
+    return m.group(0).strip() if m else ""
+
+
+def scrub_campaign_narrative(
+    narrative: str,
+    *,
+    allowed_values: Sequence[str],
+    campaign_title: str,
+) -> str:
+    """Scoped-scrub the model-authored ``campaign_narrative`` (CD v2 Slice B, B0.3).
+
+    ``campaign_narrative`` is a marketing message that RENDERS prominently — the
+    only new fabrication surface in Slice B. This is the operator-approved Option B
+    SCOPED scrub: keep evocative-but-grounded marketing language, reject
+    fabrication, and on reject default to ``campaign_title``.
+
+    Returns:
+      - ``""`` if ``narrative`` is empty / blank (nothing to render);
+      - ``campaign_title`` if ``narrative`` contains ANY of:
+          * an UNGROUNDED commercial value (price / discount / percentage / free-X
+            offer not present in ``allowed_values``) — ``_first_ungrounded_commercial``;
+          * an UNGROUNDED genuine operational / delivery claim —
+            ``_first_ungrounded_operational`` (PRECISE detector, grounding-aware);
+          * a scheduling / availability / booking claim — ``_scheduling_claim_hit``;
+          * an explicit superlative / award / ranking token —
+            ``_narrative_superlative_hit``;
+          * an explicit time-pressure phrase ("today only" / "limited time" / …) —
+            ``_narrative_time_pressure_hit``;
+        (when ``campaign_title`` is itself empty/absent the reject default is ``""`` —
+        there is nothing safe to show);
+      - otherwise the ``narrative`` unchanged.
+
+    A GROUNDED value is fine: "Everything at $7.99" survives when "$7.99" is in
+    ``allowed_values`` (the commercial scan is grounding-aware); "Free delivery on
+    all orders" survives when grounded. An UNGROUNDED "$9.99" rejects even when
+    "$7.99" is grounded (token-anchored).
+
+    PURE; NEVER raises: a non-str ``narrative`` coerces to ``""``; any scanner
+    error fail-closes to ``campaign_title`` (or ``""`` when the title is absent)
+    rather than letting an unverified narrative through. REUSES the existing
+    scanners — no new commercial regex; the aggressive render-reaching detector is
+    DELIBERATELY not used (it over-rejects the grounded marketing ALLOW list)."""
+    safe_narrative = narrative if isinstance(narrative, str) else ""
+    safe_narrative = safe_narrative.strip()
+    safe_title = campaign_title if isinstance(campaign_title, str) else ""
+    if not safe_narrative:
+        return ""
+    allowed = [v for v in (allowed_values or ()) if isinstance(v, str)]
+    try:
+        if _first_ungrounded_commercial(safe_narrative, allowed):
+            return safe_title
+        if _first_ungrounded_operational(safe_narrative, allowed):
+            return safe_title
+        if _scheduling_claim_hit(safe_narrative):
+            return safe_title
+        if _narrative_superlative_hit(safe_narrative):
+            return safe_title
+        if _narrative_time_pressure_hit(safe_narrative):
+            return safe_title
+    except Exception:  # pragma: no cover - defensive: cannot prove clean ⇒ default
+        return safe_title
+    return safe_narrative
+
+
 # ── textless-background firewall (Codex Finding 3) ──────────────────────────
 # background_brief / visual_direction are the TEXTLESS-background prompt: the model
 # must render NO words there (all visible text is overlaid deterministically from
