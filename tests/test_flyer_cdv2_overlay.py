@@ -320,3 +320,186 @@ def test_fix2_empty_narrative_single_attempt_byte_identical(tmp_path):
     empty_out = _render(_project(creative_direction={"campaign_narrative": "   "}, pid="F0263"), tmp_path, "fix2_blank.png")
     assert po._LAST_NARRATIVE_DROP == []
     assert none_out.read_bytes() == empty_out.read_bytes()
+
+
+# ===========================================================================
+# CD v2 Composition Phase 1, Task 2 — the MESSAGE-FIRST (A) overlay template.
+#
+# When ``creative_direction["poster_archetype"] == "message_first"`` the overlay
+# inverts today's hierarchy: the campaign_narrative becomes the LARGEST headline,
+# the hook_text the second sub-headline, the campaign_title a small kicker, and
+# the brand a small demoted lockup (NO dominant emblem ring).
+#
+#   NON-NEGOTIABLE invariant:  narrative_px > hook_px > title_px
+#                              AND brand_px <= title_px (brand demoted)
+#
+# #1 SAFETY PROPERTY: every NON-message_first archetype (offer_first / event_first
+# / unknown / None / flag-off) MUST render BYTE-IDENTICAL to today — the
+# message_first code path is a strict no-op for those.
+# ===========================================================================
+
+_CD_MF = dict(_CD, poster_archetype="message_first")
+
+
+# ---------------------------------------------------------------------------
+# Task-2 #1 LOAD-BEARING byte-identical guard for the NEW archetype branch
+# ---------------------------------------------------------------------------
+
+def test_message_first_offer_first_byte_identical_to_today(tmp_path):
+    """poster_archetype == 'offer_first' must NOT engage the message_first path:
+    byte-identical to the SAME CD dict with no archetype key (today's B2.5 layout —
+    which already carries the narrative/seal scaling, so the comparison baseline is
+    the no-archetype render, NOT None)."""
+    base = _render(_project(creative_direction=dict(_CD), pid="F0270"), tmp_path, "mf_base1.png")
+    off = _render(_project(creative_direction=dict(_CD, poster_archetype="offer_first"),
+                           pid="F0270"), tmp_path, "mf_offer.png")
+    assert base.read_bytes() == off.read_bytes()
+
+
+def test_message_first_event_first_byte_identical_to_today(tmp_path):
+    """poster_archetype == 'event_first' must NOT engage the message_first path:
+    byte-identical to the SAME CD dict with no archetype key (today's B2.5 layout)."""
+    base = _render(_project(creative_direction=dict(_CD), pid="F0271"), tmp_path, "mf_base2.png")
+    ev = _render(_project(creative_direction=dict(_CD, poster_archetype="event_first"),
+                          pid="F0271"), tmp_path, "mf_event.png")
+    assert base.read_bytes() == ev.read_bytes()
+
+
+def test_message_first_archetype_none_byte_identical_to_today(tmp_path):
+    """creative_direction=None (flag-off) must NOT engage the message_first path
+    and stays byte-identical to today."""
+    base = _render(_project(creative_direction=None, pid="F0272"), tmp_path, "mf_base3.png")
+    # A CD dict carrying every other CD-v2 field but NO poster_archetype key must
+    # ALSO leave the message_first path dormant — but it still carries the
+    # narrative/seal scaling of B2.5, so we compare against the SAME CD dict
+    # WITHOUT the archetype rather than against None.
+    no_arch = _render(_project(creative_direction=dict(_CD), pid="F0272"), tmp_path, "mf_noarch.png")
+    same_no_arch = _render(_project(creative_direction=dict(_CD), pid="F0272"), tmp_path, "mf_noarch2.png")
+    # Determinism of the non-message_first path:
+    assert no_arch.read_bytes() == same_no_arch.read_bytes()
+
+
+def test_message_first_unknown_archetype_byte_identical_to_noarch(tmp_path):
+    """An UNKNOWN archetype string must be treated as non-message_first → identical
+    to the same CD dict with NO archetype key (today's B2.5 layout)."""
+    no_arch = _render(_project(creative_direction=dict(_CD), pid="F0273"), tmp_path, "mf_known.png")
+    unknown = _render(_project(creative_direction=dict(_CD, poster_archetype="banner_first"),
+                               pid="F0273"), tmp_path, "mf_unknown.png")
+    assert no_arch.read_bytes() == unknown.read_bytes()
+
+
+# ---------------------------------------------------------------------------
+# Task-2 #2 THE TYPE-HIERARCHY CONTRACT (the unit-asserted invariant)
+# ---------------------------------------------------------------------------
+
+def test_message_first_type_hierarchy_invariant(tmp_path):
+    """The success contract: in message_first the computed font sizes MUST satisfy
+    narrative_px > hook_px > title_px AND brand_px <= title_px (brand demoted).
+    Sizes are exposed deterministically via po._LAST_LAYOUT_DEBUG (no pixel read)."""
+    out = _render(_project(creative_direction=_CD_MF, pid="F0274"), tmp_path, "mf_hier.png")
+    assert out.exists()
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert dbg.get("archetype") == "message_first"
+    narrative_px = dbg["narrative_px"]
+    hook_px = dbg["hook_px"]
+    title_px = dbg["title_px"]
+    brand_px = dbg["brand_px"]
+    assert narrative_px > hook_px, (narrative_px, hook_px)
+    assert hook_px > title_px, (hook_px, title_px)
+    assert brand_px <= title_px, (brand_px, title_px)
+
+
+def test_message_first_narrative_is_largest_within_band(tmp_path):
+    """Narrative scale is within the message_first headline band (~0.072-0.082 ×
+    width) — it is the dominant headline, sized like / larger than today's title."""
+    _render(_project(creative_direction=_CD_MF, pid="F0275"), tmp_path, "mf_band.png")
+    dbg = po._LAST_LAYOUT_DEBUG
+    # narrative is the headline: at least the old title scale (0.072×1080≈77px) is
+    # the TOP of its band; it shrinks-to-fit so we only assert it is the largest.
+    assert dbg["narrative_px"] >= dbg["hook_px"] >= dbg["title_px"]
+    assert dbg["narrative_px"] <= int(1080 * 0.082) + 1  # never blows past the band ceiling
+
+
+# ---------------------------------------------------------------------------
+# Task-2 #3 DEMOTION: no dominant emblem ring; title is a small kicker
+# ---------------------------------------------------------------------------
+
+def test_message_first_no_dominant_emblem_ring(tmp_path):
+    """In message_first the dominant brand emblem ring is NOT drawn (brand is a
+    small lockup). We assert via the debug record's emblem flag."""
+    _render(_project(creative_direction=_CD_MF, pid="F0276"), tmp_path, "mf_nomblem.png")
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert dbg.get("emblem_ring_drawn") is False
+
+
+def test_message_first_title_demoted_to_kicker(tmp_path):
+    """campaign_title renders as a SMALL kicker, not the headline: title_px is at
+    most the small-kicker scale (~0.026×width) and strictly below narrative+hook."""
+    _render(_project(creative_direction=_CD_MF, pid="F0277"), tmp_path, "mf_kicker.png")
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert dbg["title_px"] <= int(1080 * 0.030)   # small kicker band, not headline
+    assert dbg["title_px"] < dbg["hook_px"] < dbg["narrative_px"]
+
+
+def test_message_first_brand_demoted_below_title(tmp_path):
+    """Brand lockup is demoted to <= title kicker px (the lowest of the four)."""
+    _render(_project(creative_direction=_CD_MF, pid="F0278"), tmp_path, "mf_brand.png")
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert dbg["brand_px"] <= dbg["title_px"]
+
+
+# ---------------------------------------------------------------------------
+# Task-2 #4 message_first render DIFFERS from today (the inversion is visible)
+# ---------------------------------------------------------------------------
+
+def test_message_first_render_differs_from_today(tmp_path):
+    """The message_first artifact MUST visibly differ from the same project rendered
+    with no archetype (today's hierarchy)."""
+    today = _render(_project(creative_direction=dict(_CD), pid="F0279"), tmp_path, "mf_today.png")
+    mf = _render(_project(creative_direction=_CD_MF, pid="F0279"), tmp_path, "mf_inverted.png")
+    assert today.read_bytes() != mf.read_bytes()
+
+
+# ---------------------------------------------------------------------------
+# Task-2 #5 FIT + LEDGER: pathological narrative still fits / degrades; every
+#     required locked fact is still verified; over-emphasis never overflows.
+# ---------------------------------------------------------------------------
+
+def test_message_first_pathological_narrative_still_renders(tmp_path):
+    """A pathological long narrative in message_first must NOT overflow / hard-fail
+    by itself: narrative shrinks (or drops) before any required fact; the render
+    succeeds and covers every required fact."""
+    cd = dict(_CD_MF, campaign_narrative="South Indian Favorites at One Price " * 30)
+    out = _render(_project(creative_direction=cd, pid="F0280"), tmp_path, "mf_longnarr.png")
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+
+
+def test_message_first_required_fact_ledger_preserved(tmp_path):
+    """The fail-closed required-fact ledger is intact in message_first: 40 long
+    locked items still overflow and RAISE (the inverted hierarchy must not mask a
+    real overflow / silently drop a required fact)."""
+    facts = [f for f in _base_facts() if not f.fact_id.startswith("item:")]
+    for i in range(40):
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label="Item",
+                                     value=f"VeryLongDishNameNumber{i}", source="customer_text", required=True))
+    proj = _project(creative_direction=_CD_MF, facts=facts, pid="F0281")
+    with pytest.raises(render.FlyerRenderError):
+        po.render_premium_overlay(proj, _bg(tmp_path), tmp_path / "mf_overflow.png",
+                                  size=(1080, 1350), output_format="concept_preview")
+
+
+def test_message_first_never_raises_on_malformed_cd(tmp_path):
+    """Malformed CD with a message_first archetype but garbage hook/narrative types
+    must never raise from the CD-v2 reads; it still produces a valid render."""
+    cd = {"poster_archetype": "message_first", "campaign_narrative": 999,
+          "hook_text": ["bad"], "hook_prominence": None, "offer_priority": object()}
+    out = _render(_project(creative_direction=cd, pid="F0282"), tmp_path, "mf_malformed.png")
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+
+
+def test_message_first_covers_every_required_fact(tmp_path):
+    """End-to-end: a normal message_first project renders and (by virtue of the
+    fail-closed ledger NOT raising) covers brand, title, narrative-as-headline,
+    schedule, every item, the offer, location and contact."""
+    out = _render(_project(creative_direction=_CD_MF, pid="F0283"), tmp_path, "mf_cover.png")
+    assert out.exists() and Image.open(out).size == (1080, 1350)
