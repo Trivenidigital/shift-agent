@@ -118,10 +118,13 @@ def test_creative_direction_blank_narrative_is_byte_identical(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_narrative_present_changes_output(tmp_path):
-    """With a non-empty campaign_narrative the rendered top zone must differ from
-    the None render (the narrative line is drawn)."""
+    """With a non-empty campaign_narrative on the MESSAGE-FIRST archetype the
+    rendered top zone must differ from the None render (the narrative headline is
+    drawn). FINDING 1: the narrative is ONLY consumed by the message_first (A)
+    template — a non-message_first carrier is scrubbed to today's layout — so the
+    carrier-consuming path is exercised via poster_archetype='message_first'."""
     base = _render(_project(creative_direction=None, pid="F0254"), tmp_path, "n_none.png")
-    cd = _render(_project(creative_direction=_CD, pid="F0254"), tmp_path, "n_cd.png")
+    cd = _render(_project(creative_direction=_CD_MF, pid="F0254"), tmp_path, "n_cd.png")
     assert base.read_bytes() != cd.read_bytes()
 
 
@@ -136,11 +139,12 @@ def test_layout_plan_exposes_narrative(tmp_path):
 
 
 def test_narrative_value_is_inked_for_coverage(tmp_path, monkeypatch):
-    """When the narrative is drawn it must register in the renderer's ink log
-    (proves it was actually placed, not silently skipped). We spy the ink path by
-    rendering and confirming the output differs AND the render succeeds (coverage
-    gate still passes — narrative is not a required fact)."""
-    out = _render(_project(creative_direction=_CD, pid="F0255"), tmp_path, "ink.png")
+    """When the narrative is drawn (message_first archetype) it registers in the
+    renderer's ink log (proves it was actually placed, not silently skipped) and the
+    render succeeds (coverage gate still passes — narrative is not a required fact).
+    FINDING 1: narrative is consumed only by the message_first template, so the
+    carrier-consuming render uses poster_archetype='message_first'."""
+    out = _render(_project(creative_direction=_CD_MF, pid="F0255"), tmp_path, "ink.png")
     assert out.exists() and Image.open(out).size == (1080, 1350)
 
 
@@ -244,49 +248,54 @@ def test_never_raises_on_malformed_creative_direction(tmp_path):
 #   only a layout that fails EVEN WITHOUT the narrative raises/degrades.
 # ---------------------------------------------------------------------------
 
-def test_fix2_narrative_dropped_not_degraded_when_it_breaks_required(tmp_path, monkeypatch):
-    """A narrative that, once DRAWN, consumes enough top-zone space to push the
-    required menu off the canvas must NOT degrade to flat: the overlay drops the
-    narrative and retries, producing a premium render that covers every required
-    fact. We force the narrative to be DRAWN large (simulating a looser band /
-    short narrative that still competes) by stubbing the role-block fitter so the
-    first attempt over-consumes; the second attempt (narrative omitted) restores
-    the room."""
+def test_fix2_non_message_first_narrative_carrier_is_scrubbed_single_attempt(tmp_path, monkeypatch):
+    """FINDING 1 (BLOCKER, Codex FINAL review): a campaign_narrative carried on a
+    NON-message_first render is SCRUBBED entirely — the ``_compose`` narrative-draw +
+    drop-retry ladder is NEVER engaged. Pre-FINDING-1 this path drew the narrative
+    eyebrow (role 'kicker') and, when it broke the required content, DROPPED it +
+    retried (``_LAST_NARRATIVE_DROP == [True]``). Under the Phase-1 contract a
+    non-message_first carrier is byte-identical to ``creative_direction=None``: a
+    SINGLE attempt, NO narrative drawn, NO drop record. We assert (a) byte-identical
+    to None and (b) the drop ladder never fired even with a greedy narrative stub
+    that would have over-consumed the top zone on the old path.
+
+    (The narrative-drop behavior for the MESSAGE-FIRST archetype — where the carrier
+    IS consumed — is covered by test_fix2_narrative_dropped_after_hook_when_both_break.)"""
     real_fit = po._fit_role_block
-    state = {"calls": 0}
 
     def _greedy_fit(draw, text, role, start_px, max_width, min_px, *, max_height, line_factor, max_lines):
-        # Only affects the narrative attempt (role == "kicker" eyebrow). Return a
-        # block that consumes a LARGE band at a large size so the drawn narrative
-        # pushes top_zone_bottom down hard — mimicking a narrative that fits its
-        # band yet starves the required content below it. (~8 lines × ~73px so the
-        # required menu/title no longer fits → first attempt raises → retry.)
-        state["calls"] += 1
-        if role == "kicker" and text:
-            big = max(start_px, min_px, 60)
-            lines = [f"NARRATIVE LINE {n}" for n in range(8)]
-            return lines, big
+        # If the (now-scrubbed) narrative eyebrow were ever attempted, this would
+        # over-consume the top zone and force a drop. Under FINDING 1 it is never
+        # reached for a non-message_first render, so the drop record stays empty.
+        if role == "kicker" and text and "NARRATIVE" in text.upper():
+            return [f"NARRATIVE LINE {n}" for n in range(8)], max(start_px, min_px, 60)
         return real_fit(draw, text, role, start_px, max_width, min_px,
                         max_height=max_height, line_factor=line_factor, max_lines=max_lines)
 
     monkeypatch.setattr(po, "_fit_role_block", _greedy_fit)
 
-    # A dense priced menu so the greedy narrative tips the menu placement check.
     facts = [f for f in _base_facts() if not f.fact_id.startswith("item:")]
     names = ["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar", "Rasam", "Bonda"]
     for i, nm in enumerate(names):
         facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item {i}", value=nm, source="customer_text", required=True))
         facts.append(FlyerLockedFact(fact_id=f"item:{i}:price", label=f"Price {i}", value=f"${5+i}.99", source="customer_text", required=True))
-    cd = dict(_CD, campaign_narrative="Authentic Weekend Tiffin Festival Family Favorites On Now")
+    # A non-message_first carrier (no poster_archetype key) carrying a narrative.
+    cd = dict(_CD, campaign_narrative="NARRATIVE Authentic Weekend Tiffin Festival")
     proj = _project(creative_direction=cd, facts=facts, pid="F0260")
 
-    out = tmp_path / "fix2_drop.png"
-    # MUST NOT raise (no flat degrade): the narrative is dropped and the premium
-    # overlay still renders.
+    out = tmp_path / "fix2_scrub.png"
     po.render_premium_overlay(proj, _bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
     assert out.exists() and Image.open(out).size == (1080, 1350)
-    # The drop-not-degrade retry fired (observable record set).
-    assert po._LAST_NARRATIVE_DROP == [True]
+    # FINDING 1: the narrative-drop ladder is NOT engaged for non-message_first.
+    assert po._LAST_NARRATIVE_DROP == [], po._LAST_NARRATIVE_DROP
+
+    # And the render is byte-identical to the true creative_direction=None baseline
+    # (the scrubbed carrier draws nothing new). Render the baseline with the SAME
+    # greedy stub installed so the comparison isolates the carrier-scrub, not the stub.
+    base = tmp_path / "fix2_scrub_none.png"
+    po.render_premium_overlay(_project(creative_direction=None, facts=facts, pid="F0260"),
+                              _bg(tmp_path), base, size=(1080, 1350), output_format="concept_preview")
+    assert out.read_bytes() == base.read_bytes()
 
 
 def test_fix2_overflow_without_narrative_still_raises(tmp_path):
@@ -349,20 +358,25 @@ _CD_MF = dict(_CD, poster_archetype="message_first")
 # ---------------------------------------------------------------------------
 
 def test_message_first_offer_first_byte_identical_to_today(tmp_path):
-    """poster_archetype == 'offer_first' must NOT engage the message_first path:
-    byte-identical to the SAME CD dict with no archetype key (today's B2.5 layout —
-    which already carries the narrative/seal scaling, so the comparison baseline is
-    the no-archetype render, NOT None)."""
-    base = _render(_project(creative_direction=dict(_CD), pid="F0270"), tmp_path, "mf_base1.png")
+    """poster_archetype == 'offer_first' must NOT engage the message_first path AND
+    must render BYTE-IDENTICAL to a ``creative_direction=None`` render (today's
+    layout). PHASE-1 CONTRACT (Codex FINAL review, FINDING 1): only the A template
+    is built; B/C archetypes = today's layout. The TRUE baseline is None, NOT a
+    no-archetype CD render — a non-message_first CD carrier can still set
+    campaign_narrative/offer_priority, which must be IGNORED (scrubbed) so the
+    render matches the no-CD baseline exactly."""
+    base = _render(_project(creative_direction=None, pid="F0270"), tmp_path, "mf_base1.png")
     off = _render(_project(creative_direction=dict(_CD, poster_archetype="offer_first"),
                            pid="F0270"), tmp_path, "mf_offer.png")
     assert base.read_bytes() == off.read_bytes()
 
 
 def test_message_first_event_first_byte_identical_to_today(tmp_path):
-    """poster_archetype == 'event_first' must NOT engage the message_first path:
-    byte-identical to the SAME CD dict with no archetype key (today's B2.5 layout)."""
-    base = _render(_project(creative_direction=dict(_CD), pid="F0271"), tmp_path, "mf_base2.png")
+    """poster_archetype == 'event_first' must NOT engage the message_first path AND
+    must render BYTE-IDENTICAL to a ``creative_direction=None`` render (today's
+    layout). TRUE baseline is None (FINDING 1) — the CD narrative/seal scaling
+    carried alongside event_first must be scrubbed."""
+    base = _render(_project(creative_direction=None, pid="F0271"), tmp_path, "mf_base2.png")
     ev = _render(_project(creative_direction=dict(_CD, poster_archetype="event_first"),
                           pid="F0271"), tmp_path, "mf_event.png")
     assert base.read_bytes() == ev.read_bytes()
@@ -370,25 +384,44 @@ def test_message_first_event_first_byte_identical_to_today(tmp_path):
 
 def test_message_first_archetype_none_byte_identical_to_today(tmp_path):
     """creative_direction=None (flag-off) must NOT engage the message_first path
-    and stays byte-identical to today."""
+    and stays byte-identical to today. A CD dict carrying every other CD-v2 field
+    but NO poster_archetype key must ALSO render BYTE-IDENTICAL to None — the
+    absent-archetype carrier is non-message_first, so its narrative/seal scaling is
+    scrubbed (FINDING 1: TRUE baseline is None, not the carried-narrative render)."""
     base = _render(_project(creative_direction=None, pid="F0272"), tmp_path, "mf_base3.png")
-    # A CD dict carrying every other CD-v2 field but NO poster_archetype key must
-    # ALSO leave the message_first path dormant — but it still carries the
-    # narrative/seal scaling of B2.5, so we compare against the SAME CD dict
-    # WITHOUT the archetype rather than against None.
     no_arch = _render(_project(creative_direction=dict(_CD), pid="F0272"), tmp_path, "mf_noarch.png")
-    same_no_arch = _render(_project(creative_direction=dict(_CD), pid="F0272"), tmp_path, "mf_noarch2.png")
-    # Determinism of the non-message_first path:
-    assert no_arch.read_bytes() == same_no_arch.read_bytes()
+    assert base.read_bytes() == no_arch.read_bytes()
 
 
 def test_message_first_unknown_archetype_byte_identical_to_noarch(tmp_path):
-    """An UNKNOWN archetype string must be treated as non-message_first → identical
-    to the same CD dict with NO archetype key (today's B2.5 layout)."""
-    no_arch = _render(_project(creative_direction=dict(_CD), pid="F0273"), tmp_path, "mf_known.png")
+    """An UNKNOWN archetype string must be treated as non-message_first → BYTE-
+    IDENTICAL to a ``creative_direction=None`` render (today's layout). FINDING 1:
+    the TRUE baseline is None — the CD carrier (narrative/offer_priority) riding on
+    an unknown archetype must be scrubbed, not drawn."""
+    base = _render(_project(creative_direction=None, pid="F0273"), tmp_path, "mf_base4.png")
     unknown = _render(_project(creative_direction=dict(_CD, poster_archetype="banner_first"),
                                pid="F0273"), tmp_path, "mf_unknown.png")
-    assert no_arch.read_bytes() == unknown.read_bytes()
+    assert base.read_bytes() == unknown.read_bytes()
+
+
+def test_finding1_non_message_first_archetypes_all_byte_identical_to_none(tmp_path):
+    """FINDING 1 (BLOCKER, Codex FINAL review): EVERY non-message_first archetype —
+    offer_first / event_first / unknown / absent — MUST render BYTE-IDENTICAL to a
+    ``creative_direction=None`` render. The Phase-1 contract: only the message_first
+    (A) template is built; B/C/unknown/absent = today's layout. A CD carrier riding
+    a non-message_first archetype can still set campaign_narrative / offer_priority /
+    hook_text — those must be SCRUBBED (ignored entirely), routing through the SAME
+    code path a None creative_direction uses. Before the fix the CD narrative eyebrow
+    was drawn + the seal scaled for these archetypes (leak) → NOT byte-identical."""
+    baseline = _render(_project(creative_direction=None, pid="F0290"), tmp_path, "f1_none.png").read_bytes()
+    for arch in ("offer_first", "event_first", "banner_first", "unknown_xyz"):
+        cd = dict(_CD, poster_archetype=arch)
+        out = _render(_project(creative_direction=cd, pid="F0290"), tmp_path, f"f1_{arch}.png")
+        assert out.read_bytes() == baseline, f"archetype={arch} not byte-identical to creative_direction=None"
+    # Absent archetype key (carrier present, no poster_archetype) — also baseline.
+    cd_noarch = dict(_CD)
+    out_noarch = _render(_project(creative_direction=cd_noarch, pid="F0290"), tmp_path, "f1_noarch.png")
+    assert out_noarch.read_bytes() == baseline, "absent poster_archetype not byte-identical to creative_direction=None"
 
 
 # ---------------------------------------------------------------------------
@@ -1285,3 +1318,68 @@ def test_fixB_long_promoted_title_clamps_brand_below_headline(tmp_path):
     # FIX B: brand stays STRICTLY below the FITTED promoted headline (present-tiers).
     assert dbg["brand_px"] < dbg["narrative_px"], (dbg["brand_px"], dbg["narrative_px"])
     _assert_present_tiers(dbg)
+
+
+# ===========================================================================
+# FINDING 3 (MAJOR, Codex FINAL review) — message_first NEVER saves headline-less
+# even when BOTH the campaign_narrative AND the campaign_title produce no headline.
+#
+# THE HOLE: promotion is gated by ``bool(title)``. When there is NO narrative drawn
+# AND NO title to promote (empty title), ``promote_title`` stays False, the promote
+# block is skipped, NO raise fires, ``_narr_lines`` stays empty, and the render
+# proceeds with ``narrative_px == 0`` — a headline-less premium SAVES. Invariant:
+# draw narrative, else promoted title, else RAISE (degrade to flat).
+# ===========================================================================
+
+
+def test_finding3_message_first_raises_when_no_headline_possible(tmp_path, monkeypatch):
+    """FINDING 3: message_first with BOTH an empty campaign_narrative AND an empty
+    campaign_title (no headline text from any source) must RAISE FlyerRenderError
+    (degrade to flat), NEVER save a headline-less premium. ``_display_title`` normally
+    forces a 'Specials' fallback so the payload ``title`` is never empty in practice;
+    this test forces the genuine empty-title payload to exercise the guard. Pre-fix:
+    ``promote_title`` is False (no title), the promote block is skipped, no raise
+    fires, render proceeds headline-less. Post-fix: the never-headline-less guard
+    raises."""
+    real_payload = render._menu_overlay_payload
+
+    def _empty_title_payload(project):
+        p = dict(real_payload(project))
+        p["title"] = ""  # genuinely empty title — no headline text available
+        return p
+
+    monkeypatch.setattr(render, "_menu_overlay_payload", _empty_title_payload)
+    # message_first CD with NO campaign_narrative → narrative empty AND title empty.
+    cd = {k: v for k, v in _CD_MF.items() if k != "campaign_narrative"}
+    # Build facts WITHOUT a campaign_title so nothing reintroduces a title downstream.
+    facts = [f for f in _base_facts() if f.fact_id != "campaign_title"]
+    with pytest.raises(render.FlyerRenderError):
+        po.render_premium_overlay(
+            _project(creative_direction=cd, facts=facts, pid="F0350"),
+            _bg(tmp_path), tmp_path / "f3_headlineless.png",
+            size=(1080, 1350), output_format="concept_preview")
+
+
+def test_finding3_message_first_unfittable_title_no_narrative_raises(tmp_path, monkeypatch):
+    """FINDING 3 (alt route): message_first with an empty narrative AND a
+    campaign_title that cannot fit even the generous headline band at the floor must
+    RAISE (degrade to flat) — never a headline-less save. Here the promote block's
+    own fail-closed fires; the guard is the belt-and-suspenders. ``_fit_title``
+    returns None for the title text (unfittable headline) and real-fits anything
+    else."""
+    real_fit_title = po._fit_title
+    title = "Weekend Specials"
+
+    def _title_unfittable(draw, text, start_px, max_width, min_px, *, max_height, line_factor):
+        if text == title:
+            return None, start_px
+        return real_fit_title(draw, text, start_px, max_width, min_px,
+                              max_height=max_height, line_factor=line_factor)
+
+    monkeypatch.setattr(po, "_fit_title", _title_unfittable)
+    cd = {k: v for k, v in _CD_MF.items() if k != "campaign_narrative"}
+    with pytest.raises(render.FlyerRenderError):
+        po.render_premium_overlay(
+            _project(creative_direction=cd, pid="F0351"),
+            _bg(tmp_path), tmp_path / "f3_unfit_title.png",
+            size=(1080, 1350), output_format="concept_preview")

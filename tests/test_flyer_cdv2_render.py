@@ -1,9 +1,12 @@
 """Tests for the FLYER_CREATIVE_DIRECTOR_V2 scoped gate (Slice B Task B2.1).
 
-TDD: these assert on `_creative_director_v2_enabled`, which mirrors the sibling
-gates (`_deterministic_first_enabled`, `_premium_overlay_enabled`) exactly:
-flag == "1" AND (allowlist empty => global, else normalized customer_phone in
-allowlist). Flag-off => False even for an allowlisted number => no behavior change.
+TDD: these assert on `_creative_director_v2_enabled`. SCOPED-ROLLOUT GUARD
+(Codex FINAL review, FINDING 2): UNLIKE the sibling gates
+(`_deterministic_first_enabled`, `_premium_overlay_enabled`) which treat an empty
+allowlist as GLOBAL, CD v2 must require a NON-EMPTY allowlist — an empty/unset
+allowlist DISABLES CD v2 entirely. CD v2 is enabled ONLY when flag == "1" AND the
+allowlist is NON-EMPTY AND the normalized customer_phone is a member. Flag-off =>
+False even for an allowlisted number => no behavior change.
 """
 import sys
 from datetime import datetime, timezone
@@ -43,11 +46,36 @@ def test_env_on_other_number_returns_false(monkeypatch):
     assert _creative_director_v2_enabled(_project("+19998887777")) is False
 
 
-def test_env_on_empty_allowlist_is_global(monkeypatch):
-    """Flag "1" + no allowlist => global ON (mirrors sibling gates)."""
+def test_env_on_empty_allowlist_is_disabled(monkeypatch):
+    """FINDING 2 (MAJOR, Codex FINAL review): Flag "1" + UNSET allowlist => DISABLED,
+    NOT global. CD v2 must NOT inherit the sibling gates' empty-allowlist-means-global
+    behavior — empty/unset allowlist is the broadening footgun the scoped rollout
+    (+17329837841 only) must reject. Pre-fix this returned True (global); post-fix
+    False."""
     monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
     monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
-    assert _creative_director_v2_enabled(_project("+19998887777")) is True
+    assert _creative_director_v2_enabled(_project("+19998887777")) is False
+    # Even the intended allowlisted phone is DISABLED when the allowlist is unset —
+    # CD v2 requires an explicitly-set non-empty allowlist.
+    assert _creative_director_v2_enabled(_project("+17329837841")) is False
+
+
+def test_env_on_empty_string_allowlist_is_disabled(monkeypatch):
+    """FINDING 2: an explicitly EMPTY-STRING allowlist (set but blank) is also
+    DISABLED — the parsed allowlist set is empty, so the scoped-rollout guard
+    rejects it for every phone (including the intended one)."""
+    monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "")
+    assert _creative_director_v2_enabled(_project("+17329837841")) is False
+    assert _creative_director_v2_enabled(_project("+19998887777")) is False
+
+
+def test_env_on_whitespace_allowlist_is_disabled(monkeypatch):
+    """FINDING 2: an allowlist of only separators/whitespace parses to an empty set
+    => DISABLED (no member can ever match an empty set)."""
+    monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", " , , ")
+    assert _creative_director_v2_enabled(_project("+17329837841")) is False
 
 
 def test_env_const_name(monkeypatch):

@@ -501,6 +501,27 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     # existing layout untouched → byte-identical.
     message_first = cd_poster_archetype == "message_first"
 
+    # ===================================================================
+    # PHASE-1 CONTRACT (Codex FINAL review, FINDING 1 BLOCKER): ONLY the
+    # message_first (A) template is built in Phase 1. EVERY other archetype —
+    # offer_first / event_first / unknown / absent — MUST render BYTE-IDENTICAL
+    # to a ``creative_direction=None`` render (today's layout), NOT merely to a
+    # "no-archetype CD" render. A CD carrier can still set campaign_narrative /
+    # offer_priority / hook_text even when poster_archetype is non-message_first;
+    # passing those into ``plan_premium_layout`` (offer_scale, narrative) and into
+    # ``_compose(include_narrative=True)`` would draw the CD narrative eyebrow +
+    # scale the seal for B/C archetypes — exactly the leak FINDING 1 flags. So we
+    # SCRUB the ENTIRE CD overlay carrier here: reset every CD-derived overlay
+    # input to its ``creative_direction=None`` baseline value, which routes the
+    # non-message_first dispatch through the SAME single-attempt, narrative="",
+    # offer_scale=1.0 code path that a None creative_direction uses. message_first
+    # is untouched (it consumes the full carrier below).
+    if not message_first:
+        cd_narrative = ""
+        cd_offer_priority = None
+        cd_hook_text = ""
+        cd_hook_prominence = ""
+
     # FIX 2 observability: reset the per-call best-effort drop records (see the
     # _LAST_NARRATIVE_DROP / _LAST_HOOK_DROP module notes + the dispatch at the
     # end of this fn).
@@ -1199,6 +1220,24 @@ def render_premium_overlay(project, source, target, *, size, output_format):
                 raise render.FlyerRenderError(
                     "premium overlay does not fit (campaign_title headline cannot fit on-canvas)"
                 )
+
+        # NEVER-HEADLINE-LESS GUARD (Codex FINAL review, FINDING 3 MAJOR): the
+        # message_first invariant is ``narrative_px > 0`` ALWAYS — draw the
+        # narrative, else the PROMOTED campaign_title, else RAISE (degrade to
+        # flat). The promote ladder above only fires when ``bool(title)`` is True;
+        # when there is NO campaign_narrative drawn AND NO campaign_title to
+        # promote, ``promote_title`` is False, the block is skipped, and the render
+        # would proceed with ``_narr_lines is None`` / ``narrative_px == 0`` — a
+        # headline-less A poster. Close that hole: if NO headline lines will be
+        # drawn after the narrative-fit + title-promotion attempts, fail-closed so
+        # the caller degrades to a complete FLAT flyer (preferred over saving a
+        # headline-less premium).
+        if not _narr_lines:
+            narrative_px = 0
+            raise render.FlyerRenderError(
+                "premium overlay does not fit (message_first has no headline: "
+                "no campaign_narrative drawn and no campaign_title to promote)"
+            )
 
         # narr_draw — the DRAWN narrative size (0 when dropped/absent). The hero
         # tier that the title + hook must stay strictly below.

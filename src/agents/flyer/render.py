@@ -3523,15 +3523,23 @@ CREATIVE_DIRECTOR_V2_ENV = "FLYER_CREATIVE_DIRECTOR_V2"
 def _creative_director_v2_enabled(project: FlyerProject) -> bool:
     """Routing gate for Creative Director v2: resolve a creative direction
     upstream and carry it into the render. Flag FLYER_CREATIVE_DIRECTOR_V2 == "1"
-    AND (the shared FLYER_PREMIUM_OVERLAY_ALLOWLIST is empty => global, else
-    project.customer_phone is in it). Independent of FLYER_PREMIUM_OVERLAY /
-    FLYER_DETERMINISTIC_RECOVERY / FLYER_DETERMINISTIC_FIRST. Mirrors
-    _deterministic_first_enabled exactly. Flag-off => byte-identical legacy."""
+    AND the shared FLYER_PREMIUM_OVERLAY_ALLOWLIST is NON-EMPTY AND
+    project.customer_phone is in it. Independent of FLYER_PREMIUM_OVERLAY /
+    FLYER_DETERMINISTIC_RECOVERY / FLYER_DETERMINISTIC_FIRST. Flag-off =>
+    byte-identical legacy.
+
+    SCOPED-ROLLOUT GUARD (Codex FINAL review, FINDING 2 MAJOR): CD v2 is rolling
+    out to +17329837841 ONLY. UNLIKE the sibling gates (_deterministic_first /
+    _deterministic_recovery / _premium_overlay) which treat an empty allowlist as
+    GLOBAL, CD v2 must NOT inherit that broadening footgun — an empty/unset
+    allowlist must DISABLE CD v2 entirely (not enable it for every phone). CD v2
+    therefore requires the flag "1" AND a NON-EMPTY allowlist AND membership."""
     if os.environ.get(CREATIVE_DIRECTOR_V2_ENV) != "1":
         return False
     allow = _premium_overlay_allowlist()
     if not allow:
-        return True
+        # Empty/unset allowlist => DISABLED (scoped-rollout guard), NOT global.
+        return False
     return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
 
 
