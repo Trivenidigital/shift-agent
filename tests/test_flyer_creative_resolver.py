@@ -1082,3 +1082,98 @@ def test_resolver_ungrounded_day_narrative_defaults_to_title():
     brief = _brief(campaign_narrative="Festive Specials this Monday")
     out = resolve_creative_direction(brief, facts)
     assert out.campaign_narrative == "Weekend Combo Special"
+
+
+# --- FIX D: hero falls back to the primary OFFER subject for combo flyers ------
+#
+# For combo flyers production extracts each combo as ONE COARSE ``offer:N`` fact (no
+# fine ``item:*:name`` slots). The resolver only accepted ``item:*:name`` for the
+# hero, so ``hero_name`` resolved to "" — the hero was unnamed. FIX D: if hero_ref
+# resolves to an ``offer:*`` fact, OR there are no item:*:name facts but offers
+# exist, the hero falls back to the PRIMARY offer's subject NAME, derived
+# deterministically from the offer's OWN text (the name before the price/":"/
+# "includes"). NEVER invented — always a substring of a locked fact value.
+
+
+def _combo_offer_facts() -> list[FlyerLockedFact]:
+    """A combo flyer: only coarse offer:N facts, NO item:*:name."""
+    return [
+        _fact("offer:0", "Veg Combo - $12.99: Includes 2 curries, dessert"),
+        _fact("offer:1", "Non-Veg Combo - $15.99: Includes biryani, kebab"),
+    ]
+
+
+def test_hero_offer_ref_resolves_to_offer_subject_name():
+    """hero_ref pointing at offer:0 → hero_name is the offer's subject name
+    ("Veg Combo"), derived from the offer text — and a substring of offer:0's value."""
+    facts = _combo_offer_facts()
+    brief = _brief(hero_ref=FactRef(fact_id="offer:0"))
+    out = resolve_creative_direction(brief, facts)
+    assert out.hero_name == "Veg Combo"
+    # Never invented — the hero name is a substring of the offer's OWN locked value.
+    assert out.hero_name and out.hero_name in facts[0].value
+
+
+def test_hero_no_ref_with_offers_falls_back_to_first_offer_subject():
+    """No hero_ref, but offers present and NO item:*:name → hero_name is the FIRST
+    (lowest-index) offer's subject name."""
+    facts = _combo_offer_facts()
+    brief = _brief()  # no hero_ref
+    out = resolve_creative_direction(brief, facts)
+    assert out.hero_name == "Veg Combo"
+    assert out.hero_name in facts[0].value
+
+
+def test_hero_item_flyer_unchanged_when_item_names_exist():
+    """An item flyer (has item:*:name) is UNCHANGED: hero = item name as before, even
+    if an offer:* fact also exists."""
+    facts = _two_item_facts() + [_fact("offer:0", "Veg Combo - $12.99")]
+    brief = _brief(hero_ref=FactRef(fact_id="item:1:name"))
+    out = resolve_creative_direction(brief, facts)
+    assert out.hero_name == "Idli Sambar"  # item name, not the offer
+
+
+def test_hero_item_flyer_default_first_item_unchanged_with_offer_present():
+    """No hero_ref, item:*:name facts present (plus an offer) → first ITEM name wins
+    (item-level facts take precedence over the offer fallback)."""
+    facts = _two_item_facts() + [_fact("offer:0", "Veg Combo - $12.99")]
+    brief = _brief()
+    out = resolve_creative_direction(brief, facts)
+    assert out.hero_name == "Masala Dosa"  # first item name, unchanged
+
+
+def test_hero_no_items_no_offers_is_empty():
+    """Neither items nor offers → hero_name "" (unchanged behavior)."""
+    facts = [_fact("business_name", "Lakshmi's Kitchen")]
+    brief = _brief()
+    out = resolve_creative_direction(brief, facts)
+    assert out.hero_name == ""
+
+
+def test_hero_offer_subject_derivation_handles_no_separator():
+    """An offer with no price/":"/"includes" separator → the whole (cleaned) value is
+    the subject name (still a substring of the offer value)."""
+    facts = [_fact("offer:0", "Family Feast Platter")]
+    brief = _brief(hero_ref=FactRef(fact_id="offer:0"))
+    out = resolve_creative_direction(brief, facts)
+    assert out.hero_name == "Family Feast Platter"
+    assert out.hero_name in facts[0].value
+
+
+def test_hero_offer_fallback_invariant_substring_of_locked_fact():
+    """INVARIANT: across offer-ref / no-ref-with-offers / item / empty cases the hero
+    name is ALWAYS "" or a substring of SOME locked fact value (never invented)."""
+    cases = [
+        (_combo_offer_facts(), _brief(hero_ref=FactRef(fact_id="offer:0"))),
+        (_combo_offer_facts(), _brief(hero_ref=FactRef(fact_id="offer:1"))),
+        (_combo_offer_facts(), _brief()),
+        (_combo_offer_facts(), _brief(hero_ref=FactRef(fact_id="offer:99"))),  # bad ref → first offer
+        (_two_item_facts(), _brief(hero_ref=FactRef(fact_id="item:0:name"))),
+        ([_fact("business_name", "X Cafe")], _brief()),
+    ]
+    for facts, brief in cases:
+        out = resolve_creative_direction(brief, facts)
+        if out.hero_name:
+            assert any(out.hero_name in f.value for f in facts), (
+                f"hero_name {out.hero_name!r} not a substring of any locked fact value"
+            )

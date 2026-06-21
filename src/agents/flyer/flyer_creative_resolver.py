@@ -13,7 +13,10 @@ Three load-bearing invariants:
      ``locked_facts`` yields the safe-default ``ResolvedCreativeDirection``
      (``""`` / ``[]`` / fixed default prominence/priority), never an exception.
   3. **NEVER invents** — it SELECTS values that already exist in ``locked_facts``;
-     a name / hook text is ALWAYS either ``""`` or a verbatim locked-fact value.
+     a name / hook text is ALWAYS either ``""`` or a locked-fact value (a hook text
+     is verbatim; a hero name is verbatim for an ``item:*:name`` flyer, and for a
+     combo flyer is the offer's SUBJECT NAME derived from the offer's OWN value by
+     TRUNCATION ONLY — so it is always a substring of a locked fact value, FIX D).
      Theme / mood are visual-taste strings: a model could otherwise smuggle a
      fabricated COMMERCIAL value through them (e.g. ``mood="$5 off"``), which the
      strict ``fact_refs`` firewall never scans. So they are validated to carry NO
@@ -79,9 +82,48 @@ _ITEM_NAME_RE = re.compile(r"^item:(\d+):name$")
 # offer (``offer:<N>``), or an offer price (``offer_price``). An item NAME is NOT
 # a valid hook source.
 _OFFER_RE = re.compile(r"^offer:\d+$")
+# Indexed offer id: ``offer:<N>`` — used to find the PRIMARY (lowest-index) offer
+# for the combo-flyer hero fallback (FIX D).
+_OFFER_INDEX_RE = re.compile(r"^offer:(\d+)$")
 _HOOK_SOURCE_EXACT = frozenset({"pricing_structure", "offer_price"})
 
 _VALID_PRIORITIES = frozenset({"high", "medium", "low"})
+
+# ── offer SUBJECT-NAME derivation (FIX D) ───────────────────────────────────
+# A combo offer's locked value carries the subject name as its HEADLINE, e.g.
+# ``"Veg Combo - $12.99: Includes 2 curries, dessert"`` → subject "Veg Combo". The
+# subject is the headline BEFORE the component list (":"/"includes"/"with") and
+# BEFORE the price. Derivation is deterministic + TRUNCATION-ONLY, so the result is
+# ALWAYS a substring of the offer's OWN value (NEVER invented). Mirrors the headline
+# split facts.py uses (``:|\binclud(e|es|ing)\b|\bwith\b``) but kept self-contained
+# (the resolver imports no facts.py and stays pure).
+_OFFER_HEADLINE_SPLIT_RE = re.compile(
+    r":|\binclud(?:e|es|ing)\b|\bwith\b", re.IGNORECASE
+)
+# A price token (currency-prefixed or a trailing dash-led price) inside the headline:
+# everything from the first price onward is dropped so "Veg Combo - $12.99" → "Veg
+# Combo -" → "Veg Combo".
+_OFFER_PRICE_RE = re.compile(r"[$₹€£]\s*\d|(?<![\w.])\d{1,4}\.\d{2}(?![\w.])")
+
+
+def _offer_subject_name(offer_value: str) -> str:
+    """The subject NAME of an offer, derived from its OWN text by TRUNCATION ONLY —
+    so the result is ALWAYS a substring of ``offer_value`` (never invented). Cuts at
+    the component list (":"/"includes"/"with") and at the price, then strips trailing
+    separators/whitespace. Returns "" only for an empty/blank value. Guarded so a
+    malformed value never raises."""
+    try:
+        value = offer_value or ""
+        if not value.strip():
+            return ""
+        headline = _OFFER_HEADLINE_SPLIT_RE.split(value, maxsplit=1)[0]
+        price_match = _OFFER_PRICE_RE.search(headline)
+        if price_match:
+            headline = headline[: price_match.start()]
+        name = headline.strip().strip("-–—:").strip()
+        return name
+    except Exception:  # pragma: no cover - defensive: never raise
+        return ""
 
 
 @dataclass(frozen=True)
@@ -159,6 +201,36 @@ def _resolve_item_name(
     return value or ""
 
 
+def _has_item_name_fact(locked_facts: Sequence[FlyerLockedFact]) -> bool:
+    """True iff ANY ``item:<N>:name`` locked fact exists (item-level flyer)."""
+    for fact in locked_facts or ():
+        try:
+            if _ITEM_NAME_RE.match(getattr(fact, "fact_id", None) or ""):
+                return True
+        except Exception:  # pragma: no cover - defensive: never raise
+            continue
+    return False
+
+
+def _first_offer_value(locked_facts: Sequence[FlyerLockedFact]) -> str:
+    """The value of the PRIMARY (lowest-index) ``offer:<N>`` locked fact, or ""
+    (FIX D). "Primary" = lowest index, mirroring ``_first_item_name``'s convention."""
+    best_index: Optional[int] = None
+    best_value = ""
+    for fact in locked_facts or ():
+        try:
+            m = _OFFER_INDEX_RE.match(getattr(fact, "fact_id", None) or "")
+            if not m:
+                continue
+            index = int(m.group(1))
+            if best_index is None or index < best_index:
+                best_index = index
+                best_value = getattr(fact, "value", None) or ""
+        except Exception:  # pragma: no cover - defensive: never raise
+            continue
+    return best_value
+
+
 def _is_hook_source_id(fact_id: str) -> bool:
     """True iff ``fact_id`` is an allowed hook source kind: pricing_structure,
     offer:<N>, or offer_price."""
@@ -175,10 +247,31 @@ def _pricing_structure_value(locked_facts: Sequence[FlyerLockedFact]) -> str:
 def _resolve_hero_name(
     brief: FlyerBrief, locked_facts: Sequence[FlyerLockedFact]
 ) -> str:
+    # 1. hero_ref → an item:*:name (item-level flyer, unchanged).
     hero = _resolve_item_name(getattr(brief, "hero_ref", None), locked_facts)
     if hero:
         return hero
-    return _first_item_name(locked_facts)
+    # 2. FIX D — hero_ref → an offer:* fact: the hero is that offer's SUBJECT NAME,
+    # derived from the offer's OWN text (truncation-only ⇒ substring, never invented).
+    hero_ref_fid = _ref_fact_id(getattr(brief, "hero_ref", None))
+    if hero_ref_fid and _OFFER_INDEX_RE.match(hero_ref_fid):
+        offer_value = _locked_value_by_id(locked_facts, hero_ref_fid) or ""
+        subject = _offer_subject_name(offer_value)
+        if subject:
+            return subject
+    # 3. item-level fallback: the first item name (item-level flyer, unchanged).
+    first_item = _first_item_name(locked_facts)
+    if first_item:
+        return first_item
+    # 4. FIX D — combo flyer (NO item:*:name) with offers: fall back to the PRIMARY
+    # offer's subject name. Gated on "no item names" so an item flyer is never
+    # diverted to an offer (item-level facts take precedence).
+    if not _has_item_name_fact(locked_facts):
+        subject = _offer_subject_name(_first_offer_value(locked_facts))
+        if subject:
+            return subject
+    # 5. neither items nor offers (e.g. pure identity) → "" (unchanged).
+    return ""
 
 
 def _resolve_supporting_names(
