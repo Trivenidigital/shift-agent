@@ -689,3 +689,136 @@ def test_fix3_title_kicker_band_overflow_raises(tmp_path):
     with pytest.raises(render.FlyerRenderError):
         po.render_premium_overlay(proj, _bg(tmp_path), tmp_path / "fix3_band.png",
                                   size=(1080, 1350), output_format="concept_preview")
+
+
+# ===========================================================================
+# RESIDUAL BLOCKER 1 (Codex) — capping the MAX size does not GUARANTEE the
+# strict descending order on the sizes ACTUALLY DRAWN.  ``_fit_*`` may return any
+# size down to min_px, so a LONG hook can fit below the title and a LONG title
+# below the brand even with the caps in place.  The order must be enforced on the
+# DRAWN/REPORTED sizes by construction:
+#     narr_draw > hook_draw > title_draw >= brand_draw   (hook present)
+#     narr_draw > title_draw >= brand_draw               (hook dropped)
+# and NEVER invert regardless of text length.
+# ===========================================================================
+
+def test_blocker1_long_hook_never_inverts_below_title(tmp_path):
+    """A SHORT narrative + a very LONG hook (cannot fit in its ≤2-line band at any
+    readable size): pre-fix the debug reported a PHANTOM hook_px == hook_cap (50)
+    even though the hook was never drawn (_LAST_HOOK_DROP stayed empty) — i.e. the
+    reported size did not reflect the DRAWN size.  After the fix the hook must be
+    recorded as DROPPED and the reported order must hold on the DRAWN sizes
+    (narrative_px > title_px, no phantom hook between them)."""
+    cd = dict(
+        _CD_MF,
+        campaign_narrative="Weekend Specials",  # short → narrative sits high in band
+        hook_text=("LIMITED TIME WEEKEND OFFER EVERY SINGLE ITEM ON THE MENU IS "
+                   "AVAILABLE AT ONE FLAT PRICE COME EARLY AND BRING THE WHOLE FAMILY "
+                   "TODAY ONLY WHILE STOCKS LAST DO NOT MISS THIS GREAT DEAL EVER ") * 4
+    )
+    out = _render(_project(creative_direction=cd, pid="F0298"), tmp_path, "b1_longhook.png")
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert dbg.get("archetype") == "message_first"
+    # The over-long hook could not fit its band → it MUST be recorded as dropped,
+    # not phantom-reported as a drawn 50px hook.
+    assert po._LAST_HOOK_DROP == [True], po._LAST_HOOK_DROP
+    # With the hook dropped the DRAWN order is narrative > title >= brand, and the
+    # reported hook_px must equal the title_px (collapsed, no phantom between).
+    assert dbg["narrative_px"] > dbg["title_px"], (dbg["narrative_px"], dbg["title_px"])
+    assert dbg["hook_px"] == dbg["title_px"], (dbg["hook_px"], dbg["title_px"])
+    assert dbg["brand_px"] <= dbg["title_px"], (dbg["brand_px"], dbg["title_px"])
+
+
+def test_blocker1_long_title_demoted_on_canvas_or_failclosed(tmp_path):
+    """A long campaign_title either fits demoted-and-on-canvas (ordering holds) OR
+    fail-closed raises — it is NEVER silently drawn at a size below the floor or
+    inverted above the hook/narrative.  No success path may leave title_px above
+    hook_px/narrative_px."""
+    facts = [f for f in _base_facts() if f.fact_id != "campaign_title"]
+    facts.append(FlyerLockedFact(
+        fact_id="campaign_title", label="Campaign",
+        value="Grand Weekend South Indian Tiffin Festival Family Celebration Specials",
+        source="customer_text", required=True))
+    proj = _project(creative_direction=_CD_MF, facts=facts, pid="F0299")
+    out = tmp_path / "b1_longtitle.png"
+    try:
+        po.render_premium_overlay(proj, _bg(tmp_path), out,
+                                  size=(1080, 1350), output_format="concept_preview")
+    except render.FlyerRenderError:
+        return  # fail-closed is an acceptable outcome
+    # Success path: the order must hold on the DRAWN sizes.
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert dbg["title_px"] < dbg["narrative_px"], (dbg["title_px"], dbg["narrative_px"])
+    if not po._LAST_HOOK_DROP:
+        assert dbg["title_px"] < dbg["hook_px"], (dbg["title_px"], dbg["hook_px"])
+    assert dbg["brand_px"] <= dbg["title_px"], (dbg["brand_px"], dbg["title_px"])
+
+
+def test_blocker1_hook_drop_preserves_order(tmp_path, monkeypatch):
+    """A hook that has NO room between the title and the narrative (its fitted size
+    would land at/below the title) must be DROPPED in-place — never drawn inverted.
+    After the drop the reported order is narrative_px > title_px and the render
+    succeeds premium (no flat degrade).  _LAST_HOOK_DROP records the drop."""
+    real_fit = po._fit_role_block
+
+    def _tiny_hook(draw, text, role, start_px, max_width, min_px, *, max_height, line_factor, max_lines):
+        # Force the hook (kicker role) to fit only at the FLOOR — no room above the
+        # title kicker, which also fits near the floor → the hook must be dropped
+        # rather than drawn at/below the title.
+        if role == "kicker" and text == "$7.99":
+            return ["$7.99"], min_px
+        return real_fit(draw, text, role, start_px, max_width, min_px,
+                        max_height=max_height, line_factor=line_factor, max_lines=max_lines)
+
+    monkeypatch.setattr(po, "_fit_role_block", _tiny_hook)
+    cd = dict(_CD_MF, campaign_narrative="Weekend Specials", hook_text="$7.99")
+    out = _render(_project(creative_direction=cd, pid="F0300"), tmp_path, "b1_hookdrop.png")
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert po._LAST_HOOK_DROP == [True]
+    # Hook dropped → order collapses to narrative > title >= brand (no inversion).
+    assert dbg["narrative_px"] > dbg["title_px"], (dbg["narrative_px"], dbg["title_px"])
+    assert dbg["brand_px"] <= dbg["title_px"], (dbg["brand_px"], dbg["title_px"])
+
+
+# ===========================================================================
+# RESIDUAL BLOCKER 2 (Codex) — prove the REQUIRED title is ON-CANVAS (absolute
+# coords) before ink.  ``_fit_role_block`` only checks local max_height; if the
+# brand lockup is pushed down (multi-line / forced tall) the kicker's ABSOLUTE
+# kick_top/kick_bottom can fall off-canvas while _ink(title) still marks the
+# required fact covered.  An off-canvas required title must FAIL-CLOSED.
+# ===========================================================================
+
+def _facts_no_menu():
+    """Base required facts WITHOUT any item:* rows (so the menu placement check is
+    skipped and the title kicker's on-canvas guard is exercised in isolation)."""
+    return [f for f in _base_facts() if not f.fact_id.startswith("item:")]
+
+
+def test_blocker2_offcanvas_required_title_failcloses(tmp_path, monkeypatch):
+    """Force the brand lockup tall enough that the title kicker's ABSOLUTE y-range
+    (kick_top/kick_bottom) is pushed past the canvas height while the rest of the
+    layout (footer-anchored required facts, no menu) would still ship.  Pre-fix the
+    render SUCCEEDS with the REQUIRED campaign_title drawn OFF-CANVAS yet _ink'd as
+    covered — a silent covered-but-off-canvas ship.  After the fix the absolute
+    on-canvas check must FAIL-CLOSED (FlyerRenderError → flat fallback)."""
+    real_wrap = po._wrap_premium
+
+    def _tall_brand(draw, text, role, size, max_width):
+        # The brand wraps with the "masthead" role at the very top.  Return enough
+        # brand lines that brand_bottom pushes the title kicker's absolute
+        # kick_bottom PAST the 1350px canvas height — pre-fix this SUCCEEDED with
+        # the required campaign_title _ink'd off-canvas; post-fix the absolute guard
+        # must raise the SPECIFIC off-canvas error.
+        if role == "masthead":
+            return [f"BRAND {n}" for n in range(45)]
+        return real_wrap(draw, text, role, size, max_width)
+
+    monkeypatch.setattr(po, "_wrap_premium", _tall_brand)
+    # No menu items → the menu placement check cannot mask the off-canvas title.
+    proj = _project(creative_direction=_CD_MF, facts=_facts_no_menu(), pid="F0301")
+    with pytest.raises(render.FlyerRenderError, match="off-canvas"):
+        po.render_premium_overlay(proj, _bg(tmp_path), tmp_path / "b2_offcanvas.png",
+                                  size=(1080, 1350), output_format="concept_preview")

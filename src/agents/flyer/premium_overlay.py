@@ -1087,44 +1087,51 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         # kicker FINAL sizes are NOT decided here — FIX 1 derives them from the
         # FITTED narrative size below so clamping can never invert the ordering.
         narrative_start_px = max(min_px, int(width * 0.078))   # ~84px @1080 (band 0.072-0.082)
-        brand_px           = max(min_px, int(width * 0.024))   # ~26px @1080 (demoted, <= title)
-
-        # ===================================================================
-        # TOP — demoted brand lockup (NO emblem ring): small letter-spaced caps.
-        # ===================================================================
-        y = max(16, int(height * 0.018))
-        if business:
-            brand_font = _premium_font("masthead", brand_px)
-            brand_spaced = " ".join(_spaced_caps(business))
-            brand_lines = _wrap_premium(draw, brand_spaced, "masthead", brand_px, safe_w)
-            for ln in brand_lines:
-                _draw_centered(draw, ln, brand_font, cy=y, width=width,
-                               fill=_EMBLEM_IVORY, shadow_dy=2)
-                y += int(brand_px * 1.18)
-            _ink(business)
-        brand_bottom = y
+        brand_start_px     = max(min_px, int(width * 0.024))   # ~26px @1080 (demoted, <= title)
 
         # ===================================================================
         # FIX 1 — FIT THE NARRATIVE FIRST, then DERIVE hook + title sizes as
         # fractions of the FITTED narrative so ``narrative_px > hook_px >
         # title_px`` holds BY CONSTRUCTION regardless of how far the narrative
         # clamped.  The narrative band is measured from a top that RESERVES an
-        # upper bound for the (yet-to-be-sized) title kicker: the kicker's FINAL
-        # size is derived ≤ this allowance, so reserving the allowance can only
-        # OVER-reserve → the narrative still fits its real band.
+        # upper bound for the (yet-to-be-sized) title kicker AND the (demoted,
+        # ≤ kicker) brand lockup: both final sizes are derived ≤ this allowance,
+        # so reserving it can only OVER-reserve → the narrative still fits its band.
+        #
+        # RESIDUAL-BLOCKER ORDERING — the START caps below bound the MAX size, but
+        # ``_fit_*`` may return any size down to ``min_px`` so the MAX cap alone
+        # cannot prevent an inversion (a long hook fitting below the title, a long
+        # title below the brand).  This composer therefore enforces the strict
+        # descending order on the sizes ACTUALLY DRAWN (``*_draw`` below), with the
+        # priority narrative(hero) ≻ title(required) ≻ hook(flex) ≻ brand:
+        #   • narr_draw  = the fitted narrative (best-effort: dropped if it cannot
+        #                  fit even at the floor — the drop ladder handles that).
+        #   • title_draw = the fitted REQUIRED kicker, capped below narr_draw; it
+        #                  must draw on-canvas (see the absolute guard) or fail-close.
+        #   • hook_draw  = min(hook_fitted, narr_draw-1); DROPPED if it leaves no
+        #                  room above the title (hook_draw <= title_draw).
+        #   • brand_draw = min(brand_fitted, title_draw)  (≤ title, lowest tier).
+        # Net DRAWN/reported invariant: narr_draw > hook_draw > title_draw >=
+        # brand_draw with the hook present; narr_draw > title_draw >= brand_draw
+        # with the hook dropped.  This never inverts regardless of text length.
         # ===================================================================
         _title_allowance = 0
         if title:
-            # Reserve up to ~3 kicker lines at the narrative-start-derived cap as
-            # an upper bound (kicker final size ≤ round(narr_start*0.34)).
+            # Reserve up to ~3 kicker lines + ~2 brand lines at the start-derived
+            # caps as an upper bound (final kicker ≤ round(narr_start*0.34); final
+            # brand ≤ that kicker cap).  Over-reserving only shrinks the narrative
+            # band slightly; the brand+kicker are RE-placed against the real top.
             _kick_cap_ub = max(min_px, int(round(narrative_start_px * 0.34)))
-            _title_allowance = max(8, int(height * 0.012)) + 3 * int(_kick_cap_ub * 1.22)
+            _title_allowance = (max(8, int(height * 0.012))
+                                + 3 * int(_kick_cap_ub * 1.22)
+                                + max(16, int(height * 0.018))
+                                + 2 * int(_kick_cap_ub * 1.18))
 
         narrative_px = 0
         _narr_lines = None
         if cd_narrative and include_narrative:
             _narr_gap = max(10, int(height * 0.014))
-            _narr_top = brand_bottom + _title_allowance + _narr_gap
+            _narr_top = _title_allowance + _narr_gap
             # Headline band: the upper ~40% so the hook + hero/menu sit below.
             _narr_ceiling = max(_narr_top, int(height * 0.40))
             _narr_lines, narrative_px = _fit_title(
@@ -1134,60 +1141,109 @@ def render_premium_overlay(project, source, target, *, size, output_format):
             if not _narr_lines:
                 narrative_px = 0  # dropped (did not fit) — best-effort
 
+        # narr_draw — the DRAWN narrative size (0 when dropped/absent). The hero
+        # tier that the title + hook must stay strictly below.
+        narr_draw = narrative_px
         # The reference size that drives the derived hook/title caps. When the
         # narrative was drawn use its FITTED size; when it was dropped/absent fall
-        # back to the start size so the derived caps (and the exposed debug) still
-        # reflect a coherent hierarchy.
-        _narr_ref_px = narrative_px or narrative_start_px
+        # back to the start size so the derived caps still reflect a coherent
+        # hierarchy (and there is a strict ceiling for the hook/title even with no
+        # narrative on-canvas).
+        _narr_ref_px = narr_draw or narrative_start_px
 
-        # DERIVE hook + title caps from the narrative reference (FIX 1 core):
+        # DERIVE the hook + title MAX caps from the narrative reference (FIX 1):
         #   hook_max   = ~0.60 × narrative   title_kicker = ~0.34 × narrative
         # then enforce strict spread at the FLOOR edge (when caps collapse to
         # min_px the 2-px step keeps narrative > hook > title >= brand strict).
         hook_cap        = max(min_px, int(round(_narr_ref_px * 0.60)))
-        title_kicker_px = max(min_px, int(round(_narr_ref_px * 0.34)))
-        if not (_narr_ref_px > hook_cap > title_kicker_px >= brand_px):
-            title_kicker_px = max(min_px, brand_px)
-            hook_cap = title_kicker_px + 2
+        title_kicker_cap = max(min_px, int(round(_narr_ref_px * 0.34)))
+        if not (_narr_ref_px > hook_cap > title_kicker_cap >= brand_start_px):
+            title_kicker_cap = max(min_px, brand_start_px)
+            hook_cap = title_kicker_cap + 2
             # _narr_ref_px must remain strictly above hook_cap; if the narrative
             # clamped to min the start size is still the reference, but guard it.
             if _narr_ref_px <= hook_cap:
                 _narr_ref_px = hook_cap + 2
 
         # ===================================================================
-        # FIX 3 — TITLE kicker is a REQUIRED fact (campaign_title): fail-closed
-        # fit.  Shrink-to-fit within its small band capped at title_kicker_px; if
-        # the REQUIRED title cannot fit on-canvas even at the floor → raise
+        # FIX 3 / RESIDUAL-BLOCKER 2 — TITLE kicker is a REQUIRED fact
+        # (campaign_title): fail-closed FIT, then a fail-closed ON-CANVAS check on
+        # the ABSOLUTE y-range.  The kicker is FITTED FIRST (band-height budget,
+        # independent of the absolute top) so its DRAWN size ``title_draw`` is
+        # known BEFORE the brand is sized (brand_draw <= title_draw) and BEFORE the
+        # absolute placement is verified.  The brand is then drawn (≤ title), the
+        # kicker's absolute kick_top/kick_bottom computed against the REAL
+        # brand_bottom, and ON-CANVAS verified (0 <= kick_top, kick_bottom <=
+        # canvas height) — only THEN is the kicker drawn + ``_ink``'d.  If the
+        # REQUIRED title cannot fit OR would land off-canvas → raise
         # FlyerRenderError (degrades to the flat fallback, which handles required
-        # facts).  NEVER ``_ink`` a title that was not drawn-to-fit on-canvas.
+        # facts).  NEVER ``_ink`` a title not drawn-to-fit ON-CANVAS.
         # ===================================================================
-        top_zone_bottom = brand_bottom
+        title_draw = 0
+        _kick_lines = None
+        _kick_line_h = 0
         if title:
-            _kick_gap = max(8, int(height * 0.012))
-            _kick_top = brand_bottom + _kick_gap
-            # Band: keep the kicker compact (≤ ~3 lines) above the narrative; the
-            # ceiling matches the reserved allowance so the narrative band stays
-            # intact.  max_lines=3 bounds it; _fit_role_block returns None if even
-            # the floor overflows.
-            _kick_ceiling = max(_kick_top, brand_bottom + _title_allowance)
-            _kick_lines, _kick_px = _fit_role_block(
-                draw, _spaced_caps(title), "kicker", title_kicker_px, safe_w, min_px,
-                max_height=max(0, _kick_ceiling - _kick_top),
-                line_factor=1.22, max_lines=3,
+            # Band budget for the kicker FIT — bounded by the reserved allowance
+            # (independent of brand_bottom) so title_draw is known before the brand
+            # is sized.  Capped at title_kicker_cap (< narr_draw by construction).
+            _kick_band = max(0, _title_allowance - max(8, int(height * 0.012)))
+            _kick_lines, title_draw = _fit_role_block(
+                draw, _spaced_caps(title), "kicker", title_kicker_cap, safe_w, min_px,
+                max_height=_kick_band, line_factor=1.22, max_lines=3,
             )
             if not _kick_lines:
-                # REQUIRED fact cannot fit → fail-closed (same as _compose title).
+                # REQUIRED fact cannot fit its band → fail-closed (as _compose title).
                 raise render.FlyerRenderError(
                     "premium overlay does not fit (campaign_title kicker cannot fit on-canvas)"
                 )
-            title_kicker_px = _kick_px   # the actually-drawn (fitted) kicker size
-            kick_font = _premium_font("kicker", title_kicker_px)
-            ky = _kick_top
+            # title_draw must stay strictly below the hero narrative (when drawn).
+            if narr_draw and not (title_draw < narr_draw):
+                raise render.FlyerRenderError(
+                    "premium overlay does not fit (campaign_title kicker cannot demote below narrative)"
+                )
+            _kick_line_h = int(title_draw * 1.22)
+
+        # ===================================================================
+        # TOP — demoted brand lockup (NO emblem ring): small letter-spaced caps.
+        # brand_draw = min(brand_fitted, title_draw) so the brand is the LOWEST
+        # tier (<= the kicker) on the DRAWN size, never inverting above the title.
+        # ===================================================================
+        brand_draw = brand_start_px
+        if title:
+            brand_draw = min(brand_start_px, title_draw)
+        y = max(16, int(height * 0.018))
+        if business:
+            brand_font = _premium_font("masthead", brand_draw)
+            brand_spaced = " ".join(_spaced_caps(business))
+            brand_lines = _wrap_premium(draw, brand_spaced, "masthead", brand_draw, safe_w)
+            for ln in brand_lines:
+                _draw_centered(draw, ln, brand_font, cy=y, width=width,
+                               fill=_EMBLEM_IVORY, shadow_dy=2)
+                y += int(brand_draw * 1.18)
+            _ink(business)
+        brand_bottom = y
+
+        # ---- TITLE kicker: absolute on-canvas guard, then draw -----------
+        top_zone_bottom = brand_bottom
+        if title:
+            _kick_gap = max(8, int(height * 0.012))
+            kick_top = brand_bottom + _kick_gap
+            kick_bottom = kick_top + len(_kick_lines) * _kick_line_h
+            # RESIDUAL-BLOCKER 2: the kicker's ABSOLUTE y-range must be fully on
+            # the real canvas. _fit_role_block only checked the LOCAL band height;
+            # a brand pushed down can shove the kicker off-canvas while it is still
+            # _ink'd as covered. Verify before any ink (same fail-closed posture).
+            if kick_top < 0 or kick_bottom > height:
+                raise render.FlyerRenderError(
+                    "premium overlay does not fit (campaign_title kicker off-canvas)"
+                )
+            kick_font = _premium_font("kicker", title_draw)
+            ky = kick_top
             for ln in _kick_lines:
                 _draw_centered(draw, ln, kick_font, cy=ky, width=width,
                                fill=_EMBLEM_GOLD, shadow_dy=2)
-                ky += int(title_kicker_px * 1.22)
-            _ink(title)   # inked ONLY after a verified draw-to-fit
+                ky += _kick_line_h
+            _ink(title)   # inked ONLY after a verified ON-CANVAS draw-to-fit
             top_zone_bottom = ky
 
         # ===================================================================
@@ -1199,59 +1255,82 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         if cd_narrative and include_narrative and _narr_lines:
             _narr_gap = max(10, int(height * 0.014))
             _narr_top = top_zone_bottom + _narr_gap
-            narr_font = _premium_font("title", narrative_px)
+            narr_font = _premium_font("title", narr_draw)
             ny = _narr_top
             for ln in _narr_lines:
                 _draw_centered(draw, ln, narr_font, cy=ny, width=width,
                                fill=_TITLE_CREAM, shadow_dy=4)
-                ny += int(narrative_px * 1.04)
+                ny += int(narr_draw * 1.04)
             _ink(cd_narrative)
             top_zone_bottom = ny
 
         # ===================================================================
         # HOOK — the SECOND sub-headline (offer / marketing line), Montserrat-
-        # Bold tracked, GOLD, below the narrative.  FIX 2: best-effort AND
-        # dropped before the narrative — only drawn when ``include_hook``.  Capped
-        # at ``hook_cap`` (derived < narrative, > title) so the ordering holds.
+        # Bold tracked, GOLD, below the narrative.  FIX 2 + RESIDUAL-BLOCKER 1:
+        # best-effort AND the FLEX tier — only drawn when ``include_hook``. The
+        # DRAWN size ``hook_draw`` must satisfy ``title_draw < hook_draw <
+        # narr_draw``: it is fitted, then clamped to ``min(hook_fitted, narr-1)``,
+        # and DROPPED in-place (recording ``_LAST_HOOK_DROP``) when no room remains
+        # above the title (``hook_draw <= title_draw``) — never drawn inverted.
         # ===================================================================
-        hook_px = 0
+        hook_draw = 0
+        hook_dropped_inplace = False
         if cd_hook_text and include_hook:
             _hook_gap = max(8, int(height * 0.010))
             _hook_top = top_zone_bottom + _hook_gap
             _hook_ceiling = max(_hook_top, int(height * 0.50))
-            _hook_lines, hook_px = _fit_role_block(
+            _hook_lines, hook_fitted = _fit_role_block(
                 draw, cd_hook_text, "kicker", hook_cap, safe_w, min_px,
                 max_height=max(0, _hook_ceiling - _hook_top),
                 line_factor=1.18, max_lines=2,
             )
             if _hook_lines:
-                # Cap the FITTED hook below the narrative + above the title so the
-                # strict ordering survives even if _fit_role_block returned the cap.
-                hook_px = min(hook_px, hook_cap)
-                hook_font = _premium_font("kicker", hook_px)
-                hy = _hook_top
-                for ln in _hook_lines:
-                    _draw_centered(draw, ln, hook_font, cy=hy, width=width,
-                                   fill=_EMBLEM_GOLD, shadow_dy=2)
-                    hy += int(hook_px * 1.18)
-                _ink(cd_hook_text)
-                top_zone_bottom = hy
+                # Clamp the DRAWN hook strictly below the narrative (when drawn) so
+                # narr_draw > hook_draw holds even if the fitter returned the cap.
+                hook_draw = hook_fitted
+                if narr_draw:
+                    hook_draw = min(hook_draw, narr_draw - 1)
+                # The hook is the FLEX element: if there is no room between the
+                # title (required) and the narrative (hero), DROP it rather than
+                # invert (hook_draw must be strictly above title_draw).
+                if hook_draw <= title_draw:
+                    hook_draw = 0
+                    hook_dropped_inplace = True
+                else:
+                    hook_font = _premium_font("kicker", hook_draw)
+                    hy = _hook_top
+                    for ln in _hook_lines:
+                        _draw_centered(draw, ln, hook_font, cy=hy, width=width,
+                                       fill=_EMBLEM_GOLD, shadow_dy=2)
+                        hy += int(hook_draw * 1.18)
+                    _ink(cd_hook_text)
+                    top_zone_bottom = hy
             else:
-                hook_px = 0  # dropped — best-effort
+                # Could not fit its ≤2-line band at all → dropped (best-effort).
+                hook_dropped_inplace = True
+        # The in-place hook drop is committed to ``_LAST_HOOK_DROP`` ONLY just
+        # before the successful save (below), so a FAILED attempt that later RETRIES
+        # via the dispatch ladder never leaves a phantom record. (``hook_dropped_inplace``
+        # is local to this attempt; a fresh _compose_mf call recomputes it.)
 
-        # ---- expose the FITTED type scales for the unit assertion ---------
-        # FIX 1: report the FITTED sizes (narrative_px / hook_px when drawn), with
-        # the derived caps as the fallback when an element was absent/dropped so the
-        # ORDERING contract is still inspectable AND strict. Construction guarantees
-        # narrative > hook > title >= brand on these values.
-        _dbg_narrative = narrative_px or _narr_ref_px
-        _dbg_hook = hook_px or hook_cap
+        # ---- expose the DRAWN type scales for the unit assertion ----------
+        # RESIDUAL-BLOCKER 1: report the sizes ACTUALLY DRAWN. When the narrative
+        # was dropped/absent the start reference stands in (there is no on-canvas
+        # narrative to over-claim a hero above). When the hook was dropped report
+        # it COLLAPSED to the title size (no phantom hook between title +
+        # narrative). Construction guarantees the reported order is:
+        #   narr > hook > title >= brand  (hook drawn)
+        #   narr > title >= brand         (hook dropped → hook == title)
+        _dbg_narrative = narr_draw or _narr_ref_px
+        _dbg_title = title_draw if title else title_kicker_cap
+        _dbg_hook = hook_draw or _dbg_title
+        _dbg_brand = brand_draw
         _LAST_LAYOUT_DEBUG.update({
             "archetype": "message_first",
             "narrative_px": _dbg_narrative,
             "hook_px": _dbg_hook,
-            "title_px": title_kicker_px,
-            "brand_px": brand_px,
+            "title_px": _dbg_title,
+            "brand_px": _dbg_brand,
             "emblem_ring_drawn": False,
         })
 
@@ -1400,6 +1479,13 @@ def render_premium_overlay(project, source, target, *, size, output_format):
             raise render.FlyerRenderError(
                 "premium overlay does not fit (missing required visible fact: " + detail + ")"
             )
+
+        # Commit the in-place hook drop ONLY on the successful attempt (a failed
+        # attempt that retries via the dispatch ladder never leaks a phantom drop
+        # record). The flex hook had no room above the title between it + the
+        # narrative, so it was dropped without inverting the hierarchy.
+        if hook_dropped_inplace:
+            _LAST_HOOK_DROP.append(True)
 
         img.convert("RGB").save(target, format="PNG", optimize=True)
 
