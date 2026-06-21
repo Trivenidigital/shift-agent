@@ -87,6 +87,7 @@ def test_provider_may_return_dict_directly():
 
 def test_scores_out_of_range_clamped_to_1_10():
     raw_scores = {
+        "message_clarity": 0,
         "theme_clarity": 0,
         "hook_prominence": 11,
         "appetite_appeal": -3,
@@ -102,6 +103,7 @@ def test_scores_out_of_range_clamped_to_1_10():
     provider = _provider_returning(json.dumps(payload))
     result = score_art_direction("/tmp/flyer.png", provider=provider)
 
+    assert result.axes["message_clarity"].score == 1
     assert result.axes["theme_clarity"].score == 1
     assert result.axes["hook_prominence"].score == 10
     assert result.axes["appetite_appeal"].score == 1
@@ -510,3 +512,71 @@ def test_cli_self_contained_without_src_on_pythonpath(tmp_path):
     assert loaded["composite"] == 0.0
     assert loaded["axes"] == {}
     assert loaded["overall_critique"] != ""
+
+
+# ── Slice B / Task B1.1: message_clarity headline axis (8-axis rubric) ───────
+
+
+def test_axes_includes_message_clarity_as_eighth_axis():
+    """The rubric now has 8 axes; message_clarity is one of them and is the
+    HEADLINE axis (listed FIRST in canonical order)."""
+    assert "message_clarity" in AXES
+    assert len(AXES) == 8
+    assert AXES[0] == "message_clarity"
+
+
+def test_all_eight_axes_parsed_with_composite_mean_of_eight():
+    """A model that returns all 8 axes (including message_clarity {score, critique})
+    is parsed in full; composite is the mean over all 8."""
+    payload = _well_formed_payload()  # built from AXES → now spans all 8
+    provider = _provider_returning(json.dumps(payload))
+    result = score_art_direction(
+        "/tmp/flyer.png", brief_summary="diwali sweets", provider=provider
+    )
+
+    assert set(result.axes) == set(AXES)
+    assert len(result.axes) == 8
+    assert isinstance(result.axes["message_clarity"], AxisScore)
+    # message_clarity sits at index 0 → its score is 0 + 2 in _well_formed_payload.
+    assert result.axes["message_clarity"].score == 2
+    assert result.axes["message_clarity"].critique == "crit-message_clarity"
+    expected = sum(idx + 2 for idx in range(len(AXES))) / len(AXES)
+    assert result.composite == expected
+
+
+def test_message_clarity_omitted_tolerated_composite_over_present():
+    """If the model omits message_clarity, the axis is simply absent; composite is
+    the mean over the 7 axes actually scored. The oracle never raises."""
+    present = [a for a in AXES if a != "message_clarity"]
+    payload = {
+        "axes": {axis: {"score": 6, "critique": "c"} for axis in present},
+        "overall_critique": "no headline axis returned",
+    }
+    provider = _provider_returning(json.dumps(payload))
+    result = score_art_direction("/tmp/flyer.png", provider=provider)
+
+    assert "message_clarity" not in result.axes
+    assert set(result.axes) == set(present)
+    assert len(result.axes) == 7
+    assert result.composite == 6.0
+
+
+def test_message_clarity_score_out_of_range_clamped_1_10():
+    """An out-of-range message_clarity score is clamped to 1..10 like every axis."""
+    low = {
+        "axes": {"message_clarity": {"score": 0, "critique": "c"}},
+        "overall_critique": "o",
+    }
+    high = {
+        "axes": {"message_clarity": {"score": 42, "critique": "c"}},
+        "overall_critique": "o",
+    }
+    low_result = score_art_direction(
+        "/tmp/flyer.png", provider=_provider_returning(json.dumps(low))
+    )
+    high_result = score_art_direction(
+        "/tmp/flyer.png", provider=_provider_returning(json.dumps(high))
+    )
+
+    assert low_result.axes["message_clarity"].score == 1
+    assert high_result.axes["message_clarity"].score == 10

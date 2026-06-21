@@ -1,6 +1,6 @@
 """DEV-ONLY vision-LLM "art director" oracle scorer for Flyer Studio (Slice C, C1).
 
-Scores a rendered flyer PNG on 7 art-direction axes (1-10 + a one-sentence
+Scores a rendered flyer PNG on 8 art-direction axes (1-10 + a one-sentence
 critique each, plus an overall critique). This is a STANDALONE diagnostic tool:
 
 - It is NOT wired into the render or QA path; it NEVER blocks delivery.
@@ -47,9 +47,12 @@ except ImportError:  # pragma: no cover - exercised under the package layout
     )
 
 
-# The 7 art-direction axes, in canonical order. `composite` averages over the
-# axes actually scored (so order is not load-bearing for the mean).
+# The art-direction axes, in canonical order. `message_clarity` is the HEADLINE
+# poster axis (first): can a customer understand the primary offer within ~2s?
+# `composite` averages over the axes actually scored (so order is not load-bearing
+# for the mean).
 AXES = (
+    "message_clarity",
     "theme_clarity",
     "hook_prominence",
     "appetite_appeal",
@@ -68,8 +71,11 @@ ArtDirectorProvider = Callable[..., Any]
 
 ART_DIRECTOR_PROMPT = (
     "You are a senior art director reviewing a finished marketing flyer image. "
-    "Score it on these 7 axes, each an INTEGER 1-10, with one short sentence of "
-    "critique per axis:\n"
+    "Score it on these 8 axes, each an INTEGER 1-10, with one short sentence of "
+    "critique per axis. Score message_clarity FIRST — it is the headline poster "
+    "axis:\n"
+    "- message_clarity: can a customer understand the primary offer within ~2 "
+    "seconds?\n"
     "- theme_clarity: is the visual theme/concept immediately clear?\n"
     "- hook_prominence: does a single attention-grabbing hook dominate?\n"
     "- appetite_appeal: does the imagery look appetizing / desirable?\n"
@@ -91,7 +97,7 @@ class AxisScore:
 
 @dataclass(frozen=True)
 class ArtDirectorScore:
-    axes: dict[str, AxisScore]  # keyed by the 7 AXES (only axes actually scored)
+    axes: dict[str, AxisScore]  # keyed by the 8 AXES (only axes actually scored)
     composite: float  # mean of the scored axes (0.0 if none)
     overall_critique: str
 
@@ -208,7 +214,7 @@ def score_art_direction(
     brief_summary: str = "",
     provider: Optional[ArtDirectorProvider] = None,
 ) -> ArtDirectorScore:
-    """Score a rendered flyer PNG on the 7 art-direction axes.
+    """Score a rendered flyer PNG on the 8 art-direction axes.
 
     DEV-ONLY. NEVER raises. NEVER blocks delivery. Vision calls go through
     `provider` (injectable for tests); when None, the real OpenRouter seam is used
