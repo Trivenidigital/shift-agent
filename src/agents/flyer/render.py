@@ -39,6 +39,42 @@ try:
 except ImportError:  # pragma: no cover - src layout fallback
     from agents.flyer.campaign_scene_prompts import campaign_scene_prompt_block, select_campaign_scene
 
+import dataclasses
+
+# Creative Director v2 (Slice B, B2.3) — propose+resolve a creative direction in
+# _render_model and carry it on project.creative_direction. Flat on the VPS,
+# package-style in the repo tree (mirrors the facts/scene-prompt imports above).
+try:
+    from flyer_context_builder import propose_creative_brief_v2  # type: ignore
+    from flyer_creative_resolver import resolve_creative_direction  # type: ignore
+    from flyer_brief import VisualDirection as _CDV2VisualDirection  # type: ignore
+    from flyer_brief import FlyerBrief as _CDV2FlyerBrief  # type: ignore
+except ImportError:  # pragma: no cover - src layout fallback
+    from agents.flyer.flyer_context_builder import propose_creative_brief_v2
+    from agents.flyer.flyer_creative_resolver import resolve_creative_direction
+    from agents.flyer.flyer_brief import VisualDirection as _CDV2VisualDirection
+    from agents.flyer.flyer_brief import FlyerBrief as _CDV2FlyerBrief
+
+# FIX 4 (Codex MAJOR): the poster-archetype router is a Composition-Phase-1
+# addition that may be ABSENT on a flat deploy that predates it (or rolled it
+# back). It is imported in its OWN guarded block — independent of the CD v2
+# chain above — with a fallback that yields the safe ``message_first`` default
+# so render.py imports CLEANLY even when ``flyer_poster_archetype`` is missing.
+# Without this, a missing module would propagate ImportError and crash render.py
+# at import time, breaking flag-off + the entire flyer render path (not just the
+# CD-v2 archetype feature). The fallback preserves legacy behavior: the carrier
+# simply records ``message_first`` and _compose_mf is engaged only when the
+# overlay also sees that archetype on a flag-on render.
+try:
+    from flyer_poster_archetype import select_poster_archetype  # type: ignore
+except ImportError:  # pragma: no cover - src layout fallback
+    try:
+        from agents.flyer.flyer_poster_archetype import select_poster_archetype
+    except ImportError:  # module genuinely absent on a flat/rolled-back deploy
+        def select_poster_archetype(request_intent: str, offer_priority: str = "medium") -> str:  # type: ignore
+            """Fallback archetype router (module absent): always the safe default."""
+            return "message_first"
+
 
 class FlyerRenderError(RuntimeError):
     pass
@@ -1303,20 +1339,53 @@ def _poster_layout_requirements(project: FlyerProject, *, force_background_only:
             # reserved-zone banding (which yielded a flat multi-item spread → template) with a
             # cinematic single-hero composition; the deterministic overlay's own gradient
             # scrims provide text legibility (validated). Scoped ⇒ flag-off byte-identical.
+            #
+            # CD v2 (Task B2.4): when the resolved creative direction carrier is present
+            # (project.creative_direction, flag-on only), NAME the chosen hero dish and
+            # reflect the chosen theme/mood in the subject line. Carrier absent/empty ⇒
+            # the directive is byte-identical to the fixed legacy string (regression-tested).
+            _cd = getattr(project, "creative_direction", None)
+            _hero_name = ""
+            _theme_family = ""
+            _mood = ""
+            if isinstance(_cd, dict):
+                _hero_name = (_cd.get("hero_name") or "").strip()
+                _theme_family = (_cd.get("theme_family") or "").strip()
+                _mood = (_cd.get("mood") or "").strip()
+            if _hero_name or _theme_family or _mood:
+                _hero_subject = f"the featured {_hero_name} dish" if _hero_name else "the featured food"
+                _scene_clauses = ""
+                if _theme_family:
+                    _scene_clauses += f" Style the scene for a {_theme_family} theme."
+                if _mood:
+                    _scene_clauses += f" Convey a {_mood} mood."
+                _hero_line = (
+                    "- Compose a wordless HERO food photograph for the background: ONE single mouth-watering hero "
+                    f"dish ({_hero_subject}) as the bold subject that DOMINATES the frame, with warm golden "
+                    "cinematic lighting, gentle steam and visible texture where appropriate, rich shallow depth of "
+                    f"field, on a rustic dark wood or slate surface with softly-lit ambiance behind.{_scene_clauses} "
+                    "Appetizing, vibrant, and atmospheric.\n"
+                )
+            else:
+                _hero_line = (
+                    "- Compose a wordless HERO food photograph for the background: ONE single mouth-watering hero "
+                    "dish (the featured food) as the bold subject that DOMINATES the frame, with warm golden "
+                    "cinematic lighting, gentle steam and visible texture where appropriate, rich shallow depth of "
+                    "field, on a rustic dark wood or slate surface with softly-lit ambiance behind. Appetizing, "
+                    "vibrant, and atmospheric.\n"
+                )
             reserve += (
-                "- Compose a wordless HERO food photograph for the background: ONE single mouth-watering hero "
-                "dish (the featured food) as the bold subject that DOMINATES the frame, with warm golden "
-                "cinematic lighting, gentle steam and visible texture where appropriate, rich shallow depth of "
-                "field, on a rustic dark wood or slate surface with softly-lit ambiance behind. Appetizing, "
-                "vibrant, and atmospheric.\n"
-                "- This is a PHOTOGRAPH ONLY: absolutely NO text, letters, words, numbers, captions, signage, "
-                "menu boards, price tags, watermarks, or logos anywhere in the image — do not imitate an "
-                "advertisement layout; the exact text is composited afterwards into overlay panels.\n"
-                "- Cinematic and atmospheric, with naturally darker, softer top and bottom edges (a gentle "
-                "vignette) so the composited title and menu stay legible — but the hero dish still fills the frame; "
-                "do NOT leave empty flat bands or blank panels.\n"
-                "- No people, no faces, no hands, no diners, no family scene, no buffet, and no spread of many "
-                "separate dishes — ONE hero dish is the subject.\n"
+                _hero_line
+                + (
+                    "- This is a PHOTOGRAPH ONLY: absolutely NO text, letters, words, numbers, captions, signage, "
+                    "menu boards, price tags, watermarks, or logos anywhere in the image — do not imitate an "
+                    "advertisement layout; the exact text is composited afterwards into overlay panels.\n"
+                    "- Cinematic and atmospheric, with naturally darker, softer top and bottom edges (a gentle "
+                    "vignette) so the composited title and menu stay legible — but the hero dish still fills the frame; "
+                    "do NOT leave empty flat bands or blank panels.\n"
+                    "- No people, no faces, no hands, no diners, no family scene, no buffet, and no spread of many "
+                    "separate dishes — ONE hero dish is the subject.\n"
+                )
             )
         else:
             reserve += (
@@ -2997,6 +3066,12 @@ try:
     except ImportError:
         from agents.flyer import premium_overlay          # repo / tests
     project = FlyerProject.model_validate_json(spec["project_json"])
+    # creative_direction is exclude=True on FlyerProject (rollback-safe: never in
+    # projects.json), so model_dump_json above OMITS it. Re-attach the carrier the
+    # parent delivered via the spec so the overlay leads with the marketing message.
+    _cd = spec.get("creative_direction")
+    if _cd is not None:
+        project.creative_direction = _cd
 except Exception as e:
     sys.stderr.write(f"{type(e).__name__}: {e}")
     sys.exit(1)  # import/serialization error -> unexpected
@@ -3071,6 +3146,11 @@ def _render_premium_overlay_with_fallback(project: FlyerProject, source: Path | 
         return PremiumOverlayOutcome("premium_overlay_failed_unexpected", "serialization_error", f"{type(e).__name__}: {e}"[:300], "none", output_format)
     spec = {
         "project_json": project_json,
+        # creative_direction is exclude=True (omitted from project_json above for
+        # rollback safety), so deliver the carrier to the subprocess SEPARATELY;
+        # the renderer re-attaches it to the reconstructed project. None/absent is
+        # fine (the renderer guards it).
+        "creative_direction": getattr(project, "creative_direction", None),
         "source": str(source),
         "target": str(target),
         "size": list(size),
@@ -3434,6 +3514,32 @@ def _deterministic_first_enabled(project: FlyerProject) -> bool:
     allow = _premium_overlay_allowlist()
     if not allow:
         return True
+    return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+
+
+CREATIVE_DIRECTOR_V2_ENV = "FLYER_CREATIVE_DIRECTOR_V2"
+
+
+def _creative_director_v2_enabled(project: FlyerProject) -> bool:
+    """Routing gate for Creative Director v2: resolve a creative direction
+    upstream and carry it into the render. Flag FLYER_CREATIVE_DIRECTOR_V2 == "1"
+    AND the shared FLYER_PREMIUM_OVERLAY_ALLOWLIST is NON-EMPTY AND
+    project.customer_phone is in it. Independent of FLYER_PREMIUM_OVERLAY /
+    FLYER_DETERMINISTIC_RECOVERY / FLYER_DETERMINISTIC_FIRST. Flag-off =>
+    byte-identical legacy.
+
+    SCOPED-ROLLOUT GUARD (Codex FINAL review, FINDING 2 MAJOR): CD v2 is rolling
+    out to +17329837841 ONLY. UNLIKE the sibling gates (_deterministic_first /
+    _deterministic_recovery / _premium_overlay) which treat an empty allowlist as
+    GLOBAL, CD v2 must NOT inherit that broadening footgun — an empty/unset
+    allowlist must DISABLE CD v2 entirely (not enable it for every phone). CD v2
+    therefore requires the flag "1" AND a NON-EMPTY allowlist AND membership."""
+    if os.environ.get(CREATIVE_DIRECTOR_V2_ENV) != "1":
+        return False
+    allow = _premium_overlay_allowlist()
+    if not allow:
+        # Empty/unset allowlist => DISABLED (scoped-rollout guard), NOT global.
+        return False
     return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
 
 
@@ -4133,9 +4239,51 @@ def _render(project: FlyerProject, path: Path, *, concept_id: str, size: tuple[i
         _render_with_system_pillow(project, path, concept_id=concept_id, size=size)
 
 
+def _populate_creative_direction_v2(project: FlyerProject) -> None:
+    """CD v2 (Slice B, B2.3): when the V2 gate is ON for this project, PROPOSE a
+    creative brief (Hermes proposes the creative fields), RESOLVE it over the
+    project's EXISTING locked_facts, and store ``dataclasses.asdict(resolved)`` on
+    ``project.creative_direction`` so it round-trips into the overlay subprocess.
+
+    Strict boundaries (B2.3):
+      - This is ONLY reached when ``_creative_director_v2_enabled(project)`` — flag-off
+        the caller never calls it, so the carrier stays None, ``propose_creative_brief_v2``
+        is NEVER invoked, and NO locked_facts mutation happens (byte-identical legacy).
+      - The V2 propose path NEVER mutates ``project.locked_facts`` (it does not call
+        ``materialize_spans``); the resolver is PURE.
+      - Failure ANYWHERE ⇒ resolve from an EMPTY ``FlyerBrief`` (deterministic
+        defaults) so the render is still enriched, NEVER blocked — and on a truly
+        unexpected error leave ``creative_direction`` None. This populates the
+        carrier only; B2.4/B2.5 consume it in the bg prompt / overlay.
+    """
+    try:
+        raw_request = (project.raw_request or project.fields.notes or "").strip()
+        brief = propose_creative_brief_v2(
+            raw_request, project.locked_facts, None
+        ) or _CDV2FlyerBrief(
+            request_intent="new", visual_direction=_CDV2VisualDirection()
+        )
+        resolved = resolve_creative_direction(brief, project.locked_facts)
+        project.creative_direction = dataclasses.asdict(resolved)
+        # Composition Phase 1: route the poster archetype from the brief's
+        # request_intent (offer_priority accepted but unused this phase). Guarded
+        # so any failure simply omits poster_archetype and leaves the carrier as-is.
+        try:
+            archetype = select_poster_archetype(
+                getattr(brief, "request_intent", "") or "", resolved.offer_priority
+            )
+            project.creative_direction["poster_archetype"] = archetype
+        except Exception:  # noqa: BLE001 — never block; just omit poster_archetype
+            pass
+    except Exception:  # noqa: BLE001 — never block the render; carrier stays None
+        project.creative_direction = None
+
+
 def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> None:
     token = _FORCE_BACKGROUND_ONLY.set(True) if force_background_only else None
     try:
+        if _creative_director_v2_enabled(project):
+            _populate_creative_direction_v2(project)
         if model.strip().lower() in DETERMINISTIC_MODEL_NAMES:
             _render(project, path, concept_id=concept_id, size=size)
             return

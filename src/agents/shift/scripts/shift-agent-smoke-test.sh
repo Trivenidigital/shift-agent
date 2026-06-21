@@ -139,6 +139,24 @@ assert hasattr(flyer_visual_qa, 'is_own_brand_variant'), \
     'flyer_visual_qa.is_own_brand_variant missing — brand-typo gate broken'
 assert _os.environ.get('FLYER_DETERMINISTIC_RECOVERY') in (None, '', '0', '1'), \
     'FLYER_DETERMINISTIC_RECOVERY has unexpected value — must be unset, empty, 0, or 1'
+# CD v2 brain SKILL must be installed at the ACTUAL runtime read path with the
+# CD v2 output schema (2026-06-21 stale-SKILL-path fix). flyer_context_builder
+# (the Creative-Director brain) reads SKILL_MD_PATH = __file__.parent/skills/
+# flyer_generation/SKILL.md = /opt/shift-agent/skills/flyer_generation/SKILL.md,
+# NOT the Hermes dispatch copy under /root/.hermes/skills/. If the deploy doesn't
+# refresh that path the brain reads a stale pre-CD-v2 SKILL and can never emit
+# campaign_narrative/hero_ref/marketing_hook/offer_priority — the live render
+# came out headline-less and the cause was mis-attributed to brain nondeterminism.
+# Asserting via the brain's own SKILL_MD_PATH (not a hardcoded path) keeps this
+# gate drift-proof against any future change to where the brain reads.
+import flyer_context_builder as _fcb
+_cdv2_skill = _fcb.SKILL_MD_PATH
+assert _cdv2_skill.exists(), \
+    'CD v2 brain SKILL absent at runtime read path %s (deploy did not install it)' % _cdv2_skill
+_cdv2_body = _cdv2_skill.read_text(encoding='utf-8', errors='replace')
+for _cdv2_field in ('campaign_narrative', 'hero_ref', 'marketing_hook', 'offer_priority'):
+    assert _cdv2_field in _cdv2_body, \
+        'CD v2 brain SKILL at %s is stale — missing field %r' % (_cdv2_skill, _cdv2_field)
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
 " > /dev/null; then
     echo "FAIL: Python modules don't import"
@@ -451,6 +469,36 @@ fi
 trap - EXIT
 cleanup_ref_smoke
 echo "Flyer deferred reference extraction smoke passed"
+
+# CD v2 durable rollback verification: after the deploy-time scrub, the flyer
+# project store MUST contain zero `creative_direction` keys. The key is now
+# Field(exclude=True) (never persisted by new code) and the deploy scrubs any
+# lingering pre-fix keys before restart — so a surviving key here means the scrub
+# step did not run / failed, which would make a future rollback to extra="forbid"
+# code reject the store. Fail-closed (→ auto-rollback) if any remain. No-op when
+# the store file is absent (fresh VPS / flyer never used).
+FLYER_STORE_SMOKE=/opt/shift-agent/state/flyer/projects.json
+if [ -f "$FLYER_STORE_SMOKE" ]; then
+    if ! sudo -u shift-agent "$PY" - "$FLYER_STORE_SMOKE" <<'PY'; then
+import json, sys
+store = json.load(open(sys.argv[1], encoding="utf-8"))
+projects = store.get("projects") if isinstance(store, dict) else None
+leftover = sum(
+    1 for p in (projects or [])
+    if isinstance(p, dict) and "creative_direction" in p
+)
+if leftover:
+    sys.stderr.write(f"{leftover} project(s) still carry creative_direction\n")
+    raise SystemExit(1)
+print("flyer store: 0 creative_direction keys (CD v2 rollback-safe)")
+PY
+        echo "FAIL: flyer project store still contains creative_direction keys post-scrub — CD v2 rollback safety broken"
+        exit 1
+    fi
+    echo "✓ flyer project store has no creative_direction keys (CD v2 rollback-safe)"
+else
+    echo "⚠  flyer project store absent ($FLYER_STORE_SMOKE) — CD v2 scrub verification skipped (flyer unused)"
+fi
 
 if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-delivery-report --json > /dev/null; then
     echo "FAIL: Flyer delivery report failed"

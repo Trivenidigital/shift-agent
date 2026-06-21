@@ -67,6 +67,20 @@ install_artifacts() {
     # check-audit-helpers-symbols imports this module; missing here =
     # forced rollback on every deploy.
     install -m 644 src/platform/audit_helpers.py /opt/shift-agent/audit_helpers.py
+    # CD v2 rollback safety — flyer_store_maintenance.py provides scrub_store_file,
+    # invoked by the pre-restart scrub step below to strip any lingering
+    # `creative_direction` keys from the flyer project store (durable rollback
+    # guarantee independent of serialization behavior). Installed flat so the
+    # scrub step's `from flyer_store_maintenance import scrub_store_file` resolves.
+    # GUARDED for rollback (Codex BLOCKER A): rolling back to an older tarball that
+    # predates this module must not fail install_artifacts mid-rollback — install
+    # when present, else remove any stale copy on the box so the scrub step (also
+    # guarded) skips cleanly.
+    if [ -f src/platform/flyer_store_maintenance.py ]; then
+        install -m 644 src/platform/flyer_store_maintenance.py /opt/shift-agent/flyer_store_maintenance.py
+    else
+        rm -f /opt/shift-agent/flyer_store_maintenance.py
+    fi
     # Credential-minimized readiness matrix/report. Guarded for rollback
     # compatibility with tarballs that predate this module.
     if [ -f src/platform/credential_readiness.py ]; then
@@ -297,6 +311,22 @@ PY
         rsync -a src/agents/flyer/skills/ /root/.hermes/skills/
         chown -R shift-agent:shift-agent /root/.hermes/skills/
     fi
+    # CD v2 brain SKILL → the ACTUAL runtime read path. flyer_context_builder.py
+    # (the Creative-Director brain) reads its governing system prompt from
+    # ``Path(__file__).resolve().parent / "skills" / "flyer_generation" / "SKILL.md"``
+    # — i.e. /opt/shift-agent/skills/flyer_generation/SKILL.md, NOT the Hermes
+    # dispatch copy under /root/.hermes/skills/ that the rsync above installs.
+    # Before 2026-06-21 the deploy never refreshed this path, so the brain read a
+    # stale pre-CD-v2 SKILL and could never emit campaign_narrative / hero_ref /
+    # marketing_hook / offer_priority (the live render came out headline-less and
+    # the cause was mis-attributed to brain nondeterminism). Install it to the
+    # brain's read path, mirroring the flat-module pattern below. The post-restart
+    # smoke gate (shift-agent-smoke-test.sh) asserts the installed copy carries the
+    # CD v2 fields so this can never silently regress again.
+    if [ -f src/agents/flyer/skills/flyer_generation/SKILL.md ]; then
+        install -d -m 755 /opt/shift-agent/skills/flyer_generation
+        install -m 644 src/agents/flyer/skills/flyer_generation/SKILL.md /opt/shift-agent/skills/flyer_generation/SKILL.md
+    fi
     if [ -f src/agents/flyer/render.py ]; then
         install -m 644 src/agents/flyer/render.py /opt/shift-agent/flyer_render.py
     else
@@ -435,6 +465,39 @@ PY
         install -m 644 src/agents/flyer/visual_qa.py /opt/shift-agent/flyer_visual_qa.py
     else
         rm -f /opt/shift-agent/flyer_visual_qa.py
+    fi
+    # CD v2 module chain (source files already carry the flyer_ prefix):
+    # flyer_render imports propose_creative_brief_v2 (flyer_context_builder) +
+    # resolve_creative_direction (flyer_creative_resolver); both need
+    # flyer_brief + flyer_brief_validator. Install at the deployed version so the
+    # render path's imports resolve (else the smoke module-import probe fails).
+    if [ -f src/agents/flyer/flyer_brief.py ]; then
+        install -m 644 src/agents/flyer/flyer_brief.py /opt/shift-agent/flyer_brief.py
+    else
+        rm -f /opt/shift-agent/flyer_brief.py
+    fi
+    if [ -f src/agents/flyer/flyer_brief_validator.py ]; then
+        install -m 644 src/agents/flyer/flyer_brief_validator.py /opt/shift-agent/flyer_brief_validator.py
+    else
+        rm -f /opt/shift-agent/flyer_brief_validator.py
+    fi
+    if [ -f src/agents/flyer/flyer_context_builder.py ]; then
+        install -m 644 src/agents/flyer/flyer_context_builder.py /opt/shift-agent/flyer_context_builder.py
+    else
+        rm -f /opt/shift-agent/flyer_context_builder.py
+    fi
+    if [ -f src/agents/flyer/flyer_creative_resolver.py ]; then
+        install -m 644 src/agents/flyer/flyer_creative_resolver.py /opt/shift-agent/flyer_creative_resolver.py
+    else
+        rm -f /opt/shift-agent/flyer_creative_resolver.py
+    fi
+    # CD v2 Composition Phase 1: the poster-archetype router. flyer_render guards
+    # this import (falls back to message_first if absent), but install it so the
+    # message_first (A) overlay template is actually reachable on the box.
+    if [ -f src/agents/flyer/flyer_poster_archetype.py ]; then
+        install -m 644 src/agents/flyer/flyer_poster_archetype.py /opt/shift-agent/flyer_poster_archetype.py
+    else
+        rm -f /opt/shift-agent/flyer_poster_archetype.py
     fi
     if [ -f src/agents/flyer/visible_contract.py ]; then
         install -m 644 src/agents/flyer/visible_contract.py /opt/shift-agent/flyer_visible_contract.py
@@ -965,6 +1028,45 @@ case "$ACTION" in
                 rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
             fi
             exit 1
+        fi
+
+        # CD v2 durable rollback scrub. `creative_direction` is Field(exclude=True)
+        # so NEW writes never persist it, but rows written before that fix may
+        # still carry the key on disk and an older (rolled-back) extra="forbid"
+        # loader would reject it. Strip any lingering key from the flyer project
+        # store now (after install_artifacts so flyer_store_maintenance.py is
+        # installed flat; before the gateway restart so the running gateway never
+        # reads a store carrying the key). Idempotent + safe: with exclude=True the
+        # key is never legitimately persisted, so removing it loses nothing. No-op
+        # when the store file is absent (fresh VPS / flyer never used).
+        #
+        # GUARDED on module presence (Codex BLOCKER A): on a rollback to an older
+        # tarball the guarded install above removed /opt/shift-agent/flyer_store_
+        # maintenance.py, so this `import flyer_store_maintenance` would crash. Only
+        # run the scrub when the module is actually present on the box; otherwise skip
+        # it (a rolled-back older loader does not know the key and never wrote it).
+        FLYER_STORE=/opt/shift-agent/state/flyer/projects.json
+        if [ -f /opt/shift-agent/flyer_store_maintenance.py ]; then
+            if [ -f "$FLYER_STORE" ]; then
+                if ! "$VENV_PY" -c "import sys; sys.path.insert(0, '/opt/shift-agent'); from flyer_store_maintenance import scrub_store_file; print('scrubbed creative_direction x', scrub_store_file('$FLYER_STORE'))"; then
+                    echo "FAIL: CD v2 rollback scrub of $FLYER_STORE failed — refusing to restart hermes-gateway" >&2
+                    if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                        "$0" rollback "$PREV_TAG"
+                        rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                    else
+                        /usr/local/bin/shift-agent-notify-owner \
+                            --title "Deploy FAILED at CD v2 store scrub, no prior tarball" \
+                            --priority 2 \
+                            "Deploy $NEW_TAG failed scrubbing creative_direction from the flyer project store. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
+                        rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                    fi
+                    exit 1
+                fi
+            else
+                echo "OK: CD v2 rollback scrub skipped (no flyer store at $FLYER_STORE)"
+            fi
+        else
+            echo "skip scrub (module absent — rollback)"
         fi
 
         # Pre-restart cf-router compile gate: hooks.py is imported by the

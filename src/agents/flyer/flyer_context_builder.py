@@ -33,7 +33,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Mapping, Optional, Sequence
+from typing import Any, Callable, Literal, Mapping, Optional, Sequence
 
 from pydantic import ValidationError
 
@@ -45,11 +45,19 @@ except ImportError:  # pragma: no cover - import-path shim
     from agents.flyer.semantic_brief import OPENROUTER_URL, _openrouter_key
 
 try:  # sibling FlyerBrief / validator — flat on the VPS, package-style in repo
-    from flyer_brief import FlyerBrief, VisualDirection  # type: ignore
+    from flyer_brief import FactRef, FlyerBrief, MarketingHook, VisualDirection  # type: ignore
     import flyer_brief_validator as _validator  # type: ignore
+    from flyer_brief_validator import (  # type: ignore
+        _norm_ws,
+        scrub_ungrounded_commercial_taste,
+    )
 except ImportError:  # pragma: no cover - import-path shim
-    from agents.flyer.flyer_brief import FlyerBrief, VisualDirection
+    from agents.flyer.flyer_brief import FactRef, FlyerBrief, MarketingHook, VisualDirection
     from agents.flyer import flyer_brief_validator as _validator
+    from agents.flyer.flyer_brief_validator import (
+        _norm_ws,
+        scrub_ungrounded_commercial_taste,
+    )
 
 
 CREATIVE_DIRECTOR_ENABLED_ENV = "FLYER_CREATIVE_DIRECTOR_ENABLED"
@@ -176,7 +184,20 @@ def _build_user_message(
     """The USER message: just the DATA the SKILL body operates on — the raw
     request, the available locked-fact IDs (so the model references facts by ID,
     never by value), a short profile summary, and any source/project context.
-    Carries NO creative instructions — those live in the SKILL.md system prompt."""
+    Carries NO creative instructions — those live in the SKILL.md system prompt.
+
+    Plus a SHORT additive note that the brief ALWAYS includes the REQUIRED
+    ``campaign_narrative`` (the message-first poster renders it as the dominant
+    headline, so it must never be empty) and MAY include the CD v2 OPTIONAL
+    TOP-LEVEL fields (``hero_ref`` / ``supporting_refs`` / ``marketing_hook`` /
+    ``offer_priority``, and ``visual_direction.mood``).
+    These are enhancement-only: the emphasis refs (``hero_ref`` / ``supporting_refs``
+    / ``marketing_hook.text_ref``) point at a fact by a LOCKED ``fact_id`` only —
+    NOT a ``raw_span`` (the resolver silently drops a raw_span on these) — never an
+    inline value, and OMITTING them is always fine — they default and never block.
+    The SKILL.md output schema is the
+    authority for their exact shape (and the parser reads them at TOP LEVEL, so the
+    note keeps them top-level, not nested)."""
     fact_catalog = [
         {"fact_id": f.fact_id, "label": f.label, "source": f.source}
         for f in locked_facts or []
@@ -188,6 +209,18 @@ def _build_user_message(
             "business_profile": _profile_summary(business_profile),
             "source_summary": source_summary or "",
             "project_context": project_context or "",
+            # CD v2 — OPTIONAL TOP-LEVEL enhancement fields; see the SKILL schema for shape.
+            "optional_creative_fields_note": (
+                "Always include the top-level campaign_narrative (a short grounded "
+                "marketing message; restate the campaign occasion if you cannot craft a "
+                "distinct one) — it is required and the message-first poster renders it as "
+                "the dominant headline. The brief MAY also include the OPTIONAL top-level "
+                "fields hero_ref, supporting_refs, marketing_hook, offer_priority, and "
+                "visual_direction.mood (per the SKILL output schema). The emphasis refs "
+                "hero_ref, supporting_refs, and marketing_hook.text_ref each point at a "
+                "fact by a locked fact_id only (never an inline value); omit any of these "
+                "you are unsure of — they default and never block."
+            ),
         },
         ensure_ascii=False,
     )
@@ -317,6 +350,181 @@ def _call_gateway(system_prompt: str, user_message: str) -> Optional[Mapping[str
     return None  # pragma: no cover - loop always returns on the final iteration
 
 
+# CD v2 (Slice A) — the new OPTIONAL creative fields the brain may PROPOSE. They are
+# ENHANCEMENTS, never requirements: a model that omits OR malforms any of them must
+# never raise, never flip the brief to "invalid", and never disturb the rest of the
+# brief. They are PRE-SANITIZED in the raw dict BEFORE a single ``FlyerBrief.
+# model_validate`` runs (Codex MAJOR fix): each CD v2 field is reduced to a form that
+# is GUARANTEED to satisfy the FlyerBrief schema constraints (or removed so it
+# defaults), so the one strict ``model_validate`` ENFORCES every constraint uniformly
+# — ``supporting_refs`` max_length=40, ``mood`` max_length=120 — instead of the old
+# pop-then-reassign path, which set the validated fields by attribute and thereby
+# bypassed those length constraints, letting over-length malformed values through.
+_CDV2_TOP_LEVEL_FIELDS = ("hero_ref", "supporting_refs", "marketing_hook", "offer_priority")
+
+# Schema caps mirrored from flyer_brief.py so the pre-sanitize CAPS the offending
+# field to a value the single ``model_validate`` accepts (a bare ``model_validate``
+# would RAISE on an over-length list/str, not truncate). Kept in sync with
+# FlyerBrief.supporting_refs (max_length=40) / VisualDirection.mood (max_length=120)
+# / FlyerBrief.campaign_narrative (max_length=200).
+_SUPPORTING_REFS_MAX = 40
+_MOOD_MAX_LEN = 120
+_CAMPAIGN_NARRATIVE_MAX_LEN = 200
+
+
+def _sanitize_cdv2_fields(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a COPY of the raw model dict with the CD v2 enhancement fields reduced
+    to forms that are GUARANTEED to satisfy the ``FlyerBrief`` schema — so a SINGLE
+    ``FlyerBrief.model_validate`` on the result enforces every constraint and never
+    raises on these fields (a malformed value is REMOVED so it defaults, an
+    over-length value is CAPPED). Pure: ``raw`` is not mutated.
+
+      - ``hero_ref``: kept only if it constructs as a valid ``FactRef``; else removed
+        (→ default None).
+      - ``supporting_refs``: keep only entries that construct as a valid ``FactRef``,
+        then CAP to ``_SUPPORTING_REFS_MAX`` (so the list-length constraint holds).
+      - ``marketing_hook``: kept only if it constructs as a valid ``MarketingHook``;
+        else removed (→ default None).
+      - ``offer_priority``: kept only if ∈ {high, medium, low}; else removed
+        (→ default "medium").
+      - ``visual_direction.mood``: dropped if not a ``str``; otherwise TRUNCATED to
+        ``_MOOD_MAX_LEN`` (so the str-length constraint holds).
+      - ``campaign_narrative``: dropped if not a ``str`` (→ default ""); otherwise
+        TRUNCATED to ``_CAMPAIGN_NARRATIVE_MAX_LEN`` (so the str-length constraint
+        holds). Mirrors the ``mood`` handling exactly."""
+    out: dict[str, Any] = dict(raw)
+
+    # hero_ref — keep only a constructible FactRef; otherwise remove → default None.
+    if "hero_ref" in out:
+        hero = out["hero_ref"]
+        if hero is None or not _constructs(FactRef, hero):
+            out.pop("hero_ref", None)
+
+    # supporting_refs — keep only constructible entries, then CAP to the schema max.
+    if "supporting_refs" in out:
+        supporting = out["supporting_refs"]
+        if isinstance(supporting, list):
+            valid = [e for e in supporting if _constructs(FactRef, e)]
+            out["supporting_refs"] = valid[:_SUPPORTING_REFS_MAX]
+        else:
+            out.pop("supporting_refs", None)  # wrong type → default []
+
+    # marketing_hook — keep only a constructible MarketingHook; else remove → None.
+    if "marketing_hook" in out:
+        hook = out["marketing_hook"]
+        if hook is None or not _constructs(MarketingHook, hook):
+            out.pop("marketing_hook", None)
+
+    # offer_priority — keep only an in-enum value; else remove → default "medium".
+    if "offer_priority" in out:
+        if out["offer_priority"] not in ("high", "medium", "low"):
+            out.pop("offer_priority", None)
+
+    # visual_direction.mood — drop a non-str; truncate an over-length str to the cap.
+    vd = out.get("visual_direction")
+    if isinstance(vd, Mapping) and "mood" in vd:
+        vd = dict(vd)
+        mood = vd.get("mood")
+        if not isinstance(mood, str):
+            vd.pop("mood", None)  # wrong type → default ""
+        elif len(mood) > _MOOD_MAX_LEN:
+            vd["mood"] = mood[:_MOOD_MAX_LEN]
+        out["visual_direction"] = vd
+
+    # campaign_narrative — drop a non-str (→ default ""); truncate an over-length str
+    # to the cap. Mirrors the mood handling exactly (a top-level free-text field).
+    if "campaign_narrative" in out:
+        narrative = out["campaign_narrative"]
+        if not isinstance(narrative, str):
+            out.pop("campaign_narrative", None)  # wrong type → default ""
+        elif len(narrative) > _CAMPAIGN_NARRATIVE_MAX_LEN:
+            out["campaign_narrative"] = narrative[:_CAMPAIGN_NARRATIVE_MAX_LEN]
+
+    return out
+
+
+def _constructs(model: type, value: Any) -> bool:
+    """True iff ``value`` constructs into ``model`` via ``model_validate`` without
+    raising. Used to pre-screen CD v2 sub-objects so the single ``FlyerBrief.
+    model_validate`` never raises on a malformed enhancement field."""
+    try:
+        model.model_validate(value)
+        return True
+    except (ValidationError, TypeError, ValueError):
+        return False
+
+
+# A gateway callable: (system_prompt, user_message) -> parsed-JSON Mapping | None.
+# Defaults to the module ``_call_gateway`` (the deployed OpenRouter seam + retry).
+# Injectable so callers/tests can supply an offline fake without monkeypatching the
+# module attribute. ``build_flyer_brief`` keeps its historic monkeypatch contract
+# by NOT injecting (it calls the module ``_call_gateway`` so existing tests that
+# ``monkeypatch.setattr(fcb, "_call_gateway", ...)`` still intercept it).
+GatewayCallable = Callable[[str, str], Optional[Mapping[str, Any]]]
+
+
+def _propose_and_parse_brief(
+    raw_request: str,
+    locked_facts: Sequence[FlyerLockedFact],
+    business_profile: Mapping[str, Any] | object | None,
+    source_summary: Optional[str],
+    project_context: Optional[str],
+    *,
+    gateway: Optional[GatewayCallable],
+) -> Optional[FlyerBrief]:
+    """Run the SHARED propose+parse path: assemble the SKILL.md system prompt + the
+    USER data message, call the gateway, PRE-SANITIZE the CD v2 enhancement fields,
+    then run the SINGLE strict ``FlyerBrief.model_validate``. Returns the parsed
+    ``FlyerBrief`` on success, or ``None`` on ANY failure (skill body unreadable,
+    gateway unreachable/None, or an unparseable/off-schema response). Never raises.
+
+    This is the ONE place the propose+parse internals live — both ``build_flyer_brief``
+    (which layers the strict anti-fabrication ``validate`` + ``materialize_spans`` on
+    top) and the V2 ``propose_creative_brief_v2`` (which does NOT) call it, so the
+    prompt assembly + ``_call_gateway`` + ``_sanitize_cdv2_fields`` + ``model_validate``
+    are not duplicated. The CD v2 / campaign_narrative instructions in the USER
+    message (B0.2) and the firewalled sanitize are therefore identical on both paths.
+
+    ``gateway`` defaults to the module ``_call_gateway`` when None, so ``build_flyer_brief``
+    keeps its historic monkeypatch contract (tests patch the module attribute); the
+    V2 path injects a fake gateway directly for tests (no network).
+    """
+    call_gateway = gateway or _call_gateway
+
+    # The SKILL.md body is the governing system instruction (the brain). Unreadable
+    # ⇒ the brain is unreachable ⇒ None (fail safe), never Python-authored creativity.
+    system_prompt = _skill_body()
+    if not system_prompt:
+        _set_gateway_reason("skill_body_unreadable")
+        return None
+
+    user_message = _build_user_message(
+        raw_request, locked_facts, business_profile, source_summary, project_context
+    )
+    # Reset the reason mailbox first so we read THIS call's classification (or "" →
+    # the caller's default when a fake/monkeypatched gateway writes nothing).
+    _set_gateway_reason("")
+    raw = call_gateway(system_prompt, user_message)
+    if not raw:
+        return None
+
+    # CD v2: the new OPTIONAL creative fields must NEVER fail the parse OR bypass the
+    # FlyerBrief schema constraints. So PRE-SANITIZE them in the raw dict (malformed →
+    # removed so it defaults; over-length → capped) and then run a SINGLE strict
+    # ``FlyerBrief.model_validate`` over the WHOLE sanitized dict — that one validate
+    # enforces every constraint uniformly (``supporting_refs`` max_length=40, ``mood``
+    # max_length=120) instead of a pop-then-attribute-assign path that would bypass
+    # those length constraints (Codex MAJOR).
+    sanitized = _sanitize_cdv2_fields(raw)
+    try:
+        return FlyerBrief.model_validate(sanitized)
+    except (ValidationError, TypeError, ValueError):
+        # A response that does not shape into a FlyerBrief is an unreachable/garbled
+        # brain → None (fail safe), exactly as a gateway failure.
+        _set_gateway_reason("brief_unparseable")
+        return None
+
+
 def build_flyer_brief(
     raw_request: str,
     locked_facts: Sequence[FlyerLockedFact],
@@ -349,33 +557,24 @@ def build_flyer_brief(
     if not _is_enabled():
         return BriefResult(status="disabled")
 
-    # The SKILL.md body is the governing system instruction (the brain). If it is
-    # unreadable the firewall is armed but the brain is unreachable → unavailable
-    # (fail safe), NEVER a fall-back to Python-authored creativity.
-    system_prompt = _skill_body()
-    if not system_prompt:
-        return BriefResult(status="unavailable", reason="skill_body_unreadable")
-
-    user_message = _build_user_message(
-        raw_request, locked_facts, business_profile, source_summary, project_context
+    # Reuse the SHARED propose+parse path (skill body → user message → gateway →
+    # sanitize → model_validate). It returns None for ALL "brain unreachable" cases
+    # (skill body unreadable, missing/placeholder key, the call threw, an empty /
+    # unparseable JSON, or an off-schema body) → unavailable. ``_GATEWAY_FAILURE``
+    # carries the classified reason (set by ``_attempt_gateway`` / the helper); when a
+    # monkeypatched ``_call_gateway`` writes nothing it stays "" → "gateway_unreachable".
+    brief = _propose_and_parse_brief(
+        raw_request,
+        locked_facts,
+        business_profile,
+        source_summary,
+        project_context,
+        gateway=None,  # use the module _call_gateway so existing monkeypatch tests intercept
     )
-    # _call_gateway returns None for ALL "brain unreachable" cases (missing/placeholder
-    # key, the call threw, or the response was empty/unparseable JSON) → unavailable.
-    # Reset the reason mailbox first so we read THIS call's classification (or "" →
-    # "gateway_unreachable" when _call_gateway is monkeypatched and writes nothing).
-    _set_gateway_reason("")
-    raw = _call_gateway(system_prompt, user_message)
-    if not raw:
+    if brief is None:
         return BriefResult(
             status="unavailable", reason=_GATEWAY_FAILURE["reason"] or "gateway_unreachable"
         )
-
-    try:
-        brief = FlyerBrief.model_validate(dict(raw))
-    except (ValidationError, TypeError, ValueError):
-        # A response that does not shape into a FlyerBrief is an unreachable/garbled
-        # brain, not a firewall rejection → unavailable (fail safe), not invalid.
-        return BriefResult(status="unavailable", reason="brief_unparseable")
 
     result = _validator.validate(brief, locked_facts, raw_request)
     if not result.ok:
@@ -391,6 +590,54 @@ def build_flyer_brief(
         locked_facts.extend(materialized)
 
     return BriefResult(status="ok", brief=brief)
+
+
+def propose_creative_brief_v2(
+    raw_request: str,
+    locked_facts: Sequence[FlyerLockedFact],
+    business_profile: Mapping[str, Any] | object | None = None,
+    *,
+    gateway: Optional[GatewayCallable] = None,
+) -> Optional[FlyerBrief]:
+    """CD v2 PROPOSE: the Hermes brain proposes the creative fields, parsed
+    DEFENSIVELY into a ``FlyerBrief`` — WITHOUT the strict anti-fabrication
+    ``validate`` and WITHOUT ``materialize_spans`` (so it NEVER mutates the passed
+    ``locked_facts``).
+
+    This is the V2 render path's brief source (B2.3). It REUSES the SHARED
+    propose+parse internals (``_propose_and_parse_brief``): the SAME prompt assembly
+    incl. the CD v2 / campaign_narrative instructions (B0.2), the SAME ``_call_gateway``
+    seam, and the SAME ``_sanitize_cdv2_fields`` + single ``FlyerBrief.model_validate``
+    parse — no prompt text or parse logic is duplicated. It deliberately departs from
+    ``build_flyer_brief`` in two ways:
+
+      - It does NOT run the strict ``flyer_brief_validator.validate`` (required-fact
+        enforcement / fail-closed rejection). The deterministic resolver + the CD v2
+        scrubs are the V2 firewall for every field V2 renders, so a brief that the
+        strict validator would reject is still safely RESOLVED downstream (it only
+        selects grounded locked-fact values, never invents).
+      - It does NOT call ``materialize_spans`` — so it NEVER appends to / mutates the
+        caller's ``locked_facts`` (a HARD V2 boundary). The list is read-only here.
+
+    Returns the parsed ``FlyerBrief`` on success, or ``None`` on ANY gateway/parse
+    failure (skill body unreadable, gateway unreachable, unparseable/off-schema
+    response). NEVER raises. ``gateway`` is injectable so tests supply an offline fake
+    (no network); when None it uses the module ``_call_gateway``.
+
+    NOTE: unlike ``build_flyer_brief`` this is NOT gated by
+    ``FLYER_CREATIVE_DIRECTOR_ENABLED`` — the V2 caller gates on the separate
+    ``FLYER_CREATIVE_DIRECTOR_V2`` flag + allowlist (``_creative_director_v2_enabled``)
+    BEFORE calling, so flag-off this function is never reached and the network is
+    never touched.
+    """
+    return _propose_and_parse_brief(
+        raw_request,
+        locked_facts,
+        business_profile,
+        None,  # source_summary — not used on the V2 render path yet
+        None,  # project_context — not used on the V2 render path yet
+        gateway=gateway,
+    )
 
 
 def advise_scene_direction(
@@ -430,6 +677,30 @@ def advise_scene_direction(
         if not isinstance(vd_raw, Mapping):
             return None
         vd = VisualDirection.model_validate(dict(vd_raw))
+        # Scrub ungrounded COMMERCIAL values from the model-authored theme_family /
+        # mood AT THE SOURCE (the brain) — these taste strings reach the image prompt,
+        # so a model could otherwise smuggle a fabricated commercial claim (e.g.
+        # theme_family="$5 off") into the scene. This closes the SAME class the CD v2
+        # resolver's _resolve_theme_mood closes, via the SHARED scanner (no parallel
+        # regex). Ground against the locked-fact values exactly as the resolver does,
+        # so a legitimately grounded number is not over-stripped; a scene theme carries
+        # no grounded numbers in practice, so any commercial value is stripped. Guarded
+        # so a scrub error never breaks the advisory path (it falls back to the raw vd).
+        try:
+            allowed_values = [
+                _norm_ws(getattr(f, "value", "") or "")
+                for f in locked_facts or ()
+                if (getattr(f, "value", "") or "").strip()
+            ]
+            scrubbed_theme, scrubbed_mood = scrub_ungrounded_commercial_taste(
+                vd.theme_family, vd.mood, allowed_values
+            )
+            if scrubbed_theme != vd.theme_family or scrubbed_mood != vd.mood:
+                vd = vd.model_copy(
+                    update={"theme_family": scrubbed_theme, "mood": scrubbed_mood}
+                )
+        except Exception:  # noqa: BLE001 — advisory only; a scrub error keeps the raw vd
+            pass
         # Require a SUBSTANTIVE direction — a theme AND at least one NON-EMPTY concrete subject/motif.
         # Check CLEANED values (render strips whitespace-only entries), so a partial like
         # ``{"theme_family": "x", "visual_subjects": [" "]}`` falls back to the richer Python scene

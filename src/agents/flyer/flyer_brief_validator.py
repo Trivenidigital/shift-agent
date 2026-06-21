@@ -361,6 +361,421 @@ def _first_ungrounded_commercial(text: str, allowed_values: Sequence[str]) -> st
     return ""
 
 
+def scrub_ungrounded_commercial_taste(
+    theme: str, mood: str, allowed_values: Sequence[str]
+) -> tuple[str, str]:
+    """Scrub a (theme_family, mood) pair of any UNGROUNDED commercial value.
+
+    ``theme_family`` and ``mood`` are VISUAL-TASTE strings (e.g. "South Indian
+    Weekend Feast", "warm and festive") — but a model could smuggle a fabricated
+    COMMERCIAL value through either (e.g. ``mood="$5 off"``), and these strings can
+    reach the image prompt. The strict ``fact_refs`` firewall never scans them, so
+    each is scanned here for the FIRST UNGROUNDED commercial value (one NOT present
+    in ``allowed_values``) via ``_first_ungrounded_commercial`` — the SAME single-
+    source-of-truth scanner the brief firewall uses, NO parallel commercial regex.
+    A field that carries an ungrounded commercial value is defaulted to ``""``; a
+    field whose only commercial value IS in ``allowed_values`` is GROUNDED and kept
+    (so ``"$8.99 hero"`` is not over-stripped). With an EMPTY ``allowed_values`` any
+    commercial value is ungrounded by definition (advisory scene themes carry no
+    grounded numbers), so all commercial taste is stripped.
+
+    Shared by the CD v2 deterministic resolver (``flyer_creative_resolver``) and the
+    advisory scene path (``flyer_context_builder.advise_scene_direction``).
+
+    NEVER raises: a non-str input coerces to ``""``; any scanner error fail-closes
+    the offending field to ``""`` rather than letting an unscanned value through."""
+    safe_theme = theme if isinstance(theme, str) else ""
+    safe_mood = mood if isinstance(mood, str) else ""
+    allowed = list(allowed_values or ())
+    if safe_theme and not _taste_value_is_clean(safe_theme, allowed):
+        safe_theme = ""
+    if safe_mood and not _taste_value_is_clean(safe_mood, allowed):
+        safe_mood = ""
+    return safe_theme, safe_mood
+
+
+def _taste_value_is_clean(value: str, allowed_values: Sequence[str]) -> bool:
+    """True iff ``value`` carries NO UNGROUNDED commercial value (safe to keep).
+    Guarded so any scanner error defaults to NOT-clean (fail-closed: strip the
+    field) rather than letting an unscanned value reach the image prompt."""
+    try:
+        return not _first_ungrounded_commercial(value, allowed_values)
+    except Exception:  # pragma: no cover - defensive: scanner error => strip the field
+        return False
+
+
+# ── scoped-scrub narrative firewall (CD v2 Slice B, Task B0.3) ──────────────
+# ``campaign_narrative`` is a model-authored marketing message that RENDERS
+# prominently above the hero — the ONLY new fabrication surface in CD v2 Slice B.
+# The operator approved Option B (a SCOPED scrub, NOT the full strict battery):
+# keep evocative-but-grounded marketing language ("South Indian Favorites at One
+# Price", "Weekend Feast of Family Favorites"), reject fabrication (prices/
+# discounts/percentages not in facts, "today only"/"limited time", delivery/
+# operational/scheduling claims, awards/rankings/superlatives), and on reject
+# DEFAULT to the campaign_title.
+#
+# Why a scoped composition and NOT the full ``validate`` battery (the whole point
+# of Option B): the render-reaching ``_operational_claim_hit`` /
+# ``_occasion_aware_operational_claim_hit`` HARD-LINE detector OVER-REJECTS the
+# operator's ALLOW list — it flags bare date/occasion-overlap words ("weekend" in
+# "Weekend Feast of Family Favorites", "One-Price Weekend Treats", "weekend
+# treats") and fail-closes when the broad classifier is absent. Marketing language
+# legitimately evokes the occasion, so the narrative MUST NOT be subjected to that
+# aggressive scan. Instead the scoped scrub composes the NARROWEST set that
+# satisfies the operator's exact ALLOW/REJECT lists, REUSING the existing scanners:
+#   - ``_first_ungrounded_commercial`` — prices / currency / bare prices /
+#     percentage-discounts / free-X offer phrases, token-anchored + GROUNDING-aware
+#     (so a grounded "$7.99" survives but "$5 off" / "50% off" / an ungrounded
+#     "$9.99" reject). This is the SAME single-source-of-truth commercial scanner
+#     ``scrub_ungrounded_commercial_taste`` uses — NO parallel commercial regex.
+#   - ``_first_ungrounded_operational`` — the PRECISE strict operational detector
+#     (genuine service/availability/hours/credential claims, NOT theme/celebration
+#     words), grounding-aware (so a grounded "free delivery" survives, an invented
+#     one rejects). The aggressive ``_operational_claim_hit`` is DELIBERATELY NOT
+#     used (it over-rejects the ALLOW list, per above).
+#   - ``_scheduling_claim_hit`` — scheduling/availability/booking claims ("tables
+#     available", "book now", "reserve", "until/till", "this/every weekend").
+#   - an EXPLICIT superlative/award/ranking + time-pressure phrase set
+#     (``_NARRATIVE_SUPERLATIVE_RE`` / ``_NARRATIVE_TIME_PRESSURE_RE``) for the
+#     specific REJECT tokens the broad scanners MISS without over-rejecting the
+#     ALLOW list: "best"/"#1"/"number one"/"voted"/"top-rated"/"finest"/"greatest"/
+#     "award-winning" and "today only"/"limited time"/"act now"/"hurry"/"while
+#     supplies last". These are required because the strict operational regex only
+#     catches "best <in town/seller/...>" (context-bound), so the operator's "best
+#     biryani in town" and bare superlatives would otherwise slip through — yet a
+#     blanket "best" ban is fine here (no ALLOW phrase contains any of these tokens,
+#     verified). The award/ranking subset DOUBLES the strict detector's coverage
+#     (intentional belt-and-suspenders; matching either rejects).
+#
+# REJECT → return campaign_title. The aggressive render-reaching scan, the strict
+# ``validate`` logic, and every existing scanner's behavior are UNCHANGED.
+
+# EXPLICIT superlative / award / ranking phrase set (the specific REJECT tokens the
+# strict operational detector misses out of context, e.g. bare "best", "#1",
+# "voted", "top-rated", "finest", "greatest"). Verified to NOT match any operator
+# ALLOW phrase (none contain these tokens). ``#1`` is matched without a leading
+# word-boundary (``\b`` does not anchor before ``#``).
+_NARRATIVE_SUPERLATIVE_RE = re.compile(
+    r"#\s*1\b"
+    r"|\b(?:best|finest|greatest|top[\s-]?rated|number\s+one|"
+    r"award[\s-]?winning|award[\s-]?winner|voted)\b",
+    re.IGNORECASE,
+)
+# EXPLICIT time-pressure phrase set ("today only" / "limited time" / "act now" /
+# "hurry" / "while supplies last" + a few close cousins). None appear in the ALLOW
+# list. The grounded-occasion words the ALLOW list DOES use ("weekend", "festive",
+# "celebration") are intentionally absent here. Matched against the NORMALIZED
+# narrative (``_narrative_normalize``: lowercased, hyphens/underscores → spaces,
+# whitespace collapsed) so hyphenated forms ("limited-time", "today-only",
+# "while-supplies-last") match the same as the spaced forms.
+_NARRATIVE_TIME_PRESSURE_RE = re.compile(
+    r"\b(?:today\s+only|limited\s+time|act\s+now|hurry|"
+    r"while\s+supplies\s+last|last\s+chance|ends?\s+(?:today|tonight|soon)|"
+    r"ends\s+soon|don'?t\s+miss|for\s+a\s+limited|this\s+week\s+only|"
+    r"now\s+or\s+never)\b",
+    re.IGNORECASE,
+)
+# EXPLICIT sale/discount/offer-claim WORD set (FIX 1 — Codex BLOCKER). The narrative
+# firewall's commercial scanner (``_first_ungrounded_commercial``) intentionally
+# excludes generic claim WORDS like "discount"/"deal"/"promo"/"sale"/"clearance"
+# (it catches only numeric VALUES), so a wordy narrative ("Weekend Discount Feast",
+# "Today-only Promo", "BOGO Dosa") slipped through. The operator's reject list
+# explicitly forbids discounts/promos/sales, so the scoped narrative scrub adds an
+# EXPLICIT whole-word/phrase ban here. Matched against the NORMALIZED narrative so
+# hyphenated forms ("combo-deal", "%-off") match too. CRITICAL: "specials" is NOT a
+# sale-word (operator ALLOW list: "Weekend Specials", "Clearance Specials" rejects
+# only on "clearance"); "combo"/"price"/"feast"/"treats"/"favorites"/"festive"/
+# "authentic" are NOT here so the grounded-evocative ALLOW list survives.
+# PLURALS (FIX — Codex BLOCKER residual): each sale word matches an optional
+# trailing ``s`` so the plural/inflected forms ("promos", "promotions", "sales",
+# "clearances", "markdowns", "discounts", "deals") reject the SAME as the singular.
+# The whole-word ``\b`` boundary keeps the ALLOW words that merely END in ``s``
+# alive: ``\bsales?\b`` does NOT match inside "specials"/"desserts"/"treats"/
+# "favorites"/"flavors" (no word boundary between "sale" and "s" there).
+_NARRATIVE_SALE_WORD_RE = re.compile(
+    r"\b(?:discounts?|discounted|deals?|promos?|promotions?|promotional|"
+    r"sales?|clearances?|markdowns?|bogo|"
+    r"buy\s+one\s+get|buy\s+1\s+get|combo\s+deals?)\b"
+    r"|%\s*off|\bpercent\s+off\b|\bcents\s+off\b|\bdollars\s+off\b",
+    re.IGNORECASE,
+)
+
+
+def _narrative_normalize(text: str) -> str:
+    """Lowercase + hyphens/underscores → spaces + collapsed whitespace (FIX 1).
+
+    The narrative phrase sets (sale-word / time-pressure / superlative) are matched
+    against this normalized form so a hyphenated/underscored form ("limited-time",
+    "today_only", "award-winning", "top-rated", "while-supplies-last") matches the
+    SAME as the spaced form. Used ONLY for the narrative phrase scans — never for
+    the commercial/operational scanners (which keep their own normalization)."""
+    if not text:
+        return ""
+    lowered = text.casefold().replace("-", " ").replace("_", " ")
+    return " ".join(lowered.split())
+
+
+def _narrative_sale_word_hit(text: str) -> str:
+    """First explicit sale/discount/offer-claim WORD in ``text`` (FIX 1 — the WORDS
+    the numeric-only commercial scanner misses: discount/deal/promo/sale/clearance/
+    BOGO/% off/…), or "". Scanned on the NORMALIZED narrative so hyphenated forms
+    ("combo-deal", "%-off") match the spaced forms."""
+    if not text:
+        return ""
+    m = _NARRATIVE_SALE_WORD_RE.search(_narrative_normalize(text))
+    return m.group(0).strip() if m else ""
+
+
+def _narrative_superlative_hit(text: str) -> str:
+    """First explicit superlative / award / ranking token in ``text`` (the REJECT
+    tokens the strict operational detector misses out of context), or "". Scanned on
+    the NORMALIZED narrative so "award-winning"/"top-rated" match the spaced forms."""
+    if not text:
+        return ""
+    m = _NARRATIVE_SUPERLATIVE_RE.search(_narrative_normalize(text))
+    return m.group(0).strip() if m else ""
+
+
+def _narrative_time_pressure_hit(text: str) -> str:
+    """First explicit time-pressure phrase in ``text`` ("today only" / "limited
+    time" / "act now" / "hurry" / "while supplies last" / …), or "". Scanned on the
+    NORMALIZED narrative so "limited-time"/"today-only" match the spaced forms."""
+    if not text:
+        return ""
+    m = _NARRATIVE_TIME_PRESSURE_RE.search(_narrative_normalize(text))
+    return m.group(0).strip() if m else ""
+
+
+# ── SCHEDULE-GROUNDED temporal wording (FIX C, operator-approved firewall change) ─
+# ``scrub_campaign_narrative`` used to reject ALL scheduling/temporal references via
+# ``_scheduling_claim_hit`` — so a GROUNDED "this weekend" (when the flyer's schedule
+# IS the weekend) was scrubbed to the bland campaign_title. The operator's boundary:
+# reject scheduling/temporal claims ONLY when NOT grounded in the schedule fact; ALLOW
+# them when grounded. Pure time-pressure / urgency ("today only", "limited time", "act
+# now", "hurry", "while supplies last") stays ALWAYS-reject (it is urgency, NOT a
+# schedule reference) — handled by the SEPARATE ``_narrative_time_pressure_hit`` check.
+#
+# Grounding is a DAY-SET subset test: build a day-set from the narrative's temporal
+# tokens AND from the schedule, mapping ``weekend → {sat, sun}`` / ``weekday →
+# {mon..fri}`` plus explicit day names (full + abbrev) and day-RANGES ("Friday through
+# Sunday"). The narrative is GROUNDED iff it carries at least one temporal token and
+# EVERY temporal day it references is covered by the schedule's day-set. A narrative
+# day NOT in the schedule (e.g. "this Monday" vs a Sat/Sun schedule) is ungrounded →
+# reject. A narrative with NO resolvable temporal day is NOT grounded by this path
+# (the scheduling claim — e.g. a bare "available"/"book"/"until" — still rejects).
+
+_WEEKDAYS_ORDER = (
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+)
+# Canonical day name ← full or common abbreviation.
+_DAY_ALIASES = {
+    "monday": "monday", "mon": "monday",
+    "tuesday": "tuesday", "tue": "tuesday", "tues": "tuesday",
+    "wednesday": "wednesday", "wed": "wednesday", "weds": "wednesday",
+    "thursday": "thursday", "thu": "thursday", "thur": "thursday", "thurs": "thursday",
+    "friday": "friday", "fri": "friday",
+    "saturday": "saturday", "sat": "saturday",
+    "sunday": "sunday", "sun": "sunday",
+}
+_WEEKEND_DAYS = frozenset({"saturday", "sunday"})
+_WEEKDAY_DAYS = frozenset({"monday", "tuesday", "wednesday", "thursday", "friday"})
+# A single day token (full or abbrev), word-boundary anchored.
+_DAY_TOKEN_RE = re.compile(
+    r"\b(" + "|".join(sorted(_DAY_ALIASES, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
+# Category temporal words.
+_WEEKEND_WORD_RE = re.compile(r"\bweekends?\b", re.IGNORECASE)
+_WEEKDAY_WORD_RE = re.compile(r"\bweekdays?\b", re.IGNORECASE)
+# A day-RANGE: "<day> (through|thru|to|until|till|-|–|—) <day>" — inclusive span over
+# the weekday order (e.g. "Friday through Sunday" → fri, sat, sun).
+_DAY_RANGE_RE = re.compile(
+    r"\b(" + "|".join(sorted(_DAY_ALIASES, key=len, reverse=True)) + r")\b"
+    r"\s*(?:through|thru|to|until|till|til|[-–—])\s*"
+    r"\b(" + "|".join(sorted(_DAY_ALIASES, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
+# NOTE (FIX 2 — Codex BLOCKER C): an explicit connector-phrase regex
+# (``_TEMPORAL_SCHEDULING_PHRASE_RE``, "this weekend"/"every Saturday") used to be the
+# gate trigger. It is now SUBSUMED by ``_day_set`` scanning for ANY temporal token
+# (with or without a connector), so the dedicated connector regex was removed — every
+# connector+day phrase contributes its day to ``_day_set`` and is ground-checked the
+# same as a bare day token. See ``scrub_campaign_narrative``'s temporal gate.
+
+
+def _expand_day_range(start_day: str, end_day: str) -> set[str]:
+    """The inclusive set of canonical days from ``start_day`` to ``end_day`` over the
+    Mon..Sun order. Wraps if end precedes start (e.g. "Friday through Sunday" =
+    fri/sat/sun; "Sunday through Tuesday" wraps = sun/mon/tue). Unknown day → {}."""
+    s = _DAY_ALIASES.get(start_day.lower())
+    e = _DAY_ALIASES.get(end_day.lower())
+    if not s or not e:
+        return set()
+    si = _WEEKDAYS_ORDER.index(s)
+    ei = _WEEKDAYS_ORDER.index(e)
+    if si <= ei:
+        return set(_WEEKDAYS_ORDER[si : ei + 1])
+    # wrap-around span
+    return set(_WEEKDAYS_ORDER[si:]) | set(_WEEKDAYS_ORDER[: ei + 1])
+
+
+def _day_set(text: str) -> set[str]:
+    """The canonical day-set ``text`` resolves to: explicit day names (full/abbrev),
+    day-ranges ("Friday through Sunday"), and the category words weekend (→ sat,sun)
+    / weekday (→ mon..fri). Empty when ``text`` carries no resolvable temporal day.
+    Used for BOTH the narrative's temporal tokens and the schedule's day-set."""
+    if not text:
+        return set()
+    norm = _narrative_normalize(text)  # lowercase, hyphens→spaces (so "16-9" etc. safe)
+    days: set[str] = set()
+    # Ranges first (they subsume their endpoint day tokens, and that is fine — the
+    # single-token scan below only ADDS the same canonical days).
+    for m in _DAY_RANGE_RE.finditer(text):
+        days |= _expand_day_range(m.group(1), m.group(2))
+    for m in _DAY_TOKEN_RE.finditer(text):
+        canon = _DAY_ALIASES.get(m.group(1).lower())
+        if canon:
+            days.add(canon)
+    if _WEEKEND_WORD_RE.search(norm):
+        days |= _WEEKEND_DAYS
+    if _WEEKDAY_WORD_RE.search(norm):
+        days |= _WEEKDAY_DAYS
+    return days
+
+
+def _temporal_reference_is_schedule_grounded(narrative: str, schedule: str) -> bool:
+    """True iff EVERY temporal day the ``narrative`` references is covered by the
+    ``schedule``'s day-set (i.e. the narrative day-set is a NON-EMPTY subset of the
+    schedule day-set). A narrative with NO resolvable temporal day is NOT grounded by
+    this path (returns False) — its scheduling claim (a bare "available"/"book"/
+    "until") still rejects. Guarded: any error → not grounded (fail-closed → reject)."""
+    try:
+        narrative_days = _day_set(narrative)
+        if not narrative_days:
+            return False
+        schedule_days = _day_set(schedule)
+        if not schedule_days:
+            return False
+        return narrative_days <= schedule_days
+    except Exception:  # pragma: no cover - defensive: cannot prove grounded ⇒ reject
+        return False
+
+
+def scrub_campaign_narrative(
+    narrative: str,
+    *,
+    allowed_values: Sequence[str],
+    campaign_title: str,
+    schedule: str = "",
+) -> str:
+    """Scoped-scrub the model-authored ``campaign_narrative`` (CD v2 Slice B, B0.3).
+
+    ``campaign_narrative`` is a marketing message that RENDERS prominently — the
+    only new fabrication surface in Slice B. This is the operator-approved Option B
+    SCOPED scrub: keep evocative-but-grounded marketing language, reject
+    fabrication, and on reject default to ``campaign_title``.
+
+    Returns:
+      - ``""`` if ``narrative`` is empty / blank (nothing to render);
+      - ``campaign_title`` if ``narrative`` contains ANY of:
+          * an UNGROUNDED commercial value (price / discount / percentage / free-X
+            offer not present in ``allowed_values``) — ``_first_ungrounded_commercial``;
+          * an explicit sale/discount/offer-claim WORD (discount / deal / promo /
+            sale / clearance / BOGO / % off / …) — ``_narrative_sale_word_hit``
+            (FIX 1: the WORDS the numeric-only commercial scanner misses);
+          * an UNGROUNDED genuine operational / delivery claim —
+            ``_first_ungrounded_operational`` (PRECISE detector, grounding-aware);
+          * an UNGROUNDED TEMPORAL reference (FIX C + FIX 2): ANY temporal token in
+            the narrative — bare or connector-led day name, ``weekend``, ``weekday``,
+            or a day-RANGE ("Friday through Sunday") — is ground-checked via
+            ``_day_set``; the narrative's day-set MUST be a SUBSET of the ``schedule``
+            fact's day-set, else REJECT. So "Monday Specials" + a Sat/Sun schedule
+            rejects, any day token with an empty ``schedule`` rejects, and a SCHEDULE-
+            GROUNDED reference ("this weekend"/"Weekend Combos" + a Sat/Sun schedule)
+            is KEPT. A NON-DAY scheduling claim (a bare "available"/"book"/"until" with
+            no resolvable day) still rejects via ``_scheduling_claim_hit``;
+          * an explicit superlative / award / ranking token —
+            ``_narrative_superlative_hit``;
+          * an explicit time-pressure phrase ("today only" / "limited time" / …) —
+            ``_narrative_time_pressure_hit`` (ALWAYS reject — urgency, NOT a schedule
+            reference — independent of ``schedule``);
+        (when ``campaign_title`` is itself empty/absent the reject default is ``""`` —
+        there is nothing safe to show);
+      - otherwise the ``narrative`` unchanged.
+
+    ``schedule`` (FIX C) is the value of the "schedule" locked fact (or "" when
+    absent). It grounds the narrative's temporal references: every day the narrative
+    names must be covered by the schedule's day-set (``weekend → {sat, sun}``,
+    ``weekday → {mon..fri}``, explicit day names + day-ranges) for the scheduling
+    reference to be KEPT. With ``schedule=""`` no temporal reference is grounded, so
+    the prior reject-all-scheduling behavior is preserved.
+
+    A GROUNDED value is fine: "Everything at $7.99" survives when "$7.99" is in
+    ``allowed_values`` (the commercial scan is grounding-aware); "Free delivery on
+    all orders" survives when grounded. An UNGROUNDED "$9.99" rejects even when
+    "$7.99" is grounded (token-anchored).
+
+    PURE; NEVER raises: a non-str ``narrative`` coerces to ``""``; any scanner
+    error fail-closes to ``campaign_title`` (or ``""`` when the title is absent)
+    rather than letting an unverified narrative through. REUSES the existing
+    scanners — no new commercial regex; the aggressive render-reaching detector is
+    DELIBERATELY not used (it over-rejects the grounded marketing ALLOW list)."""
+    safe_narrative = narrative if isinstance(narrative, str) else ""
+    safe_narrative = safe_narrative.strip()
+    safe_title = campaign_title if isinstance(campaign_title, str) else ""
+    if not safe_narrative:
+        return ""
+    allowed = [v for v in (allowed_values or ()) if isinstance(v, str)]
+    try:
+        if _first_ungrounded_commercial(safe_narrative, allowed):
+            return safe_title
+        if _narrative_sale_word_hit(safe_narrative):
+            return safe_title
+        if _first_ungrounded_operational(safe_narrative, allowed):
+            return safe_title
+        # TEMPORAL / SCHEDULING references (FIX C + FIX 2): reject ONLY when NOT
+        # grounded in the ``schedule`` fact. Two INDEPENDENT triggers:
+        #
+        #   (1) ANY TEMPORAL TOKEN (FIX 2 — Codex BLOCKER C): build the narrative's
+        #       day-set from EVERY temporal token present — day names (full + abbrev),
+        #       ``weekend → {sat,sun}``, ``weekday → {mon..fri}``, and day-RANGES
+        #       ("Friday through Sunday") — via ``_day_set``. This runs for BARE day /
+        #       range / weekend / weekday claims too ("Monday Specials", "Friday
+        #       through Sunday feast", "Weekend Combos"), which carry NO scheduling
+        #       connector and so previously bypassed grounding. When the narrative's
+        #       day-set is NON-EMPTY it MUST be a SUBSET of the schedule's day-set; an
+        #       empty ``schedule`` (empty day-set) OR any narrative day not in the
+        #       schedule → REJECT. So "Monday Specials" + a Sat/Sun schedule rejects,
+        #       and any day token with an empty schedule rejects, while "this weekend" /
+        #       "Weekend Combos" + a Sat/Sun schedule is KEPT.
+        #
+        #   (2) a NON-DAY scheduling CLAIM (``_scheduling_claim_hit``: a bare
+        #       "available"/"book now"/"reserve"/"until"/… with NO resolvable day): the
+        #       day-set is empty so trigger (1) does not fire, but the claim is still an
+        #       ungrounded scheduling assertion → REJECT. (The connector phrase
+        #       ``_TEMPORAL_SCHEDULING_PHRASE_RE`` is subsumed by trigger (1) — any
+        #       connector+day phrase contributes its day to ``_day_set`` — so it no
+        #       longer needs a separate arm.)
+        #
+        # Time-pressure / urgency ("today only"/"limited time"/…) is handled SEPARATELY
+        # below — ALWAYS reject regardless of schedule. A bare NON-temporal theme word
+        # ("Festive Dessert Celebration") yields an empty day-set + no scheduling claim,
+        # so NEITHER trigger fires and other checks still apply.
+        narrative_days = _day_set(safe_narrative)
+        if narrative_days:
+            if not _temporal_reference_is_schedule_grounded(safe_narrative, schedule):
+                return safe_title
+        elif _scheduling_claim_hit(safe_narrative):
+            return safe_title
+        if _narrative_superlative_hit(safe_narrative):
+            return safe_title
+        if _narrative_time_pressure_hit(safe_narrative):
+            return safe_title
+    except Exception:  # pragma: no cover - defensive: cannot prove clean ⇒ default
+        return safe_title
+    return safe_narrative
+
+
 # ── textless-background firewall (Codex Finding 3) ──────────────────────────
 # background_brief / visual_direction are the TEXTLESS-background prompt: the model
 # must render NO words there (all visible text is overlaid deterministically from

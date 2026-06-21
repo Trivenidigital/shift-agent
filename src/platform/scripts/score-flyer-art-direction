@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""score-flyer-art-direction — DEV-ONLY art-director oracle scorer + sidecar.
+
+Scores a rendered flyer PNG on the 7 art-direction axes (see
+flyer_art_director_oracle.AXES) and writes the result as a sidecar JSON next to
+the image (<image>.artdirector.json by default) so successive versions can be
+diffed by composite + per-axis critique.
+
+This is a STANDALONE diagnostic CLI:
+  - NOT wired into the render or QA path; it never blocks delivery.
+  - NEVER tracebacks. A real CLI usage error (bad args / unwritable sidecar)
+    exits non-zero with a one-line message; otherwise it exits 0.
+  - When no OpenRouter key/provider is available the oracle returns a SAFE empty
+    score (composite 0.0 + an unavailable note) and the sidecar is STILL written
+    — that is a successful run (exit 0), not an error.
+
+Usage:
+  score-flyer-art-direction --image flyer.png
+  score-flyer-art-direction --image flyer.png --brief-summary "diwali sweets"
+  score-flyer-art-direction --image flyer.png --out /tmp/score.json
+
+Exit codes:
+  0 — scored + sidecar written (including the no-key safe-empty score)
+  2 — CLI usage error (missing image, unwritable sidecar, etc.)
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+SRC_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, "/opt/shift-agent")
+# `src` itself must be on the path: the oracle transitively imports visual_qa,
+# whose fallback imports are `from agents.flyer.facts ...` / `agents.flyer.
+# semantic_brief ...` — package paths rooted at `src`. Without this, a bare CLI
+# invocation (no PYTHONPATH=src) tracebacks at import, BEFORE main()'s handling.
+sys.path.insert(0, str(SRC_ROOT))
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT / "agents" / "flyer"))
+
+try:  # flat-VPS layout: oracle deployed as flyer_art_director_oracle.py
+    from flyer_art_director_oracle import (  # type: ignore  # noqa: E402
+        score_art_direction,
+        write_sidecar,
+    )
+except ImportError:  # source package layout
+    from agents.flyer.flyer_art_director_oracle import (  # noqa: E402
+        score_art_direction,
+        write_sidecar,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--image", required=True, help="path to the rendered flyer PNG")
+    ap.add_argument("--brief-summary", default="", help="optional brief context for the scorer")
+    ap.add_argument("--out", default=None, help="sidecar path (default: <image>.artdirector.json)")
+    args = ap.parse_args(argv)
+
+    image_path = args.image
+    if not Path(image_path).exists():
+        # The oracle still fails safe on a missing image, but a missing input is a
+        # genuine CLI usage error — surface it as exit 2 rather than silently
+        # writing a sidecar for a file that isn't there.
+        print(f"error: image not found: {image_path}", file=sys.stderr)
+        return 2
+
+    # score_art_direction NEVER raises; with no key it returns a safe empty score.
+    score = score_art_direction(image_path, brief_summary=args.brief_summary)
+
+    try:
+        sidecar = write_sidecar(image_path, score, out_path=args.out)
+    except OSError as exc:
+        print(f"error: could not write sidecar: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"composite={score.composite} sidecar={sidecar}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -116,15 +116,41 @@ def _premium_font(role: str, size: int):
 # Task 2: layout solver — pure function, no I/O
 # ---------------------------------------------------------------------------
 
+# CD v2 (Slice B, B2.5): offer_priority → seal-scale multiplier. "medium" (and
+# any unknown / None value) maps to 1.0 so the DEFAULT path is byte-identical to
+# pre-CD-v2 output; "high" enlarges, "low" shrinks the seal.
+_OFFER_PRIORITY_SCALE: dict[str, float] = {"high": 1.18, "medium": 1.0, "low": 0.82}
+
+
+def _offer_priority_scale(offer_priority) -> float:
+    """Map an ``offer_priority`` string to a seal-size multiplier.
+
+    Guarded: any value that is not a recognised priority (including ``None``,
+    the default ``"medium"``, or malformed input) yields ``1.0`` — the byte-
+    identical-to-today scale.  Never raises."""
+    try:
+        return _OFFER_PRIORITY_SCALE.get((offer_priority or "").strip().lower(), 1.0)
+    except (AttributeError, TypeError):
+        return 1.0
+
+
 @dataclass(frozen=True)
 class PremiumLayout:
     menu_mode: str        # "combo" | "name_rows" | "two_col" | "two_col_compact"
     offer_mode: str       # "seal" | "inline" | "none"
     menu_font_px: int
     min_font_px: int
+    # CD v2 (Slice B, B2.5): offer-energy + message-clarity levers. Defaults
+    # (1.0 / "") reproduce the pre-CD-v2 PremiumLayout EXACTLY so flag-off /
+    # creative_direction-absent renders are byte-identical.
+    offer_scale: float = 1.0   # 1.0 == today's seal size (medium/None/default)
+    narrative: str = ""        # campaign_narrative to lead with, "" == none
 
 
-def plan_premium_layout(items, *, shared_price, width: int = 1080) -> PremiumLayout:
+def plan_premium_layout(
+    items, *, shared_price, width: int = 1080,
+    offer_priority=None, narrative: str = "",
+) -> PremiumLayout:
     """Map menu content metrics to a presentation spec.
 
     Pure function — no I/O, no PIL drawing.  Later tasks consume the returned
@@ -137,6 +163,11 @@ def plan_premium_layout(items, *, shared_price, width: int = 1080) -> PremiumLay
                       or ``None`` when items carry individual prices.
         width:        Canvas width in pixels (default 1080); drives the mobile
                       legibility floor calculation.
+        offer_priority: CD v2 offer-energy lever ("high"/"medium"/"low" or
+                      ``None``).  Maps to ``offer_scale``; default/medium/None
+                      => 1.0 (byte-identical seal).
+        narrative:    CD v2 campaign_narrative to lead with as a prominent top
+                      element.  "" (default) => no narrative (byte-identical).
 
     Returns:
         A frozen ``PremiumLayout`` dataclass with mode + font decisions.
@@ -158,7 +189,11 @@ def plan_premium_layout(items, *, shared_price, width: int = 1080) -> PremiumLay
     font_px = max(floor, int(width * base))
 
     offer = "seal" if (shared_price and not has_item_prices) else ("inline" if has_item_prices else "none")
-    return PremiumLayout(menu_mode=mode, offer_mode=offer, menu_font_px=font_px, min_font_px=floor)
+    return PremiumLayout(
+        menu_mode=mode, offer_mode=offer, menu_font_px=font_px, min_font_px=floor,
+        offer_scale=_offer_priority_scale(offer_priority),
+        narrative=(narrative or "").strip() if isinstance(narrative, str) else "",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -230,26 +265,43 @@ def _seal_geometry(draw, *, label, price, width):
     return bw, bh, label_lines, lf, pf, pw, ph, pad_x, pad_y, gap, label_h
 
 
-def _measure_offer_seal(draw, *, label, price, width):
+def _seal_radius(bw, bh, width, offer_scale=1.0):
+    """The seal circle radius from the sized pill + a min-pad.
+
+    Single source of truth shared by ``_measure_offer_seal`` and
+    ``draw_offer_seal`` so the reserved band and the drawn circle never drift.
+    ``offer_scale`` (CD v2, B2.5) scales the radius: 1.0 (default) is BYTE-
+    IDENTICAL to the pre-CD-v2 formula; >1.0 enlarges, <1.0 shrinks.  When the
+    scale is exactly 1.0 the original integer expression is used verbatim so the
+    seal geometry is unchanged to the pixel."""
+    base = max(bw, bh) // 2 + max(8, int(width * 0.010))
+    if offer_scale == 1.0:
+        return base
+    return int(round(base * offer_scale))
+
+
+def _measure_offer_seal(draw, *, label, price, width, offer_scale=1.0):
     """Return the seal DIAMETER for the given label+price (for layout).
 
     The seal is now a circle whose radius is ``max(bw, bh) // 2 + pad``;
     this function returns the full diameter (2 × sr) so that callers
     (``render_premium_overlay``) reserve the correct vertical band for the
-    seal and correctly position ``seal_cy`` and ``title_anchor``."""
+    seal and correctly position ``seal_cy`` and ``title_anchor``.  ``offer_scale``
+    (CD v2) scales the diameter; 1.0 == today (byte-identical)."""
     bw, bh, *_rest = _seal_geometry(draw, label=label, price=price, width=width)
-    sr = max(bw, bh) // 2 + max(8, int(width * 0.010))
-    return sr * 2
+    return _seal_radius(bw, bh, width, offer_scale) * 2
 
 
-def draw_offer_seal(draw, *, label, price, width, center):
+def draw_offer_seal(draw, *, label, price, width, center, offer_scale=1.0):
     """Draw a prominent maroon+gold circular seal (label / price / "EACH") centred
     at ``center`` — the Editorial Luxury focal element (Fix C v2).
 
     Geometry: a circle whose radius is derived from the existing ``_seal_geometry``
-    sizing (keeps the label+price fit invariant).  Palette mirrors compose_A() in
-    fixc-v2-mockup-generator.py: maroon fill (120,24,28), GOLD ring (208,178,110),
-    IVORY price text (244,240,232).
+    sizing (keeps the label+price fit invariant).  ``offer_scale`` (CD v2, B2.5)
+    scales the circle: 1.0 (default) is BYTE-IDENTICAL to the pre-CD-v2 seal;
+    "high" offer_priority passes >1.0 (larger/bolder), "low" passes <1.0.  Palette
+    mirrors compose_A() in fixc-v2-mockup-generator.py: maroon fill (120,24,28),
+    GOLD ring (208,178,110), IVORY price text (244,240,232).
 
     Three text lines inside the circle, top→bottom:
       • label   — letter-spaced small-caps (Cormorant / kicker font)  GOLD
@@ -269,7 +321,10 @@ def draw_offer_seal(draw, *, label, price, width, center):
     # Radius: half the larger dimension of the sized pill, with a minimum so
     # the circle never collapses to a tiny dot.  The bounding box is square
     # (2r × 2r) — larger than the pill when the pill is taller than it is wide.
-    sr = max(bw, bh) // 2 + max(8, int(width * 0.010))
+    # ``offer_scale`` scales it (1.0 == byte-identical to today).  The text
+    # offsets below are all derived from ``sr`` so they scale proportionally and
+    # the label+price always stays inside the (now larger/smaller) circle.
+    sr = _seal_radius(bw, bh, width, offer_scale)
 
     x0, y0 = cx - sr, cy - sr
     x1, y1 = cx + sr, cy + sr
@@ -407,6 +462,76 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     target.parent.mkdir(parents=True, exist_ok=True)
     width, height = size
 
+    # CD v2 (Slice B, B2.5): when a resolved creative direction is carried on the
+    # project (flag-on only; serialized FlyerProject field that survives into the
+    # /usr/bin/python3 overlay subprocess), lead with the MARKETING MESSAGE.
+    # ALL reads are guarded — a missing/None/malformed carrier yields the
+    # byte-identical-to-today values (narrative="", scale 1.0, no new pixels).
+    cd = getattr(project, "creative_direction", None)
+    cd_narrative = ""
+    cd_offer_priority = None
+    # CD v2 Composition Phase 1, Task 2 (message-first A template). The router
+    # (Task 1) writes ``poster_archetype`` into the creative_direction dict;
+    # ``hook_text``/``hook_prominence``/``hero_name`` come from the resolved CD.
+    # ALL reads are guarded — a missing/None/malformed carrier (non-str values,
+    # absent keys, a non-"message_first" archetype) yields the byte-identical-to-
+    # today path (archetype="", hook="", emblem ring drawn as today).
+    cd_poster_archetype = ""
+    cd_hook_text = ""
+    cd_hook_prominence = ""
+    if isinstance(cd, dict):
+        _raw_narr = cd.get("campaign_narrative")
+        if isinstance(_raw_narr, str):
+            cd_narrative = _raw_narr.strip()
+        _raw_pri = cd.get("offer_priority")
+        if isinstance(_raw_pri, str):
+            cd_offer_priority = _raw_pri
+        _raw_arch = cd.get("poster_archetype")
+        if isinstance(_raw_arch, str):
+            cd_poster_archetype = _raw_arch.strip()
+        _raw_hook = cd.get("hook_text")
+        if isinstance(_raw_hook, str):
+            cd_hook_text = _raw_hook.strip()
+        _raw_hook_prom = cd.get("hook_prominence")
+        if isinstance(_raw_hook_prom, str):
+            cd_hook_prominence = _raw_hook_prom.strip()
+
+    # Engage the message-first (A) hierarchy ONLY for the exact archetype string.
+    # Any other value (offer_first / event_first / unknown / "" / None) leaves the
+    # existing layout untouched → byte-identical.
+    message_first = cd_poster_archetype == "message_first"
+
+    # ===================================================================
+    # PHASE-1 CONTRACT (Codex FINAL review, FINDING 1 BLOCKER): ONLY the
+    # message_first (A) template is built in Phase 1. EVERY other archetype —
+    # offer_first / event_first / unknown / absent — MUST render BYTE-IDENTICAL
+    # to a ``creative_direction=None`` render (today's layout), NOT merely to a
+    # "no-archetype CD" render. A CD carrier can still set campaign_narrative /
+    # offer_priority / hook_text even when poster_archetype is non-message_first;
+    # passing those into ``plan_premium_layout`` (offer_scale, narrative) and into
+    # ``_compose(include_narrative=True)`` would draw the CD narrative eyebrow +
+    # scale the seal for B/C archetypes — exactly the leak FINDING 1 flags. So we
+    # SCRUB the ENTIRE CD overlay carrier here: reset every CD-derived overlay
+    # input to its ``creative_direction=None`` baseline value, which routes the
+    # non-message_first dispatch through the SAME single-attempt, narrative="",
+    # offer_scale=1.0 code path that a None creative_direction uses. message_first
+    # is untouched (it consumes the full carrier below).
+    if not message_first:
+        cd_narrative = ""
+        cd_offer_priority = None
+        cd_hook_text = ""
+        cd_hook_prominence = ""
+
+    # FIX 2 observability: reset the per-call best-effort drop records (see the
+    # _LAST_NARRATIVE_DROP / _LAST_HOOK_DROP module notes + the dispatch at the
+    # end of this fn).
+    _LAST_NARRATIVE_DROP.clear()
+    _LAST_HOOK_DROP.clear()
+    # Task 2 observability: reset the per-call layout-debug record. Populated ONLY
+    # on the message_first path so non-message_first stays a strict no-op (the
+    # record is left empty, asserted by the byte-identical tests indirectly).
+    _LAST_LAYOUT_DEBUG.clear()
+
     payload = render._menu_overlay_payload(project)
     business = str(payload.get("business") or "").strip()
     title = str(payload.get("title") or "").strip()
@@ -427,6 +552,8 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         items,
         shared_price=shared_offer_price or None,
         width=width,
+        offer_priority=cd_offer_priority,
+        narrative=cd_narrative,
     )
     min_px = layout.min_font_px
 
@@ -451,410 +578,1168 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         if fid and value:
             required_facts.append((fid, label, value))
 
-    # ``ink`` accumulates the RAW text of every string actually rendered, one
-    # entry per visual line/row, so the final coverage check is grounded in real
-    # pixels AND so the referee's line-wise item name+price pairing works.
-    ink: list[str] = []
-
-    def _ink(text: str) -> None:
-        if text and text.strip():
-            ink.append(text.strip())
-
-    def _rendered_text() -> str:
-        return "\n".join(ink)
-
-    def _fact_flags(fid: str, label: str, value: str) -> dict:
-        """The EXACT per-fact flags the referee passes to ``_value_present_in``
-        (visual_qa.run_visual_qa locked-fact loop, visual_qa.py ~1710-1717).
-        Mirrors them character-for-character — fact_id-equality OR the keyword in
-        the LABEL ONLY (casefolded), never the fact_id — so the renderer's
-        matching is neither over- nor under-broad relative to the referee."""
-        label_cf = label.casefold()
-        return {
-            "phone_match": vqa._locked_fact_uses_phone_match(fact_id=fid, label=label, value=value),
-            "address_match": fid == "location" or "address" in label_cf or "location" in label_cf,
-            "schedule_match": fid == "schedule" or "schedule" in label_cf,
-            "price_match": fid.endswith(":price") or "price" in label_cf,
-        }
-
-    def _covered(fid: str, label: str, value: str) -> bool:
-        """A fact is covered iff the referee's own presence check passes against
-        the text we actually drew — eliminating substring boundary false
-        positives ("Vada"≠"Vadai", "$7.99"≠"$7.999") and using phone/price/
-        address/schedule semantics identical to visual_qa."""
-        normalized = vqa._normalize_text_for_match(_rendered_text())
-        return vqa._value_present_in(normalized, value, **_fact_flags(fid, label, value))
-
-    # ---- compose background + scrims ------------------------------------
-    with Image.open(source) as bg:
-        img = bg.convert("RGB")
-        if img.size != size:
-            img = img.resize(size)
-    img = compose_scrims(img, top_frac=0.22, bottom_frac=0.40)
-    draw = ImageDraw.Draw(img, "RGBA")
-
-    margin = max(28, int(width * 0.05))
-    safe_w = width - margin * 2
-
     # ===================================================================
-    # TOP ZONE — editorial brand lockup: emblem ring + monogram + brand
-    #   Mirrors compose_A() in fixc-v2-mockup-generator.py:
-    #     • gold ellipse ring (cx±34, top 56→124 in a 1080×1350 canvas)
-    #     • monogram (brand initials) centred in the ring — Playfair-Black
-    #     • brand name below in letter-spaced small-caps — Cormorant/masthead
-    #   Palette: GOLD=(208,178,110,255)  IVORY=(244,240,232,255) (approved mockup)
-    #   Replaces old kicker + hairline; brand is still `_ink`'d (coverage kept).
-    # ===================================================================
-    _EMBLEM_GOLD  = (208, 178, 110, 255)   # approved mockup gold (≠ legacy _GOLD)
-    _EMBLEM_IVORY = (244, 240, 232, 255)   # approved mockup ivory
-
-    cx_top = width // 2
-    # Scale ring geometry from the 1080-wide mockup reference.
-    ring_half = max(28, int(width * 0.0315))   # ≈34px @1080
-    ring_top  = int(height * 0.0415)           # ≈56px @1350
-    ring_bot  = ring_top + ring_half * 2       # ≈124px @1350 (height=68px)
-
-    draw.ellipse(
-        (cx_top - ring_half, ring_top, cx_top + ring_half, ring_bot),
-        outline=_EMBLEM_GOLD,
-        width=3,
-    )
-
-    # Monogram: Playfair-Black at ~38px; centred vertically inside the ring.
-    mono_px  = max(min_px, int(width * 0.0352))   # ≈38px @1080
-    mono_font = _premium_font("title", mono_px)    # "title" role → PlayfairDisplay-Black
-    monogram  = _brand_monogram(business) if business else ""
-    if monogram:
-        mono_cy = ring_top + (ring_bot - ring_top - mono_px) // 2
-        _draw_centered(draw, monogram, mono_font,
-                       cy=mono_cy, width=width,
-                       fill=_EMBLEM_GOLD, shadow=None)
-
-    # Brand name: letter-spaced small-caps below the ring.
-    y = ring_bot + max(10, int(height * 0.010))
-    if business:
-        brand_px   = max(min_px, int(width * 0.0315))   # ≈34px @1080
-        brand_font = _premium_font("masthead", brand_px)
-        brand_text = _spaced_caps(business)
-        # Inline letter-spacing: interleave extra thin spaces between characters
-        # to replicate the `center_spaced(..., extra=6)` effect in compose_A.
-        brand_spaced = " ".join(brand_text)        # thin space ≈ CSS letter-spacing
-        brand_lines  = _wrap_premium(draw, brand_spaced, "masthead", brand_px, safe_w)
-        for ln in brand_lines:
-            _draw_centered(draw, ln, brand_font,
-                           cy=y, width=width,
-                           fill=_EMBLEM_IVORY, shadow_dy=2)
-            y += int(brand_px * 1.18)
-        # INVARIANT: log the ORIGINAL business value so the coverage ledger
-        # (_covered / _value_present_in) sees the locked fact regardless of the
-        # display transformation (upper-casing, thin-space insertion, wrapping).
-        _ink(business)
-    top_zone_bottom = y
-
-    # ===================================================================
-    # FOOTER — schedule | location | contact (anchored to the bottom)
-    # Drawn first so the menu/title/seal can use the space above it.
-    # ===================================================================
-    footer_px = max(min_px, int(width * 0.0185))
-    footer_parts = [p for p in (schedule, location, contact) if p]
-    footer_text = "   |   ".join(footer_parts)
-    footer_font = _premium_font("footer", footer_px)
-    footer_y = height - margin
-    if footer_text:
-        footer_lines = _wrap_premium(draw, footer_text, "footer", footer_px, safe_w)
-        footer_block_h = len(footer_lines) * int(footer_px * 1.35)
-        footer_y = height - max(margin, int(height * 0.022)) - footer_block_h
-        fy = footer_y
-        for ln in footer_lines:
-            _draw_centered(draw, ln, footer_font, cy=fy, width=width,
-                           fill=_CREAM_SOFT, shadow_dy=2)
-            _ink(ln)
-            fy += int(footer_px * 1.35)
-    bottom_limit = footer_y - max(14, int(height * 0.012))
-
-    # ===================================================================
-    # MENU — Cormorant rows just above the footer.  Fully preflighted:
-    # ``_plan_menu_block`` wraps/shrinks every row to fit its column and raises
-    # if a row cannot fit at ``min_px``; the returned ``render_fn`` only paints
-    # rows that were proven to fit, and returns the exact strings it drew.
-    # ===================================================================
-    menu_px = max(min_px, layout.menu_font_px)
-    menu_block_h, menu_render = _plan_menu_block(
-        draw, items, layout, menu_px, min_px, safe_w, has_item_prices, render,
-    )
-    menu_top = bottom_limit - menu_block_h
-    if items and menu_top < top_zone_bottom:
-        raise render.FlyerRenderError("premium overlay does not fit")
-    for drawn_text in menu_render(draw, x_left=margin, y_top=menu_top, width=width, safe_w=safe_w):
-        _ink(drawn_text)
-
-    # ===================================================================
-    # TITLE — Playfair-Black headline, anchored in the UPPER zone just
-    # below the brand/emblem block.  Mirrors compose_A() in the reference
-    # mockup where the title sits at y≈210 (upper third of a 1350-tall
-    # canvas), well above the food hero mid-section.
+    # CD v2 (Slice B, FIX 2 — Codex MAJOR): the campaign_narrative is BEST-EFFORT.
+    # Including it must NEVER degrade the premium overlay to flat. The whole
+    # compose→fit→draw→verify→save sequence is wrapped in ``_compose`` so it can
+    # be attempted WITH the narrative and, if the REQUIRED content (title/menu/
+    # seal/footer + required-fact ledger) does not fit WITH it, RETRIED WITHOUT
+    # the narrative before degrading. Each attempt rebuilds a fresh image + ink
+    # log from scratch, so a failed first attempt leaves no partial pixels.
     #
-    # Upper band: title_top just below top_zone_bottom; max_height gives
-    # about 32% of canvas height for the headline + rules, keeping the
-    # seal + menu free to float/fill the lower two-thirds.
+    # Flag-off / empty narrative ⇒ ``cd_narrative == ""`` ⇒ the narrative block is
+    # a no-op on the FIRST attempt AND the retry is never engaged (only triggered
+    # when a narrative was actually present) ⇒ a SINGLE attempt byte-identical to
+    # today. The required-fact ledger is verified on EVERY attempt unchanged.
     # ===================================================================
-    _title_gap   = max(8, int(height * 0.012))         # gap below brand block
-    title_top    = top_zone_bottom + _title_gap         # where title block starts
-    _upper_limit = title_top + max(0, int(height * 0.32) - title_top)  # upper band ceiling
-    title_bottom = title_top  # will be updated below if title is drawn
-    if title:
-        title_px = max(min_px, int(width * 0.072))
-        # Shrink-to-fit within the upper band so the headline never overruns
-        # into the food-hero middle section reserved for the seal.
-        title_lines, title_px = _fit_title(
-            draw, title, title_px, safe_w, min_px,
-            max_height=_upper_limit - title_top - 8,
-            line_factor=1.0,
+    def _compose(include_narrative: bool) -> None:
+        # ``ink`` accumulates the RAW text of every string actually rendered, one
+        # entry per visual line/row, so the final coverage check is grounded in real
+        # pixels AND so the referee's line-wise item name+price pairing works.
+        # Rebuilt per attempt so a retry never inherits the dropped attempt's text.
+        ink: list[str] = []
+
+        def _ink(text: str) -> None:
+            if text and text.strip():
+                ink.append(text.strip())
+
+        def _rendered_text() -> str:
+            return "\n".join(ink)
+
+        def _fact_flags(fid: str, label: str, value: str) -> dict:
+            """The EXACT per-fact flags the referee passes to ``_value_present_in``
+            (visual_qa.run_visual_qa locked-fact loop, visual_qa.py ~1710-1717).
+            Mirrors them character-for-character — fact_id-equality OR the keyword in
+            the LABEL ONLY (casefolded), never the fact_id — so the renderer's
+            matching is neither over- nor under-broad relative to the referee."""
+            label_cf = label.casefold()
+            return {
+                "phone_match": vqa._locked_fact_uses_phone_match(fact_id=fid, label=label, value=value),
+                "address_match": fid == "location" or "address" in label_cf or "location" in label_cf,
+                "schedule_match": fid == "schedule" or "schedule" in label_cf,
+                "price_match": fid.endswith(":price") or "price" in label_cf,
+            }
+
+        def _covered(fid: str, label: str, value: str) -> bool:
+            """A fact is covered iff the referee's own presence check passes against
+            the text we actually drew — eliminating substring boundary false
+            positives ("Vada"≠"Vadai", "$7.99"≠"$7.999") and using phone/price/
+            address/schedule semantics identical to visual_qa."""
+            normalized = vqa._normalize_text_for_match(_rendered_text())
+            return vqa._value_present_in(normalized, value, **_fact_flags(fid, label, value))
+
+        # ---- compose background + scrims ------------------------------------
+        with Image.open(source) as bg:
+            img = bg.convert("RGB")
+            if img.size != size:
+                img = img.resize(size)
+        img = compose_scrims(img, top_frac=0.22, bottom_frac=0.40)
+        draw = ImageDraw.Draw(img, "RGBA")
+
+        margin = max(28, int(width * 0.05))
+        safe_w = width - margin * 2
+
+        # ===================================================================
+        # TOP ZONE — editorial brand lockup: emblem ring + monogram + brand
+        #   Mirrors compose_A() in fixc-v2-mockup-generator.py:
+        #     • gold ellipse ring (cx±34, top 56→124 in a 1080×1350 canvas)
+        #     • monogram (brand initials) centred in the ring — Playfair-Black
+        #     • brand name below in letter-spaced small-caps — Cormorant/masthead
+        #   Palette: GOLD=(208,178,110,255)  IVORY=(244,240,232,255) (approved mockup)
+        #   Replaces old kicker + hairline; brand is still `_ink`'d (coverage kept).
+        # ===================================================================
+        _EMBLEM_GOLD  = (208, 178, 110, 255)   # approved mockup gold (≠ legacy _GOLD)
+        _EMBLEM_IVORY = (244, 240, 232, 255)   # approved mockup ivory
+
+        cx_top = width // 2
+        # Scale ring geometry from the 1080-wide mockup reference.
+        ring_half = max(28, int(width * 0.0315))   # ≈34px @1080
+        ring_top  = int(height * 0.0415)           # ≈56px @1350
+        ring_bot  = ring_top + ring_half * 2       # ≈124px @1350 (height=68px)
+
+        draw.ellipse(
+            (cx_top - ring_half, ring_top, cx_top + ring_half, ring_bot),
+            outline=_EMBLEM_GOLD,
+            width=3,
         )
-        if title_lines is None:
+
+        # Monogram: Playfair-Black at ~38px; centred vertically inside the ring.
+        mono_px  = max(min_px, int(width * 0.0352))   # ≈38px @1080
+        mono_font = _premium_font("title", mono_px)    # "title" role → PlayfairDisplay-Black
+        monogram  = _brand_monogram(business) if business else ""
+        if monogram:
+            mono_cy = ring_top + (ring_bot - ring_top - mono_px) // 2
+            _draw_centered(draw, monogram, mono_font,
+                           cy=mono_cy, width=width,
+                           fill=_EMBLEM_GOLD, shadow=None)
+
+        # Brand name: letter-spaced small-caps below the ring.
+        y = ring_bot + max(10, int(height * 0.010))
+        if business:
+            brand_px   = max(min_px, int(width * 0.0315))   # ≈34px @1080
+            brand_font = _premium_font("masthead", brand_px)
+            brand_text = _spaced_caps(business)
+            # Inline letter-spacing: interleave extra thin spaces between characters
+            # to replicate the `center_spaced(..., extra=6)` effect in compose_A.
+            brand_spaced = " ".join(brand_text)        # thin space ≈ CSS letter-spacing
+            brand_lines  = _wrap_premium(draw, brand_spaced, "masthead", brand_px, safe_w)
+            for ln in brand_lines:
+                _draw_centered(draw, ln, brand_font,
+                               cy=y, width=width,
+                               fill=_EMBLEM_IVORY, shadow_dy=2)
+                y += int(brand_px * 1.18)
+            # INVARIANT: log the ORIGINAL business value so the coverage ledger
+            # (_covered / _value_present_in) sees the locked fact regardless of the
+            # display transformation (upper-casing, thin-space insertion, wrapping).
+            _ink(business)
+        top_zone_bottom = y
+
+        # ===================================================================
+        # CD v2 (Slice B, B2.5) — CAMPAIGN NARRATIVE eyebrow.
+        #
+        # The message-clarity lever: when a resolved creative direction carries a
+        # ``campaign_narrative``, render it as a PROMINENT enlarged kicker/eyebrow
+        # directly below the brand lockup so the customer reads the MARKETING MESSAGE
+        # first.  Montserrat-Bold (kicker role), tracked small-caps, GOLD — visually
+        # distinct from the cream Playfair title below it.
+        #
+        # Best-effort + flag-off byte-identical:
+        #   • ``cd_narrative == ""`` (carrier absent / blank) ⇒ this whole block is a
+        #     no-op (NO pixels, top_zone_bottom unchanged) → byte-identical to today.
+        #   • The narrative is NEVER a required fact: if it cannot fit its bounded
+        #     band (shrink-to-floor fails), it is DROPPED — never raised, never
+        #     allowed to push a required fact off the canvas.
+        # ===================================================================
+        if cd_narrative and include_narrative:
+            _narr_gap = max(8, int(height * 0.010))
+            _narr_top = top_zone_bottom + _narr_gap
+            # Bounded band: keep the narrative in the upper ~26% so the Playfair
+            # title still has its own band below it. The narrative shrinks/drops
+            # before it would intrude on the title zone.
+            _narr_ceiling = max(_narr_top, int(height * 0.26))
+            _narr_px = max(min_px, int(width * 0.030))   # enlarged eyebrow (~32px @1080)
+            _narr_lines, _narr_px = _fit_role_block(
+                draw, cd_narrative, "kicker", _narr_px, safe_w, min_px,
+                max_height=max(0, _narr_ceiling - _narr_top),
+                line_factor=1.22, max_lines=3,
+            )
+            if _narr_lines:
+                _narr_font = _premium_font("kicker", _narr_px)
+                ny = _narr_top
+                for ln in _narr_lines:
+                    _draw_centered(draw, ln, _narr_font, cy=ny, width=width,
+                                   fill=_EMBLEM_GOLD, shadow_dy=2)
+                    ny += int(_narr_px * 1.22)
+                # Log the ORIGINAL narrative so any future coverage check sees it;
+                # the narrative itself is optional, so this never gates fail-closed.
+                _ink(cd_narrative)
+                top_zone_bottom = ny
+
+        # ===================================================================
+        # FOOTER — schedule | location | contact (anchored to the bottom)
+        # Drawn first so the menu/title/seal can use the space above it.
+        # ===================================================================
+        footer_px = max(min_px, int(width * 0.0185))
+        footer_parts = [p for p in (schedule, location, contact) if p]
+        footer_text = "   |   ".join(footer_parts)
+        footer_font = _premium_font("footer", footer_px)
+        footer_y = height - margin
+        if footer_text:
+            footer_lines = _wrap_premium(draw, footer_text, "footer", footer_px, safe_w)
+            footer_block_h = len(footer_lines) * int(footer_px * 1.35)
+            footer_y = height - max(margin, int(height * 0.022)) - footer_block_h
+            fy = footer_y
+            for ln in footer_lines:
+                _draw_centered(draw, ln, footer_font, cy=fy, width=width,
+                               fill=_CREAM_SOFT, shadow_dy=2)
+                _ink(ln)
+                fy += int(footer_px * 1.35)
+        bottom_limit = footer_y - max(14, int(height * 0.012))
+
+        # ===================================================================
+        # MENU — Cormorant rows just above the footer.  Fully preflighted:
+        # ``_plan_menu_block`` wraps/shrinks every row to fit its column and raises
+        # if a row cannot fit at ``min_px``; the returned ``render_fn`` only paints
+        # rows that were proven to fit, and returns the exact strings it drew.
+        # ===================================================================
+        menu_px = max(min_px, layout.menu_font_px)
+        menu_block_h, menu_render = _plan_menu_block(
+            draw, items, layout, menu_px, min_px, safe_w, has_item_prices, render,
+        )
+        menu_top = bottom_limit - menu_block_h
+        if items and menu_top < top_zone_bottom:
             raise render.FlyerRenderError("premium overlay does not fit")
-        title_font = _premium_font("title", title_px)
-        ty = title_top
-        for ln in title_lines:
-            _draw_centered(draw, ln, title_font, cy=ty, width=width,
-                           fill=_TITLE_CREAM, shadow_dy=4)
-            ty += int(title_px * 1.0)
-        _ink(title)
-        title_bottom = ty  # bottom of last title line
+        for drawn_text in menu_render(draw, x_left=margin, y_top=menu_top, width=width, safe_w=safe_w):
+            _ink(drawn_text)
 
-        # ---------------------------------------------------------------
-        # Decorative gold rules flanking the title (Fix C v2 Editorial).
-        # Mirrors compose_A() in fixc-v2-mockup-generator.py:
-        #   d.line((cx-250,rule_y, cx-90,rule_y), fill=GOLD, width=2)
-        #   d.line((cx+90, rule_y, cx+250,rule_y), fill=GOLD, width=2)
-        #   d.ellipse((cx-4,rule_y-4, cx+4,rule_y+4), fill=GOLD)
-        # Scale gap (90px) and reach (250px) from the 1080-wide reference.
-        # Placed 8px below the last title line so the rules sit just
-        # beneath the headline.
-        # _EMBLEM_GOLD and cx_top are defined in the TOP ZONE block above.
-        # ---------------------------------------------------------------
-        _rule_gap   = max(40, int(width * 90 / 1080))   # ≈90px @1080
-        _rule_reach = max(80, int(width * 250 / 1080))  # ≈250px @1080
-        _rule_y = title_bottom + 8  # 8px below last title line
-        _dot_r = 4        # 4px radius dot (8×8 bounding box)
-        if _rule_y < height - margin:   # safety: don't draw outside canvas
-            # left rule
-            draw.line(
-                (cx_top - _rule_reach, _rule_y, cx_top - _rule_gap, _rule_y),
-                fill=_EMBLEM_GOLD, width=2,
+        # ===================================================================
+        # TITLE — Playfair-Black headline, anchored in the UPPER zone just
+        # below the brand/emblem block.  Mirrors compose_A() in the reference
+        # mockup where the title sits at y≈210 (upper third of a 1350-tall
+        # canvas), well above the food hero mid-section.
+        #
+        # Upper band: title_top just below top_zone_bottom; max_height gives
+        # about 32% of canvas height for the headline + rules, keeping the
+        # seal + menu free to float/fill the lower two-thirds.
+        # ===================================================================
+        _title_gap   = max(8, int(height * 0.012))         # gap below brand block
+        title_top    = top_zone_bottom + _title_gap         # where title block starts
+        _upper_limit = title_top + max(0, int(height * 0.32) - title_top)  # upper band ceiling
+        title_bottom = title_top  # will be updated below if title is drawn
+        if title:
+            title_px = max(min_px, int(width * 0.072))
+            # Shrink-to-fit within the upper band so the headline never overruns
+            # into the food-hero middle section reserved for the seal.
+            title_lines, title_px = _fit_title(
+                draw, title, title_px, safe_w, min_px,
+                max_height=_upper_limit - title_top - 8,
+                line_factor=1.0,
             )
-            # right rule
-            draw.line(
-                (cx_top + _rule_gap, _rule_y, cx_top + _rule_reach, _rule_y),
-                fill=_EMBLEM_GOLD, width=2,
+            if title_lines is None:
+                raise render.FlyerRenderError("premium overlay does not fit")
+            title_font = _premium_font("title", title_px)
+            ty = title_top
+            for ln in title_lines:
+                _draw_centered(draw, ln, title_font, cy=ty, width=width,
+                               fill=_TITLE_CREAM, shadow_dy=4)
+                ty += int(title_px * 1.0)
+            _ink(title)
+            title_bottom = ty  # bottom of last title line
+
+            # ---------------------------------------------------------------
+            # Decorative gold rules flanking the title (Fix C v2 Editorial).
+            # Mirrors compose_A() in fixc-v2-mockup-generator.py:
+            #   d.line((cx-250,rule_y, cx-90,rule_y), fill=GOLD, width=2)
+            #   d.line((cx+90, rule_y, cx+250,rule_y), fill=GOLD, width=2)
+            #   d.ellipse((cx-4,rule_y-4, cx+4,rule_y+4), fill=GOLD)
+            # Scale gap (90px) and reach (250px) from the 1080-wide reference.
+            # Placed 8px below the last title line so the rules sit just
+            # beneath the headline.
+            # _EMBLEM_GOLD and cx_top are defined in the TOP ZONE block above.
+            # ---------------------------------------------------------------
+            _rule_gap   = max(40, int(width * 90 / 1080))   # ≈90px @1080
+            _rule_reach = max(80, int(width * 250 / 1080))  # ≈250px @1080
+            _rule_y = title_bottom + 8  # 8px below last title line
+            _dot_r = 4        # 4px radius dot (8×8 bounding box)
+            if _rule_y < height - margin:   # safety: don't draw outside canvas
+                # left rule
+                draw.line(
+                    (cx_top - _rule_reach, _rule_y, cx_top - _rule_gap, _rule_y),
+                    fill=_EMBLEM_GOLD, width=2,
+                )
+                # right rule
+                draw.line(
+                    (cx_top + _rule_gap, _rule_y, cx_top + _rule_reach, _rule_y),
+                    fill=_EMBLEM_GOLD, width=2,
+                )
+                # center dot
+                draw.ellipse(
+                    (cx_top - _dot_r, _rule_y - _dot_r,
+                     cx_top + _dot_r, _rule_y + _dot_r),
+                    fill=_EMBLEM_GOLD,
+                )
+            title_bottom = _rule_y + _dot_r + 4  # include the rule+dot height
+
+        # ===================================================================
+        # OFFER SEAL — gold circle floating in the right-middle over the food
+        # hero, between the title block (upper) and the menu (lower).
+        #
+        # Change 1: seal_planned is True whenever shared_offer_price is
+        # non-empty, regardless of offer_mode.  The "Any item $7.99" hook must
+        # appear as the prominent visual accent even when items carry per-item
+        # prices (offer_mode=="inline").
+        #
+        # Change 2: seal floats at the vertical MIDPOINT of the gap between
+        # title_bottom (upper anchor) and menu_top (lower anchor), horizontally
+        # right-of-centre — mirroring compose_A() sx=W-175, sy=600.
+        #
+        # Fail-closed: if the seal cannot fit its band (box out-of-bounds), it
+        # is SKIPPED and the offer coverage falls through to the secondary line
+        # (Change 4).  FlyerRenderError is raised only if NEITHER the seal
+        # NOR the secondary line can cover the pricing_structure fact (Change 5).
+        # ===================================================================
+        seal_label = (shared_offer_label or "OFFER").strip()
+        # Change 1: show seal whenever there is a shared offer price — not
+        # gated on layout.offer_mode so "inline" briefs also get the seal.
+        seal_planned = bool(shared_offer_price)
+        seal_drawn = False   # set True only when draw_offer_seal succeeds in bounds
+        seal_h = 0
+        seal_cy = 0
+        if seal_planned:
+            # CD v2 (B2.5): offer_priority scales the seal (1.0 == today). Sizing,
+            # band reservation and the drawn circle all use the SAME scale so they
+            # never drift.
+            seal_h = _measure_offer_seal(draw, label=seal_label, price=shared_offer_price,
+                                         width=width, offer_scale=layout.offer_scale)
+            # Change 2: float vertically in the gap between title_bottom and menu_top.
+            seal_cy = (title_bottom + menu_top) // 2
+
+        # Draw the seal AFTER the title so its gold border sits cleanly on top.
+        # Placement: right side, mirroring compose_A() which places the seal at
+        # sx=W-175, sy=600 on a 1080×1350 canvas.  We offset cx so the right
+        # edge sits at (width - margin), keeping it inside the canvas.
+        if seal_h:
+            # seal_h is already the circle diameter (2×sr) returned by
+            # _measure_offer_seal, so the radius is simply half of that.
+            _seal_r_est = seal_h // 2
+            _seal_cx = width - margin - _seal_r_est
+            # Safety clamp: never let the seal overlap the left half of the canvas.
+            _seal_cx = max(width // 2 + _seal_r_est + margin, _seal_cx)
+            # PREFLIGHT (Codex BLOCKER fix): compute the seal's bounding box from its
+            # centre + radius and verify it fits BEFORE drawing any pixels. Drawing
+            # first and rejecting after would leave stray seal pixels on the flyer
+            # while the secondary line ALSO draws the offer (double-draw). The seal is
+            # a circle of radius _seal_r_est centred at (_seal_cx, seal_cy); a small
+            # pad covers the drop shadow.
+            _shadow_pad = max(4, int(width * 0.006))
+            _pf = (
+                _seal_cx - _seal_r_est,
+                seal_cy - _seal_r_est,
+                _seal_cx + _seal_r_est + _shadow_pad,
+                seal_cy + _seal_r_est + _shadow_pad,
             )
-            # center dot
-            draw.ellipse(
-                (cx_top - _dot_r, _rule_y - _dot_r,
-                 cx_top + _dot_r, _rule_y + _dot_r),
-                fill=_EMBLEM_GOLD,
-            )
-        title_bottom = _rule_y + _dot_r + 4  # include the rule+dot height
+            # Fit: fully below title_bottom, above menu_top, within the canvas.
+            if (_pf[1] >= title_bottom and _pf[3] <= menu_top
+                    and _pf[0] >= 0 and _pf[2] <= width):
+                draw_offer_seal(draw, label=seal_label, price=shared_offer_price,
+                                width=width, center=(_seal_cx, seal_cy),
+                                offer_scale=layout.offer_scale)
+                # Ink the label, the price, AND their combined form (the circle
+                # stacks label directly above price, so the combined "label price"
+                # string is visibly present) — this covers a ``pricing_structure``
+                # fact whose value is the whole "Any item ... $7.99" phrase.
+                _ink(seal_label)
+                _ink(shared_offer_price)
+                _ink(f"{seal_label} {shared_offer_price}")
+                if shared_offer_text:
+                    _ink(shared_offer_text)
+                seal_drawn = True
+            # If the seal did NOT fit, NO seal pixels were drawn and seal_drawn stays
+            # False — the secondary line path will place the offer (fail-closed
+            # fallback), with no stray seal and no double-draw.
 
-    # ===================================================================
-    # OFFER SEAL — gold circle floating in the right-middle over the food
-    # hero, between the title block (upper) and the menu (lower).
-    #
-    # Change 1: seal_planned is True whenever shared_offer_price is
-    # non-empty, regardless of offer_mode.  The "Any item $7.99" hook must
-    # appear as the prominent visual accent even when items carry per-item
-    # prices (offer_mode=="inline").
-    #
-    # Change 2: seal floats at the vertical MIDPOINT of the gap between
-    # title_bottom (upper anchor) and menu_top (lower anchor), horizontally
-    # right-of-centre — mirroring compose_A() sx=W-175, sy=600.
-    #
-    # Fail-closed: if the seal cannot fit its band (box out-of-bounds), it
-    # is SKIPPED and the offer coverage falls through to the secondary line
-    # (Change 4).  FlyerRenderError is raised only if NEITHER the seal
-    # NOR the secondary line can cover the pricing_structure fact (Change 5).
-    # ===================================================================
-    seal_label = (shared_offer_label or "OFFER").strip()
-    # Change 1: show seal whenever there is a shared offer price — not
-    # gated on layout.offer_mode so "inline" briefs also get the seal.
-    seal_planned = bool(shared_offer_price)
-    seal_drawn = False   # set True only when draw_offer_seal succeeds in bounds
-    seal_h = 0
-    seal_cy = 0
-    if seal_planned:
-        seal_h = _measure_offer_seal(draw, label=seal_label, price=shared_offer_price, width=width)
-        # Change 2: float vertically in the gap between title_bottom and menu_top.
-        seal_cy = (title_bottom + menu_top) // 2
+        # ===================================================================
+        # SECONDARY LINES — facts that no region above placed (offer-without-seal,
+        # promotion_end, taglines, source_required_text, any other required fact ID
+        # this renderer doesn't have a dedicated region for) PLUS best-effort
+        # optional extras.  Each line is preflighted as a whole block (the MINOR
+        # fix): we draw it only if ALL its wrapped lines fit the band — never
+        # partially.  Required lines that cannot fit are caught by the coverage
+        # check below (fail-closed); optional extras are simply skipped.
+        #
+        # Change 3: secondary lines now occupy the band BELOW the title block
+        # (title_bottom + gap) up to menu_top.  The seal floats right-of-centre
+        # in the same zone; secondary text is centred and typically short, so
+        # visual overlap is rare and the editorial composition is preserved.
+        # ===================================================================
+        secondary_y = title_bottom + max(6, int(height * 0.008))
+        sec_px = max(min_px, int(width * 0.020))
+        sec_font = _premium_font("footer", sec_px)
+        sec_line_h = int(sec_px * 1.4)
 
-    # Draw the seal AFTER the title so its gold border sits cleanly on top.
-    # Placement: right side, mirroring compose_A() which places the seal at
-    # sx=W-175, sy=600 on a 1080×1350 canvas.  We offset cx so the right
-    # edge sits at (width - margin), keeping it inside the canvas.
-    if seal_h:
-        # seal_h is already the circle diameter (2×sr) returned by
-        # _measure_offer_seal, so the radius is simply half of that.
-        _seal_r_est = seal_h // 2
-        _seal_cx = width - margin - _seal_r_est
-        # Safety clamp: never let the seal overlap the left half of the canvas.
-        _seal_cx = max(width // 2 + _seal_r_est + margin, _seal_cx)
-        # PREFLIGHT (Codex BLOCKER fix): compute the seal's bounding box from its
-        # centre + radius and verify it fits BEFORE drawing any pixels. Drawing
-        # first and rejecting after would leave stray seal pixels on the flyer
-        # while the secondary line ALSO draws the offer (double-draw). The seal is
-        # a circle of radius _seal_r_est centred at (_seal_cx, seal_cy); a small
-        # pad covers the drop shadow.
-        _shadow_pad = max(4, int(width * 0.006))
-        _pf = (
-            _seal_cx - _seal_r_est,
-            seal_cy - _seal_r_est,
-            _seal_cx + _seal_r_est + _shadow_pad,
-            seal_cy + _seal_r_est + _shadow_pad,
-        )
-        # Fit: fully below title_bottom, above menu_top, within the canvas.
-        if (_pf[1] >= title_bottom and _pf[3] <= menu_top
-                and _pf[0] >= 0 and _pf[2] <= width):
-            draw_offer_seal(draw, label=seal_label, price=shared_offer_price,
-                            width=width, center=(_seal_cx, seal_cy))
-            # Ink the label, the price, AND their combined form (the circle
-            # stacks label directly above price, so the combined "label price"
-            # string is visibly present) — this covers a ``pricing_structure``
-            # fact whose value is the whole "Any item ... $7.99" phrase.
-            _ink(seal_label)
-            _ink(shared_offer_price)
-            _ink(f"{seal_label} {shared_offer_price}")
-            if shared_offer_text:
-                _ink(shared_offer_text)
-            seal_drawn = True
-        # If the seal did NOT fit, NO seal pixels were drawn and seal_drawn stays
-        # False — the secondary line path will place the offer (fail-closed
-        # fallback), with no stray seal and no double-draw.
+        def _draw_secondary(text, *, fill) -> bool:
+            """Draw a centred secondary block ONLY if the whole wrapped block fits
+            the band between title_bottom and menu_top; returns True (and inks it)
+            if drawn, else False with no pixels mutated."""
+            nonlocal secondary_y
+            if not text:
+                return False
+            lines = _wrap_premium(draw, text, "footer", sec_px, safe_w)
+            if not lines:
+                return False
+            block_h = len(lines) * sec_line_h
+            if secondary_y + block_h > menu_top:
+                return False  # whole block does not fit → draw nothing (no partial)
+            for ln in lines:
+                _draw_centered(draw, ln, sec_font, cy=secondary_y, width=width, fill=fill, shadow_dy=2)
+                _ink(ln)
+                secondary_y += sec_line_h
+            return True
 
-    # ===================================================================
-    # SECONDARY LINES — facts that no region above placed (offer-without-seal,
-    # promotion_end, taglines, source_required_text, any other required fact ID
-    # this renderer doesn't have a dedicated region for) PLUS best-effort
-    # optional extras.  Each line is preflighted as a whole block (the MINOR
-    # fix): we draw it only if ALL its wrapped lines fit the band — never
-    # partially.  Required lines that cannot fit are caught by the coverage
-    # check below (fail-closed); optional extras are simply skipped.
-    #
-    # Change 3: secondary lines now occupy the band BELOW the title block
-    # (title_bottom + gap) up to menu_top.  The seal floats right-of-centre
-    # in the same zone; secondary text is centred and typically short, so
-    # visual overlap is rare and the editorial composition is preserved.
-    # ===================================================================
-    secondary_y = title_bottom + max(6, int(height * 0.008))
-    sec_px = max(min_px, int(width * 0.020))
-    sec_font = _premium_font("footer", sec_px)
-    sec_line_h = int(sec_px * 1.4)
+        # Required facts not yet covered by a region above get drawn here as
+        # must-fit lines.  This is what makes BLOCKER 1 safe: an unknown required
+        # fact id (tagline / source_required_text:* / replacement:*:new / future)
+        # is rendered rather than silently skipped; if it can't fit, the coverage
+        # check fails closed.
+        #
+        # Change 4: offer-class facts are SKIPPED when the seal already drew
+        # them (seal_drawn=True) to avoid a duplicate "Any item $7.99" line.
+        # When the seal DID NOT draw (seal_drawn=False), the offer falls through
+        # to this secondary path as the coverage fallback (Change 5).
+        #
+        # Item facts are excluded — they belong to the menu region and their
+        # coverage/pairing is enforced by the final gate.
+        _offer_norm = render._normalize_fact_text(shared_offer_text or f"{seal_label} {shared_offer_price}")
+        for fid, label, value in required_facts:
+            if re.match(r"^item:\d+:(name|price)$", fid):
+                continue
+            if _covered(fid, label, value):
+                continue
+            is_offer = fid == "pricing_structure" or fid.startswith("offer:") \
+                or render._normalize_fact_text(value) == _offer_norm
+            # Change 4: if the seal drew the offer, skip the secondary offer line
+            # to avoid duplication.  If the seal did NOT draw (seal_drawn=False),
+            # allow the secondary to handle it so the offer stays covered.
+            if is_offer and seal_drawn:
+                continue  # seal already covers this; do NOT double-draw
+            _draw_secondary(value, fill=_GOLD if is_offer else _CREAM_SOFT)
 
-    def _draw_secondary(text, *, fill) -> bool:
-        """Draw a centred secondary block ONLY if the whole wrapped block fits
-        the band between title_bottom and menu_top; returns True (and inks it)
-        if drawn, else False with no pixels mutated."""
-        nonlocal secondary_y
-        if not text:
-            return False
-        lines = _wrap_premium(draw, text, "footer", sec_px, safe_w)
-        if not lines:
-            return False
-        block_h = len(lines) * sec_line_h
-        if secondary_y + block_h > menu_top:
-            return False  # whole block does not fit → draw nothing (no partial)
-        for ln in lines:
-            _draw_centered(draw, ln, sec_font, cy=secondary_y, width=width, fill=fill, shadow_dy=2)
-            _ink(ln)
-            secondary_y += sec_line_h
-        return True
+        # Best-effort optional extras: assembly detail clauses that are NOT required
+        # locked facts (e.g. the raw-request echo).  POLISH: suppress any extra that
+        # adds NO new information vs the text already drawn, so a redundant echo
+        # ("Weekend Specials any item $7.99") or a reformatted duplicate of an
+        # already-shown fact (request-body "+1 732-983-7841" vs locked
+        # "+17329837841") never prints.  Word tokens must be present in the drawn
+        # word-token set; digit tokens must appear (as a run) in the drawn digit
+        # string — so phone/number reformatting is recognized as redundant.  An
+        # extra is drawn only if it adds a genuinely new token AND fits (best-effort,
+        # never fail-closed).
+        _drawn_tokens: set[str] = set()
+        for line in ink:
+            _drawn_tokens.update(_tokens(line))
+        _drawn_digits = "".join(re.findall(r"\d+", " ".join(ink)))
 
-    # Required facts not yet covered by a region above get drawn here as
-    # must-fit lines.  This is what makes BLOCKER 1 safe: an unknown required
-    # fact id (tagline / source_required_text:* / replacement:*:new / future)
-    # is rendered rather than silently skipped; if it can't fit, the coverage
-    # check fails closed.
-    #
-    # Change 4: offer-class facts are SKIPPED when the seal already drew
-    # them (seal_drawn=True) to avoid a duplicate "Any item $7.99" line.
-    # When the seal DID NOT draw (seal_drawn=False), the offer falls through
-    # to this secondary path as the coverage fallback (Change 5).
-    #
-    # Item facts are excluded — they belong to the menu region and their
-    # coverage/pairing is enforced by the final gate.
-    _offer_norm = render._normalize_fact_text(shared_offer_text or f"{seal_label} {shared_offer_price}")
-    for fid, label, value in required_facts:
-        if re.match(r"^item:\d+:(name|price)$", fid):
-            continue
-        if _covered(fid, label, value):
-            continue
-        is_offer = fid == "pricing_structure" or fid.startswith("offer:") \
-            or render._normalize_fact_text(value) == _offer_norm
-        # Change 4: if the seal drew the offer, skip the secondary offer line
-        # to avoid duplication.  If the seal did NOT draw (seal_drawn=False),
-        # allow the secondary to handle it so the offer stays covered.
-        if is_offer and seal_drawn:
-            continue  # seal already covers this; do NOT double-draw
-        _draw_secondary(value, fill=_GOLD if is_offer else _CREAM_SOFT)
-
-    # Best-effort optional extras: assembly detail clauses that are NOT required
-    # locked facts (e.g. the raw-request echo).  POLISH: suppress any extra that
-    # adds NO new information vs the text already drawn, so a redundant echo
-    # ("Weekend Specials any item $7.99") or a reformatted duplicate of an
-    # already-shown fact (request-body "+1 732-983-7841" vs locked
-    # "+17329837841") never prints.  Word tokens must be present in the drawn
-    # word-token set; digit tokens must appear (as a run) in the drawn digit
-    # string — so phone/number reformatting is recognized as redundant.  An
-    # extra is drawn only if it adds a genuinely new token AND fits (best-effort,
-    # never fail-closed).
-    _drawn_tokens: set[str] = set()
-    for line in ink:
-        _drawn_tokens.update(_tokens(line))
-    _drawn_digits = "".join(re.findall(r"\d+", " ".join(ink)))
-
-    def _adds_new(extra: str) -> bool:
-        for tok in _tokens(extra):
-            if tok.isdigit():
-                if tok not in _drawn_digits:
+        def _adds_new(extra: str) -> bool:
+            for tok in _tokens(extra):
+                if tok.isdigit():
+                    if tok not in _drawn_digits:
+                        return True
+                elif tok not in _drawn_tokens:
                     return True
-            elif tok not in _drawn_tokens:
-                return True
-        return False
+            return False
 
-    for extra in extras:
-        etoks = _tokens(extra)
-        if not etoks or not _adds_new(extra):
-            continue  # adds nothing new → skip (suppresses redundant echoes)
-        if _draw_secondary(extra, fill=_CREAM_SOFT):
-            _drawn_tokens.update(etoks)
-            # MINOR: keep the digit ledger current so a LATER extra that repeats
-            # these digits (in a different format) is also suppressed.
-            _drawn_digits += "".join(re.findall(r"\d+", extra))
+        for extra in extras:
+            etoks = _tokens(extra)
+            if not etoks or not _adds_new(extra):
+                continue  # adds nothing new → skip (suppresses redundant echoes)
+            if _draw_secondary(extra, fill=_CREAM_SOFT):
+                _drawn_tokens.update(etoks)
+                # MINOR: keep the digit ledger current so a LATER extra that repeats
+                # these digits (in a different format) is also suppressed.
+                _drawn_digits += "".join(re.findall(r"\d+", extra))
+
+        # ===================================================================
+        # FAIL-CLOSED — run the referee's OWN checks against the text we drew, so
+        # the contract is identical to visual_qa by construction:
+        #   (1) every required locked fact present via _value_present_in (text/
+        #       phone/address/schedule/price semantics, value-and-boundary-aware);
+        #   (2) every priced item present as a name+price PAIR per row
+        #       (_item_price_pair_blockers) so duplicate prices can't collapse and
+        #       an item:N:price isn't satisfied by the offer price elsewhere.
+        # ===================================================================
+        rendered = _rendered_text()
+        normalized = vqa._normalize_text_for_match(rendered)
+        missing: set[str] = set()
+        for fid, label, value in required_facts:
+            if not vqa._value_present_in(normalized, value, **_fact_flags(fid, label, value)):
+                missing.add(fid)
+        # Per-row item name+price pairing (BLOCKER + NOT-FIXED#2): the referee's own
+        # pair check — a priced item must appear with ITS price on a row; duplicate
+        # prices are matched per-row, never collapsed.
+        pair_blockers = vqa._item_price_pair_blockers(project, rendered)
+        if missing or pair_blockers:
+            detail = ", ".join(sorted(missing) + list(pair_blockers))
+            raise render.FlyerRenderError(
+                "premium overlay does not fit (missing required visible fact: " + detail + ")"
+            )
+
+        img.convert("RGB").save(target, format="PNG", optimize=True)
 
     # ===================================================================
-    # FAIL-CLOSED — run the referee's OWN checks against the text we drew, so
-    # the contract is identical to visual_qa by construction:
-    #   (1) every required locked fact present via _value_present_in (text/
-    #       phone/address/schedule/price semantics, value-and-boundary-aware);
-    #   (2) every priced item present as a name+price PAIR per row
-    #       (_item_price_pair_blockers) so duplicate prices can't collapse and
-    #       an item:N:price isn't satisfied by the offer price elsewhere.
+    # CD v2 Composition Phase 1, Task 2 — MESSAGE-FIRST (A) composer.
+    #
+    # Inverts today's hierarchy for ``poster_archetype == "message_first"``:
+    #   • campaign_narrative -> LARGEST headline, top third, Playfair-Black,
+    #     shrink-to-fit (~0.072-0.082 × width)
+    #   • hook_text          -> SECOND sub-headline (~0.044-0.050 × width)
+    #   • campaign_title     -> SMALL kicker eyebrow above the narrative (~0.026)
+    #   • brand lockup       -> SMALL demoted top text, NO dominant emblem ring (~0.024)
+    #   • hero / menu / footer / seal -> retained from today's lower-zone logic
+    #
+    # The unit-asserted invariant is PRESENT-TIERS (not a literal strict chain over
+    # all four tiers — in PROMOTED-title mode there is NO kicker so ``title_px == 0``
+    # while the brand is small but > 0, and ``title_px >= brand_px`` would falsely
+    # fail). The real intent: the HEADLINE dominates and the BRAND stays small; the
+    # kicker tier only participates WHEN PRESENT:
+    #   • ALWAYS: ``narrative_px (headline) > 0``; ``narrative_px > hook_px`` (when a
+    #     hook is present); the brand is SMALL (``brand_px <= hook_px`` with a hook,
+    #     else ``brand_px < narrative_px``).
+    #   • WHEN a kicker exists (``title_px > 0``, narrative-present mode): the FULL
+    #     descending chain ``narrative_px > hook_px > title_px >= brand_px``.
+    #   • WHEN promoted (``title_px == 0``): skip the kicker comparison —
+    #     ``narrative_px > hook_px`` (if hook) ``> brand_px`` and the brand stays small.
+    # Sizes are exposed on ``_LAST_LAYOUT_DEBUG`` so the test reads them
+    # deterministically (no pixel reading).
+    #
+    # Best-effort + fail-closed identical to ``_compose``: narrative/hook/title-
+    # kicker are NEVER required facts (the campaign_title VALUE is still inked for
+    # the ledger); the menu/seal/footer + required-fact ledger are the SAME checks.
+    # ``include_narrative`` drives the drop-not-degrade retry exactly like _compose.
     # ===================================================================
-    rendered = _rendered_text()
-    normalized = vqa._normalize_text_for_match(rendered)
-    missing: set[str] = set()
-    for fid, label, value in required_facts:
-        if not vqa._value_present_in(normalized, value, **_fact_flags(fid, label, value)):
-            missing.add(fid)
-    # Per-row item name+price pairing (BLOCKER + NOT-FIXED#2): the referee's own
-    # pair check — a priced item must appear with ITS price on a row; duplicate
-    # prices are matched per-row, never collapsed.
-    pair_blockers = vqa._item_price_pair_blockers(project, rendered)
-    if missing or pair_blockers:
-        detail = ", ".join(sorted(missing) + list(pair_blockers))
-        raise render.FlyerRenderError(
-            "premium overlay does not fit (missing required visible fact: " + detail + ")"
+    def _compose_mf(include_narrative: bool, include_hook: bool) -> None:
+        ink: list[str] = []
+
+        def _ink(text: str) -> None:
+            if text and text.strip():
+                ink.append(text.strip())
+
+        def _rendered_text() -> str:
+            return "\n".join(ink)
+
+        def _fact_flags(fid: str, label: str, value: str) -> dict:
+            label_cf = label.casefold()
+            return {
+                "phone_match": vqa._locked_fact_uses_phone_match(fact_id=fid, label=label, value=value),
+                "address_match": fid == "location" or "address" in label_cf or "location" in label_cf,
+                "schedule_match": fid == "schedule" or "schedule" in label_cf,
+                "price_match": fid.endswith(":price") or "price" in label_cf,
+            }
+
+        def _covered(fid: str, label: str, value: str) -> bool:
+            normalized = vqa._normalize_text_for_match(_rendered_text())
+            return vqa._value_present_in(normalized, value, **_fact_flags(fid, label, value))
+
+        # ---- compose background + scrims (same as _compose) ----------------
+        with Image.open(source) as bg:
+            img = bg.convert("RGB")
+            if img.size != size:
+                img = img.resize(size)
+        img = compose_scrims(img, top_frac=0.22, bottom_frac=0.40)
+        draw = ImageDraw.Draw(img, "RGBA")
+
+        margin = max(28, int(width * 0.05))
+        safe_w = width - margin * 2
+        cx_top = width // 2
+
+        _EMBLEM_GOLD  = (208, 178, 110, 255)
+        _EMBLEM_IVORY = (244, 240, 232, 255)
+
+        # ---- TYPE SCALES — START sizes only ------------------------------
+        # narrative LARGEST (headline) start; brand demoted. The hook + title-
+        # kicker FINAL sizes are NOT decided here — FIX 1 derives them from the
+        # FITTED narrative size below so clamping can never invert the ordering.
+        narrative_start_px = max(min_px, int(width * 0.078))   # ~84px @1080 (band 0.072-0.082)
+        brand_start_px     = max(min_px, int(width * 0.024))   # ~26px @1080 (demoted, <= title)
+
+        # ===================================================================
+        # FIX 1 — FIT THE NARRATIVE FIRST, then DERIVE hook + title sizes as
+        # fractions of the FITTED narrative so ``narrative_px > hook_px >
+        # title_px`` holds BY CONSTRUCTION regardless of how far the narrative
+        # clamped.  The narrative band is measured from a top that RESERVES an
+        # upper bound for the (yet-to-be-sized) title kicker AND the (demoted,
+        # ≤ kicker) brand lockup: both final sizes are derived ≤ this allowance,
+        # so reserving it can only OVER-reserve → the narrative still fits its band.
+        #
+        # RESIDUAL-BLOCKER ORDERING — the START caps below bound the MAX size, but
+        # ``_fit_*`` may return any size down to ``min_px`` so the MAX cap alone
+        # cannot prevent an inversion (a long hook fitting below the title, a long
+        # title below the brand).  This composer therefore enforces the strict
+        # descending order on the sizes ACTUALLY DRAWN (``*_draw`` below), with the
+        # priority narrative(hero) ≻ title(required) ≻ hook(flex) ≻ brand:
+        #   • narr_draw  = the fitted narrative (best-effort: dropped if it cannot
+        #                  fit even at the floor — the drop ladder handles that).
+        #   • title_draw = the fitted REQUIRED kicker, capped below narr_draw; it
+        #                  must draw on-canvas (see the absolute guard) or fail-close.
+        #   • hook_draw  = min(hook_fitted, narr_draw-1); DROPPED if it leaves no
+        #                  room above the title (hook_draw <= title_draw).
+        #   • brand_draw = min(brand_fitted, title_draw)  (≤ title, lowest tier).
+        # Net DRAWN/reported invariant: narr_draw > hook_draw > title_draw >=
+        # brand_draw with the hook present; narr_draw > title_draw >= brand_draw
+        # with the hook dropped.  This never inverts regardless of text length.
+        # ===================================================================
+        _title_allowance = 0
+        if title:
+            # Reserve up to ~3 kicker lines + ~2 brand lines at the start-derived
+            # caps as an upper bound (final kicker ≤ round(narr_start*0.34); final
+            # brand ≤ that kicker cap).  Over-reserving only shrinks the narrative
+            # band slightly; the brand+kicker are RE-placed against the real top.
+            _kick_cap_ub = max(min_px, int(round(narrative_start_px * 0.34)))
+            _title_allowance = (max(8, int(height * 0.012))
+                                + 3 * int(_kick_cap_ub * 1.22)
+                                + max(16, int(height * 0.018))
+                                + 2 * int(_kick_cap_ub * 1.18))
+
+        # NARRATIVE-RELIABILITY: the dominant HEADLINE slot must NEVER be empty. The
+        # headline text is the campaign_narrative WHEN PRESENT, else the REQUIRED
+        # campaign_title is PROMOTED into the headline slot (and the redundant small
+        # kicker below is SUPPRESSED so the title is never drawn twice). The brain
+        # sometimes omits campaign_narrative (it is non-deterministic) → an empty
+        # narrative would otherwise render a headline-less A poster.
+        #
+        # INTENT (Codex FIX A — key promotion on the ACTUAL narrative LINES DRAWN,
+        # not on ``_narrative_active``): the narrative is FITTED FIRST, then promotion
+        # is decided from whether it produced DRAWABLE lines. ``promote_title`` is True
+        # whenever NO narrative line will be drawn — for ANY reason: the narrative is
+        # EMPTY, *or* it was DROPPED-for-fit by the retry ladder (re-entered here with
+        # ``include_narrative=False`` on the bare attempt), *or* ``_fit_title`` returns
+        # None IN-PLACE (a non-empty narrative that cannot fit its band at the floor).
+        # Keying on "no narrative drawn" — not merely "narrative absent" — is what
+        # closes the never-headline-less hole: a non-empty narrative that fails to fit
+        # IN-PLACE no longer slips through with a small kicker + a skipped headline; it
+        # PROMOTES the campaign_title into the headline slot → there is ALWAYS a
+        # headline. If the promoted title itself cannot fit (dense layout) the promotion
+        # fit below raises FlyerRenderError → the existing fail-closed degrade to FLAT
+        # (a complete flyer downstream), which is preferred over a headline-less
+        # premium. Net invariant: ``narrative_px > 0`` ALWAYS for message_first —
+        # a headline-less premium is structurally impossible (promote-or-raise).
+        _narrative_active = bool(cd_narrative) and include_narrative
+
+        _narr_gap = max(10, int(height * 0.014))
+        _narr_top = _title_allowance + _narr_gap
+        # Headline band: the upper ~40% so the hook + hero/menu sit below.
+        _narr_ceiling = max(_narr_top, int(height * 0.40))
+        _narr_band_h = max(0, _narr_ceiling - _narr_top)
+
+        narrative_px = 0
+        _narr_lines = None
+        # 1) Try the campaign_narrative as the headline (best-effort) WHEN active.
+        if _narrative_active:
+            _narr_lines, narrative_px = _fit_title(
+                draw, cd_narrative, narrative_start_px, safe_w, min_px,
+                max_height=_narr_band_h, line_factor=1.04,
+            )
+            if not _narr_lines:
+                narrative_px = 0  # narrative did not fit IN-PLACE — best-effort drop
+
+        # 2) PROMOTE the title decided on the ACTUAL drawn lines (FIX A): promote
+        # whenever NO narrative line will be drawn (empty / dropped / in-place-unfit).
+        promote_title = (not bool(_narr_lines)) and bool(title)
+
+        # 3) When promoting, FIT campaign_title as the HEADLINE at the narrative
+        # (largest) scale so the dominant slot is filled; the small kicker is
+        # SUPPRESSED below (no duplicate title). The promoted title is a REQUIRED
+        # fact: fail-closed if it cannot fit even the generous headline band at the
+        # floor (degrade to FLAT — never a blank/headline-less premium).
+        if promote_title:
+            _narr_lines, narrative_px = _fit_title(
+                draw, title, narrative_start_px, safe_w, min_px,
+                max_height=_narr_band_h, line_factor=1.04,
+            )
+            if not _narr_lines:
+                narrative_px = 0
+                raise render.FlyerRenderError(
+                    "premium overlay does not fit (campaign_title headline cannot fit on-canvas)"
+                )
+
+        # NEVER-HEADLINE-LESS GUARD (Codex FINAL review, FINDING 3 MAJOR): the
+        # message_first invariant is ``narrative_px > 0`` ALWAYS — draw the
+        # narrative, else the PROMOTED campaign_title, else RAISE (degrade to
+        # flat). The promote ladder above only fires when ``bool(title)`` is True;
+        # when there is NO campaign_narrative drawn AND NO campaign_title to
+        # promote, ``promote_title`` is False, the block is skipped, and the render
+        # would proceed with ``_narr_lines is None`` / ``narrative_px == 0`` — a
+        # headline-less A poster. Close that hole: if NO headline lines will be
+        # drawn after the narrative-fit + title-promotion attempts, fail-closed so
+        # the caller degrades to a complete FLAT flyer (preferred over saving a
+        # headline-less premium).
+        if not _narr_lines:
+            narrative_px = 0
+            raise render.FlyerRenderError(
+                "premium overlay does not fit (message_first has no headline: "
+                "no campaign_narrative drawn and no campaign_title to promote)"
+            )
+
+        # narr_draw — the DRAWN narrative size (0 when dropped/absent). The hero
+        # tier that the title + hook must stay strictly below.
+        narr_draw = narrative_px
+        # The reference size that drives the derived hook/title caps. When the
+        # narrative was drawn use its FITTED size; when it was dropped/absent fall
+        # back to the start size so the derived caps still reflect a coherent
+        # hierarchy (and there is a strict ceiling for the hook/title even with no
+        # narrative on-canvas).
+        _narr_ref_px = narr_draw or narrative_start_px
+
+        # DERIVE the hook + title MAX caps from the narrative reference (FIX 1):
+        #   hook_max   = ~0.60 × narrative   title_kicker = ~0.34 × narrative
+        # then enforce strict spread at the FLOOR edge (when caps collapse to
+        # min_px the 2-px step keeps narrative > hook > title >= brand strict).
+        hook_cap        = max(min_px, int(round(_narr_ref_px * 0.60)))
+        title_kicker_cap = max(min_px, int(round(_narr_ref_px * 0.34)))
+        if not (_narr_ref_px > hook_cap > title_kicker_cap >= brand_start_px):
+            title_kicker_cap = max(min_px, brand_start_px)
+            hook_cap = title_kicker_cap + 2
+            # _narr_ref_px must remain strictly above hook_cap; if the narrative
+            # clamped to min the start size is still the reference, but guard it.
+            if _narr_ref_px <= hook_cap:
+                _narr_ref_px = hook_cap + 2
+
+        # ===================================================================
+        # FIX 3 / RESIDUAL-BLOCKER 2 — TITLE kicker is a REQUIRED fact
+        # (campaign_title): fail-closed FIT, then a fail-closed ON-CANVAS check on
+        # the ABSOLUTE y-range.  The kicker is FITTED FIRST (band-height budget,
+        # independent of the absolute top) so its DRAWN size ``title_draw`` is
+        # known BEFORE the brand is sized (brand_draw <= title_draw) and BEFORE the
+        # absolute placement is verified.  The brand is then drawn (≤ title), the
+        # kicker's absolute kick_top/kick_bottom computed against the REAL
+        # brand_bottom, and ON-CANVAS verified (0 <= kick_top, kick_bottom <=
+        # canvas height) — only THEN is the kicker drawn + ``_ink``'d.  If the
+        # REQUIRED title cannot fit OR would land off-canvas → raise
+        # FlyerRenderError (degrades to the flat fallback, which handles required
+        # facts).  NEVER ``_ink`` a title not drawn-to-fit ON-CANVAS.
+        # ===================================================================
+        # Draw the small title KICKER ONLY when a narrative occupies the headline
+        # slot. When the title is PROMOTED into the headline (no narrative) the kicker
+        # is SUPPRESSED (title_draw stays 0) so campaign_title is never drawn twice —
+        # the promoted headline is its single covering element.
+        title_draw = 0
+        _kick_lines = None
+        _kick_line_h = 0
+        if title and not promote_title:
+            # Band budget for the kicker FIT — bounded by the reserved allowance
+            # (independent of brand_bottom) so title_draw is known before the brand
+            # is sized.  Capped at title_kicker_cap (< narr_draw by construction).
+            _kick_band = max(0, _title_allowance - max(8, int(height * 0.012)))
+            _kick_lines, title_draw = _fit_role_block(
+                draw, _spaced_caps(title), "kicker", title_kicker_cap, safe_w, min_px,
+                max_height=_kick_band, line_factor=1.22, max_lines=3,
+            )
+            if not _kick_lines:
+                # REQUIRED fact cannot fit its band → fail-closed (as _compose title).
+                raise render.FlyerRenderError(
+                    "premium overlay does not fit (campaign_title kicker cannot fit on-canvas)"
+                )
+            # title_draw must stay strictly below the hero narrative (when drawn).
+            if narr_draw and not (title_draw < narr_draw):
+                raise render.FlyerRenderError(
+                    "premium overlay does not fit (campaign_title kicker cannot demote below narrative)"
+                )
+            _kick_line_h = int(title_draw * 1.22)
+
+        # ===================================================================
+        # TOP — demoted brand lockup (NO emblem ring): small letter-spaced caps.
+        # brand_draw = min(brand_fitted, title_draw) so the brand is the LOWEST
+        # tier (<= the kicker) on the DRAWN size, never inverting above the title.
+        # ===================================================================
+        brand_draw = brand_start_px
+        if title and not promote_title:
+            # Narrative-present mode: clamp the brand to the kicker (its carrier) so
+            # the full descending chain narrative > hook > title >= brand holds.
+            brand_draw = min(brand_start_px, title_draw)
+        elif promote_title:
+            # FIX B — PROMOTED mode: there is NO kicker (title_draw == 0), so the
+            # brand cannot be clamped to it. Clamp the brand strictly BELOW the FITTED
+            # promoted HEADLINE (narr_draw == narrative_px) so present-tiers holds even
+            # when a long campaign_title fits only near min_px: brand_start_px (~0.024w
+            # ≈ 25px) could otherwise meet/exceed a headline clamped to ~min_px,
+            # inverting present-tiers (brand_px >= narrative_px). Using the ACTUAL
+            # fitted headline size (not the start size) keeps the brand subordinate to
+            # whatever the headline actually fitted to. We clamp to ``narr_draw - 2``
+            # (two below the headline) so the brand also stays STRICTLY below the HOOK
+            # tier, which itself draws at most ``narr_draw - 1`` (its own clamp below
+            # the headline): present-tiers requires narrative > hook > brand in promoted
+            # mode, and a single ``narr_draw - 1`` clamp would tie the brand to a hook
+            # sitting at the headline-minus-one ceiling when everything collapses to the
+            # floor. No min_px re-floor (the demoted brand lockup may legitimately sit
+            # below the floor, mirroring the narrative-present ``min(brand_start_px,
+            # title_draw)`` clamp) so the brand stays strictly below even a headline
+            # clamped all the way to min_px.
+            brand_draw = min(brand_start_px, narr_draw - 2)
+        y = max(16, int(height * 0.018))
+        if business:
+            brand_font = _premium_font("masthead", brand_draw)
+            brand_spaced = " ".join(_spaced_caps(business))
+            brand_lines = _wrap_premium(draw, brand_spaced, "masthead", brand_draw, safe_w)
+            for ln in brand_lines:
+                _draw_centered(draw, ln, brand_font, cy=y, width=width,
+                               fill=_EMBLEM_IVORY, shadow_dy=2)
+                y += int(brand_draw * 1.18)
+            _ink(business)
+        brand_bottom = y
+
+        # ---- TITLE kicker: absolute on-canvas guard, then draw -----------
+        # Only when the kicker carries the title (narrative present). When the title
+        # is promoted to the headline the kicker is suppressed and the title's
+        # coverage + on-canvas guard live in the headline draw below.
+        top_zone_bottom = brand_bottom
+        if title and not promote_title:
+            _kick_gap = max(8, int(height * 0.012))
+            kick_top = brand_bottom + _kick_gap
+            kick_bottom = kick_top + len(_kick_lines) * _kick_line_h
+            # RESIDUAL-BLOCKER 2: the kicker's ABSOLUTE y-range must be fully on
+            # the real canvas. _fit_role_block only checked the LOCAL band height;
+            # a brand pushed down can shove the kicker off-canvas while it is still
+            # _ink'd as covered. Verify before any ink (same fail-closed posture).
+            if kick_top < 0 or kick_bottom > height:
+                raise render.FlyerRenderError(
+                    "premium overlay does not fit (campaign_title kicker off-canvas)"
+                )
+            kick_font = _premium_font("kicker", title_draw)
+            ky = kick_top
+            for ln in _kick_lines:
+                _draw_centered(draw, ln, kick_font, cy=ky, width=width,
+                               fill=_EMBLEM_GOLD, shadow_dy=2)
+                ky += _kick_line_h
+            _ink(title)   # inked ONLY after a verified ON-CANVAS draw-to-fit
+            top_zone_bottom = ky
+
+        # ===================================================================
+        # HEADLINE — the LARGEST element, drawn now (fitted above). The text is the
+        # campaign_narrative when present, else the PROMOTED REQUIRED campaign_title
+        # (NARRATIVE-RELIABILITY: the slot is never empty). Drawn at the SAME
+        # narrative scale either way. Best-effort for a real narrative (dropped if it
+        # could not fit); fail-closed for a promoted title (the required-fact ledger +
+        # the absolute on-canvas guard below enforce it). Re-fit position against the
+        # REAL top — the reserved allowance only over-reserved.
+        # ===================================================================
+        if _narr_lines:
+            _narr_gap = max(10, int(height * 0.014))
+            _narr_top = top_zone_bottom + _narr_gap
+            _narr_bottom = _narr_top + len(_narr_lines) * int(narr_draw * 1.04)
+            # When the title is PROMOTED into the headline it is a REQUIRED fact: its
+            # absolute y-range must be fully on-canvas before any ink (mirrors the
+            # kicker's RESIDUAL-BLOCKER 2 guard). A real narrative is best-effort and
+            # is not subject to this guard.
+            if promote_title and (_narr_top < 0 or _narr_bottom > height):
+                raise render.FlyerRenderError(
+                    "premium overlay does not fit (campaign_title headline off-canvas)"
+                )
+            narr_font = _premium_font("title", narr_draw)
+            ny = _narr_top
+            for ln in _narr_lines:
+                _draw_centered(draw, ln, narr_font, cy=ny, width=width,
+                               fill=_TITLE_CREAM, shadow_dy=4)
+                ny += int(narr_draw * 1.04)
+            # Ink the ORIGINAL value so the coverage ledger sees it: the narrative
+            # (best-effort, ungated) OR the promoted title (covers the REQUIRED
+            # campaign_title fact in place of the suppressed kicker).
+            _ink(cd_narrative if _narrative_active else title)
+            top_zone_bottom = ny
+
+        # ===================================================================
+        # HOOK — the SECOND sub-headline (offer / marketing line), Montserrat-
+        # Bold tracked, GOLD, below the narrative.  FIX 2 + RESIDUAL-BLOCKER 1:
+        # best-effort AND the FLEX tier — only drawn when ``include_hook``. The
+        # DRAWN size ``hook_draw`` must satisfy ``title_draw < hook_draw <
+        # narr_draw``: it is fitted, then clamped to ``min(hook_fitted, narr-1)``,
+        # and DROPPED in-place (recording ``_LAST_HOOK_DROP``) when no room remains
+        # above the title (``hook_draw <= title_draw``) — never drawn inverted.
+        # ===================================================================
+        hook_draw = 0
+        hook_dropped_inplace = False
+        if cd_hook_text and include_hook:
+            _hook_gap = max(8, int(height * 0.010))
+            _hook_top = top_zone_bottom + _hook_gap
+            _hook_ceiling = max(_hook_top, int(height * 0.50))
+            _hook_lines, hook_fitted = _fit_role_block(
+                draw, cd_hook_text, "kicker", hook_cap, safe_w, min_px,
+                max_height=max(0, _hook_ceiling - _hook_top),
+                line_factor=1.18, max_lines=2,
+            )
+            if _hook_lines:
+                # Clamp the DRAWN hook strictly below the narrative (when drawn) so
+                # narr_draw > hook_draw holds even if the fitter returned the cap.
+                hook_draw = hook_fitted
+                if narr_draw:
+                    hook_draw = min(hook_draw, narr_draw - 1)
+                # The hook is the FLEX element: if there is no room between the
+                # title (required) and the narrative (hero), DROP it rather than
+                # invert (hook_draw must be strictly above title_draw).
+                if hook_draw <= title_draw:
+                    hook_draw = 0
+                    hook_dropped_inplace = True
+                else:
+                    hook_font = _premium_font("kicker", hook_draw)
+                    hy = _hook_top
+                    for ln in _hook_lines:
+                        _draw_centered(draw, ln, hook_font, cy=hy, width=width,
+                                       fill=_EMBLEM_GOLD, shadow_dy=2)
+                        hy += int(hook_draw * 1.18)
+                    _ink(cd_hook_text)
+                    top_zone_bottom = hy
+            else:
+                # Could not fit its ≤2-line band at all → dropped (best-effort).
+                hook_dropped_inplace = True
+        # The in-place hook drop is committed to ``_LAST_HOOK_DROP`` ONLY just
+        # before the successful save (below), so a FAILED attempt that later RETRIES
+        # via the dispatch ladder never leaves a phantom record. (``hook_dropped_inplace``
+        # is local to this attempt; a fresh _compose_mf call recomputes it.)
+
+        # ---- expose the DRAWN type scales for the unit assertion ----------
+        # FIX 2 (MAJOR) — report the sizes ACTUALLY DRAWN, with 0 for any tier NOT
+        # drawn (dropped / failed / absent). NO cap/reference fallbacks: a dropped
+        # narrative reports narrative_px == 0, a dropped hook reports hook_px == 0
+        # (not the cap, not a collapse-to-title phantom), and a brand/title that was
+        # never inked reports 0. The strict descending invariant narrative_px >
+        # hook_px > title_px >= brand_px is asserted on these real DRAWN values over
+        # the tiers actually present (0 = absent); construction keeps the present
+        # tiers strictly ordered.
+        _dbg_narrative = narr_draw                       # 0 when narrative dropped/absent
+        _dbg_title = title_draw if title else 0          # 0 when no title drawn
+        _dbg_hook = hook_draw                            # 0 when hook dropped/absent
+        _dbg_brand = brand_draw if business else 0       # 0 when no brand drawn
+        _LAST_LAYOUT_DEBUG.update({
+            "archetype": "message_first",
+            "narrative_px": _dbg_narrative,
+            "hook_px": _dbg_hook,
+            "title_px": _dbg_title,
+            "brand_px": _dbg_brand,
+            "emblem_ring_drawn": False,
+        })
+
+        # ===================================================================
+        # FOOTER — schedule | location | contact (anchored to the bottom).
+        # Identical to _compose so the lower zone behaves as today.
+        # ===================================================================
+        footer_px = max(min_px, int(width * 0.0185))
+        footer_parts = [p for p in (schedule, location, contact) if p]
+        footer_text = "   |   ".join(footer_parts)
+        footer_font = _premium_font("footer", footer_px)
+        footer_y = height - margin
+        if footer_text:
+            footer_lines = _wrap_premium(draw, footer_text, "footer", footer_px, safe_w)
+            footer_block_h = len(footer_lines) * int(footer_px * 1.35)
+            footer_y = height - max(margin, int(height * 0.022)) - footer_block_h
+            fy = footer_y
+            for ln in footer_lines:
+                _draw_centered(draw, ln, footer_font, cy=fy, width=width,
+                               fill=_CREAM_SOFT, shadow_dy=2)
+                _ink(ln)
+                fy += int(footer_px * 1.35)
+        bottom_limit = footer_y - max(14, int(height * 0.012))
+
+        # ===================================================================
+        # MENU — same preflighted Cormorant rows as today, just above the footer.
+        # ===================================================================
+        menu_px = max(min_px, layout.menu_font_px)
+        menu_block_h, menu_render = _plan_menu_block(
+            draw, items, layout, menu_px, min_px, safe_w, has_item_prices, render,
         )
+        menu_top = bottom_limit - menu_block_h
+        if items and menu_top < top_zone_bottom:
+            raise render.FlyerRenderError("premium overlay does not fit")
+        for drawn_text in menu_render(draw, x_left=margin, y_top=menu_top, width=width, safe_w=safe_w):
+            _ink(drawn_text)
 
-    img.convert("RGB").save(target, format="PNG", optimize=True)
+        # ===================================================================
+        # OFFER SEAL — retained if shared price (same logic + scale as _compose),
+        # floated between the headline block (top_zone_bottom) and the menu.
+        # ===================================================================
+        seal_label = (shared_offer_label or "OFFER").strip()
+        seal_planned = bool(shared_offer_price)
+        seal_drawn = False
+        seal_h = 0
+        seal_cy = 0
+        if seal_planned:
+            seal_h = _measure_offer_seal(draw, label=seal_label, price=shared_offer_price,
+                                         width=width, offer_scale=layout.offer_scale)
+            seal_cy = (top_zone_bottom + menu_top) // 2
+        if seal_h:
+            _seal_r_est = seal_h // 2
+            _seal_cx = width - margin - _seal_r_est
+            _seal_cx = max(width // 2 + _seal_r_est + margin, _seal_cx)
+            _shadow_pad = max(4, int(width * 0.006))
+            _pf = (
+                _seal_cx - _seal_r_est,
+                seal_cy - _seal_r_est,
+                _seal_cx + _seal_r_est + _shadow_pad,
+                seal_cy + _seal_r_est + _shadow_pad,
+            )
+            if (_pf[1] >= top_zone_bottom and _pf[3] <= menu_top
+                    and _pf[0] >= 0 and _pf[2] <= width):
+                draw_offer_seal(draw, label=seal_label, price=shared_offer_price,
+                                width=width, center=(_seal_cx, seal_cy),
+                                offer_scale=layout.offer_scale)
+                _ink(seal_label)
+                _ink(shared_offer_price)
+                _ink(f"{seal_label} {shared_offer_price}")
+                if shared_offer_text:
+                    _ink(shared_offer_text)
+                seal_drawn = True
+
+        # ===================================================================
+        # SECONDARY LINES — required facts no region above placed (offer-without-
+        # seal, promotion_end, taglines, any unknown required fact) + best-effort
+        # extras. Same fail-closed semantics as _compose.
+        # ===================================================================
+        secondary_y = top_zone_bottom + max(6, int(height * 0.008))
+        sec_px = max(min_px, int(width * 0.020))
+        sec_font = _premium_font("footer", sec_px)
+        sec_line_h = int(sec_px * 1.4)
+
+        def _draw_secondary(text, *, fill) -> bool:
+            nonlocal secondary_y
+            if not text:
+                return False
+            lines = _wrap_premium(draw, text, "footer", sec_px, safe_w)
+            if not lines:
+                return False
+            block_h = len(lines) * sec_line_h
+            if secondary_y + block_h > menu_top:
+                return False
+            for ln in lines:
+                _draw_centered(draw, ln, sec_font, cy=secondary_y, width=width, fill=fill, shadow_dy=2)
+                _ink(ln)
+                secondary_y += sec_line_h
+            return True
+
+        _offer_norm = render._normalize_fact_text(shared_offer_text or f"{seal_label} {shared_offer_price}")
+        for fid, label, value in required_facts:
+            if re.match(r"^item:\d+:(name|price)$", fid):
+                continue
+            if _covered(fid, label, value):
+                continue
+            is_offer = fid == "pricing_structure" or fid.startswith("offer:") \
+                or render._normalize_fact_text(value) == _offer_norm
+            if is_offer and seal_drawn:
+                continue
+            _draw_secondary(value, fill=_GOLD if is_offer else _CREAM_SOFT)
+
+        _drawn_tokens: set[str] = set()
+        for line in ink:
+            _drawn_tokens.update(_tokens(line))
+        _drawn_digits = "".join(re.findall(r"\d+", " ".join(ink)))
+
+        def _adds_new(extra: str) -> bool:
+            for tok in _tokens(extra):
+                if tok.isdigit():
+                    if tok not in _drawn_digits:
+                        return True
+                elif tok not in _drawn_tokens:
+                    return True
+            return False
+
+        for extra in extras:
+            etoks = _tokens(extra)
+            if not etoks or not _adds_new(extra):
+                continue
+            if _draw_secondary(extra, fill=_CREAM_SOFT):
+                _drawn_tokens.update(etoks)
+                _drawn_digits += "".join(re.findall(r"\d+", extra))
+
+        # ===================================================================
+        # FAIL-CLOSED — identical referee checks to _compose.
+        # ===================================================================
+        rendered = _rendered_text()
+        normalized = vqa._normalize_text_for_match(rendered)
+        missing: set[str] = set()
+        for fid, label, value in required_facts:
+            if not vqa._value_present_in(normalized, value, **_fact_flags(fid, label, value)):
+                missing.add(fid)
+        pair_blockers = vqa._item_price_pair_blockers(project, rendered)
+        if missing or pair_blockers:
+            detail = ", ".join(sorted(missing) + list(pair_blockers))
+            raise render.FlyerRenderError(
+                "premium overlay does not fit (missing required visible fact: " + detail + ")"
+            )
+
+        # Commit the in-place hook drop ONLY on the successful attempt (a failed
+        # attempt that retries via the dispatch ladder never leaks a phantom drop
+        # record). The flex hook had no room above the title between it + the
+        # narrative, so it was dropped without inverting the hierarchy.
+        if hook_dropped_inplace:
+            _LAST_HOOK_DROP.append(True)
+
+        img.convert("RGB").save(target, format="PNG", optimize=True)
+
+    # ===================================================================
+    # DISPATCH — narrative + hook are best-effort, never a flat-degrade trigger.
+    #
+    # NON-message_first (``_compose``): only the narrative is best-effort (there
+    # is no hook in today's layout). Drop ladder: (narrative=True) → (False).
+    #   • No narrative (flag-off / blank) ⇒ a SINGLE attempt, byte-identical to
+    #     today (the retry branch is never reached because cd_narrative is "").
+    #   • Narrative present ⇒ attempt WITH it; on FlyerRenderError DROP it + retry.
+    #
+    # FIX 2 — message_first (``_compose_mf``): BOTH the hook and the narrative are
+    # best-effort. Message-first = the MESSAGE is the hero, so DROP THE HOOK FIRST,
+    # then the narrative:
+    #     (narrative=True,  hook=True)   ← full
+    #  →  (narrative=True,  hook=False)  ← drop hook, keep the message
+    #  →  (narrative=False, hook=False)  ← bare (no narrative/hook)
+    #  →  existing degrade/raise path (a genuine overflow of REQUIRED content).
+    # Each attempt rebuilds a fresh image + ink log, so a failed attempt leaves no
+    # partial pixels. ``_LAST_HOOK_DROP`` / ``_LAST_NARRATIVE_DROP`` record drops.
+    #
+    # Byte-identical guard: for non-message_first the call shape is unchanged
+    # (include_hook is irrelevant to _compose, which ignores it via its signature
+    # adapter below), so flag-off / non-message_first output is unchanged.
+    # ===================================================================
+    if not message_first:
+        # _compose has no hook; adapt the 2-arg dispatch to its 1-arg signature.
+        if not cd_narrative:
+            _compose(include_narrative=False)
+            return
+        try:
+            _compose(include_narrative=True)
+        except render.FlyerRenderError:
+            _LAST_NARRATIVE_DROP.append(True)
+            _compose(include_narrative=False)
+        return
+
+    # message_first: hook-first drop ladder.
+    if not cd_narrative and not cd_hook_text:
+        # Nothing best-effort to drop → a single attempt.
+        _compose_mf(include_narrative=False, include_hook=False)
+        return
+    try:
+        _compose_mf(include_narrative=bool(cd_narrative), include_hook=bool(cd_hook_text))
+        return
+    except render.FlyerRenderError:
+        pass
+    # Step 1: drop the HOOK (keep the message) — only meaningful if a hook existed.
+    # The drop record is appended ONLY AFTER the winning attempt returns (FIX 1):
+    # an attempt that later raises must never leave a phantom drop record behind.
+    if cd_hook_text and cd_narrative:
+        try:
+            _compose_mf(include_narrative=True, include_hook=False)
+            _LAST_HOOK_DROP.append(True)
+            return
+        except render.FlyerRenderError:
+            pass
+    # Step 2: drop EVERYTHING best-effort (bare). A single (False, False) attempt is
+    # the final fallback for every remaining state (narrative-only, hook-only, both).
+    # The drop records are committed ONLY AFTER this bare attempt SUCCEEDS, keyed to
+    # which best-effort tiers existed; if it RAISES (a genuine REQUIRED overflow) the
+    # error propagates with NO drop record leaked (degrade-to-flat). (FIX 1 BLOCKER.)
+    #
+    # INTENT (Codex FIX 2 — never-headline-less): this bare attempt re-enters
+    # ``_compose_mf`` with ``include_narrative=False``, so ``_narrative_active`` is
+    # False and the REQUIRED campaign_title is PROMOTED into the headline slot. That
+    # is why dropping a NON-EMPTY narrative for fit here does NOT yield a headline-less
+    # poster — the promoted title fills the headline. If even the promoted-title
+    # headline cannot fit the required content, ``_compose_mf`` raises
+    # FlyerRenderError and the error propagates → the caller DEGRADES TO FLAT (a
+    # complete flyer), which is preferred over a headline-less premium.
+    _compose_mf(include_narrative=False, include_hook=False)
+    if cd_hook_text:
+        _LAST_HOOK_DROP.append(True)
+    if cd_narrative:
+        _LAST_NARRATIVE_DROP.append(True)
+
+
+# Observability for FIX 2 (CD v2 Slice B): records, per render_premium_overlay
+# call, whether the campaign_narrative had to be DROPPED on retry because the
+# required content did not fit with it. A list (append-only within a call) so a
+# test can assert the drop-not-degrade retry actually fired; the production
+# caller does not depend on it. Cleared at the top of each call.
+_LAST_NARRATIVE_DROP: list[bool] = []
+
+
+# Observability for FIX 2 (message-first drop ladder): records, per
+# render_premium_overlay call, whether the hook_text had to be DROPPED because
+# the required content did not fit with it. Message-first drops the HOOK FIRST
+# (the message is the hero), then the narrative. Append-only within a call; the
+# production caller does not depend on it. Cleared at the top of each call.
+_LAST_HOOK_DROP: list[bool] = []
+
+
+# Observability for CD v2 Composition Phase 1, Task 2 (message-first A template):
+# records, per render_premium_overlay call, the COMPUTED type-scale font sizes for
+# the inverted hierarchy so a unit test can assert the PRESENT-TIERS contract
+# deterministically (no pixel reading). The asserted invariant is NOT a literal
+# strict chain over all four tiers — in PROMOTED-title mode there is no kicker
+# (``title_px == 0``) while the brand is small but > 0. PRESENT-TIERS form:
+#   • ALWAYS: ``narrative_px (headline) > 0``; ``narrative_px > hook_px`` (with a
+#     hook); the brand stays SMALL (``brand_px <= hook_px`` with a hook, else
+#     ``brand_px < narrative_px``).
+#   • WHEN a kicker exists (``title_px > 0``): the full descending chain
+#     ``narrative_px > hook_px > title_px >= brand_px``.
+#   • WHEN promoted (``title_px == 0``): skip the kicker comparison —
+#     ``narrative_px > hook_px`` (if hook) ``> brand_px`` with the brand small.
+# Populated ONLY on the message_first path; left EMPTY for every non-message_first /
+# flag-off render (so those stay a strict no-op + byte-identical). Cleared at the
+# top of each call. The production caller does not depend on it.
+_LAST_LAYOUT_DEBUG: dict = {}
 
 
 # --- Template-A draw/measure helpers ---------------------------------------
@@ -950,6 +1835,28 @@ def _fit_title(draw, text, start_px, max_width, min_px, *, max_height, line_fact
     # Last attempt at min_px:
     lines = _wrap_premium(draw, text, "title", min_px, max_width)
     if len(lines) * int(min_px * line_factor) <= max_height and len(lines) <= 4:
+        return lines, min_px
+    return None, start_px
+
+
+def _fit_role_block(draw, text, role, start_px, max_width, min_px, *, max_height, line_factor, max_lines):
+    """Role-generic shrink-to-fit for a short text block (CD v2 narrative eyebrow).
+
+    Like ``_fit_title`` but wraps/measures with the GIVEN *role*'s font (so a
+    kicker eyebrow is measured with the kicker font, not the title font).  Returns
+    ``(lines, font_px)`` if the wrapped block fits *max_width* × *max_height* in
+    ≤ *max_lines* lines, else ``(None, start_px)``.  Best-effort by contract — the
+    caller DROPS the block on ``None`` (the narrative is never a required fact)."""
+    if not text or max_height <= 0:
+        return None, start_px
+    px = start_px
+    while px >= min_px:
+        lines = _wrap_premium(draw, text, role, px, max_width)
+        if lines and len(lines) <= max_lines and len(lines) * int(px * line_factor) <= max_height:
+            return lines, px
+        px -= 2
+    lines = _wrap_premium(draw, text, role, min_px, max_width)
+    if lines and len(lines) <= max_lines and len(lines) * int(min_px * line_factor) <= max_height:
         return lines, min_px
     return None, start_px
 
