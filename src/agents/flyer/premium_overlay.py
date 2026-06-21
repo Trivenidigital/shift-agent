@@ -1145,43 +1145,60 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         # sometimes omits campaign_narrative (it is non-deterministic) → an empty
         # narrative would otherwise render a headline-less A poster.
         #
-        # INTENT (Codex FIX 2 — keep this keying): ``_narrative_active`` is False
-        # whenever NO narrative will be DRAWN — i.e. the narrative is EMPTY *or* it
-        # was DROPPED-for-fit by the retry ladder (which re-enters here with
-        # ``include_narrative=False`` on the bare attempt). Keying promotion on
-        # "no narrative drawn" — not merely "narrative absent" — is DELIBERATE: a
-        # message-first poster must never render without a message, so a non-empty
-        # narrative dropped for fit ALSO promotes the title → there is ALWAYS a
-        # headline. If the promoted title itself cannot fit (dense layout) the headline
-        # draw below raises FlyerRenderError → the existing fail-closed degrade to FLAT
+        # INTENT (Codex FIX A — key promotion on the ACTUAL narrative LINES DRAWN,
+        # not on ``_narrative_active``): the narrative is FITTED FIRST, then promotion
+        # is decided from whether it produced DRAWABLE lines. ``promote_title`` is True
+        # whenever NO narrative line will be drawn — for ANY reason: the narrative is
+        # EMPTY, *or* it was DROPPED-for-fit by the retry ladder (re-entered here with
+        # ``include_narrative=False`` on the bare attempt), *or* ``_fit_title`` returns
+        # None IN-PLACE (a non-empty narrative that cannot fit its band at the floor).
+        # Keying on "no narrative drawn" — not merely "narrative absent" — is what
+        # closes the never-headline-less hole: a non-empty narrative that fails to fit
+        # IN-PLACE no longer slips through with a small kicker + a skipped headline; it
+        # PROMOTES the campaign_title into the headline slot → there is ALWAYS a
+        # headline. If the promoted title itself cannot fit (dense layout) the promotion
+        # fit below raises FlyerRenderError → the existing fail-closed degrade to FLAT
         # (a complete flyer downstream), which is preferred over a headline-less
-        # premium. ``promote_title`` is True exactly when the headline carries the
-        # title (no narrative on-canvas, whether empty or dropped).
+        # premium. Net invariant: ``narrative_px > 0`` ALWAYS for message_first —
+        # a headline-less premium is structurally impossible (promote-or-raise).
         _narrative_active = bool(cd_narrative) and include_narrative
-        headline_text = cd_narrative if _narrative_active else title
-        promote_title = (not _narrative_active) and bool(title)
+
+        _narr_gap = max(10, int(height * 0.014))
+        _narr_top = _title_allowance + _narr_gap
+        # Headline band: the upper ~40% so the hook + hero/menu sit below.
+        _narr_ceiling = max(_narr_top, int(height * 0.40))
+        _narr_band_h = max(0, _narr_ceiling - _narr_top)
 
         narrative_px = 0
         _narr_lines = None
-        if headline_text:
-            _narr_gap = max(10, int(height * 0.014))
-            _narr_top = _title_allowance + _narr_gap
-            # Headline band: the upper ~40% so the hook + hero/menu sit below.
-            _narr_ceiling = max(_narr_top, int(height * 0.40))
+        # 1) Try the campaign_narrative as the headline (best-effort) WHEN active.
+        if _narrative_active:
             _narr_lines, narrative_px = _fit_title(
-                draw, headline_text, narrative_start_px, safe_w, min_px,
-                max_height=max(0, _narr_ceiling - _narr_top), line_factor=1.04,
+                draw, cd_narrative, narrative_start_px, safe_w, min_px,
+                max_height=_narr_band_h, line_factor=1.04,
             )
             if not _narr_lines:
-                narrative_px = 0  # narrative dropped (did not fit) — best-effort
-                # If the PROMOTED title is the headline and it cannot fit even the
-                # generous headline band at the floor, the REQUIRED campaign_title has
-                # no covering element → fail-closed (the kicker is suppressed when
-                # promoting). With a real narrative this is just a best-effort drop.
-                if promote_title:
-                    raise render.FlyerRenderError(
-                        "premium overlay does not fit (campaign_title headline cannot fit on-canvas)"
-                    )
+                narrative_px = 0  # narrative did not fit IN-PLACE — best-effort drop
+
+        # 2) PROMOTE the title decided on the ACTUAL drawn lines (FIX A): promote
+        # whenever NO narrative line will be drawn (empty / dropped / in-place-unfit).
+        promote_title = (not bool(_narr_lines)) and bool(title)
+
+        # 3) When promoting, FIT campaign_title as the HEADLINE at the narrative
+        # (largest) scale so the dominant slot is filled; the small kicker is
+        # SUPPRESSED below (no duplicate title). The promoted title is a REQUIRED
+        # fact: fail-closed if it cannot fit even the generous headline band at the
+        # floor (degrade to FLAT — never a blank/headline-less premium).
+        if promote_title:
+            _narr_lines, narrative_px = _fit_title(
+                draw, title, narrative_start_px, safe_w, min_px,
+                max_height=_narr_band_h, line_factor=1.04,
+            )
+            if not _narr_lines:
+                narrative_px = 0
+                raise render.FlyerRenderError(
+                    "premium overlay does not fit (campaign_title headline cannot fit on-canvas)"
+                )
 
         # narr_draw — the DRAWN narrative size (0 when dropped/absent). The hero
         # tier that the title + hook must stay strictly below.
@@ -1256,14 +1273,28 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         # ===================================================================
         brand_draw = brand_start_px
         if title and not promote_title:
-            # Clamp the brand to the kicker only when the kicker is the title's
-            # carrier. When the title is PROMOTED to the headline there is no kicker
-            # (title_draw == 0); the brand keeps its own small demoted start size. The
-            # PRESENT-TIERS invariant skips the kicker comparison in promoted mode —
-            # the brand is not measured against title_px (== 0) but stays SMALL on its
-            # own: brand_start_px is the demoted ~0.024w lockup (<= hook, < narrative),
-            # so the headline dominates and the brand stays small without a kicker.
+            # Narrative-present mode: clamp the brand to the kicker (its carrier) so
+            # the full descending chain narrative > hook > title >= brand holds.
             brand_draw = min(brand_start_px, title_draw)
+        elif promote_title:
+            # FIX B — PROMOTED mode: there is NO kicker (title_draw == 0), so the
+            # brand cannot be clamped to it. Clamp the brand strictly BELOW the FITTED
+            # promoted HEADLINE (narr_draw == narrative_px) so present-tiers holds even
+            # when a long campaign_title fits only near min_px: brand_start_px (~0.024w
+            # ≈ 25px) could otherwise meet/exceed a headline clamped to ~min_px,
+            # inverting present-tiers (brand_px >= narrative_px). Using the ACTUAL
+            # fitted headline size (not the start size) keeps the brand subordinate to
+            # whatever the headline actually fitted to. We clamp to ``narr_draw - 2``
+            # (two below the headline) so the brand also stays STRICTLY below the HOOK
+            # tier, which itself draws at most ``narr_draw - 1`` (its own clamp below
+            # the headline): present-tiers requires narrative > hook > brand in promoted
+            # mode, and a single ``narr_draw - 1`` clamp would tie the brand to a hook
+            # sitting at the headline-minus-one ceiling when everything collapses to the
+            # floor. No min_px re-floor (the demoted brand lockup may legitimately sit
+            # below the floor, mirroring the narrative-present ``min(brand_start_px,
+            # title_draw)`` clamp) so the brand stays strictly below even a headline
+            # clamped all the way to min_px.
+            brand_draw = min(brand_start_px, narr_draw - 2)
         y = max(16, int(height * 0.018))
         if business:
             brand_font = _premium_font("masthead", brand_draw)

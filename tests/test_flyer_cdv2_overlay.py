@@ -1165,3 +1165,123 @@ def test_fix2_genuinely_impossible_layout_degrades_to_flat_not_headline_less(tmp
             _project(creative_direction=cd, facts=facts, pid="F0333"),
             _bg(tmp_path), tmp_path / "mf_impossible.png", size=(1080, 1350),
             output_format="concept_preview")
+
+
+# ===========================================================================
+# CD v2 MAJOR FIX A (Codex round-2) — never-headline-less hole closed by keying
+# promotion on the ACTUAL narrative lines drawn, not _narrative_active.
+#
+# THE HOLE: promote_title was decided from _narrative_active (narrative non-empty),
+# computed BEFORE fitting. A NON-EMPTY narrative whose _fit_title returns None
+# IN-PLACE (unfittable at the floor in its band) → narrative_px == 0,
+# promote_title stayed False, the small kicker was still drawn, the headline draw
+# was skipped (empty _narr_lines) → a HEADLINE-LESS premium could SAVE if the
+# ledger passed. FIX: fit the narrative FIRST, set promote_title = not _narr_lines
+# (promote whenever NO narrative line will be drawn, for ANY reason), and when
+# promoting fit campaign_title as the HEADLINE at narrative scale (kicker
+# suppressed). Net invariant: narrative_px > 0 ALWAYS — headline-less is now
+# structurally impossible (promote-or-raise).
+# ===========================================================================
+
+
+def test_fixA_inplace_unfittable_narrative_promotes_title_never_headline_less(tmp_path):
+    """FIX A: a NON-EMPTY narrative that _fit_title returns None for IN-PLACE
+    (unfittable in its band at the floor) must NOT leave a headline-less premium.
+    Pre-fix: promote_title keyed on _narrative_active (True here, narrative
+    non-empty) → stayed False → kicker drawn, headline skipped → narrative_px == 0,
+    HEADLINE-LESS yet saved (ledger covered by the kicker). Post-fix: promotion is
+    keyed on the ACTUAL drawn lines → the title is PROMOTED into the headline slot
+    (narrative_px > 0, kicker suppressed → title_px == 0), the render succeeds
+    (never raised, never headline-less).
+
+    The _fit_title stub returns None ONLY for the narrative text (forcing the
+    in-place-unfit branch with a non-empty narrative) and real-fits everything else
+    (so the promoted-title headline still fits)."""
+    real_fit_title = po._fit_title
+    narr = "South Indian Favorites at One Price"
+
+    def _narr_unfittable(draw, text, start_px, max_width, min_px, *, max_height, line_factor):
+        # The NARRATIVE input is unfittable IN-PLACE (None) — a non-empty narrative
+        # whose headline-band fit fails at the floor. The PROMOTED campaign_title
+        # headline (a DIFFERENT text) real-fits, so promotion succeeds.
+        if text == narr:
+            return None, start_px
+        return real_fit_title(draw, text, start_px, max_width, min_px,
+                              max_height=max_height, line_factor=line_factor)
+
+    import pytest as _pytest
+    monkeypatch = _pytest.MonkeyPatch()
+    monkeypatch.setattr(po, "_fit_title", _narr_unfittable)
+    try:
+        cd = dict(_CD_MF, campaign_narrative=narr)
+        out = tmp_path / "fixA_inplace_unfit.png"
+        # MUST NOT raise: the in-place-unfit narrative promotes the title to the
+        # headline rather than shipping a headline-less premium.
+        po.render_premium_overlay(
+            _project(creative_direction=cd, pid="F0340"),
+            _bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
+    finally:
+        monkeypatch.undo()
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert dbg.get("archetype") == "message_first"
+    # NEVER headline-less: the promoted title fills the dominant headline slot.
+    assert dbg["narrative_px"] > 0, dbg
+    # The small kicker is SUPPRESSED (the title is the headline, not drawn twice).
+    assert dbg["title_px"] == 0, dbg
+    _assert_present_tiers(dbg)
+
+
+# ===========================================================================
+# CD v2 MAJOR FIX B (Codex round-2) — clamp the brand BELOW the FITTED promoted
+# headline so present-tiers holds even when a long campaign_title fits only near
+# min_px. Pre-fix the promoted branch kept brand_draw == brand_start_px with NO
+# clamp against the fitted promoted-headline px; a long title clamping to ~min_px
+# could make brand_px >= narrative_px(headline), violating present-tiers.
+# ===========================================================================
+
+
+def test_fixB_long_promoted_title_clamps_brand_below_headline(tmp_path):
+    """FIX B: an EMPTY narrative + a long campaign_title that fits only near min_px
+    as the promoted headline must keep the brand strictly below the FITTED headline
+    px (present-tiers holds). Pre-fix brand_draw kept its start size (~0.024w ≈ 25px)
+    which could meet/exceed a headline clamped to min_px; post-fix brand_px <
+    narrative_px(headline) by construction.
+
+    The _fit_title stub returns the promoted title at min_px (forcing the worst
+    case) and real-fits anything else."""
+    real_fit_title = po._fit_title
+    long_title = "Grand Weekend South Indian Tiffin Festival Family Celebration Specials"
+
+    def _title_at_floor(draw, text, start_px, max_width, min_px, *, max_height, line_factor):
+        # The PROMOTED title (the headline text in promoted mode) fits only at the
+        # floor → narrative_px(headline) == min_px, the worst case for the brand
+        # clamp. Anything else real-fits.
+        if text == long_title:
+            return [long_title], min_px
+        return real_fit_title(draw, text, start_px, max_width, min_px,
+                              max_height=max_height, line_factor=line_factor)
+
+    import pytest as _pytest
+    monkeypatch = _pytest.MonkeyPatch()
+    monkeypatch.setattr(po, "_fit_title", _title_at_floor)
+    try:
+        facts = [f for f in _base_facts() if f.fact_id != "campaign_title"]
+        facts.append(FlyerLockedFact(fact_id="campaign_title", label="Campaign",
+                                     value=long_title, source="customer_text", required=True))
+        cd = {k: v for k, v in _CD_MF.items() if k != "campaign_narrative"}
+        out = tmp_path / "fixB_long_promoted_title.png"
+        po.render_premium_overlay(
+            _project(creative_direction=cd, facts=facts, pid="F0341"),
+            _bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
+    finally:
+        monkeypatch.undo()
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert dbg.get("archetype") == "message_first"
+    # Promoted mode: kicker suppressed, headline filled by the promoted title.
+    assert dbg["title_px"] == 0, dbg
+    assert dbg["narrative_px"] > 0, dbg
+    # FIX B: brand stays STRICTLY below the FITTED promoted headline (present-tiers).
+    assert dbg["brand_px"] < dbg["narrative_px"], (dbg["brand_px"], dbg["narrative_px"])
+    _assert_present_tiers(dbg)
