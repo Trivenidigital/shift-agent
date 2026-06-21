@@ -344,3 +344,103 @@ def test_cdv2_campaign_narrative_non_string_defaults_to_empty_not_invalid(monkey
         assert result.status == "ok", result.errors
         assert result.brief is not None
         assert result.brief.campaign_narrative == ""  # defaulted, not fatal
+
+
+# ── (6) ALL CD v2 fields at TOP LEVEL together → none dropped (root-cause) ────
+# Live B3 proved the brain returned only the OLD-schema fields and NOT the CD v2
+# fields, so campaign_narrative / hero_ref / marketing_hook / offer_priority came
+# back empty. This asserts the FULL CD v2 set, emitted at TOP LEVEL exactly as the
+# parser (``_sanitize_cdv2_fields``) reads them, round-trips with NOTHING dropped.
+
+
+def test_cdv2_all_top_level_fields_propose_with_nothing_dropped(monkeypatch):
+    brief_json = _base_brief_json()
+    brief_json["hero_ref"] = {"fact_id": "item:1:name"}
+    brief_json["supporting_refs"] = [{"fact_id": "item:0:name"}]
+    brief_json["marketing_hook"] = {
+        "text_ref": {"fact_id": "pricing_structure"},
+        "prominence": "high",
+    }
+    brief_json["offer_priority"] = "high"
+    brief_json["campaign_narrative"] = "South Indian Favorites at One Price"
+    brief_json["visual_direction"]["mood"] = "Warm Restaurant Promo"
+    _arm(monkeypatch, brief_json)
+
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+
+    assert result.status == "ok", result.errors
+    brief = result.brief
+    assert brief is not None
+
+    # EVERY CD v2 field carried — none dropped, none empty.
+    assert brief.hero_ref is not None and brief.hero_ref.fact_id == "item:1:name"
+    assert [r.fact_id for r in brief.supporting_refs] == ["item:0:name"]
+    assert brief.marketing_hook is not None
+    assert brief.marketing_hook.text_ref.fact_id == "pricing_structure"
+    assert brief.marketing_hook.prominence == "high"
+    assert brief.offer_priority == "high"
+    assert brief.campaign_narrative == "South Indian Favorites at One Price"
+    assert brief.visual_direction.mood == "Warm Restaurant Promo"
+
+
+# ── (7) GUARD: SKILL.md output schema declares the CD v2 fields where the ─────
+# parser reads them — TOP-LEVEL hero_ref / supporting_refs / marketing_hook /
+# offer_priority / campaign_narrative, and ``mood`` inside ``visual_direction``.
+# This prevents the prompt↔parser mismatch from regressing: the model is only told
+# to emit the OLD-schema fields unless the schema block also lists the CD v2 ones.
+
+
+def _skill_schema_block() -> str:
+    """The output-schema JSON block of SKILL.md — the fenced ```json contract
+    that begins the "output exactly ONE FlyerBrief" section. Falls back to the
+    full body if the fence cannot be isolated."""
+    text = fcb.SKILL_MD_PATH.read_text(encoding="utf-8")
+    start = text.find("```json")
+    if start == -1:
+        return text
+    end = text.find("```", start + len("```json"))
+    return text[start: end if end != -1 else len(text)]
+
+
+def test_skill_md_declares_cdv2_top_level_fields_in_output_schema():
+    block = _skill_schema_block()
+    for field_name in (
+        "hero_ref",
+        "supporting_refs",
+        "marketing_hook",
+        "offer_priority",
+        "campaign_narrative",
+    ):
+        assert f'"{field_name}"' in block, (
+            f"SKILL.md output-schema block must declare top-level {field_name!r} "
+            f"so the brain emits it where _sanitize_cdv2_fields reads it"
+        )
+
+
+def test_skill_md_declares_mood_inside_visual_direction():
+    """``mood`` must appear inside the ``visual_direction`` object of the schema
+    block (next to ``theme_family``), since the parser reads
+    ``visual_direction.mood``."""
+    block = _skill_schema_block()
+    vd_start = block.find('"visual_direction"')
+    assert vd_start != -1, "schema block must contain visual_direction"
+    # The visual_direction object ends at the next top-level key after it; the
+    # mood key must appear within the object (after theme_family, before the next
+    # closing of the visual_direction block). Locate the object's closing brace.
+    brace_open = block.find("{", vd_start)
+    assert brace_open != -1
+    depth = 0
+    vd_end = len(block)
+    for i in range(brace_open, len(block)):
+        if block[i] == "{":
+            depth += 1
+        elif block[i] == "}":
+            depth -= 1
+            if depth == 0:
+                vd_end = i
+                break
+    vd_obj = block[brace_open:vd_end]
+    assert '"mood"' in vd_obj, (
+        "SKILL.md schema must declare 'mood' inside visual_direction (parser reads "
+        "visual_direction.mood)"
+    )

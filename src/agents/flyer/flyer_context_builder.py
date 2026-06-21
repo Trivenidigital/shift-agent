@@ -186,10 +186,14 @@ def _build_user_message(
     never by value), a short profile summary, and any source/project context.
     Carries NO creative instructions — those live in the SKILL.md system prompt.
 
-    Plus a SHORT additive note for the CD v2 OPTIONAL creative fields (hero/
-    supporting/hook/offer_priority/mood). These are enhancement-only: the model
-    references commercial facts by id/span exactly like ``fact_refs`` (never inline
-    values), and OMITTING them is always fine — they default and never block."""
+    Plus a SHORT additive note that the brief MAY include the CD v2 OPTIONAL
+    TOP-LEVEL fields (``hero_ref`` / ``supporting_refs`` / ``marketing_hook`` /
+    ``offer_priority`` / ``campaign_narrative``, and ``visual_direction.mood``).
+    These are enhancement-only: the model references commercial facts by id/span
+    exactly like ``fact_refs`` (never inline values), and OMITTING them is always
+    fine — they default and never block. The SKILL.md output schema is the
+    authority for their exact shape (and the parser reads them at TOP LEVEL, so the
+    note keeps them top-level, not nested)."""
     fact_catalog = [
         {"fact_id": f.fact_id, "label": f.label, "source": f.source}
         for f in locked_facts or []
@@ -201,20 +205,14 @@ def _build_user_message(
             "business_profile": _profile_summary(business_profile),
             "source_summary": source_summary or "",
             "project_context": project_context or "",
-            # CD v2 (Slice A) — OPTIONAL enhancement fields; omit any you are unsure of.
-            "optional_creative_fields": {
-                "hero_ref": "the single most prominent offer/item, as a fact_id (or a "
-                            "verbatim raw_span of the request) — never an inline value",
-                "supporting_refs": "secondary offers/items, each a fact_id or raw_span",
-                "marketing_hook": "one headline angle: {text_ref: {fact_id|raw_span}, "
-                                  "prominence: high|medium|low} — text is a ref, not a value",
-                "offer_priority": "overall emphasis: high|medium|low (default medium)",
-                "visual_direction.mood": "free-text mood/tone label, e.g. 'Warm Restaurant "
-                                         "Promo' — visual taste only, no words/text in art",
-                "campaign_narrative": "OPTIONAL short (<=~120 chars) grounded marketing "
-                                      "message, e.g. 'South Indian Favorites at One Price' — "
-                                      "omit if unsure; no invented prices/items/claims",
-            },
+            # CD v2 — OPTIONAL TOP-LEVEL enhancement fields; see the SKILL schema for shape.
+            "optional_creative_fields_note": (
+                "The brief MAY include the OPTIONAL top-level fields hero_ref, "
+                "supporting_refs, marketing_hook, offer_priority, campaign_narrative, "
+                "and visual_direction.mood (per the SKILL output schema). Each commercial "
+                "ref points at a fact by id/span (never an inline value); omit any you are "
+                "unsure of — they default and never block."
+            ),
         },
         ensure_ascii=False,
     )
