@@ -284,3 +284,63 @@ def test_cdv2_mood_over_length_is_constrained_to_120(monkeypatch):
     assert result.status == "ok", result.errors
     assert result.brief is not None
     assert len(result.brief.visual_direction.mood) <= 120
+
+
+# ── (5) campaign_narrative (Slice B, Task B0.2) — proposed, defensive ────────
+
+
+def test_cdv2_campaign_narrative_included_is_parsed_onto_brief(monkeypatch):
+    """The model may PROPOSE a top-level campaign_narrative (a short marketing
+    message); it is carried onto the brief and the status stays ok."""
+    brief_json = _base_brief_json()
+    brief_json["campaign_narrative"] = "South Indian Favorites at One Price"
+    _arm(monkeypatch, brief_json)
+
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+
+    assert result.status == "ok", result.errors
+    assert result.brief is not None
+    assert result.brief.campaign_narrative == "South Indian Favorites at One Price"
+
+
+def test_cdv2_campaign_narrative_omitted_defaults_to_empty(monkeypatch):
+    """A model response that OMITS campaign_narrative parses fine; the field sits
+    at its default ""."""
+    _arm(monkeypatch, _base_brief_json())
+
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+
+    assert result.status == "ok", result.errors
+    assert result.brief is not None
+    assert result.brief.campaign_narrative == ""
+
+
+def test_cdv2_campaign_narrative_over_length_is_truncated_to_200(monkeypatch):
+    """A campaign_narrative longer than the schema max_length=200 must be CAPPED
+    (a bare model_validate would RAISE on the over-length str). Status stays ok and
+    nothing raises."""
+    brief_json = _base_brief_json()
+    brief_json["campaign_narrative"] = "great deal " * 30  # 300 chars, all benign
+    _arm(monkeypatch, brief_json)
+
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+
+    assert result.status == "ok", result.errors
+    assert result.brief is not None
+    assert len(result.brief.campaign_narrative) <= 200
+    assert len(result.brief.campaign_narrative) == 200  # capped, not dropped to ""
+
+
+def test_cdv2_campaign_narrative_non_string_defaults_to_empty_not_invalid(monkeypatch):
+    """A non-string campaign_narrative (e.g. a dict or a number) must NOT raise and
+    must NOT flip the status to invalid — it defaults to "" and the brief parses → ok."""
+    for bad_value in ({"text": "nope"}, 42):
+        brief_json = _base_brief_json()
+        brief_json["campaign_narrative"] = bad_value
+        _arm(monkeypatch, brief_json)
+
+        result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+
+        assert result.status == "ok", result.errors
+        assert result.brief is not None
+        assert result.brief.campaign_narrative == ""  # defaulted, not fatal

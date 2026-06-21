@@ -211,6 +211,9 @@ def _build_user_message(
                 "offer_priority": "overall emphasis: high|medium|low (default medium)",
                 "visual_direction.mood": "free-text mood/tone label, e.g. 'Warm Restaurant "
                                          "Promo' — visual taste only, no words/text in art",
+                "campaign_narrative": "OPTIONAL short (<=~120 chars) grounded marketing "
+                                      "message, e.g. 'South Indian Favorites at One Price' — "
+                                      "omit if unsure; no invented prices/items/claims",
             },
         },
         ensure_ascii=False,
@@ -356,9 +359,11 @@ _CDV2_TOP_LEVEL_FIELDS = ("hero_ref", "supporting_refs", "marketing_hook", "offe
 # Schema caps mirrored from flyer_brief.py so the pre-sanitize CAPS the offending
 # field to a value the single ``model_validate`` accepts (a bare ``model_validate``
 # would RAISE on an over-length list/str, not truncate). Kept in sync with
-# FlyerBrief.supporting_refs (max_length=40) / VisualDirection.mood (max_length=120).
+# FlyerBrief.supporting_refs (max_length=40) / VisualDirection.mood (max_length=120)
+# / FlyerBrief.campaign_narrative (max_length=200).
 _SUPPORTING_REFS_MAX = 40
 _MOOD_MAX_LEN = 120
+_CAMPAIGN_NARRATIVE_MAX_LEN = 200
 
 
 def _sanitize_cdv2_fields(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -377,7 +382,10 @@ def _sanitize_cdv2_fields(raw: Mapping[str, Any]) -> dict[str, Any]:
       - ``offer_priority``: kept only if ∈ {high, medium, low}; else removed
         (→ default "medium").
       - ``visual_direction.mood``: dropped if not a ``str``; otherwise TRUNCATED to
-        ``_MOOD_MAX_LEN`` (so the str-length constraint holds)."""
+        ``_MOOD_MAX_LEN`` (so the str-length constraint holds).
+      - ``campaign_narrative``: dropped if not a ``str`` (→ default ""); otherwise
+        TRUNCATED to ``_CAMPAIGN_NARRATIVE_MAX_LEN`` (so the str-length constraint
+        holds). Mirrors the ``mood`` handling exactly."""
     out: dict[str, Any] = dict(raw)
 
     # hero_ref — keep only a constructible FactRef; otherwise remove → default None.
@@ -416,6 +424,15 @@ def _sanitize_cdv2_fields(raw: Mapping[str, Any]) -> dict[str, Any]:
         elif len(mood) > _MOOD_MAX_LEN:
             vd["mood"] = mood[:_MOOD_MAX_LEN]
         out["visual_direction"] = vd
+
+    # campaign_narrative — drop a non-str (→ default ""); truncate an over-length str
+    # to the cap. Mirrors the mood handling exactly (a top-level free-text field).
+    if "campaign_narrative" in out:
+        narrative = out["campaign_narrative"]
+        if not isinstance(narrative, str):
+            out.pop("campaign_narrative", None)  # wrong type → default ""
+        elif len(narrative) > _CAMPAIGN_NARRATIVE_MAX_LEN:
+            out["campaign_narrative"] = narrative[:_CAMPAIGN_NARRATIVE_MAX_LEN]
 
     return out
 
