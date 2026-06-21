@@ -1969,6 +1969,13 @@ class FlyerProject(BaseModel):
     # code path). Required to persist the recovery decision across the separate
     # final-export invocation.
     deterministic_recovery: bool = False
+    # Creative Director v2 (2026-06-21) — additive transient carrier for a
+    # resolved creative direction (e.g. dataclasses.asdict(ResolvedCreativeDirection)).
+    # Mirrors deterministic_recovery: OPTIONAL, default None => NO data migration
+    # (existing rows load fine) and flag-off BEHAVIOR is byte-identical (default
+    # None changes no code path). Round-trips through model_dump_json() /
+    # model_validate_json() so it survives into the premium-overlay subprocess.
+    creative_direction: Optional[dict] = None
 
     @model_validator(mode="after")
     def _selected_concept_must_exist(self) -> "FlyerProject":

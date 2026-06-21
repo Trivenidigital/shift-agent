@@ -3437,6 +3437,24 @@ def _deterministic_first_enabled(project: FlyerProject) -> bool:
     return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
 
 
+CREATIVE_DIRECTOR_V2_ENV = "FLYER_CREATIVE_DIRECTOR_V2"
+
+
+def _creative_director_v2_enabled(project: FlyerProject) -> bool:
+    """Routing gate for Creative Director v2: resolve a creative direction
+    upstream and carry it into the render. Flag FLYER_CREATIVE_DIRECTOR_V2 == "1"
+    AND (the shared FLYER_PREMIUM_OVERLAY_ALLOWLIST is empty => global, else
+    project.customer_phone is in it). Independent of FLYER_PREMIUM_OVERLAY /
+    FLYER_DETERMINISTIC_RECOVERY / FLYER_DETERMINISTIC_FIRST. Mirrors
+    _deterministic_first_enabled exactly. Flag-off => byte-identical legacy."""
+    if os.environ.get(CREATIVE_DIRECTOR_V2_ENV) != "1":
+        return False
+    allow = _premium_overlay_allowlist()
+    if not allow:
+        return True
+    return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+
+
 def _openrouter_repair_edit_bytes(
     project: FlyerProject,
     *,
