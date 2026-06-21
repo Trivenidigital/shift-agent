@@ -475,6 +475,14 @@ PY
     else
         rm -f /opt/shift-agent/flyer_creative_resolver.py
     fi
+    # CD v2 Composition Phase 1: the poster-archetype router. flyer_render guards
+    # this import (falls back to message_first if absent), but install it so the
+    # message_first (A) overlay template is actually reachable on the box.
+    if [ -f src/agents/flyer/flyer_poster_archetype.py ]; then
+        install -m 644 src/agents/flyer/flyer_poster_archetype.py /opt/shift-agent/flyer_poster_archetype.py
+    else
+        rm -f /opt/shift-agent/flyer_poster_archetype.py
+    fi
     if [ -f src/agents/flyer/visible_contract.py ]; then
         install -m 644 src/agents/flyer/visible_contract.py /opt/shift-agent/flyer_visible_contract.py
     else

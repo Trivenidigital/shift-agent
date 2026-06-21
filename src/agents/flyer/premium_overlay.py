@@ -501,9 +501,11 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     # existing layout untouched → byte-identical.
     message_first = cd_poster_archetype == "message_first"
 
-    # FIX 2 observability: reset the per-call narrative-drop record (see the
-    # _LAST_NARRATIVE_DROP module note + the dispatch at the end of this fn).
+    # FIX 2 observability: reset the per-call best-effort drop records (see the
+    # _LAST_NARRATIVE_DROP / _LAST_HOOK_DROP module notes + the dispatch at the
+    # end of this fn).
     _LAST_NARRATIVE_DROP.clear()
+    _LAST_HOOK_DROP.clear()
     # Task 2 observability: reset the per-call layout-debug record. Populated ONLY
     # on the message_first path so non-message_first stays a strict no-op (the
     # record is left empty, asserted by the byte-identical tests indirectly).
@@ -1042,7 +1044,7 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     # the ledger); the menu/seal/footer + required-fact ledger are the SAME checks.
     # ``include_narrative`` drives the drop-not-degrade retry exactly like _compose.
     # ===================================================================
-    def _compose_mf(include_narrative: bool) -> None:
+    def _compose_mf(include_narrative: bool, include_hook: bool) -> None:
         ink: list[str] = []
 
         def _ink(text: str) -> None:
@@ -1080,23 +1082,12 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         _EMBLEM_GOLD  = (208, 178, 110, 255)
         _EMBLEM_IVORY = (244, 240, 232, 255)
 
-        # ---- TYPE SCALES (the contract) -----------------------------------
-        # narrative LARGEST (headline) > hook (sub-headline) > title (kicker);
-        # brand demoted to <= title kicker.  All floored at min_px so nothing
-        # drops below the mobile legibility floor.  These are the START sizes; the
-        # narrative + hook shrink-to-fit within their bands.
+        # ---- TYPE SCALES — START sizes only ------------------------------
+        # narrative LARGEST (headline) start; brand demoted. The hook + title-
+        # kicker FINAL sizes are NOT decided here — FIX 1 derives them from the
+        # FITTED narrative size below so clamping can never invert the ordering.
         narrative_start_px = max(min_px, int(width * 0.078))   # ~84px @1080 (band 0.072-0.082)
-        hook_start_px      = max(min_px, int(width * 0.047))   # ~50px @1080 (band 0.044-0.050)
-        title_kicker_px    = max(min_px, int(width * 0.026))   # ~28px @1080 (small kicker)
         brand_px           = max(min_px, int(width * 0.024))   # ~26px @1080 (demoted, <= title)
-        # Guard the ordering at the FLOOR edge: when width is tiny every scale
-        # could clamp to min_px and collapse the ordering. Re-spread by stepping
-        # each tier down from the one above so the strict ordering always holds
-        # (the test asserts strict >).
-        if not (narrative_start_px > hook_start_px > title_kicker_px >= brand_px):
-            title_kicker_px = max(min_px, brand_px)
-            hook_start_px = title_kicker_px + 2
-            narrative_start_px = hook_start_px + 2
 
         # ===================================================================
         # TOP — demoted brand lockup (NO emblem ring): small letter-spaced caps.
@@ -1111,66 +1102,132 @@ def render_premium_overlay(project, source, target, *, size, output_format):
                                fill=_EMBLEM_IVORY, shadow_dy=2)
                 y += int(brand_px * 1.18)
             _ink(business)
-        top_zone_bottom = y
+        brand_bottom = y
 
-        # ---- TITLE kicker (eyebrow above the narrative) -------------------
-        # campaign_title is DEMOTED to a small tracked kicker. Its VALUE is still
-        # inked so the required-fact ledger (campaign_title) is satisfied.
+        # ===================================================================
+        # FIX 1 — FIT THE NARRATIVE FIRST, then DERIVE hook + title sizes as
+        # fractions of the FITTED narrative so ``narrative_px > hook_px >
+        # title_px`` holds BY CONSTRUCTION regardless of how far the narrative
+        # clamped.  The narrative band is measured from a top that RESERVES an
+        # upper bound for the (yet-to-be-sized) title kicker: the kicker's FINAL
+        # size is derived ≤ this allowance, so reserving the allowance can only
+        # OVER-reserve → the narrative still fits its real band.
+        # ===================================================================
+        _title_allowance = 0
         if title:
-            _kick_gap = max(8, int(height * 0.012))
-            _kick_top = top_zone_bottom + _kick_gap
-            kick_font = _premium_font("kicker", title_kicker_px)
-            kick_lines = _wrap_premium(draw, _spaced_caps(title), "kicker", title_kicker_px, safe_w)
-            ky = _kick_top
-            for ln in kick_lines:
-                _draw_centered(draw, ln, kick_font, cy=ky, width=width,
-                               fill=_EMBLEM_GOLD, shadow_dy=2)
-                ky += int(title_kicker_px * 1.22)
-            _ink(title)
-            top_zone_bottom = ky
+            # Reserve up to ~3 kicker lines at the narrative-start-derived cap as
+            # an upper bound (kicker final size ≤ round(narr_start*0.34)).
+            _kick_cap_ub = max(min_px, int(round(narrative_start_px * 0.34)))
+            _title_allowance = max(8, int(height * 0.012)) + 3 * int(_kick_cap_ub * 1.22)
 
-        # ===================================================================
-        # NARRATIVE — the LARGEST headline (top third), Playfair-Black,
-        # multi-line, shrink-to-fit within its band. Best-effort: when omitted
-        # (retry) OR it cannot fit even at min_px it is dropped, never raised.
-        # ===================================================================
         narrative_px = 0
+        _narr_lines = None
         if cd_narrative and include_narrative:
             _narr_gap = max(10, int(height * 0.014))
-            _narr_top = top_zone_bottom + _narr_gap
+            _narr_top = brand_bottom + _title_allowance + _narr_gap
             # Headline band: the upper ~40% so the hook + hero/menu sit below.
             _narr_ceiling = max(_narr_top, int(height * 0.40))
             _narr_lines, narrative_px = _fit_title(
                 draw, cd_narrative, narrative_start_px, safe_w, min_px,
                 max_height=max(0, _narr_ceiling - _narr_top), line_factor=1.04,
             )
-            if _narr_lines:
-                narr_font = _premium_font("title", narrative_px)
-                ny = _narr_top
-                for ln in _narr_lines:
-                    _draw_centered(draw, ln, narr_font, cy=ny, width=width,
-                                   fill=_TITLE_CREAM, shadow_dy=4)
-                    ny += int(narrative_px * 1.04)
-                _ink(cd_narrative)
-                top_zone_bottom = ny
-            else:
+            if not _narr_lines:
                 narrative_px = 0  # dropped (did not fit) — best-effort
+
+        # The reference size that drives the derived hook/title caps. When the
+        # narrative was drawn use its FITTED size; when it was dropped/absent fall
+        # back to the start size so the derived caps (and the exposed debug) still
+        # reflect a coherent hierarchy.
+        _narr_ref_px = narrative_px or narrative_start_px
+
+        # DERIVE hook + title caps from the narrative reference (FIX 1 core):
+        #   hook_max   = ~0.60 × narrative   title_kicker = ~0.34 × narrative
+        # then enforce strict spread at the FLOOR edge (when caps collapse to
+        # min_px the 2-px step keeps narrative > hook > title >= brand strict).
+        hook_cap        = max(min_px, int(round(_narr_ref_px * 0.60)))
+        title_kicker_px = max(min_px, int(round(_narr_ref_px * 0.34)))
+        if not (_narr_ref_px > hook_cap > title_kicker_px >= brand_px):
+            title_kicker_px = max(min_px, brand_px)
+            hook_cap = title_kicker_px + 2
+            # _narr_ref_px must remain strictly above hook_cap; if the narrative
+            # clamped to min the start size is still the reference, but guard it.
+            if _narr_ref_px <= hook_cap:
+                _narr_ref_px = hook_cap + 2
+
+        # ===================================================================
+        # FIX 3 — TITLE kicker is a REQUIRED fact (campaign_title): fail-closed
+        # fit.  Shrink-to-fit within its small band capped at title_kicker_px; if
+        # the REQUIRED title cannot fit on-canvas even at the floor → raise
+        # FlyerRenderError (degrades to the flat fallback, which handles required
+        # facts).  NEVER ``_ink`` a title that was not drawn-to-fit on-canvas.
+        # ===================================================================
+        top_zone_bottom = brand_bottom
+        if title:
+            _kick_gap = max(8, int(height * 0.012))
+            _kick_top = brand_bottom + _kick_gap
+            # Band: keep the kicker compact (≤ ~3 lines) above the narrative; the
+            # ceiling matches the reserved allowance so the narrative band stays
+            # intact.  max_lines=3 bounds it; _fit_role_block returns None if even
+            # the floor overflows.
+            _kick_ceiling = max(_kick_top, brand_bottom + _title_allowance)
+            _kick_lines, _kick_px = _fit_role_block(
+                draw, _spaced_caps(title), "kicker", title_kicker_px, safe_w, min_px,
+                max_height=max(0, _kick_ceiling - _kick_top),
+                line_factor=1.22, max_lines=3,
+            )
+            if not _kick_lines:
+                # REQUIRED fact cannot fit → fail-closed (same as _compose title).
+                raise render.FlyerRenderError(
+                    "premium overlay does not fit (campaign_title kicker cannot fit on-canvas)"
+                )
+            title_kicker_px = _kick_px   # the actually-drawn (fitted) kicker size
+            kick_font = _premium_font("kicker", title_kicker_px)
+            ky = _kick_top
+            for ln in _kick_lines:
+                _draw_centered(draw, ln, kick_font, cy=ky, width=width,
+                               fill=_EMBLEM_GOLD, shadow_dy=2)
+                ky += int(title_kicker_px * 1.22)
+            _ink(title)   # inked ONLY after a verified draw-to-fit
+            top_zone_bottom = ky
+
+        # ===================================================================
+        # NARRATIVE — the LARGEST headline, drawn now (fitted above). Best-effort:
+        # when omitted (retry) OR it could not fit at min_px it is dropped, never
+        # raised. Re-fit against the REAL top (after the actually-drawn kicker) so
+        # the placement is exact — the reserved allowance only over-reserved.
+        # ===================================================================
+        if cd_narrative and include_narrative and _narr_lines:
+            _narr_gap = max(10, int(height * 0.014))
+            _narr_top = top_zone_bottom + _narr_gap
+            narr_font = _premium_font("title", narrative_px)
+            ny = _narr_top
+            for ln in _narr_lines:
+                _draw_centered(draw, ln, narr_font, cy=ny, width=width,
+                               fill=_TITLE_CREAM, shadow_dy=4)
+                ny += int(narrative_px * 1.04)
+            _ink(cd_narrative)
+            top_zone_bottom = ny
 
         # ===================================================================
         # HOOK — the SECOND sub-headline (offer / marketing line), Montserrat-
-        # Bold tracked, GOLD, below the narrative. Best-effort, never required.
+        # Bold tracked, GOLD, below the narrative.  FIX 2: best-effort AND
+        # dropped before the narrative — only drawn when ``include_hook``.  Capped
+        # at ``hook_cap`` (derived < narrative, > title) so the ordering holds.
         # ===================================================================
         hook_px = 0
-        if cd_hook_text:
+        if cd_hook_text and include_hook:
             _hook_gap = max(8, int(height * 0.010))
             _hook_top = top_zone_bottom + _hook_gap
             _hook_ceiling = max(_hook_top, int(height * 0.50))
             _hook_lines, hook_px = _fit_role_block(
-                draw, cd_hook_text, "kicker", hook_start_px, safe_w, min_px,
+                draw, cd_hook_text, "kicker", hook_cap, safe_w, min_px,
                 max_height=max(0, _hook_ceiling - _hook_top),
                 line_factor=1.18, max_lines=2,
             )
             if _hook_lines:
+                # Cap the FITTED hook below the narrative + above the title so the
+                # strict ordering survives even if _fit_role_block returned the cap.
+                hook_px = min(hook_px, hook_cap)
                 hook_font = _premium_font("kicker", hook_px)
                 hy = _hook_top
                 for ln in _hook_lines:
@@ -1182,15 +1239,17 @@ def render_premium_overlay(project, source, target, *, size, output_format):
             else:
                 hook_px = 0  # dropped — best-effort
 
-        # ---- expose the computed type scales for the unit assertion -------
-        # narrative_px/hook_px fall back to their START scale when the element was
-        # absent/dropped (so the ORDERING contract is still inspectable). The
-        # invariant the test asserts (narrative > hook > title >= brand) holds on
-        # the START scales by construction above.
+        # ---- expose the FITTED type scales for the unit assertion ---------
+        # FIX 1: report the FITTED sizes (narrative_px / hook_px when drawn), with
+        # the derived caps as the fallback when an element was absent/dropped so the
+        # ORDERING contract is still inspectable AND strict. Construction guarantees
+        # narrative > hook > title >= brand on these values.
+        _dbg_narrative = narrative_px or _narr_ref_px
+        _dbg_hook = hook_px or hook_cap
         _LAST_LAYOUT_DEBUG.update({
             "archetype": "message_first",
-            "narrative_px": narrative_px or narrative_start_px,
-            "hook_px": hook_px or hook_start_px,
+            "narrative_px": _dbg_narrative,
+            "hook_px": _dbg_hook,
             "title_px": title_kicker_px,
             "brand_px": brand_px,
             "emblem_ring_drawn": False,
@@ -1345,31 +1404,74 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         img.convert("RGB").save(target, format="PNG", optimize=True)
 
     # ===================================================================
-    # FIX 2 dispatch — narrative is best-effort, never a flat-degrade trigger.
+    # DISPATCH — narrative + hook are best-effort, never a flat-degrade trigger.
+    #
+    # NON-message_first (``_compose``): only the narrative is best-effort (there
+    # is no hook in today's layout). Drop ladder: (narrative=True) → (False).
     #   • No narrative (flag-off / blank) ⇒ a SINGLE attempt, byte-identical to
     #     today (the retry branch is never reached because cd_narrative is "").
-    #   • Narrative present ⇒ attempt WITH it; if the REQUIRED content does not
-    #     fit (any FlyerRenderError from the menu/title/seal fit or the required-
-    #     fact ledger), DROP the narrative and retry WITHOUT it. Only if the
-    #     layout fails EVEN WITHOUT the narrative does the error propagate (the
-    #     existing raise/degrade-to-flat path, unchanged). Each attempt rebuilds
-    #     a fresh image, so the dropped attempt leaves no partial pixels.
+    #   • Narrative present ⇒ attempt WITH it; on FlyerRenderError DROP it + retry.
     #
-    # Task 2: when ``message_first`` is engaged, route to ``_compose_mf`` (the A
-    # hierarchy). EVERY other archetype / None / flag-off routes to ``_compose``
-    # UNCHANGED — guaranteeing byte-identical output for non-message_first.
+    # FIX 2 — message_first (``_compose_mf``): BOTH the hook and the narrative are
+    # best-effort. Message-first = the MESSAGE is the hero, so DROP THE HOOK FIRST,
+    # then the narrative:
+    #     (narrative=True,  hook=True)   ← full
+    #  →  (narrative=True,  hook=False)  ← drop hook, keep the message
+    #  →  (narrative=False, hook=False)  ← bare (no narrative/hook)
+    #  →  existing degrade/raise path (a genuine overflow of REQUIRED content).
+    # Each attempt rebuilds a fresh image + ink log, so a failed attempt leaves no
+    # partial pixels. ``_LAST_HOOK_DROP`` / ``_LAST_NARRATIVE_DROP`` record drops.
+    #
+    # Byte-identical guard: for non-message_first the call shape is unchanged
+    # (include_hook is irrelevant to _compose, which ignores it via its signature
+    # adapter below), so flag-off / non-message_first output is unchanged.
     # ===================================================================
-    _composer = _compose_mf if message_first else _compose
-    if not cd_narrative:
-        _composer(include_narrative=False)
+    if not message_first:
+        # _compose has no hook; adapt the 2-arg dispatch to its 1-arg signature.
+        if not cd_narrative:
+            _compose(include_narrative=False)
+            return
+        try:
+            _compose(include_narrative=True)
+        except render.FlyerRenderError:
+            _LAST_NARRATIVE_DROP.append(True)
+            _compose(include_narrative=False)
+        return
+
+    # message_first: hook-first drop ladder.
+    if not cd_narrative and not cd_hook_text:
+        # Nothing best-effort to drop → a single attempt.
+        _compose_mf(include_narrative=False, include_hook=False)
         return
     try:
-        _composer(include_narrative=True)
+        _compose_mf(include_narrative=bool(cd_narrative), include_hook=bool(cd_hook_text))
+        return
     except render.FlyerRenderError:
-        # The required content did not fit WITH the narrative. Retry without it
-        # before degrading to flat — the narrative is never a required fact.
+        pass
+    # Step 1: drop the HOOK (keep the message) — only meaningful if a hook existed.
+    if cd_hook_text:
+        try:
+            _compose_mf(include_narrative=bool(cd_narrative), include_hook=False)
+            _LAST_HOOK_DROP.append(True)
+            return
+        except render.FlyerRenderError:
+            pass
+    # Step 2: drop the NARRATIVE too (bare) — only meaningful if a narrative existed.
+    if cd_narrative:
+        try:
+            _compose_mf(include_narrative=False, include_hook=False)
+            if cd_hook_text:
+                _LAST_HOOK_DROP.append(True)
+            _LAST_NARRATIVE_DROP.append(True)
+            return
+        except render.FlyerRenderError:
+            pass
+    # Step 3: genuine overflow of REQUIRED content — propagate (degrade-to-flat).
+    if cd_hook_text:
+        _LAST_HOOK_DROP.append(True)
+    if cd_narrative:
         _LAST_NARRATIVE_DROP.append(True)
-        _composer(include_narrative=False)
+    _compose_mf(include_narrative=False, include_hook=False)
 
 
 # Observability for FIX 2 (CD v2 Slice B): records, per render_premium_overlay
@@ -1378,6 +1480,14 @@ def render_premium_overlay(project, source, target, *, size, output_format):
 # test can assert the drop-not-degrade retry actually fired; the production
 # caller does not depend on it. Cleared at the top of each call.
 _LAST_NARRATIVE_DROP: list[bool] = []
+
+
+# Observability for FIX 2 (message-first drop ladder): records, per
+# render_premium_overlay call, whether the hook_text had to be DROPPED because
+# the required content did not fit with it. Message-first drops the HOOK FIRST
+# (the message is the hero), then the narrative. Append-only within a call; the
+# production caller does not depend on it. Cleared at the top of each call.
+_LAST_HOOK_DROP: list[bool] = []
 
 
 # Observability for CD v2 Composition Phase 1, Task 2 (message-first A template):

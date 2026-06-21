@@ -49,13 +49,31 @@ try:
     from flyer_creative_resolver import resolve_creative_direction  # type: ignore
     from flyer_brief import VisualDirection as _CDV2VisualDirection  # type: ignore
     from flyer_brief import FlyerBrief as _CDV2FlyerBrief  # type: ignore
-    from flyer_poster_archetype import select_poster_archetype  # type: ignore
 except ImportError:  # pragma: no cover - src layout fallback
     from agents.flyer.flyer_context_builder import propose_creative_brief_v2
     from agents.flyer.flyer_creative_resolver import resolve_creative_direction
     from agents.flyer.flyer_brief import VisualDirection as _CDV2VisualDirection
     from agents.flyer.flyer_brief import FlyerBrief as _CDV2FlyerBrief
-    from agents.flyer.flyer_poster_archetype import select_poster_archetype
+
+# FIX 4 (Codex MAJOR): the poster-archetype router is a Composition-Phase-1
+# addition that may be ABSENT on a flat deploy that predates it (or rolled it
+# back). It is imported in its OWN guarded block — independent of the CD v2
+# chain above — with a fallback that yields the safe ``message_first`` default
+# so render.py imports CLEANLY even when ``flyer_poster_archetype`` is missing.
+# Without this, a missing module would propagate ImportError and crash render.py
+# at import time, breaking flag-off + the entire flyer render path (not just the
+# CD-v2 archetype feature). The fallback preserves legacy behavior: the carrier
+# simply records ``message_first`` and _compose_mf is engaged only when the
+# overlay also sees that archetype on a flag-on render.
+try:
+    from flyer_poster_archetype import select_poster_archetype  # type: ignore
+except ImportError:  # pragma: no cover - src layout fallback
+    try:
+        from agents.flyer.flyer_poster_archetype import select_poster_archetype
+    except ImportError:  # module genuinely absent on a flat/rolled-back deploy
+        def select_poster_archetype(request_intent: str, offer_priority: str = "medium") -> str:  # type: ignore
+            """Fallback archetype router (module absent): always the safe default."""
+            return "message_first"
 
 
 class FlyerRenderError(RuntimeError):

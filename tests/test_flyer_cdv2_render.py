@@ -592,3 +592,80 @@ def test_renderer_source_reads_creative_direction_back_onto_project():
     assert "project.creative_direction = " in src
     # The read-back must occur BEFORE the render_premium_overlay call.
     assert src.index("project.creative_direction = ") < src.index("render_premium_overlay(")
+
+
+# ── FIX 4 (Codex MAJOR) — render imports cleanly without flyer_poster_archetype ─
+#
+# On a flat deploy that predates / rolled back the Composition-Phase-1 router,
+# flyer_poster_archetype.py may be ABSENT. render.py must import CLEANLY in that
+# case (guarded import + message_first fallback) — a missing module must NEVER
+# crash render.py at import time, or flag-off + the whole flyer render path
+# breaks. Plus: the deploy manifest installs the module under a guard.
+import os  # noqa: E402
+import subprocess as _subprocess  # noqa: E402
+import textwrap as _textwrap  # noqa: E402
+
+
+def test_render_imports_without_poster_archetype_module():
+    """render.py must import CLEANLY when flyer_poster_archetype is unimportable
+    (guarded import + message_first fallback). Run in a SUBPROCESS with a fresh
+    interpreter so the import meta-path block does NOT pollute this test session's
+    sys.modules (a reload-in-process corrupts the dual-module identity other
+    flyer tests rely on). The subprocess blocks BOTH the flat and package
+    archetype module names, imports the render module, and asserts the fallback
+    router returns the safe 'message_first' default."""
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[1]
+    src = repo / "src"
+    platform = repo / "src" / "platform"
+    code = _textwrap.dedent(
+        """
+        import sys, importlib.abc
+
+        BLOCKED = {"flyer_poster_archetype", "agents.flyer.flyer_poster_archetype"}
+
+        class _Blocker(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path, target=None):
+                if name in BLOCKED:
+                    raise ImportError("blocked for test: " + name)
+                return None
+
+        sys.meta_path.insert(0, _Blocker())
+
+        # Import the render module (repo package layout) — must NOT raise even
+        # though flyer_poster_archetype is unimportable (guarded import +
+        # message_first fallback). The flat-name import attempt inside render.py
+        # fails first (no flat module in the repo), then the package-name attempt
+        # is ALSO blocked here, exercising the inner fallback def.
+        import agents.flyer.render as render  # noqa: F401
+        assert render.select_poster_archetype("menu") == "message_first"
+        assert render.select_poster_archetype("combo_offer") == "message_first"
+        print("OK")
+        """
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(src), str(platform)])
+    res = _subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env=env,
+    )
+    assert res.returncode == 0, f"stdout={res.stdout!r} stderr={res.stderr!r}"
+    assert "OK" in res.stdout
+
+
+def test_deploy_manifest_has_guarded_poster_archetype_install():
+    """deploy.sh `bash -n` passes AND it carries a GUARDED install line for
+    flyer_poster_archetype.py (sibling pattern: install when present, rm when not)."""
+    from pathlib import Path
+    deploy = Path(__file__).resolve().parents[1] / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
+    text = deploy.read_text(encoding="utf-8")
+    assert "src/agents/flyer/flyer_poster_archetype.py" in text
+    assert "/opt/shift-agent/flyer_poster_archetype.py" in text
+    # Guarded: an `if [ -f ... ]` test guarding the install + a matching rm -f.
+    assert "if [ -f src/agents/flyer/flyer_poster_archetype.py ]" in text
+    assert "rm -f /opt/shift-agent/flyer_poster_archetype.py" in text
+    # `bash -n` syntax check passes (skip cleanly if bash is unavailable).
+    import shutil
+    bash = shutil.which("bash")
+    if bash:
+        res = _subprocess.run([bash, "-n", str(deploy)], capture_output=True, text=True)
+        assert res.returncode == 0, res.stderr

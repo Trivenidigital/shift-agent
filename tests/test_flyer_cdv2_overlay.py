@@ -503,3 +503,189 @@ def test_message_first_covers_every_required_fact(tmp_path):
     schedule, every item, the offer, location and contact."""
     out = _render(_project(creative_direction=_CD_MF, pid="F0283"), tmp_path, "mf_cover.png")
     assert out.exists() and Image.open(out).size == (1080, 1350)
+
+
+# ===========================================================================
+# FIX 1 (Codex BLOCKER) — the type hierarchy must hold on the FITTED sizes,
+# not the START sizes. A LONG narrative shrinks toward min_px; the hook + title
+# kicker are DERIVED as fractions of the FITTED narrative so the ordering
+# narrative_px > hook_px > title_px can never invert. The debug record must
+# carry the FITTED sizes (the short-narrative test never forced the clamp).
+# ===========================================================================
+
+_LONG_NARRATIVE = (
+    "Authentic South Indian Weekend Tiffin Festival Family Favorites Now Served "
+    "Fresh Every Single Evening Come Taste The Long Tradition Today With Us"
+)  # long enough to force the headline to clamp hard toward min_px
+
+
+def test_fix1_long_narrative_fitted_hierarchy_holds(tmp_path):
+    """A LONG multi-line narrative forces the headline to shrink toward min_px.
+    The FITTED sizes must STILL satisfy narrative_px > hook_px > title_px (the
+    derived-from-fitted construction), not just the start sizes. A SHORT hook is
+    used so an independent (pre-fix) fit would leave hook at its start size and
+    invert against the clamped narrative — this is the case the old short-narrative
+    test missed."""
+    cd = dict(_CD_MF, campaign_narrative=_LONG_NARRATIVE, hook_text="$7.99")
+    out = _render(_project(creative_direction=cd, pid="F0290"), tmp_path, "fix1_long.png")
+    assert out.exists()
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert dbg.get("archetype") == "message_first"
+    # FITTED ordering — the load-bearing invariant under heavy clamp.
+    assert dbg["narrative_px"] > dbg["hook_px"], (dbg["narrative_px"], dbg["hook_px"])
+    assert dbg["hook_px"] > dbg["title_px"], (dbg["hook_px"], dbg["title_px"])
+    assert dbg["brand_px"] <= dbg["title_px"], (dbg["brand_px"], dbg["title_px"])
+
+
+def test_fix1_debug_reports_fitted_not_start_for_long_narrative(tmp_path):
+    """The narrative_px reported is the FITTED size: with a long narrative it must
+    be strictly below the start-band ceiling (it clamped), proving the debug
+    reflects the actually-drawn size — not the start scale."""
+    cd = dict(_CD_MF, campaign_narrative=_LONG_NARRATIVE, hook_text="$7.99")
+    out = _render(_project(creative_direction=cd, pid="F0291"), tmp_path, "fix1_fitted.png")
+    assert out.exists()
+    dbg = po._LAST_LAYOUT_DEBUG
+    # A long narrative cannot sit at the start ceiling (~0.078×1080≈84); it clamps.
+    assert dbg["narrative_px"] < int(1080 * 0.078)
+
+
+# ===========================================================================
+# FIX 2 (Codex BLOCKER) — hook + narrative are BOTH best-effort with a drop
+# ladder (drop HOOK first, then narrative); neither may push required content
+# off the canvas. A genuine overflow (too many required items) still raises.
+# ===========================================================================
+
+_HOOK_TEXT = "ANY ITEM SEVEN NINETY NINE TODAY ONLY"
+
+
+def test_fix2_hook_dropped_first_keeps_premium(tmp_path, monkeypatch):
+    """A hook that, once DRAWN, over-consumes the top zone and pushes the required
+    menu off canvas must NOT degrade to flat: the overlay drops the HOOK first,
+    keeps the narrative+message, and still renders premium. _LAST_HOOK_DROP
+    records the drop; _LAST_NARRATIVE_DROP must NOT (narrative was retained).
+
+    The greedy stub targets ONLY the hook text (not the title kicker, which also
+    uses the kicker role) and returns a block tall enough to starve the menu."""
+    real_fit = po._fit_role_block
+
+    def _greedy_hook(draw, text, role, start_px, max_width, min_px, *, max_height, line_factor, max_lines):
+        if role == "kicker" and text == _HOOK_TEXT:
+            return [f"HOOK LINE {n}" for n in range(14)], max(start_px, min_px, 90)
+        return real_fit(draw, text, role, start_px, max_width, min_px,
+                        max_height=max_height, line_factor=line_factor, max_lines=max_lines)
+
+    monkeypatch.setattr(po, "_fit_role_block", _greedy_hook)
+
+    facts = [f for f in _base_facts() if not f.fact_id.startswith("item:")]
+    names = ["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar", "Rasam", "Bonda"]
+    for i, nm in enumerate(names):
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item {i}", value=nm, source="customer_text", required=True))
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:price", label=f"Price {i}", value=f"${5+i}.99", source="customer_text", required=True))
+    cd = dict(_CD_MF, campaign_narrative="Weekend Specials", hook_text=_HOOK_TEXT)
+    proj = _project(creative_direction=cd, facts=facts, pid="F0292")
+
+    out = tmp_path / "fix2_hookdrop.png"
+    po.render_premium_overlay(proj, _bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+    # The hook was dropped (its greedy block no longer competes); narrative kept.
+    assert po._LAST_HOOK_DROP == [True]
+    assert po._LAST_NARRATIVE_DROP == []
+
+
+def test_fix2_narrative_dropped_after_hook_when_both_break(tmp_path, monkeypatch):
+    """When dropping the hook alone is not enough, the narrative is dropped too
+    (full ladder: (T,T)->(T,F)->(F,F)). Here BOTH the narrative (title role) and
+    the hook (kicker role) are forced greedy so only the (F,F) bare attempt fits.
+    Both drop records must fire; the render still succeeds premium (no flat)."""
+    real_title = po._fit_title
+    real_role = po._fit_role_block
+
+    def _greedy_title(draw, text, start_px, max_width, min_px, *, max_height, line_factor):
+        if text:
+            return [f"NARR {n}" for n in range(7)], max(start_px, min_px, 70)
+        return real_title(draw, text, start_px, max_width, min_px,
+                          max_height=max_height, line_factor=line_factor)
+
+    def _greedy_role(draw, text, role, start_px, max_width, min_px, *, max_height, line_factor, max_lines):
+        if role == "kicker" and text:
+            return [f"HOOK {n}" for n in range(6)], max(start_px, min_px, 60)
+        return real_role(draw, text, role, start_px, max_width, min_px,
+                         max_height=max_height, line_factor=line_factor, max_lines=max_lines)
+
+    monkeypatch.setattr(po, "_fit_title", _greedy_title)
+    monkeypatch.setattr(po, "_fit_role_block", _greedy_role)
+
+    facts = [f for f in _base_facts() if not f.fact_id.startswith("item:")]
+    names = ["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar", "Rasam", "Bonda"]
+    for i, nm in enumerate(names):
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item {i}", value=nm, source="customer_text", required=True))
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:price", label=f"Price {i}", value=f"${5+i}.99", source="customer_text", required=True))
+    cd = dict(_CD_MF, campaign_narrative="Weekend Specials Festival", hook_text="ANY ITEM $7.99 TODAY")
+    proj = _project(creative_direction=cd, facts=facts, pid="F0293")
+
+    out = tmp_path / "fix2_bothdrop.png"
+    po.render_premium_overlay(proj, _bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+    assert po._LAST_HOOK_DROP == [True]
+    assert po._LAST_NARRATIVE_DROP == [True]
+
+
+def test_fix2_genuine_overflow_still_raises_message_first(tmp_path):
+    """Best-effort drops never mask a REAL overflow: 40 long required items cannot
+    fit even after dropping BOTH the hook and the narrative → raises."""
+    facts = [f for f in _base_facts() if not f.fact_id.startswith("item:")]
+    for i in range(40):
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label="Item",
+                                     value=f"VeryLongDishNameNumber{i}", source="customer_text", required=True))
+    cd = dict(_CD_MF, campaign_narrative="Weekend Specials", hook_text="ANY ITEM $7.99")
+    proj = _project(creative_direction=cd, facts=facts, pid="F0294")
+    with pytest.raises(render.FlyerRenderError):
+        po.render_premium_overlay(proj, _bg(tmp_path), tmp_path / "fix2_of.png",
+                                  size=(1080, 1350), output_format="concept_preview")
+
+
+# ===========================================================================
+# FIX 3 (Codex BLOCKER) — campaign_title kicker is a REQUIRED fact → fail-closed
+# fit, not a blind _ink of off-canvas text. A pathologically long required title
+# that cannot fit its kicker band even at the floor must RAISE; a normal title
+# fits and is verified.
+# ===========================================================================
+
+def test_fix3_unfittable_required_title_raises(tmp_path):
+    """A REQUIRED campaign_title that cannot fit on-canvas as a kicker (a single
+    enormous unbroken token within the 500-char value cap) must raise
+    FlyerRenderError — never silently _ink a title that wasn't drawn-to-fit. A
+    480-char unbroken token char-wraps into many lines that overflow the small
+    kicker band even at the floor."""
+    facts = [f for f in _base_facts() if f.fact_id != "campaign_title"]
+    facts.append(FlyerLockedFact(
+        fact_id="campaign_title", label="Campaign",
+        value="X" * 480, source="customer_text", required=True))
+    proj = _project(creative_direction=_CD_MF, facts=facts, pid="F0295")
+    with pytest.raises(render.FlyerRenderError):
+        po.render_premium_overlay(proj, _bg(tmp_path), tmp_path / "fix3_title.png",
+                                  size=(1080, 1350), output_format="concept_preview")
+
+
+def test_fix3_normal_title_fits_and_is_verified(tmp_path):
+    """A normal campaign_title fits its kicker band and the render succeeds (the
+    fail-closed required-fact ledger passes — the title VALUE is covered)."""
+    out = _render(_project(creative_direction=_CD_MF, pid="F0296"), tmp_path, "fix3_ok.png")
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+    # The title kicker is still small (demoted) AND below the hook/narrative.
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert dbg["title_px"] < dbg["hook_px"] < dbg["narrative_px"]
+
+
+def test_fix3_title_kicker_band_overflow_raises(tmp_path):
+    """A required title with many long words that cannot wrap into the small kicker
+    band at the floor must raise (fail-closed) rather than draw off-canvas."""
+    facts = [f for f in _base_facts() if f.fact_id != "campaign_title"]
+    facts.append(FlyerLockedFact(
+        fact_id="campaign_title", label="Campaign",
+        value=" ".join(f"Supercalifragilistic{i}" for i in range(20)),
+        source="customer_text", required=True))
+    proj = _project(creative_direction=_CD_MF, facts=facts, pid="F0297")
+    with pytest.raises(render.FlyerRenderError):
+        po.render_premium_overlay(proj, _bg(tmp_path), tmp_path / "fix3_band.png",
+                                  size=(1080, 1350), output_format="concept_preview")
