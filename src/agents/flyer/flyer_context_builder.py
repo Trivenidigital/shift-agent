@@ -33,7 +33,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Mapping, Optional, Sequence
+from typing import Any, Callable, Literal, Mapping, Optional, Sequence
 
 from pydantic import ValidationError
 
@@ -448,6 +448,77 @@ def _constructs(model: type, value: Any) -> bool:
         return False
 
 
+# A gateway callable: (system_prompt, user_message) -> parsed-JSON Mapping | None.
+# Defaults to the module ``_call_gateway`` (the deployed OpenRouter seam + retry).
+# Injectable so callers/tests can supply an offline fake without monkeypatching the
+# module attribute. ``build_flyer_brief`` keeps its historic monkeypatch contract
+# by NOT injecting (it calls the module ``_call_gateway`` so existing tests that
+# ``monkeypatch.setattr(fcb, "_call_gateway", ...)`` still intercept it).
+GatewayCallable = Callable[[str, str], Optional[Mapping[str, Any]]]
+
+
+def _propose_and_parse_brief(
+    raw_request: str,
+    locked_facts: Sequence[FlyerLockedFact],
+    business_profile: Mapping[str, Any] | object | None,
+    source_summary: Optional[str],
+    project_context: Optional[str],
+    *,
+    gateway: Optional[GatewayCallable],
+) -> Optional[FlyerBrief]:
+    """Run the SHARED propose+parse path: assemble the SKILL.md system prompt + the
+    USER data message, call the gateway, PRE-SANITIZE the CD v2 enhancement fields,
+    then run the SINGLE strict ``FlyerBrief.model_validate``. Returns the parsed
+    ``FlyerBrief`` on success, or ``None`` on ANY failure (skill body unreadable,
+    gateway unreachable/None, or an unparseable/off-schema response). Never raises.
+
+    This is the ONE place the propose+parse internals live — both ``build_flyer_brief``
+    (which layers the strict anti-fabrication ``validate`` + ``materialize_spans`` on
+    top) and the V2 ``propose_creative_brief_v2`` (which does NOT) call it, so the
+    prompt assembly + ``_call_gateway`` + ``_sanitize_cdv2_fields`` + ``model_validate``
+    are not duplicated. The CD v2 / campaign_narrative instructions in the USER
+    message (B0.2) and the firewalled sanitize are therefore identical on both paths.
+
+    ``gateway`` defaults to the module ``_call_gateway`` when None, so ``build_flyer_brief``
+    keeps its historic monkeypatch contract (tests patch the module attribute); the
+    V2 path injects a fake gateway directly for tests (no network).
+    """
+    call_gateway = gateway or _call_gateway
+
+    # The SKILL.md body is the governing system instruction (the brain). Unreadable
+    # ⇒ the brain is unreachable ⇒ None (fail safe), never Python-authored creativity.
+    system_prompt = _skill_body()
+    if not system_prompt:
+        _set_gateway_reason("skill_body_unreadable")
+        return None
+
+    user_message = _build_user_message(
+        raw_request, locked_facts, business_profile, source_summary, project_context
+    )
+    # Reset the reason mailbox first so we read THIS call's classification (or "" →
+    # the caller's default when a fake/monkeypatched gateway writes nothing).
+    _set_gateway_reason("")
+    raw = call_gateway(system_prompt, user_message)
+    if not raw:
+        return None
+
+    # CD v2: the new OPTIONAL creative fields must NEVER fail the parse OR bypass the
+    # FlyerBrief schema constraints. So PRE-SANITIZE them in the raw dict (malformed →
+    # removed so it defaults; over-length → capped) and then run a SINGLE strict
+    # ``FlyerBrief.model_validate`` over the WHOLE sanitized dict — that one validate
+    # enforces every constraint uniformly (``supporting_refs`` max_length=40, ``mood``
+    # max_length=120) instead of a pop-then-attribute-assign path that would bypass
+    # those length constraints (Codex MAJOR).
+    sanitized = _sanitize_cdv2_fields(raw)
+    try:
+        return FlyerBrief.model_validate(sanitized)
+    except (ValidationError, TypeError, ValueError):
+        # A response that does not shape into a FlyerBrief is an unreachable/garbled
+        # brain → None (fail safe), exactly as a gateway failure.
+        _set_gateway_reason("brief_unparseable")
+        return None
+
+
 def build_flyer_brief(
     raw_request: str,
     locked_facts: Sequence[FlyerLockedFact],
@@ -480,42 +551,24 @@ def build_flyer_brief(
     if not _is_enabled():
         return BriefResult(status="disabled")
 
-    # The SKILL.md body is the governing system instruction (the brain). If it is
-    # unreadable the firewall is armed but the brain is unreachable → unavailable
-    # (fail safe), NEVER a fall-back to Python-authored creativity.
-    system_prompt = _skill_body()
-    if not system_prompt:
-        return BriefResult(status="unavailable", reason="skill_body_unreadable")
-
-    user_message = _build_user_message(
-        raw_request, locked_facts, business_profile, source_summary, project_context
+    # Reuse the SHARED propose+parse path (skill body → user message → gateway →
+    # sanitize → model_validate). It returns None for ALL "brain unreachable" cases
+    # (skill body unreadable, missing/placeholder key, the call threw, an empty /
+    # unparseable JSON, or an off-schema body) → unavailable. ``_GATEWAY_FAILURE``
+    # carries the classified reason (set by ``_attempt_gateway`` / the helper); when a
+    # monkeypatched ``_call_gateway`` writes nothing it stays "" → "gateway_unreachable".
+    brief = _propose_and_parse_brief(
+        raw_request,
+        locked_facts,
+        business_profile,
+        source_summary,
+        project_context,
+        gateway=None,  # use the module _call_gateway so existing monkeypatch tests intercept
     )
-    # _call_gateway returns None for ALL "brain unreachable" cases (missing/placeholder
-    # key, the call threw, or the response was empty/unparseable JSON) → unavailable.
-    # Reset the reason mailbox first so we read THIS call's classification (or "" →
-    # "gateway_unreachable" when _call_gateway is monkeypatched and writes nothing).
-    _set_gateway_reason("")
-    raw = _call_gateway(system_prompt, user_message)
-    if not raw:
+    if brief is None:
         return BriefResult(
             status="unavailable", reason=_GATEWAY_FAILURE["reason"] or "gateway_unreachable"
         )
-
-    # CD v2: the new OPTIONAL creative fields must NEVER fail the parse OR bypass the
-    # FlyerBrief schema constraints. So PRE-SANITIZE them in the raw dict (malformed →
-    # removed so it defaults; over-length → capped) and then run a SINGLE strict
-    # ``FlyerBrief.model_validate`` over the WHOLE sanitized dict — that one validate
-    # enforces every constraint uniformly (``supporting_refs`` max_length=40, ``mood``
-    # max_length=120) instead of the old pop-then-attribute-assign path, which set the
-    # CD v2 fields by attribute and so bypassed those length constraints (Codex MAJOR).
-    sanitized = _sanitize_cdv2_fields(raw)
-
-    try:
-        brief = FlyerBrief.model_validate(sanitized)
-    except (ValidationError, TypeError, ValueError):
-        # A response that does not shape into a FlyerBrief is an unreachable/garbled
-        # brain, not a firewall rejection → unavailable (fail safe), not invalid.
-        return BriefResult(status="unavailable", reason="brief_unparseable")
 
     result = _validator.validate(brief, locked_facts, raw_request)
     if not result.ok:
@@ -531,6 +584,54 @@ def build_flyer_brief(
         locked_facts.extend(materialized)
 
     return BriefResult(status="ok", brief=brief)
+
+
+def propose_creative_brief_v2(
+    raw_request: str,
+    locked_facts: Sequence[FlyerLockedFact],
+    business_profile: Mapping[str, Any] | object | None = None,
+    *,
+    gateway: Optional[GatewayCallable] = None,
+) -> Optional[FlyerBrief]:
+    """CD v2 PROPOSE: the Hermes brain proposes the creative fields, parsed
+    DEFENSIVELY into a ``FlyerBrief`` — WITHOUT the strict anti-fabrication
+    ``validate`` and WITHOUT ``materialize_spans`` (so it NEVER mutates the passed
+    ``locked_facts``).
+
+    This is the V2 render path's brief source (B2.3). It REUSES the SHARED
+    propose+parse internals (``_propose_and_parse_brief``): the SAME prompt assembly
+    incl. the CD v2 / campaign_narrative instructions (B0.2), the SAME ``_call_gateway``
+    seam, and the SAME ``_sanitize_cdv2_fields`` + single ``FlyerBrief.model_validate``
+    parse — no prompt text or parse logic is duplicated. It deliberately departs from
+    ``build_flyer_brief`` in two ways:
+
+      - It does NOT run the strict ``flyer_brief_validator.validate`` (required-fact
+        enforcement / fail-closed rejection). The deterministic resolver + the CD v2
+        scrubs are the V2 firewall for every field V2 renders, so a brief that the
+        strict validator would reject is still safely RESOLVED downstream (it only
+        selects grounded locked-fact values, never invents).
+      - It does NOT call ``materialize_spans`` — so it NEVER appends to / mutates the
+        caller's ``locked_facts`` (a HARD V2 boundary). The list is read-only here.
+
+    Returns the parsed ``FlyerBrief`` on success, or ``None`` on ANY gateway/parse
+    failure (skill body unreadable, gateway unreachable, unparseable/off-schema
+    response). NEVER raises. ``gateway`` is injectable so tests supply an offline fake
+    (no network); when None it uses the module ``_call_gateway``.
+
+    NOTE: unlike ``build_flyer_brief`` this is NOT gated by
+    ``FLYER_CREATIVE_DIRECTOR_ENABLED`` — the V2 caller gates on the separate
+    ``FLYER_CREATIVE_DIRECTOR_V2`` flag + allowlist (``_creative_director_v2_enabled``)
+    BEFORE calling, so flag-off this function is never reached and the network is
+    never touched.
+    """
+    return _propose_and_parse_brief(
+        raw_request,
+        locked_facts,
+        business_profile,
+        None,  # source_summary — not used on the V2 render path yet
+        None,  # project_context — not used on the V2 render path yet
+        gateway=gateway,
+    )
 
 
 def advise_scene_direction(

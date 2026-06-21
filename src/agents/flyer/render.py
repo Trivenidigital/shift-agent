@@ -39,6 +39,22 @@ try:
 except ImportError:  # pragma: no cover - src layout fallback
     from agents.flyer.campaign_scene_prompts import campaign_scene_prompt_block, select_campaign_scene
 
+import dataclasses
+
+# Creative Director v2 (Slice B, B2.3) — propose+resolve a creative direction in
+# _render_model and carry it on project.creative_direction. Flat on the VPS,
+# package-style in the repo tree (mirrors the facts/scene-prompt imports above).
+try:
+    from flyer_context_builder import propose_creative_brief_v2  # type: ignore
+    from flyer_creative_resolver import resolve_creative_direction  # type: ignore
+    from flyer_brief import VisualDirection as _CDV2VisualDirection  # type: ignore
+    from flyer_brief import FlyerBrief as _CDV2FlyerBrief  # type: ignore
+except ImportError:  # pragma: no cover - src layout fallback
+    from agents.flyer.flyer_context_builder import propose_creative_brief_v2
+    from agents.flyer.flyer_creative_resolver import resolve_creative_direction
+    from agents.flyer.flyer_brief import VisualDirection as _CDV2VisualDirection
+    from agents.flyer.flyer_brief import FlyerBrief as _CDV2FlyerBrief
+
 
 class FlyerRenderError(RuntimeError):
     pass
@@ -4151,9 +4167,41 @@ def _render(project: FlyerProject, path: Path, *, concept_id: str, size: tuple[i
         _render_with_system_pillow(project, path, concept_id=concept_id, size=size)
 
 
+def _populate_creative_direction_v2(project: FlyerProject) -> None:
+    """CD v2 (Slice B, B2.3): when the V2 gate is ON for this project, PROPOSE a
+    creative brief (Hermes proposes the creative fields), RESOLVE it over the
+    project's EXISTING locked_facts, and store ``dataclasses.asdict(resolved)`` on
+    ``project.creative_direction`` so it round-trips into the overlay subprocess.
+
+    Strict boundaries (B2.3):
+      - This is ONLY reached when ``_creative_director_v2_enabled(project)`` — flag-off
+        the caller never calls it, so the carrier stays None, ``propose_creative_brief_v2``
+        is NEVER invoked, and NO locked_facts mutation happens (byte-identical legacy).
+      - The V2 propose path NEVER mutates ``project.locked_facts`` (it does not call
+        ``materialize_spans``); the resolver is PURE.
+      - Failure ANYWHERE ⇒ resolve from an EMPTY ``FlyerBrief`` (deterministic
+        defaults) so the render is still enriched, NEVER blocked — and on a truly
+        unexpected error leave ``creative_direction`` None. This populates the
+        carrier only; B2.4/B2.5 consume it in the bg prompt / overlay.
+    """
+    try:
+        raw_request = (project.raw_request or project.fields.notes or "").strip()
+        brief = propose_creative_brief_v2(
+            raw_request, project.locked_facts, None
+        ) or _CDV2FlyerBrief(
+            request_intent="new", visual_direction=_CDV2VisualDirection()
+        )
+        resolved = resolve_creative_direction(brief, project.locked_facts)
+        project.creative_direction = dataclasses.asdict(resolved)
+    except Exception:  # noqa: BLE001 — never block the render; carrier stays None
+        project.creative_direction = None
+
+
 def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> None:
     token = _FORCE_BACKGROUND_ONLY.set(True) if force_background_only else None
     try:
+        if _creative_director_v2_enabled(project):
+            _populate_creative_direction_v2(project)
         if model.strip().lower() in DETERMINISTIC_MODEL_NAMES:
             _render(project, path, concept_id=concept_id, size=size)
             return
