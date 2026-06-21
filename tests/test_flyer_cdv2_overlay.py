@@ -235,3 +235,88 @@ def test_never_raises_on_malformed_creative_direction(tmp_path):
     cd = {"campaign_narrative": 12345, "offer_priority": ["nonsense"], "hook_prominence": None}
     out = _render(_project(creative_direction=cd, pid="F0259"), tmp_path, "malformed.png")
     assert out.exists() and Image.open(out).size == (1080, 1350)
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 (Codex MAJOR): the narrative is DROPPED under pressure, never degraded
+#   premium→flat. When including the narrative makes the required content not
+#   fit, the overlay RETRIES without the narrative and still renders premium;
+#   only a layout that fails EVEN WITHOUT the narrative raises/degrades.
+# ---------------------------------------------------------------------------
+
+def test_fix2_narrative_dropped_not_degraded_when_it_breaks_required(tmp_path, monkeypatch):
+    """A narrative that, once DRAWN, consumes enough top-zone space to push the
+    required menu off the canvas must NOT degrade to flat: the overlay drops the
+    narrative and retries, producing a premium render that covers every required
+    fact. We force the narrative to be DRAWN large (simulating a looser band /
+    short narrative that still competes) by stubbing the role-block fitter so the
+    first attempt over-consumes; the second attempt (narrative omitted) restores
+    the room."""
+    real_fit = po._fit_role_block
+    state = {"calls": 0}
+
+    def _greedy_fit(draw, text, role, start_px, max_width, min_px, *, max_height, line_factor, max_lines):
+        # Only affects the narrative attempt (role == "kicker" eyebrow). Return a
+        # block that consumes a LARGE band at a large size so the drawn narrative
+        # pushes top_zone_bottom down hard — mimicking a narrative that fits its
+        # band yet starves the required content below it. (~8 lines × ~73px so the
+        # required menu/title no longer fits → first attempt raises → retry.)
+        state["calls"] += 1
+        if role == "kicker" and text:
+            big = max(start_px, min_px, 60)
+            lines = [f"NARRATIVE LINE {n}" for n in range(8)]
+            return lines, big
+        return real_fit(draw, text, role, start_px, max_width, min_px,
+                        max_height=max_height, line_factor=line_factor, max_lines=max_lines)
+
+    monkeypatch.setattr(po, "_fit_role_block", _greedy_fit)
+
+    # A dense priced menu so the greedy narrative tips the menu placement check.
+    facts = [f for f in _base_facts() if not f.fact_id.startswith("item:")]
+    names = ["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar", "Rasam", "Bonda"]
+    for i, nm in enumerate(names):
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item {i}", value=nm, source="customer_text", required=True))
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:price", label=f"Price {i}", value=f"${5+i}.99", source="customer_text", required=True))
+    cd = dict(_CD, campaign_narrative="Authentic Weekend Tiffin Festival Family Favorites On Now")
+    proj = _project(creative_direction=cd, facts=facts, pid="F0260")
+
+    out = tmp_path / "fix2_drop.png"
+    # MUST NOT raise (no flat degrade): the narrative is dropped and the premium
+    # overlay still renders.
+    po.render_premium_overlay(proj, _bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+    # The drop-not-degrade retry fired (observable record set).
+    assert po._LAST_NARRATIVE_DROP == [True]
+
+
+def test_fix2_overflow_without_narrative_still_raises(tmp_path):
+    """A genuinely overflowing case (too many long items to fit EVEN WITHOUT the
+    narrative) must still raise/degrade — the retry must not mask a real
+    overflow. The narrative is present but irrelevant: dropping it cannot help."""
+    facts = [f for f in _base_facts() if not f.fact_id.startswith("item:")]
+    for i in range(40):
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label="Item", value=f"VeryLongDishNameNumber{i}", source="customer_text", required=True))
+    cd = dict(_CD, campaign_narrative="Authentic Weekend Tiffin Festival")
+    proj = _project(creative_direction=cd, facts=facts, pid="F0261")
+    with pytest.raises(render.FlyerRenderError):
+        po.render_premium_overlay(proj, _bg(tmp_path), tmp_path / "fix2_overflow.png", size=(1080, 1350), output_format="concept_preview")
+
+
+def test_fix2_pathological_long_narrative_renders_premium(tmp_path):
+    """A pathological long narrative + a normal item set that fits WITHOUT the
+    narrative renders premium (NOT a flat degrade / FlyerRenderError). End-to-end
+    through real geometry (no stub)."""
+    cd = dict(_CD, campaign_narrative="South Indian Favorites at One Price " * 40)
+    out = tmp_path / "fix2_long.png"
+    po.render_premium_overlay(_project(creative_direction=cd, pid="F0262"), _bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+
+
+def test_fix2_empty_narrative_single_attempt_byte_identical(tmp_path):
+    """FIX 2 regression: empty/None narrative ⇒ a SINGLE compose attempt, the
+    retry branch never engaged, byte-identical to today; no drop recorded."""
+    none_out = _render(_project(creative_direction=None, pid="F0263"), tmp_path, "fix2_none.png")
+    assert po._LAST_NARRATIVE_DROP == []
+    empty_out = _render(_project(creative_direction={"campaign_narrative": "   "}, pid="F0263"), tmp_path, "fix2_blank.png")
+    assert po._LAST_NARRATIVE_DROP == []
+    assert none_out.read_bytes() == empty_out.read_bytes()

@@ -753,3 +753,108 @@ def test_resolver_narrative_never_raises_empty_facts():
     out = resolve_creative_direction(brief, [])
     assert isinstance(out, ResolvedCreativeDirection)
     assert out.campaign_narrative == ""
+
+
+# --- FIX 1 (Codex BLOCKER): sale/discount/offer WORDS + hyphen forms reject ----
+#
+# The narrative firewall delegated commercial rejection to a scanner that only
+# catches numeric VALUES, so generic claim WORDS ("Discount", "Deal", "Promo",
+# "Sale", "Clearance", "BOGO") and hyphenated time-pressure / superlative forms
+# ("Limited-time", "Today-only", "Award-winning", "top-rated") survived into the
+# prominently-rendered narrative. The operator's reject list forbids them.
+
+# Sale/discount/offer-claim WORDS the operator explicitly forbids — each must
+# default to the campaign_title (no numeric value present, so the prior numeric-
+# only scanner missed them).
+_FIX1_SALE_WORD_REJECTS = [
+    "Weekend Discount Feast",
+    "Discounted Dosa Platter",
+    "Limited-time Deal",
+    "Today-only Promo",
+    "Big Sale This Weekend",
+    "Clearance Specials",
+    "BOGO Dosa",
+    "Buy One Get One Free Idli",
+    "Markdown Mania",
+    "Combo Deal of the Day",
+    "20% off the menu in words: percent off",
+    "Cents off every plate",
+    "Dollars off your order",
+]
+
+# Hyphenated time-pressure / superlative forms — the prior whitespace-only phrase
+# sets missed these. Normalizing hyphens/underscores to spaces makes them match.
+_FIX1_HYPHEN_REJECTS = [
+    "Award-winning",
+    "top-rated",
+    "Limited-time only",
+    "Today-only feast",
+    "Act-now and save",
+]
+
+
+def test_scrub_narrative_sale_words_reject_to_title():
+    """Every operator-forbidden sale/discount/offer WORD defaults to the
+    campaign_title even though it carries NO numeric value (the numeric-only
+    scanner used to let these through)."""
+    allowed_values = ["$7.99", "masala dosa", "idli sambar"]
+    for phrase in _FIX1_SALE_WORD_REJECTS:
+        out = scrub_campaign_narrative(
+            phrase, allowed_values=allowed_values, campaign_title=_TITLE
+        )
+        assert out == _TITLE, f"sale word not caught: {phrase!r} -> {out!r}"
+
+
+def test_scrub_narrative_hyphenated_forms_reject_to_title():
+    """Hyphenated time-pressure / superlative forms reject the same as the spaced
+    forms (narrative is normalized before phrase matching)."""
+    allowed_values = ["$7.99", "masala dosa"]
+    for phrase in _FIX1_HYPHEN_REJECTS:
+        out = scrub_campaign_narrative(
+            phrase, allowed_values=allowed_values, campaign_title=_TITLE
+        )
+        assert out == _TITLE, f"hyphen form not caught: {phrase!r} -> {out!r}"
+
+
+def test_scrub_narrative_fix1_allow_list_still_survives():
+    """CRITICAL: the operator ALLOW list MUST still survive the new sale-word /
+    normalization sets. "specials" is NOT a sale-word; one-price/weekend/family/
+    festive/authentic marketing language is grounded-evocative, not fabrication."""
+    allowed_values = ["$7.99", "masala dosa", "idli sambar", "gulab jamun"]
+    allow = [
+        "One-Price Specials",
+        "Weekend Treats",
+        "Family Favorites",
+        "Festive Desserts",
+        "Authentic Classic Flavors",
+        "Weekend Feast",
+        "Weekend Specials",  # the campaign_title itself — "specials" is not a sale word
+        "South Indian Favorites at One Price",
+        "Weekend Feast of Family Favorites",
+        "One-Price Weekend Treats",
+    ]
+    for phrase in allow:
+        out = scrub_campaign_narrative(
+            phrase, allowed_values=allowed_values, campaign_title=_TITLE
+        )
+        assert out == phrase, f"ALLOW phrase wrongly rejected: {phrase!r} -> {out!r}"
+
+
+def test_scrub_narrative_time_pressure_extended_set():
+    """The extended time-pressure set is caught (ends soon / last chance / dont
+    miss / for a limited / this week only / now or never), spaced + hyphenated."""
+    allowed_values = ["$7.99"]
+    for phrase in (
+        "ends soon so order",
+        "your last chance for dosa",
+        "dont miss this",
+        "don't miss this",
+        "for a limited run",
+        "this week only feast",
+        "now or never on idli",
+        "while-supplies-last platter",  # hyphenated form of "while supplies last"
+    ):
+        out = scrub_campaign_narrative(
+            phrase, allowed_values=allowed_values, campaign_title=_TITLE
+        )
+        assert out == _TITLE, f"time-pressure not caught: {phrase!r} -> {out!r}"

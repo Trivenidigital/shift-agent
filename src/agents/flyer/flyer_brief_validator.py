@@ -464,29 +464,79 @@ _NARRATIVE_SUPERLATIVE_RE = re.compile(
 # EXPLICIT time-pressure phrase set ("today only" / "limited time" / "act now" /
 # "hurry" / "while supplies last" + a few close cousins). None appear in the ALLOW
 # list. The grounded-occasion words the ALLOW list DOES use ("weekend", "festive",
-# "celebration") are intentionally absent here.
+# "celebration") are intentionally absent here. Matched against the NORMALIZED
+# narrative (``_narrative_normalize``: lowercased, hyphens/underscores → spaces,
+# whitespace collapsed) so hyphenated forms ("limited-time", "today-only",
+# "while-supplies-last") match the same as the spaced forms.
 _NARRATIVE_TIME_PRESSURE_RE = re.compile(
     r"\b(?:today\s+only|limited\s+time|act\s+now|hurry|"
-    r"while\s+supplies\s+last|last\s+chance|ends?\s+(?:today|tonight|soon))\b",
+    r"while\s+supplies\s+last|last\s+chance|ends?\s+(?:today|tonight|soon)|"
+    r"ends\s+soon|don'?t\s+miss|for\s+a\s+limited|this\s+week\s+only|"
+    r"now\s+or\s+never)\b",
+    re.IGNORECASE,
+)
+# EXPLICIT sale/discount/offer-claim WORD set (FIX 1 — Codex BLOCKER). The narrative
+# firewall's commercial scanner (``_first_ungrounded_commercial``) intentionally
+# excludes generic claim WORDS like "discount"/"deal"/"promo"/"sale"/"clearance"
+# (it catches only numeric VALUES), so a wordy narrative ("Weekend Discount Feast",
+# "Today-only Promo", "BOGO Dosa") slipped through. The operator's reject list
+# explicitly forbids discounts/promos/sales, so the scoped narrative scrub adds an
+# EXPLICIT whole-word/phrase ban here. Matched against the NORMALIZED narrative so
+# hyphenated forms ("combo-deal", "%-off") match too. CRITICAL: "specials" is NOT a
+# sale-word (operator ALLOW list: "Weekend Specials", "Clearance Specials" rejects
+# only on "clearance"); "combo"/"price"/"feast"/"treats"/"favorites"/"festive"/
+# "authentic" are NOT here so the grounded-evocative ALLOW list survives.
+_NARRATIVE_SALE_WORD_RE = re.compile(
+    r"\b(?:discount|discounted|deal|deals|promo|promotion|promotional|"
+    r"sale|clearance|markdown|bogo|"
+    r"buy\s+one\s+get|buy\s+1\s+get|combo\s+deal)\b"
+    r"|%\s*off|\bpercent\s+off\b|\bcents\s+off\b|\bdollars\s+off\b",
     re.IGNORECASE,
 )
 
 
-def _narrative_superlative_hit(text: str) -> str:
-    """First explicit superlative / award / ranking token in ``text`` (the REJECT
-    tokens the strict operational detector misses out of context), or ""."""
+def _narrative_normalize(text: str) -> str:
+    """Lowercase + hyphens/underscores → spaces + collapsed whitespace (FIX 1).
+
+    The narrative phrase sets (sale-word / time-pressure / superlative) are matched
+    against this normalized form so a hyphenated/underscored form ("limited-time",
+    "today_only", "award-winning", "top-rated", "while-supplies-last") matches the
+    SAME as the spaced form. Used ONLY for the narrative phrase scans — never for
+    the commercial/operational scanners (which keep their own normalization)."""
     if not text:
         return ""
-    m = _NARRATIVE_SUPERLATIVE_RE.search(text)
+    lowered = text.casefold().replace("-", " ").replace("_", " ")
+    return " ".join(lowered.split())
+
+
+def _narrative_sale_word_hit(text: str) -> str:
+    """First explicit sale/discount/offer-claim WORD in ``text`` (FIX 1 — the WORDS
+    the numeric-only commercial scanner misses: discount/deal/promo/sale/clearance/
+    BOGO/% off/…), or "". Scanned on the NORMALIZED narrative so hyphenated forms
+    ("combo-deal", "%-off") match the spaced forms."""
+    if not text:
+        return ""
+    m = _NARRATIVE_SALE_WORD_RE.search(_narrative_normalize(text))
+    return m.group(0).strip() if m else ""
+
+
+def _narrative_superlative_hit(text: str) -> str:
+    """First explicit superlative / award / ranking token in ``text`` (the REJECT
+    tokens the strict operational detector misses out of context), or "". Scanned on
+    the NORMALIZED narrative so "award-winning"/"top-rated" match the spaced forms."""
+    if not text:
+        return ""
+    m = _NARRATIVE_SUPERLATIVE_RE.search(_narrative_normalize(text))
     return m.group(0).strip() if m else ""
 
 
 def _narrative_time_pressure_hit(text: str) -> str:
     """First explicit time-pressure phrase in ``text`` ("today only" / "limited
-    time" / "act now" / "hurry" / "while supplies last"), or ""."""
+    time" / "act now" / "hurry" / "while supplies last" / …), or "". Scanned on the
+    NORMALIZED narrative so "limited-time"/"today-only" match the spaced forms."""
     if not text:
         return ""
-    m = _NARRATIVE_TIME_PRESSURE_RE.search(text)
+    m = _NARRATIVE_TIME_PRESSURE_RE.search(_narrative_normalize(text))
     return m.group(0).strip() if m else ""
 
 
@@ -508,6 +558,9 @@ def scrub_campaign_narrative(
       - ``campaign_title`` if ``narrative`` contains ANY of:
           * an UNGROUNDED commercial value (price / discount / percentage / free-X
             offer not present in ``allowed_values``) — ``_first_ungrounded_commercial``;
+          * an explicit sale/discount/offer-claim WORD (discount / deal / promo /
+            sale / clearance / BOGO / % off / …) — ``_narrative_sale_word_hit``
+            (FIX 1: the WORDS the numeric-only commercial scanner misses);
           * an UNGROUNDED genuine operational / delivery claim —
             ``_first_ungrounded_operational`` (PRECISE detector, grounding-aware);
           * a scheduling / availability / booking claim — ``_scheduling_claim_hit``;
@@ -537,6 +590,8 @@ def scrub_campaign_narrative(
     allowed = [v for v in (allowed_values or ()) if isinstance(v, str)]
     try:
         if _first_ungrounded_commercial(safe_narrative, allowed):
+            return safe_title
+        if _narrative_sale_word_hit(safe_narrative):
             return safe_title
         if _first_ungrounded_operational(safe_narrative, allowed):
             return safe_title
