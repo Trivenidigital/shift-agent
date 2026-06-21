@@ -87,12 +87,13 @@
 
 ### Task B2.5: Overlay — narrative/hook-led composition + offer/hero emphasis
 - Modify `src/agents/flyer/premium_overlay.py` (+ `render.py:_menu_overlay_payload` to surface the direction); test `tests/test_flyer_renderer.py` / overlay tests.
-- Scope (tight — the 4 primary axes; full 6-level hierarchy fidelity is a follow-up):
+- **SCOPE TRIM (operator 2026-06-21): hero-row menu emphasis is DEFERRED** — it becomes the next targeted iteration IF product merchandising is still the limiting factor after this pass. Hero **selection** still flows to the BACKGROUND (B2.4); only the overlay menu-row emphasis is out of B2.
+- Scope (tight — targets Message Clarity + Hook Prominence + Offer Energy):
   - **Narrative + hook as the dominant TOP element** (message clarity + hook prominence): render `campaign_narrative` and/or `hook_text` as a prominent top-zone message above the menu; sized to dominate. `render_premium_overlay` reads the direction off the carrier.
   - **`offer_priority` drives the offer seal** (offer energy): scale `draw_offer_seal` radius/weight + placement by priority (`high` = larger/bolder); thread `offer_priority` into `plan_premium_layout` + `draw_offer_seal` (`premium_overlay.py:127, 245`).
-  - **Hero emphasis in the menu** (product merchandising): mark the `hero_name` row for emphasis (position/weight) above supporting items.
+  - ~~Hero emphasis in the menu~~ → **DEFERRED** (see scope trim).
   - Respect the existing fail-closed fit/coverage ladder — emphasis that would overflow degrades to current layout (assert).
-- [ ] TDD: direction present → narrative/hook drawn prominently, seal scales with priority, hero row emphasized; **all default/empty ⇒ byte-identical `PremiumLayout` + overlay (regression assert)**; over-emphasis that doesn't fit → falls back, never overflows; required-fact ledger (`premium_overlay.py:444-452`) still verifies every locked fact (no fact dropped for layout).
+- [ ] TDD: direction present → narrative/hook drawn prominently, seal scales with priority; **all default/empty ⇒ byte-identical `PremiumLayout` + overlay (regression assert)**; over-emphasis that doesn't fit → falls back, never overflows; required-fact ledger (`premium_overlay.py:444-452`) still verifies every locked fact (no fact dropped for layout).
 - [ ] Commit `feat(flyer): CD v2 overlay — narrative/hook-led composition + offer/hero emphasis (flag-off byte-identical)`.
 
 ### Phase B2 close-out
