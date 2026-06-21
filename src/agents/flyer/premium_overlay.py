@@ -1314,17 +1314,18 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         # is local to this attempt; a fresh _compose_mf call recomputes it.)
 
         # ---- expose the DRAWN type scales for the unit assertion ----------
-        # RESIDUAL-BLOCKER 1: report the sizes ACTUALLY DRAWN. When the narrative
-        # was dropped/absent the start reference stands in (there is no on-canvas
-        # narrative to over-claim a hero above). When the hook was dropped report
-        # it COLLAPSED to the title size (no phantom hook between title +
-        # narrative). Construction guarantees the reported order is:
-        #   narr > hook > title >= brand  (hook drawn)
-        #   narr > title >= brand         (hook dropped → hook == title)
-        _dbg_narrative = narr_draw or _narr_ref_px
-        _dbg_title = title_draw if title else title_kicker_cap
-        _dbg_hook = hook_draw or _dbg_title
-        _dbg_brand = brand_draw
+        # FIX 2 (MAJOR) — report the sizes ACTUALLY DRAWN, with 0 for any tier NOT
+        # drawn (dropped / failed / absent). NO cap/reference fallbacks: a dropped
+        # narrative reports narrative_px == 0, a dropped hook reports hook_px == 0
+        # (not the cap, not a collapse-to-title phantom), and a brand/title that was
+        # never inked reports 0. The strict descending invariant narrative_px >
+        # hook_px > title_px >= brand_px is asserted on these real DRAWN values over
+        # the tiers actually present (0 = absent); construction keeps the present
+        # tiers strictly ordered.
+        _dbg_narrative = narr_draw                       # 0 when narrative dropped/absent
+        _dbg_title = title_draw if title else 0          # 0 when no title drawn
+        _dbg_hook = hook_draw                            # 0 when hook dropped/absent
+        _dbg_brand = brand_draw if business else 0       # 0 when no brand drawn
         _LAST_LAYOUT_DEBUG.update({
             "archetype": "message_first",
             "narrative_px": _dbg_narrative,
@@ -1535,29 +1536,25 @@ def render_premium_overlay(project, source, target, *, size, output_format):
     except render.FlyerRenderError:
         pass
     # Step 1: drop the HOOK (keep the message) — only meaningful if a hook existed.
-    if cd_hook_text:
+    # The drop record is appended ONLY AFTER the winning attempt returns (FIX 1):
+    # an attempt that later raises must never leave a phantom drop record behind.
+    if cd_hook_text and cd_narrative:
         try:
-            _compose_mf(include_narrative=bool(cd_narrative), include_hook=False)
+            _compose_mf(include_narrative=True, include_hook=False)
             _LAST_HOOK_DROP.append(True)
             return
         except render.FlyerRenderError:
             pass
-    # Step 2: drop the NARRATIVE too (bare) — only meaningful if a narrative existed.
-    if cd_narrative:
-        try:
-            _compose_mf(include_narrative=False, include_hook=False)
-            if cd_hook_text:
-                _LAST_HOOK_DROP.append(True)
-            _LAST_NARRATIVE_DROP.append(True)
-            return
-        except render.FlyerRenderError:
-            pass
-    # Step 3: genuine overflow of REQUIRED content — propagate (degrade-to-flat).
+    # Step 2: drop EVERYTHING best-effort (bare). A single (False, False) attempt is
+    # the final fallback for every remaining state (narrative-only, hook-only, both).
+    # The drop records are committed ONLY AFTER this bare attempt SUCCEEDS, keyed to
+    # which best-effort tiers existed; if it RAISES (a genuine REQUIRED overflow) the
+    # error propagates with NO drop record leaked (degrade-to-flat). (FIX 1 BLOCKER.)
+    _compose_mf(include_narrative=False, include_hook=False)
     if cd_hook_text:
         _LAST_HOOK_DROP.append(True)
     if cd_narrative:
         _LAST_NARRATIVE_DROP.append(True)
-    _compose_mf(include_narrative=False, include_hook=False)
 
 
 # Observability for FIX 2 (CD v2 Slice B): records, per render_premium_overlay

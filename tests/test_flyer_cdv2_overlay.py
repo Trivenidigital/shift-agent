@@ -723,10 +723,11 @@ def test_blocker1_long_hook_never_inverts_below_title(tmp_path):
     # The over-long hook could not fit its band → it MUST be recorded as dropped,
     # not phantom-reported as a drawn 50px hook.
     assert po._LAST_HOOK_DROP == [True], po._LAST_HOOK_DROP
-    # With the hook dropped the DRAWN order is narrative > title >= brand, and the
-    # reported hook_px must equal the title_px (collapsed, no phantom between).
+    # FIX 2 (MAJOR): with the hook dropped the DRAWN order is narrative > title >=
+    # brand, and the reported hook_px must be 0 (a tier NOT drawn reports 0 — not a
+    # cap, not a collapse-to-title phantom between narrative + title).
     assert dbg["narrative_px"] > dbg["title_px"], (dbg["narrative_px"], dbg["title_px"])
-    assert dbg["hook_px"] == dbg["title_px"], (dbg["hook_px"], dbg["title_px"])
+    assert dbg["hook_px"] == 0, (dbg["hook_px"], dbg["title_px"])
     assert dbg["brand_px"] <= dbg["title_px"], (dbg["brand_px"], dbg["title_px"])
 
 
@@ -822,3 +823,96 @@ def test_blocker2_offcanvas_required_title_failcloses(tmp_path, monkeypatch):
     with pytest.raises(render.FlyerRenderError, match="off-canvas"):
         po.render_premium_overlay(proj, _bg(tmp_path), tmp_path / "b2_offcanvas.png",
                                   size=(1080, 1350), output_format="concept_preview")
+
+
+# ===========================================================================
+# FIX 1 (Codex BLOCKER) — drop records must be set ONLY on a SUCCESSFUL attempt.
+# The dispatch ladder must NOT append _LAST_HOOK_DROP / _LAST_NARRATIVE_DROP
+# before the final bare attempt: a genuine REQUIRED overflow still raises, and
+# after that (caught) raise NEITHER drop list may carry a phantom record.
+#
+# FIX 2 (Codex MAJOR) — _LAST_LAYOUT_DEBUG must report the ACTUAL DRAWN sizes
+# (0 for any tier NOT drawn: dropped / failed / absent), never a cap/reference
+# fallback or a collapse-to-title phantom.
+# ===========================================================================
+
+def test_fix_no_phantom_drop_record_on_failed_render(tmp_path, monkeypatch):
+    """A genuine REQUIRED overflow that survives EVERY best-effort drop down to the
+    bare (False, False) attempt and STILL raises FlyerRenderError. Pre-fix the
+    dispatch ladder appended the drop records BEFORE that final bare attempt, so a
+    render that ultimately raised LEAKED a phantom drop record. Post-fix: after the
+    (caught) raise BOTH _LAST_HOOK_DROP and _LAST_NARRATIVE_DROP are EMPTY.
+
+    The menu block is forced taller than the canvas so the menu placement check
+    (``menu_top < top_zone_bottom``) raises on EVERY attempt — including the bare
+    one — exercising the ladder all the way to Step 3 (the leak site). This bypasses
+    the upstream detail-cap pre-flight (which would raise BEFORE the ladder runs)."""
+    real_plan = po._plan_menu_block
+
+    def _giant_menu(draw, items, layout, menu_px, min_px, safe_w, has_item_prices, render):
+        _h, render_fn = real_plan(draw, items, layout, menu_px, min_px, safe_w, has_item_prices, render)
+        return 100_000, render_fn   # taller than the 1350px canvas → placement check raises
+
+    monkeypatch.setattr(po, "_plan_menu_block", _giant_menu)
+
+    cd = dict(_CD_MF, campaign_narrative="Weekend Specials", hook_text="ANY ITEM $7.99")
+    proj = _project(creative_direction=cd, pid="F0310")  # 6 items — passes the detail-cap pre-flight
+    raised = False
+    try:
+        po.render_premium_overlay(proj, _bg(tmp_path), tmp_path / "fix_phantom.png",
+                                  size=(1080, 1350), output_format="concept_preview")
+    except render.FlyerRenderError:
+        raised = True
+    assert raised, "a genuine overflow surviving every drop must still raise (degrade-to-flat)"
+    # No phantom drop record leaked on the failed render (the leak the BLOCKER fixes).
+    assert po._LAST_HOOK_DROP == [], po._LAST_HOOK_DROP
+    assert po._LAST_NARRATIVE_DROP == [], po._LAST_NARRATIVE_DROP
+
+
+def test_fix_debug_reports_drawn_sizes_dropped_hook_is_zero(tmp_path, monkeypatch):
+    """FIX 2: a DROPPED-hook case reports hook_px == 0 (the tier was NOT drawn) —
+    not the hook_cap, not a collapse-to-title phantom. The narrative is retained
+    and the other present tiers report their real DRAWN px (>0)."""
+    real_fit = po._fit_role_block
+    _HOOK = "ANY ITEM SEVEN NINETY NINE TODAY ONLY"
+
+    def _greedy_hook(draw, text, role, start_px, max_width, min_px, *, max_height, line_factor, max_lines):
+        if role == "kicker" and text == _HOOK:
+            return [f"HOOK LINE {n}" for n in range(14)], max(start_px, min_px, 90)
+        return real_fit(draw, text, role, start_px, max_width, min_px,
+                        max_height=max_height, line_factor=line_factor, max_lines=max_lines)
+
+    monkeypatch.setattr(po, "_fit_role_block", _greedy_hook)
+
+    facts = [f for f in _base_facts() if not f.fact_id.startswith("item:")]
+    names = ["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar", "Rasam", "Bonda"]
+    for i, nm in enumerate(names):
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item {i}", value=nm, source="customer_text", required=True))
+        facts.append(FlyerLockedFact(fact_id=f"item:{i}:price", label=f"Price {i}", value=f"${5+i}.99", source="customer_text", required=True))
+    cd = dict(_CD_MF, campaign_narrative="Weekend Specials", hook_text=_HOOK)
+    proj = _project(creative_direction=cd, facts=facts, pid="F0311")
+
+    out = tmp_path / "fix_drawn_hookzero.png"
+    po.render_premium_overlay(proj, _bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+    assert po._LAST_HOOK_DROP == [True]      # hook dropped (its greedy block starved the menu)
+    assert po._LAST_NARRATIVE_DROP == []     # narrative retained
+    dbg = po._LAST_LAYOUT_DEBUG
+    # Dropped tier reports 0 (no cap, no collapse-to-title phantom).
+    assert dbg["hook_px"] == 0, dbg
+    # Present tiers report their real DRAWN px (>0), ordering holds over present tiers.
+    assert dbg["narrative_px"] > 0 and dbg["title_px"] > 0 and dbg["brand_px"] > 0, dbg
+    assert dbg["narrative_px"] > dbg["title_px"] >= dbg["brand_px"], dbg
+
+
+def test_fix_debug_reports_drawn_sizes_normal_all_present(tmp_path):
+    """FIX 2: a normal message_first render (no drops) reports the ACTUAL DRAWN px
+    for all four tiers (>0) and the strict descending invariant holds:
+    narrative_px > hook_px > title_px >= brand_px."""
+    out = _render(_project(creative_direction=_CD_MF, pid="F0312"), tmp_path, "fix_drawn_normal.png")
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+    assert po._LAST_HOOK_DROP == [] and po._LAST_NARRATIVE_DROP == []
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert dbg["narrative_px"] > 0 and dbg["hook_px"] > 0
+    assert dbg["title_px"] > 0 and dbg["brand_px"] > 0
+    assert dbg["narrative_px"] > dbg["hook_px"] > dbg["title_px"] >= dbg["brand_px"], dbg
