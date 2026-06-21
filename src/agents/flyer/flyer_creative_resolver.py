@@ -251,7 +251,16 @@ def _resolve_hero_name(
     hero = _resolve_item_name(getattr(brief, "hero_ref", None), locked_facts)
     if hero:
         return hero
-    # 2. FIX D — hero_ref → an offer:* fact: the hero is that offer's SUBJECT NAME,
+    # FIX 3 (D residual — Codex MAJOR): an ITEM flyer (any item:*:name fact present)
+    # resolves its hero from ITEMS ONLY — a model-emitted offer hero_ref is IGNORED so
+    # item-flyer behavior never regresses to the offer subject. The offer-subject hero
+    # paths below are reached ONLY for COMBO flyers (NO item:*:name fact).
+    if _has_item_name_fact(locked_facts):
+        # 2. item-level fallback: the first item name (item-level flyer). The offer
+        # hero_ref (if any) was deliberately not honored above.
+        return _first_item_name(locked_facts)
+    # ── COMBO flyers only (no item:*:name) below ────────────────────────────────
+    # 3. FIX D — hero_ref → an offer:* fact: the hero is that offer's SUBJECT NAME,
     # derived from the offer's OWN text (truncation-only ⇒ substring, never invented).
     hero_ref_fid = _ref_fact_id(getattr(brief, "hero_ref", None))
     if hero_ref_fid and _OFFER_INDEX_RE.match(hero_ref_fid):
@@ -259,17 +268,11 @@ def _resolve_hero_name(
         subject = _offer_subject_name(offer_value)
         if subject:
             return subject
-    # 3. item-level fallback: the first item name (item-level flyer, unchanged).
-    first_item = _first_item_name(locked_facts)
-    if first_item:
-        return first_item
-    # 4. FIX D — combo flyer (NO item:*:name) with offers: fall back to the PRIMARY
-    # offer's subject name. Gated on "no item names" so an item flyer is never
-    # diverted to an offer (item-level facts take precedence).
-    if not _has_item_name_fact(locked_facts):
-        subject = _offer_subject_name(_first_offer_value(locked_facts))
-        if subject:
-            return subject
+    # 4. FIX D — combo flyer with offers but no resolvable offer hero_ref: fall back
+    # to the PRIMARY (lowest-index) offer's subject name.
+    subject = _offer_subject_name(_first_offer_value(locked_facts))
+    if subject:
+        return subject
     # 5. neither items nor offers (e.g. pure identity) → "" (unchanged).
     return ""
 

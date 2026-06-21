@@ -595,19 +595,12 @@ _DAY_RANGE_RE = re.compile(
     r"\b(" + "|".join(sorted(_DAY_ALIASES, key=len, reverse=True)) + r")\b",
     re.IGNORECASE,
 )
-# A TEMPORAL SCHEDULING phrase: a scheduling connector ("this"/"that"/"next"/"every"/
-# "each"/"all"/"this coming"/"come"/"on") immediately before a day / weekend / weekday
-# token — "this weekend", "this Monday", "every Saturday", "on Sunday". This is what
-# distinguishes a SCHEDULING reference (which is grounded-or-rejected against the
-# schedule) from a bare THEME word ("Weekend Feast of Family Favorites" — "weekend" as
-# an occasion theme, no connector → NOT a scheduling claim, never reaches this gate).
-_TEMPORAL_SCHEDULING_PHRASE_RE = re.compile(
-    r"\b(?:this|that|next|every|each|all|come|on)\s+(?:coming\s+)?"
-    r"(?:weekends?|weekdays?|"
-    + "|".join(sorted(_DAY_ALIASES, key=len, reverse=True))
-    + r")\b",
-    re.IGNORECASE,
-)
+# NOTE (FIX 2 — Codex BLOCKER C): an explicit connector-phrase regex
+# (``_TEMPORAL_SCHEDULING_PHRASE_RE``, "this weekend"/"every Saturday") used to be the
+# gate trigger. It is now SUBSUMED by ``_day_set`` scanning for ANY temporal token
+# (with or without a connector), so the dedicated connector regex was removed — every
+# connector+day phrase contributes its day to ``_day_set`` and is ground-checked the
+# same as a bare day token. See ``scrub_campaign_narrative``'s temporal gate.
 
 
 def _expand_day_range(start_day: str, end_day: str) -> set[str]:
@@ -692,11 +685,15 @@ def scrub_campaign_narrative(
             (FIX 1: the WORDS the numeric-only commercial scanner misses);
           * an UNGROUNDED genuine operational / delivery claim —
             ``_first_ungrounded_operational`` (PRECISE detector, grounding-aware);
-          * an UNGROUNDED scheduling / availability / booking claim —
-            ``_scheduling_claim_hit`` (FIX C: reject ONLY when the claim's temporal
-            day-set is NOT covered by the ``schedule`` fact; a SCHEDULE-GROUNDED
-            temporal reference — e.g. "this weekend" when ``schedule`` is "Saturday &
-            Sunday" — is KEPT);
+          * an UNGROUNDED TEMPORAL reference (FIX C + FIX 2): ANY temporal token in
+            the narrative — bare or connector-led day name, ``weekend``, ``weekday``,
+            or a day-RANGE ("Friday through Sunday") — is ground-checked via
+            ``_day_set``; the narrative's day-set MUST be a SUBSET of the ``schedule``
+            fact's day-set, else REJECT. So "Monday Specials" + a Sat/Sun schedule
+            rejects, any day token with an empty ``schedule`` rejects, and a SCHEDULE-
+            GROUNDED reference ("this weekend"/"Weekend Combos" + a Sat/Sun schedule)
+            is KEPT. A NON-DAY scheduling claim (a bare "available"/"book"/"until" with
+            no resolvable day) still rejects via ``_scheduling_claim_hit``;
           * an explicit superlative / award / ranking token —
             ``_narrative_superlative_hit``;
           * an explicit time-pressure phrase ("today only" / "limited time" / …) —
@@ -736,23 +733,40 @@ def scrub_campaign_narrative(
             return safe_title
         if _first_ungrounded_operational(safe_narrative, allowed):
             return safe_title
-        # SCHEDULING/temporal references (FIX C): reject ONLY when NOT grounded in the
-        # ``schedule`` fact. The trigger is EITHER the existing scheduling-claim detector
-        # (``_scheduling_claim_hit``: "this weekend"/"available"/"book"/"until"/…) OR an
-        # explicit temporal scheduling PHRASE (connector + day/weekend/weekday, e.g.
-        # "this Monday"/"every Saturday" — which ``_scheduling_claim_hit`` does not catch
-        # for bare day names). A bare THEME word ("Weekend Feast of Family Favorites" —
-        # "weekend" with no connector) is NOT a scheduling claim and never reaches this
-        # gate. When triggered, the reference is KEPT iff its temporal day-set is covered
-        # by the ``schedule`` (e.g. "this weekend" + a Sat/Sun schedule); an ungrounded
-        # one (e.g. "this Monday" vs Sat/Sun, or a bare "available"/"book"/"until" with
-        # no resolvable day) rejects. Time-pressure / urgency is handled SEPARATELY below
-        # — ALWAYS reject regardless of schedule.
-        if _scheduling_claim_hit(safe_narrative) or _TEMPORAL_SCHEDULING_PHRASE_RE.search(
-            _narrative_normalize(safe_narrative)
-        ):
+        # TEMPORAL / SCHEDULING references (FIX C + FIX 2): reject ONLY when NOT
+        # grounded in the ``schedule`` fact. Two INDEPENDENT triggers:
+        #
+        #   (1) ANY TEMPORAL TOKEN (FIX 2 — Codex BLOCKER C): build the narrative's
+        #       day-set from EVERY temporal token present — day names (full + abbrev),
+        #       ``weekend → {sat,sun}``, ``weekday → {mon..fri}``, and day-RANGES
+        #       ("Friday through Sunday") — via ``_day_set``. This runs for BARE day /
+        #       range / weekend / weekday claims too ("Monday Specials", "Friday
+        #       through Sunday feast", "Weekend Combos"), which carry NO scheduling
+        #       connector and so previously bypassed grounding. When the narrative's
+        #       day-set is NON-EMPTY it MUST be a SUBSET of the schedule's day-set; an
+        #       empty ``schedule`` (empty day-set) OR any narrative day not in the
+        #       schedule → REJECT. So "Monday Specials" + a Sat/Sun schedule rejects,
+        #       and any day token with an empty schedule rejects, while "this weekend" /
+        #       "Weekend Combos" + a Sat/Sun schedule is KEPT.
+        #
+        #   (2) a NON-DAY scheduling CLAIM (``_scheduling_claim_hit``: a bare
+        #       "available"/"book now"/"reserve"/"until"/… with NO resolvable day): the
+        #       day-set is empty so trigger (1) does not fire, but the claim is still an
+        #       ungrounded scheduling assertion → REJECT. (The connector phrase
+        #       ``_TEMPORAL_SCHEDULING_PHRASE_RE`` is subsumed by trigger (1) — any
+        #       connector+day phrase contributes its day to ``_day_set`` — so it no
+        #       longer needs a separate arm.)
+        #
+        # Time-pressure / urgency ("today only"/"limited time"/…) is handled SEPARATELY
+        # below — ALWAYS reject regardless of schedule. A bare NON-temporal theme word
+        # ("Festive Dessert Celebration") yields an empty day-set + no scheduling claim,
+        # so NEITHER trigger fires and other checks still apply.
+        narrative_days = _day_set(safe_narrative)
+        if narrative_days:
             if not _temporal_reference_is_schedule_grounded(safe_narrative, schedule):
                 return safe_title
+        elif _scheduling_claim_hit(safe_narrative):
+            return safe_title
         if _narrative_superlative_hit(safe_narrative):
             return safe_title
         if _narrative_time_pressure_hit(safe_narrative):

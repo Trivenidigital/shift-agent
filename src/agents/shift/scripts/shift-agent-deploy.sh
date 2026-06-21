@@ -72,7 +72,15 @@ install_artifacts() {
     # `creative_direction` keys from the flyer project store (durable rollback
     # guarantee independent of serialization behavior). Installed flat so the
     # scrub step's `from flyer_store_maintenance import scrub_store_file` resolves.
-    install -m 644 src/platform/flyer_store_maintenance.py /opt/shift-agent/flyer_store_maintenance.py
+    # GUARDED for rollback (Codex BLOCKER A): rolling back to an older tarball that
+    # predates this module must not fail install_artifacts mid-rollback — install
+    # when present, else remove any stale copy on the box so the scrub step (also
+    # guarded) skips cleanly.
+    if [ -f src/platform/flyer_store_maintenance.py ]; then
+        install -m 644 src/platform/flyer_store_maintenance.py /opt/shift-agent/flyer_store_maintenance.py
+    else
+        rm -f /opt/shift-agent/flyer_store_maintenance.py
+    fi
     # Credential-minimized readiness matrix/report. Guarded for rollback
     # compatibility with tarballs that predate this module.
     if [ -f src/platform/credential_readiness.py ]; then
@@ -1007,24 +1015,34 @@ case "$ACTION" in
         # reads a store carrying the key). Idempotent + safe: with exclude=True the
         # key is never legitimately persisted, so removing it loses nothing. No-op
         # when the store file is absent (fresh VPS / flyer never used).
+        #
+        # GUARDED on module presence (Codex BLOCKER A): on a rollback to an older
+        # tarball the guarded install above removed /opt/shift-agent/flyer_store_
+        # maintenance.py, so this `import flyer_store_maintenance` would crash. Only
+        # run the scrub when the module is actually present on the box; otherwise skip
+        # it (a rolled-back older loader does not know the key and never wrote it).
         FLYER_STORE=/opt/shift-agent/state/flyer/projects.json
-        if [ -f "$FLYER_STORE" ]; then
-            if ! "$VENV_PY" -c "import sys; sys.path.insert(0, '/opt/shift-agent'); from flyer_store_maintenance import scrub_store_file; print('scrubbed creative_direction x', scrub_store_file('$FLYER_STORE'))"; then
-                echo "FAIL: CD v2 rollback scrub of $FLYER_STORE failed — refusing to restart hermes-gateway" >&2
-                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
-                    "$0" rollback "$PREV_TAG"
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                else
-                    /usr/local/bin/shift-agent-notify-owner \
-                        --title "Deploy FAILED at CD v2 store scrub, no prior tarball" \
-                        --priority 2 \
-                        "Deploy $NEW_TAG failed scrubbing creative_direction from the flyer project store. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+        if [ -f /opt/shift-agent/flyer_store_maintenance.py ]; then
+            if [ -f "$FLYER_STORE" ]; then
+                if ! "$VENV_PY" -c "import sys; sys.path.insert(0, '/opt/shift-agent'); from flyer_store_maintenance import scrub_store_file; print('scrubbed creative_direction x', scrub_store_file('$FLYER_STORE'))"; then
+                    echo "FAIL: CD v2 rollback scrub of $FLYER_STORE failed — refusing to restart hermes-gateway" >&2
+                    if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                        "$0" rollback "$PREV_TAG"
+                        rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                    else
+                        /usr/local/bin/shift-agent-notify-owner \
+                            --title "Deploy FAILED at CD v2 store scrub, no prior tarball" \
+                            --priority 2 \
+                            "Deploy $NEW_TAG failed scrubbing creative_direction from the flyer project store. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
+                        rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                    fi
+                    exit 1
                 fi
-                exit 1
+            else
+                echo "OK: CD v2 rollback scrub skipped (no flyer store at $FLYER_STORE)"
             fi
         else
-            echo "OK: CD v2 rollback scrub skipped (no flyer store at $FLYER_STORE)"
+            echo "skip scrub (module absent — rollback)"
         fi
 
         # Pre-restart cf-router compile gate: hooks.py is imported by the

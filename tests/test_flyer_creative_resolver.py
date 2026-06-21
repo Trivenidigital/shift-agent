@@ -558,12 +558,17 @@ _TITLE = "Weekend Combo Special"
 def test_scrub_narrative_allow_phrases_survive_with_grounded_facts():
     """EVERY operator ALLOW phrase survives unchanged when the price ($7.99) and
     items are grounded locked-fact values. The scoped scrub keeps evocative-but-
-    grounded marketing language."""
+    grounded marketing language. A weekend schedule is supplied so the few ALLOW
+    phrases that carry a temporal "weekend" token are SCHEDULE-GROUNDED (FIX 2: any
+    temporal token is now ground-checked); the non-temporal phrases are unaffected."""
     # Grounded facts: price $7.99 + item names the marketing language can evoke.
     allowed_values = ["$7.99", "masala dosa", "idli sambar", "gulab jamun"]
     for phrase in _ALLOW_NARRATIVES:
         out = scrub_campaign_narrative(
-            phrase, allowed_values=allowed_values, campaign_title=_TITLE
+            phrase,
+            allowed_values=allowed_values,
+            campaign_title=_TITLE,
+            schedule="Saturday & Sunday",
         )
         assert out == phrase, f"ALLOW phrase wrongly rejected: {phrase!r} -> {out!r}"
 
@@ -701,8 +706,13 @@ def test_scrub_narrative_never_raises_on_bad_input():
 
 def test_resolver_carries_clean_narrative():
     """A brief with a clean (grounded/evocative) narrative → resolved carries it
-    unchanged."""
-    facts = _two_item_facts() + [_fact("campaign_title", "Weekend Combo Special")]
+    unchanged. The "weekend" temporal token is SCHEDULE-GROUNDED by a Sat/Sun schedule
+    locked fact (FIX 2: temporal tokens are ground-checked end-to-end through the
+    resolver, which passes the schedule fact into the scrub)."""
+    facts = _two_item_facts() + [
+        _fact("campaign_title", "Weekend Combo Special"),
+        _fact("schedule", "Saturday & Sunday"),
+    ]
     brief = _brief(campaign_narrative="Weekend Feast of Family Favorites")
     out = resolve_creative_direction(brief, facts)
     assert out.campaign_narrative == "Weekend Feast of Family Favorites"
@@ -833,9 +843,14 @@ def test_scrub_narrative_fix1_allow_list_still_survives():
         "Weekend Feast of Family Favorites",
         "One-Price Weekend Treats",
     ]
+    # Weekend schedule so the "weekend"-bearing phrases are SCHEDULE-GROUNDED (FIX 2);
+    # this test's purpose is the sale-word/normalization allow-listing, not grounding.
     for phrase in allow:
         out = scrub_campaign_narrative(
-            phrase, allowed_values=allowed_values, campaign_title=_TITLE
+            phrase,
+            allowed_values=allowed_values,
+            campaign_title=_TITLE,
+            schedule="Saturday & Sunday",
         )
         assert out == phrase, f"ALLOW phrase wrongly rejected: {phrase!r} -> {out!r}"
 
@@ -905,9 +920,14 @@ def test_scrub_narrative_trailing_s_allow_words_still_survive():
         "Authentic Classic Flavors",
         "Weekend Specials",  # the campaign_title — "specials" is not a sale word
     ]
+    # Weekend schedule so the "weekend"-bearing phrases are SCHEDULE-GROUNDED (FIX 2);
+    # this test's purpose is the trailing-s allow-listing, not temporal grounding.
     for phrase in allow:
         out = scrub_campaign_narrative(
-            phrase, allowed_values=allowed_values, campaign_title=_TITLE
+            phrase,
+            allowed_values=allowed_values,
+            campaign_title=_TITLE,
+            schedule="Saturday & Sunday",
         )
         assert out == phrase, f"trailing-s ALLOW phrase wrongly rejected: {phrase!r} -> {out!r}"
 
@@ -1084,6 +1104,152 @@ def test_resolver_ungrounded_day_narrative_defaults_to_title():
     assert out.campaign_narrative == "Weekend Combo Special"
 
 
+# --- FIX 2 (C residual): ground-check ALL temporal tokens, not just connector phrases
+#
+# Codex BLOCKER C: the day-set grounding ran ONLY when ``_scheduling_claim_hit`` /
+# the connector phrase (``_TEMPORAL_SCHEDULING_PHRASE_RE``) matched. A BARE day/range
+# claim with no connector ("Monday Specials", "Friday through Sunday feast") bypassed
+# the grounding gate entirely, so ungrounded temporal wording passed; and an empty
+# ``schedule`` did not reject a bare-day narrative. Fix: scan for ANY temporal token
+# and require EVERY referenced day to be grounded in the schedule's day-set.
+
+
+def test_scrub_narrative_bare_day_ungrounded_rejects():
+    """"Monday Specials" (BARE day, no connector) + schedule "Saturday & Sunday" →
+    REJECT → title (Monday is not in the Sat/Sun schedule day-set)."""
+    out = scrub_campaign_narrative(
+        "Monday Specials",
+        allowed_values=["$7.99"],
+        campaign_title=_TITLE,
+        schedule="Saturday & Sunday",
+    )
+    assert out == _TITLE
+
+
+def test_scrub_narrative_bare_range_partially_ungrounded_rejects():
+    """"Friday through Sunday feast" + schedule "Saturday & Sunday" → REJECT → title
+    (Friday spans into the range but is not in the Sat/Sun schedule)."""
+    out = scrub_campaign_narrative(
+        "Friday through Sunday feast",
+        allowed_values=["$7.99"],
+        campaign_title=_TITLE,
+        schedule="Saturday & Sunday",
+    )
+    assert out == _TITLE
+
+
+def test_scrub_narrative_bare_range_fully_grounded_kept():
+    """"Friday through Sunday feast" + schedule "Friday through Sunday" → KEPT (the
+    full range fri/sat/sun is covered by the schedule day-set)."""
+    out = scrub_campaign_narrative(
+        "Friday through Sunday feast",
+        allowed_values=["$7.99"],
+        campaign_title=_TITLE,
+        schedule="Friday through Sunday",
+    )
+    assert out == "Friday through Sunday feast"
+
+
+def test_scrub_narrative_weekend_empty_schedule_rejects():
+    """"this Weekend" + schedule "" → REJECT (no schedule to ground the temporal
+    token — bare-day/empty-schedule must reject, not pass)."""
+    out = scrub_campaign_narrative(
+        "Indulge this Weekend",
+        allowed_values=["$7.99"],
+        campaign_title=_TITLE,
+        schedule="",
+    )
+    assert out == _TITLE
+
+
+def test_scrub_narrative_weekend_weekday_only_schedule_rejects():
+    """"this Weekend" + a weekday-only schedule → REJECT (sat/sun not covered)."""
+    out = scrub_campaign_narrative(
+        "Indulge this Weekend",
+        allowed_values=["$7.99"],
+        campaign_title=_TITLE,
+        schedule="Monday through Friday",
+    )
+    assert out == _TITLE
+
+
+def test_scrub_narrative_bare_weekend_word_grounded_kept():
+    """"Weekend Combos for Every Taste" (bare "weekend" theme word) + schedule incl.
+    Sat/Sun → KEPT (weekend day-set is grounded)."""
+    out = scrub_campaign_narrative(
+        "Weekend Combos for Every Taste",
+        allowed_values=["$7.99", "masala dosa"],
+        campaign_title=_TITLE,
+        schedule="Saturday & Sunday",
+    )
+    assert out == "Weekend Combos for Every Taste"
+
+
+def test_scrub_narrative_bare_weekend_word_weekday_schedule_rejects():
+    """"Weekend Combos for Every Taste" + a weekday-only schedule → REJECT (the bare
+    "weekend" token is now ground-checked even without a connector)."""
+    out = scrub_campaign_narrative(
+        "Weekend Combos for Every Taste",
+        allowed_values=["$7.99", "masala dosa"],
+        campaign_title=_TITLE,
+        schedule="Monday through Friday",
+    )
+    assert out == _TITLE
+
+
+def test_scrub_narrative_non_temporal_allow_kept_regardless_of_schedule():
+    """Non-temporal allow phrases carry NO temporal token → KEPT regardless of the
+    schedule (no scheduling reject path is taken)."""
+    for phrase in (
+        "Festive Dessert Celebration",
+        "One-Price Specials",
+        "Family Favorites",
+        "Authentic Classic Flavors",
+    ):
+        for schedule in ("", "Saturday & Sunday", "Monday through Friday"):
+            out = scrub_campaign_narrative(
+                phrase,
+                allowed_values=["$7.99", "masala dosa", "gulab jamun"],
+                campaign_title=_TITLE,
+                schedule=schedule,
+            )
+            assert out == phrase, (
+                f"non-temporal allow wrongly rejected: {phrase!r} schedule={schedule!r} -> {out!r}"
+            )
+
+
+def test_scrub_narrative_time_pressure_rejects_regardless_of_schedule_fix2():
+    """"order today only" → REJECT (time-pressure) regardless of schedule — urgency
+    is independent of the temporal-grounding path."""
+    for schedule in ("", "Saturday & Sunday", "Monday through Sunday"):
+        out = scrub_campaign_narrative(
+            "order today only",
+            allowed_values=["$7.99"],
+            campaign_title=_TITLE,
+            schedule=schedule,
+        )
+        assert out == _TITLE, f"time-pressure leaked schedule={schedule!r}: {out!r}"
+
+
+def test_scrub_narrative_existing_reject_classes_still_reject_fix2():
+    """All existing reject classes still reject under FIX 2 (sale words, superlatives,
+    ungrounded prices) — independent of temporal grounding."""
+    allowed_values = ["$7.99", "masala dosa"]
+    for phrase in (
+        "$5 off",                 # ungrounded price
+        "50% off the menu",       # ungrounded percentage
+        "best biryani in town",   # superlative
+        "Weekend Discount Feast", # sale word (also temporal — must still reject)
+    ):
+        out = scrub_campaign_narrative(
+            phrase,
+            allowed_values=allowed_values,
+            campaign_title=_TITLE,
+            schedule="Saturday & Sunday",
+        )
+        assert out == _TITLE, f"reject class leaked: {phrase!r} -> {out!r}"
+
+
 # --- FIX D: hero falls back to the primary OFFER subject for combo flyers ------
 #
 # For combo flyers production extracts each combo as ONE COARSE ``offer:N`` fact (no
@@ -1177,3 +1343,53 @@ def test_hero_offer_fallback_invariant_substring_of_locked_fact():
             assert any(out.hero_name in f.value for f in facts), (
                 f"hero_name {out.hero_name!r} not a substring of any locked fact value"
             )
+
+
+# --- FIX 3 (D residual): offer-hero ONLY for combo flyers (no item names) ------
+#
+# Codex MAJOR D: ``_resolve_hero_name`` accepted ``hero_ref=offer:*`` (step 2) BEFORE
+# the first-item fallback, so an ITEM flyer whose model emitted an offer ref had its
+# hero changed to the offer subject — item-flyer behavior regressed. Fix: when ANY
+# ``item:*:name`` fact exists, the hero resolves from items ONLY (offer refs ignored);
+# the offer-subject hero path is reached only for COMBO flyers (no item:*:name).
+
+
+def test_hero_item_flyer_with_offer_ref_resolves_to_item_name():
+    """ITEM flyer (has item:*:name) + hero_ref=offer:0 → hero is a real ITEM name
+    (the offer ref is IGNORED), NOT the offer subject. Item-flyer behavior unchanged."""
+    facts = _two_item_facts() + [_fact("offer:0", "Veg Combo - $12.99: Includes 2 curries")]
+    brief = _brief(hero_ref=FactRef(fact_id="offer:0"))
+    out = resolve_creative_direction(brief, facts)
+    # Hero is a real item name (first item), never the offer subject "Veg Combo".
+    assert out.hero_name == "Masala Dosa"
+    assert out.hero_name != "Veg Combo"
+    assert any(out.hero_name in f.value for f in facts)
+
+
+def test_hero_combo_flyer_with_offer_ref_resolves_to_offer_subject():
+    """COMBO flyer (NO item:*:name) + hero_ref=offer:0 → hero = offer:0 subject
+    (unchanged from D)."""
+    facts = _combo_offer_facts()
+    brief = _brief(hero_ref=FactRef(fact_id="offer:0"))
+    out = resolve_creative_direction(brief, facts)
+    assert out.hero_name == "Veg Combo"
+    assert out.hero_name in facts[0].value
+
+
+def test_hero_combo_flyer_no_ref_resolves_to_first_offer_subject():
+    """COMBO flyer with NO hero_ref → first (lowest-index) offer subject (unchanged)."""
+    facts = _combo_offer_facts()
+    brief = _brief()
+    out = resolve_creative_direction(brief, facts)
+    assert out.hero_name == "Veg Combo"
+    assert out.hero_name in facts[0].value
+
+
+def test_hero_item_flyer_offer_ref_substring_invariant_holds():
+    """Substring invariant still holds when an item flyer carries an offer hero_ref:
+    the resolved hero is a substring of some locked fact value (never invented)."""
+    facts = _two_item_facts() + [_fact("offer:0", "Veg Combo - $12.99")]
+    brief = _brief(hero_ref=FactRef(fact_id="offer:0"))
+    out = resolve_creative_direction(brief, facts)
+    assert out.hero_name
+    assert any(out.hero_name in f.value for f in facts)
