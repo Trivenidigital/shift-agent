@@ -36,10 +36,51 @@ This is a **product-design** problem (marketing judgment), not an infrastructure
 
 ## 2. Goal & success metric
 
-Move the delivered flyer from **"correct premium"** to **"marketing poster"** — measurably. Success is tracked by the art-director oracle (§7) across iterations: composite rubric score rises, with hero/hook/offer axes leading. Hard constraints unchanged: facts stay source-backed, dangerous-leak = 0, QA remains the delivery gate.
+Move the delivered flyer from **"correct premium"** to **"marketing poster"** — measurably. The biggest gap is **campaign narrative + message hierarchy** (§2A), not photography/typography. Success is tracked by the art-director oracle (§7) across iterations: composite rubric score rises, **led by Message Clarity + Offer energy + Product merchandising + Hook prominence**. Hard constraints unchanged: facts stay source-backed, dangerous-leak = 0, QA remains the delivery gate.
 
 **In scope:** Creative Brief v2 (schema + Hermes-propose + firewall) and its wiring into (a) background generation and (b) deterministic overlay composition; the dev-only oracle.
 **Out of scope:** the integrated render path; the old separate CD render path in `bare_render.py` (`FLYER_CREATIVE_DIRECTOR_ENABLED`); QA/referee changes; schema migration; global rollout.
+
+## 2A. REVISION 2026-06-21 — Campaign Narrative + Message Hierarchy (supersedes the hero-centric framing)
+
+**Operator insight (load-bearing): the hero is the MESSAGE, not the food.** A marketing poster leads with a marketing message and uses the food to *support* it; our current flyers lead with Brand → Title → Food → Menu, which is why they still read as **information flyers**, not posters. The reference poster wins because **message clarity is extremely high** — a customer grasps the primary offer in ~2 seconds.
+
+**The optimization target is a MESSAGE HIERARCHY** (the composition's order of visual prominence), not "a bigger hero photo":
+
+1. **Marketing Hook / Campaign Narrative** ← the dominant element
+2. **Product Category**
+3. **Hero Product**
+4. **Supporting Choices**
+5. **Proof / Benefits**
+6. **Brand**
+
+**New brief field — `campaign_narrative`** (model-authored): a short marketing message that sits ABOVE the hero product. Example brief:
+```
+campaign:            Weekend Specials            (campaign_title locked fact)
+campaign_narrative:  "South Indian Favorites at One Price"   (NEW — model-authored)
+marketing_hook:      "ANY ITEM $7.99"            (ref to pricing_structure)
+hero_product:        Dosa                        (hero_ref)
+supporting_products: Idli, Vada, Uttapam         (supporting_refs)
+offer_priority:      High
+theme:               South Indian Weekend Feast
+mood:                Restaurant Promo
+```
+**Priority shift: narrative + hook outrank hero selection.** Hero still matters, but the biggest gap between our flyers and true posters is **campaign narrative + message hierarchy**, not food photography or typography.
+
+**Source mapping for the hierarchy (no new fabrication surface except the narrative):** Hook → `marketing_hook` (ref). Narrative → `campaign_narrative` (NEW, model-authored, firewalled — see below). Product Category → `campaign_title` / derived from hero category (existing fact; not a new field). Hero → `hero_ref`. Supporting → `supporting_refs`. Proof/Benefits → locked offer inclusions (existing facts). Brand → `business_name` (existing fact).
+
+**Narrative firewall (NEW safety surface — the one genuinely new decision; FLAGGED for operator confirmation).** Unlike `hero_ref`/`supporting_refs`/`marketing_hook` (which are `FactRef`s pointing at locked values), `campaign_narrative` is **model-authored free text that RENDERS prominently** — the highest-stakes element on the poster. It must be evocative (marketing) yet carry NO fabrication. Proposed validation (Option B — *scoped* scrub, not the full strict battery, which would over-reject legitimate taglines):
+- reject if it contains an **ungrounded commercial value** (price/%/offer not in locked facts) — reuse `_first_ungrounded_commercial`;
+- reject if it contains a **fabricated operational/scheduling claim** (delivery, hours, "limited time", "today only" not grounded) — reuse the validator's operational/scheduling-claim checks;
+- reject if it contains an **ungrounded superlative/award claim** ("best", "#1", "award-winning") — reuse the open-claim check;
+- ALLOW soft evocative framing of grounded facts ("favorites", "feast", "at one price") so the narrative can still be marketing.
+- On reject → **default to the `campaign_title` value** (a safe grounded title) or empty. Never render an unvalidated narrative.
+- **Decision for operator:** Option B (scoped scrub — evocative-but-grounded) vs Option A (strict full claim battery — safest, blandest). Default in this design = **Option B**.
+
+**Impact on already-built slices (both Codex-CLEAN):**
+- **Slice A delta:** add `campaign_narrative: str` to `FlyerBrief`; context builder proposes it; resolver returns it; the narrative firewall validates it → default. Small additive amendment.
+- **Slice C delta:** add an 8th oracle axis **Message Clarity** (see §7); **re-baseline** F0185/F0186/F0187 on the 8-axis rubric (small additional authorized vision spend) so the before/after delta includes message clarity.
+- **Slice B:** the overlay composition becomes **narrative/hook-led** (hierarchy above), not merely "bigger seal."
 
 ## 3. Current State (grounded)
 
@@ -121,8 +162,10 @@ Facts never flow through Hermes as values — only as `FactRef`s the firewall re
 
 A new module `flyer_art_director_oracle.py`, **strictly development/iteration tooling — never a customer-facing gate, never part of QA/dangerous-leak**.
 
-- Reuses `visual_qa`'s image-read + vision-gateway call. After a render, prompts a vision model with the 7-axis rubric and returns structured JSON: per axis `{score: 1–10, critique: "<one short sentence>"}` plus `composite` and `overall_critique`.
-- **Axes:** 1) Theme clarity 2) Hook prominence 3) Appetite appeal 4) Product merchandising 5) Offer energy 6) Brand presence 7) Would-I-post-this?
+- Reuses `visual_qa`'s image-read + vision-gateway call. After a render, prompts a vision model with the 8-axis rubric and returns structured JSON: per axis `{score: 1–10, critique: "<one short sentence>"}` plus `composite` and `overall_critique`.
+- **Axes (8):** 1) **Message clarity** — *can a customer understand the primary offer within ~2 seconds?* (REVISION 2026-06-21 — the headline poster axis) 2) Theme clarity 3) Hook prominence 4) Appetite appeal 5) Product merchandising 6) Offer energy 7) Brand presence 8) Would-I-post-this?
+- **Primary success axes (the "info-flyer → marketing-poster" levers):** Message clarity, Offer energy, Product merchandising, Hook prominence. Slice B success = meaningful lift in these (esp. message clarity + offer energy) with no regression elsewhere.
+- **Re-baseline note:** the existing baseline (F0185/F0186/F0187, 2026-06-20) was scored on the 7-axis rubric; adding Message Clarity requires re-scoring those three on the 8-axis rubric to establish the message-clarity before-state (small additional authorized vision spend).
 - **Persists with the artifact:** writes a sidecar `<preview>.artdirector.json` beside the rendered PNG (mirrors the existing `.qa.json` / `.text.json` sidecars) so versions are comparable across iterations.
 - **Non-blocking + isolated:** gated by its own dev flag `FLYER_ART_DIRECTOR_ORACLE=1` (OFF in prod by default; ON for CD v2 dev). Any oracle error is logged and ignored — it never affects delivery, never reads or mutates the QA verdict. Dangerous-leak / fact-correctness remain entirely in the QA path.
 
