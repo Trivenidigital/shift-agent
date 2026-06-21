@@ -452,6 +452,36 @@ trap - EXIT
 cleanup_ref_smoke
 echo "Flyer deferred reference extraction smoke passed"
 
+# CD v2 durable rollback verification: after the deploy-time scrub, the flyer
+# project store MUST contain zero `creative_direction` keys. The key is now
+# Field(exclude=True) (never persisted by new code) and the deploy scrubs any
+# lingering pre-fix keys before restart — so a surviving key here means the scrub
+# step did not run / failed, which would make a future rollback to extra="forbid"
+# code reject the store. Fail-closed (→ auto-rollback) if any remain. No-op when
+# the store file is absent (fresh VPS / flyer never used).
+FLYER_STORE_SMOKE=/opt/shift-agent/state/flyer/projects.json
+if [ -f "$FLYER_STORE_SMOKE" ]; then
+    if ! sudo -u shift-agent "$PY" - "$FLYER_STORE_SMOKE" <<'PY'; then
+import json, sys
+store = json.load(open(sys.argv[1], encoding="utf-8"))
+projects = store.get("projects") if isinstance(store, dict) else None
+leftover = sum(
+    1 for p in (projects or [])
+    if isinstance(p, dict) and "creative_direction" in p
+)
+if leftover:
+    sys.stderr.write(f"{leftover} project(s) still carry creative_direction\n")
+    raise SystemExit(1)
+print("flyer store: 0 creative_direction keys (CD v2 rollback-safe)")
+PY
+        echo "FAIL: flyer project store still contains creative_direction keys post-scrub — CD v2 rollback safety broken"
+        exit 1
+    fi
+    echo "✓ flyer project store has no creative_direction keys (CD v2 rollback-safe)"
+else
+    echo "⚠  flyer project store absent ($FLYER_STORE_SMOKE) — CD v2 scrub verification skipped (flyer unused)"
+fi
+
 if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-delivery-report --json > /dev/null; then
     echo "FAIL: Flyer delivery report failed"
     exit 1
