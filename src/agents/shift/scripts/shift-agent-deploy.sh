@@ -436,6 +436,31 @@ PY
     else
         rm -f /opt/shift-agent/flyer_visual_qa.py
     fi
+    # CD v2 module chain (source files already carry the flyer_ prefix):
+    # flyer_render imports propose_creative_brief_v2 (flyer_context_builder) +
+    # resolve_creative_direction (flyer_creative_resolver); both need
+    # flyer_brief + flyer_brief_validator. Install at the deployed version so the
+    # render path's imports resolve (else the smoke module-import probe fails).
+    if [ -f src/agents/flyer/flyer_brief.py ]; then
+        install -m 644 src/agents/flyer/flyer_brief.py /opt/shift-agent/flyer_brief.py
+    else
+        rm -f /opt/shift-agent/flyer_brief.py
+    fi
+    if [ -f src/agents/flyer/flyer_brief_validator.py ]; then
+        install -m 644 src/agents/flyer/flyer_brief_validator.py /opt/shift-agent/flyer_brief_validator.py
+    else
+        rm -f /opt/shift-agent/flyer_brief_validator.py
+    fi
+    if [ -f src/agents/flyer/flyer_context_builder.py ]; then
+        install -m 644 src/agents/flyer/flyer_context_builder.py /opt/shift-agent/flyer_context_builder.py
+    else
+        rm -f /opt/shift-agent/flyer_context_builder.py
+    fi
+    if [ -f src/agents/flyer/flyer_creative_resolver.py ]; then
+        install -m 644 src/agents/flyer/flyer_creative_resolver.py /opt/shift-agent/flyer_creative_resolver.py
+    else
+        rm -f /opt/shift-agent/flyer_creative_resolver.py
+    fi
     if [ -f src/agents/flyer/visible_contract.py ]; then
         install -m 644 src/agents/flyer/visible_contract.py /opt/shift-agent/flyer_visible_contract.py
     else
