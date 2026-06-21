@@ -1319,20 +1319,53 @@ def _poster_layout_requirements(project: FlyerProject, *, force_background_only:
             # reserved-zone banding (which yielded a flat multi-item spread → template) with a
             # cinematic single-hero composition; the deterministic overlay's own gradient
             # scrims provide text legibility (validated). Scoped ⇒ flag-off byte-identical.
+            #
+            # CD v2 (Task B2.4): when the resolved creative direction carrier is present
+            # (project.creative_direction, flag-on only), NAME the chosen hero dish and
+            # reflect the chosen theme/mood in the subject line. Carrier absent/empty ⇒
+            # the directive is byte-identical to the fixed legacy string (regression-tested).
+            _cd = getattr(project, "creative_direction", None)
+            _hero_name = ""
+            _theme_family = ""
+            _mood = ""
+            if isinstance(_cd, dict):
+                _hero_name = (_cd.get("hero_name") or "").strip()
+                _theme_family = (_cd.get("theme_family") or "").strip()
+                _mood = (_cd.get("mood") or "").strip()
+            if _hero_name or _theme_family or _mood:
+                _hero_subject = f"the featured {_hero_name} dish" if _hero_name else "the featured food"
+                _scene_clauses = ""
+                if _theme_family:
+                    _scene_clauses += f" Style the scene for a {_theme_family} theme."
+                if _mood:
+                    _scene_clauses += f" Convey a {_mood} mood."
+                _hero_line = (
+                    "- Compose a wordless HERO food photograph for the background: ONE single mouth-watering hero "
+                    f"dish ({_hero_subject}) as the bold subject that DOMINATES the frame, with warm golden "
+                    "cinematic lighting, gentle steam and visible texture where appropriate, rich shallow depth of "
+                    f"field, on a rustic dark wood or slate surface with softly-lit ambiance behind.{_scene_clauses} "
+                    "Appetizing, vibrant, and atmospheric.\n"
+                )
+            else:
+                _hero_line = (
+                    "- Compose a wordless HERO food photograph for the background: ONE single mouth-watering hero "
+                    "dish (the featured food) as the bold subject that DOMINATES the frame, with warm golden "
+                    "cinematic lighting, gentle steam and visible texture where appropriate, rich shallow depth of "
+                    "field, on a rustic dark wood or slate surface with softly-lit ambiance behind. Appetizing, "
+                    "vibrant, and atmospheric.\n"
+                )
             reserve += (
-                "- Compose a wordless HERO food photograph for the background: ONE single mouth-watering hero "
-                "dish (the featured food) as the bold subject that DOMINATES the frame, with warm golden "
-                "cinematic lighting, gentle steam and visible texture where appropriate, rich shallow depth of "
-                "field, on a rustic dark wood or slate surface with softly-lit ambiance behind. Appetizing, "
-                "vibrant, and atmospheric.\n"
-                "- This is a PHOTOGRAPH ONLY: absolutely NO text, letters, words, numbers, captions, signage, "
-                "menu boards, price tags, watermarks, or logos anywhere in the image — do not imitate an "
-                "advertisement layout; the exact text is composited afterwards into overlay panels.\n"
-                "- Cinematic and atmospheric, with naturally darker, softer top and bottom edges (a gentle "
-                "vignette) so the composited title and menu stay legible — but the hero dish still fills the frame; "
-                "do NOT leave empty flat bands or blank panels.\n"
-                "- No people, no faces, no hands, no diners, no family scene, no buffet, and no spread of many "
-                "separate dishes — ONE hero dish is the subject.\n"
+                _hero_line
+                + (
+                    "- This is a PHOTOGRAPH ONLY: absolutely NO text, letters, words, numbers, captions, signage, "
+                    "menu boards, price tags, watermarks, or logos anywhere in the image — do not imitate an "
+                    "advertisement layout; the exact text is composited afterwards into overlay panels.\n"
+                    "- Cinematic and atmospheric, with naturally darker, softer top and bottom edges (a gentle "
+                    "vignette) so the composited title and menu stay legible — but the hero dish still fills the frame; "
+                    "do NOT leave empty flat bands or blank panels.\n"
+                    "- No people, no faces, no hands, no diners, no family scene, no buffet, and no spread of many "
+                    "separate dishes — ONE hero dish is the subject.\n"
+                )
             )
         else:
             reserve += (

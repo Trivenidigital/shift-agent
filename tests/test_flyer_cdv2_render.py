@@ -305,3 +305,116 @@ def test_propose_v2_unparseable_response_returns_none(monkeypatch):
         gateway=lambda _s, _u: {"not": "a brief"},
     )
     assert brief is None
+
+
+# ── Slice B Task B2.4 — wire hero + theme + mood into the textless-bg prompt ──
+#
+# When the V2 carrier (project.creative_direction) holds a non-empty hero_name /
+# theme_family / mood, the PREMIUM textless-background directive in
+# _poster_layout_requirements must NAME the hero dish and reflect the theme/mood —
+# while KEEPING the no-text / no-people / vignette clauses verbatim. When the
+# carrier is None (flag off) or its fields are empty, the directive is
+# BYTE-IDENTICAL to today's fixed premium string (regression guard).
+
+# The fixed premium HERO directive (render.py ~1322-1336) as shipped today. This
+# literal is the flag-off / empty-carrier expected output and is the byte-for-byte
+# regression baseline. It MUST stay in sync with the production string.
+_FIXED_PREMIUM_HERO_DIRECTIVE = (
+    "- Compose a wordless HERO food photograph for the background: ONE single mouth-watering hero "
+    "dish (the featured food) as the bold subject that DOMINATES the frame, with warm golden "
+    "cinematic lighting, gentle steam and visible texture where appropriate, rich shallow depth of "
+    "field, on a rustic dark wood or slate surface with softly-lit ambiance behind. Appetizing, "
+    "vibrant, and atmospheric.\n"
+    "- This is a PHOTOGRAPH ONLY: absolutely NO text, letters, words, numbers, captions, signage, "
+    "menu boards, price tags, watermarks, or logos anywhere in the image — do not imitate an "
+    "advertisement layout; the exact text is composited afterwards into overlay panels.\n"
+    "- Cinematic and atmospheric, with naturally darker, softer top and bottom edges (a gentle "
+    "vignette) so the composited title and menu stay legible — but the hero dish still fills the frame; "
+    "do NOT leave empty flat bands or blank panels.\n"
+    "- No people, no faces, no hands, no diners, no family scene, no buffet, and no spread of many "
+    "separate dishes — ONE hero dish is the subject.\n"
+)
+
+
+def _premium_food_project(phone: str = "+17329837841") -> FlyerProject:
+    """A minimal food project that reaches the PREMIUM background branch.
+
+    No FLYER_ALLOW_INTEGRATED_POSTER ⇒ not integrated-eligible; plus we pass
+    force_background_only=True at the call site for robustness ⇒ the premium
+    background branch is taken (with FLYER_PREMIUM_OVERLAY=1)."""
+    p = _project(phone)
+    p.raw_request = "Weekend dosa special $7.99 at our South Indian restaurant"
+    return p
+
+
+def test_bg_prompt_flag_off_carrier_none_is_byte_identical(monkeypatch):
+    """Carrier None (flag off) ⇒ the premium directive is byte-identical to today's
+    fixed string (the fixed HERO directive appears verbatim, hero name NOT injected)."""
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    project = _premium_food_project()
+    assert project.creative_direction is None
+    out = render_module._poster_layout_requirements(project, force_background_only=True)
+    assert _FIXED_PREMIUM_HERO_DIRECTIVE in out
+
+
+def test_bg_prompt_empty_carrier_fields_is_byte_identical(monkeypatch):
+    """Carrier present but hero/theme/mood empty ⇒ no fragments injected; the fixed
+    HERO directive appears verbatim (byte-identical to flag-off)."""
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    project = _premium_food_project()
+    project.creative_direction = {"hero_name": "", "theme_family": "", "mood": ""}
+    out = render_module._poster_layout_requirements(project, force_background_only=True)
+    assert _FIXED_PREMIUM_HERO_DIRECTIVE in out
+
+
+def test_bg_prompt_empty_carrier_matches_flag_off_exactly(monkeypatch):
+    """Stronger guard: empty-carrier output == flag-off output, byte-for-byte."""
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    p_off = _premium_food_project()
+    out_off = render_module._poster_layout_requirements(p_off, force_background_only=True)
+    p_empty = _premium_food_project()
+    p_empty.creative_direction = {"hero_name": "", "theme_family": "", "mood": ""}
+    out_empty = render_module._poster_layout_requirements(p_empty, force_background_only=True)
+    assert out_empty == out_off
+
+
+def test_bg_prompt_populated_carrier_names_hero_theme_mood(monkeypatch):
+    """Carrier with non-empty hero/theme/mood ⇒ the directive NAMES the hero dish
+    AND reflects the theme AND the mood — while STILL being a textless directive
+    (the existing 'absolutely NO text' clause remains)."""
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    project = _premium_food_project()
+    project.creative_direction = {
+        "hero_name": "Dosa",
+        "theme_family": "South Indian Weekend Feast",
+        "mood": "Warm Restaurant Promo",
+    }
+    out = render_module._poster_layout_requirements(project, force_background_only=True)
+    assert "Dosa" in out
+    assert "South Indian Weekend Feast" in out
+    assert "Warm Restaurant Promo" in out
+    # Still textless: the no-text clause must remain.
+    assert "absolutely NO text" in out
+    # Still no-people: that clause must remain too.
+    assert "no faces" in out
+
+
+def test_bg_prompt_populated_carrier_differs_from_fixed(monkeypatch):
+    """Sanity: a populated carrier actually CHANGES the output (otherwise the
+    byte-identical guards would be vacuous)."""
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    p_off = _premium_food_project()
+    out_off = render_module._poster_layout_requirements(p_off, force_background_only=True)
+    p_on = _premium_food_project()
+    p_on.creative_direction = {
+        "hero_name": "Dosa",
+        "theme_family": "South Indian Weekend Feast",
+        "mood": "Warm Restaurant Promo",
+    }
+    out_on = render_module._poster_layout_requirements(p_on, force_background_only=True)
+    assert out_on != out_off
