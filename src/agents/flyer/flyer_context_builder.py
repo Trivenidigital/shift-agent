@@ -189,9 +189,11 @@ def _build_user_message(
     Plus a SHORT additive note that the brief MAY include the CD v2 OPTIONAL
     TOP-LEVEL fields (``hero_ref`` / ``supporting_refs`` / ``marketing_hook`` /
     ``offer_priority`` / ``campaign_narrative``, and ``visual_direction.mood``).
-    These are enhancement-only: the model references commercial facts by id/span
-    exactly like ``fact_refs`` (never inline values), and OMITTING them is always
-    fine — they default and never block. The SKILL.md output schema is the
+    These are enhancement-only: the emphasis refs (``hero_ref`` / ``supporting_refs``
+    / ``marketing_hook.text_ref``) point at a fact by a LOCKED ``fact_id`` only —
+    NOT a ``raw_span`` (the resolver silently drops a raw_span on these) — never an
+    inline value, and OMITTING them is always fine — they default and never block.
+    The SKILL.md output schema is the
     authority for their exact shape (and the parser reads them at TOP LEVEL, so the
     note keeps them top-level, not nested)."""
     fact_catalog = [
@@ -209,9 +211,10 @@ def _build_user_message(
             "optional_creative_fields_note": (
                 "The brief MAY include the OPTIONAL top-level fields hero_ref, "
                 "supporting_refs, marketing_hook, offer_priority, campaign_narrative, "
-                "and visual_direction.mood (per the SKILL output schema). Each commercial "
-                "ref points at a fact by id/span (never an inline value); omit any you are "
-                "unsure of — they default and never block."
+                "and visual_direction.mood (per the SKILL output schema). The emphasis "
+                "refs hero_ref, supporting_refs, and marketing_hook.text_ref each point "
+                "at a fact by a locked fact_id only (never an inline value); omit any you "
+                "are unsure of — they default and never block."
             ),
         },
         ensure_ascii=False,

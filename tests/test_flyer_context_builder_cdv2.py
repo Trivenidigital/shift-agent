@@ -417,6 +417,62 @@ def test_skill_md_declares_cdv2_top_level_fields_in_output_schema():
         )
 
 
+# ── (8) GUARD (FIX B): the CD v2 EMPHASIS refs are documented as a locked ─────
+# fact_id ONLY — NOT a raw_span. The resolver (``flyer_creative_resolver``) only
+# consumes ``fact_id`` for hero_ref / supporting_refs / marketing_hook.text_ref; a
+# raw_span on these is silently dropped (``_ref_fact_id`` returns "" for a raw_span).
+# So the PROMPT must NOT offer raw_span for these three — both the SKILL.md emphasis-
+# ref description AND the flat CD v2 note in ``_build_user_message`` must say fact_id
+# only. (campaign_narrative + visual_direction.mood are unchanged — free text, not
+# refs.) This guard string-scans the SKILL.md emphasis-ref description.
+
+
+def test_skill_md_emphasis_refs_are_fact_id_only_not_raw_span():
+    """The SKILL.md emphasis-ref guidance must document hero_ref / supporting_refs /
+    marketing_hook.text_ref as a LOCKED fact_id only — and must NOT offer a raw_span
+    for them (the resolver silently drops a raw_span on these). Scan each emphasis-ref
+    sentence: it must mention ``fact_id`` and must NOT pair the ref with ``raw_span``."""
+    text = fcb.SKILL_MD_PATH.read_text(encoding="utf-8")
+    # HARD OUTPUT RULE #4 is the canonical emphasis-ref instruction; it must (a) name
+    # all three refs, (b) say fact_id, and (c) NOT offer raw_span for them.
+    rule4_start = text.find("The optional emphasis fields")
+    assert rule4_start != -1, "SKILL.md must keep the HARD OUTPUT RULE #4 emphasis-ref rule"
+    rule4 = text[rule4_start : rule4_start + 600]
+    for ref in ("hero_ref", "supporting_refs", "marketing_hook"):
+        assert ref in rule4, f"emphasis-ref rule must name {ref!r}"
+    assert "fact_id" in rule4, "emphasis-ref rule must say the refs point by fact_id"
+    # Must NOT OFFER raw_span as an option for these refs — the resolver silently
+    # drops a raw_span on hero_ref/supporting_refs/marketing_hook. A negating mention
+    # ("NOT a raw_span") is fine; an OFFER ("or a raw_span", "or raw_span") is the
+    # exact regression we guard against.
+    import re as _re
+
+    offer_pat = _re.compile(r"or\s+(?:a\s+)?`?raw_span`?", _re.IGNORECASE)
+    assert not offer_pat.search(rule4), (
+        "SKILL.md emphasis-ref rule must NOT OFFER raw_span for hero_ref/"
+        "supporting_refs/marketing_hook.text_ref — the resolver silently drops it; "
+        "these are a LOCKED fact_id ONLY"
+    )
+
+
+def test_build_user_message_cdv2_note_says_fact_id_not_span_for_emphasis_refs():
+    """The flat CD v2 note in ``_build_user_message`` must describe the emphasis refs
+    as pointing by fact_id and must NOT offer a raw_span ('id/span') for them — the
+    resolver only consumes fact_id for hero_ref/supporting_refs/marketing_hook."""
+    import json as _json
+
+    msg = fcb._build_user_message(
+        _COMBO_REQUEST, _combo_facts(), None, None, None
+    )
+    payload = _json.loads(msg)
+    note = payload.get("optional_creative_fields_note", "")
+    assert "fact_id" in note, "CD v2 note must say the emphasis refs point by fact_id"
+    assert "span" not in note.lower(), (
+        "CD v2 note must NOT offer a raw_span/'id/span' for the emphasis refs — the "
+        "resolver silently drops a raw_span on hero_ref/supporting_refs/marketing_hook"
+    )
+
+
 def test_skill_md_declares_mood_inside_visual_direction():
     """``mood`` must appear inside the ``visual_direction`` object of the schema
     block (next to ``theme_family``), since the parser reads

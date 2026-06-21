@@ -69,10 +69,12 @@ fail the deterministic firewall and the flyer cannot be produced:
    (A structural count like "two combo cards" is fine — only commercial VALUES are
    forbidden.) Every commercial value is rendered deterministically from facts via
    `fact_refs` — never typed by you.
-4. **The optional emphasis fields reference facts by id, never inline values.**
-   `hero_ref` / `supporting_refs` / `marketing_hook.text_ref` each point at a fact
-   by `fact_id` (or a `raw_span`), exactly like `fact_refs` — never an inline
-   item/price/offer value. `campaign_narrative` is an evocative-but-grounded
+4. **The optional emphasis fields reference facts by a locked `fact_id` only,
+   never inline values.** `hero_ref` / `supporting_refs` / `marketing_hook.text_ref`
+   each point at a fact by a **locked `fact_id`** (NOT a `raw_span` — a `raw_span`
+   on these is silently dropped) — never an inline item/price/offer value. (Unlike
+   `fact_refs`, which may use a `raw_span`, these three emphasis refs accept a
+   `fact_id` only.) `campaign_narrative` is an evocative-but-grounded
    marketing message (e.g. "South Indian Favorites at One Price") that carries NO
    commercial VALUE (no price, `"%"`, `"$"`, `"discount"`, superlative, or
    time-pressure claim) — consistent with rule #3. All of these are OPTIONAL: omit
