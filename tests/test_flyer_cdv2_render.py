@@ -242,6 +242,75 @@ def test_render_flag_on_propose_raises_leaves_carrier_none(monkeypatch, tmp_path
     assert project.creative_direction is None  # never blocked
 
 
+# ── Composition Phase 1, Task 1 — poster_archetype on the carrier ────────────
+#
+# When the V2 gate is ON, _populate_creative_direction_v2 ALSO computes a poster
+# archetype from brief.request_intent (select_poster_archetype) and ADDS it to the
+# dict written to project.creative_direction. Flag OFF the block never runs, so the
+# carrier stays None (unchanged).
+
+
+def _intent_brief(request_intent: str) -> FlyerBrief:
+    return FlyerBrief(
+        request_intent=request_intent,
+        visual_direction=VisualDirection(theme_family="Warm South Indian Promo"),
+        hero_ref=FactRef(fact_id="item:1:name"),
+        offer_priority="high",
+        campaign_narrative="South Indian Favorites at One Price",
+    )
+
+
+def test_render_flag_on_carries_poster_archetype_message_first(monkeypatch, tmp_path):
+    """Flag ON + a menu-intent brief ⇒ creative_direction["poster_archetype"] == message_first."""
+    monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setattr(render_module, "propose_creative_brief_v2",
+                        lambda *a, **k: _intent_brief("menu"), raising=True)
+    _patch_render_io(monkeypatch)
+
+    project = _project_with_facts("+17329837841")
+    render_module._render_model(
+        project, tmp_path / "out.png", concept_id="C1",
+        output_format="concept_preview", size=(1080, 1350),
+        model="deterministic-renderer", quality="low",
+    )
+    assert project.creative_direction["poster_archetype"] == "message_first"
+
+
+def test_render_flag_on_carries_poster_archetype_offer_first(monkeypatch, tmp_path):
+    """Flag ON + a combo_offer-intent brief ⇒ poster_archetype == offer_first."""
+    monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setattr(render_module, "propose_creative_brief_v2",
+                        lambda *a, **k: _intent_brief("combo_offer"), raising=True)
+    _patch_render_io(monkeypatch)
+
+    project = _project_with_facts("+17329837841")
+    render_module._render_model(
+        project, tmp_path / "out.png", concept_id="C1",
+        output_format="concept_preview", size=(1080, 1350),
+        model="deterministic-renderer", quality="low",
+    )
+    assert project.creative_direction["poster_archetype"] == "offer_first"
+
+
+def test_render_flag_off_carrier_none_no_poster_archetype(monkeypatch, tmp_path):
+    """Flag OFF ⇒ creative_direction stays None (unchanged); no poster_archetype."""
+    monkeypatch.delenv("FLYER_CREATIVE_DIRECTOR_V2", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setattr(render_module, "propose_creative_brief_v2",
+                        lambda *a, **k: _intent_brief("menu"), raising=True)
+    _patch_render_io(monkeypatch)
+
+    project = _project_with_facts("+17329837841")
+    render_module._render_model(
+        project, tmp_path / "out.png", concept_id="C1",
+        output_format="concept_preview", size=(1080, 1350),
+        model="deterministic-renderer", quality="low",
+    )
+    assert project.creative_direction is None
+
+
 # ── propose_creative_brief_v2 unit tests (no network) ────────────────────────
 
 

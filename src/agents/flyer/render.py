@@ -49,11 +49,13 @@ try:
     from flyer_creative_resolver import resolve_creative_direction  # type: ignore
     from flyer_brief import VisualDirection as _CDV2VisualDirection  # type: ignore
     from flyer_brief import FlyerBrief as _CDV2FlyerBrief  # type: ignore
+    from flyer_poster_archetype import select_poster_archetype  # type: ignore
 except ImportError:  # pragma: no cover - src layout fallback
     from agents.flyer.flyer_context_builder import propose_creative_brief_v2
     from agents.flyer.flyer_creative_resolver import resolve_creative_direction
     from agents.flyer.flyer_brief import VisualDirection as _CDV2VisualDirection
     from agents.flyer.flyer_brief import FlyerBrief as _CDV2FlyerBrief
+    from agents.flyer.flyer_poster_archetype import select_poster_archetype
 
 
 class FlyerRenderError(RuntimeError):
@@ -4237,6 +4239,16 @@ def _populate_creative_direction_v2(project: FlyerProject) -> None:
         )
         resolved = resolve_creative_direction(brief, project.locked_facts)
         project.creative_direction = dataclasses.asdict(resolved)
+        # Composition Phase 1: route the poster archetype from the brief's
+        # request_intent (offer_priority accepted but unused this phase). Guarded
+        # so any failure simply omits poster_archetype and leaves the carrier as-is.
+        try:
+            archetype = select_poster_archetype(
+                getattr(brief, "request_intent", "") or "", resolved.offer_priority
+            )
+            project.creative_direction["poster_archetype"] = archetype
+        except Exception:  # noqa: BLE001 — never block; just omit poster_archetype
+            pass
     except Exception:  # noqa: BLE001 — never block the render; carrier stays None
         project.creative_direction = None
 
