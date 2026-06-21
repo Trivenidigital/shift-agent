@@ -161,3 +161,8 @@ class FlyerBrief(BaseModel):
     supporting_refs: list[FactRef] = Field(default_factory=list, max_length=40)
     marketing_hook: Optional[MarketingHook] = None
     offer_priority: Literal["high", "medium", "low"] = "medium"
+    # CD v2 (Slice B, B0.1): a short model-authored marketing message rendered
+    # above the hero (e.g. "South Indian Favorites at One Price"). Free text, NOT
+    # a commercial fact — it carries no prices/item-names/dates/claims, so it does
+    # not need a FactRef. Optional/defaulted (backward compatible).
+    campaign_narrative: str = Field(default="", max_length=200)

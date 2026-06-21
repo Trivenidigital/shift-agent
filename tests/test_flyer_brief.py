@@ -111,3 +111,44 @@ def test_flyer_brief_backward_compatible_defaults():
     assert brief.supporting_refs == []
     assert brief.marketing_hook is None
     assert brief.offer_priority == "medium"
+
+
+# --- FlyerBrief.campaign_narrative (CD v2, Slice B B0.1) ---------------------
+
+
+def test_flyer_brief_accepts_campaign_narrative():
+    brief = FlyerBrief(
+        request_intent="menu",
+        visual_direction=VisualDirection(),
+        campaign_narrative="South Indian Favorites at One Price",
+    )
+    assert brief.campaign_narrative == "South Indian Favorites at One Price"
+    assert (
+        brief.model_dump()["campaign_narrative"]
+        == "South Indian Favorites at One Price"
+    )
+
+
+def test_flyer_brief_campaign_narrative_defaults_empty():
+    brief = FlyerBrief(request_intent="menu", visual_direction=VisualDirection())
+    assert brief.campaign_narrative == ""
+
+
+def test_flyer_brief_campaign_narrative_max_length_raises():
+    with pytest.raises(ValidationError):
+        FlyerBrief(
+            request_intent="menu",
+            visual_direction=VisualDirection(),
+            campaign_narrative="x" * 201,
+        )
+
+
+def test_flyer_brief_campaign_narrative_extra_forbid_preserved():
+    """Adding campaign_narrative must not loosen ``extra="forbid"``."""
+    with pytest.raises(ValidationError):
+        FlyerBrief(
+            request_intent="menu",
+            visual_direction=VisualDirection(),
+            campaign_narrative="ok",
+            unexpected_field="x",
+        )
