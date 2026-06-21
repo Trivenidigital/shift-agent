@@ -186,9 +186,11 @@ def _build_user_message(
     never by value), a short profile summary, and any source/project context.
     Carries NO creative instructions — those live in the SKILL.md system prompt.
 
-    Plus a SHORT additive note that the brief MAY include the CD v2 OPTIONAL
+    Plus a SHORT additive note that the brief ALWAYS includes the REQUIRED
+    ``campaign_narrative`` (the message-first poster renders it as the dominant
+    headline, so it must never be empty) and MAY include the CD v2 OPTIONAL
     TOP-LEVEL fields (``hero_ref`` / ``supporting_refs`` / ``marketing_hook`` /
-    ``offer_priority`` / ``campaign_narrative``, and ``visual_direction.mood``).
+    ``offer_priority``, and ``visual_direction.mood``).
     These are enhancement-only: the emphasis refs (``hero_ref`` / ``supporting_refs``
     / ``marketing_hook.text_ref``) point at a fact by a LOCKED ``fact_id`` only —
     NOT a ``raw_span`` (the resolver silently drops a raw_span on these) — never an
@@ -209,12 +211,15 @@ def _build_user_message(
             "project_context": project_context or "",
             # CD v2 — OPTIONAL TOP-LEVEL enhancement fields; see the SKILL schema for shape.
             "optional_creative_fields_note": (
-                "The brief MAY include the OPTIONAL top-level fields hero_ref, "
-                "supporting_refs, marketing_hook, offer_priority, campaign_narrative, "
-                "and visual_direction.mood (per the SKILL output schema). The emphasis "
-                "refs hero_ref, supporting_refs, and marketing_hook.text_ref each point "
-                "at a fact by a locked fact_id only (never an inline value); omit any you "
-                "are unsure of — they default and never block."
+                "Always include the top-level campaign_narrative (a short grounded "
+                "marketing message; restate the campaign occasion if you cannot craft a "
+                "distinct one) — it is required and the message-first poster renders it as "
+                "the dominant headline. The brief MAY also include the OPTIONAL top-level "
+                "fields hero_ref, supporting_refs, marketing_hook, offer_priority, and "
+                "visual_direction.mood (per the SKILL output schema). The emphasis refs "
+                "hero_ref, supporting_refs, and marketing_hook.text_ref each point at a "
+                "fact by a locked fact_id only (never an inline value); omit any of these "
+                "you are unsure of — they default and never block."
             ),
         },
         ensure_ascii=False,

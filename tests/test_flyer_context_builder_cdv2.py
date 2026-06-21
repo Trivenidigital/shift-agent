@@ -473,6 +473,39 @@ def test_build_user_message_cdv2_note_says_fact_id_not_span_for_emphasis_refs():
     )
 
 
+def test_skill_md_declares_campaign_narrative_required_not_optional():
+    """NARRATIVE-RELIABILITY guard: SKILL.md must declare campaign_narrative as a
+    REQUIRED brief field (the brain must always craft a short grounded message), and
+    must NOT mark it OPTIONAL / omittable. A non-deterministic brain that omits the
+    narrative produced a headline-less message-first A render in live validation; the
+    SKILL requiredness is the upstream half of the fix.
+
+    String-scan the SKILL.md emphasis-ref rule (HARD OUTPUT RULE #4, which carries the
+    campaign_narrative description): it must (a) say campaign_narrative is REQUIRED and
+    (b) NOT pair campaign_narrative with optional/omit/"unsure" language."""
+    text = fcb.SKILL_MD_PATH.read_text(encoding="utf-8")
+    rule4_start = text.find("The optional emphasis fields")
+    assert rule4_start != -1, "SKILL.md must keep the HARD OUTPUT RULE #4 emphasis-ref rule"
+    rule4 = text[rule4_start: rule4_start + 700]
+
+    cn_idx = rule4.find("campaign_narrative")
+    assert cn_idx != -1, "SKILL.md rule #4 must describe campaign_narrative"
+    # The campaign_narrative sentence must declare it REQUIRED.
+    assert "REQUIRED" in rule4 or "required" in rule4, (
+        "SKILL.md must declare campaign_narrative REQUIRED (the brain must always craft a "
+        "short grounded message) — a missing narrative renders the A poster headline-less"
+    )
+    # The campaign_narrative description must NOT carry omittable wording. The old
+    # 'OPTIONAL ... omit any you are unsure of' applied to campaign_narrative is the
+    # exact regression we guard against.
+    cn_window = rule4[max(0, cn_idx - 80): cn_idx + 360]
+    for forbidden in ("omit if unsure", "omit any you are unsure", "OPTIONAL", "optional"):
+        assert forbidden not in cn_window, (
+            f"SKILL.md must NOT mark campaign_narrative {forbidden!r}-style omittable; "
+            f"it is REQUIRED so the message-first headline is never empty"
+        )
+
+
 def test_skill_md_declares_mood_inside_visual_direction():
     """``mood`` must appear inside the ``visual_direction`` object of the schema
     block (next to ``theme_family``), since the parser reads

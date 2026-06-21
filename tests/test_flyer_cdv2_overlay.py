@@ -916,3 +916,96 @@ def test_fix_debug_reports_drawn_sizes_normal_all_present(tmp_path):
     assert dbg["narrative_px"] > 0 and dbg["hook_px"] > 0
     assert dbg["title_px"] > 0 and dbg["brand_px"] > 0
     assert dbg["narrative_px"] > dbg["hook_px"] > dbg["title_px"] >= dbg["brand_px"], dbg
+
+
+# ===========================================================================
+# NARRATIVE-RELIABILITY (message-first): the overlay is the DELIVERED artifact, a
+# message-first poster must NEVER render with an EMPTY dominant headline slot.
+#
+# Live validation found a HEADLINE-LESS A render when the brain omitted
+# campaign_narrative. When campaign_narrative resolves EMPTY, the A template must
+# PROMOTE campaign_title into the dominant (narrative-scale) headline slot AND
+# SUPPRESS the redundant small kicker (campaign_title is never drawn twice). The
+# required campaign_title fact stays ledger-covered either way (kicker when a
+# narrative is present, headline when promoted as the fallback).
+# ===========================================================================
+
+# A message_first CD with NO campaign_narrative — the exact live failure shape.
+_CD_MF_NO_NARRATIVE = {k: v for k, v in _CD_MF.items() if k != "campaign_narrative"}
+
+
+def test_message_first_empty_narrative_promotes_title_to_headline(tmp_path):
+    """campaign_narrative empty in message_first ⇒ the campaign_title is PROMOTED to
+    the dominant (narrative) headline slot: narrative_px reports the headline's drawn
+    px (> 0, > hook_px), and the SMALL title kicker is NOT drawn (no duplicate) ⇒
+    title_px == 0. The render succeeds (premium, never headline-less, never raised)
+    and the required campaign_title fact is still covered."""
+    out = _render(_project(creative_direction=_CD_MF_NO_NARRATIVE, pid="F0320"),
+                  tmp_path, "mf_emptynarr_promote.png")
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert dbg.get("archetype") == "message_first"
+    # The dominant headline slot is FILLED (never headline-less) by the promoted title.
+    assert dbg["narrative_px"] > 0, dbg
+    assert dbg["narrative_px"] > dbg["hook_px"], (dbg["narrative_px"], dbg["hook_px"])
+    # The redundant small kicker is SUPPRESSED — campaign_title is not drawn twice.
+    assert dbg["title_px"] == 0, dbg
+
+
+def test_message_first_blank_narrative_string_promotes_title(tmp_path):
+    """A whitespace-only campaign_narrative resolves EMPTY (.strip()) ⇒ same promotion
+    fallback as an omitted narrative: title becomes the headline, no duplicate kicker."""
+    cd = dict(_CD_MF, campaign_narrative="   ")
+    out = _render(_project(creative_direction=cd, pid="F0321"), tmp_path, "mf_blanknarr.png")
+    assert out.exists()
+    dbg = po._LAST_LAYOUT_DEBUG
+    assert dbg["narrative_px"] > 0 and dbg["narrative_px"] > dbg["hook_px"]
+    assert dbg["title_px"] == 0, dbg
+
+
+def test_message_first_empty_narrative_covers_title_fact(tmp_path):
+    """The REQUIRED campaign_title fact stays ledger-covered when promoted to the
+    headline: the render's fail-closed ledger does NOT raise (it would if the title
+    value were neither kicker nor headline)."""
+    facts = _base_facts()
+    out = tmp_path / "mf_emptynarr_cover.png"
+    # No raise == the required campaign_title ("Weekend Specials") was drawn + verified.
+    po.render_premium_overlay(
+        _project(creative_direction=_CD_MF_NO_NARRATIVE, facts=facts, pid="F0322"),
+        _bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+
+
+def test_message_first_nonempty_narrative_keeps_title_as_kicker(tmp_path):
+    """Unchanged behavior with a NON-empty narrative: the narrative is the headline
+    and campaign_title is the SMALL kicker (drawn, title_px > 0) below it — the
+    promotion fallback ONLY engages when the narrative is empty."""
+    out = _render(_project(creative_direction=_CD_MF, pid="F0323"), tmp_path, "mf_narr_kicker.png")
+    assert out.exists()
+    dbg = po._LAST_LAYOUT_DEBUG
+    # Narrative present ⇒ title is the small kicker, BOTH drawn, strict ordering holds.
+    assert dbg["narrative_px"] > dbg["hook_px"] > dbg["title_px"] > 0, dbg
+    assert dbg["brand_px"] <= dbg["title_px"], dbg
+
+
+def test_message_first_headline_never_empty_both_cases(tmp_path):
+    """NEVER headline-less: for message_first the dominant headline slot is ALWAYS
+    filled — narrative_px > 0 whether the headline is the narrative (narrative
+    present) or the promoted campaign_title (narrative empty)."""
+    _render(_project(creative_direction=_CD_MF, pid="F0324"), tmp_path, "mf_hl_narr.png")
+    assert po._LAST_LAYOUT_DEBUG["narrative_px"] > 0
+    _render(_project(creative_direction=_CD_MF_NO_NARRATIVE, pid="F0324"), tmp_path, "mf_hl_title.png")
+    assert po._LAST_LAYOUT_DEBUG["narrative_px"] > 0
+
+
+def test_message_first_empty_narrative_renders_premium_not_raised(tmp_path):
+    """The live-failure shape (message_first + omitted campaign_narrative) must
+    render premium (no flat degrade / FlyerRenderError) — the headline slot is the
+    promoted title, the required-fact ledger passes."""
+    out = tmp_path / "mf_emptynarr_premium.png"
+    po.render_premium_overlay(
+        _project(creative_direction=_CD_MF_NO_NARRATIVE, pid="F0325"),
+        _bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
+    assert out.exists() and Image.open(out).size == (1080, 1350)
+    # No phantom drop records — there was no narrative to drop.
+    assert po._LAST_NARRATIVE_DROP == []

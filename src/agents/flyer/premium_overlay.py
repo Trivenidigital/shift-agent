@@ -1127,19 +1127,38 @@ def render_premium_overlay(project, source, target, *, size, output_format):
                                 + max(16, int(height * 0.018))
                                 + 2 * int(_kick_cap_ub * 1.18))
 
+        # NARRATIVE-RELIABILITY: the dominant HEADLINE slot must NEVER be empty. The
+        # headline text is the campaign_narrative WHEN PRESENT, else the REQUIRED
+        # campaign_title is PROMOTED into the headline slot (and the redundant small
+        # kicker below is SUPPRESSED so the title is never drawn twice). The brain
+        # sometimes omits campaign_narrative (it is non-deterministic) → an empty
+        # narrative would otherwise render a headline-less A poster. ``promote_title``
+        # is True exactly when the headline carries the title (no narrative on-canvas).
+        _narrative_active = bool(cd_narrative) and include_narrative
+        headline_text = cd_narrative if _narrative_active else title
+        promote_title = (not _narrative_active) and bool(title)
+
         narrative_px = 0
         _narr_lines = None
-        if cd_narrative and include_narrative:
+        if headline_text:
             _narr_gap = max(10, int(height * 0.014))
             _narr_top = _title_allowance + _narr_gap
             # Headline band: the upper ~40% so the hook + hero/menu sit below.
             _narr_ceiling = max(_narr_top, int(height * 0.40))
             _narr_lines, narrative_px = _fit_title(
-                draw, cd_narrative, narrative_start_px, safe_w, min_px,
+                draw, headline_text, narrative_start_px, safe_w, min_px,
                 max_height=max(0, _narr_ceiling - _narr_top), line_factor=1.04,
             )
             if not _narr_lines:
-                narrative_px = 0  # dropped (did not fit) — best-effort
+                narrative_px = 0  # narrative dropped (did not fit) — best-effort
+                # If the PROMOTED title is the headline and it cannot fit even the
+                # generous headline band at the floor, the REQUIRED campaign_title has
+                # no covering element → fail-closed (the kicker is suppressed when
+                # promoting). With a real narrative this is just a best-effort drop.
+                if promote_title:
+                    raise render.FlyerRenderError(
+                        "premium overlay does not fit (campaign_title headline cannot fit on-canvas)"
+                    )
 
         # narr_draw — the DRAWN narrative size (0 when dropped/absent). The hero
         # tier that the title + hook must stay strictly below.
@@ -1179,10 +1198,14 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         # FlyerRenderError (degrades to the flat fallback, which handles required
         # facts).  NEVER ``_ink`` a title not drawn-to-fit ON-CANVAS.
         # ===================================================================
+        # Draw the small title KICKER ONLY when a narrative occupies the headline
+        # slot. When the title is PROMOTED into the headline (no narrative) the kicker
+        # is SUPPRESSED (title_draw stays 0) so campaign_title is never drawn twice —
+        # the promoted headline is its single covering element.
         title_draw = 0
         _kick_lines = None
         _kick_line_h = 0
-        if title:
+        if title and not promote_title:
             # Band budget for the kicker FIT — bounded by the reserved allowance
             # (independent of brand_bottom) so title_draw is known before the brand
             # is sized.  Capped at title_kicker_cap (< narr_draw by construction).
@@ -1209,7 +1232,11 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         # tier (<= the kicker) on the DRAWN size, never inverting above the title.
         # ===================================================================
         brand_draw = brand_start_px
-        if title:
+        if title and not promote_title:
+            # Clamp the brand to the kicker only when the kicker is the title's
+            # carrier. When the title is PROMOTED to the headline there is no kicker
+            # (title_draw == 0); the brand keeps its own small demoted start size and
+            # the brand_px <= title_px invariant does not apply (title_px == 0).
             brand_draw = min(brand_start_px, title_draw)
         y = max(16, int(height * 0.018))
         if business:
@@ -1224,8 +1251,11 @@ def render_premium_overlay(project, source, target, *, size, output_format):
         brand_bottom = y
 
         # ---- TITLE kicker: absolute on-canvas guard, then draw -----------
+        # Only when the kicker carries the title (narrative present). When the title
+        # is promoted to the headline the kicker is suppressed and the title's
+        # coverage + on-canvas guard live in the headline draw below.
         top_zone_bottom = brand_bottom
-        if title:
+        if title and not promote_title:
             _kick_gap = max(8, int(height * 0.012))
             kick_top = brand_bottom + _kick_gap
             kick_bottom = kick_top + len(_kick_lines) * _kick_line_h
@@ -1247,21 +1277,36 @@ def render_premium_overlay(project, source, target, *, size, output_format):
             top_zone_bottom = ky
 
         # ===================================================================
-        # NARRATIVE — the LARGEST headline, drawn now (fitted above). Best-effort:
-        # when omitted (retry) OR it could not fit at min_px it is dropped, never
-        # raised. Re-fit against the REAL top (after the actually-drawn kicker) so
-        # the placement is exact — the reserved allowance only over-reserved.
+        # HEADLINE — the LARGEST element, drawn now (fitted above). The text is the
+        # campaign_narrative when present, else the PROMOTED REQUIRED campaign_title
+        # (NARRATIVE-RELIABILITY: the slot is never empty). Drawn at the SAME
+        # narrative scale either way. Best-effort for a real narrative (dropped if it
+        # could not fit); fail-closed for a promoted title (the required-fact ledger +
+        # the absolute on-canvas guard below enforce it). Re-fit position against the
+        # REAL top — the reserved allowance only over-reserved.
         # ===================================================================
-        if cd_narrative and include_narrative and _narr_lines:
+        if _narr_lines:
             _narr_gap = max(10, int(height * 0.014))
             _narr_top = top_zone_bottom + _narr_gap
+            _narr_bottom = _narr_top + len(_narr_lines) * int(narr_draw * 1.04)
+            # When the title is PROMOTED into the headline it is a REQUIRED fact: its
+            # absolute y-range must be fully on-canvas before any ink (mirrors the
+            # kicker's RESIDUAL-BLOCKER 2 guard). A real narrative is best-effort and
+            # is not subject to this guard.
+            if promote_title and (_narr_top < 0 or _narr_bottom > height):
+                raise render.FlyerRenderError(
+                    "premium overlay does not fit (campaign_title headline off-canvas)"
+                )
             narr_font = _premium_font("title", narr_draw)
             ny = _narr_top
             for ln in _narr_lines:
                 _draw_centered(draw, ln, narr_font, cy=ny, width=width,
                                fill=_TITLE_CREAM, shadow_dy=4)
                 ny += int(narr_draw * 1.04)
-            _ink(cd_narrative)
+            # Ink the ORIGINAL value so the coverage ledger sees it: the narrative
+            # (best-effort, ungated) OR the promoted title (covers the REQUIRED
+            # campaign_title fact in place of the suppressed kicker).
+            _ink(cd_narrative if _narrative_active else title)
             top_zone_bottom = ny
 
         # ===================================================================

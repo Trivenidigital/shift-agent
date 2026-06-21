@@ -45,7 +45,7 @@ Return JSON only, matching this schema:
   "supporting_refs": [{"fact_id": "<a secondary offer/item, by fact id>"}],
   "marketing_hook": {"text_ref": {"fact_id": "<a price/offer fact id>"}, "prominence": "high|medium|low"},
   "offer_priority": "high|medium|low",
-  "campaign_narrative": "<short grounded marketing message — evocative, NO prices/%/discounts/superlatives>"
+  "campaign_narrative": "<REQUIRED short grounded marketing message — evocative, NO prices/%/discounts/superlatives>"
 }
 ```
 
@@ -74,11 +74,16 @@ fail the deterministic firewall and the flyer cannot be produced:
    each point at a fact by a **locked `fact_id`** (NOT a `raw_span` — a `raw_span`
    on these is silently dropped) — never an inline item/price/offer value. (Unlike
    `fact_refs`, which may use a `raw_span`, these three emphasis refs accept a
-   `fact_id` only.) `campaign_narrative` is an evocative-but-grounded
-   marketing message (e.g. "South Indian Favorites at One Price") that carries NO
-   commercial VALUE (no price, `"%"`, `"$"`, `"discount"`, superlative, or
-   time-pressure claim) — consistent with rule #3. All of these are OPTIONAL: omit
-   any you are unsure of; an omitted field simply defaults and never blocks.
+   `fact_id` only.) `hero_ref` / `supporting_refs` / `marketing_hook` are OPTIONAL:
+   omit any you are unsure of; an omitted field simply defaults and never blocks.
+   **`campaign_narrative` is REQUIRED — never omit it.** It is an
+   evocative-but-grounded marketing message (e.g. "South Indian Favorites at One
+   Price") that carries NO commercial VALUE (no price, `"%"`, `"$"`, `"discount"`,
+   superlative, or time-pressure claim) — consistent with rule #3. Always include a
+   short grounded message; if you cannot craft a distinct one, restate the campaign
+   occasion (the `campaign_title`) as a short message. (The message-first poster
+   renders this as the dominant headline, so an empty `campaign_narrative` would
+   leave the flyer headline-less.)
 
 ## Hard rules (the invariant — a wrong customer-facing fact must be impossible)
 
@@ -197,8 +202,10 @@ combo to feature (`item:0:name`), `supporting_refs` at the secondary combo, and
 `marketing_hook.text_ref` at a price fact (`item:0:price`) — never an inline
 value. `campaign_narrative` ("Memorial Day Combos for the Whole Family") is
 evocative-but-grounded: it names the occasion, carries NO price/%/discount/
-superlative (rule #3), and is OPTIONAL — omit it (and any of these fields) if you
-are unsure.
+superlative (rule #3), and is REQUIRED — always include a short grounded message
+(restate the occasion if you cannot craft a distinct one). The `hero_ref` /
+`supporting_refs` / `marketing_hook` emphasis fields remain OPTIONAL — omit any if
+you are unsure.
 
 ## Language
 
