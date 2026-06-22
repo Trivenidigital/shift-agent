@@ -718,6 +718,24 @@ def test_resolver_carries_clean_narrative():
     assert out.campaign_narrative == "Weekend Feast of Family Favorites"
 
 
+def test_resolver_rejects_weak_campaign_narrative_to_campaign_title():
+    """A single model-authored campaign_narrative must pass the deterministic
+    narrative referee, not only the safety scrub. Generic caption copy falls back
+    to the safe campaign_title."""
+    facts = _two_item_facts() + [_fact("campaign_title", "Weekend Specials")]
+    brief = _brief(campaign_narrative="Fresh flavors for everyone.")
+    out = resolve_creative_direction(brief, facts)
+    assert out.campaign_narrative == "Weekend Specials"
+
+
+def test_resolver_rejects_grounded_title_with_ungrounded_product():
+    """One grounded title token cannot launder an unsupported food/product noun."""
+    facts = [_fact("campaign_title", "Diwali Celebration")]
+    brief = _brief(campaign_narrative="Diwali falafel comfort for every table.")
+    out = resolve_creative_direction(brief, facts)
+    assert out.campaign_narrative == "Diwali Celebration"
+
+
 def test_resolver_fabricated_narrative_defaults_to_campaign_title():
     """A brief with a FABRICATED narrative → resolved carries the campaign_title
     locked-fact value (the safe default)."""
