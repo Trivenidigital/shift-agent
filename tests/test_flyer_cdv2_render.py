@@ -11,6 +11,8 @@ False even for an allowlisted number => no behavior change.
 import sys
 from datetime import datetime, timezone
 
+import pytest
+
 import agents.flyer.render as render_module
 from agents.flyer.render import _creative_director_v2_enabled
 from schemas import FlyerProject
@@ -133,7 +135,7 @@ def _proposed_brief() -> FlyerBrief:
         hero_ref=FactRef(fact_id="item:1:name"),
         marketing_hook=None,
         offer_priority="high",
-        campaign_narrative="South Indian Favorites at One Price",
+        campaign_narrative="Favorites at one clear price.",
     )
 
 
@@ -174,8 +176,177 @@ def test_render_flag_on_populates_carrier_from_resolved(monkeypatch, tmp_path):
     cd = project.creative_direction
     assert isinstance(cd, dict)
     assert cd["hero_name"] == "Idli Sambar"  # resolved from hero_ref item:1:name
-    assert cd["campaign_narrative"] == "South Indian Favorites at One Price"
+    assert cd["campaign_narrative"] == "Favorites at one clear price."
     assert cd["offer_priority"] == "high"
+
+
+def test_render_flag_on_passes_transient_recent_narratives_to_referee(monkeypatch, tmp_path):
+    """Recent narrative history is intentionally transient: if a session layer
+    attaches it in memory, the CD v2 resolver uses it to avoid repeated headline
+    copy without adding a persisted FlyerProject schema field."""
+    monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setattr(
+        render_module,
+        "propose_creative_brief_v2",
+        lambda *a, **k: FlyerBrief(
+            request_intent="menu",
+            visual_direction=VisualDirection(),
+            campaign_narrative="A family feast in one bucket.",
+            campaign_narrative_candidates=[
+                "A family feast in one bucket.",
+                "Big biryani, easy sharing.",
+            ],
+        ),
+        raising=True,
+    )
+    _patch_render_io(monkeypatch)
+
+    project = _project("+17329837841")
+    project.locked_facts = [
+        FlyerLockedFact(
+            fact_id="campaign_title",
+            label="Title",
+            value="Bucket Biryani Special",
+            source="customer_text",
+            required=True,
+        ),
+        FlyerLockedFact(
+            fact_id="item:0:name",
+            label="Item",
+            value="Bucket Biryani",
+            source="customer_text",
+            required=True,
+        ),
+    ]
+    object.__setattr__(
+        project,
+        "recent_campaign_narratives",
+        ["A family feast in one bucket."],
+    )
+
+    render_module._render_model(
+        project, tmp_path / "out.png", concept_id="C1",
+        output_format="concept_preview", size=(1080, 1350),
+        model="deterministic-renderer", quality="low",
+    )
+
+    assert project.creative_direction["campaign_narrative"] == "Big biryani, easy sharing."
+
+
+def test_render_flag_on_remembers_recent_narrative_per_phone(monkeypatch, tmp_path):
+    """A same-process second CD v2 render for the same phone treats the first
+    selected narrative as recent, so it chooses a clean alternative when one exists."""
+    monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setattr(render_module, "_RECENT_CAMPAIGN_NARRATIVES_BY_PHONE", {}, raising=True)
+    monkeypatch.setattr(
+        render_module,
+        "propose_creative_brief_v2",
+        lambda *a, **k: FlyerBrief(
+            request_intent="menu",
+            visual_direction=VisualDirection(),
+            campaign_narrative="A family feast in one bucket.",
+            campaign_narrative_candidates=[
+                "A family feast in one bucket.",
+                "Big biryani, easy sharing.",
+            ],
+        ),
+        raising=True,
+    )
+    _patch_render_io(monkeypatch)
+
+    def _bucket_project() -> FlyerProject:
+        project = _project("+17329837841")
+        project.locked_facts = [
+            FlyerLockedFact(
+                fact_id="campaign_title",
+                label="Title",
+                value="Bucket Biryani Special",
+                source="customer_text",
+                required=True,
+            ),
+            FlyerLockedFact(
+                fact_id="item:0:name",
+                label="Item",
+                value="Bucket Biryani",
+                source="customer_text",
+                required=True,
+            ),
+        ]
+        return project
+
+    first = _bucket_project()
+    render_module._render_model(
+        first, tmp_path / "first.png", concept_id="C1",
+        output_format="concept_preview", size=(1080, 1350),
+        model="deterministic-renderer", quality="low",
+    )
+    assert first.creative_direction["campaign_narrative"] == "A family feast in one bucket."
+
+    second = _bucket_project()
+    render_module._render_model(
+        second, tmp_path / "second.png", concept_id="C1",
+        output_format="concept_preview", size=(1080, 1350),
+        model="deterministic-renderer", quality="low",
+    )
+    assert second.creative_direction["campaign_narrative"] == "Big biryani, easy sharing."
+
+
+def test_render_flag_on_does_not_remember_failed_render(monkeypatch, tmp_path):
+    """Recent narrative memory records delivered render attempts only. A render
+    failure may populate the transient carrier, but it must not suppress copy the
+    customer never saw."""
+    monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setattr(render_module, "_RECENT_CAMPAIGN_NARRATIVES_BY_PHONE", {}, raising=True)
+    monkeypatch.setattr(
+        render_module,
+        "propose_creative_brief_v2",
+        lambda *a, **k: FlyerBrief(
+            request_intent="menu",
+            visual_direction=VisualDirection(),
+            campaign_narrative="A family feast in one bucket.",
+            campaign_narrative_candidates=[
+                "A family feast in one bucket.",
+                "Big biryani, easy sharing.",
+            ],
+        ),
+        raising=True,
+    )
+    _patch_render_io(monkeypatch)
+
+    def _fail_render(*_a, **_k):
+        raise RuntimeError("render failed")
+
+    monkeypatch.setattr(render_module, "_render", _fail_render, raising=True)
+    project = _project("+17329837841")
+    project.locked_facts = [
+        FlyerLockedFact(
+            fact_id="campaign_title",
+            label="Title",
+            value="Bucket Biryani Special",
+            source="customer_text",
+            required=True,
+        ),
+        FlyerLockedFact(
+            fact_id="item:0:name",
+            label="Item",
+            value="Bucket Biryani",
+            source="customer_text",
+            required=True,
+        ),
+    ]
+
+    with pytest.raises(RuntimeError):
+        render_module._render_model(
+            project, tmp_path / "failed.png", concept_id="C1",
+            output_format="concept_preview", size=(1080, 1350),
+            model="deterministic-renderer", quality="low",
+        )
+
+    assert project.creative_direction["campaign_narrative"] == "A family feast in one bucket."
+    assert render_module._RECENT_CAMPAIGN_NARRATIVES_BY_PHONE == {}
 
 
 def test_render_flag_off_skips_propose_and_leaves_carrier_none(monkeypatch, tmp_path):
@@ -284,7 +455,7 @@ def _intent_brief(request_intent: str) -> FlyerBrief:
         visual_direction=VisualDirection(theme_family="Warm South Indian Promo"),
         hero_ref=FactRef(fact_id="item:1:name"),
         offer_priority="high",
-        campaign_narrative="South Indian Favorites at One Price",
+        campaign_narrative="Favorites at one clear price.",
     )
 
 
@@ -356,7 +527,7 @@ def _v2_brief_json() -> dict:
         "request_intent": "menu",
         "visual_direction": {"theme_family": "Warm South Indian Promo"},
         "hero_ref": {"fact_id": "item:0:name"},
-        "campaign_narrative": "South Indian Favorites at One Price",
+        "campaign_narrative": "Favorites at one clear price.",
     }
 
 
@@ -368,7 +539,7 @@ def test_propose_v2_fake_gateway_returns_parsed_brief():
         gateway=lambda _s, _u: _v2_brief_json(),
     )
     assert isinstance(brief, FlyerBrief)
-    assert brief.campaign_narrative == "South Indian Favorites at One Price"
+    assert brief.campaign_narrative == "Favorites at one clear price."
     assert brief.hero_ref is not None
     assert brief.hero_ref.fact_id == "item:0:name"
 
@@ -697,3 +868,17 @@ def test_deploy_manifest_has_guarded_poster_archetype_install():
     if bash:
         res = _subprocess.run([bash, "-n", str(deploy)], capture_output=True, text=True)
         assert res.returncode == 0, res.stderr
+
+
+def test_deploy_manifest_has_guarded_narrative_quality_install():
+    """flyer_creative_resolver imports flyer_narrative_quality at flat runtime, so
+    the deploy script must install/remove it with the CD v2 module chain."""
+    from pathlib import Path
+
+    deploy = Path(__file__).resolve().parents[1] / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
+    text = deploy.read_text(encoding="utf-8")
+
+    assert "src/agents/flyer/flyer_narrative_quality.py" in text
+    assert "/opt/shift-agent/flyer_narrative_quality.py" in text
+    assert "if [ -f src/agents/flyer/flyer_narrative_quality.py ]" in text
+    assert "rm -f /opt/shift-agent/flyer_narrative_quality.py" in text

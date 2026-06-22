@@ -1,5 +1,11 @@
 # Lessons
 
+## 2026-06-21 - Use absolute patch paths when the active tool root differs
+
+- In multi-repo handoffs, verify the `apply_patch` root before edits. If the
+  shell workdir is not the target repo, use absolute paths for every patch so
+  tests or source files do not land in the previous project checkout.
+
 ## 2026-06-13 - Flyer thumbnails need branded energy, not just exact text
 
 - A flyer can be technically cleaner and still look unchanged to the operator/customer if the WhatsApp thumbnail is dominated by flat black blocks and generic overlay panels.

@@ -162,7 +162,11 @@ class FlyerBrief(BaseModel):
     marketing_hook: Optional[MarketingHook] = None
     offer_priority: Literal["high", "medium", "low"] = "medium"
     # CD v2 (Slice B, B0.1): a short model-authored marketing message rendered
-    # above the hero (e.g. "South Indian Favorites at One Price"). Free text, NOT
+    # above the hero (e.g. "Favorites at one clear price."). Free text, NOT
     # a commercial fact — it carries no prices/item-names/dates/claims, so it does
     # not need a FactRef. Optional/defaulted (backward compatible).
     campaign_narrative: str = Field(default="", max_length=200)
+    # Narrative Quality pass: the brain proposes several candidate messages and
+    # deterministic Python filters/selects. Backward-compatible default for older
+    # single-narrative responses.
+    campaign_narrative_candidates: list[str] = Field(default_factory=list, max_length=8)

@@ -713,9 +713,92 @@ def test_resolver_carries_clean_narrative():
         _fact("campaign_title", "Weekend Combo Special"),
         _fact("schedule", "Saturday & Sunday"),
     ]
-    brief = _brief(campaign_narrative="Weekend Feast of Family Favorites")
+    brief = _brief(campaign_narrative="Gather the family this weekend.")
     out = resolve_creative_direction(brief, facts)
-    assert out.campaign_narrative == "Weekend Feast of Family Favorites"
+    assert out.campaign_narrative == "Gather the family this weekend."
+
+
+def test_resolver_uses_quality_referee_to_select_best_candidate():
+    """When the brain proposes several narratives, the resolver must carry the
+    deterministic referee's best safe marketing message, not the first generic
+    caption."""
+    facts = _two_item_facts() + [
+        _fact("campaign_title", "Weekend Specials"),
+        _fact("schedule", "Saturday & Sunday"),
+        _fact("pricing_structure", "Any item $7.99"),
+    ]
+    brief = _brief(
+        campaign_narrative="Weekend Specials Featuring Famous South Indian Delights",
+        campaign_narrative_candidates=[
+            "Weekend Specials Featuring Famous South Indian Delights",
+            "Weekend Combo Specials Await You",
+            "Weekend favorites, one clear price.",
+        ],
+    )
+    out = resolve_creative_direction(brief, facts)
+    assert out.campaign_narrative == "Weekend favorites, one clear price."
+
+
+def test_resolver_uses_recent_narratives_to_avoid_repeat_when_alternative_exists():
+    facts = [
+        _fact("campaign_title", "Bucket Biryani Special"),
+        _fact("item:0:name", "Bucket Biryani"),
+    ]
+    brief = _brief(
+        campaign_narrative="A family feast in one bucket.",
+        campaign_narrative_candidates=[
+            "A family feast in one bucket.",
+            "Big biryani, easy sharing.",
+        ],
+    )
+    out = resolve_creative_direction(
+        brief,
+        facts,
+        recent_narratives=["A family feast in one bucket."],
+    )
+    assert out.campaign_narrative == "Big biryani, easy sharing."
+
+
+def test_resolver_all_bad_candidate_list_falls_back_to_campaign_title():
+    facts = _two_item_facts() + [
+        _fact("campaign_title", "Festival Dessert Specials"),
+        _fact("schedule", "Saturday & Sunday"),
+    ]
+    brief = _brief(
+        campaign_narrative="Indulge in Our Festival Dessert Specials",
+        campaign_narrative_candidates=[
+            "Indulge in Our Festival Dessert Specials",
+            "Festival Dessert Specials Featuring Famous Sweets",
+            "Today only, $5 off sweets.",
+        ],
+    )
+    out = resolve_creative_direction(brief, facts)
+    assert out.campaign_narrative == "Festival Dessert Specials"
+
+
+def test_resolver_single_narrative_uses_quality_referee():
+    """A single model-authored narrative must go through the same deterministic
+    referee as candidate lists; scrub-only is not enough to reject generic copy."""
+    facts = _two_item_facts() + [_fact("campaign_title", "Weekend Specials")]
+    brief = _brief(campaign_narrative="Fresh flavors for everyone.")
+    out = resolve_creative_direction(brief, facts)
+    assert out.campaign_narrative == "Weekend Specials"
+
+
+def test_resolver_single_narrative_rejects_unsupported_product_and_schedule():
+    facts = _two_item_facts() + [_fact("campaign_title", "Family Feast")]
+
+    product = resolve_creative_direction(
+        _brief(campaign_narrative="Pizza comfort for every table."),
+        facts,
+    )
+    assert product.campaign_narrative == "Family Feast"
+
+    schedule = resolve_creative_direction(
+        _brief(campaign_narrative="Family feast tonight."),
+        facts,
+    )
+    assert schedule.campaign_narrative == "Family Feast"
 
 
 def test_resolver_fabricated_narrative_defaults_to_campaign_title():
@@ -1087,9 +1170,9 @@ def test_resolver_schedule_grounded_weekend_narrative_survives():
         _fact("campaign_title", "Weekend Combo Special"),
         _fact("schedule", "Saturday & Sunday, 4 PM-8 PM"),
     ]
-    brief = _brief(campaign_narrative="Savor the Flavors of South India This Weekend")
+    brief = _brief(campaign_narrative="Gather the family this weekend.")
     out = resolve_creative_direction(brief, facts)
-    assert out.campaign_narrative == "Savor the Flavors of South India This Weekend"
+    assert out.campaign_narrative == "Gather the family this weekend."
 
 
 def test_resolver_ungrounded_day_narrative_defaults_to_title():

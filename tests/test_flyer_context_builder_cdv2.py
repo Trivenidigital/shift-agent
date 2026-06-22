@@ -303,6 +303,50 @@ def test_cdv2_campaign_narrative_included_is_parsed_onto_brief(monkeypatch):
     assert result.brief.campaign_narrative == "South Indian Favorites at One Price"
 
 
+def test_cdv2_campaign_narrative_candidates_are_parsed_onto_brief(monkeypatch):
+    """The brain may propose multiple top-level campaign_narrative_candidates so
+    the deterministic narrative referee can filter/select without another model
+    call."""
+    brief_json = _base_brief_json()
+    brief_json["campaign_narrative"] = "Weekend Combo Specials Await You"
+    brief_json["campaign_narrative_candidates"] = [
+        "Weekend Combo Specials Await You",
+        "Two combos, one easy choice.",
+        "A Feast for the Whole Family.",
+    ]
+    _arm(monkeypatch, brief_json)
+
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+
+    assert result.status == "ok", result.errors
+    assert result.brief is not None
+    assert result.brief.campaign_narrative_candidates == [
+        "Weekend Combo Specials Await You",
+        "Two combos, one easy choice.",
+        "A Feast for the Whole Family.",
+    ]
+
+
+def test_cdv2_campaign_narrative_candidates_sanitize_bad_entries(monkeypatch):
+    """Candidate list sanitizing mirrors the single narrative field: wrong type
+    entries are dropped, strings are stripped/truncated, and over-length lists are
+    capped before the strict FlyerBrief parse."""
+    brief_json = _base_brief_json()
+    brief_json["campaign_narrative_candidates"] = (
+        ["  Two combos, one easy choice.  ", 42, {"bad": "shape"}]
+        + [f"Candidate {i}" for i in range(20)]
+    )
+    _arm(monkeypatch, brief_json)
+
+    result = fcb.build_flyer_brief(_COMBO_REQUEST, _combo_facts(), None)
+
+    assert result.status == "ok", result.errors
+    assert result.brief is not None
+    assert result.brief.campaign_narrative_candidates[0] == "Two combos, one easy choice."
+    assert all(isinstance(v, str) for v in result.brief.campaign_narrative_candidates)
+    assert len(result.brief.campaign_narrative_candidates) <= 8
+
+
 def test_cdv2_campaign_narrative_omitted_defaults_to_empty(monkeypatch):
     """A model response that OMITS campaign_narrative parses fine; the field sits
     at its default ""."""
@@ -410,6 +454,7 @@ def test_skill_md_declares_cdv2_top_level_fields_in_output_schema():
         "marketing_hook",
         "offer_priority",
         "campaign_narrative",
+        "campaign_narrative_candidates",
     ):
         assert f'"{field_name}"' in block, (
             f"SKILL.md output-schema block must declare top-level {field_name!r} "
@@ -467,6 +512,11 @@ def test_build_user_message_cdv2_note_says_fact_id_not_span_for_emphasis_refs():
     payload = _json.loads(msg)
     note = payload.get("optional_creative_fields_note", "")
     assert "fact_id" in note, "CD v2 note must say the emphasis refs point by fact_id"
+    assert "campaign_narrative_candidates" in note
+    assert "referee" in note
+    assert "fallback" in note
+    assert "restate the campaign" not in note.lower()
+    assert "restate the occasion" not in note.lower()
     assert "span" not in note.lower(), (
         "CD v2 note must NOT offer a raw_span/'id/span' for the emphasis refs — the "
         "resolver silently drops a raw_span on hero_ref/supporting_refs/marketing_hook"
@@ -504,6 +554,28 @@ def test_skill_md_declares_campaign_narrative_required_not_optional():
             f"SKILL.md must NOT mark campaign_narrative {forbidden!r}-style omittable; "
             f"it is REQUIRED so the message-first headline is never empty"
         )
+
+
+def test_skill_md_asks_for_multiple_narrative_candidates_for_referee():
+    """The prompt must ask the brain for multiple narrative candidates and name the
+    deterministic referee, otherwise Python has nothing to choose from and live
+    quality regresses to the single generic caption."""
+    text = fcb.SKILL_MD_PATH.read_text(encoding="utf-8")
+    idx = text.find("campaign_narrative_candidates")
+    assert idx != -1, "SKILL.md must declare campaign_narrative_candidates"
+    window = text[max(0, idx - 500): idx + 900].lower()
+    for required in ("multiple", "candidate", "referee"):
+        assert required in window
+    for banned in ("featuring", "available", "await", "enjoy", "indulge"):
+        assert banned in window
+    assert "restate the occasion" not in text.lower()
+    for known_example in (
+        "six favorites, one easy price",
+        "two combos, one easy choice",
+        "satisfy your sweet cravings this weekend",
+        "a feast for the whole family",
+    ):
+        assert known_example not in text.lower()
 
 
 def test_skill_md_declares_mood_inside_visual_direction():
