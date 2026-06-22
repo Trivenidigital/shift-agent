@@ -132,6 +132,7 @@ def test_flyer_brief_accepts_campaign_narrative():
 def test_flyer_brief_campaign_narrative_defaults_empty():
     brief = FlyerBrief(request_intent="menu", visual_direction=VisualDirection())
     assert brief.campaign_narrative == ""
+    assert brief.campaign_narrative_candidates == []
 
 
 def test_flyer_brief_campaign_narrative_max_length_raises():
@@ -140,6 +141,34 @@ def test_flyer_brief_campaign_narrative_max_length_raises():
             request_intent="menu",
             visual_direction=VisualDirection(),
             campaign_narrative="x" * 201,
+        )
+
+
+def test_flyer_brief_accepts_campaign_narrative_candidates():
+    brief = FlyerBrief(
+        request_intent="menu",
+        visual_direction=VisualDirection(),
+        campaign_narrative_candidates=[
+            "Weekend favorites, one clear price.",
+            "Combo choices made simple.",
+        ],
+    )
+    assert brief.campaign_narrative_candidates == [
+        "Weekend favorites, one clear price.",
+        "Combo choices made simple.",
+    ]
+    assert brief.model_dump()["campaign_narrative_candidates"] == [
+        "Weekend favorites, one clear price.",
+        "Combo choices made simple.",
+    ]
+
+
+def test_flyer_brief_campaign_narrative_candidates_max_length_raises():
+    with pytest.raises(ValidationError):
+        FlyerBrief(
+            request_intent="menu",
+            visual_direction=VisualDirection(),
+            campaign_narrative_candidates=[f"candidate {i}" for i in range(9)],
         )
 
 

@@ -4239,6 +4239,71 @@ def _render(project: FlyerProject, path: Path, *, concept_id: str, size: tuple[i
         _render_with_system_pillow(project, path, concept_id=concept_id, size=size)
 
 
+_RECENT_CAMPAIGN_NARRATIVES_MAX = 20
+_RECENT_CAMPAIGN_NARRATIVES_BY_PHONE: dict[str, list[str]] = {}
+
+
+def _campaign_narrative_phone_key(project: FlyerProject) -> str:
+    try:
+        return str(getattr(project, "customer_phone", "") or "").strip()
+    except Exception:  # noqa: BLE001 - defensive: never block rendering
+        return ""
+
+
+def _recent_campaign_narratives_for_project(project: FlyerProject) -> list[str]:
+    """Best-effort transient narrative history for CD v2 variety.
+
+    This intentionally does not persist a new schema field. Session/campaign layers
+    may attach ``recent_campaign_narratives`` in memory; the render process also
+    keeps a small per-phone ring for repeats within the current worker lifetime.
+    """
+    try:
+        raw = getattr(project, "recent_campaign_narratives", ()) or ()
+    except Exception:  # noqa: BLE001 - defensive: never block rendering
+        raw = ()
+    explicit = []
+    if isinstance(raw, (list, tuple)):
+        explicit = [v.strip() for v in raw if isinstance(v, str) and v.strip()]
+    key = _campaign_narrative_phone_key(project)
+    remembered = list(_RECENT_CAMPAIGN_NARRATIVES_BY_PHONE.get(key, ())) if key else []
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in explicit + remembered:
+        norm = value.casefold()
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(value)
+        if len(out) >= _RECENT_CAMPAIGN_NARRATIVES_MAX:
+            break
+    return out
+
+
+def _remember_campaign_narrative_for_project(project: FlyerProject, narrative: str) -> None:
+    key = _campaign_narrative_phone_key(project)
+    text = narrative.strip() if isinstance(narrative, str) else ""
+    if not key or not text:
+        return
+    existing = [
+        value
+        for value in _RECENT_CAMPAIGN_NARRATIVES_BY_PHONE.get(key, ())
+        if value.casefold() != text.casefold()
+    ]
+    _RECENT_CAMPAIGN_NARRATIVES_BY_PHONE[key] = [text] + existing[
+        : _RECENT_CAMPAIGN_NARRATIVES_MAX - 1
+    ]
+
+
+def _remember_rendered_campaign_narrative(project: FlyerProject) -> None:
+    creative_direction = getattr(project, "creative_direction", None)
+    if not isinstance(creative_direction, dict):
+        return
+    _remember_campaign_narrative_for_project(
+        project,
+        str(creative_direction.get("campaign_narrative") or ""),
+    )
+
+
 def _populate_creative_direction_v2(project: FlyerProject) -> None:
     """CD v2 (Slice B, B2.3): when the V2 gate is ON for this project, PROPOSE a
     creative brief (Hermes proposes the creative fields), RESOLVE it over the
@@ -4263,7 +4328,11 @@ def _populate_creative_direction_v2(project: FlyerProject) -> None:
         ) or _CDV2FlyerBrief(
             request_intent="new", visual_direction=_CDV2VisualDirection()
         )
-        resolved = resolve_creative_direction(brief, project.locked_facts)
+        resolved = resolve_creative_direction(
+            brief,
+            project.locked_facts,
+            recent_narratives=_recent_campaign_narratives_for_project(project),
+        )
         project.creative_direction = dataclasses.asdict(resolved)
         # Composition Phase 1: route the poster archetype from the brief's
         # request_intent (offer_priority accepted but unused this phase). Guarded
@@ -4281,17 +4350,20 @@ def _populate_creative_direction_v2(project: FlyerProject) -> None:
 
 def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> None:
     token = _FORCE_BACKGROUND_ONLY.set(True) if force_background_only else None
+    render_succeeded = False
     try:
         if _creative_director_v2_enabled(project):
             _populate_creative_direction_v2(project)
         if model.strip().lower() in DETERMINISTIC_MODEL_NAMES:
             _render(project, path, concept_id=concept_id, size=size)
+            render_succeeded = True
             return
         raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality, repair_instruction=repair_instruction, scene_direction=scene_direction, force_background_only=force_background_only)
         raw_path = _raw_background_path(path)
         raw_path.unlink(missing_ok=True)
         if _integrated_poster_eligible(project) and not force_background_only:
             _write_generated_image(raw, path, size=size)
+            render_succeeded = True
             return
         # The prompt and the overlay MUST agree (same gate). For non-eligible flows
         # (localized / reference-extraction) the model renders the text itself, so we
@@ -4302,9 +4374,11 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
         if not _background_only_eligible(project) and not force_background_only:
             if size is None:
                 _write_generated_image(raw, path, size=size)
+                render_succeeded = True
                 return
             _write_generated_image(raw, raw_path, size=size)
             apply_exact_identity_overlay(project, raw_path, path, size=size)
+            render_succeeded = True
             return
         # Background-only eligible: the model emitted a textless background; the
         # critical overlay (brand + title + schedule + menu items/prices + footer)
@@ -4321,12 +4395,16 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
             try:
                 _apply_critical_text_overlay(project, raw_path, overlaid, size=pdf_px, output_format=output_format)
                 _export_from_source_image(overlaid, path, size=None)
+                render_succeeded = True
             finally:
                 overlaid.unlink(missing_ok=True)
             return
         _write_generated_image(raw, raw_path, size=size)
         _apply_critical_text_overlay(project, raw_path, path, size=size, output_format=output_format)
+        render_succeeded = True
     finally:
+        if render_succeeded:
+            _remember_rendered_campaign_narrative(project)
         if token is not None:
             _FORCE_BACKGROUND_ONLY.reset(token)
 

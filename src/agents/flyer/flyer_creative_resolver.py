@@ -73,6 +73,11 @@ except ImportError:  # pragma: no cover - import-path shim
         scrub_ungrounded_commercial_taste,
     )
 
+try:  # pragma: no cover - import-path shim
+    from flyer_narrative_quality import select_campaign_narrative  # type: ignore
+except ImportError:  # pragma: no cover - import-path shim
+    from agents.flyer.flyer_narrative_quality import select_campaign_narrative
+
 
 # An item-name fact id: ``item:<N>:name`` (N is the item index). "First" item =
 # lowest index. Only ``item:*:name`` is a valid hero / supporting source kind.
@@ -354,7 +359,10 @@ def _resolve_theme_mood(
 
 
 def _resolve_campaign_narrative(
-    brief: FlyerBrief, locked_facts: Sequence[FlyerLockedFact]
+    brief: FlyerBrief,
+    locked_facts: Sequence[FlyerLockedFact],
+    *,
+    recent_narratives: Sequence[str] = (),
 ) -> str:
     """Resolve the model-authored ``campaign_narrative`` through the SCOPED scrub
     (CD v2 Slice B, B0.4). Evocative-but-grounded marketing language survives;
@@ -368,6 +376,12 @@ def _resolve_campaign_narrative(
         narrative = ""
     if not isinstance(narrative, str):  # pragma: no cover - schema guarantees str
         narrative = ""
+    try:
+        raw_candidates = getattr(brief, "campaign_narrative_candidates", None) or []
+    except Exception:  # pragma: no cover - defensive: never raise
+        raw_candidates = []
+    if not isinstance(raw_candidates, list):
+        raw_candidates = []
     # Normalize locked values exactly as the theme/mood scrub does, so the
     # narrative's grounding comparison matches the brief firewall's behavior.
     allowed_values = [
@@ -381,18 +395,29 @@ def _resolve_campaign_narrative(
     # while an ungrounded day (or pure time-pressure) still defaults to the title.
     schedule = _locked_value_by_id(locked_facts, "schedule") or ""
     try:
+        candidates = [c for c in raw_candidates if isinstance(c, str)]
+        if narrative:
+            candidates.append(narrative)
+        if candidates:
+            return select_campaign_narrative(
+                candidates,
+                locked_facts=locked_facts,
+                campaign_title=title,
+                schedule=schedule,
+                recent_narratives=recent_narratives,
+            )
         return scrub_campaign_narrative(
-            narrative,
-            allowed_values=allowed_values,
-            campaign_title=title,
-            schedule=schedule,
+            narrative, allowed_values=allowed_values, campaign_title=title, schedule=schedule
         )
     except Exception:  # pragma: no cover - defensive: never raise (scrub fail-closes)
         return title
 
 
 def resolve_creative_direction(
-    brief: FlyerBrief, locked_facts: Sequence[FlyerLockedFact]
+    brief: FlyerBrief,
+    locked_facts: Sequence[FlyerLockedFact],
+    *,
+    recent_narratives: Sequence[str] = (),
 ) -> ResolvedCreativeDirection:
     """Resolve the brief's creative refs against ``locked_facts`` with per-field
     deterministic fallback. PURE; NEVER raises; NEVER invents (only selects values
@@ -403,7 +428,11 @@ def resolve_creative_direction(
     hook_text, hook_prominence = _resolve_hook(brief, facts)
     offer_priority = _resolve_offer_priority(brief, facts)
     theme_family, mood = _resolve_theme_mood(brief, facts)
-    campaign_narrative = _resolve_campaign_narrative(brief, facts)
+    campaign_narrative = _resolve_campaign_narrative(
+        brief,
+        facts,
+        recent_narratives=recent_narratives,
+    )
     return ResolvedCreativeDirection(
         hero_name=hero_name,
         supporting_names=supporting_names,

@@ -491,6 +491,11 @@ PY
     else
         rm -f /opt/shift-agent/flyer_creative_resolver.py
     fi
+    if [ -f src/agents/flyer/flyer_narrative_quality.py ]; then
+        install -m 644 src/agents/flyer/flyer_narrative_quality.py /opt/shift-agent/flyer_narrative_quality.py
+    else
+        rm -f /opt/shift-agent/flyer_narrative_quality.py
+    fi
     # CD v2 Composition Phase 1: the poster-archetype router. flyer_render guards
     # this import (falls back to message_first if absent), but install it so the
     # message_first (A) overlay template is actually reachable on the box.

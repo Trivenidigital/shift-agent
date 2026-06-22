@@ -212,8 +212,10 @@ def _build_user_message(
             # CD v2 — OPTIONAL TOP-LEVEL enhancement fields; see the SKILL schema for shape.
             "optional_creative_fields_note": (
                 "Always include the top-level campaign_narrative (a short grounded "
-                "marketing message; restate the campaign occasion if you cannot craft a "
-                "distinct one) — it is required and the message-first poster renders it as "
+                "benefit-led marketing message). Also include top-level "
+                "campaign_narrative_candidates with short alternatives for the "
+                "deterministic narrative referee. Python owns fallback to the campaign "
+                "title when all candidates fail; the message-first poster renders it as "
                 "the dominant headline. The brief MAY also include the OPTIONAL top-level "
                 "fields hero_ref, supporting_refs, marketing_hook, offer_priority, and "
                 "visual_direction.mood (per the SKILL output schema). The emphasis refs "
@@ -370,6 +372,7 @@ _CDV2_TOP_LEVEL_FIELDS = ("hero_ref", "supporting_refs", "marketing_hook", "offe
 _SUPPORTING_REFS_MAX = 40
 _MOOD_MAX_LEN = 120
 _CAMPAIGN_NARRATIVE_MAX_LEN = 200
+_CAMPAIGN_NARRATIVE_CANDIDATES_MAX = 8
 
 
 def _sanitize_cdv2_fields(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -439,6 +442,23 @@ def _sanitize_cdv2_fields(raw: Mapping[str, Any]) -> dict[str, Any]:
             out.pop("campaign_narrative", None)  # wrong type → default ""
         elif len(narrative) > _CAMPAIGN_NARRATIVE_MAX_LEN:
             out["campaign_narrative"] = narrative[:_CAMPAIGN_NARRATIVE_MAX_LEN]
+
+    if "campaign_narrative_candidates" in out:
+        raw_candidates = out["campaign_narrative_candidates"]
+        if isinstance(raw_candidates, list):
+            candidates: list[str] = []
+            for entry in raw_candidates:
+                if not isinstance(entry, str):
+                    continue
+                text = entry.strip()
+                if not text:
+                    continue
+                candidates.append(text[:_CAMPAIGN_NARRATIVE_MAX_LEN])
+                if len(candidates) >= _CAMPAIGN_NARRATIVE_CANDIDATES_MAX:
+                    break
+            out["campaign_narrative_candidates"] = candidates
+        else:
+            out.pop("campaign_narrative_candidates", None)
 
     return out
 

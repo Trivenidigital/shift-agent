@@ -45,6 +45,7 @@ Return JSON only, matching this schema:
   "supporting_refs": [{"fact_id": "<a secondary offer/item, by fact id>"}],
   "marketing_hook": {"text_ref": {"fact_id": "<a price/offer fact id>"}, "prominence": "high|medium|low"},
   "offer_priority": "high|medium|low",
+  "campaign_narrative_candidates": ["<3-6 multiple short candidate messages for the deterministic referee; avoid featuring/available/await/enjoy/indulge>"],
   "campaign_narrative": "<REQUIRED short grounded marketing message — evocative, NO prices/%/discounts/superlatives>"
 }
 ```
@@ -80,10 +81,17 @@ fail the deterministic firewall and the flyer cannot be produced:
    evocative-but-grounded marketing message (e.g. "South Indian Favorites at One
    Price") that carries NO commercial VALUE (no price, `"%"`, `"$"`, `"discount"`,
    superlative, or time-pressure claim) — consistent with rule #3. Always include a
-   short grounded message; if you cannot craft a distinct one, restate the campaign
-   occasion (the `campaign_title`) as a short message. (The message-first poster
+   short grounded message; if the first idea feels generic, provide stronger
+   alternatives in `campaign_narrative_candidates` so the referee can choose. (The message-first poster
    renders this as the dominant headline, so an empty `campaign_narrative` would
    leave the flyer headline-less.)
+   Also include `campaign_narrative_candidates`: 3-6 multiple short alternatives
+   for the deterministic narrative referee. Make them benefit-led marketing
+   messages, not captions. Avoid filler/crutch phrasing: "featuring",
+   "available", "await", "enjoy", "indulge", "savor the weekend", and
+   "join us for". Prefer specific customer benefit, offer/value awareness,
+   emotional pull, short memorable phrasing, and meaningful variety. Do not copy
+   examples exactly.
 
 ## Hard rules (the invariant — a wrong customer-facing fact must be impossible)
 
@@ -188,7 +196,12 @@ Desired `FlyerBrief`:
   "supporting_refs": [{"fact_id": "item:1:name"}],
   "marketing_hook": {"text_ref": {"fact_id": "item:0:price"}, "prominence": "high"},
   "offer_priority": "high",
-  "campaign_narrative": "Memorial Day Combos for the Whole Family"
+  "campaign_narrative_candidates": [
+    "A family feast made easy.",
+    "Combo choices made simple.",
+    "Memorial Day meals around one table."
+  ],
+  "campaign_narrative": "A family feast made easy."
 }
 ```
 
@@ -200,12 +213,17 @@ merging them into one group would collapse the structure and be rejected. The
 optional emphasis fields likewise reference facts by id: `hero_ref` points at the
 combo to feature (`item:0:name`), `supporting_refs` at the secondary combo, and
 `marketing_hook.text_ref` at a price fact (`item:0:price`) — never an inline
-value. `campaign_narrative` ("Memorial Day Combos for the Whole Family") is
+value. `campaign_narrative` ("A family feast made easy.") is
 evocative-but-grounded: it names the occasion, carries NO price/%/discount/
-superlative (rule #3), and is REQUIRED — always include a short grounded message
-(restate the occasion if you cannot craft a distinct one). The `hero_ref` /
+superlative (rule #3), and is REQUIRED — always include a short grounded message.
+The `hero_ref` /
 `supporting_refs` / `marketing_hook` emphasis fields remain OPTIONAL — omit any if
 you are unsure.
+
+Narrative-quality override: do not use the campaign title as your first choice
+when a more benefit-led message is possible. Use the candidate list to offer
+short alternatives with value, emotion, and variety; the Python referee will
+fall back to the title only when all proposed messages fail.
 
 ## Language
 
