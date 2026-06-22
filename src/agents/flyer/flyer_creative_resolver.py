@@ -73,6 +73,11 @@ except ImportError:  # pragma: no cover - import-path shim
         scrub_ungrounded_commercial_taste,
     )
 
+try:  # pragma: no cover - import-path shim
+    from flyer_narrative_quality import select_campaign_narrative  # type: ignore
+except ImportError:  # pragma: no cover - import-path shim
+    from agents.flyer.flyer_narrative_quality import select_campaign_narrative
+
 
 # An item-name fact id: ``item:<N>:name`` (N is the item index). "First" item =
 # lowest index. Only ``item:*:name`` is a valid hero / supporting source kind.
@@ -381,6 +386,13 @@ def _resolve_campaign_narrative(
     # while an ungrounded day (or pure time-pressure) still defaults to the title.
     schedule = _locked_value_by_id(locked_facts, "schedule") or ""
     try:
+        if narrative:
+            return select_campaign_narrative(
+                [narrative],
+                locked_facts=locked_facts,
+                campaign_title=title,
+                schedule=schedule,
+            )
         return scrub_campaign_narrative(
             narrative,
             allowed_values=allowed_values,

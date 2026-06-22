@@ -1,5 +1,49 @@
 # Backlog — pending items
 
+## Active - Flyer CD v2 narrative quality referee (2026-06-22)
+
+**Drift-check tag:** extends-Hermes
+
+**New primitives introduced:** one pure Python narrative-quality referee module for CD v2 campaign narratives.
+
+**Hermes-first analysis**
+
+| Domain | Hermes skill found? | Decision |
+|---|---|---|
+| Creative brain / narrative proposal | existing Flyer Creative Director skill already proposes `campaign_narrative` through Hermes/OpenRouter | use it; do not add prompt/schema scope in this pass |
+| Locked fact truth and anti-fabrication | existing `FlyerLockedFact` plus `scrub_campaign_narrative` already own safety/fact grounding | use it as the first gate |
+| Narrative marketing quality | no existing in-tree pure quality referee on current `origin/main`; stale branch touched render/deploy/schema too broadly | add a narrow pure referee and resolver-only call |
+| Rendering/composition/routing/extraction/QA | existing CD v2 render/overlay/router/extractor/QA paths already own those surfaces | do not touch them |
+
+Awesome Hermes Agent ecosystem check: not applicable to this scoped local quality gate; the Hermes substrate already supplies the creative proposal, and the gap is deterministic acceptance/selection of the proposed narrative before CD v2 overlay receives it.
+
+Scope notes:
+- Fresh worktree: `C:\projects\sme-agents-narrative-quality`.
+- Branch in this worktree: `feat/flyer-narrative-quality-referee-fresh` because the requested `feat/flyer-narrative-quality-referee` is already checked out at `C:\projects\sme-agents-shift`.
+- Base: current `origin/main` at `f06292980fd75cfea76a92b98440adbabd579609`.
+- Out of scope: composition, rendering, routing, extraction, QA/referee, Phase 2 B/C, deploy, activation.
+
+Task plan:
+- [x] Confirm clean baseline and CD v2 files/tests in the fresh worktree.
+- [x] Add red pure-unit tests for narrative evaluation: banned crutches, title parroting, unsupported offer/product/schedule language, generic captions, recent-repeat avoidance, and the exact seven-category eval with at least six passing selected outputs.
+- [x] Implement `src/agents/flyer/flyer_narrative_quality.py` as pure deterministic Python: no I/O, no network, no clock, never raises, calls the existing `scrub_campaign_narrative` first, and returns explicit reason codes.
+- [x] Add red resolver tests proving `resolve_creative_direction()` applies the referee to `campaign_narrative` and falls back to `campaign_title` when the narrative is weak or unsafe.
+- [x] Wire only `src/agents/flyer/flyer_creative_resolver.py` to use the referee inside `_resolve_campaign_narrative`; keep the public render/composition/routing/extraction/QA surfaces unchanged.
+- [x] Run focused tests: `tests/test_flyer_narrative_quality.py`, narrative resolver tests, and CD v2 context/render/overlay tests that exercise campaign narrative handling.
+- [x] Run broader Flyer tests after focused green.
+- [x] Run a code-review pass on the diff and fix BLOCKER/MAJOR findings until clean.
+- [x] Stop with no deploy, no activation, and no rollout broadening.
+
+Review/verification:
+- Worktree creation: fresh worktree at `C:\projects\sme-agents-narrative-quality`; branch `feat/flyer-narrative-quality-referee-fresh`; clean base `f06292980fd75cfea76a92b98440adbabd579609`.
+- Baseline verification: `python -m pytest tests/test_flyer_creative_resolver.py -q -k "campaign_narrative or narrative"` -> `44 passed, 45 deselected`; `python -m pytest tests/test_flyer_context_builder_cdv2.py -q -k "campaign_narrative or skill_md_declares_campaign_narrative"` -> `5 passed, 14 deselected`.
+- Red/green TDD evidence: `tests/test_flyer_narrative_quality.py` first failed with `ModuleNotFoundError: No module named 'agents.flyer.flyer_narrative_quality'`; resolver red test first failed because `Fresh flavors for everyone.` survived instead of falling back to `Weekend Specials`. Review regressions first failed for `Taco/Kebab/Samosa comfort for every table.`, `Diwali falafel comfort for every table.`, the 6/7 offer-context case, generic offer copy `Easy choice worth sharing.`, title parroting `Diwali Celebration with family.`, one-token title laundering `Diwali for family.`, ungrounded numeric claim `Dosa 3 family favorites.`, and ungrounded word-numeral claim `Dosa two family favorites.` before fixes.
+- Final focused tests: `python -m pytest tests/test_flyer_narrative_quality.py tests/test_flyer_creative_resolver.py tests/test_flyer_context_builder_cdv2.py -q` -> `124 passed`; `PATH='C:\Program Files\Git\bin;...' python -m pytest tests/test_flyer_cdv2_render.py tests/test_flyer_cdv2_overlay.py tests/test_flyer_premium_overlay.py -q` -> `131 passed, 1 skipped`.
+- Broader Flyer tests: all-at-once `test_flyer_*.py` exposed a pre-existing cross-file contextvar leak in `test_premium_overlay_outcome_contextvar_consume_and_alert`; the failing test passes alone and `tests/test_flyer_renderer.py` passes alone. Final partitioned broader verification passed: all Flyer tests except renderer -> `2466 passed, 2 skipped`; renderer file separately -> `179 passed`.
+- Static checks: `python -m py_compile src\agents\flyer\flyer_narrative_quality.py src\agents\flyer\flyer_creative_resolver.py` passed; `git diff --check` passed.
+- Code review: BLOCKER/MAJOR passes found eight MAJOR issues; fixed all with regression coverage. Final review pass returned `CLEAN`.
+- Deploy/activation: intentionally not performed.
+
 ## Active - Flyer reference shared-price quality fix (2026-06-10)
 
 **Drift-check tag:** extends-Hermes
