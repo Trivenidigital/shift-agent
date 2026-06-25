@@ -491,6 +491,16 @@ PY
     else
         rm -f /opt/shift-agent/flyer_creative_resolver.py
     fi
+    # Narrative quality referee (PR #506). flyer_creative_resolver hard-imports
+    # select_campaign_narrative from flyer_narrative_quality at module load, so it
+    # MUST be installed at the deployed flat path or the resolver import raises
+    # ImportError and breaks CD v2 campaign-narrative selection (the smoke
+    # module-import probe asserts this module loads).
+    if [ -f src/agents/flyer/flyer_narrative_quality.py ]; then
+        install -m 644 src/agents/flyer/flyer_narrative_quality.py /opt/shift-agent/flyer_narrative_quality.py
+    else
+        rm -f /opt/shift-agent/flyer_narrative_quality.py
+    fi
     # CD v2 Composition Phase 1: the poster-archetype router. flyer_render guards
     # this import (falls back to message_first if absent), but install it so the
     # message_first (A) overlay template is actually reachable on the box.
