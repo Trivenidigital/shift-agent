@@ -162,10 +162,16 @@ for _cdv2_field in ('campaign_narrative', 'hero_ref', 'marketing_hook', 'offer_p
 # resolver therefore fails closed if the deploy manifest omits the new module.
 # Assert the module + public selector load so a missing install line fails this
 # smoke gate (not a live customer flyer at CD v2 narrative-selection time).
-import flyer_creative_resolver  # noqa: F401 — top-imports flyer_narrative_quality
+import flyer_creative_resolver  # noqa: F401 — top-imports flyer_narrative_quality + flyer_copy_archetypes
 import flyer_narrative_quality
 assert callable(flyer_narrative_quality.select_campaign_narrative), \
     'flyer_narrative_quality.select_campaign_narrative missing — CD v2 referee deploy packaging broken'
+# Controlled Copy Archetypes (CCA) deploy-packaging gate. flyer_creative_resolver
+# top-imports compose_archetype_headlines from flyer_copy_archetypes; assert it loads so a
+# missing install line fails this smoke gate (not a live customer flyer at compose time).
+import flyer_copy_archetypes
+assert callable(flyer_copy_archetypes.compose_archetype_headlines), \
+    'flyer_copy_archetypes.compose_archetype_headlines missing — CCA deploy packaging broken'
 print('schema classes:', [c for c in dir(schemas) if not c.startswith('_')][:5])
 " > /dev/null; then
     echo "FAIL: Python modules don't import"

@@ -74,9 +74,14 @@ except ImportError:  # pragma: no cover - import-path shim
     )
 
 try:  # pragma: no cover - import-path shim
-    from flyer_narrative_quality import select_campaign_narrative  # type: ignore
+    from flyer_narrative_quality import select_campaign_narrative  # type: ignore  # noqa: F401
 except ImportError:  # pragma: no cover - import-path shim
-    from agents.flyer.flyer_narrative_quality import select_campaign_narrative
+    from agents.flyer.flyer_narrative_quality import select_campaign_narrative  # noqa: F401
+
+try:  # pragma: no cover - import-path shim — Controlled Copy Archetypes (CCA)
+    from flyer_copy_archetypes import compose_archetype_headlines  # type: ignore
+except ImportError:  # pragma: no cover - import-path shim
+    from agents.flyer.flyer_copy_archetypes import compose_archetype_headlines
 
 
 # An item-name fact id: ``item:<N>:name`` (N is the item index). "First" item =
@@ -361,45 +366,60 @@ def _resolve_theme_mood(
 def _resolve_campaign_narrative(
     brief: FlyerBrief, locked_facts: Sequence[FlyerLockedFact]
 ) -> str:
-    """Resolve the model-authored ``campaign_narrative`` through the SCOPED scrub
-    (CD v2 Slice B, B0.4). Evocative-but-grounded marketing language survives;
-    fabrication defaults to the ``campaign_title`` locked-fact value (or "" when no
-    ``campaign_title`` is locked). Grounded against the SAME normalized locked-fact
-    values the theme/mood scrub uses (single source of truth). Guarded so a missing
-    field or any scanner error never raises (it yields the safe campaign_title / "")."""
+    """Resolve the ``campaign_narrative`` via Controlled Copy Archetypes (CCA): classify
+    the campaign deterministically from the locked-fact structure, compose grounded
+    headline candidates from APPROVED templates, and return the first that passes the
+    existing deterministic safety firewall (``scrub_campaign_narrative``) — else the safe
+    ``campaign_title`` locked-fact value (or "" when none is locked). The model's free-text
+    ``campaign_narrative`` is deliberately NOT used as the headline (no open-vocabulary LLM
+    copy). Grounded against the SAME normalized locked-fact values the theme/mood scrub uses.
+    Guarded so a missing field or any scanner error never raises (yields the safe title / "")."""
+    title = _locked_value_by_id(locked_facts, "campaign_title") or ""
+    schedule = _locked_value_by_id(locked_facts, "schedule") or ""
     try:
-        narrative = getattr(brief, "campaign_narrative", None) or ""
-    except Exception:  # pragma: no cover - defensive: never raise
-        narrative = ""
-    if not isinstance(narrative, str):  # pragma: no cover - schema guarantees str
-        narrative = ""
-    # Normalize locked values exactly as the theme/mood scrub does, so the
-    # narrative's grounding comparison matches the brief firewall's behavior.
+        request_intent = getattr(brief, "request_intent", "") or ""
+    except Exception:  # pragma: no cover - defensive
+        request_intent = ""
+    if not isinstance(request_intent, str):  # pragma: no cover - schema guarantees str
+        request_intent = ""
+    # Normalize (case-fold + ws-collapse) the locked values so the firewall's grounding
+    # matches case-insensitively (same normalization the theme/mood scrub uses) — e.g. a
+    # grounded "Free mango lassi" survives the offer scrub.
     allowed_values = [
         _norm_ws(getattr(f, "value", "") or "")
         for f in locked_facts or ()
         if (getattr(f, "value", "") or "").strip()
     ]
-    title = _locked_value_by_id(locked_facts, "campaign_title") or ""
-    # FIX C: pass the "schedule" locked fact so a SCHEDULE-GROUNDED temporal reference
-    # in the narrative (e.g. "this weekend" when the schedule IS Sat/Sun) is KEPT,
-    # while an ungrounded day (or pure time-pressure) still defaults to the title.
-    schedule = _locked_value_by_id(locked_facts, "schedule") or ""
     try:
-        if narrative:
-            return select_campaign_narrative(
-                [narrative],
-                locked_facts=locked_facts,
-                campaign_title=title,
-                schedule=schedule,
-            )
-        return scrub_campaign_narrative(
-            narrative,
-            allowed_values=allowed_values,
+        # Controlled Copy Archetypes (CCA): classify deterministically, compose grounded
+        # headline candidates from APPROVED templates, and return the first that passes
+        # the existing deterministic safety firewall (``scrub_campaign_narrative``). The
+        # model's free-text campaign_narrative is NOT used (no open-vocabulary LLM copy).
+        candidates = compose_archetype_headlines(
+            locked_facts,
+            request_intent=request_intent,
             campaign_title=title,
             schedule=schedule,
         )
-    except Exception:  # pragma: no cover - defensive: never raise (scrub fail-closes)
+        for cand in candidates:
+            if not cand:
+                continue
+            safe = scrub_campaign_narrative(
+                cand,
+                allowed_values=allowed_values,
+                campaign_title=title,
+                schedule=schedule,
+            )
+            # Accept ONLY when the firewall returned the candidate UNCHANGED. ``scrub``
+            # defaults to ``campaign_title`` on a violation, so when a candidate happens
+            # to equal the title we cannot tell pass from reject by ``safe == cand`` alone
+            # — require ``cand != title`` so a rejected-but-title-matching candidate is not
+            # mistaken for a pass (it falls through to the safe title at the end anyway).
+            if safe == cand and cand != title:
+                return cand
+        # No archetype / no eligible safe template → safe campaign_title (or "").
+        return title
+    except Exception:  # pragma: no cover - defensive: never raise (fail-closed)
         return title
 
 

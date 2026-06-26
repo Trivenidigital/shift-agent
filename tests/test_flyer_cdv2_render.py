@@ -157,7 +157,9 @@ def _patch_render_io(monkeypatch):
 def test_render_flag_on_populates_carrier_from_resolved(monkeypatch, tmp_path):
     """Flag ON + scoped phone: after _render_model, project.creative_direction is a
     dict carrying hero_name / campaign_narrative / offer_priority from the resolved
-    direction (proposed brief routed through the deterministic resolver)."""
+    direction. Under CCA the campaign_narrative is composed DETERMINISTICALLY from the
+    locked facts (a shared price + weekend schedule → the weekend_one_price headline),
+    NOT from the brain's free-text narrative."""
     monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
     monkeypatch.setattr(render_module, "propose_creative_brief_v2",
@@ -165,6 +167,13 @@ def test_render_flag_on_populates_carrier_from_resolved(monkeypatch, tmp_path):
     _patch_render_io(monkeypatch)
 
     project = _project_with_facts("+17329837841")
+    # Give the facts a weekend schedule + title so CCA classifies weekend_one_price.
+    project.locked_facts = project.locked_facts + [
+        FlyerLockedFact(fact_id="schedule", label="Schedule",
+                        value="Saturday & Sunday", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Title",
+                        value="Weekend Specials", source="customer_text", required=True),
+    ]
     render_module._render_model(
         project, tmp_path / "out.png", concept_id="C1",
         output_format="concept_preview", size=(1080, 1350),
@@ -174,7 +183,7 @@ def test_render_flag_on_populates_carrier_from_resolved(monkeypatch, tmp_path):
     cd = project.creative_direction
     assert isinstance(cd, dict)
     assert cd["hero_name"] == "Idli Sambar"  # resolved from hero_ref item:1:name
-    assert cd["campaign_narrative"] == "South Indian Favorites at One Price"
+    assert cd["campaign_narrative"] == "$7.99 favorites all weekend."  # CCA, from facts
     assert cd["offer_priority"] == "high"
 
 

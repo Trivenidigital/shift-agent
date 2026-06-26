@@ -501,6 +501,16 @@ PY
     else
         rm -f /opt/shift-agent/flyer_narrative_quality.py
     fi
+    # Controlled Copy Archetypes (CCA). flyer_creative_resolver hard-imports
+    # compose_archetype_headlines from flyer_copy_archetypes at module load, so it MUST
+    # be installed at the deployed flat path or the resolver import raises ImportError
+    # and breaks CD v2 campaign-narrative composition (the smoke module-import probe
+    # asserts this module loads).
+    if [ -f src/agents/flyer/flyer_copy_archetypes.py ]; then
+        install -m 644 src/agents/flyer/flyer_copy_archetypes.py /opt/shift-agent/flyer_copy_archetypes.py
+    else
+        rm -f /opt/shift-agent/flyer_copy_archetypes.py
+    fi
     # CD v2 Composition Phase 1: the poster-archetype router. flyer_render guards
     # this import (falls back to message_first if absent), but install it so the
     # message_first (A) overlay template is actually reachable on the box.
