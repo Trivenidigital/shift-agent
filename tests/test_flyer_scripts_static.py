@@ -164,6 +164,21 @@ def test_narrative_quality_module_is_deployed():
     assert "import flyer_narrative_quality" in smoke  # smoke import-probe proves it loads
 
 
+def test_copy_archetypes_module_is_deployed():
+    """flyer_creative_resolver hard-imports compose_archetype_headlines from
+    flyer_copy_archetypes (CCA); the deploy must install it into the flat
+    /opt/shift-agent layout or the deployed resolver import fails (ImportError) at module
+    load and breaks CD v2 campaign-narrative composition. The smoke probe must import it
+    so a missing install line fails the gate, not a live flyer."""
+    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
+    resolver = (REPO / "src" / "agents" / "flyer" / "flyer_creative_resolver.py").read_text(encoding="utf-8")
+    assert "flyer_copy_archetypes" in resolver  # resolver imports the flat module
+    assert "src/agents/flyer/flyer_copy_archetypes.py" in deploy
+    assert "/opt/shift-agent/flyer_copy_archetypes.py" in deploy
+    assert "import flyer_copy_archetypes" in smoke  # smoke import-probe proves it loads
+
+
 def test_bare_flyer_runner_catches_render_import_failures_after_ack():
     runner = (SCRIPTS / "bare-flyer-render-and-send").read_text(encoding="utf-8")
 

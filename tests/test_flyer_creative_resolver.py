@@ -701,84 +701,83 @@ def test_scrub_narrative_never_raises_on_bad_input():
     assert out2 == ""
 
 
-# --- B0.4: resolver carries the validated campaign_narrative -----------------
+# --- CCA: resolver sources the headline from Controlled Copy Archetypes ------
+#
+# The brain's free-text campaign_narrative is NOT used as a headline. The resolver
+# classifies the campaign deterministically from the locked facts, composes a grounded
+# headline from approved templates, validates it through the existing firewall
+# (scrub_campaign_narrative), and returns the first that passes — else campaign_title.
 
 
-def test_resolver_carries_clean_narrative():
-    """A brief with a clean (grounded/evocative) narrative → resolved carries it
-    unchanged. The "weekend" temporal token is SCHEDULE-GROUNDED by a Sat/Sun schedule
-    locked fact (FIX 2: temporal tokens are ground-checked end-to-end through the
-    resolver, which passes the schedule fact into the scrub)."""
-    facts = _two_item_facts() + [
-        _fact("campaign_title", "Weekend Combo Special"),
+def _cca_weekend_one_price_facts():
+    return [
+        _fact("campaign_title", "Weekend Specials"),
         _fact("schedule", "Saturday & Sunday"),
+        _fact("pricing_structure", "Any item $7.99"),
+        _fact("item:0:name", "Idli"),
+        _fact("item:1:name", "Dosa"),
     ]
-    brief = _brief(campaign_narrative="Weekend Feast of Family Favorites")
-    out = resolve_creative_direction(brief, facts)
-    assert out.campaign_narrative == "Weekend Feast of Family Favorites"
 
 
-def test_resolver_rejects_weak_campaign_narrative_to_campaign_title():
-    """A single model-authored campaign_narrative must pass the deterministic
-    narrative referee, not only the safety scrub. Generic caption copy falls back
-    to the safe campaign_title."""
-    facts = _two_item_facts() + [_fact("campaign_title", "Weekend Specials")]
-    brief = _brief(campaign_narrative="Fresh flavors for everyone.")
-    out = resolve_creative_direction(brief, facts)
-    assert out.campaign_narrative == "Weekend Specials"
+def test_resolver_cca_weekend_one_price_headline():
+    out = resolve_creative_direction(_brief(), _cca_weekend_one_price_facts())
+    assert out.campaign_narrative == "$7.99 favorites all weekend."
 
 
-def test_resolver_rejects_grounded_title_with_ungrounded_product():
-    """One grounded title token cannot launder an unsupported food/product noun."""
-    facts = [_fact("campaign_title", "Diwali Celebration")]
-    brief = _brief(campaign_narrative="Diwali falafel comfort for every table.")
-    out = resolve_creative_direction(brief, facts)
-    assert out.campaign_narrative == "Diwali Celebration"
+def test_resolver_cca_ignores_brain_free_text_narrative():
+    """The model's free-text campaign_narrative is NOT used; CCA composes from facts
+    (an unsafe brain line can never become the headline)."""
+    brief = _brief(campaign_narrative="Indulge in our award-winning $50 feast!")
+    out = resolve_creative_direction(brief, _cca_weekend_one_price_facts())
+    assert out.campaign_narrative == "$7.99 favorites all weekend."
 
 
-def test_resolver_fabricated_narrative_defaults_to_campaign_title():
-    """A brief with a FABRICATED narrative → resolved carries the campaign_title
-    locked-fact value (the safe default)."""
-    facts = _two_item_facts() + [_fact("campaign_title", "Weekend Combo Special")]
-    brief = _brief(campaign_narrative="#1 award-winning biryani, 50% off today only")
-    out = resolve_creative_direction(brief, facts)
-    assert out.campaign_narrative == "Weekend Combo Special"
-
-
-def test_resolver_fabricated_narrative_no_title_yields_empty():
-    """A FABRICATED narrative with NO campaign_title fact → resolved carries ""
-    (nothing safe to show)."""
-    facts = _two_item_facts()  # no campaign_title fact
-    brief = _brief(campaign_narrative="best biryani in town, $5 off")
-    out = resolve_creative_direction(brief, facts)
-    assert out.campaign_narrative == ""
-
-
-def test_resolver_grounded_price_narrative_survives():
-    """A narrative whose only commercial value IS a grounded locked price survives
-    through the resolver."""
+def test_resolver_cca_grand_opening_grounded_free_item_survives():
     facts = [
-        _fact("pricing_structure", "$7.99"),
-        _fact("campaign_title", "One Price Weekend"),
+        _fact("campaign_title", "Grand Opening"),
+        _fact("schedule", "This Saturday"),
+        _fact("offer:0", "Free mango lassi for the first 100 guests"),
     ]
-    brief = _brief(campaign_narrative="Everything at $7.99")
-    out = resolve_creative_direction(brief, facts)
-    assert out.campaign_narrative == "Everything at $7.99"
+    out = resolve_creative_direction(_brief(), facts)
+    assert out.campaign_narrative == "New location. Free mango lassi."
 
 
-def test_resolver_default_brief_has_empty_narrative():
-    """A brief with no campaign_narrative → resolved carries "" (default)."""
-    facts = _two_item_facts() + [_fact("campaign_title", "Weekend Combo Special")]
-    brief = _brief()
-    out = resolve_creative_direction(brief, facts)
+def test_resolver_cca_no_archetype_falls_back_to_title():
+    facts = _two_item_facts() + [_fact("campaign_title", "Our Menu")]
+    out = resolve_creative_direction(_brief(), facts)
+    assert out.campaign_narrative == "Our Menu"
+
+
+def test_resolver_cca_no_archetype_no_title_yields_empty():
+    out = resolve_creative_direction(_brief(), _two_item_facts())  # no campaign_title
     assert out.campaign_narrative == ""
+
+
+def test_resolver_cca_never_fabricates_unstated_free_offer():
+    """A grand_opening with NO grounded free offer never emits a 'Free ...' claim —
+    it uses the safe no-offer template instead (fail-closed)."""
+    facts = [_fact("campaign_title", "Grand Opening"), _fact("schedule", "This Saturday")]
+    out = resolve_creative_direction(_brief(), facts)
+    assert "Free " not in out.campaign_narrative
+    assert out.campaign_narrative == "A warm welcome, on us."
+
+
+def test_resolver_cca_headline_passes_firewall():
+    """Whatever CCA returns (when not the title) passes the deterministic firewall."""
+    facts = _cca_weekend_one_price_facts()
+    out = resolve_creative_direction(_brief(), facts)
+    assert out.campaign_narrative and out.campaign_narrative != "Weekend Specials"
+    allowed = [f.value for f in facts]
+    assert scrub_campaign_narrative(
+        out.campaign_narrative, allowed_values=allowed,
+        campaign_title="Weekend Specials", schedule="Saturday & Sunday",
+    ) == out.campaign_narrative
 
 
 def test_resolver_narrative_never_raises_empty_facts():
-    """resolve_creative_direction stays pure / never raises with a narrative and
-    empty locked_facts (no campaign_title => narrative with any claim => "")."""
-    brief = _brief(campaign_narrative="best biryani in town")
-    out = resolve_creative_direction(brief, [])
+    """resolve_creative_direction stays pure / never raises with empty locked_facts
+    (no archetype, no title → "")."""
+    out = resolve_creative_direction(_brief(), [])
     assert isinstance(out, ResolvedCreativeDirection)
     assert out.campaign_narrative == ""
 
@@ -1097,29 +1096,27 @@ def test_scrub_narrative_grounded_explicit_day_kept():
 # --- FIX C: resolver passes the schedule locked fact into the narrative scrub --
 
 
-def test_resolver_schedule_grounded_weekend_narrative_survives():
-    """Resolver integration: a brief whose narrative is schedule-grounded "this
-    weekend" → resolved campaign_narrative == the brain's narrative (NOT the title),
-    because the resolver passes the "schedule" locked fact into the scrub."""
-    facts = _two_item_facts() + [
-        _fact("campaign_title", "Weekend Combo Special"),
-        _fact("schedule", "Saturday & Sunday, 4 PM-8 PM"),
+def test_resolver_cca_combo_headline():
+    """Resolver integration (CCA): a combo campaign composes the grounded combo headline."""
+    facts = [
+        _fact("campaign_title", "Weekend Combo Specials"),
+        _fact("schedule", "Friday, Saturday and Sunday"),
+        _fact("offer:0", "Veg Combo - $12.99 Includes: 2 curries, dessert"),
+        _fact("offer:1", "Non-Veg Combo - $15.99 Includes: chicken biryani, dessert"),
     ]
-    brief = _brief(campaign_narrative="Savor the Flavors of South India This Weekend")
-    out = resolve_creative_direction(brief, facts)
-    assert out.campaign_narrative == "Savor the Flavors of South India This Weekend"
+    out = resolve_creative_direction(_brief(), facts)
+    assert out.campaign_narrative == "Two combos. One easy choice."
 
 
-def test_resolver_ungrounded_day_narrative_defaults_to_title():
-    """Resolver integration: a narrative referencing a day NOT in the schedule fact
-    defaults to the campaign_title."""
+def test_resolver_cca_plain_menu_falls_back_to_title():
+    """Resolver integration (CCA): a plain menu with no archetype signal falls back to
+    the campaign_title (no archetype → safe title)."""
     facts = _two_item_facts() + [
-        _fact("campaign_title", "Weekend Combo Special"),
+        _fact("campaign_title", "Our Daily Menu"),
         _fact("schedule", "Saturday & Sunday"),
     ]
-    brief = _brief(campaign_narrative="Festive Specials this Monday")
-    out = resolve_creative_direction(brief, facts)
-    assert out.campaign_narrative == "Weekend Combo Special"
+    out = resolve_creative_direction(_brief(), facts)
+    assert out.campaign_narrative == "Our Daily Menu"
 
 
 # --- FIX 2 (C residual): ground-check ALL temporal tokens, not just connector phrases

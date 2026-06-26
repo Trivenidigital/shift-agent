@@ -1,0 +1,17 @@
+{
+  "topic": "flyer-controlled-copy-archetypes",
+  "task_text": "flyer controlled copy archetypes: LLM classifies campaign into a copy archetype, Python composes final headline from approved templates + grounded locked-fact slots, deterministic firewall validates, fallback to campaign_title",
+  "completed_at": "2026-06-26T18:19:41Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 6,
+  "hermes_step_count": 4,
+  "files_to_read_first": [
+    "src/agents/flyer/flyer_creative_resolver.py",
+    "src/agents/flyer/flyer_narrative_quality.py",
+    "src/agents/flyer/flyer_brief_validator.py",
+    "src/agents/flyer/flyer_context_builder.py",
+    "src/agents/flyer/flyer_poster_archetype.py",
+    "src/platform/schemas.py",
+    "tests/test_flyer_creative_resolver.py"
+  ]
+}
