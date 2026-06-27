@@ -1,0 +1,16 @@
+{
+  "topic": "hermes-017-upgrade",
+  "task_text": "hermes 017 upgrade plan: port custom WhatsApp sender-id-context + CTA bridge patches to Hermes 0.17 OR migrate to official WhatsApp Business Cloud API; safe staged upgrade off pinned 0.14",
+  "completed_at": "2026-06-27T22:08:16Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 5,
+  "hermes_step_count": 5,
+  "files_to_read_first": [
+    "tools/patch-hermes.py",
+    "tools/hermes-patch-baseline.txt",
+    "tools/check-shift-agent-patch.sh",
+    "tools/hermes-fleet-upgrade.py",
+    "src/sender_context.py",
+    "src/plugins/cf-router/hooks.py"
+  ]
+}
