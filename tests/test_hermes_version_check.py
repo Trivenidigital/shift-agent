@@ -95,6 +95,51 @@ def test_classify_no_patch_port_when_no_bridge_patch():
     assert c["patch_port_required"] is False
 
 
+def test_classify_upstream_older_than_local_is_not_update():
+    # upstream rolled back / stale-cached HEAD: must NOT claim an update or demand a port
+    c = hvc.classify_update(_local(), {"version": "0.13.0", "commit": "e" * 40})
+    assert c["status"] == "up_to_date"
+    assert c["patch_port_required"] is False
+    assert c["breaking_risk"] is False
+
+
+def test_classify_empty_upstream_is_not_update():
+    # no usable upstream data → nothing to compare; never a spurious update_available
+    c = hvc.classify_update(_local(), {"version": "", "commit": ""})
+    assert c["status"] != "update_available"
+
+
+# --- alert throttling (keyed on the actionable tuple, not the raw HEAD commit) ---
+
+def test_should_alert_true_when_no_prior():
+    rep = {"status": "update_available", "severity": "minor", "patch_port_required": True,
+           "latest": {"version": "0.17.0", "commit": "a" * 40}}
+    assert hvc.should_alert(None, rep) is True
+
+
+def test_should_alert_throttled_when_only_commit_changes():
+    # pinned at 0.14 while upstream main churns weekly: same version/severity/port ⇒ no re-alert
+    prior = {"status": "update_available", "severity": "minor", "patch_port_required": True,
+             "latest": {"version": "0.17.0", "commit": "a" * 40}}
+    rep = {"status": "update_available", "severity": "minor", "patch_port_required": True,
+           "latest": {"version": "0.17.0", "commit": "b" * 40}}
+    assert hvc.should_alert(prior, rep) is False
+
+
+def test_should_alert_fires_when_version_changes():
+    prior = {"status": "update_available", "severity": "minor", "patch_port_required": True,
+             "latest": {"version": "0.17.0", "commit": "a" * 40}}
+    rep = {"status": "update_available", "severity": "minor", "patch_port_required": True,
+           "latest": {"version": "0.18.0", "commit": "a" * 40}}
+    assert hvc.should_alert(prior, rep) is True
+
+
+def test_should_alert_false_when_not_update_available():
+    rep = {"status": "up_to_date", "severity": "none", "patch_port_required": False,
+           "latest": {"version": "0.14.0", "commit": "a" * 40}}
+    assert hvc.should_alert(None, rep) is False
+
+
 # --- build_report -----------------------------------------------------------
 
 def test_build_report_shape():
@@ -117,7 +162,7 @@ def _run(tmp_path, *, upstream, dry_run=False):
     log_path = tmp_path / "hermes-version-check.log"
     rep = hvc.run_check(
         baseline_path=baseline, json_path=json_path, log_path=log_path,
-        fetch=lambda **_: dict(upstream), dry_run=dry_run, alert=False,
+        fetch=lambda: dict(upstream), dry_run=dry_run, alert=False,
     )
     return rep, baseline, json_path, log_path
 
@@ -152,7 +197,7 @@ def test_run_never_raises_on_fetch_failure(tmp_path):
     baseline = tmp_path / "hermes-patch-baseline.txt"
     baseline.write_text(_BASELINE_014, encoding="utf-8")
 
-    def _boom(**_):
+    def _boom():
         raise RuntimeError("network down")
 
     rep = hvc.run_check(
@@ -160,6 +205,27 @@ def test_run_never_raises_on_fetch_failure(tmp_path):
         fetch=_boom, dry_run=True, alert=False,
     )
     assert rep["status"] in ("unknown", "check_failed")
+
+
+def test_run_treats_empty_upstream_as_check_failed(tmp_path):
+    # probe ran but returned no usable HEAD ⇒ honest check_failed, not a spurious update
+    baseline = tmp_path / "hermes-patch-baseline.txt"
+    baseline.write_text(_BASELINE_014, encoding="utf-8")
+    rep = hvc.run_check(
+        baseline_path=baseline, json_path=tmp_path / "r.json", log_path=tmp_path / "r.jsonl",
+        fetch=lambda: {"version": "", "commit": ""}, dry_run=False, alert=False,
+    )
+    assert rep["status"] == "check_failed"
+
+
+def test_write_report_creates_parent_dirs_for_both_outputs(tmp_path):
+    # write_report must mkdir BOTH the json parent AND the jsonl history parent
+    rep = {"status": "update_available", "latest": {"version": "0.17.0", "commit": "f" * 40}}
+    json_path = tmp_path / "sub-json" / "report.json"
+    log_path = tmp_path / "sub-log" / "history.jsonl"
+    hvc.write_report(rep, json_path, log_path)
+    assert json_path.exists()
+    assert log_path.exists()
 
 
 # --- static no-mutation contract --------------------------------------------
