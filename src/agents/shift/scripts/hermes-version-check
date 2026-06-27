@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""Hermes version-check monitor (READ-ONLY).
+
+Compares the locally pinned Hermes baseline (``/usr/local/bin/hermes-patch-baseline.txt``)
+against the upstream NousResearch/hermes-agent repo and writes a report
+(``/opt/shift-agent/logs/hermes-version-check.json`` + ``.log``). On a newly-detected
+update it sends a low-priority owner alert (throttled to change-only, best-effort).
+
+HARD CONTRACT — this monitor NEVER mutates anything:
+  * it does NOT upgrade Hermes (no self-upgrade, no git working-tree change),
+  * it does NOT restart the gateway,
+  * it does NOT rewrite the baseline,
+  * it does NOT touch skills,
+  * it does NOT change the WhatsApp provider or the secrets provider.
+The ONLY network call is a read-only ``git ls-remote`` (+ a best-effort raw
+pyproject GET for the version string). The ONLY writes are the report files.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+UPSTREAM_URL = "https://github.com/NousResearch/hermes-agent.git"
+UPSTREAM_PYPROJECT = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/pyproject.toml"
+RELEASES_URL = "https://github.com/NousResearch/hermes-agent/releases"
+
+DEFAULT_BASELINE = Path("/usr/local/bin/hermes-patch-baseline.txt")
+DEFAULT_JSON = Path("/opt/shift-agent/logs/hermes-version-check.json")
+# Append-only JSONL history. Deliberately a DIFFERENT file than the systemd unit's
+# StandardOutput (which goes to the journal) so the shift-agent-run script never
+# collides with a root-owned systemd-created log file.
+DEFAULT_LOG = Path("/opt/shift-agent/logs/hermes-version-check.jsonl")
+NOTIFY_BIN = "/usr/local/bin/shift-agent-notify-owner"
+
+
+# ── pure core (unit-tested) ─────────────────────────────────────────────────
+
+def parse_baseline(text: str) -> dict:
+    """Parse the pin baseline. ``has_bridge_patch`` is True when a
+    BRIDGE_POST_PATCH_SHA256 is recorded (⇒ custom WhatsApp patches are applied)."""
+    out = {"version": "", "commit": "", "has_bridge_patch": False}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line.startswith("HERMES_VERSION="):
+            out["version"] = line.split("=", 1)[1].strip()
+        elif line.startswith("HERMES_COMMIT="):
+            out["commit"] = line.split("=", 1)[1].strip()
+        elif line.startswith("BRIDGE_POST_PATCH_SHA256=") and line.split("=", 1)[1].strip():
+            out["has_bridge_patch"] = True
+    return out
+
+
+def _semver(v: str) -> tuple[int, int, int] | None:
+    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)", (v or "").strip())
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
+def classify_update(local: dict, upstream: dict) -> dict:
+    """Compare local vs upstream → status/severity/patch_port_required/recommended_action.
+    Pure; no I/O."""
+    lc, uc = (local.get("commit") or ""), (upstream.get("commit") or "")
+    lv, uv = (local.get("version") or ""), (upstream.get("version") or "")
+    same_commit = bool(lc and uc and lc == uc)
+    same_version = bool(lv and uv and lv == uv)
+    if same_commit or (same_version and not uc):
+        return {
+            "status": "up_to_date", "severity": "none",
+            "patch_port_required": False, "breaking_risk": False,
+            "recommended_action": "No action — Hermes is at the pinned baseline.",
+        }
+    # an update (or at least a commit drift) is available
+    lsem, usem = _semver(lv), _semver(uv)
+    if lsem and usem:
+        if usem[0] != lsem[0]:
+            severity = "breaking"
+        elif usem[1] != lsem[1]:
+            severity = "minor"
+        elif usem[2] != lsem[2]:
+            severity = "patch"
+        else:
+            severity = "commit"
+    else:
+        severity = "commit"
+    # Pre-1.0 (major == 0): a minor bump is feature/often-breaking.
+    breaking_risk = severity == "breaking" or (
+        severity == "minor" and bool(lsem) and lsem[0] == 0
+    )
+    patch_port_required = bool(local.get("has_bridge_patch"))
+    if patch_port_required:
+        action = (
+            "Do NOT auto-update. Custom WhatsApp patches (sender-id-context + CTA "
+            "buttons) are anchored to the pinned Hermes internals and will fail-closed "
+            "on upgrade. Port the patches to the new version OR migrate to the official "
+            "WhatsApp Business Cloud API before updating. See the Hermes 0.17 upgrade plan."
+        )
+    else:
+        action = "Update available. Review release notes; no local custom patches recorded."
+    return {
+        "status": "update_available", "severity": severity,
+        "patch_port_required": patch_port_required, "breaking_risk": breaking_risk,
+        "recommended_action": action,
+    }
+
+
+def build_report(local: dict, upstream: dict, classification: dict, now: str) -> dict:
+    return {
+        "schema_version": 1,
+        "checked_at": now,
+        "current": {"version": local.get("version", ""), "commit": local.get("commit", "")},
+        "latest": {"version": upstream.get("version", ""), "commit": upstream.get("commit", "")},
+        "status": classification.get("status", "unknown"),
+        "severity": classification.get("severity", "unknown"),
+        "breaking_risk": classification.get("breaking_risk", False),
+        "patch_port_required": classification.get("patch_port_required", False),
+        "recommended_action": classification.get("recommended_action", ""),
+        "release_notes_url": RELEASES_URL,
+    }
+
+
+# ── I/O shell (read-only network + report writes only) ───────────────────────
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def fetch_upstream(timeout: int = 20) -> dict:
+    """READ-ONLY upstream probe: latest commit via ``git ls-remote`` (no clone, no
+    fetch into any local repo) + best-effort version string from raw pyproject.toml."""
+    commit = ""
+    proc = subprocess.run(
+        ["git", "ls-remote", UPSTREAM_URL, "HEAD"],
+        capture_output=True, text=True, timeout=timeout, check=False,
+    )
+    if proc.returncode == 0 and proc.stdout.strip():
+        head = proc.stdout.strip().split()[0]
+        if re.fullmatch(r"[0-9a-f]{40}", head):
+            commit = head
+    version = ""
+    try:
+        with urllib.request.urlopen(UPSTREAM_PYPROJECT, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        m = re.search(r'(?m)^\s*version\s*=\s*"([^"]+)"', body)
+        if m:
+            version = m.group(1).strip()
+    except Exception:  # noqa: BLE001 — version is best-effort; commit is the primary signal
+        version = ""
+    return {"commit": commit, "version": version}
+
+
+def read_prior_report(json_path: Path) -> dict | None:
+    try:
+        return json.loads(Path(json_path).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def write_report(report: dict, json_path: Path, log_path: Path) -> None:
+    Path(json_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(json_path).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    # Append the full report as one JSON line (parseable history).
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(report) + "\n")
+
+
+def send_alert(report: dict) -> None:
+    """Best-effort low-priority owner alert. NEVER raises; alerts are advisory only."""
+    try:
+        if not os.path.exists(NOTIFY_BIN):
+            return
+        msg = (
+            f"Hermes update available: {report['current']['version']} -> "
+            f"{report['latest']['version']} ({report['severity']}). "
+            f"patch_port_required={report['patch_port_required']}. "
+            f"{report['recommended_action']} Report: {DEFAULT_JSON}"
+        )
+        subprocess.run(
+            [NOTIFY_BIN, "--title", "Hermes update available", "--priority", "0", msg],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except Exception:  # noqa: BLE001 — alerting must never break or mutate the check
+        return
+
+
+def run_check(
+    *,
+    baseline_path: Path = DEFAULT_BASELINE,
+    json_path: Path = DEFAULT_JSON,
+    log_path: Path = DEFAULT_LOG,
+    fetch=fetch_upstream,
+    dry_run: bool = False,
+    alert: bool = True,
+) -> dict:
+    """Read baseline + probe upstream + classify + (unless dry-run) write report and
+    alert-on-change. NEVER mutates Hermes/gateway/baseline/skills. NEVER raises."""
+    now = _utc_now()
+    try:
+        local = parse_baseline(Path(baseline_path).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — fall back to empty local (still no mutation)
+        local = {"version": "", "commit": "", "has_bridge_patch": False}
+    try:
+        upstream = fetch() or {}
+    except Exception:  # noqa: BLE001 — network failure must not break the timer
+        report = build_report(local, {"version": "", "commit": ""},
+                              {"status": "check_failed", "severity": "unknown",
+                               "patch_port_required": False, "breaking_risk": False,
+                               "recommended_action": "Upstream probe failed; will retry next run."},
+                              now)
+        if not dry_run:
+            try:
+                write_report(report, json_path, log_path)
+            except Exception:  # noqa: BLE001
+                pass
+        return report
+
+    classification = classify_update(local, upstream)
+    report = build_report(local, upstream, classification, now)
+    if dry_run:
+        print(json.dumps(report, indent=2))
+        return report
+    prior = read_prior_report(json_path)
+    changed = not prior or prior.get("latest", {}).get("commit") != report["latest"]["commit"]
+    write_report(report, json_path, log_path)
+    if alert and report["status"] == "update_available" and changed:
+        send_alert(report)
+    return report
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Read-only Hermes version-check monitor")
+    parser.add_argument("--baseline", default=str(DEFAULT_BASELINE))
+    parser.add_argument("--json-out", default=str(DEFAULT_JSON))
+    parser.add_argument("--log-out", default=str(DEFAULT_LOG))
+    parser.add_argument("--dry-run", action="store_true", help="compute + print; write nothing, send no alert")
+    parser.add_argument("--no-alert", action="store_true", help="never send an owner alert")
+    parser.add_argument("--text", action="store_true", help="(accepted for systemd parity; output is always logged)")
+    args = parser.parse_args(argv)
+    report = run_check(
+        baseline_path=Path(args.baseline),
+        json_path=Path(args.json_out),
+        log_path=Path(args.log_out),
+        dry_run=args.dry_run,
+        alert=not args.no_alert,
+    )
+    # exit 0 always: a version check is advisory and must never fail the timer chain.
+    if not args.dry_run:
+        print(f"hermes-version-check: status={report['status']} severity={report['severity']} "
+              f"patch_port_required={report['patch_port_required']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
