@@ -740,6 +740,9 @@ PY
     systemctl enable --now prune-expense-receipts.timer 2>/dev/null || true
     # Agent #13 Compliance Calendar (PR-Agent13-v0.1)
     systemctl enable --now check-compliance-deadlines.timer 2>/dev/null || true
+    # Hermes version-check monitor (read-only; reports upstream vs pinned baseline,
+    # never mutates Hermes/gateway/baseline/skills).
+    systemctl enable --now hermes-version-check.timer 2>/dev/null || true
 
     # 2026-05-04 canonical-cleanup: F8/F9 watchdog files were deleted from
     # the repo (cf-router plugin took over their role in PR-CF6). The
