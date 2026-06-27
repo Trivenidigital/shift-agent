@@ -3,8 +3,8 @@
 
 Compares the locally pinned Hermes baseline (``/usr/local/bin/hermes-patch-baseline.txt``)
 against the upstream NousResearch/hermes-agent repo and writes a report
-(``/opt/shift-agent/logs/hermes-version-check.json`` + ``.log``). On a newly-detected
-update it sends a low-priority owner alert (throttled to change-only, best-effort).
+(``/opt/shift-agent/logs/hermes-version-check.json`` + ``.jsonl`` history). On a newly
+actionable update it sends a low-priority owner alert (throttled to change-only, best-effort).
 
 HARD CONTRACT — this monitor NEVER mutates anything:
   * it does NOT upgrade Hermes (no self-upgrade, no git working-tree change),
@@ -75,8 +75,24 @@ def classify_update(local: dict, upstream: dict) -> dict:
             "patch_port_required": False, "breaking_risk": False,
             "recommended_action": "No action — Hermes is at the pinned baseline.",
         }
-    # an update (or at least a commit drift) is available
+    if not uc and not uv:
+        # no usable upstream data to compare against — never a spurious update_available
+        return {
+            "status": "up_to_date", "severity": "none",
+            "patch_port_required": False, "breaking_risk": False,
+            "recommended_action": "No upstream version data available; nothing to compare.",
+        }
     lsem, usem = _semver(lv), _semver(uv)
+    if lsem and usem and usem < lsem:
+        # upstream is BEHIND local (rollback / stale-cached HEAD): not an update, no port needed
+        return {
+            "status": "up_to_date", "severity": "none",
+            "patch_port_required": False, "breaking_risk": False,
+            "recommended_action": (
+                f"Local pin ({lv}) is at or ahead of upstream ({uv}); no update available."
+            ),
+        }
+    # an update (or at least a commit drift) is available
     if lsem and usem:
         if usem[0] != lsem[0]:
             severity = "breaking"
@@ -164,21 +180,46 @@ def read_prior_report(json_path: Path) -> dict | None:
 def write_report(report: dict, json_path: Path, log_path: Path) -> None:
     Path(json_path).parent.mkdir(parents=True, exist_ok=True)
     Path(json_path).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    # Append the full report as one JSON line (parseable history).
+    # Append the full report as one JSON line (parseable history). The history file
+    # may live in a different directory than the latest-report json, so ensure its
+    # parent exists too (otherwise the append would silently drop the history entry).
+    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(report) + "\n")
 
 
-def send_alert(report: dict) -> None:
+def _alert_key(report: dict) -> tuple:
+    """The *actionable* fingerprint of a report. The raw upstream HEAD commit is
+    deliberately excluded: while pinned, upstream main churns weekly with no change
+    to the action we owe, and we don't want to re-alert the operator every run."""
+    latest = report.get("latest", {})
+    return (report.get("status"), latest.get("version"),
+            report.get("severity"), report.get("patch_port_required"))
+
+
+def should_alert(prior: dict | None, report: dict) -> bool:
+    """Alert only on a newly-actionable state: an update is available AND the
+    actionable fingerprint changed since the last report (throttled)."""
+    if report.get("status") != "update_available":
+        return False
+    if not prior:
+        return True
+    return _alert_key(prior) != _alert_key(report)
+
+
+def send_alert(report: dict, json_path: Path = DEFAULT_JSON) -> None:
     """Best-effort low-priority owner alert. NEVER raises; alerts are advisory only."""
     try:
         if not os.path.exists(NOTIFY_BIN):
             return
+        latest_version = report["latest"].get("version") or (
+            report["latest"].get("commit", "")[:12] or "unknown"
+        )
         msg = (
             f"Hermes update available: {report['current']['version']} -> "
-            f"{report['latest']['version']} ({report['severity']}). "
+            f"{latest_version} ({report['severity']}). "
             f"patch_port_required={report['patch_port_required']}. "
-            f"{report['recommended_action']} Report: {DEFAULT_JSON}"
+            f"{report['recommended_action']} Report: {json_path}"
         )
         subprocess.run(
             [NOTIFY_BIN, "--title", "Hermes update available", "--priority", "0", msg],
@@ -204,13 +245,11 @@ def run_check(
         local = parse_baseline(Path(baseline_path).read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 — fall back to empty local (still no mutation)
         local = {"version": "", "commit": "", "has_bridge_patch": False}
-    try:
-        upstream = fetch() or {}
-    except Exception:  # noqa: BLE001 — network failure must not break the timer
+    def _emit_failed(reason: str) -> dict:
         report = build_report(local, {"version": "", "commit": ""},
                               {"status": "check_failed", "severity": "unknown",
                                "patch_port_required": False, "breaking_risk": False,
-                               "recommended_action": "Upstream probe failed; will retry next run."},
+                               "recommended_action": reason},
                               now)
         if not dry_run:
             try:
@@ -219,16 +258,24 @@ def run_check(
                 pass
         return report
 
+    try:
+        upstream = fetch() or {}
+    except Exception:  # noqa: BLE001 — network failure must not break the timer
+        return _emit_failed("Upstream probe failed; will retry next run.")
+    if not upstream.get("commit"):
+        # probe ran but returned no usable HEAD — treat as a failed probe (honest in the
+        # report), don't classify (avoids a spurious 'update_available' on an empty result).
+        return _emit_failed("Upstream probe returned no commit; will retry next run.")
+
     classification = classify_update(local, upstream)
     report = build_report(local, upstream, classification, now)
     if dry_run:
         print(json.dumps(report, indent=2))
         return report
     prior = read_prior_report(json_path)
-    changed = not prior or prior.get("latest", {}).get("commit") != report["latest"]["commit"]
     write_report(report, json_path, log_path)
-    if alert and report["status"] == "update_available" and changed:
-        send_alert(report)
+    if alert and should_alert(prior, report):
+        send_alert(report, json_path)
     return report
 
 
