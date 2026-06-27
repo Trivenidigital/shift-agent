@@ -1,0 +1,15 @@
+[Unit]
+Description=Hermes version-check monitor timer (weekly)
+
+[Timer]
+# Weekly check (Hermes ships ~minor releases every 1-2 weeks). For a daily
+# cadence change this to OnCalendar=daily. Persistent=true runs a missed check
+# after downtime; the randomized delay avoids a thundering-herd ls-remote.
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=1h
+AccuracySec=1h
+Unit=hermes-version-check.service
+
+[Install]
+WantedBy=timers.target
