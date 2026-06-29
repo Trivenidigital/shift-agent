@@ -351,9 +351,287 @@ def upstream_check(repo, *, timeout, pinned_commit, pinned_version):
     return result
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# Evaluation brain (no notify I/O) — assembles the report + alert decision +
+# next state from local reads + the upstream result. Read-only.
+# ════════════════════════════════════════════════════════════════════════════
+
+def evaluate(home, baseline, upstream, prev_state, *, now, network_fail_after,
+             skip_upstream, extra_conditions=None):
+    """Pure-ish: performs read-only local reads (git rev-parse / sha256 / grep)
+    and assembles (report, decision, new_state). Never writes, never dispatches
+    an alert. `upstream` is the upstream_check() result (ignored if
+    skip_upstream). `extra_conditions` lets main() inject pre-computed hard
+    conditions (e.g. unsafe_permissions)."""
+    prev_state = prev_state or {}
+    conditions = list(extra_conditions or [])
+
+    if baseline is None:
+        baseline_status = "unreadable"
+        conditions.append("baseline_unreadable")
+        local = {
+            "runtime_status": "unknown", "bridge_status": "unknown",
+            "patch_markers_status": "unknown",
+            "runtime": {"commit": "", "bridge_sha256": "", "markers_ok": False},
+            "conditions": [],
+        }
+    else:
+        baseline_status = "ok"
+        local = gather_local(home, baseline)
+        conditions.extend(local["conditions"])
+
+    up = {"head_commit": "", "latest_tag": "", "reachable": False}
+    prev_consec = int(prev_state.get("consecutive_network_failures") or 0)
+    if skip_upstream:
+        upstream_status, upstream_ahead, patch_port = "skipped", False, "not_required"
+        consec = prev_consec
+    else:
+        up = upstream or up
+        status = up.get("status", "unknown")
+        if status == "unknown":
+            upstream_status, upstream_ahead, patch_port = "unknown", False, "not_required"
+            conditions.append("upstream_check_failed")
+            consec = prev_consec + 1
+        elif status == "ahead":
+            upstream_status, upstream_ahead, patch_port = "ahead", True, "required"
+            conditions.append("upstream_ahead")
+            conditions.append("patch_port_review_required")
+            consec = 0
+        else:  # ok
+            upstream_status, upstream_ahead, patch_port = "ok", False, "not_required"
+            consec = 0
+
+    hard = [c for c in conditions if c in HARD_CONDITIONS]
+    soft = [c for c in conditions if c in SOFT_CONDITIONS]
+    decision = decide_alert(conditions, hard, soft, prev_state,
+                            now=now, network_fail_after=network_fail_after)
+
+    report = {
+        "schema_version": 1,
+        "generated_at": now.isoformat(),
+        "runtime_status": local["runtime_status"],
+        "baseline_status": baseline_status,
+        "bridge_status": local["bridge_status"],
+        "patch_markers_status": local["patch_markers_status"],
+        "upstream_status": upstream_status,
+        "upstream_ahead": upstream_ahead,
+        "patch_port_review": patch_port,
+        "pinned": {
+            "commit": (baseline or {}).get("commit", ""),
+            "version": (baseline or {}).get("version", ""),
+            "bridge_sha256": (baseline or {}).get("bridge_sha256", ""),
+        },
+        "runtime": local["runtime"],
+        "upstream": {
+            "head_commit": up.get("head_commit", ""),
+            "latest_tag": up.get("latest_tag", ""),
+            "reachable": up.get("reachable", False),
+        },
+        "active_conditions": sorted(conditions),
+        "alert_action": decision["action"],
+        "alert_reason": decision["reason"],
+        "consecutive_network_failures": consec,
+        "mutation_performed": False,
+        "note": "Patch-port validation is delegated to .github/workflows/hermes-drift-check.yml (weekly CI).",
+    }
+
+    notify = decision["notify"]
+    new_state = {
+        "schema_version": 1,
+        "last_alert_signature": decision["signature"] if notify else prev_state.get("last_alert_signature", ""),
+        "active_conditions": sorted(conditions),
+        "last_notified_at": now.isoformat() if notify else prev_state.get("last_notified_at", ""),
+        "last_successful_run_at": now.isoformat(),
+        "consecutive_network_failures": consec,
+        "last_upstream_head_seen": up.get("head_commit", "") or prev_state.get("last_upstream_head_seen", ""),
+        "last_runtime_commit_seen": local["runtime"]["commit"],
+        "last_bridge_sha256_seen": local["runtime"]["bridge_sha256"],
+    }
+    return report, decision, new_state
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# I/O helpers (writes confined to the monitor's own report + state files)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _load_state(path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _atomic_write_json(path, obj, mode=0o640):
+    """Write JSON atomically (tmp → fsync → os.replace). Single-writer private
+    file; no flock needed (only this daily timer writes it)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(tmp, mode)
+        except OSError:
+            pass
+        os.replace(tmp, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _check_permissions(paths):
+    """POSIX: flag world-writable state/report files (or their parent dir) as a
+    hard 'unsafe_permissions' condition. No-op on non-POSIX."""
+    if os.name != "posix":
+        return []
+    for p in paths:
+        p = Path(p)
+        target = p if p.exists() else p.parent
+        try:
+            mode = target.stat().st_mode
+        except OSError:
+            continue
+        if mode & 0o002:  # world-writable
+            return ["unsafe_permissions"]
+    return []
+
+
+def dispatch_alert(notify_bin, title, priority, message):
+    """Invoke shift-agent-notify-owner (Pushover→WhatsApp). Returns (ok, detail).
+    Never raises — alert delivery failure must not crash the monitor."""
+    cmd = [str(notify_bin), "--title", title, "--priority", str(priority), message]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return r.returncode == 0, f"rc={r.returncode}"
+    except Exception as e:  # noqa: BLE001 — best-effort delivery
+        return False, f"notify_error:{e}"
+
+
+def _alert_text(report, decision):
+    """Plain-text (parse_mode-safe) title + body for the operator alert."""
+    action = decision["action"]
+    conds = ",".join(report["active_conditions"]) or "(none)"
+    if action == "recovery":
+        return ("Hermes version monitor: recovered",
+                "All monitored Hermes conditions cleared. Read-only monitor; no action taken.")
+    if decision["priority"] == 1:
+        body = (
+            f"Hermes drift detected: {conds}. "
+            f"runtime={report['runtime_status']} bridge={report['bridge_status']} "
+            f"markers={report['patch_markers_status']}. "
+            f"pinned={report['pinned']['commit'][:12]} live={report['runtime']['commit'][:12]}. "
+            "Read-only monitor; no automatic action taken."
+        )
+        return ("Hermes version monitor: DRIFT", body)
+    body = (
+        f"{report['alert_reason']}. upstream_status={report['upstream_status']} "
+        f"upstream_head={report['upstream']['head_commit'][:12]} latest_tag={report['upstream']['latest_tag']}. "
+        "Patch-port validation is delegated to the weekly CI drift workflow. No action taken."
+    )
+    return ("Hermes version monitor: advisory", body)
+
+
+def _print_text(report):
+    print(
+        "runtime_status={runtime_status} baseline_status={baseline_status} "
+        "bridge_status={bridge_status} markers_status={patch_markers_status} "
+        "upstream_status={upstream_status} upstream_ahead={ua} "
+        "patch_port_review={ppr} alert_action={alert_action} "
+        "mutation_performed=0 conditions={conds}".format(
+            ua=int(report["upstream_ahead"]),
+            ppr=1 if report["patch_port_review"] == "required" else 0,
+            conds=",".join(report["active_conditions"]),
+            **report,
+        )
+    )
+
+
+def parse_args(argv):
+    ap = argparse.ArgumentParser(description="Read-only Hermes version monitor")
+    ap.add_argument("--hermes-home", default=DEFAULT_HERMES_HOME)
+    ap.add_argument("--baseline-path", default=DEFAULT_BASELINE)
+    ap.add_argument("--report-path", default=DEFAULT_REPORT)
+    ap.add_argument("--state-path", default=DEFAULT_STATE)
+    ap.add_argument("--log-path", default=DEFAULT_LOG)  # informational; never written
+    ap.add_argument("--upstream-repo", default=DEFAULT_UPSTREAM)
+    ap.add_argument("--upstream-timeout", type=int, default=DEFAULT_UPSTREAM_TIMEOUT)
+    ap.add_argument("--network-fail-alert-after", type=int, default=DEFAULT_NETWORK_FAIL_ALERT_AFTER)
+    ap.add_argument("--skip-upstream", action="store_true")
+    ap.add_argument(
+        "--notify-owner-bin",
+        default=os.environ.get("SHIFT_AGENT_NOTIFY_OWNER_BIN", DEFAULT_NOTIFY_BIN),
+    )
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--text", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    return ap.parse_args(argv)
+
+
 def main(argv=None) -> int:
-    # Fleshed out in Task 4.
-    raise NotImplementedError
+    args = parse_args(argv)
+    now = datetime.now(timezone.utc)
+    try:
+        baseline = read_baseline(args.baseline_path)
+        prev_state = _load_state(args.state_path)
+        perm_conditions = _check_permissions([args.state_path, args.report_path])
+
+        if args.skip_upstream:
+            upstream = {"status": "skipped", "head_commit": "", "latest_tag": "",
+                        "reachable": False, "ahead": False}
+        else:
+            upstream = upstream_check(
+                args.upstream_repo, timeout=args.upstream_timeout,
+                pinned_commit=(baseline or {}).get("commit", ""),
+                pinned_version=(baseline or {}).get("version", ""),
+            )
+
+        report, decision, new_state = evaluate(
+            args.hermes_home, baseline, upstream, prev_state,
+            now=now, network_fail_after=args.network_fail_alert_after,
+            skip_upstream=args.skip_upstream, extra_conditions=perm_conditions,
+        )
+
+        if args.dry_run:
+            if args.text:
+                _print_text(report)
+            if args.json:
+                print(json.dumps(report, indent=2, sort_keys=True))
+            print("hermes_version_monitor dry_run=1 (no report/state written, no alert dispatched)",
+                  file=sys.stderr)
+            return EXIT_OK
+
+        # Writes confined to the monitor's own report + state files.
+        try:
+            _atomic_write_json(args.report_path, report)
+            _atomic_write_json(args.state_path, new_state)
+        except Exception as e:  # noqa: BLE001
+            print(f"hermes-version-check: FAILED to write report/state: {e}", file=sys.stderr)
+            dispatch_alert(args.notify_owner_bin, "Hermes version monitor FAILED", 1,
+                           f"could not write report/state: {e}. Read-only monitor; investigate disk/perms.")
+            return EXIT_MONITOR_FAILED
+
+        if decision["notify"]:
+            title, message = _alert_text(report, decision)
+            print(f"hermes_version_monitor_alert_dispatched action={decision['action']} "
+                  f"priority={decision['priority']} conditions={','.join(report['active_conditions'])}")
+            ok, detail = dispatch_alert(args.notify_owner_bin, title, decision["priority"], message)
+            print(f"hermes_version_monitor_alert_delivered ok={int(ok)} detail={detail}")
+
+        if args.text:
+            _print_text(report)
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        return EXIT_OK
+
+    except Exception as e:  # noqa: BLE001 — last-resort; OnFailure handler catches exit 6
+        print(f"hermes-version-check: unhandled error: {e}", file=sys.stderr)
+        return EXIT_MONITOR_FAILED
 
 
 if __name__ == "__main__":

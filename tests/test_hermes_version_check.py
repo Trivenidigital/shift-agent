@@ -231,3 +231,195 @@ def test_upstream_network_failure_is_unknown(tmp_path):
     assert r["status"] == "unknown"
     assert r["reachable"] is False
     assert r["ahead"] is False
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Task 4 — main() orchestration: evaluate() brain (cross-platform) + e2e
+# ════════════════════════════════════════════════════════════════════════════
+
+def _baseline_file(tmp_path, commit, sha):
+    p = tmp_path / "baseline.txt"
+    p.write_text(
+        f"HERMES_COMMIT={commit}\nHERMES_VERSION=unknown\nBRIDGE_POST_PATCH_SHA256={sha}\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+# ── evaluate() brain — runs everywhere (git reads are cross-platform) ────────
+
+def test_evaluate_clean_no_conditions(tmp_path):
+    home = _fake_hermes_home(tmp_path)
+    baseline = {"commit": _git_head(home), "version": "unknown", "bridge_sha256": hvc.bridge_sha(home)}
+    report, decision, state = hvc.evaluate(
+        home, baseline, {}, {}, now=_now(), network_fail_after=3, skip_upstream=True)
+    assert report["active_conditions"] == []
+    assert report["mutation_performed"] is False
+    assert report["runtime_status"] == "match"
+    assert decision["action"] == "not_needed" and decision["notify"] is False
+
+
+def test_evaluate_commit_drift_sent_then_suppressed(tmp_path):
+    home = _fake_hermes_home(tmp_path)
+    baseline = {"commit": "0" * 40, "version": "unknown", "bridge_sha256": hvc.bridge_sha(home)}
+    now = _now()
+    r1, d1, s1 = hvc.evaluate(home, baseline, {}, {}, now=now, network_fail_after=3, skip_upstream=True)
+    assert "runtime_commit_drift" in r1["active_conditions"]
+    assert d1["action"] == "sent" and d1["notify"] is True
+    r2, d2, s2 = hvc.evaluate(home, baseline, {}, s1, now=now, network_fail_after=3, skip_upstream=True)
+    assert d2["action"] == "suppressed" and d2["notify"] is False
+
+
+def test_evaluate_baseline_none_is_hard(tmp_path):
+    home = _fake_hermes_home(tmp_path)
+    report, decision, state = hvc.evaluate(
+        home, None, {}, {}, now=_now(), network_fail_after=3, skip_upstream=True)
+    assert "baseline_unreadable" in report["active_conditions"]
+    assert report["baseline_status"] == "unreadable"
+    assert decision["notify"] is True and decision["priority"] == 1
+
+
+def test_evaluate_upstream_ahead_sets_patch_port_review(tmp_path):
+    home = _fake_hermes_home(tmp_path)
+    baseline = {"commit": _git_head(home), "version": "unknown", "bridge_sha256": hvc.bridge_sha(home)}
+    upstream = {"status": "ahead", "head_commit": "f" * 40, "latest_tag": "v0.17", "reachable": True, "ahead": True}
+    report, decision, state = hvc.evaluate(
+        home, baseline, upstream, {}, now=_now(), network_fail_after=3, skip_upstream=False)
+    assert report["upstream_status"] == "ahead"
+    assert report["patch_port_review"] == "required"
+    assert "patch_port_review_required" in report["active_conditions"]
+    assert decision["priority"] == 0  # advisory/soft
+
+
+def test_evaluate_upstream_unknown_increments_network_failures(tmp_path):
+    home = _fake_hermes_home(tmp_path)
+    baseline = {"commit": _git_head(home), "version": "unknown", "bridge_sha256": hvc.bridge_sha(home)}
+    upstream = {"status": "unknown", "head_commit": "", "latest_tag": "", "reachable": False, "ahead": False}
+    prev = {"consecutive_network_failures": 0}
+    report, decision, state = hvc.evaluate(
+        home, baseline, upstream, prev, now=_now(), network_fail_after=3, skip_upstream=False)
+    assert report["upstream_status"] == "unknown"
+    assert state["consecutive_network_failures"] == 1
+    assert "upstream_check_failed" in report["active_conditions"]
+
+
+# ── main() dry-run — cross-platform (no file writes, no alert dispatch) ───────
+
+def test_main_dry_run_writes_nothing(tmp_path, capsys):
+    home = _fake_hermes_home(tmp_path)
+    baseline = _baseline_file(tmp_path, "0" * 40, hvc.bridge_sha(home))
+    report = tmp_path / "r.json"
+    state = tmp_path / "s.json"
+    rc = hvc.main([
+        "--hermes-home", str(home), "--baseline-path", str(baseline),
+        "--report-path", str(report), "--state-path", str(state),
+        "--skip-upstream", "--dry-run", "--text",
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "runtime_commit_drift" in out
+    assert "mutation_performed=0" in out
+    assert not report.exists() and not state.exists()
+
+
+# ── main() e2e via subprocess — clean + no-mutation run on Windows too (notify
+#    dispatch to a bogus bin fails gracefully); the notify-capture test is POSIX.
+
+def test_main_clean_run_writes_report_no_alert(tmp_path):
+    home = _fake_hermes_home(tmp_path)
+    baseline = _baseline_file(tmp_path, _git_head(home), hvc.bridge_sha(home))
+    report = tmp_path / "r.json"
+    state = tmp_path / "s.json"
+    r = subprocess.run([
+        sys.executable, str(SCRIPT),
+        "--hermes-home", str(home), "--baseline-path", str(baseline),
+        "--report-path", str(report), "--state-path", str(state),
+        "--log-path", str(tmp_path / "d.log"),
+        "--skip-upstream", "--text",
+        "--notify-owner-bin", str(tmp_path / "nonexistent-notify"),
+    ], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert "runtime_status=match" in r.stdout
+    assert "alert_action=not_needed" in r.stdout
+    rep = json.loads(report.read_text(encoding="utf-8"))
+    assert rep["mutation_performed"] is False and rep["active_conditions"] == []
+
+
+def test_run_does_not_mutate_hermes_home_or_baseline(tmp_path):
+    home = _fake_hermes_home(tmp_path)
+    head = _git_head(home)
+    baseline = _baseline_file(tmp_path, "0" * 40, hvc.bridge_sha(home))  # pinned != live → drift
+    before_tree = _tree_digest(home)
+    before_base = baseline.read_bytes()
+    r = subprocess.run([
+        sys.executable, str(SCRIPT),
+        "--hermes-home", str(home), "--baseline-path", str(baseline),
+        "--report-path", str(tmp_path / "r.json"), "--state-path", str(tmp_path / "s.json"),
+        "--log-path", str(tmp_path / "d.log"),
+        "--skip-upstream", "--text",
+        "--notify-owner-bin", str(tmp_path / "nonexistent-notify"),
+    ], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert "runtime_commit_drift" in r.stdout
+    # The whole point: the monitor never mutates Hermes home or the baseline.
+    assert _tree_digest(home) == before_tree
+    assert _git_head(home) == head
+    assert baseline.read_bytes() == before_base
+
+
+@pytest.mark.skipif(platform.system() == "Windows", reason="needs exec'able notify stub (POSIX)")
+def test_commit_drift_alerts_once_then_suppresses(tmp_path):
+    home = _fake_hermes_home(tmp_path)
+    baseline = _baseline_file(tmp_path, "0" * 40, hvc.bridge_sha(home))
+    notify = tmp_path / "notify"
+    out = tmp_path / "alerts.txt"
+    notify.write_text(
+        "#!/usr/bin/env python3\nimport sys, pathlib\n"
+        "pathlib.Path(" + repr(str(out)) + ").open('a').write('|'.join(sys.argv[1:]) + '\\n')\n",
+        encoding="utf-8",
+    )
+    notify.chmod(0o755)
+    report = tmp_path / "r.json"
+    state = tmp_path / "s.json"
+    cmd = [
+        sys.executable, str(SCRIPT),
+        "--hermes-home", str(home), "--baseline-path", str(baseline),
+        "--report-path", str(report), "--state-path", str(state),
+        "--log-path", str(tmp_path / "d.log"), "--skip-upstream", "--text",
+        "--notify-owner-bin", str(notify),
+    ]
+    a = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    b = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    assert "alert_action=sent" in a.stdout
+    assert "alert_action=suppressed" in b.stdout
+    assert out.read_text(encoding="utf-8").count("\n") == 1  # exactly one alert across two runs
+
+
+@pytest.mark.skipif(platform.system() == "Windows", reason="POSIX file mode bits")
+def test_unsafe_permissions_detected(tmp_path):
+    home = _fake_hermes_home(tmp_path)
+    baseline = _baseline_file(tmp_path, _git_head(home), hvc.bridge_sha(home))
+    state = tmp_path / "s.json"
+    state.write_text("{}", encoding="utf-8")
+    os.chmod(state, 0o666)  # world-writable → unsafe
+    report = tmp_path / "r.json"
+    r = subprocess.run([
+        sys.executable, str(SCRIPT),
+        "--hermes-home", str(home), "--baseline-path", str(baseline),
+        "--report-path", str(report), "--state-path", str(state),
+        "--skip-upstream", "--text",
+        "--notify-owner-bin", str(tmp_path / "nonexistent-notify"),
+    ], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert "unsafe_permissions" in r.stdout
+
+
+def test_dispatch_alert_missing_bin_is_graceful():
+    # Alert delivery failure must NEVER raise (would crash a read-only monitor).
+    ok, detail = hvc.dispatch_alert(str(Path("/nonexistent/notify-bin-xyz")), "t", 1, "m")
+    assert ok is False
+    assert ("notify_error" in detail) or detail.startswith("rc=")
