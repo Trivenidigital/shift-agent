@@ -2003,6 +2003,109 @@ class FlyerProjectStore(BaseModel):
     projects: list[FlyerProject] = Field(default_factory=list)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Creative Director Loop (CD Loop) — Slice 0 DORMANT schemas.
+#
+# Defined for the future CD Loop (plan:
+#   docs/superpowers/plans/2026-06-29-flyer-creative-director-loop.md).
+#
+# DORMANT in Slice 0: NO production code constructs, reads, writes, or imports
+# these models; NO existing model (FlyerProject / FlyerProjectStore / LogEntry)
+# is modified; NO LogEntry variant is added (the flyer_loop_* audit rows belong
+# to the later emission slice, so this slice does not touch the audit chokepoint).
+# They become live only when a later, separately-approved slice wires them.
+# No model calls, no new dependency, no config flip, no gate, no repair change.
+# ─────────────────────────────────────────────────────────────────────────────
+
+FlyerLoopContractSource = Literal["intake", "customer_feedback"]
+FlyerLoopFactualVerdict = Literal["pass", "warn", "block"]
+FlyerLoopQualityVerdict = Literal["pass", "warn", "fail"]
+FlyerLoopRepairAction = Literal[
+    "none", "premium_repair", "deterministic_recovery", "hermes_plan_repair", "regenerate",
+]
+FlyerLoopOutcome = Literal[
+    "pending", "approved", "repairable", "manual", "delivered_with_warning",
+]
+
+
+class FlyerLoopCreativeDirection(BaseModel):
+    """Grounded creative direction inside a design contract. Each ref is intended
+    to point at a locked fact (never free invention). DORMANT (Slice 0)."""
+    model_config = ConfigDict(extra="forbid")
+    hero_ref: str = Field(default="", max_length=120)
+    marketing_hook: str = Field(default="", max_length=120)
+    campaign_narrative: str = Field(default="", max_length=200)
+    palette_intent: str = Field(default="", max_length=120)
+
+
+class FlyerLoopAcceptanceCriteria(BaseModel):
+    """Per-contract acceptance criteria: the hard factual-gate list + per-rubric-
+    axis minimum quality scores. DORMANT (Slice 0)."""
+    model_config = ConfigDict(extra="forbid")
+    factual_gate: list[str] = Field(default_factory=list, max_length=50)
+    quality_min: dict[str, int] = Field(default_factory=dict)
+
+
+class FlyerDesignContract(BaseModel):
+    """Negotiated design contract (plan §6) — required facts + grounded creative
+    direction + channel→QR map + acceptance criteria. DORMANT (Slice 0)."""
+    model_config = ConfigDict(extra="forbid")
+    contract_id: str = Field(min_length=1, max_length=60)
+    project_id: str = Field(min_length=1, max_length=40)
+    contract_version: int = Field(default=1, ge=1)
+    source: FlyerLoopContractSource = "intake"
+    required_visible_facts: list[str] = Field(default_factory=list, max_length=100)
+    creative_direction: FlyerLoopCreativeDirection = Field(default_factory=FlyerLoopCreativeDirection)
+    channel_qr_map: dict[str, str] = Field(default_factory=dict)
+    acceptance_criteria: FlyerLoopAcceptanceCriteria = Field(default_factory=FlyerLoopAcceptanceCriteria)
+    rubric_version: str = Field(default="", max_length=40)
+    created_at: datetime
+
+
+class FlyerLoopEvaluation(BaseModel):
+    """Combined evaluator verdict (plan §5/§8): Tier-1 factual (fail-closed) +
+    Tier-2 quality scores (axis → 1..10). DORMANT (Slice 0)."""
+    model_config = ConfigDict(extra="forbid")
+    factual_verdict: FlyerLoopFactualVerdict = "pass"
+    factual_blockers: list[str] = Field(default_factory=list, max_length=50)
+    quality_scores: dict[str, int] = Field(default_factory=dict)
+    quality_verdict: FlyerLoopQualityVerdict = "pass"
+    rubric_version: str = Field(default="", max_length=40)
+    evaluated_at: datetime
+
+
+class FlyerLoopIteration(BaseModel):
+    """One CD Loop iteration trace row (plan §5/§11). DORMANT (Slice 0)."""
+    model_config = ConfigDict(extra="forbid")
+    iteration: int = Field(ge=1)
+    contract_id: str = Field(default="", max_length=60)
+    contract_version: int = Field(default=1, ge=1)
+    generation_params: dict[str, str] = Field(default_factory=dict)
+    evaluation: Optional[FlyerLoopEvaluation] = None
+    repair_action: FlyerLoopRepairAction = "none"
+    outcome: FlyerLoopOutcome = "pending"
+    customer_feedback: str = Field(default="", max_length=2000)
+    created_at: datetime
+
+
+class FlyerLoopProjectTrace(BaseModel):
+    """All CD Loop iterations for one project + its active contract (plan §11).
+    DORMANT (Slice 0)."""
+    model_config = ConfigDict(extra="forbid")
+    project_id: str = Field(min_length=1, max_length=40)
+    contract: Optional[FlyerDesignContract] = None
+    iterations: list[FlyerLoopIteration] = Field(default_factory=list, max_length=200)
+
+
+class FlyerLoopTraceStore(BaseModel):
+    """On-disk store schema for a FUTURE flyer_loop_traces.json (plan §5/§11).
+    Mirrors the FlyerProjectStore shape. DORMANT (Slice 0): no writer/reader
+    exists, no file is created."""
+    model_config = ConfigDict(extra="forbid")
+    schema_version: int = Field(default=1, ge=1)
+    traces: list[FlyerLoopProjectTrace] = Field(default_factory=list, max_length=10000)
+
+
 FlyerRepairMode = Literal["hermes_regenerate"]
 FlyerRepairStatus = Literal["attempted", "succeeded", "exhausted", "skipped", "stale"]
 
