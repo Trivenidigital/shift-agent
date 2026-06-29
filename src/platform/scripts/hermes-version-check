@@ -188,6 +188,111 @@ def decide_alert(active, hard, soft, prev_state, *, now, network_fail_after) -> 
             "priority": 0, "notify": False, "signature": sig}
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# Local runtime reads (READ-ONLY: git rev-parse / sha256 / file grep). No write,
+# no fetch, no checkout, no systemctl — ever.
+# ════════════════════════════════════════════════════════════════════════════
+
+def resolve_hermes_home(path):
+    """Resolve symlinks (e.g. /root/.hermes/hermes-agent → /usr/local/lib/...),
+    mirroring tools/check-shift-agent-patch.sh:67 so a shift-agent-readable real
+    path is used."""
+    try:
+        return Path(os.path.realpath(str(path)))
+    except OSError:
+        return Path(str(path))
+
+
+def live_commit(home):
+    """`git rev-parse HEAD` of the live Hermes checkout (read-only). Returns the
+    commit hash or None on any error. `safe.directory` set inline so a root-owned
+    checkout is readable when running as shift-agent (gate precedent)."""
+    home = str(home)
+    try:
+        r = subprocess.run(
+            ["git", "-c", f"safe.directory={home}", "-C", home, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip() or None
+
+
+def bridge_sha(home):
+    """sha256 of the live bridge.js, or None if absent/unreadable."""
+    p = Path(home).joinpath(*BRIDGE_REL)
+    try:
+        data = p.read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha256(data).hexdigest()
+
+
+def markers_present(home):
+    """True iff all 3 patched files exist and contain the shift-agent marker;
+    False if a readable file lacks the marker; None if any file is unreadable
+    (→ 'unknown', not a false 'missing')."""
+    home = Path(home)
+    for parts in MARKER_FILES:
+        try:
+            text = home.joinpath(*parts).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        if PATCH_MARKER not in text:
+            return False
+    return True
+
+
+def gather_local(home, baseline):
+    """Read live runtime state and compare to the pinned baseline. Pure reads;
+    never mutates `home`. `baseline` is the dict from read_baseline() or None."""
+    home = resolve_hermes_home(home)
+    commit = live_commit(home)
+    sha = bridge_sha(home)
+    markers = markers_present(home)
+    result = {
+        "runtime": {"commit": commit or "", "bridge_sha256": sha or "", "markers_ok": markers is True},
+        "conditions": [],
+    }
+
+    # runtime commit
+    if commit is None:
+        result["runtime_status"] = "unreadable"
+        result["conditions"].append("hermes_home_unreadable")
+    elif baseline and commit == baseline.get("commit"):
+        result["runtime_status"] = "match"
+    elif baseline:
+        result["runtime_status"] = "drift"
+        result["conditions"].append("runtime_commit_drift")
+    else:
+        result["runtime_status"] = "unknown"  # no baseline to compare against
+
+    # bridge.js sha
+    if sha is None:
+        result["bridge_status"] = "missing"
+        result["conditions"].append("bridge_missing")
+    elif baseline and sha == baseline.get("bridge_sha256"):
+        result["bridge_status"] = "match"
+    elif baseline:
+        result["bridge_status"] = "drift"
+        result["conditions"].append("bridge_sha_drift")
+    else:
+        result["bridge_status"] = "unknown"
+
+    # patch markers
+    if markers is None:
+        result["patch_markers_status"] = "unknown"
+    elif markers:
+        result["patch_markers_status"] = "present"
+    else:
+        result["patch_markers_status"] = "missing"
+        result["conditions"].append("patch_markers_missing")
+
+    return result
+
+
 def main(argv=None) -> int:
     # Fleshed out in Task 4.
     raise NotImplementedError

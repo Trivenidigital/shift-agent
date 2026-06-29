@@ -61,6 +61,15 @@ def _git_head(home: Path) -> str:
     ).stdout.strip()
 
 
+def _tree_digest(p: Path) -> str:
+    """Content digest of all non-.git files under p (mutation detector)."""
+    parts = []
+    for f in sorted(p.rglob("*")):
+        if f.is_file() and ".git" not in f.parts:
+            parts.append(str(f.relative_to(p)) + ":" + f.read_text(encoding="utf-8", errors="replace"))
+    return hashlib.sha256("".join(parts).encode("utf-8")).hexdigest()
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Task 1 — pure condition + signature + throttle helpers
 # ════════════════════════════════════════════════════════════════════════════
@@ -137,3 +146,57 @@ def test_read_baseline_normalizes_crlf_and_quotes(tmp_path):
 
 def test_read_baseline_missing_returns_none(tmp_path):
     assert hvc.read_baseline(tmp_path / "nope.txt") is None
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Task 2 — local runtime reads (commit / bridge sha / markers) + no-mutation
+# ════════════════════════════════════════════════════════════════════════════
+
+def test_gather_local_matches_baseline(tmp_path):
+    home = _fake_hermes_home(tmp_path)
+    commit = _git_head(home)
+    baseline = {"commit": commit, "version": "unknown", "bridge_sha256": hvc.bridge_sha(home)}
+    local = hvc.gather_local(home, baseline)
+    assert local["runtime_status"] == "match"
+    assert local["bridge_status"] == "match"
+    assert local["patch_markers_status"] == "present"
+    assert local["conditions"] == []
+
+
+def test_gather_local_detects_commit_drift(tmp_path):
+    home = _fake_hermes_home(tmp_path)
+    baseline = {"commit": "0" * 40, "version": "unknown", "bridge_sha256": hvc.bridge_sha(home)}
+    local = hvc.gather_local(home, baseline)
+    assert local["runtime_status"] == "drift"
+    assert "runtime_commit_drift" in local["conditions"]
+
+
+def test_gather_local_detects_bridge_drift(tmp_path):
+    home = _fake_hermes_home(tmp_path)
+    commit = _git_head(home)
+    baseline = {"commit": commit, "version": "unknown", "bridge_sha256": "deadbeef"}
+    local = hvc.gather_local(home, baseline)
+    assert local["bridge_status"] == "drift"
+    assert "bridge_sha_drift" in local["conditions"]
+
+
+def test_gather_local_detects_missing_markers(tmp_path):
+    home = _fake_hermes_home(tmp_path)
+    # Remove the marker from run.py
+    (home / "gateway" / "run.py").write_text("no marker here\n", encoding="utf-8")
+    commit = _git_head(home)
+    baseline = {"commit": commit, "version": "unknown", "bridge_sha256": hvc.bridge_sha(home)}
+    local = hvc.gather_local(home, baseline)
+    assert local["patch_markers_status"] == "missing"
+    assert "patch_markers_missing" in local["conditions"]
+
+
+def test_read_helpers_do_not_mutate_home(tmp_path):
+    home = _fake_hermes_home(tmp_path)
+    head = _git_head(home)
+    baseline = {"commit": head, "version": "unknown", "bridge_sha256": hvc.bridge_sha(home)}
+    before = _tree_digest(home)
+    hvc.gather_local(home, baseline)          # must not write anything
+    hvc.gather_local(home, baseline)
+    assert _tree_digest(home) == before
+    assert _git_head(home) == head
