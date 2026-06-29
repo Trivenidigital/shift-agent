@@ -293,6 +293,64 @@ def gather_local(home, baseline):
     return result
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# Best-effort upstream check — `git ls-remote` ONLY. No clone, no fetch, no
+# checkout, no patch-hermes dry-run (that heavy detection lives in the weekly CI
+# workflow). Any error → status="unknown" (never raises, never alarms loudly).
+# ════════════════════════════════════════════════════════════════════════════
+
+def _highest_tag(tags):
+    """Pick the highest semver-ish tag (strip leading 'v'); '' if none."""
+    def key(t):
+        nums = []
+        for part in t.lstrip("vV").replace("-", ".").split("."):
+            nums.append(int(part) if part.isdigit() else -1)
+        return nums
+    real = [t for t in tags if any(ch.isdigit() for ch in t)]
+    if not real:
+        return tags[0] if tags else ""
+    return sorted(real, key=key)[-1]
+
+
+def upstream_check(repo, *, timeout, pinned_commit, pinned_version):
+    """Read upstream HEAD + tags via `git ls-remote` (read-only network). Returns
+    {status, head_commit, latest_tag, reachable, ahead}. status:
+      ok      — reachable, upstream HEAD == pinned commit
+      ahead   — reachable, upstream HEAD != pinned commit
+      unknown — unreachable / git error / timeout (fail-safe)
+    """
+    result = {"status": "unknown", "head_commit": "", "latest_tag": "",
+              "reachable": False, "ahead": False}
+    try:
+        r = subprocess.run(
+            ["git", "ls-remote", str(repo), "HEAD", "refs/tags/*"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except Exception:
+        return result
+    if r.returncode != 0:
+        return result
+
+    result["reachable"] = True
+    head = ""
+    tags = []
+    for line in r.stdout.splitlines():
+        if "\t" not in line:
+            continue
+        sha, ref = line.split("\t", 1)
+        sha, ref = sha.strip(), ref.strip()
+        if ref == "HEAD":
+            head = sha
+        elif ref.startswith("refs/tags/") and not ref.endswith("^{}"):
+            tags.append(ref[len("refs/tags/"):])
+
+    result["head_commit"] = head
+    result["latest_tag"] = _highest_tag(tags)
+    result["ahead"] = bool(head) and head != pinned_commit
+    result["status"] = "ahead" if result["ahead"] else "ok"
+    return result
+
+
 def main(argv=None) -> int:
     # Fleshed out in Task 4.
     raise NotImplementedError

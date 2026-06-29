@@ -200,3 +200,34 @@ def test_read_helpers_do_not_mutate_home(tmp_path):
     hvc.gather_local(home, baseline)
     assert _tree_digest(home) == before
     assert _git_head(home) == head
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Task 3 — best-effort upstream check (git ls-remote, fail-safe)
+# ════════════════════════════════════════════════════════════════════════════
+
+def test_upstream_ahead_detected(tmp_path):
+    up = _fake_hermes_home(tmp_path / "u")   # a real git repo == valid ls-remote target
+    head = _git_head(up)
+    r = hvc.upstream_check(str(up), timeout=15, pinned_commit="0" * 40, pinned_version="unknown")
+    assert r["status"] == "ahead"
+    assert r["head_commit"] == head
+    assert r["reachable"] is True
+    assert r["ahead"] is True
+
+
+def test_upstream_at_pin_is_ok(tmp_path):
+    up = _fake_hermes_home(tmp_path / "u")
+    head = _git_head(up)
+    r = hvc.upstream_check(str(up), timeout=15, pinned_commit=head, pinned_version="unknown")
+    assert r["status"] == "ok"
+    assert r["ahead"] is False
+    assert r["reachable"] is True
+
+
+def test_upstream_network_failure_is_unknown(tmp_path):
+    # A path that is not a git repo → ls-remote errors → fail-safe 'unknown'
+    r = hvc.upstream_check(str(tmp_path / "nope.git"), timeout=5, pinned_commit="0" * 40, pinned_version="unknown")
+    assert r["status"] == "unknown"
+    assert r["reachable"] is False
+    assert r["ahead"] is False
