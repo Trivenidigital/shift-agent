@@ -56,10 +56,25 @@ for script in \
     /usr/local/bin/flyer-intent-training-export \
     /usr/local/bin/send-flyer-campaign \
     /usr/local/bin/smoke-flyer-quality \
+    /usr/local/bin/hermes-version-check \
     /usr/local/bin/send-flyer-package ; do
     [ -x "$script" ] || { echo "FAIL: $script missing or not executable"; exit 1; }
 done
 echo "✓ All scripts present + executable"
+
+# 1a. Hermes version monitor (read-only) — functional dry-run as the runtime
+# user. --dry-run writes NOTHING and dispatches NO alert; --skip-upstream avoids
+# any network dependency during deploy. Proves the binary runs on the box without
+# mutating Hermes, the gateway, or the baseline. Exits 0 regardless of drift
+# (drift is reported, not an error), so this never false-fails a clean deploy.
+if [ -x /usr/local/bin/hermes-version-check ]; then
+    if ! sudo -u shift-agent /usr/local/bin/hermes-version-check \
+            --skip-upstream --dry-run --text > /dev/null; then
+        echo "FAIL: hermes-version-check dry-run failed (read-only monitor broken)"
+        exit 1
+    fi
+    echo "✓ hermes-version-check read-only dry-run OK"
+fi
 
 if ! /usr/local/bin/shift-agent-hermes-permissions > /dev/null; then
     echo "FAIL: Hermes runtime permissions preflight failed"
@@ -854,6 +869,7 @@ for unit in \
     send-daily-brief.timer \
     catering-pattern-report.timer \
     flyer-source-edit-sla-watchdog.timer \
+    hermes-version-check.timer \
     send-routing-accuracy-summary.timer; do
     if ! systemctl is-enabled --quiet "$unit"; then
         echo "FAIL: $unit not enabled"
@@ -884,6 +900,11 @@ fi
 if [ -f /etc/systemd/system/flyer-source-edit-sla-watchdog-failure.service ]; then
     sd_verify_units+=( /etc/systemd/system/flyer-source-edit-sla-watchdog-failure.service )
 fi
+# Hermes version monitor units (conditional for rollback compatibility with
+# tarballs that predate them).
+for hvc_unit in hermes-version-check.service hermes-version-check.timer hermes-version-check-failure.service; do
+    [ -f "/etc/systemd/system/$hvc_unit" ] && sd_verify_units+=( "/etc/systemd/system/$hvc_unit" )
+done
 # Include Agent #21 prune timer if installed AND its venv is present.
 # systemd-analyze verify checks ExecStart paths exist at verify time
 # (independent of any ConditionPathIsExecutable directive); skip the unit

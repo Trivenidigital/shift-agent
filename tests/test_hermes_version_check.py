@@ -475,3 +475,33 @@ def test_failure_service_alerts_owner_without_recursion():
     # No ACTIVE OnFailure= directive (a comment may mention it); avoid recursion.
     assert not any(line.strip().startswith("OnFailure=") for line in f.splitlines())
     assert "--priority 1" in f
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Task 7 — deploy + smoke wiring (static guards; idempotent, read-only)
+# ════════════════════════════════════════════════════════════════════════════
+
+DEPLOY = REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
+SMOKE = REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh"
+
+
+def test_deploy_wires_monitor_idempotently():
+    d = DEPLOY.read_text(encoding="utf-8")
+    assert "systemctl enable --now hermes-version-check.timer" in d
+    assert "install -m 644 src/platform/systemd/*.timer /etc/systemd/system/" in d
+    assert "install -m 644 tools/hermes-patch-baseline.txt /opt/shift-agent/hermes-patch-baseline.txt" in d
+
+
+def test_deploy_never_writes_canonical_baseline():
+    d = DEPLOY.read_text(encoding="utf-8")
+    # The snapshot is one-directional: repo tools/ -> /opt/shift-agent/. Deploy
+    # must never write back into the canonical tools/hermes-patch-baseline.txt.
+    assert "/opt/shift-agent/hermes-patch-baseline.txt tools/" not in d
+    assert "> tools/hermes-patch-baseline.txt" not in d
+
+
+def test_smoke_checks_monitor_presence_and_dry_run():
+    s = SMOKE.read_text(encoding="utf-8")
+    assert "/usr/local/bin/hermes-version-check" in s
+    assert "hermes-version-check.timer" in s
+    assert "--dry-run" in s   # functional read-only smoke invocation
