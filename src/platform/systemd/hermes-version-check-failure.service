@@ -1,0 +1,25 @@
+[Unit]
+Description=Failure handler — alert owner if the Hermes version monitor crashed
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+Environment=HOME=/opt/shift-agent
+TimeoutStartSec=30s
+# Plain-text alert (no Markdown) — underscore-containing condition names must not
+# be mangled by Telegram/Pushover formatting (gecko-alpha §12b precedent).
+ExecStart=/usr/local/bin/shift-agent-notify-owner \
+    --title "Hermes version monitor FAILED" \
+    --priority 1 \
+    "hermes-version-check.service exited non-zero (could not complete a read-only check or write its report). Check journalctl -u hermes-version-check + /opt/shift-agent/logs/hermes-version-check.log. No Hermes change was made."
+
+# Security hardening — mirrors the main unit. No OnFailure= here: if
+# notify-owner is itself broken, journald is the floor; avoid a recursive cascade.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shift-agent
+ProtectHome=read-only
+PrivateTmp=true
+RuntimeDirectory=shift-agent

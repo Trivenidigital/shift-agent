@@ -423,3 +423,55 @@ def test_dispatch_alert_missing_bin_is_graceful():
     ok, detail = hvc.dispatch_alert(str(Path("/nonexistent/notify-bin-xyz")), "t", 1, "m")
     assert ok is False
     assert ("notify_error" in detail) or detail.startswith("rc=")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Task 6 — static boundary guards (read the SHIPPED files; enforce read-only)
+# ════════════════════════════════════════════════════════════════════════════
+
+SYSTEMD = REPO / "src" / "platform" / "systemd"
+SERVICE = SYSTEMD / "hermes-version-check.service"
+TIMER = SYSTEMD / "hermes-version-check.timer"
+FAILURE = SYSTEMD / "hermes-version-check-failure.service"
+
+
+def test_script_uses_only_readonly_git_subcommands():
+    txt = SCRIPT.read_text(encoding="utf-8")
+    # Quoted tokens = actual subprocess args; descriptive prose uses bare words.
+    for verb in ('"clone"', '"fetch"', '"checkout"', '"pull"', '"reset"',
+                 '"push"', '"merge"'):
+        assert verb not in txt, f"mutating git arg present in script: {verb}"
+    assert '"rev-parse"' in txt   # the only local git read
+    assert '"ls-remote"' in txt   # the only network git read
+
+
+def test_script_never_invokes_systemctl_or_writes_baseline():
+    txt = SCRIPT.read_text(encoding="utf-8")
+    assert '"systemctl"' not in txt        # never invokes systemctl as a subprocess arg
+    assert "os.system(" not in txt         # no shell-out backdoor
+    assert "_atomic_write_json(args.baseline" not in txt   # never rewrites the baseline
+    assert "mutation_performed" in txt      # report always carries the no-mutation flag
+
+
+def test_service_is_read_only_and_wires_failure_handler():
+    s = SERVICE.read_text(encoding="utf-8")
+    assert "OnFailure=hermes-version-check-failure.service" in s
+    assert "ProtectSystem=strict" in s
+    assert "ReadWritePaths=/opt/shift-agent" in s
+    assert "User=shift-agent" in s
+    assert "ExecStartPost" not in s   # no post-hooks that could mutate
+    assert "systemctl" not in s
+
+
+def test_timer_is_daily_and_targets_the_service():
+    t = TIMER.read_text(encoding="utf-8")
+    assert "OnCalendar=" in t
+    assert "Unit=hermes-version-check.service" in t
+
+
+def test_failure_service_alerts_owner_without_recursion():
+    f = FAILURE.read_text(encoding="utf-8")
+    assert "/usr/local/bin/shift-agent-notify-owner" in f
+    # No ACTIVE OnFailure= directive (a comment may mention it); avoid recursion.
+    assert not any(line.strip().startswith("OnFailure=") for line in f.splitlines())
+    assert "--priority 1" in f
