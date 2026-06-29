@@ -10,6 +10,7 @@ from agents.flyer.flyer_copy_archetypes import (
     classify_archetype,
     compose_archetype_headlines,
 )
+from agents.flyer.flyer_brief_validator import scrub_campaign_narrative
 from schemas import FlyerLockedFact
 
 
@@ -233,3 +234,85 @@ def test_compose_bucket_without_food_noun_uses_safe_fallback():
     facts = [_fact("campaign_title", "Family Value Bucket")]
     out = compose_archetype_headlines(facts, campaign_title="Family Value Bucket")
     assert out == ["A feast for the whole table, by the bucket."]
+
+
+# --- F0190: shared_price archetype (flat shared price, no/non-weekend schedule) ---
+# Bug: a legitimate flyer with a SHARED price ("Any item $7.99") but NO weekend
+# schedule classified as "none" → empty headlines → bare campaign_title (price
+# silently DROPPED). weekend_one_price was the only shared-price archetype and it
+# required a weekend schedule; even if reached, its templates contain "weekend"
+# which the temporal scrub gate rejects against an empty schedule.
+
+def _shared_price_no_schedule():
+    return [
+        _fact("campaign_title", "Weekly Specials"),
+        _fact("pricing_structure", "Any item $7.99"),
+        _fact("item:0:name", "Idli"),
+        _fact("item:1:name", "Dosa"),
+    ]
+
+
+def test_classify_shared_price_no_schedule():
+    # Was "none" (price dropped); must now classify as a shared-price archetype.
+    assert classify_archetype(_shared_price_no_schedule(), campaign_title="Weekly Specials") == "shared_price"
+
+
+def test_classify_shared_price_nonweekend_schedule():
+    # Same bug class: a shared price with a non-weekend schedule also dropped the price.
+    facts = [
+        _fact("campaign_title", "Lunch Specials"),
+        _fact("schedule", "Weekdays, lunch only"),
+        _fact("pricing_structure", "Everything $5"),
+        _fact("item:0:name", "Thali"),
+    ]
+    assert classify_archetype(facts, campaign_title="Lunch Specials") == "shared_price"
+
+
+def test_classify_weekend_one_price_still_wins_over_shared_price():
+    # Precedence preserved: a shared price WITH a weekend schedule stays weekend_one_price.
+    assert classify_archetype(_weekend_one_price(), campaign_title="Weekend Specials") == "weekend_one_price"
+
+
+def test_compose_shared_price_includes_grounded_price_no_day_word():
+    out = compose_archetype_headlines(_shared_price_no_schedule(), campaign_title="Weekly Specials")
+    assert out  # must NOT be empty (was [] → bare title)
+    assert any("$7.99" in c for c in out)  # the grounded shared price is featured
+    for c in out:  # no day/temporal word → survives the temporal scrub gate
+        low = c.lower()
+        assert "weekend" not in low and "saturday" not in low and "sunday" not in low
+        assert "monday" not in low and "friday" not in low and "weekday" not in low
+
+
+def test_shared_price_candidate_survives_scrub_with_empty_schedule():
+    # END-TO-END: a composed candidate must pass the Layer-2 firewall with an EMPTY
+    # schedule (the exact production path) — i.e. reach the customer, not drop to title.
+    facts = _shared_price_no_schedule()
+    title = "Weekly Specials"
+    allowed = [f.value for f in facts]
+    out = compose_archetype_headlines(facts, campaign_title=title)
+    assert out
+    survivors = [
+        c for c in out
+        if scrub_campaign_narrative(c, allowed_values=allowed, campaign_title=title, schedule="") == c
+        and c != title
+    ]
+    assert survivors, f"no shared_price candidate survived scrub: {out}"
+    assert any("$7.99" in c for c in survivors)  # a price-bearing candidate reaches the customer
+
+
+def test_shared_price_requires_grounded_price_never_fabricates():
+    # No pricing_structure + no shared item price → NOT shared_price (fail-closed,
+    # never invents a price). Preserves locked-fact safety.
+    facts = [_fact("campaign_title", "Our Menu"), _fact("item:0:name", "Plain Item")]
+    assert classify_archetype(facts, campaign_title="Our Menu") == "none"
+    assert compose_archetype_headlines(facts, campaign_title="Our Menu") == []
+
+
+def test_shared_price_does_not_fire_when_item_prices_differ():
+    # Different item prices = no shared price → not shared_price (fail-closed).
+    facts = [
+        _fact("campaign_title", "Our Menu"),
+        _fact("item:0:name", "Idli"), _fact("item:0:price", "$5.99"),
+        _fact("item:1:name", "Dosa"), _fact("item:1:price", "$8.99"),
+    ]
+    assert classify_archetype(facts, campaign_title="Our Menu") == "none"
