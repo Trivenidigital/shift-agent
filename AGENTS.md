@@ -170,3 +170,29 @@ The Expense Bookkeeper plan v2 (2026-04-29) had 10 drift items that the 5-agent 
 - **Production pilot bundle:** Shift Agent + Catering Agent + Daily Brief Agent.
 - **Current deployed pilot gate:** `main-vps` deploy `deploy-20260514-170739-f4ce14db`; gateway active, WhatsApp bridge connected, timers active, roster/menu valid. Readiness is blocked only by placeholder `customer.name` and `customer.location_id`.
 - **Next operational action:** seed real customer identity in `/opt/shift-agent/config.yaml`, rerun `pilot-readiness-check --text`, then execute `docs/runbooks/production-pilot-shift-catering-daily-brief.md`.
+
+---
+
+## Flyer-Studio — agent operating rules (productization, 2026-06-29)
+
+Flyer-Studio is a WhatsApp-first AI marketing assistant for Indian restaurant / grocery / bakery / meat-store owners: owner sends an offer/menu/photo/logo/QR on WhatsApp → receives a high-quality flyer + share-ready creative package with **locked facts preserved**. These rules are BINDING for any agent (Codex/Claude) working Flyer-Studio. First commercial slice: `docs/product/live-scope.md`.
+
+**Scope control**
+- One small, PR-ready slice per task. No broad architecture rewrites. Stay inside the issue's stated scope + non-goals.
+- Do NOT start large Creative Director Loop implementation without explicit per-slice operator approval.
+
+**Hard product invariants (never violate)**
+- Never fabricate prices, offers, business names, dates, locations, or QR targets. If a fact is not grounded in customer input, it must not appear on the flyer.
+- Never regenerate or alter a customer-supplied QR code — preserve the original and its target.
+- Never weaken locked-fact enforcement, the visual-QA fabrication gate, or the deterministic fallback.
+- Never change the Hermes version (pinned 0.14), migrate WhatsApp, or install community/untrusted skills. Never change production deploy behavior or production secrets from a feature PR.
+
+**Tests + evidence (required in every PR)**
+- Run the relevant tests and paste results. Flyer tests are `tests/test_flyer*` — note `send-path-ci` EXCLUDES `test_flyer*`, so run them locally / via deploy smoke and paste the output.
+- Attach VISUAL evidence: the rendered flyer preview (before/after for edits).
+- Locked-fact / OCR / QR verification: confirm every required fact is visible + correct via OCR read-back; confirm the QR is preserved and decodes to the supplied target on the correct channel.
+
+**Process discipline**
+- Do NOT merge your own PR — the operator merges. Do NOT auto-commit / push / deploy without an explicit operator request.
+- Every customer-facing change ships behind a flag, allowlist-scoped first (initial allowlist `+17329837841`), kill-switchable, with pre-registered thresholds before any gate flips. See `docs/runbooks/release.md` + `docs/runbooks/rollback.md`.
+- Prefer small documentation-only or flag-gated changes; reuse existing primitives — do not add untrusted external skills.

@@ -167,3 +167,30 @@ The Expense Bookkeeper plan v2 (2026-04-29) had 10 drift items that the 5-agent 
 - **Solid 17 consolidation:** documented in `docs/portfolio.md` and live at portal
 - **Pending user go:** schema scaffolds for Agent #21 Expense Bookkeeper and Agent #22 P&L Anomaly Detective (see `tasks/solid17-consolidation-plan.md` Phase 2/3)
 - **Stage 1 decision doc** for #21 Expense Bookkeeper: under review; gating investigations have shrunk from 3 to 2 (OCR fully removed after 2026-04-29 menu E2E test)
+
+---
+
+## Flyer-Studio — Claude working notes (productization, 2026-06-29)
+
+Product: WhatsApp-first AI marketing assistant for Indian restaurant/grocery/bakery/meat stores. Promise: owner sends an offer/menu/photo/logo/QR on WhatsApp → gets a high-quality flyer + share-ready package, **locked facts preserved**. First commercial slice: `docs/product/live-scope.md`. Agent operating rules: `AGENTS.md` → "Flyer-Studio — agent operating rules".
+
+**Commands**
+- Tests: `python -m pytest tests/test_flyer_copy_archetypes.py -q` (plus the specific flyer test file you touched). Full flyer slice locally: `python -m pytest tests/ -q -k flyer`.
+- ⚠️ CI gotcha: `send-path-ci` runs `tests/test_*.py ! -name 'test_flyer*'` — it does NOT run flyer tests. Name pure-schema/platform tests `test_*` (not `test_flyer*`) if you want CI to run them; otherwise run flyer tests locally + paste output in the PR.
+- Syntax: `python -m py_compile <script>`; shell `bash -n <script>`.
+
+**Project gotchas**
+- Windows host: `safe_io` imports `fcntl` (Linux-only) → not importable on Windows; flyer tests that need it are `skipif(Windows)` and run only in CI (Linux) / on the VPS — verify those paths in CI.
+- `.gitattributes` enforces LF for scripts / `.service` / `.timer` / `.py` / `.md` — never ship CRLF to the Linux VPS (a CRLF shebang breaks the script).
+- Deploy is tarball + scp + restart (no git checkout on the VPS); the Hermes pin gate (`tools/check-shift-agent-patch.sh`) fail-closes the deploy on drift. Do NOT change the Hermes version (pinned 0.14; 0.17 blocked).
+- Flyer state: `/opt/shift-agent/state/flyer/projects.json` (`FlyerProject`); audit at `/opt/shift-agent/logs/decisions.log`.
+
+**Review expectations**
+- Use SUBAGENT reviewers (not Codex). Multi-vector for irreversible / customer-facing / alerting / deploy changes; one focused reviewer for routine. ALWAYS include the locked-fact-safety lens for any flyer-copy change.
+- Do NOT merge your own PR; the operator gates merge + deploy.
+
+**Visual + fact verification (mandatory before claiming a flyer change works)**
+- Render the flyer and LOOK at it (attach visual evidence in the PR) — do not infer correctness from code alone.
+- OCR read-back: every required locked fact present + correct; no fabricated price/offer/business-name/date/location.
+- QR: a customer-supplied QR is preserved (never regenerated) + decodes to the supplied target on the correct channel.
+- Never claim "done" without the rendered artifact + the fact/QR checks. Never weaken the deterministic fallback or locked-fact enforcement.
