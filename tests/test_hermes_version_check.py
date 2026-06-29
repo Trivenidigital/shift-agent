@@ -70,6 +70,20 @@ def _tree_digest(p: Path) -> str:
     return hashlib.sha256("".join(parts).encode("utf-8")).hexdigest()
 
 
+def _notify_capture(tmp_path: Path):
+    """POSIX-only: a WORKING notify-owner stub that records its args to a file, so
+    a dispatched alert is observable and reports delivered (→ exit 0)."""
+    notify = tmp_path / "notify"
+    out = tmp_path / "alerts.txt"
+    notify.write_text(
+        "#!/usr/bin/env python3\nimport sys, pathlib\n"
+        "pathlib.Path(" + repr(str(out)) + ").open('a').write('|'.join(sys.argv[1:]) + '\\n')\n",
+        encoding="utf-8",
+    )
+    notify.chmod(0o755)
+    return notify, out
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Task 1 — pure condition + signature + throttle helpers
 # ════════════════════════════════════════════════════════════════════════════
