@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily Hermes version monitor (read-only)
+
+[Timer]
+# Daily at 08:30 (VPS timezone). Persistent=true so a run missed while the VPS
+# was down fires on next boot. The monitor is read-only + idempotent, so a
+# catch-up run is harmless. Cadence is daily because Hermes upstream releases
+# are infrequent and the deploy gate already checks the pin at every deploy.
+OnCalendar=*-*-* 08:30:00
+Persistent=true
+AccuracySec=5min
+Unit=hermes-version-check.service
+
+[Install]
+WantedBy=timers.target

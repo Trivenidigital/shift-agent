@@ -95,6 +95,13 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/check_hermes_config_yaml.py
     fi
+    # Hermes version monitor (read-only) needs the pinned baseline at a stable
+    # runtime path. This is a READ-ONLY SNAPSHOT of tools/hermes-patch-baseline.txt
+    # for the monitor to compare live runtime state against; the monitor never
+    # writes it, and this never modifies the canonical tools/ baseline.
+    if [ -f tools/hermes-patch-baseline.txt ]; then
+        install -m 644 tools/hermes-patch-baseline.txt /opt/shift-agent/hermes-patch-baseline.txt
+    fi
     # Commerce webhook-subscription deploy-gate module (slice-3.5). Imported by
     # the check-commerce-webhook-subscription wrapper. Guarded for rollback
     # compatibility with tarballs that predate this module.
@@ -188,6 +195,9 @@ install_artifacts() {
 
     # systemd units — platform (hermes-gateway) + shift-agent specific
     install -m 644 src/platform/systemd/*.service /etc/systemd/system/ 2>/dev/null || true
+    # Platform timers (hermes-version-check.timer). Previously no platform timer
+    # existed; this glob is forward-compatible for future platform timers too.
+    install -m 644 src/platform/systemd/*.timer /etc/systemd/system/ 2>/dev/null || true
     install -m 644 src/agents/shift/systemd/*.service /etc/systemd/system/ 2>/dev/null || true
     install -m 644 src/agents/shift/systemd/*.timer /etc/systemd/system/ 2>/dev/null || true
 
@@ -740,6 +750,9 @@ PY
     systemctl enable --now prune-expense-receipts.timer 2>/dev/null || true
     # Agent #13 Compliance Calendar (PR-Agent13-v0.1)
     systemctl enable --now check-compliance-deadlines.timer 2>/dev/null || true
+    # Hermes version monitor (read-only). Unconditional — Hermes runs on every
+    # VPS. enable --now is idempotent; re-running a deploy is a no-op.
+    systemctl enable --now hermes-version-check.timer 2>/dev/null || true
 
     # 2026-05-04 canonical-cleanup: F8/F9 watchdog files were deleted from
     # the repo (cf-router plugin took over their role in PR-CF6). The
