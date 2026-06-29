@@ -62,8 +62,12 @@ def classify_qr_preservation(
     cmap = channel_target_map or {}
     expected = (cmap.get(channel, supplied_target) if cmap else supplied_target).strip()
 
-    if not supplied_target and not cmap:
-        return _result("no_supplied_qr", expected, payloads, channel, "no customer QR supplied")
+    # Nothing to verify: no supplied target AND no expected target for this
+    # channel (gate on the COMPUTED `expected`, not the raw inputs, so a
+    # per-channel map with no entry for this channel is not a false 'missing').
+    if not expected:
+        return _result("no_supplied_qr", expected, payloads, channel,
+                       "no customer QR supplied for this channel")
     if regions_detected <= 0 and not payloads:
         return _result("missing", expected, payloads, channel, "no QR region detected in output")
     if not payloads:

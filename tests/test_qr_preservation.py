@@ -68,6 +68,16 @@ def test_classify_no_supplied_qr_is_not_a_failure():
     assert r["status"] == "no_supplied_qr"
 
 
+def test_classify_no_expected_target_for_this_channel_is_not_missing():
+    # Per-channel map supplied, but THIS channel has no expected QR and no
+    # supplied_target → nothing to verify → no_supplied_qr (NOT a false 'missing').
+    cmap = {"instagram": "https://instagram.com/store"}
+    r = classify_qr_preservation(
+        payloads=[], regions_detected=0, supplied_target="",
+        channel="whatsapp", channel_target_map=cmap)
+    assert r["status"] == "no_supplied_qr"
+
+
 # ── verify_qr_preservation with an INJECTED decoder (shadow, never raises) ───
 
 def _fake_decoder(payloads, regions, name="fake"):
