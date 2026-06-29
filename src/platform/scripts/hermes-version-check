@@ -159,6 +159,13 @@ def decide_alert(active, hard, soft, prev_state, *, now, network_fail_after) -> 
     stable_changed = sig != prev_sig
 
     effective = consec + 1 if network_failed else 0
+    # The network page is fire-once-best-effort BY DESIGN: it pages exactly on the
+    # threshold-crossing run (strict ==). Unlike the priority-1 drift page, a
+    # failed *network* delivery is NOT retried (consec keeps advancing). This is
+    # deliberate — upstream reachability is an advisory signal, the weekly CI
+    # drift workflow independently surfaces upstream movement, and drift/recovery
+    # (the load-bearing pages) are unaffected. Symmetric retry was judged not
+    # worth the added throttle complexity for a best-effort advisory.
     network_page = network_failed and effective == network_fail_after
     network_recovered = (not network_failed) and consec >= network_fail_after
 
