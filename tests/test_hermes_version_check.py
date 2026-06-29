@@ -270,7 +270,11 @@ def test_evaluate_commit_drift_sent_then_suppressed(tmp_path):
     r1, d1, s1 = hvc.evaluate(home, baseline, {}, {}, now=now, network_fail_after=3, skip_upstream=True)
     assert "runtime_commit_drift" in r1["active_conditions"]
     assert d1["action"] == "sent" and d1["notify"] is True
-    r2, d2, s2 = hvc.evaluate(home, baseline, {}, s1, now=now, network_fail_after=3, skip_upstream=True)
+    # evaluate() no longer advances the throttle signature itself — main() does
+    # that ONLY on confirmed delivery. Simulate a delivered alert by persisting
+    # the signature, then the next evaluate suppresses.
+    delivered_state = dict(s1, last_alert_signature=d1["signature"])
+    r2, d2, s2 = hvc.evaluate(home, baseline, {}, delivered_state, now=now, network_fail_after=3, skip_upstream=True)
     assert d2["action"] == "suppressed" and d2["notify"] is False
 
 
@@ -363,7 +367,9 @@ def test_run_does_not_mutate_hermes_home_or_baseline(tmp_path):
         "--skip-upstream", "--text",
         "--notify-owner-bin", str(tmp_path / "nonexistent-notify"),
     ], capture_output=True, text=True, timeout=30)
-    assert r.returncode == 0, r.stderr
+    # exit 6: a priority-1 drift whose alert could not be delivered (bogus notify
+    # bin) escalates via OnFailure — see test_undelivered_drift_alert_is_retried.
+    assert r.returncode in (0, 6), r.stderr
     assert "runtime_commit_drift" in r.stdout
     # The whole point: the monitor never mutates Hermes home or the baseline.
     assert _tree_digest(home) == before_tree
@@ -505,3 +511,105 @@ def test_smoke_checks_monitor_presence_and_dry_run():
     assert "/usr/local/bin/hermes-version-check" in s
     assert "hermes-version-check.timer" in s
     assert "--dry-run" in s   # functional read-only smoke invocation
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Review fixes — throttle channel-split (BLOCKER 1), delivery-aware throttle
+# (BLOCKER 2 / HIGH 1 / MEDIUM 1), corrupt-state safety
+# ════════════════════════════════════════════════════════════════════════════
+
+def test_persistent_hard_drift_not_repaged_by_network_blip():
+    # A network blip co-occurring with an ALREADY-alerted hard drift must NOT
+    # re-page (the transient network condition is excluded from the signature).
+    sig = hvc.alert_signature(["runtime_commit_drift"])
+    prev = {"last_alert_signature": sig, "consecutive_network_failures": 0,
+            "active_conditions": ["runtime_commit_drift"]}
+    d = hvc.decide_alert(
+        ["runtime_commit_drift", "upstream_check_failed"],
+        ["runtime_commit_drift"], ["upstream_check_failed"],
+        prev, now=datetime.now(timezone.utc), network_fail_after=3)
+    assert d["notify"] is False
+
+
+def test_new_hard_drift_with_network_blip_pages_only_the_drift():
+    # Brand-new hard drift + first network blip: page the drift (priority 1);
+    # the network condition is excluded from the signature so the threshold is
+    # not defeated.
+    prev = {"last_alert_signature": "", "consecutive_network_failures": 0}
+    d = hvc.decide_alert(
+        ["runtime_commit_drift", "upstream_check_failed"],
+        ["runtime_commit_drift"], ["upstream_check_failed"],
+        prev, now=datetime.now(timezone.utc), network_fail_after=3)
+    assert d["notify"] is True and d["priority"] == 1
+    assert d["signature"] == hvc.alert_signature(["runtime_commit_drift"])
+
+
+def test_network_recovery_after_paging_sends_one_recovery():
+    prev = {"last_alert_signature": "", "consecutive_network_failures": 3}
+    d = hvc.decide_alert([], [], [], prev, now=datetime.now(timezone.utc), network_fail_after=3)
+    assert d["notify"] is True and d["action"] == "recovery"
+
+
+def test_network_below_threshold_then_recover_sends_nothing():
+    prev = {"last_alert_signature": "", "consecutive_network_failures": 2}
+    d = hvc.decide_alert([], [], [], prev, now=datetime.now(timezone.utc), network_fail_after=3)
+    assert d["notify"] is False and d["action"] == "not_needed"
+
+
+def test_corrupt_state_file_defaults_safely(tmp_path):
+    home = _fake_hermes_home(tmp_path)
+    baseline = _baseline_file(tmp_path, _git_head(home), hvc.bridge_sha(home))  # clean
+    state = tmp_path / "s.json"
+    state.write_text("{{{ not valid json", encoding="utf-8")
+    report = tmp_path / "r.json"
+    r = subprocess.run([
+        sys.executable, str(SCRIPT),
+        "--hermes-home", str(home), "--baseline-path", str(baseline),
+        "--report-path", str(report), "--state-path", str(state),
+        "--skip-upstream", "--text", "--notify-owner-bin", str(tmp_path / "none"),
+    ], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr           # corrupt state → safe default, no crash
+    assert "runtime_status=match" in r.stdout
+    # state was rewritten cleanly
+    assert json.loads(state.read_text(encoding="utf-8"))["schema_version"] == 1
+
+
+def test_undelivered_drift_alert_is_retried_next_run(tmp_path):
+    # Delivery to a bogus notify bin always fails → the throttle signature is NOT
+    # persisted (MEDIUM 1) so the drift re-pages next run, and a priority-1
+    # undelivered alert escalates via exit 6 (OnFailure).
+    home = _fake_hermes_home(tmp_path)
+    baseline = _baseline_file(tmp_path, "0" * 40, hvc.bridge_sha(home))  # drift
+    report = tmp_path / "r.json"
+    state = tmp_path / "s.json"
+    cmd = [
+        sys.executable, str(SCRIPT),
+        "--hermes-home", str(home), "--baseline-path", str(baseline),
+        "--report-path", str(report), "--state-path", str(state),
+        "--skip-upstream", "--text", "--notify-owner-bin", str(tmp_path / "nonexistent"),
+    ]
+    a = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    b = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    assert "alert_action=sent" in a.stdout and "alert_delivered ok=0" in a.stdout
+    assert "alert_action=sent" in b.stdout          # retried (NOT suppressed) because delivery failed
+    assert a.returncode == 6 and b.returncode == 6  # priority-1 undelivered → escalate
+
+
+def test_report_and_state_are_written_atomically_as_a_pair(tmp_path):
+    # Forcing the report path to be a DIRECTORY makes the write fail. The pair
+    # writer must leave NEITHER file behind (HIGH 1) and exit 6 (OnFailure owns
+    # the page — no in-process alert on a clean run: BLOCKER 2).
+    home = _fake_hermes_home(tmp_path)
+    baseline = _baseline_file(tmp_path, _git_head(home), hvc.bridge_sha(home))  # clean
+    report_dir = tmp_path / "r.json"
+    report_dir.mkdir()                              # report path is a dir → write fails
+    state = tmp_path / "s.json"
+    r = subprocess.run([
+        sys.executable, str(SCRIPT),
+        "--hermes-home", str(home), "--baseline-path", str(baseline),
+        "--report-path", str(report_dir), "--state-path", str(state),
+        "--skip-upstream", "--text", "--notify-owner-bin", str(tmp_path / "none"),
+    ], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 6                         # write failure → monitor-failed (OnFailure)
+    assert not state.exists()                        # neither file half-written
+    assert "alert_dispatched" not in r.stdout        # clean run → no in-process alert (no double page)

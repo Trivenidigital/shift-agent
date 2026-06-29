@@ -69,8 +69,10 @@ BRIDGE_REL = ("scripts", "whatsapp-bridge", "bridge.js")
 HARD_CONDITIONS = frozenset({
     "runtime_commit_drift", "bridge_sha_drift", "bridge_missing",
     "patch_markers_missing", "baseline_unreadable", "hermes_home_unreadable",
-    "report_write_failed", "state_unsafe", "unsafe_permissions",
+    "unsafe_permissions",
 })
+# Report/state write failure is handled out-of-band (exit 6 → systemd OnFailure),
+# not as a flowed condition, so it is deliberately NOT in HARD_CONDITIONS.
 SOFT_CONDITIONS = frozenset({
     "upstream_ahead", "patch_port_review_required", "upstream_check_failed",
 })
@@ -130,61 +132,55 @@ def decide_alert(active, hard, soft, prev_state, *, now, network_fail_after) -> 
     """Notify-on-change decision (pure). Returns
     {action, reason, priority, notify, signature}.
 
-    - No active conditions: 'recovery' (notify) if there were prior conditions,
-      else 'not_needed' (no notify).
-    - Hard conditions: notify (priority 1) when the signature changed since the
-      last alert; suppress when unchanged. Hard bypasses network throttle.
-    - Soft `upstream_check_failed`: count-throttled — notify only once the
-      effective consecutive-failure count reaches `network_fail_after`, and only
-      on a signature transition (no daily repeat after that).
-    - Other soft (upstream_ahead / patch_port_review_required): notify on
-      transition (priority 0).
+    TWO INDEPENDENT CHANNELS so a transient network blip can never re-page a
+    persistent hard/advisory condition (and a co-present hard condition can never
+    defeat the network threshold):
+
+    - STABLE channel = hard conditions + non-network advisories
+      (upstream_ahead / patch_port_review_required). Notify-on-change by the
+      signature of THIS set only — `upstream_check_failed` is EXCLUDED from the
+      signature. Priority 1 if any hard condition is present, else 0.
+    - NETWORK channel = `upstream_check_failed`. Count-throttled: page exactly on
+      the run where the effective consecutive-failure count first reaches
+      `network_fail_after`; recovery when it clears after having paged.
+
+    `signature` returned is always the STABLE signature (what callers persist).
     """
-    sig = alert_signature(active)
-    prev_sig = (prev_state or {}).get("last_alert_signature") or ""
-    consec = int((prev_state or {}).get("consecutive_network_failures") or 0)
+    prev = prev_state or {}
+    prev_sig = prev.get("last_alert_signature") or ""
+    consec = int(prev.get("consecutive_network_failures") or 0)
     active = list(active or [])
-    hard = list(hard or [])
     soft = list(soft or [])
 
-    if not active:
-        if prev_sig:
-            return {"action": "recovery", "reason": "all monitored conditions cleared",
-                    "priority": 0, "notify": True, "signature": sig}
-        return {"action": "not_needed", "reason": "no conditions",
-                "priority": 0, "notify": False, "signature": sig}
+    network_failed = "upstream_check_failed" in soft
+    stable = sorted(c for c in active if c != "upstream_check_failed")
+    stable_hard = [c for c in stable if c in HARD_CONDITIONS]
+    sig = alert_signature(stable)
+    stable_changed = sig != prev_sig
 
-    changed = sig != prev_sig
+    effective = consec + 1 if network_failed else 0
+    network_page = network_failed and effective == network_fail_after
+    network_recovered = (not network_failed) and consec >= network_fail_after
 
-    if hard:
-        if changed:
-            return {"action": "sent",
-                    "reason": "new hard condition(s): " + ",".join(sorted(hard)),
-                    "priority": 1, "notify": True, "signature": sig}
-        return {"action": "suppressed",
-                "reason": "hard condition(s) unchanged since last alert",
-                "priority": 1, "notify": False, "signature": sig}
-
-    # soft-only
-    if "upstream_check_failed" in soft:
-        effective = consec + 1
-        if effective < network_fail_after:
-            return {"action": "suppressed",
-                    "reason": f"upstream unreachable {effective}/{network_fail_after} (below alert threshold)",
-                    "priority": 0, "notify": False, "signature": sig}
-        if changed:
-            return {"action": "sent",
-                    "reason": f"upstream unreachable for {effective} consecutive runs",
-                    "priority": 0, "notify": True, "signature": sig}
-        return {"action": "suppressed",
-                "reason": "upstream-unreachable already alerted", "priority": 0,
-                "notify": False, "signature": sig}
-
-    if changed:
-        return {"action": "sent",
-                "reason": "new advisory: " + ",".join(sorted(soft)),
+    if stable and stable_changed:
+        kind = "new hard condition(s): " if stable_hard else "new advisory: "
+        return {"action": "sent", "reason": kind + ",".join(stable),
+                "priority": 1 if stable_hard else 0, "notify": True, "signature": sig}
+    if not stable and prev_sig:
+        cleared = ",".join(prev.get("active_conditions") or []) or "(monitored conditions)"
+        return {"action": "recovery", "reason": f"cleared: {cleared}",
                 "priority": 0, "notify": True, "signature": sig}
-    return {"action": "suppressed", "reason": "advisory unchanged",
+    if network_page:
+        return {"action": "sent",
+                "reason": f"upstream unreachable for {effective} consecutive runs",
+                "priority": 0, "notify": True, "signature": sig}
+    if network_recovered:
+        return {"action": "recovery", "reason": "upstream reachable again",
+                "priority": 0, "notify": True, "signature": sig}
+    if stable or network_failed:
+        return {"action": "suppressed", "reason": "no change since last alert",
+                "priority": 1 if stable_hard else 0, "notify": False, "signature": sig}
+    return {"action": "not_needed", "reason": "no conditions",
             "priority": 0, "notify": False, "signature": sig}
 
 
@@ -430,17 +426,21 @@ def evaluate(home, baseline, upstream, prev_state, *, now, network_fail_after,
         "active_conditions": sorted(conditions),
         "alert_action": decision["action"],
         "alert_reason": decision["reason"],
+        "alert_delivered": None,  # set by main() after dispatch (None when no alert)
         "consecutive_network_failures": consec,
         "mutation_performed": False,
         "note": "Patch-port validation is delegated to .github/workflows/hermes-drift-check.yml (weekly CI).",
     }
 
-    notify = decision["notify"]
+    # Alert-throttle fields (last_alert_signature / last_notified_at) are carried
+    # forward unchanged here; main() advances them ONLY after a successful
+    # delivery, so a failed page is retried next run instead of silently
+    # suppressed. Observability fields update every run.
     new_state = {
         "schema_version": 1,
-        "last_alert_signature": decision["signature"] if notify else prev_state.get("last_alert_signature", ""),
+        "last_alert_signature": prev_state.get("last_alert_signature", ""),
         "active_conditions": sorted(conditions),
-        "last_notified_at": now.isoformat() if notify else prev_state.get("last_notified_at", ""),
+        "last_notified_at": prev_state.get("last_notified_at", ""),
         "last_successful_run_at": now.isoformat(),
         "consecutive_network_failures": consec,
         "last_upstream_head_seen": up.get("head_commit", "") or prev_state.get("last_upstream_head_seen", ""),
@@ -461,28 +461,38 @@ def _load_state(path):
         return {}
 
 
-def _atomic_write_json(path, obj, mode=0o640):
-    """Write JSON atomically (tmp → fsync → os.replace). Single-writer private
-    file; no flock needed (only this daily timer writes it)."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+def _atomic_write_json_pair(specs):
+    """Write several JSON files as a near-atomic unit. `specs` is a list of
+    (path, obj, mode). ALL temps are staged + fsync'd first; only then are they
+    `os.replace`d in list order. If ANY serialization fails, nothing is replaced
+    (no half-written pair). Callers put the report FIRST and the state LAST so a
+    mid-replace failure on the report leaves the state untouched.
+
+    Single-writer private files (only this daily timer writes them) → no flock."""
+    staged = []  # [(tmp_path, final_path), ...] still needing cleanup
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(obj, f, indent=2, sort_keys=True)
-            f.flush()
-            os.fsync(f.fileno())
-        try:
-            os.chmod(tmp, mode)
-        except OSError:
-            pass
-        os.replace(tmp, str(path))
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+        for path, obj, mode in specs:
+            path = Path(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(obj, f, indent=2, sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                os.chmod(tmp, mode)
+            except OSError:
+                pass
+            staged.append((tmp, str(path)))
+        for tmp, final in list(staged):
+            os.replace(tmp, final)        # may raise (e.g. target is a directory)
+            staged.remove((tmp, final))
+    finally:
+        for tmp, _ in staged:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def _check_permissions(paths):
@@ -606,27 +616,45 @@ def main(argv=None) -> int:
                   file=sys.stderr)
             return EXIT_OK
 
-        # Writes confined to the monitor's own report + state files.
-        try:
-            _atomic_write_json(args.report_path, report)
-            _atomic_write_json(args.state_path, new_state)
-        except Exception as e:  # noqa: BLE001
-            print(f"hermes-version-check: FAILED to write report/state: {e}", file=sys.stderr)
-            dispatch_alert(args.notify_owner_bin, "Hermes version monitor FAILED", 1,
-                           f"could not write report/state: {e}. Read-only monitor; investigate disk/perms.")
-            return EXIT_MONITOR_FAILED
-
+        # 1. Dispatch the alert FIRST (before any disk write) so a later write
+        #    failure cannot lose a real drift page. Persist the throttle signature
+        #    ONLY on confirmed delivery → a failed page is retried next run.
+        delivered = None
         if decision["notify"]:
             title, message = _alert_text(report, decision)
             print(f"hermes_version_monitor_alert_dispatched action={decision['action']} "
                   f"priority={decision['priority']} conditions={','.join(report['active_conditions'])}")
-            ok, detail = dispatch_alert(args.notify_owner_bin, title, decision["priority"], message)
-            print(f"hermes_version_monitor_alert_delivered ok={int(ok)} detail={detail}")
+            delivered, detail = dispatch_alert(args.notify_owner_bin, title, decision["priority"], message)
+            print(f"hermes_version_monitor_alert_delivered ok={int(delivered)} detail={detail}")
+            report["alert_delivered"] = delivered
+            if delivered:
+                new_state["last_alert_signature"] = decision["signature"]
+                new_state["last_notified_at"] = now.isoformat()
+
+        # 2. Write report + state as a near-atomic pair (report first, state last).
+        #    On failure: no in-process alert here (would double-page with
+        #    OnFailure); just exit 6 so the OnFailure handler owns the page.
+        try:
+            _atomic_write_json_pair([
+                (args.report_path, report, 0o640),
+                (args.state_path, new_state, 0o640),
+            ])
+        except Exception as e:  # noqa: BLE001
+            print(f"hermes-version-check: FAILED to write report/state: {e} "
+                  "(OnFailure handler will alert the operator)", file=sys.stderr)
+            return EXIT_MONITOR_FAILED
 
         if args.text:
             _print_text(report)
         if args.json:
             print(json.dumps(report, indent=2, sort_keys=True))
+
+        # 3. Escalate an UNDELIVERED priority-1 (hard-drift) page via exit 6 →
+        #    OnFailure, so a failed delivery is not silently swallowed.
+        if decision["notify"] and delivered is False and decision["priority"] == 1:
+            print("hermes-version-check: priority-1 alert delivery FAILED — escalating via OnFailure",
+                  file=sys.stderr)
+            return EXIT_MONITOR_FAILED
         return EXIT_OK
 
     except Exception as e:  # noqa: BLE001 — last-resort; OnFailure handler catches exit 6

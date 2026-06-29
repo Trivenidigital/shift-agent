@@ -1,6 +1,5 @@
 [Unit]
 Description=Hermes version monitor (read-only) — runtime pin vs baseline + best-effort upstream
-Documentation=file:/opt/shift-agent/working/tasks/hermes-version-monitoring-plan.md
 After=network-online.target
 Wants=network-online.target
 OnFailure=hermes-version-check-failure.service
