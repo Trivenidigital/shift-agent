@@ -411,17 +411,20 @@ def test_unsafe_permissions_detected(tmp_path):
     baseline = _baseline_file(tmp_path, _git_head(home), hvc.bridge_sha(home))
     state = tmp_path / "s.json"
     state.write_text("{}", encoding="utf-8")
-    os.chmod(state, 0o666)  # world-writable → unsafe
+    os.chmod(state, 0o666)  # world-writable → unsafe (a priority-1 hard condition)
     report = tmp_path / "r.json"
+    # A WORKING notify stub so the priority-1 page DELIVERS (→ exit 0). With a
+    # bogus bin the page would (correctly) escalate to exit 6 instead.
+    notify, out = _notify_capture(tmp_path)
     r = subprocess.run([
         sys.executable, str(SCRIPT),
         "--hermes-home", str(home), "--baseline-path", str(baseline),
         "--report-path", str(report), "--state-path", str(state),
-        "--skip-upstream", "--text",
-        "--notify-owner-bin", str(tmp_path / "nonexistent-notify"),
+        "--skip-upstream", "--text", "--notify-owner-bin", str(notify),
     ], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     assert "unsafe_permissions" in r.stdout
+    assert out.read_text(encoding="utf-8").count("\n") == 1  # the unsafe-perms page was sent
 
 
 def test_dispatch_alert_missing_bin_is_graceful():

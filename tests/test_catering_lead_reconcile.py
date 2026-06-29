@@ -137,13 +137,21 @@ def test_canary_bulk_deploy_script_exists():
 
 
 def test_harness_not_in_deploy_install_globs():
-    """Per R4-H-2: tools/synthetic-retry-harness.py must NOT land at
-    /usr/local/bin/. Confirm install_artifacts in deploy.sh does NOT
-    glob tools/*."""
+    """Per R4-H-2: test-harness scripts (e.g. tools/synthetic-retry-harness.py)
+    must NOT become commands at /usr/local/bin/, and deploy.sh must not glob
+    tools/*. A specific, reviewed install of a NON-executable tools/ DATA file
+    (the read-only hermes-patch-baseline.txt snapshot the version monitor reads)
+    to /opt/shift-agent/ is permitted — it is not a command and cannot run."""
     deploy_path = (Path(__file__).resolve().parent.parent / "src" / "agents"
                    / "shift" / "scripts" / "shift-agent-deploy.sh")
     text = deploy_path.read_text(encoding="utf-8")
-    # tools/* should not appear in any install line
     for line in text.splitlines():
-        if line.strip().startswith("install ") and "tools/" in line:
-            pytest.fail(f"deploy.sh installs from tools/: {line}")
+        s = line.strip()
+        if not s.startswith("install ") or "tools/" not in s:
+            continue
+        # The harness risk is a tools/ file becoming an executable command.
+        if "/usr/local/bin" in s:
+            pytest.fail(f"deploy.sh installs from tools/ to /usr/local/bin: {line}")
+        # No wildcard tools/* glob (would sweep in the harness), no .py scripts.
+        if "tools/*" in s or ".py" in s:
+            pytest.fail(f"deploy.sh installs a tools/ glob or script: {line}")
