@@ -1,0 +1,18 @@
+{
+  "topic": "hermes-version-monitoring",
+  "task_text": "hermes-version-monitoring — read-only on-VPS Hermes version monitor (systemd timer) verifying live runtime pin (commit + bridge.js sha256 + patch markers) vs shipped baseline, best-effort fail-safe git ls-remote upstream check, JSON report, notify-on-change operator alerts via shift-agent-notify-owner, deploy wiring, Track B 0.17 upgrade plan doc. Monitoring only — no Hermes update, no gateway restart, no baseline rewrite, no skill install, no auto-update, no patch-port.",
+  "completed_at": "2026-06-29T14:37:54.917709+00:00",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 9,
+  "hermes_step_count": 3,
+  "files_to_read_first": [
+    "tools/check-shift-agent-patch.sh",
+    "tools/hermes-patch-baseline.txt",
+    ".github/workflows/hermes-drift-check.yml",
+    "src/agents/shift/scripts/shift-agent-notify-owner",
+    "src/agents/shift/systemd/send-routing-accuracy-summary-failure.service",
+    "src/agents/shift/scripts/shift-agent-deploy.sh",
+    "tests/test_flyer_recovery_watchdog.py",
+    "src/platform/safe_io.py"
+  ]
+}

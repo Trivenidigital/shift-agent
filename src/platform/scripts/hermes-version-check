@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""
+hermes-version-check — read-only Hermes version monitor (Track A durability).
+
+Runs from a daily systemd timer as User=shift-agent. It is STRICTLY READ-ONLY:
+it never updates Hermes, restarts the gateway, rewrites the baseline, installs
+skills, enables auto-update, runs patch-hermes.py, or clones/fetches/checks-out
+upstream. Its only writes are its own private report + state files under
+/opt/shift-agent/ and (on alert) a subprocess call to shift-agent-notify-owner.
+
+What it checks (every run):
+  LOCAL (network-free, always):
+    - live Hermes commit (git rev-parse HEAD, read-only) vs pinned baseline
+    - live bridge.js sha256 vs pinned baseline
+    - shift-agent patch markers present in run.py / whatsapp.py / bridge.js
+    - baseline file readable
+  UPSTREAM (best-effort, fail-safe; skip with --skip-upstream):
+    - git ls-remote of the upstream Hermes repo (NO clone, NO fetch, NO
+      patch-hermes dry-run — that heavy detection stays in the weekly CI
+      workflow .github/workflows/hermes-drift-check.yml). Reports whether
+      upstream is ahead of the pin → an *advisory* "patch-port review required"
+      flag only. Any network/git error → upstream_status=unknown (never raises,
+      never alarms beyond a throttled soft alert).
+
+Alerts are notify-on-change (signature throttle) routed through the existing
+shift-agent-notify-owner chokepoint. Monitor-process crashes are caught by the
+systemd OnFailure handler (hermes-version-check-failure.service).
+
+Exit codes:
+  0 — monitor ran and wrote its report (drift is *reported*, not an error exit)
+  6 — the monitor itself failed (could not write report/state, or unhandled
+      exception) → systemd OnFailure fires the failure-notify service.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ── defaults (production paths; all overridable via CLI for tests) ───────────
+DEFAULT_HERMES_HOME = "/root/.hermes/hermes-agent"
+DEFAULT_BASELINE = "/opt/shift-agent/hermes-patch-baseline.txt"
+DEFAULT_REPORT = "/opt/shift-agent/logs/hermes-version-report.json"
+DEFAULT_STATE = "/opt/shift-agent/state/hermes-version-monitor.json"
+DEFAULT_LOG = "/opt/shift-agent/logs/decisions.log"  # informational; monitor does not write it
+DEFAULT_UPSTREAM = "https://github.com/NousResearch/hermes-agent.git"
+DEFAULT_NOTIFY_BIN = "/usr/local/bin/shift-agent-notify-owner"
+DEFAULT_UPSTREAM_TIMEOUT = 10
+DEFAULT_NETWORK_FAIL_ALERT_AFTER = 3
+
+EXIT_OK = 0
+EXIT_MONITOR_FAILED = 6
+
+# Marker the shift-agent patches inject into the 3 Hermes files (read-only grep).
+PATCH_MARKER = "BEGIN shift-agent-sender-id"
+MARKER_FILES = (
+    ("gateway", "run.py"),
+    ("gateway", "platforms", "whatsapp.py"),
+    ("scripts", "whatsapp-bridge", "bridge.js"),
+)
+BRIDGE_REL = ("scripts", "whatsapp-bridge", "bridge.js")
+
+HARD_CONDITIONS = frozenset({
+    "runtime_commit_drift", "bridge_sha_drift", "bridge_missing",
+    "patch_markers_missing", "baseline_unreadable", "hermes_home_unreadable",
+    "report_write_failed", "state_unsafe", "unsafe_permissions",
+})
+SOFT_CONDITIONS = frozenset({
+    "upstream_ahead", "patch_port_review_required", "upstream_check_failed",
+})
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Pure helpers (no I/O side effects) — unit-tested in-process
+# ════════════════════════════════════════════════════════════════════════════
+
+def read_baseline(path) -> dict | None:
+    """Read the pinned baseline KEY=VALUE file. Returns
+    {"commit","version","bridge_sha256"} or None if missing/unreadable/no commit.
+
+    Mirrors tools/check-shift-agent-patch.sh _read_pin: tolerates CRLF and
+    surrounding single/double quotes (so a quoted baseline value does not
+    false-compare against a raw `git rev-parse` commit).
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    def _read(key: str) -> str | None:
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if k.strip() != key:
+                continue
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                v = v[1:-1]
+            return v
+        return None
+
+    commit = _read("HERMES_COMMIT")
+    if not commit:
+        return None
+    return {
+        "commit": commit,
+        "version": _read("HERMES_VERSION") or "",
+        "bridge_sha256": _read("BRIDGE_POST_PATCH_SHA256") or "",
+    }
+
+
+def alert_signature(active) -> str:
+    """Stable signature of the active-condition set (order-independent).
+    Empty set → "" so 'no conditions' is distinguishable from any real set."""
+    items = sorted(set(active or []))
+    if not items:
+        return ""
+    return hashlib.sha256(",".join(items).encode("utf-8")).hexdigest()
+
+
+def decide_alert(active, hard, soft, prev_state, *, now, network_fail_after) -> dict:
+    """Notify-on-change decision (pure). Returns
+    {action, reason, priority, notify, signature}.
+
+    - No active conditions: 'recovery' (notify) if there were prior conditions,
+      else 'not_needed' (no notify).
+    - Hard conditions: notify (priority 1) when the signature changed since the
+      last alert; suppress when unchanged. Hard bypasses network throttle.
+    - Soft `upstream_check_failed`: count-throttled — notify only once the
+      effective consecutive-failure count reaches `network_fail_after`, and only
+      on a signature transition (no daily repeat after that).
+    - Other soft (upstream_ahead / patch_port_review_required): notify on
+      transition (priority 0).
+    """
+    sig = alert_signature(active)
+    prev_sig = (prev_state or {}).get("last_alert_signature") or ""
+    consec = int((prev_state or {}).get("consecutive_network_failures") or 0)
+    active = list(active or [])
+    hard = list(hard or [])
+    soft = list(soft or [])
+
+    if not active:
+        if prev_sig:
+            return {"action": "recovery", "reason": "all monitored conditions cleared",
+                    "priority": 0, "notify": True, "signature": sig}
+        return {"action": "not_needed", "reason": "no conditions",
+                "priority": 0, "notify": False, "signature": sig}
+
+    changed = sig != prev_sig
+
+    if hard:
+        if changed:
+            return {"action": "sent",
+                    "reason": "new hard condition(s): " + ",".join(sorted(hard)),
+                    "priority": 1, "notify": True, "signature": sig}
+        return {"action": "suppressed",
+                "reason": "hard condition(s) unchanged since last alert",
+                "priority": 1, "notify": False, "signature": sig}
+
+    # soft-only
+    if "upstream_check_failed" in soft:
+        effective = consec + 1
+        if effective < network_fail_after:
+            return {"action": "suppressed",
+                    "reason": f"upstream unreachable {effective}/{network_fail_after} (below alert threshold)",
+                    "priority": 0, "notify": False, "signature": sig}
+        if changed:
+            return {"action": "sent",
+                    "reason": f"upstream unreachable for {effective} consecutive runs",
+                    "priority": 0, "notify": True, "signature": sig}
+        return {"action": "suppressed",
+                "reason": "upstream-unreachable already alerted", "priority": 0,
+                "notify": False, "signature": sig}
+
+    if changed:
+        return {"action": "sent",
+                "reason": "new advisory: " + ",".join(sorted(soft)),
+                "priority": 0, "notify": True, "signature": sig}
+    return {"action": "suppressed", "reason": "advisory unchanged",
+            "priority": 0, "notify": False, "signature": sig}
+
+
+def main(argv=None) -> int:
+    # Fleshed out in Task 4.
+    raise NotImplementedError
+
+
+if __name__ == "__main__":
+    sys.exit(main())
