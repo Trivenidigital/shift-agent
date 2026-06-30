@@ -130,6 +130,20 @@ def test_no_fabricated_item_or_offer():
             assert tok in allowed, f"ungrounded token {tok!r} in {placed!r}"
 
 
+def test_price_only_offer_never_fabricates_a_label():
+    # offer is a bare price with no label words -> the badge must NOT invent a
+    # label like "SPECIAL". placed_text mirrors the canvas, so it must be absent.
+    facts = [f for f in _snack_fixture() if f.fact_id != "pricing_structure"]
+    facts.append(_fact("pricing_structure", "$9.99"))
+    _, r = compose_premium_poster_v1(facts)
+    assert r["eligible"] is True
+    assert r["offer_price"] == "$9.99" and r["offer_label"] == ""
+    # the fabricated default "SPECIAL" badge label must never be drawn. placed_text
+    # mirrors the canvas, so an exact-token check catches it (a legit grounded
+    # headline like "Snack Specials" is a different token and is fine).
+    assert all(p.strip().upper() != "SPECIAL" for p in r["placed_text"])
+
+
 def test_too_many_items_never_shrink_below_floor():
     facts = [f for f in _snack_fixture() if not f.fact_id.startswith("item:")]
     facts += [_fact(f"item:{i}:name", f"Snack Item {i}") for i in range(24)]  # stress: 24 items

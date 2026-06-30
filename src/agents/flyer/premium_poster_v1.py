@@ -277,14 +277,11 @@ def compose_premium_poster_v1(
 
     # ── offer badge (framed, large, dominant) ──
     badge_cx, badge_cy = int(w * 0.5), int(h * 0.50)
-    badge_r = _draw_offer_badge(draw, label=label, price=price, cx=badge_cx, cy=badge_cy, w=w)
+    badge_r, badge_drawn = _draw_offer_badge(draw, label=label, price=price, cx=badge_cx, cy=badge_cy, w=w)
     regions["offer"] = (badge_cx - badge_r, badge_cy - badge_r, badge_r * 2, badge_r * 2)
     offer_px = max(READABILITY_FLOOR_PX, int(w * 0.085))
     fonts["offer_price"] = offer_px
-    if price:
-        placed_text.append(price)
-    if label:
-        placed_text.append(label.upper())
+    placed_text.extend(badge_drawn)  # exactly what the badge drew (mirrors canvas)
 
     # ── item-list block (LARGE, readable, auto-columned) ──
     iz_x, iz_y = int(w * 0.07), int(h * 0.625)
@@ -364,19 +361,27 @@ def _fit_headline(draw, text, *, max_w, max_px, min_px=58):
 
 
 def _draw_offer_badge(draw, *, label, price, cx, cy, w):
-    """A large gold-framed circular price badge. Returns the radius."""
+    """A large gold-framed circular price badge. Draws ONLY grounded text — it
+    NEVER invents a label (fact-safety). Returns (radius, [text actually drawn])
+    so the caller's placed_text mirrors the canvas exactly."""
     r = int(w * 0.16)
     draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(20, 12, 8))
     draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=_GOLD, width=max(5, int(w * 0.008)))
     inner = int(r * 0.86)
     draw.ellipse([cx - inner, cy - inner, cx + inner, cy + inner], outline=_GOLD, width=2)
-    lab = (label or "SPECIAL").upper()
     lf = _premium_font("kicker", max(20, int(w * 0.026)))
     pf = _premium_font("offer_price", max(READABILITY_FLOOR_PX, int(w * 0.085)))
-    _draw_center_at(draw, lab[:18], lf, cx=cx, cy=cy - int(r * 0.55), fill=_CREAM)
+    drawn: list[str] = []
+    if label:
+        lab = label.upper()[:18]
+        _draw_center_at(draw, lab, lf, cx=cx, cy=cy - int(r * 0.55), fill=_CREAM)
+        drawn.append(lab)
     if price:
-        _draw_center_at(draw, price, pf, cx=cx, cy=cy - int(r * 0.18), fill=_GOLD)
-    return r
+        # centre the price vertically when there is no label above it
+        price_cy = cy - int(r * 0.18) if label else cy - int(r * 0.30)
+        _draw_center_at(draw, price, pf, cx=cx, cy=price_cy, fill=_GOLD)
+        drawn.append(price)
+    return r, drawn
 
 
 def _draw_center_at(draw, text, font, *, cx, cy, fill):
