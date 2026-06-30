@@ -27,10 +27,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Sequence
 
-from agents.flyer.campaign_scene_prompts import (
-    CampaignSceneTemplate,
-    select_food_poster_scene,
-)
+try:  # flat (VPS, deployed as flyer_campaign_scene_prompts.py) then package (tests)
+    from flyer_campaign_scene_prompts import (  # type: ignore
+        CampaignSceneTemplate,
+        select_food_poster_scene,
+    )
+except ImportError:  # pragma: no cover - src layout fallback
+    from agents.flyer.campaign_scene_prompts import (
+        CampaignSceneTemplate,
+        select_food_poster_scene,
+    )
 
 # The explicit no-text contract appended to EVERY food-background prompt. The
 # image model must produce a TEXTLESS food/background only; Python overlays all
@@ -230,7 +236,10 @@ def _oracle_scorer() -> Optional[Scorer]:
     is unavailable so the wrapper records ``critique_unavailable`` and never raises.
     NOT used by the unit tests (they inject a deterministic scorer)."""
     try:
-        from agents.flyer.flyer_art_director_oracle import score_art_direction, score_to_dict
+        try:  # flat (VPS) then package (tests)
+            from flyer_art_director_oracle import score_art_direction, score_to_dict  # type: ignore
+        except ImportError:
+            from agents.flyer.flyer_art_director_oracle import score_art_direction, score_to_dict
     except Exception:
         return None
 
@@ -323,7 +332,10 @@ def compose_premium_poster_with_generated_background(
     composed poster is recorded under ``report["critique"]`` — it NEVER blocks.
     Returns ``(PIL.Image | None, report)`` with the director outcome under
     ``report["director"]``."""
-    from agents.flyer.premium_poster_v1 import compose_premium_poster_v1
+    try:  # flat (VPS, deployed as flyer_premium_poster_v1.py) then package (tests)
+        from flyer_premium_poster_v1 import compose_premium_poster_v1  # type: ignore
+    except ImportError:  # pragma: no cover - src layout fallback
+        from agents.flyer.premium_poster_v1 import compose_premium_poster_v1
 
     bg = generate_textless_food_background(
         facts, generator=generator, textless_ocr=textless_ocr, art_director=art_director)
@@ -375,7 +387,10 @@ def compose_best_of_n(
       ``critique``) for artifact saving. Selection is by critique composite; when
       critique is unavailable for all accepted candidates, the first accepted wins.
     """
-    from agents.flyer.premium_poster_v1 import compose_premium_poster_v1
+    try:  # flat (VPS, deployed as flyer_premium_poster_v1.py) then package (tests)
+        from flyer_premium_poster_v1 import compose_premium_poster_v1  # type: ignore
+    except ImportError:  # pragma: no cover - src layout fallback
+        from agents.flyer.premium_poster_v1 import compose_premium_poster_v1
 
     n = max(1, int(n))
     bsummary = brief_summary(facts)

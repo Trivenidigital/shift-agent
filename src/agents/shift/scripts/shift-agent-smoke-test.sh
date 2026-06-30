@@ -114,6 +114,25 @@ import flyer_reference_extract
 import flyer_semantic_brief
 import flyer_visual_qa
 import flyer_premium_overlay
+# Premium Poster v1 stack (PR #523 + deploy-readiness): the flat modules must
+# import on the box so render._render_model's premium branch can resolve its
+# adapters when armed. Imports only — the branch stays a no-op while the flag is
+# OFF (default). This is the on-box deploy smoke for files-exist + imports-resolve
+# + premium-branch-initializes + flag-off-no-op.
+import flyer_premium_poster_v1
+import flyer_premium_poster_v1_director
+import flyer_art_director_oracle
+assert callable(flyer_premium_poster_v1.compose_premium_poster_v1), \
+    'premium poster composer missing on box'
+assert callable(flyer_premium_poster_v1_director.compose_best_of_n), \
+    'premium poster best-of-N selector missing on box'
+assert callable(flyer_art_director_oracle.score_art_direction), \
+    'art-director oracle missing on box'
+assert callable(flyer_render.render_premium_poster_v1), \
+    'render premium branch missing on box'
+assert flyer_render._premium_poster_v1_armed(
+    type('P', (), {'customer_phone': '+10000000000'})()) is False, \
+    'premium poster gate must never arm a non-allowlisted sender'
 import flyer_manual_queue
 # PR-ζ.1b 2026-05-26 — verify flat-renamed allowlist entry matches the
 # deployed basename, verify stale entry removed, verify cf-router entries

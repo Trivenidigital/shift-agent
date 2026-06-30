@@ -376,6 +376,25 @@ PY
     else
         rm -f /opt/shift-agent/flyer_campaign_scene_prompts.py
     fi
+    # Premium Poster v1 stack (flag-gated render integration, PR #523). Imported by
+    # flyer_render.py via the flat names below; the modules carry try-flat/except-
+    # package shims for their sibling imports (premium_overlay/campaign_scene_prompts/
+    # premium_poster_v1/flyer_art_director_oracle). Guarded for rollback compatibility.
+    if [ -f src/agents/flyer/premium_poster_v1.py ]; then
+        install -m 644 src/agents/flyer/premium_poster_v1.py /opt/shift-agent/flyer_premium_poster_v1.py
+    else
+        rm -f /opt/shift-agent/flyer_premium_poster_v1.py
+    fi
+    if [ -f src/agents/flyer/premium_poster_v1_director.py ]; then
+        install -m 644 src/agents/flyer/premium_poster_v1_director.py /opt/shift-agent/flyer_premium_poster_v1_director.py
+    else
+        rm -f /opt/shift-agent/flyer_premium_poster_v1_director.py
+    fi
+    if [ -f src/agents/flyer/flyer_art_director_oracle.py ]; then
+        install -m 644 src/agents/flyer/flyer_art_director_oracle.py /opt/shift-agent/flyer_art_director_oracle.py
+    else
+        rm -f /opt/shift-agent/flyer_art_director_oracle.py
+    fi
     if [ -f src/agents/flyer/workflow.py ]; then
         install -m 644 src/agents/flyer/workflow.py /opt/shift-agent/flyer_workflow.py
     else
