@@ -364,9 +364,13 @@ def compose_best_of_n(
     returns one).
 
     Returns ``(best_img, report, candidates)``:
-    - ``report`` = audit summary: ``n``, ``winner_index`` (-1 = deterministic
-      fallback, not in ``candidates``), ``winner_composite``, and a per-candidate
-      list (index / background_status / detail / food_image_path / composite).
+    - ``best_img`` = the winning poster (the canonical winner; ``None`` only if the
+      facts are ineligible).
+    - ``report`` = audit summary: ``n``, ``winner_index`` (always a valid index into
+      ``candidates`` — when all candidates are rejected the deterministic fallback is
+      appended as a real candidate with ``background_status="deterministic_fallback"``),
+      ``winner_composite``, and a per-candidate list (index / background_status /
+      detail / food_image_path / composite).
     - ``candidates`` = the full per-candidate records (incl. ``img`` / ``report`` /
       ``critique``) for artifact saving. Selection is by critique composite; when
       critique is unavailable for all accepted candidates, the first accepted wins.
@@ -385,12 +389,21 @@ def compose_best_of_n(
             "composite": None, "critique": None, "img": None, "report": None,
         }
         if bg.status == "ok" and bg.food_image_path:
-            c_img, c_rep = compose_premium_poster_v1(facts, food_image_path=bg.food_image_path, size=size)
-            crit = critique_composed_poster(c_img, brief_summary=bsummary, scorer=critique_scorer)
-            cand["img"] = c_img
-            cand["report"] = c_rep
-            cand["critique"] = crit
-            cand["composite"] = crit.get("composite") if crit.get("available") else None
+            # one candidate must never abort the batch (never-raises contract)
+            try:
+                c_img, c_rep = compose_premium_poster_v1(facts, food_image_path=bg.food_image_path, size=size)
+                if c_img is None:  # ineligible facts -> no poster (would crash critique on None)
+                    cand["background_status"] = "compose_ineligible"
+                    cand["detail"] = str(c_rep.get("reason", "ineligible"))
+                else:
+                    crit = critique_composed_poster(c_img, brief_summary=bsummary, scorer=critique_scorer)
+                    cand["img"] = c_img
+                    cand["report"] = c_rep
+                    cand["critique"] = crit
+                    cand["composite"] = crit.get("composite") if crit.get("available") else None
+            except Exception as exc:
+                cand["background_status"] = "compose_error"
+                cand["detail"] = f"compose_error:{type(exc).__name__}"
         candidates.append(cand)
 
     scored = [c for c in candidates if c["img"] is not None and c["composite"] is not None]
@@ -400,10 +413,15 @@ def compose_best_of_n(
     elif accepted:
         winner = accepted[0]  # critique unavailable for all -> first accepted food poster
     else:
-        fb_img, fb_rep = compose_premium_poster_v1(facts, size=size)  # all rejected -> deterministic
-        winner = {"index": -1, "background_status": "all_rejected", "scene_key": "",
-                  "detail": "all candidates rejected", "food_image_path": None,
+        # no accepted food candidate -> deterministic fallback, APPENDED as a real
+        # candidate so winner_index always indexes `candidates` (no -1 footgun).
+        # (img may be None if the facts are ineligible — the caller treats None as
+        # "fall back to the existing pipeline", same as compose_premium_poster_v1.)
+        fb_img, fb_rep = compose_premium_poster_v1(facts, size=size)
+        winner = {"index": len(candidates), "background_status": "deterministic_fallback",
+                  "scene_key": "", "detail": "all candidates rejected", "food_image_path": None,
                   "composite": None, "critique": None, "img": fb_img, "report": fb_rep}
+        candidates.append(winner)
 
     report = {
         "n": n,

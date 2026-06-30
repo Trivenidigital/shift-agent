@@ -99,9 +99,23 @@ def test_best_of_n_all_rejected_falls_back_deterministically():
     img, report, candidates = compose_best_of_n(
         _snack(), generator=_gen, textless_ocr=lambda im: False,
         critique_scorer=_scorer_seq([]), n=3)
-    assert all(c["background_status"] == "image_has_text" for c in report["candidates"])
-    assert report["winner_index"] == -1               # no food candidate won
+    # the 3 generated candidates were all rejected; the deterministic fallback is
+    # appended as a real candidate so winner_index always indexes candidates.
+    assert all(c["background_status"] == "image_has_text" for c in report["candidates"][:3])
+    assert report["winner_index"] == 3
+    assert report["candidates"][3]["background_status"] == "deterministic_fallback"
     assert img is not None                            # deterministic poster still ships
+    assert candidates[report["winner_index"]]["img"] is img   # index always valid
+
+
+def test_best_of_n_ineligible_facts_never_crashes():
+    # ineligible facts (no offer) -> compose returns None; must NOT crash critique,
+    # must return None best_img (caller falls back to the existing pipeline)
+    facts = [f for f in _snack() if f.fact_id != "pricing_structure"]
+    img, report, candidates = compose_best_of_n(
+        facts, generator=_gen, textless_ocr=_ok, critique_scorer=_scorer_seq([]), n=3)
+    assert img is None  # ineligible -> no poster
+    assert "compose_ineligible" in {c["background_status"] for c in report["candidates"]}
 
 
 # ── critique unavailable -> still selects (first accepted), never crashes ────
@@ -130,12 +144,24 @@ def test_best_of_n_winner_is_fact_safe():
     facts = _snack()
     img, report, candidates = compose_best_of_n(
         facts, generator=_gen, textless_ocr=_ok, critique_scorer=_scorer_seq([8.0, 6.0, 7.0]), n=3)
+    assert report["winner_index"] >= 0
     winner = candidates[report["winner_index"]]
     allowed = " ".join(x.value for x in facts).casefold()
     for placed in winner["report"]["placed_text"]:
         for tok in placed.casefold().split():
             if any(ch.isalnum() for ch in tok):
                 assert tok in allowed, f"ungrounded token {tok!r}"
+
+
+def test_rejected_text_bearing_candidate_never_scored_or_selected():
+    # candidate 0 fails OCR (text) -> never scored, never eligible to win, even
+    # though it was generated first. A text-bearing candidate can NEVER win.
+    img, report, candidates = compose_best_of_n(
+        _snack(), generator=_gen, textless_ocr=_seq([False, True]),
+        critique_scorer=_scorer_seq([5.0]), n=2)
+    assert report["candidates"][0]["background_status"] == "image_has_text"
+    assert report["candidates"][0]["composite"] is None   # rejected -> never scored
+    assert report["winner_index"] == 1                    # only the accepted candidate can win
 
 
 def test_best_of_n_n1_degenerate():
