@@ -155,3 +155,119 @@ def campaign_scene_prompt_block(
     return render_campaign_scene_block(
         select_campaign_scene(context), business=business, offer=offer, audience=audience
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FOOD-POSTER scene families (Premium Poster Template v1, Slice C2A).
+#
+# ADDITIVE: these are a SEPARATE family set + a SEPARATE selector
+# (`select_food_poster_scene`) used ONLY by the premium-poster director. The
+# existing `select_campaign_scene` / `CAMPAIGN_SCENE_TEMPLATES` are UNCHANGED, so
+# the deployed render path is byte-identical. Each scene_block directs a TEXTLESS,
+# appetizing food/background only — the no-text contract is added by the director's
+# prompt builder. These templates carry NO {business}/{offer} text placeholders
+# (the food scene must never render copy); facts guide FOOD STYLE only, in the
+# director, never as on-image text.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FOOD_STREET_SNACK = CampaignSceneTemplate(
+    key="food_street_snack",
+    summary="Golden fried Indian street snacks, chutneys, steam, warm festive light",
+    scene_block=(
+        "a generous platter of golden, crispy fried Indian street snacks with bowls of green "
+        "and tamarind chutney, light steam rising, warm festive lighting, dark rustic wood table, "
+        "shallow depth of field, premium appetizing food photography"
+    ),
+)
+_FOOD_COMBO = CampaignSceneTemplate(
+    key="food_combo",
+    summary="Abundant combo meal spread, warm rim light, premium",
+    scene_block=(
+        "an abundant combo meal spread of freshly cooked Indian dishes on dark plates, warm rim "
+        "lighting, fresh garnish, rich colours, premium restaurant food photography"
+    ),
+)
+_FOOD_DESSERT = CampaignSceneTemplate(
+    key="food_dessert",
+    summary="Indian sweets / mithai, gold tones, festive bokeh",
+    scene_block=(
+        "an elegant arrangement of Indian sweets and mithai on an ornate plate, warm gold tones, "
+        "soft festive bokeh, gentle glow, premium dessert photography"
+    ),
+)
+_FOOD_FESTIVAL = CampaignSceneTemplate(
+    key="food_festival",
+    summary="Festive celebratory food spread, diya/marigold ambiance",
+    scene_block=(
+        "a celebratory festive Indian food spread with warm diya and marigold ambiance, abundant "
+        "and inviting, rich warm colours, premium festive food photography"
+    ),
+)
+_FOOD_GRAND_OPENING = CampaignSceneTemplate(
+    key="food_grand_opening",
+    summary="Welcoming premium fresh spread for a grand opening",
+    scene_block=(
+        "a welcoming, fresh and bright premium Indian food spread arranged invitingly, clean warm "
+        "lighting, celebratory abundance, premium restaurant food photography"
+    ),
+)
+_FOOD_GENERIC = CampaignSceneTemplate(
+    key="food_generic",
+    summary="Safe default: appetizing premium Indian food hero",
+    scene_block=(
+        "an appetizing hero plate of freshly cooked Indian food, warm inviting lighting, rich "
+        "colours, shallow depth of field, premium restaurant food photography"
+    ),
+)
+
+FOOD_POSTER_SCENE_TEMPLATES: tuple[CampaignSceneTemplate, ...] = (
+    _FOOD_STREET_SNACK, _FOOD_COMBO, _FOOD_DESSERT, _FOOD_FESTIVAL,
+    _FOOD_GRAND_OPENING, _FOOD_GENERIC,
+)
+FOOD_POSTER_TEMPLATES_BY_KEY: dict[str, CampaignSceneTemplate] = {
+    t.key: t for t in FOOD_POSTER_SCENE_TEMPLATES
+}
+
+# Selection signals (lowercase). Precedence (see select_food_poster_scene): a
+# NAMED FOOD TYPE wins (dessert → combo → street-snack), because the food is the
+# poster's hero; OCCASION framing (grand-opening → festival) applies only when no
+# food type is named; generic food default otherwise.
+_FOOD_GRAND_OPENING_SIGNALS: frozenset[str] = frozenset({
+    "grand opening", "grand-opening", "opening", "launch", "now open", "new location",
+})
+_FOOD_FESTIVAL_SIGNALS: frozenset[str] = frozenset({
+    "festival", "celebration", "diwali", "deepavali", "holi", "navratri", "ugadi",
+    "pongal", "onam", "eid", "ramadan", "sankranti", "event",
+})
+_FOOD_DESSERT_SIGNALS: frozenset[str] = frozenset({
+    "dessert", "desserts", "sweet", "sweets", "mithai", "gulab", "jamun", "jalebi",
+    "barfi", "halwa", "kheer", "rasmalai", "ladoo", "laddu", "cake", "pastry",
+})
+_FOOD_COMBO_SIGNALS: frozenset[str] = frozenset({
+    "combo", "combos", "meal", "meals", "thali", "platter", "family pack", "bucket",
+})
+_FOOD_STREET_SNACK_SIGNALS: frozenset[str] = frozenset({
+    "snack", "snacks", "street", "bonda", "bondas", "pakora", "pakoras", "mirchi",
+    "samosa", "samosas", "punugulu", "chaat", "fried", "bhajji", "vada",
+})
+
+
+def select_food_poster_scene(context: str) -> CampaignSceneTemplate:
+    """Deterministically choose a FOOD-POSTER scene family from a context string
+    (business category + name + items + occasion + raw request). A NAMED FOOD TYPE
+    wins (dessert → combo → street-snack) because the food is the poster's hero;
+    OCCASION framing (grand-opening → festival) applies only when no food type is
+    named; generic food default otherwise. Pure; the same context always yields the
+    same template. Does NOT affect `select_campaign_scene`."""
+    ctx = (context or "").lower()
+    if _context_has(ctx, _FOOD_DESSERT_SIGNALS):
+        return _FOOD_DESSERT
+    if _context_has(ctx, _FOOD_COMBO_SIGNALS):
+        return _FOOD_COMBO
+    if _context_has(ctx, _FOOD_STREET_SNACK_SIGNALS):
+        return _FOOD_STREET_SNACK
+    if _context_has(ctx, _FOOD_GRAND_OPENING_SIGNALS):
+        return _FOOD_GRAND_OPENING
+    if _context_has(ctx, _FOOD_FESTIVAL_SIGNALS):
+        return _FOOD_FESTIVAL
+    return _FOOD_GENERIC
