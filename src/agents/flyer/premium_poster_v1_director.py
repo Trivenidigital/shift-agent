@@ -48,12 +48,14 @@ _PREMIUM_STYLE = (
     "portrait composition suitable as a poster background."
 )
 
-# Only these descriptive fact ids feed scene selection + food-style direction.
-# Money / contact / address facts are deliberately EXCLUDED so sensitive copy is
-# never injected into an image-generation prompt (it is placed by Python only).
+# Only these descriptive fact ids feed scene SELECTION (which fixed template to
+# use). They never enter the prompt (the prompt is the fixed scene_block + item
+# names + the no-text contract). Money / contact / address facts are excluded so
+# sensitive copy can never influence anything; the raw owner brief is excluded for
+# the same reason (and is not a locked-fact id today regardless).
 _DIRECTION_FACT_IDS = (
     "business_category", "business_name", "campaign_title", "occasion",
-    "style", "notes", "raw_request",
+    "style", "notes",
 )
 
 # Injected-callable contracts (the box wires the real implementations):
@@ -164,18 +166,24 @@ def generate_textless_food_background(
         return FoodBackgroundResult(
             "generation_failed", scene.key, prompt, None, "generator_returned_none")
 
+    # Decode ONCE into an in-memory RGB copy. All image-decode failure (corrupt /
+    # truncated / undecodable / a temp path cleaned up) lands here as
+    # image_load_failed; the copy survives the closed file so the OCR call below
+    # cannot race the path.
     try:
         from PIL import Image
         with Image.open(path) as im:
             im.load()
-    except Exception as exc:  # corrupt / unreadable generated image
+            rgb = im.convert("RGB")
+    except Exception as exc:
         return FoodBackgroundResult(
             "image_load_failed", scene.key, prompt, None, f"load_error:{type(exc).__name__}")
 
+    # ONLY the injected OCR call may raise here -> a check OUTAGE, kept distinct
+    # from a bad image (above) and from genuine text-detection (below).
     try:
-        with Image.open(path) as im:
-            textless = bool(textless_ocr(im.convert("RGB")))
-    except Exception as exc:  # OCR outage — do NOT trust the image, but flag distinctly
+        textless = bool(textless_ocr(rgb))
+    except Exception as exc:
         return FoodBackgroundResult(
             "check_error", scene.key, prompt, None, f"ocr_error:{type(exc).__name__}")
 
