@@ -4410,12 +4410,18 @@ def _populate_creative_direction_v2(project: FlyerProject) -> None:
         project.creative_direction = None
 
 
-def _openrouter_textless_image(prompt: str, *, model: str, quality: str, size: tuple[int, int] | None) -> bytes:
+def _openrouter_textless_image(prompt: str, *, model: str, quality: str, size: tuple[int, int] | None,
+                               timeout: float | None = None, attempts: int = 3) -> bytes:
     """OpenRouter image generation for a RAW text prompt (Premium Poster v1's
     director prompt, ``build_textless_food_prompt``). Mirrors _openrouter_image_bytes's
     request shape + parse but takes the prompt directly instead of building it via
-    _image_message_content. Returns PNG bytes; raises FlyerRenderError on failure.
-    (Isolated copy — does NOT touch the existing _openrouter_image_bytes path.)"""
+    _image_message_content. ``timeout`` (per-call socket timeout) + ``attempts`` are
+    parameterized so the premium path can bound a single call within its wall-clock
+    budget (the live path passes a budget-derived timeout + attempts=1). Returns PNG
+    bytes; raises FlyerRenderError on failure. (Isolated copy — does NOT touch the
+    existing _openrouter_image_bytes path.)"""
+    eff_timeout = timeout if timeout is not None else OPENROUTER_TIMEOUT_SEC
+    attempts = max(1, attempts)
     api_key = _read_env_value("OPENROUTER_API_KEY")
     if not api_key or "PLACEHOLDER" in api_key.upper():
         raise FlyerRenderError("OPENROUTER_API_KEY is missing or placeholder")
@@ -4434,9 +4440,9 @@ def _openrouter_textless_image(prompt: str, *, model: str, quality: str, size: t
         method="POST")
     body = ""
     last_error: Exception | None = None
-    for attempt in range(3):
+    for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=OPENROUTER_TIMEOUT_SEC) as resp:
+            with urllib.request.urlopen(req, timeout=eff_timeout) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
             break
         except urllib.error.HTTPError as e:
@@ -4444,7 +4450,9 @@ def _openrouter_textless_image(prompt: str, *, model: str, quality: str, size: t
             raise FlyerRenderError(f"OpenRouter image HTTP {e.code}: {err}") from e
         except (urllib.error.URLError, http.client.IncompleteRead, TimeoutError) as e:
             last_error = e
-            if attempt == 2:
+            if attempt == attempts - 1:
+                if isinstance(e, urllib.error.URLError):  # parity with _openrouter_image_bytes
+                    raise FlyerRenderError(f"OpenRouter image connection failed: {e.reason}") from e
                 raise FlyerRenderError(f"OpenRouter image response failed: {type(e).__name__}: {e}") from e
             time.sleep(2 * (attempt + 1))
     if not body and last_error is not None:
@@ -4467,10 +4475,16 @@ def _ppv1_default_generator(project: FlyerProject, *, model: str, quality: str,
     """Real best-of-N candidate generator: (director prompt) -> saved PNG path, or
     None on timeout/error (the candidate then fails the gate -> fall through)."""
     def gen(prompt: str):
-        if time.monotonic() > deadline:
-            return None  # premium-path timeout budget exceeded
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None  # premium-path wall-clock budget exhausted
         try:
-            raw = _openrouter_textless_image(prompt, model=model, quality=quality, size=size)
+            # Bound the single call by the remaining budget + no retries on the live
+            # path: fail fast -> fall through to the existing render (which has its
+            # own retry ladder). Keeps the gen inside _premium_poster_v1_timeout_sec.
+            raw = _openrouter_textless_image(
+                prompt, model=model, quality=quality, size=size,
+                timeout=max(5.0, min(remaining, OPENROUTER_TIMEOUT_SEC)), attempts=1)
         except Exception:  # noqa: BLE001 — never raise out of the generator
             return None
         fd, p = tempfile.mkstemp(suffix=".png", prefix="ppv1-bg-")
@@ -4484,8 +4498,8 @@ def _ppv1_default_textless_ocr(deadline: float):
     """Real textless gate over the deployed vision OCR (visual_qa._vision_text):
     empty extracted_text -> textless True; vision outage / deadline -> raise
     (-> check_error, the candidate is dropped, never trusted as textless)."""
-    try:  # flat (VPS) then package (tests) — mirrors render.py's sibling-import shim
-        from visual_qa import _vision_text  # type: ignore
+    try:  # flat (VPS, deployed as flyer_visual_qa.py) then package (tests)
+        from flyer_visual_qa import _vision_text  # type: ignore
     except ImportError:  # pragma: no cover - src layout fallback
         from agents.flyer.visual_qa import _vision_text
 
@@ -4505,15 +4519,18 @@ def _ppv1_default_textless_ocr(deadline: float):
     return ocr
 
 
-def _ppv1_default_critique_scorer():
+def _ppv1_default_critique_scorer(deadline: float):
     """Real critique selector over the dev-only art-director oracle (vision). Returns
-    the score dict, or None when unavailable (-> first-accepted selection)."""
+    the score dict, or None when unavailable / past the wall-clock budget (-> first-
+    accepted selection; the critique is a selector, never a gate)."""
     try:
         from flyer_art_director_oracle import score_art_direction, score_to_dict  # type: ignore
     except ImportError:  # pragma: no cover - src layout fallback
         from agents.flyer.flyer_art_director_oracle import score_art_direction, score_to_dict
 
     def scorer(image_path: str, brief: str = ""):
+        if time.monotonic() > deadline:
+            return None  # budget exhausted -> skip the critique call, first-accepted wins
         score = score_art_direction(image_path, brief_summary=brief)
         if not score.axes and "unavailable" in (score.overall_critique or "").lower():
             return None
@@ -4538,8 +4555,8 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
     deadline = time.monotonic() + (timeout_sec if timeout_sec is not None else _premium_poster_v1_timeout_sec())
     try:
         if compose is None:
-            try:
-                from premium_poster_v1_director import compose_best_of_n  # type: ignore
+            try:  # flat (VPS, deployed as flyer_premium_poster_v1_director.py) then package
+                from flyer_premium_poster_v1_director import compose_best_of_n  # type: ignore
             except ImportError:  # pragma: no cover - src layout fallback
                 from agents.flyer.premium_poster_v1_director import compose_best_of_n
             compose = compose_best_of_n
@@ -4547,7 +4564,7 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
         gen = generator if generator is not None else _ppv1_default_generator(
             project, model=model, quality=quality, size=size, deadline=deadline)
         ocr = textless_ocr if textless_ocr is not None else _ppv1_default_textless_ocr(deadline=deadline)
-        scorer = critique_scorer if critique_scorer is not None else _ppv1_default_critique_scorer()
+        scorer = critique_scorer if critique_scorer is not None else _ppv1_default_critique_scorer(deadline=deadline)
         best_img, report, candidates = compose(facts, generator=gen, textless_ocr=ocr, critique_scorer=scorer, n=n)
         wi = report.get("winner_index", -1)
         winner = candidates[wi] if isinstance(wi, int) and 0 <= wi < len(candidates) else None
@@ -4574,6 +4591,9 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
         # existing QA / visible-contract / send gates run on the result downstream,
         # unchanged + authoritative. Skipped during a force_background_only recovery
         # re-render so the premium path is a one-shot primary attempt, not a rung.
+        # Reset the outcome per render so a prior premium fire can never leave a stale
+        # value (None unambiguously means "premium branch not entered this render").
+        _PREMIUM_POSTER_V1_OUTCOME.set(None)
         if (not force_background_only
                 and _premium_poster_v1_bare_opt_in()
                 and _premium_poster_v1_armed(project)
