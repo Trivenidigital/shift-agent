@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import base64
+import contextlib
 import contextvars
 import hashlib
 import http.client
@@ -214,6 +215,57 @@ def premium_outcome_should_alert(outcome: PremiumOverlayOutcome | None) -> bool:
     """Page the operator only for unrecovered, unexpected premium failures.
     Intentional fail-closed (fit/coverage/overflow) is normal product behavior."""
     return bool(outcome) and outcome.status == "premium_overlay_failed_unexpected"
+
+
+# ── Premium Poster v1 — bare-path opt-in + outcome telemetry ─────────────────
+# The premium-poster-v1 render branch fires ONLY when the CURRENT render is opted
+# in (set by the bare/WhatsApp-direct path). The managed/studio path never sets
+# this, so it remains byte-identical (D1: bare path only in this slice).
+_PREMIUM_POSTER_V1_BARE_OPT_IN: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "flyer_premium_poster_v1_bare_opt_in", default=False
+)
+
+
+@contextlib.contextmanager
+def premium_poster_v1_bare_path():
+    """Opt the current render into the Premium Poster v1 branch (bare path only)."""
+    token = _PREMIUM_POSTER_V1_BARE_OPT_IN.set(True)
+    try:
+        yield
+    finally:
+        _PREMIUM_POSTER_V1_BARE_OPT_IN.reset(token)
+
+
+def _premium_poster_v1_bare_opt_in() -> bool:
+    return _PREMIUM_POSTER_V1_BARE_OPT_IN.get()
+
+
+@dataclass
+class PremiumPosterV1Outcome:
+    """How a Premium Poster v1 render resolved (set on a ContextVar; read by the
+    bare-path chokepoint for observability). ``delivered`` is True iff a valid
+    poster was written to the target; any other outcome means the caller fell
+    through to the existing render path."""
+    delivered: bool
+    status: str            # delivered | fallback | skipped
+    reason: str            # none | unsupported_size | no_winner | exception:<T>
+    n: int
+    winner_index: int
+    winner_composite: float | None
+    output_format: str
+
+
+_PREMIUM_POSTER_V1_OUTCOME: contextvars.ContextVar[PremiumPosterV1Outcome | None] = contextvars.ContextVar(
+    "flyer_premium_poster_v1_outcome", default=None
+)
+
+
+def consume_premium_poster_v1_outcome() -> PremiumPosterV1Outcome | None:
+    """Return the most-recent premium-poster-v1 outcome and clear it (so a later
+    render that does NOT run the premium branch cannot inherit a stale value)."""
+    outcome = _PREMIUM_POSTER_V1_OUTCOME.get()
+    _PREMIUM_POSTER_V1_OUTCOME.set(None)
+    return outcome
 
 
 TEXT_MANIFEST_SCHEMA_VERSION = 1
@@ -3543,6 +3595,85 @@ def _creative_director_v2_enabled(project: FlyerProject) -> bool:
     return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
 
 
+# ── Premium Poster v1 — flag + allowlist + N + eligibility gates ─────────────
+PREMIUM_POSTER_V1_ENABLED_ENV = "FLYER_PREMIUM_POSTER_V1"
+PREMIUM_POSTER_V1_ALLOWLIST_ENV = "FLYER_PREMIUM_POSTER_V1_ALLOWLIST"
+PREMIUM_POSTER_V1_N_ENV = "FLYER_PREMIUM_POSTER_V1_N"
+PREMIUM_POSTER_V1_TIMEOUT_ENV = "FLYER_PREMIUM_POSTER_V1_TIMEOUT_SEC"
+
+
+def _premium_poster_v1_allowlist() -> set[str]:
+    """Parse FLYER_PREMIUM_POSTER_V1_ALLOWLIST (comma-separated phones/LIDs) into a
+    normalized set."""
+    raw = os.environ.get(PREMIUM_POSTER_V1_ALLOWLIST_ENV, "") or ""
+    return {n for n in (_normalize_sender(p) for p in raw.split(",")) if n}
+
+
+def _premium_poster_v1_armed(project: FlyerProject) -> bool:
+    """Scoped-rollout guard (mirrors CD v2, NOT the global-on overlay gates): flag
+    FLYER_PREMIUM_POSTER_V1 == "1" AND a NON-EMPTY allowlist AND the project's
+    customer phone is in it. Empty/unset allowlist => DISABLED (not global) —
+    Premium Poster v1 rolls out to +17329837841 ONLY. Flag-off / not-allowlisted =>
+    byte-identical legacy (the branch is never entered)."""
+    if os.environ.get(PREMIUM_POSTER_V1_ENABLED_ENV) != "1":
+        return False
+    allow = _premium_poster_v1_allowlist()
+    if not allow:
+        return False  # scoped-rollout guard: empty allowlist disables, never global
+    return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+
+
+def _premium_poster_v1_n() -> int:
+    """Best-of-N candidate count: FLYER_PREMIUM_POSTER_V1_N (default 1, clamp 1..3).
+    The first live test runs N=1 (lowest latency/cost); N=2 is opt-in insurance."""
+    raw = (os.environ.get(PREMIUM_POSTER_V1_N_ENV, "") or "").strip()
+    try:
+        n = int(raw) if raw else 1
+    except ValueError:
+        n = 1
+    return max(1, min(3, n))
+
+
+def _premium_poster_v1_timeout_sec() -> float:
+    """Total wall-clock budget for the premium path: FLYER_PREMIUM_POSTER_V1_TIMEOUT_SEC
+    (default 120s, clamp 30..180). On exceed, the path falls through to the existing
+    render."""
+    raw = (os.environ.get(PREMIUM_POSTER_V1_TIMEOUT_ENV, "") or "").strip()
+    try:
+        v = float(raw) if raw else 120.0
+    except ValueError:
+        v = 120.0
+    return max(30.0, min(180.0, v))
+
+
+def _premium_poster_v1_required_facts_present(project: FlyerProject) -> bool:
+    """Coarse pre-check mirroring compose_premium_poster_v1's eligibility (business
+    name + an offer/price + >=3 menu items) so a generation is not spent on facts the
+    deterministic composer would reject anyway. The composer stays authoritative
+    (returns None -> the orchestrator yields no winner -> fall through)."""
+    facts = getattr(project, "locked_facts", []) or []
+
+    def _val(f) -> str:
+        return (getattr(f, "value", "") or "").strip()
+
+    has_business = any(getattr(f, "fact_id", "") == "business_name" and _val(f) for f in facts)
+    has_offer = any(getattr(f, "fact_id", "") in ("pricing_structure", "offer", "offer:0") and _val(f) for f in facts)
+    items = sum(1 for f in facts
+                if (getattr(f, "fact_id", "") or "").startswith("item:")
+                and (getattr(f, "fact_id", "") or "").endswith(":name") and _val(f))
+    return has_business and has_offer and items >= 3
+
+
+def _premium_poster_v1_eligible(project: FlyerProject) -> bool:
+    """Eligible flyers: food/grocery AND required locked facts present AND NOT a
+    reference-extraction project (whose items live in an attached image, not facts).
+    Deliberately NOT gated on _background_only_eligible — food menu flyers are
+    _integrated_poster_eligible today, and the premium poster is their replacement."""
+    return (_is_food_or_grocery_project(project)
+            and _premium_poster_v1_required_facts_present(project)
+            and not _needs_reference_extraction(project))
+
+
 def _openrouter_repair_edit_bytes(
     project: FlyerProject,
     *,
@@ -4279,9 +4410,201 @@ def _populate_creative_direction_v2(project: FlyerProject) -> None:
         project.creative_direction = None
 
 
+def _openrouter_textless_image(prompt: str, *, model: str, quality: str, size: tuple[int, int] | None,
+                               timeout: float | None = None, attempts: int = 3) -> bytes:
+    """OpenRouter image generation for a RAW text prompt (Premium Poster v1's
+    director prompt, ``build_textless_food_prompt``). Mirrors _openrouter_image_bytes's
+    request shape + parse but takes the prompt directly instead of building it via
+    _image_message_content. ``timeout`` (per-call socket timeout) + ``attempts`` are
+    parameterized so the premium path can bound a single call within its wall-clock
+    budget (the live path passes a budget-derived timeout + attempts=1). Returns PNG
+    bytes; raises FlyerRenderError on failure. (Isolated copy — does NOT touch the
+    existing _openrouter_image_bytes path.)"""
+    eff_timeout = timeout if timeout is not None else OPENROUTER_TIMEOUT_SEC
+    attempts = max(1, attempts)
+    api_key = _read_env_value("OPENROUTER_API_KEY")
+    if not api_key or "PLACEHOLDER" in api_key.upper():
+        raise FlyerRenderError("OPENROUTER_API_KEY is missing or placeholder")
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "modalities": ["image", "text"],
+        "max_tokens": OPENROUTER_IMAGE_MAX_TOKENS,
+        "stream": False,
+        "image_config": {"aspect_ratio": _aspect_ratio(size), "image_size": "2K" if quality == "high" else "1K"},
+    }
+    req = urllib.request.Request(
+        OPENROUTER_IMAGE_URL, data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+                 "HTTP-Referer": "https://github.com/Trivenidigital/SME-Agents", "X-Title": "Hermes Flyer Studio"},
+        method="POST")
+    body = ""
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=eff_timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            break
+        except urllib.error.HTTPError as e:
+            err = e.read().decode("utf-8", errors="replace")[:1000]
+            raise FlyerRenderError(f"OpenRouter image HTTP {e.code}: {err}") from e
+        except (urllib.error.URLError, http.client.IncompleteRead, TimeoutError) as e:
+            last_error = e
+            if attempt == attempts - 1:
+                if isinstance(e, urllib.error.URLError):  # parity with _openrouter_image_bytes
+                    raise FlyerRenderError(f"OpenRouter image connection failed: {e.reason}") from e
+                raise FlyerRenderError(f"OpenRouter image response failed: {type(e).__name__}: {e}") from e
+            time.sleep(2 * (attempt + 1))
+    if not body and last_error is not None:
+        raise FlyerRenderError(f"OpenRouter image response failed: {type(last_error).__name__}: {last_error}") from last_error
+    doc = json.loads(body)
+    choices = doc.get("choices") or []
+    if not choices:
+        raise FlyerRenderError(f"OpenRouter image response had no choices: {body[:500]}")
+    images = choices[0].get("message", {}).get("images") or []
+    if not images:
+        raise FlyerRenderError(f"OpenRouter image response had no images: {body[:500]}")
+    url = images[0].get("image_url", {}).get("url") or ""
+    if not url.startswith("data:image/"):
+        raise FlyerRenderError("OpenRouter image response did not include base64 image data")
+    return _decode_data_url(url)
+
+
+def _ppv1_default_generator(project: FlyerProject, *, model: str, quality: str,
+                            size: tuple[int, int] | None, deadline: float):
+    """Real best-of-N candidate generator: (director prompt) -> saved PNG path, or
+    None on timeout/error (the candidate then fails the gate -> fall through)."""
+    def gen(prompt: str):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None  # premium-path wall-clock budget exhausted
+        try:
+            # Bound the single call by the remaining budget + no retries on the live
+            # path: fail fast -> fall through to the existing render (which has its
+            # own retry ladder). Keeps the gen inside _premium_poster_v1_timeout_sec.
+            raw = _openrouter_textless_image(
+                prompt, model=model, quality=quality, size=size,
+                timeout=max(5.0, min(remaining, OPENROUTER_TIMEOUT_SEC)), attempts=1)
+        except Exception:  # noqa: BLE001 — never raise out of the generator
+            return None
+        fd, p = tempfile.mkstemp(suffix=".png", prefix="ppv1-bg-")
+        os.close(fd)
+        Path(p).write_bytes(raw)
+        return p
+    return gen
+
+
+def _ppv1_default_textless_ocr(deadline: float):
+    """Real textless gate over the deployed vision OCR (visual_qa._vision_text):
+    empty extracted_text -> textless True; vision outage / deadline -> raise
+    (-> check_error, the candidate is dropped, never trusted as textless)."""
+    try:  # flat (VPS, deployed as flyer_visual_qa.py) then package (tests)
+        from flyer_visual_qa import _vision_text  # type: ignore
+    except ImportError:  # pragma: no cover - src layout fallback
+        from agents.flyer.visual_qa import _vision_text
+
+    def ocr(pil) -> bool:
+        if time.monotonic() > deadline:
+            raise TimeoutError("premium poster v1 textless OCR deadline exceeded")
+        fd, p = tempfile.mkstemp(suffix=".png", prefix="ppv1-ocr-")
+        os.close(fd)
+        try:
+            pil.save(p)
+            text, source, _kind, _notes = _vision_text(Path(p))
+            if source == "unavailable":
+                raise RuntimeError("premium poster v1 textless OCR unavailable")
+            return str(text or "").strip() == ""
+        finally:
+            Path(p).unlink(missing_ok=True)
+    return ocr
+
+
+def _ppv1_default_critique_scorer(deadline: float):
+    """Real critique selector over the dev-only art-director oracle (vision). Returns
+    the score dict, or None when unavailable / past the wall-clock budget (-> first-
+    accepted selection; the critique is a selector, never a gate)."""
+    try:
+        from flyer_art_director_oracle import score_art_direction, score_to_dict  # type: ignore
+    except ImportError:  # pragma: no cover - src layout fallback
+        from agents.flyer.flyer_art_director_oracle import score_art_direction, score_to_dict
+
+    def scorer(image_path: str, brief: str = ""):
+        if time.monotonic() > deadline:
+            return None  # budget exhausted -> skip the critique call, first-accepted wins
+        score = score_art_direction(image_path, brief_summary=brief)
+        if not score.axes and "unavailable" in (score.overall_critique or "").lower():
+            return None
+        return score_to_dict(score)
+    return scorer
+
+
+def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id: str,
+                             output_format: str, size: tuple[int, int] | None, model: str, quality: str,
+                             generator=None, textless_ocr=None, critique_scorer=None,
+                             compose=None, n: int | None = None, timeout_sec: float | None = None) -> PremiumPosterV1Outcome:
+    """Bare-path Premium Poster v1 render: best-of-N textless food-background gen ->
+    textless gate -> deterministic compose_premium_poster_v1 -> critique selector ->
+    write the winning poster to ``target``. NEVER raises; ANY failure returns
+    ``delivered=False`` so the caller falls through to the existing render path. The
+    adapters (generator / OCR / critique) are injectable for tests; the defaults wire
+    the real image model / vision OCR / oracle. The existing visual_qa / visible-
+    contract / send gates run on ``target`` downstream, unchanged + authoritative."""
+    n = _premium_poster_v1_n() if n is None else n
+    if size != (1080, 1350):  # only the concept-preview size in this slice; PDF/other -> existing path
+        return PremiumPosterV1Outcome(False, "skipped", "unsupported_size", n, -1, None, output_format)
+    deadline = time.monotonic() + (timeout_sec if timeout_sec is not None else _premium_poster_v1_timeout_sec())
+    try:
+        if compose is None:
+            try:  # flat (VPS, deployed as flyer_premium_poster_v1_director.py) then package
+                from flyer_premium_poster_v1_director import compose_best_of_n  # type: ignore
+            except ImportError:  # pragma: no cover - src layout fallback
+                from agents.flyer.premium_poster_v1_director import compose_best_of_n
+            compose = compose_best_of_n
+        facts = list(getattr(project, "locked_facts", []) or [])
+        gen = generator if generator is not None else _ppv1_default_generator(
+            project, model=model, quality=quality, size=size, deadline=deadline)
+        ocr = textless_ocr if textless_ocr is not None else _ppv1_default_textless_ocr(deadline=deadline)
+        scorer = critique_scorer if critique_scorer is not None else _ppv1_default_critique_scorer(deadline=deadline)
+        best_img, report, candidates = compose(facts, generator=gen, textless_ocr=ocr, critique_scorer=scorer, n=n)
+        wi = report.get("winner_index", -1)
+        winner = candidates[wi] if isinstance(wi, int) and 0 <= wi < len(candidates) else None
+        # Deliver ONLY when a real FOOD candidate won (background_status == "ok"). If
+        # every candidate was rejected, compose_best_of_n returns its DETERMINISTIC
+        # gradient fallback — we do NOT ship that here; we fall through to the existing
+        # render path (which owns the richer recovery ladder + its own gradient floor).
+        won_food = best_img is not None and winner is not None and winner.get("background_status") == "ok"
+        if not won_food:
+            reason = "no_food_winner" if best_img is not None else "no_winner"
+            return PremiumPosterV1Outcome(False, "fallback", reason, n, wi, report.get("winner_composite"), output_format)
+        best_img.save(target)
+        return PremiumPosterV1Outcome(True, "delivered", "none", n, wi, report.get("winner_composite"), output_format)
+    except Exception as exc:  # noqa: BLE001 — premium path must never raise into _render_model
+        return PremiumPosterV1Outcome(False, "fallback", f"exception:{type(exc).__name__}", n, -1, None, output_format)
+
+
 def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> None:
     token = _FORCE_BACKGROUND_ONLY.set(True) if force_background_only else None
     try:
+        # Premium Poster v1 (bare-path opt-in + flag + allowlist + food/grocery +
+        # required facts). On success writes `path` and returns; ANY miss falls
+        # through to the existing render below (byte-identical when not armed). The
+        # existing QA / visible-contract / send gates run on the result downstream,
+        # unchanged + authoritative. Skipped during a force_background_only recovery
+        # re-render so the premium path is a one-shot primary attempt, not a rung.
+        # Reset the outcome per render so a prior premium fire can never leave a stale
+        # value (None unambiguously means "premium branch not entered this render").
+        _PREMIUM_POSTER_V1_OUTCOME.set(None)
+        if (not force_background_only
+                and _premium_poster_v1_bare_opt_in()
+                and _premium_poster_v1_armed(project)
+                and _premium_poster_v1_eligible(project)):
+            outcome = render_premium_poster_v1(
+                project, path, concept_id=concept_id, output_format=output_format,
+                size=size, model=model, quality=quality)
+            _PREMIUM_POSTER_V1_OUTCOME.set(outcome)
+            if outcome.delivered:
+                return
+            # not delivered -> fall through to the existing render path (outcome recorded)
         if _creative_director_v2_enabled(project):
             _populate_creative_direction_v2(project)
         if model.strip().lower() in DETERMINISTIC_MODEL_NAMES:

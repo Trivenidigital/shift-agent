@@ -199,10 +199,17 @@ def test_all_text_from_facts_with_generated_background():
 
 # ── no routing / no model-text trust ────────────────────────────────────────
 
-def test_no_routing_render_py_does_not_reference_director():
-    render = (REPO / "src" / "agents" / "flyer" / "render.py").read_text(encoding="utf-8")
-    assert "premium_poster_v1_director" not in render
-    assert "compose_premium_poster_with_generated_background" not in render
+def test_premium_poster_v1_dormant_by_default_in_render():
+    # The integration wires compose_best_of_n into render.py, but it is dormant by
+    # default (flag off -> not armed). The SHADOW-only orchestrator
+    # compose_premium_poster_with_generated_background is NOT wired into the live path.
+    import os
+    from types import SimpleNamespace
+    from agents.flyer import render as render_mod
+    render_src = (REPO / "src" / "agents" / "flyer" / "render.py").read_text(encoding="utf-8")
+    assert "compose_premium_poster_with_generated_background" not in render_src
+    os.environ.pop("FLYER_PREMIUM_POSTER_V1", None)
+    assert render_mod._premium_poster_v1_armed(SimpleNamespace(customer_phone="+17329837841")) is False
 
 
 def test_unit_result_never_returns_unvalidated_path():

@@ -121,9 +121,13 @@ def test_corrupt_image_falls_back(tmp_path):
 
 # ── no routing / flag-off unchanged + golden committed ──────────────────────
 
-def test_no_routing_render_py_still_clean():
-    render = (REPO / "src" / "agents" / "flyer" / "render.py").read_text(encoding="utf-8")
-    assert "premium_poster_v1" not in render and "compose_premium_poster_v1" not in render
+def test_premium_poster_v1_dormant_by_default_in_render():
+    # Wired into render.py (integration slice) but dormant by default (flag off -> not armed).
+    import os
+    from types import SimpleNamespace
+    from agents.flyer import render as render_mod
+    os.environ.pop("FLYER_PREMIUM_POSTER_V1", None)
+    assert render_mod._premium_poster_v1_armed(SimpleNamespace(customer_phone="+17329837841")) is False
 
 
 def test_food_golden_committed():

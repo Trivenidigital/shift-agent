@@ -167,13 +167,15 @@ def test_flag_defaults_off():
             os.environ["FLYER_PREMIUM_POSTER_V1"] = monkey
 
 
-def test_no_routing_render_py_does_not_reference_v1():
-    # Slice A wires NO routing -> the existing render path is byte-identical when
-    # the flag is off (there is nothing to flip). Prove render.py never imports
-    # or calls the new composer.
-    render = (REPO / "src" / "agents" / "flyer" / "render.py").read_text(encoding="utf-8")
-    assert "premium_poster_v1" not in render
-    assert "compose_premium_poster_v1" not in render
+def test_premium_poster_v1_dormant_by_default_in_render():
+    # The integration slice wires Premium Poster v1 into render.py, but it is DORMANT
+    # by default: with FLYER_PREMIUM_POSTER_V1 unset, _premium_poster_v1_armed returns
+    # False, so the render branch is never entered (byte-identical legacy).
+    import os
+    from types import SimpleNamespace
+    from agents.flyer import render as render_mod
+    os.environ.pop("FLYER_PREMIUM_POSTER_V1", None)
+    assert render_mod._premium_poster_v1_armed(SimpleNamespace(customer_phone="+17329837841")) is False
 
 
 def test_golden_artifact_committed():
