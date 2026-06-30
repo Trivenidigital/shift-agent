@@ -47,6 +47,15 @@ _PREMIUM_STYLE = (
     "appetizing colours, professional food styling, generous negative space, "
     "portrait composition suitable as a poster background."
 )
+# Composition guidance (C3): bias the model toward overlay-safe layouts so the
+# deterministic text (headline/offer/items/footer) lands on clean areas. Still
+# textless — this directs WHERE the food sits, never adds copy.
+_COMPOSITION = (
+    "Composition: keep the food primarily in the centre / mid-background; leave the "
+    "upper third and a lower band as clean, uncluttered negative space (soft "
+    "out-of-focus backdrop or empty table surface) as overlay-safe zones for poster "
+    "text."
+)
 
 # Only these descriptive fact ids feed scene SELECTION (which fixed template to
 # use). They never enter the prompt (the prompt is the fixed scene_block + item
@@ -65,6 +74,10 @@ _DIRECTION_FACT_IDS = (
 Generator = Callable[[str], Optional[str]]
 TextlessOCR = Callable[[Any], bool]
 ArtDirector = Callable[[Sequence[Any], CampaignSceneTemplate], str]
+#   Scorer : (image_path, brief_summary) -> the oracle's score_to_dict shape
+#            ({"axes": {...}, "composite": float, "overall_critique": str}) or None
+#            when no critique is available. Injected for tests + the box shadow run.
+Scorer = Callable[..., Optional[dict]]
 
 
 def _fact_value(facts: Sequence[Any], fact_id: str) -> str:
@@ -126,7 +139,19 @@ def build_textless_food_prompt(
             f" Feature appetizing, freshly-prepared dishes such as {shown} as food in "
             f"the scene (as food only — never rendered as text)."
         )
-    return f"{_PREMIUM_STYLE} Scene: {direction}{food_hint} {TEXTLESS_CONTRACT}"
+    return f"{_PREMIUM_STYLE} Scene: {direction}{food_hint} {_COMPOSITION} {TEXTLESS_CONTRACT}"
+
+
+def brief_summary(facts: Sequence[Any]) -> str:
+    """A short, SAFE context line for the vision critique (campaign title +
+    category + a few item names). Never includes prices / phone / address."""
+    title = _fact_value(facts, "campaign_title") or _fact_value(facts, "business_name")
+    category = _fact_value(facts, "business_category")
+    parts = [p for p in (title, category) if p]
+    items = _items(facts)[:3]
+    if items:
+        parts.append("featuring " + ", ".join(items))
+    return " — ".join(parts)
 
 
 @dataclass(frozen=True)
@@ -194,20 +219,110 @@ def generate_textless_food_background(
     return FoodBackgroundResult("ok", scene.key, prompt, path, "textless_verified")
 
 
+def _critique_dict(axes: dict, composite: float, overall: str, status: str, available: bool) -> dict:
+    return {"axes": axes, "composite": composite, "overall_critique": overall,
+            "status": status, "available": available}
+
+
+def _oracle_scorer() -> Optional[Scorer]:
+    """Default scorer: the dev-only art-director oracle (lazy import — its
+    visual_qa->safe_io->fcntl chain is Linux-only). Returns None when the oracle
+    is unavailable so the wrapper records ``critique_unavailable`` and never raises.
+    NOT used by the unit tests (they inject a deterministic scorer)."""
+    try:
+        from agents.flyer.flyer_art_director_oracle import score_art_direction, score_to_dict
+    except Exception:
+        return None
+
+    def scorer(image_path: str, brief: str = "") -> Optional[dict]:
+        score = score_art_direction(image_path, brief_summary=brief)
+        # The oracle returns an empty-axis safe score for BOTH "no vision provider"
+        # (note prefix "art-director oracle unavailable") and internal errors (note
+        # prefix "art-director oracle error"). Anchor on the documented prefix —
+        # not a bare substring — so only the genuinely-unavailable case maps to
+        # critique_unavailable (None); an oracle error keeps its empty-axis dict and
+        # the wrapper records critique_error (ran, bad result — a distinct signal).
+        if not score.axes and (score.overall_critique or "").lower().startswith(
+            "art-director oracle unavailable"
+        ):
+            return None
+        return score_to_dict(score)
+
+    return scorer
+
+
+def critique_composed_poster(
+    image,
+    *,
+    brief_summary: str = "",
+    scorer: Optional[Scorer] = None,
+    image_save_path: Optional[str] = None,
+) -> dict:
+    """LOG-ONLY visual critique of a composed poster (Hermes's *eyes*). NEVER
+    gates delivery, NEVER raises. The injected ``scorer`` maps an image path to the
+    oracle's score dict (or None when unavailable); when None the real art-director
+    oracle is used. Returns a JSON-safe dict: ``available``, ``composite``,
+    ``axes``, ``overall_critique``, ``status`` (ok | critique_unavailable |
+    critique_error)."""
+    try:
+        if image_save_path is not None:
+            path = str(image_save_path)
+            image.save(path)
+        else:
+            import os
+            import tempfile
+            fd, path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+            image.save(path)
+    except Exception as exc:  # could not materialize the image for the oracle
+        return _critique_dict({}, 0.0, f"critique image save failed: {type(exc).__name__}",
+                              "critique_error", False)
+
+    use = scorer if scorer is not None else _oracle_scorer()
+    if use is None:
+        return _critique_dict({}, 0.0, "art-director oracle unavailable", "critique_unavailable", False)
+
+    try:
+        result = use(path, brief_summary)
+    except Exception as exc:  # scorer/vision backend failure -> safe, recorded
+        return _critique_dict({}, 0.0, f"critique scorer error: {type(exc).__name__}",
+                              "critique_error", False)
+
+    if result is None:
+        return _critique_dict({}, 0.0, "art-director oracle unavailable", "critique_unavailable", False)
+    if not isinstance(result, dict):
+        return _critique_dict({}, 0.0, "malformed critique result", "critique_error", False)
+
+    axes = result.get("axes") if isinstance(result.get("axes"), dict) else {}
+    available = bool(axes)
+    try:
+        composite = float(result.get("composite"))
+    except (TypeError, ValueError):
+        composite = 0.0
+    overall = result.get("overall_critique")
+    overall = overall if isinstance(overall, str) else ""
+    return _critique_dict(axes, composite, overall, "ok" if available else "critique_error", available)
+
+
 def compose_premium_poster_with_generated_background(
     facts: Sequence[Any],
     *,
     generator: Generator,
     textless_ocr: TextlessOCR,
     art_director: Optional[ArtDirector] = None,
+    run_critique: bool = False,
+    critique_scorer: Optional[Scorer] = None,
+    poster_save_path: Optional[str] = None,
     size: tuple[int, int] = (1080, 1350),
 ):
     """SHADOW orchestration (no routing): direct + generate + textless-gate a food
     background, then compose the deterministic premium poster over it. The
     orchestrator is the single textless gate (it only passes a validated path or
     None), so the composer's ``textless_check`` is left unset to avoid a second
-    OCR call. Returns ``(PIL.Image | None, report)`` with the director outcome
-    merged under ``report["director"]``."""
+    OCR call. When ``run_critique`` is set, a LOG-ONLY visual critique of the
+    composed poster is recorded under ``report["critique"]`` — it NEVER blocks.
+    Returns ``(PIL.Image | None, report)`` with the director outcome under
+    ``report["director"]``."""
     from agents.flyer.premium_poster_v1 import compose_premium_poster_v1
 
     bg = generate_textless_food_background(
@@ -221,4 +336,11 @@ def compose_premium_poster_with_generated_background(
         "detail": bg.detail,
         "food_image_path": bg.food_image_path,
     }
+    if run_critique:
+        if img is not None:
+            report["critique"] = critique_composed_poster(
+                img, brief_summary=brief_summary(facts),
+                scorer=critique_scorer, image_save_path=poster_save_path)
+        else:
+            report["critique"] = _critique_dict({}, 0.0, "no poster composed", "no_poster", False)
     return img, report
