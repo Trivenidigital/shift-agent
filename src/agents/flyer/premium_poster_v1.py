@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from agents.flyer.premium_overlay import _FONT_DIR_CANDIDATES, _premium_font
 
@@ -220,12 +220,22 @@ def compose_premium_poster_v1(
     locked_facts: Sequence[object],
     *,
     food_image_path: Optional[str] = None,
+    textless_check: Optional[Callable] = None,
     size: tuple = (1080, 1350),
 ):
     """Compose the v1 poster. Returns (PIL.Image | None, layout_report).
 
     Ineligible (missing business name / offer / <3 items) → (None, {eligible:False})
     so the caller falls back to the existing path. Never raises on a fact read.
+
+    A supplied food image is used as the hero ONLY when it passes the
+    `textless_check` (Slice C textless-safety gate): a callable(PIL.Image) → bool
+    that is True when the image carries NO text/logo/price. Slice C1 is offline,
+    so the real OCR-based check is INJECTED (the C2 caller wires the existing
+    visual_qa OCR). FAIL-SAFE: a missing image, a load error, a check that
+    returns False, OR a check that raises → the deterministic warm fallback
+    background. Text/facts are ALWAYS composed deterministically from locked
+    facts; nothing is ever read from the image.
     """
     from PIL import Image, ImageDraw
 
@@ -239,16 +249,33 @@ def compose_premium_poster_v1(
         return None, {"eligible": False, "reason": "missing required facts (business / offer / >=3 items)"}
 
     w, h = size
+    food_fallback_reason = ""
     if food_image_path:
         try:
-            img = _scrim(_load_food(food_image_path, size))
-            background = "food"
+            food = _load_food(food_image_path, size)
+            safe = True
+            check_error = False
+            if textless_check is not None:
+                try:
+                    safe = bool(textless_check(food))
+                except Exception:
+                    safe = False        # cannot verify textless -> do NOT trust the image
+                    check_error = True  # ...but distinguish an infra failure from text-found
+            if safe:
+                img = _scrim(food)
+                background = "food"
+            else:
+                img = _fallback_background(size)
+                background = "fallback"
+                food_fallback_reason = "check_error" if check_error else "image_has_text"
         except Exception:
             img = _fallback_background(size)
             background = "fallback"
+            food_fallback_reason = "image_load_failed"
     else:
         img = _fallback_background(size)
         background = "fallback"
+        food_fallback_reason = "no_image"
 
     draw = ImageDraw.Draw(img)
     placed_text: list[str] = []
@@ -321,6 +348,7 @@ def compose_premium_poster_v1(
         "eligible": True,
         "size": size,
         "background": background,
+        "food_fallback_reason": food_fallback_reason,
         "regions": regions,
         "fonts": fonts,
         "headline": " ".join(head_lines),
