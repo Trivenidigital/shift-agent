@@ -296,6 +296,19 @@ def test_config_rejects_extra_fields(sample_config_dict):
         Config.model_validate(bad)
 
 
+def test_customer_config_rejects_extra_fields(sample_config_dict):
+    """CustomerConfig has extra='forbid'. After the PR-D3 absorbing shim was
+    removed (PR-D4 cleanup), this is the SOLE guard against the former PR-B
+    reserved keys (voice_quality / quote_source / tone_profile / tone_examples)
+    and any typo landing on the nested customer config. The shim used to strip
+    `tone_profile` silently on read; post-removal it must be rejected. Pin this
+    so a future extra='ignore' refactor on CustomerConfig is caught."""
+    bad = dict(sample_config_dict)
+    bad["customer"] = {**bad["customer"], "tone_profile": {"formality": "casual"}}
+    with pytest.raises(Exception):
+        Config.model_validate(bad)
+
+
 def test_config_canonicalizes_owner_phone(sample_config_dict):
     """Owner phone should pass through E164Phone validator."""
     bad = dict(sample_config_dict)
