@@ -31,8 +31,8 @@ from typing import Any, Callable, Optional
 
 # Reuse the deployed OpenRouter seam (flat layout on the VPS). We pull ONLY the
 # low-level key + endpoint + timeout + model — NOT any QA verdict logic.
-try:  # pragma: no cover - import shim mirrors sibling flyer modules
-    from visual_qa import (  # type: ignore
+try:  # pragma: no cover - flat (VPS, deployed as flyer_visual_qa.py) then package
+    from flyer_visual_qa import (  # type: ignore
         OPENROUTER_TIMEOUT_SEC,
         OPENROUTER_URL,
         VISION_QA_MODEL,

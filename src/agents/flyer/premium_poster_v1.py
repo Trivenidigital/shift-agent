@@ -25,7 +25,10 @@ import os
 import re
 from typing import Callable, Optional, Sequence
 
-from agents.flyer.premium_overlay import _FONT_DIR_CANDIDATES, _premium_font
+try:  # flat (VPS, deployed as flyer_premium_overlay.py) then package (tests)
+    from flyer_premium_overlay import _FONT_DIR_CANDIDATES, _premium_font  # type: ignore
+except ImportError:  # pragma: no cover - src layout fallback
+    from agents.flyer.premium_overlay import _FONT_DIR_CANDIDATES, _premium_font
 
 # Readability floor (px) for item text at the 1080-wide poster. At a ~400px
 # WhatsApp preview that downscales to ~13px — the line below which menu text
