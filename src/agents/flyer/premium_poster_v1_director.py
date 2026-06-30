@@ -236,8 +236,16 @@ def _oracle_scorer() -> Optional[Scorer]:
 
     def scorer(image_path: str, brief: str = "") -> Optional[dict]:
         score = score_art_direction(image_path, brief_summary=brief)
-        if not score.axes and "unavailable" in (score.overall_critique or "").lower():
-            return None  # no key / no provider -> distinctly unavailable
+        # The oracle returns an empty-axis safe score for BOTH "no vision provider"
+        # (note prefix "art-director oracle unavailable") and internal errors (note
+        # prefix "art-director oracle error"). Anchor on the documented prefix —
+        # not a bare substring — so only the genuinely-unavailable case maps to
+        # critique_unavailable (None); an oracle error keeps its empty-axis dict and
+        # the wrapper records critique_error (ran, bad result — a distinct signal).
+        if not score.axes and (score.overall_critique or "").lower().startswith(
+            "art-director oracle unavailable"
+        ):
+            return None
         return score_to_dict(score)
 
     return scorer

@@ -102,6 +102,16 @@ def test_critique_unavailable_when_scorer_returns_none(tmp_path):
     assert c["axes"] == {}
 
 
+def test_critique_default_tempfile_path_when_no_save_path():
+    # image_save_path omitted -> the tempfile branch (the production path when the
+    # caller does not pass poster_save_path). Must still score + never raise.
+    from PIL import Image
+    img = Image.new("RGB", (1080, 1350), (30, 20, 15))
+    c = critique_composed_poster(img, scorer=_good_scorer)  # no image_save_path
+    assert c["available"] is True and c["status"] == "ok"
+    assert c["composite"] == pytest.approx(8.0)
+
+
 def test_critique_malformed_result_is_safe(tmp_path):
     from PIL import Image
     img = Image.new("RGB", (1080, 1350), (0, 0, 0))
