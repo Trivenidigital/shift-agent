@@ -304,9 +304,10 @@ def compose_premium_poster_v1(
 
     # ── offer badge (framed, large, dominant) ──
     badge_cx, badge_cy = int(w * 0.5), int(h * 0.50)
-    badge_r, badge_drawn = _draw_offer_badge(draw, label=label, price=price, cx=badge_cx, cy=badge_cy, w=w)
+    badge_r, badge_drawn = _draw_offer_badge(img, draw, label=label, price=price, cx=badge_cx, cy=badge_cy, w=w)
+    draw = ImageDraw.Draw(img)  # badge composites a halo paste; re-bind for the rest
     regions["offer"] = (badge_cx - badge_r, badge_cy - badge_r, badge_r * 2, badge_r * 2)
-    offer_px = max(READABILITY_FLOOR_PX, int(w * 0.085))
+    offer_px = max(READABILITY_FLOOR_PX, int(w * 0.10))  # matches the badge price font
     fonts["offer_price"] = offer_px
     placed_text.extend(badge_drawn)  # exactly what the badge drew (mirrors canvas)
 
@@ -354,6 +355,7 @@ def compose_premium_poster_v1(
         "headline": " ".join(head_lines),
         "offer_label": label,
         "offer_price": price,
+        "offer_badge_radius": badge_r,
         "items": list(shown),
         "item_px": item_px,
         "items_overflow": bool(overflow),
@@ -388,25 +390,39 @@ def _fit_headline(draw, text, *, max_w, max_px, min_px=58):
     return min_px, [text]
 
 
-def _draw_offer_badge(draw, *, label, price, cx, cy, w):
-    """A large gold-framed circular price badge. Draws ONLY grounded text — it
-    NEVER invents a label (fact-safety). Returns (radius, [text actually drawn])
-    so the caller's placed_text mirrors the canvas exactly."""
-    r = int(w * 0.16)
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(20, 12, 8))
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=_GOLD, width=max(5, int(w * 0.008)))
-    inner = int(r * 0.86)
-    draw.ellipse([cx - inner, cy - inner, cx + inner, cy + inner], outline=_GOLD, width=2)
-    lf = _premium_font("kicker", max(20, int(w * 0.026)))
-    pf = _premium_font("offer_price", max(READABILITY_FLOOR_PX, int(w * 0.085)))
+def _draw_offer_badge(img, draw, *, label, price, cx, cy, w):
+    """A large gold-framed circular price badge — the poster's offer hook. Draws
+    ONLY grounded text (NEVER invents a label — fact-safety). A soft blurred dark
+    halo lifts the badge off the busy food so the offer reads at WhatsApp preview
+    size. Returns (radius, [text actually drawn]) so placed_text mirrors the canvas.
+    Bigger + stronger than the prior badge (offer_energy was the weak critique axis)."""
+    from PIL import Image, ImageDraw, ImageFilter
+
+    r = int(w * 0.175)  # larger circle (was 0.16w) — more dominant offer
+    # soft separation halo (blurred dark disc) BEHIND the badge — contrast vs food
+    halo = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    hr = int(r * 1.28)
+    ImageDraw.Draw(halo).ellipse([cx - hr, cy - hr, cx + hr, cy + hr], fill=(8, 5, 3, 165))
+    halo = halo.filter(ImageFilter.GaussianBlur(int(r * 0.16)))
+    img.paste(Image.alpha_composite(img.convert("RGBA"), halo).convert("RGB"), (0, 0))
+    draw = ImageDraw.Draw(img)  # re-bind after the composite paste
+
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(18, 11, 7))
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=_GOLD, width=max(7, int(w * 0.011)))  # thicker frame
+    inner = int(r * 0.87)
+    draw.ellipse([cx - inner, cy - inner, cx + inner, cy + inner], outline=_GOLD, width=3)
+    lf = _premium_font("kicker", max(22, int(w * 0.030)))                         # slightly bigger label
+    pf = _premium_font("offer_price", max(READABILITY_FLOOR_PX, int(w * 0.10)))   # bigger price (was 0.085w)
     drawn: list[str] = []
     if label:
         lab = label.upper()[:18]
-        _draw_center_at(draw, lab, lf, cx=cx, cy=cy - int(r * 0.55), fill=_CREAM)
+        _draw_center_at(draw, lab, lf, cx=cx, cy=cy - int(r * 0.52), fill=_CREAM)
         drawn.append(lab)
     if price:
         # centre the price vertically when there is no label above it
-        price_cy = cy - int(r * 0.18) if label else cy - int(r * 0.30)
+        price_cy = cy - int(r * 0.16) if label else cy - int(r * 0.28)
+        # drop shadow then gold for crisp contrast over any background
+        _draw_center_at(draw, price, pf, cx=cx + 3, cy=price_cy + 3, fill=(0, 0, 0))
         _draw_center_at(draw, price, pf, cx=cx, cy=price_cy, fill=_GOLD)
         drawn.append(price)
     return r, drawn
