@@ -61,10 +61,24 @@ def test_offer_badge_is_larger_than_previous_golden():
 def test_hierarchy_headline_dominant_offer_prominent():
     _, r = compose_premium_poster_v1(_snack())
     f = r["fonts"]
-    assert f["headline"] >= f["offer_price"]        # headline still at least as dominant
+    assert f["headline"] > f["offer_price"]         # headline STRICTLY dominant (not co-equal)
     assert f["offer_price"] > f["footer"]           # offer clearly beats the footer
     assert f["offer_price"] >= READABILITY_FLOOR_PX
     assert f["headline"] > f["menu"] > f["footer"]  # overall hierarchy intact
+
+
+def test_long_label_truncates_to_whole_words_no_fragment():
+    facts = [f for f in _snack() if f.fact_id != "pricing_structure"]
+    facts.append(_fact("pricing_structure", "Family Dinner Combo Special $19.99"))
+    _, r = compose_premium_poster_v1(facts)
+    assert r["offer_label"] == "Family Dinner Combo Special"  # report keeps the full fact
+    assert r["offer_price"] == "$19.99"
+    # the badge paints only WHOLE grounded words — placed_text has no mid-word fragment
+    allowed_words = set(" ".join(x.value for x in facts).casefold().split())
+    for placed in r["placed_text"]:
+        for tok in placed.casefold().split():
+            if any(ch.isalnum() for ch in tok):
+                assert tok in allowed_words, f"non-whole-word token {tok!r}"
 
 
 def test_item_list_readability_unchanged():

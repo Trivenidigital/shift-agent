@@ -390,6 +390,24 @@ def _fit_headline(draw, text, *, max_w, max_px, min_px=58):
     return min_px, [text]
 
 
+def _fit_badge_label(text: str, max_chars: int) -> str:
+    """Whole-word prefix of a label that fits in ``max_chars`` so the badge never
+    paints (and never records in placed_text) a mid-word fragment — every token
+    stays a whole, grounded word. A single over-long word is hard-capped only as a
+    last resort. Never fabricates: the result is always a prefix of ``text``."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    out = ""
+    for word in text.split():
+        candidate = f"{out} {word}".strip()
+        if len(candidate) <= max_chars:
+            out = candidate
+        else:
+            break
+    return out or text[:max_chars]
+
+
 def _draw_offer_badge(img, draw, *, label, price, cx, cy, w):
     """A large gold-framed circular price badge — the poster's offer hook. Draws
     ONLY grounded text (NEVER invents a label — fact-safety). A soft blurred dark
@@ -399,11 +417,14 @@ def _draw_offer_badge(img, draw, *, label, price, cx, cy, w):
     from PIL import Image, ImageDraw, ImageFilter
 
     r = int(w * 0.175)  # larger circle (was 0.16w) — more dominant offer
-    # soft separation halo (blurred dark disc) BEHIND the badge — contrast vs food
+    # soft separation halo (blurred dark disc) BEHIND the badge — contrast vs food.
+    # Tight + biased slightly DOWNWARD (toward the food) so the glow never bleeds up
+    # into a tall 2-line headline above the badge.
     halo = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    hr = int(r * 1.28)
-    ImageDraw.Draw(halo).ellipse([cx - hr, cy - hr, cx + hr, cy + hr], fill=(8, 5, 3, 165))
-    halo = halo.filter(ImageFilter.GaussianBlur(int(r * 0.16)))
+    hr = int(r * 1.12)
+    halo_cy = cy + int(r * 0.12)
+    ImageDraw.Draw(halo).ellipse([cx - hr, halo_cy - hr, cx + hr, halo_cy + hr], fill=(8, 5, 3, 150))
+    halo = halo.filter(ImageFilter.GaussianBlur(int(r * 0.11)))
     img.paste(Image.alpha_composite(img.convert("RGBA"), halo).convert("RGB"), (0, 0))
     draw = ImageDraw.Draw(img)  # re-bind after the composite paste
 
@@ -415,7 +436,7 @@ def _draw_offer_badge(img, draw, *, label, price, cx, cy, w):
     pf = _premium_font("offer_price", max(READABILITY_FLOOR_PX, int(w * 0.10)))   # bigger price (was 0.085w)
     drawn: list[str] = []
     if label:
-        lab = label.upper()[:18]
+        lab = _fit_badge_label(label.upper(), 18)
         _draw_center_at(draw, lab, lf, cx=cx, cy=cy - int(r * 0.52), fill=_CREAM)
         drawn.append(lab)
     if price:
