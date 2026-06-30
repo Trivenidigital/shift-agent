@@ -728,6 +728,7 @@ def _generate_poster(project, *, strict_note: str = "", raw_bg_dest=None, scene_
     background for no-credit re-overlay, so only that session path keeps background-only rendering
     and copies the raw sidecar before the temp dir closes.
     """
+    import contextlib
     import os as _os
     import tempfile
     from pathlib import Path as _Path
@@ -750,10 +751,18 @@ def _generate_poster(project, *, strict_note: str = "", raw_bg_dest=None, scene_
     rmod = _render_mod()
     try:
         with tempfile.TemporaryDirectory() as _td:
-            specs = rmod.render_concept_previews(
-                project, _td, model=render_model, quality="medium", concept_count=1,
-                repair_instruction=strict_note, scene_direction=scene_direction,
-            )
+            # Premium Poster v1 opt-in (D1: bare/WhatsApp-direct path only) — ONLY the
+            # normal generation path (raw_bg_dest is None). The revision/source-edit
+            # path needs the textless raw background, so it stays on the existing
+            # render. The branch still requires FLYER_PREMIUM_POSTER_V1 + allowlist +
+            # food/grocery + required facts inside render._render_model; otherwise this
+            # opt-in is a no-op and the render is byte-identical.
+            _ppv1_ctx = rmod.premium_poster_v1_bare_path() if raw_bg_dest is None else contextlib.nullcontext()
+            with _ppv1_ctx:
+                specs = rmod.render_concept_previews(
+                    project, _td, model=render_model, quality="medium", concept_count=1,
+                    repair_instruction=strict_note, scene_direction=scene_direction,
+                )
             final = _Path(specs[0].path)
             png = final.read_bytes()
             if raw_bg_dest is not None:
