@@ -95,6 +95,8 @@ def test_textless_check_raising_is_fail_safe():
     _, r = compose_premium_poster_v1(
         _snack_fixture(), food_image_path=str(FIXTURE), textless_check=_boom)
     assert r["background"] == "fallback"  # cannot verify textless -> do not trust the image
+    # a check FAILURE must be distinguishable from genuine text-detection (C2 alerting)
+    assert r["food_fallback_reason"] == "check_error"
 
 
 def test_textless_check_pass_uses_image():

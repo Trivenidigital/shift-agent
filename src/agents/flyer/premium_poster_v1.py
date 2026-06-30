@@ -254,18 +254,20 @@ def compose_premium_poster_v1(
         try:
             food = _load_food(food_image_path, size)
             safe = True
+            check_error = False
             if textless_check is not None:
                 try:
                     safe = bool(textless_check(food))
                 except Exception:
-                    safe = False  # cannot verify textless -> do NOT trust the image
+                    safe = False        # cannot verify textless -> do NOT trust the image
+                    check_error = True  # ...but distinguish an infra failure from text-found
             if safe:
                 img = _scrim(food)
                 background = "food"
             else:
                 img = _fallback_background(size)
                 background = "fallback"
-                food_fallback_reason = "image_has_text"
+                food_fallback_reason = "check_error" if check_error else "image_has_text"
         except Exception:
             img = _fallback_background(size)
             background = "fallback"
