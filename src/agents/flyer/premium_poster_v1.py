@@ -339,11 +339,16 @@ def compose_premium_poster_v1(
     regions["items"] = (iz_x, iz_y, iz_w, iz_h)
     fonts["menu"] = item_px
 
-    # ── footer ──
+    # ── footer (auto-fit to width; wrap to 2 lines only if it still overflows at
+    # the readability floor — the trailing contact/phone must never clip) ──
     foot_px = max(24, int(w * 0.026))
-    ff = _premium_font("footer", foot_px)
     if footer:
-        _draw_center(draw, footer, ff, cy=int(h * 0.945), w=w, fill=_CREAM)
+        foot_px, foot_lines = _fit_footer(draw, footer, max_w=int(w * 0.94), max_px=foot_px)
+        ff = _premium_font("footer", foot_px)
+        line_h = int(foot_px * 1.3)
+        base_cy = int(h * 0.945) - (line_h * (len(foot_lines) - 1)) // 2
+        for i, line in enumerate(foot_lines):
+            _draw_center(draw, line, ff, cy=base_cy + i * line_h, w=w, fill=_CREAM)
         placed_text.append(footer)
     regions["footer"] = (0, int(h * 0.90), w, int(h * 0.10))
     fonts["footer"] = foot_px
@@ -390,6 +395,41 @@ def _fit_headline(draw, text, *, max_w, max_px, min_px=58):
             if _text_w(draw, l1, f) <= max_w and _text_w(draw, l2, f) <= max_w:
                 return px, [l1, l2]
     f = _headline_font(min_px)
+    return min_px, [text]
+
+
+# The footer packs schedule + location + contact on one line, so it is the widest
+# single string on the poster. A FIXED font size overflowed the frame for dense
+# footers and clipped the trailing contact/phone off the right edge — which the
+# visual-QA / fact-firewall then (correctly) rejected as an unverified phone
+# number. Fit the footer to the width like the headline so the concatenated
+# footer (and its trailing phone) stops clipping. A phone (~12 chars) can never
+# itself exceed the frame; only a pathologically long SINGLE field with no
+# separator can still center over-wide at the floor, and the OCR referee blocks
+# that fail-closed. Floor is footer-specific (smaller than the item-block floor).
+FOOTER_READABILITY_FLOOR_PX = 22
+
+
+def _fit_footer(draw, text, *, max_w, max_px, min_px=FOOTER_READABILITY_FLOOR_PX):
+    """Largest footer font (down to ``min_px``) whose ``text`` fits ``max_w`` on ONE
+    line; if it still overflows at the floor, wrap to 2 balanced lines at a footer
+    separator boundary so the trailing contact stops clipping. Returns
+    ``(font_px, lines)``. Only ever splits on the deterministic ``_footer_line``
+    separator — never mid-token — so no fact is ever broken or fabricated. (A lone
+    field wider than the frame at the floor still centers over-wide; unreachable
+    for the phone, and the downstream OCR referee blocks it fail-closed.)"""
+    for px in range(max_px, min_px - 1, -1):
+        f = _premium_font("footer", px)
+        if _text_w(draw, text, f) <= max_w:
+            return px, [text]
+    f = _premium_font("footer", min_px)
+    sep = "  ·  "
+    if sep in text:
+        parts = text.split(sep)
+        for cut in range(1, len(parts)):
+            l1, l2 = sep.join(parts[:cut]), sep.join(parts[cut:])
+            if _text_w(draw, l1, f) <= max_w and _text_w(draw, l2, f) <= max_w:
+                return min_px, [l1, l2]
     return min_px, [text]
 
 
