@@ -221,7 +221,9 @@ def test_generate_concepts_wraps_primary_render_and_emits():
     src = (REPO / "src" / "agents" / "flyer" / "scripts" / "generate-flyer-concepts").read_text(encoding="utf-8")
     # the managed opt-in wraps the primary render + emits the managed outcome
     assert "with premium_poster_v1_managed_path():" in src
-    assert "_emit_premium_poster_v1_managed_outcome(audit_log_path, project)" in src
+    # emitted on BOTH the success path AND the exception path (so a raised primary
+    # render doesn't lose the managed audit row) — idempotent consume-and-clear.
+    assert src.count("_emit_premium_poster_v1_managed_outcome(audit_log_path, project)") >= 2
     # NOT wrapped around the recovery/rung re-renders (only one managed wrap)
     assert src.count("with premium_poster_v1_managed_path():") == 1
     # consumes the outcome (closes the #523 never-consumed gap)

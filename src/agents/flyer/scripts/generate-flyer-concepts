@@ -482,7 +482,9 @@ def _emit_premium_poster_v1_managed_outcome(audit_log_path: Path, project) -> No
     requested managed signals — attempted / eligible / selected / fallback reason —
     in a single row; final_pass/final_fail is the existing run_visual_qa report
     (correlate by project_id). No-op when the premium branch did not run OR ran on a
-    non-managed path. LOG-ONLY: never gates delivery, never raises into the render."""
+    non-managed path. LOG-ONLY: never gates delivery, never raises into the render.
+    (Multi-concept note: concept_count is 1 in the scoped rollout; if >1 the outcome
+    contextvar holds the LAST concept's result, so this logs one row per run.)"""
     try:
         outcome = consume_premium_poster_v1_outcome()
         if outcome is None or outcome.path != "managed":
@@ -495,7 +497,7 @@ def _emit_premium_poster_v1_managed_outcome(audit_log_path: Path, project) -> No
             eligible=True,
             selected=outcome.delivered,
             status=outcome.status,
-            reason=outcome.reason,
+            reason=(outcome.reason or "")[:120],
             n=outcome.n,
             winner_index=outcome.winner_index,
             winner_composite=outcome.winner_composite,
@@ -969,6 +971,13 @@ def main() -> int:
                     if attempt == 0 and retryable_match and not _draft_error_is_visual_qa(detail_lower):
                         time.sleep(0.35)
                         continue
+                    # The primary render raised (e.g. premium fired, fell through, and
+                    # the integrated fall-through then failed). Log the managed premium
+                    # outcome before the fallback/manual paths so the attempt is not lost
+                    # (idempotent: consume-and-clear + a no-op when premium did not run /
+                    # ran on a non-managed path). Placed after the retry-continue so a
+                    # retried attempt does not double-log.
+                    _emit_premium_poster_v1_managed_outcome(audit_log_path, project)
                     now = datetime.now(timezone.utc)
                     if _draft_error_is_visual_qa(detail_lower):
                         reason_code = "visual_qa_failed"
