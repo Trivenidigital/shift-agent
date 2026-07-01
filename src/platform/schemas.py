@@ -57,34 +57,6 @@ PRE_QUOTE_DRAFT_SENTINEL = "<v0.3-pre-quote-draft>"
 LEGACY_QUOTE_TEXT_SENTINEL = "<legacy-pre-v0.3-no-quote-persisted>"
 LEGACY_EDIT_TEXT_SENTINEL = "<legacy-pre-v0.3-no-edit-text-recorded>"
 
-# PR-D3: forward-compat absorption of v0.4 PR-B reserved keys.
-# atomic_write_json round-trips full models via model_dump_json() (no
-# exclude_defaults), so a future PR-B1+ binary that defaults voice_quality /
-# quote_source / tone_profile / tone_examples will materialize them on every
-# store write. On rollback to PR-D3-line, extra="forbid" on CateringLead /
-# CustomerConfig would crash reads. The mode='before' validators below
-# strip these keys silently (after a one-shot WARN per key per process)
-# so PR-D3 binaries remain readers of PR-B1+ writes.
-_PR_B_RESERVED_LEAD_KEYS = frozenset({"voice_quality", "quote_source"})
-_PR_B_RESERVED_CONFIG_KEYS = frozenset({"tone_profile", "tone_examples"})
-
-# Process-local memo: warn once per (model, key) pair to avoid log spam
-# during the rollback window. Subsequent strips are silent.
-_PR_B_WARNED: set[tuple[str, str]] = set()
-
-
-def _warn_pr_b_reserved_key_once(model_name: str, key: str) -> None:
-    pair = (model_name, key)
-    if pair in _PR_B_WARNED:
-        return
-    _PR_B_WARNED.add(pair)
-    sys.stderr.write(
-        f"WARN: PR-D3 absorbing-shim stripped {key!r} from {model_name} on read "
-        f"(rollback window from PR-B1+ to PR-D3). Once-per-process; subsequent "
-        f"strips silent.\n"
-    )
-
-
 # ─────────────────────────────────────────────────────────────────
 # Phone canonicalization
 # ─────────────────────────────────────────────────────────────────
@@ -353,27 +325,6 @@ class CustomerConfig(BaseModel):
     # are rejected (safer than guessing). Coerced to upper-case so
     # operators can write "us" or "US" in config.yaml without confusion.
     country_code: Optional[str] = Field(default=None, pattern=r"^[A-Za-z]{2}$")
-
-    @model_validator(mode="before")
-    @classmethod
-    def _strip_pr_b_reserved_keys(cls, data: Any) -> Any:
-        # PR-D3 absorbing shim — see module-level docstring near
-        # _PR_B_RESERVED_CONFIG_KEYS for rationale.
-        # Defensive shallow copy so the caller's input dict is never
-        # mutated (review #38 MEDIUM). The precedent
-        # _backfill_legacy_quote_text mutates in place; we deviate here
-        # because new code should be defensive even if existing code is
-        # consistent in the other direction.
-        if not isinstance(data, dict):
-            return data
-        if not any(key in data for key in _PR_B_RESERVED_CONFIG_KEYS):
-            return data  # fast-path: no copy when nothing to strip
-        data = dict(data)
-        for key in _PR_B_RESERVED_CONFIG_KEYS:
-            if key in data:
-                _warn_pr_b_reserved_key_once("CustomerConfig", key)
-                data.pop(key, None)
-        return data
 
     @field_validator("country_code", mode="after")
     @classmethod
@@ -2156,29 +2107,6 @@ class CateringLead(BaseModel):
     # NOTE: sentinel is defined at module scope (LEGACY_QUOTE_TEXT_SENTINEL)
     # to avoid Pydantic v2's ModelPrivateAttr treatment of leading-underscore
     # class attributes.
-
-    @model_validator(mode="before")
-    @classmethod
-    def _strip_pr_b_reserved_keys(cls, data: Any) -> Any:
-        # PR-D3 absorbing shim — see module-level docstring near
-        # _PR_B_RESERVED_LEAD_KEYS for rationale.
-        # Declared before _backfill_legacy_quote_text; key sets are disjoint
-        # ({voice_quality, quote_source} vs {quote_text, status}) so the
-        # ordering is incidental — both validators always run, and neither
-        # touches the other's fields.
-        # Defensive shallow copy so the caller's input dict is never
-        # mutated (review #38 MEDIUM). Fast-path skips the copy when the
-        # dict has no reserved keys (the steady-state case post-soak).
-        if not isinstance(data, dict):
-            return data
-        if not any(key in data for key in _PR_B_RESERVED_LEAD_KEYS):
-            return data
-        data = dict(data)
-        for key in _PR_B_RESERVED_LEAD_KEYS:
-            if key in data:
-                _warn_pr_b_reserved_key_once("CateringLead", key)
-                data.pop(key, None)
-        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -5235,22 +5163,6 @@ class StateFileMigrationOverridden(_BaseEntry):
     )
 
 
-class CateringQuoteRenderFailed(_BaseEntry):
-    """v0.3 (review M2): emitted when apply-catering-owner-decision approve
-    flow fails to render the customer quote (template KeyError, OSError,
-    or unexpected validation issue). Without this audit row, an
-    approve-blocked-on-render-error left the lead at AWAITING_OWNER_APPROVAL
-    with no durable trace of why retries kept failing — operators saw stderr
-    only.
-    """
-    type: Literal["catering_quote_render_failed"]
-    lead_id: str = Field(min_length=1)
-    code: str = Field(pattern=_CODE_FULL_PATTERN)
-    error_class: str = Field(min_length=1, max_length=80,
-                             description="Python exception class name (e.g. 'KeyError')")
-    detail: str = Field(default="", max_length=2000)
-
-
 # ─────────────────────────────────────────────────────────────────
 # Multi-Location Coordinator log entries (Agent #3)
 # ─────────────────────────────────────────────────────────────────
@@ -5899,8 +5811,6 @@ LogEntry = Annotated[
         Annotated[CateringOwnerApprovalCardSkipped, Tag("catering_owner_approval_card_skipped")],
         Annotated[CateringOwnerEdited, Tag("catering_owner_edited")],
         Annotated[CateringDeclineAttempted, Tag("catering_decline_attempted")],
-        # v0.3 (review M2): render-failure observability
-        Annotated[CateringQuoteRenderFailed, Tag("catering_quote_render_failed")],
         # PR-D1: post-bridge state-vs-outbound divergence audit
         Annotated[CateringQuoteSentLeadMissing, Tag("catering_quote_sent_lead_missing")],
         # PR-B v0.4: SKILL → apply-script handoff failure (LLM-drafted quote)
@@ -6183,7 +6093,6 @@ __all__ = [
     "CateringQuoteAttempted", "CateringOwnerApprovalCardAttempted",
     "CateringOwnerApprovalCardFailed", "CateringOwnerApprovalCardSkipped",
     "CateringOwnerEdited", "CateringDeclineAttempted",
-    "CateringQuoteRenderFailed",
     # PR-D1
     "CateringQuoteSentLeadMissing", "ConfigLoadFailed",
     "CateringLeadManuallyReconciled",
