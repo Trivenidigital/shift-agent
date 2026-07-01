@@ -25,6 +25,15 @@ PR #324 wired Catering Agent #2 to the Commerce slice-1 primitives. After deploy
 
 This is correct — but it's also dead-on-arrival from the customer's POV. This runbook tells the operator how to configure it.
 
+> **⚠️ Ordering matters — configure OR disable *before* the first qualifying lead.**
+> The deposit hook ships **armed** (`cfg.catering.deposit_pct` defaults to `0.25`,
+> `> 0`). If a qualifying lead reaches `SENT_TO_CUSTOMER` while the template is still
+> empty, the system mints an intent and sends the "not configured yet" promise it
+> then **cannot auto-fulfil** (re-invoke no-ops — see Steps 5, 6, 6a). If you are not
+> ready to accept deposits yet, set the Step 7 kill switch (`deposit_pct: 0`) **now**,
+> not after. Confirm current runtime posture:
+> `ssh main-vps 'grep -E "deposit_pct|payment_checkout_url_template" /opt/shift-agent/config.yaml'`.
+
 ---
 
 ## Step 1 — Decide the payment provider posture (slice-2.5 only allows manual links)
@@ -183,12 +192,15 @@ ssh main-vps 'grep -E "catering_deposit_link_(sent|failed)" /opt/shift-agent/log
 ```
 
 - **`catering_deposit_link_sent` with `url_status="configured"`** → happy path; customer received the link
-- **`catering_deposit_link_sent` with `url_status="unconfigured"`** → template is empty; operator forgot Step 2. Customer got the "not configured yet" copy. **Action: complete Step 2 + re-invoke `catering-mint-deposit --lead-id <id>`**
+- **`catering_deposit_link_sent` with `url_status="unconfigured"`** → template is empty; operator forgot Step 2. Customer got the "not configured yet" copy. **⚠️ A plain re-invoke does NOT fix this** — the unconfigured send still persisted `lead.deposit_payment_intent_id` and set `deposit_status="unconfigured"`, so re-invoking `catering-mint-deposit --lead-id <id>` returns `noop: already_minted` (see Step 6). To actually deliver the real link the operator must first clear the stale intent — see **Step 6a — Unconfigured-send remediation**. The durable fix is to configure Step 2 (or set the Step 7 kill switch) **before** any qualifying lead arrives.
 - **`catering_deposit_link_failed`** → mint or send failure. Pushover P1 fires on `bridge_send_failed`. Check the `reason` field:
   - `below_minimum` → quote total too small for deposit; expected
   - `cart_build_failed` / `order_create_failed` / `intent_mint_failed` → operator-side bug; check stderr in journald
   - `bridge_send_failed` → WhatsApp bridge transient; operator should re-invoke `catering-mint-deposit --lead-id <id>` after bridge recovers
-  - `subprocess_timeout` → script hung; treat as `bridge_send_failed`
+  - `subprocess_timeout` → script hung. **Not a `decisions.log` row** — the parent
+    logs it to journald only, so it won't appear in the grep above; check
+    `journalctl` for `catering-mint-deposit … TIMED OUT`. Do **not** blindly re-invoke
+    (double-send risk) — see the `subprocess_timeout` caveat in Step 6
 
 ---
 
@@ -201,9 +213,67 @@ ssh main-vps '/usr/local/bin/catering-mint-deposit --lead-id L0007' > .ssh_comme
 # Then read .ssh_commerce_deposit_retry.txt locally.
 ```
 
-The script is **idempotent on `lead.deposit_payment_intent_id`**: if a prior attempt already minted (rare — only happens if the bridge POST succeeded after a prior failure mid-flight), re-invocation is a no-op and reports `noop_already_minted`. Otherwise it mints a fresh intent against a new `order_id`.
+The script is **idempotent on `lead.deposit_payment_intent_id`**: if a prior attempt already minted, re-invocation is a no-op and reports `noop: already_minted`. Otherwise it mints a fresh intent against a new `order_id`.
 
-**Note:** the prior failure's order was already cancelled by slice-2.5 cleanup (`bridge_send_failed_orphan_cleanup`), so the ledger stays clean across retries.
+**When re-invoke works (mint failed before the customer send):** the six *in-script*
+failure reasons — `zero_amount`, `below_minimum`, `cart_build_failed`,
+`order_create_failed`, `intent_mint_failed`, `bridge_send_failed` — all `return`
+**before** the lead is persisted with a `deposit_payment_intent_id` (the
+`bridge_send_failed` path even voids the intent + cancels the order via
+`bridge_send_failed_orphan_cleanup`). So the lead's `deposit_payment_intent_id`
+stays empty → re-invoke mints a fresh intent and the ledger stays clean.
+
+**⚠️ `subprocess_timeout` is NOT in that safe bucket — inspect before re-invoking.**
+It is a *parent-side 30-second wall-clock kill* (`apply-catering-owner-decision`
+`TimeoutExpired`), not an in-script early return, so the child can be killed
+**anywhere** — including after the bridge POST already succeeded but before the lead
+persists. Two consequences: (a) a blind re-invoke can send the customer a **second**
+link and mint a **second** intent while the first is left un-voided (the kill runs no
+cleanup); and (b) the deployed parent logs the timeout to **stderr/journald only** —
+it does **not** write a `catering_deposit_link_failed` row, so grepping `decisions.log`
+for `reason=subprocess_timeout` finds nothing. On a timeout, **first** inspect
+`lead.deposit_payment_intent_id` (in `catering-leads.json`) and the commerce intent
+ledger; re-invoke only if no intent was persisted, otherwise treat it like the
+unconfigured/already-minted case (Step 6a).
+
+**When re-invoke does NOT work (`url_status="unconfigured"` send):** here the bridge
+POST *succeeded* (customer received the "not configured yet" copy), so the script
+runs `mark_sent` and persists `lead.deposit_payment_intent_id` +
+`deposit_status="unconfigured"`. A subsequent re-invoke short-circuits at
+`noop: already_minted`. There is **no `--force`/`--remint` flag** and **no wired
+`unconfigured → awaiting_payment` transition**, so configuring the template later
+does not retroactively deliver the real link. Use Step 6a.
+
+---
+
+## Step 6a — Unconfigured-send remediation (manual, until a remint tool exists)
+
+If a lead is stuck at `deposit_status="unconfigured"` with a persisted
+`deposit_payment_intent_id`, the real payment link can only be delivered by clearing
+the stale intent first. **This is manual state surgery — do it under
+`FileLock`-safe conditions (no live agent processing the same lead) per the
+`feedback_no_manual_test_during_agent_run` discipline.**
+
+1. Configure the template (Step 2) and verify it renders (Step 2 validation block).
+2. Void the stale commerce intent so the ledger stays consistent (operator uses the
+   commerce `payment_link.void` path / cancels the order), then clear the deposit
+   anchor fields on the lead. **The one load-bearing field is
+   `deposit_payment_intent_id` — it alone gates re-mint** (both the idempotency check
+   in `catering-mint-deposit` and `_should_mint_deposit` return early while it is
+   non-empty; clearing `deposit_status` alone does NOT un-stick the lead). Clear all
+   three for cleanliness: `deposit_payment_intent_id=""`, `deposit_commerce_order_id=""`,
+   `deposit_status="none"` (leave `quote_total_usd` / `extracted.headcount` intact so
+   the threshold still qualifies).
+3. Re-invoke `catering-mint-deposit --lead-id <id>` → now mints a fresh, *configured*
+   intent and sends the real link (`url_status="configured"`,
+   `deposit_status="awaiting_payment"`).
+
+> **Preferred: avoid this path entirely.** If no payment template is ready, set the
+> Step 7 kill switch (`cfg.catering.deposit_pct: 0`) **before** any qualifying
+> (≥ `deposit_threshold_guests`, quoted, owner-approved) lead arrives. That prevents
+> the system from minting an unfulfillable "we'll send it when it's ready" promise in
+> the first place. A future slice-3 operator remint/void tool will make Step 6a a
+> one-command action; today it is manual.
 
 ---
 
