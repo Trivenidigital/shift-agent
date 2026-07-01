@@ -217,27 +217,56 @@ def premium_outcome_should_alert(outcome: PremiumOverlayOutcome | None) -> bool:
     return bool(outcome) and outcome.status == "premium_overlay_failed_unexpected"
 
 
-# ── Premium Poster v1 — bare-path opt-in + outcome telemetry ─────────────────
+# ── Premium Poster v1 — render-path opt-in + outcome telemetry ───────────────
 # The premium-poster-v1 render branch fires ONLY when the CURRENT render is opted
-# in (set by the bare/WhatsApp-direct path). The managed/studio path never sets
-# this, so it remains byte-identical (D1: bare path only in this slice).
-_PREMIUM_POSTER_V1_BARE_OPT_IN: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "flyer_premium_poster_v1_bare_opt_in", default=False
+# in by the orchestrating render path. The opt-in carries the PATH IDENTITY
+# (``"bare"`` = WhatsApp-direct, ``"managed"`` = studio/owner-review) so
+# observability can attribute each fire to its path. A render with NO opt-in
+# (``None``) never enters the premium branch, so any path — and any recovery /
+# fallback / rung-ladder re-render that does not explicitly opt in — stays
+# byte-identical.
+_PREMIUM_POSTER_V1_PATH: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "flyer_premium_poster_v1_path", default=None
 )
 
 
 @contextlib.contextmanager
-def premium_poster_v1_bare_path():
-    """Opt the current render into the Premium Poster v1 branch (bare path only)."""
-    token = _PREMIUM_POSTER_V1_BARE_OPT_IN.set(True)
+def _premium_poster_v1_opt_in(path_id: str):
+    """Opt the current render into the Premium Poster v1 branch under ``path_id``.
+    The token-based reset guarantees the path identity is scoped to exactly the
+    wrapped render call and can never leak into a later render (or a nested
+    recovery re-render outside the ``with``)."""
+    token = _PREMIUM_POSTER_V1_PATH.set(path_id)
     try:
         yield
     finally:
-        _PREMIUM_POSTER_V1_BARE_OPT_IN.reset(token)
+        _PREMIUM_POSTER_V1_PATH.reset(token)
 
 
-def _premium_poster_v1_bare_opt_in() -> bool:
-    return _PREMIUM_POSTER_V1_BARE_OPT_IN.get()
+@contextlib.contextmanager
+def premium_poster_v1_bare_path():
+    """Opt the current render into the Premium Poster v1 branch, tagged as the
+    bare/WhatsApp-direct path."""
+    with _premium_poster_v1_opt_in("bare"):
+        yield
+
+
+@contextlib.contextmanager
+def premium_poster_v1_managed_path():
+    """Opt the current render into the Premium Poster v1 branch, tagged as the
+    managed/studio (owner-review) path. Wrap ONLY the primary preview render in
+    generate-flyer-concepts — NEVER the deterministic fallback, brand retry,
+    premium repair, deterministic recovery, legacy ladder, or source-edit
+    renders (each of those is a separate render call outside this scope)."""
+    with _premium_poster_v1_opt_in("managed"):
+        yield
+
+
+def _premium_poster_v1_opt_in_path() -> str | None:
+    """The path identity (``"bare"`` | ``"managed"``) opted into the premium
+    branch for the CURRENT render, or ``None`` when no path opted in (the branch
+    is not entered → byte-identical legacy render)."""
+    return _PREMIUM_POSTER_V1_PATH.get()
 
 
 @dataclass
@@ -4585,17 +4614,20 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
 def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> None:
     token = _FORCE_BACKGROUND_ONLY.set(True) if force_background_only else None
     try:
-        # Premium Poster v1 (bare-path opt-in + flag + allowlist + food/grocery +
+        # Premium Poster v1 (render-path opt-in + flag + allowlist + food/grocery +
         # required facts). On success writes `path` and returns; ANY miss falls
         # through to the existing render below (byte-identical when not armed). The
         # existing QA / visible-contract / send gates run on the result downstream,
-        # unchanged + authoritative. Skipped during a force_background_only recovery
-        # re-render so the premium path is a one-shot primary attempt, not a rung.
-        # Reset the outcome per render so a prior premium fire can never leave a stale
-        # value (None unambiguously means "premium branch not entered this render").
+        # unchanged + authoritative. The opt-in is set ONLY around the PRIMARY render
+        # of each path (bare _generate_poster / managed generate-flyer-concepts) —
+        # never around a rung; and this branch is additionally skipped during a
+        # force_background_only recovery re-render so the premium path is a one-shot
+        # primary attempt, not a rung. Reset the outcome per render so a prior
+        # premium fire can never leave a stale value (None unambiguously means
+        # "premium branch not entered this render").
         _PREMIUM_POSTER_V1_OUTCOME.set(None)
         if (not force_background_only
-                and _premium_poster_v1_bare_opt_in()
+                and _premium_poster_v1_opt_in_path() is not None
                 and _premium_poster_v1_armed(project)
                 and _premium_poster_v1_eligible(project)):
             outcome = render_premium_poster_v1(
