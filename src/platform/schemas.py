@@ -4515,6 +4515,50 @@ class FlyerPremiumOverlayOutcome(_BaseEntry):
     output_format: str = Field(default="", max_length=40)
 
 
+class FlyerPremiumPosterV1Managed(_BaseEntry):
+    """Premium Poster v1 — managed/studio (owner-review) path observability
+    (2026-07-01). One row per lifecycle stage of the flag-gated, allowlist-scoped
+    premium-poster branch when it is armed for the MANAGED primary preview render
+    (generate-flyer-concepts). `event` discriminates the stage:
+
+      - premium_poster_v1_managed_attempted     : the scoped-armed managed primary
+        render ran under the premium opt-in (the denominator; per CLAUDE.md §12b
+        the dispatched half of the dispatched/outcome pair).
+      - premium_poster_v1_managed_eligible      : the project passed eligibility
+        (food/grocery + required locked facts) and the branch was entered.
+      - premium_poster_v1_managed_selected      : a real textless-food candidate won
+        and the deterministic fact-locked poster was written to the preview target.
+      - premium_poster_v1_managed_fallback_reason: the branch did not deliver — the
+        render fell through to the existing managed path UNCHANGED; `reason` says why
+        (ineligible / no_winner / no_food_winner / unsupported_size / exception:<T>).
+      - premium_poster_v1_managed_final_pass     : the delivered premium poster PASSED
+        the authoritative downstream visual QA gate.
+      - premium_poster_v1_managed_final_fail     : the delivered premium poster FAILED
+        the authoritative downstream visual QA gate (the EXISTING recovery ladder then
+        runs unchanged, exactly as for any other render).
+
+    LOG-ONLY. NEVER emitted when the flag is off / the sender is not allowlisted
+    (the managed path is byte-identical + audit-silent when not armed). Never
+    alters render, QA, owner-review, or send semantics."""
+    type: Literal["flyer_premium_poster_v1_managed"] = "flyer_premium_poster_v1_managed"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+    event: Literal[
+        "premium_poster_v1_managed_attempted",
+        "premium_poster_v1_managed_eligible",
+        "premium_poster_v1_managed_selected",
+        "premium_poster_v1_managed_fallback_reason",
+        "premium_poster_v1_managed_final_pass",
+        "premium_poster_v1_managed_final_fail",
+    ]
+    reason: str = Field(default="", max_length=80)
+    n: int = Field(default=0, ge=0)
+    winner_index: int = Field(default=-1, ge=-1)
+    winner_composite: float | None = None
+    qa_status: str = Field(default="", max_length=40)
+    output_format: str = Field(default="", max_length=40)
+
+
 class FlyerPremiumRepairExhausted(_BaseEntry):
     """Slice 2 premium repair-loop observability. Emitted when the bounded (×2)
     repair edits did not produce a clean premium render — the orchestrator leaves
@@ -5915,6 +5959,8 @@ LogEntry = Annotated[
         Annotated[FlyerPremiumRepairSkipped, Tag("flyer_premium_repair_skipped")],
         # 2026-06-19 — flat-degrade observability (premium overlay outcome)
         Annotated[FlyerPremiumOverlayOutcome, Tag("flyer_premium_overlay_outcome")],
+        # 2026-07-01 — Premium Poster v1 managed/studio path observability
+        Annotated[FlyerPremiumPosterV1Managed, Tag("flyer_premium_poster_v1_managed")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],

@@ -32,6 +32,7 @@ from schemas import (  # noqa: E402
     FlyerIntegratedRefereeUnavailableFallback,
     FlyerManualReview,
     FlyerPremiumOverlayOutcome,
+    FlyerPremiumPosterV1Managed,
     FlyerPremiumRepairAttempted,
     FlyerPremiumRepairExhausted,
     FlyerPremiumRepairSkipped,
@@ -62,9 +63,9 @@ try:
 except ImportError:
     from agents.flyer.reference_extract import build_reference_extraction_provider, extract_reference  # noqa: E402
 try:
-    from flyer_render import FlyerRenderError, _deterministic_recovery_enabled, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, consume_premium_overlay_outcome, next_asset_number, premium_outcome_should_alert, render_concept_previews, render_repair_edit, render_source_edit_preview  # type: ignore  # noqa: E402
+    from flyer_render import FlyerRenderError, _deterministic_recovery_enabled, _premium_poster_v1_armed, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, consume_premium_overlay_outcome, consume_premium_poster_v1_outcome, next_asset_number, premium_outcome_should_alert, premium_poster_v1_managed_path, render_concept_previews, render_repair_edit, render_source_edit_preview  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import FlyerRenderError, _deterministic_recovery_enabled, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, consume_premium_overlay_outcome, next_asset_number, premium_outcome_should_alert, render_concept_previews, render_repair_edit, render_source_edit_preview  # noqa: E402
+    from agents.flyer.render import FlyerRenderError, _deterministic_recovery_enabled, _premium_poster_v1_armed, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, consume_premium_overlay_outcome, consume_premium_poster_v1_outcome, next_asset_number, premium_outcome_should_alert, premium_poster_v1_managed_path, render_concept_previews, render_repair_edit, render_source_edit_preview  # noqa: E402
 try:
     from flyer_visual_qa import brand_blocker_name, is_own_brand_variant, run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
 except ImportError:
@@ -475,6 +476,83 @@ def _emit_premium_overlay_outcome(audit_log_path: Path, project) -> None:
         )
 
 
+def _emit_premium_poster_v1_managed_outcome(audit_log_path: Path, project):
+    """Consume the Premium Poster v1 outcome recorded by the MANAGED primary render
+    and emit path-distinguished decisions.log rows (attempted/eligible/selected/
+    fallback_reason). Returns the outcome (or None) so the caller can pair the
+    downstream QA verdict (final_pass/final_fail).
+
+    Dormancy: a NO-OP that writes ZERO rows unless the premium branch is ARMED for
+    this project (flag FLYER_PREMIUM_POSTER_V1=1 + sender allowlisted). Flag off /
+    not allowlisted => the managed path is byte-identical AND audit-silent. The
+    outcome contextvar is consumed either way so a stale value never leaks into a
+    later render.
+
+    NEVER raises: the whole body is guarded so an audit-row construction/append
+    failure (e.g. an unexpected ValidationError) can never propagate into the
+    render retry's `except` and be misclassified as a render failure — an
+    observability failure must fall through to the existing managed render
+    UNCHANGED (audit rows must not block the render/manual path)."""
+    try:
+        if not _premium_poster_v1_armed(project):
+            consume_premium_poster_v1_outcome()  # clear any (dormant) value; emit nothing
+            return None
+        outcome = consume_premium_poster_v1_outcome()
+        now = datetime.now(timezone.utc)
+
+        def _row(event: str, **extra):
+            _audit_append(audit_log_path, FlyerPremiumPosterV1Managed(
+                ts=now, project_id=project.project_id, project_version=project.version,
+                event=event, **extra))
+
+        # Denominator (§12b dispatched half): the scoped-armed managed primary
+        # render ran under the premium opt-in — always emitted when armed.
+        _row("premium_poster_v1_managed_attempted")
+        if outcome is None:
+            # Armed but the branch did not fire → ineligible (non-food / missing
+            # facts). The render fell to the existing managed path UNCHANGED.
+            _row("premium_poster_v1_managed_fallback_reason", reason="ineligible")
+            return None
+        _row("premium_poster_v1_managed_eligible", n=outcome.n)
+        if outcome.delivered:
+            _row("premium_poster_v1_managed_selected", n=outcome.n,
+                 winner_index=outcome.winner_index, winner_composite=outcome.winner_composite,
+                 output_format=outcome.output_format)
+        else:
+            _row("premium_poster_v1_managed_fallback_reason", reason=outcome.reason,
+                 n=outcome.n, output_format=outcome.output_format)
+        return outcome
+    except Exception:  # noqa: BLE001 — observability must never break the render path
+        try:
+            consume_premium_poster_v1_outcome()  # best-effort clear so nothing leaks
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+
+def _emit_premium_poster_v1_managed_final(audit_log_path: Path, project, ppv1_outcome, *, qa_passed: bool):
+    """Pair the authoritative downstream visual-QA verdict with a DELIVERED premium
+    poster: final_pass when it passed, final_fail when it failed (the EXISTING
+    recovery ladder then runs unchanged). No-op unless a premium poster was actually
+    delivered by the primary render (ppv1_outcome.delivered) — so nothing is emitted
+    for the ineligible / fell-through / dormant cases.
+
+    NEVER raises: guarded so an audit-row failure can never propagate to main()
+    (this emitter runs OUTSIDE the render try/except) — observability must not break
+    the render/owner-review/send lifecycle."""
+    if ppv1_outcome is None or not getattr(ppv1_outcome, "delivered", False):
+        return
+    try:
+        _audit_append(audit_log_path, FlyerPremiumPosterV1Managed(
+            ts=datetime.now(timezone.utc), project_id=project.project_id,
+            project_version=project.version,
+            event="premium_poster_v1_managed_final_pass" if qa_passed else "premium_poster_v1_managed_final_fail",
+            qa_status="passed" if qa_passed else "failed",
+            output_format=getattr(ppv1_outcome, "output_format", "")))
+    except Exception:  # noqa: BLE001 — observability must never break the render path
+        return
+
+
 def _load_autorepair_store(path: Path) -> FlyerAutoRepairAttemptStore:
     if not path.exists():
         return FlyerAutoRepairAttemptStore()
@@ -799,6 +877,11 @@ def main() -> int:
                 and not visual_qa_retry_without_source_marker
             )
         )
+        # Premium Poster v1 (managed path) outcome for THIS run — set only by the
+        # new-render primary path below; stays None on the source-edit/reference-
+        # image path (which must never trigger the premium branch) so the shared
+        # QA gate downstream emits no final_pass/final_fail for source edits.
+        ppv1_managed_outcome = None
         if source_edit_requested:
             # FIX 5: source-edit has NO deterministic renderer — render.py
             # dispatches source-edit by PROVIDER (OpenRouter/OpenAI) and would
@@ -915,14 +998,26 @@ def main() -> int:
             retryable_match = False
             for attempt in range(2):
                 try:
-                    specs = render_concept_previews(
-                        project,
-                        asset_dir,
-                        model=draft_model,
-                        quality=draft_provider.quality,
-                        concept_count=cfg.flyer.concept_count,
-                    )
+                    # Premium Poster v1 (managed/studio path) opt-in — wraps ONLY
+                    # this PRIMARY preview render (retried once on transient error;
+                    # both attempts ARE the primary render). The deterministic
+                    # fallback, brand retry, premium repair, deterministic recovery,
+                    # legacy ladder, and source-edit renders are SEPARATE
+                    # render_concept_previews calls OUTSIDE this scope and never opt
+                    # in. The branch further requires FLYER_PREMIUM_POSTER_V1 +
+                    # allowlist + food/grocery + required facts inside
+                    # render._render_model; otherwise this opt-in is a no-op and the
+                    # render is byte-identical.
+                    with premium_poster_v1_managed_path():
+                        specs = render_concept_previews(
+                            project,
+                            asset_dir,
+                            model=draft_model,
+                            quality=draft_provider.quality,
+                            concept_count=cfg.flyer.concept_count,
+                        )
                     _emit_premium_overlay_outcome(audit_log_path, project)
+                    ppv1_managed_outcome = _emit_premium_poster_v1_managed_outcome(audit_log_path, project)
                     break
                 except Exception as exc:
                     detail_lower = str(exc).lower()
@@ -1051,6 +1146,13 @@ def main() -> int:
             write_visual_qa_report(report, spec.path)
             qa_reports.append(report)
         failed_qa = [report for report in qa_reports if report.status != "passed"]
+        # Premium Poster v1 (managed): pair the AUTHORITATIVE visual-QA verdict with
+        # a DELIVERED premium poster (final_pass/final_fail). Read here on the PRIMARY
+        # render's QA — before any recovery rung re-renders — so the verdict is the
+        # premium poster's own. No-op unless a premium poster was actually delivered;
+        # the QA gate, owner-review lifecycle, and recovery ladder are untouched.
+        _emit_premium_poster_v1_managed_final(
+            audit_log_path, current, ppv1_managed_outcome, qa_passed=not failed_qa)
         if (
             failed_qa
             and _qa_failed_missing_business_name(failed_qa)
