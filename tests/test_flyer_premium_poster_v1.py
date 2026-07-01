@@ -181,3 +181,53 @@ def test_premium_poster_v1_dormant_by_default_in_render():
 def test_golden_artifact_committed():
     golden = REPO / "tests" / "fixtures" / "premium_poster_v1" / "snack_weekend_golden.png"
     assert golden.exists() and golden.stat().st_size > 0
+
+
+# ── footer width-fit (regression: a dense footer clipped the trailing phone → QA
+#    rejected it as an unverified phone number; 2026-07-01 live managed-path test) ─
+
+def _long_footer_facts():
+    # Dense footer: schedule + full address + full E.164 phone (the case that
+    # overflowed 1080px at a fixed font size and clipped the last phone digit).
+    return _snack_fixture() + [
+        _fact("schedule", "Saturday & Sunday, 11 AM - 8 PM"),
+        _fact("location", "90 Brybar Dr, St Johns, FL"),
+        _fact("contact_phone", "+17329837841"),
+    ]
+
+
+def test_fit_footer_dense_line_fits_width_no_clip():
+    from PIL import Image, ImageDraw
+    from agents.flyer.premium_poster_v1 import _fit_footer, _footer_line, _premium_font, _text_w
+
+    draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
+    footer = _footer_line(_long_footer_facts())
+    assert "+17329837841" in footer
+    max_w = int(1080 * 0.94)
+    foot_px, lines = _fit_footer(draw, footer, max_w=max_w, max_px=max(24, int(1080 * 0.026)))
+    # Every emitted line fits within the frame -> nothing clips off the edge.
+    for line in lines:
+        assert _text_w(draw, line, _premium_font("footer", foot_px)) <= max_w
+    # The trailing contact/phone is never split mid-token: it lives intact on one line.
+    assert any("+17329837841" in line for line in lines)
+    # Fit stays readable (never below the footer floor).
+    assert foot_px >= 22
+
+
+def test_compose_dense_footer_phone_fully_rendered(tmp_path):
+    # End-to-end: composing with a dense footer must place the FULL footer string
+    # (incl. the complete phone) and report a font at which it fits the width.
+    from PIL import Image, ImageDraw
+    from agents.flyer.premium_poster_v1 import _footer_line, _premium_font, _text_w
+
+    img, report = compose_premium_poster_v1(_long_footer_facts(), size=(1080, 1350))
+    assert img is not None and report["eligible"] is True
+    footer = _footer_line(_long_footer_facts())
+    assert footer in report["placed_text"]          # full footer declared, phone intact
+    draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
+    foot_px = report["fonts"]["footer"]
+    # The single-line footer (common case) must fit the frame at the reported size.
+    if _text_w(draw, footer, _premium_font("footer", foot_px)) > int(1080 * 0.94):
+        # Only acceptable when it wrapped: each ' · '-split segment fits.
+        segs = footer.split("  ·  ")
+        assert all(_text_w(draw, s, _premium_font("footer", foot_px)) <= int(1080 * 0.94) for s in segs)
