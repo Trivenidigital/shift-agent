@@ -1,0 +1,14 @@
+{
+  "topic": "premium-poster-v1-managed-path-integration",
+  "task_text": "Premium Poster v1 — Managed/Studio Path Integration. Wire the premium-poster opt-in into the managed/studio preview render path (generate-flyer-concepts -> render_concept_previews primary render at line 918), gated by FLYER_PREMIUM_POSTER_V1 + allowlist +17329837841 + food/grocery + required facts + not-source-edit + not-recovery, with safe fallback to the existing managed path on any failure, owner-review/approval/QA/visible-contract/fact-firewall/text-manifest/send all preserved + authoritative, and managed-path-specific observability events. PLAN ONLY — no code.",
+  "completed_at": "2026-06-30T23:59:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 3,
+  "hermes_step_count": 9,
+  "files_to_read_first": [
+    "src/agents/flyer/scripts/generate-flyer-concepts",
+    "src/agents/flyer/render.py",
+    "src/agents/flyer/visual_qa.py",
+    "src/agents/flyer/premium_poster_v1_director.py"
+  ]
+}

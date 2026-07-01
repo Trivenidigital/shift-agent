@@ -4587,6 +4587,30 @@ class FlyerPremiumOverlayOutcome(_BaseEntry):
     output_format: str = Field(default="", max_length=40)
 
 
+class FlyerPremiumPosterV1ManagedOutcome(_BaseEntry):
+    """Premium Poster v1 MANAGED-path observability (2026-07-01). Emitted once per
+    managed/studio PRIMARY preview render when the premium-poster branch was entered
+    (opted-in + armed + eligible), recording whether the deterministic premium poster
+    was SELECTED (a real textless-food-background winner) or fell through to the
+    existing managed render — and WHY. Path-distinguished from the bare path. The 6
+    requested signals map to this one row: attempted + eligible + selected +
+    fallback reason are fields here; final_pass/final_fail is the existing
+    run_visual_qa report (correlate by project_id). LOG-ONLY: never gates delivery."""
+    type: Literal["flyer_premium_poster_v1_managed_outcome"] = "flyer_premium_poster_v1_managed_outcome"
+    project_id: str = Field(min_length=1, max_length=40)
+    project_version: int = Field(ge=1)
+    attempted: bool = True
+    eligible: bool = True
+    selected: bool = False          # a real food-background premium poster was delivered
+    status: Literal["delivered", "fallback", "skipped"] = "fallback"
+    reason: str = Field(default="", max_length=120)   # none | no_food_winner | no_winner | unsupported_size | exception:<T>
+    n: int = Field(default=1, ge=1)
+    winner_index: int = -1
+    winner_composite: float | None = None
+    path: str = Field(default="managed", max_length=16)
+    output_format: str = Field(default="", max_length=40)
+
+
 class FlyerPremiumRepairExhausted(_BaseEntry):
     """Slice 2 premium repair-loop observability. Emitted when the bounded (×2)
     repair edits did not produce a clean premium render — the orchestrator leaves
@@ -6005,6 +6029,7 @@ LogEntry = Annotated[
         Annotated[FlyerPremiumRepairSkipped, Tag("flyer_premium_repair_skipped")],
         # 2026-06-19 — flat-degrade observability (premium overlay outcome)
         Annotated[FlyerPremiumOverlayOutcome, Tag("flyer_premium_overlay_outcome")],
+        Annotated[FlyerPremiumPosterV1ManagedOutcome, Tag("flyer_premium_poster_v1_managed_outcome")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],

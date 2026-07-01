@@ -217,27 +217,48 @@ def premium_outcome_should_alert(outcome: PremiumOverlayOutcome | None) -> bool:
     return bool(outcome) and outcome.status == "premium_overlay_failed_unexpected"
 
 
-# ── Premium Poster v1 — bare-path opt-in + outcome telemetry ─────────────────
+# ── Premium Poster v1 — opt-in (path identity) + outcome telemetry ───────────
 # The premium-poster-v1 render branch fires ONLY when the CURRENT render is opted
-# in (set by the bare/WhatsApp-direct path). The managed/studio path never sets
-# this, so it remains byte-identical (D1: bare path only in this slice).
-_PREMIUM_POSTER_V1_BARE_OPT_IN: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "flyer_premium_poster_v1_bare_opt_in", default=False
+# in. The opt-in carries the PATH identity ("bare" | "managed") so telemetry can
+# distinguish which flow fired; a render that is NOT opted in (None) stays byte-
+# identical legacy. The bare/WhatsApp-direct path sets "bare"; the managed/studio
+# PRIMARY preview render sets "managed" (never the fallback/recovery/rung re-renders).
+_PREMIUM_POSTER_V1_OPT_IN: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "flyer_premium_poster_v1_opt_in", default=None
 )
 
 
 @contextlib.contextmanager
 def premium_poster_v1_bare_path():
-    """Opt the current render into the Premium Poster v1 branch (bare path only)."""
-    token = _PREMIUM_POSTER_V1_BARE_OPT_IN.set(True)
+    """Opt the current render into the Premium Poster v1 branch (bare path)."""
+    token = _PREMIUM_POSTER_V1_OPT_IN.set("bare")
     try:
         yield
     finally:
-        _PREMIUM_POSTER_V1_BARE_OPT_IN.reset(token)
+        _PREMIUM_POSTER_V1_OPT_IN.reset(token)
+
+
+@contextlib.contextmanager
+def premium_poster_v1_managed_path():
+    """Opt the current render into the Premium Poster v1 branch (managed/studio
+    PRIMARY preview render). Wrap ONLY the primary render_concept_previews call —
+    NEVER the deterministic fallback / brand-retry / premium-repair / deterministic-
+    recovery / legacy-ladder / source-edit re-renders."""
+    token = _PREMIUM_POSTER_V1_OPT_IN.set("managed")
+    try:
+        yield
+    finally:
+        _PREMIUM_POSTER_V1_OPT_IN.reset(token)
+
+
+def _premium_poster_v1_opt_in() -> str | None:
+    """The opted-in path ("bare" | "managed") for the current render, or None."""
+    return _PREMIUM_POSTER_V1_OPT_IN.get()
 
 
 def _premium_poster_v1_bare_opt_in() -> bool:
-    return _PREMIUM_POSTER_V1_BARE_OPT_IN.get()
+    """Back-compat: True iff the current render opted in via the bare path."""
+    return _PREMIUM_POSTER_V1_OPT_IN.get() == "bare"
 
 
 @dataclass
@@ -253,6 +274,7 @@ class PremiumPosterV1Outcome:
     winner_index: int
     winner_composite: float | None
     output_format: str
+    path: str = ""         # opted-in path that produced this outcome: "bare" | "managed"
 
 
 _PREMIUM_POSTER_V1_OUTCOME: contextvars.ContextVar[PremiumPosterV1Outcome | None] = contextvars.ContextVar(
@@ -4541,8 +4563,9 @@ def _ppv1_default_critique_scorer(deadline: float):
 def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id: str,
                              output_format: str, size: tuple[int, int] | None, model: str, quality: str,
                              generator=None, textless_ocr=None, critique_scorer=None,
-                             compose=None, n: int | None = None, timeout_sec: float | None = None) -> PremiumPosterV1Outcome:
-    """Bare-path Premium Poster v1 render: best-of-N textless food-background gen ->
+                             compose=None, n: int | None = None, timeout_sec: float | None = None,
+                             path: str = "") -> PremiumPosterV1Outcome:
+    """Premium Poster v1 render (bare OR managed path): best-of-N textless food-background gen ->
     textless gate -> deterministic compose_premium_poster_v1 -> critique selector ->
     write the winning poster to ``target``. NEVER raises; ANY failure returns
     ``delivered=False`` so the caller falls through to the existing render path. The
@@ -4551,7 +4574,7 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
     contract / send gates run on ``target`` downstream, unchanged + authoritative."""
     n = _premium_poster_v1_n() if n is None else n
     if size != (1080, 1350):  # only the concept-preview size in this slice; PDF/other -> existing path
-        return PremiumPosterV1Outcome(False, "skipped", "unsupported_size", n, -1, None, output_format)
+        return PremiumPosterV1Outcome(False, "skipped", "unsupported_size", n, -1, None, output_format, path)
     deadline = time.monotonic() + (timeout_sec if timeout_sec is not None else _premium_poster_v1_timeout_sec())
     try:
         if compose is None:
@@ -4575,32 +4598,34 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
         won_food = best_img is not None and winner is not None and winner.get("background_status") == "ok"
         if not won_food:
             reason = "no_food_winner" if best_img is not None else "no_winner"
-            return PremiumPosterV1Outcome(False, "fallback", reason, n, wi, report.get("winner_composite"), output_format)
+            return PremiumPosterV1Outcome(False, "fallback", reason, n, wi, report.get("winner_composite"), output_format, path)
         best_img.save(target)
-        return PremiumPosterV1Outcome(True, "delivered", "none", n, wi, report.get("winner_composite"), output_format)
+        return PremiumPosterV1Outcome(True, "delivered", "none", n, wi, report.get("winner_composite"), output_format, path)
     except Exception as exc:  # noqa: BLE001 — premium path must never raise into _render_model
-        return PremiumPosterV1Outcome(False, "fallback", f"exception:{type(exc).__name__}", n, -1, None, output_format)
+        return PremiumPosterV1Outcome(False, "fallback", f"exception:{type(exc).__name__}", n, -1, None, output_format, path)
 
 
 def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> None:
     token = _FORCE_BACKGROUND_ONLY.set(True) if force_background_only else None
     try:
-        # Premium Poster v1 (bare-path opt-in + flag + allowlist + food/grocery +
-        # required facts). On success writes `path` and returns; ANY miss falls
-        # through to the existing render below (byte-identical when not armed). The
+        # Premium Poster v1 (opt-in path + flag + allowlist + food/grocery + required
+        # facts). Fires for whichever path (bare or managed) opted in the current
+        # render. On success writes `path` and returns; ANY miss falls through to the
+        # existing render below (byte-identical when not opted-in / not armed). The
         # existing QA / visible-contract / send gates run on the result downstream,
         # unchanged + authoritative. Skipped during a force_background_only recovery
         # re-render so the premium path is a one-shot primary attempt, not a rung.
         # Reset the outcome per render so a prior premium fire can never leave a stale
         # value (None unambiguously means "premium branch not entered this render").
         _PREMIUM_POSTER_V1_OUTCOME.set(None)
+        _ppv1_opt_in = _premium_poster_v1_opt_in()
         if (not force_background_only
-                and _premium_poster_v1_bare_opt_in()
+                and _ppv1_opt_in is not None
                 and _premium_poster_v1_armed(project)
                 and _premium_poster_v1_eligible(project)):
             outcome = render_premium_poster_v1(
                 project, path, concept_id=concept_id, output_format=output_format,
-                size=size, model=model, quality=quality)
+                size=size, model=model, quality=quality, path=_ppv1_opt_in)
             _PREMIUM_POSTER_V1_OUTCOME.set(outcome)
             if outcome.delivered:
                 return
