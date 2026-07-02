@@ -248,3 +248,8 @@ timeout threading through _vision_text (touches shared QA seam), B2 paired-count
 watchdog, B3 owner premium caption + premium-aware revisions, B4 critique
 sidecar persist-or-drop, B5 grocery scene family + explicit block-tier patterns,
 C-items. All fully specified above with file:line.
+
+### Post-implementation diff review (2 reviewers over ec930bd..HEAD)
+- **Regression reviewer:** no HIGH findings; areas verified CLEAN: finals unchanged for non-premium, _vision_text change safe for all callers, alert-storm bounded (<=2/render, managed only), bare audit writes safe, flag-off byte-identical. Fixed its 2 LOWs: regional gate precision (>=2-char Indic run, painted facts only), sidecar cleanup candidates.
+- **Structural reviewer:** confirmed clean list (gate ordering, badge price_cy, schema union, CI). Fixed its findings: HIGH — stale-provenance unlink moved to after-successful-write exits (_clear_stale_ppv1_sidecars; eager unlink could strip provenance from a valid premium poster when the legacy fallthrough failed); MED — bare emitter now attempt-0 only (no double-attempted/spurious-ineligible); MED — runbook alert claim scoped to managed; LOW — items_overflow explicit always-False contract.
+- Final state: full flyer surface 3234 passed / 0 failed (main has 3 pre-existing failures, fixed here); non-flyer 1088 passed. PR #530.
