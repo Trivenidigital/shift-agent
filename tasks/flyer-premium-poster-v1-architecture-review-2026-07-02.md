@@ -295,3 +295,20 @@ Standing rule (operator, 2026-07-02): **recorded approval or it didn't happen** 
 
 - **Has a real inbound WhatsApp brief traversed premium end-to-end live? NO.** All three Jul-1 premium fires were CLI-invoked managed renders on test project F9001 (never in the production store, never owner-reviewed, 0 sends). Monitoring checklist for the first real brief: docs/runbooks/premium-poster-v1-operations.md (this PR).
 - **Approved B-order (operator, 2026-07-02):** B5 grocery scene family -> B1 timeouts/ack honesty -> B3 premium-aware revisions + owner caption -> B2 §12a paired-count watchdog -> B4 critique sidecar. Per-path arming DEFERRED until bare exposure is on the table.
+
+
+## Approvals ledger — E2E window additions (2026-07-02)
+
+| Action | Authorization source | Status |
+|---|---|---|
+| pip install pillow==10.2.0 into /usr/local/lib/hermes-agent/venv (FREEZE-AFFECTING-WITH-APPROVAL; scope: single wheel, no code, no restart) | Operator message 2026-07-02 ("Pip install — APPROVED, recorded here as the authorization source") with 3 conditions: ledger row (this), runbook provisioning note (done, this PR), post-install smoke re-run (done: all checks passed) | APPROVED (recorded) |
+| Verification: venv python imports PIL 10.2.0 AND compose_premium_poster_v1 executes end-to-end in the venv interpreter; deploy smoke green | Same approval, stated verification | DONE 2026-07-02 |
+| This docs PR (ledger + runbook provisioning note under freeze) | Operator conditions #1 quoted above | APPROVED (recorded) |
+
+### E2E window findings ledger (running)
+1. **HIGH — PIL runtime parity (RESOLVED ops-side):** cf-router spawns flyer CLIs via the Hermes venv python (pydantic convention); venv lacked Pillow; premium composer needs in-process PIL with no system-python fallback. First real inbound (F0193, 14:49:58Z) fell back with `exception:ModuleNotFoundError:No module named 'PIL'` — diagnosable in one read because of the SF-3 reason hardening. Durable fix banked post-freeze: requirements manifest OR legacy-style system-python3 fallback wrapper (decision deferred per operator).
+2. **Extraction defect (pre-existing):** 6-item brief locked only 5 item facts — `idli` (first element after "like") never extracted. PRE-REGISTERED classification for the resent brief: an item drop there = finding-#2 evidence, NOT E2E machinery failure; pass/fail stays sidecar + four formats. Fact omission is a feature ship-blocker regardless of pipes.
+3. **Alert delivery (OPEN):** infra-shaped ppv1 fallback at 14:50:39Z should have paged; no journal trace of the ppv1 alert (detached Popen — journal-invisible by design); operator checking Telegram. If unpaged → confirmed; post-freeze fix = §12b dispatched/delivered log pair + delivery check. Note: a SEPARATE notify fired at 14:50:20Z — `flyer-recovery-watchdog-failure.service` (the recovery watchdog itself failed during the window; likely unrelated, logged for the record).
+4. **Systemic — smoke lazy-import blind spot (BANKED post-freeze):** import-level smoke passes while function-scope imports fail in the target interpreter. Class fix: smoke executes a dry-run compose in the ACTUAL cf-router interpreter (the manual verification used for the pip install is the template).
+5. **Operator protocol miss (recorded per operator):** the 14:49:58Z inbound was sent without the agreed "sent" ping. Silver lining: organic-brief inbound path proven; fallback ladder caught the premium failure as designed.
+6. **F0193 disposition:** off the E2E ledger; queued as backlog project #36 under the staleness/stagger plan (has raw sidecar → legacy rebuild finals path).

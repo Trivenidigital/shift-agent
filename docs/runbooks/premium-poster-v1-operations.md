@@ -66,6 +66,20 @@ Send one real flyer brief (food/grocery, business name + one single-price offer 
 8. No dangling `selected` (every `_selected` paired with a `final_*` row); no new
    `/tmp/ppv1-*` files; no owner alert unless a reason was infra-shaped.
 
+## Runtime provisioning (added 2026-07-02 — REGRESSION-PRONE, read before venv/Hermes changes)
+
+- The premium composer requires **Pillow IN the Hermes venv**
+  (`/usr/local/lib/hermes-agent/venv/`): cf-router spawns the flyer CLIs with
+  that interpreter, and the composer's PIL imports are function-scope (lazy), so
+  import smoke passes without it while every live premium render fails with
+  `exception:ModuleNotFoundError:No module named 'PIL'` and falls back to legacy.
+  Installed 2026-07-02 ops-side: `pillow==10.2.0` (matches system python), with
+  operator-recorded approval. **A venv rebuild or Hermes upgrade silently
+  regresses this** — pip state is not captured in the repo. After ANY venv
+  change, verify: `venv/bin/python -c "import PIL"` AND a dry-run
+  `compose_premium_poster_v1` in that interpreter. Durable fix (requirements
+  manifest vs system-python3 fallback wrapper) is banked post-freeze.
+
 ## Kill-switch checklist (something unsafe is happening)
 
 1. `sed -i 's/^FLYER_PREMIUM_POSTER_V1=1/FLYER_PREMIUM_POSTER_V1=0/' /opt/shift-agent/.env`
