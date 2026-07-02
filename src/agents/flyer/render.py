@@ -3693,14 +3693,53 @@ def _premium_poster_v1_required_facts_present(project: FlyerProject) -> bool:
     return has_business and has_offer and items >= 3
 
 
+# Mirrors premium_poster_v1._PRICE_RE (the composer stays authoritative; this
+# pre-check only avoids spending N generations on a brief the composer refuses).
+_PPV1_PRICE_RE = re.compile(r"\$\s?\d[\d,]*(?:\.\d{1,2})?")
+# Beyond ~12 items the composer's readable item zone overflows at the floor and
+# it refuses fail-closed (partial menus never ship) — don't burn generations.
+_PPV1_MAX_ITEMS = 12
+
+
+def _premium_poster_v1_composer_unfit(project: FlyerProject) -> bool:
+    """Briefs the deterministic composer will REFUSE fail-closed (so arming them
+    only burns N generations + OCR + critique before falling through):
+    multi-price offers (a single badge price would mutate the offer), menus past
+    the readable-zone cap, and regional-script facts (the vendored poster fonts
+    are Latin-only — tofu boxes would fail QA every time)."""
+    facts = getattr(project, "locked_facts", []) or []
+
+    def _val(f) -> str:
+        return (getattr(f, "value", "") or "").strip()
+
+    offer_text = ""
+    for fid in ("pricing_structure", "offer:0", "offer"):
+        offer_text = next((_val(f) for f in facts if getattr(f, "fact_id", "") == fid and _val(f)), "")
+        if offer_text:
+            break
+    if len(_PPV1_PRICE_RE.findall(offer_text)) > 1:
+        return True
+    items = sum(1 for f in facts
+                if (getattr(f, "fact_id", "") or "").startswith("item:")
+                and (getattr(f, "fact_id", "") or "").endswith(":name") and _val(f))
+    if items > _PPV1_MAX_ITEMS:
+        return True
+    if any(_has_regional_script(_val(f)) for f in facts):
+        return True
+    return False
+
+
 def _premium_poster_v1_eligible(project: FlyerProject) -> bool:
     """Eligible flyers: food/grocery AND required locked facts present AND NOT a
-    reference-extraction project (whose items live in an attached image, not facts).
+    reference-extraction project (whose items live in an attached image, not facts)
+    AND not a brief the composer would refuse fail-closed (multi-price / dense menu
+    / regional script — see _premium_poster_v1_composer_unfit).
     Deliberately NOT gated on _background_only_eligible — food menu flyers are
     _integrated_poster_eligible today, and the premium poster is their replacement."""
     return (_is_food_or_grocery_project(project)
             and _premium_poster_v1_required_facts_present(project)
-            and not _needs_reference_extraction(project))
+            and not _needs_reference_extraction(project)
+            and not _premium_poster_v1_composer_unfit(project))
 
 
 def _openrouter_repair_edit_bytes(
@@ -4571,7 +4610,8 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
                              output_format: str, size: tuple[int, int] | None, model: str, quality: str,
                              generator=None, textless_ocr=None, critique_scorer=None,
                              compose=None, n: int | None = None, timeout_sec: float | None = None) -> PremiumPosterV1Outcome:
-    """Bare-path Premium Poster v1 render: best-of-N textless food-background gen ->
+    """Premium Poster v1 render (both the bare and managed opt-in paths route
+    here): best-of-N textless food-background gen ->
     textless gate -> deterministic compose_premium_poster_v1 -> critique selector ->
     write the winning poster to ``target``. NEVER raises; ANY failure returns
     ``delivered=False`` so the caller falls through to the existing render path. The

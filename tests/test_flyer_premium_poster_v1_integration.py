@@ -138,6 +138,34 @@ def test_missing_required_facts_not_eligible():
     assert render._premium_poster_v1_eligible(_project(facts=too_few)) is False
 
 
+# ── composer-unfit pre-checks: never burn N generations on a brief the composer
+#    refuses fail-closed (multi-price / dense menu / regional script) ──────────
+
+def test_multi_price_offer_not_eligible():
+    facts = [f for f in _food_facts() if f.fact_id != "pricing_structure"]
+    facts.append(_F("pricing_structure", "Was $12.99 now $8.99"))
+    assert render._premium_poster_v1_eligible(_project(facts=facts)) is False
+    # single price stays eligible
+    assert render._premium_poster_v1_eligible(_project()) is True
+
+
+def test_dense_menu_beyond_item_cap_not_eligible():
+    facts = [f for f in _food_facts() if not f.fact_id.startswith("item:")]
+    facts += [_F(f"item:{i}:name", f"Snack Item {i}") for i in range(13)]  # cap is 12
+    assert render._premium_poster_v1_eligible(_project(facts=facts)) is False
+    at_cap = [f for f in _food_facts() if not f.fact_id.startswith("item:")]
+    at_cap += [_F(f"item:{i}:name", f"Item {i}") for i in range(12)]
+    assert render._premium_poster_v1_eligible(_project(facts=at_cap)) is True
+
+
+def test_regional_script_facts_not_eligible():
+    # The vendored poster fonts are Latin-only; regional-script facts would render
+    # tofu boxes and fail QA every time. Excluded at eligibility, not after N gens.
+    facts = [f for f in _food_facts() if f.fact_id != "item:0:name"]
+    facts.append(_F("item:0:name", "పునుగులు"))  # Telugu
+    assert render._premium_poster_v1_eligible(_project(facts=facts)) is False
+
+
 # ── render_premium_poster_v1: delivers on a food win, falls through otherwise ─
 
 def test_delivers_on_food_win(tmp_path):

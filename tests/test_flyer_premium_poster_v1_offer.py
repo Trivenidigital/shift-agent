@@ -67,18 +67,37 @@ def test_hierarchy_headline_dominant_offer_prominent():
     assert f["headline"] > f["menu"] > f["footer"]  # overall hierarchy intact
 
 
-def test_long_label_truncates_to_whole_words_no_fragment():
+def test_long_label_never_painted_as_prefix():
+    # A prefix of an offer is a FACT MUTATION ("BUY 2 GET 1 HALF OFF" -> "BUY 2
+    # GET 1 HALF"). The badge must paint the WHOLE label (shrunk to fit) or OMIT
+    # it entirely — never a truncation. placed_text mirrors the canvas exactly.
     facts = [f for f in _snack() if f.fact_id != "pricing_structure"]
     facts.append(_fact("pricing_structure", "Family Dinner Combo Special $19.99"))
     _, r = compose_premium_poster_v1(facts)
     assert r["offer_label"] == "Family Dinner Combo Special"  # report keeps the full fact
     assert r["offer_price"] == "$19.99"
-    # the badge paints only WHOLE grounded words — placed_text has no mid-word fragment
-    allowed_words = set(" ".join(x.value for x in facts).casefold().split())
+    label_upper = "FAMILY DINNER COMBO SPECIAL"
+    placed_labelish = [p for p in r["placed_text"] if "FAMILY" in p.upper()]
+    # Either the whole label was placed, or no part of it was — never a prefix.
+    assert all(p.upper() == label_upper for p in placed_labelish)
+
+
+def test_extreme_label_is_omitted_not_truncated():
+    # A label that cannot fit the badge whole even at the floor must be OMITTED
+    # (the price alone is drawn); downstream fact QA then fail-closes on the
+    # missing offer clause and the render falls through to the full-text path.
+    facts = [f for f in _snack() if f.fact_id != "pricing_structure"]
+    long_label = "Buy any two family dinner combo specials and get one dessert platter half off this weekend"
+    facts.append(_fact("pricing_structure", f"{long_label} $19.99"))
+    img, r = compose_premium_poster_v1(facts)
+    assert img is not None and r["eligible"] is True
+    up = long_label.upper()
     for placed in r["placed_text"]:
-        for tok in placed.casefold().split():
-            if any(ch.isalnum() for ch in tok):
-                assert tok in allowed_words, f"non-whole-word token {tok!r}"
+        pu = placed.upper()
+        if pu == up:
+            continue  # whole label placed (acceptable if a tiny font fits it)
+        # No PREFIX of the label may ever be painted.
+        assert not (up.startswith(pu) and pu != up), f"prefix of offer painted: {placed!r}"
 
 
 def test_item_list_readability_unchanged():
