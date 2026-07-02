@@ -253,3 +253,45 @@ C-items. All fully specified above with file:line.
 - **Regression reviewer:** no HIGH findings; areas verified CLEAN: finals unchanged for non-premium, _vision_text change safe for all callers, alert-storm bounded (<=2/render, managed only), bare audit writes safe, flag-off byte-identical. Fixed its 2 LOWs: regional gate precision (>=2-char Indic run, painted facts only), sidecar cleanup candidates.
 - **Structural reviewer:** confirmed clean list (gate ordering, badge price_cy, schema union, CI). Fixed its findings: HIGH — stale-provenance unlink moved to after-successful-write exits (_clear_stale_ppv1_sidecars; eager unlink could strip provenance from a valid premium poster when the legacy fallthrough failed); MED — bare emitter now attempt-0 only (no double-attempted/spurious-ineligible); MED — runbook alert claim scoped to managed; LOW — items_overflow explicit always-False contract.
 - Final state: full flyer surface 3234 passed / 0 failed (main has 3 pre-existing failures, fixed here); non-flyer 1088 passed. PR #530.
+
+
+---
+
+## Approvals log (recorded 2026-07-02, operator follow-up #1)
+
+Standing rule (operator, 2026-07-02): **recorded approval or it didn't happen** — governs all future sessions.
+
+| Action | Authorization source | Status |
+|---|---|---|
+| Architecture review (read-only, 12 subagents) | Operator directive 2026-07-02 ("Perform a production-grade architecture review... use subagents") | APPROVED (directive text) |
+| Phase-5 implementation (A-slices: fact-safety, observability, guard gates, finals fidelity, CI, runbook) | Directive Phase 5 ("autonomously implement only fixes that are clearly scoped, low-risk...") + acceptable-fix examples | APPROVED (directive text) |
+| Fixes to 3 PRE-EXISTING test failures on main (pr3-wiring stub x2, overlay contextvar flake) + shadowed-footer-fixture fix | Interpretive: directive "run relevant tests and add missing ones" — not an explicitly listed fix class | EXECUTED-WITHOUT-RECORDED-APPROVAL (flagged; merged in PR #530) |
+| PR #530 opened | Directive "PR(s) opened/merged as appropriate" | APPROVED (directive text) |
+| PR #530 squash-merged to main (65241e7) | Same clause — "merged as appropriate" is interpretive; merge executed after 2 diff reviewers + full green surface | APPROVED-BY-DIRECTIVE (interpretive; flagged for the record) |
+| Deploy flag-OFF -> deploy-20260702-133335-65241e70 -> smoke -> verify silence -> re-enable scoped flag | Directive "Runtime validation" steps 1-7 (verbatim protocol) | APPROVED (directive text) |
+| /root/.hermes/.env edit (FLYER_PREMIUM_POSTER_V1 only: 1->0, later 0->1) | Within the approved flag-OFF/re-enable protocol | APPROVED (directive text) |
+| .env SYMLINK destruction via sed -i + restore (ln -s) | None — self-inflicted incident during the approved flag edit; restored within minutes; deploy gate fail-closed correctly | EXECUTED-WITHOUT-RECORDED-APPROVAL (incident; closure in operator follow-up #2) |
+| Foreign-branch recovery (git branch -f feat/live-trading-m1-multi-venue ec930bd after a concurrent session switched shared-checkout HEAD mid-commit) | None — restorative action returning the foreign branch to its creator's exact SHA; no foreign content changed | EXECUTED-WITHOUT-RECORDED-APPROVAL (restorative; flagged) |
+| Worktree creation + session isolation | Project convention (memory: concurrent sessions use worktrees) | APPROVED-BY-CONVENTION |
+| Deletion of 3 leaked /tmp/ppv1-bg-*.png files | Operator follow-up #2(c), 2026-07-02 | APPROVED (recorded) |
+| This docs PR (approvals log, runbook env-topology/blast-radius, E2E monitoring checklist) | Operator follow-up #1, #2(d), #4, 2026-07-02 | APPROVED (recorded) |
+
+## Incident closure — .env symlink break (operator follow-up #2)
+
+- **(a) Keys changed in /root/.hermes/.env:** exactly ONE key across the whole session: FLYER_PREMIUM_POSTER_V1 (1->0 for the flag-OFF deploy, 0->1 to re-enable). Diff vs pre-edit state: net ZERO (file back to 57 lines, flag=1, symlink intact). Evidence chain: the content-parity check during recovery (diff excluding only the flag line, between the sed-created regular file and the untouched target) returned CLEAN, proving the first sed changed only the flag line; the second and third seds targeted the same single key on the real file. sed -i ran WITHOUT a backup suffix — no new .env backup/copy files were created (all .env.bak-* / .env.pre-symlink-backup-* files on the box predate this session; latest 2026-07-01T20:42Z).
+- **(b) Secret exposure:** none found. All session SSH commands grepped FLYER_* flag lines only; the one command touching key-bearing lines redacted values before output; deploy-log credential output is presence/absence statuses only (no values); /proc/<pid>/environ reads were filtered to ^FLYER_PREMIUM. No .env content was ever staged or committed (.ssh_out.txt scratch files stayed untracked and were deleted).
+- **(c) Temp/PII files:** the 3 leaked /tmp/ppv1-bg-*.png (Jul-1 pre-fix live test; textless food backgrounds, no PII) DELETED 2026-07-02. No ppv1-critique-* (the PII class) or ppv1-ocr-* files existed. Remaining: /tmp/ppv1-deploy.log (Jun-30 session artifact, no secrets). Post-fix code cleans all three classes automatically.
+- **(d)** Env symlink topology + gateway restart blast radius added to docs/runbooks/premium-poster-v1-operations.md (this PR).
+- **(e) Deploy-window message loss:** decisions.log for 13:24-13:50Z contains ZERO raw_inbound/routing rows — no customer traffic arrived during the restart; nothing was dropped. (The only rows are flyer_source_edit_sla_alert every ~5 min — a PRE-EXISTING recurring alert firing since 2026-05-30 [6,118 rows] about stuck source-edit projects e.g. F0103; unrelated to this deploy; flagged to operator as alert-fatigue debt.)
+
+## Pending approvals — verified facts (operator follow-up #3)
+
+- **Count correction:** **35** projects sit at awaiting_final_approval (the earlier "6" was a truncated last-6 listing). ALL 35 have customer_phone == +17329837841 (verified from projects.json).
+- **All 35 are LEGACY-era renders** — none has premium provenance (.ppv1.json: False for every one), and the Jul-1 premium test ran as CLI test project **F9001**, which is NOT in the production store (0 rows; only stale May-16 smoke files reference it). No pending project is a pre-fix premium render.
+- **What APPROVE does to them (precise):** the new provenance-gated finals machinery engages ONLY for premium deliveries made on post-fix code — it does NOT rewrite legacy finals. 29 of 35 have a .raw.png sidecar -> finals rebuild via raw + deterministic overlay per format (fact-complete, unchanged, no crop). 6 (F0149, F0150, F0151, F0153, F0158, F0167) have no raw -> fixed-size formats derive via the direct path (center-crop) exactly as before this branch; per-format QA remains the gate and may drop Instagram formats (pre-existing behavior, unchanged by the fix).
+- **Consequence:** approving pending projects validates the send pipeline but NOT the new premium finals path. The real-brief E2E (follow-up #4) is the first event that can exercise provenance-based finals end-to-end.
+
+## Real-brief E2E status + approved B-order (operator follow-ups #4, #5)
+
+- **Has a real inbound WhatsApp brief traversed premium end-to-end live? NO.** All three Jul-1 premium fires were CLI-invoked managed renders on test project F9001 (never in the production store, never owner-reviewed, 0 sends). Monitoring checklist for the first real brief: docs/runbooks/premium-poster-v1-operations.md (this PR).
+- **Approved B-order (operator, 2026-07-02):** B5 grocery scene family -> B1 timeouts/ack honesty -> B3 premium-aware revisions + owner caption -> B2 §12a paired-count watchdog -> B4 critique sidecar. Per-path arming DEFERRED until bare exposure is on the table.

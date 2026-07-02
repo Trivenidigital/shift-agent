@@ -22,6 +22,50 @@ FLYER_PREMIUM_POSTER_V1_N=1
 - Empty/unset allowlist **disables** the branch (scoped-rollout guard — it never
   goes global like the older overlay gates).
 
+## Env symlink topology + restart blast radius (added 2026-07-02 after incident)
+
+- `/opt/shift-agent/.env` is a **SYMLINK** to `/root/.hermes/.env` (one shared env
+  for the Hermes runtime and shift-agent). **`sed -i` on the symlink path DESTROYS
+  the symlink** (writes a divergent regular file); the deploy env-integrity gate
+  then fail-closes (correct). Always edit the TARGET (`/root/.hermes/.env`);
+  restore with `rm /opt/shift-agent/.env && ln -s /root/.hermes/.env /opt/shift-agent/.env`.
+  Convention for change backups: `cp /root/.hermes/.env /root/.hermes/.env.bak-<tag>-<UTCts>` first.
+- **Gateway restart blast radius:** `systemctl restart hermes-gateway` takes the
+  WhatsApp bridge down for the restart window. In-flight flyer renders are killed
+  unless drained — the DEPLOY script drains `generate-flyer-concepts`/`finalize-
+  flyer-assets`/`send-flyer-package` (not the bare renderer); a MANUAL restart
+  drains nothing (check `pgrep -f generate-flyer-concepts` first). Inbound
+  WhatsApp during the window is held by WhatsApp multi-device sync and delivered
+  on bridge reconnect — verify `raw_inbound` continuity in decisions.log after
+  any restart. Other bots on the multi-tenant box are separate systemd services
+  and are unaffected.
+
+## First real-brief E2E monitoring checklist (premium, managed path)
+
+Pre-send baseline:
+1. `wc -l /opt/shift-agent/logs/decisions.log` and
+   `grep -c premium_poster_v1_managed_attempted /opt/shift-agent/logs/decisions.log` (baseline counts).
+2. Confirm process env (`/proc/<pid>/environ`): flag=1, allowlist `+17329837841`, N=1.
+
+Send one real flyer brief (food/grocery, business name + one single-price offer +
+3-12 items) from the allowlisted number, then verify IN ORDER:
+3. Routing rows for a NEW F0xxx project (dispatcher/cf-router + `flyer_project_created`).
+4. Premium ladder for that project_id: `premium_poster_v1_managed_attempted` ->
+   `_eligible` -> `_selected` -> `_final_pass` (a `_fallback_reason` instead of
+   `_selected` = fell to legacy; the reason string says why — see taxonomy table).
+5. Provenance sidecars exist next to the preview:
+   `<preview>.ppv1.json` + `<preview>.ppv1-bg.png` in the project asset dir.
+6. **Owner-notification vs customer-send marker:** the preview goes to the OWNER
+   for review — at this point there must be NO `flyer_assets_delivered` row and
+   the project sits at `awaiting_final_approval` with `final_asset_ids` unset.
+   A customer send exists ONLY after APPROVE: `finalize-flyer-assets` rows, 4
+   formats in `final_asset_ids`, `flyer_assets_delivered`, status `delivered`.
+7. After APPROVE: all FOUR formats present in `final_asset_ids` (instagram_post +
+   instagram_story must NOT be dropped — that was the pre-fix crop bug); verify
+   the instagram_post artifact visually shows brand band + footer.
+8. No dangling `selected` (every `_selected` paired with a `final_*` row); no new
+   `/tmp/ppv1-*` files; no owner alert unless a reason was infra-shaped.
+
 ## Kill-switch checklist (something unsafe is happening)
 
 1. `sed -i 's/^FLYER_PREMIUM_POSTER_V1=1/FLYER_PREMIUM_POSTER_V1=0/' /opt/shift-agent/.env`
