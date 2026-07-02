@@ -144,16 +144,57 @@ def test_price_only_offer_never_fabricates_a_label():
     assert all(p.strip().upper() != "SPECIAL" for p in r["placed_text"])
 
 
-def test_too_many_items_never_shrink_below_floor():
+def test_too_many_items_fails_closed_never_partial_menu():
+    # A menu that cannot fit the readable zone at the floor must NEVER compose a
+    # partial menu (dropped items are customer-supplied required facts). The
+    # composer refuses -> the caller falls through to the existing render path.
     facts = [f for f in _snack_fixture() if not f.fact_id.startswith("item:")]
     facts += [_fact(f"item:{i}:name", f"Snack Item {i}") for i in range(24)]  # stress: 24 items
-    _, r = compose_premium_poster_v1(facts)
-    assert r["item_px"] >= READABILITY_FLOOR_PX           # never below the floor
-    placed = set(r["items"])
-    assert placed.issubset({f.value for f in facts if f.fact_id.startswith("item:")})  # no fabrication
-    # if not all fit at the floor, the report says so honestly (no silent drop pretending complete)
-    if len(placed) < 24:
-        assert r["items_overflow"] is True
+    img, r = compose_premium_poster_v1(facts)
+    assert img is None and r["eligible"] is False
+    assert "overflow" in r["reason"]
+
+
+def test_fitting_item_count_still_composes_at_floor_or_above():
+    facts = [f for f in _snack_fixture() if not f.fact_id.startswith("item:")]
+    facts += [_fact(f"item:{i}:name", f"Item {i}") for i in range(10)]  # short names, fits 2-col
+    img, r = compose_premium_poster_v1(facts)
+    assert img is not None and r["eligible"] is True
+    assert r["item_px"] >= READABILITY_FLOOR_PX
+    assert set(r["items"]) == {f.value for f in facts if f.fact_id.startswith("item:")}
+    assert r["items_overflow"] is False
+
+
+def test_multi_price_offer_fails_closed():
+    # "Was $12.99 now $8.99": a single dominant badge price would mutate the offer
+    # (the OLD price as THE price). Must refuse, never compose.
+    facts = [f for f in _snack_fixture() if f.fact_id != "pricing_structure"]
+    facts.append(_fact("pricing_structure", "Was $12.99 now $8.99"))
+    img, r = compose_premium_poster_v1(facts)
+    assert img is None and r["eligible"] is False
+    assert "multi-price" in r["reason"]
+
+
+def test_two_for_price_multi_price_fails_closed():
+    facts = [f for f in _snack_fixture() if f.fact_id != "pricing_structure"]
+    facts.append(_fact("pricing_structure", "2 for $5 or 5 for $10"))
+    img, r = compose_premium_poster_v1(facts)
+    assert img is None and r["eligible"] is False
+
+
+def test_long_business_name_shrinks_to_fit_never_clips():
+    from PIL import Image, ImageDraw
+    from agents.flyer.premium_poster_v1 import _premium_font, _text_w
+
+    facts = [f for f in _snack_fixture() if f.fact_id != "business_name"]
+    facts.append(_fact("business_name", "Sri Lakshmi Venkateswara Supermarket and Catering"))
+    img, r = compose_premium_poster_v1(facts)
+    assert img is not None and r["eligible"] is True
+    draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
+    name = "Sri Lakshmi Venkateswara Supermarket and Catering".upper()
+    # The reported brand font must actually fit the full name inside the frame.
+    assert _text_w(draw, name, _premium_font("masthead", r["fonts"]["brand"])) <= int(1080 * 0.94)
+    assert name in r["placed_text"]  # the FULL name, never a clipped fragment
 
 
 # ── flag + no routing (flag-off byte identity by construction) ──────────────
@@ -189,9 +230,13 @@ def test_golden_artifact_committed():
 def _long_footer_facts():
     # Dense footer: schedule + full address + full E.164 phone (the case that
     # overflowed 1080px at a fixed font size and clipped the last phone digit).
-    return _snack_fixture() + [
-        _fact("schedule", "Saturday & Sunday, 11 AM - 8 PM"),
-        _fact("location", "90 Brybar Dr, St Johns, FL"),
+    # REPLACE the fixture's short footer fields (never append: `_value_of` returns
+    # the FIRST match, so appended duplicates are dead and the dense values would
+    # silently never be exercised — the 2026-07-02 review's CQ-3 finding).
+    base = [f for f in _snack_fixture() if f.fact_id not in ("schedule", "location", "contact_phone")]
+    return base + [
+        _fact("schedule", "Saturday & Sunday, 11 AM - 8 PM, dine-in and takeout available"),
+        _fact("location", "90 Brybar Drive, Suite 210, St Johns, Florida 32259"),
         _fact("contact_phone", "+17329837841"),
     ]
 
@@ -205,6 +250,10 @@ def test_fit_footer_dense_line_fits_width_no_clip():
     assert "+17329837841" in footer
     max_w = int(1080 * 0.94)
     foot_px, lines = _fit_footer(draw, footer, max_w=max_w, max_px=max(24, int(1080 * 0.026)))
+    # The dense footer must actually exercise the fit machinery: either it shrank
+    # below the starting size or it wrapped (guards against fixture shadowing
+    # silently reverting this test to the short-footer no-op it was before).
+    assert foot_px < max(24, int(1080 * 0.026)) or len(lines) == 2
     # Every emitted line fits within the frame -> nothing clips off the edge.
     for line in lines:
         assert _text_w(draw, line, _premium_font("footer", foot_px)) <= max_w
@@ -212,6 +261,28 @@ def test_fit_footer_dense_line_fits_width_no_clip():
     assert any("+17329837841" in line for line in lines)
     # Fit stays readable (never below the footer floor).
     assert foot_px >= 22
+
+
+def test_fit_footer_wraps_to_two_lines_at_floor_on_separator_only():
+    # A footer too wide for one line even at the 22px floor must wrap into exactly
+    # two lines, split ONLY at the deterministic '  ·  ' separator (never mid-token).
+    from PIL import Image, ImageDraw
+    from agents.flyer.premium_poster_v1 import _fit_footer, _premium_font, _text_w
+
+    draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
+    footer = ("Monday through Sunday, 10:30 AM - 9:30 PM, dine-in, takeout and catering"
+              "  ·  4280 Southside Boulevard, Suite 1400, Jacksonville, Florida 32216"
+              "  ·  +17329837841")
+    max_w = int(1080 * 0.94)
+    foot_px, lines = _fit_footer(draw, footer, max_w=max_w, max_px=28)
+    assert len(lines) == 2
+    assert foot_px == 22  # only wraps once the floor is reached
+    for line in lines:
+        assert _text_w(draw, line, _premium_font("footer", foot_px)) <= max_w
+    # Reassembling the lines with the separator reproduces the exact footer: no
+    # token was dropped, reordered, or split.
+    assert "  ·  ".join(lines) == footer
+    assert any("+17329837841" in line for line in lines)
 
 
 def test_compose_dense_footer_phone_fully_rendered(tmp_path):

@@ -132,6 +132,11 @@ def test_render_premium_branch_compose_import_resolves():
         assert out.delivered is True   # the compose import resolved + the path ran end-to-end
     finally:
         tmp.unlink(missing_ok=True)
+        # PR-S4 delivery invariants write provenance sidecars next to the target —
+        # clean them too so the fixtures dir never accumulates junk.
+        from agents.flyer.render import _ppv1_background_path, _ppv1_provenance_path
+        _ppv1_provenance_path(tmp).unlink(missing_ok=True)
+        _ppv1_background_path(tmp).unlink(missing_ok=True)
 
 
 # ── flag stays a no-op (off / not-allowlisted) ──────────────────────────────

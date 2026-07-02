@@ -352,9 +352,16 @@ def _fake_rmod_capturing(captured):
     def _raw_background_path(final):
         return str(_P(final).with_suffix(".raw.png"))
 
+    import contextlib as _contextlib
+
     return types.SimpleNamespace(
         render_concept_previews=_render_concept_previews,
         _raw_background_path=_raw_background_path,
+        # _generate_poster opts the normal bare render into the Premium Poster v1
+        # branch since PR #523 - the stub was never updated, which silently broke
+        # this kill-switch test on main (pre-existing; found by the 2026-07-02
+        # hardening pass). A nullcontext keeps the stub inert.
+        premium_poster_v1_bare_path=_contextlib.nullcontext,
     )
 
 

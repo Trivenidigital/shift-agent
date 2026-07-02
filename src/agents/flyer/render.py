@@ -20,6 +20,7 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -271,13 +272,16 @@ def _premium_poster_v1_opt_in_path() -> str | None:
 
 @dataclass
 class PremiumPosterV1Outcome:
-    """How a Premium Poster v1 render resolved (set on a ContextVar; read by the
-    bare-path chokepoint for observability). ``delivered`` is True iff a valid
-    poster was written to the target; any other outcome means the caller fell
-    through to the existing render path."""
+    """How a Premium Poster v1 render resolved (set on a ContextVar; consumed by
+    the managed emitter in generate-flyer-concepts AND the bare-path emitter in
+    bare_render._consume_and_emit_premium_poster_v1_bare — both write
+    decisions.log rows). ``delivered`` is True iff a valid poster was written to
+    the target; any other outcome means the caller fell through to the existing
+    render path."""
     delivered: bool
     status: str            # delivered | fallback | skipped
-    reason: str            # none | unsupported_size | no_winner | exception:<T>
+    reason: str            # none | unsupported_size | no_winner[:<status>=<count>,…]
+    #                      # | no_food_winner[:…] | exception:<T>:<msg-head>
     n: int
     winner_index: int
     winner_composite: float | None
@@ -3693,14 +3697,66 @@ def _premium_poster_v1_required_facts_present(project: FlyerProject) -> bool:
     return has_business and has_offer and items >= 3
 
 
+# Mirrors premium_poster_v1._PRICE_RE (the composer stays authoritative; this
+# pre-check only avoids spending N generations on a brief the composer refuses).
+_PPV1_PRICE_RE = re.compile(r"\$\s?\d[\d,]*(?:\.\d{1,2})?")
+# Beyond ~12 items the composer's readable item zone overflows at the floor and
+# it refuses fail-closed (partial menus never ship) — don't burn generations.
+_PPV1_MAX_ITEMS = 12
+# >=2 consecutive Indic chars (mirrors visual_qa.REGIONAL_WORD_RE's rationale:
+# a single stray glyph must NOT force regional routing / disable premium).
+_PPV1_REGIONAL_RUN_RE = re.compile(r"[ऀ-ൿ]{2}")
+# Only the fact ids the COMPOSER actually paints gate regional exclusion — a
+# regional glyph in an unpainted fact (notes, customer_text spans) is irrelevant
+# to the Latin-only poster fonts.
+_PPV1_PAINTED_FACT_IDS = (
+    "business_name", "campaign_title", "pricing_structure", "offer", "offer:0",
+    "schedule", "location", "contact_phone",
+)
+
+
+def _premium_poster_v1_composer_unfit(project: FlyerProject) -> bool:
+    """Briefs the deterministic composer will REFUSE fail-closed (so arming them
+    only burns N generations + OCR + critique before falling through):
+    multi-price offers (a single badge price would mutate the offer), menus past
+    the readable-zone cap, and regional-script facts (the vendored poster fonts
+    are Latin-only — tofu boxes would fail QA every time)."""
+    facts = getattr(project, "locked_facts", []) or []
+
+    def _val(f) -> str:
+        return (getattr(f, "value", "") or "").strip()
+
+    offer_text = ""
+    for fid in ("pricing_structure", "offer:0", "offer"):
+        offer_text = next((_val(f) for f in facts if getattr(f, "fact_id", "") == fid and _val(f)), "")
+        if offer_text:
+            break
+    if len(_PPV1_PRICE_RE.findall(offer_text)) > 1:
+        return True
+    items = sum(1 for f in facts
+                if (getattr(f, "fact_id", "") or "").startswith("item:")
+                and (getattr(f, "fact_id", "") or "").endswith(":name") and _val(f))
+    if items > _PPV1_MAX_ITEMS:
+        return True
+    for f in facts:
+        fid = (getattr(f, "fact_id", "") or "")
+        painted = fid in _PPV1_PAINTED_FACT_IDS or (fid.startswith("item:") and fid.endswith(":name"))
+        if painted and _PPV1_REGIONAL_RUN_RE.search(_val(f)):
+            return True
+    return False
+
+
 def _premium_poster_v1_eligible(project: FlyerProject) -> bool:
     """Eligible flyers: food/grocery AND required locked facts present AND NOT a
-    reference-extraction project (whose items live in an attached image, not facts).
+    reference-extraction project (whose items live in an attached image, not facts)
+    AND not a brief the composer would refuse fail-closed (multi-price / dense menu
+    / regional script — see _premium_poster_v1_composer_unfit).
     Deliberately NOT gated on _background_only_eligible — food menu flyers are
     _integrated_poster_eligible today, and the premium poster is their replacement."""
     return (_is_food_or_grocery_project(project)
             and _premium_poster_v1_required_facts_present(project)
-            and not _needs_reference_extraction(project))
+            and not _needs_reference_extraction(project)
+            and not _premium_poster_v1_composer_unfit(project))
 
 
 def _openrouter_repair_edit_bytes(
@@ -4500,25 +4556,32 @@ def _openrouter_textless_image(prompt: str, *, model: str, quality: str, size: t
 
 
 def _ppv1_default_generator(project: FlyerProject, *, model: str, quality: str,
-                            size: tuple[int, int] | None, deadline: float):
-    """Real best-of-N candidate generator: (director prompt) -> saved PNG path, or
-    None on timeout/error (the candidate then fails the gate -> fall through)."""
+                            size: tuple[int, int] | None, deadline: float,
+                            created_paths: list | None = None):
+    """Real best-of-N candidate generator: (director prompt) -> saved PNG path.
+    RAISES on failure so the director's generation_failed branch records the REAL
+    error class (a blanket swallow here previously collapsed auth failures, quota
+    exhaustion, provider outages, and budget exhaustion into one indistinguishable
+    "generator_returned_none" — 2026-07-02 review SF-2/FM-1). Budget exhaustion
+    raises TimeoutError, keeping timeouts a distinct fallback reason. The director
+    contains every raise per candidate (never-raises contract preserved).
+    Temp files are appended to ``created_paths`` so the orchestrator can clean up
+    after compose (SF-7: ppv1-bg-*.png previously leaked on every fire)."""
     def gen(prompt: str):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return None  # premium-path wall-clock budget exhausted
-        try:
-            # Bound the single call by the remaining budget + no retries on the live
-            # path: fail fast -> fall through to the existing render (which has its
-            # own retry ladder). Keeps the gen inside _premium_poster_v1_timeout_sec.
-            raw = _openrouter_textless_image(
-                prompt, model=model, quality=quality, size=size,
-                timeout=max(5.0, min(remaining, OPENROUTER_TIMEOUT_SEC)), attempts=1)
-        except Exception:  # noqa: BLE001 — never raise out of the generator
-            return None
+            raise TimeoutError("premium poster v1 wall-clock budget exhausted")
+        # Bound the single call by the remaining budget + no retries on the live
+        # path: fail fast -> fall through to the existing render (which has its
+        # own retry ladder). Keeps the gen inside _premium_poster_v1_timeout_sec.
+        raw = _openrouter_textless_image(
+            prompt, model=model, quality=quality, size=size,
+            timeout=max(5.0, min(remaining, OPENROUTER_TIMEOUT_SEC)), attempts=1)
         fd, p = tempfile.mkstemp(suffix=".png", prefix="ppv1-bg-")
         os.close(fd)
         Path(p).write_bytes(raw)
+        if created_paths is not None:
+            created_paths.append(p)
         return p
     return gen
 
@@ -4561,7 +4624,13 @@ def _ppv1_default_critique_scorer(deadline: float):
         if time.monotonic() > deadline:
             return None  # budget exhausted -> skip the critique call, first-accepted wins
         score = score_art_direction(image_path, brief_summary=brief)
-        if not score.axes and "unavailable" in (score.overall_critique or "").lower():
+        # Prefix-anchored (mirrors the director's _oracle_scorer, which documents
+        # why a bare substring is wrong): only the genuinely-unavailable case maps
+        # to None; an oracle ERROR keeps its empty-axis dict and is recorded as
+        # critique_error — a distinct signal (2026-07-02 review CQ-5).
+        if not score.axes and (score.overall_critique or "").lower().startswith(
+            "art-director oracle unavailable"
+        ):
             return None
         return score_to_dict(score)
     return scorer
@@ -4571,7 +4640,8 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
                              output_format: str, size: tuple[int, int] | None, model: str, quality: str,
                              generator=None, textless_ocr=None, critique_scorer=None,
                              compose=None, n: int | None = None, timeout_sec: float | None = None) -> PremiumPosterV1Outcome:
-    """Bare-path Premium Poster v1 render: best-of-N textless food-background gen ->
+    """Premium Poster v1 render (both the bare and managed opt-in paths route
+    here): best-of-N textless food-background gen ->
     textless gate -> deterministic compose_premium_poster_v1 -> critique selector ->
     write the winning poster to ``target``. NEVER raises; ANY failure returns
     ``delivered=False`` so the caller falls through to the existing render path. The
@@ -4582,6 +4652,7 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
     if size != (1080, 1350):  # only the concept-preview size in this slice; PDF/other -> existing path
         return PremiumPosterV1Outcome(False, "skipped", "unsupported_size", n, -1, None, output_format)
     deadline = time.monotonic() + (timeout_sec if timeout_sec is not None else _premium_poster_v1_timeout_sec())
+    created_paths: list = []  # temp files the DEFAULT generator writes (cleaned in finally)
     try:
         if compose is None:
             try:  # flat (VPS, deployed as flyer_premium_poster_v1_director.py) then package
@@ -4591,7 +4662,8 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
             compose = compose_best_of_n
         facts = list(getattr(project, "locked_facts", []) or [])
         gen = generator if generator is not None else _ppv1_default_generator(
-            project, model=model, quality=quality, size=size, deadline=deadline)
+            project, model=model, quality=quality, size=size, deadline=deadline,
+            created_paths=created_paths)
         ocr = textless_ocr if textless_ocr is not None else _ppv1_default_textless_ocr(deadline=deadline)
         scorer = critique_scorer if critique_scorer is not None else _ppv1_default_critique_scorer(deadline=deadline)
         best_img, report, candidates = compose(facts, generator=gen, textless_ocr=ocr, critique_scorer=scorer, n=n)
@@ -4602,13 +4674,127 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
         # gradient fallback — we do NOT ship that here; we fall through to the existing
         # render path (which owns the richer recovery ladder + its own gradient floor).
         won_food = best_img is not None and winner is not None and winner.get("background_status") == "ok"
-        if not won_food:
-            reason = "no_food_winner" if best_img is not None else "no_winner"
-            return PremiumPosterV1Outcome(False, "fallback", reason, n, wi, report.get("winner_composite"), output_format)
-        best_img.save(target)
-        return PremiumPosterV1Outcome(True, "delivered", "none", n, wi, report.get("winner_composite"), output_format)
+        if won_food:
+            best_img.save(target)
+            target_p = Path(target)
+            # Write-time invariants for the FINAL package (2026-07-02 review
+            # ST-1/FM-3/FA-1/FA-2/CF-1):
+            # 1. No stale raw sibling may survive a premium delivery — otherwise
+            #    render_final_package's 30s mtime heuristic can rebuild finals
+            #    from an UNRELATED earlier background (final != approved design).
+            _raw_background_path(target_p).unlink(missing_ok=True)
+            # 2. Persist premium provenance + the OCR-verified winner background
+            #    so finals RECOMPOSE the same deterministic poster at each target
+            #    aspect instead of center-cropping the brand band + footer off
+            #    (which silently dropped the Instagram formats at QA). Best-effort:
+            #    without provenance, finals letterbox/degrade — never crash.
+            try:
+                wb = winner.get("food_image_path")
+                if wb:
+                    shutil.copy2(wb, _ppv1_background_path(target_p))
+                _ppv1_provenance_path(target_p).write_text(json.dumps({
+                    "schema": 1,
+                    "delivered_at": datetime.now(timezone.utc).isoformat(),
+                    "n": n,
+                    "winner_index": report.get("winner_index"),
+                    "winner_composite": report.get("winner_composite"),
+                }), encoding="utf-8")
+            except OSError:
+                pass
+            return PremiumPosterV1Outcome(True, "delivered", "none", n, wi, report.get("winner_composite"), output_format)
+        # Carry the per-candidate failure taxonomy into the audited reason so an
+        # OCR outage / auth failure / timeout is distinguishable from the normal
+        # "model painted text" fail-closed case (2026-07-02 review SF-2/PR-H1):
+        # e.g. "no_food_winner:check_error=2" vs "no_food_winner:image_has_text=1".
+        reason = "no_food_winner" if best_img is not None else "no_winner"
+        reason = f"{reason}:{_ppv1_candidate_status_summary(report)}"[:80]
+        return PremiumPosterV1Outcome(False, "fallback", reason, n, wi, report.get("winner_composite"), output_format)
     except Exception as exc:  # noqa: BLE001 — premium path must never raise into _render_model
-        return PremiumPosterV1Outcome(False, "fallback", f"exception:{type(exc).__name__}", n, -1, None, output_format)
+        # Keep the message head, not just the type: "exception:OSError" cannot
+        # distinguish disk-full from a missing font during a live incident (SF-3).
+        detail = f"exception:{type(exc).__name__}:{str(exc)[:50]}"[:80]
+        return PremiumPosterV1Outcome(False, "fallback", detail, n, -1, None, output_format)
+    finally:
+        for p in created_paths:  # default-generator temp backgrounds only (we own them)
+            try:
+                Path(p).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _ppv1_provenance_path(preview: Path) -> Path:
+    """Sidecar marking a preview as a Premium Poster v1 delivery (JSON: schema,
+    delivered_at, n, winner_index, winner_composite). Its EXISTENCE is the
+    provenance signal render_final_package uses — never a timing heuristic."""
+    return Path(str(preview) + ".ppv1.json")
+
+
+def _ppv1_background_path(preview: Path) -> Path:
+    """The delivered winner's textless food background (already OCR-verified at
+    delivery), persisted so finals can recompose the same deterministic poster at
+    each target aspect. Deliberately NOT the legacy .raw.png name — the raw
+    sidecar carries background-only overlay-rebuild semantics that must never
+    apply to a premium poster."""
+    return Path(str(preview) + ".ppv1-bg.png")
+
+
+def _ppv1_final_fixed_size(project: FlyerProject, preview: Path, path: Path, *, size: tuple[int, int]) -> str:
+    """Derive a fixed-size premium final. Center-cropping the 4:5 premium poster
+    deterministically destroys the brand band (top ~6%) and footer (bottom ~6%)
+    for instagram_post/story — those formats then fail per-format QA and are
+    silently dropped (2026-07-02 review FA-2/CF-1). Instead:
+    1. RECOMPOSE the same deterministic poster at the target size from the
+       persisted, already-OCR-verified winner background (zero new generations;
+       the composer is size-parametric and fact-locked). The composer's
+       fail-closed refusals apply per aspect (e.g. a menu that fits 4:5 may
+       overflow the square readable zone) — then:
+    2. LETTERBOX the approved preview (every fact stays visible; QA passes).
+    Returns "recomposed" | "letterboxed" for observability/tests."""
+    bg = _ppv1_background_path(preview)
+    if bg.exists():
+        try:
+            try:  # flat (VPS, deployed as flyer_premium_poster_v1.py) then package
+                from flyer_premium_poster_v1 import compose_premium_poster_v1  # type: ignore
+            except ImportError:  # pragma: no cover - src layout fallback
+                from agents.flyer.premium_poster_v1 import compose_premium_poster_v1
+            img, report = compose_premium_poster_v1(
+                list(getattr(project, "locked_facts", []) or []),
+                food_image_path=str(bg), size=size)
+            # Require the FOOD background (design continuity with the approved
+            # preview) — a gradient-fallback recompose would look like a different
+            # product than what the owner approved.
+            if img is not None and report.get("background") == "food":
+                path.parent.mkdir(parents=True, exist_ok=True)
+                img.save(path)
+                return "recomposed"
+        except Exception:  # noqa: BLE001 — fall through to the letterbox floor
+            pass
+    _export_from_source_image_contained(preview, path, size=size)
+    return "letterboxed"
+
+
+def _clear_stale_ppv1_sidecars(path: Path) -> None:
+    """Remove premium provenance sidecars AFTER a legacy render successfully
+    overwrote ``path``. Ordering matters (2026-07-02 structural review, HIGH): an
+    eager pre-render unlink would strip provenance from a still-valid premium
+    poster whenever the legacy fallthrough render then FAILED (path untouched,
+    provenance gone → render_final_package silently falls back to center-crop).
+    Called only at each successful-write exit of _render_model; premium delivery
+    re-writes the sidecars fresh."""
+    _ppv1_provenance_path(path).unlink(missing_ok=True)
+    _ppv1_background_path(path).unlink(missing_ok=True)
+
+
+def _ppv1_candidate_status_summary(report: dict) -> str:
+    """Compact 'status=count' summary of best-of-N candidate outcomes, ordered by
+    count desc then name, e.g. 'check_error=2,image_has_text=1'. Fits the 80-char
+    audit reason budget for N<=3."""
+    counts: dict[str, int] = {}
+    for c in report.get("candidates", []) or []:
+        s = str(c.get("background_status", "") or "unknown")
+        counts[s] = counts.get(s, 0) + 1
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ",".join(f"{s}={k}" for s, k in ordered) or "no_candidates"
 
 
 def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> None:
@@ -4626,7 +4812,22 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
         # premium fire can never leave a stale value (None unambiguously means
         # "premium branch not entered this render").
         _PREMIUM_POSTER_V1_OUTCOME.set(None)
+        # Guard gates added by the 2026-07-02 review:
+        # - not repair_instruction (PR-B1): a strict-note / revision-feedback render
+        #   must NEVER enter premium — the premium composer works from stored locked
+        #   facts and would silently DROP the instruction (QA validates against the
+        #   same stored facts, so the dropped instruction would ship undetected).
+        # - deterministic model (FA-3): under FLYER_INTEGRATED_KILLSWITCH (or an
+        #   explicitly deterministic draft model) the render must make ZERO
+        #   generative calls — the premium branch would still POST to OpenRouter.
+        # - concept_id == "C1" (FM-7/PR-M1): with concept_count > 1 each concept
+        #   would burn its own N generations + full budget and the managed emitter
+        #   would record only the LAST concept's outcome; premium is a one-shot
+        #   primary attempt on the first concept only.
         if (not force_background_only
+                and not repair_instruction
+                and concept_id == "C1"
+                and model.strip().lower() not in DETERMINISTIC_MODEL_NAMES
                 and _premium_poster_v1_opt_in_path() is not None
                 and _premium_poster_v1_armed(project)
                 and _premium_poster_v1_eligible(project)):
@@ -4641,12 +4842,14 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
             _populate_creative_direction_v2(project)
         if model.strip().lower() in DETERMINISTIC_MODEL_NAMES:
             _render(project, path, concept_id=concept_id, size=size)
+            _clear_stale_ppv1_sidecars(path)
             return
         raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality, repair_instruction=repair_instruction, scene_direction=scene_direction, force_background_only=force_background_only)
         raw_path = _raw_background_path(path)
         raw_path.unlink(missing_ok=True)
         if _integrated_poster_eligible(project) and not force_background_only:
             _write_generated_image(raw, path, size=size)
+            _clear_stale_ppv1_sidecars(path)
             return
         # The prompt and the overlay MUST agree (same gate). For non-eligible flows
         # (localized / reference-extraction) the model renders the text itself, so we
@@ -4657,9 +4860,11 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
         if not _background_only_eligible(project) and not force_background_only:
             if size is None:
                 _write_generated_image(raw, path, size=size)
+                _clear_stale_ppv1_sidecars(path)
                 return
             _write_generated_image(raw, raw_path, size=size)
             apply_exact_identity_overlay(project, raw_path, path, size=size)
+            _clear_stale_ppv1_sidecars(path)
             return
         # Background-only eligible: the model emitted a textless background; the
         # critical overlay (brand + title + schedule + menu items/prices + footer)
@@ -4676,11 +4881,13 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
             try:
                 _apply_critical_text_overlay(project, raw_path, overlaid, size=pdf_px, output_format=output_format)
                 _export_from_source_image(overlaid, path, size=None)
+                _clear_stale_ppv1_sidecars(path)
             finally:
                 overlaid.unlink(missing_ok=True)
             return
         _write_generated_image(raw, raw_path, size=size)
         _apply_critical_text_overlay(project, raw_path, path, size=size, output_format=output_format)
+        _clear_stale_ppv1_sidecars(path)
     finally:
         if token is not None:
             _FORCE_BACKGROUND_ONLY.reset(token)
@@ -4941,6 +5148,15 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                 if direct_poster_source:
                     if source_edit_project:
                         _export_from_source_image_contained(source, path, size=size)
+                    elif (_ppv1_provenance_path(selected_preview).exists()
+                          and size != FINAL_FORMAT_PIXEL_SHAPES["whatsapp_image"]):
+                        # Premium Poster v1 provenance: recompose the same
+                        # deterministic poster at the target aspect (or letterbox)
+                        # instead of center-cropping the brand band + footer off
+                        # (2026-07-02 review FA-2/CF-1). whatsapp_image shares the
+                        # preview's 4:5 aspect and stays a direct export of the
+                        # EXACT approved artifact.
+                        _ppv1_final_fixed_size(project, selected_preview, path, size=size)
                     else:
                         _export_from_source_image(source, path, size=size)
                 else:

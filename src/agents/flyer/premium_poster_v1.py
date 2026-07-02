@@ -6,15 +6,23 @@ name, date, or location). It directly targets the F0190 failures: weak
 hierarchy, a tiny unreadable item list, a non-dominant offer, and poor
 WhatsApp-preview readability.
 
-Slice A scope (flag-gated, default OFF, NO production routing):
+Composition scope:
   fixed poster regions · brand/header band · bold dominant headline ·
   large framed offer/price badge · LARGE readable auto-columned item-list block ·
   footer/contact · warm/dark text-safe background with a deterministic fallback
   when no food image is supplied.
 
-NOT in Slice A: accents (chili/fire/smoke), routing into render.py, rollout,
-model-policy changes, Hermes critique. The existing render path is untouched and
-byte-identical when the flag is off (nothing wires this composer yet).
+WIRING STATUS (2026-07): this composer IS live — `premium_poster_v1_director.
+compose_best_of_n` orchestrates it and `render.render_premium_poster_v1` routes
+it behind FLYER_PREMIUM_POSTER_V1 + allowlist on both the managed and bare
+paths. Flag-off / not-allowlisted renders never enter the branch and stay
+byte-identical legacy.
+
+FAIL-CLOSED CONTRACT: the composer never paints a mutated, truncated, or
+partial fact. Any brief it cannot represent faithfully (multi-price offer,
+brand wider than the band at the floor, more items than fit the readable
+zone) returns (None, report) so the caller falls through to the existing
+render path, which draws full text with its own ladder.
 
 Reuses `premium_overlay._premium_font` (vendored Playfair/Montserrat/Cormorant);
 does not modify premium_overlay.
@@ -34,6 +42,11 @@ except ImportError:  # pragma: no cover - src layout fallback
 # WhatsApp preview that downscales to ~13px — the line below which menu text
 # becomes the unreadable F0190 failure. The composer NEVER renders items below it.
 READABILITY_FLOOR_PX = 34
+# Floors for the brand band and the badge label (each fits-to-width and, when the
+# full text cannot fit even at the floor, the composer fails closed / omits the
+# label rather than ever painting a clipped or truncated fact).
+BRAND_READABILITY_FLOOR_PX = 24
+BADGE_LABEL_FLOOR_PX = 18
 
 _FLAG = "FLYER_PREMIUM_POSTER_V1"
 _PRICE_RE = re.compile(r"\$\s?\d[\d,]*(?:\.\d{1,2})?")
@@ -82,9 +95,17 @@ def _item_names(facts) -> list[str]:
     return out
 
 
+def _offer_source_text(facts) -> str:
+    """The single locked-fact value the offer badge is built from."""
+    return _value_of("pricing_structure", facts) or _value_of("offer:0", facts) or _value_of("offer", facts)
+
+
 def _offer(facts) -> tuple[str, str]:
-    """(label, price) from pricing_structure or the first offer fact. Grounded."""
-    text = _value_of("pricing_structure", facts) or _value_of("offer:0", facts) or _value_of("offer", facts)
+    """(label, price) from pricing_structure or the first offer fact. Grounded.
+    Only meaningful for single-price offers — compose refuses multi-price offers
+    fail-closed BEFORE calling this (a badge showing the first of two prices as
+    the dominant number would mutate the offer, e.g. "Was $12.99 now $8.99")."""
+    text = _offer_source_text(facts)
     if not text:
         return ("", "")
     m = _PRICE_RE.search(text)
@@ -128,6 +149,16 @@ def _headline_font(size: int):
 def _text_w(draw, text, font) -> int:
     b = draw.textbbox((0, 0), text, font=font)
     return b[2] - b[0]
+
+
+def _fit_single_line_px(draw, text, *, font_role, max_w, max_px, min_px):
+    """Largest font size (max_px down to min_px) at which ``text`` fits ``max_w``
+    on one line, or None when even the floor overflows. Whole-string fit only —
+    never a truncation."""
+    for px in range(max_px, min_px - 1, -1):
+        if _text_w(draw, text, _premium_font(font_role, px)) <= max_w:
+            return px
+    return None
 
 
 def _text_h(draw, text, font) -> int:
@@ -250,6 +281,11 @@ def compose_premium_poster_v1(
 
     if not business or not (price or label) or len(items) < 3:
         return None, {"eligible": False, "reason": "missing required facts (business / offer / >=3 items)"}
+    # Multi-price offers cannot be represented by a single dominant badge price
+    # without mutating the offer ("Was $12.99 now $8.99" would show $12.99 as THE
+    # price). Refuse fail-closed; the existing render path draws the full text.
+    if len(_PRICE_RE.findall(_offer_source_text(locked_facts))) > 1:
+        return None, {"eligible": False, "reason": "multi-price offer (single badge price would mutate the offer)"}
 
     w, h = size
     food_fallback_reason = ""
@@ -285,8 +321,17 @@ def compose_premium_poster_v1(
     regions: dict = {}
     fonts: dict = {}
 
-    # ── brand band ──
-    brand_px = max(40, int(w * 0.052))
+    # ── brand band (fit-to-width like the headline/footer: the brand band was the
+    # ONLY text region with a fixed size, so a very long business name clipped at
+    # the canvas edges — a brand-name mutation risk if OCR folds the clipped
+    # fragment to a warn-tier "typo") ──
+    brand_px = _fit_single_line_px(
+        draw, business.upper(), font_role="masthead",
+        max_w=int(w * 0.94), max_px=max(40, int(w * 0.052)), min_px=BRAND_READABILITY_FLOOR_PX)
+    if brand_px is None:
+        # Cannot fit the full business name even at the floor — never paint a
+        # clipped brand; fall through to the existing render path.
+        return None, {"eligible": False, "reason": "business name too wide for the brand band at the readability floor"}
     bf = _premium_font("masthead", brand_px)
     regions["brand"] = (0, int(h * 0.015), w, int(h * 0.085))
     _draw_center(draw, business.upper(), bf, cy=int(h * 0.058), w=w, fill=_GOLD)
@@ -321,13 +366,19 @@ def compose_premium_poster_v1(
     _rounded_panel(img, (iz_x - 18, iz_y - 18, iz_x + iz_w + 18, iz_y + iz_h + 18), fill=_PANEL, alpha=200)
     draw = ImageDraw.Draw(img)
     item_px, ncols, rows_fit, overflow = _fit_item_block(draw, items, zone_w=iz_w, zone_h=iz_h)
+    if overflow:
+        # A partial menu must never ship: dropped items are customer-supplied
+        # required facts (block-tier downstream), so composing them away would at
+        # best burn a doomed QA cycle and at worst slip past fuzzy matching.
+        # Fail closed; the existing render path owns dense menus.
+        return None, {"eligible": False, "reason": "items overflow the readable item zone (partial menu never composed)"}
     itf = _premium_font("footer", item_px)
     line_h = int(item_px * 1.5)
     col_w = iz_w // ncols
-    shown = items[: rows_fit * ncols] if overflow else items
+    shown = items
     for idx, it in enumerate(shown):
-        col = idx // rows_fit if overflow else (idx % ncols)
-        row = idx % rows_fit if overflow else (idx // ncols)
+        col = idx % ncols
+        row = idx // ncols
         cx = iz_x + col * col_w
         cy = iz_y + row * line_h
         # filled-circle bullet (drawn, not a glyph — robust across fonts)
@@ -366,7 +417,7 @@ def compose_premium_poster_v1(
         "offer_badge_radius": badge_r,
         "items": list(shown),
         "item_px": item_px,
-        "items_overflow": bool(overflow),
+        "items_overflow": False,  # partial menus are never composed (fail-closed above)
         "placed_text": placed_text,
     }
     return img, report
@@ -405,8 +456,9 @@ def _fit_headline(draw, text, *, max_w, max_px, min_px=58):
 # number. Fit the footer to the width like the headline so the concatenated
 # footer (and its trailing phone) stops clipping. A phone (~12 chars) can never
 # itself exceed the frame; only a pathologically long SINGLE field with no
-# separator can still center over-wide at the floor, and the OCR referee blocks
-# that fail-closed. Floor is footer-specific (smaller than the item-block floor).
+# separator can still center over-wide at the floor, and the downstream
+# `run_visual_qa` fact readback blocks that fail-closed (missing/partial
+# contact_phone). Floor is footer-specific (smaller than the item-block floor).
 FOOTER_READABILITY_FLOOR_PX = 22
 
 
@@ -417,7 +469,8 @@ def _fit_footer(draw, text, *, max_w, max_px, min_px=FOOTER_READABILITY_FLOOR_PX
     ``(font_px, lines)``. Only ever splits on the deterministic ``_footer_line``
     separator — never mid-token — so no fact is ever broken or fabricated. (A lone
     field wider than the frame at the floor still centers over-wide; unreachable
-    for the phone, and the downstream OCR referee blocks it fail-closed.)"""
+    for the phone, and the downstream `run_visual_qa` fact readback blocks it
+    fail-closed.)"""
     for px in range(max_px, min_px - 1, -1):
         f = _premium_font("footer", px)
         if _text_w(draw, text, f) <= max_w:
@@ -433,22 +486,18 @@ def _fit_footer(draw, text, *, max_w, max_px, min_px=FOOTER_READABILITY_FLOOR_PX
     return min_px, [text]
 
 
-def _fit_badge_label(text: str, max_chars: int) -> str:
-    """Whole-word prefix of a label that fits in ``max_chars`` so the badge never
-    paints (and never records in placed_text) a mid-word fragment — every token
-    stays a whole, grounded word. A single over-long word is hard-capped only as a
-    last resort. Never fabricates: the result is always a prefix of ``text``."""
-    text = text.strip()
-    if len(text) <= max_chars:
-        return text
-    out = ""
-    for word in text.split():
-        candidate = f"{out} {word}".strip()
-        if len(candidate) <= max_chars:
-            out = candidate
-        else:
-            break
-    return out or text[:max_chars]
+def _fit_badge_label_px(draw, text: str, *, max_w: int, max_px: int) -> Optional[int]:
+    """Font size at which the WHOLE label fits the badge chord width, or None.
+    Replaces the earlier whole-word-prefix truncation: a prefix of an offer is a
+    FACT MUTATION ("BUY 2 GET 1 HALF OFF" -> "BUY 2 GET 1 HALF"; "50% off orders
+    over $50" -> "50% OFF ORDERS" beside a dominant "$50") that poster-global
+    token QA cannot reliably catch when the dropped words appear elsewhere on the
+    poster. The badge now shrinks the full label to fit, and when it cannot fit
+    at the floor the label is OMITTED entirely — a missing offer clause then
+    fails the downstream fact QA closed and the render falls through to the
+    existing path, which draws the full text."""
+    return _fit_single_line_px(
+        draw, text, font_role="kicker", max_w=max_w, max_px=max_px, min_px=BADGE_LABEL_FLOOR_PX)
 
 
 def _draw_offer_badge(img, draw, *, label, price, cx, cy, w):
@@ -475,16 +524,23 @@ def _draw_offer_badge(img, draw, *, label, price, cx, cy, w):
     draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=_GOLD, width=max(7, int(w * 0.011)))  # thicker frame
     inner = int(r * 0.87)
     draw.ellipse([cx - inner, cy - inner, cx + inner, cy + inner], outline=_GOLD, width=3)
-    lf = _premium_font("kicker", max(22, int(w * 0.030)))                         # slightly bigger label
     pf = _premium_font("offer_price", max(READABILITY_FLOOR_PX, int(w * 0.10)))   # bigger price (was 0.085w)
     drawn: list[str] = []
     if label:
-        lab = _fit_badge_label(label.upper(), 18)
-        _draw_center_at(draw, lab, lf, cx=cx, cy=cy - int(r * 0.52), fill=_CREAM)
-        drawn.append(lab)
+        lab = label.upper()
+        # chord width of the inner circle at the label's vertical offset (~0.52r)
+        label_max_w = int(r * 1.6)
+        label_px = _fit_badge_label_px(draw, lab, max_w=label_max_w, max_px=max(22, int(w * 0.030)))
+        if label_px is not None:
+            lf = _premium_font("kicker", label_px)
+            _draw_center_at(draw, lab, lf, cx=cx, cy=cy - int(r * 0.52), fill=_CREAM)
+            drawn.append(lab)
+        # label_px None -> label omitted entirely (never a prefix); the price alone
+        # is drawn and downstream fact QA fail-closes on the missing offer clause.
     if price:
-        # centre the price vertically when there is no label above it
-        price_cy = cy - int(r * 0.16) if label else cy - int(r * 0.28)
+        # centre the price vertically when no label was DRAWN above it (either no
+        # label fact, or the label was omitted because it could not fit whole)
+        price_cy = cy - int(r * 0.16) if drawn else cy - int(r * 0.28)
         # drop shadow then gold for crisp contrast over any background
         _draw_center_at(draw, price, pf, cx=cx + 3, cy=price_cy + 3, fill=(0, 0, 0))
         _draw_center_at(draw, price, pf, cx=cx, cy=price_cy, fill=_GOLD)

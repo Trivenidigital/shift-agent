@@ -424,11 +424,13 @@ def test_emit_managed_final_noop_when_not_delivered(monkeypatch, tmp_path):
     assert rows == []
 
 
-def test_emit_managed_outcome_never_raises_on_audit_failure(monkeypatch, tmp_path):
+def test_emit_managed_outcome_never_raises_on_audit_failure(monkeypatch, tmp_path, capsys):
     # Fail-safe: the emitter runs INSIDE the render retry try/except — an audit
     # failure must NOT propagate (else it is misclassified as a render failure and
-    # downgrades a good render to manual). It must swallow, clear the outcome, and
-    # return None. Simulate a construction/append blow-up.
+    # downgrades a good render to manual). 2026-07-02 hardening (SF-5): it must
+    # STILL return the consumed outcome (a decisions.log failure must not also
+    # suppress the final_pass/final_fail pairing for a DELIVERED poster) and must
+    # leave one stderr line so the blackout is journalctl-visible.
     mod = _load_script()
     consumed = {"n": 0}
 
@@ -440,8 +442,31 @@ def test_emit_managed_outcome_never_raises_on_audit_failure(monkeypatch, tmp_pat
     monkeypatch.setattr(mod, "consume_premium_poster_v1_outcome", _consume)
     monkeypatch.setattr(mod, "_audit_append", lambda path, entry: (_ for _ in ()).throw(RuntimeError("boom")))
     out = mod._emit_premium_poster_v1_managed_outcome(tmp_path / "decisions.log", _proj_ns())
-    assert out is None                 # swallowed -> caller treats as no premium delivery
-    assert consumed["n"] >= 1          # outcome still consumed (best-effort clear, no leak)
+    assert out is not None and out.delivered is True  # QA pairing must survive audit failure
+    assert consumed["n"] == 1          # outcome consumed exactly once (no leak, no re-read)
+    assert "ppv1_managed_audit_emit_failed" in capsys.readouterr().err
+
+
+def test_emit_managed_infra_shaped_reason_alerts_owner(monkeypatch, tmp_path):
+    # An infra-shaped fallback (OCR outage / exception / timeout) must page the
+    # owner (mirrors the premium-overlay alert precedent); the normal fail-closed
+    # image_has_text reason must NOT page (2026-07-02 review SF-4/PR-M3).
+    mod = _load_script()
+    alerts = []
+    rows = []
+    monkeypatch.setattr(mod, "_premium_poster_v1_armed", lambda p: True)
+    monkeypatch.setattr(mod, "_alert_owner", lambda msg: alerts.append(msg))
+    monkeypatch.setattr(mod, "_audit_append", lambda path, entry: rows.append(entry))
+
+    monkeypatch.setattr(mod, "consume_premium_poster_v1_outcome",
+                        lambda: _ppv1_outcome(False, status="fallback", reason="no_food_winner:check_error=1"))
+    mod._emit_premium_poster_v1_managed_outcome(tmp_path / "decisions.log", _proj_ns())
+    assert len(alerts) == 1 and "check_error" in alerts[0]
+
+    monkeypatch.setattr(mod, "consume_premium_poster_v1_outcome",
+                        lambda: _ppv1_outcome(False, status="fallback", reason="no_food_winner:image_has_text=1"))
+    mod._emit_premium_poster_v1_managed_outcome(tmp_path / "decisions.log", _proj_ns())
+    assert len(alerts) == 1  # intentional fail-closed: no page
 
 
 def test_emit_managed_final_never_raises_on_audit_failure(monkeypatch, tmp_path):
