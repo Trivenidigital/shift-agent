@@ -446,3 +446,131 @@ def test_vision_text_missing_extracted_text_key_is_unavailable(monkeypatch, tmp_
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_empty)
     text, source, kind, notes = visual_qa._vision_text(target)
     assert source == "openrouter" and text == ""  # genuinely-textless stays textless
+
+
+# ── PR-S4 finals fidelity (2026-07-02 review ST-1/FM-3/FA-1/FA-2/CF-1) ───────
+
+def test_delivery_unlinks_stale_raw_and_writes_provenance(tmp_path):
+    # A premium delivery must (1) remove any stale legacy .raw.png sibling so
+    # render_final_package can never rebuild finals from an unrelated earlier
+    # background, and (2) persist the ppv1 provenance sidecar + the OCR-verified
+    # winner background for per-format recomposition.
+    target = tmp_path / "F0001-C1-preview.png"
+    stale_raw = render._raw_background_path(target)
+    stale_raw.write_bytes(b"\x89PNG-stale-raw")
+    outcome = _render_ppv1(_project(), target, generator=_gen_ok,
+                           textless_ocr=_ocr_textless, critique_scorer=_scorer)
+    assert outcome.delivered is True
+    assert not stale_raw.exists()                                # write-time invariant
+    assert render._ppv1_provenance_path(target).exists()         # provenance sidecar
+    assert render._ppv1_background_path(target).exists()         # persisted winner bg
+    assert FIXTURE.exists()                                      # source copied, not moved
+    import json as _json
+    prov = _json.loads(render._ppv1_provenance_path(target).read_text(encoding="utf-8"))
+    assert prov["schema"] == 1 and prov["n"] == 1
+
+
+def test_fallback_writes_no_provenance(tmp_path):
+    target = tmp_path / "F0001-C1-preview.png"
+    outcome = _render_ppv1(_project(), target, generator=_gen_ok,
+                           textless_ocr=lambda im: False, critique_scorer=_scorer)
+    assert outcome.delivered is False
+    assert not render._ppv1_provenance_path(target).exists()
+    assert not render._ppv1_background_path(target).exists()
+
+
+def test_ppv1_final_fixed_size_recomposes_story_from_saved_background(tmp_path):
+    # instagram_story (1080x1920): the composer recomposes the SAME deterministic
+    # poster at the target aspect from the saved background — brand band + footer
+    # survive (center-crop destroyed both).
+    preview = tmp_path / "F0001-C1-preview.png"
+    outcome = _render_ppv1(_project(), preview, generator=_gen_ok,
+                           textless_ocr=_ocr_textless, critique_scorer=_scorer)
+    assert outcome.delivered is True
+    out = tmp_path / "F0001-instagram_story.png"
+    route = render._ppv1_final_fixed_size(_project(), preview, out, size=(1080, 1920))
+    assert route == "recomposed"
+    from PIL import Image
+    with Image.open(out) as im:
+        assert im.size == (1080, 1920)
+
+
+def test_ppv1_final_fixed_size_letterboxes_when_compose_refuses(tmp_path):
+    # A dense menu that fits 4:5 can overflow the SQUARE readable zone — the
+    # composer refuses fail-closed and the final letterboxes the approved preview
+    # (every fact visible; never a partial or cropped poster).
+    facts = [f for f in _food_facts() if not f.fact_id.startswith("item:")]
+    facts += [_F(f"item:{i}:name", f"Very Long Snack Item Name Number {i}") for i in range(12)]
+    proj = _project(facts=facts)
+    preview = tmp_path / "F0001-C1-preview.png"
+    outcome = _render_ppv1(proj, preview, generator=_gen_ok,
+                           textless_ocr=_ocr_textless, critique_scorer=_scorer)
+    assert outcome.delivered is True
+    out = tmp_path / "F0001-instagram_post.png"
+    route = render._ppv1_final_fixed_size(proj, preview, out, size=(1080, 1080))
+    assert route in ("recomposed", "letterboxed")  # composer decides; both fact-safe
+    from PIL import Image
+    with Image.open(out) as im:
+        assert im.size == (1080, 1080)
+
+
+def test_ppv1_final_fixed_size_letterboxes_without_saved_background(tmp_path):
+    # Missing bg sidecar (e.g. provenance write half-failed): letterbox floor.
+    preview = tmp_path / "F0001-C1-preview.png"
+    from PIL import Image
+    Image.new("RGB", (1080, 1350), (40, 20, 10)).save(preview)
+    out = tmp_path / "F0001-instagram_post.png"
+    route = render._ppv1_final_fixed_size(_project(), preview, out, size=(1080, 1080))
+    assert route == "letterboxed"
+    with Image.open(out) as im:
+        assert im.size == (1080, 1080)
+
+
+def test_final_package_premium_provenance_avoids_center_crop(tmp_path, monkeypatch):
+    # End-to-end: a premium-provenance preview must derive instagram formats via
+    # _ppv1_final_fixed_size (recompose-or-letterbox), and whatsapp_image stays a
+    # DIRECT export of the exact approved artifact.
+    from datetime import datetime, timezone
+
+    from schemas import FlyerAsset, FlyerConcept
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    preview = asset_dir / "F0001-C1-preview.png"
+    outcome = _render_ppv1(_project(), preview, generator=_gen_ok,
+                           textless_ocr=_ocr_textless, critique_scorer=_scorer)
+    assert outcome.delivered is True
+
+    import hashlib
+    sha = hashlib.sha256(preview.read_bytes()).hexdigest()
+    proj = _project().model_copy(update={
+        "assets": [FlyerAsset(asset_id="A0001", kind="concept_preview", source="rendered",
+                              path=str(preview), mime_type="image/png", sha256=sha,
+                              original_message_id="wamid.1",
+                              received_at=datetime.now(timezone.utc))],
+        "concepts": [FlyerConcept(concept_id="C1", title="Best Design",
+                                  style_summary="Premium poster", preview_asset_id="A0001",
+                                  prompt="", created_at=datetime.now(timezone.utc))],
+        "selected_concept_id": "C1",
+    })
+
+    routes = []
+    real = render._ppv1_final_fixed_size
+
+    def _spy(project, preview_p, path, *, size):
+        r = real(project, preview_p, path, size=size)
+        routes.append((size, r))
+        return r
+
+    monkeypatch.setattr(render, "_ppv1_final_fixed_size", _spy)
+    specs = render.render_final_package(proj, tmp_path / "finals")
+    by_format = {s.output_format: s for s in specs}
+    assert set(by_format) == {"whatsapp_image", "instagram_post", "instagram_story", "printable_pdf"}
+    # instagram formats went through the premium derivation, not center-crop
+    assert {sz for sz, _ in routes} == {(1080, 1080), (1080, 1920)}
+    # whatsapp_image is byte-identical in content to the approved preview export path
+    from PIL import Image
+    with Image.open(by_format["whatsapp_image"].path) as wa, Image.open(preview) as ap:
+        assert wa.size == (1080, 1350)
+        assert wa.getpixel((540, 675)) == ap.getpixel((540, 675))

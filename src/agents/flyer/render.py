@@ -20,6 +20,7 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -4660,16 +4661,41 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
         # gradient fallback — we do NOT ship that here; we fall through to the existing
         # render path (which owns the richer recovery ladder + its own gradient floor).
         won_food = best_img is not None and winner is not None and winner.get("background_status") == "ok"
-        if not won_food:
-            # Carry the per-candidate failure taxonomy into the audited reason so an
-            # OCR outage / auth failure / timeout is distinguishable from the normal
-            # "model painted text" fail-closed case (2026-07-02 review SF-2/PR-H1):
-            # e.g. "no_food_winner:check_error=2" vs "no_food_winner:image_has_text=1".
-            reason = "no_food_winner" if best_img is not None else "no_winner"
-            reason = f"{reason}:{_ppv1_candidate_status_summary(report)}"[:80]
-            return PremiumPosterV1Outcome(False, "fallback", reason, n, wi, report.get("winner_composite"), output_format)
-        best_img.save(target)
-        return PremiumPosterV1Outcome(True, "delivered", "none", n, wi, report.get("winner_composite"), output_format)
+        if won_food:
+            best_img.save(target)
+            target_p = Path(target)
+            # Write-time invariants for the FINAL package (2026-07-02 review
+            # ST-1/FM-3/FA-1/FA-2/CF-1):
+            # 1. No stale raw sibling may survive a premium delivery — otherwise
+            #    render_final_package's 30s mtime heuristic can rebuild finals
+            #    from an UNRELATED earlier background (final != approved design).
+            _raw_background_path(target_p).unlink(missing_ok=True)
+            # 2. Persist premium provenance + the OCR-verified winner background
+            #    so finals RECOMPOSE the same deterministic poster at each target
+            #    aspect instead of center-cropping the brand band + footer off
+            #    (which silently dropped the Instagram formats at QA). Best-effort:
+            #    without provenance, finals letterbox/degrade — never crash.
+            try:
+                wb = winner.get("food_image_path")
+                if wb:
+                    shutil.copy2(wb, _ppv1_background_path(target_p))
+                _ppv1_provenance_path(target_p).write_text(json.dumps({
+                    "schema": 1,
+                    "delivered_at": datetime.now(timezone.utc).isoformat(),
+                    "n": n,
+                    "winner_index": report.get("winner_index"),
+                    "winner_composite": report.get("winner_composite"),
+                }), encoding="utf-8")
+            except OSError:
+                pass
+            return PremiumPosterV1Outcome(True, "delivered", "none", n, wi, report.get("winner_composite"), output_format)
+        # Carry the per-candidate failure taxonomy into the audited reason so an
+        # OCR outage / auth failure / timeout is distinguishable from the normal
+        # "model painted text" fail-closed case (2026-07-02 review SF-2/PR-H1):
+        # e.g. "no_food_winner:check_error=2" vs "no_food_winner:image_has_text=1".
+        reason = "no_food_winner" if best_img is not None else "no_winner"
+        reason = f"{reason}:{_ppv1_candidate_status_summary(report)}"[:80]
+        return PremiumPosterV1Outcome(False, "fallback", reason, n, wi, report.get("winner_composite"), output_format)
     except Exception as exc:  # noqa: BLE001 — premium path must never raise into _render_model
         # Keep the message head, not just the type: "exception:OSError" cannot
         # distinguish disk-full from a missing font during a live incident (SF-3).
@@ -4681,6 +4707,57 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
                 Path(p).unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def _ppv1_provenance_path(preview: Path) -> Path:
+    """Sidecar marking a preview as a Premium Poster v1 delivery (JSON: schema,
+    delivered_at, n, winner_index, winner_composite). Its EXISTENCE is the
+    provenance signal render_final_package uses — never a timing heuristic."""
+    return Path(str(preview) + ".ppv1.json")
+
+
+def _ppv1_background_path(preview: Path) -> Path:
+    """The delivered winner's textless food background (already OCR-verified at
+    delivery), persisted so finals can recompose the same deterministic poster at
+    each target aspect. Deliberately NOT the legacy .raw.png name — the raw
+    sidecar carries background-only overlay-rebuild semantics that must never
+    apply to a premium poster."""
+    return Path(str(preview) + ".ppv1-bg.png")
+
+
+def _ppv1_final_fixed_size(project: FlyerProject, preview: Path, path: Path, *, size: tuple[int, int]) -> str:
+    """Derive a fixed-size premium final. Center-cropping the 4:5 premium poster
+    deterministically destroys the brand band (top ~6%) and footer (bottom ~6%)
+    for instagram_post/story — those formats then fail per-format QA and are
+    silently dropped (2026-07-02 review FA-2/CF-1). Instead:
+    1. RECOMPOSE the same deterministic poster at the target size from the
+       persisted, already-OCR-verified winner background (zero new generations;
+       the composer is size-parametric and fact-locked). The composer's
+       fail-closed refusals apply per aspect (e.g. a menu that fits 4:5 may
+       overflow the square readable zone) — then:
+    2. LETTERBOX the approved preview (every fact stays visible; QA passes).
+    Returns "recomposed" | "letterboxed" for observability/tests."""
+    bg = _ppv1_background_path(preview)
+    if bg.exists():
+        try:
+            try:  # flat (VPS, deployed as flyer_premium_poster_v1.py) then package
+                from flyer_premium_poster_v1 import compose_premium_poster_v1  # type: ignore
+            except ImportError:  # pragma: no cover - src layout fallback
+                from agents.flyer.premium_poster_v1 import compose_premium_poster_v1
+            img, report = compose_premium_poster_v1(
+                list(getattr(project, "locked_facts", []) or []),
+                food_image_path=str(bg), size=size)
+            # Require the FOOD background (design continuity with the approved
+            # preview) — a gradient-fallback recompose would look like a different
+            # product than what the owner approved.
+            if img is not None and report.get("background") == "food":
+                path.parent.mkdir(parents=True, exist_ok=True)
+                img.save(path)
+                return "recomposed"
+        except Exception:  # noqa: BLE001 — fall through to the letterbox floor
+            pass
+    _export_from_source_image_contained(preview, path, size=size)
+    return "letterboxed"
 
 
 def _ppv1_candidate_status_summary(report: dict) -> str:
@@ -5040,6 +5117,15 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                 if direct_poster_source:
                     if source_edit_project:
                         _export_from_source_image_contained(source, path, size=size)
+                    elif (_ppv1_provenance_path(selected_preview).exists()
+                          and size != FINAL_FORMAT_PIXEL_SHAPES["whatsapp_image"]):
+                        # Premium Poster v1 provenance: recompose the same
+                        # deterministic poster at the target aspect (or letterbox)
+                        # instead of center-cropping the brand band + footer off
+                        # (2026-07-02 review FA-2/CF-1). whatsapp_image shares the
+                        # preview's 4:5 aspect and stays a direct export of the
+                        # EXACT approved artifact.
+                        _ppv1_final_fixed_size(project, selected_preview, path, size=size)
                     else:
                         _export_from_source_image(source, path, size=size)
                 else:
