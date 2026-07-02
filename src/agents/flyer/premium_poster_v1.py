@@ -417,7 +417,7 @@ def compose_premium_poster_v1(
         "offer_badge_radius": badge_r,
         "items": list(shown),
         "item_px": item_px,
-        "items_overflow": bool(overflow),
+        "items_overflow": False,  # partial menus are never composed (fail-closed above)
         "placed_text": placed_text,
     }
     return img, report

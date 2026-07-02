@@ -4773,6 +4773,18 @@ def _ppv1_final_fixed_size(project: FlyerProject, preview: Path, path: Path, *, 
     return "letterboxed"
 
 
+def _clear_stale_ppv1_sidecars(path: Path) -> None:
+    """Remove premium provenance sidecars AFTER a legacy render successfully
+    overwrote ``path``. Ordering matters (2026-07-02 structural review, HIGH): an
+    eager pre-render unlink would strip provenance from a still-valid premium
+    poster whenever the legacy fallthrough render then FAILED (path untouched,
+    provenance gone → render_final_package silently falls back to center-crop).
+    Called only at each successful-write exit of _render_model; premium delivery
+    re-writes the sidecars fresh."""
+    _ppv1_provenance_path(path).unlink(missing_ok=True)
+    _ppv1_background_path(path).unlink(missing_ok=True)
+
+
 def _ppv1_candidate_status_summary(report: dict) -> str:
     """Compact 'status=count' summary of best-of-N candidate outcomes, ordered by
     count desc then name, e.g. 'check_error=2,image_has_text=1'. Fits the 80-char
@@ -4826,24 +4838,18 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
             if outcome.delivered:
                 return
             # not delivered -> fall through to the existing render path (outcome recorded)
-        # Any render that reaches the legacy paths below OVERWRITES `path` with a
-        # non-premium artifact — stale premium provenance sidecars from an EARLIER
-        # premium delivery at this path must not survive, or render_final_package
-        # would treat the new legacy preview as premium (recompose finals from a
-        # stale background). Mirror of the raw-sidecar hygiene; delivery re-writes
-        # them fresh.
-        _ppv1_provenance_path(path).unlink(missing_ok=True)
-        _ppv1_background_path(path).unlink(missing_ok=True)
         if _creative_director_v2_enabled(project):
             _populate_creative_direction_v2(project)
         if model.strip().lower() in DETERMINISTIC_MODEL_NAMES:
             _render(project, path, concept_id=concept_id, size=size)
+            _clear_stale_ppv1_sidecars(path)
             return
         raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality, repair_instruction=repair_instruction, scene_direction=scene_direction, force_background_only=force_background_only)
         raw_path = _raw_background_path(path)
         raw_path.unlink(missing_ok=True)
         if _integrated_poster_eligible(project) and not force_background_only:
             _write_generated_image(raw, path, size=size)
+            _clear_stale_ppv1_sidecars(path)
             return
         # The prompt and the overlay MUST agree (same gate). For non-eligible flows
         # (localized / reference-extraction) the model renders the text itself, so we
@@ -4854,9 +4860,11 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
         if not _background_only_eligible(project) and not force_background_only:
             if size is None:
                 _write_generated_image(raw, path, size=size)
+                _clear_stale_ppv1_sidecars(path)
                 return
             _write_generated_image(raw, raw_path, size=size)
             apply_exact_identity_overlay(project, raw_path, path, size=size)
+            _clear_stale_ppv1_sidecars(path)
             return
         # Background-only eligible: the model emitted a textless background; the
         # critical overlay (brand + title + schedule + menu items/prices + footer)
@@ -4873,11 +4881,13 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
             try:
                 _apply_critical_text_overlay(project, raw_path, overlaid, size=pdf_px, output_format=output_format)
                 _export_from_source_image(overlaid, path, size=None)
+                _clear_stale_ppv1_sidecars(path)
             finally:
                 overlaid.unlink(missing_ok=True)
             return
         _write_generated_image(raw, raw_path, size=size)
         _apply_critical_text_overlay(project, raw_path, path, size=size, output_format=output_format)
+        _clear_stale_ppv1_sidecars(path)
     finally:
         if token is not None:
             _FORCE_BACKGROUND_ONLY.reset(token)

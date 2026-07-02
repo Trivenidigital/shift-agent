@@ -1192,15 +1192,25 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
             # and surfaced only in the FINAL fail-closed blockers (→ send.log), so a bare-path
             # FlyerRenderError is diagnosable instead of opaque (operator obs request 2026-06-06).
             # A premium fire whose surrounding render then raised must still be audited
-            # (denominator; mirrors the managed exception-path emission).
-            _consume_and_emit_premium_poster_v1_bare(render_project, chat_id)
+            # (denominator). Attempt 1 carries a strict note, which the premium
+            # branch's repair-instruction guard structurally blocks — emitting there
+            # would double-count and mislabel the guard-skip as "ineligible"
+            # (2026-07-02 structural review, MEDIUM); attempt 0 is the only attempt
+            # where premium can fire.
+            if attempt == 0:
+                _consume_and_emit_premium_poster_v1_bare(render_project, chat_id)
             last_blockers = [f"render_error:{type(e).__name__}"]
             last_render_detail = _render_error_detail(e, render_project, "generate_poster")
             continue
-        # Premium Poster v1 bare-path observability (LOG-ONLY; zero rows unless armed):
-        # consume the outcome recorded by _render_model and emit attempted/eligible/
-        # selected/fallback rows, then pair the QA verdict below.
-        _ppv1_bare_outcome = _consume_and_emit_premium_poster_v1_bare(render_project, chat_id)
+        # Premium Poster v1 bare-path observability (LOG-ONLY; zero rows unless
+        # armed): consume the outcome recorded by _render_model and emit attempted/
+        # eligible/selected/fallback rows, then pair the QA verdict below. Only
+        # attempt 0 can enter the premium branch (attempt 1's strict note trips the
+        # repair-instruction guard), so only attempt 0 emits.
+        _ppv1_bare_outcome = (
+            _consume_and_emit_premium_poster_v1_bare(render_project, chat_id)
+            if attempt == 0 else None
+        )
         ok, blockers = run_visual_qa(png, render_project)
         _emit_premium_poster_v1_bare_final(_ppv1_bare_outcome, chat_id, qa_passed=bool(ok))
         if ok:

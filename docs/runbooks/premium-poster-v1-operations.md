@@ -107,7 +107,9 @@ Do **not** broaden until every box below is checked:
       (fail-closed, 2026-07-02).
 - [x] Kill-switch totality, repair-note guard, C1-only guard (2026-07-02).
 - [x] OCR schema-drift fail-closed (`extracted_text` missing ⇒ outage).
-- [x] Precise fallback reasons + owner alert on infra-shaped failures.
+- [x] Precise fallback reasons + owner alert on infra-shaped failures
+      (alert fires on the MANAGED path only; the bare path emits audit rows
+      but does not page — pair with the B2 watchdog before broadening bare).
 - [x] Bare-path audit rows; managed denominator on exception exits.
 - [x] Temp hygiene (`ppv1-bg-*`, critique PII PNGs).
 - [x] Finals derivation provenance-aware (no crop, no stale raw).
