@@ -4710,7 +4710,22 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
         # premium fire can never leave a stale value (None unambiguously means
         # "premium branch not entered this render").
         _PREMIUM_POSTER_V1_OUTCOME.set(None)
+        # Guard gates added by the 2026-07-02 review:
+        # - not repair_instruction (PR-B1): a strict-note / revision-feedback render
+        #   must NEVER enter premium — the premium composer works from stored locked
+        #   facts and would silently DROP the instruction (QA validates against the
+        #   same stored facts, so the dropped instruction would ship undetected).
+        # - deterministic model (FA-3): under FLYER_INTEGRATED_KILLSWITCH (or an
+        #   explicitly deterministic draft model) the render must make ZERO
+        #   generative calls — the premium branch would still POST to OpenRouter.
+        # - concept_id == "C1" (FM-7/PR-M1): with concept_count > 1 each concept
+        #   would burn its own N generations + full budget and the managed emitter
+        #   would record only the LAST concept's outcome; premium is a one-shot
+        #   primary attempt on the first concept only.
         if (not force_background_only
+                and not repair_instruction
+                and concept_id == "C1"
+                and model.strip().lower() not in DETERMINISTIC_MODEL_NAMES
                 and _premium_poster_v1_opt_in_path() is not None
                 and _premium_poster_v1_armed(project)
                 and _premium_poster_v1_eligible(project)):

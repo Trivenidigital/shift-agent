@@ -1670,6 +1670,13 @@ def _vision_text(path: Path, *, model: str = VISION_QA_MODEL) -> tuple[str, str,
     except (OSError, KeyError, IndexError, TypeError, json.JSONDecodeError, urllib.error.URLError, urllib.error.HTTPError) as exc:
         return "", "unavailable", "ocr_vision", [f"vision OCR failed: {type(exc).__name__}"]
     notes = [str(item) for item in parsed.get("quality_notes") or [] if str(item).strip()]
+    if "extracted_text" not in parsed:
+        # Valid JSON but the expected key is ABSENT (provider schema drift / model
+        # swap). Treating that as "no text" would certify a text-bearing image as
+        # textless (2026-07-02 review FM-6) — fail closed as an OCR outage instead.
+        # A present-and-empty extracted_text (a genuinely textless image) is
+        # unaffected.
+        return "", "unavailable", "ocr_vision", ["vision OCR response missing extracted_text"]
     return str(parsed.get("extracted_text") or ""), "openrouter", "ocr_vision", notes
 
 

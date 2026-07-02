@@ -352,3 +352,97 @@ def test_no_routing_premium_branch_skipped_during_recovery(tmp_path, monkeypatch
                              output_format="concept_preview", size=SIZE,
                              model="deterministic-renderer", quality="low", force_background_only=True)
     assert calls["n"] == 0
+
+
+# ── PR-S3 guard gates (2026-07-02 review PR-B1 / FA-3 / FM-7) ─────────────────
+
+def test_repair_instruction_render_never_enters_premium(tmp_path, monkeypatch):
+    # A strict-note / revision-feedback render must NEVER enter premium: the
+    # composer works from stored locked facts and would silently DROP the
+    # instruction (and QA validates against the same stored facts).
+    _arm()
+    calls = {"n": 0}
+    monkeypatch.setattr(render, "render_premium_poster_v1",
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
+    with render.premium_poster_v1_bare_path():
+        render._render_model(_project(), tmp_path / "out.png", concept_id="C1",
+                             output_format="concept_preview", size=SIZE,
+                             model="deterministic-renderer", quality="low",
+                             repair_instruction="CRITICAL: fix the price of X")
+    assert calls["n"] == 0
+    assert (tmp_path / "out.png").exists()  # existing path still rendered
+
+
+def test_deterministic_model_never_enters_premium(tmp_path, monkeypatch):
+    # Kill-switch totality (FA-3): with a deterministic draft model (the
+    # FLYER_INTEGRATED_KILLSWITCH panic path), the render must make ZERO
+    # generative calls — the premium branch must not even be entered.
+    _arm()
+    calls = {"n": 0}
+    monkeypatch.setattr(render, "render_premium_poster_v1",
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
+    with render.premium_poster_v1_bare_path():
+        render._render_model(_project(), tmp_path / "out.png", concept_id="C1",
+                             output_format="concept_preview", size=SIZE,
+                             model="deterministic-renderer", quality="low")
+    assert calls["n"] == 0
+    assert (tmp_path / "out.png").exists()
+
+
+def test_non_c1_concept_never_enters_premium(tmp_path, monkeypatch):
+    # concept_count > 1 (FM-7/PR-M1): each concept would burn its own N gens +
+    # budget and the emitter would record only the LAST outcome. Premium is a
+    # one-shot primary attempt on C1 only.
+    _arm()
+    calls = {"n": 0}
+    monkeypatch.setattr(render, "render_premium_poster_v1",
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
+    with render.premium_poster_v1_bare_path():
+        render._render_model(_project(), tmp_path / "out.png", concept_id="C2",
+                             output_format="concept_preview", size=SIZE,
+                             model="deterministic-renderer", quality="low")
+    assert calls["n"] == 0
+
+
+def test_vision_text_missing_extracted_text_key_is_unavailable(monkeypatch, tmp_path):
+    # OCR schema-drift fail-closed (FM-6): a valid-JSON response WITHOUT the
+    # extracted_text key must be an OUTAGE (source="unavailable" -> the premium
+    # textless gate raises -> check_error -> candidate dropped), never a
+    # "textless" certification. Present-and-empty stays textless.
+    import io
+    import json as _json
+    import urllib.request
+
+    from agents.flyer import visual_qa
+
+    target = tmp_path / "img.png"
+    from PIL import Image
+    Image.new("RGB", (32, 32)).save(target)
+    monkeypatch.setattr(visual_qa, "_openrouter_key", lambda: "sk-test-1234567890")
+
+    def _fake_urlopen(req, timeout=None):
+        body = _json.dumps({"choices": [{"message": {"content": _json.dumps({"quality_notes": []})}}]})
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+        return _Resp(body.encode("utf-8"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    text, source, kind, notes = visual_qa._vision_text(target)
+    assert source == "unavailable"
+    assert any("missing extracted_text" in n for n in notes)
+
+    def _fake_urlopen_empty(req, timeout=None):
+        body = _json.dumps({"choices": [{"message": {"content": _json.dumps({"extracted_text": "", "quality_notes": []})}}]})
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+        return _Resp(body.encode("utf-8"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_empty)
+    text, source, kind, notes = visual_qa._vision_text(target)
+    assert source == "openrouter" and text == ""  # genuinely-textless stays textless
