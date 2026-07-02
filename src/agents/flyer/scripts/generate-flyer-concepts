@@ -608,6 +608,9 @@ def _render_artifact_candidates(spec) -> list[Path]:
         Path(str(path) + ".ocr.txt"),
         path.with_name(f"{path.stem}.raw.png"),
         path.with_suffix(path.suffix + ".raw.png"),
+        # Premium Poster v1 provenance sidecars (2026-07-02) — clean with the render
+        Path(str(path) + ".ppv1.json"),
+        Path(str(path) + ".ppv1-bg.png"),
     ]
 
 

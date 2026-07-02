@@ -3703,6 +3703,16 @@ _PPV1_PRICE_RE = re.compile(r"\$\s?\d[\d,]*(?:\.\d{1,2})?")
 # Beyond ~12 items the composer's readable item zone overflows at the floor and
 # it refuses fail-closed (partial menus never ship) — don't burn generations.
 _PPV1_MAX_ITEMS = 12
+# >=2 consecutive Indic chars (mirrors visual_qa.REGIONAL_WORD_RE's rationale:
+# a single stray glyph must NOT force regional routing / disable premium).
+_PPV1_REGIONAL_RUN_RE = re.compile(r"[ऀ-ൿ]{2}")
+# Only the fact ids the COMPOSER actually paints gate regional exclusion — a
+# regional glyph in an unpainted fact (notes, customer_text spans) is irrelevant
+# to the Latin-only poster fonts.
+_PPV1_PAINTED_FACT_IDS = (
+    "business_name", "campaign_title", "pricing_structure", "offer", "offer:0",
+    "schedule", "location", "contact_phone",
+)
 
 
 def _premium_poster_v1_composer_unfit(project: FlyerProject) -> bool:
@@ -3728,8 +3738,11 @@ def _premium_poster_v1_composer_unfit(project: FlyerProject) -> bool:
                 and (getattr(f, "fact_id", "") or "").endswith(":name") and _val(f))
     if items > _PPV1_MAX_ITEMS:
         return True
-    if any(_has_regional_script(_val(f)) for f in facts):
-        return True
+    for f in facts:
+        fid = (getattr(f, "fact_id", "") or "")
+        painted = fid in _PPV1_PAINTED_FACT_IDS or (fid.startswith("item:") and fid.endswith(":name"))
+        if painted and _PPV1_REGIONAL_RUN_RE.search(_val(f)):
+            return True
     return False
 
 

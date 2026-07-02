@@ -598,3 +598,14 @@ def test_legacy_rerender_clears_stale_premium_provenance(tmp_path, monkeypatch):
     assert target.exists()
     assert not render._ppv1_provenance_path(target).exists()  # stale provenance cleared
     assert not render._ppv1_background_path(target).exists()
+
+
+def test_single_stray_indic_glyph_does_not_disable_premium():
+    # LOW-1 (regression review): one stray Indic char in an UNPAINTED fact (or a
+    # single glyph anywhere) must not silently disable premium — only a real
+    # regional-script run (>=2 consecutive chars) in a COMPOSER-PAINTED fact does.
+    facts = _food_facts() + [_F("notes", "customer prefers త style")]  # single glyph, unpainted-adjacent
+    assert render._premium_poster_v1_eligible(_project(facts=facts)) is True
+    stray = [f for f in _food_facts() if f.fact_id != "item:0:name"]
+    stray.append(_F("item:0:name", "Punugulu త"))  # single stray glyph in a painted fact
+    assert render._premium_poster_v1_eligible(_project(facts=stray)) is True
