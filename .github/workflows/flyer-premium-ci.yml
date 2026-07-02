@@ -1,0 +1,59 @@
+# Flyer Premium Poster v1 — blocking CI (2026-07-02 review finding PR-B3).
+#
+# send-path-ci deliberately excludes test_flyer* (its minimal runner has no PIL),
+# which left ALL premium-poster tests with no blocking gate: a refactor could
+# break the fallback contract, the fact-safety composer, or deploy parity and
+# merge green. This job runs the premium suite (plus the renderer suite that
+# owns render_final_package) with Pillow installed, on any PR touching the
+# flyer render stack.
+#
+# Scope note: heavier flyer suites (golden scenarios, cf-router routing) stay
+# out of this gate — they carry their own harness assumptions; this job gates
+# exactly the premium-poster blast radius.
+name: flyer-premium-ci
+
+on:
+  pull_request:
+    paths:
+      - "src/agents/flyer/**"
+      - "src/platform/schemas.py"
+      - "tests/test_flyer_premium_poster_v1*.py"
+      - "tests/test_flyer_renderer.py"
+      - "tests/test_flyer_visual_qa.py"
+      - ".github/workflows/flyer-premium-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/agents/flyer/**"
+      - "src/platform/schemas.py"
+
+jobs:
+  premium-poster-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps (Hermes-venv parity: pydantic + pyyaml + pillow)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pydantic pyyaml pytest pillow
+      - name: Premium Poster v1 suite
+        run: |
+          python -m pytest \
+            tests/test_flyer_premium_poster_v1.py \
+            tests/test_flyer_premium_poster_v1_offer.py \
+            tests/test_flyer_premium_poster_v1_food.py \
+            tests/test_flyer_premium_poster_v1_director.py \
+            tests/test_flyer_premium_poster_v1_critique.py \
+            tests/test_flyer_premium_poster_v1_best_of_n.py \
+            tests/test_flyer_premium_poster_v1_integration.py \
+            tests/test_flyer_premium_poster_v1_managed.py \
+            tests/test_flyer_premium_poster_v1_deploy_parity.py \
+            tests/test_flyer_premium_poster_v1_bare_obs.py \
+            -q
+      - name: Renderer + visual QA suites (final package / QA blast radius)
+        run: |
+          python -m pytest tests/test_flyer_renderer.py tests/test_flyer_visual_qa.py -q

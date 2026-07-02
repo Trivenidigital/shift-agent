@@ -227,3 +227,24 @@ Deduplication note: 10 reviewers converged repeatedly — finals fidelity (5×),
 4. **PR-S4** finals fidelity (A1)
 5. **PR-S5** CI job (A6) + docs/runbook/checklists (B6-docs, B7-runbook)
 Rollback for every slice: revert the PR; premium behavior degrades to current state; flag/allowlist untouched throughout.
+
+---
+
+## Phase 5 — Implemented (2026-07-02, branch review/flyer-premium-poster-v1-hardening-20260702)
+
+All five slices implemented as stacked commits on one branch (each PR-sized and
+reviewable independently):
+
+| Slice | Commit subject | Closes |
+|---|---|---|
+| S1 | composer fact-safety — never paint a truncated/partial fact | AD-B, SEC-1/2, AD-J, SEC-5/PQ-2/AD-C, AD-A/E, CQ-3/4/7-partial |
+| S2 | observability — precise fallback reasons, bare-path telemetry, infra alerts, temp hygiene | SF-1..7, PR-B2/H1/M3, FM-1/2, FA-4/5, CQ-1/2/5, SEC-6 |
+| S3 | guard gates — repair-note / kill-switch / concept guards + OCR schema-drift fail-closed | PR-B1, FA-3, FM-6, FM-7/PR-M1 |
+| S4 | finals fidelity — provenance-aware final package (no crop, no stale raw) | ST-1/FM-3/FA-1 (4x), FA-2/CF-1 (2x) |
+| S5 | blocking CI for the premium suite + operations runbook (kill-switch, broadening, readiness checklists) | PR-B3, PR-L2/B7, B6-docs |
+
+Deliberately NOT implemented (operator decision / later): B1 end-to-end HTTP
+timeout threading through _vision_text (touches shared QA seam), B2 paired-count
+watchdog, B3 owner premium caption + premium-aware revisions, B4 critique
+sidecar persist-or-drop, B5 grocery scene family + explicit block-tier patterns,
+C-items. All fully specified above with file:line.
