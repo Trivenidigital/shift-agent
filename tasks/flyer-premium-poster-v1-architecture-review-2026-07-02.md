@@ -312,3 +312,34 @@ Standing rule (operator, 2026-07-02): **recorded approval or it didn't happen** 
 4. **Systemic — smoke lazy-import blind spot (BANKED post-freeze):** import-level smoke passes while function-scope imports fail in the target interpreter. Class fix: smoke executes a dry-run compose in the ACTUAL cf-router interpreter (the manual verification used for the pip install is the template).
 5. **Operator protocol miss (recorded per operator):** the 14:49:58Z inbound was sent without the agreed "sent" ping. Silver lining: organic-brief inbound path proven; fallback ladder caught the premium failure as designed.
 6. **F0193 disposition:** off the E2E ledger; queued as backlog project #36 under the staleness/stagger plan (has raw sidecar → legacy rebuild finals path).
+
+
+---
+
+## E2E LEDGER CLOSED + FREEZE LIFTED (operator directive, 2026-07-02)
+
+**E2E final status:** *pipes proven live* — intake, routing, extraction-to-facts,
+fail-closed premium gating (4x correct refusals of poisoned facts), PREMIUM LIVE
+ENTRY (F0197: attempted->eligible->selected, composite 8.0, first ever on a real
+inbound), delivery to preview target, authoritative QA gating (final_fail), recovery
+ladder engagement, owner-review loop, zero unsanctioned customer sends throughout.
+**Premium composer finals path: unexercised** (QA failed the one live premium
+delivery before owner review; evidence artifact overwritten by recovery — preserved-
+artifact gap logged). Composer **slated for demotion CONDITIONAL on workstream #0's
+pre-registered gate (>=8/10)** per directive item 5. No further brief sends.
+
+- F0197 terminal: manual_edit_required, manual_review=queued(visual_qa_failed),
+  final_asset_ids empty, flyer_assets_delivered=0.
+- F0197 QA anomaly ON RECORD: vision readback found badge/items/footer but missed
+  the two LARGEST text elements (brand band + headline) -> either a premium-style
+  readback blind spot or a verifier false negative. EITHER WAY it is load-bearing
+  for v2: workstream #0's accept/regen loop stands on this same verifier.
+- Backlog #36-#39 (F0193-F0196) hold unanswered under staleness/stagger; no
+  approvals until v2 renders exist to compare against.
+- B-order: SUPERSEDED (production-readiness spec to follow; renderer-swap =
+  workstream #0). Freeze: LIFTED.
+- Archaeology delivered: tasks/flyer-accretion-timeline-2026-07-02.md — NOTE: it
+  REFUTES the "restore week-1" premise (day one was deterministic; integrated
+  became primary 06-15 and still is; v2 = subtraction, not restoration).
+- Standing rules recorded: complexity budget; $200/mo OpenRouter cap + workstream
+  tagging + weekly cost-per-accepted-flyer report.
