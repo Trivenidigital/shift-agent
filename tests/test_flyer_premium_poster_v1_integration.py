@@ -228,10 +228,49 @@ def test_unsupported_size_skips(tmp_path):
 
 
 def test_default_generator_respects_deadline():
-    # the timeout mechanism: a past deadline -> generator returns None WITHOUT a network call
+    # the timeout mechanism: a past deadline -> raises TimeoutError WITHOUT a network
+    # call. Raising (not returning None) keeps budget exhaustion a DISTINCT fallback
+    # reason: the director records generator_error:TimeoutError instead of collapsing
+    # it into generator_returned_none (2026-07-02 review SF-2/FM-1).
     gen = render._ppv1_default_generator(_project(), model="m", quality="low", size=SIZE,
                                          deadline=time.monotonic() - 1)
-    assert gen("any prompt") is None
+    with pytest.raises(TimeoutError):
+        gen("any prompt")
+
+
+def test_generator_timeout_becomes_distinct_fallback_reason(tmp_path):
+    # End-to-end: budget exhaustion must be distinguishable in the outcome reason.
+    target = tmp_path / "C1.png"
+    gen = render._ppv1_default_generator(_project(), model="m", quality="low", size=SIZE,
+                                         deadline=time.monotonic() - 1)
+    outcome = _render_ppv1(_project(), target, generator=gen,
+                           textless_ocr=_ocr_textless, critique_scorer=_scorer)
+    assert outcome.delivered is False
+    assert "generation_failed" in outcome.reason
+
+
+def test_fallback_reason_carries_candidate_status_summary(tmp_path):
+    # OCR outage vs model-painted-text must be distinguishable from the reason
+    # string alone (2026-07-02 review SF-2/PR-H1).
+    def _ocr_boom(_im):
+        raise RuntimeError("vision outage")
+    target = tmp_path / "C1.png"
+    outcome = _render_ppv1(_project(), target, generator=_gen_ok, textless_ocr=_ocr_boom, critique_scorer=_scorer)
+    assert outcome.delivered is False
+    assert "check_error" in outcome.reason
+    outcome2 = _render_ppv1(_project(), target, generator=_gen_ok, textless_ocr=lambda im: False, critique_scorer=_scorer)
+    assert outcome2.delivered is False
+    assert "image_has_text" in outcome2.reason
+    assert outcome.reason != outcome2.reason
+
+
+def test_injected_generator_files_never_deleted(tmp_path):
+    # Temp cleanup applies ONLY to files the DEFAULT generator creates. An injected
+    # generator owns its paths — the orchestrator must never unlink them (the test
+    # fixture itself would vanish).
+    target = tmp_path / "C1.png"
+    _render_ppv1(_project(), target, generator=_gen_ok, textless_ocr=_ocr_textless, critique_scorer=_scorer)
+    assert FIXTURE.exists()
 
 
 def test_delivered_poster_is_fact_safe(tmp_path):

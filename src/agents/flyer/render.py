@@ -271,13 +271,16 @@ def _premium_poster_v1_opt_in_path() -> str | None:
 
 @dataclass
 class PremiumPosterV1Outcome:
-    """How a Premium Poster v1 render resolved (set on a ContextVar; read by the
-    bare-path chokepoint for observability). ``delivered`` is True iff a valid
-    poster was written to the target; any other outcome means the caller fell
-    through to the existing render path."""
+    """How a Premium Poster v1 render resolved (set on a ContextVar; consumed by
+    the managed emitter in generate-flyer-concepts AND the bare-path emitter in
+    bare_render._consume_and_emit_premium_poster_v1_bare — both write
+    decisions.log rows). ``delivered`` is True iff a valid poster was written to
+    the target; any other outcome means the caller fell through to the existing
+    render path."""
     delivered: bool
     status: str            # delivered | fallback | skipped
-    reason: str            # none | unsupported_size | no_winner | exception:<T>
+    reason: str            # none | unsupported_size | no_winner[:<status>=<count>,…]
+    #                      # | no_food_winner[:…] | exception:<T>:<msg-head>
     n: int
     winner_index: int
     winner_composite: float | None
@@ -4539,25 +4542,32 @@ def _openrouter_textless_image(prompt: str, *, model: str, quality: str, size: t
 
 
 def _ppv1_default_generator(project: FlyerProject, *, model: str, quality: str,
-                            size: tuple[int, int] | None, deadline: float):
-    """Real best-of-N candidate generator: (director prompt) -> saved PNG path, or
-    None on timeout/error (the candidate then fails the gate -> fall through)."""
+                            size: tuple[int, int] | None, deadline: float,
+                            created_paths: list | None = None):
+    """Real best-of-N candidate generator: (director prompt) -> saved PNG path.
+    RAISES on failure so the director's generation_failed branch records the REAL
+    error class (a blanket swallow here previously collapsed auth failures, quota
+    exhaustion, provider outages, and budget exhaustion into one indistinguishable
+    "generator_returned_none" — 2026-07-02 review SF-2/FM-1). Budget exhaustion
+    raises TimeoutError, keeping timeouts a distinct fallback reason. The director
+    contains every raise per candidate (never-raises contract preserved).
+    Temp files are appended to ``created_paths`` so the orchestrator can clean up
+    after compose (SF-7: ppv1-bg-*.png previously leaked on every fire)."""
     def gen(prompt: str):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return None  # premium-path wall-clock budget exhausted
-        try:
-            # Bound the single call by the remaining budget + no retries on the live
-            # path: fail fast -> fall through to the existing render (which has its
-            # own retry ladder). Keeps the gen inside _premium_poster_v1_timeout_sec.
-            raw = _openrouter_textless_image(
-                prompt, model=model, quality=quality, size=size,
-                timeout=max(5.0, min(remaining, OPENROUTER_TIMEOUT_SEC)), attempts=1)
-        except Exception:  # noqa: BLE001 — never raise out of the generator
-            return None
+            raise TimeoutError("premium poster v1 wall-clock budget exhausted")
+        # Bound the single call by the remaining budget + no retries on the live
+        # path: fail fast -> fall through to the existing render (which has its
+        # own retry ladder). Keeps the gen inside _premium_poster_v1_timeout_sec.
+        raw = _openrouter_textless_image(
+            prompt, model=model, quality=quality, size=size,
+            timeout=max(5.0, min(remaining, OPENROUTER_TIMEOUT_SEC)), attempts=1)
         fd, p = tempfile.mkstemp(suffix=".png", prefix="ppv1-bg-")
         os.close(fd)
         Path(p).write_bytes(raw)
+        if created_paths is not None:
+            created_paths.append(p)
         return p
     return gen
 
@@ -4600,7 +4610,13 @@ def _ppv1_default_critique_scorer(deadline: float):
         if time.monotonic() > deadline:
             return None  # budget exhausted -> skip the critique call, first-accepted wins
         score = score_art_direction(image_path, brief_summary=brief)
-        if not score.axes and "unavailable" in (score.overall_critique or "").lower():
+        # Prefix-anchored (mirrors the director's _oracle_scorer, which documents
+        # why a bare substring is wrong): only the genuinely-unavailable case maps
+        # to None; an oracle ERROR keeps its empty-axis dict and is recorded as
+        # critique_error — a distinct signal (2026-07-02 review CQ-5).
+        if not score.axes and (score.overall_critique or "").lower().startswith(
+            "art-director oracle unavailable"
+        ):
             return None
         return score_to_dict(score)
     return scorer
@@ -4622,6 +4638,7 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
     if size != (1080, 1350):  # only the concept-preview size in this slice; PDF/other -> existing path
         return PremiumPosterV1Outcome(False, "skipped", "unsupported_size", n, -1, None, output_format)
     deadline = time.monotonic() + (timeout_sec if timeout_sec is not None else _premium_poster_v1_timeout_sec())
+    created_paths: list = []  # temp files the DEFAULT generator writes (cleaned in finally)
     try:
         if compose is None:
             try:  # flat (VPS, deployed as flyer_premium_poster_v1_director.py) then package
@@ -4631,7 +4648,8 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
             compose = compose_best_of_n
         facts = list(getattr(project, "locked_facts", []) or [])
         gen = generator if generator is not None else _ppv1_default_generator(
-            project, model=model, quality=quality, size=size, deadline=deadline)
+            project, model=model, quality=quality, size=size, deadline=deadline,
+            created_paths=created_paths)
         ocr = textless_ocr if textless_ocr is not None else _ppv1_default_textless_ocr(deadline=deadline)
         scorer = critique_scorer if critique_scorer is not None else _ppv1_default_critique_scorer(deadline=deadline)
         best_img, report, candidates = compose(facts, generator=gen, textless_ocr=ocr, critique_scorer=scorer, n=n)
@@ -4643,12 +4661,38 @@ def render_premium_poster_v1(project: FlyerProject, target: Path, *, concept_id:
         # render path (which owns the richer recovery ladder + its own gradient floor).
         won_food = best_img is not None and winner is not None and winner.get("background_status") == "ok"
         if not won_food:
+            # Carry the per-candidate failure taxonomy into the audited reason so an
+            # OCR outage / auth failure / timeout is distinguishable from the normal
+            # "model painted text" fail-closed case (2026-07-02 review SF-2/PR-H1):
+            # e.g. "no_food_winner:check_error=2" vs "no_food_winner:image_has_text=1".
             reason = "no_food_winner" if best_img is not None else "no_winner"
+            reason = f"{reason}:{_ppv1_candidate_status_summary(report)}"[:80]
             return PremiumPosterV1Outcome(False, "fallback", reason, n, wi, report.get("winner_composite"), output_format)
         best_img.save(target)
         return PremiumPosterV1Outcome(True, "delivered", "none", n, wi, report.get("winner_composite"), output_format)
     except Exception as exc:  # noqa: BLE001 — premium path must never raise into _render_model
-        return PremiumPosterV1Outcome(False, "fallback", f"exception:{type(exc).__name__}", n, -1, None, output_format)
+        # Keep the message head, not just the type: "exception:OSError" cannot
+        # distinguish disk-full from a missing font during a live incident (SF-3).
+        detail = f"exception:{type(exc).__name__}:{str(exc)[:50]}"[:80]
+        return PremiumPosterV1Outcome(False, "fallback", detail, n, -1, None, output_format)
+    finally:
+        for p in created_paths:  # default-generator temp backgrounds only (we own them)
+            try:
+                Path(p).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _ppv1_candidate_status_summary(report: dict) -> str:
+    """Compact 'status=count' summary of best-of-N candidate outcomes, ordered by
+    count desc then name, e.g. 'check_error=2,image_has_text=1'. Fits the 80-char
+    audit reason budget for N<=3."""
+    counts: dict[str, int] = {}
+    for c in report.get("candidates", []) or []:
+        s = str(c.get("background_status", "") or "unknown")
+        counts[s] = counts.get(s, 0) + 1
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ",".join(f"{s}={k}" for s, k in ordered) or "no_candidates"
 
 
 def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_format: str, size: tuple[int, int] | None, model: str, quality: str, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> None:

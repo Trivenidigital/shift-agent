@@ -18,9 +18,12 @@ the optional injected ``art_director`` / the injected image ``generator``);
 exact deterministic layout/shipping**. NO model-rendered text is ever trusted:
 any gate failure -> the composer's deterministic warm fallback background.
 
-SHADOW only: nothing here is wired into the live render path (no routing, no
-deploy, no flag). The C2B VPS shadow run injects the real generator (render.py's
-``force_background_only`` path) + real OCR (``visual_qa``) at the call site.
+WIRING STATUS (2026-07): ``compose_best_of_n`` IS the live orchestrator —
+``render.render_premium_poster_v1`` calls it behind FLYER_PREMIUM_POSTER_V1 +
+allowlist on both the managed and bare opt-in paths, and the deploy script
+installs this module flat as ``flyer_premium_poster_v1_director.py``.
+``compose_premium_poster_with_generated_background`` remains a shadow/test
+harness only (asserted absent from render.py by the director tests).
 """
 from __future__ import annotations
 
@@ -190,9 +193,11 @@ def generate_textless_food_background(
 
     try:
         path = generator(prompt)
-    except Exception as exc:  # generation backend error
+    except Exception as exc:  # generation backend error — keep the message head so
+        # auth / quota / outage / timeout stay distinguishable in the audit trail
         return FoodBackgroundResult(
-            "generation_failed", scene.key, prompt, None, f"generator_error:{type(exc).__name__}")
+            "generation_failed", scene.key, prompt, None,
+            f"generator_error:{type(exc).__name__}:{str(exc)[:80]}")
     if not path:
         return FoodBackgroundResult(
             "generation_failed", scene.key, prompt, None, "generator_returned_none")
@@ -208,7 +213,8 @@ def generate_textless_food_background(
             rgb = im.convert("RGB")
     except Exception as exc:
         return FoodBackgroundResult(
-            "image_load_failed", scene.key, prompt, None, f"load_error:{type(exc).__name__}")
+            "image_load_failed", scene.key, prompt, None,
+            f"load_error:{type(exc).__name__}:{str(exc)[:80]}")
 
     # ONLY the injected OCR call may raise here -> a check OUTAGE, kept distinct
     # from a bad image (above) and from genuine text-detection (below).
@@ -216,7 +222,8 @@ def generate_textless_food_background(
         textless = bool(textless_ocr(rgb))
     except Exception as exc:
         return FoodBackgroundResult(
-            "check_error", scene.key, prompt, None, f"ocr_error:{type(exc).__name__}")
+            "check_error", scene.key, prompt, None,
+            f"ocr_error:{type(exc).__name__}:{str(exc)[:80]}")
 
     if not textless:  # the model rendered text — drop it
         return FoodBackgroundResult(
@@ -273,6 +280,7 @@ def critique_composed_poster(
     oracle is used. Returns a JSON-safe dict: ``available``, ``composite``,
     ``axes``, ``overall_critique``, ``status`` (ok | critique_unavailable |
     critique_error)."""
+    ephemeral = image_save_path is None  # we own (and must clean) the temp file
     try:
         if image_save_path is not None:
             path = str(image_save_path)
@@ -280,22 +288,32 @@ def critique_composed_poster(
         else:
             import os
             import tempfile
-            fd, path = tempfile.mkstemp(suffix=".png")
+            fd, path = tempfile.mkstemp(suffix=".png", prefix="ppv1-critique-")
             os.close(fd)
             image.save(path)
     except Exception as exc:  # could not materialize the image for the oracle
         return _critique_dict({}, 0.0, f"critique image save failed: {type(exc).__name__}",
                               "critique_error", False)
 
-    use = scorer if scorer is not None else _oracle_scorer()
-    if use is None:
-        return _critique_dict({}, 0.0, "art-director oracle unavailable", "critique_unavailable", False)
-
     try:
-        result = use(path, brief_summary)
-    except Exception as exc:  # scorer/vision backend failure -> safe, recorded
-        return _critique_dict({}, 0.0, f"critique scorer error: {type(exc).__name__}",
-                              "critique_error", False)
+        use = scorer if scorer is not None else _oracle_scorer()
+        if use is None:
+            return _critique_dict({}, 0.0, "art-director oracle unavailable", "critique_unavailable", False)
+
+        try:
+            result = use(path, brief_summary)
+        except Exception as exc:  # scorer/vision backend failure -> safe, recorded
+            return _critique_dict({}, 0.0, f"critique scorer error: {type(exc).__name__}",
+                                  "critique_error", False)
+    finally:
+        if ephemeral:
+            # The composed poster carries real business PII (name/phone/address) —
+            # never leave it behind in the shared temp dir (2026-07-02 review SEC-6).
+            try:
+                from pathlib import Path as _P
+                _P(path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     if result is None:
         return _critique_dict({}, 0.0, "art-director oracle unavailable", "critique_unavailable", False)
@@ -368,9 +386,11 @@ def compose_best_of_n(
     art_director: Optional[ArtDirector] = None,
     size: tuple[int, int] = (1080, 1350),
 ):
-    """SHADOW best-of-N (no routing, never gates customer output): generate N
-    textless backgrounds, OCR-gate each, render + LOG-ONLY-critique each ACCEPTED
-    one, and select the highest-critique composed poster. Candidates that fail the
+    """Best-of-N orchestration (LIVE: called by render.render_premium_poster_v1
+    behind the flag+allowlist gates; the winner IS the customer-facing preview
+    when it delivers — downstream visual QA + owner review stay authoritative):
+    generate N textless backgrounds, OCR-gate each, render + LOG-ONLY-critique
+    each ACCEPTED one, and select the highest-critique composed poster. Candidates that fail the
     textless gate are recorded with their reason and excluded from selection. If
     ALL candidates are rejected, fall back to the deterministic poster (still
     returns one).

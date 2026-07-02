@@ -4559,6 +4559,36 @@ class FlyerPremiumPosterV1Managed(_BaseEntry):
     output_format: str = Field(default="", max_length=40)
 
 
+class FlyerPremiumPosterV1Bare(_BaseEntry):
+    """Premium Poster v1 — bare/WhatsApp-direct path observability (2026-07-02).
+    Mirror of FlyerPremiumPosterV1Managed for the bare render chokepoint
+    (bare_render.render_grounded): the bare path opts into the same flag-gated,
+    allowlist-scoped premium branch but previously emitted NOTHING — a premium
+    fire (delivery or fallback) on the customer-direct path was invisible in
+    decisions.log (2026-07-02 review finding SF-1/PR-B2/FM-2/FA-4). `event`
+    mirrors the managed stages; `chat_id` identifies the conversation (bare
+    renders use a transient in-memory project, so there is no project row).
+
+    LOG-ONLY. NEVER emitted when the flag is off / the sender is not allowlisted.
+    Never alters render, QA, or send semantics."""
+    type: Literal["flyer_premium_poster_v1_bare"] = "flyer_premium_poster_v1_bare"
+    chat_id: str = Field(default="", max_length=80)
+    event: Literal[
+        "premium_poster_v1_bare_attempted",
+        "premium_poster_v1_bare_eligible",
+        "premium_poster_v1_bare_selected",
+        "premium_poster_v1_bare_fallback_reason",
+        "premium_poster_v1_bare_final_pass",
+        "premium_poster_v1_bare_final_fail",
+    ]
+    reason: str = Field(default="", max_length=80)
+    n: int = Field(default=0, ge=0)
+    winner_index: int = Field(default=-1, ge=-1)
+    winner_composite: float | None = None
+    qa_status: str = Field(default="", max_length=40)
+    output_format: str = Field(default="", max_length=40)
+
+
 class FlyerPremiumRepairExhausted(_BaseEntry):
     """Slice 2 premium repair-loop observability. Emitted when the bounded (×2)
     repair edits did not produce a clean premium render — the orchestrator leaves
@@ -5961,6 +5991,8 @@ LogEntry = Annotated[
         Annotated[FlyerPremiumOverlayOutcome, Tag("flyer_premium_overlay_outcome")],
         # 2026-07-01 — Premium Poster v1 managed/studio path observability
         Annotated[FlyerPremiumPosterV1Managed, Tag("flyer_premium_poster_v1_managed")],
+        # 2026-07-02 — Premium Poster v1 bare/WhatsApp-direct path observability
+        Annotated[FlyerPremiumPosterV1Bare, Tag("flyer_premium_poster_v1_bare")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],

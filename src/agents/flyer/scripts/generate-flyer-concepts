@@ -492,12 +492,24 @@ def _emit_premium_poster_v1_managed_outcome(audit_log_path: Path, project):
     failure (e.g. an unexpected ValidationError) can never propagate into the
     render retry's `except` and be misclassified as a render failure — an
     observability failure must fall through to the existing managed render
-    UNCHANGED (audit rows must not block the render/manual path)."""
+    UNCHANGED (audit rows must not block the render/manual path).
+
+    Hardening (2026-07-02 review SF-4/SF-5): the outcome is consumed BEFORE the
+    row-writing block and returned even when the appends fail, so a decisions.log
+    failure can no longer suppress the final_pass/final_fail pairing for a poster
+    that WAS delivered; emitter failures print one stderr line (journalctl-visible
+    instead of a silent observability blackout); and infra-shaped fallbacks
+    (exceptions / OCR-outage check_error / generation errors — NOT the normal
+    image_has_text fail-closed) page the owner, mirroring the premium-overlay
+    alert precedent."""
+    outcome = None
+    try:
+        outcome = consume_premium_poster_v1_outcome()  # consume-first: never re-read
+    except Exception:  # noqa: BLE001
+        outcome = None
     try:
         if not _premium_poster_v1_armed(project):
-            consume_premium_poster_v1_outcome()  # clear any (dormant) value; emit nothing
-            return None
-        outcome = consume_premium_poster_v1_outcome()
+            return None  # dormant: byte-identical AND audit-silent (value already cleared)
         now = datetime.now(timezone.utc)
 
         def _row(event: str, **extra):
@@ -519,15 +531,38 @@ def _emit_premium_poster_v1_managed_outcome(audit_log_path: Path, project):
                  winner_index=outcome.winner_index, winner_composite=outcome.winner_composite,
                  output_format=outcome.output_format)
         else:
-            _row("premium_poster_v1_managed_fallback_reason", reason=outcome.reason,
+            reason = str(getattr(outcome, "reason", "") or "")[:80]
+            _row("premium_poster_v1_managed_fallback_reason", reason=reason,
                  n=outcome.n, output_format=outcome.output_format)
+            if _ppv1_reason_is_infra_shaped(reason):
+                _alert_owner(
+                    (f"Flyer Premium Poster v1 fallback looks like an INFRA failure "
+                     f"({project.project_id}): {reason}. Premium fell through to the "
+                     f"existing render (customer-safe), but the premium path may be "
+                     f"silently dead — check OpenRouter key/quota + vision OCR.")[:900]
+                )
         return outcome
-    except Exception:  # noqa: BLE001 — observability must never break the render path
+    except Exception as exc:  # noqa: BLE001 — observability must never break the render path
         try:
-            consume_premium_poster_v1_outcome()  # best-effort clear so nothing leaks
+            print(json.dumps({"ppv1_managed_audit_emit_failed": type(exc).__name__,
+                              "project_id": getattr(project, "project_id", "")}),
+                  file=sys.stderr)
         except Exception:  # noqa: BLE001
             pass
-        return None
+        return outcome  # rows may be lost; the QA pairing must not be
+
+
+def _ppv1_reason_is_infra_shaped(reason: str) -> bool:
+    """True for fallback reasons that indicate infrastructure failure (unexpected
+    exception, OCR outage, generation backend error, budget exhaustion) rather than
+    the NORMAL fail-closed product behavior (model painted text / compose-ineligible
+    facts). Only infra-shaped reasons page the owner — intentional fail-closed is
+    working as designed (mirrors render.premium_outcome_should_alert for the
+    overlay path)."""
+    r = (reason or "").lower()
+    if r.startswith("exception:"):
+        return True
+    return any(tok in r for tok in ("check_error", "generation_failed", "timeout"))
 
 
 def _emit_premium_poster_v1_managed_final(audit_log_path: Path, project, ppv1_outcome, *, qa_passed: bool):
@@ -1025,6 +1060,13 @@ def main() -> int:
                     if attempt == 0 and retryable_match and not _draft_error_is_visual_qa(detail_lower):
                         time.sleep(0.35)
                         continue
+                    # Denominator fix (2026-07-02 review SF-6/ST-2): an armed premium
+                    # fire whose surrounding render then raised was previously never
+                    # audited (the emitter ran only on the success break) — premium
+                    # fallbacks were systematically undercounted exactly during
+                    # provider outages. Emit before the fallback/manual branches;
+                    # the emitter is a no-op when not armed and never raises.
+                    ppv1_managed_outcome = _emit_premium_poster_v1_managed_outcome(audit_log_path, project)
                     now = datetime.now(timezone.utc)
                     if _draft_error_is_visual_qa(detail_lower):
                         reason_code = "visual_qa_failed"

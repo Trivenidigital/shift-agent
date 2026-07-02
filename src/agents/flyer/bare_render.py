@@ -335,6 +335,92 @@ def _emit_creative_director_audit(*, chat_id: str, resolved_sender: str, reached
         return
 
 
+def _emit_premium_poster_v1_bare(event: str, *, chat_id: str, reason: str = "", n: int = 0,
+                                 winner_index: int = -1, winner_composite=None,
+                                 qa_status: str = "", output_format: str = "") -> None:
+    """Emit one FlyerPremiumPosterV1Bare row via the canonical decisions.log
+    chokepoint (mirrors _emit_creative_director_audit). Fixes the 2026-07-02
+    review's SF-1/PR-B2/FM-2/FA-4 finding: the bare path opted into the premium
+    branch but consumed the outcome NOWHERE, so a premium fire (delivery or
+    fallback) on the customer-direct path wrote zero audit rows. Best-effort:
+    an audit failure never blocks or alters the render."""
+    try:
+        schemas = _schemas()
+        try:
+            from safe_io import flock as _flock, ndjson_append as _ndjson_append  # type: ignore
+        except Exception:  # noqa: BLE001 — tests / non-VPS layouts may lack safe_io helpers (fcntl)
+            _flock = None  # type: ignore
+            _ndjson_append = None  # type: ignore
+        entry = schemas.FlyerPremiumPosterV1Bare(
+            type="flyer_premium_poster_v1_bare",
+            ts=datetime.now(timezone.utc),
+            chat_id=(chat_id or "")[:80],
+            event=event,
+            reason=(reason or "")[:80],
+            n=max(0, int(n or 0)),
+            winner_index=max(-1, int(winner_index if winner_index is not None else -1)),
+            winner_composite=winner_composite,
+            qa_status=(qa_status or "")[:40],
+            output_format=(output_format or "")[:40],
+        )
+        line = entry.model_dump_json()
+        AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if _flock is not None and _ndjson_append is not None:
+            with _flock(AUDIT_LOG_PATH):
+                _ndjson_append(AUDIT_LOG_PATH, line)
+        else:
+            with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _consume_and_emit_premium_poster_v1_bare(project, chat_id: str):
+    """Consume the premium outcome contextvar after a bare primary render and emit
+    path-tagged rows (attempted/eligible/selected/fallback_reason), mirroring the
+    managed emitter's semantics: ZERO rows unless armed (flag + allowlist); the
+    contextvar is consumed either way. Returns the outcome (or None) so the caller
+    can pair the bare QA verdict. Never raises."""
+    rmod = _render_mod()
+    try:
+        outcome = rmod.consume_premium_poster_v1_outcome()
+    except Exception:  # noqa: BLE001
+        outcome = None
+    try:
+        if not rmod._premium_poster_v1_armed(project):
+            return None
+        _emit_premium_poster_v1_bare("premium_poster_v1_bare_attempted", chat_id=chat_id)
+        if outcome is None:
+            _emit_premium_poster_v1_bare("premium_poster_v1_bare_fallback_reason",
+                                         chat_id=chat_id, reason="ineligible")
+            return None
+        _emit_premium_poster_v1_bare("premium_poster_v1_bare_eligible", chat_id=chat_id, n=outcome.n)
+        if outcome.delivered:
+            _emit_premium_poster_v1_bare(
+                "premium_poster_v1_bare_selected", chat_id=chat_id, n=outcome.n,
+                winner_index=outcome.winner_index, winner_composite=outcome.winner_composite,
+                output_format=outcome.output_format)
+        else:
+            _emit_premium_poster_v1_bare(
+                "premium_poster_v1_bare_fallback_reason", chat_id=chat_id,
+                reason=str(getattr(outcome, "reason", "") or "")[:80],
+                n=outcome.n, output_format=outcome.output_format)
+        return outcome
+    except Exception:  # noqa: BLE001
+        return outcome
+
+
+def _emit_premium_poster_v1_bare_final(outcome, chat_id: str, *, qa_passed: bool) -> None:
+    """Pair the bare-path QA verdict with a DELIVERED premium poster (mirrors the
+    managed final_pass/final_fail pairing). No-op unless delivered. Never raises."""
+    if outcome is None or not getattr(outcome, "delivered", False):
+        return
+    _emit_premium_poster_v1_bare(
+        "premium_poster_v1_bare_final_pass" if qa_passed else "premium_poster_v1_bare_final_fail",
+        chat_id=chat_id, qa_status="passed" if qa_passed else "failed",
+        output_format=getattr(outcome, "output_format", ""))
+
+
 def _sanitize_chat(chat_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.@-]", "_", chat_id or "")[:80]
 
@@ -1105,10 +1191,18 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
             # behavior change. The descriptive cause is captured LOG-ONLY in last_render_detail
             # and surfaced only in the FINAL fail-closed blockers (→ send.log), so a bare-path
             # FlyerRenderError is diagnosable instead of opaque (operator obs request 2026-06-06).
+            # A premium fire whose surrounding render then raised must still be audited
+            # (denominator; mirrors the managed exception-path emission).
+            _consume_and_emit_premium_poster_v1_bare(render_project, chat_id)
             last_blockers = [f"render_error:{type(e).__name__}"]
             last_render_detail = _render_error_detail(e, render_project, "generate_poster")
             continue
+        # Premium Poster v1 bare-path observability (LOG-ONLY; zero rows unless armed):
+        # consume the outcome recorded by _render_model and emit attempted/eligible/
+        # selected/fallback rows, then pair the QA verdict below.
+        _ppv1_bare_outcome = _consume_and_emit_premium_poster_v1_bare(render_project, chat_id)
         ok, blockers = run_visual_qa(png, render_project)
+        _emit_premium_poster_v1_bare_final(_ppv1_bare_outcome, chat_id, qa_passed=bool(ok))
         if ok:
             if REVISION_APPLY_ENABLED:
                 # Write a PENDING session (project + optional raw bg). The orchestrator commits it

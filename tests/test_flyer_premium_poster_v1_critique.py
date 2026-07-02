@@ -191,3 +191,43 @@ def test_brief_summary_excludes_sensitive_copy():
 def test_no_routing_render_py_does_not_reference_critique():
     render = (REPO / "src" / "agents" / "flyer" / "render.py").read_text(encoding="utf-8")
     assert "critique_composed_poster" not in render
+
+
+# ── critique temp hygiene (2026-07-02 review SEC-6/FM-5) ────────────────────
+
+def test_critique_ephemeral_temp_file_is_cleaned_up():
+    # The composed poster carries real business PII (name/phone/address). When
+    # critique_composed_poster mkstemps its own file (no image_save_path), that
+    # file must be unlinked after scoring — never left in the shared temp dir.
+    from pathlib import Path
+
+    from agents.flyer.premium_poster_v1 import compose_premium_poster_v1
+    from agents.flyer.premium_poster_v1_director import critique_composed_poster
+
+    img, _ = compose_premium_poster_v1(_snack())
+    assert img is not None
+    seen = {}
+
+    def scorer(path, brief=""):
+        seen["path"] = path
+        assert Path(path).exists()  # alive during scoring
+        return {"axes": {"appetite_appeal": {"score": 8, "critique": "x"}},
+                "composite": 8.0, "overall_critique": "ok"}
+
+    result = critique_composed_poster(img, scorer=scorer)
+    assert result["available"] is True
+    assert not Path(seen["path"]).exists()  # cleaned after scoring
+
+
+def test_critique_caller_supplied_save_path_is_kept(tmp_path):
+    # An explicit image_save_path belongs to the CALLER (artifact saving) — the
+    # cleanup applies only to the ephemeral mkstemp case.
+    from pathlib import Path
+
+    from agents.flyer.premium_poster_v1 import compose_premium_poster_v1
+    from agents.flyer.premium_poster_v1_director import critique_composed_poster
+
+    img, _ = compose_premium_poster_v1(_snack())
+    keep = tmp_path / "poster.png"
+    critique_composed_poster(img, scorer=lambda p, b="": None, image_save_path=str(keep))
+    assert keep.exists()
