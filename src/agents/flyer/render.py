@@ -4813,6 +4813,14 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
             if outcome.delivered:
                 return
             # not delivered -> fall through to the existing render path (outcome recorded)
+        # Any render that reaches the legacy paths below OVERWRITES `path` with a
+        # non-premium artifact — stale premium provenance sidecars from an EARLIER
+        # premium delivery at this path must not survive, or render_final_package
+        # would treat the new legacy preview as premium (recompose finals from a
+        # stale background). Mirror of the raw-sidecar hygiene; delivery re-writes
+        # them fresh.
+        _ppv1_provenance_path(path).unlink(missing_ok=True)
+        _ppv1_background_path(path).unlink(missing_ok=True)
         if _creative_director_v2_enabled(project):
             _populate_creative_direction_v2(project)
         if model.strip().lower() in DETERMINISTIC_MODEL_NAMES:

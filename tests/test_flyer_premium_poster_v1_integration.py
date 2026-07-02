@@ -574,3 +574,27 @@ def test_final_package_premium_provenance_avoids_center_crop(tmp_path, monkeypat
     with Image.open(by_format["whatsapp_image"].path) as wa, Image.open(preview) as ap:
         assert wa.size == (1080, 1350)
         assert wa.getpixel((540, 675)) == ap.getpixel((540, 675))
+
+
+def test_legacy_rerender_clears_stale_premium_provenance(tmp_path, monkeypatch):
+    # A premium delivery leaves provenance sidecars; if a LATER render of the same
+    # path goes legacy (premium fell through / disarmed), those sidecars are stale
+    # and must be removed — otherwise render_final_package would treat the new
+    # legacy preview as premium and recompose finals from an unrelated background.
+    _arm()
+    target = tmp_path / "F0001-C1-preview.png"
+    outcome = _render_ppv1(_project(), target, generator=_gen_ok,
+                           textless_ocr=_ocr_textless, critique_scorer=_scorer)
+    assert outcome.delivered is True
+    assert render._ppv1_provenance_path(target).exists()
+    # Second render at the same path: premium misses -> legacy deterministic render
+    monkeypatch.setattr(render, "render_premium_poster_v1",
+                        lambda project, t, **k: render.PremiumPosterV1Outcome(
+                            False, "fallback", "no_food_winner:image_has_text=1", 1, -1, None, ""))
+    with render.premium_poster_v1_bare_path():
+        render._render_model(_project(), target, concept_id="C1",
+                             output_format="concept_preview", size=SIZE,
+                             model="deterministic-renderer", quality="low")
+    assert target.exists()
+    assert not render._ppv1_provenance_path(target).exists()  # stale provenance cleared
+    assert not render._ppv1_background_path(target).exists()
