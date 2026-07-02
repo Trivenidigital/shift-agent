@@ -5429,6 +5429,12 @@ def test_w1_flagoff_prompt_byte_identical(monkeypatch):
 
 def test_premium_overlay_outcome_contextvar_consume_and_alert():
     from agents.flyer import render as r
+    # Reset first: asserting the AMBIENT contextvar is None was order-dependent
+    # (any earlier test that rendered with the overlay armed and never consumed
+    # left a stale value -> pre-existing flake on main, found 2026-07-02). The
+    # contract under test is consume-clears + alert classification, not ambient
+    # cross-test state.
+    r._PREMIUM_OVERLAY_OUTCOME.set(None)
     assert r.consume_premium_overlay_outcome() is None
     out = r.PremiumOverlayOutcome(
         status="premium_overlay_failed_unexpected", reason_class="subprocess_failure",
