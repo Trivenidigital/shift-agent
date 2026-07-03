@@ -1,0 +1,115 @@
+{
+ "B01-like": {
+  "brief": "Create a flyer for Weekend Specials. Any item $7.99 this weekend. Include famous South Indian items like idli, dosa, vada, pongal, upma, and pesarattu.",
+  "expected_items": [
+   "idli",
+   "dosa",
+   "vada",
+   "pongal",
+   "upma",
+   "pesarattu"
+  ],
+  "llm_response": "{\n  \"business_name\": null,\n  \"campaign_title\": \"Weekend Specials\",\n  \"pricing_structure\": \"Any item $7.99 this weekend.\",\n  \"schedule\": null,\n  \"location\": null,\n  \"contact_phone\": null,\n  \"items\": [\n    {\"name\": \"idli\", \"price\": \"$7.99\"},\n    {\"name\": \"dosa\", \"price\": \"$7.99\"},\n    {\"name\": \"vada\", \"price\": \"$7.99\"},\n    {\"name\": \"pongal\", \"price\": \"$7.99\"},\n    {\"name\": \"upma\", \"price\": \"$7.99\"},\n    {\"name\": \"pesarattu\", \"price\": \"$7.99\"}\n  ]\n}"
+ },
+ "B02-pricecolon": {
+  "brief": "Create a flyer for Lakshmi's Kitchen Tiffin Combo. All tiffins $6.49 each: idli, dosa, vada, pongal, upma, pesarattu. Monday to Friday, 7 AM - 11 AM.",
+  "expected_items": [
+   "idli",
+   "dosa",
+   "vada",
+   "pongal",
+   "upma",
+   "pesarattu"
+  ],
+  "llm_response": "{\n  \"business_name\": \"Lakshmi's Kitchen\",\n  \"campaign_title\": \"Tiffin Combo\",\n  \"pricing_structure\": \"All tiffins $6.49 each\",\n  \"schedule\": \"Monday to Friday, 7 AM - 11 AM\",\n  \"location\": null,\n  \"contact_phone\": null,\n  \"items\": [\n    {\"name\": \"idli\", \"price\": \"$6.49\"},\n    {\"name\": \"dosa\", \"price\": \"$6.49\"},\n    {\"name\": \"vada\", \"price\": \"$6.49\"},\n    {\"name\": \"pongal\", \"price\": \"$6.49\"},\n    {\"name\": \"upma\", \"price\": \"$6.49\"},\n    {\"name\": \"pesarattu\", \"price\": \"$6.49\"}\n  ]\n}"
+ },
+ "B03-shapeC": {
+  "brief": "Create a flyer for Lakshmi's Kitchen Breakfast Combo. Any item $6.49 this week. Include idli, dosa, vada, pongal, upma, and pesarattu. Monday to Friday, 7 AM - 11 AM.",
+  "expected_items": [
+   "idli",
+   "dosa",
+   "vada",
+   "pongal",
+   "upma",
+   "pesarattu"
+  ],
+  "llm_response": "{\n  \"business_name\": \"Lakshmi's Kitchen\",\n  \"campaign_title\": \"Breakfast Combo\",\n  \"pricing_structure\": \"Any item $6.49 this week.\",\n  \"schedule\": \"Monday to Friday, 7 AM - 11 AM.\",\n  \"location\": null,\n  \"contact_phone\": null,\n  \"items\": [\n    {\"name\": \"idli\", \"price\": \"$6.49\"},\n    {\"name\": \"dosa\", \"price\": \"$6.49\"},\n    {\"name\": \"vada\", \"price\": \"$6.49\"},\n    {\"name\": \"pongal\", \"price\": \"$6.49\"},\n    {\"name\": \"upma\", \"price\": \"$6.49\"},\n    {\"name\": \"pesarattu\", \"price\": \"$6.49\"}\n  ]\n}"
+ },
+ "B04-grocery": {
+  "brief": "Sri Venkateswara Groceries - Weekend Fresh Produce Sale. Everything $1.99/lb: okra, tindora, fresh methi leaves, curry leaves, green chillies, small brinjal. Saturday and Sunday only. 123 Main St, Hanover MD.",
+  "expected_items": [
+   "okra",
+   "tindora",
+   "fresh methi leaves",
+   "curry leaves",
+   "green chillies",
+   "small brinjal"
+  ],
+  "llm_response": "{\n  \"business_name\": \"Sri Venkateswara Groceries\",\n  \"campaign_title\": \"Weekend Fresh Produce Sale\",\n  \"pricing_structure\": \"Everything $1.99/lb\",\n  \"schedule\": \"Saturday and Sunday only\",\n  \"location\": \"123 Main St, Hanover MD\",\n  \"contact_phone\": null,\n  \"items\": [\n    {\n      \"name\": \"okra\",\n      \"price\": \"$1.99/lb\"\n    },\n    {\n      \"name\": \"tindora\",\n      \"price\": \"$1.99/lb\"\n    },\n    {\n      \"name\": \"fresh methi leaves\",\n      \"price\": \"$1.99/lb\"\n    },\n    {\n      \"name\": \"curry leaves\",\n      \"price\": \"$1.99/lb\"\n    },\n    {\n      \"name\": \"green chillies\",\n      \"price\": \"$1.99/lb\"\n    },\n    {\n      \"name\": \"small brinjal\",\n      \"price\": \"$1.99/lb\"\n    }\n  ]\n}"
+ },
+ "B05-barelines": {
+  "brief": "Create a flyer for Lakshmi's Kitchen Breakfast Combo. Any item $6.49 this week. Monday to Friday, 7 AM - 11 AM.\nIdli\nDosa\nVada\nPongal\nUpma\nPesarattu",
+  "expected_items": [
+   "idli",
+   "dosa",
+   "vada",
+   "pongal",
+   "upma",
+   "pesarattu"
+  ],
+  "llm_response": "{\n  \"business_name\": \"Lakshmi's Kitchen\",\n  \"campaign_title\": \"Breakfast Combo\",\n  \"pricing_structure\": \"Any item $6.49 this week.\",\n  \"schedule\": \"Monday to Friday, 7 AM - 11 AM.\",\n  \"location\": null,\n  \"contact_phone\": null,\n  \"items\": [\n    {\"name\": \"Idli\", \"price\": \"$6.49\"},\n    {\"name\": \"Dosa\", \"price\": \"$6.49\"},\n    {\"name\": \"Vada\", \"price\": \"$6.49\"},\n    {\"name\": \"Pongal\", \"price\": \"$6.49\"},\n    {\"name\": \"Upma\", \"price\": \"$6.49\"},\n    {\"name\": \"Pesarattu\", \"price\": \"$6.49\"}\n  ]\n}"
+ },
+ "B06-pairs": {
+  "brief": "Create a flyer for Lakshmi's Kitchen Breakfast Combo. Idli $6.49, Dosa $6.49, Vada $6.49, Pongal $6.49, Upma $6.49, Pesarattu $6.49. Monday to Friday, 7 AM - 11 AM.",
+  "expected_items": [
+   "idli",
+   "dosa",
+   "vada",
+   "pongal",
+   "upma",
+   "pesarattu"
+  ],
+  "llm_response": "{\n  \"business_name\": \"Lakshmi's Kitchen\",\n  \"campaign_title\": \"Breakfast Combo\",\n  \"pricing_structure\": \"$6.49 each\",\n  \"schedule\": \"Monday to Friday, 7 AM - 11 AM\",\n  \"location\": null,\n  \"contact_phone\": null,\n  \"items\": [\n    {\n      \"name\": \"Idli\",\n      \"price\": \"$6.49\"\n    },\n    {\n      \"name\": \"Dosa\",\n      \"price\": \"$6.49\"\n    },\n    {\n      \"name\": \"Vada\",\n      \"price\": \"$6.49\"\n    },\n    {\n      \"name\": \"Pongal\",\n      \"price\": \"$6.49\"\n    },\n    {\n      \"name\": \"Upma\",\n      \"price\": \"$6.49\"\n    },\n    {\n      \"name\": \"Pesarattu\",\n      \"price\": \"$6.49\"\n    }\n  ]\n}"
+ },
+ "B07-lineprices": {
+  "brief": "Create a flyer for Lakshmi's Kitchen Breakfast Combo. Monday to Friday, 7 AM - 11 AM.\nIdli - $6.49\nDosa - $6.49\nVada - $6.49\nPongal - $6.49\nUpma - $6.49\nPesarattu - $6.49",
+  "expected_items": [
+   "idli",
+   "dosa",
+   "vada",
+   "pongal",
+   "upma",
+   "pesarattu"
+  ],
+  "llm_response": "{\n  \"business_name\": \"Lakshmi's Kitchen\",\n  \"campaign_title\": \"Breakfast Combo\",\n  \"pricing_structure\": \"$6.49 each\",\n  \"schedule\": \"Monday to Friday, 7 AM - 11 AM\",\n  \"location\": null,\n  \"contact_phone\": null,\n  \"items\": [\n    {\n      \"name\": \"Idli\",\n      \"price\": \"$6.49\"\n    },\n    {\n      \"name\": \"Dosa\",\n      \"price\": \"$6.49\"\n    },\n    {\n      \"name\": \"Vada\",\n      \"price\": \"$6.49\"\n    },\n    {\n      \"name\": \"Pongal\",\n      \"price\": \"$6.49\"\n    },\n    {\n      \"name\": \"Upma\",\n      \"price\": \"$6.49\"\n    },\n    {\n      \"name\": \"Pesarattu\",\n      \"price\": \"$6.49\"\n    }\n  ]\n}"
+ },
+ "B08-countcolon": {
+  "brief": "Create a flyer for Weekend Specials. Any item $7.99. 6 famous South Indian items: Idli, Dosa, Vada, Uttapam, Pongal, Sambar. Available Saturday & Sunday, 4 PM-8 PM.",
+  "expected_items": [
+   "idli",
+   "dosa",
+   "vada",
+   "uttapam",
+   "pongal",
+   "sambar"
+  ],
+  "llm_response": "{\n  \"business_name\": null,\n  \"campaign_title\": \"Weekend Specials\",\n  \"pricing_structure\": \"Any item $7.99\",\n  \"schedule\": \"Available Saturday & Sunday, 4 PM-8 PM\",\n  \"location\": null,\n  \"contact_phone\": null,\n  \"items\": [\n    {\"name\": \"Idli\", \"price\": \"$7.99\"},\n    {\"name\": \"Dosa\", \"price\": \"$7.99\"},\n    {\"name\": \"Vada\", \"price\": \"$7.99\"},\n    {\"name\": \"Uttapam\", \"price\": \"$7.99\"},\n    {\"name\": \"Pongal\", \"price\": \"$7.99\"},\n    {\"name\": \"Sambar\", \"price\": \"$7.99\"}\n  ]\n}"
+ },
+ "B09-combo": {
+  "brief": "Family dinner combo at Lakshmi's Kitchen - feeds 4 for $39.99. Comes with chicken biryani, butter naan, paneer tikka, and gulab jamun. Fridays and Saturdays. Call +17329837841.",
+  "expected_items": [
+   "chicken biryani",
+   "butter naan",
+   "paneer tikka",
+   "gulab jamun"
+  ],
+  "llm_response": "{\n  \"business_name\": \"Lakshmi's Kitchen\",\n  \"campaign_title\": \"Family dinner combo\",\n  \"pricing_structure\": \"feeds 4 for $39.99\",\n  \"schedule\": \"Fridays and Saturdays\",\n  \"location\": null,\n  \"contact_phone\": \"+17329837841\",\n  \"items\": [\n    {\n      \"name\": \"chicken biryani\",\n      \"price\": null\n    },\n    {\n      \"name\": \"butter naan\",\n      \"price\": null\n    },\n    {\n      \"name\": \"paneer tikka\",\n      \"price\": null\n    },\n    {\n      \"name\": \"gulab jamun\",\n      \"price\": null\n    }\n  ]\n}"
+ },
+ "B10-single": {
+  "brief": "Grand opening special! Masala dosa just $4.99 this Sunday at Lakshmi's Kitchen, 90 Brybar Dr St Johns FL.",
+  "expected_items": [
+   "masala dosa"
+  ],
+  "llm_response": "{\n  \"business_name\": \"Lakshmi's Kitchen\",\n  \"campaign_title\": \"Grand opening special!\",\n  \"pricing_structure\": \"Masala dosa just $4.99\",\n  \"schedule\": \"this Sunday\",\n  \"location\": \"90 Brybar Dr St Johns FL\",\n  \"contact_phone\": null,\n  \"items\": [\n    {\n      \"name\": \"Masala dosa\",\n      \"price\": \"$4.99\"\n    }\n  ]\n}"
+ }
+}

@@ -4555,6 +4555,27 @@ def _openrouter_textless_image(prompt: str, *, model: str, quality: str, size: t
     return _decode_data_url(url)
 
 
+def openrouter_image_with_transport_retry(project: FlyerProject, *, transport_attempts: int = 2, **kw) -> bytes:
+    """v2 spec amendment A3 (labeled failure: Workstream #0 Leg 2 B02): an OpenRouter
+    response with NO image ("had no images"/"had no choices") is a TRANSPORT-class
+    transient, not a content failure — retry it here, separately from the regen
+    counter (regens are for verification mismatches only). Real render errors
+    re-raise immediately."""
+    last: Exception | None = None
+    for attempt in range(max(1, transport_attempts)):
+        try:
+            return _openrouter_image_bytes(project, **kw)
+        except FlyerRenderError as exc:
+            msg = str(exc)
+            if "had no images" in msg or "had no choices" in msg:
+                last = exc
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise
+    assert last is not None
+    raise last
+
+
 def _ppv1_default_generator(project: FlyerProject, *, model: str, quality: str,
                             size: tuple[int, int] | None, deadline: float,
                             created_paths: list | None = None):

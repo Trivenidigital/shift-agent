@@ -18,6 +18,8 @@ on:
       - "src/agents/flyer/**"
       - "src/platform/schemas.py"
       - "tests/test_flyer_premium_poster_v1*.py"
+      - "tests/test_flyer_extraction_v2*.py"
+      - "src/agents/flyer/extraction_v2.py"
       - "tests/test_flyer_renderer.py"
       - "tests/test_flyer_visual_qa.py"
       - ".github/workflows/flyer-premium-ci.yml"
