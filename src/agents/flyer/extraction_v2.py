@@ -19,8 +19,10 @@ Contract (mirrors facts.extract_text_facts so the seam swap is a name change):
 Invariants:
 - SOURCE-PARITY GUARD (mandatory, load-bearing): every fact value's alphanumeric
   tokens must appear verbatim in the brief text; violating facts are DROPPED and
-  logged in the report, never locked. The "system never invents customer-facing
-  facts" invariant now holds at the producer.
+  logged in the report, never locked. Whole-token membership (word-boundary):
+  sub-token collisions like a hallucinated $9.99 against a brief's $4.99 are
+  rejected — fabrication defense holds at the producer for the classes QA
+  cannot see downstream.
 - FAIL-CLOSED: any transport/parse failure raises ExtractionV2Error — callers
   fall back to the legacy extractor and log; v2 never silently returns empty.
 - Deterministic in CI: `transport` is injectable; tests replay recorded LLM
@@ -97,7 +99,12 @@ def _default_transport(system: str, user: str) -> str:
     try:
         with urllib.request.urlopen(req, timeout=TRANSPORT_TIMEOUT_SEC) as resp:
             doc = json.loads(resp.read().decode("utf-8", errors="replace"))
-        return doc["choices"][0]["message"]["content"]
+        content = doc["choices"][0]["message"]["content"]
+        if not isinstance(content, str):  # refusals / empty completions: content null
+            raise ExtractionV2Error("extraction transport returned non-string content")
+        return content
+    except ExtractionV2Error:
+        raise
     except (OSError, KeyError, IndexError, TypeError, ValueError,
             urllib.error.URLError, urllib.error.HTTPError) as exc:
         raise ExtractionV2Error(f"extraction transport failed: {type(exc).__name__}: {str(exc)[:120]}") from exc
@@ -107,11 +114,15 @@ def _tokens(value: str) -> list[str]:
     return [t for t in "".join(c if c.isalnum() else " " for c in value.lower()).split() if t]
 
 
-def value_has_source_parity(value: str, brief_lower: str) -> bool:
-    """True iff every alphanumeric token of ``value`` appears in the brief.
-    The guard that makes 'never invents facts' hold at the producer."""
+def value_has_source_parity(value: str, brief_text: str) -> bool:
+    """True iff every alphanumeric token of ``value`` appears as a WHOLE TOKEN
+    in the brief (word-boundary membership, not substring: a hallucinated
+    "$9.99" never passes against "$4.99"; "rice" never passes against "price"
+    — PR #535 review F2, proven exploit class). This is the only line of
+    defense for facts downstream QA verifies AGAINST (QA checks the render
+    against locked facts, so a fabricated locked fact is invisible later)."""
     toks = _tokens(str(value))
-    return bool(toks) and all(t in brief_lower for t in toks)
+    return bool(toks) and set(toks) <= set(_tokens(brief_text))
 
 
 def _fact(fact_id: str, value: str) -> FlyerLockedFact:
@@ -134,7 +145,7 @@ def extract_text_facts_v2(fields, raw_request: str, *, message_id: str = "",
         doc = json.loads(content)
         if not isinstance(doc, dict):
             raise ValueError("non-object extraction payload")
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:  # TypeError: injected non-str content
         raise ExtractionV2Error(f"extraction parse failed: {type(exc).__name__}") from exc
 
     brief_lower = raw.lower()
@@ -165,7 +176,7 @@ def extract_text_facts_v2(fields, raw_request: str, *, message_id: str = "",
             continue
         facts.append(_fact(f"item:{n}:name", name))
         report.items_locked += 1
-        if price and value_has_source_parity(price.replace("$", " "), brief_lower):
+        if price and value_has_source_parity(price, brief_lower):
             facts.append(_fact(f"item:{n}:price", price))
         n += 1
 

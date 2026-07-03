@@ -174,3 +174,33 @@ def test_transport_retry_real_errors_raise_immediately(monkeypatch):
     with _pytest.raises(render.FlyerRenderError):
         render.openrouter_image_with_transport_retry(object(), transport_attempts=3)
     assert calls["n"] == 1  # not retried — only empty-response transients retry
+
+
+# -- F2 regression: word-boundary parity (proven exploit class, PR #535 review) --
+
+def test_parity_guard_blocks_subtoken_price_fabrication():
+    # "$9.99" must NOT pass against a brief containing "$4.99" (digit substrings)
+    fake = json.dumps({"items": [{"name": "masala dosa", "price": "$9.99"}]})
+    brief = "Grand opening special! Masala dosa just $4.99 this Sunday."
+    facts, report = extract_text_facts_v2(FlyerRequestFields(), brief,
+                                          transport=lambda s, u: fake)
+    ids = {f.fact_id: f.value for f in facts}
+    assert ids.get("item:0:name") == "masala dosa"
+    assert "item:0:price" not in ids  # fabricated money fact blocked at the producer
+
+
+def test_parity_guard_blocks_subtoken_item_fabrication():
+    # "rice" must NOT pass against a brief containing "price"
+    fake = json.dumps({"items": [{"name": "rice", "price": None}]})
+    brief = "Any item one price this weekend."
+    facts, _ = extract_text_facts_v2(FlyerRequestFields(), brief,
+                                     transport=lambda s, u: fake)
+    assert not [f for f in facts if f.fact_id.startswith("item:")]
+
+
+# -- F3 regression: null content is fail-closed, never a raw TypeError --
+
+def test_null_transport_content_raises_extraction_error():
+    with pytest.raises(ExtractionV2Error):
+        extract_text_facts_v2(FlyerRequestFields(), "some brief",
+                              transport=lambda s, u: None)

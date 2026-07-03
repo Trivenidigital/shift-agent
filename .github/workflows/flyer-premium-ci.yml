@@ -55,6 +55,7 @@ jobs:
             tests/test_flyer_premium_poster_v1_managed.py \
             tests/test_flyer_premium_poster_v1_deploy_parity.py \
             tests/test_flyer_premium_poster_v1_bare_obs.py \
+            tests/test_flyer_extraction_v2_golden.py \
             -q
       - name: Renderer + visual QA suites (final package / QA blast radius)
         run: |

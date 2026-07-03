@@ -32,8 +32,11 @@ KEY_FILE = Path("/root/.hermes/ws0-openrouter.key")
 
 
 def _load_state():
-    if STATE.exists():
-        return json.loads(STATE.read_text())
+    try:
+        if STATE.exists():
+            return json.loads(STATE.read_text())
+    except (OSError, ValueError):  # corrupt/racing state -> re-compare (idempotent)
+        pass
     return {"seen": []}
 
 
@@ -81,7 +84,9 @@ def run_once() -> int:
         (OUT / f"{pid}.json").write_text(json.dumps(row, indent=1), encoding="utf-8")
         print(json.dumps({k: row[k] for k in row if k != "brief"}))
         new += 1
-    STATE.write_text(json.dumps(state), encoding="utf-8")
+    tmp = STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state), encoding="utf-8")
+    tmp.replace(STATE)
     return new
 
 

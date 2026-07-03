@@ -4556,11 +4556,16 @@ def _openrouter_textless_image(prompt: str, *, model: str, quality: str, size: t
 
 
 def openrouter_image_with_transport_retry(project: FlyerProject, *, transport_attempts: int = 2, **kw) -> bytes:
-    """v2 spec amendment A3 (labeled failure: Workstream #0 Leg 2 B02): an OpenRouter
-    response with NO image ("had no images"/"had no choices") is a TRANSPORT-class
-    transient, not a content failure — retry it here, separately from the regen
-    counter (regens are for verification mismatches only). Real render errors
-    re-raise immediately."""
+    """v2 spec amendment A3 (labeled failure class: Workstream #0 Leg 2 B02): an
+    OpenRouter response with NO image ("had no images"/"had no choices" — the
+    exact raise strings in _openrouter_image_bytes; keep in sync) is a
+    TRANSPORT-class transient, not a content failure — retried here, separately
+    from the regen counter (regens are for verification mismatches only). Real
+    render errors re-raise immediately.
+
+    INTENT (PR #535 review F4): deliberately wraps the INTEGRATED path
+    (_openrouter_image_bytes) — v2 Layer 2. The premium textless path is slated
+    for demotion and is NOT a client of this wrapper."""
     last: Exception | None = None
     for attempt in range(max(1, transport_attempts)):
         try:
@@ -4569,7 +4574,8 @@ def openrouter_image_with_transport_retry(project: FlyerProject, *, transport_at
             msg = str(exc)
             if "had no images" in msg or "had no choices" in msg:
                 last = exc
-                time.sleep(1.5 * (attempt + 1))
+                if attempt + 1 < transport_attempts:  # no dead sleep before final re-raise
+                    time.sleep(1.5 * (attempt + 1))
                 continue
             raise
     assert last is not None
