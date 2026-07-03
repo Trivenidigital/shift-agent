@@ -343,3 +343,59 @@ pre-registered gate (>=8/10)** per directive item 5. No further brief sends.
   became primary 06-15 and still is; v2 = subtraction, not restoration).
 - Standing rules recorded: complexity budget; $200/mo OpenRouter cap + workstream
   tagging + weekly cost-per-accepted-flyer report.
+
+
+---
+
+## v2 SPEC EVIDENCE-GROUNDING + ACCEPTANCE (2026-07-03)
+
+Draft v0.1 reviewed against the tree. VERDICT: **ACCEPTED WITH 4 AMENDMENTS** (none
+reverse the architecture). Per the recorded decision: **B-order superseded; B5
+subsumed and expanded; Class 1/2 rules pulled forward.** Leg 2 numbers verified
+against /tmp/ws0-leg2/summary.json as cited.
+
+### Open questions answered (file:line)
+1. **WS1 seams (2, not 1):** managed `create-flyer-project:730` and bare
+   `bare_render.py:713` both call `facts.extract_text_facts(fields, raw, ...)` ->
+   list[FlyerLockedFact]. The Leg 2 Arm B extractor emits the same type — promote
+   in place at BOTH seams (keep `_extract_fields` for the fields object initially).
+2. **WS2 site:** `_item_price_pair_blockers` (visual_qa.py:984), called from
+   run_visual_qa at :1778 with the full project in scope — `pricing_structure` is
+   directly readable there (see also :313-321, :1175). Fix is local to the rule.
+3. **WS3 consumers:** NO cross-agent consumers of the 13 components (catering/
+   shift import none of them). Coupling that must be updated with each deletion:
+   deploy install lines (shift-agent-deploy.sh:341-397), smoke checks
+   (shift-agent-smoke-test.sh:117-135), cf-router actions glue, env flags, and
+   decisions.log LogEntry variants (NEVER delete union members — history parsing).
+4. **WS7 shadow tap:** no code fork needed — watcher pattern: tail decisions.log
+   for flyer_project_created + read raw_request from projects.json (persisted per
+   project row; verified F0193-F0197), run the v2 harness offline, quarantine.
+   Zero production mutation; counters untouched; complexity-budget clean.
+5. **B02 transient:** `_openrouter_image_bytes` DISTINGUISHES empty responses
+   (raises FlyerRenderError "had no choices/images", render.py:3362/3365) but the
+   retry loop (:4534-4540) retries ONLY URLError/IncompleteRead/Timeout — empty-
+   image responses are NOT retried. WS1 needs the transport-retry wrapper
+   (labeled failure: Leg 2 B02).
+
+### REQUIRED AMENDMENTS
+- **A1 (exit-criterion-blocking): v2 finals treatment.** v2 integrated previews
+  are raw-less AND provenance-less -> render_final_package's direct path
+  CENTER-CROPS instagram formats (render.py:5039-5044 via _export_from_source_
+  image :4181) — the FA-2/CF-1 crop class reapplies to v2 wholesale; the exit
+  criterion "all four formats on APPROVE" fails as spec'd. Minimal fix per
+  complexity budget: letterbox raw-less non-source-edit finals (labeled failure:
+  FA-2 corpus + this analysis). Add as WS2b.
+- **A2: WS3 sequencing constraints.** (i) The deterministic overlay + raw-rebuild
+  machinery is load-bearing for the 35-project legacy backlog finals — no
+  deletion before backlog resolution. (ii) FLYER_INTEGRATED_KILLSWITCH + the
+  deterministic floor SURVIVE WS3 (labeled failure: provider-outage class, incl.
+  Leg 2 B02 same-day). (iii) Live flags must flip before their machinery deletes:
+  FLYER_DETERMINISTIC_FIRST/RECOVERY=1, FLYER_CREATIVE_DIRECTOR_V2=1,
+  FLYER_SKILL_DRIVEN_SCENE=1, FLYER_PREMIUM_OVERLAY=1 are all ON on the box.
+- **A3: WS1 includes the empty-image transport-retry wrapper** (Q5 evidence).
+- **A4: WS7 shadow implements the watcher pattern** (Q4) rather than an inline fork.
+
+### Ledger entry (supersession, per prior recorded decision)
+B-order SUPERSEDED by the v2 production-readiness spec (accepted 2026-07-03 with
+amendments A1-A4). B5 subsumed and expanded (WS1/WS2/WS6); Class 1/2 rules pulled
+forward (WS5). Backlog #36-#39 resolution path = WS7 step 3.
