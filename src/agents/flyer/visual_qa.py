@@ -981,6 +981,28 @@ def _rowwise_item_price_pair_present(raw_text: str, records: dict[int, dict[str,
     return False
 
 
+def _uniform_shared_price(project: FlyerProject, records: "dict[int, dict[str, str]]") -> bool:
+    """True when the flyer is a SINGLE-SHARED-PRICE design: every locked item
+    price is the same value AND that value appears in the locked offer statement
+    (pricing_structure / offer). WS2 of the v2 spec (2026-07-03), labeled
+    failures: Leg-1 G2/G3 corpus + live F0197/F0201 premium final_fails — the
+    composer/verifier CONTRACT CONFLICT where a legitimate one-dominant-price +
+    item-name-strip design (canonical positive: the image-2 reference) could
+    never satisfy per-item price adjacency. Extraction propagates the shared
+    price onto every item, so adjacency demanded N redundant price rows the
+    design correctly refuses to paint."""
+    prices = {record.get("price", "").replace(" ", "").strip()
+              for record in records.values() if record.get("price", "").strip()}
+    if len(prices) != 1:
+        return False
+    shared = next(iter(prices))
+    for fact in project.locked_facts:
+        if fact.fact_id in ("pricing_structure", "offer", "offer:0"):
+            if shared in str(fact.value or "").replace(" ", ""):
+                return True
+    return False
+
+
 def _item_price_pair_blockers(project: FlyerProject, raw_text: str) -> list[str]:
     item_re = re.compile(r"^item:(?P<index>\d+):(?P<kind>name|price)$")
     records: dict[int, dict[str, str]] = {}
@@ -993,6 +1015,22 @@ def _item_price_pair_blockers(project: FlyerProject, raw_text: str) -> list[str]
         index = int(match.group("index"))
         records.setdefault(index, {})[match.group("kind")] = str(fact.value or "")
     all_names = [record["name"] for _index, record in sorted(records.items()) if record.get("name")]
+    if _uniform_shared_price(project, records):
+        # Uniform-price design contract (WS2): per-item price ADJACENCY is not
+        # required — one dominant shared price + an item NAME strip is legitimate.
+        # Everything else stays enforced by the OTHER rules, unchanged: item-name
+        # presence (block-tier), the shared price's own visibility (the
+        # pricing_structure required-fact check), foreign/fabricated prices
+        # (_fabricated_offer_price_blockers), near-duplicate rows. Only the
+        # duplicate SAME-ROW check is kept here (N identical name+price rows is
+        # still wrong output).
+        dup_blockers: list[str] = []
+        for index, record in sorted(records.items()):
+            name = record.get("name", "").strip()
+            price = record.get("price", "").strip()
+            if name and price and _same_line_fuzzy_item_price_match_count(raw_text, name, price) > 1:
+                dup_blockers.append(f"duplicate item price visible: item:{index} {name} {price}")
+        return dup_blockers
     blockers: list[str] = []
     for index, record in sorted(records.items()):
         name = record.get("name", "").strip()
