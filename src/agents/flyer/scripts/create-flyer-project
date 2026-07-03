@@ -17,7 +17,11 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 sys.path.insert(0, str(SRC_ROOT))
 
-from schemas import Config, FlyerAsset, FlyerConfig, FlyerCustomerStore, FlyerManualReview, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerReferenceExtraction, FlyerRequestFields, FlyerSourceContractExtracted  # noqa: E402
+from schemas import Config, FlyerAsset, FlyerConfig, FlyerCustomerStore, FlyerManualReview, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerReferenceExtraction, FlyerRequestFields, FlyerSourceContractExtracted, FlyerExtractionV2Outcome  # noqa: E402
+try:
+    from flyer_extraction_seam import extract_text_facts_seam  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.extraction_seam import extract_text_facts_seam  # noqa: E402
 from safe_io import FileLock, atomic_write_text  # noqa: E402
 try:
     from safe_io import load_yaml_model as _load_yaml_model  # type: ignore  # noqa: E402
@@ -725,15 +729,40 @@ def main() -> int:
             profile_facts = profile_locked_facts(customer, raw_request=args.raw_request, message_id=args.message_id)
         reference_owns_items = any(_needs_reference_extraction(extraction) for extraction in reference_extractions)
         text_fact_cfg = None if reference_owns_items else flyer_cfg
+        def _audit_extraction_v2(event, payload):
+            # Best-effort observability at the existing ndjson chokepoint —
+            # zero rows when FLYER_EXTRACTION_V2 is off (the seam only calls
+            # this when the flag routed through v2 or fell back).
+            if _safe_flock is None or _safe_ndjson_append is None:
+                return
+            try:
+                from pydantic import TypeAdapter as _TA
+                if event == "extraction_v2_used":
+                    entry = FlyerExtractionV2Outcome(
+                        ts=datetime.now(timezone.utc), seam="managed_create", event=event,
+                        items_locked=payload.items_locked, scalars_locked=payload.scalars_locked,
+                        dropped_by_parity_n=len(payload.dropped_by_parity))
+                else:
+                    entry = FlyerExtractionV2Outcome(
+                        ts=datetime.now(timezone.utc), seam="managed_create", event=event,
+                        reason=str(payload)[:120])
+                LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with _safe_flock(LOG_PATH):
+                    _safe_ndjson_append(LOG_PATH, _TA(FlyerExtractionV2Outcome).dump_json(entry).decode("utf-8"))
+            except Exception:
+                pass
+
         locked_facts = merge_locked_facts(
             profile_facts,
-            extract_text_facts(
+            extract_text_facts_seam(
                 fields,
                 args.raw_request,
                 message_id=args.message_id,
                 profile_business_name=(customer.business_name if customer is not None else ""),
                 allow_text_identity=not bool(profile_facts),
                 cfg=text_fact_cfg,
+                audit=_audit_extraction_v2,
+                seam="managed_create",
             ),
         )
         # P0-2 missing-required-fact gate: if extraction (customer text + profile +
