@@ -104,16 +104,18 @@ def test_rawless_fixed_formats_letterbox_never_crop(tmp_path, monkeypatch):
         assert _has_color(im, RED) and _has_color(im, BLUE)
 
 
-def test_background_only_raw_rebuild_path_unchanged(tmp_path, monkeypatch):
-    # Sanity: the raw+overlay rebuild path for background-only projects is not
-    # touched by WS2b — existing renderer suite covers it in depth; this pins
-    # that a RAW-BEARING preview still routes away from the direct branch.
-    from agents.flyer.render import _raw_background_path
+def test_same_aspect_whatsapp_is_byte_identical_to_old_path(tmp_path):
+    # The no-op claim, pinned: for a same-aspect target (1080x1350 -> 1080x1350)
+    # contained must produce BYTE-IDENTICAL output to the old cover-crop export,
+    # so whatsapp_image finals are provably unchanged by WS2b (reviewer-verified
+    # by execution; this test keeps it true).
+    from agents.flyer.render import (_export_from_source_image,
+                                     _export_from_source_image_contained)
 
-    project = _rawless_project(tmp_path, monkeypatch)
-    preview = tmp_path / "F9401-C1-preview.png"
-    raw = _raw_background_path(preview)
-    _pinned_preview(raw)  # matched raw present -> not the raw-less class
-    # (Behavioral depth for this path lives in test_flyer_renderer.py; here we
-    # only assert the raw file's presence flips the routing input.)
-    assert raw.exists()
+    preview = tmp_path / "preview.png"
+    _pinned_preview(preview)
+    old_out = tmp_path / "old.png"
+    new_out = tmp_path / "new.png"
+    _export_from_source_image(preview, old_out, size=(1080, 1350))
+    _export_from_source_image_contained(preview, new_out, size=(1080, 1350))
+    assert old_out.read_bytes() == new_out.read_bytes()
