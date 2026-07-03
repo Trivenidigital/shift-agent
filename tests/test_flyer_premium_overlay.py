@@ -184,9 +184,12 @@ def test_render_premium_overlay_does_not_fail_on_raw_request_echo(tmp_path):
         "updated_at":"2026-06-18T00:00:00Z","original_message_id":"wamid.F9002",
         "raw_request":"Weekend Specials any item $7.99",
         "fields":{"event_or_business_name":"Weekend Specials","preferred_language":"en"},"locked_facts":facts})
-    # The verbatim echo IS present as a non-locked detail clause here.
+    # 2026-07-03 leak fix: the verbatim echo is now SUPPRESSED at the source
+    # (restatement guard in _detail_clauses — a clause echoing >=2 locked fact
+    # values is the brief restated, never poster copy). The overlay-robustness
+    # property this test pins survives via a genuine standalone detail clause.
     nonlocked = {f.text for f in render.collect_text_facts(proj)} - {f.value for f in proj.locked_facts}
-    assert "Weekend Specials any item $7.99" in nonlocked
+    assert "Weekend Specials any item $7.99" not in nonlocked  # echo class extinct
     out = tmp_path / "echo.png"
     po.render_premium_overlay(proj, _bg(tmp_path), out, size=(1080, 1350), output_format="concept_preview")
     assert out.exists() and Image.open(out).size == (1080, 1350)

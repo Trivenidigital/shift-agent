@@ -738,10 +738,39 @@ def _detail_clauses(project: FlyerProject) -> list[str]:
         return selected
     line_copy_requested = _request_asks_to_include_line_copy(details)
     compact = re.sub(r"[ \t\r\f\v]+", " ", details)
-    clauses = [part.strip(" .") for part in re.split(r";|\n+|\u2022|-{2,}|(?<=\.)\s+", compact) if part.strip(" .")]
+    # Vertical-bar separator glyphs split clauses like newlines do. Labeled
+    # failure (3 exhibits, 2026-07-03 F0201): a brief copied from a chat
+    # blockquote carried U+258E bars instead of newlines; without these split
+    # points the ENTIRE brief survived as one mined clause and was painted
+    # verbatim as the poster subhead (the "tofu boxes" were the literal bars).
+    clauses = [part.strip(" .") for part in re.split(r";|\n+|\u2022|\u258e|\u258f|\u2502|\u2503|\|+|-{2,}|(?<=\.)\s+", compact) if part.strip(" .")]
+    # Restatement guard: a mined clause echoing >=2 distinct locked
+    # customer_text fact values is the brief restated, not a new detail —
+    # brief text is model context, never poster copy.
+    _locked_norms = {
+        _normalize_fact_text(str(fact.value))
+        for fact in project.locked_facts
+        if fact.source == "customer_text" and str(fact.value or "").strip()
+    }
+
+    def _is_restatement(clause: str) -> bool:
+        # DISTINCT fact values (set — PR #542 review F1: four items sharing one
+        # "$5.99" must count once, not four times, or "Kids eat for $5.99 on
+        # Mondays" gets dropped) with a trailing-digit boundary (F2: "$3" must
+        # not match inside "$30").
+        norm = _normalize_fact_text(clause)
+        hits = 0
+        for v in _locked_norms:
+            if v and re.search(rf"(?<![\w.]){re.escape(v)}(?![\d.])", norm):
+                hits += 1
+                if hits >= 2:
+                    return True
+        return False
     current_contact_digits = _digits(project.fields.contact_info or "")
     for clause in clauses:
         clause = _strip_request_instruction_prefix(clause)
+        if clause and _is_restatement(clause):
+            continue
         if not clause:
             continue
         if _instruction_only_clause(clause):
