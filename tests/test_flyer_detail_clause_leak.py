@@ -93,3 +93,32 @@ def test_pipe_separated_briefs_also_split():
     ])
     for clause in _detail_clauses(project):
         assert "|" not in clause, clause
+
+
+def test_shared_price_detail_survives_distinct_count():
+    # PR #542 review F1: four items sharing "$5.99" must count as ONE distinct
+    # value — "Kids eat for $5.99 on Mondays" echoes one fact, it is a genuine
+    # detail, not a restatement.
+    raw = RAW + " ▎ Kids eat for $5.99 on Mondays."
+    project = _project(raw=raw, notes=raw)
+    clauses = _detail_clauses(project)
+    assert any("Kids eat" in c for c in clauses), clauses
+
+
+def test_short_price_does_not_match_inside_larger_number():
+    # PR #542 review F2: "$3" must not hit inside "$30" — the delivery detail
+    # echoes only the schedule fact (one hit) and must survive.
+    raw = "Friday special. Samosa $3. Free delivery on orders above $30 every Friday."
+    project = _project(raw=raw, notes=raw, facts=[
+        _F("schedule", "Friday"),
+        _F("item:0:name", "Samosa"), _F("item:0:price", "$3"),
+    ])
+    clauses = _detail_clauses(project)
+    assert any("delivery" in c.lower() for c in clauses), clauses
+
+
+def test_incident_clause_still_caught_after_distinct_dedup():
+    # The dedup must not resurrect the original leak: the incident clause has
+    # 3 DISTINCT hits (title + pricing_structure + shared price).
+    for clause in _detail_clauses(_project()):
+        assert not ("weekend special" in clause.lower() and "$5.99" in clause), clause
