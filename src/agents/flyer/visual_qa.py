@@ -996,9 +996,13 @@ def _uniform_shared_price(project: FlyerProject, records: "dict[int, dict[str, s
     if len(prices) != 1:
         return False
     shared = next(iter(prices))
+    # Exact price-token equality, NOT substring: "$5.99" must not activate the
+    # loosened path under a "$15.99" offer (substring would say yes).
+    price_re = re.compile(r"\$\s?\d[\d,]*(?:\.\d{1,2})?")
     for fact in project.locked_facts:
         if fact.fact_id in ("pricing_structure", "offer", "offer:0"):
-            if shared in str(fact.value or "").replace(" ", ""):
+            offer_prices = {m.replace(" ", "") for m in price_re.findall(str(fact.value or ""))}
+            if shared in offer_prices:
                 return True
     return False
 

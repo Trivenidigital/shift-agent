@@ -146,3 +146,16 @@ def test_uniform_detector_unit():
     records[3] = {"name": "Pongal", "price": "$7.99"}
     assert _uniform_shared_price(proj, records) is False       # mixed -> strict
     assert _uniform_shared_price(proj, {0: {"name": "Idli"}}) is False  # no prices -> strict path (no-op anyway)
+
+
+def test_substring_price_never_activates_loosened_path():
+    # "$5.99" items under a "$15.99" offer must NOT count as uniform-price
+    # (substring containment is not equality); strict adjacency applies.
+    from agents.flyer.visual_qa import _uniform_shared_price
+    proj = _uniform_project()
+    facts = [f for f in proj.locked_facts if f.fact_id != "pricing_structure"]
+    facts.append(_F("pricing_structure", "Family platter $15.99"))
+    proj = proj.model_copy(update={"locked_facts": facts})
+    records = {i: {"name": n, "price": "$5.99"}
+               for i, n in enumerate(["Idli", "Medu Vada", "Upma", "Pongal"])}
+    assert _uniform_shared_price(proj, records) is False
