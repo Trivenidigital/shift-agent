@@ -162,6 +162,17 @@ def _hydrate_fields_from_customer(
     return fields.model_copy(update=updates)
 
 
+
+def _clamp_string_field(value: str | None, max_length: int) -> str | None:
+    """Clamp a string field to schema maximum length (defense-in-depth).
+    
+    Prevents over-long strings from reaching Pydantic validation, catching
+    any producer bugs that create strings longer than their schema fields allow.
+    """
+    if value and len(value) > max_length:
+        return value[:max_length]
+    return value
+
 def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
     text = " ".join(raw_request.split())
     event_name = ""
@@ -321,14 +332,22 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
 
     event_name = _normalize_event_name(event_name, text)
 
+    # Defense against over-capture: reject implausibly long names that likely span
+    # the entire brief (e.g., "flyer for sale event as part of anniversary sale...").
+    # A legitimate business/event name should be <100 chars; longer captures are
+    # probably the whole brief and should be dropped to trigger customer-identity
+    # hydration (which fills the registered business name).
+    if event_name and len(event_name) > 100:
+        event_name = ""
+
     return FlyerRequestFields(
-        event_or_business_name=event_name or None,
+        event_or_business_name=_clamp_string_field(event_name, 160) or None,
         event_date=date_value,
         event_time=time_value,
-        venue_or_location=venue or None,
-        contact_info=contact or None,
+        venue_or_location=_clamp_string_field(venue, 240) or None,
+        contact_info=_clamp_string_field(contact, 200) or None,
         preferred_language=language,
-        style_preference=style,
+        style_preference=_clamp_string_field(style, 500),
         output_formats=formats,
         notes=text,
     )
