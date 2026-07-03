@@ -818,7 +818,13 @@ FLYER_TRANSITIONS: dict[FlyerWorkflowStatus, set[FlyerWorkflowStatus]] = {
     "generating_concepts": {"awaiting_concept_selection", "awaiting_final_approval", "manual_edit_required", "delivered_with_warning"},
     "awaiting_concept_selection": {"revising_design"},
     "revising_design": {"generating_concepts", "awaiting_final_approval"},
-    "awaiting_final_approval": {"finalizing_assets", "revising_design"},
+    "awaiting_final_approval": {"finalizing_assets", "revising_design", "closed_no_send"},
+    # closed_no_send from awaiting_final_approval is the OPERATOR reject edge
+    # (2026-07-03 F0200 finding): a project whose locked facts are poisoned
+    # (legacy fabrication class) must be terminable at final approval, not
+    # merely outrun in the approve-binding race. Reachable ONLY via the
+    # flyer-manual-queue --close CLI (freshness guard + audit + customer
+    # notification) — no automated writer uses this edge.
     "finalizing_assets": {"delivered", "manual_edit_required"},
     "delivered": {"completed", "revising_design"},
     "completed": set(),

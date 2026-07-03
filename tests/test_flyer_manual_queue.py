@@ -1267,3 +1267,122 @@ def test_close_script_invokes_notify_after_state_write_and_only_once():
     assert text.count("notify_customer_of_closure(") == 1, (
         "notify_customer_of_closure must be called exactly once in the script"
     )
+
+
+def test_close_awaiting_final_approval_project_operator_reject_edge():
+    # 2026-07-03 F0200 finding: a project at final approval with poisoned
+    # locked facts (legacy fabrication class) must be TERMINABLE by the
+    # operator, not merely outrun in the approve-binding race. Same guarded
+    # CLI path, same terminal state, same notification flow.
+    from agents.flyer.manual_queue import close_manual_project
+
+    project = _manual_project().model_copy(update={
+        "status": "awaiting_final_approval",
+        "manual_review": FlyerManualReview(status="none"),
+    })
+    store = FlyerProjectStore(projects=[project])
+
+    updated = close_manual_project(store, "F9100", reason="fabricated facts must never ship")
+    closed = updated.projects[0]
+    assert closed.status == "closed_no_send"
+    assert closed.manual_review.status == "closed_no_send"
+    assert closed.manual_review.detail == "fabricated facts must never ship"
+
+
+def test_close_still_rejects_other_statuses():
+    from agents.flyer.manual_queue import close_manual_project
+
+    for status in ("generating_concepts", "finalizing_assets", "delivered"):
+        project = _manual_project().model_copy(update={
+            "status": status,
+            "manual_review": FlyerManualReview(status="none"),
+        })
+        store = FlyerProjectStore(projects=[project])
+        with pytest.raises(ValueError, match="not queued for manual close"):
+            close_manual_project(store, "F9100", reason="operator cleanup attempt")
+
+
+def test_reject_edge_is_cli_only_static_pin():
+    # PR #541 review finding 5: the awaiting_final_approval -> closed_no_send
+    # capability lives in an unguarded library function; the freshness guard,
+    # --reason requirement, and customer notification are CLI-layer. This pin
+    # fails if any NEW production code calls close_manual_project or writes
+    # closed_no_send outside the sanctioned sites.
+    import re
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parent.parent / "src"
+    allowed_callers = {"manual_queue.py", "flyer-manual-queue"}
+    offenders = []
+    for f in src.rglob("*"):
+        if not f.is_file() or f.suffix not in ("", ".py") or "__pycache__" in str(f):
+            continue
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if "close_manual_project" in text and f.name not in allowed_callers:
+            offenders.append(f"{f.name}: calls close_manual_project")
+        if f.name not in allowed_callers and f.name != "schemas.py":
+            if re.search(r'''["']status["']\s*:\s*["']closed_no_send["']''', text):
+                offenders.append(f"{f.name}: writes status closed_no_send")
+    assert not offenders, offenders
+
+
+def test_close_rejects_completed_and_warning_statuses():
+    from agents.flyer.manual_queue import close_manual_project
+
+    for status in ("completed", "delivered_with_warning"):
+        project = _manual_project().model_copy(update={
+            "status": status,
+            "manual_review": FlyerManualReview(status="none"),
+        })
+        store = FlyerProjectStore(projects=[project])
+        with pytest.raises(ValueError, match="not queued for manual close"):
+            close_manual_project(store, "F9100", reason="operator cleanup attempt")
+
+
+def test_new_transition_edge_in_schema():
+    from schemas import is_flyer_transition_allowed
+
+    assert is_flyer_transition_allowed("awaiting_final_approval", "closed_no_send")
+    assert not is_flyer_transition_allowed("finalizing_assets", "closed_no_send")
+    assert not is_flyer_transition_allowed("delivered", "closed_no_send")
+
+
+def test_backfill_skips_terminal_manual_states():
+    # PR #541 MEDIUM: a closed row with historical failed qa_reports must not
+    # re-queue under backfill --apply (ghost queue entry on a terminal project).
+    from datetime import datetime, timezone
+
+    from agents.flyer.manual_queue import backfill_manual_reasons
+    from schemas import FlyerVisualQAReport
+
+    project = _manual_project().model_copy(update={
+        "status": "closed_no_send",
+        "manual_review": FlyerManualReview(
+            status="closed_no_send", reason_code="unclassified",
+            detail="operator close", completed_at=datetime.now(timezone.utc)),
+        "qa_reports": [FlyerVisualQAReport(
+            project_id="F9100", asset_id="A0001", artifact_path="/tmp/x.png",
+            artifact_sha256="a" * 64, project_version=1,
+            output_format="concept_preview", provider="test",
+            qa_source="ocr_vision", status="failed", blockers=["x"],
+            checked_at=datetime.now(timezone.utc))],
+    })
+    store = FlyerProjectStore(projects=[project])
+    result = backfill_manual_reasons(store, apply=True)
+    assert result["candidate_count"] == 0
+    assert store.projects[0].manual_review.status == "closed_no_send"  # not resurrected
+
+
+def test_operator_reject_close_sets_reason_code():
+    from agents.flyer.manual_queue import close_manual_project
+
+    project = _manual_project().model_copy(update={
+        "status": "awaiting_final_approval",
+        "manual_review": FlyerManualReview(status="none"),
+    })
+    store = FlyerProjectStore(projects=[project])
+    updated = close_manual_project(store, "F9100", reason="fabricated facts must never ship")
+    assert updated.projects[0].manual_review.reason_code == "operator_request"
