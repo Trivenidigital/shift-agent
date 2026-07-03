@@ -264,13 +264,34 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
         r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*(?:-|:)?\s*\$\s*(?P<price>\d+(?:\.\d{2})?)\b(?P<tail>[^\n\r,;]*)",
         flags=re.IGNORECASE,
     )
+    # Bullet/marker glyphs that precede a menu item. The image model returns
+    # decorative glyphs verbatim (live gpt-4o-mini emits "\u2605 Punugulu"), so the
+    # class must cover the common flyer markers \u2014 not just "-/*/\u2022/N." \u2014 or a
+    # whole bulleted menu reads as zero items (the Triveni live failure).
     bullet_item = re.compile(
-        r"^\s*(?:[-*]|\u2022|\d+[.)])\s+(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60})\s*$",
+        r"^\s*(?:[-*\u2022\u2605\u2606\u25cf\u25cb\u25aa\u25ab\u25a0\u25a1\u25c6\u25c7\u2023\u27a4\u27a2\u00bb\u203a\u00b7\u2219]|\d+[.)])\s+"
+        r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60})\s*$",
         flags=re.IGNORECASE,
     )
+    # A price on its OWN line \u2014 the combo "$9.99" the model renders on a separate
+    # line below "ANY 2 SNACKS". Captured and attached to the preceding offer
+    # label so the one real shared price survives as pricing_structure.
+    standalone_price = re.compile(r"^\s*[$\u20b9]\s*\d[\d,]*(?:\.\d{1,2})?\s*$")
     promo_tail = re.compile(r"^\s*(?:off|discount|save|coupon|credit|cashback|%|\bpercent\b)", flags=re.IGNORECASE)
     promo_name = re.compile(r"^(?:save|coupon|discount|offer|deal|special|weekend special|cashback|credit)\b", flags=re.IGNORECASE)
     shared_price_name = re.compile(r"^(?:any|all|every|each)\b", flags=re.IGNORECASE)
+    # The reference's own promotional heading (e.g. "TUESDAY NIGHT SPECIALS") is a truthful,
+    # on-theme campaign title — far better than the renderer falling back to the customer's raw
+    # instruction text ("create the same flyer ... use my theme"). Require a promo word AND
+    # exclude business-type tokens so the SOURCE brand ("...at Triveni Express") can never be
+    # lifted onto the new flyer (wrong-brand safety).
+    heading_promo = re.compile(
+        r"\b(?:special|specials|menu|offer|offers|deal|deals|combo|night|nights|sale|"
+        r"feast|festival|fest|weekend|daily|happy\s*hour|fresh)\b", flags=re.IGNORECASE)
+    heading_business = re.compile(
+        r"\b(?:kitchen|restaurant|cafe|café|express|bakery|grill|grille|bar|diner|bistro|"
+        r"eatery|foods?|catering|caterer|sweets|tiffin|hotel|pizzeria|deli|mart|market)\b",
+        flags=re.IGNORECASE)
 
     def clean(value: str) -> str:
         return " ".join((value or "").strip(" .,:;-").split())
@@ -314,10 +335,25 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
             source_sha256=asset.sha256,
         ))
 
+    prev_nonempty = ""
+    first_item_heading = ""  # the line just above the FIRST menu item (its section heading)
     for line in (text or "").splitlines():
+        stripped = line.strip()
         bullet_match = bullet_item.match(line)
         if bullet_match and "$" not in line:
+            if not items and not first_item_heading:
+                first_item_heading = prev_nonempty
             add_item_name(bullet_match.group("name"))
+            if stripped:
+                prev_nonempty = stripped
+            continue
+        if standalone_price.match(line):
+            # "ANY 2 SNACKS" on one line, "$9.99" on the next: stitch them so the
+            # real shared price is captured (not lost — and later invented by the
+            # model, which the visible-contract referee then blocks).
+            add_pricing(f"{prev_nonempty} {stripped}".strip())
+            if stripped:
+                prev_nonempty = stripped
             continue
         for match in pattern.finditer(line):
             if promo_tail.search(match.group("tail") or ""):
@@ -326,8 +362,12 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
             if shared_price_name.search(name):
                 add_pricing(line)
                 continue
+            if not items and not first_item_heading:
+                first_item_heading = prev_nonempty
             price = f"${match.group('price')}"
             add_item_name(name, price)
+        if stripped:
+            prev_nonempty = stripped
     facts: list[FlyerLockedFact] = []
     for idx, item in enumerate(items):
         facts.append(FlyerLockedFact(
@@ -349,6 +389,19 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
                 source_asset_id=asset.asset_id,
                 source_sha256=asset.sha256,
             ))
+    heading = clean(first_item_heading)
+    if (3 <= len(heading) <= 60 and heading_promo.search(heading)
+            and not heading_business.search(heading) and "$" not in heading
+            and not standalone_price.match(heading)):
+        facts.insert(0, FlyerLockedFact(
+            fact_id="campaign_title",
+            label="Campaign",
+            value=heading.title() if heading.isupper() else heading,
+            source=source,
+            required=False,
+            source_asset_id=asset.asset_id,
+            source_sha256=asset.sha256,
+        ))
     facts.extend(pricing_facts)
     return facts
 

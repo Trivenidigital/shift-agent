@@ -1,5 +1,28 @@
 # Lessons
 
+## 2026-06-10 - Flyer reference regressions must use real vision text, not hand-written approximations
+
+Pattern: The Flyer reference-use fix was committed and deployed after tests passed against synthetic OCR fixtures (`-` bullets and same-line `ANY 2 SNACKS $9.99`). The live gpt-4o-mini output for the exact Triveni snack flyer used decorative star bullets (`★ Punugulu`) and split the shared price across lines (`ANY 2 SNACKS` then `$9.99`). The parser returned zero facts, the role was `menu_reference`, and the hard-block path still fired. The deployed fix therefore did not resolve the customer-visible failure.
+
+Rules:
+
+- For production Flyer reference/OCR incidents, regression fixtures must be the real model/provider text from the failed asset, not a manually normalized approximation.
+- Before claiming a parser fix, run the parser against the exact live vision output and report item/pricing fact counts.
+- When a failure depends on `reference_role`, tests must assert the actual production role from audit/state (`menu_reference` vs `old_flyer_reference`), not the intended product wording.
+- A fallback rule for "use as reference" must be tested on the role that production actually assigns. If production says `menu_reference`, an `old_flyer_reference`-only fallback is not coverage.
+- Parser support for bullet/list styles must include decorative OCR glyphs seen in provider output, and split-line shared prices must be represented as shared pricing without inventing per-item prices.
+
+## 2026-06-10 - Flyer reference quality can fail even after fact extraction succeeds
+
+Pattern: A generated Lakshmi's Kitchen reference flyer preserved some snack facts, but rendered the customer's instruction (`same content, but I'd like you to use Lakshmi's kitchen theme`) as the visible flyer title. The preview details also surfaced that raw instruction as `Title`. This is a different failure class from zero-fact extraction: the fact pipeline can extract items/offer while still poisoning the visible title/campaign copy with meta-instructions.
+
+Rules:
+
+- For reference/inspiration flyer QA, inspect the delivered pixels and preview detail summary, not only extracted item/price counts.
+- Customer instructions such as "same content", "use as reference", "use Lakshmi's theme", "change to my branding", or "create same flyer" are control instructions, not campaign titles or visible poster copy.
+- A reference-flow regression must assert negative visible text: raw customer meta-instructions must not appear in `campaign_title`, `headline`, rendered overlay text, preview details, or model prompt-visible exact-copy slots.
+- Quality proof for Flyer Studio must include the real rendered asset, because correct facts with poisoned title/layout is still a customer failure.
+
 ## 2026-06-08 - Active Catering proposal turns must not fall through to generic LLM
 
 - A customer asking for catering menu combinations must never receive freeform LLM menu invention. In the live failure, an active Catering lead follow-up (`create two sample menus mix n match`) missed the deterministic proposal-request classifier and the generic LLM suggested Western/off-menu items including beef/tacos for an Indian restaurant.

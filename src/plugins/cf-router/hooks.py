@@ -557,9 +557,19 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             # preserving generation/manual queue; concept references use the existing
             # authorization gate and new-poster path while preserving the attachment as
             # visual inspiration.
+            # A reference IMAGE attached to ANY flyer-creation request must take the primary
+            # media path so the reference is EXTRACTED (items/prices -> locked facts) and drawn
+            # via the deterministic overlay. Previously only exact-edit / concept-adaptation
+            # phrasings did this; a "create the same flyer, same content" NEW-flyer request fell
+            # through to the bare render below — which has no media param and IGNORED the image,
+            # so the model invented a menu + prices the visible-contract referee then blocked
+            # (2026-06-10 Triveni). Extraction-first; if the primary intercept declines (None),
+            # control still falls through to the bare arms, so this never strands a request.
             if media_path and (
                 actions.is_exact_reference_edit_request(text, has_media=True)
                 or actions.is_reference_concept_adaptation_request(text, has_media=True)
+                or actions.is_strong_new_flyer_request(text)
+                or actions.classify_flyer_intent(text)[0]
             ):
                 source_edit_result = _try_flyer_primary_intercept(
                     text, chat_id, event, force_new=True, media_path=media_path)

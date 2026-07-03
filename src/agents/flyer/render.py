@@ -785,7 +785,19 @@ def _compact_menu_overlay_allowed(project: FlyerProject, menu_items: list[str] |
     the opposite: every item/price pair came from customer text and must be shown.
     """
     items = menu_items if menu_items is not None else _menu_item_lines(project)
-    if len(items) <= MAX_DETAIL_FACTS or len(items) > MAX_COMPACT_MENU_DETAIL_FACTS:
+    # Structured offer/pricing facts (a combo "Any 2 snacks $9.99", "10% off") are drawn
+    # alongside the menu items and count against the SAME legibility cap in _detail_clauses.
+    # So a grounded menu of exactly MAX_DETAIL_FACTS items plus one such offer overflows the
+    # standard cap (10 items + 1 combo = 11) even though it fits the compact layout (<=18).
+    # Trigger the dense layout on the TOTAL grounded fact count, not menu-item count alone,
+    # so a price-less reference menu with a shared combo price renders instead of fail-closing.
+    structured = sum(
+        1 for f in project.locked_facts
+        if str(getattr(f, "fact_id", "")) == "pricing_structure"
+        or str(getattr(f, "fact_id", "")).startswith("offer")
+    )
+    total = len(items) + structured
+    if total <= MAX_DETAIL_FACTS or total > MAX_COMPACT_MENU_DETAIL_FACTS:
         return False
     grouped: dict[int, dict[str, str]] = {}
     for fact in project.locked_facts:
@@ -980,16 +992,43 @@ def _request_asks_reference_extraction(project: FlyerProject) -> bool:
     ))
 
 
+def _reference_facts_materialized(project: FlyerProject) -> bool:
+    """True once reference extraction has already pulled item / pricing facts INTO
+    locked_facts (source ``reference_vision`` / ``reference_ocr``).
+
+    The original exclusion of reference flows from the overlay path existed only
+    because "items/prices live in the attached image and aren't in
+    collect_text_facts() yet". Once the extractor has materialized them as locked
+    facts, that premise is false: the deterministic overlay can own the text, so
+    the flow should use the safer textless-background + overlay render rather than
+    an integrated render that invents per-item prices (the Triveni live failure,
+    where a price-less reference menu produced a fabricated $2.99–$15.99 spread
+    that the visible-contract referee then blocked)."""
+    for fact in getattr(project, "locked_facts", None) or []:
+        src = str(getattr(fact, "source", "") or "")
+        fid = str(getattr(fact, "fact_id", "") or "")
+        if src in {"reference_vision", "reference_ocr"} and (
+            fid.startswith("item:") or fid == "pricing_structure" or fid.startswith("offer")
+        ):
+            return True
+    return False
+
+
 def _needs_reference_extraction(project: FlyerProject) -> bool:
     """A reference IMAGE is attached AND the request asks to read its items/prices
-    out of the image — so that copy isn't in `collect_text_facts()` and only the
-    model can render it. In that case the deterministic overlay can't own the text.
+    out of the image AND that copy is not yet in locked_facts — so only the model
+    can render it. In that case the deterministic overlay can't own the text.
 
     NOT true (→ background-only stays eligible):
       - logo/brand asset only (visual identity, not a text source); or
       - the reference is a visual/STYLE template and the copy is already in
-        fields/locked facts (no extraction requested) — the overlay draws it.
+        fields/locked facts (no extraction requested) — the overlay draws it; or
+      - extraction already ran and the items/prices ARE in locked_facts
+        (`_reference_facts_materialized`) — the overlay now owns that text, so the
+        model must NOT re-render it (and cannot invent prices).
     """
+    if _reference_facts_materialized(project):
+        return False
     has_reference_image = any(
         getattr(asset, "kind", "") == "reference_image"
         for asset in _project_reference_assets(project)
