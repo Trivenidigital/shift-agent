@@ -5185,7 +5185,15 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                         # EXACT approved artifact.
                         _ppv1_final_fixed_size(project, selected_preview, path, size=size)
                     else:
-                        _export_from_source_image(source, path, size=size)
+                        # WS2b (v2 spec amendment A1; labeled failure FA-2/CF-1):
+                        # raw-less direct previews (v2/integrated renders,
+                        # reference previews) must NEVER be center-cropped into
+                        # fixed-shape formats — instagram_post cut the brand band
+                        # and footer off and the format was then dropped at
+                        # per-format QA. Letterbox instead: every fact stays
+                        # visible; same-aspect targets are unaffected (contained
+                        # == plain resize when aspects match).
+                        _export_from_source_image_contained(source, path, size=size)
                 else:
                     temp_png = path.with_suffix(".overlay-source.png")
                     if source_edit_project:
