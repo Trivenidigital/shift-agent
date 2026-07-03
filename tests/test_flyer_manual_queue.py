@@ -1267,3 +1267,36 @@ def test_close_script_invokes_notify_after_state_write_and_only_once():
     assert text.count("notify_customer_of_closure(") == 1, (
         "notify_customer_of_closure must be called exactly once in the script"
     )
+
+
+def test_close_awaiting_final_approval_project_operator_reject_edge():
+    # 2026-07-03 F0200 finding: a project at final approval with poisoned
+    # locked facts (legacy fabrication class) must be TERMINABLE by the
+    # operator, not merely outrun in the approve-binding race. Same guarded
+    # CLI path, same terminal state, same notification flow.
+    from agents.flyer.manual_queue import close_manual_project
+
+    project = _manual_project().model_copy(update={
+        "status": "awaiting_final_approval",
+        "manual_review": FlyerManualReview(status="none"),
+    })
+    store = FlyerProjectStore(projects=[project])
+
+    updated = close_manual_project(store, "F9100", reason="fabricated facts must never ship")
+    closed = updated.projects[0]
+    assert closed.status == "closed_no_send"
+    assert closed.manual_review.status == "closed_no_send"
+    assert closed.manual_review.detail == "fabricated facts must never ship"
+
+
+def test_close_still_rejects_other_statuses():
+    from agents.flyer.manual_queue import close_manual_project
+
+    for status in ("generating_concepts", "finalizing_assets", "delivered"):
+        project = _manual_project().model_copy(update={
+            "status": status,
+            "manual_review": FlyerManualReview(status="none"),
+        })
+        store = FlyerProjectStore(projects=[project])
+        with pytest.raises(ValueError, match="not queued for manual close"):
+            close_manual_project(store, "F9100", reason="operator cleanup attempt")

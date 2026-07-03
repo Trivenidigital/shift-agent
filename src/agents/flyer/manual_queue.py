@@ -553,7 +553,14 @@ def close_manual_project(
         if project.project_id != project_id:
             continue
         manual = project.manual_review
-        if project.status != "manual_edit_required" or manual.status not in {"queued", "in_progress"}:
+        closable_manual = (project.status == "manual_edit_required"
+                           and manual.status in {"queued", "in_progress"})
+        # Operator reject edge (2026-07-03 F0200 finding): a project at final
+        # approval with facts that must never ship (fabrication class) is
+        # closable by the operator through this same guarded CLI path. The
+        # manual_review row records the closure reason either way.
+        closable_awaiting = project.status == "awaiting_final_approval"
+        if not (closable_manual or closable_awaiting):
             raise ValueError(f"project not queued for manual close: {project_id}")
         if not is_flyer_transition_allowed(project.status, "closed_no_send"):
             raise ValueError(f"invalid transition {project.status}->closed_no_send")
