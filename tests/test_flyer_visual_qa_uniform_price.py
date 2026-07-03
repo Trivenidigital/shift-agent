@@ -149,13 +149,15 @@ def test_uniform_detector_unit():
 
 
 def test_substring_price_never_activates_loosened_path():
-    # "$5.99" items under a "$15.99" offer must NOT count as uniform-price
-    # (substring containment is not equality); strict adjacency applies.
+    # Dollarless "5.99" items under a "$15.99" offer must NOT count as
+    # uniform-price. This is the EXACT exploit the pre-fix substring check
+    # allowed ("5.99" in "Familyplatter$15.99" is True; reviewer-verified this
+    # test FAILS on the old code and passes on the exact-token gate).
     from agents.flyer.visual_qa import _uniform_shared_price
     proj = _uniform_project()
     facts = [f for f in proj.locked_facts if f.fact_id != "pricing_structure"]
     facts.append(_F("pricing_structure", "Family platter $15.99"))
     proj = proj.model_copy(update={"locked_facts": facts})
-    records = {i: {"name": n, "price": "$5.99"}
+    records = {i: {"name": n, "price": "5.99"}
                for i, n in enumerate(["Idli", "Medu Vada", "Upma", "Pongal"])}
     assert _uniform_shared_price(proj, records) is False
