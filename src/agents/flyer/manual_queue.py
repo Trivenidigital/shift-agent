@@ -43,6 +43,10 @@ CLOSE_FRESH_OK_REASON_TOKENS = (
     "test",
     "superseded",
     "provider_unavailable_after_retry",
+    # fabricated locked facts must never ship — the operator-reject edge's
+    # canonical justification (F0200 class) should not require --force
+    "fabricated",
+    "fact_safety",
 )
 _CLOSE_FRESH_REASON_TOKEN_RE = re.compile(
     r"(?:^|[^a-z0-9])(?:"
@@ -359,6 +363,12 @@ def backfill_manual_reasons(
     now = now or datetime.now(timezone.utc)
     candidates: list[dict] = []
     for idx, project in enumerate(store.projects):
+        if project.manual_review.status in {"closed_no_send", "break_glass_sent"}:
+            # Terminal manual states are never backfill-eligible: re-queueing a
+            # closed row resurrects a ghost queue entry on a terminal project
+            # (PR #541 review, MEDIUM — every operator-reject close would
+            # otherwise qualify via its historical failed qa_reports).
+            continue
         if project.manual_review.reason_code != "unclassified":
             continue
         has_failed_qa = any(report.status != "passed" for report in project.qa_reports)
@@ -564,11 +574,18 @@ def close_manual_project(
             raise ValueError(f"project not queued for manual close: {project_id}")
         if not is_flyer_transition_allowed(project.status, "closed_no_send"):
             raise ValueError(f"invalid transition {project.status}->closed_no_send")
-        new_manual = project.manual_review.model_copy(update={
+        manual_update = {
             "status": "closed_no_send",
             "detail": reason[:500],
             "completed_at": now,
-        })
+        }
+        if manual.reason_code in ("", "unclassified"):
+            # Operator-reject closes (incl. the awaiting_final_approval edge)
+            # get a definite reason_code: better customer closure copy and
+            # defense-in-depth against unclassified-row backfill eligibility.
+            manual_update["reason_code"] = "operator_request"
+            manual_update["reason"] = "operator_request"
+        new_manual = project.manual_review.model_copy(update=manual_update)
         store.projects[idx] = project.model_copy(update={
             "status": "closed_no_send",
             "manual_review": new_manual,
