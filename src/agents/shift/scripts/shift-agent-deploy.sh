@@ -380,6 +380,16 @@ PY
     # flyer_render.py via the flat names below; the modules carry try-flat/except-
     # package shims for their sibling imports (premium_overlay/campaign_scene_prompts/
     # premium_poster_v1/flyer_art_director_oracle). Guarded for rollback compatibility.
+    if [ -f src/agents/flyer/extraction_v2.py ]; then
+        install -m 644 src/agents/flyer/extraction_v2.py /opt/shift-agent/flyer_extraction_v2.py
+    else
+        rm -f /opt/shift-agent/flyer_extraction_v2.py
+    fi
+    if [ -f src/agents/flyer/extraction_seam.py ]; then
+        install -m 644 src/agents/flyer/extraction_seam.py /opt/shift-agent/flyer_extraction_seam.py
+    else
+        rm -f /opt/shift-agent/flyer_extraction_seam.py
+    fi
     if [ -f src/agents/flyer/premium_poster_v1.py ]; then
         install -m 644 src/agents/flyer/premium_poster_v1.py /opt/shift-agent/flyer_premium_poster_v1.py
     else

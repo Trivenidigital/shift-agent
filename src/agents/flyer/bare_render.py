@@ -421,6 +421,27 @@ def _emit_premium_poster_v1_bare_final(outcome, chat_id: str, *, qa_passed: bool
         output_format=getattr(outcome, "output_format", ""))
 
 
+def _append_audit_line(line: str) -> None:
+    """One NDJSON row to the canonical decisions.log chokepoint (flock +
+    ndjson_append when available; plain append in fcntl-less test envs).
+    Best-effort: never raises."""
+    try:
+        try:
+            from safe_io import flock as _flock, ndjson_append as _ndjson_append  # type: ignore
+        except Exception:  # noqa: BLE001
+            _flock = None  # type: ignore
+            _ndjson_append = None  # type: ignore
+        AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if _flock is not None and _ndjson_append is not None:
+            with _flock(AUDIT_LOG_PATH):
+                _ndjson_append(AUDIT_LOG_PATH, line)
+        else:
+            with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+    except Exception:  # noqa: BLE001
+        return
+
+
 def _sanitize_chat(chat_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.@-]", "_", chat_id or "")[:80]
 
@@ -708,13 +729,36 @@ def _build_locked_facts(customer, fields, raw_text: str, message_id: str, flyer_
     profile_facts = []
     if getattr(customer, "status", "") in {"trial", "active"}:
         profile_facts = F.profile_locked_facts(customer, raw_request=raw_text, message_id=message_id)
+    try:  # flat (VPS) then package (tests)
+        from flyer_extraction_seam import extract_text_facts_seam  # type: ignore
+    except ImportError:
+        from agents.flyer.extraction_seam import extract_text_facts_seam
+
+    def _audit_extraction_v2(event, payload):
+        try:
+            schemas = _schemas()
+            if event == "extraction_v2_used":
+                entry = schemas.FlyerExtractionV2Outcome(
+                    ts=datetime.now(timezone.utc), seam="bare_render", event=event,
+                    items_locked=payload.items_locked, scalars_locked=payload.scalars_locked,
+                    dropped_by_parity_n=len(payload.dropped_by_parity))
+            else:
+                entry = schemas.FlyerExtractionV2Outcome(
+                    ts=datetime.now(timezone.utc), seam="bare_render", event=event,
+                    reason=str(payload)[:120])
+            _append_audit_line(entry.model_dump_json())
+        except Exception:  # noqa: BLE001 — observability never blocks the render
+            pass
+
     return F.merge_locked_facts(
         profile_facts,
-        F.extract_text_facts(
+        extract_text_facts_seam(
             fields, raw_text, message_id=message_id,
             profile_business_name=getattr(customer, "business_name", ""),
             allow_text_identity=not bool(profile_facts),
             cfg=flyer_cfg,
+            audit=_audit_extraction_v2,
+            seam="bare_render",
         ),
     )
 

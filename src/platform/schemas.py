@@ -4589,6 +4589,20 @@ class FlyerPremiumPosterV1Bare(_BaseEntry):
     output_format: str = Field(default="", max_length=40)
 
 
+class FlyerExtractionV2Outcome(_BaseEntry):
+    """WS1 seam-swap observability (v2 spec, 2026-07-03): one row per brief when
+    FLYER_EXTRACTION_V2=1 records whether the LLM extractor was used or fell back
+    to the legacy regex layer (fail-closed contract). LOG-ONLY; zero rows when
+    the flag is off (byte-identical legacy)."""
+    type: Literal["flyer_extraction_v2_outcome"] = "flyer_extraction_v2_outcome"
+    seam: Literal["managed_create", "bare_render"]
+    event: Literal["extraction_v2_used", "extraction_v2_fallback"]
+    items_locked: int = Field(default=0, ge=0)
+    scalars_locked: int = Field(default=0, ge=0)
+    dropped_by_parity_n: int = Field(default=0, ge=0)
+    reason: str = Field(default="", max_length=120)
+
+
 class FlyerPremiumRepairExhausted(_BaseEntry):
     """Slice 2 premium repair-loop observability. Emitted when the bounded (×2)
     repair edits did not produce a clean premium render — the orchestrator leaves
@@ -5993,6 +6007,8 @@ LogEntry = Annotated[
         Annotated[FlyerPremiumPosterV1Managed, Tag("flyer_premium_poster_v1_managed")],
         # 2026-07-02 — Premium Poster v1 bare/WhatsApp-direct path observability
         Annotated[FlyerPremiumPosterV1Bare, Tag("flyer_premium_poster_v1_bare")],
+        # 2026-07-03 — WS1 extraction seam-swap observability
+        Annotated[FlyerExtractionV2Outcome, Tag("flyer_extraction_v2_outcome")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
