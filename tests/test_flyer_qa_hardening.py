@@ -139,9 +139,15 @@ def test_pool_is_word_tokenized_not_substring(tmp_path):
     raw = ("Create a flyer for the Freedom Sale. Stuffed peppers $8.99. "
            "Fridays and Saturdays.")
     proj = _project(raw=raw)
+    # Mixed prices so the uniform-price bridge cannot apply — 'per' stays an
+    # invented claim here. (The original assertion used substring-in-lows and
+    # was satisfied by 'oPERational' — the very bug class this test pins.)
+    facts = [f for f in proj.locked_facts if f.fact_id != "item:1:price"]
+    facts.append(_F("item:1:price", "$8.99"))
+    proj = proj.model_copy(update={"locked_facts": facts})
     rep = _qa(tmp_path, GOOD_OCR + "PER PLATE\nFREE DELIVERY\n", project=proj)
-    lows = " ".join(rep.blockers).lower()
-    assert "per" in lows and "free" in lows, rep.blockers
+    assert "invented offer qualifier visible: per" in rep.blockers, rep.blockers
+    assert "invented offer qualifier visible: free" in rep.blockers, rep.blockers
 
 
 def test_paraphrase_bridges_authorize_customer_stated_forms(tmp_path):
@@ -152,3 +158,23 @@ def test_paraphrase_bridges_authorize_customer_stated_forms(tmp_path):
     proj = _project(raw=raw)
     rep = _qa(tmp_path, GOOD_OCR + "PER PLATE\nBOGO\n", project=proj)
     assert not any("qualifier" in b.lower() for b in rep.blockers), rep.blockers
+
+
+def test_each_authorized_on_uniform_price_design(tmp_path):
+    # F0208 (C1 exhibit): brief "Any tiffin $6.99" without the literal word
+    # 'each' — the render painting '$6.99 each' is a faithful restatement of
+    # the locked uniform price and must NOT block (it killed the entire
+    # ladder: integrated -> premium -> deterministic -> manual).
+    rep = _qa(tmp_path, GOOD_OCR + "$6.99 each\n")
+    assert not any("each" in b.lower() for b in rep.blockers), rep.blockers
+
+
+def test_each_still_blocks_without_uniform_price(tmp_path):
+    # Mixed-price project: 'each' visible with no uniform price and no brief
+    # backing remains an invented claim.
+    proj = _project()
+    facts = [f for f in proj.locked_facts if f.fact_id != "item:1:price"]
+    facts.append(_F("item:1:price", "$8.99"))
+    proj = proj.model_copy(update={"locked_facts": facts})
+    rep = _qa(tmp_path, GOOD_OCR + "EACH\n", project=proj)
+    assert any("each" in b.lower() for b in rep.blockers), rep.blockers
