@@ -520,10 +520,20 @@ PY
     else
         rm -f /opt/shift-agent/flyer_creative_resolver.py
     fi
-    # Retired 2026-07-04 (graduation commit 5 audition verdict): the narrative
-    # referee never selected anything live (candidate pool <=1; its bar rejects
-    # the archetype library's own templates). Clean the stale flat copy.
-    rm -f /opt/shift-agent/flyer_narrative_quality.py
+    # Retired 2026-07-04 (graduation commit 5): the narrative referee is
+    # redundant under CCA — the firewall owns safety/grounding, the composer
+    # owns priority order; the referee blacklists CCA's own combo template and
+    # its scoring would demote the designed offer-explicit-first ordering.
+    # ROLLBACK HYGIENE (PR #546 review F1): the install branch exists ONLY for
+    # rollback to pre-#546 tarballs still in rotation (KEEP_TARBALLS window) —
+    # the old resolver top-imports this module and a bare rm -f would leave a
+    # restored tree broken (terminal, since rollback-of-rollback is refused).
+    # Dead code on forward deploys (the repo file no longer exists).
+    if [ -f src/agents/flyer/flyer_narrative_quality.py ]; then
+        install -m 644 src/agents/flyer/flyer_narrative_quality.py /opt/shift-agent/flyer_narrative_quality.py
+    else
+        rm -f /opt/shift-agent/flyer_narrative_quality.py
+    fi
     # Controlled Copy Archetypes (CCA). flyer_creative_resolver hard-imports
     # compose_archetype_headlines from flyer_copy_archetypes at module load, so it MUST
     # be installed at the deployed flat path or the resolver import raises ImportError

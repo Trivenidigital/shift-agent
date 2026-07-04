@@ -176,9 +176,8 @@ _cdv2_body = _cdv2_skill.read_text(encoding='utf-8', errors='replace')
 for _cdv2_field in ('campaign_narrative', 'hero_ref', 'marketing_hook', 'offer_priority'):
     assert _cdv2_field in _cdv2_body, \
         'CD v2 brain SKILL at %s is stale — missing field %r' % (_cdv2_skill, _cdv2_field)
-# Narrative quality referee (PR #506) deploy-packaging gate. flyer_creative_resolver
-# resolver therefore fails closed if the deploy manifest omits the new module.
-# Assert the module + public selector load so a missing install line fails this
+# Resolver deploy-packaging gate: flyer_creative_resolver top-imports
+# flyer_copy_archetypes; assert the resolver module loads from the flat path.
 # smoke gate (not a live customer flyer at CD v2 narrative-selection time).
 import flyer_creative_resolver  # noqa: F401 — top-imports flyer_copy_archetypes
 # Controlled Copy Archetypes (CCA) deploy-packaging gate. flyer_creative_resolver
