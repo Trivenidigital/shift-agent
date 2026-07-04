@@ -274,3 +274,36 @@ def test_composer_demoted_when_typeset_contract_applies(monkeypatch, tmp_path):
                         output_format="concept_preview", size=(1080, 1350),
                         model="google/gemini-3.1-flash-image-preview", quality="medium")
     assert calls["ppv1"] == 1
+
+
+def test_demotion_records_truthful_outcome(monkeypatch, tmp_path):
+    # PR #550 review F2: a demoted render must record reason=demoted_typeset,
+    # never "ineligible" (the project IS eligible; it was demoted by design).
+    from agents.flyer import render as R
+    monkeypatch.setattr(R, "render_premium_poster_v1",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("demoted — must not run")))
+    monkeypatch.setattr(R, "_openrouter_image_bytes", lambda *a, **k: __import__("io").BytesIO().getvalue() or _png())
+    def _png():
+        import io
+        from PIL import Image, ImageDraw
+        buf = io.BytesIO(); img = Image.new("RGB", (1080, 1350), (200, 60, 40))
+        d = ImageDraw.Draw(img)
+        for y in range(0, 1350, 40): d.rectangle([100, y, 900, y + 15], fill=(30 + y % 100, 80, 60))
+        img.save(buf, format="PNG"); return buf.getvalue()
+    monkeypatch.setattr(R, "_openrouter_image_bytes", lambda *a, **k: _png())
+    for var in ("FLYER_ALLOW_INTEGRATED_POSTER", "FLYER_PREMIUM_POSTER_V1", "FLYER_STYLE_REGISTERS"):
+        monkeypatch.setenv(var, "1")
+    monkeypatch.setenv("FLYER_PREMIUM_POSTER_V1_ALLOWLIST", PHONE)
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", PHONE)
+    proj = _project()
+    proj = proj.model_copy(update={"locked_facts": [*proj.locked_facts,
+        _F("item:2:name", "Pongal"), _F("item:2:price", "$6.99")]})
+    from agents.flyer.render import premium_poster_v1_managed_path
+    with premium_poster_v1_managed_path():
+        R._render_model(proj, tmp_path / "d.png", concept_id="C1",
+                        output_format="concept_preview", size=(1080, 1350),
+                        model="google/gemini-3.1-flash-image-preview", quality="medium")
+        outcome = R._PREMIUM_POSTER_V1_OUTCOME.get()
+    assert outcome is not None
+    assert outcome.status == "skipped" and outcome.reason == "demoted_typeset"
+    assert outcome.delivered is False

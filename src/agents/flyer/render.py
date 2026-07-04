@@ -280,7 +280,8 @@ class PremiumPosterV1Outcome:
     render path."""
     delivered: bool
     status: str            # delivered | fallback | skipped
-    reason: str            # none | unsupported_size | no_winner[:<status>=<count>,…]
+    reason: str            # none | unsupported_size | demoted_typeset
+    #                      # | no_winner[:<status>=<count>,…]
     #                      # | no_food_winner[:…] | exception:<T>:<msg-head>
     n: int
     winner_index: int
@@ -5012,22 +5013,28 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
         #   would burn its own N generations + full budget and the managed emitter
         #   would record only the LAST concept's outcome; premium is a one-shot
         #   primary attempt on the first concept only.
-        if (not force_background_only
+        _ppv1_conjuncts = (not force_background_only
                 and not repair_instruction
                 and concept_id == "C1"
                 and model.strip().lower() not in DETERMINISTIC_MODEL_NAMES
                 and _premium_poster_v1_opt_in_path() is not None
                 and _premium_poster_v1_armed(project)
-                and _premium_poster_v1_eligible(project)
-                # COMPOSER DEMOTION (v2 spec ruling, shipped 2026-07-04 after the
-                # C1 structural finding on F0205/F0206): when the typeset
-                # contract applies, the INTEGRATED register render is the
-                # preview path — the deterministic composer cannot paint the
-                # crowned register (beveled-gold dimensional type) and was
-                # winning selection on exactly the premium-eligible briefs the
-                # register exists for. PPv1 stays primary for non-register
-                # projects; the existing recovery ladder is the fallback.
-                and not _typeset_contract_applies(project, force_background_only=force_background_only)):
+                and _premium_poster_v1_eligible(project))
+        # COMPOSER DEMOTION (v2 spec ruling, shipped 2026-07-04 after the C1
+        # structural finding on F0205/F0206): when the typeset contract
+        # applies, the INTEGRATED register render is the preview path — the
+        # deterministic composer cannot paint the crowned register and was
+        # winning selection on exactly the premium-eligible briefs the
+        # register exists for. PPv1 stays primary for non-register projects;
+        # the existing recovery ladder is the fallback. Telemetry (PR #550
+        # review F2): record a truthful demoted reason so the pilot's
+        # eligible/attempted rows don't read as an eligibility collapse.
+        _ppv1_demoted = _ppv1_conjuncts and _typeset_contract_applies(
+            project, force_background_only=force_background_only)
+        if _ppv1_demoted:
+            _PREMIUM_POSTER_V1_OUTCOME.set(PremiumPosterV1Outcome(
+                False, "skipped", "demoted_typeset", 0, -1, None, output_format))
+        if _ppv1_conjuncts and not _ppv1_demoted:
             outcome = render_premium_poster_v1(
                 project, path, concept_id=concept_id, output_format=output_format,
                 size=size, model=model, quality=quality)
