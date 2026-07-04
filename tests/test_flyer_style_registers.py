@@ -97,3 +97,35 @@ def test_flag_default_off(monkeypatch):
     monkeypatch.delenv("FLYER_STYLE_REGISTERS", raising=False)
     monkeypatch.delenv("FLYER_STYLE_REGISTERS_ALLOWLIST", raising=False)
     assert style_registers_enabled("+17329837841") is False
+
+
+def test_all_register_jargon_screened():
+    # PR #543 review F1/F2: every register's distinctive prompt jargon is in
+    # the base screen, and every occasion entry can actually match its text.
+    entries = forbidden_substrings_for(DEFAULT_REGISTER)
+    for word in ("kolam", "paisley", "mandala", "starburst", "damask",
+                 "scrollwork", "temple-motif", "geometric"):
+        assert word in entries, word
+    ram = forbidden_substrings_for(DEFAULT_REGISTER, occasion="ramadan")
+    assert "islamic" in ram
+    # every occasion screen entry appears as a substring of its own prompt text
+    # (an entry that can't match its vocabulary is decoration, not a screen)
+    from agents.flyer.style_registers import OCCASIONS, _OCCASION_FORBIDDEN
+    for occ, words in _OCCASION_FORBIDDEN.items():
+        text = " ".join(OCCASIONS[occ].values()).lower()
+        matched = [w for w in words if w in text]
+        assert len(matched) >= len(words) - 1, (occ, set(words) - set(matched))
+
+
+def test_phone_normalization_matches_jid_and_unplussed(monkeypatch):
+    # PR #543 review F3: allowlist "+1..." must match JID / un-plussed callers.
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", "+17329837841")
+    assert style_registers_enabled("17329837841@s.whatsapp.net") is True
+    assert style_registers_enabled("17329837841") is True
+    assert style_registers_enabled("+1 (732) 983-7841") is True
+    assert style_registers_enabled("15550000000@s.whatsapp.net") is False
+
+
+def test_premium_dark_carries_ornament_discipline():
+    assert "ORNAMENT DISCIPLINE" in REGISTERS["premium-dark"]

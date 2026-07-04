@@ -78,7 +78,8 @@ REGISTERS: dict[str, str] = {
         "TYPOGRAPHY: main display text in a high-contrast DIDONE display face with a beveled "
         "metallic-gold treatment (deep shadow, polished highlights); top small line in small caps, "
         "widely spaced, thin gold rule either side; every badge row one identical typeface, size, "
-        "weight. No mixed weights inside any line."
+        "weight. No mixed weights inside any line. ORNAMENT DISCIPLINE: decoration frames "
+        "text zones but NEVER overlaps, crowds, or distorts any text."
     ),
 }
 
@@ -142,11 +143,16 @@ _BASE_FORBIDDEN = [
     "beveled", "scalloped", "dimensional", "letterspaced", "didone", "grotesque",
     "emboss", "keyline", "kicker", "medallion", "badge row", "ornament", "register",
     "intensity", "typography", "art direction", "occasion theme",
+    # PR #543 review F1: distinctive vocabulary from ALL registers, not just the
+    # default (kolam/paisley/mandala appear in register text, not only occasion
+    # lists; damask/scrollwork/starburst/temple-motif are pure prompt jargon).
+    "kolam", "paisley", "mandala", "starburst", "damask", "scrollwork",
+    "temple-motif", "geometric",
 ]
 _OCCASION_FORBIDDEN: dict[str, list[str]] = {
     "july4": ["bunting", "star-field", "keylines", "two-tone", "star-shaped"],
     "diwali": ["diya", "marigold", "rangoli", "garland", "mandala"],
-    "ramadan": ["crescent", "lantern", "night-blue", "geometric pattern"],
+    "ramadan": ["crescent", "lantern", "night-blue", "islamic"],
     "thanksgiving": ["harvest", "maple", "wheat", "sheaves", "cornucopia", "gourd"],
 }
 
@@ -173,13 +179,26 @@ def forbidden_substrings_for(register: str, *, occasion: str | None = None) -> l
     return entries
 
 
+def _normalize_phone(value: str) -> str:
+    """Mirror render._normalize_sender semantics (PR #543 review F3): strip any
+    @-JID suffix, drop punctuation/plus, casefold — so an allowlist entry
+    "+17329837841" matches a caller passing a JID or un-plussed form instead of
+    silently never firing (the phantom-lever setup)."""
+    v = (value or "").strip().casefold()
+    if "@" in v:
+        v = v.split("@", 1)[0]
+    return "".join(c for c in v if c.isalnum())
+
+
 def style_registers_enabled(customer_phone: str) -> bool:
     """ppv1 allowlist semantics — fail-closed: flag on AND non-empty allowlist
-    AND phone membership. Empty allowlist DISABLES (never global-on)."""
+    AND phone membership (both sides normalized). Empty allowlist DISABLES
+    (never global-on)."""
     if os.environ.get("FLYER_STYLE_REGISTERS", "") != "1":
         return False
-    allowlist = [p.strip() for p in
-                 os.environ.get("FLYER_STYLE_REGISTERS_ALLOWLIST", "").split(",") if p.strip()]
+    allowlist = {_normalize_phone(p) for p in
+                 os.environ.get("FLYER_STYLE_REGISTERS_ALLOWLIST", "").split(",") if p.strip()}
+    allowlist.discard("")
     if not allowlist:
         return False
-    return (customer_phone or "").strip() in allowlist
+    return _normalize_phone(customer_phone) in allowlist
