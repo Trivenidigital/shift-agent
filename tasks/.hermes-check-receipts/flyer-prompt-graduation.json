@@ -1,0 +1,43 @@
+{
+ "topic": "flyer-prompt-graduation",
+ "task_text": "flyer-prompt-graduation \u2014 graduate the R1-R3.5 harness prompt layer (style registers, typeset-spec assembly, occasion field, intensity dial, QA hardening batch, referee audition, planner removal) into production render/extraction/QA code, flag-gated, per operator sequence 2026-07-04",
+ "checked_at": "2026-07-04T15:22:17.700229+00:00",
+ "steps": [
+  {
+   "step": "author style/occasion/intensity prompt blocks",
+   "tag": "[net-new]",
+   "note": "pure data module mirroring campaign_scene_prompts precedent"
+  },
+  {
+   "step": "LLM gateway for extraction+occasion",
+   "tag": "[Hermes]",
+   "note": "existing OpenRouter gateway via extraction_v2 seam; schema extension only"
+  },
+  {
+   "step": "image generation",
+   "tag": "[Hermes]",
+   "note": "existing render.py OpenRouter path; prompt text changes only"
+  },
+  {
+   "step": "vision QA readback",
+   "tag": "[Hermes]",
+   "note": "existing visual_qa OCR seam; new rules added to existing rule set"
+  },
+  {
+   "step": "typeset-spec prompt assembly",
+   "tag": "[net-new]",
+   "note": "replaces flat facts block inside existing _image_prompt; flag-gated"
+  },
+  {
+   "step": "candidate-selection screen",
+   "tag": "[net-new]",
+   "note": "text screen inside existing best-of-N director; no new pipeline"
+  },
+  {
+   "step": "tagline judging",
+   "tag": "[Hermes]",
+   "note": "in-tree flyer_narrative_quality already built+tested; audition wiring only"
+  }
+ ],
+ "verdict": "5 of 7 steps ride existing substrate/in-tree modules; net-new = prompt data + assembly text + one screen. No Hermes ecosystem skill covers poster art direction (checked skills hub categories: productivity/*, mcp/native-mcp \u2014 none apply to prompt authoring)."
+}
