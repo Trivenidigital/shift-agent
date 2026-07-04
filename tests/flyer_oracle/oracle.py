@@ -28,7 +28,6 @@ os.environ["OPENROUTER_API_KEY"] = ""
 os.environ.pop("OPENAI_API_KEY", None)
 
 from schemas import FlyerAsset, FlyerConfig, FlyerCreativePlannerConfig, FlyerLockedFact, FlyerProject, FlyerRequestFields  # noqa: E402
-from agents.flyer import creative_planner as cp  # noqa: E402
 from agents.flyer import facts as flyer_facts  # noqa: E402
 
 CORPUS_DIR = _HERE.parent / "corpus"
@@ -64,10 +63,12 @@ def run_pipeline(case: dict):
     LLM planner without network spend and lets the oracle check the product
     contract around when those planner facts may flow.
     """
-    offers = case.get("planner_offers")
-    cp.build_creative_planner_provider = (
-        (lambda o=offers: (lambda fields, raw: list(o))) if offers else (lambda: None)
-    )
+    # creative_planner removed (graduation commit 6): planner_offers-bearing
+    # fixtures were retired to corpus-retired/ (unreachable states).
+    if case.get("planner_offers"):
+        raise SystemExit(
+            f"case {case.get('id', '?')} uses planner_offers — the planner was "
+            "removed; move the fixture to corpus-retired/")
     # Seal offline determinism (Codex review): the deployed semantic-brief provider can
     # read /root/.hermes/.env or /opt/shift-agent/.env (not just process env), so on a
     # host with those files it could call OpenRouter. Force it to None ⇒ deterministic
