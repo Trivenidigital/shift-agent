@@ -1741,6 +1741,174 @@ def _internal_asset_id_blockers(extracted_text: str) -> list[str]:
     return blockers
 
 
+_QUALIFIER_WORDS = {
+    "combo", "free", "bogo", "unlimited", "each", "per",
+}
+
+
+def _authorized_text_pool(project: FlyerProject) -> str:
+    """Everything the customer actually supplied: locked fact labels+values,
+    the raw brief, and request fields. Lowercased blob for containment checks.
+    The bright line: content absent from ALL of these was invented."""
+    parts = [str(getattr(project, "raw_request", "") or "")]
+    for fact in getattr(project, "locked_facts", []) or []:
+        parts.append(str(getattr(fact, "value", "") or ""))
+        parts.append(str(getattr(fact, "label", "") or ""))
+    fields = getattr(project, "fields", None)
+    if fields is not None:
+        for attr in ("event_or_business_name", "notes", "venue_or_location",
+                     "contact_info", "style_preference"):
+            parts.append(str(getattr(fields, attr, "") or ""))
+    return " ".join(parts).casefold()
+
+
+def _style_vocab_entries() -> list[str]:
+    """Union of every authored forbidden-substrings list from style_registers.
+    Lazy import, FAIL-OPEN (screen absent) on deploy-order skew — this is an
+    additional screen, not a load-bearing gate."""
+    try:
+        try:
+            from style_registers import (OCCASIONS,  # type: ignore
+                                         forbidden_substrings_for)
+        except ImportError:
+            from agents.flyer.style_registers import (OCCASIONS,
+                                                      forbidden_substrings_for)
+        entries: set[str] = set(forbidden_substrings_for("festive-premium"))
+        for occ in OCCASIONS:
+            entries.update(forbidden_substrings_for("festive-premium", occasion=occ))
+        return sorted(entries)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _style_vocab_blockers(project: FlyerProject, extracted_text: str) -> list[str]:
+    """Prompt jargon painted into art (leak law screen — R2.5/R2.6 exhibits:
+    'WIDELY LETTERSPACED' subhead, 'SCHEDULE LINE' labels). An entry present in
+    the customer's own text is authorized (never punish the brief)."""
+    text = (extracted_text or "").casefold()
+    if not text.strip():
+        return []
+    pool = _authorized_text_pool(project)
+    blockers: list[str] = []
+    for entry in _style_vocab_entries():
+        if entry in text and entry not in pool:
+            blockers.append(f"prompt vocabulary painted into art: {entry}")
+    return blockers
+
+
+def _offer_qualifier_blockers(project: FlyerProject, extracted_text: str) -> list[str]:
+    """Invented offer qualifiers (the ships-wrong class): a promo/portion
+    qualifier visible in the art that appears in NO locked fact and NOT in the
+    customer's brief asserts a claim nobody made ('COMBO' badge on a brief
+    that never said combo).
+
+    PR #545 review F3: pool membership is WORD-tokenized ('per' must not be
+    authorized by 'peppers', 'free' not by 'Freedom Sale'). F4: semantic
+    bridges authorize faithful paraphrases of customer-stated forms
+    ('$10/plate' -> 'per plate'; 'buy one get one' -> 'BOGO')."""
+    text = (extracted_text or "").casefold()
+    if not text.strip():
+        return []
+    pool_raw = _authorized_text_pool(project)
+    pool_words = set(re.findall(r"[a-z]+", pool_raw))
+    words = set(re.findall(r"[a-z]+", text))
+    unit_pricing = bool(re.search(r"/\s*[a-z]+", pool_raw))  # "$10/plate" forms
+    blockers: list[str] = []
+    for q in sorted(_QUALIFIER_WORDS):
+        if q not in words or q in pool_words:
+            continue
+        if q in ("per", "each") and (unit_pricing or "per" in pool_words or "each" in pool_words):
+            continue  # F4 bridge: per-unit pricing stated by the customer
+        if q == "bogo" and {"buy", "get"} <= pool_words:
+            continue  # F4 bridge: buy-X-get-Y stated by the customer
+        blockers.append(f"invented offer qualifier visible: {q}")
+    return blockers
+
+
+_DAY_WORDS = ("monday", "mondays", "tuesday", "tuesdays", "wednesday", "wednesdays",
+              "thursday", "thursdays", "friday", "fridays", "saturday", "saturdays",
+              "sunday", "sundays")
+
+
+def _schedule_near_miss_blockers(project: FlyerProject, extracted_text: str) -> list[str]:
+    """Day-word corruption at edit distance 1 ('FRIDAYS AND SATURDAY' for
+    locked 'Saturdays' — the plural-loss exhibit that passed fact-presence).
+    Only fires when the corrupted form is NOT itself authorized text."""
+    text_words = set(re.findall(r"[a-z]+", (extracted_text or "").casefold()))
+    if not text_words:
+        return []
+    pool_words = set(re.findall(r"[a-z]+", _authorized_text_pool(project)))
+    authorized_days = {w for w in pool_words if w in _DAY_WORDS}
+    if not authorized_days:
+        return []
+    blockers: list[str] = []
+    for w in sorted(text_words):
+        if w in _DAY_WORDS and w not in authorized_days:
+            for a in authorized_days:
+                if _edit_distance_at_most_one(w, a):
+                    blockers.append(
+                        f"schedule day near-miss: rendered '{w}' vs locked '{a}'")
+                    break
+    return blockers
+
+
+_EXTRANEOUS_GLUE = {
+    "with", "from", "your", "only", "call", "open", "every", "this", "week",
+    "today", "daily", "and", "the", "for", "our", "now",
+}
+
+
+_TYPESET_MARKER_SUFFIX = ".typeset.json"
+
+# Strings the TYPESET PROMPT ITSELF may instruct beyond customer text (PR #545
+# review F1): the "Specials" title fallback and the "Call" footer prefix. The
+# registered-business-name case is covered by profile hydration — both live
+# seams (create-flyer-project and bare _build_locked_facts) merge profile
+# identity into locked facts, so the name is always pool-authorized on the
+# customer's path.
+_TYPESET_SYSTEM_WORDS = {"specials", "call"}
+
+
+def _typeset_marker_applies(artifact_path) -> bool:
+    """PR #545 review F2: the strict screen keys on a RENDER-TIME sidecar
+    marker (written by render.py when the typeset contract shaped the prompt),
+    NOT on env at QA time — a legacy-rendered preview approved after flag-on
+    must never be screened under a contract its prompt never carried. Finals
+    (recompose/resize of an approved preview) carry no marker -> screen off at
+    finalize, where preview QA already screened the same painted text."""
+    try:
+        return Path(str(artifact_path) + _TYPESET_MARKER_SUFFIX).exists()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _extraneous_token_blockers(project: FlyerProject, extracted_text: str,
+                               artifact_path=None) -> list[str]:
+    """STRICT extraneous-text screen, active ONLY for renders whose prompt
+    carried the typeset contract (render-time sidecar marker): the prompt
+    promised the numbered strings are the ONLY text, so any unauthorized alpha
+    token >=5 chars is a contract violation ('Degional', 'Dunchanuf',
+    'cleary treatment' exhibits). Legacy renders are NOT screened."""
+    if artifact_path is None or not _typeset_marker_applies(artifact_path):
+        return []
+    text_words = re.findall(r"[a-z]+", (extracted_text or "").casefold())
+    if not text_words:
+        return []
+    pool_words = set(re.findall(r"[a-z]+", _authorized_text_pool(project)))
+    pool_words |= _TYPESET_SYSTEM_WORDS  # F1: the prompt's own instructed strings
+    blockers: list[str] = []
+    flagged: set[str] = set()
+    for w in text_words:
+        if len(w) < 5 or w in _EXTRANEOUS_GLUE or w in pool_words or w in flagged:
+            continue
+        # tolerate OCR-benign singular/plural of authorized words
+        if any(_edit_distance_at_most_one(w, a) for a in pool_words if len(a) >= 5):
+            continue
+        flagged.add(w)
+        blockers.append(f"extraneous text under typeset contract: {w}")
+    return blockers
+
+
 def run_visual_qa(
     project: FlyerProject,
     artifact_path: Path | str,
@@ -1821,6 +1989,13 @@ def run_visual_qa(
     blockers.extend(_near_duplicate_item_blockers(project, extracted_text))
     blockers.extend(_unexpected_phone_blockers(project, extracted_text))
     blockers.extend(_fabricated_offer_price_blockers(project, extracted_text))
+    # Graduation commit 4 — QA hardening batch (exhibit-backed; see
+    # tests/test_flyer_qa_hardening.py):
+    blockers.extend(_style_vocab_blockers(project, extracted_text))
+    blockers.extend(_offer_qualifier_blockers(project, extracted_text))
+    blockers.extend(_schedule_near_miss_blockers(project, extracted_text))
+    blockers.extend(_extraneous_token_blockers(project, extracted_text,
+                                                artifact_path=artifact_path))
     # Source-contract negative-assertion gate: any value in
     # forbidden_substrings (populated upstream from brand/phone/address
     # replacements) must NOT appear in the OCR text. Reuses the same
