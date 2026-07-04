@@ -125,3 +125,79 @@ def test_flag_on_other_phone_stays_legacy(monkeypatch):
     p = _prompt(_project())
     assert "TEXT TO RENDER" not in p
     assert "Controlled customer copy:" in p
+
+
+def test_offer_and_promotion_end_reach_typeset(monkeypatch):
+    # PR #544 F1: offer:N and promotion_end are required=True facts QA demands;
+    # the typeset spec must carry them (via the legacy detail selectors).
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", PHONE)
+    proj = _project()
+    proj = proj.model_copy(update={"locked_facts": [*proj.locked_facts,
+        _F("offer:0", "Buy 2 get 1 free"),
+        _F("promotion_end", "July 31")]})
+    p = _prompt(proj)
+    section = p.split("TEXT TO RENDER", 1)[1].split("HOW TO SET EACH LINE", 1)[0]
+    assert "Buy 2 get 1 free" in section
+    assert "July 31" in section
+
+
+def test_headline_fallback_reaches_typeset(monkeypatch):
+    # PR #544 F1: headline-only projects (no campaign_title) must still get
+    # display text via the legacy title fallback.
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", PHONE)
+    proj = _project()
+    facts = [f for f in proj.locked_facts if f.fact_id != "campaign_title"]
+    facts.append(_F("headline", "Grand Feast Days"))
+    proj = proj.model_copy(update={"locked_facts": facts})
+    p = _prompt(proj)
+    section = p.split("TEXT TO RENDER", 1)[1].split("HOW TO SET EACH LINE", 1)[0]
+    assert "Grand Feast Days" in section
+
+
+def test_whole_dollar_substring_not_uniform(monkeypatch):
+    # PR #544 F2: "$5" items under a "$50" offer are NOT uniform (WS2 exact-token
+    # semantics) — rows must keep their prices so QA adjacency passes.
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", PHONE)
+    proj = _project()
+    facts = [f for f in proj.locked_facts if not f.fact_id.startswith("item:")
+             and f.fact_id != "pricing_structure"]
+    facts.extend([_F("pricing_structure", "Party tray $50"),
+                  _F("item:0:name", "Samosa"), _F("item:0:price", "$5"),
+                  _F("item:1:name", "Kachori"), _F("item:1:price", "$5")])
+    proj = proj.model_copy(update={"locked_facts": facts})
+    p = _prompt(proj)
+    section = p.split("TEXT TO RENDER", 1)[1].split("HOW TO SET EACH LINE", 1)[0]
+    assert "Samosa $5" in section  # prices stay beside names
+    assert "Kachori $5" in section
+
+
+def test_reference_extraction_project_stays_legacy(monkeypatch):
+    # PR #544 F3: reference-extraction projects (items live in the attached
+    # image) must NOT get the typeset "ONLY text allowed" contract.
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", PHONE)
+    from agents.flyer import render as R
+    proj = _project()
+    monkeypatch.setattr(R, "_needs_reference_extraction", lambda p: True)
+    p = _prompt(proj)
+    assert "TEXT TO RENDER" not in p
+
+
+def test_flag_off_integrated_matches_other_phone_legacy(monkeypatch):
+    # PR #544 F6: pin flag-off byte path on the INTEGRATED route — flag fully
+    # off must equal flag-on-for-another-phone (both legacy) byte for byte.
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.delenv("FLYER_STYLE_REGISTERS", raising=False)
+    monkeypatch.delenv("FLYER_STYLE_REGISTERS_ALLOWLIST", raising=False)
+    off = _prompt(_project())
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", "+15550001111")
+    other = _prompt(_project())
+    assert off == other

@@ -2249,17 +2249,26 @@ def _style_register_parts(project: FlyerProject) -> tuple[str, str, str]:
                                                   style_prompt_block)
     register_block = style_prompt_block(DEFAULT_REGISTER)
 
+    # F1 (PR #544): build from the LEGACY fact selectors so every required
+    # locked fact QA demands is present — _poster_copy_plan covers title
+    # fallback (campaign_title -> headline), business/location/contact
+    # fallbacks, offer:N + promotion_end via detail_lines.
+    plan = _poster_copy_plan(project)
+    business = _display_business_name(project)
     by_id = {f.fact_id: str(f.value or "").strip() for f in project.locked_facts
              if str(f.value or "").strip()}
-    items: list[tuple[str, str]] = []
-    for f in project.locked_facts:
-        fid = str(f.fact_id or "")
-        if fid.startswith("item:") and fid.endswith(":name"):
-            idx = fid.split(":")[1]
-            items.append((str(f.value or "").strip(), by_id.get(f"item:{idx}:price", "")))
-    prices = {pr.replace(" ", "") for _n, pr in items if pr}
+    items = list(plan.items)
     offer = by_id.get("pricing_structure", "")
-    uniform = len(prices) <= 1 and (not prices or next(iter(prices)) in offer.replace(" ", ""))
+    # F2 (PR #544): EXACT price-token membership, mirroring WS2's verifier gate
+    # (visual_qa._uniform_shared_price) — substring said "$5" is uniform under a
+    # "$50" offer and QA then failed the render on adjacency. Same regex, same
+    # set semantics, and uniform requires EXACTLY ONE distinct item price.
+    _price_re = re.compile(r"\$\s?\d[\d,]*(?:\.\d{1,2})?")
+    item_prices = {pr.replace(" ", "") for _n, pr in items if pr.strip()}
+    offer_tokens: set[str] = set()
+    for fid in ("pricing_structure", "offer", "offer:0"):
+        offer_tokens.update(m.replace(" ", "") for m in _price_re.findall(by_id.get(fid, "")))
+    uniform = len(item_prices) == 1 and next(iter(item_prices)) in offer_tokens
 
     strings: list[str] = []
     roles: list[str] = []
@@ -2270,18 +2279,21 @@ def _style_register_parts(project: FlyerProject) -> tuple[str, str, str]:
         strings.append(text)
         roles.append(f"Line {len(strings)}: {role}")
 
-    add(by_id.get("business_name", ""), "small top line; widely spaced")
-    add(by_id.get("campaign_title", ""),
-        "the huge display text; as given; never extend into a sentence; no price in it")
+    add(business, "small top line; widely spaced")
+    add(plan.title, "the huge display text; as given; never extend into a sentence; no price in it")
     if offer:
         add(offer, "inside/beside the shaped price element ONLY; never in the display text")
-    add(by_id.get("schedule", ""), "its own small line")
+    add(plan.schedule, "its own small line")
     for name, price in items:
         add(name if uniform else f"{name} {price}".strip(),
             "one menu row" + ("; the shared price stays in the price element, never beside items" if uniform else ""))
-    footer_bits = [by_id.get("location", "")]
-    if by_id.get("contact_phone"):
-        footer_bits.append(f"Call {by_id['contact_phone']}")
+    for detail in plan.detail_lines:
+        if detail == offer:
+            continue  # already typeset as the price line
+        add(detail, "its own small supporting line")
+    footer_bits = [plan.location]
+    if plan.contact:
+        footer_bits.append(f"Call {plan.contact}")
     add(" | ".join(b for b in footer_bits if b), "the single clean bottom strip")
 
     sec1 = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(strings))
@@ -2396,12 +2408,21 @@ Autonomous repair instruction:
                 )
         else:
             language_block = _language_constraint_hint(project)
+    # F3 (PR #544): gate on INTEGRATED eligibility explicitly — "not
+    # background-only" also admitted the reference-extraction path, where
+    # items live in the attached image and the typeset "ONLY text allowed"
+    # contract contradicts the extraction instruction.
     _registers_on = (
         _style_registers_active(project)
-        and not (_background_only_eligible(project) or force_background_only)
+        and _integrated_poster_eligible(project)
+        and not force_background_only
     )
     if _registers_on:
-        _reg_block, _typeset_section, _ban_line = _style_register_parts(project)
+        try:
+            _reg_block, _typeset_section, _ban_line = _style_register_parts(project)
+        except Exception:  # noqa: BLE001 — F5: symbol-missing skew -> legacy, never crash
+            _registers_on = False
+    if _registers_on:
         register_segment = f"\n{_reg_block}\n"
         copy_section = _typeset_section
         ban_segment = f"\n{_ban_line}"
