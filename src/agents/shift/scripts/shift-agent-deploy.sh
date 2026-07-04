@@ -380,6 +380,13 @@ PY
     # flyer_render.py via the flat names below; the modules carry try-flat/except-
     # package shims for their sibling imports (premium_overlay/campaign_scene_prompts/
     # premium_poster_v1/flyer_art_director_oracle). Guarded for rollback compatibility.
+    # Style registers (graduation commit 1; flat name matches the lazy import
+    # `from style_registers import ...` in render.py + visual_qa.py).
+    if [ -f src/agents/flyer/style_registers.py ]; then
+        install -m 644 src/agents/flyer/style_registers.py /opt/shift-agent/style_registers.py
+    else
+        rm -f /opt/shift-agent/style_registers.py
+    fi
     if [ -f src/agents/flyer/extraction_v2.py ]; then
         install -m 644 src/agents/flyer/extraction_v2.py /opt/shift-agent/flyer_extraction_v2.py
     else
