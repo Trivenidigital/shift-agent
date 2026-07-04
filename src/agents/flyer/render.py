@@ -2218,6 +2218,87 @@ def _scene_block_from_visual_direction(scene_direction) -> str:
     return "\n".join(lines)
 
 
+def _style_registers_active(project: FlyerProject) -> bool:
+    """Graduation commit 2 gate (plan: tasks/flyer-prompt-graduation-plan.md).
+    Lazy import: a deploy-order skew (module missing) fails CLOSED to legacy
+    assembly — the WS1b create-flyer-project lesson."""
+    try:
+        try:
+            from style_registers import style_registers_enabled  # type: ignore
+        except ImportError:
+            from agents.flyer.style_registers import style_registers_enabled
+    except Exception:  # noqa: BLE001 — any import failure -> legacy
+        return False
+    try:
+        return style_registers_enabled(str(project.customer_phone or ""))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _style_register_parts(project: FlyerProject) -> tuple[str, str, str]:
+    """(register_block, typeset_copy_section, ban_line) for the flag-on path.
+    Occasion/intensity plumb in at commit 3; until then register-only, accent.
+    All fact text enters VERBATIM from locked facts — the spec only assigns
+    typographic roles (leak-proofed two-section shape, R2.6 evidence)."""
+    try:
+        from style_registers import (DEFAULT_REGISTER, forbidden_substrings_for,
+                                     style_prompt_block)  # type: ignore
+    except ImportError:
+        from agents.flyer.style_registers import (DEFAULT_REGISTER,
+                                                  forbidden_substrings_for,
+                                                  style_prompt_block)
+    register_block = style_prompt_block(DEFAULT_REGISTER)
+
+    by_id = {f.fact_id: str(f.value or "").strip() for f in project.locked_facts
+             if str(f.value or "").strip()}
+    items: list[tuple[str, str]] = []
+    for f in project.locked_facts:
+        fid = str(f.fact_id or "")
+        if fid.startswith("item:") and fid.endswith(":name"):
+            idx = fid.split(":")[1]
+            items.append((str(f.value or "").strip(), by_id.get(f"item:{idx}:price", "")))
+    prices = {pr.replace(" ", "") for _n, pr in items if pr}
+    offer = by_id.get("pricing_structure", "")
+    uniform = len(prices) <= 1 and (not prices or next(iter(prices)) in offer.replace(" ", ""))
+
+    strings: list[str] = []
+    roles: list[str] = []
+
+    def add(text: str, role: str) -> None:
+        if not text:
+            return
+        strings.append(text)
+        roles.append(f"Line {len(strings)}: {role}")
+
+    add(by_id.get("business_name", ""), "small top line; widely spaced")
+    add(by_id.get("campaign_title", ""),
+        "the huge display text; as given; never extend into a sentence; no price in it")
+    if offer:
+        add(offer, "inside/beside the shaped price element ONLY; never in the display text")
+    add(by_id.get("schedule", ""), "its own small line")
+    for name, price in items:
+        add(name if uniform else f"{name} {price}".strip(),
+            "one menu row" + ("; the shared price stays in the price element, never beside items" if uniform else ""))
+    footer_bits = [by_id.get("location", "")]
+    if by_id.get("contact_phone"):
+        footer_bits.append(f"Call {by_id['contact_phone']}")
+    add(" | ".join(b for b in footer_bits if b), "the single clean bottom strip")
+
+    sec1 = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(strings))
+    sec2 = "\n".join(roles)
+    typeset_section = (
+        "TEXT TO RENDER - these numbered strings are the ONLY text allowed in the art; "
+        f"render each VERBATIM, spelled exactly:\n{sec1}\n\n"
+        f"HOW TO SET EACH LINE (instructions for you - these words are NEVER painted):\n{sec2}"
+    )
+    vocab = ", ".join(forbidden_substrings_for(DEFAULT_REGISTER))
+    ban_line = (
+        "- Instruction and style vocabulary must NEVER appear as visible text in the art "
+        f"(includes: {vocab}); no list numbering digits; no field names or key:value notation."
+    )
+    return register_block, typeset_section, ban_line
+
+
 def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str, size: tuple[int, int] | None, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> str:
     revision_block = _revision_notes_for_prompt(project)
     reference_instruction = _reference_preservation_instruction(project)
@@ -2315,6 +2396,22 @@ Autonomous repair instruction:
                 )
         else:
             language_block = _language_constraint_hint(project)
+    _registers_on = (
+        _style_registers_active(project)
+        and not (_background_only_eligible(project) or force_background_only)
+    )
+    if _registers_on:
+        _reg_block, _typeset_section, _ban_line = _style_register_parts(project)
+        register_segment = f"\n{_reg_block}\n"
+        copy_section = _typeset_section
+        ban_segment = f"\n{_ban_line}"
+    else:
+        register_segment = ""
+        copy_section = (
+            "Controlled customer copy:\n"
+            + _poster_copy_block(project, force_background_only=force_background_only)
+        )
+        ban_segment = ""
     return f"""Create a complete, finished customer-ready poster flyer for WhatsApp delivery.
 
 Design direction: {_design_direction(project, concept_id)}.
@@ -2322,9 +2419,8 @@ Customer style notes: {sanitized_style}.
 Output format: {output_format}; aspect ratio {_aspect_ratio(size)}.
 
 {campaign_scene_block}
-
-Controlled customer copy:
-{_poster_copy_block(project, force_background_only=force_background_only)}
+{register_segment}
+{copy_section}
 
 Visual context for style and imagery:
 - theme/category: {_sanitize_visual_context(fact_value(project, "business_name", fallback=project.fields.event_or_business_name) or visual_context or "local SMB promotion")}
@@ -2354,7 +2450,7 @@ Quality bar:
 {brand_quality_line}
 {reference_quality_line}
 - If there is no one-time date, present the recurring schedule clearly instead of inventing a date.
-- Avoid QR codes, fake logos, watermarks, unreadable microtext, and placeholder glyph boxes.
+- Avoid QR codes, fake logos, watermarks, unreadable microtext, and placeholder glyph boxes.{ban_segment}
 {language_block}
 """
 
