@@ -11,7 +11,7 @@ import time
 import pytest
 
 from agents.flyer.creative_firewall import CreativeFirewall, is_hard_fact_claim
-from agents.flyer.creative_planner import CreativeCandidate
+from agents.flyer.creative_firewall import CreativeCandidate
 
 
 def _items(*names):

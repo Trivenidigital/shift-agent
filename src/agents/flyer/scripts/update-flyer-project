@@ -33,9 +33,9 @@ try:
 except ImportError:
     from agents.flyer.manual_queue import make_manual_review  # noqa: E402
 try:
-    from flyer_creative_planner import promote_inferred_to_confirmed as _promote_inferred_to_confirmed  # type: ignore  # noqa: E402
+    from flyer_facts import promote_inferred_to_confirmed as _promote_inferred_to_confirmed  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.creative_planner import promote_inferred_to_confirmed as _promote_inferred_to_confirmed  # noqa: E402
+    from agents.flyer.facts import promote_inferred_to_confirmed as _promote_inferred_to_confirmed  # noqa: E402
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 RAW_REQUEST_MAX_LEN = 2000

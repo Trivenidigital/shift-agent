@@ -3,7 +3,9 @@
 Design: tasks/flyer-bounded-creative-planner-contract-design.md §6.
 
 The planner produces inferred candidates (item names). They may become facts
-ONLY by passing through this firewall (`creative_planner.materialize_inferred`
+ONLY by passing through this firewall (historically `creative_planner` — REMOVED
+2026-07-04, graduation commit 6; the module survives because
+`flyer_brief_validator` reuses `is_hard_fact_claim` on the CD path
 calls `clear()`). The firewall is the truth-guard: it drops any candidate whose
 text smuggles a HARD-FACT-CLASS CLAIM — a price/discount, a date/schedule, a
 superlative price claim, or a service/legal/payment/delivery claim — because the
@@ -17,6 +19,7 @@ from the grounded extractor; the creative path can never introduce them.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Sequence
 
 # ── hard-fact-class claim patterns (case-insensitive) ───────────────────────
@@ -223,6 +226,16 @@ def is_hard_fact_claim(text: str) -> bool:
     if _open_is_operational(t):
         return True
     return False
+
+
+@dataclass(frozen=True)
+class CreativeCandidate:
+    """The firewall's input contract (moved here from the removed
+    creative_planner, graduation commit 6 — the type belongs to the checker,
+    not the retired producer). kind: "item" | "headline" | ...; value: the
+    proposed text."""
+    kind: str
+    value: str
 
 
 class CreativeFirewall:

@@ -25,10 +25,6 @@ except ImportError:
         build_hermes_semantic_brief_provider,
         build_semantic_flyer_brief,
     )
-try:
-    import flyer_creative_planner as _creative_planner  # type: ignore
-except ImportError:
-    from agents.flyer import creative_planner as _creative_planner
 
 
 ALLOWED_NEW_PROJECT_FACT_SOURCES = {
@@ -877,51 +873,13 @@ def extract_text_facts(
     # not enabled / not matched) ⇒ inferred_facts == [] ⇒ byte-identical to the hardcoded
     # path below. FAMOUS_ITEM_SETS is physically removed only at operator per-category
     # enablement (design §9 slice 5), never while dormant.
+    # creative_planner REMOVED (graduation commit 6, operator ruling #3):
+    # inert-by-construction for its whole life — no config category was ever
+    # enabled, so this always evaluated to [] (byte-identical to the empty
+    # default). The firewall (creative_firewall.is_hard_fact_claim) survives
+    # as flyer_brief_validator's shared helper.
     inferred_facts: list[FlyerLockedFact] = []
-    if (
-        cfg is not None
-        and _creative_planner.is_active(cfg)
-        and _creative_planner.request_matches_enabled_category(raw_request, cfg)
-        and requests_generated_item_suggestions(text)
-        and not (
-            pre_requested_item_count is None
-            and item_name_facts
-            and not _requests_more_item_suggestions(text)
-        )
-    ):
-        inferred_facts = _creative_planner.materialize_inferred(
-            _creative_planner.plan_creative_items(fields, raw_request),
-            firewall=_creative_planner.load_firewall(),
-        )
-    requested_item_count: int | None = None
-    if inferred_facts:
-        # The request's own count clause ("6 famous indo-chinese items") is mis-parsed by
-        # _item_name_facts into a junk item. Drop it — keyed off the count phrase itself,
-        # so a coincidental real name ("5 piece items combo") is never dropped. The
-        # planner owns the items for this request; the count drives the remainder cap below.
-        requested_item_count, count_phrase = _requested_item_count_and_phrase(text)
-        if count_phrase:
-            phrase_key = _norm(count_phrase)
-            # Drop the count clause AND the count-clause + a trailing count-MODIFIER
-            # ("8 items total", "8 items in all") — the count parser matches only the
-            # "8 items" head, so the exact-equality check missed the "total" suffix
-            # (oracle F0141). A real dish name keeps a non-modifier word after "items"
-            # ("10 items combo"), so it is preserved.
-            _count_modifiers = {"total", "in", "all", "altogether", "overall", "please", "menu", "items"}
-
-            def _is_count_clause_junk(value: str) -> bool:
-                nv = _norm(value)
-                if nv == phrase_key:
-                    return True
-                if nv.startswith(phrase_key + " "):
-                    return all(w in _count_modifiers for w in nv[len(phrase_key):].split())
-                return False
-
-            item_name_facts = [f for f in item_name_facts if not _is_count_clause_junk(f.value)]
-    famous_item_facts = (
-        [] if inferred_facts
-        else _requested_famous_item_facts(text, message_id=message_id)
-    )
+    famous_item_facts = _requested_famous_item_facts(text, message_id=message_id)
     generic_price = _generic_item_price(text)
     paired_item_price_facts = _item_price_facts(text, message_id=message_id)
     item_price_facts = paired_item_price_facts
@@ -946,50 +904,25 @@ def extract_text_facts(
             )
             if price_fact:
                 item_price_facts.append(price_fact)
-    inferred_price_facts: list[FlyerLockedFact] = []
-    if (
-        inferred_facts
-        and requested_item_count is None
-        and not _requests_more_item_suggestions(text)
-        and _distinct_grounded_item_count(item_name_facts, item_price_facts) > 0
-    ):
-        inferred_facts = []
-    if inferred_facts:
-        # Remainder-fill cap (mixed case): customer named K items + asked for N total ⇒
-        # the planner fills only N-K so the project commits to exactly N.
-        if requested_item_count is not None:
-            grounded_k = _distinct_grounded_item_count(item_name_facts, item_price_facts)
-            inferred_facts = inferred_facts[: max(0, requested_item_count - grounded_k)]
-        # Offset the planner's items into an index block strictly ABOVE the grounded
-        # items, so merge_locked_facts is never handed a same-index grounded/inferred
-        # collision (it would resolve by last-seen and drop the grounded customer fact
-        # before source priority). Grounded items keep item:0..M and their values;
-        # inferred take item:M+1..  base==0 (pure-vague, no grounded items) is a no-op.
-        inferred_facts = _reindex_item_facts(
-            inferred_facts, _max_item_index(item_name_facts, item_price_facts) + 1
-        )
-        # Flat-price reconciliation: a flat customer price ("any item at $8.99") applies
-        # to each planner item. The NAME stays hermes_inferred (the planner's assumption);
-        # the PRICE is customer_text (the customer's stated fact).
-        if generic_price:
-            for name_fact in inferred_facts:
-                match = re.match(r"^item:(?P<index>\d+):name$", name_fact.fact_id)
-                if not match:
-                    continue
-                price_fact = _fact(
-                    f"item:{match.group('index')}:price",
-                    "Price",
-                    generic_price,
-                    "customer_text",
-                    message_id=message_id,
-                )
-                if price_fact:
-                    inferred_price_facts.append(price_fact)
     facts.extend(item_price_facts)
     facts.extend(item_name_facts)
-    facts.extend(inferred_facts)  # offset above grounded ⇒ no same-index collision in merge
-    facts.extend(inferred_price_facts)  # customer's flat price paired onto planner items
     return reconcile_priced_facts(merge_locked_facts(facts), text)
+
+
+def promote_inferred_to_confirmed(facts):
+    """Provenance lifecycle (moved from the removed creative_planner,
+    graduation commit 6 — the function belongs to the source-priority system,
+    not the retired producer): on customer approval, hermes_inferred facts the
+    customer signed off on become customer-truthful FOR THIS PROJECT — source
+    hermes_inferred -> customer_confirmed. Other sources untouched.
+    PROJECT-SCOPED ONLY: never writes durable business menu/profile memory."""
+    promoted = []
+    for fact in facts or []:
+        if getattr(fact, "source", "") == "hermes_inferred":
+            promoted.append(fact.model_copy(update={"source": "customer_confirmed"}))
+        else:
+            promoted.append(fact)
+    return promoted
 
 
 def merge_locked_facts(*fact_lists: Iterable[FlyerLockedFact]) -> list[FlyerLockedFact]:
