@@ -63,7 +63,14 @@ _SYSTEM_PROMPT = (
     "A wrong festival is worse than none."
 )
 
-_KNOWN_OCCASIONS = {"july4", "diwali", "ramadan", "thanksgiving"}
+# Derived from the schema enum (PR #547 review minor): one source of truth.
+try:
+    from typing import get_args as _get_args
+
+    from schemas import FlyerOccasion as _FlyerOccasion
+    _KNOWN_OCCASIONS = {v for v in _get_args(_FlyerOccasion) if v != "none"}
+except Exception:  # noqa: BLE001 — deploy-order skew: fall back to the literal set
+    _KNOWN_OCCASIONS = {"july4", "diwali", "ramadan", "thanksgiving"}
 _SCALAR_FACT_IDS = ("business_name", "campaign_title", "pricing_structure",
                     "schedule", "location", "contact_phone")
 

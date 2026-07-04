@@ -703,6 +703,14 @@ def _routable_customer_phone(customer):
     return getattr(customer, "public_phone", None)
 
 
+def _known_occasions():
+    try:
+        from typing import get_args
+        return {v for v in get_args(_schemas().FlyerOccasion) if v != "none"}
+    except Exception:  # noqa: BLE001
+        return {"july4", "diwali", "ramadan", "thanksgiving"}
+
+
 def _build_transient_project(customer, fields, locked_facts, raw_text: str, message_id, chat_id: str,
                              occasion: str = "none"):
     schemas = _schemas()
@@ -713,7 +721,7 @@ def _build_transient_project(customer, fields, locked_facts, raw_text: str, mess
         customer_id=(getattr(customer, "customer_id", "") or ""),
         customer_phone=_routable_customer_phone(customer),
         chat_id=chat_id or "",
-        occasion=occasion if occasion in ("july4", "diwali", "ramadan", "thanksgiving") else "none",
+        occasion=occasion if occasion in _known_occasions() else "none",
         created_at=now,
         updated_at=now,
         original_message_id=(message_id or f"bare-{int(now.timestamp())}")[:200],
