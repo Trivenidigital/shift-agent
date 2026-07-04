@@ -5150,6 +5150,22 @@ class StateFileMigrationFailed(_BaseEntry):
     detail: str = Field(default="", max_length=2000)
 
 
+class CfRouterRawBody(_BaseEntry):
+    """Raw-body diagnostic capture at the cf-router entry (Phase B, the
+    quoted-APPROVE prerequisite): records what the bridge actually delivers —
+    body head, length, the event's populated attribute names, and the heads of
+    any quote/reply/context-shaped attributes — so reply-stripping logic can
+    be designed against real WhatsApp shapes instead of guesses. Best-effort,
+    additive, low-volume (pilot line)."""
+    type: Literal["cf_router_raw_body"]
+    message_id: str = Field(default="", max_length=200)
+    chat_id: str = Field(max_length=200)
+    body_head: str = Field(default="", max_length=400)
+    body_len: int = 0
+    event_attrs: list[str] = Field(default_factory=list)
+    quote_attrs: dict[str, str] = Field(default_factory=dict)
+
+
 class CfRouterIntercepted(_BaseEntry):
     """PR-CF6: cf-router Hermes plugin intercepted an inbound message and either
     invoked a deployed script directly (skipping the LLM) or fired an alert.
@@ -5942,6 +5958,7 @@ LogEntry = Annotated[
         # for the deleted CateringOwnerActionWatchdog* and
         # ShiftMissedDispatch* class definitions if rollback ever needed).
         Annotated[CfRouterIntercepted, Tag("cf_router_intercepted")],
+        Annotated[CfRouterRawBody, Tag("cf_router_raw_body")],
         # PR-D1: config load observability + operator reconcile audit
         Annotated[ConfigLoadFailed, Tag("config_load_failed")],
         Annotated[CateringLeadManuallyReconciled, Tag("catering_lead_manually_reconciled")],
