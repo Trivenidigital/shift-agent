@@ -108,23 +108,47 @@ def test_day_word_near_miss_blocks(tmp_path):
                for b in rep.blockers), rep.blockers
 
 
-def test_strict_extraneous_screen_gated_on_typeset_contract(tmp_path, monkeypatch):
-    # "Degional"-class gibberish: passes legacy QA (no contract), BLOCKS when
-    # the typeset contract applies (prompt promised ONLY the numbered strings).
+def test_strict_extraneous_screen_gated_on_render_marker(tmp_path):
+    # PR #545 F2: the strict screen keys on the RENDER-TIME sidecar marker,
+    # never env at QA time. No marker (legacy render) -> unscreened even with
+    # gibberish; marker present -> 'Degional'-class blocks.
     gib = GOOD_OCR + "Degional inide\n"
-    monkeypatch.delenv("FLYER_STYLE_REGISTERS", raising=False)
-    legacy = _qa(tmp_path, gib)
+    art = _artifact(tmp_path, gib)
+    from agents.flyer.visual_qa import run_visual_qa
+    legacy = run_visual_qa(_project(), art, output_format="concept_preview", allow_sidecar=True)
     assert not any("extraneous" in b.lower() for b in legacy.blockers)
-    monkeypatch.setenv("FLYER_STYLE_REGISTERS", "1")
-    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", PHONE)
-    strict = _qa(tmp_path, gib)
-    assert any("extraneous" in b.lower() or "degional" in b.lower()
-               for b in strict.blockers), strict.blockers
+    (tmp_path / "p.png.typeset.json").write_text('{"typeset_contract": true}', encoding="utf-8")
+    strict = run_visual_qa(_project(), art, output_format="concept_preview", allow_sidecar=True)
+    assert any("degional" in b.lower() for b in strict.blockers), strict.blockers
 
 
-def test_strict_screen_allows_authorized_and_small_words(tmp_path, monkeypatch):
-    monkeypatch.setenv("FLYER_STYLE_REGISTERS", "1")
-    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", PHONE)
-    # authorized strings + tiny glue words — must pass under the contract
-    rep = _qa(tmp_path, GOOD_OCR + "for the\n")
-    assert rep.status == "passed", rep.blockers
+def test_strict_screen_authorizes_system_fallback_strings(tmp_path):
+    # PR #545 F1: the prompt's own instructed strings ('Specials' fallback,
+    # 'Call' prefix) are never punished by the contract screen.
+    ocr = GOOD_OCR + "SPECIALS\nCall now\n"
+    art = _artifact(tmp_path, ocr)
+    (tmp_path / "p.png.typeset.json").write_text('{"typeset_contract": true}', encoding="utf-8")
+    from agents.flyer.visual_qa import run_visual_qa
+    rep = run_visual_qa(_project(), art, output_format="concept_preview", allow_sidecar=True)
+    assert not any("extraneous" in b.lower() for b in rep.blockers), rep.blockers
+
+
+def test_pool_is_word_tokenized_not_substring(tmp_path):
+    # PR #545 F3: 'peppers' in the brief must NOT authorize an invented 'PER
+    # PLATE' claim; 'Freedom Sale' must not authorize 'FREE'.
+    raw = ("Create a flyer for the Freedom Sale. Stuffed peppers $8.99. "
+           "Fridays and Saturdays.")
+    proj = _project(raw=raw)
+    rep = _qa(tmp_path, GOOD_OCR + "PER PLATE\nFREE DELIVERY\n", project=proj)
+    lows = " ".join(rep.blockers).lower()
+    assert "per" in lows and "free" in lows, rep.blockers
+
+
+def test_paraphrase_bridges_authorize_customer_stated_forms(tmp_path):
+    # PR #545 F4: '$10/plate' brief authorizes 'PER PLATE'; 'buy one get one'
+    # authorizes 'BOGO'.
+    raw = ("Thali special $10/plate, buy one get one on samosas. "
+           "Idli, Medu Vada. Fridays and Saturdays.")
+    proj = _project(raw=raw)
+    rep = _qa(tmp_path, GOOD_OCR + "PER PLATE\nBOGO\n", project=proj)
+    assert not any("qualifier" in b.lower() for b in rep.blockers), rep.blockers

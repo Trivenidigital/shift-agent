@@ -2412,11 +2412,8 @@ Autonomous repair instruction:
     # background-only" also admitted the reference-extraction path, where
     # items live in the attached image and the typeset "ONLY text allowed"
     # contract contradicts the extraction instruction.
-    _registers_on = (
-        _style_registers_active(project)
-        and _integrated_poster_eligible(project)
-        and not force_background_only
-    )
+    _registers_on = _typeset_contract_applies(
+        project, force_background_only=force_background_only)
     if _registers_on:
         try:
             _reg_block, _typeset_section, _ban_line = _style_register_parts(project)
@@ -5066,12 +5063,35 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
             _FORCE_BACKGROUND_ONLY.reset(token)
 
 
+def _typeset_contract_applies(project: FlyerProject, *, force_background_only: bool = False) -> bool:
+    """Single source of truth for 'this render's prompt carries the typeset
+    contract' — used by _image_prompt (assembly) and the preview writer (the
+    QA sidecar marker, PR #545 review F2)."""
+    return (
+        _style_registers_active(project)
+        and _integrated_poster_eligible(project)
+        and not force_background_only
+    )
+
+
+def _write_typeset_marker(project: FlyerProject, path: Path, *, force_background_only: bool = False) -> None:
+    """Best-effort render-time marker: QA's strict extraneous-text screen keys
+    on this file, never on env at QA time."""
+    try:
+        if _typeset_contract_applies(project, force_background_only=force_background_only):
+            Path(str(path) + ".typeset.json").write_text(
+                '{"typeset_contract": true}', encoding="utf-8")
+    except Exception:  # noqa: BLE001 — marker is observability, never blocks
+        pass
+
+
 def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, model: str = "deterministic-renderer", quality: str = "low", concept_count: int = 1, repair_instruction: str = "", scene_direction=None, force_background_only: bool = False) -> list[RenderedAssetSpec]:
     output_dir = Path(output_dir)
     specs: list[RenderedAssetSpec] = []
     for concept_id in ("C1", "C2", "C3")[:concept_count]:
         path = output_dir / f"{project.project_id}-{concept_id}-preview.png"
         _render_model(project, path, concept_id=concept_id, output_format="concept_preview", size=(1080, 1350), model=model, quality=quality, repair_instruction=repair_instruction, scene_direction=scene_direction, force_background_only=force_background_only)
+        _write_typeset_marker(project, path, force_background_only=force_background_only)
         quality_report = inspect_rendered_asset(path, expected_width=1080, expected_height=1350, mime_type="image/png")
         if not quality_report.ok:
             raise FlyerRenderError(f"rendered concept failed quality check: {quality_report.blockers}")

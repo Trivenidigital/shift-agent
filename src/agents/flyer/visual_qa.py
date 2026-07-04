@@ -1792,7 +1792,7 @@ def _style_vocab_blockers(project: FlyerProject, extracted_text: str) -> list[st
     blockers: list[str] = []
     for entry in _style_vocab_entries():
         if entry in text and entry not in pool:
-            blockers.append(f"style vocabulary painted into art: {entry}")
+            blockers.append(f"prompt vocabulary painted into art: {entry}")
     return blockers
 
 
@@ -1800,16 +1800,28 @@ def _offer_qualifier_blockers(project: FlyerProject, extracted_text: str) -> lis
     """Invented offer qualifiers (the ships-wrong class): a promo/portion
     qualifier visible in the art that appears in NO locked fact and NOT in the
     customer's brief asserts a claim nobody made ('COMBO' badge on a brief
-    that never said combo)."""
+    that never said combo).
+
+    PR #545 review F3: pool membership is WORD-tokenized ('per' must not be
+    authorized by 'peppers', 'free' not by 'Freedom Sale'). F4: semantic
+    bridges authorize faithful paraphrases of customer-stated forms
+    ('$10/plate' -> 'per plate'; 'buy one get one' -> 'BOGO')."""
     text = (extracted_text or "").casefold()
     if not text.strip():
         return []
-    pool = _authorized_text_pool(project)
+    pool_raw = _authorized_text_pool(project)
+    pool_words = set(re.findall(r"[a-z]+", pool_raw))
     words = set(re.findall(r"[a-z]+", text))
+    unit_pricing = bool(re.search(r"/\s*[a-z]+", pool_raw))  # "$10/plate" forms
     blockers: list[str] = []
     for q in sorted(_QUALIFIER_WORDS):
-        if q in words and q not in pool:
-            blockers.append(f"invented offer qualifier visible: {q}")
+        if q not in words or q in pool_words:
+            continue
+        if q in ("per", "each") and (unit_pricing or "per" in pool_words or "each" in pool_words):
+            continue  # F4 bridge: per-unit pricing stated by the customer
+        if q == "bogo" and {"buy", "get"} <= pool_words:
+            continue  # F4 bridge: buy-X-get-Y stated by the customer
+        blockers.append(f"invented offer qualifier visible: {q}")
     return blockers
 
 
@@ -1846,26 +1858,44 @@ _EXTRANEOUS_GLUE = {
 }
 
 
-def _extraneous_token_blockers(project: FlyerProject, extracted_text: str) -> list[str]:
-    """STRICT extraneous-text screen, active ONLY when the typeset contract
-    applied to this render (FLYER_STYLE_REGISTERS for this phone): the prompt
+_TYPESET_MARKER_SUFFIX = ".typeset.json"
+
+# Strings the TYPESET PROMPT ITSELF may instruct beyond customer text (PR #545
+# review F1): the "Specials" title fallback and the "Call" footer prefix. The
+# registered-business-name case is covered by profile hydration — both live
+# seams (create-flyer-project and bare _build_locked_facts) merge profile
+# identity into locked facts, so the name is always pool-authorized on the
+# customer's path.
+_TYPESET_SYSTEM_WORDS = {"specials", "call"}
+
+
+def _typeset_marker_applies(artifact_path) -> bool:
+    """PR #545 review F2: the strict screen keys on a RENDER-TIME sidecar
+    marker (written by render.py when the typeset contract shaped the prompt),
+    NOT on env at QA time — a legacy-rendered preview approved after flag-on
+    must never be screened under a contract its prompt never carried. Finals
+    (recompose/resize of an approved preview) carry no marker -> screen off at
+    finalize, where preview QA already screened the same painted text."""
+    try:
+        return Path(str(artifact_path) + _TYPESET_MARKER_SUFFIX).exists()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _extraneous_token_blockers(project: FlyerProject, extracted_text: str,
+                               artifact_path=None) -> list[str]:
+    """STRICT extraneous-text screen, active ONLY for renders whose prompt
+    carried the typeset contract (render-time sidecar marker): the prompt
     promised the numbered strings are the ONLY text, so any unauthorized alpha
     token >=5 chars is a contract violation ('Degional', 'Dunchanuf',
-    'cleary treatment' exhibits). Legacy renders are NOT screened (no such
-    contract). Fail-open on import skew."""
-    try:
-        try:
-            from style_registers import style_registers_enabled  # type: ignore
-        except ImportError:
-            from agents.flyer.style_registers import style_registers_enabled
-        if not style_registers_enabled(str(getattr(project, "customer_phone", "") or "")):
-            return []
-    except Exception:  # noqa: BLE001
+    'cleary treatment' exhibits). Legacy renders are NOT screened."""
+    if artifact_path is None or not _typeset_marker_applies(artifact_path):
         return []
     text_words = re.findall(r"[a-z]+", (extracted_text or "").casefold())
     if not text_words:
         return []
     pool_words = set(re.findall(r"[a-z]+", _authorized_text_pool(project)))
+    pool_words |= _TYPESET_SYSTEM_WORDS  # F1: the prompt's own instructed strings
     blockers: list[str] = []
     flagged: set[str] = set()
     for w in text_words:
@@ -1964,7 +1994,8 @@ def run_visual_qa(
     blockers.extend(_style_vocab_blockers(project, extracted_text))
     blockers.extend(_offer_qualifier_blockers(project, extracted_text))
     blockers.extend(_schedule_near_miss_blockers(project, extracted_text))
-    blockers.extend(_extraneous_token_blockers(project, extracted_text))
+    blockers.extend(_extraneous_token_blockers(project, extracted_text,
+                                                artifact_path=artifact_path))
     # Source-contract negative-assertion gate: any value in
     # forbidden_substrings (populated upstream from brand/phone/address
     # replacements) must NOT appear in the OCR text. Reuses the same
