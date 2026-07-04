@@ -23,7 +23,7 @@ ROOT = "/opt/shift-agent"
 # enabling the allowlisted path returns "unavailable" because flyer_context_builder /
 # flyer_brief / flyer_brief_validator / flyer_semantic_brief / creative_firewall (or the
 # SKILL.md) aren't deployed. Check them too — the gate must reflect the ARMED runtime.
-MODULES = ["flyer_bare_render", "flyer_facts", "flyer_render", "flyer_visual_qa",
+MODULES = ["style_registers", "flyer_bare_render", "flyer_facts", "flyer_render", "flyer_visual_qa",
            "flyer_context_builder", "flyer_brief", "flyer_brief_validator",
            "flyer_semantic_brief", "creative_firewall", "flyer_visible_contract"]
 sys.path.insert(0, ROOT)
