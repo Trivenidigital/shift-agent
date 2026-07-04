@@ -2300,6 +2300,19 @@ def _style_register_parts(project: FlyerProject) -> tuple[str, str, str]:
         footer_bits.append(f"Call {plan.contact}")
     add(" | ".join(b for b in footer_bits if b), "the single clean bottom strip")
 
+    # Typeset COMPLETENESS fail-closed (operator carryover, commit 6): every
+    # required locked fact's value must be carried by the spec strings — a
+    # shape the builder doesn't cover must fall back to the legacy copy block
+    # (raise -> the caller's fail-closed wrapper), never render an incomplete
+    # contract that QA then fails deterministically.
+    _joined = " ".join(strings).casefold()
+    for _fact in project.locked_facts:
+        if not getattr(_fact, "required", False):
+            continue
+        _val = str(getattr(_fact, "value", "") or "").strip()
+        if _val and _val.casefold() not in _joined:
+            raise ValueError(f"typeset_incomplete:{_fact.fact_id}")
+
     sec1 = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(strings))
     sec2 = "\n".join(roles)
     typeset_section = (

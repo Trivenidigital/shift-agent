@@ -470,6 +470,9 @@ PY
     else
         rm -f /opt/shift-agent/flyer_facts.py
     fi
+    # creative_planner RETIRED (graduation commit 6): inert-by-construction
+    # for its whole life. Conditional kept for rollback to pre-removal
+    # tarballs still in rotation (the grad5 F1 standing pattern).
     if [ -f src/agents/flyer/creative_planner.py ]; then
         install -m 644 src/agents/flyer/creative_planner.py /opt/shift-agent/flyer_creative_planner.py
     else

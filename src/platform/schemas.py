@@ -917,6 +917,9 @@ class FlyerConfig(BaseModel):
         max_length=4,
     )
     recovery: FlyerRecoveryConfig = Field(default_factory=FlyerRecoveryConfig)
+    # DEPRECATED (graduation commit 6): consumer removed; field retained so
+    # deployed config.yaml files carrying the key keep parsing. Remove the
+    # field + the on-box key together in a later config-migration window.
     creative_planner: FlyerCreativePlannerConfig = Field(default_factory=FlyerCreativePlannerConfig)
 
     @staticmethod

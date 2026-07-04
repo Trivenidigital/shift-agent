@@ -898,8 +898,11 @@ def test_no_production_producer_of_new_provenance_sources():
     # on customer approval). No other production module may emit either source — the
     # consuming script only CALLS the promotion helper, it never sets the source.
     SANCTIONED = {
-        "hermes_inferred": {"creative_planner.py"},
-        "customer_confirmed": {"creative_planner.py"},
+        # creative_planner removed (graduation commit 6): NOTHING may emit
+        # hermes_inferred anymore; customer_confirmed's sole sanctioned emitter
+        # is the relocated promote_inferred_to_confirmed in facts.py.
+        "hermes_inferred": set(),
+        "customer_confirmed": {"facts.py"},
     }
 
     def _new_source(node):
@@ -960,7 +963,7 @@ def test_no_production_producer_of_new_provenance_sources():
     # Self-check: prove the scan actually reached the real fact-producing scripts
     # (extensionless), so the guard can't silently pass by scanning nothing.
     scanned_names = {p.name for p in _python_sources()}
-    for must in ("create-flyer-project", "generate-flyer-concepts", "facts.py", "creative_planner.py"):
+    for must in ("create-flyer-project", "generate-flyer-concepts", "facts.py"):
         assert must in scanned_names, f"producer-guard did not scan {must} (scan scope regressed)"
     assert offenders == [], (
         f"only creative_planner may emit hermes_inferred/customer_confirmed; found: {offenders}"
@@ -1045,25 +1048,21 @@ def test_extract_text_facts_keeps_faithful_offer_fact(monkeypatch):
     assert by_id["offer:0"].value == "Free Masala Chai with any purchase above $12"
 
 
-def test_creative_planner_hallucinated_item_is_not_required():
-    """Requirement #2: an inferred/ungrounded planner item that survives the firewall is
-    materialized as ADVISORY (required=False) and source=hermes_inferred — never a
-    required customer-visible truth. A claim-bearing candidate is rejected outright."""
-    from agents.flyer.creative_planner import CreativeCandidate, materialize_inferred
-    from agents.flyer.creative_firewall import CreativeFirewall
+def test_hermes_inferred_source_never_outranks_customer_text():
+    """Successor to the removed planner-materialization pin (graduation commit
+    6): the PROPERTY that survives the producer is merge priority —
+    hermes_inferred can never shadow a customer_text fact of the same id."""
+    from agents.flyer.facts import merge_locked_facts
+    from schemas import FlyerLockedFact
 
-    candidates = [
-        CreativeCandidate(kind="item", value="Veg Manchurian"),   # benign inferred item
-        CreativeCandidate(kind="item", value="Free Delivery"),    # claim disguised as item
-    ]
-
-    facts = materialize_inferred(candidates, firewall=CreativeFirewall())
-
-    # The claim is dropped by the firewall; the benign item survives but is advisory.
-    assert [f.value for f in facts] == ["Veg Manchurian"]
-    assert all(f.required is False for f in facts)
-    assert all(f.source == "hermes_inferred" for f in facts)
-
+    customer = FlyerLockedFact(fact_id="item:0:name", label="I", value="Idli",
+                               source="customer_text", required=True)
+    inferred = FlyerLockedFact(fact_id="item:0:name", label="I", value="Hakka Noodles",
+                               source="hermes_inferred", required=False)
+    merged = merge_locked_facts([inferred, customer])
+    winner = [f for f in merged if f.fact_id == "item:0:name"]
+    assert len(winner) == 1 and winner[0].value == "Idli"
+    assert winner[0].source == "customer_text"
 
 def _items_map(facts):
     """{name: price} from item:N facts."""

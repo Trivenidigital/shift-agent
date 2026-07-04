@@ -201,3 +201,20 @@ def test_flag_off_integrated_matches_other_phone_legacy(monkeypatch):
     monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", "+15550001111")
     other = _prompt(_project())
     assert off == other
+
+
+def test_uncovered_required_fact_falls_back_to_legacy(monkeypatch):
+    # Commit 6 carryover: a required fact shape the typeset builder does not
+    # cover (e.g. a bespoke 'tagline') must fall back to the LEGACY copy block
+    # (fail-closed), never ship an incomplete typeset contract.
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", PHONE)
+    proj = _project()
+    proj = proj.model_copy(update={"locked_facts": [*proj.locked_facts,
+        _F("tagline", "Taste of the Coast")]})
+    p = _prompt(proj)
+    assert "TEXT TO RENDER" not in p                 # typeset refused
+    assert "Controlled customer copy:" in p          # legacy carried the render
+    # (Legacy also drops bespoke fact shapes — QA then routes to manual review.
+    # The fail-closed preserves PARITY with legacy, never a worse contract.)
