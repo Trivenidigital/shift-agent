@@ -349,6 +349,7 @@ os.environ.pop('FLYER_DETERMINISTIC_FIRST', None)
 os.environ.pop('FLYER_PREMIUM_OVERLAY_ALLOWLIST', None)
 assert r._integrated_poster_eligible(proj) is True, 'flag-off should be byte-identical (integrated-eligible)'
 os.environ['FLYER_DETERMINISTIC_FIRST'] = '1'
+os.environ['FLYER_PREMIUM_OVERLAY_ALLOWLIST'] = '+17329837841'  # unified semantics: empty allowlist = DISABLED
 assert r._integrated_poster_eligible(proj) is False, 'flag-on dense should route to mode 2 (ineligible for integrated)'
 print('deterministic-first routing OK: dense+flag-on -> mode 2; flag-off unchanged')
 " > /dev/null; then
@@ -1129,6 +1130,16 @@ print('expense_bookkeeper schema + config + transitions validated')
 else
     echo "⚠  Agent #21 venv (/opt/shift-agent/venv/) absent — skipping expense-bookkeeper smoke checks"
 fi
+
+# Config sanity (allowlist-semantics unification): flag=1 with an empty
+# allowlist is now silent-OFF, not global-ON. Non-fatal WARN so a wiped
+# allowlist is visible at deploy time instead of discovered as "feature dead".
+for pair in "FLYER_PREMIUM_REPAIR:FLYER_PREMIUM_REPAIR_ALLOWLIST"             "FLYER_PREMIUM_OVERLAY:FLYER_PREMIUM_OVERLAY_ALLOWLIST"             "FLYER_DETERMINISTIC_RECOVERY:FLYER_PREMIUM_OVERLAY_ALLOWLIST"             "FLYER_DETERMINISTIC_FIRST:FLYER_PREMIUM_OVERLAY_ALLOWLIST"             "FLYER_PREMIUM_POSTER_V1:FLYER_PREMIUM_POSTER_V1_ALLOWLIST"             "FLYER_CREATIVE_DIRECTOR_V2:FLYER_PREMIUM_OVERLAY_ALLOWLIST"             "FLYER_STYLE_REGISTERS:FLYER_STYLE_REGISTERS_ALLOWLIST"; do
+    flag="${pair%%:*}"; allow="${pair##*:}"
+    if [ "$(grep -E "^${flag}=1$" /opt/shift-agent/.env 2>/dev/null | wc -l)" = "1" ] &&        [ -z "$(grep -E "^${allow}=." /opt/shift-agent/.env 2>/dev/null)" ]; then
+        echo "WARN: ${flag}=1 but ${allow} is empty/unset — feature is silently OFF (unified semantics)"
+    fi
+done
 
 echo ""
 echo "=== All smoke checks passed ==="

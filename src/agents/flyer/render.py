@@ -3753,7 +3753,7 @@ PREMIUM_DETERMINISTIC_RECOVERY_ENV = "FLYER_DETERMINISTIC_RECOVERY"
 def _deterministic_recovery_enabled(project: FlyerProject) -> bool:
     """Routing gate for integrated-fail -> deterministic recovery. Flag
     FLYER_DETERMINISTIC_RECOVERY == "1" AND (the shared FLYER_PREMIUM_OVERLAY_ALLOWLIST
-    is empty => global, else project.customer_phone is in it). Independent of
+    is empty => DISABLED (unified 2026-07-04), else project.customer_phone is in it). Independent of
     FLYER_PREMIUM_OVERLAY (which separately controls premium-vs-flat overlay)."""
     if os.environ.get(PREMIUM_DETERMINISTIC_RECOVERY_ENV) != "1":
         return False
@@ -3774,7 +3774,7 @@ def _deterministic_first_enabled(project: FlyerProject) -> bool:
     """Routing gate for deterministic-first: fact-dense flyers skip integrated
     model text and render via the deterministic overlay. Flag
     FLYER_DETERMINISTIC_FIRST == "1" AND (the shared FLYER_PREMIUM_OVERLAY_ALLOWLIST
-    is empty => global, else project.customer_phone is in it). Independent of
+    is empty => DISABLED (unified 2026-07-04), else project.customer_phone is in it). Independent of
     FLYER_PREMIUM_OVERLAY / FLYER_DETERMINISTIC_RECOVERY. Mirrors
     _deterministic_recovery_enabled exactly."""
     if os.environ.get(DETERMINISTIC_FIRST_ENV) != "1":
@@ -3803,7 +3803,7 @@ def _creative_director_v2_enabled(project: FlyerProject) -> bool:
     SCOPED-ROLLOUT GUARD (Codex FINAL review, FINDING 2 MAJOR): CD v2 is rolling
     out to +17329837841 ONLY. UNLIKE the sibling gates (_deterministic_first /
     _deterministic_recovery / _premium_overlay) which treat an empty allowlist as
-    GLOBAL, CD v2 must NOT inherit that broadening footgun — an empty/unset
+    GLOBAL (pre-unification), CD v2 never inherited that footgun — an empty/unset
     allowlist must DISABLE CD v2 entirely (not enable it for every phone). CD v2
     therefore requires the flag "1" AND a NON-EMPTY allowlist AND membership."""
     if os.environ.get(CREATIVE_DIRECTOR_V2_ENV) != "1":
@@ -3830,7 +3830,7 @@ def _premium_poster_v1_allowlist() -> set[str]:
 
 
 def _premium_poster_v1_armed(project: FlyerProject) -> bool:
-    """Scoped-rollout guard (mirrors CD v2, NOT the global-on overlay gates): flag
+    """Scoped-rollout guard (all gates unified explicit-allow 2026-07-04): flag
     FLYER_PREMIUM_POSTER_V1 == "1" AND a NON-EMPTY allowlist AND the project's
     customer phone is in it. Empty/unset allowlist => DISABLED (not global) —
     Premium Poster v1 rolls out to +17329837841 ONLY. Flag-off / not-allowlisted =>

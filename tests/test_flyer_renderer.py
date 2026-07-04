@@ -5755,10 +5755,12 @@ def test_deterministic_first_enabled_flag_off(monkeypatch):
     assert render_module._deterministic_first_enabled(_weekend_project()) is False
 
 
-def test_deterministic_first_enabled_global_when_no_allowlist(monkeypatch):
+def test_deterministic_first_disabled_when_no_allowlist(monkeypatch):
+    # Unified semantics (PR #554): flag on + EMPTY allowlist = DISABLED, never
+    # global — wiping an allowlist fails safe.
     monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
-    assert render_module._deterministic_first_enabled(_weekend_project()) is True
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    assert render_module._deterministic_first_enabled(_weekend_project()) is False
 
 
 def test_deterministic_first_enabled_allowlist_scoped(monkeypatch):

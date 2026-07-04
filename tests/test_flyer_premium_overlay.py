@@ -570,10 +570,12 @@ def test_allowlist_not_containing_project_phone_uses_legacy(tmp_path, monkeypatc
     assert called == {"premium": 0, "legacy": 1}  # not in allowlist → legacy
 
 
-def test_flag_on_no_allowlist_uses_premium_globally(tmp_path, monkeypatch):
-    """flag on + no allowlist env set → global ON (premium for all food projects)."""
+def test_flag_on_no_allowlist_uses_legacy(tmp_path, monkeypatch):
+    """Unified semantics (PR #554): flag on + EMPTY allowlist => the LEGACY
+    overlay path actually runs at the render surface (not just predicate
+    False — the seven-gate pin covers that; this pins the path taken)."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
     from agents.flyer import render, premium_overlay
     called = {"premium": 0, "legacy": 0}
     monkeypatch.setattr(premium_overlay, "render_premium_overlay",
@@ -582,7 +584,7 @@ def test_flag_on_no_allowlist_uses_premium_globally(tmp_path, monkeypatch):
                         lambda *a, **k: called.__setitem__("legacy", called["legacy"] + 1))
     render._apply_critical_text_overlay(_project6(), _bg(tmp_path), tmp_path / "o.png",
                                         size=(1080, 1350), output_format="concept_preview")
-    assert called == {"premium": 1, "legacy": 0}  # no allowlist → global ON
+    assert called == {"premium": 0, "legacy": 1}  # empty allowlist -> DISABLED -> legacy
 
 
 def test_flag_off_allowlist_set_still_uses_legacy(tmp_path, monkeypatch):
