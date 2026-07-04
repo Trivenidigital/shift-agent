@@ -56,8 +56,14 @@ _SYSTEM_PROMPT = (
     '"items":[{"name":str,"price":str|null}]}. '
     "Rules: copy values VERBATIM from the brief text; every menu/product item goes in "
     "items; pricing_structure is the offer/price statement; never invent or infer "
-    "anything absent from the text."
+    "anything absent from the text. "
+    'Additionally return "occasion": one of "july4","diwali","ramadan","thanksgiving" '
+    "ONLY when the brief EXPLICITLY names that holiday/festival; generic festive words "
+    '(celebration, special, sale, seasonal) are NOT occasions; when unsure return "none". '
+    "A wrong festival is worse than none."
 )
+
+_KNOWN_OCCASIONS = {"july4", "diwali", "ramadan", "thanksgiving"}
 _SCALAR_FACT_IDS = ("business_name", "campaign_title", "pricing_structure",
                     "schedule", "location", "contact_phone")
 
@@ -74,6 +80,10 @@ class V2ExtractionReport:
     items_locked: int = 0
     scalars_locked: int = 0
     dropped_by_parity: list = field(default_factory=list)  # ["fact_id=value", ...]
+    # Interpretive, structurally OUTSIDE the fact contract (schema ruling
+    # 2026-07-04): reported for observability + project plumbing, never
+    # counted in items_locked/scalars_locked, never parity-checked.
+    occasion: str = "none"
 
     def summary_line(self) -> str:
         parts = [f"items locked: {self.items_locked}", f"fields: {self.scalars_locked}"]
@@ -150,6 +160,8 @@ def extract_text_facts_v2(fields, raw_request: str, *, message_id: str = "",
 
     brief_lower = raw.lower()
     report = V2ExtractionReport()
+    occ = str(doc.get("occasion") or "").strip().lower()  # lowercase before lookup
+    report.occasion = occ if occ in _KNOWN_OCCASIONS else "none"  # fail-neutral
     facts: list[FlyerLockedFact] = []
 
     for fid in _SCALAR_FACT_IDS:

@@ -2247,7 +2247,11 @@ def _style_register_parts(project: FlyerProject) -> tuple[str, str, str]:
         from agents.flyer.style_registers import (DEFAULT_REGISTER,
                                                   forbidden_substrings_for,
                                                   style_prompt_block)
-    register_block = style_prompt_block(DEFAULT_REGISTER)
+    occasion = str(getattr(project, "occasion", "none") or "none")
+    if occasion == "none":
+        register_block = style_prompt_block(DEFAULT_REGISTER)
+    else:
+        register_block = style_prompt_block(DEFAULT_REGISTER, occasion=occasion)
 
     # F1 (PR #544): build from the LEGACY fact selectors so every required
     # locked fact QA demands is present — _poster_copy_plan covers title
@@ -2303,7 +2307,8 @@ def _style_register_parts(project: FlyerProject) -> tuple[str, str, str]:
         f"render each VERBATIM, spelled exactly:\n{sec1}\n\n"
         f"HOW TO SET EACH LINE (instructions for you - these words are NEVER painted):\n{sec2}"
     )
-    vocab = ", ".join(forbidden_substrings_for(DEFAULT_REGISTER))
+    vocab = ", ".join(forbidden_substrings_for(
+        DEFAULT_REGISTER, occasion=None if occasion == "none" else occasion))
     ban_line = (
         "- Instruction and style vocabulary must NEVER appear as visible text in the art "
         f"(includes: {vocab}); no list numbering digits; no field names or key:value notation."
