@@ -3702,40 +3702,48 @@ def _normalize_sender(value: str) -> str:
 
 def _premium_repair_allowlist() -> set[str]:
     """Parse FLYER_PREMIUM_REPAIR_ALLOWLIST (comma-separated phones/LIDs) into a
-    normalized set. Empty/unset ⇒ empty set ⇒ no allowlist scoping (global)."""
+    normalized set. Empty/unset ⇒ empty set ⇒ DISABLED (explicit-allow, unified 2026-07-04)."""
     raw = os.environ.get(PREMIUM_REPAIR_ALLOWLIST_ENV, "") or ""
     return {n for n in (_normalize_sender(p) for p in raw.split(",")) if n}
 
 
 def _premium_repair_enabled(project: FlyerProject) -> bool:
     """Slice 2 gate: flag == "1" AND, when the allowlist env is set, the
-    project's customer phone is in it. Flag "1" + no allowlist ⇒ global ON. OFF
+    project's customer phone is in it. Flag "1" + empty allowlist ⇒ DISABLED (unified 2026-07-04). OFF
     for anything else (the entire repair rung is skipped → byte-identical)."""
     if os.environ.get(PREMIUM_REPAIR_ENABLED_ENV) != "1":
         return False
     allow = _premium_repair_allowlist()
     if not allow:
-        return True
+        # Allowlist-semantics unification (Phase A exit): empty/unset means
+        # DISABLED, never global — wiping an allowlist must fail safe, not
+        # silently widen to every customer. All seven flyer allowlist gates
+        # now share explicit-allow semantics.
+        return False
     return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
 
 
 def _premium_overlay_allowlist() -> set[str]:
     """Parse FLYER_PREMIUM_OVERLAY_ALLOWLIST (comma-separated phones/LIDs) into a
-    normalized set. Empty/unset ⇒ empty set ⇒ no allowlist scoping (global)."""
+    normalized set. Empty/unset ⇒ empty set ⇒ DISABLED (explicit-allow, unified 2026-07-04)."""
     raw = os.environ.get(PREMIUM_OVERLAY_ALLOWLIST_ENV, "") or ""
     return {n for n in (_normalize_sender(p) for p in raw.split(",")) if n}
 
 
 def _premium_overlay_enabled(project: FlyerProject) -> bool:
     """Fix C gate: flag == "1" AND, when the allowlist env is set, the
-    project's customer phone is in it. Flag "1" + no allowlist ⇒ global ON. OFF
+    project's customer phone is in it. Flag "1" + empty allowlist ⇒ DISABLED (unified 2026-07-04). OFF
     for anything else (the branch is skipped → byte-identical legacy behavior).
     Mirrors _premium_repair_enabled exactly."""
     if os.environ.get(PREMIUM_OVERLAY_ENABLED_ENV) != "1":
         return False
     allow = _premium_overlay_allowlist()
     if not allow:
-        return True
+        # Allowlist-semantics unification (Phase A exit): empty/unset means
+        # DISABLED, never global — wiping an allowlist must fail safe, not
+        # silently widen to every customer. All seven flyer allowlist gates
+        # now share explicit-allow semantics.
+        return False
     return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
 
 
@@ -3751,7 +3759,11 @@ def _deterministic_recovery_enabled(project: FlyerProject) -> bool:
         return False
     allow = _premium_overlay_allowlist()
     if not allow:
-        return True
+        # Allowlist-semantics unification (Phase A exit): empty/unset means
+        # DISABLED, never global — wiping an allowlist must fail safe, not
+        # silently widen to every customer. All seven flyer allowlist gates
+        # now share explicit-allow semantics.
+        return False
     return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
 
 
@@ -3769,7 +3781,11 @@ def _deterministic_first_enabled(project: FlyerProject) -> bool:
         return False
     allow = _premium_overlay_allowlist()
     if not allow:
-        return True
+        # Allowlist-semantics unification (Phase A exit): empty/unset means
+        # DISABLED, never global — wiping an allowlist must fail safe, not
+        # silently widen to every customer. All seven flyer allowlist gates
+        # now share explicit-allow semantics.
+        return False
     return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
 
 

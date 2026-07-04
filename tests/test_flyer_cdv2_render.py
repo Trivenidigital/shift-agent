@@ -457,7 +457,7 @@ def test_bg_prompt_flag_off_carrier_none_is_byte_identical(monkeypatch):
     """Carrier None (flag off) ⇒ the premium directive is byte-identical to today's
     fixed string (the fixed HERO directive appears verbatim, hero name NOT injected)."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
     project = _premium_food_project()
     assert project.creative_direction is None
     out = render_module._poster_layout_requirements(project, force_background_only=True)
@@ -468,7 +468,7 @@ def test_bg_prompt_empty_carrier_fields_is_byte_identical(monkeypatch):
     """Carrier present but hero/theme/mood empty ⇒ no fragments injected; the fixed
     HERO directive appears verbatim (byte-identical to flag-off)."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
     project = _premium_food_project()
     project.creative_direction = {"hero_name": "", "theme_family": "", "mood": ""}
     out = render_module._poster_layout_requirements(project, force_background_only=True)
@@ -478,7 +478,7 @@ def test_bg_prompt_empty_carrier_fields_is_byte_identical(monkeypatch):
 def test_bg_prompt_empty_carrier_matches_flag_off_exactly(monkeypatch):
     """Stronger guard: empty-carrier output == flag-off output, byte-for-byte."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
     p_off = _premium_food_project()
     out_off = render_module._poster_layout_requirements(p_off, force_background_only=True)
     p_empty = _premium_food_project()
@@ -492,7 +492,7 @@ def test_bg_prompt_populated_carrier_names_hero_theme_mood(monkeypatch):
     AND reflects the theme AND the mood — while STILL being a textless directive
     (the existing 'absolutely NO text' clause remains)."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
     project = _premium_food_project()
     project.creative_direction = {
         "hero_name": "Dosa",
@@ -513,7 +513,7 @@ def test_bg_prompt_populated_carrier_differs_from_fixed(monkeypatch):
     """Sanity: a populated carrier actually CHANGES the output (otherwise the
     byte-identical guards would be vacuous)."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
     p_off = _premium_food_project()
     out_off = render_module._poster_layout_requirements(p_off, force_background_only=True)
     p_on = _premium_food_project()

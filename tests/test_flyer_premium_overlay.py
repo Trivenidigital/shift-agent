@@ -504,6 +504,7 @@ def test_flag_off_uses_legacy_not_premium(tmp_path, monkeypatch):
 
 def test_flag_on_food_project_uses_premium(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
     from agents.flyer import render, premium_overlay
     called = {"premium": 0, "legacy": 0}
     monkeypatch.setattr(premium_overlay, "render_premium_overlay",
@@ -521,6 +522,7 @@ def test_flag_on_premium_render_error_degrades_to_flat(tmp_path, monkeypatch):
     through to the legacy flat overlay. Fix C is strictly >= today's fallback:
     premium when it fits, flat when it can't, never manual-worse-than-flat."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
     from agents.flyer import render, premium_overlay
     legacy = {"n": 0}
     monkeypatch.setattr(premium_overlay, "render_premium_overlay",
@@ -571,7 +573,7 @@ def test_allowlist_not_containing_project_phone_uses_legacy(tmp_path, monkeypatc
 def test_flag_on_no_allowlist_uses_premium_globally(tmp_path, monkeypatch):
     """flag on + no allowlist env set → global ON (premium for all food projects)."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
     from agents.flyer import render, premium_overlay
     called = {"premium": 0, "legacy": 0}
     monkeypatch.setattr(premium_overlay, "render_premium_overlay",
@@ -620,6 +622,7 @@ def _bg_only_project():
 def test_background_prompt_has_textsafe_zones_when_flag_on(monkeypatch):
     from agents.flyer import render
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
     # Pin the eligibility predicate so the background-only branch is entered
     # regardless of FLYER_ALLOW_INTEGRATED_POSTER state in CI.
     monkeypatch.setattr(render, "_background_only_eligible", lambda _p: True)
@@ -692,6 +695,7 @@ def test_apply_critical_text_overlay_flat_premium_import(tmp_path, monkeypatch):
     fallback)."""
     import sys
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
     from agents.flyer import render, premium_overlay
     # Register premium_overlay under its FLAT deployed name so the
     # `import flyer_premium_overlay` arm in _apply_critical_text_overlay binds.

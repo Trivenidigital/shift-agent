@@ -331,3 +331,40 @@ def test_registers_supersede_deterministic_first(monkeypatch, tmp_path):
     monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", PHONE)
     assert R._integrated_poster_eligible(proj) is True   # contract supersedes
     assert R._typeset_contract_applies(proj) is True     # the full gate opens
+
+
+def test_all_seven_allowlist_gates_empty_means_disabled(monkeypatch):
+    # Allowlist-semantics unification pin (Phase A exit): EVERY flyer
+    # allowlist gate shares explicit-allow semantics — flag on + empty/unset
+    # allowlist = DISABLED, member = enabled, non-member = disabled. This is
+    # the pre-design-partner blocker: two premium tracks previously had
+    # OPPOSITE empty semantics (overlay global-on vs ppv1 disabled).
+    from agents.flyer import render as R
+    from agents.flyer import style_registers as S
+
+    proj = _project()
+    gates = [
+        ("FLYER_PREMIUM_REPAIR", "FLYER_PREMIUM_REPAIR_ALLOWLIST",
+         lambda: R._premium_repair_enabled(proj)),
+        ("FLYER_PREMIUM_OVERLAY", "FLYER_PREMIUM_OVERLAY_ALLOWLIST",
+         lambda: R._premium_overlay_enabled(proj)),
+        ("FLYER_DETERMINISTIC_RECOVERY", "FLYER_PREMIUM_OVERLAY_ALLOWLIST",
+         lambda: R._deterministic_recovery_enabled(proj)),
+        ("FLYER_DETERMINISTIC_FIRST", "FLYER_PREMIUM_OVERLAY_ALLOWLIST",
+         lambda: R._deterministic_first_enabled(proj)),
+        ("FLYER_PREMIUM_POSTER_V1", "FLYER_PREMIUM_POSTER_V1_ALLOWLIST",
+         lambda: R._premium_poster_v1_armed(proj)),
+        ("FLYER_CREATIVE_DIRECTOR_V2", "FLYER_PREMIUM_OVERLAY_ALLOWLIST",
+         lambda: R._creative_director_v2_enabled(proj)),
+        ("FLYER_STYLE_REGISTERS", "FLYER_STYLE_REGISTERS_ALLOWLIST",
+         lambda: S.style_registers_enabled(PHONE)),
+    ]
+    for flag, allow, fn in gates:
+        for var in {f for f, a, _ in gates} | {a for f, a, _ in gates}:
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv(flag, "1")
+        assert fn() is False, f"{flag}: empty allowlist must be DISABLED"
+        monkeypatch.setenv(allow, PHONE)
+        assert fn() is True, f"{flag}: member must be enabled"
+        monkeypatch.setenv(allow, "+19999999999")
+        assert fn() is False, f"{flag}: non-member must be disabled"

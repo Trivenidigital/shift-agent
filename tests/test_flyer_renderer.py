@@ -4974,13 +4974,19 @@ def test_premium_repair_enabled_flag_gating(monkeypatch):
     project = _english_project()
     # OFF by default.
     monkeypatch.delenv("FLYER_PREMIUM_REPAIR", raising=False)
-    monkeypatch.delenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
     assert render_module._premium_repair_enabled(project) is False
     # Anything other than exactly "1" is OFF.
     monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "true")
     assert render_module._premium_repair_enabled(project) is False
-    # Flag == "1" with NO allowlist → global ON.
+    # Flag == "1" with NO allowlist => DISABLED (allowlist-semantics
+    # unification, Phase A exit: empty means off, never global — wiping an
+    # allowlist fails safe instead of widening to every customer).
     monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
+    monkeypatch.delenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", raising=False)
+    assert render_module._premium_repair_enabled(project) is False
+    # Member of a non-empty allowlist => ON.
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+19045550123")
     assert render_module._premium_repair_enabled(project) is True
 
 
@@ -5350,7 +5356,7 @@ def test_background_only_prompt_requests_food_hero_no_people(monkeypatch):
     from agents.flyer import render as r
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
     p = _f0174_integrated_project()  # existing helper in this file
     tok = r._FORCE_BACKGROUND_ONLY.set(True)
     try:
@@ -5389,7 +5395,7 @@ def test_w1_scoped_prompt_is_restaurant_promo_single_hero(monkeypatch):
     from agents.flyer import render as r
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
     p = _f0174_integrated_project()
     tok = r._FORCE_BACKGROUND_ONLY.set(True)
     try:
@@ -5489,7 +5495,7 @@ def _premium_food_project():
 
 def _enable_premium(monkeypatch):
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
     from agents.flyer import render as r
     monkeypatch.setattr(r, "_is_food_or_grocery_project", lambda p: True)
 
@@ -5751,7 +5757,7 @@ def test_deterministic_first_enabled_flag_off(monkeypatch):
 
 def test_deterministic_first_enabled_global_when_no_allowlist(monkeypatch):
     monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
     assert render_module._deterministic_first_enabled(_weekend_project()) is True
 
 
@@ -5765,7 +5771,7 @@ def test_deterministic_first_enabled_allowlist_scoped(monkeypatch):
 
 def _enable_integrated(monkeypatch):
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
 
 
 def test_dense_flag_on_routes_to_mode2(monkeypatch):
@@ -5779,6 +5785,7 @@ def test_dense_flag_on_routes_to_mode2(monkeypatch):
 def test_sparse_flag_on_stays_integrated(monkeypatch):
     _enable_integrated(monkeypatch)
     monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
     assert render_module._integrated_poster_eligible(_sparse_project()) is True
 
 
@@ -5798,7 +5805,9 @@ def test_flag_off_byte_identical_dense_and_sparse(monkeypatch):
 def test_dense_flag_on_premium_overlay_interaction(monkeypatch):
     _enable_integrated(monkeypatch)
     monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
     p = _weekend_project()
     assert render_module._integrated_poster_eligible(p) is False
     assert render_module._premium_overlay_enabled(p) is True
