@@ -73,11 +73,6 @@ except ImportError:  # pragma: no cover - import-path shim
         scrub_ungrounded_commercial_taste,
     )
 
-try:  # pragma: no cover - import-path shim
-    from flyer_narrative_quality import select_campaign_narrative  # type: ignore  # noqa: F401
-except ImportError:  # pragma: no cover - import-path shim
-    from agents.flyer.flyer_narrative_quality import select_campaign_narrative  # noqa: F401
-
 try:  # pragma: no cover - import-path shim — Controlled Copy Archetypes (CCA)
     from flyer_copy_archetypes import compose_archetype_headlines  # type: ignore
 except ImportError:  # pragma: no cover - import-path shim

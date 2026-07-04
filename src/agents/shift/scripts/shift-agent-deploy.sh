@@ -520,11 +520,15 @@ PY
     else
         rm -f /opt/shift-agent/flyer_creative_resolver.py
     fi
-    # Narrative quality referee (PR #506). flyer_creative_resolver hard-imports
-    # select_campaign_narrative from flyer_narrative_quality at module load, so it
-    # MUST be installed at the deployed flat path or the resolver import raises
-    # ImportError and breaks CD v2 campaign-narrative selection (the smoke
-    # module-import probe asserts this module loads).
+    # Retired 2026-07-04 (graduation commit 5): the narrative referee is
+    # redundant under CCA — the firewall owns safety/grounding, the composer
+    # owns priority order; the referee blacklists CCA's own combo template and
+    # its scoring would demote the designed offer-explicit-first ordering.
+    # ROLLBACK HYGIENE (PR #546 review F1): the install branch exists ONLY for
+    # rollback to pre-#546 tarballs still in rotation (KEEP_TARBALLS window) —
+    # the old resolver top-imports this module and a bare rm -f would leave a
+    # restored tree broken (terminal, since rollback-of-rollback is refused).
+    # Dead code on forward deploys (the repo file no longer exists).
     if [ -f src/agents/flyer/flyer_narrative_quality.py ]; then
         install -m 644 src/agents/flyer/flyer_narrative_quality.py /opt/shift-agent/flyer_narrative_quality.py
     else
