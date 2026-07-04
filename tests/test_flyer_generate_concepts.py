@@ -4384,7 +4384,7 @@ def _run_premium_repair_case(monkeypatch, tmp_path, *, repair_passes_on, flag="1
         monkeypatch.delenv("FLYER_PREMIUM_REPAIR", raising=False)
     else:
         monkeypatch.setenv("FLYER_PREMIUM_REPAIR", flag)
-    monkeypatch.delenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
 
     state_path = tmp_path / "projects.json"
     audit_path = tmp_path / "decisions.log"
@@ -4552,7 +4552,7 @@ def test_premium_repair_introducing_fabrication_is_discarded(monkeypatch, tmp_pa
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
 
     state_path = tmp_path / "projects.json"
     audit_path = tmp_path / "decisions.log"
@@ -4643,7 +4643,7 @@ def test_failed_premium_repair_leaves_original_preview_byte_identical(monkeypatc
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
 
     state_path = tmp_path / "projects.json"
     audit_path = tmp_path / "decisions.log"
@@ -4752,7 +4752,7 @@ def test_premium_repair_non_flyer_render_error_does_not_crash_run(monkeypatch, t
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
 
     state_path = tmp_path / "projects.json"
     audit_path = tmp_path / "decisions.log"
@@ -5006,7 +5006,7 @@ def test_premium_repair_skipped_no_instruction(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
 
     state_path = tmp_path / "projects.json"
     audit_path = tmp_path / "decisions.log"
@@ -5112,7 +5112,7 @@ def _run_multi_concept_premium_repair_case(monkeypatch, tmp_path, *, per_concept
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
-    monkeypatch.delenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
 
     state_path = tmp_path / "projects.json"
     audit_path = tmp_path / "decisions.log"
