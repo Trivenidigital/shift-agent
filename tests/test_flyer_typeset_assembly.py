@@ -307,3 +307,27 @@ def test_demotion_records_truthful_outcome(monkeypatch, tmp_path):
     assert outcome is not None
     assert outcome.status == "skipped" and outcome.reason == "demoted_typeset"
     assert outcome.delivered is False
+
+
+def test_registers_supersede_deterministic_first(monkeypatch, tmp_path):
+    # F0209 (C1 attempt 3): FLYER_DETERMINISTIC_FIRST=1 + fact-dense brief
+    # vetoed integrated eligibility -> typeset gate + demotion never fired
+    # live; the register was structurally unreachable. Registers-active must
+    # supersede the veto (the typeset contract IS the text-safety machinery);
+    # registers-off keeps the veto byte-identical.
+    from agents.flyer import render as R
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", PHONE)
+    proj = _project()
+    proj = proj.model_copy(update={"locked_facts": [*proj.locked_facts,
+        _F("item:2:name", "Pongal"), _F("item:2:price", "$6.99")]})
+    assert R._is_fact_dense(proj), "fixture must be fact-dense for this pin"
+
+    monkeypatch.delenv("FLYER_STYLE_REGISTERS", raising=False)
+    assert R._integrated_poster_eligible(proj) is False  # veto holds flag-off
+
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", PHONE)
+    assert R._integrated_poster_eligible(proj) is True   # contract supersedes
+    assert R._typeset_contract_applies(proj) is True     # the full gate opens

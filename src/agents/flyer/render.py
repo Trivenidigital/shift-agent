@@ -1380,7 +1380,16 @@ def _integrated_poster_eligible(project: FlyerProject) -> bool:
     # price lists, combos, schedule+price) skip integrated model-rendered text and
     # render via the deterministic premium overlay (mode 2). Gated + allowlist-scoped
     # via FLYER_DETERMINISTIC_FIRST; flag-off short-circuits -> byte-identical.
-    if _deterministic_first_enabled(project) and _is_fact_dense(project):
+    # REGISTER OVERRIDE (F0209, C1 attempt 3): deterministic-first was the
+    # PRE-REGISTER text-safety policy — model-rendered text was unreliable, so
+    # fact-dense briefs went to the overlay. The typeset contract (numbered
+    # strings + fail-closed completeness + the four QA screens) is exactly the
+    # machinery that makes model text safe, and every C1-class brief is
+    # fact-dense — so this veto silently made the register unreachable live.
+    # When style registers are active (flag + pilot allowlist), the contract
+    # supersedes deterministic-first; flag-off is byte-identical.
+    if (_deterministic_first_enabled(project) and _is_fact_dense(project)
+            and not _style_registers_active(project)):
         return False
     reference_menu = _style_only_reference_requested(project) and _has_materialized_reference_menu_facts(project)
     if reference_menu:
