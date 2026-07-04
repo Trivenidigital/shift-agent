@@ -520,16 +520,10 @@ PY
     else
         rm -f /opt/shift-agent/flyer_creative_resolver.py
     fi
-    # Narrative quality referee (PR #506). flyer_creative_resolver hard-imports
-    # select_campaign_narrative from flyer_narrative_quality at module load, so it
-    # MUST be installed at the deployed flat path or the resolver import raises
-    # ImportError and breaks CD v2 campaign-narrative selection (the smoke
-    # module-import probe asserts this module loads).
-    if [ -f src/agents/flyer/flyer_narrative_quality.py ]; then
-        install -m 644 src/agents/flyer/flyer_narrative_quality.py /opt/shift-agent/flyer_narrative_quality.py
-    else
-        rm -f /opt/shift-agent/flyer_narrative_quality.py
-    fi
+    # Retired 2026-07-04 (graduation commit 5 audition verdict): the narrative
+    # referee never selected anything live (candidate pool <=1; its bar rejects
+    # the archetype library's own templates). Clean the stale flat copy.
+    rm -f /opt/shift-agent/flyer_narrative_quality.py
     # Controlled Copy Archetypes (CCA). flyer_creative_resolver hard-imports
     # compose_archetype_headlines from flyer_copy_archetypes at module load, so it MUST
     # be installed at the deployed flat path or the resolver import raises ImportError

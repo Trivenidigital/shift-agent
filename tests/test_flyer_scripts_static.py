@@ -149,19 +149,22 @@ def test_campaign_scene_prompts_module_is_deployed():
     assert "/opt/shift-agent/flyer_campaign_scene_prompts.py" in deploy
 
 
-def test_narrative_quality_module_is_deployed():
-    """flyer_creative_resolver hard-imports select_campaign_narrative from
-    flyer_narrative_quality (PR #506); the deploy must install it into the flat
-    /opt/shift-agent layout or the deployed resolver import fails (ImportError)
-    at module load and breaks CD v2 campaign-narrative selection. The smoke probe
-    must import it so a missing install line fails the gate, not a live flyer."""
-    deploy = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
-    smoke = (REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh").read_text(encoding="utf-8")
-    resolver = (REPO / "src" / "agents" / "flyer" / "flyer_creative_resolver.py").read_text(encoding="utf-8")
-    assert "flyer_narrative_quality" in resolver  # resolver imports the flat module
-    assert "src/agents/flyer/flyer_narrative_quality.py" in deploy
-    assert "/opt/shift-agent/flyer_narrative_quality.py" in deploy
-    assert "import flyer_narrative_quality" in smoke  # smoke import-probe proves it loads
+def test_narrative_quality_module_is_retired():
+    """Graduation commit 5 audition verdict (2026-07-04): the narrative referee
+    NEVER selected anything live (compose_archetype_headlines yields <=1
+    candidate in practice, and the referee's acceptance bar rejects the
+    archetype library's own approved templates — audited empirically). Retired
+    per the wire-or-delete no-carry ruling. This pin inverts PR #506's: the
+    module must NOT exist, the resolver must NOT import it, and the deploy
+    must clean the stale flat copy."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    assert not (root / "src" / "agents" / "flyer" / "flyer_narrative_quality.py").exists()
+    resolver = (root / "src" / "agents" / "flyer" / "flyer_creative_resolver.py").read_text(encoding="utf-8")
+    assert "flyer_narrative_quality" not in resolver
+    deploy = (root / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh").read_text(encoding="utf-8")
+    assert "rm -f /opt/shift-agent/flyer_narrative_quality.py" in deploy
+    assert "install -m 644 src/agents/flyer/flyer_narrative_quality.py" not in deploy
 
 
 def test_copy_archetypes_module_is_deployed():
