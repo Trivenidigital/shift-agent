@@ -1878,6 +1878,16 @@ class FlyerBrandKit(BaseModel):
     updated_at: Optional[datetime] = None
 
 
+# Interpretive occasion (schema ruling 2026-07-04): a SEPARATE project-level
+# enum — never a locked fact. Structurally exempt from the fact contract:
+# never in QA's required set, never parity-checked, never counted in
+# extraction telemetry, never painted verbatim as poster text. It licenses
+# THEME VOCABULARY only. The enum makes guessing unrepresentable: unknown or
+# ambiguous detections map to "none" (fail-neutral — wrong-festival is a
+# customer-relationship injury; abstention beats a guess).
+FlyerOccasion = Literal["none", "july4", "diwali", "ramadan", "thanksgiving"]
+
+
 class FlyerProject(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: str = Field(pattern=r"^F\d{4,}$")
@@ -1885,6 +1895,7 @@ class FlyerProject(BaseModel):
     customer_phone: E164Phone
     customer_id: str = Field(default="", max_length=40)
     chat_id: str = Field(default="", max_length=200)
+    occasion: FlyerOccasion = "none"
     created_at: datetime
     updated_at: datetime
     original_message_id: str = Field(min_length=1, max_length=200)

@@ -26,7 +26,7 @@ def extraction_v2_enabled() -> bool:
     return os.environ.get("FLYER_EXTRACTION_V2") == "1"
 
 
-def extract_text_facts_seam(fields, raw_request, *, message_id="",
+def extract_text_facts_seam(fields, raw_request, *, message_id="", report_out=None,
                             profile_business_name="", allow_text_identity=True,
                             cfg=None, audit=None, seam="managed_create"):
     """Drop-in replacement for facts.extract_text_facts at both seams.
@@ -48,6 +48,11 @@ def extract_text_facts_seam(fields, raw_request, *, message_id="",
                 profile_business_name=profile_business_name)
             if not allow_text_identity:
                 facts = [f for f in facts if f.fact_id not in _IDENTITY_FACT_IDS]
+            if report_out is not None:
+                try:
+                    report_out["occasion"] = getattr(report, "occasion", "none")
+                except Exception:  # noqa: BLE001
+                    pass
             if audit is not None:
                 try:
                     audit("extraction_v2_used", report)
