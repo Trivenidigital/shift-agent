@@ -752,6 +752,7 @@ def main() -> int:
             except Exception:
                 pass
 
+        _extraction_report_sink: dict = {}
         locked_facts = merge_locked_facts(
             profile_facts,
             extract_text_facts_seam(
@@ -763,6 +764,7 @@ def main() -> int:
                 cfg=text_fact_cfg,
                 audit=_audit_extraction_v2,
                 seam="managed_create",
+                report_out=_extraction_report_sink,
             ),
         )
         # P0-2 missing-required-fact gate: if extraction (customer text + profile +
@@ -799,6 +801,9 @@ def main() -> int:
             customer_phone=args.customer_phone,
             customer_id=customer.customer_id if customer is not None else "",
             chat_id=project_chat_id,
+            # Interpretive, structurally outside the fact contract (schema
+            # ruling 2026-07-04); "none" whenever v2 didn't run or abstained.
+            occasion=_extraction_report_sink.get("occasion", "none"),
             created_at=now,
             updated_at=now,
             original_message_id=args.message_id,

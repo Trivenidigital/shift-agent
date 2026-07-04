@@ -125,3 +125,18 @@ def test_render_composes_occasion_theme(monkeypatch):
         _render_project(occasion="none"), concept_id="C1",
         output_format="concept_preview", size=(1080, 1350))
     assert "OCCASION THEME" not in none_p
+
+
+def test_bare_transient_project_carries_occasion():
+    # Plumbing pin: detection must reach the constructed project (the
+    # phantom-field gap) — bare path.
+    from types import SimpleNamespace
+
+    from agents.flyer.bare_render import _build_transient_project
+    cust = SimpleNamespace(customer_id="CUST0001", business_whatsapp_number=PHONE)
+    proj = _build_transient_project(cust, FlyerRequestFields(), [], "brief", "m1", "c@lid",
+                                    occasion="diwali")
+    assert proj.occasion == "diwali"
+    proj2 = _build_transient_project(cust, FlyerRequestFields(), [], "brief", "m1", "c@lid",
+                                     occasion="christmas")
+    assert proj2.occasion == "none"  # constructor also fail-neutral

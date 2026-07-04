@@ -703,7 +703,8 @@ def _routable_customer_phone(customer):
     return getattr(customer, "public_phone", None)
 
 
-def _build_transient_project(customer, fields, locked_facts, raw_text: str, message_id, chat_id: str):
+def _build_transient_project(customer, fields, locked_facts, raw_text: str, message_id, chat_id: str,
+                             occasion: str = "none"):
     schemas = _schemas()
     now = datetime.now(timezone.utc)
     return schemas.FlyerProject(
@@ -712,6 +713,7 @@ def _build_transient_project(customer, fields, locked_facts, raw_text: str, mess
         customer_id=(getattr(customer, "customer_id", "") or ""),
         customer_phone=_routable_customer_phone(customer),
         chat_id=chat_id or "",
+        occasion=occasion if occasion in ("july4", "diwali", "ramadan", "thanksgiving") else "none",
         created_at=now,
         updated_at=now,
         original_message_id=(message_id or f"bare-{int(now.timestamp())}")[:200],
@@ -722,7 +724,8 @@ def _build_transient_project(customer, fields, locked_facts, raw_text: str, mess
 
 
 # --- grounding (facts.py) -----------------------------------------------------
-def _build_locked_facts(customer, fields, raw_text: str, message_id: str, flyer_cfg):
+def _build_locked_facts(customer, fields, raw_text: str, message_id: str, flyer_cfg,
+                        report_out=None):
     """Mirror create-flyer-project's canonical combine: registered identity (profile) + brief content
     + firewall-cleared creative-planner items (when the planner flag/category is enabled in cfg)."""
     F = _facts_mod()
@@ -759,6 +762,7 @@ def _build_locked_facts(customer, fields, raw_text: str, message_id: str, flyer_
             cfg=flyer_cfg,
             audit=_audit_extraction_v2,
             seam="bare_render",
+            report_out=report_out,
         ),
     )
 
@@ -1191,7 +1195,9 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
                            "registered": getattr(customer, "business_name", "")})
 
     flyer_cfg = _load_flyer_cfg()
-    locked_facts = _build_locked_facts(customer, fields, raw_text, message_id or "", flyer_cfg)
+    _extraction_report_sink: dict = {}
+    locked_facts = _build_locked_facts(customer, fields, raw_text, message_id or "", flyer_cfg,
+                                       report_out=_extraction_report_sink)
 
     # PR3: Creative-Director branch — armed ONLY when the flag is "1" AND this trusted
     # resolved sender is allowlisted. The audit row is emitted on EVERY new-flyer render
@@ -1210,7 +1216,8 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
         allowlisted=allowlisted,
     )
 
-    project = _build_transient_project(customer, fields, locked_facts, raw_text, message_id, chat_id)
+    project = _build_transient_project(customer, fields, locked_facts, raw_text, message_id, chat_id,
+                                       occasion=_extraction_report_sink.get("occasion", "none"))
 
     # Session persistence is enabled by default for customer follow-up edits. Raw-background capture is
     # separately opt-in so the first flyer can keep the direct integrated-poster path.
