@@ -958,6 +958,48 @@ def audit_flyer_hermes_intent_decision(
 
 # === Audit ===
 
+_QUOTE_ATTR_PAT = re.compile(r"quot|context|reply|stanza|participant", re.IGNORECASE)
+
+
+def audit_raw_body(event: Any, chat_id: str, message_id: str, text: str) -> None:
+    """Best-effort raw-body diagnostic row (quoted-APPROVE prerequisite).
+    Never raises — same contract as audit_intercepted."""
+    try:
+        attrs: list[str] = []
+        quotes: dict[str, str] = {}
+        for obj, prefix in ((event, ""), (getattr(event, "source", None), "source.")):
+            if obj is None:
+                continue
+            for name in dir(obj):
+                if name.startswith("_"):
+                    continue
+                try:
+                    val = getattr(obj, name)
+                except Exception:  # noqa: BLE001
+                    continue
+                if val is None or callable(val):
+                    continue
+                attrs.append(prefix + name)
+                if _QUOTE_ATTR_PAT.search(name):
+                    quotes[(prefix + name)[:60]] = str(val)[:200]
+        _ensure_platform_path()
+        from safe_io import ndjson_append  # type: ignore
+        from schemas import CfRouterRawBody  # type: ignore
+        entry = CfRouterRawBody(
+            type="cf_router_raw_body",
+            ts=datetime.now(timezone.utc),
+            message_id=(message_id or "")[:200],
+            chat_id=(chat_id or "")[:200],
+            body_head=(text or "")[:400],
+            body_len=len(text or ""),
+            event_attrs=attrs[:40],
+            quote_attrs=quotes,
+        )
+        ndjson_append(AUDIT_LOG_PATH, entry.model_dump(mode="json"))
+    except Exception as e:  # noqa: BLE001
+        print(f"cf-router audit_raw_body failed (non-fatal): {e}", file=sys.stderr)
+
+
 def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
                       subprocess_rc: Optional[int] = None, detail: str = "") -> None:
     """Emit a `cf_router_intercepted` audit row via the deployed

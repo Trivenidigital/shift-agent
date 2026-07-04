@@ -264,6 +264,10 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
         message_id = native_message_id or _extract_message_id(event, chat_id, text)
         if native_message_id and actions.mark_cf_router_inbound_seen(chat_id, native_message_id, text):
             return {"action": "skip", "reason": "cf-router duplicate inbound"}
+        # Raw-body diagnostic capture (quoted-APPROVE prerequisite): record what
+        # the bridge delivers — body head + quote/reply-shaped event attrs —
+        # BEFORE any routing. Best-effort; never blocks the flow.
+        actions.audit_raw_body(event, chat_id, message_id, text)
         flyer_generation_enabled = actions.is_flyer_enabled()
         flyer_workflow_enabled = flyer_generation_enabled or actions.is_flyer_workflow_enabled()
 
