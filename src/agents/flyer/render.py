@@ -5018,7 +5018,16 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
                 and model.strip().lower() not in DETERMINISTIC_MODEL_NAMES
                 and _premium_poster_v1_opt_in_path() is not None
                 and _premium_poster_v1_armed(project)
-                and _premium_poster_v1_eligible(project)):
+                and _premium_poster_v1_eligible(project)
+                # COMPOSER DEMOTION (v2 spec ruling, shipped 2026-07-04 after the
+                # C1 structural finding on F0205/F0206): when the typeset
+                # contract applies, the INTEGRATED register render is the
+                # preview path — the deterministic composer cannot paint the
+                # crowned register (beveled-gold dimensional type) and was
+                # winning selection on exactly the premium-eligible briefs the
+                # register exists for. PPv1 stays primary for non-register
+                # projects; the existing recovery ladder is the fallback.
+                and not _typeset_contract_applies(project, force_background_only=force_background_only)):
             outcome = render_premium_poster_v1(
                 project, path, concept_id=concept_id, output_format=output_format,
                 size=size, model=model, quality=quality)

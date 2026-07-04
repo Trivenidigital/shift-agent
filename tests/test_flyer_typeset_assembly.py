@@ -218,3 +218,59 @@ def test_uncovered_required_fact_falls_back_to_legacy(monkeypatch):
     assert "Controlled customer copy:" in p          # legacy carried the render
     # (Legacy also drops bespoke fact shapes — QA then routes to manual review.
     # The fail-closed preserves PARITY with legacy, never a worse contract.)
+
+
+def test_composer_demoted_when_typeset_contract_applies(monkeypatch, tmp_path):
+    # C1 structural finding (F0205/F0206): premium-eligible briefs routed to
+    # the PPv1 composer, which cannot paint the crowned register. Under the
+    # typeset contract the INTEGRATED render is the preview path; PPv1 must
+    # NOT fire. Flag off: PPv1 stays primary (unchanged).
+    from agents.flyer import render as R
+
+    calls = {"ppv1": 0, "integrated": 0}
+    monkeypatch.setattr(R, "render_premium_poster_v1",
+                        lambda *a, **k: calls.__setitem__("ppv1", calls["ppv1"] + 1) or
+                        type("O", (), {"delivered": True})())
+
+    def fake_bytes(*a, **k):
+        calls["integrated"] += 1
+        import io
+
+        from PIL import Image
+        buf = io.BytesIO()
+        img = Image.new("RGB", (1080, 1350), (200, 60, 40))
+        from PIL import ImageDraw
+        d = ImageDraw.Draw(img)
+        for y in range(0, 1350, 40):
+            d.rectangle([100, y, 900, y + 15], fill=(30 + y % 100, 80, 60))
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    monkeypatch.setattr(R, "_openrouter_image_bytes", fake_bytes)
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_POSTER_V1", "1")
+    monkeypatch.setenv("FLYER_PREMIUM_POSTER_V1_ALLOWLIST", PHONE)
+    proj = _project()
+    proj = proj.model_copy(update={"locked_facts": [*proj.locked_facts,
+        _F("item:2:name", "Pongal"), _F("item:2:price", "$6.99")]})  # ppv1 needs >=3 items
+
+    from agents.flyer.render import premium_poster_v1_managed_path
+
+    # flag ON -> integrated wins, ppv1 skipped, marker written
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", PHONE)
+    with premium_poster_v1_managed_path():
+        R._render_model(proj, tmp_path / "on.png", concept_id="C1",
+                        output_format="concept_preview", size=(1080, 1350),
+                        model="google/gemini-3.1-flash-image-preview", quality="medium")
+    assert calls == {"ppv1": 0, "integrated": 1}
+    R._write_typeset_marker(proj, tmp_path / "on.png")
+    assert (tmp_path / "on.png.typeset.json").exists()
+
+    # flag OFF -> ppv1 primary unchanged
+    monkeypatch.delenv("FLYER_STYLE_REGISTERS", raising=False)
+    with premium_poster_v1_managed_path():
+        R._render_model(proj, tmp_path / "off.png", concept_id="C1",
+                        output_format="concept_preview", size=(1080, 1350),
+                        model="google/gemini-3.1-flash-image-preview", quality="medium")
+    assert calls["ppv1"] == 1
