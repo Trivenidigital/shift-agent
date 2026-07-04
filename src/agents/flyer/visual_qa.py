@@ -1796,6 +1796,21 @@ def _style_vocab_blockers(project: FlyerProject, extracted_text: str) -> list[st
     return blockers
 
 
+def _project_has_uniform_shared_price(project: FlyerProject) -> bool:
+    """WS2's uniform detection over locked facts: exactly one distinct item
+    price, exact-token present in the offer statement."""
+    try:
+        items: dict[int, dict[str, str]] = {}
+        for fact in project.locked_facts:
+            fid = str(getattr(fact, "fact_id", "") or "")
+            m = re.match(r"^item:(\d+):(name|price)$", fid)
+            if m:
+                items.setdefault(int(m.group(1)), {})[m.group(2)] = str(fact.value or "")
+        return _uniform_shared_price(project, items)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _offer_qualifier_blockers(project: FlyerProject, extracted_text: str) -> list[str]:
     """Invented offer qualifiers (the ships-wrong class): a promo/portion
     qualifier visible in the art that appears in NO locked fact and NOT in the
@@ -1819,6 +1834,12 @@ def _offer_qualifier_blockers(project: FlyerProject, extracted_text: str) -> lis
             continue
         if q in ("per", "each") and (unit_pricing or "per" in pool_words or "each" in pool_words):
             continue  # F4 bridge: per-unit pricing stated by the customer
+        if q in ("per", "each") and _project_has_uniform_shared_price(project):
+            # F0208 bridge (C1 exhibit): a UNIFORM shared-price design saying
+            # '$7.49 each' restates the locked price, asserts nothing new —
+            # the deterministic overlay itself paints this treatment, and
+            # blocking it killed the entire render ladder to manual.
+            continue
         if q == "bogo" and {"buy", "get"} <= pool_words:
             continue  # F4 bridge: buy-X-get-Y stated by the customer
         blockers.append(f"invented offer qualifier visible: {q}")
