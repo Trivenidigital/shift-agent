@@ -276,7 +276,9 @@ def test_create_lead_writes_state_and_sends_card(env_dir, bridge_server):
 
 def test_create_lead_idempotent_replay(env_dir, bridge_server):
     port, BridgeStub = bridge_server
-    fields = {"headcount": 30, "event_date": "2026-07-04"}
+    # Relative future date — hardcoded literals are calendar time-bombs (this
+    # one went hard-red when "today" passed 2026-07-04; see note above).
+    fields = {"headcount": 30, "event_date": (date.today() + timedelta(days=30)).isoformat()}
     r1 = _run_create(env_dir, port, fields, message_id="meta_xyz")
     out1 = json.loads(r1.stdout.strip().splitlines()[-1])
     r2 = _run_create(env_dir, port, fields, message_id="meta_xyz")
@@ -308,7 +310,8 @@ def test_create_lead_invalid_fields_json(env_dir, bridge_server):
 def test_apply_approve_sends_quote_to_customer(env_dir, bridge_server):
     port, BridgeStub = bridge_server
     # 1) Create
-    r1 = _run_create(env_dir, port, {"headcount": 25, "event_date": "2026-08-01"},
+    r1 = _run_create(env_dir, port,
+                     {"headcount": 25, "event_date": (date.today() + timedelta(days=30)).isoformat()},
                      customer_phone="+15551234567", customer_name="Anita")
     out1 = json.loads(r1.stdout.strip().splitlines()[-1])
     code = out1["approval_code"]
@@ -630,7 +633,7 @@ def test_audit_fail_recovery_success_path(env_dir, bridge_server):
 
     r = _run_create(
         env_dir, port,
-        fields={"headcount": 25, "event_date": "2027-06-15"},
+        fields={"headcount": 25, "event_date": (date.today() + timedelta(days=30)).isoformat()},
         message_id="MSG_AUDIT_FAIL_SUCC_001",
     )
     assert r.returncode == 0, f"success path must exit 0 even on audit fail: stderr={r.stderr}"
