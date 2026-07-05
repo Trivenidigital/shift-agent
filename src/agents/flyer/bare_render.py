@@ -634,9 +634,9 @@ def _api_key() -> str:
         return v
     for p in _ENV_PATHS:
         pp = Path(p)
-        if not pp.exists():
-            continue
         try:
+            if not pp.exists():
+                continue
             for line in pp.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if line.startswith("OPENROUTER_API_KEY=") and "=" in line:
