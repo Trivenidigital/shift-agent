@@ -80,3 +80,13 @@ def test_emitter_never_raises(monkeypatch, tmp_path):
 def test_body_head_capped(monkeypatch, tmp_path):
     rows = _capture(monkeypatch, tmp_path, SimpleNamespace(text="x"), text="A" * 999)
     assert rows[0]["body_len"] == 999 and len(rows[0]["body_head"]) == 400
+
+
+def test_raw_message_structure_captured(monkeypatch, tmp_path):
+    # Probe-2 evidence (2026-07-05): quote metadata rides in raw_message, not
+    # a quote-named attr — the capture must record its head.
+    event = SimpleNamespace(text="APPROVE",
+                            raw_message={"key": {"id": "X"}, "contextInfo": {"stanzaId": "PREV"}})
+    rows = _capture(monkeypatch, tmp_path, event)
+    assert "raw_message" in rows[0]["quote_attrs"]
+    assert "stanzaId" in rows[0]["quote_attrs"]["raw_message"]

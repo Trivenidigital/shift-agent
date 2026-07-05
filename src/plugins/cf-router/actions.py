@@ -982,6 +982,11 @@ def audit_raw_body(event: Any, chat_id: str, message_id: str, text: str) -> None
                 attrs.append(prefix + name)
                 if _QUOTE_ATTR_PAT.search(name):
                     quotes[(prefix + name)[:60]] = str(val)[:200]
+                elif name == "raw_message":
+                    # The bridge's full message structure — the most likely
+                    # carrier of quote/reply metadata (probe 2 evidence: clean
+                    # body, empty quote_attrs, raw_message present-uncaptured).
+                    quotes[(prefix + name)[:60]] = str(val)[:600]
         _ensure_platform_path()
         from safe_io import ndjson_append  # type: ignore
         from schemas import CfRouterRawBody  # type: ignore
