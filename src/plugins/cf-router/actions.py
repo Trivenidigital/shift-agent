@@ -995,7 +995,7 @@ def audit_raw_body(event: Any, chat_id: str, message_id: str, text: str) -> None
             event_attrs=attrs[:40],
             quote_attrs=quotes,
         )
-        ndjson_append(AUDIT_LOG_PATH, entry.model_dump(mode="json"))
+        ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:  # noqa: BLE001
         print(f"cf-router audit_raw_body failed (non-fatal): {e}", file=sys.stderr)
 

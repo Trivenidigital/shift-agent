@@ -21,6 +21,8 @@ on:
       - "tests/test_flyer_extraction_v2*.py"
       - "src/agents/flyer/extraction_v2.py"
       - "tests/test_flyer_renderer.py"
+      - "tests/test_cf_router_raw_body.py"
+      - "src/plugins/cf-router/**"
       - "tests/test_flyer_visual_qa.py"
       - ".github/workflows/flyer-premium-ci.yml"
   push:
@@ -45,7 +47,7 @@ jobs:
       - name: Premium Poster v1 suite
         run: |
           python -m pytest \
-            tests/test_flyer_premium_poster_v1.py \
+            tests/test_cf_router_raw_body.py \n            tests/test_flyer_premium_poster_v1.py \
             tests/test_flyer_premium_poster_v1_offer.py \
             tests/test_flyer_premium_poster_v1_food.py \
             tests/test_flyer_premium_poster_v1_director.py \

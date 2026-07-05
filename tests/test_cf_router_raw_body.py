@@ -31,9 +31,11 @@ spec.loader.exec_module(cf_actions)
 def _capture(monkeypatch, tmp_path, event, text="APPROVE"):
     rows = []
     import safe_io
-    monkeypatch.setattr(cf_actions, "AUDIT_LOG_PATH", tmp_path / "decisions.log")
+    monkeypatch.setattr(cf_actions, "LOG_PATH", tmp_path / "decisions.log")
     real_append = safe_io.ndjson_append
-    monkeypatch.setattr(safe_io, "ndjson_append", lambda p, e: rows.append(e) or real_append(p, e))
+    import json as _json
+    monkeypatch.setattr(safe_io, "ndjson_append",
+                        lambda p, e: rows.append(_json.loads(e) if isinstance(e, str) else e) or real_append(p, e))
     cf_actions.audit_raw_body(event, "123@lid", "wamid.X1", text)
     return rows
 
