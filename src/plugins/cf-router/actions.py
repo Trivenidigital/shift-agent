@@ -1006,7 +1006,8 @@ def audit_raw_body(event: Any, chat_id: str, message_id: str, text: str) -> None
 
 
 def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
-                      subprocess_rc: Optional[int] = None, detail: str = "") -> None:
+                      subprocess_rc: Optional[int] = None, detail: str = "",
+                      binding_source: str = "") -> None:
     """Emit a `cf_router_intercepted` audit row via the deployed
     safe_io.ndjson_append chokepoint.
 
@@ -1028,6 +1029,7 @@ def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
             code=code,
             subprocess_rc=subprocess_rc,
             detail=detail[:2000],
+            binding_source=binding_source,  # type: ignore[arg-type]
         )
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
@@ -2720,50 +2722,62 @@ def _load_flyer_projects() -> list[dict]:
     return projects if isinstance(projects, list) else []
 
 
-def find_active_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> Optional[dict]:
-    """Look up a non-terminal flyer project by sender phone, for routing
-    new-request / revision / approval flow.
+def _flyer_candidate_projects_by_sender(phone: Optional[str], chat_id: str) -> list[dict]:
+    """Non-terminal project rows owned by this sender's account.
 
     `closed_no_send` is intentionally excluded: an operator-closed row must
     not swallow legitimate new flyer requests from the same customer. Use
     `find_latest_flyer_project_for_status_by_sender` for status replies,
     which DOES need to surface closures.
+
+    Shared by the active-routing picker (max updated_at), the quoted-mid
+    binder, and the quote-echo guard so account scoping stays in one place —
+    none of them may leak projects across customers.
     """
     if not FLYER_PROJECTS_PATH.exists():
-        return None
+        return []
     terminal = {"completed", "closed_no_send"}
+    account_phones = _flyer_account_phones(phone, chat_id)
+    if not account_phones:
+        return []
+    customer = find_flyer_customer_by_sender(phone, chat_id)
+    customer_id = str((customer or {}).get("customer_id") or "")
+    direct_account_phones = _flyer_direct_account_phones(phone, chat_id, customer)
+    account_chat_ids = {chat_id} if chat_id else set()
+    if customer:
+        primary_chat_id = str(customer.get("primary_chat_id") or "")
+        if primary_chat_id:
+            account_chat_ids.add(primary_chat_id)
+    matches = []
+    for row in _load_flyer_projects():
+        if not isinstance(row, dict) or row.get("status") in terminal:
+            continue
+        row_customer_id = str(row.get("customer_id") or "")
+        row_chat_id = str(row.get("chat_id") or "")
+        row_phone = _canonical_phone(row.get("customer_phone")) or str(row.get("customer_phone") or "")
+        if row_customer_id:
+            if customer_id and row_customer_id == customer_id:
+                matches.append(row)
+            continue
+        if row_chat_id:
+            if row_chat_id in account_chat_ids:
+                matches.append(row)
+            continue
+        if customer_id and row_phone in direct_account_phones:
+            matches.append(row)
+            continue
+        if not customer_id and row_phone in account_phones:
+            matches.append(row)
+    return matches
+
+
+def find_active_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> Optional[dict]:
+    """Look up a non-terminal flyer project by sender phone, for routing
+    new-request / revision / approval flow. Newest-updated heuristic; see
+    `resolve_flyer_binding_project` for the quoted-mid precision override.
+    """
     try:
-        account_phones = _flyer_account_phones(phone, chat_id)
-        if not account_phones:
-            return None
-        customer = find_flyer_customer_by_sender(phone, chat_id)
-        customer_id = str((customer or {}).get("customer_id") or "")
-        direct_account_phones = _flyer_direct_account_phones(phone, chat_id, customer)
-        account_chat_ids = {chat_id} if chat_id else set()
-        if customer:
-            primary_chat_id = str(customer.get("primary_chat_id") or "")
-            if primary_chat_id:
-                account_chat_ids.add(primary_chat_id)
-        matches = []
-        for row in _load_flyer_projects():
-            if not isinstance(row, dict) or row.get("status") in terminal:
-                continue
-            row_customer_id = str(row.get("customer_id") or "")
-            row_chat_id = str(row.get("chat_id") or "")
-            row_phone = _canonical_phone(row.get("customer_phone")) or str(row.get("customer_phone") or "")
-            if row_customer_id:
-                if customer_id and row_customer_id == customer_id:
-                    matches.append(row)
-                continue
-            if row_chat_id:
-                if row_chat_id in account_chat_ids:
-                    matches.append(row)
-                continue
-            if customer_id and row_phone in direct_account_phones:
-                matches.append(row)
-                continue
-            if not customer_id and row_phone in account_phones:
-                matches.append(row)
+        matches = _flyer_candidate_projects_by_sender(phone, chat_id)
         if not matches:
             return None
         return max(matches, key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""))
@@ -2839,6 +2853,155 @@ def find_latest_flyer_project_for_status_by_sender(
         if not matches:
             return None
         return max(matches, key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""))
+    except Exception:
+        return None
+
+
+def extract_quoted_message_id(event: Any) -> str:
+    """Return the quoted (swipe-reply) message id from the bridge event, or "".
+
+    Probe evidence (cf_router_raw_body, 2026-07-05): the bridge delivers
+    swipe-replies with a CLEAN body and quote metadata in `event.raw_message`
+    (dict): hasQuotedMessage=True, quotedMessageId=<id of quoted message>,
+    quotedParticipant=<lid of quoted sender>. Defensive on every axis — dict,
+    JSON string, missing, hostile attribute access — and NEVER raises: any
+    parsing issue means "" and the caller falls back to newest-updated
+    binding (fail-open contract).
+    """
+    try:
+        for obj in (event, getattr(event, "source", None)):
+            if obj is None:
+                continue
+            raw = getattr(obj, "raw_message", None)
+            if raw is None and isinstance(obj, dict):
+                raw = obj.get("raw_message")
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+            if not isinstance(raw, dict):
+                continue
+            if not raw.get("hasQuotedMessage"):
+                continue
+            quoted = raw.get("quotedMessageId")
+            if isinstance(quoted, str) and quoted.strip():
+                return quoted.strip()[:200]
+        return ""
+    except Exception:
+        return ""
+
+
+def _flyer_project_outbound_mids(row: dict) -> set[str]:
+    """All outbound message ids known for a project row: the preview-batch
+    index (media + APPROVE-CTA text) plus per-asset delivery mids (concept
+    previews and finals recorded by _record_flyer_concept_preview_delivery /
+    send-flyer-package)."""
+    mids: set[str] = set()
+    for mid in row.get("preview_message_ids") or []:
+        if isinstance(mid, str) and mid.strip():
+            mids.add(mid.strip())
+    for asset in row.get("assets") or []:
+        if not isinstance(asset, dict):
+            continue
+        mid = str(asset.get("outbound_message_id") or "").strip()
+        if mid:
+            mids.add(mid)
+    return mids
+
+
+def find_flyer_project_by_quoted_mid(
+    phone: Optional[str], chat_id: str, quoted_mid: str,
+) -> Optional[dict]:
+    """Return the sender's non-terminal project whose known outbound mids
+    contain `quoted_mid`, or None. Account-scoped via the same candidate set
+    as the active picker — never binds across customers."""
+    if not quoted_mid:
+        return None
+    try:
+        hits = [
+            row for row in _flyer_candidate_projects_by_sender(phone, chat_id)
+            if quoted_mid in _flyer_project_outbound_mids(row)
+        ]
+        if not hits:
+            return None
+        return max(hits, key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""))
+    except Exception:
+        return None
+
+
+def resolve_flyer_binding_project(
+    active_project: Optional[dict],
+    phone: Optional[str],
+    chat_id: str,
+    event: Any,
+) -> tuple[Optional[dict], str]:
+    """Bind an inbound to a flyer project, preferring the quoted message.
+
+    When the customer swipe-replied on a specific outbound message (concept
+    preview media, APPROVE CTA, final delivery), the quoted mid identifies the
+    project they mean — more precise than the newest-updated heuristic when
+    multiple projects are open. Returns (project, binding_source) where
+    binding_source is "quoted_message_id" or "newest_updated". Fail-open: any
+    missing/odd quote metadata or lookup failure keeps the newest-updated
+    result untouched.
+    """
+    if active_project is None:
+        return None, "newest_updated"
+    quoted_mid = extract_quoted_message_id(event)
+    if quoted_mid:
+        quoted_project = find_flyer_project_by_quoted_mid(phone, chat_id, quoted_mid)
+        if quoted_project is not None:
+            return quoted_project, "quoted_message_id"
+    return active_project, "newest_updated"
+
+
+# Quote-echo guard (F0211 class) only considers projects touched inside this
+# window — an echo quotes a message from a live conversation, not archives.
+FLYER_QUOTE_ECHO_RECENT_SEC = 7 * 24 * 3600
+# Prefix matches (echo + appended reply text) need a long brief to be safe;
+# short briefs only match on exact equality.
+_FLYER_QUOTE_ECHO_PREFIX_MIN_LEN = 80
+
+
+def find_flyer_quote_echo_project(
+    phone: Optional[str], chat_id: str, body: str,
+) -> Optional[dict]:
+    """Detect a flattened quote-echo body (F0211 class) and return the echoed
+    project, or None.
+
+    One legacy bridge shape flattens the QUOTED message text into the inbound
+    body on swipe-reply. When the quoted text is a project brief, the echo
+    looks like a fresh brief and creates a duplicate project. Conservative
+    match ONLY: whitespace/case-normalized body exactly equals a recent
+    project's raw_request, or starts with it when the brief is long
+    (> _FLYER_QUOTE_ECHO_PREFIX_MIN_LEN chars). No fuzzy matching.
+    """
+    normalized_body = " ".join((body or "").split()).casefold()
+    if not normalized_body:
+        return None
+    try:
+        now = datetime.now(timezone.utc)
+        best: Optional[dict] = None
+        for row in _flyer_candidate_projects_by_sender(phone, chat_id):
+            raw_request = " ".join(str(row.get("raw_request") or "").split()).casefold()
+            if not raw_request:
+                continue
+            if normalized_body != raw_request and not (
+                len(raw_request) > _FLYER_QUOTE_ECHO_PREFIX_MIN_LEN
+                and normalized_body.startswith(raw_request)
+            ):
+                continue
+            ts_str = str(row.get("updated_at") or row.get("created_at") or "")
+            try:
+                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                if (now - ts).total_seconds() > FLYER_QUOTE_ECHO_RECENT_SEC:
+                    continue
+            except (ValueError, TypeError):
+                continue  # unparseable timestamp — cannot prove recency, skip
+            if best is None or str(row.get("updated_at") or "") > str(best.get("updated_at") or ""):
+                best = row
+        return best
     except Exception:
         return None
 
@@ -5078,6 +5241,42 @@ def _record_flyer_concept_preview_delivery(project_id: str, asset_id: str, outbo
         raise RuntimeError(f"project_not_found: {project_id}")
 
 
+def _record_flyer_preview_message_ids(project_id: str, mids: list[str]) -> None:
+    """Append preview-batch outbound mids to the project's quoted-binding index.
+
+    The per-concept media mids are already delivery state on the asset rows
+    (_record_flyer_concept_preview_delivery); this list additionally captures
+    the trailing APPROVE-CTA text mid — the message customers most often
+    swipe-reply APPROVE on. Best-effort index, NOT delivery state: callers
+    swallow failures so a persist problem never fails a preview delivery that
+    already reached the customer. Dedupes, keeps newest 10 (schema cap)."""
+    cleaned: list[str] = []
+    for mid in mids or []:
+        if isinstance(mid, str) and mid.strip() and mid.strip() not in cleaned:
+            cleaned.append(mid.strip())
+    if not cleaned:
+        return
+    _ensure_platform_path()
+    from safe_io import FileLock, atomic_write_text  # type: ignore
+    with FileLock(Path(str(FLYER_PROJECTS_PATH) + ".lock")):
+        store = json.loads(FLYER_PROJECTS_PATH.read_text(encoding="utf-8"))
+        projects = store.get("projects") if isinstance(store, dict) else None
+        if not isinstance(projects, list):
+            raise RuntimeError("project_store_shape_invalid")
+        for project in projects:
+            if not isinstance(project, dict) or project.get("project_id") != project_id:
+                continue
+            existing = [
+                mid for mid in (project.get("preview_message_ids") or [])
+                if isinstance(mid, str) and mid.strip()
+            ]
+            merged = existing + [mid for mid in cleaned if mid not in existing]
+            project["preview_message_ids"] = merged[-10:]
+            atomic_write_text(FLYER_PROJECTS_PATH, json.dumps(store, indent=2, ensure_ascii=False))
+            return
+        raise RuntimeError(f"project_not_found: {project_id}")
+
+
 def _load_flyer_project_dict(project_id: str) -> Optional[dict]:
     """Load a single flyer project from the projects.json store as a dict.
     Returns None if the store is unreadable or the project_id is absent.
@@ -5225,6 +5424,10 @@ def _send_concept_preview_media(
         outbound_ids.append(mid)
     else:
         return False, ",".join(outbound_ids), f"partial_delivery: {bridge_status}: {err}"
+    try:
+        _record_flyer_preview_message_ids(project_id, outbound_ids)
+    except Exception as e:  # noqa: BLE001 - binding index is best-effort; delivery already succeeded
+        print(f"cf-router preview-mid index persist failed (non-fatal): {e}", file=sys.stderr)
     return True, ",".join(outbound_ids), ""
 
 
