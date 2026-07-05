@@ -36,6 +36,7 @@ FLYER_PROJECTS_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 FLYER_CUSTOMERS_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
 FLYER_GUEST_ORDERS_PATH = Path("/opt/shift-agent/state/flyer/guest_orders.json")
 FLYER_REFERENCE_SCOPE_PATH = Path("/opt/shift-agent/state/flyer/reference_scope_pending.json")
+FLYER_QUOTE_ECHO_PENDING_PATH = Path("/opt/shift-agent/state/flyer/quote_echo_pending.json")
 FLYER_OUTBOUND_DEDUPE_PATH = Path("/opt/shift-agent/state/flyer/outbound_dedupe.json")
 _DEFAULT_CF_ROUTER_INBOUND_DEDUPE_PATH = Path("/opt/shift-agent/state/cf-router-inbound-dedupe.json")
 CF_ROUTER_INBOUND_DEDUPE_PATH = _DEFAULT_CF_ROUTER_INBOUND_DEDUPE_PATH
@@ -2957,8 +2958,16 @@ def resolve_flyer_binding_project(
 
 
 # Quote-echo guard (F0211 class) only considers projects touched inside this
-# window — an echo quotes a message from a live conversation, not archives.
-FLYER_QUOTE_ECHO_RECENT_SEC = 7 * 24 * 3600
+# window. 14 days: weekly-specials customers re-send the same brief text on a
+# ~7-day cadence (operator ruling 2026-07-05 — a verbatim re-send is a FEATURE
+# of that cadence, never noise to drop), so the window must comfortably cover
+# 7-days-apart re-sends; the guard's reply is a one-word NEW/APPROVE
+# disambiguation, so firing on a genuine weekly re-send costs one reply, not
+# a lost request.
+FLYER_QUOTE_ECHO_RECENT_SEC = 14 * 24 * 3600
+# Pending NEW/APPROVE disambiguation lives this long (matches the 4h
+# proposal/pending-revision TTL convention).
+FLYER_QUOTE_ECHO_PENDING_TTL_SEC = 4 * 60 * 60
 # Prefix matches (echo + appended reply text) need a long brief to be safe;
 # short briefs only match on exact equality.
 _FLYER_QUOTE_ECHO_PREFIX_MIN_LEN = 80
@@ -3004,6 +3013,95 @@ def find_flyer_quote_echo_project(
         return best
     except Exception:
         return None
+
+
+def classify_flyer_quote_echo_choice(text: str) -> Optional[str]:
+    """Classify a reply to the quote-echo NEW/APPROVE disambiguation.
+
+    "new" — customer wants a fresh flyer from the same brief text (weekly-
+    specials cadence). "approve" — customer wants the existing flyer; the
+    caller clears the pending state and lets normal approval routing handle
+    it. None — anything else (pending state stays until TTL)."""
+    body = " ".join(flyer_visible_message_text(text).split()).lower().strip(" .!,:;")
+    if not body:
+        return None
+    if re.fullmatch(r"(?:new|new one|new flyer|fresh|fresh one)", body):
+        return "new"
+    if is_flyer_approval_text(text):
+        return "approve"
+    return None
+
+
+def _load_flyer_quote_echo_pending_doc() -> dict:
+    _ensure_platform_path()
+    from safe_io import safe_load_json  # type: ignore
+
+    doc, _status = safe_load_json(
+        FLYER_QUOTE_ECHO_PENDING_PATH,
+        default={"version": 1, "pending": {}},
+    )
+    if not isinstance(doc, dict):
+        doc = {"version": 1, "pending": {}}
+    pending = doc.get("pending")
+    if not isinstance(pending, dict):
+        doc["pending"] = {}
+    doc["version"] = 1
+    return doc
+
+
+def save_flyer_quote_echo_pending(
+    *,
+    chat_id: str,
+    original_text: str,
+    message_id: str,
+    project_id: str,
+) -> None:
+    """Remember the echoed brief so a one-word NEW reply can create the fresh
+    project from it. Mirrors the revenue-route clarification state pattern."""
+    _ensure_platform_path()
+    from safe_io import atomic_write_json, flock  # type: ignore
+
+    with flock(FLYER_QUOTE_ECHO_PENDING_PATH):
+        doc = _load_flyer_quote_echo_pending_doc()
+        doc["pending"][chat_id] = {
+            "chat_id": chat_id,
+            "original_text": original_text[:4000],
+            "message_id": message_id,
+            "project_id": project_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        atomic_write_json(FLYER_QUOTE_ECHO_PENDING_PATH, doc)
+
+
+def _flyer_quote_echo_pending_fresh(row: Optional[dict]) -> Optional[dict]:
+    if not isinstance(row, dict):
+        return None
+    try:
+        created = datetime.fromisoformat(str(row.get("created_at") or ""))
+        age = (datetime.now(timezone.utc) - created).total_seconds()
+    except (ValueError, TypeError):
+        return None
+    return row if age <= FLYER_QUOTE_ECHO_PENDING_TTL_SEC else None
+
+
+def get_flyer_quote_echo_pending(chat_id: str) -> Optional[dict]:
+    _ensure_platform_path()
+    from safe_io import flock  # type: ignore
+
+    with flock(FLYER_QUOTE_ECHO_PENDING_PATH):
+        doc = _load_flyer_quote_echo_pending_doc()
+        return _flyer_quote_echo_pending_fresh(doc.get("pending", {}).get(chat_id))
+
+
+def pop_flyer_quote_echo_pending(chat_id: str) -> Optional[dict]:
+    _ensure_platform_path()
+    from safe_io import atomic_write_json, flock  # type: ignore
+
+    with flock(FLYER_QUOTE_ECHO_PENDING_PATH):
+        doc = _load_flyer_quote_echo_pending_doc()
+        row = doc.get("pending", {}).pop(chat_id, None)
+        atomic_write_json(FLYER_QUOTE_ECHO_PENDING_PATH, doc)
+        return _flyer_quote_echo_pending_fresh(row)
 
 
 def has_non_delivered_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> bool:

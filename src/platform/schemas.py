@@ -5270,7 +5270,11 @@ class CfRouterIntercepted(_BaseEntry):
         # Quoted-APPROVE binding (2026-07-05) — flattened quote-echo guard
         # (F0211 class): inbound body exactly equals / prefixes a recent
         # project's raw_request, so it's a bridge quote-echo, not a new brief.
+        # The guard replies with a one-word NEW/APPROVE disambiguation
+        # (operator ruling: echoes are ambiguity to resolve, never noise to
+        # drop); a follow-up NEW creates the fresh project from the same brief.
         "flyer_quote_echo_suppressed",
+        "flyer_quote_echo_new_confirmed",
         # cf-router/hooks.py bare-flyer dispatch path (reconciled from the deployed
         # fix/flyer-customer-qa-cleanup branch into main 2026-06-06). Both ternary
         # branches of the spawn audit (dispatched on success, failed otherwise).

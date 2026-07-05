@@ -308,8 +308,59 @@ def test_quote_echo_genuinely_new_brief_unaffected(tmp_path, monkeypatch):
 
 
 def test_quote_echo_stale_project_ignored(tmp_path, monkeypatch):
-    _echo_store(tmp_path, monkeypatch, updated_hours=24 * 30)  # 30 days old
+    _echo_store(tmp_path, monkeypatch, updated_hours=24 * 30)  # 30 days > 14d window
     assert cf_actions.find_flyer_quote_echo_project(PHONE, CHAT, LONG_BRIEF) is None
+
+
+def test_quote_echo_fires_for_weekly_cadence_resend(tmp_path, monkeypatch):
+    """Operator ruling: 7-days-apart verbatim re-sends (weekly specials) must
+    fire the guard so the NEW/APPROVE disambiguation resolves the intent."""
+    _echo_store(tmp_path, monkeypatch, updated_hours=24 * 7)
+    row = cf_actions.find_flyer_quote_echo_project(PHONE, CHAT, LONG_BRIEF)
+    assert row is not None and row["project_id"] == "F0211"
+
+
+# ---------------------------------------------------------------------------
+# Quote-echo NEW/APPROVE choice classification + pending state
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("NEW", "new"),
+    ("new.", "new"),
+    ("New one", "new"),
+    ("new flyer", "new"),
+    ("fresh one", "new"),
+    ("APPROVE", "approve"),
+    ("ok", "approve"),
+    ("make the price bigger", None),
+    ("", None),
+    ("new diwali flyer for this weekend", None),  # a real brief, not a bare choice
+])
+def test_classify_flyer_quote_echo_choice(text, expected):
+    assert cf_actions.classify_flyer_quote_echo_choice(text) == expected
+
+
+def test_quote_echo_pending_roundtrip_and_ttl(tmp_path, monkeypatch):
+    monkeypatch.setattr(cf_actions, "FLYER_QUOTE_ECHO_PENDING_PATH",
+                        tmp_path / "quote_echo_pending.json")
+    cf_actions.save_flyer_quote_echo_pending(
+        chat_id=CHAT, original_text=LONG_BRIEF, message_id="wamid.E1", project_id="F0211")
+    row = cf_actions.get_flyer_quote_echo_pending(CHAT)
+    assert row and row["original_text"] == LONG_BRIEF and row["project_id"] == "F0211"
+    popped = cf_actions.pop_flyer_quote_echo_pending(CHAT)
+    assert popped and popped["message_id"] == "wamid.E1"
+    assert cf_actions.get_flyer_quote_echo_pending(CHAT) is None
+
+    # Expired rows are invisible (4h TTL)
+    stale_created = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+    (tmp_path / "quote_echo_pending.json").write_text(json.dumps({
+        "version": 1,
+        "pending": {CHAT: {"chat_id": CHAT, "original_text": LONG_BRIEF,
+                           "message_id": "m", "project_id": "F0211",
+                           "created_at": stale_created}},
+    }), encoding="utf-8")
+    assert cf_actions.get_flyer_quote_echo_pending(CHAT) is None
 
 
 # ---------------------------------------------------------------------------
@@ -444,9 +495,11 @@ def test_hooks_approve_without_quote_uses_newest(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_hooks_quote_echo_guard_suppresses_echo(tmp_path, monkeypatch):
+def test_hooks_quote_echo_guard_sends_actionable_disambiguation(tmp_path, monkeypatch):
     hooks_mod, actions_mod = _load_plugin_modules()
     calls = {"audits": [], "sends": []}
+    monkeypatch.setattr(actions_mod, "FLYER_QUOTE_ECHO_PENDING_PATH",
+                        tmp_path / "quote_echo_pending.json")
     monkeypatch.setattr(actions_mod, "lid_to_phone_via_identify_sender",
                         lambda _c: (PHONE, "customer"))
     echo_row = {"project_id": "F0211", "status": "awaiting_final_approval"}
@@ -468,7 +521,100 @@ def test_hooks_quote_echo_guard_suppresses_echo(tmp_path, monkeypatch):
     assert result is not None and result["action"] == "skip"
     assert "F0211" in result["reason"]
     assert calls["audits"] == ["flyer_quote_echo_suppressed"]
-    assert calls["sends"] and "reply APPROVE" in calls["sends"][0]
+    # Operator ruling: one-word actionable disambiguation, never a bare status
+    assert calls["sends"] and "Reply NEW" in calls["sends"][0]
+    assert "APPROVE" in calls["sends"][0]
+    # Pending state saved so a follow-up NEW can create the fresh project
+    pending = actions_mod.get_flyer_quote_echo_pending(CHAT)
+    assert pending and pending["original_text"] == LONG_BRIEF
+    assert pending["project_id"] == "F0211"
+
+
+def test_hooks_weekly_resend_new_creates_fresh_project(tmp_path, monkeypatch):
+    """Operator-mandated case: identical brief text seven days apart, customer
+    intent = new flyer. The guard fires, the disambiguation is sent, and the
+    follow-up NEW actually creates the fresh project from the same brief."""
+    hooks_mod, actions_mod = _load_plugin_modules()
+    projects = [{
+        "project_id": "F0300",
+        "customer_phone": PHONE,
+        "status": "awaiting_final_approval",
+        "created_at": _now_iso(24 * 7 + 1),
+        "updated_at": _now_iso(24 * 7),  # seven days apart
+        "raw_request": LONG_BRIEF,
+    }]
+    store_path = tmp_path / "projects.json"
+    store_path.write_text(json.dumps({"projects": projects}), encoding="utf-8")
+    monkeypatch.setattr(actions_mod, "FLYER_PROJECTS_PATH", store_path)
+    monkeypatch.setattr(actions_mod, "FLYER_QUOTE_ECHO_PENDING_PATH",
+                        tmp_path / "quote_echo_pending.json")
+    monkeypatch.setattr(actions_mod, "find_flyer_customer_by_sender", lambda _p, _c: None)
+    monkeypatch.setattr(actions_mod, "lid_to_phone_via_identify_sender",
+                        lambda _c: (PHONE, "customer"))
+    monkeypatch.setattr(actions_mod, "flyer_project_status_reply", lambda _p: "STATUS")
+    sent: list[str] = []
+    monkeypatch.setattr(
+        actions_mod, "send_flyer_text",
+        lambda _c, message, *, action_context, allow_duplicate=False:
+            sent.append(message) or (True, "wamid.ACK", ""))
+    audits: list[str] = []
+    monkeypatch.setattr(
+        actions_mod, "audit_intercepted",
+        lambda reason, chat_id, code=None, subprocess_rc=None, detail="",
+               binding_source="": audits.append(reason))
+
+    # 1. The verbatim re-send fires the guard (real finder, real store)
+    result = hooks_mod._try_flyer_quote_echo_guard(LONG_BRIEF, CHAT, SimpleNamespace())
+    assert result is not None and "F0300" in result["reason"]
+    assert sent and "Reply NEW" in sent[0]
+
+    # 2. Negative pin: the disambiguation reply itself must not loop back
+    #    into the echo guard (nor match the echo finder against the store)
+    disambiguation = sent[0]
+    assert actions_mod.find_flyer_quote_echo_project(PHONE, CHAT, disambiguation) is None
+    assert hooks_mod._try_flyer_quote_echo_guard(disambiguation, CHAT, SimpleNamespace()) is None
+    assert actions_mod.find_flyer_quote_echo_project(PHONE, CHAT, "NEW") is None
+
+    # 3. Follow-up NEW replays the echoed brief through the fresh-project path
+    created: list[tuple[str, bool]] = []
+
+    def fake_primary(text, chat_id, event, *, force_new=False, media_path=None,
+                     brief_audit_detail=""):
+        created.append((text, force_new))
+        return {"action": "skip", "reason": "cf-router flyer primary: created F0301"}
+    monkeypatch.setattr(hooks_mod, "_try_flyer_primary_intercept", fake_primary)
+
+    choice_result = hooks_mod._try_flyer_quote_echo_choice(
+        "NEW", CHAT, SimpleNamespace(),
+        flyer_generation_enabled=True, flyer_workflow_enabled=True)
+    assert choice_result is not None and "created F0301" in choice_result["reason"]
+    assert created == [(LONG_BRIEF, True)]
+    assert "flyer_quote_echo_new_confirmed" in audits
+    # Pending consumed: a second NEW does nothing
+    assert hooks_mod._try_flyer_quote_echo_choice(
+        "NEW", CHAT, SimpleNamespace(),
+        flyer_generation_enabled=True, flyer_workflow_enabled=True) is None
+
+
+def test_hooks_quote_echo_choice_approve_clears_pending_and_defers(tmp_path, monkeypatch):
+    hooks_mod, actions_mod = _load_plugin_modules()
+    monkeypatch.setattr(actions_mod, "FLYER_QUOTE_ECHO_PENDING_PATH",
+                        tmp_path / "quote_echo_pending.json")
+    actions_mod.save_flyer_quote_echo_pending(
+        chat_id=CHAT, original_text=LONG_BRIEF, message_id="m", project_id="F0300")
+    # APPROVE returns None (normal approval routing handles the existing
+    # project, including quoted binding) and consumes the pending state.
+    assert hooks_mod._try_flyer_quote_echo_choice(
+        "APPROVE", CHAT, SimpleNamespace(),
+        flyer_generation_enabled=True, flyer_workflow_enabled=True) is None
+    assert actions_mod.get_flyer_quote_echo_pending(CHAT) is None
+    # Non-choice replies leave pending untouched and route normally
+    actions_mod.save_flyer_quote_echo_pending(
+        chat_id=CHAT, original_text=LONG_BRIEF, message_id="m", project_id="F0300")
+    assert hooks_mod._try_flyer_quote_echo_choice(
+        "make the price bigger", CHAT, SimpleNamespace(),
+        flyer_generation_enabled=True, flyer_workflow_enabled=True) is None
+    assert actions_mod.get_flyer_quote_echo_pending(CHAT) is not None
 
 
 def test_hooks_quote_echo_guard_passes_new_brief(tmp_path, monkeypatch):
