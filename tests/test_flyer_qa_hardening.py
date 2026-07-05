@@ -178,3 +178,33 @@ def test_each_still_blocks_without_uniform_price(tmp_path):
     proj = proj.model_copy(update={"locked_facts": facts})
     rep = _qa(tmp_path, GOOD_OCR + "EACH\n", project=proj)
     assert any("each" in b.lower() for b in rep.blockers), rep.blockers
+
+
+def test_uniform_price_column_blocks_with_marker(tmp_path):
+    # C1 polish (F0210 exhibit): shared price painted beside every menu row —
+    # 3+ appearances under the typeset contract = the column defect. The
+    # strict alpha screen cannot see it (numbers pass free).
+    ocr = GOOD_OCR + "$6.99\n$6.99\n$6.99\n"
+    art = _artifact(tmp_path, ocr)
+    (tmp_path / "p.png.typeset.json").write_text('{"typeset_contract": true}', encoding="utf-8")
+    rep = run_visual_qa(_project(), art, output_format="concept_preview", allow_sidecar=True)
+    assert any("price column defect" in b for b in rep.blockers), rep.blockers
+
+
+def test_uniform_price_twice_passes_and_legacy_unscreened(tmp_path):
+    # Offer line + price element = the legitimate two appearances; and the
+    # backstop is marker-gated (legacy renders never screened).
+    ocr = GOOD_OCR + "$6.99\n"  # offer line already carries one -> two total
+    art = _artifact(tmp_path, ocr)
+    (tmp_path / "p.png.typeset.json").write_text('{"typeset_contract": true}', encoding="utf-8")
+    rep = run_visual_qa(_project(), art, output_format="concept_preview", allow_sidecar=True)
+    assert not any("price column" in b for b in rep.blockers), rep.blockers
+    ocr3 = GOOD_OCR + "$6.99\n$6.99\n$6.99\n"
+    legacy = run_visual_qa(_project(), _artifact(tmp_path, ocr3),
+                           output_format="concept_preview", allow_sidecar=True)
+    # marker file exists from above in tmp_path for p.png — use a fresh artifact name
+    art2 = tmp_path / "q.png"
+    art2.write_bytes(b"x")
+    (tmp_path / "q.png.ocr.txt").write_text(ocr3, encoding="utf-8")
+    legacy = run_visual_qa(_project(), art2, output_format="concept_preview", allow_sidecar=True)
+    assert not any("price column" in b for b in legacy.blockers), legacy.blockers
