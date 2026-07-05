@@ -22,6 +22,7 @@ on:
       - "src/agents/flyer/extraction_v2.py"
       - "tests/test_flyer_renderer.py"
       - "tests/test_cf_router_raw_body.py"
+      - "tests/test_cf_router_quoted_approve.py"
       - "src/plugins/cf-router/**"
       - "tests/test_flyer_visual_qa.py"
       - ".github/workflows/flyer-premium-ci.yml"
@@ -40,14 +41,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install deps (Hermes-venv parity: pydantic + pyyaml + pillow)
+      - name: "Install deps (Hermes-venv parity: pydantic + pyyaml + pillow)"
         run: |
           python -m pip install --upgrade pip
           python -m pip install pydantic pyyaml pytest pillow
       - name: Premium Poster v1 suite
         run: |
           python -m pytest \
-            tests/test_cf_router_raw_body.py \n            tests/test_flyer_premium_poster_v1.py \
+            tests/test_cf_router_raw_body.py \
+            tests/test_cf_router_quoted_approve.py \
+            tests/test_flyer_premium_poster_v1.py \
             tests/test_flyer_premium_poster_v1_offer.py \
             tests/test_flyer_premium_poster_v1_food.py \
             tests/test_flyer_premium_poster_v1_director.py \

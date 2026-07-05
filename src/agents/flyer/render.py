@@ -413,9 +413,9 @@ def _read_env_value(name: str) -> str:
         Path(os.environ.get("SHIFT_AGENT_ENV_PATH", "/opt/shift-agent/.env")),
     ]
     for env_path in candidates:
-        if not env_path.exists():
-            continue
         try:
+            if not env_path.exists():
+                continue
             for line in env_path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:

@@ -233,9 +233,13 @@ def plan_flyer_autorepair(*, project: object, blockers: Iterable[str], rendered_
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not api_key:
         for env_path in (Path("/root/.hermes/.env"), Path("/opt/shift-agent/.env")):
-            if not env_path.exists():
+            try:
+                if not env_path.exists():
+                    continue
+                lines = env_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except OSError:  # unreadable env file (EACCES etc.) = no key here
                 continue
-            for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            for line in lines:
                 if line.startswith("OPENROUTER_API_KEY="):
                     api_key = line.split("=", 1)[1].strip().strip("'\"")
                     break

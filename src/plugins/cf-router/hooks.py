@@ -355,6 +355,16 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 if cta_result is not None:
                     return cta_result
                 return None
+            # Quote-echo NEW/APPROVE resolution must run before any intercept
+            # that could swallow a bare "NEW" (intake continuation, vague-start
+            # clarifications). Self-gates on pending state + 4h TTL.
+            quote_echo_choice_result = _try_flyer_quote_echo_choice(
+                text, chat_id, event,
+                flyer_generation_enabled=flyer_generation_enabled,
+                flyer_workflow_enabled=flyer_workflow_enabled,
+            )
+            if quote_echo_choice_result is not None:
+                return quote_echo_choice_result
             account_result = _try_flyer_account_intercept(text, chat_id, event)
             if account_result is not None:
                 return account_result
@@ -370,6 +380,14 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 flyer_result = _try_flyer_active_project_intercept(text, chat_id, event, media_path)
                 if flyer_result is not None:
                     return flyer_result
+            # Quoted-APPROVE binding (2026-07-05): flattened quote-echo guard
+            # (F0211 class). Ordered BEFORE intake / new-request routing so an
+            # echoed brief cannot create a duplicate project, and BEFORE the
+            # unconditional active-project intercept so it cannot be captured
+            # as revision text.
+            quote_echo_result = _try_flyer_quote_echo_guard(text, chat_id, event, media_path)
+            if quote_echo_result is not None:
+                return quote_echo_result
             intake_result = _try_flyer_intake_intercept(text, chat_id, event, media_path=media_path)
             if intake_result is not None:
                 return intake_result
@@ -2839,6 +2857,167 @@ def _try_flyer_delivery_state_guard(text: str, chat_id: str, event: Any) -> Opti
     return {"action": "skip", "reason": "cf-router flyer delivery state guard"}
 
 
+def _try_flyer_quote_echo_guard(text: str, chat_id: str, event: Any, media_path: Optional[str] = None) -> Optional[dict]:
+    """Suppress flattened quote-echo bodies (F0211 class) before they become
+    duplicate projects or bogus revision text.
+
+    One legacy bridge shape flattens the QUOTED message text into the inbound
+    body on swipe-reply. When the quoted text is a project brief, the echo
+    re-enters intake / new-request routing and creates a duplicate project
+    (or lands in the revision fallback as a nonsense instruction). Match is
+    conservative — exact equality with a recent project's raw_request, or
+    prefix when the brief is long (actions.find_flyer_quote_echo_project);
+    genuinely new briefs never match and are unaffected. Text-only: media
+    uploads are never quote echoes.
+    """
+    if media_path:
+        return None
+    body = " ".join(actions.flyer_visible_message_text(text).split())
+    if not body:
+        return None
+    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    if role == "owner":
+        return None
+    echo_project = actions.find_flyer_quote_echo_project(phone, chat_id, body)
+    if echo_project is None:
+        return None
+    project_id = str(echo_project.get("project_id") or "")
+    status = str(echo_project.get("status") or "")
+    message_id = _extract_message_id(event, chat_id, text)
+    # Operator ruling 2026-07-05: an echo is ambiguity to RESOLVE, never noise
+    # to drop — weekly-specials customers legitimately re-send the same brief.
+    # The reply must be resolvable in one word: NEW creates a fresh project
+    # from this same brief (pending state below + _try_flyer_quote_echo_choice);
+    # APPROVE flows through normal approval routing on the existing project.
+    status_reply, _is_source_edit = _select_flyer_status_reply(echo_project)
+    if status in {"awaiting_final_approval", "revising_design", "delivered_with_warning"}:
+        choice_line = (
+            "This looks like the same request as your current flyer. "
+            "Reply NEW to create a fresh flyer with these details, "
+            "or reply APPROVE to receive the current flyer's final files."
+        )
+    else:
+        choice_line = (
+            "This looks like the same request as your current flyer. "
+            "Reply NEW to create a fresh flyer with these details, "
+            "or reply with any changes to the current one."
+        )
+    reply = f"{status_reply}\n\n{choice_line}"
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id, reply,
+        action_context=build_action_context(
+            action_id="flyer.project.quote_echo_clarification",
+            is_regulated_action=False,
+        ),
+    )
+    if ack_ok:
+        try:
+            actions.save_flyer_quote_echo_pending(
+                chat_id=chat_id,
+                original_text=body,
+                message_id=message_id,
+                project_id=project_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - pending persist must not undo the sent reply
+            err = f"{err}; pending_persist_failed: {type(exc).__name__}: {exc}"
+    actions.audit_intercepted(
+        reason="flyer_quote_echo_suppressed",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 3,
+        detail=(
+            f"project_id={project_id}; status={status}; quote_echo=true; "
+            f"disambiguation_sent={'1' if ack_ok else '0'}; "
+            f"body_len={len(body)}; sender_role={role}; "
+            f"ack_message_id={mid}; ack_error={err[:300]}"
+        ),
+    )
+    return {"action": "skip", "reason": f"cf-router flyer quote echo suppressed for {project_id}"}
+
+
+def _try_flyer_quote_echo_choice(
+    text: str,
+    chat_id: str,
+    event: Any,
+    *,
+    flyer_generation_enabled: bool,
+    flyer_workflow_enabled: bool,
+) -> Optional[dict]:
+    """Resolve a pending quote-echo NEW/APPROVE disambiguation.
+
+    NEW replays the remembered echoed brief through the normal fresh-project
+    path (`_try_flyer_primary_intercept(force_new=True)` — same reuse as the
+    revenue-route clarification's flyer branch). APPROVE clears the pending
+    state and returns None so the existing approval routing (including quoted
+    binding) finalizes the existing project. Anything else leaves the pending
+    state for its TTL and routes normally.
+    """
+    try:
+        # M2 (PR #558 review): a live source-vs-new choice OUTRANKS the quote-
+        # echo disambiguation — "NEW" must answer the question the customer
+        # was asked most recently (the source/new prompt), not spawn a fresh
+        # project from a stale echoed brief.
+        if actions.has_awaiting_source_vs_new_choice(chat_id):
+            return None
+        pending = actions.get_flyer_quote_echo_pending(chat_id)
+    except Exception as exc:  # noqa: BLE001 - pending state must not preempt core routing
+        try:
+            actions.audit_intercepted(
+                reason="error",
+                chat_id=chat_id,
+                detail=f"flyer_quote_echo_pending_lookup_failed: {type(exc).__name__}: {exc}",
+            )
+        except Exception:
+            pass
+        return None
+    if not pending:
+        return None
+    choice = actions.classify_flyer_quote_echo_choice(text)
+    if choice is None:
+        return None
+    if choice == "approve":
+        actions.pop_flyer_quote_echo_pending(chat_id)
+        # M1 (PR #558 review): the disambiguation described the ECHO project's
+        # status — the customer's APPROVE means THAT project, not whatever
+        # newest-updated resolves to (they can differ with two open projects).
+        # Stash the pending project id; resolve_flyer_binding_project prefers
+        # it over the heuristic for this one inbound.
+        pid = str(pending.get("project_id") or "").strip()
+        if pid:
+            try:
+                actions.set_flyer_echo_approve_bind_hint(chat_id, pid)
+            except Exception:  # noqa: BLE001 - hint is best-effort; fallback = old behavior
+                pass
+        return None
+    pending = actions.pop_flyer_quote_echo_pending(chat_id) or pending
+    original_text = str(pending.get("original_text") or "").strip()
+    if not original_text:
+        return None
+    original_message_id = str(pending.get("message_id") or "").strip()
+    if not original_message_id:
+        original_message_id = _extract_message_id(event, chat_id, original_text)
+    actions.audit_intercepted(
+        reason="flyer_quote_echo_new_confirmed",
+        chat_id=chat_id,
+        detail=(
+            f"prior_project_id={pending.get('project_id') or ''}; "
+            f"original_message_id={original_message_id}"
+        ),
+    )
+    original_event = _clarified_text_event(
+        text=original_text,
+        chat_id=chat_id,
+        message_id=original_message_id,
+    )
+    if flyer_generation_enabled:
+        return _try_flyer_primary_intercept(original_text, chat_id, original_event, force_new=True)
+    if flyer_workflow_enabled:
+        actions.spawn_bare_flyer_render_and_send(
+            chat_id, original_text, message_id=original_message_id,
+        )
+        return {"action": "skip", "reason": "cf-router bare flyer dispatched"}
+    return None
+
+
 def _try_flyer_campaign_cta_intercept(text: str, chat_id: str, event: Any) -> Optional[dict]:
     """Route campaign button replies before project/revision intake."""
     source = actions.flyer_campaign_source(text)
@@ -3508,6 +3687,14 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     if not phone:
         return None
     active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)
+    # Quoted-APPROVE binding (2026-07-05): a swipe-reply's quotedMessageId,
+    # when it matches one of a project's known outbound mids (preview media /
+    # APPROVE CTA / finals), identifies the project the customer means —
+    # override the newest-updated pick. Fail-open: any quote-metadata parsing
+    # or lookup issue keeps the newest-updated result untouched.
+    active_project, binding_source = actions.resolve_flyer_binding_project(
+        active_project, phone, chat_id, event,
+    )
     if active_project is None:
         # No active row, but a status check ("any update?" / "F0058 status")
         # must still resolve when the only relevant project is closed_no_send
@@ -4003,6 +4190,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                 f"project_id={project_id}; retry_finalizing_assets=true; "
                 f"sender_role={role}; message_id={message_id}; {detail[:500]}"
             ),
+            binding_source=binding_source,
         )
         if ok:
             return {"action": "skip",
@@ -4108,7 +4296,8 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         actions.audit_intercepted(
             reason="flyer_primary_project_created" if ok else "flyer_primary_failed",
             chat_id=chat_id, subprocess_rc=0 if ok else 2,
-            detail=f"project_id={project_id}; approve=true; sender_role={role}; {detail[:500]}",
+            detail=f"project_id={project_id}; approve=true; binding_source={binding_source}; sender_role={role}; {detail[:500]}",
+            binding_source=binding_source,
         )
         if ok:
             return {"action": "skip",
@@ -4173,7 +4362,13 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         except Exception:
             revision_requires_clarification = not ok
             clarification_reason = detail[:180] or "I could not apply that revision."
+        # Reload the project the revision was actually applied to. When the
+        # newest-updated picker resolves a DIFFERENT row (quoted binding chose
+        # an older project, or a newer project appeared concurrently), the
+        # regen decision must read the bound project's row by id instead.
         active_after = actions.find_active_flyer_project_by_sender(phone, chat_id) or {}
+        if str(active_after.get("project_id") or "") != project_id:
+            active_after = actions._load_flyer_project_dict(project_id) or {}
         needs_regen = not active_after.get("concepts")
         # PR-ζ.1b §13.C — split into 3 distinct sends, each with its own
         # action_context. Operator decision: clarification, regeneration-
@@ -4262,7 +4457,8 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                 if regeneration_failed else ("flyer_primary_project_created" if ok else "flyer_primary_failed")
             ),
             chat_id=chat_id, subprocess_rc=0 if ok and ack_ok else 2,
-            detail=f"project_id={project_id}; revision=true; revision_requires_clarification={revision_requires_clarification}; update={detail[:250]}; ack_message_id={mid}; ack_error={err}",
+            detail=f"project_id={project_id}; revision=true; binding_source={binding_source}; revision_requires_clarification={revision_requires_clarification}; update={detail[:250]}; ack_message_id={mid}; ack_error={err}",
+            binding_source=binding_source,
         )
         return {"action": "skip",
                 "reason": f"cf-router flyer active: revision captured for {project_id}"}

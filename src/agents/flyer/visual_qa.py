@@ -1633,9 +1633,12 @@ def visual_qa_path(artifact_path: Path | str) -> Path:
 
 def _read_key_from_env_file(path: str) -> str:
     p = Path(path)
-    if not p.exists():
-        return ""
     try:
+        # exists() itself can raise PermissionError (py3.11: EACCES is not in
+        # pathlib's ignored-errno set when the parent denies traversal — CI
+        # runner reading /root/...). Any unreadable env file = no key.
+        if not p.exists():
+            return ""
         for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:

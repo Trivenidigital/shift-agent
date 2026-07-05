@@ -1926,6 +1926,16 @@ class FlyerProject(BaseModel):
     version: int = Field(default=1, ge=1)
     final_asset_ids: list[str] = Field(default_factory=list, max_length=4)
     approved_message_id: str = Field(default="", max_length=200)
+    # Quoted-APPROVE binding (2026-07-05): outbound mids of the concept-preview
+    # batch (per-concept media sends + the trailing APPROVE-CTA text) recorded
+    # at preview-send time, so a customer swipe-reply can bind to THIS project
+    # via the bridge's quotedMessageId instead of the newest-updated fallback.
+    # The media mids also live on the asset rows (outbound_message_id); this
+    # list additionally captures the CTA text mid — the message customers most
+    # often swipe-reply APPROVE on. Rolling window, newest last, capped at 10.
+    # Additive default: pre-existing rows validate unchanged; like
+    # deterministic_recovery it serializes a default key on rewrite.
+    preview_message_ids: list[str] = Field(default_factory=list, max_length=10)
     # P0 #2 2026-05-28 — warn-tier outcome payload. None for projects in
     # any state other than `delivered_with_warning`. Replaced (not merged)
     # on re-QA per design §9 Q3; cleared to None when severity returns to
@@ -5257,6 +5267,14 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_access_finalize_failed",
         "flyer_access_release_failed",
         "flyer_pending_revision_confirmation_reminder",
+        # Quoted-APPROVE binding (2026-07-05) — flattened quote-echo guard
+        # (F0211 class): inbound body exactly equals / prefixes a recent
+        # project's raw_request, so it's a bridge quote-echo, not a new brief.
+        # The guard replies with a one-word NEW/APPROVE disambiguation
+        # (operator ruling: echoes are ambiguity to resolve, never noise to
+        # drop); a follow-up NEW creates the fresh project from the same brief.
+        "flyer_quote_echo_suppressed",
+        "flyer_quote_echo_new_confirmed",
         # cf-router/hooks.py bare-flyer dispatch path (reconciled from the deployed
         # fix/flyer-customer-qa-cleanup branch into main 2026-06-06). Both ternary
         # branches of the spawn audit (dispatched on success, failed otherwise).
@@ -5270,6 +5288,12 @@ class CfRouterIntercepted(_BaseEntry):
     code: Optional[str] = Field(default=None, max_length=10)
     subprocess_rc: Optional[int] = Field(default=None)
     detail: str = Field(default="", max_length=2000)
+    # Quoted-APPROVE binding (2026-07-05): which selector bound this inbound to
+    # a flyer project — "quoted_message_id" (swipe-reply quote matched a known
+    # outbound mid) vs "newest_updated" (max(updated_at) fallback). "" on rows
+    # predating the field and on paths where binding is not applicable.
+    # Additive with default per LogEntry union conventions.
+    binding_source: Literal["", "newest_updated", "quoted_message_id", "quote_echo_choice"] = ""
 
 
 class StateFileMigrationOverridden(_BaseEntry):
