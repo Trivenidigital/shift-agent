@@ -5293,7 +5293,7 @@ class CfRouterIntercepted(_BaseEntry):
     # outbound mid) vs "newest_updated" (max(updated_at) fallback). "" on rows
     # predating the field and on paths where binding is not applicable.
     # Additive with default per LogEntry union conventions.
-    binding_source: Literal["", "newest_updated", "quoted_message_id"] = ""
+    binding_source: Literal["", "newest_updated", "quoted_message_id", "quote_echo_choice"] = ""
 
 
 class StateFileMigrationOverridden(_BaseEntry):

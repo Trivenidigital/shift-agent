@@ -643,3 +643,33 @@ def test_hooks_quote_echo_guard_skips_media_and_owner(tmp_path, monkeypatch):
     monkeypatch.setattr(actions_mod, "find_flyer_quote_echo_project", finder)
     assert hooks_mod._try_flyer_quote_echo_guard(LONG_BRIEF, CHAT, SimpleNamespace()) is None
     assert called["finder"] is False
+
+
+def test_echo_approve_binds_the_described_project(monkeypatch, tmp_path):
+    # PR #558 review M1: with two open projects where the echo matched the
+    # OLDER one (F0100), the customer's APPROVE after the disambiguation must
+    # bind the project the disambiguation DESCRIBED — never newest-updated.
+    _two_project_store(tmp_path, monkeypatch, cf_actions)
+    monkeypatch.setattr(cf_actions, "FLYER_QUOTE_ECHO_PENDING_PATH",
+                        tmp_path / "quote_echo_pending.json")
+    newer = {"project_id": "F0111", "customer_phone": PHONE,
+             "status": "awaiting_final_approval", "updated_at": _now_iso(1)}
+    cf_actions.set_flyer_echo_approve_bind_hint(CHAT, "F0100")
+    proj, source = cf_actions.resolve_flyer_binding_project(
+        newer, PHONE, CHAT, SimpleNamespace(text="APPROVE"))
+    assert proj["project_id"] == "F0100"
+    assert source == "quote_echo_choice"
+    # one-shot: consumed
+    proj2, source2 = cf_actions.resolve_flyer_binding_project(
+        newer, PHONE, CHAT, SimpleNamespace(text="APPROVE"))
+    assert source2 == "newest_updated" and proj2["project_id"] == "F0111"
+
+
+def test_quote_echo_choice_yields_to_source_vs_new(monkeypatch):
+    # PR #558 review M2: a live SOURCE/NEW row outranks quote-echo pending —
+    # "NEW" answers the question asked most recently.
+    monkeypatch.setattr(cf_actions, "peek_flyer_source_vs_new_pending",
+                        lambda **k: {"status": "awaiting_source_vs_new_choice"})
+    assert cf_actions.has_awaiting_source_vs_new_choice("chat@lid") is True
+    monkeypatch.setattr(cf_actions, "peek_flyer_source_vs_new_pending", lambda **k: None)
+    assert cf_actions.has_awaiting_source_vs_new_choice("chat@lid") is False

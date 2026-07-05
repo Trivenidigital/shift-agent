@@ -2952,6 +2952,12 @@ def _try_flyer_quote_echo_choice(
     state for its TTL and routes normally.
     """
     try:
+        # M2 (PR #558 review): a live source-vs-new choice OUTRANKS the quote-
+        # echo disambiguation — "NEW" must answer the question the customer
+        # was asked most recently (the source/new prompt), not spawn a fresh
+        # project from a stale echoed brief.
+        if actions.has_awaiting_source_vs_new_choice(chat_id):
+            return None
         pending = actions.get_flyer_quote_echo_pending(chat_id)
     except Exception as exc:  # noqa: BLE001 - pending state must not preempt core routing
         try:
@@ -2970,6 +2976,17 @@ def _try_flyer_quote_echo_choice(
         return None
     if choice == "approve":
         actions.pop_flyer_quote_echo_pending(chat_id)
+        # M1 (PR #558 review): the disambiguation described the ECHO project's
+        # status — the customer's APPROVE means THAT project, not whatever
+        # newest-updated resolves to (they can differ with two open projects).
+        # Stash the pending project id; resolve_flyer_binding_project prefers
+        # it over the heuristic for this one inbound.
+        pid = str(pending.get("project_id") or "").strip()
+        if pid:
+            try:
+                actions.set_flyer_echo_approve_bind_hint(chat_id, pid)
+            except Exception:  # noqa: BLE001 - hint is best-effort; fallback = old behavior
+                pass
         return None
     pending = actions.pop_flyer_quote_echo_pending(chat_id) or pending
     original_text = str(pending.get("original_text") or "").strip()

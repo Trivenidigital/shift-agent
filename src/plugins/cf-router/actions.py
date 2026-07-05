@@ -2949,6 +2949,11 @@ def resolve_flyer_binding_project(
     """
     if active_project is None:
         return None, "newest_updated"
+    hinted_id = pop_flyer_echo_approve_bind_hint(chat_id)
+    if hinted_id:
+        for candidate in _flyer_candidate_projects_by_sender(phone, chat_id):
+            if str(candidate.get("project_id") or "") == hinted_id:
+                return candidate, "quote_echo_choice"
     quoted_mid = extract_quoted_message_id(event)
     if quoted_mid:
         quoted_project = find_flyer_project_by_quoted_mid(phone, chat_id, quoted_mid)
@@ -2971,6 +2976,54 @@ FLYER_QUOTE_ECHO_PENDING_TTL_SEC = 4 * 60 * 60
 # Prefix matches (echo + appended reply text) need a long brief to be safe;
 # short briefs only match on exact equality.
 _FLYER_QUOTE_ECHO_PREFIX_MIN_LEN = 80
+
+
+# Echo-APPROVE bind hint (PR #558 review M1): the disambiguation described a
+# SPECIFIC project; the customer's APPROVE means that one, not whatever
+# newest-updated resolves to. Short TTL — it exists only for the immediately
+# following approval routing.
+FLYER_ECHO_APPROVE_HINT_TTL_SEC = 10 * 60
+
+
+def set_flyer_echo_approve_bind_hint(chat_id: str, project_id: str) -> None:
+    _ensure_platform_path()
+    from safe_io import atomic_write_json, flock  # type: ignore
+
+    with flock(FLYER_QUOTE_ECHO_PENDING_PATH):
+        doc = _load_flyer_quote_echo_pending_doc()
+        hints = doc.setdefault("approve_hints", {})
+        hints[chat_id] = {"project_id": project_id,
+                          "ts": datetime.now(timezone.utc).isoformat()}
+        atomic_write_json(FLYER_QUOTE_ECHO_PENDING_PATH, doc)
+
+
+def pop_flyer_echo_approve_bind_hint(chat_id: str) -> str:
+    """Return the hinted project_id ("" if none/expired) and clear it."""
+    try:
+        _ensure_platform_path()
+        from safe_io import atomic_write_json, flock  # type: ignore
+
+        with flock(FLYER_QUOTE_ECHO_PENDING_PATH):
+            doc = _load_flyer_quote_echo_pending_doc()
+            hints = doc.get("approve_hints", {})
+            row = hints.pop(chat_id, None)
+            atomic_write_json(FLYER_QUOTE_ECHO_PENDING_PATH, doc)
+        if not row:
+            return ""
+        ts = datetime.fromisoformat(str(row.get("ts")))
+        if (datetime.now(timezone.utc) - ts).total_seconds() > FLYER_ECHO_APPROVE_HINT_TTL_SEC:
+            return ""
+        return str(row.get("project_id") or "")
+    except Exception:  # noqa: BLE001 - hint is best-effort
+        return ""
+
+
+def has_awaiting_source_vs_new_choice(chat_id: str) -> bool:
+    """M2 (PR #558 review): quote-echo choice yields to a live SOURCE/NEW row."""
+    try:
+        return peek_flyer_source_vs_new_pending(chat_id=chat_id, sender_phone="") is not None
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def find_flyer_quote_echo_project(
