@@ -2325,10 +2325,22 @@ def _style_register_parts(project: FlyerProject) -> tuple[str, str, str]:
 
     sec1 = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(strings))
     sec2 = "\n".join(roles)
+    # Uniform-price DISCIPLINE (C1 polish, F0210 exhibit): the per-line "stays
+    # in the price element" guidance alone did not bind — the model painted a
+    # price column beside the menu rows anyway. A counted NEGATIVE constraint
+    # binds harder than positional guidance; the QA numeric screen backstops.
+    uniform_discipline = (
+        "\n\nPRICE DISCIPLINE: the price appears EXACTLY ONCE in the art - inside the "
+        "shaped price element. NEVER repeat it beside menu rows, under the headline, or "
+        "anywhere else. A column of repeated prices is a defect. The price element sits "
+        "CLEAR of the display text - never overlapping or crowding the headline."
+        if uniform else ""
+    )
     typeset_section = (
         "TEXT TO RENDER - these numbered strings are the ONLY text allowed in the art; "
         f"render each VERBATIM, spelled exactly:\n{sec1}\n\n"
         f"HOW TO SET EACH LINE (instructions for you - these words are NEVER painted):\n{sec2}"
+        f"{uniform_discipline}"
     )
     vocab = ", ".join(forbidden_substrings_for(
         DEFAULT_REGISTER, occasion=None if occasion == "none" else occasion))

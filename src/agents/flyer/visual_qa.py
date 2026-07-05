@@ -1906,6 +1906,34 @@ def _typeset_marker_applies(artifact_path) -> bool:
         return False
 
 
+def _uniform_price_column_blockers(project: FlyerProject, extracted_text: str,
+                                   artifact_path=None) -> list[str]:
+    """Numeric backstop for the typeset contract (C1 polish, F0210 exhibit):
+    on a UNIFORM-price poster the shared price legitimately appears at most
+    twice in the art (offer statement + price element). Three or more
+    appearances is the repeated-price-column defect the strict alpha screen
+    cannot see (numbers pass free). Marker-gated like the strict screen —
+    render-time contract only, never legacy renders or finals."""
+    try:
+        if not _typeset_marker_applies(artifact_path):
+            return []
+        if not _project_has_uniform_shared_price(project):
+            return []
+        prices = {str(f.value or "").strip() for f in project.locked_facts
+                  if re.match(r"^item:\d+:price$", str(f.fact_id or ""))
+                  and str(f.value or "").strip()}
+        if len(prices) != 1:
+            return []
+        token = next(iter(prices))
+        count = (extracted_text or "").count(token)
+        if count >= 3:
+            return [f"shared price repeated {count}x - price column defect "
+                    "(allowed: offer line + price element)"]
+        return []
+    except Exception:  # noqa: BLE001 - backstop never blocks on its own failure
+        return []
+
+
 def _extraneous_token_blockers(project: FlyerProject, extracted_text: str,
                                artifact_path=None) -> list[str]:
     """STRICT extraneous-text screen, active ONLY for renders whose prompt
@@ -2020,6 +2048,8 @@ def run_visual_qa(
     blockers.extend(_schedule_near_miss_blockers(project, extracted_text))
     blockers.extend(_extraneous_token_blockers(project, extracted_text,
                                                 artifact_path=artifact_path))
+    blockers.extend(_uniform_price_column_blockers(project, extracted_text,
+                                                   artifact_path=artifact_path))
     # Source-contract negative-assertion gate: any value in
     # forbidden_substrings (populated upstream from brand/phone/address
     # replacements) must NOT appear in the OCR text. Reuses the same

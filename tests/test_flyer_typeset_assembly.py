@@ -368,3 +368,19 @@ def test_all_seven_allowlist_gates_empty_means_disabled(monkeypatch):
         assert fn() is True, f"{flag}: member must be enabled"
         monkeypatch.setenv(allow, "+19999999999")
         assert fn() is False, f"{flag}: non-member must be disabled"
+
+
+def test_uniform_spec_carries_price_discipline(monkeypatch):
+    # C1 polish: uniform-price specs carry the counted negative constraint +
+    # medallion clearance; non-uniform specs do not.
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", PHONE)
+    p = _prompt(_project())
+    assert "PRICE DISCIPLINE: the price appears EXACTLY ONCE" in p
+    assert "never overlapping or crowding the headline" in p
+    proj = _project()
+    facts = [f for f in proj.locked_facts if f.fact_id != "item:1:price"]
+    facts.append(_F("item:1:price", "$8.99"))
+    mixed = proj.model_copy(update={"locked_facts": facts})
+    assert "PRICE DISCIPLINE" not in _prompt(mixed)
