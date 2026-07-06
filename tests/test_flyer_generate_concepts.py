@@ -1780,7 +1780,9 @@ def test_generate_autorepairs_f0105_style_visual_qa_failure_before_manual_review
     assert attempts[0]["status"] == "succeeded"
     assert attempts[0]["repair_instruction_hash"] != "0" * 64
     audit_types = [json.loads(line)["type"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
-    assert audit_types == ["flyer_autorepair_attempted", "flyer_autorepair_succeeded"]
+    # quarantine-before-recovery (F0197/F0208): the failed original is preserved
+    # before the autorepair re-render overwrites it
+    assert audit_types == ["flyer_autorepair_attempted", "flyer_artifact_quarantined", "flyer_autorepair_succeeded"]
 
 
 def test_generate_autorepair_preserves_repaired_asset_when_renderer_reuses_path(monkeypatch, tmp_path, capsys):
@@ -2013,7 +2015,9 @@ def test_generate_autorepair_failure_preserves_failed_preview_for_manual_review(
     assert not (asset_dir / "F0106-C1-repair.png").exists()
     assert json.loads(attempt_path.read_text(encoding="utf-8"))["attempts"][0]["status"] == "exhausted"
     audit_types = [json.loads(line)["type"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
-    assert audit_types == ["flyer_autorepair_attempted", "flyer_autorepair_exhausted"]
+    # quarantine-before-recovery (F0197/F0208): one set for the failed original;
+    # the later content/fallback rungs see UNCHANGED evidence and dedupe-skip
+    assert audit_types == ["flyer_autorepair_attempted", "flyer_artifact_quarantined", "flyer_autorepair_exhausted"]
 
 
 def test_generate_autorepair_failure_preserves_original_asset_when_renderer_reuses_path(monkeypatch, tmp_path, capsys):

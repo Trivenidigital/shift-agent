@@ -25,6 +25,7 @@ on:
       - "tests/test_cf_router_quoted_approve.py"
       - "src/plugins/cf-router/**"
       - "tests/test_flyer_visual_qa.py"
+      - "tests/test_flyer_quarantine.py"
       - ".github/workflows/flyer-premium-ci.yml"
   push:
     branches: [main]
@@ -65,3 +66,6 @@ jobs:
       - name: Renderer + visual QA suites (final package / QA blast radius)
         run: |
           python -m pytest tests/test_flyer_renderer.py tests/test_flyer_visual_qa.py -q
+      - name: Quarantine-before-recovery suite (census C4; F0197/F0208)
+        run: |
+          python -m pytest tests/test_flyer_quarantine.py -q

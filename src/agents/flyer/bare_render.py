@@ -442,6 +442,23 @@ def _append_audit_line(line: str) -> None:
         return
 
 
+def _quarantine_failed_raw_bg(chat_id: str, raw_bg_dest) -> None:
+    """Quarantine-before-recovery (F0197/F0208, bare-path equivalent): the QA-fail
+    retry re-renders into a fresh temp dir (no preview overwrite), but its
+    raw-background copy lands on the SAME raw_bg_dest as attempt 0's — preserve
+    the failed attempt's background first. Keyed per chat (bare projects all
+    carry project_id F0000). Best-effort: never raises."""
+    try:
+        try:
+            from flyer_quarantine import quarantine_before_overwrite as _q  # type: ignore
+        except ImportError:
+            from agents.flyer.quarantine import quarantine_before_overwrite as _q
+        _q([raw_bg_dest], project_id=f"bare-{_sanitize_chat(chat_id)}",
+           rung="bare_retry", audit_log_path=AUDIT_LOG_PATH)
+    except Exception:  # noqa: BLE001 — quarantine must never block the retry
+        return
+
+
 def _sanitize_chat(chat_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.@-]", "_", chat_id or "")[:80]
 
@@ -1243,6 +1260,8 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
             + ". Fix them — render every listed fact exactly, include every listed item, and add "
               "nothing that is not listed."
         )
+        if attempt and raw_bg_dest is not None:
+            _quarantine_failed_raw_bg(chat_id, raw_bg_dest)
         try:
             png = _generate_poster(render_project, strict_note=strict, raw_bg_dest=raw_bg_dest, scene_direction=scene_direction)
         except Exception as e:  # noqa: BLE001

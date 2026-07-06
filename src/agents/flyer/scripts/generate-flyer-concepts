@@ -78,6 +78,10 @@ try:
     from flyer_repair import build_premium_repair_instruction, build_repair_instruction  # type: ignore  # noqa: E402
 except ImportError:
     from agents.flyer.repair import build_premium_repair_instruction, build_repair_instruction  # noqa: E402
+try:
+    from flyer_quarantine import quarantine_before_overwrite  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.quarantine import quarantine_before_overwrite  # noqa: E402
 
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
@@ -1204,6 +1208,11 @@ def main() -> int:
             and _mentions_saved_brand_assets(current)
             and os.environ.get("FLYER_DISABLE_BRAND_ASSETS") != "1"
         ):
+            # Quarantine-before-recovery (F0197/F0208): preserve the QA-failed
+            # render + sidecars before this rung deletes/overwrites them.
+            quarantine_before_overwrite(
+                [spec.path for spec in specs], project_id=current.project_id,
+                rung="brand_assets_retry", audit_log_path=audit_log_path)
             _cleanup_render_artifacts(specs)
             specs = _render_with_brand_assets_disabled(lambda: render_concept_previews(
                 current,
@@ -1296,6 +1305,12 @@ def main() -> int:
             # repair{n}.png) so exhaustion can clean up ALL of them, never leaving
             # an orphaned earlier attempt on disk.
             premium_all_repair_specs = []
+            # Quarantine-before-recovery (F0197/F0208): repairs render to
+            # DISTINCT repair{n}.png paths, but a PASSING repair deletes the
+            # failed original via _cleanup_render_artifacts — preserve it first.
+            quarantine_before_overwrite(
+                [spec.path for spec in specs], project_id=current.project_id,
+                rung="premium_repair", audit_log_path=audit_log_path)
             for _ in range(2):
                 instruction = build_premium_repair_instruction(premium_blockers, premium_locked)
                 if not instruction:
@@ -1531,6 +1546,11 @@ def main() -> int:
         ):
             det_specs = []
             _det_render_exc: Exception | None = None
+            # Quarantine-before-recovery (F0197/F0208): the MODE-2 re-render
+            # writes to the SAME preview paths — preserve the failed original.
+            quarantine_before_overwrite(
+                [spec.path for spec in specs], project_id=current.project_id,
+                rung="deterministic_recovery", audit_log_path=audit_log_path)
             try:
                 det_specs = render_concept_previews(
                     current, asset_dir, model=draft_model, quality=draft_provider.quality,
@@ -1750,6 +1770,12 @@ def main() -> int:
                     repair_qa_reports = []
                     repair_failed_qa = []
                     repair_error = ""
+                    # Quarantine-before-recovery (F0197/F0208): the autorepair
+                    # re-render writes to the SAME preview paths — preserve the
+                    # failed original first.
+                    quarantine_before_overwrite(
+                        [spec.path for spec in specs], project_id=current.project_id,
+                        rung="legacy_autorepair", audit_log_path=audit_log_path)
                     try:
                         repair_specs = render_concept_previews(
                             current,
@@ -1874,6 +1900,12 @@ def main() -> int:
                 fab_qa_reports = []
                 fab_failed_qa = []
                 fab_error = ""
+                # Quarantine-before-recovery (F0197/F0208): each corrective
+                # re-render writes to the SAME preview paths — preserve the
+                # failed render (attempt 2 preserves attempt 1's output).
+                quarantine_before_overwrite(
+                    [spec.path for spec in specs], project_id=current.project_id,
+                    rung="fabrication_rerender", audit_log_path=audit_log_path)
                 try:
                     fab_specs = render_concept_previews(
                         current,
@@ -1992,6 +2024,12 @@ def main() -> int:
             content_failed_qa = []
             content_error = ""
             content_fallback_reason = "retries_exhausted"
+            # Quarantine-before-recovery (F0197/F0208): the content-miss
+            # re-render writes to the SAME preview paths — preserve the failed
+            # original first.
+            quarantine_before_overwrite(
+                [spec.path for spec in specs], project_id=current.project_id,
+                rung="content_rerender", audit_log_path=audit_log_path)
             try:
                 content_specs = render_concept_previews(
                     current,
@@ -2109,6 +2147,12 @@ def main() -> int:
             fallback_qa_reports = []
             fallback_failed_qa = []
             fallback_error = ""
+            # Quarantine-before-recovery (F0197/F0208): the overlay-fallback
+            # re-render writes to the SAME preview paths — preserve the failed
+            # original first.
+            quarantine_before_overwrite(
+                [spec.path for spec in specs], project_id=current.project_id,
+                rung="overlay_fallback", audit_log_path=audit_log_path)
             try:
                 if referee_unavailable_fallback:
                     # FIX 1: the referee is UNAVAILABLE — there is no QA to catch a
