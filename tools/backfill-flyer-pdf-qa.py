@@ -15,17 +15,19 @@ Write discipline (read-only against live state):
     send-flyer-package's delivery audit).
 
 Raster resolution order (first hit wins):
-  1. --raster <path>            (explicit operator override)         exactness=explicit
+  1. --raster <path>            (explicit operator override)         exactness=exact
   2. <pdf>.qapng.png            (post-WS5 generation-time twin)      exactness=exact
   3. selected concept preview   (closest upstream approved artifact) exactness=upstream_equivalent
-If none exists, the run still records an audit row with qa_status="raster_missing".
+If none exists, the run still records an audit row with qa_status="raster_missing"
+(raster_source keeps the attempted source; a mistyped --raster shows "explicit").
 
 STAGED INVOCATION (document only — NOT run by the PR that adds this tool; live
 runs are operator- or main-session-executed per protocol, needs OPENROUTER_API_KEY
-reachable via the usual env chokepoint):
+reachable via the usual env chokepoint). Pass a DURABLE --work-dir so the audit
+row's report_path outlives tmp cleanup:
 
     /usr/local/lib/hermes-agent/venv/bin/python \
-        /opt/shift-agent/staging/tools/backfill-flyer-pdf-qa.py --project-id F0203
+        /opt/shift-agent/staging/tools/backfill-flyer-pdf-qa.py --project-id F0203 \n        --work-dir /root/flyer-pdf-qa-backfill-F0203
 
 Exit codes: 0 = ran and recorded a verdict row (including raster_missing);
 4 = project/asset not found; 5 = store unreadable.
@@ -120,12 +122,16 @@ def main() -> int:
             project_id=project.project_id,
             asset_id=pdf_asset.asset_id,
             pdf_path=str(pdf_path),
-            raster_source="none",
+            # Keep the attempted source: "explicit" here means the operator's
+            # --raster path did not exist (a mistype is distinguishable from a
+            # genuinely raster-less project in the audit trail).
+            raster_source=raster_source,
             raster_exactness="none",
             qa_status="raster_missing",
         )
         _append_audit(log_path, entry.model_dump_json())
-        print(json.dumps({"project_id": project.project_id, "qa_status": "raster_missing"}))
+        print(json.dumps({"project_id": project.project_id, "qa_status": "raster_missing",
+                          "raster_source": raster_source}))
         return 0
 
     work_dir = Path(args.work_dir) if args.work_dir else Path(tempfile.mkdtemp(prefix="flyer-pdf-qa-backfill-"))
