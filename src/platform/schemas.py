@@ -4713,6 +4713,75 @@ class FlyerArtifactQuarantined(_BaseEntry):
     swept_project_dirs: int = Field(default=0, ge=0)
 
 
+class FlyerCreativeDirectionV2Applied(_BaseEntry):
+    """Creative Director v2 observability (census D10 prerequisite, 2026-07-06).
+    CD-v2 previously had ZERO telemetry, so the "48h-observe -> flag-off ->
+    delete" decision on ~hundreds of LOC rested on static analysis alone. One row
+    per managed primary render (when the CD-v2 gate is ON for the project) records
+    whether the resolver POPULATED a ``project.creative_direction`` carrier and
+    whether that carrier was CONSUMED into the prompt this process built (the
+    bg-only hero-naming branch). The census established the primary path has zero
+    consumption call sites (residual = recovery rung only); this row lets the
+    operator CONFIRM that live before deleting: 48h with only ``consumed=false``
+    rows means the carrier never shaped a delivered primary render.
+
+    Dormant: NO row when the CD-v2 gate is off for the project (byte-identical).
+    LOG-ONLY; an emit failure never blocks the render."""
+    type: Literal["flyer_creative_direction_v2_applied"] = "flyer_creative_direction_v2_applied"
+    project_id: str = Field(default="", max_length=80)
+    project_version: int = Field(default=0, ge=0)
+    populated: bool = False
+    consumed: bool = False
+    request_intent: str = Field(default="", max_length=40)
+    poster_archetype: str = Field(default="", max_length=60)
+    offer_priority: str = Field(default="", max_length=40)
+
+
+class FlyerRevisionApplyOutcome(_BaseEntry):
+    """Bare-path revision observability (tranche-2, 2026-07-06). The bare
+    uniform-price revision-apply handler is LIVE default-ON (FLYER_BARE_REVISION_APPLY=1)
+    and had ZERO audit trail — a customer follow-up ("$8.99 header") that fell
+    closed to "resend full details" was indistinguishable in the log from one that
+    rendered and sent. One row per revision attempt records the terminal ``status``
+    (send | failclosed | revision_needed) and a ``reason`` for the non-send
+    outcomes. Dormant when the handler's flag is off (byte-identical). LOG-ONLY;
+    an emit failure never blocks the revision."""
+    type: Literal["flyer_revision_apply_outcome"] = "flyer_revision_apply_outcome"
+    chat_id: str = Field(default="", max_length=200)
+    handler: Literal["revision_apply"] = "revision_apply"
+    status: str = Field(default="", max_length=40)
+    reason: str = Field(default="", max_length=200)
+
+
+class FlyerVisualQaSkipped(_BaseEntry):
+    """Break-glass observability (tranche-2, 2026-07-06): the FLYER_BARE_SKIP_VISUAL_QA
+    escape hatch disables the broad subjective visual QA and was SILENT — a bare
+    render could ship QA-unverified with no audit trace at all. One row per skipped
+    QA records that the break-glass fired for a project. The concrete
+    visible-contract referee runs INDEPENDENTLY of this flag and is unaffected.
+    LOG-ONLY; an emit failure never blocks the render."""
+    type: Literal["flyer_visual_qa_skipped"] = "flyer_visual_qa_skipped"
+    project_id: str = Field(default="", max_length=80)
+    reason: str = Field(default="break_glass_flag", max_length=60)
+
+
+class FlyerSemanticBriefOutcome(_BaseEntry):
+    """Semantic-brief provenance (tranche-2, 2026-07-06). The legacy extractor's
+    Hermes semantic-brief seam (``build_semantic_flyer_brief``) silently either
+    USED the Hermes provider's grounded output or FELL BACK to the deterministic
+    layer, with no record of which — defeating attribution of extraction quality
+    to the provider (is the Hermes brain contributing, or is the key dead and the
+    deterministic fallback carrying every brief?). One row per legacy extraction
+    records ``status`` (provider_used | fell_back), ``reason`` (provider_absent |
+    provider_empty), and ``provider_present``. Emitted only on the legacy path
+    (extraction_v2 carries its own FlyerExtractionV2Outcome); LOG-ONLY."""
+    type: Literal["flyer_semantic_brief_outcome"] = "flyer_semantic_brief_outcome"
+    seam: Literal["managed_create", "bare_render"]
+    status: Literal["provider_used", "fell_back"]
+    reason: str = Field(default="", max_length=60)
+    provider_present: bool = False
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -6100,6 +6169,11 @@ LogEntry = Annotated[
         Annotated[FlyerPremiumPosterV1Bare, Tag("flyer_premium_poster_v1_bare")],
         # 2026-07-03 — WS1 extraction seam-swap observability
         Annotated[FlyerExtractionV2Outcome, Tag("flyer_extraction_v2_outcome")],
+        # 2026-07-06 — tranche-2 telemetry emitters (census top-3 observability gaps)
+        Annotated[FlyerCreativeDirectionV2Applied, Tag("flyer_creative_direction_v2_applied")],
+        Annotated[FlyerRevisionApplyOutcome, Tag("flyer_revision_apply_outcome")],
+        Annotated[FlyerVisualQaSkipped, Tag("flyer_visual_qa_skipped")],
+        Annotated[FlyerSemanticBriefOutcome, Tag("flyer_semantic_brief_outcome")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],

@@ -498,6 +498,17 @@ def build_hermes_semantic_brief_provider() -> SemanticBriefProvider | None:
     return provider
 
 
+def _brief_has_content(brief: FlyerSemanticBrief) -> bool:
+    """True iff the (source-grounded) provider brief contributed any non-empty
+    field — i.e. the Hermes brain produced grounded content that survived
+    grounding. Used only for provenance telemetry (used-vs-fell-back)."""
+    return bool(
+        brief.campaign_title or brief.account_business or brief.display_brand
+        or brief.pricing_structure or brief.offers or brief.schedule
+        or brief.promotion_end or brief.style or brief.stored_contact_policy
+    )
+
+
 def build_semantic_flyer_brief(
     fields: FlyerRequestFields,
     raw_request: str,
@@ -505,22 +516,38 @@ def build_semantic_flyer_brief(
     profile_business_name: str = "",
     allow_text_identity: bool = True,
     provider: SemanticBriefProvider | None = None,
+    provenance: dict | None = None,
 ) -> FlyerSemanticBrief:
     """Return a source-grounded flyer brief from Hermes/provider semantics.
 
     The provider is the intended Hermes brain seam. Deterministic extraction is
     only a conservative fallback for currently observed incident shapes.
+
+    ``provenance`` (optional out-param): when a dict is passed, it is populated
+    with ``status`` (provider_used | fell_back), ``reason`` (provider_absent |
+    provider_empty), and ``provider_present`` so the caller can emit a
+    semantic-brief-outcome audit row. Purely observational — does not change the
+    returned brief or the control flow.
     """
     source = _source_text(fields, raw_request)
     provider_source = _provider_grounding_text(fields, raw_request)
     fallback = _fallback_brief(fields, raw_request, allow_text_identity=allow_text_identity)
     provider_brief = FlyerSemanticBrief()
+    provider_contributed = False
     if provider is not None:
         provider_brief = _source_ground_brief(
             _coerce_brief(provider(fields, raw_request)),
             provider_source,
             allow_text_identity=allow_text_identity,
         )
+        provider_contributed = _brief_has_content(provider_brief)
+    if provenance is not None:
+        if provider is None:
+            provenance.update(status="fell_back", reason="provider_absent", provider_present=False)
+        elif provider_contributed:
+            provenance.update(status="provider_used", reason="", provider_present=True)
+        else:
+            provenance.update(status="fell_back", reason="provider_empty", provider_present=True)
     merged = _merge_briefs(provider_brief, fallback)
     if profile_business_name and _norm(merged.campaign_title) == _norm(profile_business_name):
         merged = FlyerSemanticBrief(
