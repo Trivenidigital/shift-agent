@@ -2931,11 +2931,34 @@ def find_flyer_project_by_quoted_mid(
         return None
 
 
+def _bind_override_strands_approval(
+    override_project: dict, fallback_project: dict, text: str,
+) -> bool:
+    """True when a bind override would silently swallow an approval.
+
+    F0213 live incident 2026-07-06T01:00Z: the customer swipe-replied APPROVE
+    on the PREVIOUS project's CTA (F0212, already delivered an hour earlier)
+    while the current project (F0213) sat in awaiting_final_approval. The
+    quoted-mid override bound the delivered row, the intercept's
+    delivered-status early return dropped the approval, and the message fell
+    through to the delivery-state guard as a status reply — the approval was
+    lost. An approval bound to an already-delivered project is a no-op, so
+    when the newest-updated pick can actually act on the approval, keep it.
+    """
+    if str(override_project.get("status") or "") != "delivered":
+        return False
+    if not (is_flyer_approval_text(text) or is_flyer_send_now_intent(text)):
+        return False
+    fallback_status = str(fallback_project.get("status") or "")
+    return fallback_status in _FLYER_FINAL_APPROVAL_STATUSES | {"finalizing_assets"}
+
+
 def resolve_flyer_binding_project(
     active_project: Optional[dict],
     phone: Optional[str],
     chat_id: str,
     event: Any,
+    text: str = "",
 ) -> tuple[Optional[dict], str]:
     """Bind an inbound to a flyer project, preferring the quoted message.
 
@@ -2946,19 +2969,33 @@ def resolve_flyer_binding_project(
     binding_source is "quoted_message_id" or "newest_updated". Fail-open: any
     missing/odd quote metadata or lookup failure keeps the newest-updated
     result untouched.
+
+    Exception (F0213 incident): an approval must never bind to an
+    already-delivered project while the newest-updated pick is approvable —
+    that strands the approval as a status reply. See
+    `_bind_override_strands_approval`; such binds fall back with
+    binding_source "stale_quote_approve_fallback".
     """
     if active_project is None:
         return None, "newest_updated"
+    override: Optional[dict] = None
+    source = ""
     hinted_id = pop_flyer_echo_approve_bind_hint(chat_id)
     if hinted_id:
         for candidate in _flyer_candidate_projects_by_sender(phone, chat_id):
             if str(candidate.get("project_id") or "") == hinted_id:
-                return candidate, "quote_echo_choice"
-    quoted_mid = extract_quoted_message_id(event)
-    if quoted_mid:
-        quoted_project = find_flyer_project_by_quoted_mid(phone, chat_id, quoted_mid)
-        if quoted_project is not None:
-            return quoted_project, "quoted_message_id"
+                override, source = candidate, "quote_echo_choice"
+                break
+    if override is None:
+        quoted_mid = extract_quoted_message_id(event)
+        if quoted_mid:
+            quoted_project = find_flyer_project_by_quoted_mid(phone, chat_id, quoted_mid)
+            if quoted_project is not None:
+                override, source = quoted_project, "quoted_message_id"
+    if override is not None:
+        if _bind_override_strands_approval(override, active_project, text):
+            return active_project, "stale_quote_approve_fallback"
+        return override, source
     return active_project, "newest_updated"
 
 

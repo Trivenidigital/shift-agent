@@ -5310,8 +5310,14 @@ class CfRouterIntercepted(_BaseEntry):
     # a flyer project — "quoted_message_id" (swipe-reply quote matched a known
     # outbound mid) vs "newest_updated" (max(updated_at) fallback). "" on rows
     # predating the field and on paths where binding is not applicable.
+    # "stale_quote_approve_fallback" (2026-07-06, F0213 incident): an approval
+    # quoted an already-delivered project's message while a newer project was
+    # approvable — the binder refused the stale bind and kept newest-updated.
     # Additive with default per LogEntry union conventions.
-    binding_source: Literal["", "newest_updated", "quoted_message_id", "quote_echo_choice"] = ""
+    binding_source: Literal[
+        "", "newest_updated", "quoted_message_id", "quote_echo_choice",
+        "stale_quote_approve_fallback",
+    ] = ""
 
 
 class StateFileMigrationOverridden(_BaseEntry):

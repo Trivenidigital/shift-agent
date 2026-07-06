@@ -86,13 +86,14 @@ def _now_iso(delta_hours: float = 0.0) -> str:
     return ts.isoformat().replace("+00:00", "Z")
 
 
-def _two_project_store(tmp_path, monkeypatch, mod, *, newer_status="awaiting_final_approval"):
+def _two_project_store(tmp_path, monkeypatch, mod, *, newer_status="awaiting_final_approval",
+                       older_status="awaiting_final_approval"):
     """Older F0100 (owns the quoted mids) + newer F0111 (newest-updated pick)."""
     projects = [
         {
             "project_id": "F0100",
             "customer_phone": PHONE,
-            "status": "awaiting_final_approval",
+            "status": older_status,
             "created_at": _now_iso(30),
             "updated_at": _now_iso(20),
             "raw_request": "Diwali sweets flyer",
@@ -673,3 +674,124 @@ def test_quote_echo_choice_yields_to_source_vs_new(monkeypatch):
     assert cf_actions.has_awaiting_source_vs_new_choice("chat@lid") is True
     monkeypatch.setattr(cf_actions, "peek_flyer_source_vs_new_pending", lambda **k: None)
     assert cf_actions.has_awaiting_source_vs_new_choice("chat@lid") is False
+
+
+# ---------------------------------------------------------------------------
+# Stale-quote APPROVE fallback (F0213 live incident, 2026-07-06T01:00Z)
+#
+# The customer swipe-replied APPROVE on the PREVIOUS project's CTA (F0212,
+# delivered an hour earlier) while the current project (F0213) sat in
+# awaiting_final_approval. Quoted binding bound the delivered row, the
+# delivered-status early return dropped the approval, and the inbound fell
+# through to the delivery-state guard as a status reply. The binder must
+# refuse an approval bind onto an already-delivered project when the
+# newest-updated pick is approvable.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("approval_text", ["APPROVE", "approve.", "send it", "send my flyer now"])
+def test_stale_quote_approve_falls_back_to_newest(tmp_path, monkeypatch, approval_text):
+    _two_project_store(tmp_path, monkeypatch, cf_actions, older_status="delivered")
+    active = cf_actions.find_active_flyer_project_by_sender(PHONE, CHAT)
+    assert active["project_id"] == "F0111"
+    bound, source = cf_actions.resolve_flyer_binding_project(
+        active, PHONE, CHAT, _quoting_event("wamid.CTA100"), approval_text)
+    assert bound["project_id"] == "F0111"
+    assert source == "stale_quote_approve_fallback"
+
+
+def test_stale_quote_revision_still_binds_quoted_delivered(tmp_path, monkeypatch):
+    # Revision intent quoting a delivered project is the #558 feature working
+    # as designed (revise THAT project) — the fallback must not touch it.
+    _two_project_store(tmp_path, monkeypatch, cf_actions, older_status="delivered")
+    active = cf_actions.find_active_flyer_project_by_sender(PHONE, CHAT)
+    bound, source = cf_actions.resolve_flyer_binding_project(
+        active, PHONE, CHAT, _quoting_event("wamid.CTA100"), "make the price bigger")
+    assert bound["project_id"] == "F0100"
+    assert source == "quoted_message_id"
+
+
+def test_quoted_approve_on_approvable_project_still_binds(tmp_path, monkeypatch):
+    # The F0212 00:02Z success case: quoted APPROVE where the quoted project
+    # is itself approvable keeps the precise quoted bind.
+    _two_project_store(tmp_path, monkeypatch, cf_actions)
+    active = cf_actions.find_active_flyer_project_by_sender(PHONE, CHAT)
+    bound, source = cf_actions.resolve_flyer_binding_project(
+        active, PHONE, CHAT, _quoting_event("wamid.CTA100"), "APPROVE")
+    assert bound["project_id"] == "F0100"
+    assert source == "quoted_message_id"
+
+
+def test_stale_quote_approve_keeps_quote_when_newest_not_approvable(tmp_path, monkeypatch):
+    # Conservative scope: when the newest-updated pick cannot act on an
+    # approval either, the quoted bind stands (pre-fix behavior unchanged).
+    _two_project_store(tmp_path, monkeypatch, cf_actions,
+                       older_status="delivered", newer_status="generating_concepts")
+    active = cf_actions.find_active_flyer_project_by_sender(PHONE, CHAT)
+    bound, source = cf_actions.resolve_flyer_binding_project(
+        active, PHONE, CHAT, _quoting_event("wamid.CTA100"), "APPROVE")
+    assert bound["project_id"] == "F0100"
+    assert source == "quoted_message_id"
+
+
+def test_echo_approve_hint_on_delivered_project_falls_back(tmp_path, monkeypatch):
+    # Same stranded-approval shape through the M1 hint path: the echo project
+    # the disambiguation described has since been delivered; APPROVE must act
+    # on the approvable newest project instead of dead-ending.
+    _two_project_store(tmp_path, monkeypatch, cf_actions, older_status="delivered")
+    monkeypatch.setattr(cf_actions, "FLYER_QUOTE_ECHO_PENDING_PATH",
+                        tmp_path / "quote_echo_pending.json")
+    cf_actions.set_flyer_echo_approve_bind_hint(CHAT, "F0100")
+    active = cf_actions.find_active_flyer_project_by_sender(PHONE, CHAT)
+    bound, source = cf_actions.resolve_flyer_binding_project(
+        active, PHONE, CHAT, SimpleNamespace(text="APPROVE"), "APPROVE")
+    assert bound["project_id"] == "F0111"
+    assert source == "stale_quote_approve_fallback"
+
+
+def test_hooks_stale_quote_approve_finalizes_newest_project(tmp_path, monkeypatch):
+    """End-to-end incident pin: APPROVE quoting the delivered project's CTA
+    finalizes the awaiting project instead of surfacing a status reply."""
+    hooks_mod, actions_mod = _load_plugin_modules()
+    _two_project_store(tmp_path, monkeypatch, actions_mod, older_status="delivered")
+    monkeypatch.setattr(actions_mod, "FLYER_QUOTE_ECHO_PENDING_PATH",
+                        tmp_path / "quote_echo_pending.json")
+    calls = _wire_intercept_mocks(hooks_mod, actions_mod, monkeypatch)
+
+    result = hooks_mod._try_flyer_active_project_intercept(
+        "APPROVE", CHAT, _quoting_event("wamid.CTA100"))
+    assert result is not None and "F0111" in result["reason"]
+    assert calls["finalized"] == ["F0111"]
+    approve_audits = [row for row in calls["audits"] if "approve=true" in row["detail"]]
+    assert approve_audits and approve_audits[0]["binding_source"] == "stale_quote_approve_fallback"
+
+
+def test_hooks_status_request_with_stale_quote_still_surfaces_status(tmp_path, monkeypatch):
+    # Third direction: genuine status intent keeps surfacing status — the
+    # fallback must never convert a check-in into an approval.
+    hooks_mod, actions_mod = _load_plugin_modules()
+    _two_project_store(tmp_path, monkeypatch, actions_mod, older_status="delivered")
+    monkeypatch.setattr(actions_mod, "FLYER_QUOTE_ECHO_PENDING_PATH",
+                        tmp_path / "quote_echo_pending.json")
+    monkeypatch.setattr(actions_mod, "flyer_project_status_reply", lambda _p: "STATUS")
+    calls = _wire_intercept_mocks(hooks_mod, actions_mod, monkeypatch)
+
+    result = hooks_mod._try_flyer_active_project_intercept(
+        "any update?", CHAT, _quoting_event("wamid.CTA100"))
+    assert result is not None and "flyer status" in result["reason"]
+    assert calls["finalized"] == []
+
+
+def test_binding_source_stale_quote_fallback_roundtrip():
+    from pydantic import TypeAdapter
+
+    from schemas import LogEntry
+    adapter = TypeAdapter(LogEntry)
+    entry = adapter.validate_python({
+        "type": "cf_router_intercepted",
+        "ts": _now_iso(),
+        "reason": "flyer_primary_project_created",
+        "chat_id": CHAT,
+        "binding_source": "stale_quote_approve_fallback",
+    })
+    assert entry.binding_source == "stale_quote_approve_fallback"
