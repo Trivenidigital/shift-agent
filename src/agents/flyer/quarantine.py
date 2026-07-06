@@ -141,6 +141,26 @@ def _project_dir_newest_age_days(project_dir: Path, *, now: datetime) -> float |
     return (now - stamp).total_seconds() / 86400.0
 
 
+_TERMINAL_STATUSES = {"completed", "closed_no_send", "delivered"}
+
+
+def _terminal_project_ids():
+    """Project ids the store marks terminal, or None when the store cannot be
+    read (fail open: no sweep). Delivered counts as terminal for EVIDENCE
+    retention: post-delivery rungs never fire, and the 14d age gate has
+    already passed."""
+    try:
+        import json
+        store = Path(os.environ.get("FLYER_STATE_ROOT",
+                                     "/opt/shift-agent/state/flyer/")) / "projects.json"
+        doc = json.loads(store.read_text(encoding="utf-8"))
+        return {str(p.get("project_id") or ""): True
+                for p in doc.get("projects", [])
+                if str(p.get("status") or "") in _TERMINAL_STATUSES}
+    except Exception:  # noqa: BLE001 - unreadable store => sweep nothing
+        return None
+
+
 def _sweep_stale_project_dirs(root: Path, *, now: datetime, max_age_days: int,
                               skip_project_dir: Path | None = None) -> int:
     """Remove whole per-project quarantine dirs whose newest set is older than
@@ -152,12 +172,21 @@ def _sweep_stale_project_dirs(root: Path, *, now: datetime, max_age_days: int,
     except OSError:
         return 0
     skip_name = skip_project_dir.name if skip_project_dir is not None else None
+    terminal_ids = _terminal_project_ids()
     for project_dir in project_dirs:
         if project_dir.name == skip_name:
             continue
         age = _project_dir_newest_age_days(project_dir, now=now)
         if age is None or age <= max_age_days:
             continue
+        # grad11 MEDIUM (PR #566): age alone is an UNSOUND terminality proxy —
+        # a long-pending live project whose last rung fired >14d ago must keep
+        # its evidence. Sweep only projects the store says are terminal;
+        # store unreadable => terminal_ids is None => fail open, sweep nothing.
+        # bare-* dirs have no store row and stay age-based (transient F0000).
+        if not project_dir.name.startswith("bare-"):
+            if terminal_ids is None or project_dir.name not in terminal_ids:
+                continue
         try:
             shutil.rmtree(project_dir)
             swept += 1

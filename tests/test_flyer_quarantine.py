@@ -401,6 +401,14 @@ def test_cross_project_ttl_sweep_removes_stale_terminal_dirs(tmp_path, monkeypat
     # still-recent project (1d old) that must be left alone.
     _seed_quarantine_set("F0100", age_days=20)
     _seed_quarantine_set("F0101", age_days=1)
+    # Status gate (grad11 MEDIUM): the sweep consults the store — mark the
+    # stale project terminal so the age-based expectation still holds.
+    import json as _json
+    (tmp_path / "state" / "projects.json").write_text(_json.dumps({"projects": [
+        {"project_id": "F0100", "status": "closed_no_send"},
+        {"project_id": "F0101", "status": "closed_no_send"},
+        {"project_id": "F0200", "status": "awaiting_final_approval"},
+    ]}), encoding="utf-8")
 
     preview = _make_failed_artifact(tmp_path / "assets", project_id="F0200")
     set_dir = quarantine_before_overwrite(
@@ -432,3 +440,31 @@ def test_cross_project_ttl_sweep_skips_unparseable_and_empty_dirs(tmp_path, monk
     assert set_dir is not None
     assert (quarantine_root() / "F0300").exists()
     assert (quarantine_root() / "F0301").exists()
+
+
+def test_ttl_sweep_never_touches_non_terminal_projects(tmp_path, monkeypatch):
+    # grad11 MEDIUM: an old quarantine dir for a LIVE project must survive the
+    # sweep; the same-age dir for a store-terminal project is swept; store
+    # unreadable => nothing swept (fail open).
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from agents.flyer import quarantine as Q
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    root = tmp_path / "quarantine"  # store lives at FLYER_STATE_ROOT/projects.json
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y%m%dT%H%M%S.%fZ")
+    for pid in ("F0100", "F0111"):
+        d = root / pid / f"{old_ts}-deterministic_recovery"
+        d.mkdir(parents=True)
+        (d / "p.png").write_bytes(b"x")
+    (tmp_path / "projects.json").write_text(json.dumps({"projects": [
+        {"project_id": "F0100", "status": "closed_no_send"},
+        {"project_id": "F0111", "status": "awaiting_final_approval"},
+    ]}), encoding="utf-8")
+    swept = Q._sweep_stale_project_dirs(root, now=datetime.now(timezone.utc), max_age_days=14)
+    assert swept == 1
+    assert not (root / "F0100").exists()   # terminal: swept
+    assert (root / "F0111").exists()       # LIVE: evidence retained
+    (tmp_path / "projects.json").write_text("{corrupt", encoding="utf-8")
+    swept2 = Q._sweep_stale_project_dirs(root, now=datetime.now(timezone.utc), max_age_days=14)
+    assert swept2 == 0 and (root / "F0111").exists()  # fail open
