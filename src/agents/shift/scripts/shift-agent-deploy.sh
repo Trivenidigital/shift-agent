@@ -437,6 +437,14 @@ PY
     else
         rm -f /opt/shift-agent/flyer_recovery.py
     fi
+    # Quarantine-before-recovery chokepoint (F0197/F0208): imported flat by
+    # generate-flyer-concepts + flyer_bare_render before any recovery rung
+    # overwrites a QA-failed preview artifact.
+    if [ -f src/agents/flyer/quarantine.py ]; then
+        install -m 644 src/agents/flyer/quarantine.py /opt/shift-agent/flyer_quarantine.py
+    else
+        rm -f /opt/shift-agent/flyer_quarantine.py
+    fi
     if [ -f src/agents/flyer/customer_copy_policy.py ]; then
         install -m 644 src/agents/flyer/customer_copy_policy.py /opt/shift-agent/flyer_customer_copy_policy.py
     else

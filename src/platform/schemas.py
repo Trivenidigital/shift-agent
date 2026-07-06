@@ -4691,6 +4691,24 @@ class FlyerPremiumRepairSkipped(_BaseEntry):
     blockers: list[str] = Field(default_factory=list, max_length=50)
 
 
+class FlyerArtifactQuarantined(_BaseEntry):
+    """Quarantine-before-recovery (F0197 / F0208, 2026-07-06): a QA-failed
+    render + its sidecars were copied into the quarantine directory BEFORE a
+    recovery/repair/deterministic re-render overwrote or deleted them, so
+    failed attempts survive their own post-mortem. `rung` names the recovery
+    rung about to destroy the evidence; `files` are the preserved basenames;
+    `pruned_sets` counts older quarantine sets evicted by the keep-3 bound.
+
+    Best-effort observability: no row is emitted when nothing was copied, and
+    a quarantine/audit failure never blocks the recovery itself. LOG-ONLY."""
+    type: Literal["flyer_artifact_quarantined"] = "flyer_artifact_quarantined"
+    project_id: str = Field(min_length=1, max_length=80)
+    rung: str = Field(min_length=1, max_length=80)
+    quarantine_dir: str = Field(min_length=1, max_length=500)
+    files: list[str] = Field(default_factory=list, max_length=50)
+    pruned_sets: int = Field(default=0, ge=0)
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -6062,6 +6080,8 @@ LogEntry = Annotated[
         Annotated[FlyerPremiumRepairSucceeded, Tag("flyer_premium_repair_succeeded")],
         Annotated[FlyerPremiumRepairExhausted, Tag("flyer_premium_repair_exhausted")],
         Annotated[FlyerPremiumRepairSkipped, Tag("flyer_premium_repair_skipped")],
+        # 2026-07-06 — quarantine-before-recovery (census C4; F0197/F0208)
+        Annotated[FlyerArtifactQuarantined, Tag("flyer_artifact_quarantined")],
         # 2026-06-19 — flat-degrade observability (premium overlay outcome)
         Annotated[FlyerPremiumOverlayOutcome, Tag("flyer_premium_overlay_outcome")],
         # 2026-07-01 — Premium Poster v1 managed/studio path observability
