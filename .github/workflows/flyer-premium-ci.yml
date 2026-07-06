@@ -50,7 +50,8 @@ jobs:
       - name: Premium Poster v1 suite
         run: |
           python -m pytest \
-            tests/test_cf_router_raw_body.py \n            tests/test_flyer_extraction_seam.py \
+            tests/test_cf_router_raw_body.py \
+            tests/test_flyer_extraction_seam.py \
             tests/test_cf_router_quoted_approve.py \
             tests/test_flyer_premium_poster_v1.py \
             tests/test_flyer_premium_poster_v1_offer.py \
@@ -63,6 +64,7 @@ jobs:
             tests/test_flyer_premium_poster_v1_deploy_parity.py \
             tests/test_flyer_premium_poster_v1_bare_obs.py \
             tests/test_flyer_extraction_v2_golden.py \
+            tests/test_flyer_intake_fields.py \
             tests/test_flyer_tranche2_telemetry.py \
             -q
       - name: Renderer + visual QA suites (final package / QA blast radius)
