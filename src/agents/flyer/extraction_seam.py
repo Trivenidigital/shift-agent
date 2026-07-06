@@ -73,7 +73,12 @@ def extract_text_facts_seam(fields, raw_request, *, message_id="", report_out=No
         profile_business_name=profile_business_name,
         allow_text_identity=allow_text_identity, cfg=cfg,
         brief_provenance=brief_provenance)
-    if audit is not None and brief_provenance:
+    # Flag-scope (#569 regression fix): the row exists to answer "did the
+    # legacy provider fire while v2 is ACTIVE" (fallback observability, §9c).
+    # With the flag deliberately off, legacy-and-silent is the PINNED contract
+    # (test_flag_off_is_byte_identical_legacy_and_silent) — emit nothing.
+    if (audit is not None and brief_provenance
+            and os.environ.get("FLYER_EXTRACTION_V2") == "1"):
         try:
             audit("semantic_brief_outcome", brief_provenance)
         except Exception:  # noqa: BLE001 — observability never blocks

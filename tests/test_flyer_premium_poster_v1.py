@@ -199,23 +199,18 @@ def test_long_business_name_shrinks_to_fit_never_clips():
 
 # ── flag + no routing (flag-off byte identity by construction) ──────────────
 
-def test_flag_defaults_off():
-    monkey = os.environ.pop("FLYER_PREMIUM_POSTER_V1", None)
-    try:
-        assert poster_v1_enabled() is False
-    finally:
-        if monkey is not None:
-            os.environ["FLYER_PREMIUM_POSTER_V1"] = monkey
+def test_flag_defaults_off(monkeypatch):
+    monkeypatch.delenv("FLYER_PREMIUM_POSTER_V1", raising=False)
+    assert poster_v1_enabled() is False
 
 
-def test_premium_poster_v1_dormant_by_default_in_render():
+def test_premium_poster_v1_dormant_by_default_in_render(monkeypatch):
     # The integration slice wires Premium Poster v1 into render.py, but it is DORMANT
     # by default: with FLYER_PREMIUM_POSTER_V1 unset, _premium_poster_v1_armed returns
     # False, so the render branch is never entered (byte-identical legacy).
-    import os
     from types import SimpleNamespace
     from agents.flyer import render as render_mod
-    os.environ.pop("FLYER_PREMIUM_POSTER_V1", None)
+    monkeypatch.delenv("FLYER_PREMIUM_POSTER_V1", raising=False)
     assert render_mod._premium_poster_v1_armed(SimpleNamespace(customer_phone="+17329837841")) is False
 
 

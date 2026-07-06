@@ -23,6 +23,28 @@ for _p in (_SRC_DIR, _SRC_DIR / "platform", _SRC_DIR / "agents" / "shift"):
         sys.path.insert(0, str(_p))
 
 
+# ── env hygiene (census env-pop fix 2026-07-06) ─────────────────────────────
+# Belt-and-suspenders for the monkeypatch discipline: monkeypatch.setenv/delenv
+# already auto-restore, but a test that mutates os.environ DIRECTLY (raw
+# os.environ[...] = / os.environ.pop) would leak that mutation into later tests
+# in the same process (the exact order-interference the premium_poster suites'
+# unrestored os.environ.pop produced). Snapshotting the ambient environment and
+# restoring it after teardown makes single-process runs order-independent
+# regardless of HOW a test touches the environment. Defined FIRST so it is the
+# outermost autouse fixture: it snapshots before every other fixture sets up and
+# restores after every other fixture (incl. monkeypatch) has torn down.
+@pytest.fixture(autouse=True)
+def _restore_os_environ():
+    snapshot = dict(os.environ)
+    yield
+    if dict(os.environ) != snapshot:
+        for key in [k for k in os.environ if k not in snapshot]:
+            del os.environ[key]
+        for key, value in snapshot.items():
+            if os.environ.get(key) != value:
+                os.environ[key] = value
+
+
 # ── send-path test safety (send-path-test-harness 2026-05-30) ───────────────
 # Default the bridge URL to a CLOSED loopback sink for EVERY test so no test can
 # reach the live WhatsApp bridge (port 3000). Subprocess tests inherit
