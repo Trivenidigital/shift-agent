@@ -52,7 +52,7 @@ the runtime substrate; Flyer Studio is built around it. Drift tag: **Hermes-nati
 | Cockpit P0-5 (customer-visible message preview) | ✅ | `/manual-queue/{id}/action-preview` (`test_flyer_admin_close_no_send.py`) |
 | Cockpit P0-6 (close/no-send UI) | ✅ | `/manual-queue/{id}/close-no-send` (`test_flyer_admin_close_no_send.py`) |
 | Cockpit P0-7 (provider/runtime health panel) | ✅ | `/flyer/health` (`test_flyer_health.py`) |
-| Starter briefs (intake) | ✅ | `starter_briefs.py` + `test_flyer_starter_briefs.py` |
+| Starter briefs / example prompts | ✅ | `starter_briefs.py` + `test_flyer_starter_briefs.py`. **Caveat:** the conversational **guided-intake flow** (`intake.py`) is built but **dormant — it has never fired live.** See "Vague-request handling — write-up correction" below before citing intake as a shipped capability. |
 | Edit-fidelity regressions (F0023/F0024/F0029) | ✅ | `test_cf_router_flyer_routing.py`, `test_flyer_golden_scenarios.py` |
 | Recovery lane | ✅ deployed | `recovery.py` + `flyer-recovery-watchdog` (smoke-passing) |
 | Send-time format truthfulness + downgrade observability | ✅ | PRs #339, #351 |
@@ -82,6 +82,47 @@ edit/provider backlog (**#362**).
    incrementally without a plan + explicit go.
 2. `operating_layer.py` activation — currently advisory/dead-scaffolding
    (imported only by tests). Wiring it into runtime is a rollout decision.
+
+---
+
+## Vague-request handling — write-up correction (2026-07-06)
+
+*Added 2026-07-06 as the "architecture confirmation #4 / roadmap write-up correction owed"
+item from the Settlement Census (`tasks/settlement-census-2026-07.md`, verdict D11). This
+section corrects a long-standing overstatement: that Flyer Studio resolves vague/underspecified
+briefs via a live **guided-intake** flow. It does not. Verified against `origin/main` `e908c39`
+and the box decisions log the same day.*
+
+**The bright-line rule (operator standing rule, 2026-07-04):** the customer's brief is
+NEVER rewritten, enriched, or gap-filled before extraction — *vagueness resolves by ASKING,
+never by inference.* The sole documented exception is the interpretive `occasion` field
+(mood-only, parity-exempt, fail-neutral).
+
+**Who actually owns "asking" today:** the **sample-prompts menu**, not the conversational
+guided-intake flow.
+
+| Mechanism | Code | Live status (verified 2026-07-06) | Verdict |
+|---|---|---|---|
+| **Sample-prompts menu** (self-serve example briefs on explicit menu-request text) | `src/plugins/cf-router/hooks.py:881` `_try_flyer_sample_prompt_request_intercept` → emits `flyer_sample_prompt_requested` (`:933`/`:988`) | **LIVE — the named owner.** 8 `flyer_sample_prompt_requested` rows in the decisions log (= 5 real fires + 3 shadow-classifier rows, per census A8); 0 misfires; dedup verified | **PROVEN** (census A8) |
+| **Guided-intake conversational flow** (adaptive-language + missing-field Q&A) | `src/agents/flyer/intake.py:77` `handle_intake_message` (962 LOC); sole caller `src/agents/flyer/scripts/handle-flyer-intake` | **DORMANT — never fired live.** 0 intake-session fire markers in the decisions log; **546** `flyer_intake_bypassed` rows (routing consistently skips it); `intake.py` emits no audit rows, so it has no fire marker at all | **KEEP-DORMANT** (census D11) |
+
+**Why keep a dormant module:** guided intake is the *designated* mechanism for the bright-line
+rule above — deleting it orphans the rule with no replacement Q&A surface (sample-prompts hands
+out examples; it does not interview for missing fields). The census kept it in-tree pending
+productization. It is ~962 LOC and rebuildable if a future rollout deletes it instead.
+
+**Honest roadmap item:** before guided intake may be described as a live capability anywhere,
+it must (a) be reachable in production routing (546 bypass rows show it currently is not) and
+(b) emit a fire-marker audit row at entry so "has it ever fired" is answerable from the log.
+Until then: **sample-prompts is the live vague-request surface; guided intake is dormant scaffolding.**
+
+**⚠ Directive-vs-tree discrepancy (flagged, not silently resolved):** a 2026-07-06 operator
+directive referred to guided intake as *"now DELETED."* That is **not** what the tree shows.
+`origin/main` `e908c39` still contains `src/agents/flyer/intake.py` (962 LOC) **and** its sole
+caller `src/agents/flyer/scripts/handle-flyer-intake` — both present, imports intact. The
+authoritative census verdict is **KEEP-DORMANT** (D11), and the deployed tree matches KEEP-DORMANT,
+not deletion. This write-up therefore states the tree truth (dormant, present). If a later
+PR-D-ladder step actually removes the module, update this section at that commit.
 
 ---
 

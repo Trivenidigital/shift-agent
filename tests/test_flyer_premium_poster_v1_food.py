@@ -121,12 +121,11 @@ def test_corrupt_image_falls_back(tmp_path):
 
 # ── no routing / flag-off unchanged + golden committed ──────────────────────
 
-def test_premium_poster_v1_dormant_by_default_in_render():
+def test_premium_poster_v1_dormant_by_default_in_render(monkeypatch):
     # Wired into render.py (integration slice) but dormant by default (flag off -> not armed).
-    import os
     from types import SimpleNamespace
     from agents.flyer import render as render_mod
-    os.environ.pop("FLYER_PREMIUM_POSTER_V1", None)
+    monkeypatch.delenv("FLYER_PREMIUM_POSTER_V1", raising=False)
     assert render_mod._premium_poster_v1_armed(SimpleNamespace(customer_phone="+17329837841")) is False
 
 

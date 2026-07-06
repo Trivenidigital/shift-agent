@@ -302,6 +302,37 @@ def consume_premium_poster_v1_outcome() -> PremiumPosterV1Outcome | None:
     return outcome
 
 
+@dataclass
+class CreativeDirectionV2Outcome:
+    """How Creative Director v2 resolved for one render (set on a ContextVar;
+    consumed by the managed emitter in generate-flyer-concepts). ``populated`` is
+    True iff the resolver produced a non-None ``project.creative_direction``
+    carrier; ``consumed`` is True iff that carrier actually shaped the prompt this
+    process built (the bg-only hero-naming branch fired). Census D10 delete-gate:
+    over the observe window ``consumed`` distinguishes "CD-v2 populated a carrier
+    that changed nothing" (the expected primary-path state → delete-safe) from
+    "the carrier reached a rendered prompt". None ⇒ the CD-v2 gate was off for
+    this render (byte-identical legacy)."""
+    populated: bool
+    consumed: bool
+    request_intent: str
+    poster_archetype: str
+    offer_priority: str
+
+
+_CREATIVE_DIRECTION_V2_OUTCOME: contextvars.ContextVar[CreativeDirectionV2Outcome | None] = contextvars.ContextVar(
+    "flyer_creative_direction_v2_outcome", default=None
+)
+
+
+def consume_creative_direction_v2_outcome() -> CreativeDirectionV2Outcome | None:
+    """Return the most-recent CD-v2 outcome and clear it (so a later render that
+    does NOT run the CD-v2 gate cannot inherit a stale value)."""
+    outcome = _CREATIVE_DIRECTION_V2_OUTCOME.get()
+    _CREATIVE_DIRECTION_V2_OUTCOME.set(None)
+    return outcome
+
+
 TEXT_MANIFEST_SCHEMA_VERSION = 1
 # Total critical text facts (menu items + offer/pricing/promo clauses) that fit one
 # flyer legibly. The binding output is the square 1080x1080 Instagram post in the final
@@ -1477,6 +1508,11 @@ def _poster_layout_requirements(project: FlyerProject, *, force_background_only:
                 _theme_family = (_cd.get("theme_family") or "").strip()
                 _mood = (_cd.get("mood") or "").strip()
             if _hero_name or _theme_family or _mood:
+                # CD-v2 observability (census D10): the resolved carrier is now
+                # shaping this prompt — mark the render's outcome consumed.
+                _cdv2_out = _CREATIVE_DIRECTION_V2_OUTCOME.get()
+                if _cdv2_out is not None:
+                    _cdv2_out.consumed = True
                 _hero_subject = f"the featured {_hero_name} dish" if _hero_name else "the featured food"
                 _scene_clauses = ""
                 if _theme_family:
@@ -4717,6 +4753,7 @@ def _populate_creative_direction_v2(project: FlyerProject) -> None:
         )
         resolved = resolve_creative_direction(brief, project.locked_facts)
         project.creative_direction = dataclasses.asdict(resolved)
+        _cdv2_archetype = ""
         # Composition Phase 1: route the poster archetype from the brief's
         # request_intent (offer_priority accepted but unused this phase). Guarded
         # so any failure simply omits poster_archetype and leaves the carrier as-is.
@@ -4725,10 +4762,23 @@ def _populate_creative_direction_v2(project: FlyerProject) -> None:
                 getattr(brief, "request_intent", "") or "", resolved.offer_priority
             )
             project.creative_direction["poster_archetype"] = archetype
+            _cdv2_archetype = archetype
         except Exception:  # noqa: BLE001 — never block; just omit poster_archetype
             pass
+        # CD-v2 observability (census D10 prerequisite): record that a carrier was
+        # POPULATED this render. `consumed` is set later, iff the carrier actually
+        # shapes a rendered prompt (the bg-only hero-naming branch). LOG-ONLY.
+        _CREATIVE_DIRECTION_V2_OUTCOME.set(CreativeDirectionV2Outcome(
+            populated=True, consumed=False,
+            request_intent=str(getattr(brief, "request_intent", "") or "")[:40],
+            poster_archetype=str(_cdv2_archetype or "")[:60],
+            offer_priority=str(getattr(resolved, "offer_priority", "") or "")[:40],
+        ))
     except Exception:  # noqa: BLE001 — never block the render; carrier stays None
         project.creative_direction = None
+        _CREATIVE_DIRECTION_V2_OUTCOME.set(CreativeDirectionV2Outcome(
+            populated=False, consumed=False, request_intent="",
+            poster_archetype="", offer_priority=""))
 
 
 def _openrouter_textless_image(prompt: str, *, model: str, quality: str, size: tuple[int, int] | None,
@@ -5075,6 +5125,9 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
         # premium fire can never leave a stale value (None unambiguously means
         # "premium branch not entered this render").
         _PREMIUM_POSTER_V1_OUTCOME.set(None)
+        # CD-v2 observability (census D10): reset per render so None means "the
+        # CD-v2 gate did not run this render" (populate below sets it when enabled).
+        _CREATIVE_DIRECTION_V2_OUTCOME.set(None)
         # Guard gates added by the 2026-07-02 review:
         # - not repair_instruction (PR-B1): a strict-note / revision-feedback render
         #   must NEVER enter premium — the premium composer works from stored locked
