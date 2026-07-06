@@ -1289,6 +1289,31 @@ def test_close_awaiting_final_approval_project_operator_reject_edge():
     assert closed.manual_review.detail == "fabricated facts must never ship"
 
 
+def test_close_intake_started_project_operator_abandonment_edge():
+    # 2026-07-06 F0184 finding (59->1 legacy release): a project abandoned at
+    # intake (no brief, no render, nothing customer-visible pending) was
+    # un-terminable — the transition table only allowed intake_started ->
+    # collecting_required_info. Same guarded CLI path as the F0200 reject
+    # edge, same terminal state, same audit trail.
+    from agents.flyer.manual_queue import close_manual_project
+    from schemas import is_flyer_transition_allowed
+
+    assert is_flyer_transition_allowed("intake_started", "closed_no_send")
+
+    project = _manual_project().model_copy(update={
+        "status": "intake_started",
+        "manual_review": FlyerManualReview(status="none"),
+    })
+    store = FlyerProjectStore(projects=[project])
+
+    updated = close_manual_project(store, "F9100", reason="intake abandoned")
+    closed = updated.projects[0]
+    assert closed.status == "closed_no_send"
+    assert closed.manual_review.status == "closed_no_send"
+    assert closed.manual_review.reason_code == "operator_request"
+    assert closed.manual_review.detail == "intake abandoned"
+
+
 def test_close_still_rejects_other_statuses():
     from agents.flyer.manual_queue import close_manual_project
 
