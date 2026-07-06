@@ -1803,6 +1803,14 @@ class FlyerAsset(BaseModel):
     delivered_at: Optional[datetime] = None
     delivery_attempt_count: int = Field(default=0, ge=0)
     delivery_error: str = Field(default="", max_length=500)
+    # WS5 (2026-07-06): printable_pdf verification provenance — the verdict of
+    # the visual-QA screen run on the PDF's PNG twin. "twin_missing" = legacy
+    # render without a twin sidecar (QA then ran on the PDF itself and the
+    # vision provider fails it closed). None for non-PDF assets and rows
+    # written before WS5.
+    pdf_qa_status: Optional[Literal[
+        "passed", "failed", "not_run", "provider_unavailable", "twin_missing"
+    ]] = None
 
     @field_validator("path")
     @classmethod
@@ -4545,6 +4553,26 @@ class FlyerPremiumOverlayOutcome(_BaseEntry):
     output_format: str = Field(default="", max_length=40)
 
 
+class FlyerPdfQaBackfill(_BaseEntry):
+    """WS5 retroactive PDF-QA backfill (tools/backfill-flyer-pdf-qa.py). One row
+    per tool run recording the twin-based visual-QA verdict for an already-
+    delivered printable_pdf (F0203 class — delivered before rasterize-before-QA
+    landed). The tool is read-only against the project store; this audit row is
+    its ONLY write to live state. `raster_source` says which on-disk artifact
+    stood in for the (post-WS5) generation-time twin; `raster_exactness` is
+    "exact" only when that artifact IS the raster the PDF was composed from
+    (twin sidecar), "upstream_equivalent" for the approved preview stand-in."""
+    type: Literal["flyer_pdf_qa_backfill"] = "flyer_pdf_qa_backfill"
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    asset_id: str = Field(default="", max_length=40)
+    pdf_path: str = Field(min_length=1, max_length=500)
+    raster_source: Literal["twin_sidecar", "selected_preview", "explicit", "none"]
+    raster_exactness: Literal["exact", "upstream_equivalent", "none"] = "none"
+    qa_status: Literal["passed", "failed", "not_run", "provider_unavailable", "raster_missing"]
+    blockers: list[str] = Field(default_factory=list, max_length=50)
+    report_path: str = Field(default="", max_length=500)
+
+
 class FlyerPremiumPosterV1Managed(_BaseEntry):
     """Premium Poster v1 — managed/studio (owner-review) path observability
     (2026-07-01). One row per lifecycle stage of the flag-gated, allowlist-scoped
@@ -6163,6 +6191,8 @@ LogEntry = Annotated[
         Annotated[FlyerArtifactQuarantined, Tag("flyer_artifact_quarantined")],
         # 2026-06-19 — flat-degrade observability (premium overlay outcome)
         Annotated[FlyerPremiumOverlayOutcome, Tag("flyer_premium_overlay_outcome")],
+        # WS5 PDF rasterize-before-QA retroactive backfill (2026-07-06)
+        Annotated[FlyerPdfQaBackfill, Tag("flyer_pdf_qa_backfill")],
         # 2026-07-01 — Premium Poster v1 managed/studio path observability
         Annotated[FlyerPremiumPosterV1Managed, Tag("flyer_premium_poster_v1_managed")],
         # 2026-07-02 — Premium Poster v1 bare/WhatsApp-direct path observability
