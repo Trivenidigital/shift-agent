@@ -453,7 +453,7 @@ def _quarantine_failed_raw_bg(chat_id: str, raw_bg_dest) -> None:
             from flyer_quarantine import quarantine_before_overwrite as _q  # type: ignore
         except ImportError:
             from agents.flyer.quarantine import quarantine_before_overwrite as _q
-        _q([raw_bg_dest], project_id=f"bare-{_sanitize_chat(chat_id)}",
+        _q([raw_bg_dest], project_id=(f"bare-{_sanitize_chat(chat_id)}")[:80],
            rung="bare_retry", audit_log_path=AUDIT_LOG_PATH)
     except Exception:  # noqa: BLE001 — quarantine must never block the retry
         return
