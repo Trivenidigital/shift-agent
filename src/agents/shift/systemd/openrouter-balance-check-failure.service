@@ -1,0 +1,27 @@
+[Unit]
+Description=Failure handler — alert owner if the OpenRouter balance check failed
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+# `-` prefix: notify-owner reads Pushover creds from config.yaml, not .env --
+# a broken .env symlink (the known sed -i failure mode) must not take the
+# pager down together with the check it is paging about.
+EnvironmentFile=-/opt/shift-agent/.env
+Environment=HOME=/opt/shift-agent
+TimeoutStartSec=30s
+ExecStart=/usr/local/bin/shift-agent-notify-owner \
+    --title "OpenRouter balance check FAILED" \
+    --priority 1 \
+    "openrouter-balance-check.service exited non-zero (credits fetch or alert delivery failed). Check journalctl -u openrouter-balance-check + /opt/shift-agent/logs/openrouter-balance.log"
+
+# Security hardening — must match main service unit.
+# No OnFailure= here: if notify-owner is itself broken, journald is the floor;
+# avoid recursive cascade.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shift-agent
+ProtectHome=read-only
+PrivateTmp=true
+RuntimeDirectory=shift-agent

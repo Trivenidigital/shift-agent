@@ -25,6 +25,7 @@ from schemas import (  # noqa: E402
     FlyerAutoRepairSkipped,
     FlyerAutoRepairSucceeded,
     FlyerConcept,
+    FlyerCreativeDirectionV2Applied,
     FlyerIntegratedAttempted,
     FlyerIntegratedFellBackDeterministic,
     FlyerIntegratedManualReview,
@@ -63,9 +64,9 @@ try:
 except ImportError:
     from agents.flyer.reference_extract import build_reference_extraction_provider, extract_reference  # noqa: E402
 try:
-    from flyer_render import FlyerRenderError, _deterministic_recovery_enabled, _premium_poster_v1_armed, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, consume_premium_overlay_outcome, consume_premium_poster_v1_outcome, next_asset_number, premium_outcome_should_alert, premium_poster_v1_managed_path, render_concept_previews, render_repair_edit, render_source_edit_preview  # type: ignore  # noqa: E402
+    from flyer_render import FlyerRenderError, _deterministic_recovery_enabled, _premium_poster_v1_armed, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, consume_creative_direction_v2_outcome, consume_premium_overlay_outcome, consume_premium_poster_v1_outcome, next_asset_number, premium_outcome_should_alert, premium_poster_v1_managed_path, render_concept_previews, render_repair_edit, render_source_edit_preview  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import FlyerRenderError, _deterministic_recovery_enabled, _premium_poster_v1_armed, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, consume_premium_overlay_outcome, consume_premium_poster_v1_outcome, next_asset_number, premium_outcome_should_alert, premium_poster_v1_managed_path, render_concept_previews, render_repair_edit, render_source_edit_preview  # noqa: E402
+    from agents.flyer.render import FlyerRenderError, _deterministic_recovery_enabled, _premium_poster_v1_armed, _premium_repair_enabled, build_asset_manifest, build_image_generation_prompt, build_source_edit_generation_prompt, consume_creative_direction_v2_outcome, consume_premium_overlay_outcome, consume_premium_poster_v1_outcome, next_asset_number, premium_outcome_should_alert, premium_poster_v1_managed_path, render_concept_previews, render_repair_edit, render_source_edit_preview  # noqa: E402
 try:
     from flyer_visual_qa import brand_blocker_name, is_own_brand_variant, run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
 except ImportError:
@@ -478,6 +479,31 @@ def _emit_premium_overlay_outcome(audit_log_path: Path, project) -> None:
             (f"Flyer premium overlay FAILED unexpectedly ({project.project_id}): "
              f"{outcome.reason_class} - premium shipped FLAT. Detail: {outcome.reason_detail}")[:900]
         )
+
+
+def _emit_creative_direction_v2_applied(audit_log_path: Path, project) -> None:
+    """Consume the CD-v2 outcome recorded during the last managed primary render
+    and emit one flyer_creative_direction_v2_applied row. NO-OP (no row) when the
+    CD-v2 gate did not run this render (outcome None) — byte-identical + audit-
+    silent when the flag is off. This is the census D10 delete-gate signal: a 48h
+    observe window with only ``consumed=false`` rows confirms CD-v2 shapes no
+    primary render before the flag-off + deletion. LOG-ONLY; never raises."""
+    try:
+        outcome = consume_creative_direction_v2_outcome()
+    except Exception:  # noqa: BLE001
+        outcome = None
+    if outcome is None:
+        return
+    _audit_append(audit_log_path, FlyerCreativeDirectionV2Applied(
+        ts=datetime.now(timezone.utc),
+        project_id=project.project_id,
+        project_version=project.version,
+        populated=bool(outcome.populated),
+        consumed=bool(outcome.consumed),
+        request_intent=str(outcome.request_intent or "")[:40],
+        poster_archetype=str(outcome.poster_archetype or "")[:60],
+        offer_priority=str(outcome.offer_priority or "")[:40],
+    ))
 
 
 def _emit_premium_poster_v1_managed_outcome(audit_log_path: Path, project):
@@ -1060,6 +1086,7 @@ def main() -> int:
                         )
                     _emit_premium_overlay_outcome(audit_log_path, project)
                     ppv1_managed_outcome = _emit_premium_poster_v1_managed_outcome(audit_log_path, project)
+                    _emit_creative_direction_v2_applied(audit_log_path, project)
                     break
                 except Exception as exc:
                     detail_lower = str(exc).lower()
@@ -1074,6 +1101,7 @@ def main() -> int:
                     # provider outages. Emit before the fallback/manual branches;
                     # the emitter is a no-op when not armed and never raises.
                     ppv1_managed_outcome = _emit_premium_poster_v1_managed_outcome(audit_log_path, project)
+                    _emit_creative_direction_v2_applied(audit_log_path, project)
                     now = datetime.now(timezone.utc)
                     if _draft_error_is_visual_qa(detail_lower):
                         reason_code = "visual_qa_failed"
