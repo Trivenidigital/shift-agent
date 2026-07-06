@@ -277,7 +277,10 @@ def test_semantic_provenance_provider_empty():
 
 
 def test_seam_emits_semantic_brief_outcome_on_legacy(monkeypatch):
-    monkeypatch.delenv("FLYER_EXTRACTION_V2", raising=False)  # v2 off => legacy path runs
+    # v2 ACTIVE but no provider key in test env => v2 falls back to legacy =>
+    # the row fires exactly for its purpose: fallback observability (#569 fix).
+    monkeypatch.setenv("FLYER_EXTRACTION_V2", "1")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     events = []
     extract_text_facts_seam(
         FlyerRequestFields(notes="Any item $5.99"), "Any item $5.99",
@@ -289,7 +292,9 @@ def test_seam_emits_semantic_brief_outcome_on_legacy(monkeypatch):
 
 
 def test_bare_build_locked_facts_lands_semantic_brief_row(tmp_path, monkeypatch):
-    monkeypatch.delenv("FLYER_EXTRACTION_V2", raising=False)
+    # v2 ACTIVE, no provider key => falls back to legacy => row fires (#569 fix).
+    monkeypatch.setenv("FLYER_EXTRACTION_V2", "1")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     log = tmp_path / "decisions.log"
     monkeypatch.setattr(bare_render, "AUDIT_LOG_PATH", log)
     customer = SimpleNamespace(status="", business_name="")
