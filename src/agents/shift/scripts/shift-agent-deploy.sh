@@ -800,6 +800,10 @@ PY
     systemctl enable --now prune-expense-receipts.timer 2>/dev/null || true
     # Agent #13 Compliance Calendar (PR-Agent13-v0.1)
     systemctl enable --now check-compliance-deadlines.timer 2>/dev/null || true
+    # openrouter-balance-check.timer is DELIBERATELY not enabled here — the
+    # unit files are installed above but arming is a one-time operator step:
+    #   systemctl daemon-reload && systemctl enable --now openrouter-balance-check.timer
+    # (2026-07-06 ops-hardening; see the timer unit's comment.)
 
     # 2026-05-04 canonical-cleanup: F8/F9 watchdog files were deleted from
     # the repo (cf-router plugin took over their role in PR-CF6). The
@@ -917,6 +921,34 @@ case "$ACTION" in
             echo "  The Hermes-agent install is incomplete - verify /usr/local/lib/hermes-agent/venv/" >&2
             echo "  No state change has been made; refusing to continue deploy." >&2
             exit 1
+        fi
+
+        # ─────────────────────────────────────────────────────────────────
+        # Hermes venv import smoke (Pillow-regression class)
+        # ─────────────────────────────────────────────────────────────────
+        # The venv is owned by the hermes-agent install: a venv rebuild /
+        # Hermes upgrade silently drops packages shift-agent needs but Hermes
+        # does not (Pillow vanished this way; premium overlay degraded to
+        # flat with no import error surfaced anywhere). Smoke-import the
+        # requirements-hermes-venv.txt set through the TARGET interpreter,
+        # fail-closed BEFORE any state change.
+        # Override: HERMES_VENV_IMPORT_GATE_OVERRIDE_REASON (non-empty) skips
+        # the hard gate (still prints the failure) — for a conscious deploy
+        # onto a box mid-provisioning.
+        if ! "$VENV_PY" -c "import PIL, PIL.Image, PIL.ImageDraw, PIL.ImageFont, pydantic, yaml" 2>&1; then
+            if [ -n "${HERMES_VENV_IMPORT_GATE_OVERRIDE_REASON:-}" ]; then
+                echo "WARN: Hermes venv import smoke FAILED but overridden: ${HERMES_VENV_IMPORT_GATE_OVERRIDE_REASON}" >&2
+            else
+                echo "ERROR: Hermes venv is missing required imports (PIL/pydantic/yaml)." >&2
+                echo "  Reprovision: $VENV_PY -m pip install -r \$STAGING/requirements-hermes-venv.txt" >&2
+                echo "  No state change has been made; refusing to continue deploy." >&2
+                exit 1
+            fi
+        fi
+        # stripe is commerce-only (lazily imported; unarmed VPSes never load
+        # it) — WARN, not fail-closed, so non-commerce boxes keep deploying.
+        if ! "$VENV_PY" -c "import stripe" 2>/dev/null; then
+            echo "WARN: Hermes venv lacks 'stripe' — fine unless this VPS arms commerce payment links." >&2
         fi
 
         # ─────────────────────────────────────────────────────────────────

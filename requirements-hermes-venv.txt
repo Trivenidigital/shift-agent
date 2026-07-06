@@ -1,0 +1,35 @@
+# requirements-hermes-venv.txt — third-party deps the shift-agent stack imports
+# when running under the Hermes venv (/usr/local/lib/hermes-agent/venv).
+#
+# WHY THIS FILE EXISTS (the Pillow-regression class): the Hermes venv is owned
+# by the hermes-agent install, so a venv rebuild / Hermes upgrade silently drops
+# packages WE depend on but Hermes itself does not (Pillow disappeared this way;
+# the premium overlay then degraded to flat with no import-time error anywhere).
+# shift-agent-deploy.sh now smoke-imports this set through the TARGET
+# interpreter and fails closed before any state change.
+#
+# Floors, not exact pins: this repo cannot see the live venv. To capture the
+# exact working set on a box (for reproducing a venv after rebuild):
+#   /usr/local/lib/hermes-agent/venv/bin/pip freeze | grep -iE 'pillow|pydantic|pyyaml|stripe'
+# To (re)provision:
+#   /usr/local/lib/hermes-agent/venv/bin/pip install -r requirements-hermes-venv.txt
+#
+# Source of truth for the list: AST scan of src/ top-level imports (2026-07-06)
+# — everything else src/ imports is stdlib or in-repo flat modules.
+
+# Pydantic v2 required (schemas.py uses model_config/ConfigDict, discriminated
+# unions with Tag/Discriminator callable form).
+pydantic>=2.5
+
+# Config + LogEntry YAML loading (safe_io.load_yaml_model, config.yaml gates).
+PyYAML>=6.0
+
+# Flyer render/overlay/QA raster work. render.py has a /usr/bin/python3
+# system-Pillow escape hatch, but that is a degraded fallback — the venv copy
+# is the load-bearing one (see premium-overlay flat-degrade incident).
+Pillow>=10.0
+
+# Commerce payment-link + payment-confirm path (platform/commerce). Scripts
+# import it lazily; VPSes without commerce armed never load it, which is why
+# the deploy smoke treats it as WARN-only rather than fail-closed.
+stripe>=7.0
