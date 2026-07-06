@@ -811,7 +811,13 @@ FlyerAssetKind = Literal[
 FlyerAssetDeliveryStatus = Literal["pending", "sent", "failed", "uncertain"]
 
 FLYER_TRANSITIONS: dict[FlyerWorkflowStatus, set[FlyerWorkflowStatus]] = {
-    "intake_started": {"collecting_required_info"},
+    # closed_no_send from intake_started is the OPERATOR intake-abandonment
+    # edge (2026-07-06 F0184 finding, 59->1 legacy release): a project the
+    # customer abandoned before any brief/render exists has nothing pending
+    # customer-side and must be terminable. Reachable ONLY via the
+    # flyer-manual-queue --close CLI, exactly like the awaiting_final_approval
+    # reject edge below — no automated writer uses this edge.
+    "intake_started": {"collecting_required_info", "closed_no_send"},
     "collecting_required_info": {"awaiting_assets", "generating_concepts"},
     "awaiting_assets": {"generating_concepts"},
     "manual_edit_required": {"generating_concepts", "revising_design", "awaiting_final_approval", "closed_no_send"},

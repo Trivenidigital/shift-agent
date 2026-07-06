@@ -570,7 +570,13 @@ def close_manual_project(
         # closable by the operator through this same guarded CLI path. The
         # manual_review row records the closure reason either way.
         closable_awaiting = project.status == "awaiting_final_approval"
-        if not (closable_manual or closable_awaiting):
+        # Operator intake-abandonment edge (2026-07-06 F0184 finding): a
+        # project abandoned at intake has no render, no preview and nothing
+        # customer-visible pending, yet was previously un-terminable — the
+        # transition table only allowed intake_started -> collecting_required_info.
+        # Same guarded CLI path, same terminal state, same audit trail.
+        closable_intake = project.status == "intake_started"
+        if not (closable_manual or closable_awaiting or closable_intake):
             raise ValueError(f"project not queued for manual close: {project_id}")
         if not is_flyer_transition_allowed(project.status, "closed_no_send"):
             raise ValueError(f"invalid transition {project.status}->closed_no_send")
