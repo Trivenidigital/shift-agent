@@ -2258,10 +2258,23 @@ def _style_register_parts(project: FlyerProject) -> tuple[str, str, str]:
                                                   forbidden_substrings_for,
                                                   style_prompt_block)
     occasion = str(getattr(project, "occasion", "none") or "none")
+    # Operator override knobs (C2 tranche-2 live exhibits; seed of the catalog
+    # era's per-customer register config). NO brief-text mapping exists — a
+    # non-default register/intensity is always SERVER-SIDE PRE-CONFIGURATION,
+    # and exhibit ledger rows must say so. Fail-closed: invalid values compose
+    # the default register at accent, byte-identical to unset.
+    try:
+        from style_registers import REGISTERS as _REGS  # type: ignore
+    except ImportError:
+        from agents.flyer.style_registers import REGISTERS as _REGS
+    _reg_override = os.environ.get("FLYER_STYLE_REGISTER_OVERRIDE", "").strip()
+    register = _reg_override if _reg_override in _REGS else DEFAULT_REGISTER
+    _int_override = os.environ.get("FLYER_STYLE_INTENSITY_OVERRIDE", "").strip()
+    intensity = _int_override if _int_override in ("accent", "full") else "accent"
     if occasion == "none":
-        register_block = style_prompt_block(DEFAULT_REGISTER)
+        register_block = style_prompt_block(register)
     else:
-        register_block = style_prompt_block(DEFAULT_REGISTER, occasion=occasion)
+        register_block = style_prompt_block(register, occasion=occasion, intensity=intensity)
 
     # F1 (PR #544): build from the LEGACY fact selectors so every required
     # locked fact QA demands is present — _poster_copy_plan covers title
@@ -2343,7 +2356,7 @@ def _style_register_parts(project: FlyerProject) -> tuple[str, str, str]:
         f"{uniform_discipline}"
     )
     vocab = ", ".join(forbidden_substrings_for(
-        DEFAULT_REGISTER, occasion=None if occasion == "none" else occasion))
+        register, occasion=None if occasion == "none" else occasion))
     ban_line = (
         "- Instruction and style vocabulary must NEVER appear as visible text in the art "
         f"(includes: {vocab}); no list numbering digits; no field names or key:value notation."
