@@ -730,6 +730,7 @@ def extract_text_facts(
     profile_business_name: str = "",
     allow_text_identity: bool = True,
     cfg: "FlyerConfig | None" = None,
+    brief_provenance: dict | None = None,
 ) -> list[FlyerLockedFact]:
     text = _combined_extraction_text(raw_request or "", fields.notes or "")
     semantic_brief = build_semantic_flyer_brief(
@@ -738,6 +739,7 @@ def extract_text_facts(
         profile_business_name=profile_business_name,
         allow_text_identity=allow_text_identity,
         provider=build_hermes_semantic_brief_provider(),
+        provenance=brief_provenance,
     )
     facts: list[FlyerLockedFact] = []
     event_or_campaign = fields.event_or_business_name or ""

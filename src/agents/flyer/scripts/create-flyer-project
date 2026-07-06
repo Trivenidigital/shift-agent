@@ -17,7 +17,7 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 sys.path.insert(0, str(SRC_ROOT))
 
-from schemas import Config, FlyerAsset, FlyerConfig, FlyerCustomerStore, FlyerManualReview, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerReferenceExtraction, FlyerRequestFields, FlyerSourceContractExtracted, FlyerExtractionV2Outcome  # noqa: E402
+from schemas import Config, FlyerAsset, FlyerConfig, FlyerCustomerStore, FlyerManualReview, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerReferenceExtraction, FlyerRequestFields, FlyerSourceContractExtracted, FlyerExtractionV2Outcome, FlyerSemanticBriefOutcome  # noqa: E402
 # NB: the extraction seam (flyer_extraction_seam) is imported lazily at its single
 # call site below, not here — a module-level import crashes the whole script during
 # the deploy self-update window when the new seam module is not yet installed, even
@@ -730,14 +730,21 @@ def main() -> int:
         reference_owns_items = any(_needs_reference_extraction(extraction) for extraction in reference_extractions)
         text_fact_cfg = None if reference_owns_items else flyer_cfg
         def _audit_extraction_v2(event, payload):
-            # Best-effort observability at the existing ndjson chokepoint —
-            # zero rows when FLYER_EXTRACTION_V2 is off (the seam only calls
-            # this when the flag routed through v2 or fell back).
+            # Best-effort observability at the existing ndjson chokepoint. The seam
+            # calls this for v2 outcomes (used/fell-back) AND, on the legacy path,
+            # the semantic-brief provenance (semantic_brief_outcome — one row per
+            # legacy extraction recording provider-used vs fell-back).
             if _safe_flock is None or _safe_ndjson_append is None:
                 return
             try:
                 from pydantic import TypeAdapter as _TA
-                if event == "extraction_v2_used":
+                if event == "semantic_brief_outcome":
+                    entry = FlyerSemanticBriefOutcome(
+                        ts=datetime.now(timezone.utc), seam="managed_create",
+                        status=payload.get("status", "fell_back"),
+                        reason=str(payload.get("reason", ""))[:60],
+                        provider_present=bool(payload.get("provider_present", False)))
+                elif event == "extraction_v2_used":
                     entry = FlyerExtractionV2Outcome(
                         ts=datetime.now(timezone.utc), seam="managed_create", event=event,
                         items_locked=payload.items_locked, scalars_locked=payload.scalars_locked,
@@ -748,7 +755,7 @@ def main() -> int:
                         reason=str(payload)[:120])
                 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
                 with _safe_flock(LOG_PATH):
-                    _safe_ndjson_append(LOG_PATH, _TA(FlyerExtractionV2Outcome).dump_json(entry).decode("utf-8"))
+                    _safe_ndjson_append(LOG_PATH, _TA(type(entry)).dump_json(entry).decode("utf-8"))
             except Exception:
                 pass
 
