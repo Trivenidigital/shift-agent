@@ -1,0 +1,16 @@
+{
+  "topic": "phase-d-flyer-gbp-post-instagram-caption-repurposing-offer-after-finals-delivery-yes-approval-draft-as-text-delivery-paper-only-gbp-api-scoping",
+  "task_text": "Phase D: flyer → GBP post + Instagram caption repurposing (offer after finals delivery, YES approval, draft-as-text delivery; paper-only GBP API scoping)",
+  "completed_at": "2026-07-06T02:15:18Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 5,
+  "hermes_step_count": 5,
+  "files_to_read_first": [
+    "src/agents/flyer/scripts/send-flyer-package",
+    "src/plugins/cf-router/hooks.py",
+    "src/plugins/cf-router/actions.py",
+    "src/agents/flyer/customer_copy_policy.py",
+    "src/platform/schemas.py",
+    "tests/test_flyer_qa_hardening.py"
+  ]
+}
