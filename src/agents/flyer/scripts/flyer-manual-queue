@@ -55,6 +55,11 @@ def main() -> int:
     parser.add_argument("--close", metavar="PROJECT_ID", help="operator-close without sending assets")
     parser.add_argument("--asset")
     parser.add_argument("--reason", default="")
+    parser.add_argument("--no-notify", action="store_true",
+                        help="close WITHOUT the proactive customer notice (operator-ruled "
+                             "silent close; the reactive any-update path still answers with "
+                             "the closed-status line). An audit row is still written, "
+                             "marked silent.")
     parser.add_argument("--force", action="store_true",
                         help="bypass the --close freshness guard (still requires --reason)")
     args = parser.parse_args()
@@ -96,12 +101,28 @@ def main() -> int:
         # best-effort: never raises into the script, always audits. The
         # reactive "any update?" path (PR #129) is the safety net for missed
         # sends.
-        notify_customer_of_closure(
-            store, args.close,
-            customers_path=CUSTOMERS_PATH,
-            decisions_log_path=DECISIONS_LOG_PATH,
-        )
-        print(json.dumps({"project_id": args.close, "status": "closed_no_send"}))
+        if args.no_notify:
+            # Silent close (C2 census E-verdict 2026-07-06): audit trail kept,
+            # customer notice deliberately skipped by operator ruling.
+            try:
+                from safe_io import ndjson_append  # type: ignore
+                ndjson_append(DECISIONS_LOG_PATH, json.dumps({
+                    "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    "type": "flyer_closure_customer_notified",
+                    "project_id": args.close,
+                    "skipped": True,
+                    "error": "silent_close_operator_ruling",
+                }))
+            except Exception as exc:  # noqa: BLE001 - closure already committed
+                print(f"silent-close audit append failed (non-fatal): {exc}", file=sys.stderr)
+        else:
+            notify_customer_of_closure(
+                store, args.close,
+                customers_path=CUSTOMERS_PATH,
+                decisions_log_path=DECISIONS_LOG_PATH,
+            )
+        print(json.dumps({"project_id": args.close, "status": "closed_no_send",
+                          "notified": (not args.no_notify)}))
         return 0
     raise SystemExit("pass --list, --triage, --complete, or --close")
 
