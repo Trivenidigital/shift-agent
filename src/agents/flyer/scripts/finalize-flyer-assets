@@ -15,13 +15,13 @@ sys.path.insert(0, str(SRC_ROOT / "platform"))
 from schemas import Config, FlyerManualReview, FlyerProjectStore  # noqa: E402
 from safe_io import FileLock, atomic_write_text, load_yaml_model  # noqa: E402
 try:
-    from flyer_render import build_asset_manifest, next_asset_number, render_final_package  # type: ignore  # noqa: E402
+    from flyer_render import build_asset_manifest, next_asset_number, pdf_png_twin_path, render_final_package  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.render import build_asset_manifest, next_asset_number, render_final_package  # noqa: E402
+    from agents.flyer.render import build_asset_manifest, next_asset_number, pdf_png_twin_path, render_final_package  # noqa: E402
 try:
-    from flyer_visual_qa import run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
+    from flyer_visual_qa import derive_pdf_twin_report, run_visual_qa, write_visual_qa_report  # type: ignore  # noqa: E402
 except ImportError:
-    from agents.flyer.visual_qa import run_visual_qa, write_visual_qa_report  # noqa: E402
+    from agents.flyer.visual_qa import derive_pdf_twin_report, run_visual_qa, write_visual_qa_report  # noqa: E402
 try:
     from flyer_manual_queue import make_manual_review  # type: ignore  # noqa: E402
 except ImportError:
@@ -74,15 +74,42 @@ def main() -> int:
                 original_message_id=args.approved_message_id,
             )
             qa_reports = []
+            pdf_qa_status_by_asset_id = {}
             for asset, spec in zip(assets, specs):
+                # WS5: the vision provider cannot screen application/pdf, so the
+                # printable_pdf is QA'd via the PNG twin its render wrote from
+                # the SAME raster, and the verdict is projected onto the PDF
+                # (re-bound to the PDF's sha) so the send gate can bind it. No
+                # twin (pre-WS5 render) keeps the legacy fail-closed behavior:
+                # QA the PDF directly -> provider_unavailable -> dropped from
+                # the deliverable set below.
+                qa_target = spec.path
+                if spec.output_format == "printable_pdf":
+                    twin = pdf_png_twin_path(spec.path)
+                    if twin.exists():
+                        qa_target = twin
                 report = run_visual_qa(
                     project,
-                    spec.path,
+                    qa_target,
                     output_format=spec.output_format,
                     asset_id=asset.asset_id,
                 )
-                write_visual_qa_report(report, spec.path)
+                write_visual_qa_report(report, qa_target)
+                if qa_target != spec.path:
+                    report = derive_pdf_twin_report(report, spec.path)
+                    write_visual_qa_report(report, spec.path)
+                if spec.output_format == "printable_pdf":
+                    pdf_qa_status_by_asset_id[asset.asset_id] = (
+                        report.status if qa_target != spec.path else "twin_missing"
+                    )
                 qa_reports.append(report)
+            if pdf_qa_status_by_asset_id:
+                assets = [
+                    asset.model_copy(update={"pdf_qa_status": pdf_qa_status_by_asset_id[asset.asset_id]})
+                    if asset.asset_id in pdf_qa_status_by_asset_id
+                    else asset
+                    for asset in assets
+                ]
             failed_qa = [report for report in qa_reports if report.status != "passed"]
             failed_core_qa = [
                 report for report in failed_qa if report.output_format == "whatsapp_image"

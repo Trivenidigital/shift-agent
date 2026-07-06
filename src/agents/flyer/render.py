@@ -4140,6 +4140,18 @@ def _openai_source_edit_bytes(
     raise FlyerRenderError("OpenAI image edit response did not include image data")
 
 
+PDF_PNG_TWIN_SUFFIX = ".qapng.png"
+
+
+def pdf_png_twin_path(pdf_path: Path | str) -> Path:
+    """WS5 (PR #566 design note): sidecar path of the PNG twin written at every
+    PDF-write site from the SAME raster that goes into the PDF. The vision-QA
+    provider rejects ``application/pdf`` sent as an image (provider_unavailable),
+    so per-format QA screens the twin and the PDF's delivery is gated on the
+    twin's verdict. Sidecar naming mirrors ``.qa.json`` / ``.ocr.txt``."""
+    return Path(str(pdf_path) + PDF_PNG_TWIN_SUFFIX)
+
+
 def _write_generated_image(raw: bytes, path: Path, *, size: tuple[int, int] | None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     pil = _load_pillow()
@@ -4152,7 +4164,9 @@ def _write_generated_image(raw: bytes, path: Path, *, size: tuple[int, int] | No
             tmp_path = Path(fh.name)
         try:
             with Image.open(tmp_path) as img:
-                img.convert("RGB").save(path, "PDF", resolution=150.0)
+                rgb = img.convert("RGB")
+                rgb.save(path, "PDF", resolution=150.0)
+                rgb.save(pdf_png_twin_path(path), format="PNG", optimize=True)
         finally:
             tmp_path.unlink(missing_ok=True)
     else:
@@ -4393,6 +4407,7 @@ with Image.open(src) as img:
     img=img.convert("RGB")
     if is_pdf:
         img.save(out, "PDF", resolution=150.0)
+        img.save(Path(str(out) + ".qapng.png"), format="PNG", optimize=True)
     else:
         src_ratio=img.width/img.height
         dst_ratio=width/height
@@ -4418,6 +4433,7 @@ def _export_from_source_image(source: Path, path: Path, *, size: tuple[int, int]
             img = img.convert("RGB")
             if size is None:
                 img.save(path, "PDF", resolution=150.0)
+                img.save(pdf_png_twin_path(path), format="PNG", optimize=True)
                 return
             width, height = size
             src_ratio = img.width / img.height
@@ -4572,6 +4588,7 @@ def _render_with_local_pillow(project: FlyerProject, path: Path, *, concept_id: 
     if size is None:
         img = _draw_flyer_pil(project, concept_id=concept_id, size=(1275, 1650), pil_modules=pil)
         img.save(path, "PDF", resolution=150.0)
+        img.save(pdf_png_twin_path(path), format="PNG", optimize=True)
     else:
         img = _draw_flyer_pil(project, concept_id=concept_id, size=size, pil_modules=pil)
         img.save(path, format="PNG", optimize=True)
@@ -4628,7 +4645,9 @@ for label,value in spec["facts"]:
     fy += 4
 footer="Send APPROVE to finalize - Flyer Studio"; box=draw.textbbox((0,0),footer,font=sm)
 draw.text(((w-(box[2]-box[0]))//2,h-m), footer, font=sm, fill=tuple(palette["ink"]))
-if spec["format"]=="PDF": img.save(out,"PDF",resolution=150.0)
+if spec["format"]=="PDF":
+    img.save(out,"PDF",resolution=150.0)
+    img.save(Path(str(out)+".qapng.png"),format="PNG",optimize=True)
 else: img.save(out,format="PNG",optimize=True)
 '''
 
