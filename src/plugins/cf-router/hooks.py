@@ -3691,9 +3691,11 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
     # when it matches one of a project's known outbound mids (preview media /
     # APPROVE CTA / finals), identifies the project the customer means —
     # override the newest-updated pick. Fail-open: any quote-metadata parsing
-    # or lookup issue keeps the newest-updated result untouched.
+    # or lookup issue keeps the newest-updated result untouched. `text` lets
+    # the binder refuse approval binds onto already-delivered rows (F0213
+    # incident — stale-quote APPROVE must not strand the pending approval).
     active_project, binding_source = actions.resolve_flyer_binding_project(
-        active_project, phone, chat_id, event,
+        active_project, phone, chat_id, event, text,
     )
     if active_project is None:
         # No active row, but a status check ("any update?" / "F0058 status")
