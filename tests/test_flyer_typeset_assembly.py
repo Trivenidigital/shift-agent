@@ -384,3 +384,25 @@ def test_uniform_spec_carries_price_discipline(monkeypatch):
     facts.append(_F("item:1:price", "$8.99"))
     mixed = proj.model_copy(update={"locked_facts": facts})
     assert "PRICE DISCIPLINE" not in _prompt(mixed)
+
+
+def test_register_and_intensity_overrides(monkeypatch):
+    # C2 tranche-2 exhibits: operator override knobs. Valid values select;
+    # invalid values fail closed to default/accent (byte-identical to unset).
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS", "1")
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", PHONE)
+    baseline = _prompt(_project())
+    monkeypatch.setenv("FLYER_STYLE_REGISTER_OVERRIDE", "premium-dark")
+    dark = _prompt(_project())
+    assert dark != baseline and "PREMIUM DARK" in dark.upper() or "premium-dark" in dark.lower() or "charcoal" in dark.lower()
+    monkeypatch.setenv("FLYER_STYLE_REGISTER_OVERRIDE", "not-a-register")
+    assert _prompt(_project()) == baseline  # fail-closed
+    monkeypatch.delenv("FLYER_STYLE_REGISTER_OVERRIDE", raising=False)
+    # intensity applies on occasion-bearing projects
+    proj = _project().model_copy(update={"occasion": "diwali"})
+    monkeypatch.setenv("FLYER_STYLE_INTENSITY_OVERRIDE", "full")
+    full = _prompt(proj)
+    monkeypatch.setenv("FLYER_STYLE_INTENSITY_OVERRIDE", "bogus")
+    accent = _prompt(proj)
+    assert full != accent  # full variant composed; bogus fell closed to accent
