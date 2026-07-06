@@ -73,3 +73,6 @@ jobs:
       - name: Quarantine-before-recovery suite (census C4; F0197/F0208)
         run: |
           python -m pytest tests/test_flyer_quarantine.py -q
+      - name: Source-edit SLA watchdog (throttled-append suppression; was CI-orphaned)
+        run: |
+          python -m pytest tests/test_flyer_source_edit_sla_watchdog.py -q
