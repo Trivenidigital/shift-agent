@@ -873,13 +873,13 @@ def test_existing_seven_source_relative_order_unchanged():
 
 
 def test_no_production_producer_of_new_provenance_sources():
-    """Provenance producer invariant (evolved at slice 2).
+    """Provenance producer invariant (current: creative_planner removed).
 
-    Slice 1 had NO producer. Slice 2 introduces ONE sanctioned, firewall-gated
-    producer of `hermes_inferred`: `creative_planner.materialize_inferred`. So:
-      - `hermes_inferred` may be emitted ONLY in creative_planner.py.
-      - `customer_confirmed` may be emitted NOWHERE yet (that producer lands with
-        the revision lifecycle in slice 4).
+    creative_planner — the former sole sanctioned emitter of `hermes_inferred` —
+    was removed in graduation commit 6. Current invariant:
+      - `hermes_inferred` may be emitted by NO production module.
+      - `customer_confirmed` may be emitted ONLY by facts.py (the relocated
+        promote_inferred_to_confirmed provenance-lifecycle helper).
     Any other production emission of either source fails.
 
     AST-based (multiline-proof): flags a `_fact(...)` / `FlyerLockedFact(...)` call
@@ -891,12 +891,11 @@ def test_no_production_producer_of_new_provenance_sources():
 
     flyer_dir = pathlib.Path(__file__).resolve().parents[1] / "src" / "agents" / "flyer"
     EMIT_FUNCS = {"_fact", "FlyerLockedFact"}
-    # source -> set of filenames permitted to emit it. creative_planner.py is the
-    # SOLE sanctioned emitter of both new sources: it produces hermes_inferred
-    # candidates (materialize_inferred) and performs the slice-4 provenance-lifecycle
-    # promotion hermes_inferred -> customer_confirmed (promote_inferred_to_confirmed,
-    # on customer approval). No other production module may emit either source — the
-    # consuming script only CALLS the promotion helper, it never sets the source.
+    # source -> set of filenames permitted to emit it. No module may emit
+    # hermes_inferred (creative_planner, its former sole emitter, was removed in
+    # graduation commit 6); customer_confirmed's sole sanctioned emitter is the
+    # relocated promote_inferred_to_confirmed in facts.py. The consuming script only
+    # CALLS the promotion helper, it never sets the source.
     SANCTIONED = {
         # creative_planner removed (graduation commit 6): NOTHING may emit
         # hermes_inferred anymore; customer_confirmed's sole sanctioned emitter
@@ -966,7 +965,9 @@ def test_no_production_producer_of_new_provenance_sources():
     for must in ("create-flyer-project", "generate-flyer-concepts", "facts.py"):
         assert must in scanned_names, f"producer-guard did not scan {must} (scan scope regressed)"
     assert offenders == [], (
-        f"only creative_planner may emit hermes_inferred/customer_confirmed; found: {offenders}"
+        "hermes_inferred may be emitted by NO production module (creative_planner "
+        "removed, graduation commit 6); customer_confirmed only by facts.py; "
+        f"found: {offenders}"
     )
 
 

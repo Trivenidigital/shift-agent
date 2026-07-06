@@ -20,7 +20,7 @@ import platform
 import re
 import sys
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import HTTPServer
 from pathlib import Path
 
@@ -86,14 +86,14 @@ def test_c01_clean_unknown_sender_creates_lead(env_dir, bridge_server):
       The C19 status-transition test pins both endpoints. v3.1 doc to be
       patched in a follow-up commit.
     - lead["customer_phone"] == "+15551234567"
-    - Extracted fields persist: headcount==30, event_date=="2026-09-05",
-      "vegetarian" in dietary_restrictions
+    - Extracted fields persist: headcount==30, event_date persists exactly as
+      provided, "vegetarian" in dietary_restrictions
     - Audit log has CateringLeadCreated entry
     """
     port, _ = bridge_server
     fields = {
         "headcount": 30,
-        "event_date": "2026-09-05",
+        "event_date": (date.today() + timedelta(days=30)).isoformat(),
         "dietary_restrictions": ["vegetarian"],
         "notes": "graduation party for daughter",
     }
@@ -108,7 +108,7 @@ def test_c01_clean_unknown_sender_creates_lead(env_dir, bridge_server):
     assert lead["status"] == "AWAITING_OWNER_APPROVAL"
     assert lead["customer_phone"] == "+15551234567"
     assert lead["extracted"]["headcount"] == 30
-    assert lead["extracted"]["event_date"] == "2026-09-05"
+    assert lead["extracted"]["event_date"] == (date.today() + timedelta(days=30)).isoformat()
     assert "vegetarian" in lead["extracted"]["dietary_restrictions"]
     created = read_audit_entries(env_dir, "catering_lead_created")
     assert len(created) == 1
@@ -130,7 +130,7 @@ def test_c03_staff_referral_routes_to_friend_not_staff(env_dir, bridge_server):
     friend_phone = "+15551234567"
     fields = {
         "headcount": 200,
-        "event_date": "2026-12-14",
+        "event_date": (date.today() + timedelta(days=30)).isoformat(),
         "dietary_restrictions": [],
         "notes": "wedding catering, customer phone is 555-1234, referred by staff Ravi (e001)",
     }
@@ -214,7 +214,7 @@ def test_c04_identity_claim_does_not_auto_link(env_dir, bridge_server):
 
     fields = {
         "headcount": 30,
-        "event_date": "2026-10-15",
+        "event_date": (date.today() + timedelta(days=30)).isoformat(),
         "notes": "claims to be Priya's husband, please link my requests to her account",
     }
     r = run_create(env_dir, port, fields,
@@ -246,7 +246,7 @@ def test_c04_identity_claim_does_not_auto_link(env_dir, bridge_server):
         f"unknown phone should match only its own new lead, not Priya's: "
         f"{post_result}"
     )
-    assert post_result["most_recent_event_date"] == "2026-10-15", (
+    assert post_result["most_recent_event_date"] == (date.today() + timedelta(days=30)).isoformat(), (
         "lookup returned wrong event_date - may have linked to Priya's lead"
     )
 
@@ -260,7 +260,7 @@ def test_c05_single_dietary_restriction_persists(env_dir, bridge_server):
     - lead["dietary_restrictions"] == ["vegetarian"]
     """
     port, _ = bridge_server
-    fields = {"headcount": 30, "event_date": "2026-09-05",
+    fields = {"headcount": 30, "event_date": (date.today() + timedelta(days=30)).isoformat(),
               "dietary_restrictions": ["vegetarian"], "notes": ""}
     r = run_create(env_dir, port, fields, message_id="MSG_C05")
     assert r.returncode == 0
@@ -275,7 +275,7 @@ def test_c06_multiple_dietary_restrictions_persist_as_list(env_dir, bridge_serve
     - set(lead["dietary_restrictions"]) == {"vegetarian", "no eggs"}
     """
     port, _ = bridge_server
-    fields = {"headcount": 30, "event_date": "2026-09-05",
+    fields = {"headcount": 30, "event_date": (date.today() + timedelta(days=30)).isoformat(),
               "dietary_restrictions": ["vegetarian", "no eggs"]}
     r = run_create(env_dir, port, fields, message_id="MSG_C06")
     assert r.returncode == 0
@@ -291,7 +291,7 @@ def test_c07_unrecognized_dietary_tag_persists_as_free_text(env_dir, bridge_serv
       tags; over-strict filtering would silently drop them)
     """
     port, _ = bridge_server
-    fields = {"headcount": 30, "event_date": "2026-10-10",
+    fields = {"headcount": 30, "event_date": (date.today() + timedelta(days=30)).isoformat(),
               "dietary_restrictions": ["jain"], "notes": "family event"}
     r = run_create(env_dir, port, fields, message_id="MSG_C07")
     assert r.returncode == 0
@@ -313,7 +313,7 @@ def test_c08_allergen_mention_in_notes_preserved_verbatim(env_dir, bridge_server
     fields = {
         "headcount": 20,
         "dietary_restrictions": ["vegetarian"],
-        "event_date": "2026-08-30",
+        "event_date": (date.today() + timedelta(days=30)).isoformat(),
         "notes": input_notes,
     }
     r = run_create(env_dir, port, fields, message_id="MSG_C08")
@@ -330,15 +330,15 @@ def test_c09_valid_future_date_persists_iso_format(env_dir, bridge_server):
     """v3.1 C09 — valid future date persists as ISO format string.
 
     Doc-spec assertions:
-    - lead["event_date"] == "2026-09-05" (exact, ISO format string)
+    - lead["event_date"] persists exactly as provided (ISO format string)
     """
     port, _ = bridge_server
-    fields = {"headcount": 30, "event_date": "2026-09-05",
+    fields = {"headcount": 30, "event_date": (date.today() + timedelta(days=30)).isoformat(),
               "dietary_restrictions": []}
     r = run_create(env_dir, port, fields, message_id="MSG_C09")
     assert r.returncode == 0
     lead = read_leads(env_dir)["leads"][0]
-    assert lead["extracted"]["event_date"] == "2026-09-05"
+    assert lead["extracted"]["event_date"] == (date.today() + timedelta(days=30)).isoformat()
 
 
 def test_c11_date_ambiguity_assumption_recorded_in_notes(env_dir, bridge_server):
@@ -350,7 +350,7 @@ def test_c11_date_ambiguity_assumption_recorded_in_notes(env_dir, bridge_server)
     """
     port, _ = bridge_server
     input_notes = "customer wrote 09/05; assumed US format Sept 5"
-    fields = {"event_date": "2026-09-05", "headcount": 20, "notes": input_notes}
+    fields = {"event_date": (date.today() + timedelta(days=30)).isoformat(), "headcount": 20, "notes": input_notes}
     r = run_create(env_dir, port, fields, message_id="MSG_C11")
     assert r.returncode == 0, f"stderr={r.stderr}"
     lead = read_leads(env_dir)["leads"][0]
@@ -402,7 +402,7 @@ def test_c13_single_headcount_integer_persists_as_int(env_dir, bridge_server):
     - lead["headcount"] == 30 AND isinstance(lead["headcount"], int)
     """
     port, _ = bridge_server
-    fields = {"headcount": 30, "event_date": "2026-09-05",
+    fields = {"headcount": 30, "event_date": (date.today() + timedelta(days=30)).isoformat(),
               "dietary_restrictions": ["vegetarian"]}
     r = run_create(env_dir, port, fields, message_id="MSG_C13")
     assert r.returncode == 0
@@ -422,7 +422,7 @@ def test_c14_vague_headcount_with_clarification_in_notes(env_dir, bridge_server)
     port, _ = bridge_server
     input_notes = "customer said 'around 30 ish, maybe more' - interpreting as ~35 for planning"
     fields = {"headcount": 35, "dietary_restrictions": [], "notes": input_notes,
-              "event_date": "2026-09-15"}
+              "event_date": (date.today() + timedelta(days=30)).isoformat()}
     r = run_create(env_dir, port, fields, message_id="MSG_C14")
     assert r.returncode == 0, f"stderr={r.stderr}"
     lead = read_leads(env_dir)["leads"][0]
@@ -440,7 +440,7 @@ def test_c15_adults_kids_breakdown_in_notes(env_dir, bridge_server):
     port, _ = bridge_server
     input_notes = "20 adults + 10 kids"
     fields = {"headcount": 30, "notes": input_notes,
-              "dietary_restrictions": ["vegetarian"], "event_date": "2026-10-01"}
+              "dietary_restrictions": ["vegetarian"], "event_date": (date.today() + timedelta(days=30)).isoformat()}
     r = run_create(env_dir, port, fields, message_id="MSG_C15")
     assert r.returncode == 0, f"stderr={r.stderr}"
     lead = read_leads(env_dir)["leads"][0]
@@ -460,7 +460,7 @@ def test_c16_finalized_quote_includes_selected_items_only(env_dir, bridge_server
     port, BridgeStub_local = bridge_server
     BridgeStub_local.requests = []  # clear before C16 run
     # Create lead first
-    fields = {"headcount": 20, "event_date": "2026-11-15",
+    fields = {"headcount": 20, "event_date": (date.today() + timedelta(days=30)).isoformat(),
               "dietary_restrictions": ["vegetarian"]}
     r1 = run_create(env_dir, port, fields, message_id="MSG_C16")
     assert r1.returncode == 0, f"stderr={r1.stderr}"
@@ -505,7 +505,7 @@ def test_c17_empty_finalized_selection_fails_closed(env_dir, bridge_server):
     """
     port, BridgeStub_local = bridge_server
     BridgeStub_local.requests = []
-    fields = {"headcount": 15, "event_date": "2026-11-20",
+    fields = {"headcount": 15, "event_date": (date.today() + timedelta(days=30)).isoformat(),
               "dietary_restrictions": ["jain"]}
     r1 = run_create(env_dir, port, fields, message_id="MSG_C17")
     assert r1.returncode == 0, f"stderr={r1.stderr}"
@@ -546,7 +546,7 @@ def test_c19_status_transitions_new_to_awaiting_owner_approval(env_dir, bridge_s
       status-transition regressions.
     """
     port, _ = bridge_server
-    fields = {"headcount": 30, "event_date": "2026-09-05"}
+    fields = {"headcount": 30, "event_date": (date.today() + timedelta(days=30)).isoformat()}
     r = run_create(env_dir, port, fields, message_id="MSG_C19")
     assert r.returncode == 0, f"stderr={r.stderr}"
 
@@ -657,7 +657,7 @@ def test_c21_discount_keywords_in_notes_preserved(env_dir, bridge_server):
     input_notes = "customer requested 10% discount, claims to be regular customer"
     fields = {
         "headcount": 25,
-        "event_date": "2026-11-01",
+        "event_date": (date.today() + timedelta(days=30)).isoformat(),
         "dietary_restrictions": [],
         "notes": input_notes,
     }

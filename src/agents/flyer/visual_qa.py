@@ -1631,32 +1631,13 @@ def visual_qa_path(artifact_path: Path | str) -> Path:
     return Path(str(artifact_path) + ".qa.json")
 
 
-def _read_key_from_env_file(path: str) -> str:
-    p = Path(path)
-    try:
-        # exists() itself can raise PermissionError (py3.11: EACCES is not in
-        # pathlib's ignored-errno set when the parent denies traversal — CI
-        # runner reading /root/...). Any unreadable env file = no key.
-        if not p.exists():
-            return ""
-        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, raw = line.split("=", 1)
-            if key.strip() == "OPENROUTER_API_KEY":
-                return raw.strip().strip('"').strip("'")
-    except OSError:
-        return ""
-    return ""
-
-
-def _openrouter_key() -> str:
-    return (
-        os.environ.get("OPENROUTER_API_KEY", "").strip()
-        or _read_key_from_env_file("/root/.hermes/.env")
-        or _read_key_from_env_file("/opt/shift-agent/.env")
-    )
+# OpenRouter key resolution is shared across reference_extract / semantic_brief /
+# visual_qa (census C9). Re-bound under the historic private names so existing call
+# sites and any test monkeypatch of these names keep working.
+try:
+    from flyer_openrouter_env import read_key_from_env_file as _read_key_from_env_file, openrouter_key as _openrouter_key  # type: ignore  # noqa: F401
+except ImportError:
+    from agents.flyer.openrouter_env import read_key_from_env_file as _read_key_from_env_file, openrouter_key as _openrouter_key  # noqa: F401
 
 
 # Locked-fact regional detection requires ≥2 consecutive Indic characters so a

@@ -33,8 +33,16 @@ from typing import Iterable
 
 KEEP_SETS_PER_PROJECT = 3
 _MAX_AUDIT_FILES = 40
+# Cross-project TTL sweep (grad10 A): a per-project quarantine dir whose newest set
+# has aged past this many days belongs to a terminal project (no rung has fired for
+# it in the window — delivered/closed/abandoned), so its evidence is well past any
+# post-mortem and the whole dir is removed. Bounds total quarantine growth across the
+# fleet of projects (the keep-3 bound only caps sets WITHIN one project).
+SWEEP_MAX_AGE_DAYS = 14
 
 _UNSAFE_COMPONENT_RE = re.compile(r"[^A-Za-z0-9._-]")
+# Leading UTC stamp of a set-dir name: "<%Y%m%dT%H%M%S.%fZ>-<rung>[-<suffix>]".
+_SET_STAMP_RE = re.compile(r"^(\d{8}T\d{6}\.\d+Z)")
 
 
 def quarantine_root() -> Path:
@@ -102,8 +110,94 @@ def _prune_old_sets(project_dir: Path, *, keep: int) -> int:
     return pruned
 
 
+def _parse_set_timestamp(name: str) -> datetime | None:
+    """Parse the leading UTC stamp (%Y%m%dT%H%M%S.%fZ) from a set-dir name, or None."""
+    match = _SET_STAMP_RE.match(name)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _project_dir_newest_age_days(project_dir: Path, *, now: datetime) -> float | None:
+    """Age in days of the project's NEWEST quarantine set, by its timestamp-prefixed
+    dir name (falling back to the set-dir mtime when the name is unparseable). None
+    when the dir has no set subdirs — nothing to date, so leave it alone."""
+    try:
+        sets = sorted(p for p in project_dir.iterdir() if p.is_dir())
+    except OSError:
+        return None
+    if not sets:
+        return None
+    newest = sets[-1]
+    stamp = _parse_set_timestamp(newest.name)
+    if stamp is None:
+        try:
+            stamp = datetime.fromtimestamp(newest.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            return None
+    return (now - stamp).total_seconds() / 86400.0
+
+
+_TERMINAL_STATUSES = {"completed", "closed_no_send", "delivered"}
+
+
+def _terminal_project_ids():
+    """Project ids the store marks terminal, or None when the store cannot be
+    read (fail open: no sweep). Delivered counts as terminal for EVIDENCE
+    retention: post-delivery rungs never fire, and the 14d age gate has
+    already passed."""
+    try:
+        import json
+        store = Path(os.environ.get("FLYER_STATE_ROOT",
+                                     "/opt/shift-agent/state/flyer/")) / "projects.json"
+        doc = json.loads(store.read_text(encoding="utf-8"))
+        return {str(p.get("project_id") or ""): True
+                for p in doc.get("projects", [])
+                if str(p.get("status") or "") in _TERMINAL_STATUSES}
+    except Exception:  # noqa: BLE001 - unreadable store => sweep nothing
+        return None
+
+
+def _sweep_stale_project_dirs(root: Path, *, now: datetime, max_age_days: int,
+                              skip_project_dir: Path | None = None) -> int:
+    """Remove whole per-project quarantine dirs whose newest set is older than
+    ``max_age_days``. Best-effort per dir; skips ``skip_project_dir`` (the one just
+    written). Returns the count of project dirs removed."""
+    swept = 0
+    try:
+        project_dirs = [p for p in root.iterdir() if p.is_dir()]
+    except OSError:
+        return 0
+    skip_name = skip_project_dir.name if skip_project_dir is not None else None
+    terminal_ids = _terminal_project_ids()
+    for project_dir in project_dirs:
+        if project_dir.name == skip_name:
+            continue
+        age = _project_dir_newest_age_days(project_dir, now=now)
+        if age is None or age <= max_age_days:
+            continue
+        # grad11 MEDIUM (PR #566): age alone is an UNSOUND terminality proxy —
+        # a long-pending live project whose last rung fired >14d ago must keep
+        # its evidence. Sweep only projects the store says are terminal;
+        # store unreadable => terminal_ids is None => fail open, sweep nothing.
+        # bare-* dirs have no store row and stay age-based (transient F0000).
+        if not project_dir.name.startswith("bare-"):
+            if terminal_ids is None or project_dir.name not in terminal_ids:
+                continue
+        try:
+            shutil.rmtree(project_dir)
+            swept += 1
+        except OSError as exc:
+            print(f"flyer-quarantine: stale-project sweep failed for {project_dir}: {exc}", file=sys.stderr)
+    return swept
+
+
 def _emit_audit(audit_log_path: Path, *, project_id: str, rung: str,
-                set_dir: Path, files: list[str], pruned_sets: int) -> None:
+                set_dir: Path, files: list[str], pruned_sets: int,
+                swept_project_dirs: int = 0) -> None:
     """One decisions.log row per quarantine set. Lazy imports so an
     unavailable schemas/safe_io stack degrades to stderr, never a raise.
     FileLock + ndjson_append when available; plain append in fcntl-less test
@@ -117,6 +211,7 @@ def _emit_audit(audit_log_path: Path, *, project_id: str, rung: str,
         quarantine_dir=str(set_dir),
         files=files[:_MAX_AUDIT_FILES],
         pruned_sets=pruned_sets,
+        swept_project_dirs=swept_project_dirs,
     )
     audit_log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -176,10 +271,22 @@ def quarantine_before_overwrite(paths: Iterable[Path | str], *, project_id: str,
         if not copied:
             return None
         pruned = _prune_old_sets(project_dir, keep=KEEP_SETS_PER_PROJECT)
+        # Cross-project TTL sweep (grad10 A): opportunistic hygiene at the same
+        # chokepoint — drop terminal projects' quarantine dirs older than the window.
+        # Its own best-effort internals never raise; wrapped so it can never turn a
+        # successful quarantine into a None return.
+        try:
+            swept = _sweep_stale_project_dirs(
+                project_dir.parent, now=datetime.now(timezone.utc),
+                max_age_days=SWEEP_MAX_AGE_DAYS, skip_project_dir=project_dir)
+        except Exception as exc:  # noqa: BLE001 — sweep is hygiene, never blocks the result
+            print(f"flyer-quarantine: stale-project sweep skipped: {exc}", file=sys.stderr)
+            swept = 0
         if audit_log_path is not None:
             try:
                 _emit_audit(Path(audit_log_path), project_id=project_id, rung=rung,
-                            set_dir=set_dir, files=copied, pruned_sets=pruned)
+                            set_dir=set_dir, files=copied, pruned_sets=pruned,
+                            swept_project_dirs=swept)
             except Exception as exc:  # noqa: BLE001 — audit is observability, never blocks
                 print(f"flyer-quarantine: audit emit failed ({rung}): {exc}", file=sys.stderr)
         return set_dir

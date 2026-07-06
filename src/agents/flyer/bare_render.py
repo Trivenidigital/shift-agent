@@ -177,7 +177,9 @@ _FALSE_VALUES = {"0", "false", "no", "off"}
 REVISION_APPLY_ENABLED = (os.environ.get("FLYER_BARE_REVISION_APPLY", "1").strip().lower() not in _FALSE_VALUES)
 # Slice 3: skill-driven iteration (re-roll / specific_revision / style_reuse) on the text --revision
 # branch, instead of the "resend full details" dead-end. Default OFF (scoped via the allowlist).
-ITERATION_ENABLED = (os.environ.get("FLYER_BARE_ITERATION", "0").strip().lower() not in _FALSE_VALUES)
+# Strict "1" parse (house convention) so only an explicit "1" arms it — "2"/"on"/"true" no longer
+# accidentally enable it (census C6). Live convention on the box is "1"; tests set the bool directly.
+ITERATION_ENABLED = (os.environ.get("FLYER_BARE_ITERATION", "0").strip() == "1")
 REVISION_CAPTURE_RAW_BG = os.environ.get("FLYER_BARE_REVISION_CAPTURE_RAW_BG") == "1"
 
 # --- PR3: Creative-Director render branch (flag + allowlist scoped) ------------

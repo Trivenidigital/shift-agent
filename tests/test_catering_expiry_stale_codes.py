@@ -40,7 +40,7 @@ from __future__ import annotations
 import platform
 import sys
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import HTTPServer
 from pathlib import Path
 
@@ -97,7 +97,7 @@ def test_a018_second_inquiry_while_prior_awaiting_creates_new_lead(
     which lead an owner-reply applies to.
     """
     port, _ = bridge_server
-    fields1 = {"headcount": 50, "event_date": "2026-08-15",
+    fields1 = {"headcount": 50, "event_date": (date.today() + timedelta(days=30)).isoformat(),
                "dietary_restrictions": ["vegetarian"]}
     r1 = run_create(
         env_dir, port, fields1,
@@ -114,7 +114,7 @@ def test_a018_second_inquiry_while_prior_awaiting_creates_new_lead(
     first_id = first_lead["lead_id"]
 
     # Second inquiry, same phone, DIFFERENT message_id → not an idempotent replay.
-    fields2 = {"headcount": 75, "event_date": "2026-08-16",
+    fields2 = {"headcount": 75, "event_date": (date.today() + timedelta(days=31)).isoformat(),
                "dietary_restrictions": ["vegetarian"]}
     r2 = run_create(
         env_dir, port, fields2,

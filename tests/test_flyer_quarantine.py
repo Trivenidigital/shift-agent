@@ -17,7 +17,7 @@ evidence the failed attempt's post-mortem needs. The chokepoint
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -380,3 +380,91 @@ def test_generate_script_deterministic_recovery_quarantines_failed_original(monk
     assert len(q_rows) == 1
     assert q_rows[0]["rung"] == "deterministic_recovery"
     assert q_rows[0]["project_id"] == "F0208"
+
+
+# ── 4. cross-project TTL sweep: terminal projects' dirs age out (grad10 A) ────
+
+def _seed_quarantine_set(project_id: str, *, age_days: float) -> Path:
+    """A bare quarantine set dir for `project_id` whose name carries a UTC stamp
+    `age_days` in the past (matching the chokepoint's %Y%m%dT%H%M%S.%fZ shape)."""
+    stamp = (datetime.now(timezone.utc) - timedelta(days=age_days)).strftime("%Y%m%dT%H%M%S.%fZ")
+    set_dir = quarantine_root() / project_id / f"{stamp}-legacy_autorepair"
+    set_dir.mkdir(parents=True, exist_ok=True)
+    (set_dir / f"{project_id}-C1-preview.png").write_bytes(b"old-evidence")
+    return set_dir
+
+
+def test_cross_project_ttl_sweep_removes_stale_terminal_dirs(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path / "state"))
+    audit = tmp_path / "decisions.log"
+    # A terminal project whose newest set is 20d old (past the 14d window) and a
+    # still-recent project (1d old) that must be left alone.
+    _seed_quarantine_set("F0100", age_days=20)
+    _seed_quarantine_set("F0101", age_days=1)
+    # Status gate (grad11 MEDIUM): the sweep consults the store — mark the
+    # stale project terminal so the age-based expectation still holds.
+    import json as _json
+    (tmp_path / "state" / "projects.json").write_text(_json.dumps({"projects": [
+        {"project_id": "F0100", "status": "closed_no_send"},
+        {"project_id": "F0101", "status": "closed_no_send"},
+        {"project_id": "F0200", "status": "awaiting_final_approval"},
+    ]}), encoding="utf-8")
+
+    preview = _make_failed_artifact(tmp_path / "assets", project_id="F0200")
+    set_dir = quarantine_before_overwrite(
+        [preview], project_id="F0200", rung="deterministic_recovery", audit_log_path=audit)
+
+    assert set_dir is not None
+    assert not (quarantine_root() / "F0100").exists()   # stale terminal dir swept
+    assert (quarantine_root() / "F0101").exists()        # recent dir preserved
+    assert (quarantine_root() / "F0200").exists()        # the fresh project stays
+    rows = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+    q_rows = [r for r in rows if r.get("type") == "flyer_artifact_quarantined"]
+    assert len(q_rows) == 1
+    assert q_rows[0]["swept_project_dirs"] == 1
+
+
+def test_cross_project_ttl_sweep_skips_unparseable_and_empty_dirs(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path / "state"))
+    # A project dir with no set subdirs, and one whose set name has no timestamp
+    # prefix — neither is datable, so the sweep must leave both alone.
+    (quarantine_root() / "F0300").mkdir(parents=True, exist_ok=True)
+    weird = quarantine_root() / "F0301" / "not-a-stamp"
+    weird.mkdir(parents=True, exist_ok=True)
+    (weird / "x.png").write_bytes(b"x")
+
+    preview = _make_failed_artifact(tmp_path / "assets", project_id="F0302")
+    set_dir = quarantine_before_overwrite(
+        [preview], project_id="F0302", rung="overlay_fallback")
+
+    assert set_dir is not None
+    assert (quarantine_root() / "F0300").exists()
+    assert (quarantine_root() / "F0301").exists()
+
+
+def test_ttl_sweep_never_touches_non_terminal_projects(tmp_path, monkeypatch):
+    # grad11 MEDIUM: an old quarantine dir for a LIVE project must survive the
+    # sweep; the same-age dir for a store-terminal project is swept; store
+    # unreadable => nothing swept (fail open).
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from agents.flyer import quarantine as Q
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    root = tmp_path / "quarantine"  # store lives at FLYER_STATE_ROOT/projects.json
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y%m%dT%H%M%S.%fZ")
+    for pid in ("F0100", "F0111"):
+        d = root / pid / f"{old_ts}-deterministic_recovery"
+        d.mkdir(parents=True)
+        (d / "p.png").write_bytes(b"x")
+    (tmp_path / "projects.json").write_text(json.dumps({"projects": [
+        {"project_id": "F0100", "status": "closed_no_send"},
+        {"project_id": "F0111", "status": "awaiting_final_approval"},
+    ]}), encoding="utf-8")
+    swept = Q._sweep_stale_project_dirs(root, now=datetime.now(timezone.utc), max_age_days=14)
+    assert swept == 1
+    assert not (root / "F0100").exists()   # terminal: swept
+    assert (root / "F0111").exists()       # LIVE: evidence retained
+    (tmp_path / "projects.json").write_text("{corrupt", encoding="utf-8")
+    swept2 = Q._sweep_stale_project_dirs(root, now=datetime.now(timezone.utc), max_age_days=14)
+    assert swept2 == 0 and (root / "F0111").exists()  # fail open

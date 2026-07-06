@@ -2404,7 +2404,12 @@ Autonomous repair instruction:
             "text into overlay panels afterwards. Leave the upper-left and lower areas visually "
             "calm/uncluttered so those panels read cleanly; keep hero imagery in the center and right."
         )
-        if os.environ.get("FLYER_PREMIUM_OVERLAY") == "1":
+        if _premium_overlay_enabled(project):
+            # Prompt bias that reserves overlay negative-space; scope it to projects
+            # the premium overlay is actually enabled for (allowlist-aware) rather than
+            # a bare flag read, so a non-allowlisted customer is not steered toward an
+            # overlay layout that will never be composited. Last allowlist-bypassing
+            # read after the Phase A unification (census C5).
             text_contract_line += (
                 " Keep the top ~22% and the bottom ~32% darker and visually calm/uncluttered "
                 "(negative space for a text overlay); place the hero food in the centre band."

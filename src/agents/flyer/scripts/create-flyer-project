@@ -18,10 +18,10 @@ sys.path.insert(0, str(SRC_ROOT / "platform"))
 sys.path.insert(0, str(SRC_ROOT))
 
 from schemas import Config, FlyerAsset, FlyerConfig, FlyerCustomerStore, FlyerManualReview, FlyerProject, FlyerProjectStore, FlyerProjectCreated, FlyerReferenceExtraction, FlyerRequestFields, FlyerSourceContractExtracted, FlyerExtractionV2Outcome  # noqa: E402
-try:
-    from flyer_extraction_seam import extract_text_facts_seam  # type: ignore  # noqa: E402
-except ImportError:
-    from agents.flyer.extraction_seam import extract_text_facts_seam  # noqa: E402
+# NB: the extraction seam (flyer_extraction_seam) is imported lazily at its single
+# call site below, not here — a module-level import crashes the whole script during
+# the deploy self-update window when the new seam module is not yet installed, even
+# for invocations that never extract. bare_render already imports it lazily. (census C8)
 from safe_io import FileLock, atomic_write_text  # noqa: E402
 try:
     from safe_io import load_yaml_model as _load_yaml_model  # type: ignore  # noqa: E402
@@ -753,6 +753,12 @@ def main() -> int:
                 pass
 
         _extraction_report_sink: dict = {}
+        # Lazy import (census C8): only load the seam module when we actually extract,
+        # so a missing flat-name module during a deploy window does not crash creates.
+        try:
+            from flyer_extraction_seam import extract_text_facts_seam  # type: ignore
+        except ImportError:
+            from agents.flyer.extraction_seam import extract_text_facts_seam
         locked_facts = merge_locked_facts(
             profile_facts,
             extract_text_facts_seam(

@@ -4697,7 +4697,10 @@ class FlyerArtifactQuarantined(_BaseEntry):
     recovery/repair/deterministic re-render overwrote or deleted them, so
     failed attempts survive their own post-mortem. `rung` names the recovery
     rung about to destroy the evidence; `files` are the preserved basenames;
-    `pruned_sets` counts older quarantine sets evicted by the keep-3 bound.
+    `pruned_sets` counts older quarantine sets evicted by the keep-3 bound;
+    `swept_project_dirs` counts whole per-project quarantine dirs removed by the
+    cross-project TTL sweep (terminal projects with no quarantine activity in the
+    sweep window) — an automated deletion, kept observable here.
 
     Best-effort observability: no row is emitted when nothing was copied, and
     a quarantine/audit failure never blocks the recovery itself. LOG-ONLY."""
@@ -4707,6 +4710,7 @@ class FlyerArtifactQuarantined(_BaseEntry):
     quarantine_dir: str = Field(min_length=1, max_length=500)
     files: list[str] = Field(default_factory=list, max_length=50)
     pruned_sets: int = Field(default=0, ge=0)
+    swept_project_dirs: int = Field(default=0, ge=0)
 
 
 class CateringLeadCreated(_BaseEntry):

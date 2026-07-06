@@ -397,6 +397,15 @@ PY
     else
         rm -f /opt/shift-agent/flyer_extraction_seam.py
     fi
+    # Shared OpenRouter key resolution (census C9) — reference_extract / semantic_brief /
+    # visual_qa import it flat as `flyer_openrouter_env`. Must install before/with them;
+    # guarded for rollback so an older tarball (which has the inlined copies, not this
+    # import) removes the flat module cleanly.
+    if [ -f src/agents/flyer/openrouter_env.py ]; then
+        install -m 644 src/agents/flyer/openrouter_env.py /opt/shift-agent/flyer_openrouter_env.py
+    else
+        rm -f /opt/shift-agent/flyer_openrouter_env.py
+    fi
     if [ -f src/agents/flyer/premium_poster_v1.py ]; then
         install -m 644 src/agents/flyer/premium_poster_v1.py /opt/shift-agent/flyer_premium_poster_v1.py
     else

@@ -3160,6 +3160,7 @@ def save_flyer_quote_echo_pending(
             "project_id": project_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        _purge_expired_quote_echo_rows(doc)
         atomic_write_json(FLYER_QUOTE_ECHO_PENDING_PATH, doc)
 
 
@@ -3172,6 +3173,20 @@ def _flyer_quote_echo_pending_fresh(row: Optional[dict]) -> Optional[dict]:
     except (ValueError, TypeError):
         return None
     return row if age <= FLYER_QUOTE_ECHO_PENDING_TTL_SEC else None
+
+
+def _purge_expired_quote_echo_rows(doc: dict) -> None:
+    """Drop every chat's pending row whose brief has aged past the TTL (or whose
+    timestamp is unparseable). Runs under flock on every save/pop so the store stays
+    bounded — the row is keyed per chat_id, so a chat that echoes a brief and never
+    returns would otherwise leave its row forever (grad9 LOW)."""
+    pending = doc.get("pending")
+    if not isinstance(pending, dict):
+        return
+    doc["pending"] = {
+        cid: row for cid, row in pending.items()
+        if _flyer_quote_echo_pending_fresh(row) is not None
+    }
 
 
 def get_flyer_quote_echo_pending(chat_id: str) -> Optional[dict]:
@@ -3190,6 +3205,7 @@ def pop_flyer_quote_echo_pending(chat_id: str) -> Optional[dict]:
     with flock(FLYER_QUOTE_ECHO_PENDING_PATH):
         doc = _load_flyer_quote_echo_pending_doc()
         row = doc.get("pending", {}).pop(chat_id, None)
+        _purge_expired_quote_echo_rows(doc)
         atomic_write_json(FLYER_QUOTE_ECHO_PENDING_PATH, doc)
         return _flyer_quote_echo_pending_fresh(row)
 
