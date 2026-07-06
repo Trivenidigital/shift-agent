@@ -162,6 +162,20 @@ def _hydrate_fields_from_customer(
     return fields.model_copy(update=updates)
 
 
+def _clamp_string_field(value: str | None, max_length: int) -> str | None:
+    """Clamp a string field to its schema maximum length (defense-in-depth).
+
+    The deterministic fallback extractor can over-capture a whole multi-line brief
+    into a single field, producing a value longer than the FlyerRequestFields
+    schema allows and raising ValidationError before the project is ever created
+    (incident #537). Callers still drop implausibly-long names entirely; this is
+    the last-line guard so any producer bug degrades to a clamped field rather
+    than a hard crash on the deterministic path (v2 owns new-brief extraction)."""
+    if value and len(value) > max_length:
+        return value[:max_length]
+    return value
+
+
 def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
     text = " ".join(raw_request.split())
     event_name = ""
@@ -321,14 +335,22 @@ def _extract_fields(raw_request: str, *, now: datetime) -> FlyerRequestFields:
 
     event_name = _normalize_event_name(event_name, text)
 
+    # Defense against over-capture: reject an implausibly long "name" that likely
+    # spans the whole brief (e.g. "flyer for sale event as part of anniversary
+    # sale ... [offer details]"). A legitimate business/event name is < 100 chars;
+    # a longer capture is dropped to "" so customer-identity hydration fills the
+    # registered business name instead (incident #537).
+    if event_name and len(event_name) > 100:
+        event_name = ""
+
     return FlyerRequestFields(
-        event_or_business_name=event_name or None,
+        event_or_business_name=_clamp_string_field(event_name, 160) or None,
         event_date=date_value,
         event_time=time_value,
-        venue_or_location=venue or None,
-        contact_info=contact or None,
+        venue_or_location=_clamp_string_field(venue, 240) or None,
+        contact_info=_clamp_string_field(contact, 200) or None,
         preferred_language=language,
-        style_preference=style,
+        style_preference=_clamp_string_field(style, 500),
         output_formats=formats,
         notes=text,
     )

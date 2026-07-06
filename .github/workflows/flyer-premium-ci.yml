@@ -22,6 +22,7 @@ on:
       - "src/agents/flyer/extraction_v2.py"
       - "tests/test_flyer_renderer.py"
       - "tests/test_cf_router_raw_body.py"
+      - "tests/test_flyer_extraction_seam.py"
       - "tests/test_cf_router_quoted_approve.py"
       - "src/plugins/cf-router/**"
       - "tests/test_flyer_visual_qa.py"
@@ -50,6 +51,7 @@ jobs:
         run: |
           python -m pytest \
             tests/test_cf_router_raw_body.py \
+            tests/test_flyer_extraction_seam.py \
             tests/test_cf_router_quoted_approve.py \
             tests/test_flyer_premium_poster_v1.py \
             tests/test_flyer_premium_poster_v1_offer.py \
@@ -62,6 +64,8 @@ jobs:
             tests/test_flyer_premium_poster_v1_deploy_parity.py \
             tests/test_flyer_premium_poster_v1_bare_obs.py \
             tests/test_flyer_extraction_v2_golden.py \
+            tests/test_flyer_intake_fields.py \
+            tests/test_flyer_tranche2_telemetry.py \
             -q
       - name: Renderer + visual QA suites (final package / QA blast radius)
         run: |
@@ -69,3 +73,6 @@ jobs:
       - name: Quarantine-before-recovery suite (census C4; F0197/F0208)
         run: |
           python -m pytest tests/test_flyer_quarantine.py -q
+      - name: Source-edit SLA watchdog (throttled-append suppression; was CI-orphaned)
+        run: |
+          python -m pytest tests/test_flyer_source_edit_sla_watchdog.py -q

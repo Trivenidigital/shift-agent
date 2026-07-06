@@ -2086,6 +2086,25 @@ def write_visual_qa_report(report: FlyerVisualQAReport, artifact_path: Path | st
     return path
 
 
+def derive_pdf_twin_report(twin_report: FlyerVisualQAReport, pdf_path: Path | str) -> FlyerVisualQAReport:
+    """WS5: project the PNG twin's QA verdict onto the delivered PDF artifact.
+
+    The send gate (validate_visual_qa_report) binds a report to the artifact it
+    ships by sha256, so the twin's own report cannot gate the PDF directly.
+    Returns a copy re-bound to the PDF's path+sha with an explicit provenance
+    warning; the verdict — status / blockers / extracted text — is unchanged."""
+    pdf = Path(pdf_path)
+    return twin_report.model_copy(update={
+        "artifact_path": str(pdf),
+        "artifact_sha256": sha256_file(pdf),
+        "warnings": [
+            *twin_report.warnings,
+            f"visual QA screened PNG twin {Path(twin_report.artifact_path).name} "
+            "(WS5 rasterize-before-QA); verdict projected onto the PDF",
+        ],
+    })
+
+
 def validate_visual_qa_report(
     artifact_path: Path | str,
     *,

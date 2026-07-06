@@ -1803,6 +1803,14 @@ class FlyerAsset(BaseModel):
     delivered_at: Optional[datetime] = None
     delivery_attempt_count: int = Field(default=0, ge=0)
     delivery_error: str = Field(default="", max_length=500)
+    # WS5 (2026-07-06): printable_pdf verification provenance — the verdict of
+    # the visual-QA screen run on the PDF's PNG twin. "twin_missing" = legacy
+    # render without a twin sidecar (QA then ran on the PDF itself and the
+    # vision provider fails it closed). None for non-PDF assets and rows
+    # written before WS5.
+    pdf_qa_status: Optional[Literal[
+        "passed", "failed", "not_run", "provider_unavailable", "twin_missing"
+    ]] = None
 
     @field_validator("path")
     @classmethod
@@ -4545,6 +4553,26 @@ class FlyerPremiumOverlayOutcome(_BaseEntry):
     output_format: str = Field(default="", max_length=40)
 
 
+class FlyerPdfQaBackfill(_BaseEntry):
+    """WS5 retroactive PDF-QA backfill (tools/backfill-flyer-pdf-qa.py). One row
+    per tool run recording the twin-based visual-QA verdict for an already-
+    delivered printable_pdf (F0203 class — delivered before rasterize-before-QA
+    landed). The tool is read-only against the project store; this audit row is
+    its ONLY write to live state. `raster_source` says which on-disk artifact
+    stood in for the (post-WS5) generation-time twin; `raster_exactness` is
+    "exact" only when that artifact IS the raster the PDF was composed from
+    (twin sidecar), "upstream_equivalent" for the approved preview stand-in."""
+    type: Literal["flyer_pdf_qa_backfill"] = "flyer_pdf_qa_backfill"
+    project_id: str = Field(pattern=r"^F\d{4,}$")
+    asset_id: str = Field(default="", max_length=40)
+    pdf_path: str = Field(min_length=1, max_length=500)
+    raster_source: Literal["twin_sidecar", "selected_preview", "explicit", "none"]
+    raster_exactness: Literal["exact", "upstream_equivalent", "none"] = "none"
+    qa_status: Literal["passed", "failed", "not_run", "provider_unavailable", "raster_missing"]
+    blockers: list[str] = Field(default_factory=list, max_length=50)
+    report_path: str = Field(default="", max_length=500)
+
+
 class FlyerPremiumPosterV1Managed(_BaseEntry):
     """Premium Poster v1 — managed/studio (owner-review) path observability
     (2026-07-01). One row per lifecycle stage of the flag-gated, allowlist-scoped
@@ -4711,6 +4739,75 @@ class FlyerArtifactQuarantined(_BaseEntry):
     files: list[str] = Field(default_factory=list, max_length=50)
     pruned_sets: int = Field(default=0, ge=0)
     swept_project_dirs: int = Field(default=0, ge=0)
+
+
+class FlyerCreativeDirectionV2Applied(_BaseEntry):
+    """Creative Director v2 observability (census D10 prerequisite, 2026-07-06).
+    CD-v2 previously had ZERO telemetry, so the "48h-observe -> flag-off ->
+    delete" decision on ~hundreds of LOC rested on static analysis alone. One row
+    per managed primary render (when the CD-v2 gate is ON for the project) records
+    whether the resolver POPULATED a ``project.creative_direction`` carrier and
+    whether that carrier was CONSUMED into the prompt this process built (the
+    bg-only hero-naming branch). The census established the primary path has zero
+    consumption call sites (residual = recovery rung only); this row lets the
+    operator CONFIRM that live before deleting: 48h with only ``consumed=false``
+    rows means the carrier never shaped a delivered primary render.
+
+    Dormant: NO row when the CD-v2 gate is off for the project (byte-identical).
+    LOG-ONLY; an emit failure never blocks the render."""
+    type: Literal["flyer_creative_direction_v2_applied"] = "flyer_creative_direction_v2_applied"
+    project_id: str = Field(default="", max_length=80)
+    project_version: int = Field(default=0, ge=0)
+    populated: bool = False
+    consumed: bool = False
+    request_intent: str = Field(default="", max_length=40)
+    poster_archetype: str = Field(default="", max_length=60)
+    offer_priority: str = Field(default="", max_length=40)
+
+
+class FlyerRevisionApplyOutcome(_BaseEntry):
+    """Bare-path revision observability (tranche-2, 2026-07-06). The bare
+    uniform-price revision-apply handler is LIVE default-ON (FLYER_BARE_REVISION_APPLY=1)
+    and had ZERO audit trail — a customer follow-up ("$8.99 header") that fell
+    closed to "resend full details" was indistinguishable in the log from one that
+    rendered and sent. One row per revision attempt records the terminal ``status``
+    (send | failclosed | revision_needed) and a ``reason`` for the non-send
+    outcomes. Dormant when the handler's flag is off (byte-identical). LOG-ONLY;
+    an emit failure never blocks the revision."""
+    type: Literal["flyer_revision_apply_outcome"] = "flyer_revision_apply_outcome"
+    chat_id: str = Field(default="", max_length=200)
+    handler: Literal["revision_apply"] = "revision_apply"
+    status: str = Field(default="", max_length=40)
+    reason: str = Field(default="", max_length=200)
+
+
+class FlyerVisualQaSkipped(_BaseEntry):
+    """Break-glass observability (tranche-2, 2026-07-06): the FLYER_BARE_SKIP_VISUAL_QA
+    escape hatch disables the broad subjective visual QA and was SILENT — a bare
+    render could ship QA-unverified with no audit trace at all. One row per skipped
+    QA records that the break-glass fired for a project. The concrete
+    visible-contract referee runs INDEPENDENTLY of this flag and is unaffected.
+    LOG-ONLY; an emit failure never blocks the render."""
+    type: Literal["flyer_visual_qa_skipped"] = "flyer_visual_qa_skipped"
+    project_id: str = Field(default="", max_length=80)
+    reason: str = Field(default="break_glass_flag", max_length=60)
+
+
+class FlyerSemanticBriefOutcome(_BaseEntry):
+    """Semantic-brief provenance (tranche-2, 2026-07-06). The legacy extractor's
+    Hermes semantic-brief seam (``build_semantic_flyer_brief``) silently either
+    USED the Hermes provider's grounded output or FELL BACK to the deterministic
+    layer, with no record of which — defeating attribution of extraction quality
+    to the provider (is the Hermes brain contributing, or is the key dead and the
+    deterministic fallback carrying every brief?). One row per legacy extraction
+    records ``status`` (provider_used | fell_back), ``reason`` (provider_absent |
+    provider_empty), and ``provider_present``. Emitted only on the legacy path
+    (extraction_v2 carries its own FlyerExtractionV2Outcome); LOG-ONLY."""
+    type: Literal["flyer_semantic_brief_outcome"] = "flyer_semantic_brief_outcome"
+    seam: Literal["managed_create", "bare_render"]
+    status: Literal["provider_used", "fell_back"]
+    reason: str = Field(default="", max_length=60)
+    provider_present: bool = False
 
 
 class CateringLeadCreated(_BaseEntry):
@@ -6094,12 +6191,19 @@ LogEntry = Annotated[
         Annotated[FlyerArtifactQuarantined, Tag("flyer_artifact_quarantined")],
         # 2026-06-19 — flat-degrade observability (premium overlay outcome)
         Annotated[FlyerPremiumOverlayOutcome, Tag("flyer_premium_overlay_outcome")],
+        # WS5 PDF rasterize-before-QA retroactive backfill (2026-07-06)
+        Annotated[FlyerPdfQaBackfill, Tag("flyer_pdf_qa_backfill")],
         # 2026-07-01 — Premium Poster v1 managed/studio path observability
         Annotated[FlyerPremiumPosterV1Managed, Tag("flyer_premium_poster_v1_managed")],
         # 2026-07-02 — Premium Poster v1 bare/WhatsApp-direct path observability
         Annotated[FlyerPremiumPosterV1Bare, Tag("flyer_premium_poster_v1_bare")],
         # 2026-07-03 — WS1 extraction seam-swap observability
         Annotated[FlyerExtractionV2Outcome, Tag("flyer_extraction_v2_outcome")],
+        # 2026-07-06 — tranche-2 telemetry emitters (census top-3 observability gaps)
+        Annotated[FlyerCreativeDirectionV2Applied, Tag("flyer_creative_direction_v2_applied")],
+        Annotated[FlyerRevisionApplyOutcome, Tag("flyer_revision_apply_outcome")],
+        Annotated[FlyerVisualQaSkipped, Tag("flyer_visual_qa_skipped")],
+        Annotated[FlyerSemanticBriefOutcome, Tag("flyer_semantic_brief_outcome")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
