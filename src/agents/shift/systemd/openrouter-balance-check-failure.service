@@ -5,7 +5,10 @@ Description=Failure handler — alert owner if the OpenRouter balance check fail
 Type=oneshot
 User=shift-agent
 Group=shift-agent
-EnvironmentFile=/opt/shift-agent/.env
+# `-` prefix: notify-owner reads Pushover creds from config.yaml, not .env --
+# a broken .env symlink (the known sed -i failure mode) must not take the
+# pager down together with the check it is paging about.
+EnvironmentFile=-/opt/shift-agent/.env
 Environment=HOME=/opt/shift-agent
 TimeoutStartSec=30s
 ExecStart=/usr/local/bin/shift-agent-notify-owner \

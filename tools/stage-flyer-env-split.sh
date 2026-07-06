@@ -55,7 +55,10 @@ ENV_OUT="$STAGING/dot-env.proposed"
 
 secret_count=0
 flag_count=0
-while IFS= read -r line; do
+# `|| [ -n "$line" ]`: read returns non-zero on a final unterminated line even
+# though it populated $line -- without this, a .env lacking a trailing newline
+# silently loses its last entry from BOTH proposed files (review M3).
+while IFS= read -r line || [ -n "$line" ]; do
     name="${line%%=*}"
     case "$line" in
         FLYER_*=*)

@@ -60,7 +60,7 @@ tar czf "$TARBALL" \
     --exclude='*.pyc' \
     --exclude='*.pyo' \
     --exclude='.pytest_cache' \
-    src/ tools/ .commit-hash
+    src/ tools/ requirements-hermes-venv.txt .commit-hash
 
 # Cleanup the staging hash file
 rm -f .commit-hash

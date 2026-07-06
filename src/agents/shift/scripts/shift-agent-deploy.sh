@@ -940,7 +940,7 @@ case "$ACTION" in
                 echo "WARN: Hermes venv import smoke FAILED but overridden: ${HERMES_VENV_IMPORT_GATE_OVERRIDE_REASON}" >&2
             else
                 echo "ERROR: Hermes venv is missing required imports (PIL/pydantic/yaml)." >&2
-                echo "  Reprovision: $VENV_PY -m pip install -r \$STAGING/requirements-hermes-venv.txt" >&2
+                echo "  Reprovision: $VENV_PY -m pip install -r $STAGING/requirements-hermes-venv.txt" >&2
                 echo "  No state change has been made; refusing to continue deploy." >&2
                 exit 1
             fi
