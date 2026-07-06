@@ -1,0 +1,242 @@
+{
+  "project_id": "F0214",
+  "status": "awaiting_final_approval",
+  "customer_phone": "+17329837841",
+  "customer_id": "CUST0001",
+  "chat_id": "201975216009469@lid",
+  "occasion": "diwali",
+  "created_at": "2026-07-06T01:34:06.962171Z",
+  "updated_at": "2026-07-06T01:34:47.141221Z",
+  "original_message_id": "3A25DB5A36E9F13E05B7",
+  "raw_request": "Create a flyer for Lakshmi's Kitchen Diwali Sweets Box. Mixed sweets box $24.99. Include kaju katli, motichoor laddu, mysore pak, and soan papdi. Order by October 25.",
+  "fields": {
+    "event_or_business_name": "Lakshmi's Kitchen Diwali Sweets Box",
+    "event_date": "2026-10-25",
+    "event_time": null,
+    "venue_or_location": "90 Brybar Dr St Johns FL",
+    "contact_info": "+17329837841",
+    "preferred_language": "mixed",
+    "style_preference": "professional local food menu flyer with appetizing photography, strong price readability, and brand-forward retail design",
+    "output_formats": [],
+    "notes": "Create a flyer for Lakshmi's Kitchen Diwali Sweets Box. Mixed sweets box $24.99. Include kaju katli, motichoor laddu, mysore pak, and soan papdi. Order by October 25."
+  },
+  "locked_facts": [
+    {
+      "fact_id": "business_name",
+      "label": "Business",
+      "value": "Lakshmi's Kitchen",
+      "source": "customer_profile",
+      "required": true,
+      "confidence": 1.0,
+      "source_project_id": "",
+      "source_asset_id": "",
+      "source_message_id": "3A25DB5A36E9F13E05B7",
+      "source_sha256": ""
+    },
+    {
+      "fact_id": "contact_phone",
+      "label": "Contact",
+      "value": "+17329837841",
+      "source": "customer_profile",
+      "required": true,
+      "confidence": 1.0,
+      "source_project_id": "",
+      "source_asset_id": "",
+      "source_message_id": "3A25DB5A36E9F13E05B7",
+      "source_sha256": ""
+    },
+    {
+      "fact_id": "location",
+      "label": "Location",
+      "value": "90 Brybar Dr St Johns FL",
+      "source": "customer_profile",
+      "required": true,
+      "confidence": 1.0,
+      "source_project_id": "",
+      "source_asset_id": "",
+      "source_message_id": "3A25DB5A36E9F13E05B7",
+      "source_sha256": ""
+    },
+    {
+      "fact_id": "campaign_title",
+      "label": "campaign_title",
+      "value": "Diwali Sweets Box",
+      "source": "customer_text",
+      "required": true,
+      "confidence": 1.0,
+      "source_project_id": "",
+      "source_asset_id": "",
+      "source_message_id": "",
+      "source_sha256": ""
+    },
+    {
+      "fact_id": "pricing_structure",
+      "label": "pricing_structure",
+      "value": "$24.99",
+      "source": "customer_text",
+      "required": true,
+      "confidence": 1.0,
+      "source_project_id": "",
+      "source_asset_id": "",
+      "source_message_id": "",
+      "source_sha256": ""
+    },
+    {
+      "fact_id": "schedule",
+      "label": "schedule",
+      "value": "Order by October 25",
+      "source": "customer_text",
+      "required": true,
+      "confidence": 1.0,
+      "source_project_id": "",
+      "source_asset_id": "",
+      "source_message_id": "",
+      "source_sha256": ""
+    },
+    {
+      "fact_id": "item:0:name",
+      "label": "item:0:name",
+      "value": "Mixed sweets box",
+      "source": "customer_text",
+      "required": true,
+      "confidence": 1.0,
+      "source_project_id": "",
+      "source_asset_id": "",
+      "source_message_id": "",
+      "source_sha256": ""
+    },
+    {
+      "fact_id": "item:0:price",
+      "label": "item:0:price",
+      "value": "$24.99",
+      "source": "customer_text",
+      "required": true,
+      "confidence": 1.0,
+      "source_project_id": "",
+      "source_asset_id": "",
+      "source_message_id": "",
+      "source_sha256": ""
+    },
+    {
+      "fact_id": "item:1:name",
+      "label": "item:1:name",
+      "value": "kaju katli",
+      "source": "customer_text",
+      "required": true,
+      "confidence": 1.0,
+      "source_project_id": "",
+      "source_asset_id": "",
+      "source_message_id": "",
+      "source_sha256": ""
+    },
+    {
+      "fact_id": "item:2:name",
+      "label": "item:2:name",
+      "value": "motichoor laddu",
+      "source": "customer_text",
+      "required": true,
+      "confidence": 1.0,
+      "source_project_id": "",
+      "source_asset_id": "",
+      "source_message_id": "",
+      "source_sha256": ""
+    },
+    {
+      "fact_id": "item:3:name",
+      "label": "item:3:name",
+      "value": "mysore pak",
+      "source": "customer_text",
+      "required": true,
+      "confidence": 1.0,
+      "source_project_id": "",
+      "source_asset_id": "",
+      "source_message_id": "",
+      "source_sha256": ""
+    },
+    {
+      "fact_id": "item:4:name",
+      "label": "item:4:name",
+      "value": "soan papdi",
+      "source": "customer_text",
+      "required": true,
+      "confidence": 1.0,
+      "source_project_id": "",
+      "source_asset_id": "",
+      "source_message_id": "",
+      "source_sha256": ""
+    }
+  ],
+  "reference_extractions": [],
+  "qa_reports": [
+    {
+      "project_id": "F0214",
+      "asset_id": "A0001",
+      "artifact_path": "/opt/shift-agent/state/flyer/assets/F0214-C1-preview.png",
+      "artifact_sha256": "6ed9805f2d6aeee127475e62a20abf0ecc0478f5c2ededd75b4fb7fbbcc87b7d",
+      "project_version": 1,
+      "output_format": "concept_preview",
+      "provider": "openrouter",
+      "qa_source": "ocr_vision",
+      "status": "passed",
+      "blockers": [],
+      "warnings": [],
+      "extracted_text": "LAKSHMI'S KITCHEN Diwali Sweets Box $24.99 Order by October 25 Mixed sweets box kaju katli motichoor laddu mysore pak soan papdi 90 Brybar Dr St Johns FL | Call +17329837841",
+      "checked_at": "2026-07-06T01:34:46.102574Z",
+      "severity": "pass"
+    }
+  ],
+  "premium_repair_qa": [],
+  "manual_review": {
+    "status": "none",
+    "reason": "",
+    "reason_code": "unclassified",
+    "detail": "",
+    "queued_at": null,
+    "completed_at": null,
+    "operator_asset_ids": [],
+    "break_glass_reason": "",
+    "claimed_by": "",
+    "claimed_at": null
+  },
+  "assets": [
+    {
+      "asset_id": "A0001",
+      "kind": "concept_preview",
+      "source": "rendered",
+      "path": "/opt/shift-agent/state/flyer/assets/F0214-C1-preview.png",
+      "mime_type": "image/png",
+      "sha256": "6ed9805f2d6aeee127475e62a20abf0ecc0478f5c2ededd75b4fb7fbbcc87b7d",
+      "original_message_id": "3A25DB5A36E9F13E05B7",
+      "received_at": "2026-07-06T01:34:43.893664Z",
+      "delivery_status": "sent",
+      "outbound_message_id": "3EB07121CB36C5F508C990",
+      "delivered_at": "2026-07-06T01:34:47.141221Z",
+      "delivery_attempt_count": 1,
+      "delivery_error": ""
+    }
+  ],
+  "concepts": [
+    {
+      "concept_id": "C1",
+      "title": "Best Design",
+      "style_summary": "Best-quality flyer direction for this request",
+      "preview_asset_id": "A0001",
+      "prompt": "Create a complete, finished customer-ready poster flyer for WhatsApp delivery.\n\nDesign direction: premium/editorial restaurant advertisement, magazine-quality food advertising, bold appetizing hero photography, restrained typography, tasteful retail hierarchy.\nCustomer style notes: professional local food menu flyer with appetizing photography, strong price readability, and brand-forward retail design.\nOutput format: concept_preview; aspect ratio 4:5.\n\nCampaign scene direction (family discovery):\n- Show a warm, aspirational scene of a happy local family or community enjoying Lakshmi's Kitchen's offering, with the hero product/dish as the focal point.\n- Inviting, celebratory mood with natural lighting and relatable local people.\n- The scene supports the offer (Diwali Sweets Box) for local customers and never covers the controlled copy.\n\nART DIRECTION - FESTIVE PREMIUM register: near-black charcoal canvas, warm spotlight food photography, luxury-menu energy. Ornamental gold corner flourishes, decorative border with South Indian scrollwork, thin gold divider under the top small line, the price inside a SCALLOPED decorative gold medallion, menu items on dark badge rows with small gold food icons.\nTYPOGRAPHY: main display text in DIMENSIONAL BEVELED-GOLD lettering - deep emboss, polished highlights, dark outline, real depth, never flat - high-contrast didone/fat-face style; top small line in small caps widely spaced; every badge row one identical typeface, size, weight. ORNAMENT DISCIPLINE: decoration frames text zones but NEVER overlaps, crowds, or distorts any text.\n\nOCCASION THEME - DIWALI at FULL intensity (theme co-leads): marigold garlands framing top and sides, dense diya rows with visible flames along the bottom, rangoli mandala motifs in the corners, firework sparkles in the dark areas, the palette warmed to deep amber and saffron over the base; the price element gains a rangoli-patterned rim. ORNAMENT DISCIPLINE still holds: nothing overlaps or crowds any text.\n\nTEXT TO RENDER - these numbered strings are the ONLY text allowed in the art; render each VERBATIM, spelled exactly:\n1. Lakshmi's Kitchen\n2. Diwali Sweets Box\n3. $24.99\n4. Order by October 25\n5. Mixed sweets box\n6. kaju katli\n7. motichoor laddu\n8. mysore pak\n9. soan papdi\n10. 90 Brybar Dr St Johns FL | Call +17329837841\n\nHOW TO SET EACH LINE (instructions for you - these words are NEVER painted):\nLine 1: small top line; widely spaced\nLine 2: the huge display text; as given; never extend into a sentence; no price in it\nLine 3: inside/beside the shaped price element ONLY; never in the display text\nLine 4: its own small line\nLine 5: one menu row; the shared price stays in the price element, never beside items\nLine 6: one menu row; the shared price stays in the price element, never beside items\nLine 7: one menu row; the shared price stays in the price element, never beside items\nLine 8: one menu row; the shared price stays in the price element, never beside items\nLine 9: one menu row; the shared price stays in the price element, never beside items\nLine 10: the single clean bottom strip\n\nPRICE DISCIPLINE: the price appears EXACTLY ONCE in the art - inside the shaped price element. NEVER repeat it beside menu rows, under the headline, or anywhere else. A column of repeated prices is a defect. The price element sits CLEAR of the display text - never overlapping or crowding the headline.\n\nVisual context for style and imagery:\n- theme/category: Lakshmi's Kitchen\n- style: professional local food menu flyer with appetizing photography, strong price readability, and brand-forward retail design\n\nLayout requirements:\n- Build a full restaurant/menu poster with a premium/editorial restaurant-advertisement finish, not an ordinary menu template or background template.\n- Use product-specific close-up food imagery based on the listed menu items.\n- Use one strong hero food image, a confident brand masthead, a large high-im\n[truncated metadata; renderer used the full structured prompt]",
+      "created_at": "2026-07-06T01:34:43.893657Z",
+      "selected_at": null
+    }
+  ],
+  "selected_concept_id": "C1",
+  "revisions": [],
+  "pending_revision_confirmation": null,
+  "last_applied_pending_revision_id": "",
+  "version": 1,
+  "final_asset_ids": [],
+  "approved_message_id": "",
+  "preview_message_ids": [
+    "3EB07121CB36C5F508C990",
+    "3EB0C025F7623B0111EF4D"
+  ],
+  "warning": null,
+  "deterministic_recovery": false
+}

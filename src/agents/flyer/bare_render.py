@@ -444,6 +444,43 @@ def _append_audit_line(line: str) -> None:
         return
 
 
+def _emit_revision_apply_outcome(*, chat_id: str, handler: str, status: str, reason: str = "") -> None:
+    """One flyer_revision_apply_outcome row per bare revision attempt via the
+    canonical decisions.log chokepoint. The LIVE default-ON uniform-price
+    revision-apply handler was previously fully silent (a follow-up that fell
+    closed to "resend full details" looked identical in the log to one that
+    rendered + sent). Best-effort: an audit failure never blocks the revision."""
+    try:
+        schemas = _schemas()
+        entry = schemas.FlyerRevisionApplyOutcome(
+            ts=datetime.now(timezone.utc),
+            chat_id=str(chat_id or "")[:200],
+            handler=handler,
+            status=str(status or "")[:40],
+            reason=str(reason or "")[:200],
+        )
+        _append_audit_line(entry.model_dump_json())
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _emit_visual_qa_skipped(project) -> None:
+    """One flyer_visual_qa_skipped row when the FLYER_BARE_SKIP_VISUAL_QA
+    break-glass disables the broad visual QA (previously a silent send-anyway).
+    The concrete visible-contract referee runs independently and is unaffected.
+    Best-effort: an audit failure never blocks the render."""
+    try:
+        schemas = _schemas()
+        entry = schemas.FlyerVisualQaSkipped(
+            ts=datetime.now(timezone.utc),
+            project_id=str(getattr(project, "project_id", "") or "")[:80],
+            reason="break_glass_flag",
+        )
+        _append_audit_line(entry.model_dump_json())
+    except Exception:  # noqa: BLE001
+        return
+
+
 def _quarantine_failed_raw_bg(chat_id: str, raw_bg_dest) -> None:
     """Quarantine-before-recovery (F0197/F0208, bare-path equivalent): the QA-fail
     retry re-renders into a fresh temp dir (no preview overwrite), but its
@@ -772,6 +809,12 @@ def _build_locked_facts(customer, fields, raw_text: str, message_id: str, flyer_
                     ts=datetime.now(timezone.utc), seam="bare_render", event=event,
                     items_locked=payload.items_locked, scalars_locked=payload.scalars_locked,
                     dropped_by_parity_n=len(payload.dropped_by_parity))
+            elif event == "semantic_brief_outcome":
+                entry = schemas.FlyerSemanticBriefOutcome(
+                    ts=datetime.now(timezone.utc), seam="bare_render",
+                    status=payload.get("status", "fell_back"),
+                    reason=str(payload.get("reason", ""))[:60],
+                    provider_present=bool(payload.get("provider_present", False)))
             else:
                 entry = schemas.FlyerExtractionV2Outcome(
                     ts=datetime.now(timezone.utc), seam="bare_render", event=event,
@@ -1121,6 +1164,7 @@ def run_visual_qa(image_bytes: bytes, project):
             return (False, vc_blockers)
 
     if _skip_visual_qa_enabled():
+        _emit_visual_qa_skipped(project)
         return (True, ["visual_qa_disabled"])
 
     VQ = _visual_qa_mod()
@@ -1726,10 +1770,24 @@ def render_revision_apply(chat_id: str, raw_text: str):
     textless background (slice 2c). Returns (SEND, png) | (REVISION_NEEDED, None) | (FAILCLOSED, [..]).
     Degrades to REVISION_NEEDED ("resend full details") — never a wrong render — when the flag is off,
     no session/background exists, the dump won't rebuild, or the item prices are not uniform."""
+    if not REVISION_APPLY_ENABLED:
+        return (REVISION_NEEDED, None)   # dormant: flag off => byte-identical, no audit
+    status, payload = _render_revision_apply_impl(chat_id, raw_text)
+    reason = ""
+    if status == FAILCLOSED and isinstance(payload, list):
+        reason = ";".join(str(b) for b in payload)[:200]
+    elif status == REVISION_NEEDED:
+        reason = "resend_full_details"
+    _emit_revision_apply_outcome(chat_id=chat_id, handler="revision_apply",
+                                 status=status, reason=reason)
+    return (status, payload)
+
+
+def _render_revision_apply_impl(chat_id: str, raw_text: str):
+    """Body of render_revision_apply once the LIVE flag gate passed. Every outcome
+    returned here is audited by the wrapper (send / failclosed / revision_needed)."""
     import schemas
 
-    if not REVISION_APPLY_ENABLED:
-        return (REVISION_NEEDED, None)
     sess = _load_session(chat_id)
     if not sess:
         return (REVISION_NEEDED, None)
