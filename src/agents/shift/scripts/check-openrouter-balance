@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""
+check-openrouter-balance — alert the operator before OpenRouter credits run dry.
+
+Why: every flyer draft/QA/extraction call dies silently-ish (per-request errors,
+no fleet-level warning) when the OpenRouter account hits $0. This one-shot
+reads the credits endpoint and pages the owner through the existing
+shift-agent-notify-owner chokepoint (Pushover-primary, plain text — no
+Markdown parse mode anywhere, per CLAUDE.md §12b) when the remaining balance
+drops below the threshold.
+
+Key resolution: process env first (systemd EnvironmentFile=/opt/shift-agent/.env
+is read by systemd as root before User= drops privileges, so the key is in the
+environment even though the unit user cannot read /root/.hermes/.env), then the
+on-box env files — the shared flyer_openrouter_env chokepoint.
+
+§12b observability: prints structured one-line JSON events —
+  openrouter_balance_ok / openrouter_balance_check_failed /
+  openrouter_balance_alert_dispatched / openrouter_balance_alert_delivered /
+  openrouter_balance_alert_delivery_failed
+so journalctl can always distinguish "healthy", "checker broken", and
+"alert fired but delivery failed".
+
+Threshold: OPENROUTER_BALANCE_ALERT_THRESHOLD_USD (default 5).
+
+Exit codes: 0 healthy or alert delivered; 6 credits fetch failed OR alert
+delivery failed (EXIT_DEPENDENCY_DOWN — trips the systemd OnFailure handler).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "platform"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from exit_codes import EXIT_OK, EXIT_DEPENDENCY_DOWN  # noqa: E402
+try:
+    from flyer_openrouter_env import openrouter_key  # type: ignore  # noqa: E402
+except ImportError:
+    from agents.flyer.openrouter_env import openrouter_key  # noqa: E402
+
+CREDITS_URL = "https://openrouter.ai/api/v1/credits"
+TIMEOUT_SEC = 30
+DEFAULT_THRESHOLD_USD = 5.0
+NOTIFY_BIN = "/usr/local/bin/shift-agent-notify-owner"
+
+
+def _emit(event: str, **fields) -> None:
+    print(json.dumps({"event": event, **fields}))
+
+
+def fetch_balance(credits_json_path: str = "") -> float:
+    """Return remaining balance in USD (total_credits - total_usage).
+
+    ``credits_json_path`` injects a response document for tests."""
+    if credits_json_path:
+        doc = json.loads(Path(credits_json_path).read_text(encoding="utf-8"))
+    else:
+        key = openrouter_key()
+        if not key or "PLACEHOLDER" in key:
+            raise RuntimeError("OPENROUTER_API_KEY missing or placeholder")
+        req = urllib.request.Request(
+            CREDITS_URL, headers={"Authorization": f"Bearer {key}"}, method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
+            doc = json.loads(resp.read().decode("utf-8"))
+    data = doc["data"]
+    return float(data["total_credits"]) - float(data["total_usage"])
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--threshold-usd", type=float,
+                   default=float(os.environ.get("OPENROUTER_BALANCE_ALERT_THRESHOLD_USD", DEFAULT_THRESHOLD_USD)))
+    p.add_argument("--notify-bin", default=NOTIFY_BIN)
+    p.add_argument("--credits-json", default="", help="test injection: read the credits response from this file instead of the API")
+    args = p.parse_args()
+
+    try:
+        balance = fetch_balance(args.credits_json)
+    except Exception as exc:  # noqa: BLE001 — any failure here is DEPENDENCY_DOWN
+        _emit("openrouter_balance_check_failed", error=f"{type(exc).__name__}: {exc}"[:300])
+        return EXIT_DEPENDENCY_DOWN
+
+    if balance >= args.threshold_usd:
+        _emit("openrouter_balance_ok", balance_usd=round(balance, 2), threshold_usd=args.threshold_usd)
+        return EXIT_OK
+
+    # Plain text on purpose (§12b): dollar amounts and thresholds must not be
+    # mangled by any Markdown parsing downstream.
+    message = (
+        f"OpenRouter balance LOW: ${balance:.2f} remaining "
+        f"(threshold ${args.threshold_usd:.2f}). Flyer draft/QA/extraction "
+        f"calls fail once credits hit $0 - top up at openrouter.ai/credits."
+    )
+    _emit("openrouter_balance_alert_dispatched", balance_usd=round(balance, 2), threshold_usd=args.threshold_usd)
+    try:
+        proc = subprocess.run(
+            [args.notify_bin, "--title", "OpenRouter credits low", "--priority", "1", message],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _emit("openrouter_balance_alert_delivery_failed", error=f"{type(exc).__name__}: {exc}"[:300])
+        return EXIT_DEPENDENCY_DOWN
+    if proc.returncode != 0:
+        _emit("openrouter_balance_alert_delivery_failed",
+              notify_exit_code=proc.returncode,
+              stderr=(proc.stderr or "").strip()[:300])
+        return EXIT_DEPENDENCY_DOWN
+    _emit("openrouter_balance_alert_delivered", balance_usd=round(balance, 2))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,20 @@
+[Unit]
+Description=Daily OpenRouter balance threshold check
+
+# STAGED, NOT ENABLED: shift-agent-deploy.sh installs this unit file but does
+# NOT enable it (no systemctl enable anywhere for this timer). Operator (or
+# main session) arms it once per VPS with:
+#   systemctl daemon-reload && systemctl enable --now openrouter-balance-check.timer
+# Threshold override: set OPENROUTER_BALANCE_ALERT_THRESHOLD_USD in the env
+# file the service sources (default $5).
+
+[Timer]
+# Daily 14:00 UTC (offset from the Sun 13:00 routing summary so failure pages
+# do not stack). Persistent=true: a missed day (VPS down) fires on next boot —
+# a credits check is exactly the thing to catch up on.
+OnCalendar=*-*-* 14:00:00
+Persistent=true
+Unit=openrouter-balance-check.service
+
+[Install]
+WantedBy=timers.target
