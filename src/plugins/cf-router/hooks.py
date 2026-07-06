@@ -2991,6 +2991,19 @@ def _try_flyer_quote_echo_choice(
     pending = actions.pop_flyer_quote_echo_pending(chat_id) or pending
     original_text = str(pending.get("original_text") or "").strip()
     if not original_text:
+        # grad9 LOW: the customer confirmed NEW but the popped echo row carried no
+        # usable original brief (empty/whitespace) — audit the skip so it is not a
+        # silent drop, then fall through to core routing.
+        try:
+            actions.audit_intercepted(
+                reason="flyer_quote_echo_suppressed",
+                chat_id=chat_id,
+                detail=(
+                    f"new_confirmed_empty_original; prior_project_id={pending.get('project_id') or ''}"
+                ),
+            )
+        except Exception:  # noqa: BLE001 - audit is best-effort, must not preempt routing
+            pass
         return None
     original_message_id = str(pending.get("message_id") or "").strip()
     if not original_message_id:

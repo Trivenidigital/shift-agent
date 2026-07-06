@@ -664,34 +664,6 @@ def _offset_standalone_item_names(
     return offset
 
 
-# ── item-index reconciliation (planner truth contract) ──────────────────────
-# The bounded creative planner contributes inferred item facts. These helpers keep
-# them in an index block strictly ABOVE customer-grounded items so merge_locked_facts
-# is never handed a same-index grounded/inferred collision — it groups item facts by
-# index with LAST-SEEN winning (`grouped[index][kind] = fact`) BEFORE source-priority
-# reconciliation, so a shared index would silently drop the grounded customer fact.
-# Design: tasks/flyer-item-index-reconciliation-design.md.
-_REQUESTED_ITEM_COUNT_RE = re.compile(
-    r"\b(?P<count>\d{1,2})\s+(?:[A-Za-z][\w'-]*\s+){0,6}?items?\b",
-    re.IGNORECASE,
-)
-
-
-def _requested_item_count_and_phrase(text: str) -> tuple[int | None, str | None]:
-    """The customer's stated item count and the EXACT phrase it matched, e.g.
-    "6 famous indo-chinese items" -> (6, "6 famous indo-chinese items"). Drives (a) the
-    remainder-fill cap and (b) the junk-drop (we remove only the item whose value equals
-    this phrase — never a coincidental real name). Tight: number + nearby "items",
-    bounded 1..30 so prices/times are not mistaken."""
-    match = _REQUESTED_ITEM_COUNT_RE.search(text or "")
-    if not match:
-        return (None, None)
-    count = int(match.group("count"))
-    if not (1 <= count <= 30):
-        return (None, None)
-    return (count, match.group(0))
-
-
 def _requests_more_item_suggestions(text: str) -> bool:
     return bool(re.search(
         r"\b(?:add|include|suggest|recommend|give)\s+(?:some\s+)?(?:more|additional|extra)\s+"
@@ -748,46 +720,6 @@ def requests_generated_item_suggestions(text: str) -> bool:
         or _GENERATED_ITEM_TOTAL_RE.search(source)
         or _requests_more_item_suggestions(source)
     )
-
-
-def _max_item_index(*fact_lists: Iterable[FlyerLockedFact]) -> int:
-    """Highest item:N:* index across the lists, or -1 if there are none."""
-    highest = -1
-    for facts in fact_lists:
-        for fact in facts or []:
-            match = re.match(r"^item:(?P<index>\d+):(?:name|price)$", getattr(fact, "fact_id", ""))
-            if match:
-                highest = max(highest, int(match.group("index")))
-    return highest
-
-
-def _distinct_grounded_item_count(*fact_lists: Iterable[FlyerLockedFact]) -> int:
-    """Count of distinct grounded item NAMES across the lists — the K in "customer named
-    K items and asked for N total" (used to cap the planner's fill to N-K)."""
-    names: set[str] = set()
-    for facts in fact_lists:
-        for fact in facts or []:
-            if re.match(r"^item:\d+:name$", getattr(fact, "fact_id", "")):
-                key = _norm(fact.value)
-                if key:
-                    names.add(key)
-    return len(names)
-
-
-def _reindex_item_facts(facts: list[FlyerLockedFact], base: int) -> list[FlyerLockedFact]:
-    """Shift every item:N:* fact_id by `base` so a producer's items occupy a
-    non-colliding index range. base <= 0 (no grounded items) is a no-op."""
-    if base <= 0:
-        return facts
-    shifted: list[FlyerLockedFact] = []
-    for fact in facts:
-        match = re.match(r"^item:(?P<index>\d+):(?P<kind>name|price)$", fact.fact_id)
-        if match:
-            new_id = f"item:{base + int(match.group('index'))}:{match.group('kind')}"
-            shifted.append(fact.model_copy(update={"fact_id": new_id}))
-        else:
-            shifted.append(fact)
-    return shifted
 
 
 def extract_text_facts(
@@ -863,7 +795,6 @@ def extract_text_facts(
     if parsed_schedule:
         facts.append(parsed_schedule)
     item_name_facts = _item_name_facts(text, message_id=message_id)
-    pre_requested_item_count, _pre_count_phrase = _requested_item_count_and_phrase(text)
     # Bounded creative planner (slice 2 producer; slice 5 per-request category gate).
     # Fires ONLY when armed (flag + firewall + >=1 category opened, is_active) AND THIS
     # request's category is operator-enabled. When it produces inferred items it

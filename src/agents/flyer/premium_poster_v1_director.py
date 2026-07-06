@@ -71,8 +71,10 @@ _COMPOSITION = (
 # names + the no-text contract). Money / contact / address facts are excluded so
 # sensitive copy can never influence anything; the raw owner brief is excluded for
 # the same reason (and is not a locked-fact id today regardless).
+# NB: "occasion" is a project-level enum field (parity-exempt), never a locked fact,
+# so it has no producer here and always resolved to "" — dropped (census C7).
 _DIRECTION_FACT_IDS = (
-    "business_category", "business_name", "campaign_title", "occasion",
+    "business_category", "business_name", "campaign_title",
     "style", "notes",
 )
 
