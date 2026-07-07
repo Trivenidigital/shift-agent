@@ -840,6 +840,11 @@ def resend_status_to_customer(
 
 
 _VALID_PROACTIVE_WHATSAPP_CHAT_ID = re.compile(r"^\d{6,20}@(lid|s\.whatsapp\.net)$")
+# Extract the project_id embedded in a decisions.log row's `detail` string.
+# Mirrors the canonical extraction at cf-router/actions.py (\bproject_id=...\b);
+# the greedy \d{4,} + word boundary captures the FULL id, so F00601 is not
+# truncated to F0060.
+_PROJECT_ID_IN_DETAIL = re.compile(r"\bproject_id=([A-Z]\d{4,})\b")
 
 
 def find_recent_inbound_chat_id_for_project(
@@ -885,6 +890,15 @@ def find_recent_inbound_chat_id_for_project(
         except json.JSONDecodeError:
             continue
         if doc.get("type") not in {"cf_router_intercepted", "raw_inbound"}:
+            continue
+        # The `needle in line` check above is a cheap pre-filter only: bare
+        # substring matching prefix-matches (project_id=F0060 is a substring of
+        # project_id=F00601) and can hit the id mentioned in an unrelated field,
+        # either of which would return the WRONG customer's chat_id — the exact
+        # silent-misroute this function (PR #133 HIGH-1) exists to prevent.
+        # Require an EXACT structured match on the id embedded in `detail`.
+        m = _PROJECT_ID_IN_DETAIL.search(str(doc.get("detail") or ""))
+        if not m or m.group(1) != project_id:
             continue
         chat_id = str(doc.get("chat_id") or "")
         if chat_id and _VALID_PROACTIVE_WHATSAPP_CHAT_ID.match(chat_id):

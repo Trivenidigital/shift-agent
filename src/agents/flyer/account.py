@@ -952,10 +952,22 @@ def _append_audit(path: Optional[Path], entry_json: str) -> None:
     if path is None:
         return
     try:
-        from safe_io import ndjson_append  # type: ignore
-        ndjson_append(path, entry_json)
-    except Exception:
-        pass
+        from safe_io import ndjson_append, FileLock  # type: ignore
+        # Hold the SAME canonical decisions.log lock (`<path>.lock`) that
+        # safe_io._emit_audit_row / log-decision-direct acquire — ndjson_append's
+        # contract requires the caller to hold it, and locking a different (or
+        # no) file gives zero mutual exclusion against those writers.
+        with FileLock(Path(str(path) + ".lock")):
+            ndjson_append(path, entry_json)
+    except Exception as e:
+        # An audit write failure must not crash activation, but the previous
+        # silent `pass` hid dropped money/activation audit rows entirely.
+        # Surface to stderr so journald captures the drop.
+        import sys as _sys
+        _sys.stderr.write(
+            f"WARN: flyer activation audit append failed (non-fatal): "
+            f"{type(e).__name__}: {e}\n"
+        )
 
 
 def _audit_activation(path: Optional[Path], customer: FlyerCustomerProfile, provider: str, ref: str, amount_cents: Optional[int], currency: str, *, idempotent: bool) -> None:

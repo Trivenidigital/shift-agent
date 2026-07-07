@@ -153,7 +153,14 @@ _DETERMINISTIC_RENDERER_MODEL = "deterministic-renderer"
 
 
 def _integrated_killswitch_active() -> bool:
-    return os.environ.get("FLYER_INTEGRATED_KILLSWITCH") == "1"
+    # Panic switch: ENGAGE (collapse to the deterministic renderer) on any value
+    # that is not clearly "off". Unlike an arming flag (opt-in, strict "1"), a
+    # kill-switch's fail-safe direction is inverted — a mistyped
+    # FLYER_INTEGRATED_KILLSWITCH=true|on|yes during an incident must still trip
+    # it, not silently leave the generative path running. Must stay in lockstep
+    # with generate-flyer-concepts._integrated_killswitch_active.
+    val = os.environ.get("FLYER_INTEGRATED_KILLSWITCH", "").strip().lower()
+    return val not in ("", "0", "false", "no", "off")
 
 
 def _effective_render_model(model: str) -> str:
