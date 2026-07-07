@@ -83,6 +83,27 @@ def test_healthy_state_root_no_alert(tmp_path):
     assert not seen.exists()
 
 
+def test_seen_file_not_self_detected(tmp_path):
+    """Regression: the watchdog's own `.corrupt-state-seen.json` bookkeeping
+    file contains the substring `.corrupt-` but is NOT a quarantine artifact
+    (safe_io names those `<name>.corrupt-<digits>`). It must never be reported
+    as `new` or alerted on, across repeated runs."""
+    state = tmp_path / "state"
+    state.mkdir()
+    corrupt = state / "leads.json.corrupt-1700000001"
+    corrupt.write_text("{bad", encoding="utf-8")
+    seen = state / ".corrupt-state-seen.json"
+
+    r1 = _run(state, seen, dry_run=False)
+    assert r1.returncode == 0, (r1.stdout, r1.stderr)
+    # Second run must find NOTHING new — the seen-file (now present) is not a
+    # quarantine artifact and the real corrupt file is already deduped.
+    r2 = _run(state, seen, dry_run=False)
+    out = json.loads(r2.stdout)
+    assert out["new"] == [], out
+    assert str(seen) not in out["found"]
+
+
 def test_missing_state_root_is_noop(tmp_path):
     state = tmp_path / "nonexistent"
     seen = tmp_path / "seen.json"

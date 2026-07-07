@@ -21,8 +21,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
+
+# safe_io quarantines as `<name>.corrupt-<int(time.time())>` — match that exact
+# shape (trailing `.corrupt-<digits>`) rather than a bare `.corrupt-` substring,
+# so the watchdog's own `.corrupt-state-seen.json` bookkeeping file (and any
+# unrelated file merely containing the word) is NOT self-detected as a quarantine.
+_CORRUPT_ARTIFACT_RE = re.compile(r"\.corrupt-\d+$")
 
 
 def _add_import_roots() -> None:
@@ -73,7 +80,7 @@ def scan(state_root: Path, seen_file: Path, *, dry_run: bool = False) -> dict:
     seen = _load_seen(seen_file)
     found = sorted(
         str(p) for p in state_root.rglob("*")
-        if ".corrupt-" in p.name and p.is_file()
+        if _CORRUPT_ARTIFACT_RE.search(p.name) and p.is_file()
     )
     new = [p for p in found if p not in seen]
 
