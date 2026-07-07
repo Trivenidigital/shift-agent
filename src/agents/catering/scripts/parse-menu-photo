@@ -112,9 +112,73 @@ Return ONLY the JSON object. No markdown fences, no explanation, no preamble.
 """
 
 
+# Shared #XXXXX code pool: codes are namespaced across agents and the
+# dispatcher disambiguates a collision only by state-file priority, so a
+# colliding code silently shadows the lower-priority item. This generator
+# previously did NO collision check at all — it now excludes codes already
+# active across the reachable pools (own menu-pending + catering leads +
+# shift proposals), mirroring the cross-pool intent of extract-receipt.
+# Per reviewer-a HIGH A1 each agent inlines its own generator (no shared
+# module), so this is inlined rather than imported.
+CATERING_LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
+SHIFT_PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
+
+
+def _collect_active_codes() -> set[str]:
+    """Active codes across the shared pool, best-effort — never fail extraction
+    on a stale or unreadable sibling store.
+
+    Reads are RAW json.loads rather than load_model on purpose: load_model routes
+    through safe_load_json which RENAMES a corrupt file to .corrupt-<epoch> as a
+    side effect. This scan is advisory collision-avoidance; it must not quarantine
+    a sibling agent's state file (masking a corruption signal that the owning
+    script surfaces loudly via assert_load_status_clean).
+    """
+    codes: set[str] = set()
+    # Our own prior menu-pending update (single-slot file).
+    if PENDING_PATH.exists():
+        try:
+            raw = json.loads(PENDING_PATH.read_text())
+            if raw.get("confirmation_code"):
+                codes.add(raw["confirmation_code"])
+        except Exception:
+            pass
+    # Catering leads (exclude terminal statuses that can no longer be actioned).
+    if CATERING_LEADS_PATH.exists():
+        try:
+            raw = json.loads(CATERING_LEADS_PATH.read_text())
+            for cl in raw.get("leads", []):
+                if (isinstance(cl, dict) and cl.get("owner_approval_code")
+                        and cl.get("status") not in (
+                            "CLOSED", "OWNER_REJECTED", "STALE", "NOT_CATERING")):
+                    codes.add(cl["owner_approval_code"])
+        except Exception:
+            pass
+    # Shift proposals. pending.json stores proposals as an OBJECT keyed by id
+    # (dict[str,Proposal]), so iterate .values(); iterating the mapping directly
+    # would yield id keys and silently collect nothing.
+    if SHIFT_PENDING_PATH.exists():
+        try:
+            raw = json.loads(SHIFT_PENDING_PATH.read_text())
+            proposals = raw.get("proposals", {})
+            iterable = proposals.values() if isinstance(proposals, dict) else proposals
+            for prop in iterable:
+                if isinstance(prop, dict) and prop.get("code"):
+                    codes.add(prop["code"])
+        except Exception:
+            pass
+    return codes
+
+
 def _generate_unique_code() -> str:
-    """5-char approval code reusing Shift's alphabet."""
-    return "#" + "".join(secrets.choice(_CODE_ALPHA) for _ in range(5))
+    """5-char approval code in the shared pool, avoiding codes already active
+    across catering leads / menu-pending / shift proposals."""
+    active = _collect_active_codes()
+    for _ in range(100):
+        candidate = "#" + "".join(secrets.choice(_CODE_ALPHA) for _ in range(5))
+        if candidate not in active:
+            return candidate
+    raise RuntimeError("could not generate unique menu approval code after 100 tries")
 
 
 def _next_update_id() -> str:
