@@ -551,3 +551,75 @@ def test_bridge_send_failed_voids_intent_and_audits(isolated_state):
     leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
     assert leads["leads"][0].get("deposit_status", "none") == "none"
     assert leads["leads"][0].get("deposit_payment_intent_id", "") == ""
+
+
+# ─────────────────────────────────────────────────────────────────
+# S1-1 — double-charge guard: re-invoke when a live intent already exists
+# for the lead (prior mint crashed after send, before persisting the binding)
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_reinvoke_with_live_intent_refuses_second_mint(isolated_state):
+    """S1-1: a crash between the customer-facing send and the lead-binding
+    persist leaves a non-terminal intent under originating_message_id
+    'catering_deposit_<lead_id>' while the lead stays unbound. Re-invoking must
+    REFUSE — audit + P1 + non-zero exit — instead of minting a SECOND, different
+    payment link (the double-charge). No new cart/order/intent may be created."""
+    _write_config(isolated_state["config_path"])
+    lead_id = _write_lead(isolated_state["leads_path"])  # L0007, unbound
+
+    # Seed the live intent left by the crashed prior run.
+    intents_path = isolated_state["commerce_state"] / "payment_intents.json"
+    intents_path.write_text(json.dumps({"intents": [{
+        "intent_id": "CPI00001",
+        "order_id": "CO00001",
+        "originating_message_id": f"catering_deposit_{lead_id}",
+        "amount_cents": 15000,
+        "currency": "USD",
+        "provider": "placeholder",
+        "checkout_url": "https://pay.example/CO00001",
+        "status": "sent",
+        "created_at": TS.isoformat(),
+        "updated_at": TS.isoformat(),
+    }]}, indent=2), encoding="utf-8")
+
+    # NOTE (adversarial-verify residual #1): this seed leaves orders.json empty,
+    # so in the guard-REMOVED counterfactual mint's order_id idempotency would
+    # coincidentally return the existing CPI00001 (a fresh cart regenerates
+    # CO00001) — making the `..._minted not in types` / len==1 assertions
+    # non-distinguishing on removal. The test is STILL a valid regression test
+    # (removal flips returncode 2→0 and emits commerce_payment_link_attempted).
+    # To exercise the TRUE production double-charge path (fresh order_id CO00002
+    # escaping mint idempotency → a real second intent), seed orders.json with
+    # CO00001 — deferred to Linux CI where the nested CommerceOrder shape runs.
+    result = _run_script(isolated_state["env"], lead_id)
+
+    # Refused with EXIT_INVALID_INPUT (2), not a silent success.
+    assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+
+    rows = _read_audit_rows(isolated_state["log_path"])
+    types = [r["type"] for r in rows]
+    deposit_failed = next(r for r in rows if r["type"] == "catering_deposit_link_failed")
+    assert deposit_failed["reason"] == "reinvoke_live_intent_exists"
+    assert deposit_failed["commerce_payment_intent_id"] == "CPI00001"
+    # Did NOT mint or attempt a second intent.
+    assert "commerce_payment_intent_minted" not in types
+    assert "commerce_payment_link_attempted" not in types
+
+    # Exactly the one seeded intent remains, still 'sent'.
+    intents = json.loads(intents_path.read_text(encoding="utf-8"))["intents"]
+    assert len(intents) == 1
+    assert intents[0]["intent_id"] == "CPI00001"
+    assert intents[0]["status"] == "sent"
+
+    # No new cart/order created by the refused run.
+    carts_path = isolated_state["commerce_state"] / "carts.json"
+    orders_path = isolated_state["commerce_state"] / "orders.json"
+    if carts_path.exists():
+        assert json.loads(carts_path.read_text(encoding="utf-8")).get("carts", []) == []
+    if orders_path.exists():
+        assert json.loads(orders_path.read_text(encoding="utf-8")).get("orders", []) == []
+
+    # Lead remains unbound (guard fired before any binding).
+    leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
+    assert leads["leads"][0].get("deposit_payment_intent_id", "") == ""
