@@ -150,6 +150,30 @@ def _notify_owner_best_effort(priority: int, title: str, body: str) -> None:
         )
 
 
+def _find_live_intent_for_lead(intent_state_path: Path, lead_id: str):
+    """S1-1 double-charge guard support. Return a non-terminal payment intent
+    minted for this lead under the deterministic originating_message_id, or None.
+
+    The mint (catering-mint-deposit) and the lead-binding persist share one
+    FileLock, so `originating_message_id == catering_deposit_<lead_id>` on a
+    non-terminal intent while the lead is UNBOUND is the only committed trace of
+    a crash between the customer-facing send and the binding persist. Best-effort:
+    on any read error, return None (the caller then proceeds as today — we never
+    convert a read glitch into a hard block)."""
+    try:
+        store = commerce_payment_link.load_intent_store(intent_state_path)
+    except Exception as e:  # noqa: BLE001 — advisory guard, never fail-hard on read
+        sys.stderr.write(f"WARN: _find_live_intent_for_lead read failed: {e}\n")
+        return None
+    origin = f"catering_deposit_{lead_id}"
+    return next(
+        (i for i in store.intents
+         if i.originating_message_id == origin
+         and i.status not in {"voided", "refunded", "chargeback"}),
+        None,
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--lead-id", required=True, help="catering lead ID (e.g. L0007)")
@@ -184,6 +208,40 @@ def main() -> int:
         if lead.deposit_payment_intent_id:
             print(json.dumps({"lead_id": lead.lead_id, "noop": "already_minted"}))
             return EXIT_OK
+
+        # S1-1 double-charge guard. We only reach here with the lead UNBOUND
+        # (deposit_payment_intent_id falsy). If a non-terminal intent already
+        # exists for this lead's deterministic originating_message_id, a prior
+        # mint crashed AFTER minting/sending the link but BEFORE persisting the
+        # binding. Minting again would build a fresh cart -> fresh order -> fresh
+        # intent -> a SECOND, different payment link (double-charge once a live
+        # provider is configured). Fail closed: refuse, audit, P1-alert, exit
+        # non-zero. apply-catering-owner-decision logs the non-zero rc and never
+        # rolls back the quote-send. (Full auto-resend recovery is deferred to
+        # the slice-3 provider PR — see tasks/audit-remediation-2026-07-plan.md.)
+        recovered = _find_live_intent_for_lead(COMMERCE_INTENTS_PATH, lead.lead_id)
+        if recovered is not None:
+            _emit_deposit_link_failed(
+                lead_id=lead.lead_id, reason="reinvoke_live_intent_exists",
+                detail=(f"live intent {recovered.intent_id} status={recovered.status}; "
+                        f"lead unbound; refusing 2nd mint (double-charge guard)"),
+                commerce_order_id=recovered.order_id,
+                commerce_payment_intent_id=recovered.intent_id,
+            )
+            _notify_owner_best_effort(
+                priority=1,
+                title=f"Catering deposit re-invoke blocked (lead {lead.lead_id})",
+                body=(f"Live intent {recovered.intent_id} (order {recovered.order_id}, "
+                      f"status {recovered.status}) exists for lead {lead.lead_id} but the "
+                      f"lead is unbound — a prior mint likely crashed before persisting the "
+                      f"binding. Refusing to send a 2nd deposit link (double-charge guard). "
+                      f"Reconcile: bind the lead to {recovered.intent_id} or void it."),
+            )
+            print(json.dumps({"lead_id": lead.lead_id,
+                              "refused": "reinvoke_live_intent_exists",
+                              "intent_id": recovered.intent_id,
+                              "order_id": recovered.order_id}))
+            return EXIT_INVALID_INPUT
 
         if not _should_mint_deposit(cfg, lead):
             # Not an error — just doesn't apply (threshold not met, etc.)

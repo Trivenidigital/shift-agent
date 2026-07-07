@@ -5955,6 +5955,10 @@ class CateringDepositLinkFailed(_BaseEntry):
         "intent_mint_failed",
         "bridge_send_failed",
         "subprocess_timeout",
+        # S1-1 double-charge guard: a re-invocation found a non-terminal intent
+        # already minted for this lead while the lead was still unbound (prior
+        # mint crashed before persisting the binding); refused a 2nd mint.
+        "reinvoke_live_intent_exists",
     ]
     detail: str = Field(default="", max_length=500)
     commerce_order_id: str = Field(default="", max_length=40)

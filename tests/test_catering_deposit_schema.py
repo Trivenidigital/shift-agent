@@ -200,6 +200,7 @@ def test_catering_deposit_link_failed_round_trip_all_reasons():
         "intent_mint_failed",
         "bridge_send_failed",
         "subprocess_timeout",
+        "reinvoke_live_intent_exists",
     )
     for reason in reasons:
         obj = CateringDepositLinkFailed(
