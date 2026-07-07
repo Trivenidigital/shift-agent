@@ -1,0 +1,53 @@
+# Flyer extended CI — audit finding S2-11 (initial curated expansion).
+#
+# send-path-ci excludes ALL test_flyer* (no PIL); flyer-premium-ci gates only
+# the premium-poster blast radius. That left the tests covering the flyer
+# DELIVERY / recovery / kill-switch / proactive-routing surfaces with no
+# blocking gate — a regression there (e.g. the S2-9 kill-switch fail-open or
+# the S2-11 manual_queue misroute) could merge green.
+#
+# This job gates a CURATED, deterministic subset (unit-style, no network / no
+# real-model / no golden-scenario harness). It is an initial down-payment, NOT
+# the full 93-file flyer suite: heavier suites (golden_scenarios_real_model,
+# autonomous_train, incident_replay, …) need external resources and are a
+# separate triage. Expand this list as suites are confirmed CI-clean.
+name: flyer-extended-ci
+
+on:
+  pull_request:
+    paths:
+      - "src/agents/flyer/**"
+      - "src/plugins/cf-router/**"
+      - "tests/test_flyer_manual_queue*.py"
+      - "tests/test_flyer_generate_concepts.py"
+      - "tests/test_flyer_scripts_static.py"
+      - "tests/test_flyer_recovery*.py"
+      - ".github/workflows/flyer-extended-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/agents/flyer/**"
+      - ".github/workflows/flyer-extended-ci.yml"
+
+jobs:
+  flyer-extended-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Install deps (Hermes-venv parity: pydantic + pyyaml + pillow)"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pydantic pyyaml pytest pillow
+      - name: "Flyer delivery / recovery / kill-switch / routing suites"
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/test_flyer_manual_queue.py \
+            tests/test_flyer_manual_queue_cli.py \
+            tests/test_flyer_generate_concepts.py \
+            tests/test_flyer_scripts_static.py \
+            tests/test_flyer_recovery.py \
+            tests/test_flyer_recovery_watchdog.py
