@@ -1,0 +1,11 @@
+[Unit]
+Description=Corrupt-state quarantine watchdog — run every 15 min (audit S2-8)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=check-corrupt-state.service
+
+[Install]
+WantedBy=timers.target

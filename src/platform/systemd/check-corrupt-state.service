@@ -1,0 +1,9 @@
+[Unit]
+Description=Corrupt-state quarantine watchdog — alert on safe_io *.corrupt-* artifacts (audit S2-8)
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+ExecStart=/usr/local/bin/check-corrupt-state
