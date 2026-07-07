@@ -1,0 +1,21 @@
+{
+  "topic": "audit-remediation-2026-07",
+  "task_text": "audit-remediation-2026-07 — harden approval-code chokepoint (unify generate_unique_code), audit-log FileLock coverage, corrupt-state quarantine alert, flyer integrated kill-switch permissive parse, recovery send_uncertain idempotency, shift sick-call date-parse crash guard, update-proposal-status audit lock gap, python-jose floor bump, flyer CI broadening",
+  "completed_at": "2026-07-07T00:00:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 0,
+  "hermes_step_count": 0,
+  "files_to_read_first": [
+    "src/platform/safe_io.py",
+    "src/agents/shift/scripts/create-proposal",
+    "src/agents/catering/scripts/parse-menu-photo",
+    "src/agents/catering/scripts/create-catering-lead",
+    "src/agents/expense_bookkeeper/scripts/extract-receipt",
+    "src/platform/commerce/audit.py",
+    "src/agents/flyer/account.py",
+    "src/agents/flyer/manual_queue.py",
+    "tests/test_catering_expiry_stale_codes.py",
+    "tests/test_safe_io.py",
+    "web/backend/pyproject.toml"
+  ]
+}

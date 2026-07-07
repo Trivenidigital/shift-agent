@@ -265,7 +265,7 @@ def _collect_active_codes(store: ExpenseLeadStore) -> set[str]:
             if st == "ok":
                 for cl in cs.leads:
                     if cl.owner_approval_code and cl.status not in (
-                        "CLOSED", "OWNER_REJECTED", "STALE",
+                        "CLOSED", "OWNER_REJECTED", "STALE", "NOT_CATERING",
                     ):
                         codes.add(cl.owner_approval_code)
         except Exception:
@@ -283,10 +283,15 @@ def _collect_active_codes(store: ExpenseLeadStore) -> set[str]:
     if PENDING_PATH.exists():
         try:
             raw = json.loads(PENDING_PATH.read_text())
-            for prop in raw.get("proposals", []):
-                code = prop.get("code")
-                if code:
-                    codes.add(code)
+            # pending.json stores proposals as an OBJECT keyed by id
+            # (dict[str,Proposal]); iterating the mapping directly yields id
+            # keys (strings), so .get("code") raised and this branch silently
+            # collected NOTHING — shift codes were never actually excluded.
+            proposals = raw.get("proposals", {})
+            iterable = proposals.values() if isinstance(proposals, dict) else proposals
+            for prop in iterable:
+                if isinstance(prop, dict) and prop.get("code"):
+                    codes.add(prop["code"])
         except Exception:
             pass
     return codes

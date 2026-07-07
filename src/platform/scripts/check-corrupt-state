@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""check-corrupt-state — S2-8 corrupt-state quarantine watchdog.
+
+safe_io.safe_load_json renames a corrupt JSON state file to
+`<name>.corrupt-<epoch>` and returns a default, so the owning agent fails
+closed on that run — but nothing alerts the operator that a (possibly
+money-bearing) state file was quarantined, and the NEXT run silently starts
+from an empty store. This oneshot timer globs the state root for `*.corrupt-*`
+artifacts and fires a P1 owner alert once per NEW artifact (deduped via a
+seen-file), so a silent quarantine cannot go unnoticed.
+
+Caller-agnostic backstop (audit S2-8, Option B): catches quarantines from
+EVERY caller — including best-effort advisory scans that never reach
+assert_load_status_clean — without adding a subprocess side-effect to the hot
+safe_load_json read primitive.
+
+Exit is always 0: this is a monitor, not a gate. A new quarantine is surfaced
+via the P1 alert + stdout summary, not via exit code, so the timer stays green.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+# safe_io quarantines as `<name>.corrupt-<int(time.time())>` — match that exact
+# shape (trailing `.corrupt-<digits>`) rather than a bare `.corrupt-` substring,
+# so the watchdog's own `.corrupt-state-seen.json` bookkeeping file (and any
+# unrelated file merely containing the word) is NOT self-detected as a quarantine.
+_CORRUPT_ARTIFACT_RE = re.compile(r"\.corrupt-\d+$")
+
+
+def _add_import_roots() -> None:
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[1],  # .../src/platform when run from staging or checkout
+        Path("/opt/shift-agent"),
+    ]
+    try:
+        candidates.append(here.parents[3] / "src" / "platform")
+    except IndexError:
+        pass
+    roots = []
+    for candidate in candidates:
+        s = str(candidate)
+        if candidate.exists() and s not in sys.path and s not in roots:
+            roots.append(s)
+    sys.path[:0] = roots
+
+
+_add_import_roots()
+
+from safe_io import notify_owner_with_fallback, atomic_write_json  # noqa: E402
+
+DEFAULT_STATE_ROOT = Path("/opt/shift-agent/state")
+DEFAULT_SEEN_FILE = Path("/opt/shift-agent/state/.corrupt-state-seen.json")
+
+
+def _load_seen(seen_file: Path) -> set[str]:
+    try:
+        raw = json.loads(seen_file.read_text(encoding="utf-8"))
+        if isinstance(raw, list):
+            return {str(x) for x in raw}
+    except Exception:
+        pass
+    return set()
+
+
+def scan(state_root: Path, seen_file: Path, *, dry_run: bool = False) -> dict:
+    """Glob `state_root` for `*.corrupt-*` artifacts and alert once per NEW one.
+
+    Returns a summary dict {found, new, alerted, dry_run}. New artifacts are
+    recorded in the seen-file so each is alerted exactly once. The seen-file
+    itself never matches (it has no `.corrupt-` in its name)."""
+    if not state_root.exists():
+        return {"found": [], "new": [], "alerted": [], "dry_run": dry_run}
+
+    seen = _load_seen(seen_file)
+    found = sorted(
+        str(p) for p in state_root.rglob("*")
+        if _CORRUPT_ARTIFACT_RE.search(p.name) and p.is_file()
+    )
+    new = [p for p in found if p not in seen]
+
+    alerted: list[str] = []
+    for path in new:
+        if not dry_run:
+            notify_owner_with_fallback(
+                title="Corrupt state file quarantined",
+                message=(
+                    f"safe_io quarantined a corrupt state file: {path}. The owning "
+                    f"agent fell back to an empty store on that run — verify potential "
+                    f"data loss and restore from backup if needed."
+                ),
+                priority=1,
+                source="check-corrupt-state",
+            )
+        alerted.append(path)
+
+    if new and not dry_run:
+        # Persist ALL currently-found artifacts (union with prior seen) so each
+        # is alerted exactly once, even across artifacts the operator hasn't
+        # cleaned up yet.
+        atomic_write_json(seen_file, sorted(set(found) | seen))
+
+    return {"found": found, "new": new, "alerted": alerted, "dry_run": dry_run}
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Alert (P1) once per quarantined *.corrupt-* state file."
+    )
+    ap.add_argument("--state-root", default=str(DEFAULT_STATE_ROOT))
+    ap.add_argument("--seen-file", default=str(DEFAULT_SEEN_FILE))
+    ap.add_argument("--dry-run", action="store_true",
+                    help="detect + report but do not alert or update the seen-file")
+    args = ap.parse_args(argv)
+
+    summary = scan(Path(args.state_root), Path(args.seen_file), dry_run=args.dry_run)
+    print(json.dumps(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

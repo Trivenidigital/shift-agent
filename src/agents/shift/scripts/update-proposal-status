@@ -177,18 +177,23 @@ def main():
         store.proposals[args.proposal_id] = updated
         dump_model(PENDING_PATH, store)
 
-    # Log the transition
-    entry = ProposalStatusChange(
-        type="proposal_status_change",
-        ts=now,
-        proposal_id=args.proposal_id,
-        from_status=from_status,
-        to_status=args.new_status,
-        cause=args.cause,
-        actor=args.actor,
-    )
-    with FileLock(LOG_LOCK):
-        ndjson_append(LOG_PATH, TypeAdapter(ProposalStatusChange).dump_json(entry).decode())
+        # Log the transition INSIDE the PENDING_LOCK block: emitting the audit
+        # row after the lock released left a crash window where a status change
+        # persisted with no decisions.log row (orphaned transition invisible to
+        # the routing-reliability monitor). create-proposal already nests its
+        # append this way; LOG_LOCK is a distinct lock file, so nesting under
+        # PENDING_LOCK is deadlock-free.
+        entry = ProposalStatusChange(
+            type="proposal_status_change",
+            ts=now,
+            proposal_id=args.proposal_id,
+            from_status=from_status,
+            to_status=args.new_status,
+            cause=args.cause,
+            actor=args.actor,
+        )
+        with FileLock(LOG_LOCK):
+            ndjson_append(LOG_PATH, TypeAdapter(ProposalStatusChange).dump_json(entry).decode())
 
     print(f"OK: {args.proposal_id}: {from_status} → {args.new_status}")
     return EXIT_OK
