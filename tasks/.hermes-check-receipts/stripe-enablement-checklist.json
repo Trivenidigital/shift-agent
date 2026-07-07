@@ -1,0 +1,15 @@
+{
+  "topic": "stripe-enablement-checklist",
+  "task_text": "stripe-enablement-checklist — deploy-time safety gates that must be satisfied before enabling any live payment provider (cfg.commerce.provider=stripe): S1-1 guard deployed, S1-1 full auto-resend recovery landed, S2-14 approval-code/deposit-link TTL driver confirmed to exist, S2-12 install.sh SHA-pinning on provisioning PR",
+  "completed_at": "2026-07-07T04:00:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 0,
+  "hermes_step_count": 0,
+  "files_to_read_first": [
+    "src/agents/catering/scripts/catering-mint-deposit",
+    "tasks/commerce-slice2-catering-deposit-followup-backlog.md",
+    "tasks/commerce-slice1-followup-backlog.md",
+    "docs/fleet-provisioning.md",
+    "src/agents/shift/scripts/shift-agent-deploy.sh"
+  ]
+}
