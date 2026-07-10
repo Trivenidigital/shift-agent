@@ -302,6 +302,13 @@ class LimitsConfig(BaseModel):
     # existing config.yaml files (which omit these) stay valid under extra="forbid".
     no_response_sweep_enabled: bool = False
     candidate_response_ttl_minutes: int = 30
+    # BL-SHIFT-04 (owner-experience review): the same sweep also expires
+    # awaiting_owner_approval proposals older than pending_proposal_ttl_hours to
+    # `expired` (a LEGAL, terminal transition) and alerts the owner — making the
+    # card's "expires 4h after creation" promise true instead of leaving unapproved
+    # proposals to sit forever unseen. Ships OFF; operator enables per-customer after
+    # review. Additive default keeps pre-existing config.yaml valid under extra="forbid".
+    owner_approval_expiry_enabled: bool = False
 
 
 class AlertingConfig(BaseModel):

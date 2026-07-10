@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""shift-agent-proposal-sweep — no-response escalation sweep (owner-experience review 2026-07-10).
+"""shift-agent-proposal-sweep — proposal-lifecycle escalation sweep (owner-experience review 2026-07-10).
 
-Finds `sent` coverage proposals whose candidate hasn't replied within
-limits.candidate_response_ttl_minutes, transitions each to `no_response_timeout` via the existing
-`update-proposal-status` chokepoint (--actor timer), then alerts the owner that the shift is still
-uncovered. Closes the silent-uncovered-shift gap: a `sent` proposal that never gets a reply
-otherwise sits forever with no escalation, while the owner was told "I'll let you know when they
-respond."
+Two independently-gated escalations, both owner-alert + a single LEGAL, terminal state transition:
 
-GATED: no-op unless limits.no_response_sweep_enabled is true (ships OFF; the operator enables it
+  1. No-response (limits.no_response_sweep_enabled): `sent` proposals whose candidate hasn't replied
+     within limits.candidate_response_ttl_minutes → `no_response_timeout` + alert. Closes the
+     silent-uncovered-shift gap (the owner was told "I'll let you know when they respond").
+  2. Owner-approval expiry (limits.owner_approval_expiry_enabled, BL-SHIFT-04):
+     `awaiting_owner_approval` proposals older than limits.pending_proposal_ttl_hours → `expired`
+     + alert. Makes the card's "expires 4h after creation" promise true instead of leaving
+     unapproved proposals to sit forever.
+
+Both transition via the existing `update-proposal-status` chokepoint (--actor timer).
+
+GATED: no-op unless at least one of the two flags is true (both ship OFF; the operator enables each
 per-customer after review). Owner-alert + a single LEGAL state transition only — it never messages
 staff, never changes coverage selection, never touches money.
 
@@ -27,7 +32,10 @@ from pathlib import Path
 sys.path.insert(0, "/opt/shift-agent")
 from schemas import Config, PendingStore  # noqa: E402
 from safe_io import load_model, customer_now, FileLock  # noqa: E402
-from proposal_sweep import find_stale_sent_proposals  # noqa: E402
+from proposal_sweep import (  # noqa: E402
+    find_stale_sent_proposals,
+    find_expired_awaiting_proposals,
+)
 import yaml  # noqa: E402
 
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
@@ -77,6 +85,43 @@ def _sweep_one(pid: str, prop, ttl: int) -> None:
         _log(f"no_response_alert_delivery_failed proposal={pid} rc={arc}")
 
 
+def _expire_one(pid: str, prop, ttl_hours: int) -> None:
+    """Transition one over-age `awaiting_owner_approval` proposal to `expired` + alert
+    the owner (BL-SHIFT-04).
+
+    Transition-first, same discipline as _sweep_one: an owner who approved/denied/cancelled
+    between the snapshot and now yields an illegal transition (rc 9) → skip, no alert. `expired`
+    is terminal, so this fires at most once per proposal (no alert-spam across sweep cycles).
+    """
+    rc = subprocess.run(
+        [UPDATE_STATUS, pid, "expired",
+         "--cause", "owner_approval_ttl", "--actor", "timer"],
+        capture_output=True, text=True,
+    ).returncode
+    if rc == 9:
+        _log(f"proposal_sweep: {pid} no longer 'awaiting_owner_approval' (rc=9); skipping")
+        return
+    if rc != 0:
+        _log(f"proposal_sweep: {pid} expire transition failed rc={rc}; not alerting")
+        return
+
+    code = getattr(prop, "code", None) or pid
+    msg = (
+        f"Proposal {code} for the {prop.absent_role} shift on {prop.absent_date} "
+        f"({prop.absent_shift}) expired after {ttl_hours}h with no approval. If you still "
+        f"need coverage for it, start a new request."
+    )
+    # §12b: dispatched/delivered structured logs around the alert (traceable in journalctl).
+    _log(f"owner_approval_expiry_alert_dispatched proposal={pid} code={code!r}")
+    arc = subprocess.run(
+        [NOTIFY_OWNER, "--title", "Proposal expired", "--priority", "1", msg],
+    ).returncode
+    if arc == 0:
+        _log(f"owner_approval_expiry_alert_delivered proposal={pid}")
+    else:
+        _log(f"owner_approval_expiry_alert_delivery_failed proposal={pid} rc={arc}")
+
+
 def main() -> int:
     try:
         with CONFIG_PATH.open() as f:
@@ -85,11 +130,14 @@ def main() -> int:
         _log(f"proposal_sweep: config load failed: {e}")
         return 0  # never fail the timer
 
-    if not cfg.limits.no_response_sweep_enabled:
-        return 0  # dormant — operator has not enabled the sweep
+    no_resp_on = cfg.limits.no_response_sweep_enabled
+    expiry_on = cfg.limits.owner_approval_expiry_enabled
+    if not (no_resp_on or expiry_on):
+        return 0  # dormant — operator has enabled neither sweep
 
     try:
         ttl = cfg.limits.candidate_response_ttl_minutes
+        ttl_hours = cfg.limits.pending_proposal_ttl_hours
         now = customer_now(cfg.customer.timezone)
 
         # Brief locked snapshot, then RELEASE before subprocessing update-proposal-status (which
@@ -100,12 +148,20 @@ def main() -> int:
             _log(f"proposal_sweep: pending.json {status}; skipping this cycle")
             return 0
 
-        for pid in find_stale_sent_proposals(store.proposals, now, ttl):
-            try:
-                _sweep_one(pid, store.proposals[pid], ttl)
-            except Exception as e:
-                # One bad proposal must not skip the rest of the cycle.
-                _log(f"proposal_sweep: {pid} unexpected error: {e}")
+        if no_resp_on:
+            for pid in find_stale_sent_proposals(store.proposals, now, ttl):
+                try:
+                    _sweep_one(pid, store.proposals[pid], ttl)
+                except Exception as e:
+                    # One bad proposal must not skip the rest of the cycle.
+                    _log(f"proposal_sweep: {pid} unexpected error: {e}")
+
+        if expiry_on:
+            for pid in find_expired_awaiting_proposals(store.proposals, now, ttl_hours):
+                try:
+                    _expire_one(pid, store.proposals[pid], ttl_hours)
+                except Exception as e:
+                    _log(f"proposal_sweep: {pid} unexpected error: {e}")
     except Exception as e:
         _log(f"proposal_sweep: unexpected error, skipping this cycle: {e}")
 
