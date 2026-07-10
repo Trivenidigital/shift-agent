@@ -5,6 +5,9 @@ Description=Shift Agent — nightly GPG-encrypted backup
 Type=oneshot
 User=root
 Group=root
+# Pin CWD to / (root-owned): backup.sh runs `python3 -c "import yaml"`, which prepends CWD to
+# sys.path; a shift-agent-writable CWD could plant a yaml.py and hijack this ROOT process.
+WorkingDirectory=/
 EnvironmentFile=/opt/shift-agent/.env
 ExecStart=/usr/local/bin/shift-agent-backup.sh
 TimeoutStartSec=600
