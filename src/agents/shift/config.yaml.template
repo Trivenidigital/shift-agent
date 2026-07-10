@@ -28,6 +28,11 @@ limits:
   # to activate per-customer (takes effect within ~15 min; no redeploy, no restart).
   no_response_sweep_enabled: false
   candidate_response_ttl_minutes: 30
+  # Owner-approval expiry (BL-SHIFT-04): the same sweep expires proposals you haven't
+  # approved within pending_proposal_ttl_hours (above), marks them `expired`, and alerts
+  # you — making the card's "expires 4h after creation" line true. Ships OFF — set
+  # enabled: true to activate per-customer (takes effect within ~15 min; no redeploy).
+  owner_approval_expiry_enabled: false
 
 alerting:
   # REQUIRED — agent refuses to start if either is empty.
