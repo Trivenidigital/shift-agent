@@ -45,6 +45,22 @@ if [ "$SKIP_PYTEST" -eq 0 ]; then
     tail -1 /tmp/build-deploy-pytest.log
 fi
 
+# Skills-manifest lockfile check. tools/skills-manifest.txt must match a fresh build of
+# src/agents; otherwise a SKILL.md was edited without regenerating the manifest, which would
+# fail-close the deploy-time content gate (check-skills-manifest.sh). Fail here — on the dev
+# box, cheaply — rather than on the customer VPS. Not gated by --skip-pytest: it's a
+# consistency check on the artifact, not a test run.
+echo "=== checking skills-manifest is current ==="
+PYBIN="$(command -v python3 || command -v python || true)"
+if [ -z "$PYBIN" ]; then
+    echo "WARN: no python found — skipping skills-manifest lockfile check" >&2
+elif ! "$PYBIN" src/platform/skills_manifest.py build --check tools/skills-manifest.txt; then
+    echo "SKILLS-MANIFEST STALE — refusing to build tarball." >&2
+    echo "  A SKILL.md changed without regenerating the manifest." >&2
+    echo "  Fix: ./tools/check-skills-manifest.sh build   (then commit tools/skills-manifest.txt)" >&2
+    exit 1
+fi
+
 # Capture commit hash for traceability + as the deploy tag
 COMMIT_HASH=$(git rev-parse HEAD)
 echo "$COMMIT_HASH" > .commit-hash

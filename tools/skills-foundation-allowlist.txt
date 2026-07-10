@@ -1,0 +1,20 @@
+# skills-foundation-allowlist.txt
+# FLAT skill-dir names under /root/.hermes/skills that are legitimately present but NOT
+# shipped by us — so the between-deploy watchdog (shift-agent-skills-audit) must NOT flag
+# them as "extra".
+#
+# Namespaced bundled skills (productivity/maps, mcp/native-mcp, …) are ALREADY excluded by
+# construction: scan_live_skills() only considers dirs with a DIRECT SKILL.md, and bundled
+# skills live at <namespace>/<skill>/SKILL.md (the namespace dir has no direct SKILL.md).
+# So this file is only ever needed for a FLAT foundation skill, if any exist.
+#
+# STARTS EMPTY — deliberately. The exact on-box foundation-skill layout has NOT been
+# verified against a live VPS (that was outside the overnight-run envelope). The watchdog
+# is ALERT-ONLY, so a false "extra" here costs one throttled Pushover alert, never a broken
+# deploy. If the watchdog flags a flat dir that is a legitimate bundled Hermes skill:
+#   1. Confirm on-box:  ls -la /root/.hermes/skills/<name>/
+#   2. Add its exact name below, one per line.
+#   3. Redeploy.
+# See tasks/skills-integrity-guard-plan.md → "Foundation-allowlist residual".
+#
+# (one skill-dir name per line; blank lines and #-comments ignored)

@@ -1,0 +1,9 @@
+[Unit]
+Description=Shift Agent — skills-integrity audit (between-deploy SKILL.md drift watchdog)
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+ExecStart=/usr/local/bin/shift-agent-skills-audit.sh

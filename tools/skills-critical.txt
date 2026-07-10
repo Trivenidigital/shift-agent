@@ -1,0 +1,24 @@
+# skills-critical.txt
+# CRITICAL flat skill-dir names that must ALWAYS be present on-box. If one of these is
+# MISSING between deploys, the watchdog (shift-agent-skills-audit) alerts — deletion of a
+# core skill is the 2026-05-05 dispatcher-silence failure mode (Hermes falls back to
+# LLM-direct hallucination with no audit trail). Unlike optional/disabled agents, these are
+# never legitimately absent on a deployed VPS.
+#
+# This mirrors the UNCONDITIONAL portion of the required_skills list in
+# shift-agent-deploy.sh's presence gate (the core shift + catering dispatchers/handlers).
+# Conditionally-deployed skills (flyer_*, tier-2 stubs, expense_bookkeeper) are deliberately
+# NOT listed — their absence is normal on a VPS where that agent is disabled.
+#
+# (one skill-dir name per line; blank lines and #-comments ignored)
+dispatch_shift_agent
+handle_sick_call
+handle_owner_command
+handle_candidate_response
+roster_lookup
+catering_dispatcher
+parse_catering_inquiry
+handle_catering_owner_approval
+handle_catering_menu_finalize
+update_catering_menu
+apply_catering_menu_decision

@@ -49,6 +49,9 @@ install_artifacts() {
     if [ ! -f src/platform/scripts/check-hermes-config-yaml ]; then
         rm -f /usr/local/bin/check-hermes-config-yaml
     fi
+    if [ ! -f src/platform/scripts/check-skills-manifest ]; then
+        rm -f /usr/local/bin/check-skills-manifest
+    fi
     if [ ! -f src/platform/scripts/check-commerce-webhook-subscription ]; then
         rm -f /usr/local/bin/check-commerce-webhook-subscription
     fi
@@ -94,6 +97,19 @@ install_artifacts() {
         install -m 644 src/platform/check_hermes_config_yaml.py /opt/shift-agent/check_hermes_config_yaml.py
     else
         rm -f /opt/shift-agent/check_hermes_config_yaml.py
+    fi
+    # Skills-integrity manifest module. Powers the deploy-time content gate
+    # (check-skills-manifest.sh, called after the presence gate) AND the between-deploy
+    # watchdog (shift-agent-skills-audit.sh). Guarded for rollback compat with tarballs
+    # that predate this feature. NOTE: the manifest baseline (tools/skills-manifest.txt)
+    # and foundation allowlist are deliberately NOT installed separately — both the gate
+    # and the watchdog read them from the persistent deployed tree at
+    # $STAGING/tools/ (=/opt/shift-agent/staging-new/tools/). This honors R4-H-2
+    # (deploy.sh must not `install` from tools/) and keeps a single source of truth.
+    if [ -f src/platform/skills_manifest.py ]; then
+        install -m 644 src/platform/skills_manifest.py /opt/shift-agent/skills_manifest.py
+    else
+        rm -f /opt/shift-agent/skills_manifest.py
     fi
     # Commerce webhook-subscription deploy-gate module (slice-3.5). Imported by
     # the check-commerce-webhook-subscription wrapper. Guarded for rollback
@@ -751,6 +767,21 @@ PY
     fi
     echo "✓ deploy gate: all ${#required_skills[@]} required project SKILLs present"
 
+    # Deploy gate — SKILL.md CONTENT check (pairs with the presence gate above).
+    # Presence proves the SKILL.md file exists; this proves its CONTENT matches the shipped
+    # sha256 manifest (tools/skills-manifest.txt), closing the silent-mutation gap where a
+    # self-writing Hermes ("smarter memory edits" / curator consolidation) or an in-place
+    # rewrite of a deployed SKILL.md would pass presence unnoticed. Rollback-safe: the gate
+    # itself skips (WARN, not FAIL) if the manifest/helper predates this tarball.
+    if [ -f tools/check-skills-manifest.sh ]; then
+        if ! SKILLS_ROOT=/root/.hermes/skills bash tools/check-skills-manifest.sh verify; then
+            echo "FATAL: skills-manifest content gate failed — a deployed SKILL.md drifted from" >&2
+            echo "  the shipped manifest (self-writing Hermes / manual edit / stale manifest)." >&2
+            echo "  Inspect: ls -la /root/.hermes/skills/ ; diff against src/agents/*/skills/." >&2
+            return 1
+        fi
+    fi
+
     # Vision-auth smoke gate (D-015) — fail-closed.
     #
     # Background (2026-05-05): step-4 model swap left auxiliary.vision in a
@@ -790,6 +821,17 @@ PY
     systemctl enable --now shift-agent-tail-logger.timer 2>/dev/null || true
     systemctl enable --now shift-agent-health.timer 2>/dev/null || true
     systemctl enable --now shift-agent-health-watchdog.timer 2>/dev/null || true
+    # shift-agent-skills-audit.timer ships INSTALLED-BUT-DISABLED (unit installed by the
+    # wildcard at :208, but NOT enabled here). The D2 watchdog runs as shift-agent (same uid
+    # as the gateway it polices) and the on-box flat foundation-skill layout is unverified, so
+    # auto-enabling risks a false first alert (eroding §12b alert trust) and gives false
+    # assurance vs an adversarial gateway. The root-run D1 deploy CONTENT gate above still
+    # protects every deploy. Operator enables D2 after validating the allowlist on-box:
+    #   ls /root/.hermes/skills/  # confirm no legit FLAT bundled skills; if any, add them to
+    #   tools/skills-foundation-allowlist.txt and redeploy; then:
+    #   systemctl enable --now shift-agent-skills-audit.timer
+    # PR files a hardening follow-up to move D2 out of the shift-agent trust domain.
+    systemctl disable shift-agent-skills-audit.timer 2>/dev/null || true
     systemctl enable --now shift-agent-backup.timer 2>/dev/null || true
     systemctl enable --now shift-agent-fsck.timer 2>/dev/null || true
     systemctl enable --now send-daily-brief.timer 2>/dev/null || true
