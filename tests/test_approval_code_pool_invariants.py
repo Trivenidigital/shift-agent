@@ -94,14 +94,12 @@ def test_no_generator_mints_without_collision_check():
       generator reverts to a bare return) would still PASS. A behavioral test
       that seeds a store with a known code and asserts avoidance would be
       stronger but requires importing the fcntl-dependent scripts (Linux-only).
-    - This does NOT assert CROSS-pool coverage. S2-6 is only PARTIALLY closed:
-      parse-menu-photo (the zero-check defect) and extract-receipt (the
-      dict-iteration bug) now check the shared pool, but create-proposal and
-      create-catering-lead remain OWN-pool-only — they can still mint a code
-      colliding with an active code in a sibling pool (negligible ~N/28.6M
-      probability, accepted; full cross-pool unification is a deferred design
-      item pending the inline-vs-shared-helper decision). So a PASS here means
-      "each generator has some check," NOT "S2-6 fully closed."
+    - This test asserts PRESENCE of an own-pool check only. CROSS-pool coverage
+      (each generator also consulting sibling pools) is asserted separately by
+      test_all_generators_check_cross_pool below. As of BL-SEC-04/BL-SHIFT-13 all
+      four generators check the shared pool cross-agent (inline sibling scan per
+      parse-menu-photo:121 "each agent inlines its own generator"); this test
+      remains the own-pool-presence guard.
     """
     for path in GENERATOR_FILES:
         text = path.read_text(encoding="utf-8")
@@ -116,4 +114,35 @@ def test_no_generator_mints_without_collision_check():
         assert has_check, (
             f"{path.name} mints an approval code with no active-code collision "
             f"check — regression of audit finding S2-6"
+        )
+
+
+# Each generator must consult at least one SIBLING agent's #XXXXX store (cross-pool), not
+# just its own — the dispatcher disambiguates a cross-pool collision only by state-file
+# priority, so an own-pool-only generator can mint a code that silently shadows a sibling's.
+# BL-SEC-04 (catering) / BL-SHIFT-13 (shift) closed the last two own-pool-only generators.
+_CROSS_POOL_SIBLING_REF = {
+    "create-proposal": "catering-leads.json",   # shift must also consult catering leads
+    "create-catering-lead": "pending.json",      # catering must also consult shift proposals
+    "parse-menu-photo": "pending.json",          # catering must also consult shift proposals
+    "extract-receipt": "catering-leads.json",    # expense must also consult a sibling pool
+}
+
+
+def test_all_generators_check_cross_pool():
+    """Every generator must reference at least one SIBLING agent's code store, closing the
+    S2-6 cross-pool gap. A future edit that drops the sibling scan (reverting a generator to
+    own-pool-only) trips this test.
+
+    Text-grep proxy (like the sibling test above): asserts the sibling store PATH is referenced,
+    not that it is behaviorally consulted — a full behavioral test needs the fcntl-dependent
+    scripts (Linux-only). Still strong enough to catch a dropped sibling scan.
+    """
+    for path in GENERATOR_FILES:
+        text = path.read_text(encoding="utf-8")
+        sibling = _CROSS_POOL_SIBLING_REF[path.name]
+        assert sibling in text, (
+            f"{path.name} does not reference sibling pool store {sibling!r} — it can mint a "
+            f"code colliding with a live code in a sibling agent's pool (S2-6 cross-pool gap, "
+            f"BL-SEC-04/BL-SHIFT-13)"
         )
