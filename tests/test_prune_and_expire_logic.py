@@ -92,7 +92,21 @@ def _make_receipt(receipts_dir: Path, name: str, *, age_days: float) -> Path:
     return p
 
 
-def _run(tmp_path: Path):
+def _make_notify_stub(tmp_path: Path):
+    """A fake shift-agent-notify-owner executable that records its argv and exits 0."""
+    stub = tmp_path / "notify_stub"
+    calls = tmp_path / "notify_calls.txt"
+    stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"open({str(calls)!r}, 'a', encoding='utf-8').write(' '.join(sys.argv[1:]) + chr(10))\n",
+        encoding="utf-8",
+    )
+    os.chmod(stub, 0o755)
+    return stub, calls
+
+
+def _run(tmp_path: Path, notify_bin: str | None = None):
     receipts_dir = tmp_path / "receipts"
     wrapper = f"""
 import sys, pathlib
@@ -111,6 +125,10 @@ sys.exit(mod.main())
 """
     env = dict(os.environ)
     env["EXPENSE_RECEIPTS_DIR"] = str(receipts_dir)
+    # Keep the §12b alert's fallback log inside tmp (never touch /opt on CI).
+    env["SHIFT_AGENT_NOTIFY_FAILED_LOG"] = str(tmp_path / "notify-failed.log")
+    if notify_bin is not None:
+        env["SHIFT_AGENT_NOTIFY_OWNER_BIN"] = notify_bin
     return subprocess.run(
         [sys.executable, "-c", wrapper],
         capture_output=True, text=True, timeout=15, env=env,
@@ -291,3 +309,60 @@ def test_disabled_is_silent_noop(tmp_path):
     # disabled returns before the loop AND before the json.dumps count line
     assert r.stdout.strip() == ""
     assert _read_leads(tmp_path)["E0009"] == "AWAITING_OWNER_APPROVAL"
+
+
+# ── §12b owner alert on auto-expiry (BL-OBS-03) ───────────────────────────────
+
+def test_expired_awaiting_alerts_owner(tmp_path):
+    rec = tmp_path / "receipts"
+    _make_config(tmp_path, ttl_hours=1)
+    _write_leads(tmp_path, [_lead("E0020", "AWAITING_OWNER_APPROVAL", received_ago_hours=2,
+                                   receipts_dir=rec, image_name="e20.jpg", total=4599, vendor="costco")])
+    stub, calls = _make_notify_stub(tmp_path)
+    r = _run(tmp_path, notify_bin=str(stub))
+    assert r.returncode == 0, (r.stderr, r.stdout)
+    assert _read_leads(tmp_path)["E0020"] == "EXPIRED"
+    # §12b: dispatched log emitted + owner-notify actually invoked with the expense + amount.
+    assert "expense_expiry_alert_dispatched expense=E0020" in r.stderr
+    assert calls.exists(), "notify-owner should have been invoked for the auto-expired lead"
+    body = calls.read_text(encoding="utf-8")
+    assert "E0020" in body and "$45.99" in body
+
+
+def test_no_alert_when_nothing_expires(tmp_path):
+    rec = tmp_path / "receipts"
+    _make_config(tmp_path, ttl_hours=72)
+    _write_leads(tmp_path, [_lead("E0021", "AWAITING_OWNER_APPROVAL", received_ago_hours=1,
+                                   receipts_dir=rec, image_name="e21.jpg")])
+    stub, calls = _make_notify_stub(tmp_path)
+    r = _run(tmp_path, notify_bin=str(stub))
+    assert r.returncode == 0, (r.stderr, r.stdout)
+    assert not calls.exists(), "no expiry => no owner alert"
+
+
+def test_terminal_prune_does_not_alert(tmp_path):
+    # Pruning an already-terminal lead's receipt is NOT an operator-pending reversal → no alert.
+    rec = tmp_path / "receipts"
+    _make_config(tmp_path, retention_days=7)
+    _make_receipt(rec, "e22.jpg", age_days=10)
+    _write_leads(tmp_path, [_lead("E0022", "PUSHED", received_ago_hours=0,
+                                   receipts_dir=rec, image_name="e22.jpg", total=1000, vendor="x")])
+    stub, calls = _make_notify_stub(tmp_path)
+    r = _run(tmp_path, notify_bin=str(stub))
+    assert r.returncode == 0, (r.stderr, r.stdout)
+    assert _counts(r)["pruned"] == 1
+    assert not calls.exists(), "pruning a terminal lead's receipt must not alert the owner"
+
+
+def test_expiry_alert_failure_does_not_fail_prune(tmp_path):
+    # notify bin points at a nonexistent path → delivery fails, but the prune still succeeds
+    # (best-effort §12b) and the lead is still expired + audited.
+    rec = tmp_path / "receipts"
+    _make_config(tmp_path, ttl_hours=1)
+    _write_leads(tmp_path, [_lead("E0023", "AWAITING_OWNER_APPROVAL", received_ago_hours=2,
+                                   receipts_dir=rec, image_name="e23.jpg", total=500, vendor="y")])
+    r = _run(tmp_path, notify_bin=str(tmp_path / "does_not_exist"))
+    assert r.returncode == 0, (r.stderr, r.stdout)
+    assert _read_leads(tmp_path)["E0023"] == "EXPIRED"
+    assert _counts(r)["expired"] == 1
+    assert "expense_expiry_alert_delivery_failed expense=E0023" in r.stderr
