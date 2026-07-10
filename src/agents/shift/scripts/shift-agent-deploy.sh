@@ -98,18 +98,40 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/check_hermes_config_yaml.py
     fi
-    # Skills-integrity manifest module. Powers the deploy-time content gate
-    # (check-skills-manifest.sh, called after the presence gate) AND the between-deploy
-    # watchdog (shift-agent-skills-audit.sh). Guarded for rollback compat with tarballs
-    # that predate this feature. NOTE: the manifest baseline (tools/skills-manifest.txt)
-    # and foundation allowlist are deliberately NOT installed separately — both the gate
-    # and the watchdog read them from the persistent deployed tree at
-    # $STAGING/tools/ (=/opt/shift-agent/staging-new/tools/). This honors R4-H-2
-    # (deploy.sh must not `install` from tools/) and keeps a single source of truth.
+    # Skills-integrity manifest module. The /opt copy backs the D1 gate's CLI wrapper
+    # (check-skills-manifest, which _add_import_roots-imports it). Guarded for rollback.
     if [ -f src/platform/skills_manifest.py ]; then
         install -m 644 src/platform/skills_manifest.py /opt/shift-agent/skills_manifest.py
     else
         rm -f /opt/shift-agent/skills_manifest.py
+    fi
+    # D2 trust-domain hardening (PR #583 security follow-up): the ROOT-run watchdog reads its
+    # module + manifest + allowlist + critical-list ONLY from this root-owned dir. It is owned
+    # root:root (DAC) AND under /usr, which the gateway's ProtectSystem=strict makes read-only
+    # (MAC) — so a shift-agent-uid adversary cannot poison the checker or its inputs (closes the
+    # #583 env / throttle / manifest / checker-code poisoning bypasses). These are specific-file
+    # installs into a root-owned NON-bin dir; the refined R4-H-2 test allows this (it forbids
+    # only tools/* globs, tools/->/usr/local/bin, and the synthetic-retry-harness). Guarded.
+    install -d -m 755 /usr/local/share/shift-agent
+    if [ -f src/platform/skills_manifest.py ]; then
+        install -m 644 src/platform/skills_manifest.py /usr/local/share/shift-agent/skills_manifest.py
+    else
+        rm -f /usr/local/share/shift-agent/skills_manifest.py
+    fi
+    if [ -f tools/skills-manifest.txt ]; then
+        install -m 644 tools/skills-manifest.txt /usr/local/share/shift-agent/skills-manifest.txt
+    else
+        rm -f /usr/local/share/shift-agent/skills-manifest.txt
+    fi
+    if [ -f tools/skills-foundation-allowlist.txt ]; then
+        install -m 644 tools/skills-foundation-allowlist.txt /usr/local/share/shift-agent/skills-foundation-allowlist.txt
+    else
+        rm -f /usr/local/share/shift-agent/skills-foundation-allowlist.txt
+    fi
+    if [ -f tools/skills-critical.txt ]; then
+        install -m 644 tools/skills-critical.txt /usr/local/share/shift-agent/skills-critical.txt
+    else
+        rm -f /usr/local/share/shift-agent/skills-critical.txt
     fi
     # Commerce webhook-subscription deploy-gate module (slice-3.5). Imported by
     # the check-commerce-webhook-subscription wrapper. Guarded for rollback
@@ -822,15 +844,14 @@ PY
     systemctl enable --now shift-agent-health.timer 2>/dev/null || true
     systemctl enable --now shift-agent-health-watchdog.timer 2>/dev/null || true
     # shift-agent-skills-audit.timer ships INSTALLED-BUT-DISABLED (unit installed by the
-    # wildcard at :208, but NOT enabled here). The D2 watchdog runs as shift-agent (same uid
-    # as the gateway it polices) and the on-box flat foundation-skill layout is unverified, so
-    # auto-enabling risks a false first alert (eroding §12b alert trust) and gives false
-    # assurance vs an adversarial gateway. The root-run D1 deploy CONTENT gate above still
-    # protects every deploy. Operator enables D2 after validating the allowlist on-box:
+    # wildcard at :208, but NOT enabled here). The watchdog now runs as ROOT reading root-owned
+    # inputs (trust-domain hardening), so it IS adversary-resistant for DETECTION — but the
+    # on-box flat foundation-skill layout is still unverified, so auto-enabling risks a false
+    # first `extra` alert (eroding §12b alert trust). The root-run D1 deploy CONTENT gate above
+    # protects every deploy regardless. Operator enables D2 after validating the allowlist on-box:
     #   ls /root/.hermes/skills/  # confirm no legit FLAT bundled skills; if any, add them to
     #   tools/skills-foundation-allowlist.txt and redeploy; then:
     #   systemctl enable --now shift-agent-skills-audit.timer
-    # PR files a hardening follow-up to move D2 out of the shift-agent trust domain.
     systemctl disable shift-agent-skills-audit.timer 2>/dev/null || true
     systemctl enable --now shift-agent-backup.timer 2>/dev/null || true
     systemctl enable --now shift-agent-fsck.timer 2>/dev/null || true

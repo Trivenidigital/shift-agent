@@ -137,13 +137,26 @@ def test_canary_bulk_deploy_script_exists():
 
 
 def test_harness_not_in_deploy_install_globs():
-    """Per R4-H-2: tools/synthetic-retry-harness.py must NOT land at
-    /usr/local/bin/. Confirm install_artifacts in deploy.sh does NOT
-    glob tools/*."""
+    """Per R4-H-2: tools/synthetic-retry-harness.py must NOT land at /usr/local/bin/.
+    The actual risk is a `tools/*` GLOB install into /usr/local/bin sweeping the harness in.
+    Refined 2026-07-10 (skills-audit-root-hardening): SPECIFIC-file installs from tools/ into a
+    root-owned NON-bin dir (/usr/local/share/shift-agent, for the root-owned skills-integrity
+    manifest that the hardened D2 watchdog reads) are safe and allowed. So forbid the real leak
+    vectors instead of any tools/ mention:
+      (a) a `tools/*` glob in an install line,
+      (b) installing the synthetic-retry-harness,
+      (c) any install from tools/ into /usr/local/bin.
+    Strictly stronger on the harness-leak risk than the old blunt `"tools/" in line` check."""
     deploy_path = (Path(__file__).resolve().parent.parent / "src" / "agents"
                    / "shift" / "scripts" / "shift-agent-deploy.sh")
     text = deploy_path.read_text(encoding="utf-8")
-    # tools/* should not appear in any install line
     for line in text.splitlines():
-        if line.strip().startswith("install ") and "tools/" in line:
-            pytest.fail(f"deploy.sh installs from tools/: {line}")
+        s = line.strip()
+        if not s.startswith("install "):
+            continue
+        if "tools/*" in s:
+            pytest.fail(f"deploy.sh globs tools/* in an install line: {line}")
+        if "synthetic-retry-harness" in s:
+            pytest.fail(f"deploy.sh installs the synthetic-retry-harness: {line}")
+        if "tools/" in s and "/usr/local/bin" in s:
+            pytest.fail(f"deploy.sh installs from tools/ into /usr/local/bin: {line}")

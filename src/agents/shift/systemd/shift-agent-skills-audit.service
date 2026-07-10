@@ -3,7 +3,21 @@ Description=Shift Agent — skills-integrity audit (between-deploy SKILL.md drif
 
 [Service]
 Type=oneshot
-User=shift-agent
-Group=shift-agent
-EnvironmentFile=/opt/shift-agent/.env
+# Runs as ROOT — deliberately NOT shift-agent. The watchdog must not share the uid or
+# writable filesystem of the Hermes gateway it polices (hermes-gateway.service runs
+# User=shift-agent with ReadWritePaths=/opt/shift-agent /root/.hermes). Mirrors the
+# in-tree root-oneshot precedent shift-agent-backup.service.
+User=root
+Group=root
+# NO EnvironmentFile: /opt/shift-agent/.env is shift-agent-owned, so sourcing it would let a
+# compromised gateway inject config (e.g. SKILLS_MANIFEST_FILE=/dev/null). All security-critical
+# inputs are hardcoded root-owned paths in the script.
+# Root-owned throttle dir at /var/lib/shift-agent-skills-audit (outside the gateway's writable
+# paths); systemd creates it and exports $STATE_DIRECTORY.
+StateDirectory=shift-agent-skills-audit
+# Pin WorkingDirectory=/ (root-owned). The inline `python3 -c` helpers in the script prepend
+# CWD to sys.path; running from a shift-agent-writable dir (e.g. /opt/shift-agent) would let a
+# planted json.py shadow the stdlib import and hijack this ROOT process. / is root-owned, and
+# pinning it here prevents a future edit from silently reintroducing that risk.
+WorkingDirectory=/
 ExecStart=/usr/local/bin/shift-agent-skills-audit.sh
