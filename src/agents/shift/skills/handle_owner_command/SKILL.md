@@ -63,9 +63,11 @@ Read pending.json. For each non-terminal proposal, output:
 ```
 Sort by created_ts desc. If no non-terminal proposals, reply "No pending proposals."
 
-### 6. Kill: `KILL`
+### 6. Kill: `KILL CONFIRM`
 
-Invoke `/usr/local/bin/shift-agent-disable "owner_kill_command"`. Reply will be the kill confirmation (owner receives it via Pushover).
+Require the exact two-word command `KILL CONFIRM` (case-insensitive) — this guards against an accidental, autocorrected, or forwarded `KILL`.
+- On bare `KILL` (or `KILL` followed by anything other than `CONFIRM`): do NOT disable. Reply: "To stop the agent, reply `KILL CONFIRM` (two words). This prevents an accidental kill."
+- ONLY on `KILL CONFIRM`: invoke `/usr/local/bin/shift-agent-disable "owner_kill_command"`. Reply will be the kill confirmation (owner receives it via Pushover).
 
 ### 7. Anything else
 
@@ -75,7 +77,7 @@ Reply: "I understand these commands:
 • `RETRY #XXXXX` — retry a failed send
 • `CANCEL #XXXXX` — cancel a proposal
 • `STATUS` — list pending
-• `KILL` — disable the agent
+• `KILL CONFIRM` — disable the agent (two words, prevents an accidental kill)
 
 Unapproved proposals expire 4 hours after creation."
 

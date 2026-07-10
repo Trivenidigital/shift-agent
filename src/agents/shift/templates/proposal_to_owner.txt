@@ -12,4 +12,4 @@ Proposed message to {candidate_name}:
 > {rendered_coverage_message}
 
 Reply {code} to approve + send, or "DENY {code}" to reject.
-(Type STATUS for all pending, KILL to stop the agent.)
+(Type STATUS for all pending.)
