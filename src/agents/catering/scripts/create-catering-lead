@@ -192,8 +192,11 @@ def _format_menu_section(items: list[MenuItem], total: int, dietary_restrictions
         for it in by_cat[cat][:per_cat]:
             if shown >= PROPOSAL_MENU_ITEMS_CAP:
                 break
-            price = f" — ${it.price_usd:.0f}" if it.price_usd is not None else ""
-            lines.append(f"  - {it.name}{price}")
+            # BL-CATER-08: no per-item prices in the pre-approval sample menu.
+            # These are unapproved retail prices; the owner sets the real quote at
+            # finalize. Showing them pre-approval risks the customer anchoring on a
+            # number the owner never signed off on.
+            lines.append(f"  - {it.name}")
             shown += 1
     leftover = len(items) - shown
     if leftover > 0:

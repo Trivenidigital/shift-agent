@@ -589,6 +589,12 @@ class CateringConfig(BaseModel):
     enabled: bool = False  # default OFF — opt-in (offshore work pending integration)
     deposit_threshold_guests: int = Field(default=50, ge=1)
     deposit_pct: float = Field(default=0.25, ge=0.0, le=1.0)
+    # BL-CATER-03: refuse to mint a deposit when the quote implies an implausibly
+    # low per-guest spend (the unscaled-basket bug: a qty=1 sample basket ~$50 for
+    # a 200-guest event => $0.25/guest). Defense-in-depth behind the fail-closed
+    # payment-provider gate. Conservative default catches the bug without blocking
+    # legitimate budget catering (e.g. a $6/guest order). Operator-tunable per customer.
+    min_per_guest_usd: float = Field(default=3.0, ge=0.0)
     stale_after_hours: int = Field(default=14 * 24, ge=1)  # 14 days default
     # Per-customer pricing knobs land in v0.2 (would otherwise bloat config).
 

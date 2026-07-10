@@ -35,6 +35,12 @@ UNCONFIGURED_TEMPLATE_REPLY = (
 BRIDGE_PREFIX = "⚕ *Catering Agent*\n────────────\n"
 
 
+def _per_guest_usd(quote_total_usd: int, headcount: int) -> float:
+    """Dollars-per-guest implied by the quote. headcount must be > 0 — callers
+    guarantee this after the headcount/threshold checks in _should_mint_deposit."""
+    return quote_total_usd / headcount
+
+
 def _should_mint_deposit(cfg, lead) -> bool:
     """Threshold predicate per design §2 'Threshold logic'.
 
@@ -43,6 +49,7 @@ def _should_mint_deposit(cfg, lead) -> bool:
     - lead.extracted.headcount is set
     - headcount >= cfg.catering.deposit_threshold_guests (inclusive — Reviewer B MEDIUM-1)
     - lead.quote_total_usd is set and > 0
+    - per-guest spend is plausible (BL-CATER-03 — fail-closed unscaled-basket guard)
     - lead has not already been minted (idempotent skip via deposit_payment_intent_id)
     """
     if cfg.catering.deposit_pct <= 0:
@@ -52,6 +59,13 @@ def _should_mint_deposit(cfg, lead) -> bool:
     if lead.extracted.headcount < cfg.catering.deposit_threshold_guests:
         return False
     if lead.quote_total_usd is None or lead.quote_total_usd <= 0:
+        return False
+    # BL-CATER-03: per-guest plausibility floor. When the total was never scaled to
+    # the guest count (unscaled-basket bug), per-guest collapses toward cents; a wrong
+    # deposit is worse than a missed one, so refuse. The owner card surfaces the same
+    # warning so the owner can edit + re-finalize. headcount > 0 guaranteed above.
+    min_per_guest = getattr(cfg.catering, "min_per_guest_usd", 3.0)
+    if _per_guest_usd(lead.quote_total_usd, lead.extracted.headcount) < min_per_guest:
         return False
     if lead.deposit_payment_intent_id:
         return False

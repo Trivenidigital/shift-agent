@@ -220,11 +220,16 @@ def _render_owner_card(
     items_with_prices: list[tuple[str, int, int]],  # (name, qty, price_usd)
     server_total: int,
     price_drift: bool,
+    min_per_guest_usd: float | None = None,
 ) -> str:
     """Render owner card. Caller passes (name, qty, price) tuples — on FIRST
     finalize the prices are current-menu values; on REPLAY the caller passes
     the PERSISTED prices from target.selected_items (captured at first
     finalize-time). The card always reflects the canonical persisted state.
+
+    When min_per_guest_usd is set and the total implies an implausibly low
+    per-guest spend (BL-CATER-03 unscaled-basket bug), a warning is surfaced so
+    the owner edits before approving (mirrors the deposit-mint fail-closed guard).
     """
     template_path = TEMPLATE_DIR / "catering_finalized_menu_to_owner.txt"
     items_section = "\n".join(
@@ -237,6 +242,20 @@ def _render_owner_card(
         if price_drift else ""
     )
     extracted = lead.extracted
+    headcount_val = extracted.headcount if extracted else None
+    price_warning = ""
+    if (
+        min_per_guest_usd is not None
+        and headcount_val
+        and headcount_val > 0
+        and server_total > 0
+        and server_total / headcount_val < min_per_guest_usd
+    ):
+        price_warning = (
+            f"⚠ ${server_total} is only ${server_total / headcount_val:.2f}/guest for "
+            f"{headcount_val} guests — the menu may not be scaled to the headcount. "
+            f"Edit before approving.\n\n"
+        )
     fmt_fields = {
         "lead_id": lead.lead_id,
         "approval_code": lead.owner_approval_code or "#?????",
@@ -250,6 +269,7 @@ def _render_owner_card(
         "items_section": items_section,
         "quote_total_usd": server_total,
         "price_drift_note": drift_note,
+        "price_warning": price_warning,
     }
     if template_path.exists():
         try:
@@ -266,7 +286,8 @@ def _render_owner_card(
     # Inline fallback (mirrors create-catering-lead inline pattern)
     return (
         f"⚕ *Catering Agent*\n────────────\n"
-        f"Customer FINALIZED their menu — your approval needed\n\n"
+        f"Catering menu ready — your approval needed\n\n"
+        f"{price_warning}"
         f"Lead: {fmt_fields['lead_id']}    Code: {fmt_fields['approval_code']}\n"
         f"Customer: {fmt_fields['customer_name']} ({fmt_fields['customer_phone']})\n"
         f"Event: {fmt_fields['event_date']} at {fmt_fields['event_time']} — "
@@ -608,6 +629,7 @@ def main() -> int:
         card_total = target.quote_total_usd if replay else server_total
         card_text = _render_owner_card(
             target, persisted_items_with_prices, card_total, price_drift,
+            min_per_guest_usd=cfg.catering.min_per_guest_usd,
         )
         ok, mid_or_err = _bridge_post(cfg.owner.self_chat_jid, card_text)
         if ok:
