@@ -280,6 +280,7 @@ def _aggregate_today(cfg: Config) -> tuple[dict, bool]:
         "shifts_today": [],
         "pending_active_count": 0,
         "pending_send_failed_count": 0,
+        "send_failed_codes": [],  # BL-SHIFT-16: surface the actual codes so the owner can RETRY
     }
     degraded = False
 
@@ -301,11 +302,15 @@ def _aggregate_today(cfg: Config) -> tuple[dict, bool]:
     try:
         pending, status = load_model(PENDING_PATH, PendingStore)
         if status == "ok":
-            for p in pending.proposals:
+            # PendingStore.proposals is dict[str, Proposal]; iterate VALUES (iterating the
+            # dict yields id keys, so `p.status` on a str silently degraded the whole pending
+            # aggregation for any non-empty store — latent bug, also blocks BL-SHIFT-16).
+            for p in pending.proposals.values():
                 if p.status in ("awaiting_owner_approval", "approved", "reconciling", "sent"):
                     out["pending_active_count"] += 1
                 if p.status == "send_failed":
                     out["pending_send_failed_count"] += 1
+                    out["send_failed_codes"].append(p.code)
         elif status == "missing" or status == "empty":
             pass  # zero counts is correct
         else:
@@ -391,14 +396,27 @@ def _render_today(today: dict) -> str:
     return ", ".join(parts) + "."
 
 
-def _render_alerts(yesterday: dict, today: dict) -> str:
+def _render_alerts(yesterday: dict, today: dict, no_response_enabled: bool = True) -> str:
     alerts = []
+    # BL-SHIFT-14: standing warning when the no-response escalation sweep is OFF, so the owner
+    # isn't falsely assuming unanswered coverage requests will auto-escalate. Enabling the flag
+    # (limits.no_response_sweep_enabled) silences this.
+    if not no_response_enabled:
+        alerts.append(
+            "⚠ no-response escalation is OFF — unanswered coverage requests won't auto-escalate "
+            "(enable limits.no_response_sweep_enabled)"
+        )
     if yesterday["outbound_send_failed"] > 0:
         alerts.append(f"{yesterday['outbound_send_failed']} outbound send failed yesterday")
     if yesterday["invariant_violations"] > 0:
         alerts.append(f"{yesterday['invariant_violations']} invariant violation(s) yesterday")
     if today["pending_send_failed_count"] > 0:
-        alerts.append(f"{today['pending_send_failed_count']} proposal stuck in send_failed")
+        # BL-SHIFT-16: name the stuck proposals + the action, so the daily touchpoint is
+        # actionable rather than a bare count.
+        codes = ", ".join(today.get("send_failed_codes", []))
+        where = f" ({codes})" if codes else ""
+        n = today["pending_send_failed_count"]
+        alerts.append(f"{n} proposal(s) stuck in send_failed{where} — reply RETRY <code> to resend")
     if not alerts:
         return "Nothing — all green."
     return "; ".join(alerts) + "."
@@ -583,7 +601,9 @@ def _render_brief_text(
         "catchup_note": catchup_note,
         "yesterday_summary": _render_yesterday(yesterday_counts),
         "today_outlook": _render_today(today_data),
-        "alerts_summary": _render_alerts(yesterday_counts, today_data),
+        "alerts_summary": _render_alerts(
+            yesterday_counts, today_data, cfg.limits.no_response_sweep_enabled
+        ),
         "birthdays_block": birthdays_block,
         "catering_block": catering_block,
     }
