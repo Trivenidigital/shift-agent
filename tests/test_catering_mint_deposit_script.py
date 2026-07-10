@@ -479,13 +479,21 @@ def test_deposit_failure_does_NOT_roll_back_quote_send(isolated_state, monkeypat
 
 
 def test_below_minimum_deposit(isolated_state):
-    """$10 quote × 25% = $2.50 = 250 cents < minimum (500). Refuse + audit."""
+    """$400 quote × 1% = $4.00 = 400 cents < minimum (500). Refuse + audit.
+
+    Uses a low deposit_pct so the per-guest total ($4/guest at the default 100
+    guests) clears the BL-CATER-03 plausibility floor ($3) — otherwise
+    _should_mint_deposit would no-op first (threshold_not_met, rc 0) and the
+    below-minimum path would be unreachable. With deposit_pct=0.01 the quote is
+    plausibly-scaled yet the computed deposit still falls under the $5 minimum.
+    """
     _write_config(
         isolated_state["config_path"],
         checkout_url_template="https://pay/?o={order_id}",
+        deposit_pct=0.01,
         min_dep_cents=500,
     )
-    lead_id = _write_lead(isolated_state["leads_path"], quote_total_usd=10)
+    lead_id = _write_lead(isolated_state["leads_path"], quote_total_usd=400)
 
     result = _run_script(isolated_state["env"], lead_id)
     assert result.returncode == 2  # EXIT_INVALID_INPUT
