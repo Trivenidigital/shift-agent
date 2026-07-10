@@ -898,6 +898,13 @@ fi
 if [ -f /etc/systemd/system/flyer-source-edit-sla-watchdog-failure.service ]; then
     sd_verify_units+=( /etc/systemd/system/flyer-source-edit-sla-watchdog-failure.service )
 fi
+# No-response escalation sweep units (guarded: absent after a rollback below the sweep tarball).
+if [ -f /etc/systemd/system/shift-agent-proposal-sweep.service ]; then
+    sd_verify_units+=( /etc/systemd/system/shift-agent-proposal-sweep.service )
+fi
+if [ -f /etc/systemd/system/shift-agent-proposal-sweep.timer ]; then
+    sd_verify_units+=( /etc/systemd/system/shift-agent-proposal-sweep.timer )
+fi
 # Include Agent #21 prune timer if installed AND its venv is present.
 # systemd-analyze verify checks ExecStart paths exist at verify time
 # (independent of any ConditionPathIsExecutable directive); skip the unit

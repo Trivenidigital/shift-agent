@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""shift-agent-proposal-sweep — no-response escalation sweep (owner-experience review 2026-07-10).
+
+Finds `sent` coverage proposals whose candidate hasn't replied within
+limits.candidate_response_ttl_minutes, transitions each to `no_response_timeout` via the existing
+`update-proposal-status` chokepoint (--actor timer), then alerts the owner that the shift is still
+uncovered. Closes the silent-uncovered-shift gap: a `sent` proposal that never gets a reply
+otherwise sits forever with no escalation, while the owner was told "I'll let you know when they
+respond."
+
+GATED: no-op unless limits.no_response_sweep_enabled is true (ships OFF; the operator enables it
+per-customer after review). Owner-alert + a single LEGAL state transition only — it never messages
+staff, never changes coverage selection, never touches money.
+
+Run by shift-agent-proposal-sweep.timer every ~15 min. Idempotent: once a proposal leaves `sent` it
+is no longer selected, and update-proposal-status re-checks legality under lock, so a candidate who
+replies between our snapshot and the transition is skipped (illegal transition → rc 9). **Exit 0
+always** — a watchdog must not fail its timer; every error path is caught + logged to journald, and a
+failure on one proposal never skips the rest of the cycle.
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+from schemas import Config, PendingStore  # noqa: E402
+from safe_io import load_model, customer_now, FileLock  # noqa: E402
+from proposal_sweep import find_stale_sent_proposals  # noqa: E402
+import yaml  # noqa: E402
+
+CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
+PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
+PENDING_LOCK = Path("/opt/shift-agent/state/pending.json.lock")
+UPDATE_STATUS = "/usr/local/bin/update-proposal-status"
+NOTIFY_OWNER = "/usr/local/bin/shift-agent-notify-owner"
+
+
+def _log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def _sweep_one(pid: str, prop, ttl: int) -> None:
+    """Transition one stale `sent` proposal to no_response_timeout + alert the owner.
+
+    Transition-first (terminal + idempotent): a candidate who replied between the snapshot and
+    now yields an illegal transition (rc 9) → skip, no alert. Any other nonzero rc → skip, no
+    alert (never alert without a confirmed transition).
+    """
+    rc = subprocess.run(
+        [UPDATE_STATUS, pid, "no_response_timeout",
+         "--cause", "no_response_sweep", "--actor", "timer"],
+        capture_output=True, text=True,
+    ).returncode
+    if rc == 9:
+        _log(f"proposal_sweep: {pid} no longer 'sent' (rc=9); skipping")
+        return
+    if rc != 0:
+        _log(f"proposal_sweep: {pid} transition failed rc={rc}; not alerting")
+        return
+
+    candidate = getattr(prop, "candidate_name", None) or "The chosen replacement"
+    msg = (
+        f"{candidate} hasn't replied to the coverage request for the {prop.absent_role} "
+        f"shift on {prop.absent_date} ({prop.absent_shift}) in {ttl} min. That shift is "
+        f"still uncovered — please arrange coverage manually."
+    )
+    # §12b: dispatched/delivered structured logs around the alert (traceable in journalctl).
+    _log(f"no_response_alert_dispatched proposal={pid} candidate={candidate!r}")
+    arc = subprocess.run(
+        [NOTIFY_OWNER, "--title", "Coverage still needed", "--priority", "1", msg],
+    ).returncode
+    if arc == 0:
+        _log(f"no_response_alert_delivered proposal={pid}")
+    else:
+        _log(f"no_response_alert_delivery_failed proposal={pid} rc={arc}")
+
+
+def main() -> int:
+    try:
+        with CONFIG_PATH.open() as f:
+            cfg = Config.model_validate(yaml.safe_load(f))
+    except Exception as e:
+        _log(f"proposal_sweep: config load failed: {e}")
+        return 0  # never fail the timer
+
+    if not cfg.limits.no_response_sweep_enabled:
+        return 0  # dormant — operator has not enabled the sweep
+
+    try:
+        ttl = cfg.limits.candidate_response_ttl_minutes
+        now = customer_now(cfg.customer.timezone)
+
+        # Brief locked snapshot, then RELEASE before subprocessing update-proposal-status (which
+        # takes the same lock — holding it across the subprocess would deadlock).
+        with FileLock(PENDING_LOCK):
+            store, status = load_model(PENDING_PATH, PendingStore, default=PendingStore())
+        if status not in ("ok", "missing", "empty"):
+            _log(f"proposal_sweep: pending.json {status}; skipping this cycle")
+            return 0
+
+        for pid in find_stale_sent_proposals(store.proposals, now, ttl):
+            try:
+                _sweep_one(pid, store.proposals[pid], ttl)
+            except Exception as e:
+                # One bad proposal must not skip the rest of the cycle.
+                _log(f"proposal_sweep: {pid} unexpected error: {e}")
+    except Exception as e:
+        _log(f"proposal_sweep: unexpected error, skipping this cycle: {e}")
+
+    return 0  # a watchdog must never fail its timer
+
+
+if __name__ == "__main__":
+    sys.exit(main())

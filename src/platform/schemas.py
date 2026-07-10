@@ -294,6 +294,14 @@ class LimitsConfig(BaseModel):
     pending_proposal_ttl_hours: int = 4
     per_message_timeout_sec: int = 120
     send_failure_retry_count: int = 1
+    # Shift no-response escalation sweep (owner-experience review 2026-07-10). A `sent`
+    # coverage proposal whose candidate hasn't replied within candidate_response_ttl_minutes
+    # is transitioned to no_response_timeout by shift-agent-proposal-sweep, which then alerts
+    # the owner that the shift is still uncovered — closing the silent-uncovered-shift gap.
+    # Ships OFF: the operator enables it per-customer after review. Additive with defaults, so
+    # existing config.yaml files (which omit these) stay valid under extra="forbid".
+    no_response_sweep_enabled: bool = False
+    candidate_response_ttl_minutes: int = 30
 
 
 class AlertingConfig(BaseModel):
