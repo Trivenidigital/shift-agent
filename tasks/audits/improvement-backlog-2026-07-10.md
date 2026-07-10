@@ -57,7 +57,7 @@ cf-router, the 167-variant `LogEntry`) are the shared root of the deploy trap an
 7. **BL-HERMES-02 (P1)** — cf-router approve-before-reject precedence: "go ahead and *reject* #ABCDE" fires the irreversible customer *send*.
 8. **BL-HERMES-01 / BL-SEC-13 (P1)** — two-pass deploy: new gates/install-lines don't run on the deploy that ships them (confirmed live).
 9. **BL-HERMES-03 / BL-SEC-18 / OBS-G4 (P1)** — audit chokepoint `decisions.log` has no write-rate watchdog + failures swallowed.
-10. **BL-SEC-16 (P1)** — owner-alert silent-drop (muted Pushover invisible to API; quiet-hours) with no delivery-ack — *directly relevant to the live box, which is Pushover-muted.*
+10. **BL-SEC-16 / BL-OBS-02 (P1)** — owner-alert silent-drop (muted Pushover invisible to API; quiet-hours) with no delivery-ack, AND the `notify-failed.log` dropped-alert sink has no watchdog — *directly relevant to the live box (Pushover is muted): if delivery breaks, every watchdog silently pools into one unread log.*
 
 **Security:**
 11. **BL-SEC-07 (P1, quick)** — `shift-agent-backup.service` (root) runs `python3 -c` with no `WorkingDirectory=/` → CWD sys.path-hijack → root RCE.
@@ -85,7 +85,8 @@ BL-CATER-03 (deposit-plausibility guard) · BL-CATER-05 (retitle "FINALIZED"→"
 - **Deterministic owner/candidate cf-router intercept** → closes BL-SHIFT-01+11 together + enables their tests (BL-SHIFT-15).
 - **Manifest-driven `install_artifacts`** (BL-HERMES-08) → fixes the two-pass deploy (BL-HERMES-01) + rollback-hygiene drift at the root.
 - **QBO MCP adapter** (BL-PORT-01) → Expense #21 to value; **POS adapter** (BL-PORT-05) → 5 agents.
-- **A real CI pipeline** (BL-HERMES-11/17, BL-FLYER-05) → gates every safety net.
+- **A real CI pipeline** (BL-HERMES-11/17, BL-FLYER-05, BL-OBS-04) → gates every safety net.
+- **A central state-freshness daemon** (BL-OBS-12) with a table→(SLO, priority) registry → subsumes the per-table watchdog items (BL-OBS-01/02/08/10, BL-HERMES-03) instead of hand-rolling each.
 
 ### 5c. Hard gates — MUST precede the relevant go-live
 - **Before `provider=stripe` (any catering VPS):** BL-CATER-01, -02, -03, -10, -13 + BL-SEC-02/06 + BL-PORT-02/03. (Mechanical gate = BL-SEC-02.)
@@ -239,6 +240,28 @@ Hermes 0.14→0.17 upgrade / patch-port / official WhatsApp Business API (BL-HER
 | BL-CI-04 | Deploy-gate patch baseline + `check-safe-io-symbols` have no enforcing pytest (only fail-closed bash at deploy) | test | P2 | S | low |
 | BL-CI-05 | 8 Tier-2 agents ship a dispatcher skill with only config-schema coverage (no routing/behavioral test) | test | P3 | M | low |
 | BL-CI-06 | No consolidated blocking pytest gate; `hermes-drift-check` full run is weekly + non-blocking; build-tarball gate is `--skip-pytest`-able | test/ops | P2 | M | low |
+
+### 6h. Observability / silent-failure — full audit (authoritative; supersedes the interim BL-OBS-G* rows in §6f)
+| ID | Title | Type | Sev | Effort |
+|---|---|---|---|---|
+| BL-OBS-01 | Audit `decisions.log` no write-rate freshness watchdog (stalled writer invisible 24h–30d) | observability | P1 | S |
+| BL-OBS-02 | Dropped-alert sink `notify-failed.log` has no growth watchdog — if Pushover breaks, ALL watchdogs pool here unread | observability | P1 | S |
+| BL-OBS-03 | Expense auto-expiry reverses pending owner-approval with no write-site alert (§12b) | bug | P1 | S |
+| BL-OBS-04 | No aggregate pytest gate; 69/93 flyer tests in no blocking CI (= BL-CI-01) | test | P1 | M |
+| BL-OBS-05 | `test_flyer_ws5_pdf_twin_qa` runs in NO env (Windows-skip + no CI); gates printable_pdf (= BL-CI-02) | test | P1 | S |
+| BL-OBS-06 | `safe_io`/`audit_helpers` changes bypass the flyer CI path filters → flyer send regressions merge green | test | P1 | S |
+| BL-OBS-07 | Stripe webhook subscription deploy-gated only; no runtime watchdog (paid-but-unconfirmed) | observability | P2→P1 live | M |
+| BL-OBS-08 | Live catering-leads.json has no freshness watchdog (silent intake stop = lost customer) | observability | P2 | S-M |
+| BL-OBS-09 | Dispatcher accuracy measured (`coverage_pct`) but never alerts on regression (weekly, priority-0) | observability | P2 | S |
+| BL-OBS-10 | Compliance heartbeat defines SLO but no runtime watchdog consumes it (only deploy-smoke WARN) | observability | P2 | S |
+| BL-OBS-11 | No `LogEntry` union-completeness test (unregistered variant → silently untyped) (= BL-CI-03) | test | P2 | S |
+| BL-OBS-12 | **Consolidate deploy-time WARN checks into ONE central state-freshness daemon** (subsumes 01/08/10) | tech-debt/foundation | P2 | M |
+| BL-OBS-13 | No-response sweep ships OFF → silent-uncovered-shift open by default; add "dormant is observable" (= BL-SHIFT-14) | ops | P2 | S |
+| BL-OBS-14 | 8 Tier-2 agents zero behavioral coverage (= BL-CI-05) | test | P3 | L |
+| BL-OBS-15 | `check-safe-io-symbols` deploy gate has no pytest wrapper (= BL-CI-04 sibling) | test | P3 | S |
+| BL-OBS-16 | Hermes patch baseline gate has no pytest (only bash + weekly non-blocking) (= BL-CI-04) | test | P3 | S |
+
+*Already-closed (do not re-open): corrupt-state quarantine (`check-corrupt-state`), auto-curator drift (`skills-audit`, #583/#584), send-path live-bridge tripwire, regulated-send static gate, approval-code pool invariants.*
 
 ## 7. Dedup / merge map (cross-lens duplicates)
 - **Catering headcount total:** BL-CATER-01 = BL-SEC-01 (kept CATER-01).
