@@ -62,6 +62,22 @@ install_artifacts() {
     # Python modules — flat layout at /opt/shift-agent/ matches scripts' sys.path
     install -m 644 src/platform/schemas.py /opt/shift-agent/schemas.py
     install -m 644 src/platform/safe_io.py /opt/shift-agent/safe_io.py
+    # No-response escalation sweep logic (imported by shift-agent-proposal-sweep). Guarded for
+    # rollback compatibility with tarballs that predate this module.
+    if [ -f src/platform/proposal_sweep.py ]; then
+        install -m 644 src/platform/proposal_sweep.py /opt/shift-agent/proposal_sweep.py
+    else
+        # Rollback to a pre-sweep tarball: tear down the WHOLE no-response-sweep surface so a
+        # lingering enabled timer can't fire a script whose module was just removed
+        # (ModuleNotFoundError every 15 min). Mirrors the flyer / catering-dispatcher-watchdog
+        # per-unit rollback cleanup.
+        systemctl disable --now shift-agent-proposal-sweep.timer 2>/dev/null || true
+        rm -f /opt/shift-agent/proposal_sweep.py \
+              /usr/local/bin/shift-agent-proposal-sweep \
+              /etc/systemd/system/shift-agent-proposal-sweep.service \
+              /etc/systemd/system/shift-agent-proposal-sweep.timer
+        systemctl daemon-reload 2>/dev/null || true
+    fi
     install -m 644 src/platform/sender_context.py /opt/shift-agent/sender_context.py
     install -m 644 src/platform/exit_codes.py /opt/shift-agent/exit_codes.py
     install -m 644 src/platform/log_source.py /opt/shift-agent/log_source.py
@@ -843,6 +859,15 @@ PY
     systemctl enable --now shift-agent-tail-logger.timer 2>/dev/null || true
     systemctl enable --now shift-agent-health.timer 2>/dev/null || true
     systemctl enable --now shift-agent-health-watchdog.timer 2>/dev/null || true
+    # shift-agent-proposal-sweep.timer — the no-response escalation sweep. Enable ONLY on a tarball
+    # that ships the sweep (guards a rollback from re-enabling a timer whose script was removed
+    # above). The timer is a harmless ~15-min config-read no-op while the sweep is GATED by
+    # limits.no_response_sweep_enabled (ships FALSE). To ACTIVATE: set
+    # `limits.no_response_sweep_enabled: true` in config.yaml — no redeploy, no restart; the sweep
+    # re-reads config on its next fire (<=15 min). Owner then gets an alert when a candidate goes silent.
+    if [ -f src/platform/proposal_sweep.py ]; then
+        systemctl enable --now shift-agent-proposal-sweep.timer 2>/dev/null || true
+    fi
     # shift-agent-skills-audit.timer ships INSTALLED-BUT-DISABLED (unit installed by the
     # wildcard at :208, but NOT enabled here). The watchdog now runs as ROOT reading root-owned
     # inputs (trust-domain hardening), so it IS adversary-resistant for DETECTION — but the

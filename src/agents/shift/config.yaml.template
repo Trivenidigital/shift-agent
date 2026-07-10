@@ -22,6 +22,12 @@ limits:
   pending_proposal_ttl_hours: 4   # proposals unapproved longer → owner dead-man
   per_message_timeout_sec: 120    # LLM call timeout
   send_failure_retry_count: 1     # retry send once, then fail loudly
+  # No-response escalation sweep (owner-experience review 2026-07-10): when a candidate hasn't
+  # replied to a coverage request within candidate_response_ttl_minutes, mark the proposal
+  # no_response_timeout and alert you the shift is still uncovered. Ships OFF — set enabled: true
+  # to activate per-customer (takes effect within ~15 min; no redeploy, no restart).
+  no_response_sweep_enabled: false
+  candidate_response_ttl_minutes: 30
 
 alerting:
   # REQUIRED — agent refuses to start if either is empty.

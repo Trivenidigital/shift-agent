@@ -1,0 +1,9 @@
+[Unit]
+Description=Shift Agent — no-response escalation sweep (stale `sent` coverage proposals)
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+ExecStart=/usr/local/bin/shift-agent-proposal-sweep

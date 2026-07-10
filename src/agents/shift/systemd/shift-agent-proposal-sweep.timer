@@ -1,0 +1,11 @@
+[Unit]
+Description=Shift Agent — run the no-response escalation sweep every 15 minutes
+
+[Timer]
+OnBootSec=300
+OnUnitActiveSec=900
+AccuracySec=30
+Unit=shift-agent-proposal-sweep.service
+
+[Install]
+WantedBy=timers.target
