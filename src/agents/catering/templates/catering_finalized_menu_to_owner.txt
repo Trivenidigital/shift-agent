@@ -1,8 +1,8 @@
 ⚕ *Catering Agent*
 ────────────
-Customer FINALIZED their menu — your approval needed
+Catering menu ready — your approval needed
 
-Lead: {lead_id}    Code: {approval_code}
+{price_warning}Lead: {lead_id}    Code: {approval_code}
 Customer: {customer_name} ({customer_phone})
 Event: {event_date} at {event_time} — {headcount} guests
 Dietary: {dietary}
