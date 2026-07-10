@@ -1,0 +1,11 @@
+[Unit]
+Description=Shift Agent — run skills-integrity audit every 15 minutes
+
+[Timer]
+OnBootSec=360
+OnUnitActiveSec=900
+AccuracySec=30
+Unit=shift-agent-skills-audit.service
+
+[Install]
+WantedBy=timers.target
