@@ -97,7 +97,7 @@ def fixture_dir(tmp_path):
             "name": "Owner", "phone": "+19045550100",
             "self_chat_jid": "19045550100@s.whatsapp.net",
         },
-        "limits": {},
+        "limits": {"no_response_sweep_enabled": True},
         "alerting": {"pushover_user_key": "test_k", "pushover_app_token": "test_t"},
         "backup": {"gpg_recipient_email": "x@y"},
         "daily_brief": {"brief_time": "07:00", "catchup_window_minutes": 180},
@@ -112,7 +112,7 @@ def fixture_dir(tmp_path):
         "schedule": {},
     }
     (tmp_path / "roster.json").write_text(json.dumps(roster), encoding="utf-8")
-    pending = {"proposals": []}
+    pending = {"proposals": {}}  # PendingStore.proposals is dict[str, Proposal]
     (state / "pending.json").write_text(json.dumps(pending), encoding="utf-8")
     decisions = logs / "decisions.log"
     decisions.write_text("", encoding="utf-8")
@@ -450,3 +450,44 @@ def test_today_aggregation_honors_now_override(fixture_dir):
              now_override="2026-04-28T07:05:00-04:00")
     assert r.returncode == 0, r.stderr
     assert "1 scheduled shift" in r.stdout  # used override date 2026-04-28, not wall clock
+
+
+# ── BL-SHIFT-14: no-response escalation-off visibility ────────────────────────
+
+def test_escalation_off_warns_in_brief(fixture_dir):
+    # Flip the sweep OFF; the brief must tell the owner escalation isn't running.
+    cfg = yaml.safe_load((fixture_dir / "config.yaml").read_text())
+    cfg["limits"]["no_response_sweep_enabled"] = False
+    (fixture_dir / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    r = _run(fixture_dir, args=("--force", "--dry-run"))
+    assert r.returncode == 0, r.stderr
+    assert "no-response escalation is OFF" in r.stdout
+
+
+def test_escalation_on_has_no_warning(fixture_dir):
+    # Baseline fixture ships escalation ON → no warning noise.
+    r = _run(fixture_dir, args=("--force", "--dry-run"))
+    assert r.returncode == 0, r.stderr
+    assert "escalation is OFF" not in r.stdout
+
+
+# ── BL-SHIFT-16: send_failed alert names the codes + the action ───────────────
+
+def test_send_failed_alert_shows_code_and_retry(fixture_dir):
+    proposal = {
+        "proposal_id": "P0001", "code": "#AB3X2",
+        "created_ts": "2026-07-10T08:00:00-04:00",
+        "last_updated_ts": "2026-07-10T08:05:00-04:00",
+        "absent_employee_id": "e001", "absent_date": "2026-07-10",
+        "absent_shift": "09:00-17:00", "absent_role": "cashier",
+        "absent_reason": "sick", "input_message": "out sick", "message_id": "m1",
+        "status": "send_failed", "last_error": "bridge 500", "retry_count": 1,
+    }
+    # PendingStore.proposals is dict[str, Proposal] — keyed by proposal_id.
+    pending = {"proposals": {"P0001": proposal}}
+    (fixture_dir / "state" / "pending.json").write_text(json.dumps(pending), encoding="utf-8")
+    r = _run(fixture_dir, args=("--force", "--dry-run"))
+    assert r.returncode == 0, r.stderr
+    assert "stuck in send_failed" in r.stdout
+    assert "#AB3X2" in r.stdout          # names the specific proposal
+    assert "RETRY" in r.stdout           # tells the owner the action
