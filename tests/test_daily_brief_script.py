@@ -482,6 +482,7 @@ def test_send_failed_alert_shows_code_and_retry(fixture_dir):
         "absent_shift": "09:00-17:00", "absent_role": "cashier",
         "absent_reason": "sick", "input_message": "out sick", "message_id": "m1",
         "status": "send_failed", "last_error": "bridge 500", "retry_count": 1,
+        "failed_ts": "2026-07-10T08:05:00-04:00",
     }
     # PendingStore.proposals is dict[str, Proposal] — keyed by proposal_id.
     pending = {"proposals": {"P0001": proposal}}
