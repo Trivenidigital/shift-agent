@@ -1079,8 +1079,19 @@ case "$ACTION" in
                 echo "  No state change has been made. Restore/install missing Hermes foundation skills first." >&2
                 exit 1
             fi
+        elif [ -n "${ALLOW_MISSING_FOUNDATION_GATE:-}" ]; then
+            # Deliberate rollback to a pre-gate artifact: the operator has acknowledged the gate's
+            # absence (a pre-gate tarball also predates the foundation requirements it would check).
+            echo "WARN: credential-minimized-readiness absent - skipping foundation gate (override: ALLOW_MISSING_FOUNDATION_GATE=$ALLOW_MISSING_FOUNDATION_GATE)" >&2
         else
-            echo "WARN: credential-minimized-readiness absent from staging - skipping foundation gate (rollback compatibility)" >&2
+            # BL-HERMES-12 hardening: a forward tarball ALWAYS ships this gate; its absence means a
+            # malformed/incomplete artifact. Fail closed (mirrors the config-yaml shape gate above),
+            # rather than silently proceeding without the foundation check. Set
+            # ALLOW_MISSING_FOUNDATION_GATE=<reason> to intentionally roll back to a pre-gate artifact.
+            echo "ERROR: credential-minimized-readiness absent from staging - refusing to deploy without the foundation gate." >&2
+            echo "  A forward tarball always ships it; its absence indicates a malformed artifact." >&2
+            echo "  To intentionally roll back to a pre-gate artifact: ALLOW_MISSING_FOUNDATION_GATE=<reason>" >&2
+            exit 1
         fi
 
         # PR-CF5 2026-05-03: state-file migration gate. Brings legacy state
