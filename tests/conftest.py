@@ -106,6 +106,26 @@ def _isolate_notify_dedup(tmp_path, monkeypatch):
     yield
 
 
+# ── notify-owner dead-letter isolation (fix/test-prod-path-bleed-class) ──────
+# safe_io.notify_owner_with_fallback appends to a fallback "dead-letter" log when
+# the Pushover bin fails — which it always does under test (no bin on the runner).
+# Its default lives at /opt/shift-agent/logs/notify-failed.log, a real path on the
+# VPS/CI. Without isolation a test whose send fails appends real rows there, and
+# pytest pollutes the production dead-letter file (same class as the audit-log and
+# notify-dedup isolations above; the generalized safe_io write-guard now RAISES on
+# such a stray write, which is how the flyer-recovery-watchdog subprocess tests
+# surfaced it). notify_owner_with_fallback resolves SHIFT_AGENT_NOTIFY_FAILED_LOG
+# at CALL time, so routing it to a per-test tmp path reaches both in-process and
+# subprocess callers (the latter inherit os.environ).
+@pytest.fixture(autouse=True)
+def _isolate_notify_failed_log(tmp_path, monkeypatch):
+    """Autouse: default the notify-owner dead-letter log to a per-test tmp path."""
+    monkeypatch.setenv(
+        "SHIFT_AGENT_NOTIFY_FAILED_LOG", str(tmp_path / "notify-failed.log")
+    )
+    yield
+
+
 @pytest.fixture
 def tmp_state_dir(tmp_path: Path) -> Path:
     """Isolated state directory per test."""

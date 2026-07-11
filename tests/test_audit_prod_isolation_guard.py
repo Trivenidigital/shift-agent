@@ -45,7 +45,10 @@ class TestProdAuditWriteGuard:
         prod = Path("/opt/shift-agent/logs/decisions.log")
         with pytest.raises(RuntimeError) as exc:
             safe_io_module.ndjson_append(prod, "{}")
-        assert "production audit tree" in str(exc.value)
+        # Generalized guard (fix/test-prod-path-bleed-class): the message now
+        # names the calling chokepoint + the deployed tree instead of the old
+        # audit-only phrasing.
+        assert "ndjson_append refused" in str(exc.value)
         assert not prod.exists()  # nothing was created
 
     def test_bypass_env_allows_write(self, safe_io_module, monkeypatch, tmp_path):

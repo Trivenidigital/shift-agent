@@ -217,6 +217,7 @@ def atomic_write_text(path: Path, content: str, mode: int = 0o600) -> None:
     Not guaranteed on data=writeback or nobarrier mounts.
     """
     path = Path(path)
+    _refuse_prod_write_under_pytest(path, helper="atomic_write_text")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".tmp-{os.getpid()}-{int(time.time()*1000)}")
     # Preserve existing mode if target was tightened manually
@@ -261,24 +262,34 @@ def _json_default(x):
     raise TypeError(f"object of type {type(x).__name__} is not JSON serializable")
 
 
-# census C1 2026-07-11 — production audit-tree write-guard.
-# pytest MUST NOT write into the deployed audit tree. Tests that forgot to
-# override the default decisions-log path wrote real rows into
-# /opt/shift-agent/logs/decisions.log on the box (census C1 found 41
-# regulated_send_*, 87 config_load_failed, 209 dry-run proposal rows). The
-# guard below makes that failure LOUD instead of silent: any ndjson_append
-# under the production root from a pytest process raises unless explicitly
-# opted in. Module-level so tests can monkeypatch the root to a tmp dir.
+# census C1 2026-07-11 — deployed-tree write-guard. Generalized 2026-07-11
+# (fix/test-prod-path-bleed-class) from the audit-only #606 form to cover EVERY
+# safe_io write chokepoint.
+#
+# pytest MUST NOT write into the deployed /opt/shift-agent tree. Tests that
+# forgot to override a default STATE/AUDIT path wrote real data onto the box:
+#   - census C1 (#606): pytest wrote 41 regulated_send_*, 87 config_load_failed
+#     and 209 dry-run proposal rows into /opt/shift-agent/logs/decisions.log.
+#   - census C-7 (#608): pytest poisoned /opt/shift-agent/state/notify-dedup.json
+#     and one test's delivered alert armed another test's dedup window.
+# #606's guard covered ONLY ndjson_append. It is now invoked by every write
+# chokepoint (atomic_write_text — hence atomic_write_json / dump_model —
+# ndjson_append, and the notify-failed.log dead-letter append), so a forgotten
+# path override fails LOUDLY at the write instead of silently polluting the box.
+# Module-level root so tests can monkeypatch it to a tmp dir.
 _PROD_AUDIT_ROOT = "/opt/shift-agent"
 
 
-def _refuse_prod_audit_write_under_pytest(path: Path) -> None:
-    """Raise if a pytest run targets the production audit tree.
+def _refuse_prod_write_under_pytest(path: Path, *, helper: str = "safe_io write") -> None:
+    """Raise if a pytest run targets the deployed /opt/shift-agent tree.
 
     Dirt-cheap fast path: the env lookup short-circuits for every non-pytest
     (i.e. production) call before any path resolution happens, so the guard is
     free on the hot path. Bypass with ``SHIFT_AGENT_ALLOW_PROD_AUDIT_IN_TEST=1``
-    for the rare on-box smoke that legitimately writes real audit rows.
+    for the rare on-box smoke that legitimately writes real state/audit data.
+
+    ``helper`` names the calling chokepoint so the RuntimeError points at the
+    writer that needs a tmp-path override.
     """
     if not os.environ.get("PYTEST_CURRENT_TEST"):
         return
@@ -288,12 +299,18 @@ def _refuse_prod_audit_write_under_pytest(path: Path) -> None:
     target = os.path.abspath(str(path))
     if target == root or target.startswith(root + os.sep):
         raise RuntimeError(
-            f"ndjson_append refused: pytest attempted to write to the production "
-            f"audit tree ({target}, under {_PROD_AUDIT_ROOT}). Point the audit "
-            f"path at a tmp dir — set SHIFT_AGENT_DECISIONS_LOG_PATH or pass an "
-            f"explicit log_path. If this on-box write is intentional, set "
+            f"{helper} refused: pytest attempted to write into the deployed "
+            f"shift-agent tree ({target}, under {_PROD_AUDIT_ROOT}). Route the "
+            f"write to a tmp dir — override the writer's path (a SHIFT_AGENT_*_PATH "
+            f"env var, monkeypatch the module path constant, or pass an explicit "
+            f"path). If this on-box write is intentional, set "
             f"SHIFT_AGENT_ALLOW_PROD_AUDIT_IN_TEST=1."
         )
+
+
+# Back-compat alias for the pre-generalization name (#606). Nothing in-tree
+# imports it, but keep the symbol stable for any out-of-tree caller/test.
+_refuse_prod_audit_write_under_pytest = _refuse_prod_write_under_pytest
 
 
 def ndjson_append(path: Path, entry_json: str) -> None:
@@ -306,7 +323,7 @@ def ndjson_append(path: Path, entry_json: str) -> None:
     (U+0085 NEL, U+2028, U+2029) that some NDJSON parsers treat as line terminators.
     """
     path = Path(path)
-    _refuse_prod_audit_write_under_pytest(path)
+    _refuse_prod_write_under_pytest(path, helper="ndjson_append")
     path.parent.mkdir(parents=True, exist_ok=True)
     _LINE_BREAKERS = ("\n", "\r", "", " ", " ")
     if any(c in entry_json for c in _LINE_BREAKERS):
@@ -478,9 +495,15 @@ def validate_phone_input(v: str) -> str:
 NOTIFY_OWNER_BIN = os.environ.get(
     "SHIFT_AGENT_NOTIFY_OWNER_BIN", "/usr/local/bin/shift-agent-notify-owner",
 )
-NOTIFY_FAILED_LOG = Path(os.environ.get(
-    "SHIFT_AGENT_NOTIFY_FAILED_LOG", "/opt/shift-agent/logs/notify-failed.log",
-))
+# Resolved at CALL time (not import) from SHIFT_AGENT_NOTIFY_FAILED_LOG so a
+# per-test conftest fixture can isolate the fallback log — otherwise a test whose
+# Pushover bin fails appends to the one real /opt/shift-agent/logs/notify-failed.log
+# (which exists on the VPS/CI), polluting the production dead-letter file (census
+# C1-class, found via the generalized write-guard on fix/test-prod-path-bleed-class:
+# the flyer-recovery-watchdog subprocess tests were writing real rows here). The
+# NOTIFY_FAILED_LOG constant is kept for back-compat with any importer.
+NOTIFY_FAILED_LOG_DEFAULT = "/opt/shift-agent/logs/notify-failed.log"
+NOTIFY_FAILED_LOG = Path(os.environ.get("SHIFT_AGENT_NOTIFY_FAILED_LOG", NOTIFY_FAILED_LOG_DEFAULT))
 
 # Same-message alert dedup (census C-7). Suppress an identical (title+body) owner
 # alert within a short window so a repeated identical page (a stuck condition
@@ -603,7 +626,7 @@ def notify_owner_with_fallback(
     *,
     source: str = "unknown",
     notify_owner_bin: str = NOTIFY_OWNER_BIN,
-    notify_failed_log: Path = NOTIFY_FAILED_LOG,
+    notify_failed_log: Optional[Path] = None,
     dedup_state_path: Optional[Path] = None,
     dedup_window_min: int = NOTIFY_DEDUP_WINDOW_MIN,
     dedup_enabled: bool = NOTIFY_DEDUP_ENABLED,
@@ -636,20 +659,25 @@ def notify_owner_with_fallback(
     writes to stderr so journald captures the alert-drop event.
 
     The notify_owner_bin and notify_failed_log kwargs are for testability;
-    callers should not override them in production code.
+    callers should not override them in production code. When notify_failed_log
+    is None it resolves at CALL time from SHIFT_AGENT_NOTIFY_FAILED_LOG (default
+    the on-box logs path), mirroring dedup_state_path, so a per-test conftest
+    fixture can isolate the dead-letter log and pytest never appends to the real
+    /opt/shift-agent/logs/notify-failed.log.
 
-    Default-binding note: NOTIFY_OWNER_BIN and NOTIFY_FAILED_LOG are
-    captured at module-import time (which reads the env vars then). Python
-    binds function defaults at function-def time, so a long-lived process
-    that monkeypatches the env vars after first import would see stale
-    defaults. In practice all callers are short-lived subprocess
-    invocations where systemd sets the env vars before exec, so this is
-    not a concern. Tests that need post-import overrides should pass
-    explicit kwargs (the helper's own tests do).
+    Default-binding note: NOTIFY_OWNER_BIN is captured at module-import time
+    (which reads the env var then). Python binds function defaults at
+    function-def time, so a long-lived process that monkeypatches the env var
+    after first import would see a stale bin default. In practice all callers
+    are short-lived subprocess invocations where systemd sets the env vars
+    before exec, so this is not a concern. Tests that need a post-import bin
+    override should pass an explicit kwarg (the helper's own tests do).
     """
     import json as _json
     import subprocess as _subprocess
 
+    if notify_failed_log is None:
+        notify_failed_log = Path(os.environ.get("SHIFT_AGENT_NOTIFY_FAILED_LOG", NOTIFY_FAILED_LOG_DEFAULT))
     if dedup_state_path is None:
         dedup_state_path = Path(os.environ.get("SHIFT_AGENT_NOTIFY_DEDUP_STATE", NOTIFY_DEDUP_STATE_DEFAULT))
 
@@ -677,7 +705,12 @@ def notify_owner_with_fallback(
     except (_subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         err_detail = f"{type(e).__name__}: {e}"
 
-    # Pushover-also-fails fallback: append to notify-failed.log
+    # Pushover-also-fails fallback: append to notify-failed.log. Guard the
+    # deployed dead-letter path (default /opt/shift-agent/logs/notify-failed.log)
+    # against a pytest run that both reaches this fallback AND left the prod
+    # default in place — override SHIFT_AGENT_NOTIFY_FAILED_LOG / pass
+    # notify_failed_log. Env fast-path keeps it free in production.
+    _refuse_prod_write_under_pytest(notify_failed_log, helper="notify_owner_with_fallback")
     try:
         notify_failed_log.parent.mkdir(parents=True, exist_ok=True)
         with notify_failed_log.open("a", encoding="utf-8") as f:
