@@ -38,6 +38,7 @@ FLYER_GUEST_ORDERS_PATH = Path("/opt/shift-agent/state/flyer/guest_orders.json")
 FLYER_REFERENCE_SCOPE_PATH = Path("/opt/shift-agent/state/flyer/reference_scope_pending.json")
 FLYER_QUOTE_ECHO_PENDING_PATH = Path("/opt/shift-agent/state/flyer/quote_echo_pending.json")
 FLYER_OUTBOUND_DEDUPE_PATH = Path("/opt/shift-agent/state/flyer/outbound_dedupe.json")
+FLYER_INTENT_SHADOW_LLM_BUDGET_PATH = Path("/opt/shift-agent/state/flyer/intent_shadow_llm_budget.json")
 _DEFAULT_CF_ROUTER_INBOUND_DEDUPE_PATH = Path("/opt/shift-agent/state/cf-router-inbound-dedupe.json")
 CF_ROUTER_INBOUND_DEDUPE_PATH = _DEFAULT_CF_ROUTER_INBOUND_DEDUPE_PATH
 ROSTER_PATH = Path("/opt/shift-agent/roster.json")
@@ -776,6 +777,11 @@ def finalize_flyer_intent_shadow(
             elif classifier is None:
                 if classifier_status != "error":
                     classifier_status = "skipped_no_gateway"
+            elif getattr(classifier, "_flyer_shadow_llm_metered", False) and not _flyer_intent_shadow_llm_reserve_budget():
+                # B1 plugin-local LLM whose per-UTC-day fire cap is exhausted —
+                # skip the call entirely and record it. Gateway-injected
+                # classifiers are unmetered and never take this branch.
+                classifier_status = "skipped_budget"
             else:
                 audit_kwargs = dict(
                     mode=mode,
@@ -1025,6 +1031,79 @@ def _flyer_intent_shadow_llm_allowlisted(chat_id: str) -> bool:
 
 def _flyer_intent_shadow_llm_model() -> str:
     return os.environ.get("FLYER_INTENT_SHADOW_LLM_MODEL") or "openai/gpt-4o-mini"
+
+
+FLYER_INTENT_SHADOW_LLM_DAILY_CAP_DEFAULT = 200
+
+
+def _flyer_intent_shadow_llm_daily_cap() -> int:
+    try:
+        return max(
+            0,
+            int(
+                os.environ.get(
+                    "FLYER_INTENT_SHADOW_LLM_DAILY_CAP",
+                    str(FLYER_INTENT_SHADOW_LLM_DAILY_CAP_DEFAULT),
+                )
+            ),
+        )
+    except Exception:
+        return FLYER_INTENT_SHADOW_LLM_DAILY_CAP_DEFAULT
+
+
+@contextmanager
+def _flyer_intent_shadow_llm_budget_lock() -> Iterator[None]:
+    """flock the budget file on deployed Linux; no-op where fcntl is unavailable
+    (Windows CI / non-POSIX). safe_io imports fcntl at module load, so guard it."""
+    try:
+        _ensure_platform_path()
+        from safe_io import flock  # type: ignore
+    except Exception:
+        yield
+        return
+    with flock(FLYER_INTENT_SHADOW_LLM_BUDGET_PATH):
+        yield
+
+
+def _load_flyer_intent_shadow_llm_budget() -> dict:
+    try:
+        doc = json.loads(FLYER_INTENT_SHADOW_LLM_BUDGET_PATH.read_text(encoding="utf-8"))
+        return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_flyer_intent_shadow_llm_budget(doc: dict) -> None:
+    path = FLYER_INTENT_SHADOW_LLM_BUDGET_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(doc), encoding="utf-8")
+    os.replace(tmp, path)  # atomic on POSIX + Windows
+
+
+def _flyer_intent_shadow_llm_reserve_budget() -> bool:
+    """Reserve one shadow-LLM fire against the per-UTC-day cap.
+
+    Returns True (and records the fire) when the day still has budget; False when
+    the cap is exhausted OR any read/write error occurs. Fail-closed: a broken
+    counter must never let the shadow LLM burn unbounded OpenRouter spend.
+    Best-effort flock (deployed Linux) with an atomic-replace fallback so the
+    counter also works where fcntl is unavailable."""
+    cap = _flyer_intent_shadow_llm_daily_cap()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        with _flyer_intent_shadow_llm_budget_lock():
+            doc = _load_flyer_intent_shadow_llm_budget()
+            if str(doc.get("utc_day") or "") != today:
+                doc = {"utc_day": today, "count": 0}
+            count = int(doc.get("count") or 0)
+            if count >= cap:
+                return False
+            doc["count"] = count + 1
+            _write_flyer_intent_shadow_llm_budget(doc)
+            return True
+    except Exception:
+        return False
 
 
 def _resolve_openrouter_key_for_flyer_intent() -> str:

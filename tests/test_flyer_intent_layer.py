@@ -741,3 +741,104 @@ def test_shadow_llm_not_armed_when_flag_unset(monkeypatch):
         )
         is None
     )
+
+
+# --- B1: per-UTC-day budget cap (skipped_budget) -----------------------------
+
+
+def _metered_stub(counter: dict):
+    def classifier(_request):
+        counter["n"] = counter.get("n", 0) + 1
+        return {"intent": "approve_final", "action": "approve_project", "confidence": 0.99}
+
+    classifier._flyer_shadow_llm_metered = True  # type: ignore[attr-defined]
+    return classifier
+
+
+def test_shadow_llm_budget_reserve_increments_and_resets(monkeypatch, tmp_path):
+    actions = _load_actions()
+    monkeypatch.setattr(actions, "FLYER_INTENT_SHADOW_LLM_BUDGET_PATH", tmp_path / "budget.json")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_DAILY_CAP", "2")
+
+    assert actions._flyer_intent_shadow_llm_reserve_budget() is True   # count -> 1
+    assert actions._flyer_intent_shadow_llm_reserve_budget() is True   # count -> 2
+    assert actions._flyer_intent_shadow_llm_reserve_budget() is False  # cap exhausted
+    assert json.loads((tmp_path / "budget.json").read_text())["count"] == 2
+
+    # A stale prior-day counter (even one over cap) resets on the new UTC day.
+    (tmp_path / "budget.json").write_text(json.dumps({"utc_day": "2000-01-01", "count": 999}))
+    assert actions._flyer_intent_shadow_llm_reserve_budget() is True
+
+
+def test_shadow_llm_over_budget_records_skipped_budget(monkeypatch, tmp_path):
+    actions = _load_actions()
+    emitted: list[dict] = []
+    counter: dict = {}
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "17329837841")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_DAILY_CAP", "0")  # no budget today
+    monkeypatch.setattr(actions, "FLYER_INTENT_SHADOW_LLM_BUDGET_PATH", tmp_path / "budget.json")
+    monkeypatch.setattr(actions, "audit_flyer_hermes_intent_decision", lambda **kw: emitted.append(kw))
+    monkeypatch.setattr(actions, "_build_flyer_intent_llm_classifier", lambda: _metered_stub(counter))
+
+    token = actions.begin_flyer_intent_shadow(
+        text="approve",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="wamid.budget",
+        has_media=False,
+    )
+    try:
+        actions.record_flyer_intent_route_event(
+            reason="flyer_primary_project_created",
+            subprocess_rc=0,
+            detail="project_id=F0065",
+        )
+        actions.finalize_flyer_intent_shadow(
+            hook_result={"action": "skip", "reason": "cf-router flyer primary created"},
+            gateway=None,
+        )
+    finally:
+        actions.reset_flyer_intent_shadow(token)
+
+    assert emitted, "budget-skip must still emit a synchronous audit row"
+    assert emitted[0]["classifier_status"] == "skipped_budget"
+    assert counter.get("n", 0) == 0  # the LLM call was skipped, not merely dropped
+
+
+def test_shadow_llm_under_budget_fires_worker(monkeypatch, tmp_path):
+    actions = _load_actions()
+    emitted: list[dict] = []
+    counter: dict = {}
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "17329837841")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_DAILY_CAP", "5")
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "1000")
+    monkeypatch.setattr(actions, "FLYER_INTENT_SHADOW_LLM_BUDGET_PATH", tmp_path / "budget.json")
+    monkeypatch.setattr(actions, "audit_flyer_hermes_intent_decision", lambda **kw: emitted.append(kw))
+    monkeypatch.setattr(actions, "_build_flyer_intent_llm_classifier", lambda: _metered_stub(counter))
+
+    token = actions.begin_flyer_intent_shadow(
+        text="approve",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="wamid.fire",
+        has_media=False,
+    )
+    try:
+        actions.record_flyer_intent_route_event(
+            reason="flyer_primary_project_created",
+            subprocess_rc=0,
+            detail="project_id=F0065",
+        )
+        actions.finalize_flyer_intent_shadow(
+            hook_result={"action": "skip", "reason": "cf-router flyer primary created"},
+            gateway=None,
+        )
+    finally:
+        actions.reset_flyer_intent_shadow(token)
+
+    _wait_for(lambda: bool(emitted))
+    assert emitted[0]["classifier_status"] == "success"
+    assert counter["n"] == 1  # exactly one metered fire consumed
+    assert json.loads((tmp_path / "budget.json").read_text())["count"] == 1
