@@ -657,3 +657,73 @@ def test_intent_llm_classifier_raises_on_non_json(monkeypatch):
     classifier = actions._build_flyer_intent_llm_classifier()
     with pytest.raises(Exception):
         classifier(FlyerClassifierRequest(text="hello"))
+
+
+# --- B1: allowlist-gated resolution in _flyer_classifier_callable_from_gateway --
+
+
+def _stub_local_classifier(_request):
+    return {"intent": "unknown", "action": "observe"}
+
+
+def test_shadow_llm_allowlist_semantics(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
+    monkeypatch.setattr(
+        actions, "_build_flyer_intent_llm_classifier", lambda: _stub_local_classifier
+    )
+    chat = "17329837841@s.whatsapp.net"
+
+    # empty/unset allowlist ⇒ disabled-for-all (never global-on), even armed.
+    monkeypatch.delenv("FLYER_INTENT_SHADOW_LLM_CHATS", raising=False)
+    assert actions._flyer_classifier_callable_from_gateway(None, chat_id=chat) is None
+
+    # member (normalized across +/punctuation/JID-suffix) ⇒ armed.
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "+1 (732) 983-7841, 55501")
+    assert actions._flyer_classifier_callable_from_gateway(None, chat_id=chat) is _stub_local_classifier
+
+    # non-member ⇒ off.
+    assert (
+        actions._flyer_classifier_callable_from_gateway(
+            None, chat_id="15550009999@s.whatsapp.net"
+        )
+        is None
+    )
+
+    # flag off ⇒ off even for an allowlisted chat.
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "0")
+    assert actions._flyer_classifier_callable_from_gateway(None, chat_id=chat) is None
+
+
+def test_gateway_classifier_precedes_local_shadow_llm(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "17329837841")
+    monkeypatch.setattr(
+        actions, "_build_flyer_intent_llm_classifier", lambda: _stub_local_classifier
+    )
+
+    class Gateway:
+        def flyer_intent_classifier(self, request):
+            return {}
+
+    gw = Gateway()
+    got = actions._flyer_classifier_callable_from_gateway(
+        gw, chat_id="17329837841@s.whatsapp.net"
+    )
+    assert got == gw.flyer_intent_classifier  # gateway attr wins over the local LLM
+
+
+def test_shadow_llm_not_armed_when_flag_unset(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.delenv("FLYER_INTENT_SHADOW_LLM", raising=False)
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "17329837841")
+    monkeypatch.setattr(
+        actions, "_build_flyer_intent_llm_classifier", lambda: _stub_local_classifier
+    )
+    assert (
+        actions._flyer_classifier_callable_from_gateway(
+            None, chat_id="17329837841@s.whatsapp.net"
+        )
+        is None
+    )

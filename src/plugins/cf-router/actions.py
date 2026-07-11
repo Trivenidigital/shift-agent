@@ -621,6 +621,10 @@ def begin_flyer_intent_shadow(
         "validation": validation,
         "message_id_hash": _short_hash(message_id),
         "chat_key_hash": _short_hash(chat_id),
+        # Raw chat_id kept in-memory ONLY (contextvar, never persisted) so
+        # finalize can match it against the B1 shadow-LLM per-chat allowlist.
+        # Audit rows still use the hash — no raw id ever reaches disk.
+        "chat_id_raw": str(chat_id or ""),
         "has_media": bool(has_media),
         "customer_status": customer_status,
         "project_status": project_status,
@@ -739,7 +743,9 @@ def finalize_flyer_intent_shadow(
             classifier_status = "skipped_passthrough" if candidate else "skipped_not_candidate"
         else:
             try:
-                classifier = _flyer_classifier_callable_from_gateway(gateway)
+                classifier = _flyer_classifier_callable_from_gateway(
+                    gateway, chat_id=str(context.get("chat_id_raw") or "")
+                )
             except Exception as exc:
                 classifier = None
                 classifier_status = "error"
@@ -839,13 +845,20 @@ def _flyer_classifier_timeout_ms() -> int:
         return 50
 
 
-def _flyer_classifier_callable_from_gateway(gateway: Any) -> Any:
-    if gateway is None:
-        return None
-    for name in ("flyer_intent_classifier", "classify_flyer_intent"):
-        candidate = getattr(gateway, name, None)
-        if callable(candidate):
-            return candidate
+def _flyer_classifier_callable_from_gateway(gateway: Any, *, chat_id: str = "") -> Any:
+    # Gateway attr-probe FIRST (forward-compat): if a future Hermes build exposes
+    # an intent classifier, always prefer it. In prod today it exposes none.
+    if gateway is not None:
+        for name in ("flyer_intent_classifier", "classify_flyer_intent"):
+            candidate = getattr(gateway, name, None)
+            if callable(candidate):
+                return candidate
+    # B1 (2026-07): fall back to the plugin-local shadow classifier (defined in
+    # the delimited B1 section below), but ONLY when explicitly armed (flag ==
+    # "1") AND this chat is allowlisted (empty allowlist = disabled-for-all).
+    # Strictly shadow: the decision is audited, never routed.
+    if _flyer_intent_shadow_llm_enabled() and _flyer_intent_shadow_llm_allowlisted(chat_id):
+        return _build_flyer_intent_llm_classifier()
     return None
 
 
@@ -972,6 +985,37 @@ def audit_flyer_hermes_intent_decision(
 
 OPENROUTER_INTENT_URL = "https://openrouter.ai/api/v1/chat/completions"
 FLYER_INTENT_SHADOW_LLM_TIMEOUT_SEC = 30
+FLYER_INTENT_SHADOW_LLM_CHATS_ENV = "FLYER_INTENT_SHADOW_LLM_CHATS"
+
+
+def _flyer_intent_shadow_llm_enabled() -> bool:
+    """Master flag for the plugin-local shadow classifier. OFF unless == "1"."""
+    return os.environ.get("FLYER_INTENT_SHADOW_LLM", "") == "1"
+
+
+def _normalize_flyer_intent_chat(value: str) -> str:
+    """Canonical comparison form for a phone/LID (mirrors bare_render._normalize_sender):
+    strip a chat-JID suffix, a leading ``+``, phone punctuation, and case-fold."""
+    s = (value or "").strip()
+    if "@" in s:
+        s = s.split("@", 1)[0]
+    s = s.lstrip("+")
+    s = re.sub(r"[\s\-().]", "", s)
+    return s.casefold()
+
+
+def _flyer_intent_shadow_llm_allowlist() -> set[str]:
+    """Parse FLYER_INTENT_SHADOW_LLM_CHATS (comma-separated phones/LIDs) into a
+    normalized set. Empty/unset ⇒ empty set ⇒ disabled-for-all (never global-on)."""
+    raw = os.environ.get(FLYER_INTENT_SHADOW_LLM_CHATS_ENV, "") or ""
+    return {n for n in (_normalize_flyer_intent_chat(c) for c in raw.split(",")) if n}
+
+
+def _flyer_intent_shadow_llm_allowlisted(chat_id: str) -> bool:
+    allow = _flyer_intent_shadow_llm_allowlist()
+    if not allow:
+        return False  # empty allowlist = disabled-for-all
+    return _normalize_flyer_intent_chat(chat_id) in allow
 
 
 def _flyer_intent_shadow_llm_model() -> str:
