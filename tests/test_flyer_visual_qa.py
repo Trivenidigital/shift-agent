@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from schemas import (
@@ -3174,3 +3175,185 @@ def test_business_identity_gate_unchanged():
         locked_facts=[FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile")],
     )
     assert is_own_brand_variant("Triveni Indian Cafe & Bakery", proj) is False
+
+
+# ── composer-painted masthead skip (F0197/F0198/F0199) ───────────────────────
+# The deterministic composer paints business_name + campaign_title from locked
+# facts; vision-OCR under-reads the letter-spaced gold-on-dark premium masthead,
+# so correctly-composed posters false-fail with "missing required visible fact:
+# business_name / campaign_title". When the render pipeline producer-stamps the
+# POSITIVE signal masthead_painted_by="composer" in the `.text.json` sidecar (and
+# the poster is NOT a model-drawn typeset render), those two masthead fields are
+# accepted as verified-by-construction — presence-echo skipped. A "model" stamp
+# (integrated/reference/repair — incl. posters OUTSIDE the style-registers
+# allowlist) or a legacy manifest lacking the key stays OCR-strict (fail-closed).
+# Every other fact (prices, items, phone, address, schedule, offers) keeps full
+# OCR verification, in ALL modes.
+
+
+def _masthead_qa_project(*, with_phone: bool = False) -> FlyerProject:
+    now = datetime(2026, 7, 11, tzinfo=timezone.utc)
+    locked = [
+        FlyerLockedFact(fact_id="business_name", label="Business", value="Grand Sweets House", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Diwali Feast Specials", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="item:0:name", label="Item", value="Paneer Tikka", source="customer_text", required=True),
+        FlyerLockedFact(fact_id="item:0:price", label="Price", value="$12.99", source="customer_text", required=True),
+    ]
+    if with_phone:
+        locked.append(FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True))
+    return FlyerProject(
+        project_id="F9200",
+        status="generating_concepts",
+        customer_phone="+17329837841",
+        created_at=now,
+        updated_at=now,
+        original_message_id="m-masthead-qa",
+        raw_request="Diwali feast specials premium poster.",
+        locked_facts=locked,
+    )
+
+
+def _write_manifest(artifact, **extra) -> None:
+    """Producer-stamped render-time text manifest (mirrors render.write_text_manifest,
+    render.py:1687 / _text_manifest_path render.py:620). `**extra` sets the
+    positive masthead_painted_by stamp; omit it to model a legacy manifest."""
+    payload = {"schema_version": 1, "verification_mode": "declared_render_facts"}
+    payload.update(extra)
+    (type(artifact)(str(artifact) + ".text.json")).write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_composer_stamp_skips_masthead_ocr_echo(tmp_path):
+    """(a) masthead_painted_by=composer + OCR missing masthead -> PASSES (F0197 repro)."""
+    from agents.flyer.visual_qa import run_visual_qa
+
+    artifact = tmp_path / "poster.png"
+    artifact.write_bytes(b"png-bytes")
+    # OCR echoes the item + price but MISSES both letter-spaced masthead fields.
+    (tmp_path / "poster.png.ocr.txt").write_text("Paneer Tikka - $12.99\n", encoding="utf-8")
+    _write_manifest(artifact, masthead_painted_by="composer")
+
+    report = run_visual_qa(_masthead_qa_project(), artifact, output_format="whatsapp_image", allow_sidecar=True)
+
+    assert report.status == "passed", report.blockers
+    assert report.blockers == []
+
+
+def test_missing_masthead_still_fails_without_manifest(tmp_path):
+    """(c) no manifest at all (model-rendered / legacy path) -> still FAILS."""
+    from agents.flyer.visual_qa import run_visual_qa
+
+    artifact = tmp_path / "poster.png"
+    artifact.write_bytes(b"png-bytes")
+    (tmp_path / "poster.png.ocr.txt").write_text("Paneer Tikka - $12.99\n", encoding="utf-8")
+    # No `.text.json` sidecar written.
+
+    report = run_visual_qa(_masthead_qa_project(), artifact, output_format="whatsapp_image", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "missing required visible fact: business_name" in report.blockers
+    assert "missing required visible fact: campaign_title" in report.blockers
+
+
+def test_model_stamp_missing_masthead_still_fails(tmp_path):
+    """(c') masthead_painted_by=model with declared mode AND no typeset marker
+    (the reviewer's customer-B latent MAJOR: an integrated poster OUTSIDE the
+    style-registers allowlist) -> still FAILS. The positive stamp — not the
+    verification_mode default — is the discriminator that closes this."""
+    from agents.flyer.visual_qa import run_visual_qa
+
+    artifact = tmp_path / "poster.png"
+    artifact.write_bytes(b"png-bytes")
+    (tmp_path / "poster.png.ocr.txt").write_text("Paneer Tikka - $12.99\n", encoding="utf-8")
+    _write_manifest(artifact, masthead_painted_by="model")  # NO typeset marker
+
+    report = run_visual_qa(_masthead_qa_project(), artifact, output_format="whatsapp_image", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "missing required visible fact: business_name" in report.blockers
+    assert "missing required visible fact: campaign_title" in report.blockers
+
+
+def test_legacy_manifest_without_stamp_still_fails(tmp_path):
+    """(c'') pre-change manifest (declared mode, NO masthead_painted_by key) ->
+    fail-closed -> still FAILS (byte-identical to pre-stamp behavior)."""
+    from agents.flyer.visual_qa import run_visual_qa
+
+    artifact = tmp_path / "poster.png"
+    artifact.write_bytes(b"png-bytes")
+    (tmp_path / "poster.png.ocr.txt").write_text("Paneer Tikka - $12.99\n", encoding="utf-8")
+    _write_manifest(artifact)  # declared mode but NO masthead_painted_by stamp
+
+    report = run_visual_qa(_masthead_qa_project(), artifact, output_format="whatsapp_image", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "missing required visible fact: business_name" in report.blockers
+    assert "missing required visible fact: campaign_title" in report.blockers
+
+
+def test_composer_stamp_with_typeset_marker_still_fails(tmp_path):
+    """(c-strong / defense-in-depth) composer stamp BUT a render-time typeset
+    marker present -> masthead skip EXCLUDED -> still FAILS."""
+    from agents.flyer.visual_qa import run_visual_qa
+
+    artifact = tmp_path / "poster.png"
+    artifact.write_bytes(b"png-bytes")
+    (tmp_path / "poster.png.ocr.txt").write_text("Paneer Tikka - $12.99\n", encoding="utf-8")
+    _write_manifest(artifact, masthead_painted_by="composer")
+    (tmp_path / "poster.png.typeset.json").write_text('{"typeset_contract": true}', encoding="utf-8")
+
+    report = run_visual_qa(_masthead_qa_project(), artifact, output_format="whatsapp_image", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "missing required visible fact: business_name" in report.blockers
+    assert "missing required visible fact: campaign_title" in report.blockers
+
+
+def test_composer_stamp_does_not_relax_price(tmp_path):
+    """(b) composer stamp + OCR missing PRICE -> still FAILS (money strictness)."""
+    from agents.flyer.visual_qa import run_visual_qa
+
+    artifact = tmp_path / "poster.png"
+    artifact.write_bytes(b"png-bytes")
+    # Masthead + item present, but the required price is absent from OCR.
+    (tmp_path / "poster.png.ocr.txt").write_text(
+        "GRAND SWEETS HOUSE\nDIWALI FEAST SPECIALS\nPaneer Tikka\n", encoding="utf-8")
+    _write_manifest(artifact, masthead_painted_by="composer")
+
+    report = run_visual_qa(_masthead_qa_project(), artifact, output_format="whatsapp_image", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "missing required visible fact: item:0:price" in report.blockers
+
+
+def test_composer_stamp_still_blocks_wrong_business_name(tmp_path):
+    """(d) composer stamp + a DIFFERENT business name visible in OCR (foreign
+    masthead) -> still FAILS. The presence-skip must not disable the wrong-brand
+    contradiction screen."""
+    from agents.flyer.visual_qa import run_visual_qa
+
+    artifact = tmp_path / "poster.png"
+    artifact.write_bytes(b"png-bytes")
+    (tmp_path / "poster.png.ocr.txt").write_text(
+        "Business: Mehfil Grocers\nPaneer Tikka - $12.99\n", encoding="utf-8")
+    _write_manifest(artifact, masthead_painted_by="composer")
+
+    report = run_visual_qa(_masthead_qa_project(), artifact, output_format="whatsapp_image", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert any("visible wrong business/brand" in b for b in report.blockers), report.blockers
+
+
+def test_composer_stamp_does_not_relax_phone(tmp_path):
+    """(e) composer stamp + OCR missing PHONE -> still FAILS (contact strictness)."""
+    from agents.flyer.visual_qa import run_visual_qa
+
+    artifact = tmp_path / "poster.png"
+    artifact.write_bytes(b"png-bytes")
+    # Masthead absent (skipped for composer), item + price present, phone MISSING.
+    (tmp_path / "poster.png.ocr.txt").write_text("Paneer Tikka - $12.99\n", encoding="utf-8")
+    _write_manifest(artifact, masthead_painted_by="composer")
+
+    report = run_visual_qa(_masthead_qa_project(with_phone=True), artifact, output_format="whatsapp_image", allow_sidecar=True)
+
+    assert report.status == "failed"
+    assert "missing required visible fact: contact_phone" in report.blockers
