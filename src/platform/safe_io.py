@@ -486,9 +486,12 @@ NOTIFY_FAILED_LOG = Path(os.environ.get(
 # alert within a short window so a repeated identical page (a stuck condition
 # re-detected every timer tick) does not spam the owner. Default ON;
 # SHIFT_AGENT_NOTIFY_DEDUP=0 disables. Captured at import like NOTIFY_OWNER_BIN.
-NOTIFY_DEDUP_STATE = Path(os.environ.get(
-    "SHIFT_AGENT_NOTIFY_DEDUP_STATE", "/opt/shift-agent/state/notify-dedup.json",
-))
+# Resolved at CALL time (not import) from SHIFT_AGENT_NOTIFY_DEDUP_STATE so a
+# per-test conftest fixture can isolate it — otherwise tests share the one real
+# /opt/shift-agent/state/notify-dedup.json (which exists on the VPS/CI), letting
+# one test's delivered alert suppress another's identical message, and letting
+# pytest pollute the production dedup file.
+NOTIFY_DEDUP_STATE_DEFAULT = "/opt/shift-agent/state/notify-dedup.json"
 NOTIFY_DEDUP_WINDOW_MIN = int(os.environ.get("SHIFT_AGENT_NOTIFY_DEDUP_WINDOW_MIN", "30"))
 NOTIFY_DEDUP_ENABLED = os.environ.get("SHIFT_AGENT_NOTIFY_DEDUP", "1") != "0"
 
@@ -601,7 +604,7 @@ def notify_owner_with_fallback(
     source: str = "unknown",
     notify_owner_bin: str = NOTIFY_OWNER_BIN,
     notify_failed_log: Path = NOTIFY_FAILED_LOG,
-    dedup_state_path: Path = NOTIFY_DEDUP_STATE,
+    dedup_state_path: Optional[Path] = None,
     dedup_window_min: int = NOTIFY_DEDUP_WINDOW_MIN,
     dedup_enabled: bool = NOTIFY_DEDUP_ENABLED,
 ) -> bool:
@@ -613,10 +616,14 @@ def notify_owner_with_fallback(
     Returns True on Pushover success, False on any failure path.
 
     Same-message dedup (default ON; SHIFT_AGENT_NOTIFY_DEDUP=0 disables): an
-    identical (title+message) alert delivered within dedup_window_min minutes is
-    suppressed and reported as delivered (returns True) rather than re-paging the
-    owner. Dormant unless dedup_state_path's dir exists, so it activates on a
-    deployed box but stays a no-op in tests/callers that don't opt in.
+    identical (title+message) alert that was DELIVERED within dedup_window_min
+    minutes is suppressed and reported as delivered (returns True) rather than
+    re-paging the owner. Only a delivered send arms the window — a FAILED send
+    never does, so a transient outage never suppresses its own retry or its
+    dead-letter trail. When dedup_state_path is None it resolves at CALL time
+    from SHIFT_AGENT_NOTIFY_DEDUP_STATE (default the on-box state path), so a
+    per-test conftest fixture can isolate it; record is a no-op if the state
+    dir is absent.
 
     Replaces the near-mirror implementations previously inlined in:
       - send-coverage-message._notify_owner + _append_notify_failed
@@ -642,6 +649,9 @@ def notify_owner_with_fallback(
     """
     import json as _json
     import subprocess as _subprocess
+
+    if dedup_state_path is None:
+        dedup_state_path = Path(os.environ.get("SHIFT_AGENT_NOTIFY_DEDUP_STATE", NOTIFY_DEDUP_STATE_DEFAULT))
 
     if dedup_enabled and dedup_window_min > 0:
         try:

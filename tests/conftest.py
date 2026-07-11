@@ -87,6 +87,25 @@ def _isolate_audit_log(tmp_path, monkeypatch):
     yield
 
 
+# ── notify-owner dedup isolation (census C-7 2026-07-11) ────────────────────
+# safe_io.notify_owner_with_fallback dedups identical (title+message) owner
+# alerts within a 30-min window via a state file. Its default lives at
+# /opt/shift-agent/state/notify-dedup.json — a SHARED, real path on the VPS/CI.
+# Without isolation one test's DELIVERED alert arms that window and suppresses a
+# later test's identical message (breaking delivery-contract + paging tests),
+# and pytest pollutes the production dedup file (same failure class as the
+# audit-log and bridge isolations above). Route it to a per-test tmp path; the
+# function resolves SHIFT_AGENT_NOTIFY_DEDUP_STATE at CALL time so this reaches
+# both in-process and subprocess callers.
+@pytest.fixture(autouse=True)
+def _isolate_notify_dedup(tmp_path, monkeypatch):
+    """Autouse: default the notify-owner dedup state to a per-test tmp path."""
+    monkeypatch.setenv(
+        "SHIFT_AGENT_NOTIFY_DEDUP_STATE", str(tmp_path / "notify-dedup.json")
+    )
+    yield
+
+
 @pytest.fixture
 def tmp_state_dir(tmp_path: Path) -> Path:
     """Isolated state directory per test."""
