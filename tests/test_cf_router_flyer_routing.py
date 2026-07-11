@@ -1695,8 +1695,10 @@ def test_pr_alpha_mark_paid_variants_are_regulated_payment_intent():
 
 
 def test_pr_alpha_cancel_my_plan_is_regulated_account_intent():
-    # Already caught via the bare "plan" keyword in the existing pattern;
-    # add explicit coverage to lock the behavior.
+    # Caught via PR #603's (2026-07-11) verb-anchored + plan-context branches,
+    # NOT the bare "plan" keyword the pattern used to rely on: "cancel plan"
+    # matches the cancel-verb anchor and "cancel my plan" matches the "my plan"
+    # plan-context noun phrase. Lock the behavior against pattern drift.
     _, actions = _load_plugin_modules()
     assert actions.is_flyer_regulated_account_intent("cancel my plan")
     assert actions.is_flyer_regulated_account_intent("I want to cancel my plan")
