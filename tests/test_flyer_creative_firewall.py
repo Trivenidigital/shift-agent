@@ -1,8 +1,10 @@
-"""Slice 3 — hard-fact firewall (truth-guard core).
+"""Hard-fact-claim classifier (truth-guard core) — `is_hard_fact_claim`.
 
-The firewall is the sole materialization gate for planner candidates. It must let
-legitimate item names through and DROP any candidate that smuggles a hard-fact-
-class claim (§6b: the #1 risk is a claim disguised as an item name). Fail-closed.
+Originally the slice-3 creative-planner firewall; the planner + the
+`CreativeFirewall` materialization gate were removed 2026-07-04 (#548).
+`is_hard_fact_claim` survives, reused by `flyer_brief_validator`: it must let
+legitimate item names through and FLAG any text that smuggles a hard-fact-class
+claim (§6b: the #1 risk is a claim disguised as an item name). Fail-closed.
 """
 from __future__ import annotations
 
@@ -10,22 +12,16 @@ import time
 
 import pytest
 
-from agents.flyer.creative_firewall import CreativeFirewall, is_hard_fact_claim
-from agents.flyer.creative_firewall import CreativeCandidate
-
-
-def _items(*names):
-    return [CreativeCandidate(kind="item", value=n) for n in names]
+from agents.flyer.creative_firewall import is_hard_fact_claim
 
 
 def test_legitimate_item_names_pass():
-    fw = CreativeFirewall()
     names = ["Idli", "Masala Dosa", "Veg Manchurian", "Plain Dosa", "Medu Vada",
              "Uttapam", "Pongal", "Filter Coffee", "7 Up", "Item 65",
              "Gluten Free Dosa", "Sugar Free Sweet",  # compound "free" must PASS (not lone)
              "Chicken 65", "Mysore 65", "Idli 8"]  # bare trailing number is NOT a claim (Codex r6)
-    cleared = fw.clear(_items(*names))
-    assert [c.value for c in cleared] == names  # all pass; incidental digits OK
+    for name in names:  # all pass; incidental digits OK
+        assert is_hard_fact_claim(name) is False, name
 
 
 @pytest.mark.parametrize("claim", [
@@ -76,22 +72,6 @@ def test_legitimate_item_names_pass():
 ])
 def test_hard_fact_class_claims_are_rejected(claim):
     assert is_hard_fact_claim(claim) is True
-    assert CreativeFirewall().clear(_items(claim)) == []
-
-
-def test_clear_drops_only_the_unsafe_candidates():
-    fw = CreativeFirewall()
-    cands = _items("Idli", "Free Delivery", "Masala Dosa", "20% Off", "Poori")
-    cleared = fw.clear(cands)
-    assert [c.value for c in cleared] == ["Idli", "Masala Dosa", "Poori"]
-    assert [c.value for c in fw.rejected(cands)] == ["Free Delivery", "20% Off"]
-
-
-def test_non_item_kind_candidates_are_dropped():
-    fw = CreativeFirewall()
-    cands = [CreativeCandidate(kind="headline", value="Tasty!"),
-             CreativeCandidate(kind="item", value="Dosa")]
-    assert [c.value for c in fw.clear(cands)] == ["Dosa"]  # only item-kind passes
 
 
 # ── "open" precision (false positive 2026-06-05) ────────────────────────────
@@ -317,12 +297,9 @@ def test_open_anchored_re_is_redos_safe():
 
 
 def test_open_compositional_item_does_not_regress_legit_names():
-    # the new open logic must not start passing a smuggled "Open Daily" item nor
-    # start failing a legitimate dish.
-    fw = CreativeFirewall()
-    cands = _items("Masala Dosa", "Open Daily", "open central area", "Idli")
-    # "open central area" is not a real dish but is compositional → it would pass
-    # the claim gate; the legitimate dishes pass; only "Open Daily" is dropped.
-    assert "Open Daily" not in [c.value for c in fw.clear(cands)]
+    # the open logic must flag a smuggled "Open Daily" claim while leaving a
+    # compositional "open central area" and legitimate dishes clean.
+    assert is_hard_fact_claim("Open Daily") is True
+    assert is_hard_fact_claim("open central area") is False
     assert is_hard_fact_claim("Masala Dosa") is False
     assert is_hard_fact_claim("Idli") is False
