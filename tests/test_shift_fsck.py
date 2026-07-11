@@ -177,6 +177,34 @@ def test_duplicate_code_among_nonterminal_proposals_logs_violation(env, capsys):
     assert env.alerts and "1 invariant violations" in env.alerts[0]
 
 
+def test_unknown_proposal_status_logs_violation(env):
+    # A status this binary doesn't recognize downgrades to _UnknownProposal (BL-HERMES-06);
+    # fsck must raise the loud §12a signal the pre-shim brick used to give.
+    _write_pending(env.pending_path, [
+        _proposal("P0007", "#E7K6B", "future_holo_status", FIXED_NOW),
+    ])
+
+    assert fsck.main() == fsck.EXIT_OK
+
+    rows = _read_violations(env.log_path)
+    assert [r["check"] for r in rows] == ["unknown_proposal_status"]
+    assert "P0007" in rows[0]["detail"]
+    assert "future_holo_status" in rows[0]["detail"]
+    assert env.alerts and "1 invariant violations" in env.alerts[0]
+
+
+def test_known_status_does_not_trigger_unknown_check(env):
+    # Sanity: a fully-known proposal must NOT be flagged as unknown.
+    _write_pending(env.pending_path, [
+        _proposal("P0008", "#F8M7C", "sent", FIXED_NOW, sent_ts=FIXED_NOW.isoformat()),
+    ])
+
+    assert fsck.main() == fsck.EXIT_OK
+
+    checks = [r["check"] for r in _read_violations(env.log_path)]
+    assert "unknown_proposal_status" not in checks
+
+
 def test_reconciling_older_than_ten_minutes_logs_violation(env):
     _write_pending(env.pending_path, [
         _proposal(
