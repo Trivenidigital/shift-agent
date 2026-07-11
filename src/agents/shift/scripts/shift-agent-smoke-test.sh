@@ -868,6 +868,7 @@ for unit in \
     send-daily-brief.timer \
     catering-pattern-report.timer \
     flyer-source-edit-sla-watchdog.timer \
+    alert-integrity-watchdog.timer \
     send-routing-accuracy-summary.timer; do
     if ! systemctl is-enabled --quiet "$unit"; then
         echo "FAIL: $unit not enabled"

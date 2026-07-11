@@ -242,6 +242,10 @@ install_artifacts() {
 
     # systemd units — platform (hermes-gateway) + shift-agent specific
     install -m 644 src/platform/systemd/*.service /etc/systemd/system/ 2>/dev/null || true
+    # Platform *.timer units (alert-integrity-watchdog, check-corrupt-state) —
+    # previously the platform block installed only *.service, so timers shipped
+    # in-repo but never landed on the box (built-but-never-installed; census A3/C4b).
+    install -m 644 src/platform/systemd/*.timer /etc/systemd/system/ 2>/dev/null || true
     install -m 644 src/agents/shift/systemd/*.service /etc/systemd/system/ 2>/dev/null || true
     install -m 644 src/agents/shift/systemd/*.timer /etc/systemd/system/ 2>/dev/null || true
 
@@ -887,6 +891,10 @@ PY
     systemctl enable --now eod-reconcile.timer 2>/dev/null || true
     systemctl enable --now send-routing-accuracy-summary.timer 2>/dev/null || true
     systemctl enable --now flyer-source-edit-sla-watchdog.timer 2>/dev/null || true
+    # Platform alert-integrity watchdog (census A3/C3): decisions.log freshness
+    # (§12a hole) + notify-failed.log dead-letter growth (§12b). Idempotent on
+    # redeploy — enable --now is a no-op on an already-enabled timer.
+    systemctl enable --now alert-integrity-watchdog.timer 2>/dev/null || true
     systemctl enable --now prune-expense-receipts.timer 2>/dev/null || true
     # Agent #13 Compliance Calendar (PR-Agent13-v0.1)
     systemctl enable --now check-compliance-deadlines.timer 2>/dev/null || true

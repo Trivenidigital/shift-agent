@@ -1,0 +1,9 @@
+[Unit]
+Description=Alert-integrity watchdog — decisions.log freshness (§12a) + notify-failed.log dead-letter growth (§12b)
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+ExecStart=/usr/local/bin/alert-integrity-watchdog
