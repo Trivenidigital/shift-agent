@@ -34,6 +34,23 @@ import urllib.request
 from pathlib import Path
 from datetime import datetime, timezone
 
+# SECURITY (BL-SEC-08): notify-owner is invoked from ROOT contexts — shift-agent-backup.service
+# (User=root) calls it via shift-agent-backup.sh. The /opt import below pulls
+# safe_io/schemas/exit_codes from a shift-agent-WRITABLE dir (/opt/shift-agent is shift-agent:755),
+# so a compromised shift-agent user could plant a malicious safe_io.py that then executes as ROOT
+# at import time — a root-RCE. Drop to the shift-agent user by re-exec BEFORE any project import.
+# Defense-in-depth: covers every root caller (present + future) without each having to remember to
+# wrap the call. No-op when already non-root (the sweep/daily-brief/cf-router path).
+# Gate on __name__ so importing this module (tests, importlib) never re-execs; every real root
+# invocation runs it as the entry-point script (backup.sh subprocesses it), where __name__ is
+# "__main__". The re-exec drops to shift-agent, which then re-enters here as non-root → no-op.
+if __name__ == "__main__" and hasattr(os, "geteuid") and os.geteuid() == 0:
+    os.execvp(
+        "runuser",
+        ["runuser", "-u", "shift-agent", "--",
+         sys.executable, os.path.abspath(__file__), *sys.argv[1:]],
+    )
+
 sys.path.insert(0, "/opt/shift-agent")
 from safe_io import customer_now, FileLock, ndjson_append  # noqa: E402
 from schemas import Config, OwnerNotificationSuppressed, OwnerWellbeingConfig  # noqa: E402
