@@ -170,6 +170,44 @@ def test_best_of_n_n1_degenerate():
     assert report["n"] == 1 and report["winner_index"] == 0 and img is not None
 
 
+def test_best_of_n_n1_short_circuits_critique():
+    """N==1: the winner is trivially the only candidate, so the vision-oracle
+    critique is SKIPPED (one fewer vision call per render). Telemetry carries a
+    `single_candidate_short_circuit` marker, not a fabricated score."""
+    calls = {"n": 0}
+
+    def boom_scorer(_path, _brief=""):
+        calls["n"] += 1
+        raise AssertionError("critique scorer must not be called when n == 1")
+
+    img, report, candidates = compose_best_of_n(
+        _snack(), generator=_gen, textless_ocr=_ok, critique_scorer=boom_scorer, n=1)
+    assert calls["n"] == 0                               # NO vision call burned
+    assert report["n"] == 1 and report["winner_index"] == 0
+    assert report["winner_composite"] is None            # honest: no critique ran
+    assert img is not None
+    winner = candidates[0]
+    assert winner["composite"] is None
+    assert winner["critique"]["status"] == "single_candidate_short_circuit"
+    assert winner["critique"]["available"] is False
+
+
+def test_best_of_n_n2_still_critiques_each_candidate():
+    """N>=2 path is unchanged — the critique runs per candidate to rank them."""
+    calls = {"n": 0}
+
+    def counting_scorer(_path, _brief=""):
+        calls["n"] += 1
+        return {"axes": {"appetite_appeal": {"score": 7, "critique": "x"}},
+                "composite": 7.0 + calls["n"], "overall_critique": "c"}
+
+    img, report, _ = compose_best_of_n(
+        _snack(), generator=_gen, textless_ocr=_ok, critique_scorer=counting_scorer, n=2)
+    assert calls["n"] == 2                               # both candidates critiqued
+    assert report["winner_composite"] is not None
+    assert img is not None
+
+
 # ── no routing ──────────────────────────────────────────────────────────────
 
 def test_premium_poster_v1_dormant_by_default_in_render(monkeypatch):

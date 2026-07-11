@@ -408,6 +408,12 @@ def compose_best_of_n(
     - ``candidates`` = the full per-candidate records (incl. ``img`` / ``report`` /
       ``critique``) for artifact saving. Selection is by critique composite; when
       critique is unavailable for all accepted candidates, the first accepted wins.
+
+    N==1 short-circuit: when only one candidate is generated the winner is trivial,
+    so the vision-oracle critique is skipped (one fewer vision call per render). The
+    single candidate's ``critique`` carries a ``single_candidate_short_circuit``
+    marker (``composite`` stays ``None``) and it wins via the first-accepted branch.
+    Byte-identical for N>=2.
     """
     try:  # flat (VPS, deployed as flyer_premium_poster_v1.py) then package (tests)
         from flyer_premium_poster_v1 import compose_premium_poster_v1  # type: ignore
@@ -415,6 +421,10 @@ def compose_best_of_n(
         from agents.flyer.premium_poster_v1 import compose_premium_poster_v1
 
     n = max(1, int(n))
+    # N==1 (live config): the winner is trivially the single candidate, so the
+    # per-candidate vision-oracle critique buys no ranking — skip it entirely to
+    # save one vision call per render. Byte-identical for N>=2.
+    single_candidate = n == 1
     bsummary = brief_summary(facts)
     candidates: list[dict] = []
     for i in range(n):
@@ -433,11 +443,20 @@ def compose_best_of_n(
                     cand["background_status"] = "compose_ineligible"
                     cand["detail"] = str(c_rep.get("reason", "ineligible"))
                 else:
-                    crit = critique_composed_poster(c_img, brief_summary=bsummary, scorer=critique_scorer)
                     cand["img"] = c_img
                     cand["report"] = c_rep
-                    cand["critique"] = crit
-                    cand["composite"] = crit.get("composite") if crit.get("available") else None
+                    if single_candidate:
+                        # No critique call. Record a marker (not a fabricated score)
+                        # so telemetry stays honest; composite stays None so the
+                        # candidate wins via the first-accepted branch below.
+                        cand["critique"] = _critique_dict(
+                            {}, 0.0, "single candidate — critique skipped",
+                            "single_candidate_short_circuit", False)
+                        cand["composite"] = None
+                    else:
+                        crit = critique_composed_poster(c_img, brief_summary=bsummary, scorer=critique_scorer)
+                        cand["critique"] = crit
+                        cand["composite"] = crit.get("composite") if crit.get("available") else None
             except Exception as exc:
                 cand["background_status"] = "compose_error"
                 cand["detail"] = f"compose_error:{type(exc).__name__}"
