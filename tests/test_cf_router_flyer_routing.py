@@ -1739,6 +1739,74 @@ def test_pr_alpha_does_not_false_positive_on_flyer_briefs():
     )
 
 
+# ---- 2026-07-11: plan-tier verb-anchor false-positive fix ------------------
+# The bare tokens `plan|starter|growth|unlimited|upgrade|downgrade` inside
+# _FLYER_REGULATED_ACCOUNT_PATTERN hijacked everyday flyer-brief menu words
+# ("unlimited dosa night", "free starter platter", "upgrade your combo") into
+# the fail-closed account guard. Live incident 2026-07-11T18:07Z on a legit
+# flyer brief. Tier-nouns are now verb/context-anchored, mirroring the PR-α
+# phone/address discipline. These tests lock both directions of the contract.
+
+
+def test_plan_tier_verb_anchor_still_matches_billing_intent():
+    """Real plan/billing-change intent must still route to the fail-closed guard."""
+    _, actions = _load_plugin_modules()
+    for phrase in [
+        "Upgrade to Growth",
+        "upgrade my plan",
+        "Upgrade plan to Growth",
+        "CHANGE PLAN GROWTH",
+        "CHANGE PLAN UNLIMITED",
+        "UPGRADE PLAN",
+        "I want the 60 flyers/month plan",
+        "I want the unlimited plan",
+        "switch to unlimited",
+        "downgrade to starter",
+        "what plan am I on",
+        "which plan do I have",
+        "my current plan",
+        "cancel my plan",
+    ]:
+        assert actions.is_flyer_regulated_account_intent(phrase), phrase
+
+
+def test_plan_tier_verb_anchor_does_not_hijack_flyer_briefs():
+    """Everyday menu words must NOT be mistaken for account/billing intent."""
+    _, actions = _load_plugin_modules()
+    for phrase in [
+        "unlimited dosa night",
+        "Dosa festival — unlimited servings all weekend",
+        "create a flyer for unlimited buffet $12.99",
+        "free starter platter",
+        "starters from $5.99",
+        "upgrade your combo to large",
+        "watch our growth this year",
+        "growth",
+    ]:
+        assert not actions.is_flyer_regulated_account_intent(phrase), phrase
+
+
+def test_plan_tier_flyer_brief_yields_from_regulated_guard(monkeypatch):
+    """Guard-level: a flyer brief containing a menu 'tier' word must yield
+    (return None) so it reaches flyer generation instead of the fail-closed
+    account reply. Reproduces the live incident 2026-07-11T18:07Z."""
+    hooks, actions = _load_plugin_modules()
+    # If the guard did not yield, it would call send_flyer_text / audit_intercepted.
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("regulated guard must not send for a flyer brief")))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **_k: (_ for _ in ()).throw(AssertionError("regulated guard must not audit for a flyer brief")))
+    for brief in [
+        "unlimited dosa night",
+        "create a flyer for unlimited buffet $12.99",
+        "free starter platter",
+    ]:
+        result = hooks._try_flyer_regulated_account_guard(
+            brief,
+            "17329837841@s.whatsapp.net",
+            SimpleNamespace(text=brief, chat_id="17329837841@s.whatsapp.net", message_id=f"brief-{abs(hash(brief))}"),
+        )
+        assert result is None, f"guard should yield for flyer brief {brief!r}, got {result!r}"
+
+
 # ---- PR-α follow-up 2026-05-26: active-project yield regression tests ----
 # The PR-α regex extension catches "change phone number" / "change address" as
 # regulated-account intent. But existing Flyer routing (flyer_routing_decision_preview
