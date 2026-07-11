@@ -4888,6 +4888,28 @@ class FlyerSemanticBriefOutcome(_BaseEntry):
     provider_present: bool = False
 
 
+class FlyerBrandAssetStateChanged(_BaseEntry):
+    """Sanctioned brand-asset activate/deactivate audit (§12b P1 pair, 2026-07-11).
+
+    Motivating incident: the 2026-06-17 wrong-brand fix deactivated brand assets
+    via a hand-edit to customers.json (backup
+    customers.json.bak-brandassets-20260617T192917Z) with ZERO audit rows — a
+    manual reversal of customer-applied state that left no trace. This variant is
+    written at the write site of every `set-flyer-brand-asset-state` invocation
+    that flips an asset's `active` flag, in the same operation as the state
+    mutation, so the audit trail always matches disk. `applied_by` is the actor
+    string (e.g. "operator" or "system:<reason>"); operator-initiated reversals
+    need no self-alert, but any future AUTOMATED deactivation of operator/
+    customer-applied state must alert at the write site (§12b)."""
+    type: Literal["flyer_brand_asset_state_changed"] = "flyer_brand_asset_state_changed"
+    asset_id: str = Field(pattern=r"^B\d{4,}$")
+    customer_id: str = Field(pattern=r"^CUST\d{4,}$")
+    prior_active: bool
+    new_active: bool
+    applied_by: str = Field(min_length=1, max_length=120)
+    reason: str = Field(default="", max_length=500)
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -6286,6 +6308,7 @@ LogEntry = Annotated[
         Annotated[FlyerRevisionApplyOutcome, Tag("flyer_revision_apply_outcome")],
         Annotated[FlyerVisualQaSkipped, Tag("flyer_visual_qa_skipped")],
         Annotated[FlyerSemanticBriefOutcome, Tag("flyer_semantic_brief_outcome")],
+        Annotated[FlyerBrandAssetStateChanged, Tag("flyer_brand_asset_state_changed")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
@@ -6429,6 +6452,7 @@ __all__ = [
     "FlyerRecoveryOperatorActionRequired", "FlyerRecoveryOwnerAlert",
     "FlyerUsageRecorded", "FlyerQuotaBlocked", "FlyerClosureCustomerNotified",
     "FlyerStatusResent", "FlyerManualQueueCustomerUpdate",
+    "FlyerBrandAssetStateChanged",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
     "SendFailedProposal", "AcceptedProposal", "DeclinedProposal", "DeniedByOwnerProposal",

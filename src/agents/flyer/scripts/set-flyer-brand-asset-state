@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Sanctioned Flyer Studio brand-asset activate/deactivate, with audit (§12b P1 pair).
+
+Manual edits reversing customer-applied brand-asset state must leave an audit
+row. The 2026-06-17 wrong-brand deactivation was a hand-edit to customers.json
+with ZERO audit rows — this script closes that gap: every activate/deactivate
+flips the located asset's ``active`` flag AND appends a
+``FlyerBrandAssetStateChanged`` row through the decisions.log chokepoint in the
+same operation. Audit-append failure is LOUD (nonzero exit), never silent.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT))
+
+from schemas import FlyerBrandAssetStateChanged, FlyerCustomerStore  # noqa: E402
+from pydantic import TypeAdapter  # noqa: E402
+try:
+    from safe_io import FileLock, atomic_write_text, flock, ndjson_append  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    from contextlib import contextmanager
+
+    class FileLock:  # type: ignore[no-redef]
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def __enter__(self) -> "FileLock":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def atomic_write_text(path: Path, text: str) -> None:  # type: ignore[no-redef]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    @contextmanager
+    def flock(path):  # type: ignore[no-redef]
+        yield
+
+    def ndjson_append(path: Path, entry_json: str) -> None:  # type: ignore[no-redef]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(entry_json + "\n")
+
+
+STATE_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+
+
+def _find_asset(store: FlyerCustomerStore, asset_id: str):
+    """Locate a brand asset by asset_id across all customers' brand_assets."""
+    for customer in store.customers:
+        for idx, asset in enumerate(customer.brand_assets):
+            if asset.asset_id == asset_id:
+                return customer, idx, asset
+    return None, None, None
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description="Sanctioned Flyer brand-asset activate/deactivate with audit.")
+    p.add_argument("--asset-id", required=True)
+    action = p.add_mutually_exclusive_group(required=True)
+    action.add_argument("--activate", action="store_true")
+    action.add_argument("--deactivate", action="store_true")
+    p.add_argument("--actor", required=True, help='actor string, e.g. "operator" or "system:<reason>"')
+    p.add_argument("--reason", required=True)
+    p.add_argument("--state-path", default=str(STATE_PATH))
+    p.add_argument("--log-path", default=str(LOG_PATH))
+    args = p.parse_args()
+
+    target_active = bool(args.activate)
+    state_path = Path(args.state_path)
+    log_path = Path(args.log_path)
+
+    with FileLock(Path(str(state_path) + ".lock")):
+        if not state_path.exists():
+            sys.stderr.write(f"error: state file not found: {state_path}\n")
+            return 2
+        store = FlyerCustomerStore.model_validate(
+            json.loads(state_path.read_text(encoding="utf-8"))
+        )
+        customer, idx, asset = _find_asset(store, args.asset_id)
+        if asset is None:
+            sys.stderr.write(
+                f"error: unknown asset_id {args.asset_id!r} "
+                f"(not found in any customer's brand_assets)\n"
+            )
+            return 3
+
+        prior_active = bool(asset.active)
+        if prior_active == target_active:
+            state_word = "active" if target_active else "inactive"
+            print(json.dumps({
+                "asset_id": args.asset_id,
+                "customer_id": customer.customer_id,
+                "prior_active": prior_active,
+                "new_active": prior_active,
+                "noop": True,
+                "notice": f"asset {args.asset_id} already {state_word}; no change",
+            }))
+            return 0
+
+        now = datetime.now(timezone.utc)
+        # Build + validate the audit entry BEFORE mutating state so a bad actor/
+        # reason/id fails closed with no state written.
+        entry = FlyerBrandAssetStateChanged(
+            type="flyer_brand_asset_state_changed",
+            ts=now,
+            asset_id=args.asset_id,
+            customer_id=customer.customer_id,
+            prior_active=prior_active,
+            new_active=target_active,
+            applied_by=args.actor,
+            reason=args.reason,
+        )
+
+        updated_assets = list(customer.brand_assets)
+        updated_assets[idx] = asset.model_copy(update={"active": target_active})
+        store.customers = [
+            row.model_copy(update={"brand_assets": updated_assets, "updated_at": now})
+            if row.customer_id == customer.customer_id else row
+            for row in store.customers
+        ]
+        atomic_write_text(state_path, store.model_dump_json(indent=2))
+
+        # Audit at the write site, same operation (§12b). Never best-effort:
+        # a failed append exits nonzero and says so, so a reversal is never
+        # completed silently.
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with flock(log_path):
+                ndjson_append(
+                    log_path,
+                    TypeAdapter(FlyerBrandAssetStateChanged).dump_json(entry).decode("utf-8"),
+                )
+        except Exception as exc:  # noqa: BLE001 — §12b: audit failure must be loud, never silent
+            sys.stderr.write(
+                f"error: state for {args.asset_id} was changed "
+                f"(active={prior_active}->{target_active}) but the audit append FAILED: {exc}. "
+                f"State file {state_path} reflects the change; the decisions.log row was NOT written.\n"
+            )
+            return 4
+
+    print(json.dumps({
+        "asset_id": args.asset_id,
+        "customer_id": customer.customer_id,
+        "prior_active": prior_active,
+        "new_active": target_active,
+    }))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
