@@ -17,6 +17,7 @@ shares the module since it's audit-log-tail-scanning logic.
 """
 from __future__ import annotations
 import json as _json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -29,6 +30,18 @@ from schemas import ConfigLoadFailed, CateringQuoteSentLeadMissing
 
 
 _LOG_PATH_DEFAULT = Path("/opt/shift-agent/logs/decisions.log")
+
+
+def _default_log_path() -> Path:
+    """Fallback audit-log path when a caller passes no explicit ``log_path``.
+
+    Honors ``SHIFT_AGENT_DECISIONS_LOG_PATH`` (the same override the deployed
+    scripts read) so a script whose config-load fails under pytest routes the
+    config_load_failed row to a tmp dir instead of the production audit log
+    (census C1 2026-07-11). Defaults to the module constant `_LOG_PATH_DEFAULT`,
+    which stays monkeypatchable for tests that pin the constant-default path."""
+    override = os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH")
+    return Path(override) if override else _LOG_PATH_DEFAULT
 
 
 def _append_best_effort(line: str, log_path: Path) -> None:
@@ -72,7 +85,7 @@ def log_config_load_failed_best_effort(
                          else "<unknown>")[:80] or "<unknown>",
         )
         line = TypeAdapter(ConfigLoadFailed).dump_json(entry).decode("utf-8")
-        _append_best_effort(line, log_path or _LOG_PATH_DEFAULT)
+        _append_best_effort(line, log_path or _default_log_path())
     except Exception:
         pass  # never let audit-emission shadow the primary error
 
@@ -103,7 +116,7 @@ def log_quote_sent_lead_missing_best_effort(
             detail=detail[:500],
         )
         line = TypeAdapter(CateringQuoteSentLeadMissing).dump_json(entry).decode("utf-8")
-        _append_best_effort(line, log_path or _LOG_PATH_DEFAULT)
+        _append_best_effort(line, log_path or _default_log_path())
     except Exception:
         pass
 

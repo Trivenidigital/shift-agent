@@ -79,8 +79,11 @@ PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
 PENDING_LOCK = Path("/opt/shift-agent/state/pending.json.lock")
 COUNTER_PATH = Path("/opt/shift-agent/state/send-counter.json")
 COUNTER_LOCK = Path("/opt/shift-agent/state/send-counter.json.lock")
-LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
-LOG_LOCK = Path("/opt/shift-agent/logs/decisions.log.lock")
+# census C1 2026-07-11: honor SHIFT_AGENT_DECISIONS_LOG_PATH so on-box tests
+# (incl. the dry-run e2e) route audit rows to a tmp file instead of the
+# production chokepoint.
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+LOG_LOCK = Path(str(LOG_PATH) + ".lock")
 DISABLED_FLAG = Path("/opt/shift-agent/state/disabled.flag")
 
 BRIDGE_SEND_URL = "http://127.0.0.1:3000/send"
