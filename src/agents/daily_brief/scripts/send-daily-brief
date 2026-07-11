@@ -64,6 +64,10 @@ ROSTER_PATH = Path(os.environ.get("SHIFT_AGENT_ROSTER_PATH", "/opt/shift-agent/r
 PENDING_PATH = Path(os.environ.get("SHIFT_AGENT_PENDING_PATH", "/opt/shift-agent/state/pending.json"))
 DECISIONS_LOG = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
 SENTINEL_PATH = Path(os.environ.get("SHIFT_AGENT_BRIEF_SENTINEL_PATH", "/opt/shift-agent/state/last-brief-sent.json"))
+# Same-day dedup marker for the "Daily Brief missed" P1 page (census S1). Records
+# the brief_date we last paged for, so a genuine miss pages once — not on every
+# 15-min past-catchup tick.
+BRIEF_MISSED_PAGE_PATH = Path(os.environ.get("SHIFT_AGENT_BRIEF_MISSED_PAGE_PATH", "/opt/shift-agent/state/last-brief-missed-page.json"))
 BIRTHDAYS_PATH = Path(os.environ.get("SHIFT_AGENT_BIRTHDAYS_PATH", "/opt/shift-agent/state/customer-birthdays.json"))
 CATERING_LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_CATERING_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
 CATERING_LEARNING_SUMMARY_PATH = Path(os.environ.get(
@@ -685,6 +689,28 @@ def _write_sentinel(brief_date: str, attempt_id: str, msg_id: str, ts: datetime)
     })
 
 
+def _read_missed_page_date() -> Optional[str]:
+    """Return the brief_date the 'Daily Brief missed' page was last sent for, or
+    None. Backs the same-day dedup (census S1) so a genuine miss pages once, not
+    on every 15-min past-catchup tick."""
+    if not BRIEF_MISSED_PAGE_PATH.exists():
+        return None
+    val, status = safe_load_json(BRIEF_MISSED_PAGE_PATH, default=None)
+    if status != "ok" or not isinstance(val, dict):
+        return None
+    d = val.get("brief_date")
+    return d if isinstance(d, str) else None
+
+
+def _record_missed_page(brief_date: str, ts: datetime) -> None:
+    """Record that the 'Daily Brief missed' page was sent for brief_date (same-day dedup)."""
+    BRIEF_MISSED_PAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(BRIEF_MISSED_PAGE_PATH, {
+        "brief_date": brief_date,
+        "ts": ts.isoformat(),
+    })
+
+
 # ─────────────────────────────────────────────────────────────────
 # Main orchestration
 # ─────────────────────────────────────────────────────────────────
@@ -750,11 +776,23 @@ def main() -> int:
                 type="brief_skipped", ts=now_local,
                 brief_date=today_str, reason="catchup_expired",
             ))
-            _pushover_alert(
-                "Daily Brief missed",
-                f"Today's brief was not sent — VPS was down past catch-up window ({minutes_late} min late, max {cfg.daily_brief.catchup_window_minutes}).",
-                priority=1,
-            )
+            # Page ONLY on a genuine miss. eod-reconcile's past_catchup branch is
+            # log-only (eod-reconcile:241-247); the brief must match. On a normal
+            # day the brief was sent in-window, today's sentinel exists, and every
+            # afternoon tick lands here — paging BEFORE the sentinel check
+            # false-paged the owner ~50×/day (census S1). Same-day dedup makes a
+            # real miss (VPS down past catch-up, no sentinel) page once, not on
+            # every 15-min tick. Read is lock-free (mirrors EOD): if now is
+            # past_catchup no other run is writing the sentinel this cycle.
+            sentinel = _read_sentinel()
+            already_sent_today = bool(sentinel and sentinel.get("brief_date") == today_str)
+            if not already_sent_today and _read_missed_page_date() != today_str:
+                _pushover_alert(
+                    "Daily Brief missed",
+                    f"Today's brief was not sent — VPS was down past catch-up window ({minutes_late} min late, max {cfg.daily_brief.catchup_window_minutes}).",
+                    priority=1,
+                )
+                _record_missed_page(today_str, now_local)
         return EXIT_OK
 
     # Idempotency check — under FileLock for the duration of the check (cheap).
