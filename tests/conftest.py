@@ -66,6 +66,27 @@ def _force_fake_bridge_sink(monkeypatch):
     yield
 
 
+# ── audit-log test isolation (census C1 2026-07-11) ─────────────────────────
+# Route EVERY test's audit writes to a per-test tmp decisions.log so no test can
+# pollute the production audit chokepoint (/opt/shift-agent/logs/decisions.log).
+# census C1 found pytest had written 41 regulated_send_*, 87 config_load_failed,
+# and 209 dry-run proposal rows into the prod log because the default paths
+# point at prod and the tests forgot to override. This mirrors
+# _force_fake_bridge_sink: a belt-and-suspenders default that the safe_io
+# ndjson_append guard backs up (a stray prod-path write from pytest RAISES).
+# In-process writers read the env at call time; subprocess tests that build
+# env={**os.environ, ...} inherit it; sudo/on-box tests pass it through
+# explicitly. A test that pins the constant-default path (test_audit_helpers'
+# default-kwarg case) delenv's this var in its own body.
+@pytest.fixture(autouse=True)
+def _isolate_audit_log(tmp_path, monkeypatch):
+    """Autouse: default the audit chokepoint to a per-test tmp path."""
+    monkeypatch.setenv(
+        "SHIFT_AGENT_DECISIONS_LOG_PATH", str(tmp_path / "audit" / "decisions.log")
+    )
+    yield
+
+
 @pytest.fixture
 def tmp_state_dir(tmp_path: Path) -> Path:
     """Isolated state directory per test."""

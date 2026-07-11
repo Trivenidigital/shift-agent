@@ -33,6 +33,7 @@ Exit codes:
 from __future__ import annotations
 import argparse
 import json
+import os
 import secrets
 import string
 import sys
@@ -53,8 +54,11 @@ import yaml
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
 PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
 PENDING_LOCK = Path("/opt/shift-agent/state/pending.json.lock")
-LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
-LOG_LOCK = Path("/opt/shift-agent/logs/decisions.log.lock")
+# census C1 2026-07-11: honor SHIFT_AGENT_DECISIONS_LOG_PATH (same override the
+# deployed digest/reconcile scripts read) so on-box tests route audit rows to a
+# tmp file instead of the production chokepoint. Defaults to the VPS path.
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+LOG_LOCK = Path(str(LOG_PATH) + ".lock")
 # Sibling agent's code store — shared #XXXXX pool cross-pool collision avoidance (BL-SHIFT-13).
 CATERING_LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 

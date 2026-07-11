@@ -261,6 +261,41 @@ def _json_default(x):
     raise TypeError(f"object of type {type(x).__name__} is not JSON serializable")
 
 
+# census C1 2026-07-11 — production audit-tree write-guard.
+# pytest MUST NOT write into the deployed audit tree. Tests that forgot to
+# override the default decisions-log path wrote real rows into
+# /opt/shift-agent/logs/decisions.log on the box (census C1 found 41
+# regulated_send_*, 87 config_load_failed, 209 dry-run proposal rows). The
+# guard below makes that failure LOUD instead of silent: any ndjson_append
+# under the production root from a pytest process raises unless explicitly
+# opted in. Module-level so tests can monkeypatch the root to a tmp dir.
+_PROD_AUDIT_ROOT = "/opt/shift-agent"
+
+
+def _refuse_prod_audit_write_under_pytest(path: Path) -> None:
+    """Raise if a pytest run targets the production audit tree.
+
+    Dirt-cheap fast path: the env lookup short-circuits for every non-pytest
+    (i.e. production) call before any path resolution happens, so the guard is
+    free on the hot path. Bypass with ``SHIFT_AGENT_ALLOW_PROD_AUDIT_IN_TEST=1``
+    for the rare on-box smoke that legitimately writes real audit rows.
+    """
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    if os.environ.get("SHIFT_AGENT_ALLOW_PROD_AUDIT_IN_TEST") == "1":
+        return
+    root = os.path.abspath(_PROD_AUDIT_ROOT)
+    target = os.path.abspath(str(path))
+    if target == root or target.startswith(root + os.sep):
+        raise RuntimeError(
+            f"ndjson_append refused: pytest attempted to write to the production "
+            f"audit tree ({target}, under {_PROD_AUDIT_ROOT}). Point the audit "
+            f"path at a tmp dir — set SHIFT_AGENT_DECISIONS_LOG_PATH or pass an "
+            f"explicit log_path. If this on-box write is intentional, set "
+            f"SHIFT_AGENT_ALLOW_PROD_AUDIT_IN_TEST=1."
+        )
+
+
 def ndjson_append(path: Path, entry_json: str) -> None:
     """Append a single JSON-encoded line (no line-break chars inside) + \\n.
     Caller is responsible for holding an appropriate flock on `<path>.lock`
@@ -271,6 +306,7 @@ def ndjson_append(path: Path, entry_json: str) -> None:
     (U+0085 NEL, U+2028, U+2029) that some NDJSON parsers treat as line terminators.
     """
     path = Path(path)
+    _refuse_prod_audit_write_under_pytest(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     _LINE_BREAKERS = ("\n", "\r", "", " ", " ")
     if any(c in entry_json for c in _LINE_BREAKERS):
@@ -625,6 +661,18 @@ _DECISIONS_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 _DECISIONS_LOG_LOCK = Path(str(_DECISIONS_LOG_PATH) + ".lock")
 
 
+def _decisions_log_path() -> Path:
+    """Resolve the audit-chokepoint path for the regulated-send writer.
+
+    Honors ``SHIFT_AGENT_DECISIONS_LOG_PATH`` (the same override the deployed
+    daily-brief / eod-reconcile / compliance scripts already read) so tests can
+    route audit writes to a tmp dir; defaults to the deployed VPS path. Resolved
+    at call time so an env override set after import (e.g. a conftest fixture)
+    takes effect. census C1 2026-07-11."""
+    override = os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH")
+    return Path(override) if override else _DECISIONS_LOG_PATH
+
+
 # Scripts in this set may call bridge_post / bridge_send_media / bridge_send_cta
 # WITHOUT an explicit action_context kwarg (i.e. the caller relies on the
 # parameter's default). Every other caller MUST pass a non-None
@@ -725,10 +773,11 @@ def _emit_audit_row(entry_type: str, fields: dict) -> None:
     """Build a LogEntry of the given discriminated-union type and append to
     the canonical audit chokepoint under the conventional flock.
 
-    Wraps `ndjson_append` in `FileLock(_DECISIONS_LOG_LOCK)` per the
-    documented contract of ndjson_append. PROPAGATES exceptions — used by
-    `_try_emit_audit_row` which converts them to a return value for the
-    chokepoint's HTTP-safe error path.
+    Wraps `ndjson_append` in a `FileLock` on the resolved path's `.lock` per
+    the documented contract of ndjson_append. The path is resolved via
+    `_decisions_log_path()` (honors SHIFT_AGENT_DECISIONS_LOG_PATH). PROPAGATES
+    exceptions — used by `_try_emit_audit_row` which converts them to a return
+    value for the chokepoint's HTTP-safe error path.
 
     Raises:
         pydantic.ValidationError — if `fields` don't satisfy the variant schema.
@@ -738,8 +787,10 @@ def _emit_audit_row(entry_type: str, fields: dict) -> None:
     ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     payload = {"type": entry_type, "ts": ts, **fields}
     entry = _LOG_ENTRY_ADAPTER.validate_python(payload)
-    with FileLock(_DECISIONS_LOG_LOCK):
-        ndjson_append(_DECISIONS_LOG_PATH, entry.model_dump_json())
+    log_path = _decisions_log_path()
+    log_lock = Path(str(log_path) + ".lock")
+    with FileLock(log_lock):
+        ndjson_append(log_path, entry.model_dump_json())
 
 
 def _try_emit_audit_row(entry_type: str, fields: dict) -> Optional[str]:

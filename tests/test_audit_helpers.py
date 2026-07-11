@@ -182,6 +182,9 @@ def test_config_load_failed_default_log_path_kwarg(tmp_path: Path, monkeypatch):
     to a tmp path then calls the helper WITHOUT explicit log_path so a
     refactor renaming the kwarg surfaces here."""
     import audit_helpers
+    # This case pins the module-constant fallback, so isolate from the
+    # conftest-set SHIFT_AGENT_DECISIONS_LOG_PATH env override (census C1).
+    monkeypatch.delenv("SHIFT_AGENT_DECISIONS_LOG_PATH", raising=False)
     custom_default = tmp_path / "default_decisions.log"
     monkeypatch.setattr(audit_helpers, "_LOG_PATH_DEFAULT", custom_default)
     audit_helpers.log_config_load_failed_best_effort(

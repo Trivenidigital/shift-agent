@@ -8,7 +8,9 @@ so the suite can run on a dev box without the deployed tree.
 from __future__ import annotations
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -45,6 +47,37 @@ SEND_COUNTER = Path("/opt/shift-agent/state/send-counter.json")
 
 def _run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+# census C1 2026-07-11: the deployed binaries run as user shift-agent via sudo,
+# which strips the parent env — so the pytest process' SHIFT_AGENT_DECISIONS_LOG_PATH
+# (set by conftest) never reaches them and their audit rows historically landed
+# in the production chokepoint (209 dry-run proposal rows). Redirect them to a
+# shift-agent-writable tmp file by passing the var explicitly through `env`.
+# The holder is filled by the autouse fixture below.
+_TEST_DECISIONS_LOG = [None]
+
+
+@pytest.fixture(autouse=True)
+def _redirect_agent_audit_log():
+    """World-writable tmp decisions.log so the sudo'd (shift-agent-user)
+    binaries don't write to the production audit chokepoint. The test process
+    is root; chmod 0777 lets the shift-agent user create + append the file."""
+    d = tempfile.mkdtemp(prefix="shift-agent-e2e-audit-")
+    os.chmod(d, 0o777)
+    _TEST_DECISIONS_LOG[0] = os.path.join(d, "decisions.log")
+    try:
+        yield
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        _TEST_DECISIONS_LOG[0] = None
+
+
+def _agent(bin_and_args, extra_env=()):
+    """Build a `sudo -u shift-agent env SHIFT_AGENT_DECISIONS_LOG_PATH=... <bin>`
+    command so the deployed binary's audit rows land in the test tmp log."""
+    env = ["env", f"SHIFT_AGENT_DECISIONS_LOG_PATH={_TEST_DECISIONS_LOG[0]}", *extra_env]
+    return ["sudo", "-u", "shift-agent"] + env + list(bin_and_args)
 
 
 @pytest.fixture
@@ -105,8 +138,8 @@ def test_full_proposal_lifecycle(clean_pending):
     PENDING.unlink(missing_ok=True)
 
     # 1. create-proposal
-    r = _run([
-        "sudo", "-u", "shift-agent", "/usr/local/bin/create-proposal",
+    r = _run(_agent([
+        "/usr/local/bin/create-proposal",
         "--absent-employee-id", "e001",
         "--absent-date", "2026-04-25",
         "--absent-shift", "09:00-17:00",
@@ -116,7 +149,7 @@ def test_full_proposal_lifecycle(clean_pending):
         "--message-id", "test-e2e-001",
         "--candidate-employee-id", "e004",
         "--candidate-name", "Anjali Iyer",
-    ])
+    ]))
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     pid = out["proposal_id"]
@@ -131,7 +164,7 @@ def test_full_proposal_lifecycle(clean_pending):
         [pid, "sent", "--cause", "test", "--actor", "agent", "--outbound-message-id", "msg-out-001"],
         [pid, "accepted", "--cause", "test", "--actor", "candidate", "--response-message", "yes"],
     ]:
-        r = _run(["sudo", "-u", "shift-agent", "/usr/local/bin/update-proposal-status"] + args)
+        r = _run(_agent(["/usr/local/bin/update-proposal-status"] + args))
         assert r.returncode == 0, f"transition failed: {args} — {r.stderr}"
 
     # 3. verify final state
@@ -145,8 +178,8 @@ def test_full_proposal_lifecycle(clean_pending):
 def test_illegal_transition_rejected(clean_pending):
     """sent → approved must be refused with exit 9."""
     PENDING.unlink(missing_ok=True)
-    r = _run([
-        "sudo", "-u", "shift-agent", "/usr/local/bin/create-proposal",
+    r = _run(_agent([
+        "/usr/local/bin/create-proposal",
         "--absent-employee-id", "e002",
         "--absent-date", "2026-04-25",
         "--absent-shift", "06:00-14:00",
@@ -154,7 +187,7 @@ def test_illegal_transition_rejected(clean_pending):
         "--absent-reason", "test",
         "--input-message", "test",
         "--message-id", "test-e2e-illegal-001",
-    ])
+    ]))
     assert r.returncode == 0
     pid = json.loads(r.stdout)["proposal_id"]
 
@@ -164,13 +197,13 @@ def test_illegal_transition_rejected(clean_pending):
         [pid, "reconciling", "--cause", "t", "--actor", "agent", "--reconciling-pid", "1"],
         [pid, "sent", "--cause", "t", "--actor", "agent", "--outbound-message-id", "x"],
     ]:
-        _run(["sudo", "-u", "shift-agent", "/usr/local/bin/update-proposal-status"] + args, check=False)
+        _run(_agent(["/usr/local/bin/update-proposal-status"] + args), check=False)
 
     # Now try sent → approved (illegal)
-    r = _run([
-        "sudo", "-u", "shift-agent", "/usr/local/bin/update-proposal-status",
+    r = _run(_agent([
+        "/usr/local/bin/update-proposal-status",
         pid, "approved", "--cause", "illegal_test", "--actor", "owner",
-    ])
+    ]))
     assert r.returncode == 9, f"expected EXIT_ILLEGAL_TRANSITION=9, got {r.returncode}: {r.stderr}"
 
 
@@ -226,8 +259,8 @@ def test_dry_run_skips_bridge_but_still_transitions(clean_pending, temporarily_e
     PENDING.unlink(missing_ok=True)
 
     # 1. create → approved
-    r = _run([
-        "sudo", "-u", "shift-agent", "/usr/local/bin/create-proposal",
+    r = _run(_agent([
+        "/usr/local/bin/create-proposal",
         "--absent-employee-id", "e001",
         "--absent-date", "2026-04-25",
         "--absent-shift", "09:00-17:00",
@@ -237,26 +270,23 @@ def test_dry_run_skips_bridge_but_still_transitions(clean_pending, temporarily_e
         "--message-id", "test-dryrun-001",
         "--candidate-employee-id", "e004",
         "--candidate-name", "Anjali Iyer",
-    ])
+    ]))
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     pid = out["proposal_id"]
     code = out["code"]
 
-    r = _run([
-        "sudo", "-u", "shift-agent", "/usr/local/bin/update-proposal-status",
+    r = _run(_agent([
+        "/usr/local/bin/update-proposal-status",
         pid, "approved", "--cause", "dry-run-test", "--actor", "owner",
         "--owner-input", code,
-    ])
+    ]))
     assert r.returncode == 0, r.stderr
 
     # 2. send with SHIFT_AGENT_DRY_RUN=1 — must succeed even though bridge is down/disabled
     r = subprocess.run(
-        [
-            "sudo", "-u", "shift-agent",
-            "env", "SHIFT_AGENT_DRY_RUN=1",
-            "/usr/local/bin/send-coverage-message", pid,
-        ],
+        _agent(["/usr/local/bin/send-coverage-message", pid],
+               extra_env=["SHIFT_AGENT_DRY_RUN=1"]),
         capture_output=True, text=True,
     )
     assert r.returncode == 0, f"dry-run send failed: stdout={r.stdout} stderr={r.stderr}"
