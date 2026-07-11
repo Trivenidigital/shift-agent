@@ -81,6 +81,8 @@ LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 TEMPLATE_DIR = Path("/opt/shift-agent/templates")
 MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
+# Sibling agent's code store — shared #XXXXX pool cross-pool collision avoidance (BL-SEC-04).
+SHIFT_PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
 PROPOSAL_MENU_ITEMS_CAP = 12  # cap to keep WhatsApp message readable
 
 # Off-menu render budget. Budget arithmetic:
@@ -100,13 +102,41 @@ WHATSAPP_OFF_MENU_BUDGET = 1500
 _CODE_ALPHA = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
 
+def _active_shift_codes() -> set[str]:
+    """Shift proposal codes active in the shared #XXXXX pool (best-effort, raw read).
+
+    Codes are namespaced across agents and the dispatcher disambiguates a collision only by
+    state-file priority, so a catering code that collides with a live shift proposal code can be
+    silently shadowed. Mirrors the inline sibling scan in parse-menu-photo / extract-receipt. Raw
+    json.loads (not load_model) so an unreadable sibling store is never quarantined here — the
+    owning script surfaces its own corruption loudly.
+    """
+    codes: set[str] = set()
+    if SHIFT_PENDING_PATH.exists():
+        try:
+            raw = json.loads(SHIFT_PENDING_PATH.read_text(encoding="utf-8"))
+            proposals = raw.get("proposals", {})
+            # pending.json stores proposals as dict[str, Proposal]; iterate .values()
+            # (iterating the mapping yields id keys → collects nothing).
+            iterable = proposals.values() if isinstance(proposals, dict) else proposals
+            for prop in iterable:
+                if isinstance(prop, dict) and prop.get("code"):
+                    codes.add(prop["code"])
+        except Exception:
+            pass
+    return codes
+
+
 def _generate_unique_code(store: CateringLeadStore) -> str:
-    """Generate a 5-char approval code not currently in use among non-terminal leads."""
+    """Generate a 5-char approval code not active in the shared #XXXXX pool — non-terminal
+    catering leads AND live shift proposals (cross-pool: the dispatcher disambiguates a
+    collision only by state-file priority)."""
     active_codes = {
         l.owner_approval_code for l in store.leads
         if l.status not in {"NOT_CATERING", "OWNER_REJECTED", "CLOSED", "STALE"}
         and l.owner_approval_code
     }
+    active_codes |= _active_shift_codes()
     for _ in range(50):
         candidate = "#" + "".join(secrets.choice(_CODE_ALPHA) for _ in range(5))
         if candidate not in active_codes:
