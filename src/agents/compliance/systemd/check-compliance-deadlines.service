@@ -2,7 +2,7 @@
 Description=Compliance Calendar daily reminder check (Agent #13)
 After=network-online.target hermes-gateway.service
 Wants=network-online.target
-ConditionPathIsExecutable=/usr/local/bin/check-compliance-deadlines.py
+ConditionFileIsExecutable=/usr/local/bin/check-compliance-deadlines.py
 ConditionPathExists=/opt/shift-agent/config.yaml
 
 [Service]

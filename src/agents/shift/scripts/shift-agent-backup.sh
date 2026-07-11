@@ -14,6 +14,53 @@
 
 set -euo pipefail
 
+# ─── Retention (date prune + count/size caps) ───
+# Date-only retention (30d) let backups accumulate to 15GB and fill the disk in
+# May (census S4/C-2). Cap the newest-N count AND total size, pruning oldest
+# first after the date prune. Both caps env-tunable. Factored into a function +
+# standalone `--enforce-retention <dir> [retention_days]` entrypoint so it can be
+# tested without running a full backup.
+enforce_retention() {
+    local dir="$1"
+    local retention_days="$2"
+    local max_count="${SHIFT_AGENT_BACKUP_MAX_COUNT:-14}"
+    local max_bytes="${SHIFT_AGENT_BACKUP_MAX_TOTAL_BYTES:-$((12 * 1024 * 1024 * 1024))}"
+
+    # 1) Age-based prune (unchanged default: backup.retention_days, 30d).
+    find "$dir" -maxdepth 1 -type f -name "*.tar.gz.gpg" -mtime +"$retention_days" -delete 2>/dev/null || true
+
+    # 2) Count + total-size cap on the survivors. Walk newest-first; always keep
+    #    the newest archive, then prune every older one once EITHER cap is first
+    #    exceeded (oldest deleted first).
+    local kept=0 total=0 over=0
+    local pruned=()
+    while IFS=$'\t' read -r _mtime size path; do
+        [ -n "${path:-}" ] || continue
+        if [ "$kept" -eq 0 ]; then
+            kept=1; total=$size; continue   # always keep the newest backup
+        fi
+        if [ "$over" -eq 1 ] || [ "$kept" -ge "$max_count" ] || [ $((total + size)) -gt "$max_bytes" ]; then
+            over=1
+            if rm -f "$path"; then
+                pruned+=("$(basename "$path")")
+            fi
+        else
+            kept=$((kept + 1)); total=$((total + size))
+        fi
+    done < <(find "$dir" -maxdepth 1 -type f -name "*.tar.gz.gpg" -printf '%T@\t%s\t%p\n' 2>/dev/null | sort -rn)
+
+    if [ "${#pruned[@]}" -gt 0 ]; then
+        echo "Retention: pruned ${#pruned[@]} backup(s) over caps (keep newest ${max_count}, ${max_bytes}B total): ${pruned[*]}"
+    fi
+}
+
+# Standalone entrypoint (nightly run calls enforce_retention directly below):
+#   shift-agent-backup.sh --enforce-retention <dir> [retention_days]
+if [ "${1:-}" = "--enforce-retention" ]; then
+    enforce_retention "${2:?--enforce-retention requires a backup dir}" "${3:-30}"
+    exit 0
+fi
+
 CONFIG=/opt/shift-agent/config.yaml
 BACKUP_DIR=/opt/shift-agent/backups
 STAMP=$(date +%F-%H%M)
@@ -235,7 +282,7 @@ if [ -n "${S3_BUCKET:-}" ] && command -v aws >/dev/null 2>&1; then
     fi
 fi
 
-# ─── Retention ───
-find "$BACKUP_DIR" -name "*.tar.gz.gpg" -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
+# ─── Retention (date prune + count/size caps) ───
+enforce_retention "$BACKUP_DIR" "$RETENTION_DAYS"
 
 echo "Backup OK: $GPG_PATH ($gpg_size bytes)"

@@ -9,7 +9,6 @@ stale queue rows.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from datetime import datetime, timezone
@@ -154,16 +153,6 @@ def stale_source_edit_rows(
         })
     rows.sort(key=lambda row: (-row["age_minutes"], row["project_id"]))
     return rows
-
-
-def _stale_set_signature(rows: list[dict[str, Any]]) -> str:
-    """Stable signature of a throttled stale set (sorted row_keys). Two runs over
-    the SAME set of stuck rows produce the same signature; a row entering or
-    leaving the set (or being re-queued -> new queued_at -> new row_key) changes
-    it. Used to suppress the every-tick throttled audit append on an unchanged
-    stuck set (census: that branch was 46% of decisions.log)."""
-    keys = sorted(str(row.get("row_key") or "") for row in rows)
-    return hashlib.sha256("\n".join(keys).encode("utf-8")).hexdigest()
 
 
 def _is_throttled(row: dict[str, Any], state: dict[str, Any], *, now: datetime, repeat_minutes: int) -> bool:
@@ -648,40 +637,18 @@ def run_watchdog(
     throttled_rows = [row for row in rows if row not in alert_rows]
 
     if not alert_rows:
-        # Throttled-append suppression (census: this branch produced a decisions.log
-        # row every 5-min timer tick forever on a stable stuck set — 46% of the log,
-        # ~89% no-ops). Emit a throttled audit row ONLY when the stale set's
-        # signature changes (a row entered/left the set or was re-queued); otherwise
-        # stay silent. The persisted signature makes the next unchanged tick a no-op.
-        # The operator page path is UNTOUCHED — alerts still re-fire every repeat
-        # window via the alert branch below.
-        signature = _stale_set_signature(throttled_rows)
-        prev_signature = str(state.get("last_throttled_signature") or "")
-        signature_changed = signature != prev_signature
-        if signature_changed:
-            _append_audit(
-                decisions_log_path,
-                outcome="throttled",
-                rows=throttled_rows,
-                stale_count=stale_count,
-                threshold_minutes=threshold_minutes,
-                repeat_minutes=repeat_minutes,
-                notify_ok=False,
-                reason_codes=reason_codes,
-                now=now,
-            )
-            with FileLock(Path(str(alert_state_path) + ".lock")):
-                fresh_state = _load_alert_state(alert_state_path)
-                fresh_state["last_throttled_signature"] = signature
-                fresh_state["last_throttled_at"] = now.isoformat()
-                atomic_write_json(alert_state_path, fresh_state)
+        # Throttled tick: the whole stale set is still inside its repeat window, so
+        # the operator was already paged recently (the page path below re-fires
+        # every repeat window). Do NOT append a decisions.log row here — throttled
+        # ticks were 45% of the audit log and cleared nothing (census A7/F1). Only
+        # real events (alerted / notify_failed) get audit rows; the throttled
+        # outcome stays visible via the JSON result main() prints to stdout/journald.
         return {
             "status": "throttled",
             "exit_code": 0,
             "stale_count": stale_count,
             "alerted_project_ids": [],
             "throttled_project_ids": [row["project_id"] for row in throttled_rows],
-            "throttled_append_suppressed": not signature_changed,
             "oldest_age_minutes": max(row["age_minutes"] for row in rows),
             "pruned_alert_rows": pruned_alert_rows,
             "customer_updates": customer_updates,

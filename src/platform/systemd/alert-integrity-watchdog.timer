@@ -1,0 +1,11 @@
+[Unit]
+Description=Alert-integrity watchdog — run every 15 min (audit-log freshness + dropped-alert dead-letter)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=alert-integrity-watchdog.service
+
+[Install]
+WantedBy=timers.target

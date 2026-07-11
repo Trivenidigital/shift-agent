@@ -128,6 +128,7 @@ def _run(fixture_dir, bridge_port=None, args=("--force",), now_override=None,
         "SHIFT_AGENT_PENDING_PATH": str(fixture_dir / "state" / "pending.json"),
         "SHIFT_AGENT_DECISIONS_LOG_PATH": str(fixture_dir / "logs" / "decisions.log"),
         "SHIFT_AGENT_BRIEF_SENTINEL_PATH": str(fixture_dir / "state" / "last-brief-sent.json"),
+        "SHIFT_AGENT_BRIEF_MISSED_PAGE_PATH": str(fixture_dir / "state" / "last-brief-missed-page.json"),
         "SHIFT_AGENT_DISABLED_FLAG": str(fixture_dir / "state" / "disabled.flag"),
         "SHIFT_AGENT_TEMPLATES_DIR": str(TEMPLATES_DIR),
         "SHIFT_AGENT_LOG_SOURCE_OVERRIDE": str(fixture_dir / "logs" / "decisions.log"),
@@ -492,3 +493,63 @@ def test_send_failed_alert_shows_code_and_retry(fixture_dir):
     assert "stuck in send_failed" in r.stdout
     assert "#AB3X2" in r.stdout          # names the specific proposal
     assert "RETRY" in r.stdout           # tells the owner the action
+
+
+# ── S1 (census 2026-07): past-catchup "Daily Brief missed" false-page fix ─────
+# The page must fire ONLY when the brief was genuinely not sent today (mirror
+# eod-reconcile's log-only past_catchup branch), with a same-day dedup so a real
+# miss pages once — not on every 15-min past-catchup tick. Previously the page
+# fired on EVERY past-catchup tick BEFORE the sentinel check, so on a normal day
+# (brief sent 07:0x) every afternoon fire falsely paged the owner (~50×/day).
+
+def _recording_notify_stub(fixture_dir):
+    """A notify-owner stub that appends every invocation's argv to a file, so a
+    test can assert whether (and how often) a page was dispatched."""
+    calls = fixture_dir / "notify-calls.txt"
+    stub = fixture_dir / "notify-stub.sh"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{calls}"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return stub, calls
+
+
+def test_past_catchup_no_page_when_brief_already_sent(fixture_dir, bridge_server):
+    """Normal day: brief sent in-window (sentinel for today exists); an afternoon
+    past-catchup tick must NOT page 'Daily Brief missed'."""
+    port, _ = bridge_server
+    stub, calls = _recording_notify_stub(fixture_dir)
+    # Send the brief in-window (07:05 EDT) -> writes today's sentinel.
+    r1 = _run(fixture_dir, bridge_port=port, args=(),
+              now_override="2026-04-28T07:05:00-04:00", notify_owner_stub=str(stub))
+    assert r1.returncode == 0, r1.stderr
+    # Afternoon tick, well past the 180-min catch-up window (11:00 EDT).
+    r2 = _run(fixture_dir, bridge_port=port, args=(),
+              now_override="2026-04-28T11:00:00-04:00", notify_owner_stub=str(stub))
+    assert r2.returncode == 0, r2.stderr
+    log = _read_log(fixture_dir)
+    assert any(e["type"] == "brief_skipped" and e["reason"] == "catchup_expired" for e in log)
+    body = calls.read_text(encoding="utf-8") if calls.exists() else ""
+    assert "Daily Brief missed" not in body
+
+
+def test_past_catchup_pages_once_when_brief_genuinely_missed(fixture_dir, bridge_server):
+    """VPS down through the whole catch-up window: no sentinel for today. The first
+    past-catchup tick pages once; a later same-day tick is deduped (page once)."""
+    port, _ = bridge_server
+    stub, calls = _recording_notify_stub(fixture_dir)
+    # 11:00 EDT — past the 180-min catch-up window; brief never sent (no sentinel).
+    r1 = _run(fixture_dir, bridge_port=port, args=(),
+              now_override="2026-04-28T11:00:00-04:00", notify_owner_stub=str(stub))
+    assert r1.returncode == 0, r1.stderr
+    # 11:15 EDT — next 15-min tick, still no brief sent.
+    r2 = _run(fixture_dir, bridge_port=port, args=(),
+              now_override="2026-04-28T11:15:00-04:00", notify_owner_stub=str(stub))
+    assert r2.returncode == 0, r2.stderr
+    log = _read_log(fixture_dir)
+    assert sum(1 for e in log if e["type"] == "brief_skipped" and e["reason"] == "catchup_expired") == 2
+    body = calls.read_text(encoding="utf-8") if calls.exists() else ""
+    assert body.count("Daily Brief missed") == 1

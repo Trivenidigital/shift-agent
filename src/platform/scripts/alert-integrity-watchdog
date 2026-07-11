@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""alert-integrity-watchdog — close the two owner-alert observability gaps (census A3/C3).
+
+Two independent checks, each pages the owner through the standard notify
+chokepoint (safe_io.notify_owner_with_fallback — Pushover-primary, plain text,
+no Markdown parse mode anywhere per CLAUDE.md §12b):
+
+  1. decisions.log freshness (§12a hole, long-known). The audit log at
+     /opt/shift-agent/logs/decisions.log has never had a freshness watchdog.
+     Alert if its mtime is older than the threshold (default 120 min,
+     env-tunable) OR it is missing — a stalled audit/pipeline writer is exactly
+     the silent-failure surface §12a exists to catch.
+
+  2. notify-failed.log growth (§12b dead-letter). notify_owner_with_fallback
+     appends a line to notify-failed.log whenever an owner alert could not be
+     delivered (Pushover AND WhatsApp both down). Until now nothing read that
+     file, so any future owner-alert outage silently lost every alert. Track a
+     byte-offset in a small state JSON; when new dropped-alert lines appear since
+     the last run, page the owner with the count + first new line.
+
+§12b observability: prints structured one-line JSON events so journalctl can
+always distinguish healthy / stale / dead-letter-growth / delivery-failed:
+  alert_integrity_ok
+  alert_integrity_decisions_log_stale_alert_dispatched / _delivered / _delivery_failed
+  alert_integrity_notify_failed_growth_alert_dispatched / _delivered / _delivery_failed
+
+This watchdog is itself a pipeline consumer, not a new table — its own 15-min
+timer is its liveness SLO; no additional freshness watchdog is needed.
+
+Exit codes: 0 healthy or every dispatched alert delivered; 6
+(EXIT_DEPENDENCY_DOWN — trips the systemd OnFailure page) if any dispatched
+alert failed to deliver. A delivery failure is never a silent success.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+SRC_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT))
+
+try:  # pragma: no cover - production path
+    from exit_codes import EXIT_OK, EXIT_DEPENDENCY_DOWN  # type: ignore  # noqa: E402
+except Exception:  # pragma: no cover - defensive
+    EXIT_OK, EXIT_DEPENDENCY_DOWN = 0, 6
+
+try:  # pragma: no cover - production path
+    from safe_io import atomic_write_json, notify_owner_with_fallback  # type: ignore  # noqa: E402
+except Exception:  # pragma: no cover - Windows/fcntl-less test host fallback
+    def atomic_write_json(path: Path, obj: Any, mode: int = 0o640) -> None:  # type: ignore[no-redef]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(obj, indent=2, default=str), encoding="utf-8")
+        tmp.replace(path)
+
+    def notify_owner_with_fallback(*_args: Any, **_kwargs: Any) -> bool:  # type: ignore[no-redef]
+        return False
+
+
+DECISIONS_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+NOTIFY_FAILED_LOG_PATH = Path("/opt/shift-agent/logs/notify-failed.log")
+STATE_PATH = Path("/opt/shift-agent/state/alert-integrity-watchdog.json")
+DEFAULT_FRESHNESS_THRESHOLD_MIN = 120
+DEFAULT_PRIORITY = 1
+SOURCE = "alert-integrity-watchdog"
+
+NotifyFunc = Callable[..., bool]
+
+
+def parse_utc(value: str) -> datetime:
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _load_state(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def run_watchdog(
+    *,
+    decisions_log_path: Path,
+    notify_failed_log_path: Path,
+    state_path: Path,
+    now: datetime,
+    freshness_threshold_minutes: int = DEFAULT_FRESHNESS_THRESHOLD_MIN,
+    priority: int = DEFAULT_PRIORITY,
+    notify_func: Optional[NotifyFunc] = None,
+) -> dict[str, Any]:
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now = now.astimezone(timezone.utc)
+    notify = notify_func or notify_owner_with_fallback
+    events: list[dict[str, Any]] = []
+    delivery_failed = False
+
+    def _emit(event: str, **fields: Any) -> None:
+        rec = {"event": event, **fields}
+        events.append(rec)
+        print(json.dumps(rec))
+
+    def _page(kind: str, title: str, message: str) -> None:
+        nonlocal delivery_failed
+        _emit(f"alert_integrity_{kind}_alert_dispatched")
+        try:
+            ok = bool(notify(title=title, message=message, priority=priority, source=SOURCE))
+        except Exception as exc:  # noqa: BLE001 - a broken notifier is a delivery failure
+            _emit(f"alert_integrity_{kind}_alert_delivery_failed",
+                  error=f"{type(exc).__name__}: {exc}"[:300])
+            delivery_failed = True
+            return
+        if ok:
+            _emit(f"alert_integrity_{kind}_alert_delivered")
+        else:
+            _emit(f"alert_integrity_{kind}_alert_delivery_failed")
+            delivery_failed = True
+
+    # ── Check 1: decisions.log freshness (§12a) ───────────────────────────────
+    decisions_status = "fresh"
+    age_minutes: Optional[float] = None
+    if not decisions_log_path.exists():
+        decisions_status = "missing"
+        _page(
+            "decisions_log_stale",
+            "Audit log MISSING",
+            f"decisions.log is missing at {decisions_log_path} — the audit/pipeline "
+            f"writer has never run or the file was removed. Investigate immediately.",
+        )
+    else:
+        age_minutes = max((now.timestamp() - decisions_log_path.stat().st_mtime) / 60.0, 0.0)
+        if age_minutes > freshness_threshold_minutes:
+            decisions_status = "stale"
+            _page(
+                "decisions_log_stale",
+                "Audit log STALE",
+                f"decisions.log has not been written in {int(age_minutes)} min "
+                f"(threshold {freshness_threshold_minutes} min). The audit/pipeline "
+                f"writer may be stalled — check hermes-gateway + the agent timers.",
+            )
+
+    # ── Check 2: notify-failed.log growth (§12b dead-letter) ──────────────────
+    # Capture the size BEFORE dispatching any alert so a delivery failure written
+    # to notify-failed.log DURING this run is counted next run, not this one.
+    state = _load_state(state_path)
+    last_offset = state.get("notify_failed_offset")
+    last_offset = int(last_offset) if isinstance(last_offset, (int, float)) else 0
+    size_now = notify_failed_log_path.stat().st_size if notify_failed_log_path.exists() else 0
+    # A shrink means the file was rotated/truncated — re-scan from the start.
+    start = 0 if size_now < last_offset else last_offset
+    new_lines: list[str] = []
+    if size_now > start and notify_failed_log_path.exists():
+        try:
+            with notify_failed_log_path.open("rb") as fh:
+                fh.seek(start)
+                chunk = fh.read(size_now - start)
+            new_lines = [ln for ln in chunk.decode("utf-8", "replace").splitlines() if ln.strip()]
+        except OSError:
+            new_lines = []
+
+    notify_failed_status = "ok"
+    if new_lines:
+        notify_failed_status = "growth"
+        first = new_lines[0][:200]
+        _page(
+            "notify_failed_growth",
+            "Owner alerts DROPPED",
+            f"{len(new_lines)} owner alert(s) were dropped (Pushover + WhatsApp both "
+            f"failed) and logged to notify-failed.log with nothing reading them. "
+            f"First: {first}. Investigate delivery and drain the backlog.",
+        )
+
+    if size_now != last_offset:
+        atomic_write_json(state_path, {
+            "notify_failed_offset": size_now,
+            "updated_at": now.isoformat(),
+        })
+
+    if decisions_status == "fresh" and notify_failed_status == "ok":
+        _emit("alert_integrity_ok",
+              decisions_log_age_minutes=(round(age_minutes, 1) if age_minutes is not None else None),
+              notify_failed_offset=size_now)
+
+    return {
+        "exit_code": EXIT_DEPENDENCY_DOWN if delivery_failed else EXIT_OK,
+        "decisions_log_status": decisions_status,
+        "decisions_log_age_minutes": age_minutes,
+        "notify_failed_status": notify_failed_status,
+        "notify_failed_new_count": len(new_lines),
+        "notify_failed_offset": size_now,
+        "delivery_failed": delivery_failed,
+        "events": events,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Watchdog for audit-log freshness + dropped-owner-alert growth.")
+    ap.add_argument("--decisions-log", default=str(DECISIONS_LOG_PATH))
+    ap.add_argument("--notify-failed-log", default=str(NOTIFY_FAILED_LOG_PATH))
+    ap.add_argument("--state", default=str(STATE_PATH))
+    ap.add_argument("--freshness-threshold-minutes", type=int, default=DEFAULT_FRESHNESS_THRESHOLD_MIN)
+    ap.add_argument("--priority", type=int, choices=[-2, -1, 0, 1, 2], default=DEFAULT_PRIORITY)
+    ap.add_argument("--now", default="")
+    args = ap.parse_args(argv)
+
+    now = parse_utc(args.now) if args.now else datetime.now(timezone.utc)
+    result = run_watchdog(
+        decisions_log_path=Path(args.decisions_log),
+        notify_failed_log_path=Path(args.notify_failed_log),
+        state_path=Path(args.state),
+        now=now,
+        freshness_threshold_minutes=args.freshness_threshold_minutes,
+        priority=args.priority,
+    )
+    return int(result.get("exit_code", 0))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

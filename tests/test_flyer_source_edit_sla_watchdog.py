@@ -702,7 +702,10 @@ def _no_notify(**_):
     raise AssertionError("unexpected notify while throttled")
 
 
-def test_throttled_append_suppressed_when_signature_unchanged(tmp_path):
+def test_throttled_tick_writes_no_decisions_log_row(tmp_path):
+    """A7 (census F1): a throttled tick (stuck set inside its repeat window) must
+    NOT append any flyer_source_edit_sla_alert row — throttled ticks were 45% of
+    decisions.log. Only real events (alerted / notify_failed) get audit rows."""
     module = load_module()
     projects = tmp_path / "projects.json"
     state = tmp_path / "sla-alerts.json"
@@ -714,17 +717,12 @@ def test_throttled_append_suppressed_when_signature_unchanged(tmp_path):
     r1 = module.run_watchdog(now=module.parse_utc("2026-05-21T00:30:00Z"), **kw)
     r2 = module.run_watchdog(now=module.parse_utc("2026-05-21T00:35:00Z"), **kw)
     assert r1["status"] == "throttled" and r2["status"] == "throttled"
-    # First throttled tick = a signature transition (no prior signature) -> one row.
-    assert r1["throttled_append_suppressed"] is False
-    # Unchanged stuck set on the next tick -> the append is suppressed.
-    assert r2["throttled_append_suppressed"] is True
-    rows = _sla_audit_rows(decisions)
-    assert len(rows) == 1 and rows[0]["outcome"] == "throttled"
-    saved = json.loads(state.read_text(encoding="utf-8"))
-    assert saved.get("last_throttled_signature")  # signature persisted for the next tick
+    assert _sla_audit_rows(decisions) == []  # no throttled rows, ever
 
 
-def test_throttled_append_emitted_when_stale_set_changes(tmp_path):
+def test_throttled_tick_writes_no_row_even_when_stale_set_changes(tmp_path):
+    """Even when the stuck set changes between ticks (a row resolves), a throttled
+    tick writes no audit row — the prior signature-gated append is fully removed."""
     module = load_module()
     projects = tmp_path / "projects.json"
     state = tmp_path / "sla-alerts.json"
@@ -739,13 +737,11 @@ def test_throttled_append_emitted_when_stale_set_changes(tmp_path):
     }), encoding="utf-8")
     kw = dict(projects_path=projects, alert_state_path=state, decisions_log_path=decisions,
               threshold_minutes=10, repeat_minutes=60, customer_update_minutes=0, notify_func=_no_notify)
-    r1 = module.run_watchdog(now=module.parse_utc("2026-05-21T00:30:00Z"), **kw)   # {F9003, F9004}
-    # F9004 resolved -> the stuck set shrinks -> signature changes.
+    module.run_watchdog(now=module.parse_utc("2026-05-21T00:30:00Z"), **kw)   # {F9003, F9004}
+    # F9004 resolved -> the stuck set shrinks (signature would change), still no row.
     projects.write_text(json.dumps({"projects": [_project("F9003")]}), encoding="utf-8")
-    r2 = module.run_watchdog(now=module.parse_utc("2026-05-21T00:35:00Z"), **kw)   # {F9003}
-    assert r1["throttled_append_suppressed"] is False
-    assert r2["throttled_append_suppressed"] is False  # set changed -> a fresh throttled row
-    assert len(_sla_audit_rows(decisions)) == 2
+    module.run_watchdog(now=module.parse_utc("2026-05-21T00:35:00Z"), **kw)   # {F9003}
+    assert _sla_audit_rows(decisions) == []
 
 
 def test_page_path_untouched_by_suppression(tmp_path):

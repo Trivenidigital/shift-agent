@@ -482,6 +482,74 @@ NOTIFY_FAILED_LOG = Path(os.environ.get(
     "SHIFT_AGENT_NOTIFY_FAILED_LOG", "/opt/shift-agent/logs/notify-failed.log",
 ))
 
+# Same-message alert dedup (census C-7). Suppress an identical (title+body) owner
+# alert within a short window so a repeated identical page (a stuck condition
+# re-detected every timer tick) does not spam the owner. Default ON;
+# SHIFT_AGENT_NOTIFY_DEDUP=0 disables. Captured at import like NOTIFY_OWNER_BIN.
+# Resolved at CALL time (not import) from SHIFT_AGENT_NOTIFY_DEDUP_STATE so a
+# per-test conftest fixture can isolate it — otherwise tests share the one real
+# /opt/shift-agent/state/notify-dedup.json (which exists on the VPS/CI), letting
+# one test's delivered alert suppress another's identical message, and letting
+# pytest pollute the production dedup file.
+NOTIFY_DEDUP_STATE_DEFAULT = "/opt/shift-agent/state/notify-dedup.json"
+NOTIFY_DEDUP_WINDOW_MIN = int(os.environ.get("SHIFT_AGENT_NOTIFY_DEDUP_WINDOW_MIN", "30"))
+NOTIFY_DEDUP_ENABLED = os.environ.get("SHIFT_AGENT_NOTIFY_DEDUP", "1") != "0"
+
+
+def _notify_dedup_key(title: str, message: str) -> str:
+    import hashlib as _hashlib
+    return _hashlib.sha256(f"{title}\x00{message}".encode("utf-8")).hexdigest()
+
+
+def _notify_dedup_suppresses(title: str, message: str, state_path: Path, window_min: int) -> bool:
+    """True if an identical (title+message) alert was delivered within window_min.
+    Read-only; never creates state. Best-effort — any error means 'not suppressed'
+    so dedup can never swallow a real alert."""
+    from datetime import timedelta as _timedelta
+    if not state_path.exists():
+        return False
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+        sent = data.get("sent", {}) if isinstance(data, dict) else {}
+        ts_raw = sent.get(_notify_dedup_key(title, message))
+        if not ts_raw:
+            return False
+        last = datetime.fromisoformat(str(ts_raw))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    return last >= datetime.now(tz=timezone.utc) - _timedelta(minutes=window_min)
+
+
+def _notify_dedup_record(title: str, message: str, state_path: Path, window_min: int) -> None:
+    """Record that (title+message) was just delivered; prune expired entries.
+    No-op if the state dir doesn't exist — keeps dedup dormant off a deployed box
+    (and in tests that don't opt in). Best-effort under flock."""
+    from datetime import timedelta as _timedelta
+    if not state_path.parent.is_dir():
+        return
+    now = datetime.now(tz=timezone.utc)
+    cutoff = now - _timedelta(minutes=window_min)
+    with FileLock(Path(str(state_path) + ".lock")):
+        try:
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            sent = data.get("sent", {}) if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            sent = {}
+        fresh: dict[str, str] = {}
+        for k, v in sent.items():
+            try:
+                t = datetime.fromisoformat(str(v))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            if t >= cutoff:
+                fresh[k] = v
+        fresh[_notify_dedup_key(title, message)] = now.isoformat()
+        atomic_write_json(state_path, {"sent": fresh})
+
 
 def self_gate_window_state(
     now_local: datetime,
@@ -536,12 +604,26 @@ def notify_owner_with_fallback(
     source: str = "unknown",
     notify_owner_bin: str = NOTIFY_OWNER_BIN,
     notify_failed_log: Path = NOTIFY_FAILED_LOG,
+    dedup_state_path: Optional[Path] = None,
+    dedup_window_min: int = NOTIFY_DEDUP_WINDOW_MIN,
+    dedup_enabled: bool = NOTIFY_DEDUP_ENABLED,
 ) -> bool:
     """Invoke shift-agent-notify-owner subprocess. On any failure, append a
-    structured entry to notify-failed.log so the nightly fsck + health-check
-    can surface dropped alerts.
+    structured entry to notify-failed.log; the alert-integrity-watchdog (platform
+    15-min timer) tails that file and pages the owner when new dropped-alert lines
+    appear — nothing else reads it.
 
     Returns True on Pushover success, False on any failure path.
+
+    Same-message dedup (default ON; SHIFT_AGENT_NOTIFY_DEDUP=0 disables): an
+    identical (title+message) alert that was DELIVERED within dedup_window_min
+    minutes is suppressed and reported as delivered (returns True) rather than
+    re-paging the owner. Only a delivered send arms the window — a FAILED send
+    never does, so a transient outage never suppresses its own retry or its
+    dead-letter trail. When dedup_state_path is None it resolves at CALL time
+    from SHIFT_AGENT_NOTIFY_DEDUP_STATE (default the on-box state path), so a
+    per-test conftest fixture can isolate it; record is a no-op if the state
+    dir is absent.
 
     Replaces the near-mirror implementations previously inlined in:
       - send-coverage-message._notify_owner + _append_notify_failed
@@ -568,6 +650,16 @@ def notify_owner_with_fallback(
     import json as _json
     import subprocess as _subprocess
 
+    if dedup_state_path is None:
+        dedup_state_path = Path(os.environ.get("SHIFT_AGENT_NOTIFY_DEDUP_STATE", NOTIFY_DEDUP_STATE_DEFAULT))
+
+    if dedup_enabled and dedup_window_min > 0:
+        try:
+            if _notify_dedup_suppresses(title, message, dedup_state_path, dedup_window_min):
+                return True  # identical alert delivered <window ago — don't re-page
+        except Exception:  # noqa: BLE001 — dedup must never block a real alert
+            pass
+
     err_detail = ""
     try:
         proc = _subprocess.run(
@@ -575,6 +667,11 @@ def notify_owner_with_fallback(
             capture_output=True, text=True, timeout=30,
         )
         if proc.returncode == 0:
+            if dedup_enabled and dedup_window_min > 0:
+                try:
+                    _notify_dedup_record(title, message, dedup_state_path, dedup_window_min)
+                except Exception:  # noqa: BLE001 — dedup bookkeeping is best-effort
+                    pass
             return True
         err_detail = f"exit={proc.returncode} stderr={proc.stderr.strip()[:200]}"
     except (_subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:

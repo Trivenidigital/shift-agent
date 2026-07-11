@@ -2,7 +2,7 @@
 Description=EOD Reconciliation - end-of-day snapshot for owner morning brief
 After=network-online.target hermes-gateway.service
 Wants=network-online.target
-ConditionPathIsExecutable=/usr/local/bin/eod-reconcile
+ConditionFileIsExecutable=/usr/local/bin/eod-reconcile
 ConditionPathExists=/opt/shift-agent/config.yaml
 
 [Service]
