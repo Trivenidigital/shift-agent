@@ -971,6 +971,22 @@ def format_text_report(report: dict) -> str:
     for row in report.get("foundation", []):
         lines.append(f"  {row['id']}: {row['status']} ({row['root']})")
 
+    # BL-HERMES-12 hardening #1 (non-blocking WARN): a foundation skill resolving to root=="bundled"
+    # exists in the bundled Hermes lib but NOT live (/root/.hermes/skills). The gateway loads from
+    # HERMES_HOME (live only), so a bundled-only skill won't load until a skills sync / curator seeds
+    # it. The gate still PASSES (install-state present; app rollback can't repair missing bundled
+    # skills) — but this surfaces a load-state gap no other gate catches (D1 is project-only; the
+    # foundation watchdog ships disabled + excludes namespaced skills). NOT fail-closed here: that
+    # would invert the pre-install install-state gate and false-fail legitimate bundled-will-sync
+    # states (e.g. a Hermes reinstall). The real between-deploy fix is a post-restart load smoke.
+    for row in report.get("foundation", []):
+        if row.get("root") == "bundled":
+            lines.append(
+                f"  WARN: {row['id']} present in bundled Hermes lib but NOT live "
+                f"(/root/.hermes/skills) — the live-only loader won't load it until a skills sync "
+                f"seeds it (foundation gate still passes)."
+            )
+
     plugin = report.get("plugin") or {}
     if plugin:
         lines.extend(
