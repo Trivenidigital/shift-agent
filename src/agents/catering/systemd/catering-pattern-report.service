@@ -2,7 +2,7 @@
 Description=Catering pattern report - nightly LLM-extraction-bug scan (PR-CF1c-B)
 After=network-online.target
 Wants=network-online.target
-ConditionPathIsExecutable=/usr/local/bin/catering-pattern-report
+ConditionFileIsExecutable=/usr/local/bin/catering-pattern-report
 
 [Service]
 Type=oneshot

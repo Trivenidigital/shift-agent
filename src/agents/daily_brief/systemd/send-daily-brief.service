@@ -2,7 +2,7 @@
 Description=Daily Brief - owner morning summary
 After=network-online.target hermes-gateway.service
 Wants=network-online.target
-ConditionPathIsExecutable=/usr/local/bin/send-daily-brief
+ConditionFileIsExecutable=/usr/local/bin/send-daily-brief
 ConditionPathExists=/opt/shift-agent/config.yaml
 
 [Service]
