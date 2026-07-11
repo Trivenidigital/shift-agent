@@ -640,7 +640,11 @@ def resolve_skill(
             f"src/agents/**/skills/{name}/SKILL.md",
             f"src/**/skills/{category}/{name}/SKILL.md",
         ]
-        local_present = any(repo_root.glob(pattern) for pattern in local_patterns)
+        # `repo_root.glob(pattern)` returns a generator (always truthy), so
+        # `any(glob(p) for p in patterns)` would be True whenever repo_root is set — it never
+        # inspected the matches. Wrap each glob in any() so a pattern counts only when it yields
+        # a real match.
+        local_present = any(any(repo_root.glob(pattern)) for pattern in local_patterns)
 
     row = asdict(requirement)
     row.update(
