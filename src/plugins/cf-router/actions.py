@@ -1046,6 +1046,14 @@ def _flyer_intent_shadow_llm_allowlisted(chat_id: str) -> bool:
     allow = _flyer_intent_shadow_llm_allowlist()
     if not allow:
         return False  # empty allowlist = disabled-for-all
+    # `*` graduates the gate to every chat (incident F0217) — an EXPLICIT opt-in,
+    # never the empty-list global-on footgun. Wildcard SUPPORT lands here for
+    # parity with the render/style gates, but actually SETTING
+    # FLYER_INTENT_SHADOW_LLM_CHATS=* is PARKED pending the B1 privacy ruling: the
+    # shadow classifier ships chat text to an LLM, so fleet-wide enablement is a
+    # separate privacy decision (the census does not set it).
+    if "*" in allow:
+        return True
     return _normalize_flyer_intent_chat(chat_id) in allow
 
 

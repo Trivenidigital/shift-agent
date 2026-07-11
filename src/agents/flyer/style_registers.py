@@ -193,11 +193,17 @@ def _normalize_phone(value: str) -> str:
 def style_registers_enabled(customer_phone: str) -> bool:
     """ppv1 allowlist semantics — fail-closed: flag on AND non-empty allowlist
     AND phone membership (both sides normalized). Empty allowlist DISABLES
-    (never global-on)."""
+    (never global-on). A literal ``*`` entry graduates the feature to EVERY
+    customer (incident F0217, 2026-07-11) — an EXPLICIT opt-in, never the
+    empty-list flip. ``*`` is matched on the RAW entries because
+    ``_normalize_phone`` strips non-alphanumerics (which would drop the ``*``)."""
     if os.environ.get("FLYER_STYLE_REGISTERS", "") != "1":
         return False
-    allowlist = {_normalize_phone(p) for p in
-                 os.environ.get("FLYER_STYLE_REGISTERS_ALLOWLIST", "").split(",") if p.strip()}
+    raw_entries = [p.strip() for p in
+                   os.environ.get("FLYER_STYLE_REGISTERS_ALLOWLIST", "").split(",") if p.strip()]
+    if "*" in raw_entries:
+        return True
+    allowlist = {_normalize_phone(p) for p in raw_entries}
     allowlist.discard("")
     if not allowlist:
         return False

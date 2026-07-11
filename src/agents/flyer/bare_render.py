@@ -215,6 +215,16 @@ def _normalize_sender(value: str) -> str:
     return s.casefold()
 
 
+def _allowlist_admits(sender: str, allow: set[str]) -> bool:
+    """Wildcard graduation (incident F0217, 2026-07-11): a literal ``*`` entry in
+    the allowlist admits EVERY sender — a validated feature graduated to the whole
+    fleet without a per-number env edit. Otherwise the normalized sender must be
+    listed. Empty allowlist ⇒ neither branch matches ⇒ DISABLED (unchanged
+    fail-closed); ``*`` is an EXPLICIT opt-in, never the empty-list global-on
+    footgun."""
+    return "*" in allow or _normalize_sender(sender) in allow
+
+
 def _creative_director_allowlist() -> set[str]:
     """Parse FLYER_CREATIVE_DIRECTOR_ALLOWLIST (comma-separated phones/LIDs) into a
     normalized set. Empty/unset ⇒ empty set ⇒ no sender is allowlisted."""
@@ -237,7 +247,7 @@ def _creative_director_armed(resolved_sender: str) -> bool:
     """The PR3 gate: flag == "1" AND the normalized resolved sender is allowlisted."""
     if os.environ.get(CREATIVE_DIRECTOR_ENABLED_ENV) != "1":
         return False
-    return _normalize_sender(resolved_sender) in _creative_director_allowlist()
+    return _allowlist_admits(resolved_sender, _creative_director_allowlist())
 
 
 # --- Advisory skill-driven integrated scene (separate flag from the CD+overlay path) ---
@@ -255,7 +265,7 @@ def _skill_driven_scene_armed(resolved_sender: str) -> bool:
     Flag == "1" AND the normalized resolved sender is allowlisted."""
     if os.environ.get(SKILL_DRIVEN_SCENE_ENABLED_ENV) != "1":
         return False
-    return _normalize_sender(resolved_sender) in _skill_driven_scene_allowlist()
+    return _allowlist_admits(resolved_sender, _skill_driven_scene_allowlist())
 
 
 # Slice 3 iteration gate: FLYER_BARE_ITERATION flag + its own allowlist (scoped rollout).
@@ -269,7 +279,7 @@ def _iteration_armed(resolved_sender: str) -> bool:
         return False
     raw = os.environ.get(ITERATION_ALLOWLIST_ENV, "") or ""
     allow = {n for n in (_normalize_sender(p) for p in raw.split(",")) if n}
-    return _normalize_sender(resolved_sender) in allow
+    return _allowlist_admits(resolved_sender, allow)
 
 
 def _advisory_scene_direction(raw_text: str, locked_facts, customer, resolved_sender: str):
@@ -1074,7 +1084,7 @@ def _visible_contract_armed(project) -> bool:
         return False
     raw = os.environ.get(VISIBLE_CONTRACT_ALLOWLIST_ENV, "") or ""
     allow = {n for n in (_normalize_sender(p) for p in raw.split(",")) if n}
-    return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+    return _allowlist_admits(getattr(project, "customer_phone", "") or "", allow)
 
 
 def _emit_visible_contract_audit(*, project, status: str, reason: str = "", blockers=None) -> None:
@@ -1281,7 +1291,7 @@ def render_grounded(chat_id: str, raw_text: str, *, message_id: str | None = Non
     # resolved sender is allowlisted. The audit row is emitted on EVERY new-flyer render
     # (armed or not) so the caller is provable from logs BEFORE the operator enables it.
     resolved_sender = _resolved_sender(chat_id, sender_phone)
-    allowlisted = _normalize_sender(resolved_sender) in _creative_director_allowlist()
+    allowlisted = _allowlist_admits(resolved_sender, _creative_director_allowlist())
     if _creative_director_armed(resolved_sender):
         return _render_creative_director_grounded(
             chat_id, raw_text, customer, fields, locked_facts,
