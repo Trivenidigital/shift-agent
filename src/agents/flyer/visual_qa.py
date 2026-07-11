@@ -1887,6 +1887,49 @@ def _typeset_marker_applies(artifact_path) -> bool:
         return False
 
 
+# Masthead fields the DETERMINISTIC composer paints verbatim from locked facts.
+# In declared-render-facts mode these two are verified-by-construction; every
+# other fact keeps full OCR verification.
+_DECLARED_MASTHEAD_FACT_IDS = frozenset({"business_name", "campaign_title"})
+_TEXT_MANIFEST_SUFFIX = ".text.json"
+
+
+def _masthead_verified_by_construction(artifact_path) -> bool:
+    """Whether business_name + campaign_title were painted by the DETERMINISTIC
+    composer (so vision-OCR need not echo them).
+
+    Vision-OCR routinely under-reads the composer's letter-spaced gold-on-dark
+    premium masthead, false-failing correctly-composed posters with "missing
+    required visible fact: business_name / campaign_title" (live F0197/F0198/
+    F0199). Two producer-stamped, render-time signals — both keyed on the
+    artifact path, neither injectable from customer/brief text — gate the skip:
+
+    1. `<artifact>.text.json` carries verification_mode == "declared_render_facts"
+       (stamped by render.write_text_manifest, render.py:1687/1737 — its default
+       mode; the source-edit modes are stamped explicitly elsewhere). This means
+       the render declared the facts it drew rather than proving them in pixels.
+    2. NO `<artifact>.typeset.json` marker. That marker is written only when the
+       image MODEL drew the poster text (render._write_typeset_marker /
+       _typeset_contract_applies). Model-drawn mastheads are NOT construction-
+       verified — they must be OCR-proven — so a typeset render is excluded even
+       though it also carries a declared manifest.
+
+    Read from the sidecar, never recomputed from project/env at QA time, so a
+    legacy render never inherits a contract its render never carried — same
+    discipline as `_typeset_marker_applies`. Fails closed (strict OCR) on any
+    missing/unreadable sidecar."""
+    try:
+        if _typeset_marker_applies(artifact_path):
+            return False
+        manifest = Path(str(artifact_path) + _TEXT_MANIFEST_SUFFIX)
+        if not manifest.exists():
+            return False
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return data.get("verification_mode") == "declared_render_facts"
+    except Exception:  # noqa: BLE001 — unreadable sidecar -> strict OCR echo
+        return False
+
+
 def _uniform_price_column_blockers(project: FlyerProject, extracted_text: str,
                                    artifact_path=None) -> list[str]:
     """Numeric backstop for the typeset contract (C1 polish, F0210 exhibit):
@@ -1992,10 +2035,19 @@ def run_visual_qa(
     blockers.extend(_text_defect_note_blockers(provider_notes))
     blockers.extend(visible_wrong_brand_blockers(project, extracted_text))
     skip_business_name_exact = _can_skip_exact_business_name(project, normalized, extracted_text)
+    # Deterministic composer painted the masthead verbatim from locked facts, and
+    # vision-OCR under-reads the letter-spaced premium masthead (F0197/F0198/F0199):
+    # accept business_name + campaign_title as verified-by-construction. Presence
+    # ONLY — the wrong-brand contradiction screen above (visible_wrong_brand_blockers)
+    # still blocks a DIFFERENT visible business name — and only these two masthead
+    # fields; every other fact keeps full OCR verification below.
+    masthead_verified_by_construction = _masthead_verified_by_construction(artifact)
     for fact in project.locked_facts:
         if not fact.required:
             continue
         if fact.fact_id == "business_name" and skip_business_name_exact:
+            continue
+        if fact.fact_id in _DECLARED_MASTHEAD_FACT_IDS and masthead_verified_by_construction:
             continue
         # Phone/contact facts use digit-run matching; other locked facts use
         # text matching even if they contain address/ZIP digits.
