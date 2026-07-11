@@ -895,6 +895,11 @@ PY
     # (§12a hole) + notify-failed.log dead-letter growth (§12b). Idempotent on
     # redeploy — enable --now is a no-op on an already-enabled timer.
     systemctl enable --now alert-integrity-watchdog.timer 2>/dev/null || true
+    # Corrupt-state quarantine watchdog (census C4b): units shipped on main since
+    # #579 but the platform block installed only *.service, so this timer never
+    # landed/enabled on the box (systemctl cat returned not-found). Now installed
+    # by the platform *.timer line above; enable it here. Idempotent on redeploy.
+    systemctl enable --now check-corrupt-state.timer 2>/dev/null || true
     systemctl enable --now prune-expense-receipts.timer 2>/dev/null || true
     # Agent #13 Compliance Calendar (PR-Agent13-v0.1)
     systemctl enable --now check-compliance-deadlines.timer 2>/dev/null || true
