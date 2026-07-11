@@ -87,6 +87,31 @@ def test_local_dev_skill_root_does_not_satisfy_live_strict_mode(tmp_path: Path):
     assert {"productivity/maps", "productivity/ocr-and-documents", "mcp/native-mcp"} <= missing
 
 
+def test_local_dev_present_reflects_actual_repo_match(tmp_path: Path):
+    """resolve_skill.local_dev_present must be True ONLY for a foundation skill actually present
+    under repo_root — not blanket-True whenever repo_root is set. Guards a generator-truthiness
+    bug where `any(repo_root.glob(p) for p in ...)` was always True (glob yields a truthy
+    generator), so local_dev_present never reflected a real match."""
+    repo_root = tmp_path / "repo"
+    # Only 'maps' exists locally; ocr-and-documents + native-mcp do NOT.
+    _touch(repo_root / "src" / "agents" / "demo" / "skills" / "maps" / "SKILL.md")
+
+    report = cr.build_report(
+        cr.ReadinessOptions(
+            hermes_home=tmp_path / "missing-hermes-home",
+            hermes_install_root=tmp_path / "missing-install-root",
+            repo_root=repo_root,
+            strict_foundation=True,
+            today=cr.parse_date("2026-05-14"),
+        )
+    )
+
+    local = {row["id"]: row["local_dev_present"] for row in report["foundation"]}
+    assert local["productivity/maps"] is True                # actually present under repo_root
+    assert local["productivity/ocr-and-documents"] is False  # NOT in repo — bug would report True
+    assert local["mcp/native-mcp"] is False
+
+
 def test_strict_foundation_ignores_missing_repo_installed_cf_router(tmp_path: Path):
     hermes_home, install_root = _make_foundation(tmp_path)
 
