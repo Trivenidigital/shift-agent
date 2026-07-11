@@ -476,6 +476,23 @@ def test_deploy_installs_credential_readiness_module_and_runs_staging_gate_befor
     assert text.index(gate) < text.index("state-file migration check")
 
 
+def test_deploy_foundation_gate_fails_closed_on_missing_script():
+    """BL-HERMES-12 hardening: a missing credential-minimized-readiness script must FAIL the
+    deploy (mirroring the config-yaml shape gate above it), not silently skip — a missing forward
+    gate means a malformed artifact. A deliberate rollback to a pre-gate artifact is allowed ONLY
+    via the explicit ALLOW_MISSING_FOUNDATION_GATE override."""
+    deploy = REPO_ROOT / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
+    text = deploy.read_text(encoding="utf-8")
+    start = text.index("=== Credential-minimized Hermes foundation gate ===")
+    block = text[start:text.index("state-file migration check", start)]
+    # Explicit rollback override present...
+    assert "ALLOW_MISSING_FOUNDATION_GATE" in block
+    # ...and the missing-script path fails closed (not a bare WARN-skip).
+    assert "refusing to deploy without the foundation gate" in block
+    # The old silent-skip must be gone.
+    assert "skipping foundation gate (rollback compatibility)" not in block
+
+
 def test_deploy_validates_cf_router_after_install_not_in_preinstall_foundation_gate():
     deploy = REPO_ROOT / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
     text = deploy.read_text(encoding="utf-8")
