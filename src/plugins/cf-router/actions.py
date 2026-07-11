@@ -572,6 +572,16 @@ def _short_hash(value: str) -> str:
     return hashlib.sha256(str(value or "").encode("utf-8", errors="ignore")).hexdigest()[:32]
 
 
+def _env_new_or_old(new_name: str, old_name: str, default: str = "") -> str:
+    """Read a renamed env var: the NEW name wins when set (non-empty), else the
+    legacy name, else the default. Lets the B1 rename (FLYER_INTENT_SHADOW_*)
+    land without breaking already-deployed FLYER_HERMES_INTENT_* settings."""
+    new_val = os.environ.get(new_name)
+    if new_val is not None and new_val != "":
+        return new_val
+    return os.environ.get(old_name, default)
+
+
 def flyer_intent_shadow_candidate(text: str, *, has_media: bool = False) -> bool:
     body = str(text or "").lower()
     if has_media:
@@ -600,7 +610,7 @@ def begin_flyer_intent_shadow(
     except Exception:
         return None
 
-    requested_mode = os.environ.get("FLYER_HERMES_INTENT_MODE", "shadow")
+    requested_mode = _env_new_or_old("FLYER_INTENT_SHADOW_MODE", "FLYER_HERMES_INTENT_MODE", "shadow")
     mode = flyer_intent.mode_from_value(requested_mode)
     if str(mode) == "off":
         return None
@@ -738,7 +748,9 @@ def finalize_flyer_intent_shadow(
     classifier_latency_ms = 0
     classifier_error_kind = ""
     classifier_error_detail = ""
-    classifier_setting = flyer_intent.classifier_setting_from_env(os.environ.get("FLYER_HERMES_INTENT_CLASSIFIER"))
+    classifier_setting = flyer_intent.classifier_setting_from_env(
+        _env_new_or_old("FLYER_INTENT_SHADOW_AUDIT", "FLYER_HERMES_INTENT_CLASSIFIER", "")
+    )
     if classifier_setting in {"shadow", "active"}:
         if not route_events:
             classifier_status = "skipped_passthrough" if candidate else "skipped_not_candidate"
@@ -851,7 +863,9 @@ def _flyer_classifier_timeout_ms() -> int:
     # thread and the audit records "timeout" past the ceiling).
     ceiling = 4000 if _flyer_intent_shadow_llm_enabled() else 250
     try:
-        return max(1, min(ceiling, int(os.environ.get("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "50"))))
+        return max(1, min(ceiling, int(
+            _env_new_or_old("FLYER_INTENT_SHADOW_TIMEOUT_MS", "FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "50")
+        )))
     except Exception:
         return 50
 

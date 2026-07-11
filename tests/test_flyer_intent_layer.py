@@ -842,3 +842,83 @@ def test_shadow_llm_under_budget_fires_worker(monkeypatch, tmp_path):
     assert emitted[0]["classifier_status"] == "success"
     assert counter["n"] == 1  # exactly one metered fire consumed
     assert json.loads((tmp_path / "budget.json").read_text())["count"] == 1
+
+
+# --- B1: flag rename aliases (NEW name wins, legacy names still work) ---------
+
+
+def _finalize_and_capture_status(actions, monkeypatch, *, text="Create flyer for evening snacks"):
+    emitted: list[dict] = []
+    monkeypatch.setattr(actions, "audit_flyer_hermes_intent_decision", lambda **kw: emitted.append(kw))
+    token = actions.begin_flyer_intent_shadow(
+        text=text, chat_id="15550000001@s.whatsapp.net", message_id="wamid.alias", has_media=False
+    )
+    try:
+        actions.record_flyer_intent_route_event(
+            reason="flyer_primary_project_created", subprocess_rc=0, detail="project_id=F0065"
+        )
+        actions.finalize_flyer_intent_shadow(
+            hook_result={"action": "skip", "reason": "cf-router flyer primary created"}, gateway=None
+        )
+    finally:
+        actions.reset_flyer_intent_shadow(token)
+    return emitted, token
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"FLYER_INTENT_SHADOW_MODE": "off"},                                  # new name
+        {"FLYER_HERMES_INTENT_MODE": "off"},                                  # legacy name
+        {"FLYER_INTENT_SHADOW_MODE": "off", "FLYER_HERMES_INTENT_MODE": "active"},  # new wins
+    ],
+)
+def test_shadow_mode_alias_off(monkeypatch, env):
+    actions = _load_actions()
+    monkeypatch.delenv("FLYER_INTENT_SHADOW_MODE", raising=False)
+    monkeypatch.delenv("FLYER_HERMES_INTENT_MODE", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    token = actions.begin_flyer_intent_shadow(
+        text="Create flyer", chat_id="1@s.whatsapp.net", message_id="m"
+    )
+    assert token is None
+
+
+def test_shadow_audit_setting_alias_enables_classifier_path(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.delenv("FLYER_HERMES_INTENT_CLASSIFIER", raising=False)
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_AUDIT", "shadow")  # new name enables
+    emitted, _ = _finalize_and_capture_status(actions, monkeypatch)
+    assert emitted[0]["classifier_status"] == "skipped_no_gateway"
+
+
+def test_shadow_audit_setting_legacy_name_still_works(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.delenv("FLYER_INTENT_SHADOW_AUDIT", raising=False)
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")  # legacy name
+    emitted, _ = _finalize_and_capture_status(actions, monkeypatch)
+    assert emitted[0]["classifier_status"] == "skipped_no_gateway"
+
+
+def test_shadow_audit_setting_new_name_wins(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")  # legacy says on
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_AUDIT", "off")          # new says off -> wins
+    emitted, _ = _finalize_and_capture_status(actions, monkeypatch)
+    assert emitted[0]["classifier_status"] == "off"
+
+
+def test_shadow_timeout_alias(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.delenv("FLYER_INTENT_SHADOW_LLM", raising=False)  # default ceiling 250
+    monkeypatch.delenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", raising=False)
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_TIMEOUT_MS", "123")  # new name
+    assert actions._flyer_classifier_timeout_ms() == 123
+
+    monkeypatch.delenv("FLYER_INTENT_SHADOW_TIMEOUT_MS", raising=False)
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "77")  # legacy name
+    assert actions._flyer_classifier_timeout_ms() == 77
+
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_TIMEOUT_MS", "88")  # new wins
+    assert actions._flyer_classifier_timeout_ms() == 88

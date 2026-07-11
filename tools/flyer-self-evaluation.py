@@ -1122,7 +1122,7 @@ def hermes_intent_incidents(
                 "hermes_intent_shadow_coverage_missing",
                 severity="high",
                 evidence=f"uncovered flyer cf-router rows={len(uncovered_cf_rows)}; intent shadow rows={len(intent_rows)}",
-                suggested_action="Verify FLYER_HERMES_INTENT_MODE and the flyer_hermes_intent_decision audit path before trusting shadow metrics.",
+                suggested_action="Verify FLYER_INTENT_SHADOW_MODE (or legacy FLYER_HERMES_INTENT_MODE) and the flyer_hermes_intent_decision audit path before trusting shadow metrics.",
                 category="hermes_intent",
                 count=len(uncovered_cf_rows),
                 evidence_details={
