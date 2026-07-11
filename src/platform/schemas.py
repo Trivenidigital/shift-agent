@@ -4377,6 +4377,9 @@ class FlyerIntakeBypassOutcome(_BaseEntry):
         "routed_to_project",
         "unrouted",
         "intermediate_intercept_handled",
+        # F10 (2026-07 census): guaranteed-fallback outcome so every bypass
+        # records exactly one outcome row even when normal derivation/emit fails.
+        "unknown_exit",
     ]
     project_id: str = Field(default="", max_length=40)
     handler_intercept: str = Field(default="", max_length=80)
