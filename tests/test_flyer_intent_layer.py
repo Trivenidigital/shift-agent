@@ -512,7 +512,21 @@ def test_shadow_classifier_timeout_is_hard_capped(monkeypatch):
     actions = _load_actions()
     monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "5000")
 
+    # Default regime (shadow LLM OFF): ceiling stays 250ms.
+    monkeypatch.delenv("FLYER_INTENT_SHADOW_LLM", raising=False)
     assert actions._flyer_classifier_timeout_ms() == 250
+
+    # Shadow-LLM regime: ceiling relaxes to 4000ms so a real network call fits.
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
+    assert actions._flyer_classifier_timeout_ms() == 4000
+
+    # Still hard-capped in the shadow-LLM regime (larger value clamps to 4000).
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "99999")
+    assert actions._flyer_classifier_timeout_ms() == 4000
+
+    # A value under the ceiling passes through unchanged.
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "1500")
+    assert actions._flyer_classifier_timeout_ms() == 1500
 
 
 def test_shadow_context_off_mode_emits_nothing(monkeypatch):

@@ -839,8 +839,13 @@ def finalize_flyer_intent_shadow(
 
 
 def _flyer_classifier_timeout_ms() -> int:
+    # The keyword baseline is near-instant, so the default regime hard-clamps to
+    # 250ms. When the B1 shadow LLM is armed a real network call needs headroom,
+    # so the ceiling relaxes to 4000ms (still bounded — the worker is a daemon
+    # thread and the audit records "timeout" past the ceiling).
+    ceiling = 4000 if _flyer_intent_shadow_llm_enabled() else 250
     try:
-        return max(1, min(250, int(os.environ.get("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "50"))))
+        return max(1, min(ceiling, int(os.environ.get("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "50"))))
     except Exception:
         return 50
 
