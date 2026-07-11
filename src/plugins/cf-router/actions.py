@@ -4042,7 +4042,22 @@ _FLYER_NATURAL_PLAN_CHANGE_PATTERN = (
 _FLYER_REGULATED_ACCOUNT_PATTERN = re.compile(
     r"\b(?:"
     r"billing|checkout|invoice|card|stripe|razorpay|refund|"
-    r"plan|starter|growth|unlimited|upgrade|downgrade|"
+    # 2026-07-11 — verb/context-anchored plan-tier patterns. The bare tokens
+    # `plan|starter|growth|unlimited|upgrade|downgrade` previously matched
+    # everyday flyer-brief menu words ("unlimited dosa night", "free starter
+    # platter", "upgrade your combo") and hijacked legit briefs into the
+    # fail-closed account guard (live incident 2026-07-11T18:07Z). Mirrors the
+    # PR-α verb-anchor discipline applied to the phone/address branch below —
+    # never applied to the tier words until now. Tier-nouns match only when
+    # (a) a billing/mutation/possession verb precedes them (optionally via a
+    # connective word), or (b) they sit in a plan-context noun phrase. Bare
+    # "upgrade"/"downgrade" match only as a whole-message verb — "upgrade your
+    # combo" must NOT match. Other alternates in this pattern are unchanged.
+    r"(?:upgrade|downgrade|change|switch|move|select|choose|start|want|need|cancel)"
+    r"(?:\s+(?:to|the|a|me|current|for))*\s+(?:plan|starter|growth|unlimited)|"
+    r"(?:my|our|current|which|what)\s+(?:current\s+)?plan|"
+    r"(?:starter|growth|unlimited)\s+plan|"
+    r"^\s*(?:upgrade|downgrade)(?=[\s.!?]*$)|"
     r"account\s+owner|account\s+settings|business\s+name|business\s+address|"
     r"business\s+phone|business\s+whatsapp|whatsapp\s+number|authorized\s+(?:number|requester)|"
     # PR-α 2026-05-26 — verb-anchored account-change patterns. Closes the
