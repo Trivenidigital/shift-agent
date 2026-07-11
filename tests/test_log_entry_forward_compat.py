@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import TypeAdapter, ValidationError, Tag
 
-from schemas import LogEntry, _UnknownLogEntry, _KNOWN_LOG_ENTRY_TYPES, RawInbound
+from schemas import LogEntry, _UnknownLogEntry, _KNOWN_LOG_ENTRY_TYPES, RawInbound, _BaseEntry
 
 
 _ADAPTER = TypeAdapter(LogEntry)
@@ -191,4 +191,44 @@ def test_unknown_log_entry_is_only_subclass_of_self():
     assert leaks == [], (
         f"{leaks} should not inherit from _UnknownLogEntry — extra='allow' "
         f"would silently leak via inheritance"
+    )
+
+
+# Case 13 — reachability (BL-CI-03): every _BaseEntry subclass that declares a concrete
+# `type` Literal must be REGISTERED. Case 4 pins _KNOWN_LOG_ENTRY_TYPES == union Tags, but
+# neither checks that a newly-defined variant CLASS is actually in that set — an unregistered
+# subclass is silently read back as _UnknownLogEntry (its typed fields never validate), with
+# no failing test. This closes that gap.
+def _all_base_entry_subclasses() -> set[type]:
+    """All _BaseEntry subclasses (recursive), excluding the _UnknownLogEntry sentinel."""
+    seen: set[type] = set()
+    stack = list(_BaseEntry.__subclasses__())
+    while stack:
+        cls = stack.pop()
+        if cls in seen:
+            continue
+        seen.add(cls)
+        stack.extend(cls.__subclasses__())
+    seen.discard(_UnknownLogEntry)
+    return seen
+
+
+def test_every_typed_log_entry_variant_is_registered():
+    """A _BaseEntry subclass with a single-value `type` Literal that is missing from
+    _KNOWN_LOG_ENTRY_TYPES is an unregistered variant: rows with that `type` route to
+    _UnknownLogEntry instead of validating against the typed class. Fails on the drop."""
+    unregistered = []
+    for cls in _all_base_entry_subclasses():
+        type_field = cls.model_fields.get("type")
+        if type_field is None:
+            continue
+        literal_values = get_args(type_field.annotation)  # Literal["x"] -> ("x",); str -> ()
+        if len(literal_values) == 1 and isinstance(literal_values[0], str):
+            if literal_values[0] not in _KNOWN_LOG_ENTRY_TYPES:
+                unregistered.append((cls.__name__, literal_values[0]))
+    assert not unregistered, (
+        f"unregistered LogEntry variant(s) {sorted(unregistered)} — defined as _BaseEntry "
+        f"subclasses with a `type` Literal but absent from _KNOWN_LOG_ENTRY_TYPES, so their "
+        f"rows silently route to _UnknownLogEntry. Add each to the LogEntry union "
+        f"(Annotated[<Class>, Tag(\"<type>\")]) + _KNOWN_LOG_ENTRY_TYPES."
     )
