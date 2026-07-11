@@ -861,13 +861,19 @@ def _flyer_classifier_timeout_ms() -> int:
     # 250ms. When the B1 shadow LLM is armed a real network call needs headroom,
     # so the ceiling relaxes to 4000ms (still bounded — the worker is a daemon
     # thread and the audit records "timeout" past the ceiling).
-    ceiling = 4000 if _flyer_intent_shadow_llm_enabled() else 250
+    # Default follows the regime: 50ms suffices for the near-instant keyword
+    # baseline, but an armed LLM with the env unset would silently bound every
+    # real call at 50ms and audit nothing but "timeout" — recreating the
+    # phantom-lever this slice exists to kill. Armed default = the ceiling.
+    armed = _flyer_intent_shadow_llm_enabled()
+    ceiling = 4000 if armed else 250
+    default = ceiling if armed else 50
     try:
         return max(1, min(ceiling, int(
-            _env_new_or_old("FLYER_INTENT_SHADOW_TIMEOUT_MS", "FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "50")
+            _env_new_or_old("FLYER_INTENT_SHADOW_TIMEOUT_MS", "FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", str(default))
         )))
     except Exception:
-        return 50
+        return default
 
 
 def _flyer_classifier_callable_from_gateway(gateway: Any, *, chat_id: str = "") -> Any:
