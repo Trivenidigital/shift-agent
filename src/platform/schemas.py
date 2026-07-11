@@ -5336,6 +5336,58 @@ class CateringDispatcherWatchdogSuppressed(_BaseEntry):
     detail: str = Field(default="", max_length=2000)
 
 
+class CateringOwnerActionWatchdogFired(_BaseEntry):
+    """F8 2026-05-01 (restored 2026-07-11, census C2): catering-owner-action-
+    watchdog detected a missed owner `#XXXXX approve|reject` command and
+    triggered the fallback apply-catering-owner-decision invocation.
+    Companion to CateringOwnerActionWatchdogSuppressed (the no-action audit).
+
+    Owner-side analogue of the F7 CateringDispatcherWatchdog* pair: the Hermes
+    WhatsApp adapter has no `auto_skill` channel-binding, so on chat turns 2+
+    the LLM may skip the dispatcher SKILL → the owner's `#XXXXX approve` is
+    absorbed by the gateway monologue and the lead stalls at
+    AWAITING_OWNER_APPROVAL forever. This watchdog catches it out-of-band.
+
+    NOTE: these two variants existed until the 2026-05-04 canonical-cleanup
+    (git tag pre-srilu-cleanup-2026-05-04) removed them on the assumption the
+    cf-router plugin superseded F8; census C2 found the owner-action path was
+    never actually covered, so they are restored here alongside the script.
+
+    `action` is the normalized owner action ("approve" | "reject"). `success`
+    reflects whether apply-catering-owner-decision applied the decision;
+    success=False with a null-headcount detail means the truth-guard fallback
+    was suppressed (no auto-approve — the deterministic no-LLM safe path).
+    """
+    type: Literal["catering_owner_action_watchdog_fired"]
+    chat_id: str = Field(min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=200)
+    code: str = Field(min_length=1, max_length=10)
+    action: str = Field(min_length=1, max_length=20)
+    lead_id: str = Field(default="", max_length=50)
+    success: bool
+    detail: str = Field(default="", max_length=2000)
+
+
+class CateringOwnerActionWatchdogSuppressed(_BaseEntry):
+    """F8 2026-05-01 (restored 2026-07-11, census C2): watchdog intentionally
+    did NOT fire the owner-decision fallback. Reasons:
+    - code_not_found: no lead with owner_approval_code == the parsed #XXXXX
+    - lead_terminal_state: lead status not in {AWAITING_OWNER_APPROVAL,
+      OWNER_EDITED} — nothing actionable to apply
+    - action_unsupported_by_watchdog: action is edit/wait, which have no safe
+      deterministic fallback (edit needs the owner's text; wait is a no-op)
+    """
+    type: Literal["catering_owner_action_watchdog_suppressed"]
+    chat_id: str = Field(min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=200)
+    code: str = Field(min_length=1, max_length=10)
+    action: str = Field(min_length=1, max_length=20)
+    reason: Literal[
+        "code_not_found", "lead_terminal_state", "action_unsupported_by_watchdog",
+    ]
+    detail: str = Field(default="", max_length=2000)
+
+
 class StateFileMigrated(_BaseEntry):
     """PR-CF5: a state file's on-disk shape was migrated from legacy to current schema.
 
@@ -6204,15 +6256,23 @@ LogEntry = Annotated[
         # F7 2026-05-01: dispatcher watchdog (missed-SKILL recovery)
         Annotated[CateringDispatcherWatchdogFired, Tag("catering_dispatcher_watchdog_fired")],
         Annotated[CateringDispatcherWatchdogSuppressed, Tag("catering_dispatcher_watchdog_suppressed")],
+        # F8 2026-05-01 (restored 2026-07-11, census C2): owner-action watchdog
+        # (missed `#XXXXX approve|reject` recovery). Removed in the 2026-05-04
+        # cleanup on the assumption cf-router covered it; census found it did
+        # not, so the variants + script are restored.
+        Annotated[CateringOwnerActionWatchdogFired, Tag("catering_owner_action_watchdog_fired")],
+        Annotated[CateringOwnerActionWatchdogSuppressed, Tag("catering_owner_action_watchdog_suppressed")],
         # PR-CF5 2026-05-03: state-file migration audit (legacy schema → current)
         Annotated[StateFileMigrated, Tag("state_file_migrated")],
         Annotated[StateFileMigrationFailed, Tag("state_file_migration_failed")],
         Annotated[StateFileMigrationOverridden, Tag("state_file_migration_overridden")],
-        # PR-CF6 2026-05-03: cf-router Hermes plugin (supersedes F8 + F9
-        # watchdogs; their audit variants were removed in the 2026-05-04
-        # canonical-cleanup pass — see git tag pre-srilu-cleanup-2026-05-04
-        # for the deleted CateringOwnerActionWatchdog* and
-        # ShiftMissedDispatch* class definitions if rollback ever needed).
+        # PR-CF6 2026-05-03: cf-router Hermes plugin (intended to supersede the
+        # F8 + F9 watchdogs; their audit variants were removed in the
+        # 2026-05-04 canonical-cleanup pass). F8 CateringOwnerActionWatchdog*
+        # was RESTORED 2026-07-11 (census C2 — cf-router never covered the
+        # owner-action path); see the two variants above. F9
+        # ShiftMissedDispatch* remains removed — see git tag
+        # pre-srilu-cleanup-2026-05-04 for its class definitions if needed.
         Annotated[CfRouterIntercepted, Tag("cf_router_intercepted")],
         Annotated[CfRouterRawBody, Tag("cf_router_raw_body")],
         # PR-D1: config load observability + operator reconcile audit
@@ -6502,6 +6562,8 @@ __all__ = [
     "CateringCustomerAckSent", "CateringCustomerAckFailed",
     # F7 2026-05-01 (catering dispatcher watchdog)
     "CateringDispatcherWatchdogFired", "CateringDispatcherWatchdogSuppressed",
+    # F8 2026-05-01 / restored 2026-07-11 census C2 (catering owner-action watchdog)
+    "CateringOwnerActionWatchdogFired", "CateringOwnerActionWatchdogSuppressed",
     # PR-CF5 2026-05-03 (state-file migration)
     "StateFileMigrated", "StateFileMigrationFailed", "StateFileMigrationOverridden",
     # PR-CF6 2026-05-03 (cf-router Hermes plugin; supersedes F8 + F9)

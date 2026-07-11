@@ -203,6 +203,7 @@ TOTAL=$(/usr/local/lib/hermes-agent/venv/bin/python -c "import sys, json; print(
 | 4 | Lead not actionable | Per Step 1 status logic. Brief customer reply. |
 | 6 | Bridge unreachable | State IS persisted. Tell customer: "Got it — owner will see this shortly." |
 | 11 | Quote mismatch | Re-read menu prices, recompute total, retry ONCE. If second failure → exit 2 path. |
+| 13 | Active proposal (census C4) | This lead already has menu options sent for the customer to choose from. Do NOT retry `--auto-default`. Reply: "You've got menu options to choose from — just reply with the option number you'd like." The customer's pick routes through `select-catering-proposal`. |
 
 ## Hard rules
 

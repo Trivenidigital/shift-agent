@@ -54,3 +54,12 @@ EXIT_TRUTH_GUARD_FAILED = 11
 # against a screenshot-forwarded `#XXXXX` code that the dispatcher's
 # role-gate failed to catch upstream.
 EXIT_PRIVILEGE_DENIED = 12
+
+# 13 — census C4: finalize-catering-menu --auto-default refused because the
+# lead already has an active proposal set in SENT status (an option-picker flow
+# the customer should choose from via select-catering-proposal). The crude
+# first-5-priced-items default basket must NOT silently override a sent
+# proposal. Distinct from EXIT_INVALID_INPUT (=2) so the finalize SKILL directs
+# the customer to pick an option instead of retrying the finalize. Operator
+# escape hatch: pass --force-default to build the default basket anyway.
+EXIT_PROPOSAL_ACTIVE = 13
