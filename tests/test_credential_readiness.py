@@ -68,6 +68,34 @@ def test_foundation_skills_resolve_from_live_and_bundled_roots(tmp_path: Path):
     assert report["strict_foundation_ok"] is True
 
 
+def test_bundled_only_foundation_skill_warns_but_still_passes(tmp_path: Path):
+    """BL-HERMES-12 hardening #1: a foundation skill present only in the bundled install root
+    (not live) still PASSES the gate (install-state semantics — bundled counts as present), but the
+    text report emits a non-blocking WARN so the load-state gap (the live-only loader won't load a
+    bundled-only skill) isn't silent. require-live was rejected as harmful (it would invert the
+    pre-install install-state gate and false-fail legitimate bundled-will-sync states)."""
+    hermes_home = tmp_path / "home" / ".hermes"
+    install_root = tmp_path / "hermes-agent"
+    _touch(hermes_home / "skills" / "productivity/maps" / "SKILL.md")           # LIVE
+    _touch(install_root / "skills" / "productivity/ocr-and-documents" / "SKILL.md")  # bundled-only
+    _touch(install_root / "skills" / "mcp/native-mcp" / "SKILL.md")            # bundled-only
+
+    report = cr.build_report(
+        cr.ReadinessOptions(
+            hermes_home=hermes_home,
+            hermes_install_root=install_root,
+            strict_foundation=True,
+            today=cr.parse_date("2026-05-14"),
+        )
+    )
+
+    assert report["strict_foundation_ok"] is True  # non-blocking: bundled-only still passes
+    text = cr.format_text_report(report)
+    assert "WARN: productivity/ocr-and-documents present in bundled" in text
+    assert "WARN: mcp/native-mcp present in bundled" in text
+    assert "WARN: productivity/maps" not in text    # a LIVE skill gets no WARN
+
+
 def test_local_dev_skill_root_does_not_satisfy_live_strict_mode(tmp_path: Path):
     repo_root = tmp_path / "repo"
     _touch(repo_root / "src" / "agents" / "demo" / "skills" / "maps" / "SKILL.md")
