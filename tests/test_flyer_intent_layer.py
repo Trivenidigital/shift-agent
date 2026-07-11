@@ -542,13 +542,118 @@ def _wait_for(predicate, *, timeout: float = 0.5) -> None:
 
 
 def test_static_no_provider_client_in_intent_or_cf_router_classifier_glue():
+    # intent.py stays fully provider-free, and so does the cf-router
+    # routing/finalize glue (the shadow-context section). B1 (2026-07) adds a
+    # plugin-local OpenRouter *shadow* classifier confined to the explicitly
+    # delimited "Flyer intent shadow LLM classifier (B1)" section — the ONLY
+    # place a provider client is permitted. The routing path never embeds one.
     forbidden = ("openai", "openrouter", "urllib.request", "requests.", "api_key")
     intent_source = (REPO / "src" / "agents" / "flyer" / "intent.py").read_text(encoding="utf-8").lower()
     actions_source = (REPO / "src" / "plugins" / "cf-router" / "actions.py").read_text(encoding="utf-8").lower()
-    classifier_glue = actions_source[
+    routing_glue = actions_source[
         actions_source.index("# === flyer hermes intent shadow context ===") :
-        actions_source.index("# === audit ===")
+        actions_source.index("# === flyer intent shadow llm classifier")
     ]
-    for name, source in (("intent.py", intent_source), ("actions classifier glue", classifier_glue)):
+    for name, source in (("intent.py", intent_source), ("actions routing glue", routing_glue)):
         for term in forbidden:
             assert term not in source, f"{name} must not contain provider client term {term!r}"
+
+
+# --- B1: plugin-local OpenRouter shadow classifier (strictly shadow) ---------
+
+
+class _FakeResp:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> "_FakeResp":
+        return self
+
+    def __exit__(self, *_args) -> bool:
+        return False
+
+
+def _openrouter_body(content: object) -> bytes:
+    text = content if isinstance(content, str) else json.dumps(content)
+    return json.dumps({"choices": [{"message": {"content": text}}]}).encode("utf-8")
+
+
+def test_intent_llm_classifier_factory_returns_none_without_key(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.setattr(actions, "_resolve_openrouter_key_for_flyer_intent", lambda: "")
+    assert actions._build_flyer_intent_llm_classifier() is None
+    monkeypatch.setattr(
+        actions, "_resolve_openrouter_key_for_flyer_intent", lambda: "sk-or-PLACEHOLDER-000"
+    )
+    assert actions._build_flyer_intent_llm_classifier() is None
+
+
+def test_intent_llm_classifier_returns_dict_on_200(monkeypatch):
+    import urllib.request
+
+    actions = _load_actions()
+    monkeypatch.setattr(actions, "_resolve_openrouter_key_for_flyer_intent", lambda: "sk-or-test")
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["timeout"] = timeout
+        captured["auth"] = req.headers.get("Authorization")
+        captured["payload"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(
+            _openrouter_body(
+                {"intent": "new_flyer", "action": "create_project", "confidence": 0.9}
+            )
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    classifier = actions._build_flyer_intent_llm_classifier()
+    assert classifier is not None
+    request = FlyerClassifierRequest(text="make me a flyer", actual_action="new_project")
+    out = classifier(request)
+
+    assert isinstance(out, dict)
+    assert out["intent"] == "new_flyer"
+    # The shadow parse adapter always stamps the future-gateway source.
+    assert parse_classifier_payload(out).decision_source == "hermes_gateway_future"
+    assert "openrouter.ai" in captured["url"]
+    assert captured["timeout"] == 30
+    assert captured["auth"] == "Bearer sk-or-test"
+    assert captured["payload"]["temperature"] == 0.0
+    assert captured["payload"]["response_format"] == {"type": "json_object"}
+    assert captured["payload"]["model"] == "openai/gpt-4o-mini"
+
+
+def test_intent_llm_classifier_model_from_env(monkeypatch):
+    import urllib.request
+
+    actions = _load_actions()
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_MODEL", "anthropic/claude-shadow")
+    monkeypatch.setattr(actions, "_resolve_openrouter_key_for_flyer_intent", lambda: "sk-or-test")
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["payload"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(_openrouter_body({"intent": "unknown", "action": "observe"}))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    actions._build_flyer_intent_llm_classifier()(FlyerClassifierRequest(text="hi"))
+    assert captured["payload"]["model"] == "anthropic/claude-shadow"
+
+
+def test_intent_llm_classifier_raises_on_non_json(monkeypatch):
+    import urllib.request
+
+    actions = _load_actions()
+    monkeypatch.setattr(actions, "_resolve_openrouter_key_for_flyer_intent", lambda: "sk-or-test")
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda req, timeout=None: _FakeResp(b"<html>502 bad gateway</html>")
+    )
+
+    classifier = actions._build_flyer_intent_llm_classifier()
+    with pytest.raises(Exception):
+        classifier(FlyerClassifierRequest(text="hello"))

@@ -957,6 +957,88 @@ def audit_flyer_hermes_intent_decision(
         sys.stderr.write(f"cf-router: flyer intent audit emit failed (non-fatal): {e}\n")
 
 
+# === Flyer intent shadow LLM classifier (B1) ===
+#
+# B1 (2026-07) makes the `decision_source="hermes_gateway_future"` shadow rows
+# REAL. In prod the Hermes gateway exposes no intent-classifier attribute, so
+# `_flyer_classifier_callable_from_gateway` returned None and the harness only
+# ever logged the deterministic keyword baseline. This section adds a
+# plugin-local OpenRouter classifier that mirrors
+# `build_hermes_semantic_brief_provider` (src/agents/flyer/semantic_brief.py)
+# in shape. It is STRICTLY shadow: the returned decision is audited and NEVER
+# routed on (finalize runs in pre_gateway_dispatch's `finally`, after the
+# routing result is already computed). Everything here is fail-closed and
+# gated by an explicit flag + per-chat allowlist + per-UTC-day budget.
+
+OPENROUTER_INTENT_URL = "https://openrouter.ai/api/v1/chat/completions"
+FLYER_INTENT_SHADOW_LLM_TIMEOUT_SEC = 30
+
+
+def _flyer_intent_shadow_llm_model() -> str:
+    return os.environ.get("FLYER_INTENT_SHADOW_LLM_MODEL") or "openai/gpt-4o-mini"
+
+
+def _resolve_openrouter_key_for_flyer_intent() -> str:
+    """Resolve the OpenRouter key via the deployed flyer key-resolution module
+    (flat-name fallback), mirroring how semantic_brief imports it."""
+    _ensure_src_path()
+    try:
+        from flyer_openrouter_env import openrouter_key  # type: ignore
+    except Exception:
+        from agents.flyer.openrouter_env import openrouter_key  # type: ignore
+    return openrouter_key()
+
+
+def _build_flyer_intent_llm_classifier() -> Callable[[Any], dict] | None:
+    """Return a plugin-local OpenRouter intent classifier, or None when no key.
+
+    Mirrors build_hermes_semantic_brief_provider: key gate → closure that POSTs
+    the canonical HERMES_FLYER_INTENT_PROMPT plus the JSON-serialized request
+    with response_format=json_object and temperature=0.0. On ANY failure the
+    closure RAISES (no suppression) so `run_classifier_shadow` records the fire
+    as status "error" (network/HTTP/non-JSON body) or "invalid" (unparseable
+    decision shape) — it never influences routing."""
+    import urllib.request  # local imports keep the routing glue provider-free
+
+    key = _resolve_openrouter_key_for_flyer_intent()
+    if not key or "PLACEHOLDER" in key:
+        return None
+
+    prompt = _import_flyer_intent_module().HERMES_FLYER_INTENT_PROMPT
+    model = _flyer_intent_shadow_llm_model()
+
+    def classifier(request: Any) -> dict:
+        try:
+            request_json = request.model_dump_json()
+        except Exception:
+            request_json = json.dumps(request, default=str)
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": request_json},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.0,
+        }
+        req = urllib.request.Request(
+            OPENROUTER_INTENT_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=FLYER_INTENT_SHADOW_LLM_TIMEOUT_SEC) as resp:
+            body = resp.read().decode("utf-8")
+        doc = json.loads(body)
+        content = doc["choices"][0]["message"]["content"]
+        return json.loads(content)
+
+    # Marker so finalize meters ONLY this plugin-local LLM against the budget
+    # (a gateway-injected classifier is free/local and never metered).
+    classifier._flyer_shadow_llm_metered = True  # type: ignore[attr-defined]
+    return classifier
+
+
 # === Audit ===
 
 _QUOTE_ATTR_PAT = re.compile(r"quot|context|reply|stanza|participant", re.IGNORECASE)
