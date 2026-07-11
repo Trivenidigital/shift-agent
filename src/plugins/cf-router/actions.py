@@ -38,6 +38,7 @@ FLYER_GUEST_ORDERS_PATH = Path("/opt/shift-agent/state/flyer/guest_orders.json")
 FLYER_REFERENCE_SCOPE_PATH = Path("/opt/shift-agent/state/flyer/reference_scope_pending.json")
 FLYER_QUOTE_ECHO_PENDING_PATH = Path("/opt/shift-agent/state/flyer/quote_echo_pending.json")
 FLYER_OUTBOUND_DEDUPE_PATH = Path("/opt/shift-agent/state/flyer/outbound_dedupe.json")
+FLYER_INTENT_SHADOW_LLM_BUDGET_PATH = Path("/opt/shift-agent/state/flyer/intent_shadow_llm_budget.json")
 _DEFAULT_CF_ROUTER_INBOUND_DEDUPE_PATH = Path("/opt/shift-agent/state/cf-router-inbound-dedupe.json")
 CF_ROUTER_INBOUND_DEDUPE_PATH = _DEFAULT_CF_ROUTER_INBOUND_DEDUPE_PATH
 ROSTER_PATH = Path("/opt/shift-agent/roster.json")
@@ -571,6 +572,16 @@ def _short_hash(value: str) -> str:
     return hashlib.sha256(str(value or "").encode("utf-8", errors="ignore")).hexdigest()[:32]
 
 
+def _env_new_or_old(new_name: str, old_name: str, default: str = "") -> str:
+    """Read a renamed env var: the NEW name wins when set (non-empty), else the
+    legacy name, else the default. Lets the B1 rename (FLYER_INTENT_SHADOW_*)
+    land without breaking already-deployed FLYER_HERMES_INTENT_* settings."""
+    new_val = os.environ.get(new_name)
+    if new_val is not None and new_val != "":
+        return new_val
+    return os.environ.get(old_name, default)
+
+
 def flyer_intent_shadow_candidate(text: str, *, has_media: bool = False) -> bool:
     body = str(text or "").lower()
     if has_media:
@@ -599,7 +610,7 @@ def begin_flyer_intent_shadow(
     except Exception:
         return None
 
-    requested_mode = os.environ.get("FLYER_HERMES_INTENT_MODE", "shadow")
+    requested_mode = _env_new_or_old("FLYER_INTENT_SHADOW_MODE", "FLYER_HERMES_INTENT_MODE", "shadow")
     mode = flyer_intent.mode_from_value(requested_mode)
     if str(mode) == "off":
         return None
@@ -621,6 +632,10 @@ def begin_flyer_intent_shadow(
         "validation": validation,
         "message_id_hash": _short_hash(message_id),
         "chat_key_hash": _short_hash(chat_id),
+        # Raw chat_id kept in-memory ONLY (contextvar, never persisted) so
+        # finalize can match it against the B1 shadow-LLM per-chat allowlist.
+        # Audit rows still use the hash — no raw id ever reaches disk.
+        "chat_id_raw": str(chat_id or ""),
         "has_media": bool(has_media),
         "customer_status": customer_status,
         "project_status": project_status,
@@ -733,13 +748,17 @@ def finalize_flyer_intent_shadow(
     classifier_latency_ms = 0
     classifier_error_kind = ""
     classifier_error_detail = ""
-    classifier_setting = flyer_intent.classifier_setting_from_env(os.environ.get("FLYER_HERMES_INTENT_CLASSIFIER"))
+    classifier_setting = flyer_intent.classifier_setting_from_env(
+        _env_new_or_old("FLYER_INTENT_SHADOW_AUDIT", "FLYER_HERMES_INTENT_CLASSIFIER", "")
+    )
     if classifier_setting in {"shadow", "active"}:
         if not route_events:
             classifier_status = "skipped_passthrough" if candidate else "skipped_not_candidate"
         else:
             try:
-                classifier = _flyer_classifier_callable_from_gateway(gateway)
+                classifier = _flyer_classifier_callable_from_gateway(
+                    gateway, chat_id=str(context.get("chat_id_raw") or "")
+                )
             except Exception as exc:
                 classifier = None
                 classifier_status = "error"
@@ -770,6 +789,11 @@ def finalize_flyer_intent_shadow(
             elif classifier is None:
                 if classifier_status != "error":
                     classifier_status = "skipped_no_gateway"
+            elif getattr(classifier, "_flyer_shadow_llm_metered", False) and not _flyer_intent_shadow_llm_reserve_budget():
+                # B1 plugin-local LLM whose per-UTC-day fire cap is exhausted —
+                # skip the call entirely and record it. Gateway-injected
+                # classifiers are unmetered and never take this branch.
+                classifier_status = "skipped_budget"
             else:
                 audit_kwargs = dict(
                     mode=mode,
@@ -833,19 +857,39 @@ def finalize_flyer_intent_shadow(
 
 
 def _flyer_classifier_timeout_ms() -> int:
+    # The keyword baseline is near-instant, so the default regime hard-clamps to
+    # 250ms. When the B1 shadow LLM is armed a real network call needs headroom,
+    # so the ceiling relaxes to 4000ms (still bounded — the worker is a daemon
+    # thread and the audit records "timeout" past the ceiling).
+    # Default follows the regime: 50ms suffices for the near-instant keyword
+    # baseline, but an armed LLM with the env unset would silently bound every
+    # real call at 50ms and audit nothing but "timeout" — recreating the
+    # phantom-lever this slice exists to kill. Armed default = the ceiling.
+    armed = _flyer_intent_shadow_llm_enabled()
+    ceiling = 4000 if armed else 250
+    default = ceiling if armed else 50
     try:
-        return max(1, min(250, int(os.environ.get("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "50"))))
+        return max(1, min(ceiling, int(
+            _env_new_or_old("FLYER_INTENT_SHADOW_TIMEOUT_MS", "FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", str(default))
+        )))
     except Exception:
-        return 50
+        return default
 
 
-def _flyer_classifier_callable_from_gateway(gateway: Any) -> Any:
-    if gateway is None:
-        return None
-    for name in ("flyer_intent_classifier", "classify_flyer_intent"):
-        candidate = getattr(gateway, name, None)
-        if callable(candidate):
-            return candidate
+def _flyer_classifier_callable_from_gateway(gateway: Any, *, chat_id: str = "") -> Any:
+    # Gateway attr-probe FIRST (forward-compat): if a future Hermes build exposes
+    # an intent classifier, always prefer it. In prod today it exposes none.
+    if gateway is not None:
+        for name in ("flyer_intent_classifier", "classify_flyer_intent"):
+            candidate = getattr(gateway, name, None)
+            if callable(candidate):
+                return candidate
+    # B1 (2026-07): fall back to the plugin-local shadow classifier (defined in
+    # the delimited B1 section below), but ONLY when explicitly armed (flag ==
+    # "1") AND this chat is allowlisted (empty allowlist = disabled-for-all).
+    # Strictly shadow: the decision is audited, never routed.
+    if _flyer_intent_shadow_llm_enabled() and _flyer_intent_shadow_llm_allowlisted(chat_id):
+        return _build_flyer_intent_llm_classifier()
     return None
 
 
@@ -955,6 +999,192 @@ def audit_flyer_hermes_intent_decision(
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
         sys.stderr.write(f"cf-router: flyer intent audit emit failed (non-fatal): {e}\n")
+
+
+# === Flyer intent shadow LLM classifier (B1) ===
+#
+# B1 (2026-07) makes the `decision_source="hermes_gateway_future"` shadow rows
+# REAL. In prod the Hermes gateway exposes no intent-classifier attribute, so
+# `_flyer_classifier_callable_from_gateway` returned None and the harness only
+# ever logged the deterministic keyword baseline. This section adds a
+# plugin-local OpenRouter classifier that mirrors
+# `build_hermes_semantic_brief_provider` (src/agents/flyer/semantic_brief.py)
+# in shape. It is STRICTLY shadow: the returned decision is audited and NEVER
+# routed on (finalize runs in pre_gateway_dispatch's `finally`, after the
+# routing result is already computed). Everything here is fail-closed and
+# gated by an explicit flag + per-chat allowlist + per-UTC-day budget.
+
+OPENROUTER_INTENT_URL = "https://openrouter.ai/api/v1/chat/completions"
+FLYER_INTENT_SHADOW_LLM_TIMEOUT_SEC = 30
+FLYER_INTENT_SHADOW_LLM_CHATS_ENV = "FLYER_INTENT_SHADOW_LLM_CHATS"
+
+
+def _flyer_intent_shadow_llm_enabled() -> bool:
+    """Master flag for the plugin-local shadow classifier. OFF unless == "1"."""
+    return os.environ.get("FLYER_INTENT_SHADOW_LLM", "") == "1"
+
+
+def _normalize_flyer_intent_chat(value: str) -> str:
+    """Canonical comparison form for a phone/LID (mirrors bare_render._normalize_sender):
+    strip a chat-JID suffix, a leading ``+``, phone punctuation, and case-fold."""
+    s = (value or "").strip()
+    if "@" in s:
+        s = s.split("@", 1)[0]
+    s = s.lstrip("+")
+    s = re.sub(r"[\s\-().]", "", s)
+    return s.casefold()
+
+
+def _flyer_intent_shadow_llm_allowlist() -> set[str]:
+    """Parse FLYER_INTENT_SHADOW_LLM_CHATS (comma-separated phones/LIDs) into a
+    normalized set. Empty/unset ⇒ empty set ⇒ disabled-for-all (never global-on)."""
+    raw = os.environ.get(FLYER_INTENT_SHADOW_LLM_CHATS_ENV, "") or ""
+    return {n for n in (_normalize_flyer_intent_chat(c) for c in raw.split(",")) if n}
+
+
+def _flyer_intent_shadow_llm_allowlisted(chat_id: str) -> bool:
+    allow = _flyer_intent_shadow_llm_allowlist()
+    if not allow:
+        return False  # empty allowlist = disabled-for-all
+    return _normalize_flyer_intent_chat(chat_id) in allow
+
+
+def _flyer_intent_shadow_llm_model() -> str:
+    return os.environ.get("FLYER_INTENT_SHADOW_LLM_MODEL") or "openai/gpt-4o-mini"
+
+
+FLYER_INTENT_SHADOW_LLM_DAILY_CAP_DEFAULT = 200
+
+
+def _flyer_intent_shadow_llm_daily_cap() -> int:
+    try:
+        return max(
+            0,
+            int(
+                os.environ.get(
+                    "FLYER_INTENT_SHADOW_LLM_DAILY_CAP",
+                    str(FLYER_INTENT_SHADOW_LLM_DAILY_CAP_DEFAULT),
+                )
+            ),
+        )
+    except Exception:
+        return FLYER_INTENT_SHADOW_LLM_DAILY_CAP_DEFAULT
+
+
+@contextmanager
+def _flyer_intent_shadow_llm_budget_lock() -> Iterator[None]:
+    """flock the budget file on deployed Linux; no-op where fcntl is unavailable
+    (Windows CI / non-POSIX). safe_io imports fcntl at module load, so guard it."""
+    try:
+        _ensure_platform_path()
+        from safe_io import flock  # type: ignore
+    except Exception:
+        yield
+        return
+    with flock(FLYER_INTENT_SHADOW_LLM_BUDGET_PATH):
+        yield
+
+
+def _load_flyer_intent_shadow_llm_budget() -> dict:
+    try:
+        doc = json.loads(FLYER_INTENT_SHADOW_LLM_BUDGET_PATH.read_text(encoding="utf-8"))
+        return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_flyer_intent_shadow_llm_budget(doc: dict) -> None:
+    path = FLYER_INTENT_SHADOW_LLM_BUDGET_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(doc), encoding="utf-8")
+    os.replace(tmp, path)  # atomic on POSIX + Windows
+
+
+def _flyer_intent_shadow_llm_reserve_budget() -> bool:
+    """Reserve one shadow-LLM fire against the per-UTC-day cap.
+
+    Returns True (and records the fire) when the day still has budget; False when
+    the cap is exhausted OR any read/write error occurs. Fail-closed: a broken
+    counter must never let the shadow LLM burn unbounded OpenRouter spend.
+    Best-effort flock (deployed Linux) with an atomic-replace fallback so the
+    counter also works where fcntl is unavailable."""
+    cap = _flyer_intent_shadow_llm_daily_cap()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        with _flyer_intent_shadow_llm_budget_lock():
+            doc = _load_flyer_intent_shadow_llm_budget()
+            if str(doc.get("utc_day") or "") != today:
+                doc = {"utc_day": today, "count": 0}
+            count = int(doc.get("count") or 0)
+            if count >= cap:
+                return False
+            doc["count"] = count + 1
+            _write_flyer_intent_shadow_llm_budget(doc)
+            return True
+    except Exception:
+        return False
+
+
+def _resolve_openrouter_key_for_flyer_intent() -> str:
+    """Resolve the OpenRouter key via the deployed flyer key-resolution module
+    (flat-name fallback), mirroring how semantic_brief imports it."""
+    _ensure_src_path()
+    try:
+        from flyer_openrouter_env import openrouter_key  # type: ignore
+    except Exception:
+        from agents.flyer.openrouter_env import openrouter_key  # type: ignore
+    return openrouter_key()
+
+
+def _build_flyer_intent_llm_classifier() -> Callable[[Any], dict] | None:
+    """Return a plugin-local OpenRouter intent classifier, or None when no key.
+
+    Mirrors build_hermes_semantic_brief_provider: key gate → closure that POSTs
+    the canonical HERMES_FLYER_INTENT_PROMPT plus the JSON-serialized request
+    with response_format=json_object and temperature=0.0. On ANY failure the
+    closure RAISES (no suppression) so `run_classifier_shadow` records the fire
+    as status "error" (network/HTTP/non-JSON body) or "invalid" (unparseable
+    decision shape) — it never influences routing."""
+    import urllib.request  # local imports keep the routing glue provider-free
+
+    key = _resolve_openrouter_key_for_flyer_intent()
+    if not key or "PLACEHOLDER" in key:
+        return None
+
+    prompt = _import_flyer_intent_module().HERMES_FLYER_INTENT_PROMPT
+    model = _flyer_intent_shadow_llm_model()
+
+    def classifier(request: Any) -> dict:
+        try:
+            request_json = request.model_dump_json()
+        except Exception:
+            request_json = json.dumps(request, default=str)
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": request_json},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.0,
+        }
+        req = urllib.request.Request(
+            OPENROUTER_INTENT_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=FLYER_INTENT_SHADOW_LLM_TIMEOUT_SEC) as resp:
+            body = resp.read().decode("utf-8")
+        doc = json.loads(body)
+        content = doc["choices"][0]["message"]["content"]
+        return json.loads(content)
+
+    # Marker so finalize meters ONLY this plugin-local LLM against the budget
+    # (a gateway-injected classifier is free/local and never metered).
+    classifier._flyer_shadow_llm_metered = True  # type: ignore[attr-defined]
+    return classifier
 
 
 # === Audit ===

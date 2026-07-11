@@ -512,7 +512,21 @@ def test_shadow_classifier_timeout_is_hard_capped(monkeypatch):
     actions = _load_actions()
     monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "5000")
 
+    # Default regime (shadow LLM OFF): ceiling stays 250ms.
+    monkeypatch.delenv("FLYER_INTENT_SHADOW_LLM", raising=False)
     assert actions._flyer_classifier_timeout_ms() == 250
+
+    # Shadow-LLM regime: ceiling relaxes to 4000ms so a real network call fits.
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
+    assert actions._flyer_classifier_timeout_ms() == 4000
+
+    # Still hard-capped in the shadow-LLM regime (larger value clamps to 4000).
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "99999")
+    assert actions._flyer_classifier_timeout_ms() == 4000
+
+    # A value under the ceiling passes through unchanged.
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "1500")
+    assert actions._flyer_classifier_timeout_ms() == 1500
 
 
 def test_shadow_context_off_mode_emits_nothing(monkeypatch):
@@ -542,13 +556,458 @@ def _wait_for(predicate, *, timeout: float = 0.5) -> None:
 
 
 def test_static_no_provider_client_in_intent_or_cf_router_classifier_glue():
+    # intent.py stays fully provider-free, and so does the cf-router
+    # routing/finalize glue (the shadow-context section). B1 (2026-07) adds a
+    # plugin-local OpenRouter *shadow* classifier confined to the explicitly
+    # delimited "Flyer intent shadow LLM classifier (B1)" section — the ONLY
+    # place a provider client is permitted. The routing path never embeds one.
     forbidden = ("openai", "openrouter", "urllib.request", "requests.", "api_key")
     intent_source = (REPO / "src" / "agents" / "flyer" / "intent.py").read_text(encoding="utf-8").lower()
     actions_source = (REPO / "src" / "plugins" / "cf-router" / "actions.py").read_text(encoding="utf-8").lower()
-    classifier_glue = actions_source[
+    routing_glue = actions_source[
         actions_source.index("# === flyer hermes intent shadow context ===") :
-        actions_source.index("# === audit ===")
+        actions_source.index("# === flyer intent shadow llm classifier")
     ]
-    for name, source in (("intent.py", intent_source), ("actions classifier glue", classifier_glue)):
+    for name, source in (("intent.py", intent_source), ("actions routing glue", routing_glue)):
         for term in forbidden:
             assert term not in source, f"{name} must not contain provider client term {term!r}"
+
+
+# --- B1: plugin-local OpenRouter shadow classifier (strictly shadow) ---------
+
+
+class _FakeResp:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> "_FakeResp":
+        return self
+
+    def __exit__(self, *_args) -> bool:
+        return False
+
+
+def _openrouter_body(content: object) -> bytes:
+    text = content if isinstance(content, str) else json.dumps(content)
+    return json.dumps({"choices": [{"message": {"content": text}}]}).encode("utf-8")
+
+
+def test_intent_llm_classifier_factory_returns_none_without_key(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.setattr(actions, "_resolve_openrouter_key_for_flyer_intent", lambda: "")
+    assert actions._build_flyer_intent_llm_classifier() is None
+    monkeypatch.setattr(
+        actions, "_resolve_openrouter_key_for_flyer_intent", lambda: "sk-or-PLACEHOLDER-000"
+    )
+    assert actions._build_flyer_intent_llm_classifier() is None
+
+
+def test_intent_llm_classifier_returns_dict_on_200(monkeypatch):
+    import urllib.request
+
+    actions = _load_actions()
+    monkeypatch.setattr(actions, "_resolve_openrouter_key_for_flyer_intent", lambda: "sk-or-test")
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["timeout"] = timeout
+        captured["auth"] = req.headers.get("Authorization")
+        captured["payload"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(
+            _openrouter_body(
+                {"intent": "new_flyer", "action": "create_project", "confidence": 0.9}
+            )
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    classifier = actions._build_flyer_intent_llm_classifier()
+    assert classifier is not None
+    request = FlyerClassifierRequest(text="make me a flyer", actual_action="new_project")
+    out = classifier(request)
+
+    assert isinstance(out, dict)
+    assert out["intent"] == "new_flyer"
+    # The shadow parse adapter always stamps the future-gateway source.
+    assert parse_classifier_payload(out).decision_source == "hermes_gateway_future"
+    assert "openrouter.ai" in captured["url"]
+    assert captured["timeout"] == 30
+    assert captured["auth"] == "Bearer sk-or-test"
+    assert captured["payload"]["temperature"] == 0.0
+    assert captured["payload"]["response_format"] == {"type": "json_object"}
+    assert captured["payload"]["model"] == "openai/gpt-4o-mini"
+
+
+def test_intent_llm_classifier_model_from_env(monkeypatch):
+    import urllib.request
+
+    actions = _load_actions()
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_MODEL", "anthropic/claude-shadow")
+    monkeypatch.setattr(actions, "_resolve_openrouter_key_for_flyer_intent", lambda: "sk-or-test")
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["payload"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(_openrouter_body({"intent": "unknown", "action": "observe"}))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    actions._build_flyer_intent_llm_classifier()(FlyerClassifierRequest(text="hi"))
+    assert captured["payload"]["model"] == "anthropic/claude-shadow"
+
+
+def test_intent_llm_classifier_raises_on_non_json(monkeypatch):
+    import urllib.request
+
+    actions = _load_actions()
+    monkeypatch.setattr(actions, "_resolve_openrouter_key_for_flyer_intent", lambda: "sk-or-test")
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda req, timeout=None: _FakeResp(b"<html>502 bad gateway</html>")
+    )
+
+    classifier = actions._build_flyer_intent_llm_classifier()
+    with pytest.raises(Exception):
+        classifier(FlyerClassifierRequest(text="hello"))
+
+
+# --- B1: allowlist-gated resolution in _flyer_classifier_callable_from_gateway --
+
+
+def _stub_local_classifier(_request):
+    return {"intent": "unknown", "action": "observe"}
+
+
+def test_shadow_llm_allowlist_semantics(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
+    monkeypatch.setattr(
+        actions, "_build_flyer_intent_llm_classifier", lambda: _stub_local_classifier
+    )
+    chat = "17329837841@s.whatsapp.net"
+
+    # empty/unset allowlist ⇒ disabled-for-all (never global-on), even armed.
+    monkeypatch.delenv("FLYER_INTENT_SHADOW_LLM_CHATS", raising=False)
+    assert actions._flyer_classifier_callable_from_gateway(None, chat_id=chat) is None
+
+    # member (normalized across +/punctuation/JID-suffix) ⇒ armed.
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "+1 (732) 983-7841, 55501")
+    assert actions._flyer_classifier_callable_from_gateway(None, chat_id=chat) is _stub_local_classifier
+
+    # non-member ⇒ off.
+    assert (
+        actions._flyer_classifier_callable_from_gateway(
+            None, chat_id="15550009999@s.whatsapp.net"
+        )
+        is None
+    )
+
+    # flag off ⇒ off even for an allowlisted chat.
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "0")
+    assert actions._flyer_classifier_callable_from_gateway(None, chat_id=chat) is None
+
+
+def test_gateway_classifier_precedes_local_shadow_llm(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "17329837841")
+    monkeypatch.setattr(
+        actions, "_build_flyer_intent_llm_classifier", lambda: _stub_local_classifier
+    )
+
+    class Gateway:
+        def flyer_intent_classifier(self, request):
+            return {}
+
+    gw = Gateway()
+    got = actions._flyer_classifier_callable_from_gateway(
+        gw, chat_id="17329837841@s.whatsapp.net"
+    )
+    assert got == gw.flyer_intent_classifier  # gateway attr wins over the local LLM
+
+
+def test_shadow_llm_not_armed_when_flag_unset(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.delenv("FLYER_INTENT_SHADOW_LLM", raising=False)
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "17329837841")
+    monkeypatch.setattr(
+        actions, "_build_flyer_intent_llm_classifier", lambda: _stub_local_classifier
+    )
+    assert (
+        actions._flyer_classifier_callable_from_gateway(
+            None, chat_id="17329837841@s.whatsapp.net"
+        )
+        is None
+    )
+
+
+# --- B1: per-UTC-day budget cap (skipped_budget) -----------------------------
+
+
+def _metered_stub(counter: dict):
+    def classifier(_request):
+        counter["n"] = counter.get("n", 0) + 1
+        return {"intent": "approve_final", "action": "approve_project", "confidence": 0.99}
+
+    classifier._flyer_shadow_llm_metered = True  # type: ignore[attr-defined]
+    return classifier
+
+
+def test_shadow_llm_budget_reserve_increments_and_resets(monkeypatch, tmp_path):
+    actions = _load_actions()
+    monkeypatch.setattr(actions, "FLYER_INTENT_SHADOW_LLM_BUDGET_PATH", tmp_path / "budget.json")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_DAILY_CAP", "2")
+
+    assert actions._flyer_intent_shadow_llm_reserve_budget() is True   # count -> 1
+    assert actions._flyer_intent_shadow_llm_reserve_budget() is True   # count -> 2
+    assert actions._flyer_intent_shadow_llm_reserve_budget() is False  # cap exhausted
+    assert json.loads((tmp_path / "budget.json").read_text())["count"] == 2
+
+    # A stale prior-day counter (even one over cap) resets on the new UTC day.
+    (tmp_path / "budget.json").write_text(json.dumps({"utc_day": "2000-01-01", "count": 999}))
+    assert actions._flyer_intent_shadow_llm_reserve_budget() is True
+
+
+def test_shadow_llm_over_budget_records_skipped_budget(monkeypatch, tmp_path):
+    actions = _load_actions()
+    emitted: list[dict] = []
+    counter: dict = {}
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "17329837841")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_DAILY_CAP", "0")  # no budget today
+    monkeypatch.setattr(actions, "FLYER_INTENT_SHADOW_LLM_BUDGET_PATH", tmp_path / "budget.json")
+    monkeypatch.setattr(actions, "audit_flyer_hermes_intent_decision", lambda **kw: emitted.append(kw))
+    monkeypatch.setattr(actions, "_build_flyer_intent_llm_classifier", lambda: _metered_stub(counter))
+
+    token = actions.begin_flyer_intent_shadow(
+        text="approve",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="wamid.budget",
+        has_media=False,
+    )
+    try:
+        actions.record_flyer_intent_route_event(
+            reason="flyer_primary_project_created",
+            subprocess_rc=0,
+            detail="project_id=F0065",
+        )
+        actions.finalize_flyer_intent_shadow(
+            hook_result={"action": "skip", "reason": "cf-router flyer primary created"},
+            gateway=None,
+        )
+    finally:
+        actions.reset_flyer_intent_shadow(token)
+
+    assert emitted, "budget-skip must still emit a synchronous audit row"
+    assert emitted[0]["classifier_status"] == "skipped_budget"
+    assert counter.get("n", 0) == 0  # the LLM call was skipped, not merely dropped
+
+
+def test_shadow_llm_under_budget_fires_worker(monkeypatch, tmp_path):
+    actions = _load_actions()
+    emitted: list[dict] = []
+    counter: dict = {}
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "17329837841")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_DAILY_CAP", "5")
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "1000")
+    monkeypatch.setattr(actions, "FLYER_INTENT_SHADOW_LLM_BUDGET_PATH", tmp_path / "budget.json")
+    monkeypatch.setattr(actions, "audit_flyer_hermes_intent_decision", lambda **kw: emitted.append(kw))
+    monkeypatch.setattr(actions, "_build_flyer_intent_llm_classifier", lambda: _metered_stub(counter))
+
+    token = actions.begin_flyer_intent_shadow(
+        text="approve",
+        chat_id="17329837841@s.whatsapp.net",
+        message_id="wamid.fire",
+        has_media=False,
+    )
+    try:
+        actions.record_flyer_intent_route_event(
+            reason="flyer_primary_project_created",
+            subprocess_rc=0,
+            detail="project_id=F0065",
+        )
+        actions.finalize_flyer_intent_shadow(
+            hook_result={"action": "skip", "reason": "cf-router flyer primary created"},
+            gateway=None,
+        )
+    finally:
+        actions.reset_flyer_intent_shadow(token)
+
+    _wait_for(lambda: bool(emitted))
+    assert emitted[0]["classifier_status"] == "success"
+    assert counter["n"] == 1  # exactly one metered fire consumed
+    assert json.loads((tmp_path / "budget.json").read_text())["count"] == 1
+
+
+# --- B1: flag rename aliases (NEW name wins, legacy names still work) ---------
+
+
+def _finalize_and_capture_status(actions, monkeypatch, *, text="Create flyer for evening snacks"):
+    emitted: list[dict] = []
+    monkeypatch.setattr(actions, "audit_flyer_hermes_intent_decision", lambda **kw: emitted.append(kw))
+    token = actions.begin_flyer_intent_shadow(
+        text=text, chat_id="15550000001@s.whatsapp.net", message_id="wamid.alias", has_media=False
+    )
+    try:
+        actions.record_flyer_intent_route_event(
+            reason="flyer_primary_project_created", subprocess_rc=0, detail="project_id=F0065"
+        )
+        actions.finalize_flyer_intent_shadow(
+            hook_result={"action": "skip", "reason": "cf-router flyer primary created"}, gateway=None
+        )
+    finally:
+        actions.reset_flyer_intent_shadow(token)
+    return emitted, token
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"FLYER_INTENT_SHADOW_MODE": "off"},                                  # new name
+        {"FLYER_HERMES_INTENT_MODE": "off"},                                  # legacy name
+        {"FLYER_INTENT_SHADOW_MODE": "off", "FLYER_HERMES_INTENT_MODE": "active"},  # new wins
+    ],
+)
+def test_shadow_mode_alias_off(monkeypatch, env):
+    actions = _load_actions()
+    monkeypatch.delenv("FLYER_INTENT_SHADOW_MODE", raising=False)
+    monkeypatch.delenv("FLYER_HERMES_INTENT_MODE", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    token = actions.begin_flyer_intent_shadow(
+        text="Create flyer", chat_id="1@s.whatsapp.net", message_id="m"
+    )
+    assert token is None
+
+
+def test_shadow_audit_setting_alias_enables_classifier_path(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.delenv("FLYER_HERMES_INTENT_CLASSIFIER", raising=False)
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_AUDIT", "shadow")  # new name enables
+    emitted, _ = _finalize_and_capture_status(actions, monkeypatch)
+    assert emitted[0]["classifier_status"] == "skipped_no_gateway"
+
+
+def test_shadow_audit_setting_legacy_name_still_works(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.delenv("FLYER_INTENT_SHADOW_AUDIT", raising=False)
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")  # legacy name
+    emitted, _ = _finalize_and_capture_status(actions, monkeypatch)
+    assert emitted[0]["classifier_status"] == "skipped_no_gateway"
+
+
+def test_shadow_audit_setting_new_name_wins(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")  # legacy says on
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_AUDIT", "off")          # new says off -> wins
+    emitted, _ = _finalize_and_capture_status(actions, monkeypatch)
+    assert emitted[0]["classifier_status"] == "off"
+
+
+def test_shadow_timeout_alias(monkeypatch):
+    actions = _load_actions()
+    monkeypatch.delenv("FLYER_INTENT_SHADOW_LLM", raising=False)  # default ceiling 250
+    monkeypatch.delenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", raising=False)
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_TIMEOUT_MS", "123")  # new name
+    assert actions._flyer_classifier_timeout_ms() == 123
+
+    monkeypatch.delenv("FLYER_INTENT_SHADOW_TIMEOUT_MS", raising=False)
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "77")  # legacy name
+    assert actions._flyer_classifier_timeout_ms() == 77
+
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_TIMEOUT_MS", "88")  # new wins
+    assert actions._flyer_classifier_timeout_ms() == 88
+
+
+# --- B1: the shadow invariant — a mutating advisory NEVER changes routing -----
+
+
+def _load_hooks_and_actions():
+    import importlib.machinery
+    import importlib.util
+
+    pkg_name = "cf_router_intent_invariant_pkg"
+    for mod_name in list(sys.modules):
+        if mod_name == pkg_name or mod_name.startswith(pkg_name + "."):
+            del sys.modules[mod_name]
+    plugin_dir = REPO / "src" / "plugins" / "cf-router"
+    pkg_spec = importlib.machinery.ModuleSpec(pkg_name, loader=None, is_package=True)
+    pkg_spec.submodule_search_locations = [str(plugin_dir)]
+    sys.modules[pkg_name] = importlib.util.module_from_spec(pkg_spec)
+
+    def _load(sub):
+        full = f"{pkg_name}.{sub}"
+        loader = importlib.machinery.SourceFileLoader(full, str(plugin_dir / f"{sub}.py"))
+        spec = importlib.util.spec_from_loader(full, loader)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[full] = mod
+        loader.exec_module(mod)
+        return mod
+
+    actions_mod = _load("actions")
+    hooks_mod = _load("hooks")
+    return hooks_mod, actions_mod
+
+
+def test_shadow_llm_mutating_advisory_never_changes_routing(monkeypatch, tmp_path):
+    hooks, actions = _load_hooks_and_actions()
+    chat = "17329837841@s.whatsapp.net"
+
+    # Arm the B1 shadow LLM with a MUTATING advisory (approve_project) that would
+    # be dangerous if it ever leaked into routing.
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "17329837841")
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "1000")
+    monkeypatch.setattr(actions, "FLYER_INTENT_SHADOW_LLM_BUDGET_PATH", tmp_path / "budget.json")
+    captured: list[dict] = []
+    monkeypatch.setattr(actions, "audit_flyer_hermes_intent_decision", lambda **kw: captured.append(kw))
+
+    def mutating_stub(_request):
+        return {"intent": "approve_final", "action": "approve_project", "confidence": 0.99}
+
+    mutating_stub._flyer_shadow_llm_metered = True  # type: ignore[attr-defined]
+    monkeypatch.setattr(actions, "_build_flyer_intent_llm_classifier", lambda: mutating_stub)
+
+    # Force the flyer gate on and stub the real dispatch impl to a fixed routing
+    # result that also records a flyer route event (so the shadow classifier fires).
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "is_flyer_workflow_enabled", lambda: False)
+    sentinel = {"action": "skip", "reason": "cf-router flyer primary created project_id=F0065"}
+
+    def fake_impl(event, gateway=None, session_store=None, **_kw):
+        actions.record_flyer_intent_route_event(
+            reason="flyer_primary_project_created", subprocess_rc=0, detail="project_id=F0065"
+        )
+        return dict(sentinel)
+
+    monkeypatch.setattr(hooks, "_pre_gateway_dispatch_impl", fake_impl)
+
+    from types import SimpleNamespace
+
+    armed_result = hooks.pre_gateway_dispatch(
+        SimpleNamespace(text="approve", chat_id=chat), gateway=None
+    )
+
+    # The mutating advisory actually ran in shadow (proving the LLM path fired)...
+    _wait_for(lambda: bool(captured))
+    assert captured[0]["classifier_status"] == "success"
+    assert captured[0]["decision"].action == "approve_project"
+    assert captured[0]["decision"].decision_source == "hermes_gateway_future"
+
+    # ...yet the routing result is byte-identical to what the impl returned —
+    # finalize runs in pre_gateway_dispatch's `finally`, after the result is set,
+    # so the shadow decision can NEVER influence routing.
+    assert armed_result == sentinel
+
+    # And identical to a disarmed run (shadow LLM flag off), same inputs.
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "0")
+    disarmed_result = hooks.pre_gateway_dispatch(
+        SimpleNamespace(text="approve", chat_id=chat), gateway=None
+    )
+    assert disarmed_result == armed_result == sentinel
