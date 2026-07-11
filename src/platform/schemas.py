@@ -3199,13 +3199,64 @@ class NoResponseTimeoutProposal(_BaseProp):
     timeout_ts: datetime
 
 
+class _UnknownProposal(_BaseProp):
+    """Forward-compat passthrough for unrecognized proposal `status` values (BL-HERMES-06).
+
+    An older binary reading a pending.json written by a newer binary downgrades an unknown
+    `status` to this model rather than raising ValidationError — which would brick the ENTIRE
+    store load (PendingStore.proposals is a dict[str, Proposal]; one un-routable row fails the
+    whole parse), silently dropping every proposal from the reader's view. The raw payload is
+    captured (extra="allow") so tooling can still inspect it.
+
+    Mirrors _UnknownLogEntry: `status: str` (NOT Literal) + extra="allow". Consumers treat an
+    unknown status SAFELY — it is in neither LEGAL_TRANSITIONS nor TERMINAL_STATUSES nor the
+    sweep/daily-brief active-status sets, so it is skipped (never transitioned or actioned),
+    and every consumer reads `.status`/`.code` via membership/getattr, not isinstance.
+
+    Type-validation discipline is preserved: a KNOWN status with malformed fields still raises
+    (the picker routes it to its typed variant); only truly-unknown statuses pass through.
+    """
+    model_config = ConfigDict(extra="allow")  # OVERRIDES _BaseProp's extra="forbid"
+    status: str  # NOT Literal — accepts any status the discriminator routes here
+
+
+_KNOWN_PROPOSAL_STATUSES = frozenset({
+    "awaiting_owner_approval", "approved", "reconciling", "sent", "send_failed",
+    "accepted", "declined", "denied_by_owner", "expired", "cancelled", "no_response_timeout",
+})
+
+
+def _pick_proposal_tag(v: Any) -> str:
+    """Proposal discriminator picker (Pydantic v2 callable form), mirroring
+    _pick_log_entry_tag. Returns `status` when it names a known variant, else the sentinel
+    "_unknown_" which routes to _UnknownProposal. Missing / non-string status also routes to
+    "_unknown_" — _UnknownProposal.status: str then raises on non-str, so a known status with
+    bad fields still raises while only truly-unknown statuses pass through."""
+    if isinstance(v, dict):
+        s = v.get("status")
+    else:
+        s = getattr(v, "status", None)
+    if isinstance(s, str) and s in _KNOWN_PROPOSAL_STATUSES:
+        return s
+    return "_unknown_"
+
+
 Proposal = Annotated[
     Union[
-        AwaitingProposal, ApprovedProposal, ReconcilingProposal, SentProposal,
-        SendFailedProposal, AcceptedProposal, DeclinedProposal, DeniedByOwnerProposal,
-        ExpiredProposal, CancelledProposal, NoResponseTimeoutProposal,
+        Annotated[AwaitingProposal, Tag("awaiting_owner_approval")],
+        Annotated[ApprovedProposal, Tag("approved")],
+        Annotated[ReconcilingProposal, Tag("reconciling")],
+        Annotated[SentProposal, Tag("sent")],
+        Annotated[SendFailedProposal, Tag("send_failed")],
+        Annotated[AcceptedProposal, Tag("accepted")],
+        Annotated[DeclinedProposal, Tag("declined")],
+        Annotated[DeniedByOwnerProposal, Tag("denied_by_owner")],
+        Annotated[ExpiredProposal, Tag("expired")],
+        Annotated[CancelledProposal, Tag("cancelled")],
+        Annotated[NoResponseTimeoutProposal, Tag("no_response_timeout")],
+        Annotated[_UnknownProposal, Tag("_unknown_")],
     ],
-    Field(discriminator="status"),
+    Discriminator(_pick_proposal_tag),
 ]
 
 TERMINAL_STATUSES = frozenset({
