@@ -1,0 +1,37 @@
+[Unit]
+# F8 catering-owner-action-watchdog (restored 2026-07-11, census C2). Owner-side
+# analogue of the F7 catering-dispatcher-watchdog: a deterministic no-LLM
+# absorbing shim for missed owner `#XXXXX approve|reject` commands. Long-running
+# poller (tails the WhatsApp bridge notify stream), so it ships service-only —
+# mirroring how F7 shipped (a .service with no .timer), NOT oneshot+timer. A
+# periodic oneshot cannot tail the bridge log for turn-2+ misses.
+Description=Catering owner-action watchdog (F8) - fallback for missed #XXXXX approve/reject
+After=hermes-gateway.service
+Wants=hermes-gateway.service
+# Bridge notify stream is the trigger source; skip cleanly (no restart loop) if
+# it is not present yet on a fresh box — matches shift-agent-tail-logger.service.
+ConditionPathExists=/root/.hermes/whatsapp/bridge.log
+ConditionPathIsExecutable=/usr/local/bin/catering-owner-action-watchdog
+
+[Service]
+Type=simple
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+Environment=HOME=/opt/shift-agent
+ExecStart=/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/catering-owner-action-watchdog
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/opt/shift-agent/logs/catering-owner-action-watchdog.log
+StandardError=append:/opt/shift-agent/logs/catering-owner-action-watchdog.log
+
+# Security hardening. Reads /root/.hermes (bridge.log + agent.log) read-only via
+# ProtectHome=read-only; writes only /opt/shift-agent (decisions.log + state).
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shift-agent
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

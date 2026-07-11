@@ -941,3 +941,181 @@ class TestReplayWindow:
         status_changes = [r for r in _read_audit(env_dir)
                           if r["type"] == "catering_lead_status_change"]
         assert len(status_changes) == 2  # initial + re-finalize
+
+
+# ============================================================================
+# census C4 — --auto-default proposal guard
+#
+# When a lead has a LATEST proposal set in SENT status (an option-picker flow
+# the customer should choose from), `--auto-default` must NOT silently build
+# the crude first-5-priced-items basket. It exits EXIT_PROPOSAL_ACTIVE (13)
+# with a customer-safe stderr message, unless `--force-default` is passed.
+# Non-proposal leads keep byte-identical --auto-default behavior.
+# ============================================================================
+
+EXIT_PROPOSAL_ACTIVE = 13
+
+
+def _run_auto_default(env_dir, bridge_port, *, code="#ABCDE",
+                      customer_message_id="msg_auto_001", force_default=False):
+    """Invoke finalize-catering-menu --auto-default (optionally --force-default)
+    via the same importlib wrapper as _run_script, additionally overriding the
+    proposal-store paths the census-C4 guard consults."""
+    sys_argv = [
+        "finalize-catering-menu",
+        "--code", code,
+        "--customer-message-id", customer_message_id,
+        "--auto-default",
+    ]
+    if force_default:
+        sys_argv.append("--force-default")
+    wrapper = f"""
+import sys, pathlib, json, io
+sys.argv = {sys_argv!r}
+sys.path.insert(0, {str(PLATFORM_DIR)!r})
+from importlib.machinery import SourceFileLoader
+mod = SourceFileLoader("fcm_test_loaded", {str(SCRIPT)!r}).load_module()
+mod.CONFIG_PATH = pathlib.Path({str(env_dir / 'config.yaml')!r})
+mod.LEADS_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json')!r})
+mod.LEADS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json.lock')!r})
+mod.PROPOSALS_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-proposals.json')!r})
+mod.PROPOSALS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-proposals.json.lock')!r})
+mod.MENU_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-menu.json')!r})
+mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
+mod.LOG_LOCK = pathlib.Path({str(env_dir / 'logs' / 'decisions.log.lock')!r})
+mod.TEMPLATE_DIR = pathlib.Path({str(env_dir / 'templates')!r})
+mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
+buf = io.StringIO()
+sys.stdout = buf
+rc = -99
+try:
+    rc = mod.main()
+except SystemExit as se:
+    rc = se.code if isinstance(se.code, int) else -1
+finally:
+    sys.stdout = sys.__stdout__
+print(json.dumps({{"rc": rc, "stdout": buf.getvalue()}}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", wrapper],
+        capture_output=True, text=True, timeout=15,
+        env={**os.environ,
+             "HERMES_BRIDGE_URL": f"http://127.0.0.1:{bridge_port}/send",
+             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1"},
+    )
+    out_lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
+    parsed = json.loads(out_lines[-1]) if out_lines else {"rc": -1, "stdout": ""}
+    return result, parsed
+
+
+def _seed_proposals(env_dir, sets):
+    """Write a catering-proposals.json fixture (mirrors select-proposal tests)."""
+    (env_dir / "state" / "catering-proposals.json").write_text(
+        json.dumps({"schema_version": 1, "next_sequence": len(sets) + 1, "sets": sets}),
+        encoding="utf-8",
+    )
+
+
+def _proposal_set(proposal_set_id, status, *, lead_id="L0001",
+                  outbound_message_id="proposal_msg"):
+    return {
+        "proposal_set_id": proposal_set_id,
+        "lead_id": lead_id,
+        "status": status,
+        "created_at": "2026-04-30T10:00:00-04:00",
+        "sent_at": "2026-04-30T10:01:00-04:00" if status == "SENT" else None,
+        "outbound_message_id": outbound_message_id if status == "SENT" else "",
+        "source_message_id": f"msg_{proposal_set_id[-6:]}",
+        "request_text": "two ideas",
+        "options": [
+            {"option_id": "1", "style_key": "balanced_style", "tier": "balanced",
+             "item_names": ["Aloo Paratha", "Chicken Biryani"]},
+            {"option_id": "2", "style_key": "premium_style", "tier": "premium",
+             "item_names": ["Gulab Jamun"]},
+        ],
+        "selected_option_id": None,
+        "failure_reason": "",
+    }
+
+
+class TestAutoDefaultProposalGuard:
+    def test_refused_when_lead_has_sent_proposal(self, bridge_server, env_dir):
+        """--auto-default on a lead with a LATEST SENT proposal -> exit 13, no
+        state mutation, no owner card, no finalize audit row."""
+        port, stub = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        _seed_proposals(env_dir, [_proposal_set("CPS-L0001-000001", "SENT")])
+        result, parsed = _run_auto_default(env_dir, port)
+        assert parsed["rc"] == EXIT_PROPOSAL_ACTIVE, f"stderr: {result.stderr}"
+        # customer-safe stderr directs to option selection
+        assert "option number" in result.stderr
+        # Lead untouched -- still awaiting, no finalize applied
+        lead = _read_lead(env_dir, "#ABCDE")
+        assert lead["status"] == "AWAITING_OWNER_APPROVAL"
+        assert lead["customer_finalized_at"] is None
+        assert lead["selected_items"] == []
+        # No owner card sent, no finalize audit row
+        assert len(stub.requests) == 0
+        types = [r["type"] for r in _read_audit(env_dir)]
+        assert "catering_menu_finalized" not in types
+
+    def test_force_default_overrides_sent_proposal(self, bridge_server, env_dir):
+        """--force-default builds the default basket even with a SENT proposal."""
+        port, stub = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        _seed_proposals(env_dir, [_proposal_set("CPS-L0001-000001", "SENT")])
+        result, parsed = _run_auto_default(env_dir, port, force_default=True)
+        assert parsed["rc"] == 0, f"stderr: {result.stderr}"
+        lead = _read_lead(env_dir, "#ABCDE")
+        assert lead["status"] == "CUSTOMER_FINALIZED"
+        assert lead["quote_total_usd"] == 22  # 4 + 15 + 3 (first-5 priced items)
+        assert len(stub.requests) == 1  # owner card sent
+        finalized = [r for r in _read_audit(env_dir)
+                     if r["type"] == "catering_menu_finalized"]
+        assert len(finalized) == 1
+        assert finalized[0]["outcome"] == "finalized"
+
+    def test_no_proposals_file_unchanged(self, bridge_server, env_dir):
+        """No proposals file at all -> byte-identical --auto-default finalize."""
+        port, stub = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        # deliberately NO _seed_proposals
+        result, parsed = _run_auto_default(env_dir, port)
+        assert parsed["rc"] == 0, f"stderr: {result.stderr}"
+        lead = _read_lead(env_dir, "#ABCDE")
+        assert lead["status"] == "CUSTOMER_FINALIZED"
+        assert lead["quote_total_usd"] == 22
+        assert len(stub.requests) == 1
+
+    def test_latest_proposal_not_sent_unchanged(self, bridge_server, env_dir):
+        """Proposals exist but the LATEST set is not SENT (e.g. SELECT_FAILED)
+        -> not an active option-picker flow -> auto-default proceeds normally."""
+        port, stub = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        _seed_proposals(env_dir, [
+            _proposal_set("CPS-L0001-000001", "SENT"),
+            _proposal_set("CPS-L0001-000002", "SELECT_FAILED"),  # newer, not SENT
+        ])
+        result, parsed = _run_auto_default(env_dir, port)
+        assert parsed["rc"] == 0, f"stderr: {result.stderr}"
+        lead = _read_lead(env_dir, "#ABCDE")
+        assert lead["status"] == "CUSTOMER_FINALIZED"
+        assert len(stub.requests) == 1
+
+    def test_proposal_for_other_lead_unchanged(self, bridge_server, env_dir):
+        """A SENT proposal belonging to a DIFFERENT lead must not refuse this
+        lead's auto-default finalize."""
+        port, stub = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        _seed_proposals(env_dir, [
+            _proposal_set("CPS-L9999-000001", "SENT", lead_id="L9999"),
+        ])
+        result, parsed = _run_auto_default(env_dir, port)
+        assert parsed["rc"] == 0, f"stderr: {result.stderr}"
+        assert _read_lead(env_dir, "#ABCDE")["status"] == "CUSTOMER_FINALIZED"
+        assert len(stub.requests) == 1

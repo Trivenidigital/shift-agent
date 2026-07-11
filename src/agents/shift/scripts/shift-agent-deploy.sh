@@ -884,6 +884,11 @@ PY
     systemctl enable --now shift-agent-fsck.timer 2>/dev/null || true
     systemctl enable --now send-daily-brief.timer 2>/dev/null || true
     systemctl enable --now catering-pattern-report.timer 2>/dev/null || true
+    # F8 catering-owner-action-watchdog (restored 2026-07-11, census C2). Long-
+    # running poller shipped service-only (see the unit comment); enable + start
+    # it here like the sibling timers. `--now` starts it; on a box without
+    # owner.self_chat_jid configured it logs a WARN and no-ops until configured.
+    systemctl enable --now catering-owner-action-watchdog.service 2>/dev/null || true
     systemctl enable --now eod-reconcile.timer 2>/dev/null || true
     systemctl enable --now send-routing-accuracy-summary.timer 2>/dev/null || true
     systemctl enable --now flyer-source-edit-sla-watchdog.timer 2>/dev/null || true
@@ -895,14 +900,13 @@ PY
     #   systemctl daemon-reload && systemctl enable --now openrouter-balance-check.timer
     # (2026-07-06 ops-hardening; see the timer unit's comment.)
 
-    # 2026-05-04 canonical-cleanup: F8/F9 watchdog files were deleted from
-    # the repo (cf-router plugin took over their role in PR-CF6). The
-    # earlier "disable the legacy timers" hook here is obsolete because
-    # the units never get installed by this script anymore. If you're
-    # rolling back to a pre-cleanup tarball that re-installs the
-    # watchdogs, manually `systemctl disable --now ...timer ...service`
-    # for catering-owner-action-watchdog and shift-missed-dispatch-notifier
-    # — or apply this branch on top of the rollback to re-purge.
+    # 2026-05-04 canonical-cleanup: F8/F9 watchdog files were deleted from the
+    # repo (cf-router plugin was meant to take over in PR-CF6). F8
+    # catering-owner-action-watchdog was RESTORED 2026-07-11 (census C2) and is
+    # now installed (glob at :350/:356) + enabled above as a first-class
+    # service-only unit. F9 shift-missed-dispatch-notifier remains removed; if
+    # you roll back to a pre-cleanup tarball that re-installs IT, manually
+    # `systemctl disable --now shift-missed-dispatch-notifier.{timer,service}`.
 }
 
 snapshot_staging() {

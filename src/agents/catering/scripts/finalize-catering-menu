@@ -44,6 +44,9 @@ Exit codes:
   4  lead-not-actionable (not found OR status not in actionable set)
   6  bridge unreachable (state IS persisted)
   11 quote mismatch (LLM-passed total drift > min(5%, $25))
+  13 --auto-default refused: lead has an active SENT proposal (census C4).
+     Route the customer through select-catering-proposal, or pass
+     --force-default to build the default basket anyway.
 """
 from __future__ import annotations
 
@@ -68,11 +71,12 @@ from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402  # PR-ε: c
 from schemas import (  # noqa: E402
     Config, CateringLead, CateringLeadStore, CateringSelectedItem,
     CateringLeadStatusChange, CateringMenuFinalized, Menu,
+    CateringProposalStore,
     CATERING_TRANSITIONS,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
-    EXIT_DEPENDENCY_DOWN, EXIT_TRUTH_GUARD_FAILED,
+    EXIT_DEPENDENCY_DOWN, EXIT_TRUTH_GUARD_FAILED, EXIT_PROPOSAL_ACTIVE,
 )
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
@@ -84,6 +88,10 @@ LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 LOG_LOCK = Path("/opt/shift-agent/logs/decisions.log.lock")
 MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
 TEMPLATE_DIR = Path("/opt/shift-agent/templates")
+# census C4: proposal store — consulted by the --auto-default guard so the crude
+# default basket cannot silently override an option-picker flow (SENT proposal).
+PROPOSALS_PATH = Path("/opt/shift-agent/state/catering-proposals.json")
+PROPOSALS_LOCK = Path("/opt/shift-agent/state/catering-proposals.json.lock")
 
 # Quote validation tolerance: stricter of 5% or $25 absolute.
 QUOTE_TOLERANCE_PCT = 0.05
@@ -391,6 +399,56 @@ def _emit_quote_mismatch_audit(
         sys.stderr.write(f"audit emit (mismatch) failed (non-fatal): {e}\n")
 
 
+def _proposal_sequence(proposal_set_id: str) -> int:
+    """Trailing 6-digit sequence of a proposal_set_id. Mirrors
+    select-catering-proposal._proposal_sequence; -1 when unparseable so
+    malformed ids sort last."""
+    match = re.search(r"-(\d{6})$", proposal_set_id)
+    return int(match.group(1)) if match else -1
+
+
+def _lead_has_active_sent_proposal(code: str) -> bool:
+    """census C4: True iff the lead for `code` has a LATEST proposal set in
+    SENT status — an option-picker flow the customer is expected to choose
+    from via select-catering-proposal.
+
+    Mirrors select-catering-proposal._latest_proposal_for_lead exactly: latest
+    set by trailing sequence, status SENT, non-empty outbound_message_id. Any
+    resolution failure (lead not found, proposals file missing/corrupt) returns
+    False so NON-proposal leads keep byte-identical --auto-default behavior and
+    a proposals-read error never blocks a legitimate default finalize.
+    """
+    try:
+        with FileLock(LEADS_LOCK):
+            lstore, lstatus = load_model(
+                LEADS_PATH, CateringLeadStore, default=CateringLeadStore()
+            )
+            assert_load_status_clean(
+                LEADS_PATH, lstatus, context="auto-default proposal guard (leads)"
+            )
+        lead = next((l for l in lstore.leads if l.owner_approval_code == code), None)
+        if lead is None:
+            return False
+        with FileLock(PROPOSALS_LOCK):
+            pstore, pstatus = load_model(
+                PROPOSALS_PATH, CateringProposalStore, default=CateringProposalStore()
+            )
+            assert_load_status_clean(
+                PROPOSALS_PATH, pstatus, context="auto-default proposal guard (proposals)"
+            )
+    except Exception as e:  # noqa: BLE001 — fail-open to preserve byte-identical path
+        sys.stderr.write(
+            f"auto-default proposal guard skipped (non-fatal): "
+            f"{type(e).__name__}: {e}\n"
+        )
+        return False
+    matches = [row for row in pstore.sets if row.lead_id == lead.lead_id]
+    if not matches:
+        return False
+    latest = max(matches, key=lambda r: _proposal_sequence(r.proposal_set_id))
+    return latest.status == "SENT" and bool(latest.outbound_message_id.strip())
+
+
 def _build_default_basket(
     menu_index: dict[str, int],
 ) -> tuple[list[CateringSelectedItem], int]:
@@ -434,6 +492,13 @@ def main() -> int:
     parser.add_argument("--selected-items-json", required=False, default=None)
     parser.add_argument("--quote-total-usd", required=False, default=None, type=int)
     parser.add_argument(
+        "--force-default", action="store_true",
+        help="census C4 operator escape hatch: build the --auto-default basket "
+             "even when the lead has an active SENT proposal. Without this, "
+             "--auto-default refuses (exit 13) on a lead with a sent proposal so "
+             "the crude basket cannot silently override the option-picker flow.",
+    )
+    parser.add_argument(
         "--auto-default", action="store_true",
         help="Server-side default basket (PR-CF1b). Ignores --selected-items-json "
              "and --quote-total-usd if set; picks a representative basket from "
@@ -452,6 +517,18 @@ def main() -> int:
 
     # Step 1: input validation (auto-default vs. manual-selection branches)
     if args.auto_default:
+        # census C4: an option-picker flow (SENT proposal) is canonical over the
+        # crude default basket. Refuse rather than silently override it — unless
+        # the operator forces it. Non-proposal leads fall straight through to
+        # _build_default_basket (byte-identical to the pre-guard behavior).
+        if not args.force_default and _lead_has_active_sent_proposal(args.code):
+            sys.stderr.write(
+                "auto-default refused: this lead has menu options awaiting the "
+                "customer's choice. Direct the customer to reply with the option "
+                "number they want (routes through select-catering-proposal). "
+                "Pass --force-default to build the default basket anyway.\n"
+            )
+            return EXIT_PROPOSAL_ACTIVE
         items, llm_total = _build_default_basket(menu_index)
     else:
         if not args.selected_items_json or args.quote_total_usd is None:
