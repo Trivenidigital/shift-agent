@@ -1695,8 +1695,10 @@ def test_pr_alpha_mark_paid_variants_are_regulated_payment_intent():
 
 
 def test_pr_alpha_cancel_my_plan_is_regulated_account_intent():
-    # Already caught via the bare "plan" keyword in the existing pattern;
-    # add explicit coverage to lock the behavior.
+    # Caught via PR #603's (2026-07-11) verb-anchored + plan-context branches,
+    # NOT the bare "plan" keyword the pattern used to rely on: "cancel plan"
+    # matches the cancel-verb anchor and "cancel my plan" matches the "my plan"
+    # plan-context noun phrase. Lock the behavior against pattern drift.
     _, actions = _load_plugin_modules()
     assert actions.is_flyer_regulated_account_intent("cancel my plan")
     assert actions.is_flyer_regulated_account_intent("I want to cancel my plan")
@@ -7960,6 +7962,57 @@ def test_bypass_shadow_finalize_outcome_intermediate_when_handler_no_project(mon
     assert row["outcome"] == "intermediate_intercept_handled"
     assert row["project_id"] == ""
     assert "reference scope" in row["handler_intercept"]
+
+
+def test_bypass_finalize_emits_exactly_one_row_on_normal_path(monkeypatch, tmp_path):
+    """F10 refactor guard: the normal (successful) path emits EXACTLY ONE
+    outcome row — no accidental double-emit from the unknown_exit fallback."""
+    actions = _load_actions()
+    fake_log = tmp_path / "decisions.log"
+    monkeypatch.setattr(actions, "LOG_PATH", fake_log)
+    _stub_safe_io_for_bypass_audit(monkeypatch, fake_log)
+    token = actions.begin_flyer_intake_bypass_shadow(
+        chat_id="x", message_id="m", bypass_reason="edit_with_media",
+        has_media=True, customer_state="", intake_session_status="choosing_mode",
+        inbound_script="latin",
+    )
+    actions.finalize_flyer_intake_bypass_shadow(
+        hook_result={"action": "skip", "reason": "cf-router flyer primary project created F0108"})
+    actions.reset_flyer_intake_bypass_shadow(token)
+    contents = fake_log.read_text(encoding="utf-8").strip().splitlines()
+    assert len(contents) == 1
+    assert json.loads(contents[0])["outcome"] == "routed_to_project"
+
+
+def test_bypass_finalize_emits_unknown_exit_when_normal_path_fails(monkeypatch, tmp_path):
+    """F10: every bypass must record EXACTLY ONE outcome. When the normal
+    derivation/emit path fails after a bypass fired, the finalizer still emits a
+    single `unknown_exit` outcome row instead of silently dropping it (the
+    2026-07 census found ~14% of bypasses had no paired outcome row)."""
+    actions = _load_actions()
+    fake_log = tmp_path / "decisions.log"
+    monkeypatch.setattr(actions, "LOG_PATH", fake_log)
+    _stub_safe_io_for_bypass_audit(monkeypatch, fake_log)
+
+    def _boom(_hook_result):
+        raise RuntimeError("derivation blew up")
+
+    monkeypatch.setattr(actions, "_derive_bypass_outcome", _boom)
+    token = actions.begin_flyer_intake_bypass_shadow(
+        chat_id="x", message_id="m", bypass_reason="edit_with_media",
+        has_media=True, customer_state="", intake_session_status="choosing_mode",
+        inbound_script="latin",
+    )
+    actions.finalize_flyer_intake_bypass_shadow(hook_result={"reason": "F0108"})
+    actions.reset_flyer_intake_bypass_shadow(token)
+
+    contents = fake_log.read_text(encoding="utf-8").strip().splitlines()
+    assert len(contents) == 1                                  # exactly one row
+    row = json.loads(contents[0])
+    assert row["type"] == "flyer_intake_bypass_outcome"
+    assert row["outcome"] == "unknown_exit"
+    assert row["chat_id_hash"]                                 # schema-valid, non-empty
+    assert row["elapsed_ms"] >= 0
 
 
 def test_pending_bypass_token_consume_and_clear(monkeypatch):

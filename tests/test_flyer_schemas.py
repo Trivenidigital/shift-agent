@@ -1196,10 +1196,12 @@ def test_flyer_intake_bypass_outcome_round_trip_routed_to_project():
     assert restored == entry
 
 
-def test_flyer_intake_bypass_outcome_accepts_all_three_outcome_literals():
-    """All 3 outcome Literal values — operator decision 2026-05-28 #5."""
+def test_flyer_intake_bypass_outcome_accepts_all_outcome_literals():
+    """All outcome Literal values — the 3 derived outcomes (operator decision
+    2026-05-28 #5) plus `unknown_exit` (F10 guaranteed-fallback, 2026-07)."""
     from schemas import FlyerIntakeBypassOutcome  # noqa: E402
-    for outcome in ("routed_to_project", "unrouted", "intermediate_intercept_handled"):
+    for outcome in ("routed_to_project", "unrouted", "intermediate_intercept_handled",
+                    "unknown_exit"):
         entry = FlyerIntakeBypassOutcome(
             ts=_BYPASS_NOW, chat_id_hash=_BYPASS_CHAT_HASH,
             outcome=outcome,

@@ -1,26 +1,25 @@
-"""Hard-fact firewall for the bounded creative planner — slice 3.
+"""Hard-fact-claim classifier — originally the slice-3 creative-planner firewall.
 
 Design: tasks/flyer-bounded-creative-planner-contract-design.md §6.
 
-The planner produces inferred candidates (item names). They may become facts
-ONLY by passing through this firewall (historically `creative_planner` — REMOVED
-2026-07-04, graduation commit 6; the module survives because
-`flyer_brief_validator` reuses `is_hard_fact_claim` on the CD path
-calls `clear()`). The firewall is the truth-guard: it drops any candidate whose
-text smuggles a HARD-FACT-CLASS CLAIM — a price/discount, a date/schedule, a
-superlative price claim, or a service/legal/payment/delivery claim — because the
-business never asserted it (§6b: the #1 risk is a claim disguised as an "item
-name", e.g. "Free Delivery", "Open Daily", "20% Off").
+The `creative_planner` producer and the `CreativeFirewall.clear()` materialization
+gate it fed were REMOVED 2026-07-04 (graduation commit 6/6, #548). The module
+survives because `flyer_brief_validator` reuses `is_hard_fact_claim` (and the
+context-aware `_open_is_operational` classifier) on the Creative Director path.
 
-Fail-closed: anything that looks like a hard-fact-class claim is rejected, even
-at the cost of dropping a borderline-but-legitimate item. Hard facts come ONLY
-from the grounded extractor; the creative path can never introduce them.
+`is_hard_fact_claim` is the truth-guard: it flags any text that smuggles a
+HARD-FACT-CLASS CLAIM — a price/discount, a date/schedule, a superlative price
+claim, or a service/legal/payment/delivery claim — because the business never
+asserted it (§6b: the #1 risk is a claim disguised as an "item name", e.g.
+"Free Delivery", "Open Daily", "20% Off").
+
+Fail-closed: anything that looks like a hard-fact-class claim is flagged, even at
+the cost of dropping a borderline-but-legitimate item. Hard facts come ONLY from
+the grounded extractor; inferred/creative text can never introduce them.
 """
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Sequence
 
 # ── hard-fact-class claim patterns (case-insensitive) ───────────────────────
 # A candidate item-name matching ANY of these is rejected. These mirror the
@@ -226,39 +225,3 @@ def is_hard_fact_claim(text: str) -> bool:
     if _open_is_operational(t):
         return True
     return False
-
-
-@dataclass(frozen=True)
-class CreativeCandidate:
-    """The firewall's input contract (moved here from the removed
-    creative_planner, graduation commit 6 — the type belongs to the checker,
-    not the retired producer). kind: "item" | "headline" | ...; value: the
-    proposed text."""
-    kind: str
-    value: str
-
-
-class CreativeFirewall:
-    """Clears planner candidates, dropping any that carry a hard-fact-class claim.
-
-    The contract `materialize_inferred` relies on: `clear(candidates)` returns the
-    subset that is SAFE to render as `hermes_inferred` (item names only)."""
-
-    def clear(self, candidates: Sequence) -> list:
-        cleared = []
-        for cand in candidates:
-            # field-rule: the creative path only carries item-name candidates;
-            # anything else is out of contract and dropped.
-            if getattr(cand, "kind", None) != "item":
-                continue
-            if is_hard_fact_claim(getattr(cand, "value", "")):
-                continue
-            cleared.append(cand)
-        return cleared
-
-    def rejected(self, candidates: Sequence) -> list:
-        """The dropped candidates (for observability/tests)."""
-        return [
-            c for c in candidates
-            if getattr(c, "kind", None) != "item" or is_hard_fact_claim(getattr(c, "value", ""))
-        ]

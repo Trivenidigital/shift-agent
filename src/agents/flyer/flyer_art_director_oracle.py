@@ -1,13 +1,15 @@
 """DEV-ONLY vision-LLM "art director" oracle scorer for Flyer Studio (Slice C, C1).
 
 Scores a rendered flyer PNG on 8 art-direction axes (1-10 + a one-sentence
-critique each, plus an overall critique). This is a STANDALONE diagnostic tool:
+critique each, plus an overall critique). Wiring + safety contract:
 
-- It is NOT wired into the render or QA path; it NEVER blocks delivery.
+- It IS wired into the render path as the Premium Poster v1 best-of-N critique
+  SELECTOR (render.py `_ppv1_default_critique_scorer` -> `compose_best_of_n`),
+  ranking accepted textless-background candidates. It is a selector ONLY: it
+  NEVER gates or blocks delivery.
 - It is entirely separate from the QA / dangerous-leak verdict logic — it imports
   only the low-level OpenRouter key + URL + image-encoding seam (NOT any verdict
-  function) from `visual_qa`, mirroring how `creative_planner` reuses the
-  semantic-brief OpenRouter seam while injecting a `provider` for tests.
+  function) from `visual_qa`, injecting a `provider` callable for tests.
 - It NEVER raises. Malformed JSON, provider errors, or an unreadable image all
   return a safe ArtDirectorScore(axes={}, composite=0.0, overall_critique=<note>).
 - Vision calls go through an injectable `provider` callable so tests inject a fake
@@ -15,7 +17,8 @@ critique each, plus an overall critique). This is a STANDALONE diagnostic tool:
   (NOT exercised in tests — there is no key in the test environment).
 
 Drift-tag: extends-Hermes (reuses the deployed OpenRouter vision seam; adds a
-dev-only scorer on top, no new persisted schema / no render-path wiring).
+scorer on top with no new persisted schema; wired render-side only as a
+non-gating best-of-N critique selector).
 """
 from __future__ import annotations
 

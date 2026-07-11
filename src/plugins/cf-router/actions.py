@@ -2300,39 +2300,92 @@ def _derive_bypass_outcome(hook_result: Optional[dict]) -> tuple[str, str, str]:
     return ("intermediate_intercept_handled", "", reason[:80])
 
 
-def finalize_flyer_intake_bypass_shadow(*, hook_result: Optional[dict] = None) -> None:
-    """Emit FlyerIntakeBypassOutcome via the deployed audit chokepoint
-    (safe_io.ndjson_append → LOG_PATH). No-op when no bypass fired during
-    the dispatch (context is None).
+def _emit_flyer_intake_bypass_outcome_row(
+    *,
+    chat_id_hash: str,
+    outcome: str,
+    project_id: str,
+    handler_intercept: str,
+    elapsed_ms: int,
+) -> None:
+    """Build + append ONE FlyerIntakeBypassOutcome row via the deployed audit
+    chokepoint (safe_io.ndjson_append → LOG_PATH). Raises on any failure so the
+    caller can fall back to an `unknown_exit` row (F10: every bypass records an
+    outcome). ndjson_append is the last statement, so a raise means no row was
+    written."""
+    _ensure_platform_path()
+    _ensure_src_path()
+    from safe_io import ndjson_append  # type: ignore
+    from schemas import FlyerIntakeBypassOutcome  # type: ignore
 
-    Mirrors finalize_flyer_intent_shadow exception-suppression discipline:
-    any failure here is written to stderr and never propagated — the
-    dispatch flow must NEVER be blocked by audit emit failures."""
+    entry = FlyerIntakeBypassOutcome(
+        ts=datetime.now(timezone.utc),
+        chat_id_hash=chat_id_hash,
+        outcome=outcome,  # type: ignore[arg-type]
+        project_id=project_id,
+        handler_intercept=handler_intercept,
+        elapsed_ms=elapsed_ms,
+    )
+    ndjson_append(LOG_PATH, entry.model_dump_json())
+
+
+def finalize_flyer_intake_bypass_shadow(*, hook_result: Optional[dict] = None) -> None:
+    """Emit EXACTLY ONE FlyerIntakeBypassOutcome per bypass via the deployed
+    audit chokepoint. No-op when no bypass fired during the dispatch (context
+    is None).
+
+    F10 (2026-07 census): ~14% of bypasses recorded no paired outcome row — the
+    normal outcome derivation + emit ran and any failure between the bypass
+    firing and the emit silently dropped the row (derivation was outside the
+    guard; a schema/append failure was swallowed to stderr). Now, once a bypass
+    context exists, exactly one row is ALWAYS written: the normal derived
+    outcome, or an `unknown_exit` fallback if the normal path fails.
+
+    Mirrors finalize_flyer_intent_shadow exception-suppression discipline: any
+    failure is written to stderr and never propagated — the dispatch flow must
+    NEVER be blocked by audit emit failures."""
     context = _FLYER_INTAKE_BYPASS_CONTEXT.get()
     if not context:
         return
-    outcome, project_id, handler = _derive_bypass_outcome(hook_result)
-    elapsed = datetime.now(timezone.utc) - context["begin_ts"]
-    elapsed_ms = max(0, int(elapsed.total_seconds() * 1000))
+    # Non-empty chat_id_hash keeps both the normal and fallback rows schema-valid
+    # (FlyerIntakeBypassOutcome.chat_id_hash has min_length=1).
+    chat_id_hash = str(context.get("chat_id_hash") or "") or "unknown"
     try:
-        _ensure_platform_path()
-        _ensure_src_path()
-        from safe_io import ndjson_append  # type: ignore
-        from schemas import FlyerIntakeBypassOutcome  # type: ignore
-
-        entry = FlyerIntakeBypassOutcome(
-            ts=datetime.now(timezone.utc),
-            chat_id_hash=str(context.get("chat_id_hash") or ""),
-            outcome=outcome,  # type: ignore[arg-type]
+        elapsed = datetime.now(timezone.utc) - context["begin_ts"]
+        elapsed_ms = max(0, int(elapsed.total_seconds() * 1000))
+    except Exception:
+        elapsed_ms = 0
+    # Normal path: derive the outcome + emit. If ANYTHING here fails, fall
+    # through to a guaranteed `unknown_exit` row so the bypass is never left
+    # without an outcome (the census gap).
+    try:
+        outcome, project_id, handler = _derive_bypass_outcome(hook_result)
+        _emit_flyer_intake_bypass_outcome_row(
+            chat_id_hash=chat_id_hash,
+            outcome=outcome,
             project_id=project_id,
             handler_intercept=handler,
             elapsed_ms=elapsed_ms,
         )
-        ndjson_append(LOG_PATH, entry.model_dump_json())
+        return
     except Exception as e:
         sys.stderr.write(
-            f"cf-router: flyer_intake_bypass_outcome emit failed (non-fatal): "
-            f"{type(e).__name__}: {e}\n"
+            f"cf-router: flyer_intake_bypass_outcome normal emit failed, writing "
+            f"unknown_exit fallback (non-fatal): {type(e).__name__}: {e}\n"
+        )
+    # Fallback: guarantee an outcome row exists for this bypass.
+    try:
+        _emit_flyer_intake_bypass_outcome_row(
+            chat_id_hash=chat_id_hash,
+            outcome="unknown_exit",
+            project_id="",
+            handler_intercept="finalizer_emit_failed",
+            elapsed_ms=elapsed_ms,
+        )
+    except Exception as e:
+        sys.stderr.write(
+            f"cf-router: flyer_intake_bypass_outcome unknown_exit fallback emit "
+            f"failed (non-fatal): {type(e).__name__}: {e}\n"
         )
 
 
