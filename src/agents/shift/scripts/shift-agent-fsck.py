@@ -22,7 +22,7 @@ from datetime import timedelta
 from pathlib import Path
 
 sys.path.insert(0, "/opt/shift-agent")
-from schemas import Config, PendingStore, Roster, SeenIds, InvariantViolation, is_terminal_status  # noqa: E402
+from schemas import Config, PendingStore, Roster, SeenIds, InvariantViolation, is_terminal_status, _UnknownProposal  # noqa: E402
 from safe_io import FileLock, load_model, ndjson_append, customer_now, customer_today_str  # noqa: E402
 from exit_codes import EXIT_OK, EXIT_SCHEMA_VIOLATION  # noqa: E402
 from pydantic import TypeAdapter
@@ -73,6 +73,24 @@ def main():
 
     # Load pending
     store, _ = load_model(PENDING_PATH, PendingStore, default=PendingStore())
+
+    # Check: unrecognized proposal status (BL-HERMES-06 §12a). An _UnknownProposal means
+    # pending.json holds a status this binary doesn't recognize — a hand-edit / corruption, or
+    # a store written by a newer binary. The forward-compat shim keeps the row inert (never
+    # swept / reconciled / sent) instead of bricking the whole load, but that also means it
+    # would sit SILENT; before the shim an unknown status raised + quarantined the store. This
+    # restores the loud operator signal.
+    unknown_pids = sorted(
+        pid for pid, prop in store.proposals.items()
+        if isinstance(prop, _UnknownProposal)
+    )
+    if unknown_pids:
+        statuses = sorted({store.proposals[pid].status for pid in unknown_pids})
+        violations.append((
+            "unknown_proposal_status",
+            f"{len(unknown_pids)} proposal(s) with unrecognized status {statuses}: "
+            f"{', '.join(unknown_pids)}",
+        ))
 
     # Check 5: code uniqueness among non-terminal proposals
     codes_seen = set()
