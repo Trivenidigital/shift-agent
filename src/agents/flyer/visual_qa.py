@@ -1901,23 +1901,26 @@ def _masthead_verified_by_construction(artifact_path) -> bool:
     Vision-OCR routinely under-reads the composer's letter-spaced gold-on-dark
     premium masthead, false-failing correctly-composed posters with "missing
     required visible fact: business_name / campaign_title" (live F0197/F0198/
-    F0199). Two producer-stamped, render-time signals — both keyed on the
-    artifact path, neither injectable from customer/brief text — gate the skip:
+    F0199). Gated on a POSITIVE, producer-stamped, render-time signal — keyed on
+    the artifact path, not injectable from customer/brief text:
 
-    1. `<artifact>.text.json` carries verification_mode == "declared_render_facts"
-       (stamped by render.write_text_manifest, render.py:1687/1737 — its default
-       mode; the source-edit modes are stamped explicitly elsewhere). This means
-       the render declared the facts it drew rather than proving them in pixels.
-    2. NO `<artifact>.typeset.json` marker. That marker is written only when the
-       image MODEL drew the poster text (render._write_typeset_marker /
-       _typeset_contract_applies). Model-drawn mastheads are NOT construction-
-       verified — they must be OCR-proven — so a typeset render is excluded even
-       though it also carries a declared manifest.
+    1. `<artifact>.text.json` carries masthead_painted_by == "composer" (stamped
+       by render.write_text_manifest, render.py:1687 — the render pipeline sets it
+       per write-exit: "composer" for the deterministic composer/overlay + PPv1,
+       "model" for integrated/reference/repair). This is the DISCRIMINATOR:
+       verification_mode's "declared_render_facts" default is NOT composer-
+       specific (integrated/reference/repair carry it too), so a model-drawn
+       poster outside the style-registers allowlist would otherwise be silently
+       skipped. Legacy manifests lacking the key -> "model" default -> strict OCR
+       (byte-identical pre-change behavior).
+    2. Defense-in-depth: NO `<artifact>.typeset.json` marker (written only when the
+       image MODEL drew the poster text — render._write_typeset_marker). A typeset
+       render is excluded even if some path mis-stamped it "composer".
 
     Read from the sidecar, never recomputed from project/env at QA time, so a
     legacy render never inherits a contract its render never carried — same
     discipline as `_typeset_marker_applies`. Fails closed (strict OCR) on any
-    missing/unreadable sidecar."""
+    missing/unreadable sidecar or non-"composer" stamp."""
     try:
         if _typeset_marker_applies(artifact_path):
             return False
@@ -1925,7 +1928,7 @@ def _masthead_verified_by_construction(artifact_path) -> bool:
         if not manifest.exists():
             return False
         data = json.loads(manifest.read_text(encoding="utf-8"))
-        return data.get("verification_mode") == "declared_render_facts"
+        return data.get("masthead_painted_by") == "composer"
     except Exception:  # noqa: BLE001 — unreadable sidecar -> strict OCR echo
         return False
 

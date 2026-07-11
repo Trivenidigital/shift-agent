@@ -333,6 +333,22 @@ def consume_creative_direction_v2_outcome() -> CreativeDirectionV2Outcome | None
     return outcome
 
 
+# Which painter drew the masthead (business_name + campaign_title) on the CURRENT
+# render: set on a ContextVar at each `_render_model` write-exit and read by
+# `render_concept_previews` when it stamps the text manifest. "composer" = the
+# deterministic composer/overlay drew the masthead verbatim from locked facts, so
+# visual QA may skip OCR-echo of the masthead (vision under-reads the letter-
+# spaced premium masthead — F0197/F0198/F0199). "model" = the image model drew
+# it, so the masthead MUST be OCR-proven. Default "model" is FAIL-CLOSED: any
+# render path that forgets to set it — or an exception before the write-exit —
+# leaves the masthead OCR-strict. This is a POSITIVE producer stamp (the
+# verification_mode default of "declared_render_facts" is NOT composer-specific:
+# integrated / reference / repair renders carry it too).
+_MASTHEAD_PAINTED_BY: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "flyer_masthead_painted_by", default="model"
+)
+
+
 TEXT_MANIFEST_SCHEMA_VERSION = 1
 # Total critical text facts (menu items + offer/pricing/promo clauses) that fit one
 # flyer legibly. The binding output is the square 1080x1080 Instagram post in the final
@@ -1692,6 +1708,7 @@ def write_text_manifest(
     selected_concept_id: str = "",
     source_path: Path | str | None = None,
     verification_mode: str = "declared_render_facts",
+    masthead_painted_by: str = "model",
     warnings: list[str] | None = None,
 ) -> Path:
     artifact = Path(artifact_path)
@@ -1735,6 +1752,14 @@ def write_text_manifest(
         "artifact_sha256": _sha256(artifact) if artifact.exists() else "",
         "source_sha256": _sha256(Path(source_path)) if source_path and Path(source_path).exists() else "",
         "verification_mode": verification_mode,
+        # POSITIVE producer stamp (2026-07-11): which painter drew the masthead
+        # (business_name + campaign_title). "composer" iff the DETERMINISTIC
+        # composer/overlay painted it verbatim from locked facts; "model"
+        # otherwise. visual_qa keys the masthead OCR-echo skip on == "composer"
+        # (fail-closed: legacy manifests without this key stay OCR-strict). Unlike
+        # verification_mode (whose "declared_render_facts" default is stamped by
+        # integrated/reference/repair renders too), this is composer-specific.
+        "masthead_painted_by": masthead_painted_by,
         # Additive honesty fields (2026-05-20): `rendered_facts` is a copy of
         # `expected_facts` because this manifest declares the facts the
         # renderer was asked to draw, not the facts proven present in
@@ -5125,6 +5150,10 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
         # premium fire can never leave a stale value (None unambiguously means
         # "premium branch not entered this render").
         _PREMIUM_POSTER_V1_OUTCOME.set(None)
+        # Masthead-painter stamp: reset FAIL-CLOSED per render so any write-exit
+        # that forgets to set it (or an exception before it) leaves the masthead
+        # OCR-strict. Each write-exit below sets the true painter.
+        _MASTHEAD_PAINTED_BY.set("model")
         # CD-v2 observability (census D10): reset per render so None means "the
         # CD-v2 gate did not run this render" (populate below sets it when enabled).
         _CREATIVE_DIRECTION_V2_OUTCOME.set(None)
@@ -5167,12 +5196,14 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
                 size=size, model=model, quality=quality)
             _PREMIUM_POSTER_V1_OUTCOME.set(outcome)
             if outcome.delivered:
+                _MASTHEAD_PAINTED_BY.set("composer")  # PPv1 composer painted the masthead from locked facts
                 return
             # not delivered -> fall through to the existing render path (outcome recorded)
         if _creative_director_v2_enabled(project):
             _populate_creative_direction_v2(project)
         if model.strip().lower() in DETERMINISTIC_MODEL_NAMES:
             _render(project, path, concept_id=concept_id, size=size)
+            _MASTHEAD_PAINTED_BY.set("composer")  # deterministic composer painted all text
             _clear_stale_ppv1_sidecars(path)
             return
         raw = _openrouter_image_bytes(project, concept_id=concept_id, output_format=output_format, size=size, model=model, quality=quality, repair_instruction=repair_instruction, scene_direction=scene_direction, force_background_only=force_background_only)
@@ -5180,6 +5211,7 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
         raw_path.unlink(missing_ok=True)
         if _integrated_poster_eligible(project) and not force_background_only:
             _write_generated_image(raw, path, size=size)
+            _MASTHEAD_PAINTED_BY.set("model")  # image model drew the full poster text incl. masthead
             _clear_stale_ppv1_sidecars(path)
             return
         # The prompt and the overlay MUST agree (same gate). For non-eligible flows
@@ -5191,10 +5223,12 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
         if not _background_only_eligible(project) and not force_background_only:
             if size is None:
                 _write_generated_image(raw, path, size=size)
+                _MASTHEAD_PAINTED_BY.set("model")  # model drew the text (reference/localized)
                 _clear_stale_ppv1_sidecars(path)
                 return
             _write_generated_image(raw, raw_path, size=size)
             apply_exact_identity_overlay(project, raw_path, path, size=size)
+            _MASTHEAD_PAINTED_BY.set("model")  # model drew the text; only the identity banner is overlaid
             _clear_stale_ppv1_sidecars(path)
             return
         # Background-only eligible: the model emitted a textless background; the
@@ -5215,9 +5249,11 @@ def _render_model(project: FlyerProject, path: Path, *, concept_id: str, output_
                 _clear_stale_ppv1_sidecars(path)
             finally:
                 overlaid.unlink(missing_ok=True)
+            _MASTHEAD_PAINTED_BY.set("composer")  # deterministic overlay painted all text (PDF)
             return
         _write_generated_image(raw, raw_path, size=size)
         _apply_critical_text_overlay(project, raw_path, path, size=size, output_format=output_format)
+        _MASTHEAD_PAINTED_BY.set("composer")  # deterministic overlay painted all text
         _clear_stale_ppv1_sidecars(path)
     finally:
         if token is not None:
@@ -5256,7 +5292,7 @@ def render_concept_previews(project: FlyerProject, output_dir: Path | str, *, mo
         quality_report = inspect_rendered_asset(path, expected_width=1080, expected_height=1350, mime_type="image/png")
         if not quality_report.ok:
             raise FlyerRenderError(f"rendered concept failed quality check: {quality_report.blockers}")
-        write_text_manifest(project, path, output_format="concept_preview", selected_concept_id=concept_id, source_path=_raw_background_path(path))
+        write_text_manifest(project, path, output_format="concept_preview", selected_concept_id=concept_id, source_path=_raw_background_path(path), masthead_painted_by=_MASTHEAD_PAINTED_BY.get())
         specs.append(RenderedAssetSpec(path=path, kind="concept_preview", output_format="concept_preview", width=1080, height=1350, concept_id=concept_id))
     return specs
 
@@ -5317,6 +5353,7 @@ def render_source_edit_preview(project: FlyerProject, output_dir: Path | str, *,
         # manifest declares the overlaid facts (corroborating visual QA) rather than
         # claiming integrity-only.
         verification_mode="source_edit_overlay_recomposed",
+        masthead_painted_by="composer",  # deterministic overlay re-composed the masthead
         warnings=[
             "Source edit: customer artwork with the deterministic text overlay re-composed on top; required facts are declared and visual-QA-checked. Inspect the preview before approval."
         ],
@@ -5386,6 +5423,7 @@ def render_repair_edit(
         output_format="concept_preview",
         selected_concept_id=concept_id,
         source_path=base_png,
+        masthead_painted_by="model",  # model-rendered premium text preserved (no overlay)
         warnings=[
             "Premium repair: image-to-image edit of the prior premium render; the "
             "model-rendered text is preserved (no deterministic overlay) and is "
@@ -5545,10 +5583,14 @@ def render_final_package(project: FlyerProject, output_dir: Path | str, *, model
                 selected_concept_id=concept_id,
                 source_path=source_for_manifest,
                 verification_mode=verification_mode,
+                # Finals derive from the approved preview (deterministic overlay
+                # re-composed per format / operator-approved asset); the masthead
+                # was already visual-QA'd at preview time.
+                masthead_painted_by="composer",
                 warnings=manifest_warnings,
             )
         else:
-            write_text_manifest(project, path, output_format=output_format, selected_concept_id=concept_id, source_path=source_for_manifest)
+            write_text_manifest(project, path, output_format=output_format, selected_concept_id=concept_id, source_path=source_for_manifest, masthead_painted_by="composer")
         specs.append(RenderedAssetSpec(path=path, kind=kind, output_format=output_format, width=width, height=height, concept_id=concept_id))
     return specs
 
