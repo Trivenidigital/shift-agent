@@ -922,3 +922,92 @@ def test_shadow_timeout_alias(monkeypatch):
 
     monkeypatch.setenv("FLYER_INTENT_SHADOW_TIMEOUT_MS", "88")  # new wins
     assert actions._flyer_classifier_timeout_ms() == 88
+
+
+# --- B1: the shadow invariant — a mutating advisory NEVER changes routing -----
+
+
+def _load_hooks_and_actions():
+    import importlib.machinery
+    import importlib.util
+
+    pkg_name = "cf_router_intent_invariant_pkg"
+    for mod_name in list(sys.modules):
+        if mod_name == pkg_name or mod_name.startswith(pkg_name + "."):
+            del sys.modules[mod_name]
+    plugin_dir = REPO / "src" / "plugins" / "cf-router"
+    pkg_spec = importlib.machinery.ModuleSpec(pkg_name, loader=None, is_package=True)
+    pkg_spec.submodule_search_locations = [str(plugin_dir)]
+    sys.modules[pkg_name] = importlib.util.module_from_spec(pkg_spec)
+
+    def _load(sub):
+        full = f"{pkg_name}.{sub}"
+        loader = importlib.machinery.SourceFileLoader(full, str(plugin_dir / f"{sub}.py"))
+        spec = importlib.util.spec_from_loader(full, loader)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[full] = mod
+        loader.exec_module(mod)
+        return mod
+
+    actions_mod = _load("actions")
+    hooks_mod = _load("hooks")
+    return hooks_mod, actions_mod
+
+
+def test_shadow_llm_mutating_advisory_never_changes_routing(monkeypatch, tmp_path):
+    hooks, actions = _load_hooks_and_actions()
+    chat = "17329837841@s.whatsapp.net"
+
+    # Arm the B1 shadow LLM with a MUTATING advisory (approve_project) that would
+    # be dangerous if it ever leaked into routing.
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "17329837841")
+    monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "1000")
+    monkeypatch.setattr(actions, "FLYER_INTENT_SHADOW_LLM_BUDGET_PATH", tmp_path / "budget.json")
+    captured: list[dict] = []
+    monkeypatch.setattr(actions, "audit_flyer_hermes_intent_decision", lambda **kw: captured.append(kw))
+
+    def mutating_stub(_request):
+        return {"intent": "approve_final", "action": "approve_project", "confidence": 0.99}
+
+    mutating_stub._flyer_shadow_llm_metered = True  # type: ignore[attr-defined]
+    monkeypatch.setattr(actions, "_build_flyer_intent_llm_classifier", lambda: mutating_stub)
+
+    # Force the flyer gate on and stub the real dispatch impl to a fixed routing
+    # result that also records a flyer route event (so the shadow classifier fires).
+    monkeypatch.setattr(actions, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions, "is_flyer_workflow_enabled", lambda: False)
+    sentinel = {"action": "skip", "reason": "cf-router flyer primary created project_id=F0065"}
+
+    def fake_impl(event, gateway=None, session_store=None, **_kw):
+        actions.record_flyer_intent_route_event(
+            reason="flyer_primary_project_created", subprocess_rc=0, detail="project_id=F0065"
+        )
+        return dict(sentinel)
+
+    monkeypatch.setattr(hooks, "_pre_gateway_dispatch_impl", fake_impl)
+
+    from types import SimpleNamespace
+
+    armed_result = hooks.pre_gateway_dispatch(
+        SimpleNamespace(text="approve", chat_id=chat), gateway=None
+    )
+
+    # The mutating advisory actually ran in shadow (proving the LLM path fired)...
+    _wait_for(lambda: bool(captured))
+    assert captured[0]["classifier_status"] == "success"
+    assert captured[0]["decision"].action == "approve_project"
+    assert captured[0]["decision"].decision_source == "hermes_gateway_future"
+
+    # ...yet the routing result is byte-identical to what the impl returned —
+    # finalize runs in pre_gateway_dispatch's `finally`, after the result is set,
+    # so the shadow decision can NEVER influence routing.
+    assert armed_result == sentinel
+
+    # And identical to a disarmed run (shadow LLM flag off), same inputs.
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "0")
+    disarmed_result = hooks.pre_gateway_dispatch(
+        SimpleNamespace(text="approve", chat_id=chat), gateway=None
+    )
+    assert disarmed_result == armed_result == sentinel
