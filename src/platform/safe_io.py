@@ -1003,6 +1003,24 @@ _MONEY_ACTION_ID_MARKERS: tuple[str, ...] = (
 )
 
 
+def _regulated_send_lint_clean(text: str) -> bool:
+    """True when `text` trips no forbidden-completion verb/phrase. Used to
+    RE-SCREEN a substituted fallback before it is sent (2026-07-12 hardening)
+    so a caller-supplied fallback_template carrying a completion claim can never
+    bypass the lint it was substituted for. Fails toward 'not clean' (returns
+    False) if the lint module is unavailable, so the caller downgrades to the
+    known-clean REGULATED_LINT_SAFE_FALLBACK constant rather than forwarding an
+    unscreened template."""
+    try:
+        try:
+            from agents.flyer.customer_copy_policy import lint_no_unverified_completion  # type: ignore
+        except Exception:  # pragma: no cover - deployed flat-module fallback
+            from flyer_customer_copy_policy import lint_no_unverified_completion  # type: ignore
+        return not lint_no_unverified_completion(str(text or "")).hits
+    except Exception:  # pragma: no cover - deploy-integrity fault
+        return False
+
+
 def _action_context_is_money_or_approval(
     action_context: Optional[ActionExecutionContext],
 ) -> bool:
@@ -1523,6 +1541,13 @@ def bridge_post(
                 if (fallback_template and str(fallback_template).strip())
                 else REGULATED_LINT_SAFE_FALLBACK
             )
+            # Re-screen the substituted fallback (2026-07-12 hardening): a
+            # caller-supplied fallback_template must not smuggle a completion
+            # claim past the very lint it replaces. If it is not lint-clean,
+            # downgrade to the known-clean constant (asserted clean by test);
+            # the constant always passes, so this terminates.
+            if not _regulated_send_lint_clean(message):
+                message = REGULATED_LINT_SAFE_FALLBACK
             try:
                 sys.stderr.write(
                     "PR-ζ regulated lint refused a non-money send; substituting "

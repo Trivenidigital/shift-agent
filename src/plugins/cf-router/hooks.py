@@ -1205,6 +1205,7 @@ def _try_flyer_primary_intercept(
                 actions.flyer_project_missing_info_reply(active_project),
                 action_context=build_action_context_for_command(
                     PROJECT_ACTIONS, "clarification.request",
+                    is_regulated_action=False,
                 ),
             )
         generation_failed = str(ack_err or "").startswith("concept_generation_failed:")
@@ -1509,6 +1510,7 @@ def _try_flyer_primary_intercept(
             actions.flyer_project_missing_info_reply(project or {}),
             action_context=build_action_context_for_command(
                 PROJECT_ACTIONS, "clarification.request",
+                is_regulated_action=False,
             ),
         )
     generation_failed = str(ack_err or "").startswith("concept_generation_failed:")
@@ -1565,6 +1567,7 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
             chat_id, clarification,
             action_context=build_action_context_for_command(
                 PROJECT_ACTIONS, "clarification.request",
+                is_regulated_action=False,
             ),
         )
         pending_created_at = float(pending.get("created_at") or 0)
@@ -1603,6 +1606,7 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
             chat_id, reply,
             action_context=build_action_context_for_command(
                 PROJECT_ACTIONS, "clarification.request",
+                is_regulated_action=False,
             ),
         )
         actions.audit_intercepted(
@@ -1701,6 +1705,7 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
             actions.flyer_project_missing_info_reply(project or {}),
             action_context=build_action_context_for_command(
                 PROJECT_ACTIONS, "clarification.request",
+                is_regulated_action=False,
             ),
         )
     generation_failed = str(ack_err or "").startswith("concept_generation_failed:")
@@ -1753,6 +1758,7 @@ def _try_flyer_source_vs_new_choice_intercept(text: str, chat_id: str, event: An
                 chat_id, clarification,
                 action_context=build_action_context_for_command(
                     PROJECT_ACTIONS, "clarification.request",
+                    is_regulated_action=False,
                 ),
             )
             try:
@@ -2176,6 +2182,7 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
                     actions.flyer_project_missing_info_reply(project or {}),
                     action_context=build_action_context_for_command(
                         PROJECT_ACTIONS, "clarification.request",
+                        is_regulated_action=False,
                     ),
                 )
             generation_failed = str(ack_err or "").startswith("concept_generation_failed:")
@@ -2321,6 +2328,7 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
         chat_id, reply,
         action_context=build_action_context_for_command(
             PROJECT_ACTIONS, "clarification.request",
+            is_regulated_action=False,
         ),
     )
     actions.audit_intercepted(
@@ -4555,6 +4563,7 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                 chat_id, ack_message,
                 action_context=build_action_context_for_command(
                     PROJECT_ACTIONS, "clarification.request",
+                    is_regulated_action=False,
                 ),
             )
         elif ok and needs_regen:

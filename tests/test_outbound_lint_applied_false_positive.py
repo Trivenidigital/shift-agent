@@ -158,3 +158,34 @@ def test_incident_clarification_template_still_present():
         "INCIDENT_CLARIFICATION_REPLY to match."
     )
     assert 'PROJECT_ACTIONS, "clarification.request"' in hooks_text
+
+
+def test_all_clarification_request_sends_are_non_regulated():
+    """ROOT-FIX invariant (F0222): a clarification is a QUESTION, never a
+    completion claim, so EVERY `clarification.request` send must be built with
+    `is_regulated_action=False` — the real question then always delivers (never
+    lint-refused, never fallback-substituted into acknowledged-limbo). All 9
+    sends (not the 1 the review first spotted) are pinned here so a future
+    clarification.request that omits the flag regresses the incident class.
+
+    Source-scan (cf-router is fcntl-bound; read as text). Counts every
+    `clarification.request` call and asserts each is immediately followed by
+    `is_regulated_action=False`."""
+    import re
+
+    hooks_text = (REPO / "src" / "plugins" / "cf-router" / "hooks.py").read_text(
+        encoding="utf-8"
+    )
+    total = len(re.findall(r'PROJECT_ACTIONS,\s*"clarification\.request"', hooks_text))
+    non_regulated = len(
+        re.findall(
+            r'PROJECT_ACTIONS,\s*"clarification\.request",\s*is_regulated_action=False',
+            hooks_text,
+        )
+    )
+    assert total >= 9, f"expected >=9 clarification.request sends, found {total}"
+    assert non_regulated == total, (
+        f"{total - non_regulated} of {total} clarification.request sends are NOT "
+        f"is_regulated_action=False — a clarification QUESTION must never be a "
+        f"regulated completion claim (F0222 acknowledged-limbo risk)."
+    )

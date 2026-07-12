@@ -552,6 +552,106 @@ class TestActionContextEnforcement:
         # Defect 1: the ORIGINAL reply (with "applied") is delivered as-is.
         assert self._payload_message(urlopen) == reply
 
+    @patch("urllib.request.urlopen")
+    def test_f0222_real_path_non_regulated_clarification_delivers_verbatim(
+        self, urlopen, safe_io_module
+    ):
+        """ROOT-FIX end-to-end: the PRODUCTION revision-clarification context is
+        built is_regulated_action=False (a clarification is a QUESTION, not a
+        completion claim), so the real question — even echoing KEPT-verb words
+        ("changed"/"cancelled") — is delivered VERBATIM through the chokepoint
+        (never linted, never substituted). No acknowledged-limbo."""
+        import sys as _sys
+        from pathlib import Path as _Path
+        flyer = _Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer"
+        _sys.path.insert(0, str(flyer))
+        try:
+            from action_registry import (  # type: ignore
+                PROJECT_ACTIONS, build_action_context_for_command,
+            )
+        finally:
+            _sys.path.pop(0)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.Q"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ctx = build_action_context_for_command(
+            PROJECT_ACTIONS, "clarification.request", is_regulated_action=False,
+        )
+        assert ctx.is_regulated_action is False
+        assert ctx.action_id == "flyer.project.clarification_request"
+        question = (
+            "I need one clarification before regenerating: I could not match "
+            "that change to the current flyer details. Please send the exact "
+            "item you changed or cancelled."
+        )
+        ok, mid, err, status = safe_io_module.bridge_post(
+            "jid", question, action_context=ctx,
+        )
+        assert ok is True and status == "sent", (
+            f"real clarification path silenced: err={err!r}"
+        )
+        assert self._payload_message(urlopen) == question  # verbatim, not substituted
+
+    @patch("urllib.request.urlopen")
+    def test_unclean_fallback_template_downgraded_to_safe_constant(
+        self, urlopen, safe_io_module, monkeypatch
+    ):
+        """HARDENING (reviewer residual 1): a caller-supplied fallback_template
+        that itself carries a completion claim must NOT bypass the lint it
+        replaces — it is re-screened and downgraded to the known-clean
+        REGULATED_LINT_SAFE_FALLBACK before sending."""
+        from schemas import ActionExecutionContext
+        monkeypatch.setattr(safe_io_module, "_emit_audit_row", lambda e, f: None)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.OK"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ctx = ActionExecutionContext(
+            action_id="flyer.project.generic_reply",
+            is_regulated_action=True, verified_action_result=False,
+        )
+        ok, _, _, status = safe_io_module.bridge_post(
+            "jid", "Your order has been sent.", action_context=ctx,
+            fallback_template="Your refund has been processed.",  # completion claim
+        )
+        assert ok is True and status == "sent"
+        sent = self._payload_message(urlopen)
+        assert sent == safe_io_module.REGULATED_LINT_SAFE_FALLBACK
+        assert "processed" not in sent
+
+    def test_money_registry_actions_all_classified_money(self, safe_io_module):
+        """INVARIANT (reviewer residual + standing rule): every registry action
+        with effect in {payment_request, payment_activation} OR domain=="billing"
+        MUST be classified money by _action_context_is_money_or_approval, so a
+        future money action can never silently receive fallback-not-block. Turns
+        the maintained _MONEY_ACTION_ID_MARKERS list into a tested invariant."""
+        import sys as _sys
+        from pathlib import Path as _Path
+        flyer = _Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer"
+        _sys.path.insert(0, str(flyer))
+        try:
+            from action_registry import (  # type: ignore
+                ACCOUNT_ACTIONS, PROJECT_ACTIONS, build_action_context_for_command,
+            )
+        finally:
+            _sys.path.pop(0)
+        money_effects = {"payment_request", "payment_activation"}
+        checked = 0
+        for registry in (ACCOUNT_ACTIONS, PROJECT_ACTIONS):
+            for command, defn in registry.items():
+                if defn.effect in money_effects or defn.domain == "billing":
+                    ctx = build_action_context_for_command(registry, command)
+                    assert safe_io_module._action_context_is_money_or_approval(ctx), (
+                        f"registry action {defn.action_id!r} (effect={defn.effect}, "
+                        f"domain={defn.domain}) is money/billing but classified "
+                        f"NON-money — it could get fallback instead of hard-block. "
+                        f"Add a marker to safe_io._MONEY_ACTION_ID_MARKERS."
+                    )
+                    checked += 1
+        assert checked >= 1, (
+            "no money/billing registry actions found — registry shape changed? "
+            "Update this invariant test to match."
+        )
+
     def test_audit_write_failure_returns_refusal_tuple_not_exception(
         self, safe_io_module, monkeypatch
     ):
