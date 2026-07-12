@@ -5950,6 +5950,47 @@ class _RegulatedSendLintViolation(_BaseEntry):
 
 
 # ─────────────────────────────────────────────────────────────────
+# Front-brain outbound enforcement — conversation-review surface (P0-5)
+# ─────────────────────────────────────────────────────────────────
+#
+# The Phase-1 human-review gate reads `front_brain_reply_composed`: one row per
+# send that passes through the front-brain enforcement tier (safe_io, P0-3a).
+# `verdict="passed"` records that the SENT text is safe — either the composed
+# free-form reply (template_fallback=False) or the fallback template / safe
+# generic ack substituted when the composed reply was refused
+# (template_fallback=True). Refusals of the composed reply are recorded
+# separately by `front_brain_outbound_refused`.
+
+
+class FrontBrainReplyComposed(_BaseEntry):
+    """Review-surface row for a PASSED free-form send through the front-brain
+    outbound enforcement tier. Emitted for every send admitted by the
+    FRONT_BRAIN_OUTBOUND_ENFORCE flag+allowlist. The reply_text is the exact
+    customer-visible text that was sent (capped at 2000 chars for the surface)."""
+    type: Literal["front_brain_reply_composed"]
+    chat_key_hash: str = Field(default="", max_length=64)
+    reply_text: str = Field(..., max_length=2000)
+    verdict: Literal["passed"] = "passed"
+    lint_classes_checked: list[str] = Field(default_factory=list, max_length=10)
+    template_fallback: bool = False
+
+
+class FrontBrainOutboundRefused(_BaseEntry):
+    """The front-brain enforcement tier refused a composed free-form reply
+    (one or more enforcement classes tripped). The composed text was NOT sent;
+    a fallback template / safe generic ack was sent instead — the customer is
+    never blocked silently. hit_values are truncated to 20 before construction
+    so a pathological reply still refuses cleanly (no ValidationError mid-refusal,
+    mirroring the PR-ζ lint-violation variant)."""
+    type: Literal["front_brain_outbound_refused"]
+    chat_key_hash: str = Field(default="", max_length=64)
+    hit_classes: list[str] = Field(..., max_length=10)
+    hit_values: list[str] = Field(default_factory=list, max_length=20)
+    message_preview: str = Field(..., max_length=120)
+    template_fallback_used: bool = True
+
+
+# ─────────────────────────────────────────────────────────────────
 # Commerce primitive LogEntry variants — slice 1 (PRD v2 §8)
 # Slice 1 emits: cart_started/updated/cleared/expired/checked_out,
 # order_created/status_change/cancelled/create_refused_category,
@@ -6481,6 +6522,10 @@ LogEntry = Annotated[
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
+        # Front-brain outbound enforcement — conversation-review surface (P0-5)
+        Annotated[FrontBrainReplyComposed, Tag("front_brain_reply_composed")],
+        # Front-brain outbound enforcement — refusal audit (P0-3a)
+        Annotated[FrontBrainOutboundRefused, Tag("front_brain_outbound_refused")],
         # Commerce primitives slice 1 — PRD v2 §8
         Annotated[CommerceCartStarted, Tag("commerce_cart_started")],
         Annotated[CommerceCartUpdated, Tag("commerce_cart_updated")],

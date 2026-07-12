@@ -102,6 +102,82 @@ FORBIDDEN_COMPLETION_VERB_RE = re.compile(
 )
 
 
+# ─────────────────────────────────────────────────────────────────
+# P0-3a 2026-07-12 — front-brain outbound enforcement: promise-ban class.
+#
+# The "invented operational claims" class reuses lint_no_unverified_completion
+# above (past-tense completion verbs). The promise-ban class is a PEER for the
+# OTHER failure mode: forward commitments / guarantees / money-benefit promises
+# that only the deterministic system may make. Principled list derived from the
+# 2026-05-27 lesson ("Flyer Studio must not invent operational service promises
+# — WhatsApp Delivery, catering availability, payment-method claims must be
+# requested or stored before appearing") plus the plan's named examples
+# (guarantee / promise / refund / "will deliver by" / "discount applied").
+#
+# Two shapes: single-token verbs (word-boundary anchored) and multiword phrases
+# (substring, so "free of charge"/"discount applied" match regardless of
+# surrounding words). Consumed by enforce_free_form_text (this module) and wired
+# into the safe_io.bridge_post chokepoint behind FRONT_BRAIN_OUTBOUND_ENFORCE.
+PROMISE_BAN_VERBS: tuple[str, ...] = (
+    "guarantee",
+    "guaranteed",
+    "guarantees",
+    "promise",
+    "promised",
+    "warranty",
+    "warranties",
+    "refund",
+    "refunds",
+    "reimburse",
+    "reimbursed",
+)
+
+PROMISE_BAN_PHRASES: tuple[str, ...] = (
+    "money back",
+    "money-back",
+    "discount applied",
+    "discount has been applied",
+    "coupon applied",
+    "credit applied",
+    "free of charge",
+    "on the house",
+    "no charge",
+    "at no cost",
+    "no cost to you",
+    "free delivery",
+    "same day delivery",
+    "same-day delivery",
+    "next day delivery",
+    "next-day delivery",
+    "price match",
+    "best price",
+    "lowest price",
+    "beat any price",
+    "will deliver by",
+    "deliver by",
+    "delivered by",
+    "delivery by",
+    "delivery guaranteed",
+    "guaranteed delivery",
+    "satisfaction guaranteed",
+    "rain check",
+)
+
+PROMISE_BAN_VERB_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(v) for v in PROMISE_BAN_VERBS) + r")\b",
+    re.IGNORECASE,
+)
+
+# Deterministic class labels + sanity caps for the free-form screen.
+FREE_FORM_ENFORCEMENT_CLASSES: tuple[str, ...] = (
+    "promise_ban",
+    "invented_operational_claim",
+    "length_spam_cap",
+)
+FREE_FORM_MAX_CHARS = 2000  # matches the review-surface reply_text cap (P0-5).
+FREE_FORM_MAX_LINE_REPEAT = 6  # a non-empty line repeated ≥ this many times = spam.
+
+
 @dataclass(frozen=True)
 class CustomerCopyHit:
     category: str
@@ -203,6 +279,112 @@ def lint_no_unverified_completion(
         seen.add(verb)
         hits.append(CustomerCopyHit(category="unverified_completion_verb", value=verb))
     return CustomerCopyScan(text=body, hits=tuple(hits))
+
+
+@dataclass(frozen=True)
+class FreeFormEnforcementResult:
+    """Verdict of the free-form outbound screen. Pure/offline: no side effects.
+
+    - passed: True when NO enforcement class fired.
+    - classes_checked: the fixed FREE_FORM_ENFORCEMENT_CLASSES (audit provenance).
+    - hit_classes: the ordered subset of classes that fired (deduped).
+    - hits: detailed CustomerCopyHit rows (category == class name) for the
+      refusal audit preview.
+    """
+    passed: bool
+    classes_checked: tuple[str, ...]
+    hit_classes: tuple[str, ...]
+    hits: tuple[CustomerCopyHit, ...]
+
+
+def _length_spam_hits(body: str) -> list[CustomerCopyHit]:
+    hits: list[CustomerCopyHit] = []
+    if len(body) > FREE_FORM_MAX_CHARS:
+        hits.append(CustomerCopyHit(category="length_spam_cap", value="too_long"))
+    counts: dict[str, int] = {}
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        counts[stripped] = counts.get(stripped, 0) + 1
+    if counts and max(counts.values()) >= FREE_FORM_MAX_LINE_REPEAT:
+        hits.append(CustomerCopyHit(category="length_spam_cap", value="excessive_repetition"))
+    return hits
+
+
+def enforce_free_form_text(
+    text: str,
+    *,
+    has_verified_action_result: bool = False,
+) -> FreeFormEnforcementResult:
+    """Screen an outbound free-form composition against the three deterministic
+    enforcement classes (P0-3a). Pure function — no send, no audit, no I/O.
+
+    The safe_io.bridge_post chokepoint calls this behind
+    FRONT_BRAIN_OUTBOUND_ENFORCE; on FAIL it substitutes a fallback template
+    (never blocks the customer) and records a refusal audit row.
+
+    - promise_ban: forward commitments / guarantees / money-benefit promises.
+    - invented_operational_claim: past-tense completion claims about a regulated
+      action (reuses lint_no_unverified_completion).
+    - length_spam_cap: length + line-repetition sanity (ALWAYS applies).
+
+    `has_verified_action_result=True` exempts BOTH content classes (promise_ban
+    and invented_operational_claim): a caller with evidence of a completed
+    action (payment webhook, deterministic-handler success audit row) may
+    reference it — e.g. a verified "your refund has been processed" must not be
+    clobbered. Consistent with the ActionExecutionContext contract, where the
+    verified flag is the evidence-backed escape hatch. Free-form replies (no
+    verified action) default to False → full screening. length_spam_cap is never
+    exempted.
+    """
+    body = str(text or "")
+    hits: list[CustomerCopyHit] = []
+    hit_classes: list[str] = []
+
+    def _record(class_name: str, class_hits: list[CustomerCopyHit]) -> None:
+        if class_hits:
+            hits.extend(class_hits)
+            if class_name not in hit_classes:
+                hit_classes.append(class_name)
+
+    # Class 1 — promise-ban (verbs word-boundary anchored; phrases substring).
+    # Exempted by a verified action result, like the claims class below.
+    promise_hits: list[CustomerCopyHit] = []
+    if not has_verified_action_result:
+        seen_promise: set[str] = set()
+        for match in PROMISE_BAN_VERB_RE.finditer(body):
+            term = match.group(0).lower()
+            if term not in seen_promise:
+                seen_promise.add(term)
+                promise_hits.append(CustomerCopyHit(category="promise_ban", value=term))
+        lowered = body.casefold()
+        for phrase in PROMISE_BAN_PHRASES:
+            if phrase in lowered and phrase not in seen_promise:
+                seen_promise.add(phrase)
+                promise_hits.append(CustomerCopyHit(category="promise_ban", value=phrase))
+    _record("promise_ban", promise_hits)
+
+    # Class 2 — invented operational claims (relabel the reused lint hits so the
+    # audit preview carries the enforcement-class name, not the peer category).
+    claim_scan = lint_no_unverified_completion(
+        body, has_verified_action_result=has_verified_action_result
+    )
+    _record(
+        "invented_operational_claim",
+        [CustomerCopyHit(category="invented_operational_claim", value=h.value)
+         for h in claim_scan.hits],
+    )
+
+    # Class 3 — length / spam sanity.
+    _record("length_spam_cap", _length_spam_hits(body))
+
+    return FreeFormEnforcementResult(
+        passed=not hits,
+        classes_checked=FREE_FORM_ENFORCEMENT_CLASSES,
+        hit_classes=tuple(hit_classes),
+        hits=tuple(hits),
+    )
 
 
 def classify_initial_ack(text: str) -> set[str]:
