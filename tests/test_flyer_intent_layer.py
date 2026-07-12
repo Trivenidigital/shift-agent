@@ -174,6 +174,57 @@ def test_classifier_payload_parser_marks_hermes_gateway_source():
     assert decision.intent == "new_flyer"
 
 
+def test_classifier_payload_tolerates_narrative_keys_on_recognized_decision():
+    # Incident 2026-07-12: the real OpenRouter classifier fired (1657ms) but its
+    # JSON failed FlyerIntentDecision validation -> decision_source=none/invalid.
+    # A json_object LLM commonly appends a narrative field ("reasoning") that the
+    # strict extra="forbid" schema rejects. On a payload that presents a
+    # recognizable decision (it carries `intent`), the boundary parser now
+    # projects onto the modelled fields so the decision survives.
+    payload = {
+        "intent": "new_flyer",
+        "action": "clarify",
+        "confidence": 0.6,
+        "needs_clarification": True,
+        "clarifying_question": "What should the flyer promote?",
+        "customer_reply": "",
+        "reason": "vague new-flyer brief",
+        "evidence": ["make me a flyer"],
+        "reasoning": "The customer wants a flyer but gave no offer/date.",
+    }
+    # Old behavior: the extra "reasoning" key raised ValidationError (proven here
+    # by validating the model directly, which stays strict).
+    with pytest.raises(ValidationError):
+        FlyerIntentDecision.model_validate({**payload, "decision_source": "hermes_gateway_future"})
+    # New behavior: the boundary parser tolerates it and yields a valid decision.
+    decision = parse_classifier_payload(payload)
+    assert decision.decision_source == "hermes_gateway_future"
+    assert decision.intent == "new_flyer"
+    assert decision.action == "clarify"
+    assert decision.needs_clarification is True
+
+
+def test_classifier_payload_without_intent_stays_strict_and_invalid():
+    # A payload that does NOT present a recognizable decision (no `intent`) is
+    # left strict so genuinely-unrecognizable shapes still surface as invalid on
+    # the shadow audit (preserves the observability contract).
+    with pytest.raises(ValidationError):
+        parse_classifier_payload({"unexpected": "shape"})
+
+
+def test_intent_prompt_enumerates_every_schema_enum_value():
+    # Invariant that would have caught the incident: the classifier prompt must
+    # tell the LLM the EXACT enum values the schema accepts, or the model guesses
+    # near-miss values that the strict schema rejects. Assert prompt/schema
+    # alignment for both enum fields.
+    from agents.flyer.intent import HERMES_FLYER_INTENT_PROMPT
+
+    for intent_value in get_args(FlyerIntentDecision.model_fields["intent"].annotation):
+        assert f'"{intent_value}"' in HERMES_FLYER_INTENT_PROMPT
+    for action_value in get_args(FlyerIntentDecision.model_fields["action"].annotation):
+        assert f'"{action_value}"' in HERMES_FLYER_INTENT_PROMPT
+
+
 def test_classifier_setting_only_enables_shadow():
     assert classifier_setting_from_env("shadow") == "shadow"
     assert classifier_setting_from_env("active") == "active"

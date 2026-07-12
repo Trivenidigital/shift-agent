@@ -174,6 +174,31 @@ def _fb_sample_prompt_request_matches(text: str) -> bool:
     except Exception:
         return False
 
+
+def _fb_yield_missing_info(chat_id: str, message_id: str) -> bool:
+    """Front-brain Phase-1: for CONVERSE-cohort chats, yield the deterministic
+    "I need a few more details" clarification (`flyer_project_missing_info_reply`)
+    to Hermes so the gateway LLM + flyer_intake SKILL drive the clarifying
+    conversation, instead of sending the fixed net reply.
+
+    This is the REAL vague-brief lever on an established customer's traffic —
+    the Phase-1 cold-start yields (sample-prompt / intake-followup / vague-start)
+    never fire for a trial customer with an active project (incident 2026-07-12:
+    "Create a flyer for Saturday" routed active-project-bypass -> primary-create
+    -> deterministic missing-info reply, ZERO front_brain_yielded rows).
+
+    Emits the `front_brain_yielded` marker so the hand-off is traceable on the
+    Phase-1 review surface. Returns True when the caller should yield (return
+    None to the gateway); False -> caller sends the deterministic reply unchanged.
+    Fail-CLOSED via `front_brain_converse_admits` (flag off / non-cohort / any
+    error -> False -> byte-identical deterministic net, test-enforced)."""
+    if not actions.front_brain_converse_admits(chat_id):
+        return False
+    actions.audit_front_brain_yielded(
+        chat_id, intercept="missing_info", message_id=message_id)
+    return True
+
+
 # Verb classifier — mirrors the F8 watchdog's accepted verb set so plugin
 # coverage matches the watchdog it replaces. Past-tense forms ("approved",
 # "rejected") are common in owner replies and were handled by the watchdog.
@@ -1173,6 +1198,8 @@ def _try_flyer_primary_intercept(
                 outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
                 ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
         else:
+            if _fb_yield_missing_info(chat_id, message_id):
+                return None
             ack_ok, outbound_message_id, ack_err = actions.send_flyer_text(
                 chat_id,
                 actions.flyer_project_missing_info_reply(active_project),
@@ -1468,6 +1495,15 @@ def _try_flyer_primary_intercept(
             outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
             ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
     else:
+        # ORPHAN NOTE: the project above was already created deterministically.
+        # Yielding here hands the clarifying turn to Hermes but leaves this
+        # just-created incomplete project in state — create-flyer-project dedups
+        # only on original_message_id (it does NOT reuse an active incomplete
+        # project), so a later Hermes create makes a fresh id. Accepted for the
+        # dormant Phase-1 pilot; the orphan is an incomplete row that never
+        # renders/sends. See report + flyer_intake SKILL hand-off note.
+        if _fb_yield_missing_info(chat_id, message_id):
+            return None
         ack_ok, outbound_message_id, ack_err = actions.send_flyer_text(
             chat_id,
             actions.flyer_project_missing_info_reply(project or {}),
@@ -1658,6 +1694,8 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
             outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
             ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
     else:
+        if _fb_yield_missing_info(chat_id, message_id):
+            return None
         ack_ok, outbound_message_id, ack_err = actions.send_flyer_text(
             chat_id,
             actions.flyer_project_missing_info_reply(project or {}),
@@ -2131,6 +2169,8 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
                     outbound_message_id = ",".join(x for x in [proc_mid, outbound_message_id] if x)
                     ack_err = f"concept_generation_failed: {gen_detail}; ack_error={ack_err}"
             else:
+                if _fb_yield_missing_info(chat_id, message_id):
+                    return None
                 ack_ok, outbound_message_id, ack_err = actions.send_flyer_text(
                     chat_id,
                     actions.flyer_project_missing_info_reply(project or {}),
@@ -2963,7 +3003,14 @@ def _try_flyer_quote_echo_guard(text: str, chat_id: str, event: Any, media_path:
     # The reply must be resolvable in one word: NEW creates a fresh project
     # from this same brief (pending state below + _try_flyer_quote_echo_choice);
     # APPROVE flows through normal approval routing on the existing project.
-    status_reply, _is_source_edit = _select_flyer_status_reply(echo_project)
+    #
+    # 2026-07-12: do NOT prepend the echo project's status line
+    # (`_select_flyer_status_reply`). For a delivered echo-project that line is
+    # "The final flyer files have been delivered." — a PAST-tense delivery status
+    # that a customer sending a NEW brief mis-reads as THIS turn's outcome (they
+    # get told files "have been delivered" for a request that produced nothing).
+    # The choice_line already names "your current flyer", so the banner + choice
+    # is unambiguous and clearly refers to the EXISTING flyer without the prefix.
     if status in {"awaiting_final_approval", "revising_design", "delivered_with_warning"}:
         choice_line = (
             "This looks like the same request as your current flyer. "
@@ -2976,7 +3023,7 @@ def _try_flyer_quote_echo_guard(text: str, chat_id: str, event: Any, media_path:
             "Reply NEW to create a fresh flyer with these details, "
             "or reply with any changes to the current one."
         )
-    reply = f"{status_reply}\n\n{choice_line}"
+    reply = f"Flyer Studio\n------------\n{choice_line}"
     ack_ok, mid, err = actions.send_flyer_text(
         chat_id, reply,
         action_context=build_action_context(

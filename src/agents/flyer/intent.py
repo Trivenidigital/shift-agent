@@ -93,9 +93,35 @@ MUTATING_ACTIONS = {
 }
 
 HERMES_FLYER_INTENT_PROMPT = """You classify Flyer Studio WhatsApp messages.
-Return strict JSON matching FlyerIntentDecision. Prefer clarify/observe over
-mutation when confidence is low. Never include internal project ids, provider
-names, reason codes, or raw request echoes in customer_reply."""
+
+Output a SINGLE JSON object and nothing else. No markdown, no code fences, no
+prose before or after. Include ONLY the keys listed below — any extra key is
+rejected. Use ONLY the exact enum values given (any other value is rejected).
+
+Keys:
+- "intent": one of ["new_flyer", "revise_flyer", "approve_final",
+  "status_check", "account_update", "onboarding_answer", "source_edit",
+  "reference_use", "sample_prompt_choice", "unclear", "unknown"].
+- "action": one of ["observe", "clarify", "route_current", "create_project",
+  "revise_project", "approve_project", "account_update", "manual_review"].
+- "confidence": a decimal between 0.0 and 1.0 (NOT a percentage).
+- "needs_clarification": boolean.
+- "clarifying_question": string, may be empty (max 500 chars).
+- "customer_reply": string, may be empty (max 1000 chars).
+- "reason": short string, may be empty (max 500 chars).
+- "evidence": array of short strings quoting the message (may be empty).
+
+Rules:
+- Prefer "clarify"/"observe" over any mutating action (create_project,
+  revise_project, approve_project, account_update, manual_review) when
+  confidence is low.
+- Never include internal project ids, provider names, reason codes, or raw
+  request echoes in "customer_reply".
+
+Example: {"intent": "new_flyer", "action": "clarify", "confidence": 0.6,
+"needs_clarification": true, "clarifying_question": "What should the flyer
+promote?", "customer_reply": "", "reason": "vague new-flyer brief",
+"evidence": ["make me a flyer"]}"""
 
 
 class FlyerIntentDecision(BaseModel):
@@ -191,6 +217,17 @@ def parse_classifier_payload(payload: Any) -> FlyerIntentDecision:
         data = dict(payload)
     else:
         raise TypeError(f"unsupported classifier payload: {type(payload).__name__}")
+    # LLM-boundary tolerance: a gateway payload that presents a recognizable
+    # decision (it carries an `intent`) may append narrative keys the strict
+    # schema forbids — even a temperature-0 json_object model appends a
+    # "reasoning"/"explanation" field often enough that, uncorrected, real
+    # decisions surface as `invalid` (incident 2026-07-12: classifier fired
+    # 1657ms -> ValidationError -> decision_source=none). Project onto the
+    # modelled fields so the decision survives; the enum/range validators still
+    # reject bad intents/actions/confidence, and a payload WITHOUT an `intent`
+    # (unrecognizable shape) stays strict and is flagged `invalid` for the audit.
+    if isinstance(data, dict) and "intent" in data:
+        data = {k: v for k, v in data.items() if k in FlyerIntentDecision.model_fields}
     data["decision_source"] = "hermes_gateway_future"
     return FlyerIntentDecision.model_validate(data)
 
