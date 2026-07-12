@@ -17,7 +17,7 @@ from pydantic import (
     Tag, Discriminator, HttpUrl,
 )
 from typing import Literal, Annotated, Union, Optional, Any, get_args
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from zoneinfo import ZoneInfo
 import os
 import re
@@ -1327,6 +1327,44 @@ class FlyerIntakeSession(BaseModel):
     brief_source: Literal["", "sample", "guided", "text"] = ""
     brief_approved_at: Optional[datetime] = None
     brief_approved_message_id: str = Field(default="", max_length=200)
+    # P0-2a session TTL (additive optional — old rows load with these unset).
+    # Stamped by FlyerCustomerStore.replace_intake_session; expiry falls back to
+    # updated_at when unset so pre-TTL rows still age out.
+    last_activity_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+
+    def is_expired(self, now: datetime, ttl_hours: float) -> bool:
+        """True once the session has been idle past its TTL. Uses expires_at if
+        stamped, else (last_activity_at or updated_at) + ttl_hours. Naive
+        timestamps are treated as UTC to keep replay/aware comparisons safe."""
+        ref = self.expires_at
+        if ref is None:
+            base = self.last_activity_at or self.updated_at
+            if base is None:
+                return False
+            if base.tzinfo is None:
+                base = base.replace(tzinfo=timezone.utc)
+            ref = base + timedelta(hours=ttl_hours)
+        elif ref.tzinfo is None:
+            ref = ref.replace(tzinfo=timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        return now >= ref
+
+
+FLYER_INTAKE_SESSION_TTL_HOURS_DEFAULT = 4.0
+
+
+def flyer_intake_ttl_hours() -> float:
+    """Flyer intake-session TTL in hours (operator-approved default 4h).
+    Env FLYER_INTAKE_SESSION_TTL_HOURS overrides; a non-positive/invalid value
+    falls back to the default (sessions must always eventually age out, so
+    expiry is never silently disabled)."""
+    try:
+        value = float(os.environ.get("FLYER_INTAKE_SESSION_TTL_HOURS", FLYER_INTAKE_SESSION_TTL_HOURS_DEFAULT))
+    except (TypeError, ValueError):
+        return FLYER_INTAKE_SESSION_TTL_HOURS_DEFAULT
+    return value if value > 0 else FLYER_INTAKE_SESSION_TTL_HOURS_DEFAULT
 
 
 def _flyer_canonical_key(chat_id: str, phone: Optional[str] = None) -> str:
@@ -1471,6 +1509,11 @@ class FlyerCustomerStore(BaseModel):
         return None
 
     def replace_intake_session(self, session: FlyerIntakeSession) -> None:
+        # Stamp TTL bookkeeping at the single persistence chokepoint so every
+        # write refreshes the idle clock (P0-2a). updated_at is set to `now` by
+        # the intake state machine before each replace.
+        session.last_activity_at = session.updated_at
+        session.expires_at = session.updated_at + timedelta(hours=flyer_intake_ttl_hours())
         key = _flyer_intake_session_key(session)
         self.intake_sessions = [
             s for s in self.intake_sessions
@@ -1479,6 +1522,18 @@ class FlyerCustomerStore(BaseModel):
             and not (key and _flyer_intake_session_key(s) == key)
         ]
         self.intake_sessions.append(session)
+
+    def expire_intake_sessions(
+        self, now: datetime, ttl_hours: float
+    ) -> list[FlyerIntakeSession]:
+        """Remove and return intake sessions idle past ttl_hours. Used by the
+        periodic sweep (flyer-source-edit-sla-watchdog) to physically discard +
+        audit expired sessions; read paths independently treat them as absent."""
+        expired = [s for s in self.intake_sessions if s.is_expired(now, ttl_hours)]
+        if expired:
+            drop = {id(s) for s in expired}
+            self.intake_sessions = [s for s in self.intake_sessions if id(s) not in drop]
+        return expired
 
     def discard_intake_session(self, session: FlyerIntakeSession) -> None:
         key = _flyer_intake_session_key(session)
@@ -4283,6 +4338,20 @@ class FlyerSourceEditSlaAlert(_BaseEntry):
     notify_ok: bool = False
 
 
+class FlyerIntakeSessionExpired(_BaseEntry):
+    """Audit: idle flyer intake sessions discarded by the periodic sweep (P0-2a).
+
+    PII-light by construction — counts + statuses only, no raw chat_id/phone.
+    Emitted by flyer-source-edit-sla-watchdog after age-based discard so an
+    expired session that never reaches a terminal state still leaves a trail."""
+    type: Literal["flyer_intake_session_expired"] = "flyer_intake_session_expired"
+    trigger: Literal["sweep"] = "sweep"
+    expired_count: int = Field(default=0, ge=0)
+    statuses: list[str] = Field(default_factory=list, max_length=50)
+    ttl_hours: float = Field(default=FLYER_INTAKE_SESSION_TTL_HOURS_DEFAULT, ge=0.0)
+    oldest_idle_hours: float = Field(default=0.0, ge=0.0)
+
+
 class FlyerHermesIntentDecision(_BaseEntry):
     """Read-only shadow audit for the Flyer Hermes intent contract.
 
@@ -6362,6 +6431,7 @@ LogEntry = Annotated[
         Annotated[FlyerSourceContractExtracted, Tag("flyer_source_contract_extracted")],
         Annotated[FlyerSourceVsNewChosen, Tag("flyer_source_vs_new_chosen")],
         Annotated[FlyerSourceEditSlaAlert, Tag("flyer_source_edit_sla_alert")],
+        Annotated[FlyerIntakeSessionExpired, Tag("flyer_intake_session_expired")],
         Annotated[FlyerHermesIntentDecision, Tag("flyer_hermes_intent_decision")],
         # 2026-05-28 — intake-bypass audit pair (decision + outcome)
         Annotated[FlyerIntakeBypassed, Tag("flyer_intake_bypassed")],
@@ -6504,7 +6574,8 @@ __all__ = [
     "FlyerRequestFields", "FlyerLockedFact", "FlyerReferenceExtraction",
     "FlyerSourceContractSection", "FlyerSourceContract",
     "FlyerSourceContractExtracted", "FlyerSourceVsNewChosen", "FlyerHermesIntentDecision",
-    "FlyerIntakeBypassed", "FlyerIntakeBypassOutcome",
+    "FlyerIntakeBypassed", "FlyerIntakeBypassOutcome", "FlyerIntakeSessionExpired",
+    "flyer_intake_ttl_hours", "FLYER_INTAKE_SESSION_TTL_HOURS_DEFAULT",
     "FlyerQASeverityClassified", "FlyerWarnTierDelivered", "FlyerOperatorFlaggedWarnTier",
     "FlyerCreativeDirectorRouted", "FlyerVisibleContractChecked",
     # PR-ζ 2026-05-26 — regulated-intent runtime context + chokepoint audit variants

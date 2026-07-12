@@ -54,6 +54,9 @@ def _write_lid_cache(path: Path) -> None:
 
 
 def _customers_with_intake(session_chat_id: str, session_phone) -> dict:
+    # Fresh updated_at so the identity-convergence assertions are TTL-agnostic
+    # (the cf-router finder applies read-time TTL expiry, P0-2a).
+    fresh = datetime.now(timezone.utc).isoformat()
     return {
         "schema_version": 1,
         "next_customer_sequence": 2,
@@ -66,8 +69,8 @@ def _customers_with_intake(session_chat_id: str, session_phone) -> dict:
                 "sender_phone": session_phone,
                 "status": "choosing_mode",
                 "source": "start_trial",
-                "started_at": "2026-06-02T17:50:00Z",
-                "updated_at": "2026-06-02T17:50:00Z",
+                "started_at": fresh,
+                "updated_at": fresh,
             }
         ],
     }

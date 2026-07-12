@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Page the operator when exact source-edit manual queue rows go stale.
+"""Page the operator when exact source-edit manual queue rows go stale, and
+sweep idle Flyer intake sessions (P0-2a).
 
-Read-only with respect to Flyer projects/customers: this script only reads
-projects.json/customers.json. It writes its own throttle state, appends audit
-rows, pages the operator, and sends throttled customer progress updates for
-stale queue rows.
+Reads projects.json/customers.json. It writes its own throttle state, appends
+audit rows, pages the operator, sends throttled customer progress updates for
+stale queue rows, and — on every tick — discards intake sessions in
+customers.json that have been idle past the TTL (FLYER_INTAKE_SESSION_TTL_HOURS,
+default 4h), emitting a flyer_intake_session_expired audit row.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,7 +23,13 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(SRC_ROOT / "platform"))
 sys.path.insert(0, str(SRC_ROOT))
 
-from schemas import FlyerProject, FlyerProjectStore, FlyerSourceEditSlaAlert  # noqa: E402
+from schemas import (  # noqa: E402
+    FlyerProject,
+    FlyerProjectStore,
+    FlyerSourceEditSlaAlert,
+    FlyerIntakeSessionExpired,
+    flyer_intake_ttl_hours,
+)
 
 try:  # pragma: no cover - production path
     from safe_io import FileLock, atomic_write_json, ndjson_append, notify_owner_with_fallback  # type: ignore  # noqa: E402
@@ -729,6 +737,86 @@ def run_watchdog(
     }
 
 
+def _parse_ts(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _intake_session_expired(session: dict, now: datetime, ttl_hours: float) -> bool:
+    """Dict-mirror of FlyerIntakeSession.is_expired for the raw-JSON sweep."""
+    ref = _parse_ts(session.get("expires_at"))
+    if ref is None:
+        base = _parse_ts(session.get("last_activity_at")) or _parse_ts(session.get("updated_at"))
+        if base is None:
+            return False
+        ref = base + timedelta(hours=ttl_hours)
+    return now >= ref
+
+
+def _intake_idle_hours(session: dict, now: datetime) -> float:
+    base = _parse_ts(session.get("last_activity_at")) or _parse_ts(session.get("updated_at"))
+    if base is None:
+        return 0.0
+    return max(0.0, (now - base).total_seconds() / 3600.0)
+
+
+def sweep_expired_intake_sessions(
+    *,
+    customers_path: Path,
+    decisions_log_path: Path,
+    now: datetime,
+    ttl_hours: float,
+) -> dict[str, Any]:
+    """Discard flyer intake sessions idle past ttl_hours + emit one audit row.
+
+    Raw-dict manipulation (not a Pydantic round-trip) so unmodeled keys in
+    customers.json are preserved exactly, mirroring
+    actions.discard_flyer_intake_session_by_sender. Runs on every tick,
+    independent of the SLA alert outcome."""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now = now.astimezone(timezone.utc)
+    path = Path(customers_path)
+    if not path.exists():
+        return {"expired_count": 0, "statuses": []}
+    expired: list[dict] = []
+    with FileLock(Path(str(path) + ".lock")):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"expired_count": 0, "statuses": []}
+        sessions = doc.get("intake_sessions") or []
+        kept: list[Any] = []
+        for session in sessions:
+            if isinstance(session, dict) and _intake_session_expired(session, now, ttl_hours):
+                expired.append(session)
+            else:
+                kept.append(session)
+        if not expired:
+            return {"expired_count": 0, "statuses": []}
+        doc["intake_sessions"] = kept
+        atomic_write_json(path, doc)
+    statuses = sorted({str(s.get("status") or "") for s in expired})
+    oldest_idle_hours = max((_intake_idle_hours(s, now) for s in expired), default=0.0)
+    entry = FlyerIntakeSessionExpired(
+        type="flyer_intake_session_expired",
+        ts=now,
+        trigger="sweep",
+        expired_count=len(expired),
+        statuses=statuses[:50],
+        ttl_hours=ttl_hours,
+        oldest_idle_hours=round(oldest_idle_hours, 4),
+    )
+    with FileLock(Path(str(decisions_log_path) + ".lock")):
+        ndjson_append(decisions_log_path, entry.model_dump_json())
+    return {"expired_count": len(expired), "statuses": statuses}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--projects", "--projects-path", dest="projects_path", default=str(PROJECTS_PATH))
@@ -745,11 +833,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Comma-separated manual reason_code values to monitor.",
     )
     parser.add_argument("--priority", type=int, choices=[-2, -1, 0, 1, 2], default=DEFAULT_PRIORITY)
+    parser.add_argument(
+        "--intake-ttl-hours",
+        type=float,
+        default=None,
+        help="Idle-hours before a flyer intake session is swept (default: FLYER_INTAKE_SESSION_TTL_HOURS / 4h).",
+    )
     parser.add_argument("--now", default="")
     args = parser.parse_args(argv)
 
     now = parse_utc(args.now) if args.now else datetime.now(timezone.utc)
     reason_codes = _normalize_reason_codes(tuple(args.reason_codes.split(",")))
+    ttl_hours = args.intake_ttl_hours if args.intake_ttl_hours and args.intake_ttl_hours > 0 else flyer_intake_ttl_hours()
+    intake_sweep = sweep_expired_intake_sessions(
+        customers_path=Path(args.customers_path),
+        decisions_log_path=Path(args.decisions_log),
+        now=now,
+        ttl_hours=ttl_hours,
+    )
     result = run_watchdog(
         projects_path=Path(args.projects_path),
         alert_state_path=Path(args.alert_state_path),
@@ -763,6 +864,7 @@ def main(argv: list[str] | None = None) -> int:
         customer_update_minutes=args.customer_update_minutes,
         customer_repeat_minutes=args.customer_repeat_minutes,
     )
+    result["intake_sweep"] = intake_sweep
     print(json.dumps(result, sort_keys=True))
     return int(result.get("exit_code", 0))
 
