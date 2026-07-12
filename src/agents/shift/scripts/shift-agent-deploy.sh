@@ -671,6 +671,7 @@ PY
             check-flyer-reference-scope \
             store-flyer-brand-asset \
             set-flyer-brand-asset-state \
+            derive-flyer-brand-style \
             manage-flyer-account \
             manage-flyer-guest-order \
             send-flyer-package \
@@ -701,6 +702,7 @@ PY
             /usr/local/bin/check-flyer-reference-scope \
             /usr/local/bin/store-flyer-brand-asset \
             /usr/local/bin/set-flyer-brand-asset-state \
+            /usr/local/bin/derive-flyer-brand-style \
             /usr/local/bin/manage-flyer-account \
             /usr/local/bin/manage-flyer-guest-order \
             /usr/local/bin/flyer-delivery-report \
