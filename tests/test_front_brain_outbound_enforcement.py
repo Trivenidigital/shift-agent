@@ -28,11 +28,18 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src" / "platform"))
 sys.path.insert(0, str(REPO / "src"))
 
-import safe_io  # noqa: E402
-from schemas import LogEntry  # noqa: E402
-from pydantic import TypeAdapter  # noqa: E402
+# safe_io imports fcntl at module load — guard so collection does not error on
+# Windows (the whole module is skipped there via pytestmark); on Linux/Docker
+# the import succeeds and the tests run.
+try:
+    import safe_io  # noqa: E402
+    from schemas import LogEntry  # noqa: E402
+    from pydantic import TypeAdapter  # noqa: E402
 
-ADAPTER = TypeAdapter(LogEntry)
+    ADAPTER = TypeAdapter(LogEntry)
+except ModuleNotFoundError:  # pragma: no cover - Windows (no fcntl)
+    safe_io = None  # type: ignore[assignment]
+    ADAPTER = None  # type: ignore[assignment]
 
 PROMISE_MSG = "We guarantee a full refund and free delivery by Friday."
 CLEAN_MSG = "Happy to help with that flyer! What should it promote?"
