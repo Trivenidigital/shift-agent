@@ -5605,6 +5605,10 @@ class CfRouterIntercepted(_BaseEntry):
         # 2026-05-28 — intake-bypass when intent is clear. See plan + design
         # at tasks/flyer-intake-bypass-{plan,design}-2026-05-28.md.
         "flyer_intake_bypassed",
+        # P0-2b — a lingering non-protected intake session was discarded when the
+        # customer was handed to the project-create flow (close-on-handoff; the
+        # 2026-06-02 stale-intake-session hijack fix).
+        "flyer_intake_session_closed_on_handoff",
         "flyer_onboarding",
         "flyer_onboarding_failed",
         "flyer_starter_brief",

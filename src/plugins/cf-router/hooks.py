@@ -3207,6 +3207,23 @@ def _try_flyer_intake_intercept(
             intake_session_status=intake_status,
             inbound_script=inbound_script,
         )
+        # Close-on-handoff (P0-2b): the bypass hands this customer to the
+        # project-create flow, so a lingering intake session MUST be discarded
+        # here — otherwise a later revision reply is hijacked back into "choose a
+        # creation mode" (the 2026-06-02 stale-intake-session hijack). Only
+        # NON-protected statuses (choosing_language/choosing_mode) reach this
+        # branch; protected in-progress statuses block the bypass upstream
+        # (precondition 1 of should_bypass_intake_for_clear_intent).
+        if intake_session and actions.discard_flyer_intake_session_by_sender(phone, chat_id):
+            actions.audit_intercepted(
+                reason="flyer_intake_session_closed_on_handoff",
+                chat_id=chat_id,
+                subprocess_rc=0,
+                detail=(
+                    f"message_id={message_id}; bypass_reason={bypass_reason}; "
+                    f"intake_status={intake_status}; sender_role={role}"
+                )[:500],
+            )
         return None
     if not intake_session:
         return None
