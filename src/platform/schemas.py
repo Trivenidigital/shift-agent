@@ -1329,6 +1329,28 @@ class FlyerIntakeSession(BaseModel):
     brief_approved_message_id: str = Field(default="", max_length=200)
 
 
+def _flyer_canonical_key(chat_id: str, phone: Optional[str] = None) -> str:
+    """Stable canonical identity key (LID<->phone convergence via the lid-cache).
+
+    Delegates to the shared flat platform helper `flyer_identity`; falls back to
+    raw normalization (no lid-cache convergence) when that module is unavailable
+    so schemas stays import-safe on any minimal path. Keeps intake-session
+    keying identical to the cf-router plugin's `flyer_canonical_identity_key`."""
+    try:
+        from flyer_identity import canonical_identity_key  # flat platform module
+    except Exception:
+        base = str(phone or chat_id or "")
+        if "@" in base:
+            base = base.split("@", 1)[0]
+        return re.sub(r"[\s\-().]", "", base.lstrip("+")).casefold()
+    return canonical_identity_key(chat_id, phone)
+
+
+def _flyer_intake_session_key(session: "FlyerIntakeSession") -> str:
+    sender_phone = str(session.sender_phone) if session.sender_phone is not None else None
+    return _flyer_canonical_key(session.chat_id, sender_phone)
+
+
 class FlyerCustomerStore(BaseModel):
     model_config = ConfigDict(extra="ignore")
     schema_version: int = Field(default=1, ge=1)
@@ -1435,26 +1457,36 @@ class FlyerCustomerStore(BaseModel):
             for session in self.intake_sessions:
                 if session.sender_phone == canonical:
                     return session
-            for session in self.intake_sessions:
-                if session.sender_phone is None and session.chat_id == chat_id:
-                    return session
-            return None
         for session in self.intake_sessions:
             if session.sender_phone is None and session.chat_id == chat_id:
                 return session
+        # Canonical convergence (LID<->phone via lid-cache) — additive fallback
+        # so a customer switching identifier mid-conversation hits the SAME
+        # session (2026-06-02 stale-intake-session hijack fix).
+        want_key = _flyer_canonical_key(chat_id, phone)
+        if want_key:
+            for session in self.intake_sessions:
+                if _flyer_intake_session_key(session) == want_key:
+                    return session
         return None
 
     def replace_intake_session(self, session: FlyerIntakeSession) -> None:
+        key = _flyer_intake_session_key(session)
         self.intake_sessions = [
             s for s in self.intake_sessions
-            if s.chat_id != session.chat_id and s.sender_phone != session.sender_phone
+            if s.chat_id != session.chat_id
+            and s.sender_phone != session.sender_phone
+            and not (key and _flyer_intake_session_key(s) == key)
         ]
         self.intake_sessions.append(session)
 
     def discard_intake_session(self, session: FlyerIntakeSession) -> None:
+        key = _flyer_intake_session_key(session)
         self.intake_sessions = [
             s for s in self.intake_sessions
-            if s.chat_id != session.chat_id and s.sender_phone != session.sender_phone
+            if s.chat_id != session.chat_id
+            and s.sender_phone != session.sender_phone
+            and not (key and _flyer_intake_session_key(s) == key)
         ]
 
     def new_customer(
