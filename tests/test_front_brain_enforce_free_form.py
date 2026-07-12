@@ -144,3 +144,37 @@ def test_promise_verbs_list_contains_core_commitments():
     lowered = tuple(v.lower() for v in PROMISE_BAN_VERBS)
     for core in ("guarantee", "promise", "refund"):
         assert core in lowered
+
+
+# ── 2026-07-12 defense-in-depth phrase misses (reviewer set) ─────────────────
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Your flyer is on its way!",
+        "I've set that up for you.",
+        "You'll get 20 percent off today.",
+        "We'll waive the delivery fee for you.",
+        "I can waive that for you.",
+        "That table is reserved for you.",
+        "It'll be ready by 5pm.",
+        "I've credited your account.",
+        "You've been credited $10.",
+        "Consider it done.",
+        "It's taken care of.",
+        "You have my word.",
+    ],
+)
+def test_defense_in_depth_phrases_trip_promise_ban(text):
+    result = enforce_free_form_text(text)
+    assert result.passed is False
+    assert "promise_ban" in result.hit_classes
+
+
+def test_defense_in_depth_phrases_exempt_when_verified():
+    # The verified_action_result escape hatch still applies (an evidence-backed
+    # completion is not clobbered).
+    result = enforce_free_form_text(
+        "I've credited your account.", has_verified_action_result=True
+    )
+    assert result.passed is True

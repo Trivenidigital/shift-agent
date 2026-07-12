@@ -17,6 +17,19 @@
 # commit 1e71b718. Verified check-shift-agent-patch.sh with an explicit
 # one-run override against the live Main gateway/bridge after the upgrade;
 # captured the post-upgrade bridge.js sha256 below.
+#
+# 2026-07-12 front-brain Phase-1: added the egress screen patch to
+# gateway/platforms/whatsapp.py — BOTH text-egress paths: send() (marker
+# shift-agent-front-brain-send, before format/relay) and edit_message() (marker
+# shift-agent-front-brain-edit, before the /edit relay; streamed drafts +
+# finalized answer via stream_consumer.py). Both wrap `content` with
+# safe_io.front_brain_screen_gateway_send. Authored against Hermes commit
+# 1e71b7180e5b4e84905b9a3086cf9cecca139562 (== the pin below — UNCHANGED) and
+# unpatched whatsapp.py sha256
+# d59426d5cdb18a09bed91b07521cd6d7e190a59a9222e2ed235d6a1b23513663. whatsapp.py
+# is NOT content-sha-pinned here (same convention as the sender-id whatsapp.py
+# patch — protected by the commit pin + marker + anchor-proximity checks in
+# check-shift-agent-patch.sh), so no value below changes.
 HERMES_COMMIT=1e71b7180e5b4e84905b9a3086cf9cecca139562
 HERMES_VERSION=0.14.0
 BRIDGE_POST_PATCH_SHA256=94a13a926798d5c2e6e69dd4f227ef940f88e3076bab60333d1b92fa55680913

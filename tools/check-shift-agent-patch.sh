@@ -173,6 +173,17 @@ for f in "$RUN" "$WA" "$BR"; do
     grep -q "END shift-agent-sender-id" "$f" || fail "$f missing END shift-agent-sender-id marker"
 done
 
+# Front-brain Phase-1 outbound-send screen (2026-07-12). LLM free-form replies
+# exit via WhatsAppAdapter.send() (bridge /send), NOT via safe_io.bridge_post, so
+# this patch is the ONLY screen on them. Fail-closed so a Hermes upgrade that
+# drops the patch cannot silently ship un-screened LLM replies to customers.
+grep -q "BEGIN shift-agent-front-brain-send" "$WA" || fail "$WA missing BEGIN shift-agent-front-brain-send marker (LLM outbound replies would send UN-screened)"
+grep -q "END shift-agent-front-brain-send" "$WA" || fail "$WA missing END shift-agent-front-brain-send marker"
+# edit_message() is the SECOND text-egress path (streamed drafts + finalized
+# answer via stream_consumer.py). Config-proof coverage requires screening it too.
+grep -q "BEGIN shift-agent-front-brain-edit" "$WA" || fail "$WA missing BEGIN shift-agent-front-brain-edit marker (streamed/finalized LLM edits would send UN-screened)"
+grep -q "END shift-agent-front-brain-edit" "$WA" || fail "$WA missing END shift-agent-front-brain-edit marker"
+
 # Bridge.js template-bypass patch — OBSOLETE in Hermes >= 0.12.0 (the
 # upstream chatter filter the patch extended was removed). The patch
 # script (tools/patch-bridge-filter.py) was deleted in the 2026-05-04
@@ -208,6 +219,25 @@ BA=$(grep -n "messageQueue.push" "$BR" | head -1 | cut -d: -f1)
 [ -n "$BB" ] && [ -n "$BA" ] || fail "$BR missing BEGIN marker or anchor symbol"
 DIFF3=$(( BB > BA ? BB - BA : BA - BB ))
 [ "$DIFF3" -le 200 ] || fail "$BR BEGIN marker drifted from anchor (delta=$DIFF3 lines)"
+
+# whatsapp.py: front-brain send-screen inject site. The LAST front-brain BEGIN
+# marker (the send-site one, after the module-level helper) must sit next to the
+# format_message(content) relay anchor inside send(). Drift => the screen call
+# may no longer wrap the composed reply.
+FBB=$(grep -n "BEGIN shift-agent-front-brain-send" "$WA" | tail -1 | cut -d: -f1)
+FBA=$(grep -n "formatted = self.format_message(content)" "$WA" | head -1 | cut -d: -f1)
+[ -n "$FBB" ] && [ -n "$FBA" ] || fail "$WA missing front-brain-send marker or format_message anchor"
+DIFF4=$(( FBB > FBA ? FBB - FBA : FBA - FBB ))
+[ "$DIFF4" -le 10 ] || fail "$WA front-brain-send marker drifted from format_message anchor (delta=$DIFF4 lines)"
+
+# whatsapp.py: front-brain edit-screen inject site — the edit marker must sit
+# next to the bridge /edit relay anchor inside edit_message(). Drift => streamed
+# / finalized edits may no longer be screened.
+FEB=$(grep -n "BEGIN shift-agent-front-brain-edit" "$WA" | head -1 | cut -d: -f1)
+FEA=$(grep -n '/edit"' "$WA" | head -1 | cut -d: -f1)
+[ -n "$FEB" ] && [ -n "$FEA" ] || fail "$WA missing front-brain-edit marker or /edit anchor"
+DIFF5=$(( FEB > FEA ? FEB - FEA : FEA - FEB ))
+[ "$DIFF5" -le 10 ] || fail "$WA front-brain-edit marker drifted from /edit anchor (delta=$DIFF5 lines)"
 
 # Flyer Studio delivery depends on native media send support. Fail before
 # deploy if the pinned Hermes bridge lacks the companion endpoint used by

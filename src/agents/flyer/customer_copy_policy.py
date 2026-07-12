@@ -161,6 +161,21 @@ PROMISE_BAN_PHRASES: tuple[str, ...] = (
     "guaranteed delivery",
     "satisfaction guaranteed",
     "rain check",
+    # 2026-07-12 defense-in-depth (reviewer misses). The primary walls remain the
+    # intercept guards + the SKILL prompt; these phrases catch forward
+    # commitments / completion claims the free-form screen would otherwise pass.
+    "on its way",
+    "set that up for you",
+    "percent off",
+    "waive the delivery fee",
+    "waive",
+    "reserved for",
+    "ready by",
+    "credited your account",
+    "credited",
+    "consider it done",
+    "taken care of",
+    "you have my word",
 )
 
 PROMISE_BAN_VERB_RE = re.compile(

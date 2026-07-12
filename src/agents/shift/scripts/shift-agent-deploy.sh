@@ -70,6 +70,23 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_identity.py
     fi
+    # Front-brain Phase-1: per-chat/day budget + latency fallback, imported by the
+    # gateway-send screen (safe_io.front_brain_screen_gateway_send). WITHOUT this,
+    # `from front_brain_budget import ...` fails at runtime -> the screen fails
+    # toward the template on EVERY admitted reply (pilot dead-on-arrival). Guarded
+    # for rollback compatibility with predating tarballs.
+    if [ -f src/platform/front_brain_budget.py ]; then
+        install -m 644 src/platform/front_brain_budget.py /opt/shift-agent/front_brain_budget.py
+    else
+        rm -f /opt/shift-agent/front_brain_budget.py
+    fi
+    # Front-brain Phase-1: durable unfulfillable-request queue (imported by the
+    # SKILL record-request path). Guarded for rollback compatibility.
+    if [ -f src/platform/front_brain_queue.py ]; then
+        install -m 644 src/platform/front_brain_queue.py /opt/shift-agent/front_brain_queue.py
+    else
+        rm -f /opt/shift-agent/front_brain_queue.py
+    fi
     # No-response escalation sweep logic (imported by shift-agent-proposal-sweep). Guarded for
     # rollback compatibility with tarballs that predate this module.
     if [ -f src/platform/proposal_sweep.py ]; then

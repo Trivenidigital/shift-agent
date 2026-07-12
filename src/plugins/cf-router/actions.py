@@ -115,6 +115,91 @@ def flyer_canonical_identity_key(chat_id: str, phone: Optional[str] = None) -> s
         return _normalize_flyer_intent_chat(phone or chat_id or "")
 
 
+# ─────────────────────────────────────────────────────────────────
+# Front-brain Phase-1 conversational cohort (2026-07-12, item 1).
+#
+# When a chat is admitted, the cf-router hook YIELDS its three conversational
+# flyer intercepts (vague-start / sample-prompt / intake-followup) to the LLM so
+# Hermes converses instead of the deterministic net answering (see hooks.py).
+# Money/#code/payment/delivery-state/brand-asset/active-project guards NEVER
+# yield — they are outside this gate.
+#
+# Gate semantics mirror the ppv1 / #612 + safe_io.front_brain_outbound_enforce_
+# enabled wildcard allowlist, with ONE difference: membership is compared on the
+# canonical identity key (flyer_canonical_identity_key) so a customer who reaches
+# us under a LID and a phone-JID resolves to ONE cohort decision (the #615
+# LID<->phone convergence). Fail-CLOSED: flag off / empty allowlist / any error
+# → NOT admitted (byte-identical deterministic net). A literal `*` entry
+# graduates every chat — an EXPLICIT opt-in, never the empty-list flip.
+#
+# HARD SAFETY COUPLING (2026-07-12, reviewers agreed): CONVERSE must be
+# IMPOSSIBLE to arm without its outbound screen. A chat is admitted ONLY when BOTH
+# hold: (1) the CONVERSE flag+allowlist admit it, AND (2) the gateway-send
+# enforcement tier (FRONT_BRAIN_OUTBOUND_ENFORCE + its allowlist) also admits it —
+# otherwise the LLM's free-form replies would leave un-screened. The enforcement
+# admission uses the SAME predicate the gateway-send wrap uses
+# (safe_io.front_brain_outbound_enforce_enabled), so the two can never diverge.
+# Fail-CLOSED if safe_io is unimportable (can't confirm the screen covers the
+# chat -> do NOT converse).
+FRONT_BRAIN_CONVERSE_FLAG_ENV = "FRONT_BRAIN_CONVERSE"
+FRONT_BRAIN_CONVERSE_CHATS_ENV = "FRONT_BRAIN_CONVERSE_CHATS"
+
+
+def front_brain_converse_admits(chat_id: str, phone: Optional[str] = None) -> bool:
+    """True when `chat_id` is in the Phase-1 conversational pilot cohort AND the
+    outbound enforcement tier covers it (hard coupling — see module note).
+
+    Fail-closed on every ambiguity. Never raises — a broken identity helper,
+    malformed env, or unimportable safe_io degrades to NOT admitted, preserving
+    the deployed deterministic behavior AND guaranteeing converse never arms
+    without its screen."""
+    try:
+        if os.environ.get(FRONT_BRAIN_CONVERSE_FLAG_ENV, "") != "1":
+            return False
+        raw_entries = [
+            p.strip()
+            for p in os.environ.get(FRONT_BRAIN_CONVERSE_CHATS_ENV, "").split(",")
+            if p.strip()
+        ]
+        if "*" in raw_entries:  # explicit graduation of the CONVERSE allowlist
+            converse_ok = True
+        elif not raw_entries:  # empty allowlist DISABLES (never global-on)
+            return False
+        else:
+            want = flyer_canonical_identity_key(chat_id, phone)
+            if not want:
+                return False
+            allow = {flyer_canonical_identity_key(entry) for entry in raw_entries}
+            allow.discard("")
+            converse_ok = want in allow
+        if not converse_ok:
+            return False
+        # HARD COUPLING: the same chat must ALSO be admitted by the outbound
+        # enforcement tier, or its LLM replies would send un-screened. Single
+        # source of truth = the exact predicate the gateway-send wrap consults.
+        try:
+            _ensure_platform_path()
+            from safe_io import front_brain_outbound_enforce_enabled  # type: ignore
+        except Exception:
+            return False  # cannot confirm the screen covers this chat
+        return bool(front_brain_outbound_enforce_enabled(chat_id))
+    except Exception:
+        return False
+
+
+def audit_front_brain_yielded(chat_id: str, *, intercept: str, message_id: str = "") -> None:
+    """Emit a `cf_router_intercepted` row with reason `front_brain_yielded` so
+    every hand-off from the deterministic net to the LLM is traceable on the
+    Phase-1 review surface. Best-effort (audit_intercepted already swallows
+    errors); `intercept` names which conversational intercept yielded."""
+    audit_intercepted(
+        reason="front_brain_yielded",
+        chat_id=chat_id,
+        subprocess_rc=0,
+        detail=f"intercept={intercept}; message_id={message_id}; front_brain=converse",
+    )
+
+
 # === Owner / employee identity ===
 
 def is_owner_chat(chat_id: str) -> bool:

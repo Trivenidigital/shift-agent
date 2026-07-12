@@ -29,6 +29,37 @@ MARK_END = "END shift-agent-sender-id"
 CTA_MARK_BEGIN = "BEGIN shift-agent-cta-buttons"
 BUTTON_RESPONSE_MARK_BEGIN = "BEGIN shift-agent-button-response-body"
 
+# ─── Front-brain Phase-1 outbound-send screen (2026-07-12) ─────────────────
+# LLM free-form replies exit via WhatsAppAdapter.send() (POST to the bridge
+# /send endpoint) — NOT via safe_io.bridge_post — so the P0-3a outbound
+# chokepoint never sees them. This patch wraps the composed `content` at the top
+# of send(), immediately before format/chunk/relay, routing it through
+# safe_io.front_brain_screen_gateway_send (per-chat/day budget + free-form
+# enforcement + latency bound; DORMANT and byte-identical unless the chat is
+# admitted by FRONT_BRAIN_OUTBOUND_ENFORCE + its allowlist).
+#
+# Authored/verified against Hermes checkout HEAD
+#   1e71b7180e5b4e84905b9a3086cf9cecca139562  (== the pinned baseline commit)
+# and unpatched gateway/platforms/whatsapp.py sha256
+#   d59426d5cdb18a09bed91b07521cd6d7e190a59a9222e2ed235d6a1b23513663
+# Stable anchors (symbol names, not line numbers): the module-level helper is
+# inserted before `class WhatsAppAdapter(BasePlatformAdapter):`; the one-line
+# call is injected immediately before `formatted = self.format_message(content)`
+# inside `async def send(`. check-shift-agent-patch.sh fail-closes on both
+# markers + anchor proximity so a Hermes upgrade that moves/removes them cannot
+# silently ship un-screened LLM replies.
+FB_SEND_MARK_BEGIN = "BEGIN shift-agent-front-brain-send"
+FB_SEND_MARK_END = "END shift-agent-front-brain-send"
+# edit_message() (whatsapp.py:996) is the SECOND text-egress path: Hermes core
+# stream_consumer.py delivers streamed drafts AND the finalized answer
+# (finalize=True) via adapter.edit_message. Config-proof coverage requires
+# screening it too (the live box has split streaming config). Same helper, same
+# fail-open-loudly semantics; a distinct marker so the deploy gate checks it
+# independently. Progressive drafts screen but do NOT reserve budget (finalize
+# gates the single per-reply budget unit).
+FB_EDIT_MARK_BEGIN = "BEGIN shift-agent-front-brain-edit"
+FB_EDIT_MARK_END = "END shift-agent-front-brain-edit"
+
 
 # ─── Patch payloads (Python files) ─────────────────────────────────────
 
@@ -124,6 +155,61 @@ RUN_PY_INJECT_BLOCK = '''
                 logger.warning("shift-agent: sender context inject failed: %s", _e)
                 # Fail closed — no partial block, no spoofing window.
         # END shift-agent-sender-id
+'''
+
+
+# ─── Patch payloads (front-brain outbound-send screen) ─────────────────
+
+# Module-level helper, inserted before `class WhatsAppAdapter(...)`. Lazily
+# imports safe_io from /opt/shift-agent (the flat platform install) and returns
+# the SAFE text to relay. Fail-OPEN to the ORIGINAL content if safe_io is
+# unimportable: LLM replies exit through send() UN-screened TODAY, so failing
+# open here is exactly today's behavior — it does NOT regress safety, it only
+# means the NEW control is absent, which the tier's default-off posture already
+# assumes. It must never crash the send path. The real gate lives INSIDE safe_io
+# (FRONT_BRAIN_OUTBOUND_ENFORCE + allowlist), so this wrapper is byte-identical
+# when the tier is off.
+WHATSAPP_FB_SEND_HELPER = '''# BEGIN shift-agent-front-brain-send
+def _shift_front_brain_screen_outbound(chat_id, content, reserve_budget=True):
+    """Route a composed outbound reply through the front-brain gateway-send
+    screen and return the SAFE text to relay. `reserve_budget` is False for
+    progressive streamed edit drafts (a streamed reply costs ONE budget unit,
+    reserved only on the finalized edit). See tools/patch-hermes.py."""
+    try:
+        import sys as _sys
+        if "/opt/shift-agent" not in _sys.path:
+            _sys.path.insert(0, "/opt/shift-agent")
+        from safe_io import front_brain_screen_gateway_send as _fb_screen
+        return _fb_screen(chat_id, content, reserve_budget=reserve_budget)
+    except Exception as _e:
+        # §12b: screen-disarm must NEVER be silent. Keep fail-open (return the
+        # ORIGINAL text == today's un-screened behavior) but emit a structured
+        # stderr line so the operator can see the screen was bypassed.
+        try:
+            import sys as _sys2
+            _sys2.stderr.write(
+                "front_brain_screen_disarmed reason=%s:%s\\n" % (type(_e).__name__, str(_e)[:120])
+            )
+        except Exception:
+            pass
+        return content
+# END shift-agent-front-brain-send'''
+
+# One-line call injected at the top of send(), immediately before the
+# format/chunk/relay begins (anchor: the format_message assignment). 12-space
+# indent = method-try-block body.
+WHATSAPP_FB_SEND_INJECT = '''            # BEGIN shift-agent-front-brain-send
+            content = _shift_front_brain_screen_outbound(chat_id, content)
+            # END shift-agent-front-brain-send
+'''
+
+# One-line call injected at the top of edit_message(), immediately after
+# `import aiohttp` and before the bridge /edit relay. Screens EVERY edit
+# (progressive drafts are customer-visible); reserve_budget=finalize so a whole
+# streamed reply costs ONE budget unit (reserved on the finalized edit only).
+WHATSAPP_FB_EDIT_INJECT = '''            # BEGIN shift-agent-front-brain-edit
+            content = _shift_front_brain_screen_outbound(chat_id, content, reserve_budget=finalize)
+            # END shift-agent-front-brain-edit
 '''
 
 
@@ -333,6 +419,96 @@ def _patch_whatsapp_py():
     print(f"  ✓ patched {WA}")
 
 
+def _patch_whatsapp_py_front_brain_send():
+    """Insert the front-brain egress screen into whatsapp.py — both text paths.
+
+    Three edits, all anchored on stable symbols (never line numbers), each
+    guarded by its own marker so re-runs and partial-upgrade paths stay
+    idempotent:
+      1. the module-level helper before `class WhatsAppAdapter(BasePlatformAdapter):`
+      2. the screen call before `formatted = self.format_message(content)` inside
+         `async def send(` (marker shift-agent-front-brain-send).
+      3. the screen call after `import aiohttp` inside `async def edit_message(`
+         (marker shift-agent-front-brain-edit; reserve_budget=finalize).
+    Fail-closed (exit 1) if any anchor is missing so a Hermes upgrade cannot
+    silently no-op the LLM-reply screen.
+    """
+    text = WA.read_text(encoding="utf-8")
+    changed = False
+
+    # 1 + 2. Helper + send() inject (both carry the shift-agent-front-brain-send
+    # marker, so this whole block is skipped once present).
+    if FB_SEND_MARK_BEGIN not in text:
+        class_anchor = "class WhatsAppAdapter(BasePlatformAdapter):"
+        if class_anchor not in text:
+            sys.stderr.write(
+                f"FAIL: cannot locate '{class_anchor}' in {WA} — "
+                f"Hermes may have renamed the adapter class.\n"
+            )
+            sys.exit(1)
+        text = text.replace(
+            class_anchor, WHATSAPP_FB_SEND_HELPER + "\n\n\n" + class_anchor, 1
+        )
+
+        send_def_re = re.compile(r"^    async def send\(", re.MULTILINE)
+        send_m = send_def_re.search(text)
+        if not send_m:
+            sys.stderr.write(f"FAIL: cannot find `async def send(` def in {WA}\n")
+            sys.exit(1)
+        fmt_re = re.compile(
+            r"^            formatted = self\.format_message\(content\)", re.MULTILINE
+        )
+        fmt_m = fmt_re.search(text, pos=send_m.end())
+        if not fmt_m:
+            sys.stderr.write(
+                f"FAIL: `formatted = self.format_message(content)` not found inside "
+                f"send() in {WA} — Hermes may have refactored the send path.\n"
+            )
+            sys.exit(1)
+        line_diff = text.count("\n", send_m.start(), fmt_m.start())
+        if line_diff > 40:
+            sys.stderr.write(
+                f"FAIL: format_message anchor is {line_diff} lines from `async def "
+                f"send(` — likely matched a different method's line.\n"
+            )
+            sys.exit(1)
+        text = text[:fmt_m.start()] + WHATSAPP_FB_SEND_INJECT.lstrip("\n") + text[fmt_m.start():]
+        changed = True
+
+    # 3. edit_message() inject (shift-agent-front-brain-edit marker). Uses the
+    # helper inserted above, so it MUST run after the send block.
+    if FB_EDIT_MARK_BEGIN not in text:
+        edit_def_re = re.compile(r"^    async def edit_message\(", re.MULTILINE)
+        edit_m = edit_def_re.search(text)
+        if not edit_m:
+            sys.stderr.write(f"FAIL: cannot find `async def edit_message(` def in {WA}\n")
+            sys.exit(1)
+        aiohttp_re = re.compile(r"^            import aiohttp$", re.MULTILINE)
+        aiohttp_m = aiohttp_re.search(text, pos=edit_m.end())
+        if not aiohttp_m:
+            sys.stderr.write(
+                f"FAIL: `import aiohttp` not found inside edit_message() in {WA} — "
+                f"Hermes may have refactored the edit path.\n"
+            )
+            sys.exit(1)
+        line_diff = text.count("\n", edit_m.start(), aiohttp_m.start())
+        if line_diff > 20:
+            sys.stderr.write(
+                f"FAIL: `import aiohttp` is {line_diff} lines from `async def "
+                f"edit_message(` — likely matched a different method's line.\n"
+            )
+            sys.exit(1)
+        insert_at = aiohttp_m.end() + 1  # just past the newline after `import aiohttp`
+        text = text[:insert_at] + WHATSAPP_FB_EDIT_INJECT + text[insert_at:]
+        changed = True
+
+    if changed:
+        WA.write_text(text, encoding="utf-8")
+        print(f"  ✓ patched {WA} (front-brain egress screen: send + edit_message)")
+    else:
+        print(f"  ✓ {WA} front-brain egress screen already patched")
+
+
 def _patch_run_py():
     if _has_marker(RUN):
         print(f"  ✓ {RUN} already patched")
@@ -492,6 +668,7 @@ def main() -> int:
     _patch_whatsapp_py()
     _patch_run_py()
     _patch_bridge_js()
+    _patch_whatsapp_py_front_brain_send()
     print("Done.")
     return 0
 
