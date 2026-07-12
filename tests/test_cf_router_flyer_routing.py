@@ -205,6 +205,77 @@ def test_delivered_existing_flyer_media_revision_stays_on_active_project(monkeyp
     assert not any(row.get("reason") == "flyer_active_project_bypassed" for row in audits)
 
 
+def _wire_brand_asset_save(monkeypatch, hooks, actions, spawn_calls, *, store_ok=True,
+                           customer_id="CUST0001", spawn_raises=False):
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender",
+                        lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "should_start_new_flyer_over_active",
+                        lambda _text, has_media=False: False)
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _p, _c: None)
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender",
+                        lambda _p, _c: {"customer_id": customer_id, "status": "trial"})
+    result_doc = {"reply_text": "Flyer Studio\n------------\nTemplate saved.",
+                  "next_status": "brand_asset_saved", "customer_id": customer_id,
+                  "handled": True}
+    monkeypatch.setattr(actions, "trigger_store_flyer_brand_asset",
+                        lambda **_kw: (store_ok, "ok" if store_ok else "fail",
+                                       result_doc if store_ok else None))
+    monkeypatch.setattr(actions, "send_flyer_text",
+                        lambda _chat_id, _msg, **_kw: (True, "ack-mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: None)
+
+    def _spawn(cid):
+        spawn_calls.append(cid)
+        if spawn_raises:
+            raise RuntimeError("spawn boom")
+        return True
+
+    monkeypatch.setattr(actions, "spawn_derive_flyer_brand_style", _spawn)
+
+
+def test_brand_asset_save_triggers_derivation_when_flag_on(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    spawn_calls: list[str] = []
+    _wire_brand_asset_save(monkeypatch, hooks, actions, spawn_calls)
+    monkeypatch.setenv("FLYER_BRAND_STYLE_TRANSFER", "1")
+
+    result = hooks._try_flyer_brand_asset_intercept(
+        "Here is my template", "17329837841@lid",
+        {"message_id": "m-tmpl"}, media_path="C:/tmp/tmpl.jpg",
+    )
+    assert result is not None and result["action"] == "skip"
+    assert spawn_calls == ["CUST0001"]  # detached derivation fired for the account
+
+
+def test_brand_asset_save_no_derivation_when_flag_off(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    spawn_calls: list[str] = []
+    _wire_brand_asset_save(monkeypatch, hooks, actions, spawn_calls)
+    monkeypatch.delenv("FLYER_BRAND_STYLE_TRANSFER", raising=False)
+
+    result = hooks._try_flyer_brand_asset_intercept(
+        "Here is my template", "17329837841@lid",
+        {"message_id": "m-tmpl"}, media_path="C:/tmp/tmpl.jpg",
+    )
+    assert result is not None and result["action"] == "skip"
+    assert spawn_calls == []  # dormant when the feature flag is off
+
+
+def test_brand_asset_save_derivation_failure_never_blocks_ack(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    spawn_calls: list[str] = []
+    _wire_brand_asset_save(monkeypatch, hooks, actions, spawn_calls, spawn_raises=True)
+    monkeypatch.setenv("FLYER_BRAND_STYLE_TRANSFER", "1")
+
+    # A spawn failure must be swallowed — the customer ack still returns cleanly.
+    result = hooks._try_flyer_brand_asset_intercept(
+        "Here is my template", "17329837841@lid",
+        {"message_id": "m-tmpl"}, media_path="C:/tmp/tmpl.jpg",
+    )
+    assert result is not None and result["action"] == "skip"
+    assert spawn_calls == ["CUST0001"]
+
+
 def test_media_exact_reference_edit_is_not_new_poster_generation():
     actions = _load_actions()
 
