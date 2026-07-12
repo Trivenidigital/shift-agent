@@ -521,6 +521,20 @@ def test_deploy_foundation_gate_fails_closed_on_missing_script():
     assert "skipping foundation gate (rollback compatibility)" not in block
 
 
+def test_smoke_surfaces_bundled_not_live_foundation_load_post_restart():
+    """BL-HERMES-12 #5: the POST-restart smoke re-surfaces credential_readiness's bundled-not-live
+    WARN (batch 14) as a loud advisory, so a foundation skill the running gateway isn't loading is
+    visible at deploy time. It greps for the 'but NOT live' marker (single source of truth — no
+    hardcoded skill list). Advisory / non-fatal: a smoke exit would auto-rollback, which restores
+    the release, not the Hermes skill state, and can't repair a curator-removed foundation skill."""
+    smoke = REPO_ROOT / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh"
+    text = smoke.read_text(encoding="utf-8")
+    assert "credential-minimized-readiness" in text
+    assert 'grep -q "but NOT live"' in text, "smoke must reuse the batch-14 bundled-not-live marker"
+    assert "POST-RESTART FOUNDATION-LOAD" in text
+    assert "Advisory" in text  # documented non-fatal (must not auto-rollback on this)
+
+
 def test_deploy_validates_cf_router_after_install_not_in_preinstall_foundation_gate():
     deploy = REPO_ROOT / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
     text = deploy.read_text(encoding="utf-8")

@@ -563,8 +563,28 @@ if ! sudo -u shift-agent "$PY" /usr/local/bin/flyer-intent-training-export --hel
 fi
 echo "Flyer intent training export CLI smoke passed"
 
+# 2a. Credential-minimized readiness (informational) + POST-RESTART FOUNDATION-LOAD check
+# (BL-HERMES-12 #5). The pre-install gate (shift-agent-deploy.sh) accepts a foundation skill
+# present live-OR-bundled (install-state). Here, AFTER the gateway restart, we additionally surface
+# any foundation skill present ONLY in the bundled Hermes lib and NOT live (/root/.hermes/skills):
+# the gateway loads from HERMES_HOME (live only), so a bundled-only skill is NOT loaded by the
+# now-running gateway. We reuse credential_readiness's own "but NOT live" WARN (batch 14) as the
+# single source of truth, so the foundation-skill list can never drift from this check.
+# ADVISORY (non-fatal, no exit 1): a smoke failure here would auto-rollback, but rollback restores
+# the previous RELEASE, not the curated Hermes skill state — it cannot repair a curator-removed
+# foundation skill. The operator running this deploy sees the loud WARN + the fix.
 if [ -x /usr/local/bin/credential-minimized-readiness ]; then
-    "$PY" /usr/local/bin/credential-minimized-readiness --format text || true
+    _readiness_out="$("$PY" /usr/local/bin/credential-minimized-readiness --format text 2>&1 || true)"
+    echo "$_readiness_out"
+    if echo "$_readiness_out" | grep -q "but NOT live"; then
+        echo "⚠  POST-RESTART FOUNDATION-LOAD: a foundation skill is present in the bundled Hermes" >&2
+        echo "   lib but NOT live (/root/.hermes/skills) — the running gateway (live-only loader) is" >&2
+        echo "   NOT loading it (see the 'but NOT live' line(s) above). This deploy still completed;" >&2
+        echo "   re-run the Hermes skills sync (setup-hermes.sh / skills_sync) to restore it. Advisory" >&2
+        echo "   — not rolling back (rollback restores the release, not the Hermes skill state)." >&2
+    else
+        echo "✓ post-restart foundation-load check: all foundation skills live"
+    fi
 fi
 
 # 2a.1 Production-pilot readiness report. Informational only: customer
