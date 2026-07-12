@@ -132,22 +132,27 @@ def flyer_canonical_identity_key(chat_id: str, phone: Optional[str] = None) -> s
 # → NOT admitted (byte-identical deterministic net). A literal `*` entry
 # graduates every chat — an EXPLICIT opt-in, never the empty-list flip.
 #
-# SAFETY COUPLING (operator gate, enforced procedurally — see the Phase-1
-# report): a chat MUST NOT be admitted to CONVERSE unless the gateway-send
-# enforcement tier (FRONT_BRAIN_OUTBOUND_ENFORCE) also covers it, or the LLM's
-# free-form replies would leave un-screened. This function intentionally does
-# NOT read the enforce flag (keeps the two flags independently testable); the
-# coupling is an operator responsibility surfaced loudly at rollout.
+# HARD SAFETY COUPLING (2026-07-12, reviewers agreed): CONVERSE must be
+# IMPOSSIBLE to arm without its outbound screen. A chat is admitted ONLY when BOTH
+# hold: (1) the CONVERSE flag+allowlist admit it, AND (2) the gateway-send
+# enforcement tier (FRONT_BRAIN_OUTBOUND_ENFORCE + its allowlist) also admits it —
+# otherwise the LLM's free-form replies would leave un-screened. The enforcement
+# admission uses the SAME predicate the gateway-send wrap uses
+# (safe_io.front_brain_outbound_enforce_enabled), so the two can never diverge.
+# Fail-CLOSED if safe_io is unimportable (can't confirm the screen covers the
+# chat -> do NOT converse).
 FRONT_BRAIN_CONVERSE_FLAG_ENV = "FRONT_BRAIN_CONVERSE"
 FRONT_BRAIN_CONVERSE_CHATS_ENV = "FRONT_BRAIN_CONVERSE_CHATS"
 
 
 def front_brain_converse_admits(chat_id: str, phone: Optional[str] = None) -> bool:
-    """True when `chat_id` is in the Phase-1 conversational pilot cohort.
+    """True when `chat_id` is in the Phase-1 conversational pilot cohort AND the
+    outbound enforcement tier covers it (hard coupling — see module note).
 
-    Fail-closed on every ambiguity (see module note). Never raises — a broken
-    identity helper or malformed env degrades to NOT admitted, preserving the
-    deployed deterministic behavior."""
+    Fail-closed on every ambiguity. Never raises — a broken identity helper,
+    malformed env, or unimportable safe_io degrades to NOT admitted, preserving
+    the deployed deterministic behavior AND guaranteeing converse never arms
+    without its screen."""
     try:
         if os.environ.get(FRONT_BRAIN_CONVERSE_FLAG_ENV, "") != "1":
             return False
@@ -156,16 +161,28 @@ def front_brain_converse_admits(chat_id: str, phone: Optional[str] = None) -> bo
             for p in os.environ.get(FRONT_BRAIN_CONVERSE_CHATS_ENV, "").split(",")
             if p.strip()
         ]
-        if "*" in raw_entries:  # explicit graduation to every chat
-            return True
-        if not raw_entries:  # empty allowlist DISABLES (never global-on)
+        if "*" in raw_entries:  # explicit graduation of the CONVERSE allowlist
+            converse_ok = True
+        elif not raw_entries:  # empty allowlist DISABLES (never global-on)
             return False
-        want = flyer_canonical_identity_key(chat_id, phone)
-        if not want:
+        else:
+            want = flyer_canonical_identity_key(chat_id, phone)
+            if not want:
+                return False
+            allow = {flyer_canonical_identity_key(entry) for entry in raw_entries}
+            allow.discard("")
+            converse_ok = want in allow
+        if not converse_ok:
             return False
-        allow = {flyer_canonical_identity_key(entry) for entry in raw_entries}
-        allow.discard("")
-        return want in allow
+        # HARD COUPLING: the same chat must ALSO be admitted by the outbound
+        # enforcement tier, or its LLM replies would send un-screened. Single
+        # source of truth = the exact predicate the gateway-send wrap consults.
+        try:
+            _ensure_platform_path()
+            from safe_io import front_brain_outbound_enforce_enabled  # type: ignore
+        except Exception:
+            return False  # cannot confirm the screen covers this chat
+        return bool(front_brain_outbound_enforce_enabled(chat_id))
     except Exception:
         return False
 

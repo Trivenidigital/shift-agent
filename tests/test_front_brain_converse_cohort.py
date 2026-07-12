@@ -1,17 +1,28 @@
-"""Front-brain Phase-1 conversational cohort admission (item 1).
+"""Front-brain Phase-1 conversational cohort admission (item 1 + hard coupling).
 
 actions.front_brain_converse_admits gates the hooks-side yield. It is
-canonical-identity-aware (#615 flyer_canonical_identity_key) and fail-closed.
-Pure env + identity logic (no fcntl), so this runs on Windows AND Docker.
+canonical-identity-aware (#615 flyer_canonical_identity_key), fail-closed, and
+HARD-COUPLED to the outbound enforcement tier: a chat is admitted ONLY when the
+CONVERSE flag+allowlist AND the FRONT_BRAIN_OUTBOUND_ENFORCE tier both admit it,
+so CONVERSE can never arm without its screen.
+
+The coupling consults safe_io.front_brain_outbound_enforce_enabled (single source
+of truth); safe_io imports fcntl -> Docker python:3.11-slim, not Windows.
 """
 from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import platform
 import sys
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="converse<->enforce coupling consults safe_io (fcntl only)",
+)
 
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = REPO / "src" / "plugins" / "cf-router"
@@ -34,45 +45,77 @@ actions = _load_actions()
 CHAT = "17329837841@c.us"
 
 
-def _enable(monkeypatch, chats):
-    monkeypatch.setenv("FRONT_BRAIN_CONVERSE", "1")
-    monkeypatch.setenv("FRONT_BRAIN_CONVERSE_CHATS", chats)
+def _set(monkeypatch, *, converse=None, converse_chats=None, enforce=None, enforce_allow=None):
+    for k, v in (
+        ("FRONT_BRAIN_CONVERSE", converse),
+        ("FRONT_BRAIN_CONVERSE_CHATS", converse_chats),
+        ("FRONT_BRAIN_OUTBOUND_ENFORCE", enforce),
+        ("FRONT_BRAIN_OUTBOUND_ENFORCE_ALLOWLIST", enforce_allow),
+    ):
+        if v is None:
+            monkeypatch.delenv(k, raising=False)
+        else:
+            monkeypatch.setenv(k, v)
 
+
+def _both(monkeypatch, converse_chats=CHAT, enforce_allow=CHAT):
+    _set(monkeypatch, converse="1", converse_chats=converse_chats,
+         enforce="1", enforce_allow=enforce_allow)
+
+
+# ── base admission ───────────────────────────────────────────────────────────
 
 def test_disabled_by_default(monkeypatch):
-    monkeypatch.delenv("FRONT_BRAIN_CONVERSE", raising=False)
-    monkeypatch.delenv("FRONT_BRAIN_CONVERSE_CHATS", raising=False)
+    _set(monkeypatch)
     assert actions.front_brain_converse_admits(CHAT) is False
 
 
-def test_flag_on_empty_allowlist_disables(monkeypatch):
-    _enable(monkeypatch, "")
+def test_converse_flag_off_denies(monkeypatch):
+    _set(monkeypatch, converse=None, converse_chats=CHAT, enforce="1", enforce_allow=CHAT)
     assert actions.front_brain_converse_admits(CHAT) is False
 
 
-def test_flag_off_with_allowlist_still_disabled(monkeypatch):
-    monkeypatch.delenv("FRONT_BRAIN_CONVERSE", raising=False)
-    monkeypatch.setenv("FRONT_BRAIN_CONVERSE_CHATS", CHAT)
+def test_empty_converse_allowlist_denies(monkeypatch):
+    _both(monkeypatch, converse_chats="")
     assert actions.front_brain_converse_admits(CHAT) is False
 
 
-def test_membership_admits_only_listed_chat(monkeypatch):
-    _enable(monkeypatch, "+1 732 983 7841")
-    # canonical key collapses JID/punctuation/+ so the listed number matches
+def test_both_admit_returns_true(monkeypatch):
+    _both(monkeypatch, converse_chats="+1 732 983 7841", enforce_allow="+17329837841")
     assert actions.front_brain_converse_admits(CHAT) is True
     assert actions.front_brain_converse_admits("19999999999@c.us") is False
 
 
-def test_wildcard_graduates_every_chat(monkeypatch):
-    _enable(monkeypatch, "*")
-    assert actions.front_brain_converse_admits("anyone@c.us") is True
-    assert actions.front_brain_converse_admits("74290284261595@lid") is True
+# ── HARD COUPLING: converse impossible without its screen ────────────────────
+
+def test_converse_admits_but_enforce_off_denies(monkeypatch):
+    # CONVERSE would admit, but the outbound screen is OFF -> DENY (never converse
+    # without enforcement covering the reply).
+    _set(monkeypatch, converse="1", converse_chats=CHAT, enforce=None, enforce_allow=CHAT)
+    assert actions.front_brain_converse_admits(CHAT) is False
 
 
-def test_lid_and_phone_converge_when_cache_maps(monkeypatch, tmp_path):
-    # A LID whose phone the lid-cache knows resolves to the SAME cohort decision
-    # as the phone-JID (the #615 LID<->phone convergence): allowlist the phone,
-    # a mapped LID is admitted too.
+def test_converse_admits_but_chat_not_in_enforce_allowlist_denies(monkeypatch):
+    _both(monkeypatch, converse_chats=CHAT, enforce_allow="15550001111")
+    assert actions.front_brain_converse_admits(CHAT) is False
+
+
+def test_enforce_wildcard_satisfies_coupling(monkeypatch):
+    _both(monkeypatch, converse_chats=CHAT, enforce_allow="*")
+    assert actions.front_brain_converse_admits(CHAT) is True
+
+
+def test_converse_wildcard_still_capped_by_enforce_allowlist(monkeypatch):
+    # CONVERSE graduates all chats, but enforcement only admits the listed chat,
+    # so converse is capped to that chat.
+    _both(monkeypatch, converse_chats="*", enforce_allow="+17329837841")
+    assert actions.front_brain_converse_admits(CHAT) is True
+    assert actions.front_brain_converse_admits("18005551234@c.us") is False
+
+
+# ── canonical identity (LID<->phone convergence) with enforce=* ──────────────
+
+def test_lid_and_phone_converge_on_converse_side(monkeypatch, tmp_path):
     lid = "111222333444@lid"
     cache = tmp_path / "lid-cache.json"
     cache.write_text(
@@ -80,15 +123,11 @@ def test_lid_and_phone_converge_when_cache_maps(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     monkeypatch.setenv("SHIFT_AGENT_LID_CACHE_PATH", str(cache))
-    _enable(monkeypatch, "+17329837841")
+    _both(monkeypatch, converse_chats="+17329837841", enforce_allow="*")
     assert actions.front_brain_converse_admits(lid) is True
-    # an unmapped LID with the same allowlist is NOT admitted
     assert actions.front_brain_converse_admits("999888777666@lid") is False
 
 
-def test_blank_chat_id_not_admitted(monkeypatch):
-    _enable(monkeypatch, "*")
-    # `*` graduates every chat by design; a blank id under a specific allowlist
-    # fails closed.
-    _enable(monkeypatch, CHAT)
+def test_blank_chat_denied(monkeypatch):
+    _both(monkeypatch, converse_chats=CHAT, enforce_allow=CHAT)
     assert actions.front_brain_converse_admits("") is False
