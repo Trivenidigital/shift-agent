@@ -962,11 +962,69 @@ def _join_parts_for_preview(parts: list[str]) -> str:
     return "\n".join(str(p or "") for p in parts if p)
 
 
+# Regulated-send lint fallback (2026-07-12, F0222 SILENCE incident). When a
+# NON-money regulated send (clarification / revision / informational) trips the
+# forbidden-completion lint, the chokepoint substitutes this safe generic reply
+# instead of DROPPING the send — silence is worse than a safe acknowledgment.
+# Deliberately makes NO completion claim and NO money claim, so it passes the
+# lint itself (asserted by test). Genuine money/payment/approval sends still
+# HARD-BLOCK (see _action_context_is_money_or_approval) — money safety unchanged.
+REGULATED_LINT_SAFE_FALLBACK = (
+    "Thanks — I've noted your change and I'm working on it. "
+    "I'll follow up here shortly."
+)
+
+# Sentinel placed in the err-slot of the refusal tuple by
+# _enforce_action_context_policy on a NON-money lint violation when the caller
+# opted into fallback substitution (allow_fallback=True). bridge_post recognizes
+# it and sends REGULATED_LINT_SAFE_FALLBACK (or the caller's fallback_template)
+# instead of returning the refusal. Media/CTA callers do NOT opt in, so they
+# never see this sentinel and keep the pre-existing hard block.
+_REGULATED_LINT_FALLBACK_SENTINEL = "__regulated_lint_fallback__"
+
+# action_id substrings marking a send as money / payment / approval. A lint
+# violation on any of these HARD-BLOCKS (never substitutes a fallback),
+# preserving the money-safety spine. Everything else (clarification / revision /
+# informational project sends) gets a safe fallback instead of silence.
+_MONEY_ACTION_ID_MARKERS: tuple[str, ...] = (
+    "billing",
+    "payment",
+    "plan_change",
+    "charge",
+    "refund",
+    "invoice",
+    "deposit",
+    "checkout",
+    "subscription",
+    "payout",
+    "activation",
+    "approve",
+    "approval",
+)
+
+
+def _action_context_is_money_or_approval(
+    action_context: Optional[ActionExecutionContext],
+) -> bool:
+    """Conservative money/payment/approval classifier for the regulated-lint
+    fallback decision (2026-07-12, F0222). Fail-safe TOWARD money: unknown
+    context, an externally-irreversible mutation_class, or any money/approval
+    marker in the action_id → hard block (no fallback). Only clearly non-money
+    regulated sends get a safe fallback in place of silence."""
+    if action_context is None:
+        return True  # unreachable here (None-context refuses upstream); fail-safe
+    if getattr(action_context, "mutation_class", None) == "external_irreversible":
+        return True
+    aid = (getattr(action_context, "action_id", "") or "").lower()
+    return any(marker in aid for marker in _MONEY_ACTION_ID_MARKERS)
+
+
 def _enforce_action_context_policy(
     *,
     message_parts: list[str],
     jid: str,
     action_context: Optional[ActionExecutionContext],
+    allow_fallback: bool = False,
 ) -> Optional[Tuple[bool, str, str, str]]:
     """Apply PR-ζ chokepoint discipline. Returns a refusal tuple, or None
     if the send is allowed.
@@ -976,8 +1034,14 @@ def _enforce_action_context_policy(
     the context shape — an allowlisted None-context send is by definition
     not a regulated-action-completion claim).
 
-    PR-ζ commit 3 wires the null-context branch only. Commit 4 adds the
-    lint dispatch for the regulated branch.
+    allow_fallback (2026-07-12, F0222 SILENCE incident): when True AND the lint
+    fails for a NON-money regulated send, the refusal tuple carries
+    _REGULATED_LINT_FALLBACK_SENTINEL in the err slot so the caller (bridge_post)
+    can substitute a safe fallback reply instead of dropping the send. A genuine
+    money/payment/approval send (per _action_context_is_money_or_approval) always
+    returns the hard-block "lint_violation" refusal regardless of allow_fallback.
+    The lint-violation audit row is emitted either way (observability preserved).
+    Default False preserves the hard-block behavior for the media/CTA callers.
     """
     if action_context is None:
         caller = _resolve_caller_script_name()
@@ -1039,6 +1103,13 @@ def _enforce_action_context_policy(
         )
         if audit_err is not None:
             return False, "", f"audit_write_failed: {audit_err}", "refused"
+        # 2026-07-12 (F0222) — a lint violation must NOT leave the customer in
+        # silence. For a NON-money regulated send the caller (bridge_post, via
+        # allow_fallback) substitutes a safe generic reply; a genuine money /
+        # payment / approval send still HARD-BLOCKS (money safety unchanged).
+        # The lint-violation audit above is emitted either way (observability).
+        if allow_fallback and not _action_context_is_money_or_approval(action_context):
+            return False, "", _REGULATED_LINT_FALLBACK_SENTINEL, "refused"
         return False, "", "lint_violation", "refused"
 
     return None  # passed lint, send proceeds
@@ -1434,12 +1505,34 @@ def bridge_post(
         action_context=action_context,
     )
     # PR-ζ chokepoint discipline. Refuses + emits audit row when None-context
-    # caller is not allowlisted; commit 4 adds the lint dispatch.
+    # caller is not allowlisted; runs the PR-γ lint on regulated sends. A NON-
+    # money lint violation is turned into a safe fallback here (F0222) instead
+    # of a dropped send; money/payment/approval violations still hard-block.
     refusal = _enforce_action_context_policy(
         message_parts=[message], jid=jid, action_context=action_context,
+        allow_fallback=True,
     )
     if refusal is not None:
-        return refusal
+        if refusal[2] == _REGULATED_LINT_FALLBACK_SENTINEL:
+            # Non-money regulated send tripped the lint. Substitute a safe reply
+            # (caller-supplied template if any, else the generic ack) and send
+            # it — the customer is never left in silence. The lint-violation
+            # audit was already emitted inside the policy check.
+            message = (
+                fallback_template
+                if (fallback_template and str(fallback_template).strip())
+                else REGULATED_LINT_SAFE_FALLBACK
+            )
+            try:
+                sys.stderr.write(
+                    "PR-ζ regulated lint refused a non-money send; substituting "
+                    "safe fallback (no silence)\n"
+                )
+            except Exception:
+                pass
+            # fall through to send the safe fallback `message`
+        else:
+            return refusal
     payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
     req = urllib.request.Request(
         BRIDGE_URL, data=payload,

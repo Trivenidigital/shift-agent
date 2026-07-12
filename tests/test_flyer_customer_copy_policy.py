@@ -76,16 +76,21 @@ def helper(actions, chat_id, project_id):
 
 
 def test_pr_gamma_forbidden_completion_verbs_list_complete():
-    """Lock the canonical PR-γ verb list (17 verbs covering completion claims
-    for billing/payment/account/schedule/delivery)."""
+    """Lock the canonical verb list (16 verbs covering completion claims for
+    billing/payment/account/schedule/delivery). Bare "applied" was REMOVED
+    2026-07-12 (F0222 SILENCE incident — it over-matched customer echoes); its
+    money-claim risk moved to FORBIDDEN_COMPLETION_PHRASES."""
     expected = {
         "processed", "completed", "upgraded", "downgraded", "changed",
         "confirmed", "sent", "approved", "paid", "posted", "pushed",
-        "applied", "scheduled", "booked", "cancelled", "canceled", "refunded",
+        "scheduled", "booked", "cancelled", "canceled", "refunded",
     }
     assert set(policy.FORBIDDEN_COMPLETION_VERBS) == expected
+    assert "applied" not in {v.lower() for v in policy.FORBIDDEN_COMPLETION_VERBS}
     # Tuple, not set — preserves declared order for stable test iteration.
     assert isinstance(policy.FORBIDDEN_COMPLETION_VERBS, tuple)
+    # Money-context "applied" phrases retained (multiword — never echo-match).
+    assert "discount applied" in {p.lower() for p in policy.FORBIDDEN_COMPLETION_PHRASES}
 
 
 def test_pr_gamma_lint_no_unverified_completion_catches_each_verb():
