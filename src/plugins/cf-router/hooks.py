@@ -20,6 +20,7 @@ Multi-plugin: gateway iterates results; first action != "allow" wins.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -3656,6 +3657,20 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
             subprocess_rc=2, detail=detail[:500],
         )
         return None
+
+    # Style-transfer derivation (Workstream A save-time trigger, 2026-07-11):
+    # best-effort, fire-and-forget, gated on the feature flag so it is dormant
+    # until armed. The derivation runs as a DETACHED subprocess — the customer's
+    # brand-asset-saved ack (below) is never blocked or delayed, and any failure
+    # fails open to no-derived-style (render falls back to the register voice).
+    # The script targets active templates lacking a derived_style, so a logo
+    # upload is a cheap no-op. `customer_id` is only present once the account
+    # exists (pending onboarding assets are picked up by --backfill-all later).
+    if os.environ.get("FLYER_BRAND_STYLE_TRANSFER") == "1" and result.get("customer_id"):
+        try:
+            actions.spawn_derive_flyer_brand_style(str(result.get("customer_id")))
+        except Exception:  # noqa: BLE001 — derivation is best-effort; never touch the ack
+            pass
 
     reply = result.get("reply_text") or "Flyer Studio\n------------\nBrand asset saved."
     if active_project is not None:

@@ -1888,6 +1888,12 @@ def validate_text_manifest_file(
 
 def _brand_asset_prompt(project: FlyerProject) -> str:
     active_assets = [*_active_brand_assets(project), *_project_reference_assets(project)]
+    if _brand_style_transfer_enabled(project):
+        # The "honor brand assets" list narrows to LOGO identity when style
+        # transfer is active: the template is style-transferred (derived
+        # directives), never honored as identity, so it must not appear here as a
+        # "saved template reference" the model would reproduce.
+        active_assets = [a for a in active_assets if getattr(a, "kind", "") != "template"]
     if not active_assets:
         return "- none"
     style_only = _style_only_reference_requested(project)
@@ -1933,6 +1939,11 @@ def _looks_like_owned_logo_asset(asset: FlyerAsset) -> bool:
 
 def _generation_brand_assets(project: FlyerProject):
     assets = _active_brand_assets(project)
+    if _brand_style_transfer_enabled(project):
+        # Style transfer (load-bearing invariant): a `kind: template` asset is
+        # consumed as DERIVED STYLE directives, NEVER attached as a raw generation
+        # input (the wrong-brand-masthead vector). Logos keep identity-reference mode.
+        assets = [asset for asset in assets if getattr(asset, "kind", "") != "template"]
     if not _style_only_reference_requested(project):
         return assets
     return [
@@ -2306,36 +2317,159 @@ def _style_registers_active(project: FlyerProject) -> bool:
         return False
 
 
-def _style_register_parts(project: FlyerProject) -> tuple[str, str, str]:
-    """(register_block, typeset_copy_section, ban_line) for the flag-on path.
-    Occasion/intensity plumb in at commit 3; until then register-only, accent.
-    All fact text enters VERBATIM from locked facts — the spec only assigns
-    typographic roles (leak-proofed two-section shape, R2.6 evidence)."""
+# ── Brand style-transfer (Workstream A/C, 2026-07-11) ───────────────────────
+# A `kind: template` asset the customer uploaded as "make mine look like this" is
+# consumed as DERIVED STYLE (palette/typography/energy/motifs), never attached as
+# a raw generation input. The flag+allowlist is the kill switch; when armed, the
+# customer's derived style OUTRANKS the operator register override (O1) — the
+# override is pre-configuration, not an emergency stop.
+#
+# BOTH FLAGS REQUIRED: the derived voice only reaches the prompt via the register/
+# typeset path (_resolve_style_directives runs only when _typeset_contract_applies).
+# So FLYER_BRAND_STYLE_TRANSFER must be enabled together with FLYER_STYLE_REGISTERS
+# (both flag + allowlist). Transfer alone still strips the template from attachments
+# but emits NO derived voice — a de-branded flyer — which _image_prompt surfaces as
+# a `flyer_style_transfer_stripped_no_voice` telemetry line rather than failing
+# silently.
+BRAND_STYLE_TRANSFER_ENABLED_ENV = "FLYER_BRAND_STYLE_TRANSFER"
+BRAND_STYLE_TRANSFER_ALLOWLIST_ENV = "FLYER_BRAND_STYLE_TRANSFER_ALLOWLIST"
+
+
+def _brand_style_transfer_allowlist() -> set[str]:
+    """Parse FLYER_BRAND_STYLE_TRANSFER_ALLOWLIST into a normalized set. A literal
+    ``*`` survives ``_normalize_sender`` (it strips only phone punctuation) so the
+    wildcard graduation (#612) is admitted by ``_allowlist_admits``. Empty/unset ⇒
+    empty set ⇒ DISABLED (explicit-allow, never the empty=global footgun)."""
+    raw = os.environ.get(BRAND_STYLE_TRANSFER_ALLOWLIST_ENV, "") or ""
+    return {n for n in (_normalize_sender(p) for p in raw.split(",")) if n}
+
+
+def _brand_style_transfer_enabled(project: FlyerProject) -> bool:
+    """Style-transfer gate: flag == "1" AND a NON-EMPTY allowlist AND the project's
+    customer phone is admitted (``*`` wildcard supported). Empty/unset allowlist ⇒
+    DISABLED (never global). Flag-off ⇒ byte-identical legacy render+attachments."""
+    if os.environ.get(BRAND_STYLE_TRANSFER_ENABLED_ENV) != "1":
+        return False
+    allow = _brand_style_transfer_allowlist()
+    if not allow:
+        return False  # explicit-allow: empty allowlist disables, never global
+    return _allowlist_admits(project, allow)
+
+
+def _active_derived_style(project: FlyerProject):
+    """The derived style to apply, or None. Only when style-transfer is enabled for
+    this customer AND an active `kind: template` asset carries a `derived_style`
+    (the most recent such template wins). Returns the FlyerDerivedStyle model."""
+    if not _brand_style_transfer_enabled(project):
+        return None
+    derived = None
+    for asset in _active_brand_assets(project):
+        if getattr(asset, "kind", "") == "template" and getattr(asset, "derived_style", None):
+            derived = asset.derived_style  # last (most recently appended) wins
+    return derived
+
+
+def _has_active_template(project: FlyerProject) -> bool:
+    """True if the customer has an active `kind: template` asset (which style
+    transfer strips from generation attachments). Used by the flag-coupling
+    telemetry to detect a stripped-but-no-derived-voice de-branding."""
+    return any(getattr(a, "kind", "") == "template" for a in _active_brand_assets(project))
+
+
+def _derived_style_block(derived, *, occasion: str, intensity: str) -> tuple[str, list[str]]:
+    """Build the derived-style art-direction block + its leak vocabulary. This
+    REPLACES the register block (ONE style voice — never the canned register text
+    alongside it); occasion/intensity still compose on top UNCHANGED. Carries no
+    fact-like content (the derivation screens already enforced the no-fact law)."""
     try:
-        from style_registers import (DEFAULT_REGISTER, forbidden_substrings_for,
-                                     style_prompt_block)  # type: ignore
+        from style_registers import (DEFAULT_REGISTER, INTENSITIES, OCCASIONS,
+                                     REGISTERS, forbidden_substrings_for)  # type: ignore
     except ImportError:
-        from agents.flyer.style_registers import (DEFAULT_REGISTER,
+        from agents.flyer.style_registers import (DEFAULT_REGISTER, INTENSITIES,
+                                                  OCCASIONS, REGISTERS,
+                                                  forbidden_substrings_for)
+    base_register = (getattr(derived, "base_register", "") or "").strip()
+    lines = [
+        "ART DIRECTION - DERIVED BRAND STYLE (customer style transfer): reproduce the "
+        "LOOK and feel derived from the customer's OWN saved template - never copy any "
+        "text, logo, business name, or contact details from it."
+    ]
+    palette = [str(p).strip() for p in (getattr(derived, "palette", []) or []) if str(p).strip()]
+    if palette:
+        lines.append("PALETTE: lead with " + ", ".join(palette) + ".")
+    typo = (getattr(derived, "typography", "") or "").strip()
+    if typo and base_register in REGISTERS:
+        lines.append(f"TYPOGRAPHY: {typo} headline treatment, in the spirit of the "
+                     f"{base_register} register; clean supporting text.")
+    elif typo:
+        lines.append(f"TYPOGRAPHY: {typo} headline treatment; clean supporting text.")
+    energy = (getattr(derived, "energy", "") or "balanced")
+    lines.append(f"ENERGY/DENSITY: {energy} composition.")
+    motifs = [str(m).strip() for m in (getattr(derived, "motifs", []) or []) if str(m).strip()]
+    if motifs:
+        lines.append("MOTIFS/ACCENTS: " + ", ".join(motifs) + ".")
+    lines.append("ORNAMENT DISCIPLINE: decoration frames text zones but NEVER overlaps, "
+                 "crowds, or distorts any text.")
+    block = "\n".join(lines)
+    # Occasion/intensity compose on top exactly as they do for a register.
+    if occasion in OCCASIONS:
+        level = intensity if intensity in INTENSITIES else "accent"
+        block = block + "\n\n" + OCCASIONS[occasion][level]
+    vocab_base = base_register if base_register in REGISTERS else DEFAULT_REGISTER
+    vocab = list(forbidden_substrings_for(
+        vocab_base, occasion=None if occasion == "none" else occasion))
+    return block, vocab
+
+
+def _resolve_register_block(project: FlyerProject, *, occasion: str,
+                            intensity: str) -> tuple[str, list[str]]:
+    """Single style-precedence resolution point (Workstream C). Precedence (O1):
+      1. customer derived brand style (style-transfer flag+allowlist + active
+         template with derived_style) → REPLACES the register block; one style
+         voice; occasion/intensity compose on top.
+      2. FLYER_STYLE_REGISTER_OVERRIDE (operator pre-configuration).
+      3. DEFAULT_REGISTER.
+    The env override is pre-configuration, not an emergency stop — the flag+
+    allowlist is the kill switch — so customer derived style outranks it. Returns
+    (register_block, forbidden_substrings)."""
+    try:
+        from style_registers import (DEFAULT_REGISTER, REGISTERS,
+                                     forbidden_substrings_for, style_prompt_block)  # type: ignore
+    except ImportError:
+        from agents.flyer.style_registers import (DEFAULT_REGISTER, REGISTERS,
                                                   forbidden_substrings_for,
                                                   style_prompt_block)
-    occasion = str(getattr(project, "occasion", "none") or "none")
+    derived = _active_derived_style(project)
+    if derived is not None:
+        return _derived_style_block(derived, occasion=occasion, intensity=intensity)
     # Operator override knobs (C2 tranche-2 live exhibits; seed of the catalog
     # era's per-customer register config). NO brief-text mapping exists — a
     # non-default register/intensity is always SERVER-SIDE PRE-CONFIGURATION,
     # and exhibit ledger rows must say so. Fail-closed: invalid values compose
     # the default register at accent, byte-identical to unset.
-    try:
-        from style_registers import REGISTERS as _REGS  # type: ignore
-    except ImportError:
-        from agents.flyer.style_registers import REGISTERS as _REGS
     _reg_override = os.environ.get("FLYER_STYLE_REGISTER_OVERRIDE", "").strip()
-    register = _reg_override if _reg_override in _REGS else DEFAULT_REGISTER
-    _int_override = os.environ.get("FLYER_STYLE_INTENSITY_OVERRIDE", "").strip()
-    intensity = _int_override if _int_override in ("accent", "full") else "accent"
+    register = _reg_override if _reg_override in REGISTERS else DEFAULT_REGISTER
     if occasion == "none":
         register_block = style_prompt_block(register)
     else:
         register_block = style_prompt_block(register, occasion=occasion, intensity=intensity)
+    vocab = list(forbidden_substrings_for(
+        register, occasion=None if occasion == "none" else occasion))
+    return register_block, vocab
+
+
+def _resolve_style_directives(project: FlyerProject) -> tuple[str, str, str]:
+    """(register_block, typeset_copy_section, ban_line) for the flag-on path.
+    The register_block is resolved by precedence (customer derived style >
+    override > default; see _resolve_register_block); the typeset copy section is
+    independent of which style voice won. All fact text enters VERBATIM from
+    locked facts — the spec only assigns typographic roles (leak-proofed
+    two-section shape, R2.6 evidence)."""
+    occasion = str(getattr(project, "occasion", "none") or "none")
+    _int_override = os.environ.get("FLYER_STYLE_INTENSITY_OVERRIDE", "").strip()
+    intensity = _int_override if _int_override in ("accent", "full") else "accent"
+    register_block, vocab_entries = _resolve_register_block(
+        project, occasion=occasion, intensity=intensity)
 
     # F1 (PR #544): build from the LEGACY fact selectors so every required
     # locked fact QA demands is present — _poster_copy_plan covers title
@@ -2416,8 +2550,7 @@ def _style_register_parts(project: FlyerProject) -> tuple[str, str, str]:
         f"HOW TO SET EACH LINE (instructions for you - these words are NEVER painted):\n{sec2}"
         f"{uniform_discipline}"
     )
-    vocab = ", ".join(forbidden_substrings_for(
-        register, occasion=None if occasion == "none" else occasion))
+    vocab = ", ".join(vocab_entries)
     ban_line = (
         "- Instruction and style vocabulary must NEVER appear as visible text in the art "
         f"(includes: {vocab}); no list numbering digits; no field names or key:value notation."
@@ -2433,6 +2566,11 @@ def _image_prompt(project: FlyerProject, *, concept_id: str, output_format: str,
     if _style_only_reference_requested(project):
         brand_quality_line = "- Use only the registered customer identity and controlled customer copy as identity source."
         reference_quality_line = "- For this reference-only request, do NOT preserve source/reference branding or text; treat references as inspiration only."
+    elif _brand_style_transfer_enabled(project):
+        # Style transfer narrows "honor brand assets" to logo identity: the saved
+        # template's LOOK is derived separately, its text/branding must not recur.
+        brand_quality_line = "- If a customer logo is listed, preserve only the business logo identity; the visual style is derived separately from the customer's saved template - do not reproduce that template's text, logo, or branding."
+        reference_quality_line = "- If an uploaded reference image/template is attached, preserve its visual identity and offer category but replace stale readable facts with the controlled customer copy above."
     else:
         brand_quality_line = "- If customer brand assets are listed, preserve the business identity and use the active logo/template as the visual reference."
         reference_quality_line = "- If an uploaded reference image/template is attached, preserve its visual identity and offer category but replace stale readable facts with the controlled customer copy above."
@@ -2535,7 +2673,7 @@ Autonomous repair instruction:
         project, force_background_only=force_background_only)
     if _registers_on:
         try:
-            _reg_block, _typeset_section, _ban_line = _style_register_parts(project)
+            _reg_block, _typeset_section, _ban_line = _resolve_style_directives(project)
         except Exception:  # noqa: BLE001 — F5: symbol-missing skew -> legacy, never crash
             _registers_on = False
     if _registers_on:
@@ -2549,6 +2687,27 @@ Autonomous repair instruction:
             + _poster_copy_block(project, force_background_only=force_background_only)
         )
         ban_segment = ""
+    # MAJOR-2 flag-coupling telemetry: style transfer strips the customer's template
+    # from generation attachments independently of the register/typeset machinery.
+    # If a template was stripped but NO derived voice reached this prompt — because
+    # FLYER_STYLE_REGISTERS is off (the misconfiguration), the derived_style is not
+    # yet present (derivation pending/failed), or this is a non-typeset render path
+    # — the flyer silently loses its brand style. Surface it (precise-fallback-reason
+    # convention). Observability only; never alters the prompt.
+    if _brand_style_transfer_enabled(project) and _has_active_template(project):
+        _derived_voice = _registers_on and _active_derived_style(project) is not None
+        if not _derived_voice:
+            if not _style_registers_active(project):
+                _tx_reason = "style_registers_off"
+            elif _active_derived_style(project) is None:
+                _tx_reason = "derived_style_absent"
+            else:
+                _tx_reason = "non_typeset_render_path"
+            sys.stderr.write(
+                "flyer_style_transfer_stripped_no_voice "
+                f"project={getattr(project, 'project_id', '')} "
+                f"customer={getattr(project, 'customer_phone', '')} reason={_tx_reason}\n"
+            )
     return f"""Create a complete, finished customer-ready poster flyer for WhatsApp delivery.
 
 Design direction: {_design_direction(project, concept_id)}.

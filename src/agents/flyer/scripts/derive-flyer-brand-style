@@ -1,0 +1,512 @@
+#!/usr/bin/env python3
+"""Derive style-transfer directives from a customer's own `kind: template` brand asset.
+
+Style transfer (Workstream A, 2026-07-11): a template the customer uploaded as
+"make mine look like this" is consumed as DERIVED STYLE (palette / typography /
+energy / motifs), never attached as a raw generation input. This script runs the
+vision structured-output call (default gateway model routing, mirrors the
+semantic_brief provider pattern), applies two screens, and persists a
+`derived_style` on the asset, with a `flyer_brand_style_derived` audit row through
+the decisions.log chokepoint.
+
+WHERE THE SAFETY ACTUALLY LIVES (read this before trusting the screens):
+  - The LOAD-BEARING WALL against the wrong-brand-masthead vector is the render's
+    ATTACHMENT EXCLUSION: when style transfer is enabled, the raw template is
+    NEVER attached as a generation input (render._generation_brand_assets), so the
+    model cannot copy its masthead/logo/text regardless of what we derive.
+  - The two screens below are a BACKSTOP on the DERIVED TEXT only — they stop
+    imported identity/fact strings from riding into the prompt as "style". They
+    are deliberately over-blocking (fail-closed): a screened derivation persists
+    NOTHING and the render falls back to the register voice. They are NOT the
+    primary defense and must not be reasoned about as if they were.
+
+The two screens (both fail-closed — a violation persists NO derived_style):
+  1. IDENTITY-IMPORT BAN — derived text must not reuse imported identity: no
+     business-name tokens (from the owning customer profile), no multi-word
+     Capitalized proper-noun phrase (a masthead — org-suffix-agnostic, so
+     "Triveni Express" is caught, not only "X Restaurant"), no non-Latin-script
+     run (Telugu/Hindi/etc. mastheads bypass an ASCII-only regex — over-block
+     them), no contact fragments (url/email), no design-tool watermarks.
+  2. NO-FACT LAW (inherited from style_registers) — derived STYLE carries no
+     digits, prices, or phones. Facts belong to the locked-facts layer exclusively.
+
+Derivation is BEST-EFFORT and fails open to "no derived style" (render falls back
+to the register voice). Provider-unavailable / screened / no-style outcomes write
+an `ok=false` audit row and persist nothing; only a hard CLI error exits nonzero.
+
+ACTIVATION REQUIRES BOTH FLAGS. The derived voice only reaches the prompt on the
+register/typeset path, so `FLYER_BRAND_STYLE_TRANSFER` MUST be enabled together
+with `FLYER_STYLE_REGISTERS` (both flag + allowlist). Transfer alone strips the
+template from attachments but emits no derived voice (a de-branded flyer); render
+surfaces that misconfiguration as a `flyer_style_transfer_stripped_no_voice`
+telemetry line (render._image_prompt).
+
+LOCK DISCIPLINE (MAJOR-3): the ~30s vision call NEVER runs under
+customers.json.lock (store-flyer-brand-asset shares that lock with a blocking,
+timeout-free fcntl). This runs in three phases: (1) briefly lock → snapshot target
+metadata → release; (2) lock-free → image read + vision + screen + build;
+(3) briefly re-lock → re-check derived_style is still absent (idempotent) → write.
+
+Modes (mutually exclusive):
+  --asset-id B####     derive that one template asset (re-derives if already set)
+  --customer-id CUST#### derive that customer's active templates lacking derived_style
+  --backfill-all       derive every active template fleet-wide lacking derived_style
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import mimetypes
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+import urllib.error
+import urllib.request
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT))
+
+from schemas import FlyerBrandStyleDerived, FlyerCustomerStore, FlyerDerivedStyle  # noqa: E402
+from pydantic import TypeAdapter  # noqa: E402
+try:
+    from safe_io import FileLock, atomic_write_text, flock, ndjson_append  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    from contextlib import contextmanager
+
+    class FileLock:  # type: ignore[no-redef]
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def __enter__(self) -> "FileLock":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def atomic_write_text(path: Path, text: str) -> None:  # type: ignore[no-redef]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    @contextmanager
+    def flock(path):  # type: ignore[no-redef]
+        yield
+
+    def ndjson_append(path: Path, entry_json: str) -> None:  # type: ignore[no-redef]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(entry_json + "\n")
+
+try:
+    from agents.flyer.openrouter_env import openrouter_key as _openrouter_key  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    try:
+        from flyer_openrouter_env import openrouter_key as _openrouter_key  # type: ignore  # noqa: E402
+    except ModuleNotFoundError:
+        def _openrouter_key() -> str:  # type: ignore[no-redef]
+            return os.environ.get("OPENROUTER_API_KEY", "").strip()
+
+
+STATE_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+# Default gateway model routing (O3): env-overridable id, default openai/gpt-4o-mini
+# via OpenRouter — mirrors the semantic_brief provider pattern exactly.
+DERIVE_STYLE_MODEL = (
+    os.environ.get("FLYER_BRAND_STYLE_MODEL")
+    or os.environ.get("HERMES_DEFAULT_MODEL")
+    or "openai/gpt-4o-mini"
+)
+DERIVE_STYLE_TIMEOUT_SEC = 30
+
+DERIVE_STYLE_PROMPT = (
+    "You are a brand-style analyst. Look at the attached marketing flyer/template image "
+    "and describe ONLY its visual STYLE so a designer could reproduce the LOOK on a "
+    "DIFFERENT flyer that has DIFFERENT content.\n"
+    "Return JSON only, matching this schema:\n"
+    "{\n"
+    '  "palette": ["2-4 named colors only, e.g. warm cream, tricolor green, saffron orange"],\n'
+    '  "typography": "headline treatment in a few words, e.g. brush-script-headline / '
+    'bold grotesque / high-contrast didone",\n'
+    '  "energy": "exactly one of: minimal | balanced | busy",\n'
+    '  "motifs": ["decorative motifs/accents, e.g. marigold border, food-photo strip"],\n'
+    '  "base_register": "closest style family as one hyphenated word if obvious, else empty"\n'
+    "}\n"
+    "HARD RULES:\n"
+    "- Describe STYLE ONLY. Do NOT copy or transcribe any TEXT, business name, logo, "
+    "tagline, address, phone number, website, price, percentage, or date from the image.\n"
+    "- Use ONLY generic descriptive words (colors, textures, layout energy, motif shapes).\n"
+    "- NEVER include digits, currency symbols, or contact details in any field.\n"
+    "- If unsure about a field, leave it blank/empty."
+)
+
+# ── Screen vocabularies (identity-import ban — a BACKSTOP, not the wall) ─────
+# These are deliberately OVER-BLOCKING (fail-closed): a hit rejects the whole
+# derivation. The real defense against a masthead is the render's attachment
+# exclusion; this only stops imported identity/fact TEXT riding in as "style".
+#
+# MASTHEAD = any multi-word Capitalized (Latin) proper-noun phrase. Org-suffix-
+# AGNOSTIC on purpose: "Triveni Express" and "Taj Palace" must be caught, not only
+# "X Restaurant". Generic lowercase style ("food-photo strip", "brush-script
+# headline") never matches; a Title-Cased palette word ("Saffron Orange") is
+# over-blocked, which is acceptable (the model is instructed to lowercase).
+_PROPER_NOUN_PHRASE_RE = re.compile(r"[A-Z][A-Za-z'’]*(?:\s+[A-Z][A-Za-z'’]*)+")
+# Design-tool / stock watermark attributions a template might carry (distinct from
+# color/style words — deliberately NOT instagram/facebook, which double as color
+# and gradient descriptors).
+_VENDOR_MARK_RE = re.compile(
+    r"\b(?:canva|photoshop|picsart|shutterstock|getty|freepik|istock|adobe\s*express)\b",
+    re.IGNORECASE,
+)
+# Contact fragments (url / email). Phone numbers carry digits and are caught by the
+# no-fact-law screen below, so this pattern stays digit-free to avoid overlap.
+_CONTACT_RE = re.compile(
+    r"https?://|www\.|@|\b[\w.+-]+@[\w-]+\.[\w-]+\b|\.(?:com|net|org|io)\b",
+    re.IGNORECASE,
+)
+# No-fact law (style_registers): no digits, currency, or percent in STYLE text.
+_FACT_RE = re.compile(r"\d|\$|₹|£|€|%")
+
+
+def _clean(value: object, *, limit: int = 200) -> str:
+    return " ".join(str(value or "").strip().split())[:limit]
+
+
+def _has_non_latin_letters(text: str) -> bool:
+    """True if any alphabetic char lies beyond Latin Extended-B (U+024F): Telugu,
+    Devanagari, Arabic, CJK, etc. Legitimate STYLE words are generic ASCII/Latin
+    (accented Latin like ``café`` is allowed); a non-Latin-script run in a style
+    field is almost certainly imported masthead text — fail-closed, over-block."""
+    return any(ch.isalpha() and ord(ch) > 0x024F for ch in text)
+
+
+def _derived_text_fields(raw: dict) -> list[str]:
+    """The human-readable STYLE fields the screens run over. `energy` is a fixed
+    Literal (never free text) and is intentionally excluded."""
+    fields: list[str] = []
+    for key in ("typography", "base_register"):
+        val = _clean(raw.get(key))
+        if val:
+            fields.append(val)
+    for key in ("palette", "motifs"):
+        for item in raw.get(key) or []:
+            val = _clean(item, limit=80)
+            if val:
+                fields.append(val)
+    return fields
+
+
+def _business_name_tokens(business_name: str) -> set[str]:
+    """Distinctive tokens of the owning business name (apostrophes are treated as
+    separators so ``Lakshmi's`` yields the base token ``lakshmi``; tiny/common
+    words are dropped so a generic 'the'/'and' never trips the screen)."""
+    stop = {"the", "and", "of", "a", "an", "co", "llc", "inc"}
+    normalized = re.sub(r"['’‘ʼ`]", " ", (business_name or "").lower())
+    return {
+        tok for tok in re.findall(r"[a-z0-9]+", normalized)
+        if len(tok) >= 4 and tok not in stop
+    }
+
+
+def _screen_derived(raw: dict, *, business_name: str) -> list[str]:
+    """Return the list of fail-closed screen hits (empty == clean). Non-empty ⇒ the
+    derivation is rejected and NO derived_style is persisted. A BACKSTOP over the
+    derived TEXT — the load-bearing masthead defense is render's attachment
+    exclusion, not this."""
+    hits: list[str] = []
+    fields = _derived_text_fields(raw)
+    joined = " ".join(fields)
+    low = joined.lower()
+
+    # Screen 1 — identity-import ban.
+    for tok in _business_name_tokens(business_name):
+        if re.search(r"\b" + re.escape(tok) + r"\b", low):
+            hits.append(f"identity_import:business_name:{tok}")
+    for m in _PROPER_NOUN_PHRASE_RE.finditer(joined):
+        # Any multi-word Capitalized proper-noun phrase is a masthead candidate,
+        # org-suffix-agnostic. Over-blocks Title-Cased style words (acceptable).
+        hits.append(f"identity_import:proper_noun:{m.group(0).strip().lower()}")
+    if any(_has_non_latin_letters(field) for field in fields):
+        hits.append("identity_import:non_latin_text")
+    for m in _VENDOR_MARK_RE.finditer(joined):
+        hits.append(f"identity_import:vendor_mark:{m.group(0).lower()}")
+    if _CONTACT_RE.search(joined):
+        hits.append("identity_import:contact_fragment")
+
+    # Screen 2 — no-fact law (no digits/prices/phones in STYLE text).
+    for field in fields:
+        m = _FACT_RE.search(field)
+        if m:
+            hits.append(f"no_fact_law:{m.group(0)}")
+
+    # De-dup while preserving order.
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for h in hits:
+        if h not in seen:
+            seen.add(h)
+            deduped.append(h)
+    return deduped
+
+
+def _build_derived_style(raw: dict, *, source_sha256: str, model: str,
+                         now: datetime) -> FlyerDerivedStyle:
+    """Coerce the (already-screened) provider dict into the strict schema. `energy`
+    is fail-closed to 'balanced' when the model returns an out-of-range value."""
+    energy = str(raw.get("energy") or "").strip().lower()
+    if energy not in {"minimal", "balanced", "busy"}:
+        energy = "balanced"
+    palette = [_clean(x, limit=40) for x in (raw.get("palette") or []) if _clean(x)][:8]
+    motifs = [_clean(x, limit=60) for x in (raw.get("motifs") or []) if _clean(x)][:12]
+    return FlyerDerivedStyle(
+        palette=palette,
+        typography=_clean(raw.get("typography"), limit=200),
+        energy=energy,  # type: ignore[arg-type]
+        motifs=motifs,
+        base_register=_clean(raw.get("base_register"), limit=60),
+        derived_at=now,
+        source_sha256=source_sha256,
+        model=model,
+    )
+
+
+def _derive_style_raw(path: Path, mime: str, *, model: str, api_key: str) -> dict | None:
+    """Vision structured-output call (mirrors reference_extract / semantic_brief).
+    Returns the parsed JSON dict, or None when the provider is unavailable or the
+    call fails — the caller treats None as 'no style extracted' (fail-open)."""
+    if not api_key or "PLACEHOLDER" in api_key:
+        return None
+    try:
+        raw = base64.b64encode(path.read_bytes()).decode("ascii")
+    except OSError:
+        return None
+    payload = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": DERIVE_STYLE_PROMPT},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{raw}"}},
+            ],
+        }],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.0,
+    }
+    req = urllib.request.Request(
+        OPENROUTER_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=DERIVE_STYLE_TIMEOUT_SEC) as resp:
+            body = resp.read().decode("utf-8")
+        doc = json.loads(body)
+        content = doc["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+    except (OSError, KeyError, IndexError, TypeError, json.JSONDecodeError,
+            urllib.error.URLError, urllib.error.HTTPError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _iter_targets(store: FlyerCustomerStore, *, asset_id: str | None,
+                  customer_id: str | None, backfill_all: bool):
+    """Yield (customer, idx, asset) template targets per the selected mode."""
+    for customer in store.customers:
+        if customer_id and customer.customer_id != customer_id:
+            continue
+        for idx, asset in enumerate(customer.brand_assets):
+            if asset.asset_id == asset_id:
+                yield customer, idx, asset
+                return
+            if asset_id:
+                continue
+            if asset.kind != "template" or not asset.active:
+                continue
+            if (backfill_all or customer_id) and asset.derived_style is not None:
+                continue  # idempotent: skip already-derived in sweep modes
+            yield customer, idx, asset
+
+
+def _find_asset(store: FlyerCustomerStore, asset_id: str):
+    """Locate a brand asset by asset_id across all customers (phase-3 re-find)."""
+    for customer in store.customers:
+        for idx, asset in enumerate(customer.brand_assets):
+            if asset.asset_id == asset_id:
+                return customer, idx, asset
+    return None, None, None
+
+
+def _emit_audit(log_path: Path, *, asset_id: str, customer_id: str, ok: bool,
+                screen_hits: list[str], model: str, now: datetime) -> None:
+    """Best-effort audit row (derivation is fail-open). A failed append is noted on
+    stderr but never aborts the sweep — unlike a state reversal, an additive
+    style-derivation is low-stakes and must not crash the customer-ack path."""
+    entry = FlyerBrandStyleDerived(
+        type="flyer_brand_style_derived", ts=now, asset_id=asset_id,
+        customer_id=customer_id, ok=ok, screen_hits=screen_hits[:50], model=model,
+    )
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with flock(log_path):
+            ndjson_append(
+                log_path,
+                TypeAdapter(FlyerBrandStyleDerived).dump_json(entry).decode("utf-8"),
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort; note but never abort
+        sys.stderr.write(
+            f"warn: flyer_brand_style_derived audit append failed for {asset_id}: {exc}\n"
+        )
+
+
+def _load_store(state_path: Path) -> FlyerCustomerStore:
+    return FlyerCustomerStore.model_validate(
+        json.loads(state_path.read_text(encoding="utf-8"))
+    )
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description="Derive style-transfer directives from a template brand asset.")
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--asset-id")
+    mode.add_argument("--customer-id")
+    mode.add_argument("--backfill-all", action="store_true")
+    p.add_argument("--model", default=DERIVE_STYLE_MODEL)
+    p.add_argument("--state-path", default=str(STATE_PATH))
+    p.add_argument("--log-path", default=str(LOG_PATH))
+    args = p.parse_args()
+
+    state_path = Path(args.state_path)
+    log_path = Path(args.log_path)
+    model = args.model or DERIVE_STYLE_MODEL
+    api_key = _openrouter_key().strip()
+    now = datetime.now(timezone.utc)
+    allow_overwrite = bool(args.asset_id)  # --asset-id is an explicit re-derive
+    lock_path = Path(str(state_path) + ".lock")
+
+    # ── Phase 1: acquire lock, SNAPSHOT target metadata, RELEASE. No network I/O
+    # happens under the lock (store-flyer-brand-asset shares it; a 30s vision call
+    # under a blocking fcntl would stall a concurrent customer upload). ──────────
+    with FileLock(lock_path):
+        if not state_path.exists():
+            sys.stderr.write(f"error: state file not found: {state_path}\n")
+            return 2
+        store = _load_store(state_path)
+        targets = list(_iter_targets(
+            store, asset_id=args.asset_id, customer_id=args.customer_id,
+            backfill_all=bool(args.backfill_all),
+        ))
+        if args.asset_id and not targets:
+            sys.stderr.write(f"error: unknown asset_id {args.asset_id!r}\n")
+            return 3
+        if args.asset_id and targets[0][2].kind != "template":
+            sys.stderr.write(
+                f"error: asset {args.asset_id} is kind={targets[0][2].kind!r}, "
+                f"not a template — style transfer applies to templates only\n"
+            )
+            return 4
+        meta = [{
+            "asset_id": asset.asset_id,
+            "customer_id": customer.customer_id,
+            "business_name": customer.business_name,
+            "path": asset.path,
+            "mime_type": asset.mime_type,
+        } for customer, _idx, asset in targets]
+    # lock released here — everything below runs lock-free until the brief write.
+
+    # ── Phase 2: LOCK-FREE per-target work (image read → vision → screen → build).
+    # Each result carries its terminal state; `derived` is the model to persist. ──
+    results: list[dict] = []
+    for m in meta:
+        cid, aid, bname = m["customer_id"], m["asset_id"], m["business_name"]
+        rec = {"asset_id": aid, "customer_id": cid, "ok": False, "screen_hits": [],
+               "derived": None}
+        source = Path(m["path"])
+        if not source.exists() or not source.is_file():
+            rec["screen_hits"] = ["source_missing"]
+            results.append(rec); continue
+        mime = (m["mime_type"] or mimetypes.guess_type(str(source))[0] or "").lower()
+        if not mime.startswith("image/"):
+            rec["screen_hits"] = ["unsupported_mime"]
+            results.append(rec); continue
+        try:
+            img_bytes = source.read_bytes()
+        except OSError:
+            rec["screen_hits"] = ["source_missing"]
+            results.append(rec); continue
+
+        raw = _derive_style_raw(source, mime, model=model, api_key=api_key)
+        if not raw:
+            rec["screen_hits"] = ["provider_unavailable"]
+            results.append(rec); continue
+        hits = _screen_derived(raw, business_name=bname)
+        if hits:
+            rec["screen_hits"] = hits
+            results.append(rec); continue
+        try:
+            derived = _build_derived_style(
+                raw, source_sha256=hashlib.sha256(img_bytes).hexdigest(),
+                model=model, now=now)
+        except Exception as exc:  # noqa: BLE001 — coercion failure ⇒ no style
+            rec["screen_hits"] = [f"build_failed:{type(exc).__name__}"]
+            results.append(rec); continue
+        if not (derived.palette or derived.typography or derived.motifs):
+            rec["screen_hits"] = ["no_style_extracted"]
+            results.append(rec); continue
+        rec["derived"] = derived  # provisional ok — confirmed in the phase-3 write
+        results.append(rec)
+
+    # ── Phase 3: briefly RE-ACQUIRE the lock, reload fresh, re-check derived_style
+    # is still absent (idempotent under a concurrent run), then write once. ───────
+    to_write = [r for r in results if r["derived"] is not None]
+    if to_write:
+        with FileLock(lock_path):
+            store = _load_store(state_path)
+            updates: dict[str, dict[int, object]] = {}
+            for r in to_write:
+                customer, idx, asset = _find_asset(store, r["asset_id"])
+                if asset is None:
+                    r["screen_hits"] = ["asset_removed_during_derivation"]
+                    continue
+                if asset.derived_style is not None and not allow_overwrite:
+                    r["ok"] = True  # a concurrent run already derived it — idempotent
+                    continue
+                updates.setdefault(customer.customer_id, {})[idx] = r["derived"]
+                r["ok"] = True
+            if updates:
+                new_customers = []
+                for row in store.customers:
+                    if row.customer_id in updates:
+                        per_idx = updates[row.customer_id]
+                        assets = [
+                            a.model_copy(update={"derived_style": per_idx[i]}) if i in per_idx else a
+                            for i, a in enumerate(row.brand_assets)
+                        ]
+                        new_customers.append(row.model_copy(update={"brand_assets": assets, "updated_at": now}))
+                    else:
+                        new_customers.append(row)
+                store.customers = new_customers
+                atomic_write_text(state_path, store.model_dump_json(indent=2))
+
+    # Audit every attempt (best-effort) once the terminal state is known.
+    for r in results:
+        _emit_audit(log_path, asset_id=r["asset_id"], customer_id=r["customer_id"],
+                    ok=r["ok"], screen_hits=r["screen_hits"], model=model, now=now)
+
+    print(json.dumps({
+        "derived": sum(1 for r in results if r["ok"]),
+        "attempted": len(results),
+        "results": [{k: v for k, v in r.items() if k != "derived"} for r in results],
+    }))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

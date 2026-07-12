@@ -109,6 +109,9 @@ def _registry():
         dict(id="style_registers", flags=["FLYER_STYLE_REGISTERS"],
              allow="FLYER_STYLE_REGISTERS_ALLOWLIST",
              call=lambda s: S.style_registers_enabled(s)),
+        dict(id="brand_style_transfer", flags=["FLYER_BRAND_STYLE_TRANSFER"],
+             allow="FLYER_BRAND_STYLE_TRANSFER_ALLOWLIST",
+             call=lambda s: R._brand_style_transfer_enabled(_proj(s))),
         # cf-router B1 shadow classifier gate: the allowlisted() helper carries
         # no internal flag (the master flag is checked at the call site), and the
         # env is *_CHATS, not *_ALLOWLIST — but it IS a sender-scoped allowlist gate.

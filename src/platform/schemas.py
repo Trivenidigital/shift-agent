@@ -1037,6 +1037,32 @@ class FlyerPlanTier(BaseModel):
         ]
 
 
+class FlyerDerivedStyle(BaseModel):
+    """Style-transfer derivation output for a ``kind: template`` brand asset (2026-07-11).
+
+    This is the INTERPRETIVE style layer: palette / typography / energy / motifs
+    derived from the customer's OWN saved template so future flyers reproduce its
+    LOOK — never its content, marks, or identity (those stay locked; see the two
+    fail-closed derivation screens in ``derive-flyer-brand-style``). Carries NO
+    fact-like content (no digits/prices/phones) — the no-fact law inherited from
+    ``style_registers`` (facts belong to the locked-facts layer exclusively).
+
+    LLM-output shape → ``extra="ignore"`` per the deployed convention (extractor
+    outputs may emit unmodelled fields). ``base_register`` optionally names the
+    register the derived look is closest to (used only for leak-vocabulary
+    selection + a typographic hint); derivation still works when it names a
+    register absent from the catalog — that is treated as bespoke directives."""
+    model_config = ConfigDict(extra="ignore")
+    palette: list[str] = Field(default_factory=list, max_length=8)
+    typography: str = Field(default="", max_length=200)
+    energy: Literal["minimal", "balanced", "busy"] = "balanced"
+    motifs: list[str] = Field(default_factory=list, max_length=12)
+    base_register: str = Field(default="", max_length=60)
+    derived_at: datetime
+    source_sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
+    model: str = Field(default="", max_length=120)
+
+
 class FlyerBrandAsset(BaseModel):
     model_config = ConfigDict(extra="forbid")
     asset_id: str = Field(pattern=r"^B\d{4,}$")
@@ -1048,6 +1074,11 @@ class FlyerBrandAsset(BaseModel):
     received_at: datetime
     active: bool = True
     notes: str = Field(default="", max_length=500)
+    # Style-transfer derivation (2026-07-11): populated for `kind: template`
+    # assets by `derive-flyer-brand-style`; absent (None) on logos and on any
+    # template whose derivation was screened/unavailable (fail-open). Additive
+    # optional field — load-compatible with every pre-existing row.
+    derived_style: Optional[FlyerDerivedStyle] = None
 
     @field_validator("path")
     @classmethod
@@ -5014,6 +5045,25 @@ class FlyerBrandAssetStateChanged(_BaseEntry):
     reason: str = Field(default="", max_length=500)
 
 
+class FlyerBrandStyleDerived(_BaseEntry):
+    """Style-transfer derivation audit (2026-07-11). One row per
+    ``derive-flyer-brand-style`` attempt on a template asset. ``ok`` is whether a
+    ``derived_style`` was persisted; ``screen_hits`` lists the fail-closed screen
+    violations (``identity_import:*`` / ``no_fact_law:*`` tokens) OR a non-screen
+    reason (``provider_unavailable``, ``source_missing``, ``unsupported_mime``,
+    ``no_style_extracted``, ``build_failed:*``, ``asset_removed_during_derivation``)
+    when nothing was persisted. (A ``kind: logo`` targeted by ``--asset-id`` is a
+    hard CLI error with no audit row, not an ``ok=false`` screen hit.) ``model`` is
+    the derivation model id. LOG-ONLY; an emit failure never blocks the save ack —
+    derivation is best-effort and fails open to no-derived-style."""
+    type: Literal["flyer_brand_style_derived"] = "flyer_brand_style_derived"
+    asset_id: str = Field(pattern=r"^B\d{4,}$")
+    customer_id: str = Field(pattern=r"^CUST\d{4,}$")
+    ok: bool
+    screen_hits: list[str] = Field(default_factory=list, max_length=50)
+    model: str = Field(default="", max_length=120)
+
+
 class CateringLeadCreated(_BaseEntry):
     type: Literal["catering_lead_created"]
     lead_id: str = Field(min_length=1)
@@ -6519,6 +6569,8 @@ LogEntry = Annotated[
         Annotated[FlyerVisualQaSkipped, Tag("flyer_visual_qa_skipped")],
         Annotated[FlyerSemanticBriefOutcome, Tag("flyer_semantic_brief_outcome")],
         Annotated[FlyerBrandAssetStateChanged, Tag("flyer_brand_asset_state_changed")],
+        # 2026-07-11 — style-transfer derivation audit (Workstream A)
+        Annotated[FlyerBrandStyleDerived, Tag("flyer_brand_style_derived")],
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
@@ -6617,7 +6669,7 @@ __all__ = [
     "FlyerFactSource", "FlyerReferenceRole", "FlyerReferenceExtractionStatus",
     "FlyerVisualQAStatus", "FlyerVisualQASource", "FlyerManualReviewStatus", "FlyerManualReviewReason",
     "FlyerAssetKind", "FLYER_TRANSITIONS", "is_flyer_transition_allowed",
-    "FlyerPlanTier", "FlyerBrandAsset", "FlyerUsageEvent", "FlyerPaymentRecord", "FlyerGuestOrder",
+    "FlyerPlanTier", "FlyerBrandAsset", "FlyerDerivedStyle", "FlyerUsageEvent", "FlyerPaymentRecord", "FlyerGuestOrder",
     "FLYER_AUTHORIZED_REQUESTER_LIMIT",
     "FlyerCustomerProfile", "FlyerOnboardingSession", "FlyerIntakeSession", "FlyerCustomerStore", "FlyerGuestOrderStore",
     "FlyerRequestFields", "FlyerLockedFact", "FlyerReferenceExtraction",
@@ -6667,7 +6719,7 @@ __all__ = [
     "FlyerRecoveryOperatorActionRequired", "FlyerRecoveryOwnerAlert",
     "FlyerUsageRecorded", "FlyerQuotaBlocked", "FlyerClosureCustomerNotified",
     "FlyerStatusResent", "FlyerManualQueueCustomerUpdate",
-    "FlyerBrandAssetStateChanged",
+    "FlyerBrandAssetStateChanged", "FlyerBrandStyleDerived",
     "Proposal", "ProposalId", "ProposalCode",
     "AwaitingProposal", "ApprovedProposal", "ReconcilingProposal", "SentProposal",
     "SendFailedProposal", "AcceptedProposal", "DeclinedProposal", "DeniedByOwnerProposal",

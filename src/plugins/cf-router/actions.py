@@ -57,6 +57,7 @@ HANDLE_SHIFT_SICK_CALL_BIN = Path("/usr/local/bin/handle-shift-sick-call")
 HANDLE_FLYER_ONBOARDING_BIN = Path("/usr/local/bin/handle-flyer-onboarding")
 HANDLE_FLYER_INTAKE_BIN = Path("/usr/local/bin/handle-flyer-intake")
 STORE_FLYER_BRAND_ASSET_BIN = Path("/usr/local/bin/store-flyer-brand-asset")
+DERIVE_FLYER_BRAND_STYLE_BIN = Path("/usr/local/bin/derive-flyer-brand-style")
 MANAGE_FLYER_ACCOUNT_BIN = Path("/usr/local/bin/manage-flyer-account")
 MANAGE_FLYER_GUEST_ORDER_BIN = Path("/usr/local/bin/manage-flyer-guest-order")
 CHECK_FLYER_REFERENCE_SCOPE_BIN = Path("/usr/local/bin/check-flyer-reference-scope")
@@ -6484,6 +6485,32 @@ def spawn_bare_flyer_render_and_send(chat_id: str, text: str, message_id: Option
         return True
     except (OSError, ValueError) as e:
         print("cf-router: bare_flyer spawn failed:", type(e).__name__, e, file=sys.stderr)
+        return False
+
+
+def spawn_derive_flyer_brand_style(customer_id: str) -> bool:
+    """Detached, fire-and-forget style-transfer derivation for a customer's active
+    templates (Workstream A save-time trigger, 2026-07-11).
+
+    Gated by the caller on ``FLYER_BRAND_STYLE_TRANSFER == "1"`` so it is dormant
+    until the feature is armed. Spawns ``derive-flyer-brand-style --customer-id``
+    (which itself only derives active templates lacking a ``derived_style``, so a
+    logo upload is a cheap no-op) and returns immediately — the customer's
+    brand-asset-saved ack has already been sent and is NEVER blocked or delayed by
+    the ~seconds vision call. Any spawn failure is swallowed (fail-open to
+    no-derived-style; render falls back to the register voice)."""
+    if not customer_id:
+        return False
+    cmd = [str(PYTHON_BIN), str(DERIVE_FLYER_BRAND_STYLE_BIN), "--customer-id", customer_id]
+    try:
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except (OSError, ValueError) as e:
+        print("cf-router: derive_flyer_brand_style spawn failed:", type(e).__name__, e, file=sys.stderr)
         return False
 
 
