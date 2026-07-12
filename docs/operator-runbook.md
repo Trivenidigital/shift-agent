@@ -86,6 +86,18 @@ the gateway's **process environment at start** — editing `.env` does nothing u
    `tr '\0' '\n' < /proc/$(systemctl show -p MainPID --value hermes-gateway)/environ | grep FLYER_`
    — confirm the new value **and** that unrelated flags survived the restart.
 
+**Flyer feature-gate graduation (`*` wildcard, added 2026-07-11 after incident F0217):**
+- Every flyer feature gate reads a `FLYER_*_ALLOWLIST` (or the cf-router `FLYER_INTENT_SHADOW_LLM_CHATS`).
+  A single literal `*` entry (e.g. `FLYER_PREMIUM_OVERLAY_ALLOWLIST=*`) graduates that gate to **all**
+  customers — the validated stack ships to every onboarded number without a per-customer env edit.
+- Semantics are uniform and fail-closed: **empty/unset = DISABLED** (unchanged), `*` = enabled-for-all
+  (explicit opt-in, composes with numbers — `*,+1732…` stays global), otherwise normalized membership.
+  `*` is NOT the empty-list flip (the ledgered premium_overlay empty=global bug stays fixed).
+- **Onboarding a new customer needs NO allowlist step** once the box's validated lists are `*`.
+  Keep **per-number** lists only for scoped rollout of a NEW, not-yet-validated feature (original use).
+- The cf-router shadow gate (`FLYER_INTENT_SHADOW_LLM_CHATS`) SUPPORTS `*` but setting it is PARKED
+  pending the B1 privacy ruling (the shadow classifier sends chat text to an LLM).
+
 **Incidents:**
 - `sed -i` on `/opt/shift-agent/.env` **destroyed the symlink** → deploy env-integrity gate
   fail-closed (2026-07-02).

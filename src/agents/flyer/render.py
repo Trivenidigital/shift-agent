@@ -3791,6 +3791,18 @@ def _normalize_sender(value: str) -> str:
     return s.casefold()
 
 
+def _allowlist_admits(project: FlyerProject, allow: set[str]) -> bool:
+    """Wildcard graduation (incident F0217, 2026-07-11): a literal ``*`` entry in
+    the allowlist admits EVERY customer — a validated feature graduated to the
+    whole fleet without a per-number env edit (onboarding cannot safely edit env
+    files at runtime). Otherwise the project's normalized customer phone must be
+    listed. The empty-allowlist ⇒ DISABLED convention is UNCHANGED and enforced by
+    callers (this is reached only with a non-empty set); ``*`` is an EXPLICIT
+    opt-in, never the empty-list global-on footgun (the ledgered premium_overlay
+    empty=global bug)."""
+    return "*" in allow or _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+
+
 def _premium_repair_allowlist() -> set[str]:
     """Parse FLYER_PREMIUM_REPAIR_ALLOWLIST (comma-separated phones/LIDs) into a
     normalized set. Empty/unset ⇒ empty set ⇒ DISABLED (explicit-allow, unified 2026-07-04)."""
@@ -3811,7 +3823,7 @@ def _premium_repair_enabled(project: FlyerProject) -> bool:
         # silently widen to every customer. All seven flyer allowlist gates
         # now share explicit-allow semantics.
         return False
-    return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+    return _allowlist_admits(project, allow)
 
 
 def _premium_overlay_allowlist() -> set[str]:
@@ -3835,7 +3847,7 @@ def _premium_overlay_enabled(project: FlyerProject) -> bool:
         # silently widen to every customer. All seven flyer allowlist gates
         # now share explicit-allow semantics.
         return False
-    return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+    return _allowlist_admits(project, allow)
 
 
 PREMIUM_DETERMINISTIC_RECOVERY_ENV = "FLYER_DETERMINISTIC_RECOVERY"
@@ -3855,7 +3867,7 @@ def _deterministic_recovery_enabled(project: FlyerProject) -> bool:
         # silently widen to every customer. All seven flyer allowlist gates
         # now share explicit-allow semantics.
         return False
-    return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+    return _allowlist_admits(project, allow)
 
 
 DETERMINISTIC_FIRST_ENV = "FLYER_DETERMINISTIC_FIRST"
@@ -3877,7 +3889,7 @@ def _deterministic_first_enabled(project: FlyerProject) -> bool:
         # silently widen to every customer. All seven flyer allowlist gates
         # now share explicit-allow semantics.
         return False
-    return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+    return _allowlist_admits(project, allow)
 
 
 CREATIVE_DIRECTOR_V2_ENV = "FLYER_CREATIVE_DIRECTOR_V2"
@@ -3903,7 +3915,7 @@ def _creative_director_v2_enabled(project: FlyerProject) -> bool:
     if not allow:
         # Empty/unset allowlist => DISABLED (scoped-rollout guard), NOT global.
         return False
-    return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+    return _allowlist_admits(project, allow)
 
 
 # ── Premium Poster v1 — flag + allowlist + N + eligibility gates ─────────────
@@ -3931,7 +3943,7 @@ def _premium_poster_v1_armed(project: FlyerProject) -> bool:
     allow = _premium_poster_v1_allowlist()
     if not allow:
         return False  # scoped-rollout guard: empty allowlist disables, never global
-    return _normalize_sender(getattr(project, "customer_phone", "") or "") in allow
+    return _allowlist_admits(project, allow)
 
 
 def _premium_poster_v1_n() -> int:

@@ -21,6 +21,19 @@ FLYER_PREMIUM_POSTER_V1_N=1
   `tr '\0' '\n' < /proc/$(systemctl show -p MainPID --value hermes-gateway)/environ | grep FLYER_PREMIUM`
 - Empty/unset allowlist **disables** the branch (scoped-rollout guard — it never
   goes global like the older overlay gates).
+- **Graduation wildcard (`*`) — added 2026-07-11 after incident F0217.** A single
+  literal `*` entry in any flyer `*_ALLOWLIST` (e.g. `FLYER_PREMIUM_POSTER_V1_ALLOWLIST=*`)
+  enables that gate for **every** customer — the mechanism that graduates a
+  validated feature to the whole fleet without a per-number env edit. `*` is an
+  EXPLICIT opt-in and composes with numbers (`*,+1732…` is still global); it is
+  **not** the empty-list flip — empty/unset still means DISABLED (fail-closed).
+  Onboarding a customer requires **no** allowlist step once the box's validated
+  lists are set to `*`. Keep **per-number** lists only for scoped rollout of a
+  NEW, not-yet-validated feature (the original, correct use). Applies to every
+  flyer gate: repair / overlay / deterministic-recovery / deterministic-first /
+  creative-director v1+v2 / poster-v1 / style-registers / skill-driven-scene /
+  bare-iteration / visible-contract, and the cf-router shadow gate (whose `*` is
+  supported but PARKED pending the B1 privacy ruling).
 
 ## Env symlink topology + restart blast radius (added 2026-07-02 after incident)
 
