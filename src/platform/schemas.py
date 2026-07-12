@@ -5711,6 +5711,14 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_bare_brief_generation_failed",
         "revenue_route_clarification_sent",
         "revenue_route_clarification_chosen",
+        # Front-brain Phase-1 (2026-07-12): the pilot cohort (FRONT_BRAIN_CONVERSE
+        # + FRONT_BRAIN_CONVERSE_CHATS) reached a deterministic flyer intercept
+        # (vague-start / sample-prompt / intake-followup) and the cf-router hook
+        # YIELDED it to the LLM instead of answering. `detail` carries which
+        # intercept yielded. Money/#code/payment/delivery-state/brand-asset/
+        # active-project guards NEVER yield. One marker row per yield so the
+        # Phase-1 review surface can trace every hand-off to Hermes.
+        "front_brain_yielded",
         "error",
     ]
     chat_id: str = Field(min_length=1, max_length=200)
@@ -6038,6 +6046,24 @@ class FrontBrainOutboundRefused(_BaseEntry):
     hit_values: list[str] = Field(default_factory=list, max_length=20)
     message_preview: str = Field(..., max_length=120)
     template_fallback_used: bool = True
+
+
+class FrontBrainRequestQueued(_BaseEntry):
+    """A customer asked the front-brain cohort for something not yet fulfillable
+    (a theme/style change, a not-built feature) so the request was recorded in
+    the durable unfulfillable-request queue (front_brain_queue) for operator
+    follow-up — nothing a customer asks for is silently dropped. The raw text
+    lives in the queue store (operator surface); this audit row carries only a
+    bounded preview + the hashed chat key (no raw identifier in the log). The
+    queue resolves when the capability lands (e.g. style-transfer makes a theme
+    request fulfillable)."""
+    type: Literal["front_brain_request_queued"]
+    chat_key_hash: str = Field(default="", max_length=64)
+    request_kind: Literal[
+        "theme_change", "style_preference", "feature_request", "other"
+    ] = "other"
+    request_preview: str = Field(default="", max_length=280)
+    queue_size: int = Field(default=0, ge=0)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -6578,6 +6604,8 @@ LogEntry = Annotated[
         Annotated[FrontBrainReplyComposed, Tag("front_brain_reply_composed")],
         # Front-brain outbound enforcement — refusal audit (P0-3a)
         Annotated[FrontBrainOutboundRefused, Tag("front_brain_outbound_refused")],
+        # Front-brain Phase-1 — durable unfulfillable-request queue (item 5)
+        Annotated[FrontBrainRequestQueued, Tag("front_brain_request_queued")],
         # Commerce primitives slice 1 — PRD v2 §8
         Annotated[CommerceCartStarted, Tag("commerce_cart_started")],
         Annotated[CommerceCartUpdated, Tag("commerce_cart_updated")],
