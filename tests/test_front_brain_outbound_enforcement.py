@@ -46,6 +46,30 @@ CLEAN_MSG = "Happy to help with that flyer! What should it promote?"
 FALLBACK = "I couldn't finish that reply — tell me what you need and I'll help."
 
 
+@pytest.fixture(autouse=True)
+def _rebind_safe_io_to_live_module(monkeypatch):
+    """Order-determinism: test_cf_router_plugin's loader does
+    ``sys.modules.pop("safe_io")`` and reloads it under a FRESH module object.
+    This file's top-level ``import safe_io`` then points at a STALE object that
+    the conftest fake-bridge fixture no longer patches, so a later bridge_post
+    test sees the default live-bridge URL (port 3000) and trips
+    LiveBridgeSendInTestError. Re-resolve ``safe_io`` from sys.modules at call
+    time and (re)apply the fake sink to the live object so these tests pass
+    regardless of prior module reloads."""
+    global safe_io
+    if safe_io is None:  # Windows (fcntl) — module skipped anyway
+        yield
+        return
+    import sys as _sys
+    live = _sys.modules.get("safe_io") or safe_io
+    safe_io = live
+    if hasattr(live, "BRIDGE_URL"):
+        monkeypatch.setattr(
+            live, "BRIDGE_URL", "http://127.0.0.1:1/__fake_test_sink__", raising=False
+        )
+    yield
+
+
 def _read_rows(monkeypatch) -> list[dict]:
     """Rows written to the per-test isolated decisions.log (conftest autouse)."""
     import os
