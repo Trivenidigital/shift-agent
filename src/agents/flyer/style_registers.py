@@ -81,6 +81,18 @@ REGISTERS: dict[str, str] = {
         "weight. No mixed weights inside any line. ORNAMENT DISCIPLINE: decoration frames "
         "text zones but NEVER overlaps, crowds, or distorts any text."
     ),
+    "festive-vernacular": (
+        "ART DIRECTION - FESTIVE VERNACULAR register: warm cream canvas glowing with "
+        "community-restaurant hospitality; a bright TRICOLOR accent scheme of deep leaf green and "
+        "warm saffron-orange laid over the cream; appetizing food-photo hero energy with fresh "
+        "home-kitchen warmth; menu items as friendly chip rows / badge rows each carrying a small "
+        "food icon; the price in a rounded badge ringed in leaf green.\n"
+        "TYPOGRAPHY: main display headline in a BRUSH-SCRIPT hand-lettered treatment - lively "
+        "hand-painted strokes with genuine ink energy, real motion, never flat and never a stiff "
+        "system face; a slim uppercase widely-spaced top line; every chip row and badge row one "
+        "clean friendly sans at a single size. ORNAMENT DISCIPLINE: the tricolor accents and "
+        "food-photo borders frame the text zones but NEVER overlap, crowd, or distort any text."
+    ),
 }
 
 # Occasion vocabularies at both intensities. Wrong-festival is a
@@ -148,6 +160,11 @@ _BASE_FORBIDDEN = [
     # lists; damask/scrollwork/starburst/temple-motif are pure prompt jargon).
     "kolam", "paisley", "mandala", "starburst", "damask", "scrollwork",
     "temple-motif", "geometric",
+    # festive-vernacular register (Workstream B, 2026-07-11): brush-script /
+    # tricolor / community-vernacular jargon authored WITH the vocabulary. Each
+    # appears in the register prose so the screen can actually match a leak;
+    # "chip row" parallels the already-screened "badge row".
+    "brush-script", "hand-lettered", "tricolor", "vernacular", "chip row",
 ]
 _OCCASION_FORBIDDEN: dict[str, list[str]] = {
     "july4": ["bunting", "star-field", "keylines", "two-tone", "star-shaped"],

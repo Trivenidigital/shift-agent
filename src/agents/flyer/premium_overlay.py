@@ -34,6 +34,9 @@ _FONT_DIR = _resolve_font_dir()
 
 # Maps rendering role → vendored TTF filename.
 # All fonts are SIL OFL 1.1; see fonts/FONTS.md for source URLs + substitution notes.
+# NOTE: the deploy smoke font-gate (shift-agent-smoke-test.sh) iterates
+# ``set(_ROLE_FILES.values())`` — every filename here is asserted present + loadable
+# on the box, so a new vendored face registered here is gated automatically.
 _ROLE_FILES: dict[str, str] = {
     "masthead":    "PlayfairDisplay-Bold.ttf",
     "kicker":      "Montserrat-Bold.ttf",
@@ -41,6 +44,10 @@ _ROLE_FILES: dict[str, str] = {
     "offer_price": "PlayfairDisplay-Black.ttf",
     "menu":        "CormorantGaramond-SemiBold.ttf",
     "footer":      "Montserrat-SemiBold.ttf",
+    # Brush-script hand-lettered headline face for the festive-vernacular
+    # register (Workstream B). Pacifico is a STATIC single-weight OFL face — it
+    # is deliberately absent from _ROLE_WEIGHT (no wght axis to pin).
+    "script":      "Pacifico-Regular.ttf",
 }
 
 # Desired weight (CSS-style 100–900) per role, applied to the variable-font
