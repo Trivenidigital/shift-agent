@@ -154,6 +154,26 @@ def _sample_prompt_request_should_yield_to_active_project(body: str) -> bool:
     """Return True only for idea wording that clearly iterates an active flyer."""
     return bool(_ACTIVE_PROJECT_SAMPLE_IDEA_ITERATION.search(body or ""))
 
+
+def _fb_sample_prompt_request_matches(text: str) -> bool:
+    """Pure, side-effect-free predicate mirroring the top gates of
+    `_try_flyer_sample_prompt_request_intercept` (regex + preference-command +
+    brief-detail). Used ONLY to decide whether a front-brain yield at the
+    sample-prompt site is meaningful enough to record a marker row — it never
+    gates behavior, so an imperfect match just changes whether a traceability
+    row is written, never whether the LLM runs."""
+    try:
+        if actions.is_flyer_starter_prompt_preference_command(text):
+            return False
+        body = " ".join(actions.flyer_visible_message_text(text).split())
+        if not _SAMPLE_PROMPT_REQUEST.search(body):
+            return False
+        if actions.flyer_message_has_brief_detail(text):
+            return False
+        return True
+    except Exception:
+        return False
+
 # Verb classifier — mirrors the F8 watchdog's accepted verb set so plugin
 # coverage matches the watchdog it replaces. Past-tense forms ("approved",
 # "rejected") are common in owner replies and were handled by the watchdog.
@@ -350,6 +370,21 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             return revenue_choice_result
 
         if flyer_workflow_enabled:
+            # Front-brain Phase-1 conversational cohort (2026-07-12, item 2).
+            # When admitted, the THREE conversational flyer intercepts below —
+            # sample-prompt, intake-followup, and vague-start — YIELD to the LLM
+            # (return None here) instead of the deterministic net answering, and
+            # a `front_brain_yielded` marker row is written so the yield is
+            # traceable. EVERY money/#code/payment/delivery-state/brand-asset/
+            # active-project guard in this block runs UNCHANGED. Flag off /
+            # non-cohort -> fb_converse is False -> byte-identical deterministic
+            # net (test-enforced). fb_phone/fb_role are resolved once, only for
+            # admitted chats, so the non-cohort path adds zero work.
+            fb_converse = actions.front_brain_converse_admits(chat_id)
+            fb_phone, fb_role = (
+                actions.lid_to_phone_via_identify_sender(chat_id)
+                if fb_converse else (None, None)
+            )
             campaign_cta_text = actions.flyer_campaign_cta_text(text)
             if campaign_cta_text:
                 cta_result = _try_flyer_campaign_cta_intercept(campaign_cta_text, chat_id, event)
@@ -369,9 +404,16 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             account_result = _try_flyer_account_intercept(text, chat_id, event)
             if account_result is not None:
                 return account_result
-            sample_prompt_result = _try_flyer_sample_prompt_request_intercept(text, chat_id, event, media_path)
-            if sample_prompt_result is not None:
-                return sample_prompt_result
+            if fb_converse:
+                # Yield the sample-prompt menu to the LLM; record a marker only
+                # when the request would actually have matched (cheap pure gate).
+                if _fb_sample_prompt_request_matches(text):
+                    actions.audit_front_brain_yielded(
+                        chat_id, intercept="sample_prompt", message_id=message_id)
+            else:
+                sample_prompt_result = _try_flyer_sample_prompt_request_intercept(text, chat_id, event, media_path)
+                if sample_prompt_result is not None:
+                    return sample_prompt_result
             regulated_account_result = _try_flyer_regulated_account_guard(text, chat_id, event)
             if regulated_account_result is not None:
                 return regulated_account_result
@@ -389,9 +431,20 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             quote_echo_result = _try_flyer_quote_echo_guard(text, chat_id, event, media_path)
             if quote_echo_result is not None:
                 return quote_echo_result
-            intake_result = _try_flyer_intake_intercept(text, chat_id, event, media_path=media_path)
-            if intake_result is not None:
-                return intake_result
+            if fb_converse:
+                # Yield an in-progress intake follow-up to the LLM; record a
+                # marker only when a live intake session actually exists for this
+                # customer (owner chats never had an intake session here).
+                try:
+                    if fb_role != "owner" and actions.find_flyer_intake_session_by_sender(fb_phone, chat_id):
+                        actions.audit_front_brain_yielded(
+                            chat_id, intercept="intake_followup", message_id=message_id)
+                except Exception:
+                    pass  # traceability only — never block the yield
+            else:
+                intake_result = _try_flyer_intake_intercept(text, chat_id, event, media_path=media_path)
+                if intake_result is not None:
+                    return intake_result
             scope_choice_result = _try_flyer_reference_scope_choice_intercept(text, chat_id, event)
             if scope_choice_result is not None:
                 return scope_choice_result
@@ -458,7 +511,15 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 )
                 if flyer_result is not None:
                     return flyer_result
-            if actions.is_vague_flyer_start(text, has_media=bool(media_path)):
+            _fb_vague_start = actions.is_vague_flyer_start(text, has_media=bool(media_path))
+            if _fb_vague_start and fb_converse:
+                # Yield a vague "make me a flyer" brief to the LLM so Hermes asks
+                # the clarifying questions itself (item 2). Marker records the
+                # yield; the whole deterministic starter/clarify block below is
+                # skipped for admitted chats.
+                actions.audit_front_brain_yielded(
+                    chat_id, intercept="vague_start", message_id=message_id)
+            elif _fb_vague_start:
                 phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
                 if role != "owner":
                     customer = actions.find_flyer_customer_by_sender(phone, chat_id)

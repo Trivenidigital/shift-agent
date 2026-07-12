@@ -115,6 +115,74 @@ def flyer_canonical_identity_key(chat_id: str, phone: Optional[str] = None) -> s
         return _normalize_flyer_intent_chat(phone or chat_id or "")
 
 
+# ─────────────────────────────────────────────────────────────────
+# Front-brain Phase-1 conversational cohort (2026-07-12, item 1).
+#
+# When a chat is admitted, the cf-router hook YIELDS its three conversational
+# flyer intercepts (vague-start / sample-prompt / intake-followup) to the LLM so
+# Hermes converses instead of the deterministic net answering (see hooks.py).
+# Money/#code/payment/delivery-state/brand-asset/active-project guards NEVER
+# yield — they are outside this gate.
+#
+# Gate semantics mirror the ppv1 / #612 + safe_io.front_brain_outbound_enforce_
+# enabled wildcard allowlist, with ONE difference: membership is compared on the
+# canonical identity key (flyer_canonical_identity_key) so a customer who reaches
+# us under a LID and a phone-JID resolves to ONE cohort decision (the #615
+# LID<->phone convergence). Fail-CLOSED: flag off / empty allowlist / any error
+# → NOT admitted (byte-identical deterministic net). A literal `*` entry
+# graduates every chat — an EXPLICIT opt-in, never the empty-list flip.
+#
+# SAFETY COUPLING (operator gate, enforced procedurally — see the Phase-1
+# report): a chat MUST NOT be admitted to CONVERSE unless the gateway-send
+# enforcement tier (FRONT_BRAIN_OUTBOUND_ENFORCE) also covers it, or the LLM's
+# free-form replies would leave un-screened. This function intentionally does
+# NOT read the enforce flag (keeps the two flags independently testable); the
+# coupling is an operator responsibility surfaced loudly at rollout.
+FRONT_BRAIN_CONVERSE_FLAG_ENV = "FRONT_BRAIN_CONVERSE"
+FRONT_BRAIN_CONVERSE_CHATS_ENV = "FRONT_BRAIN_CONVERSE_CHATS"
+
+
+def front_brain_converse_admits(chat_id: str, phone: Optional[str] = None) -> bool:
+    """True when `chat_id` is in the Phase-1 conversational pilot cohort.
+
+    Fail-closed on every ambiguity (see module note). Never raises — a broken
+    identity helper or malformed env degrades to NOT admitted, preserving the
+    deployed deterministic behavior."""
+    try:
+        if os.environ.get(FRONT_BRAIN_CONVERSE_FLAG_ENV, "") != "1":
+            return False
+        raw_entries = [
+            p.strip()
+            for p in os.environ.get(FRONT_BRAIN_CONVERSE_CHATS_ENV, "").split(",")
+            if p.strip()
+        ]
+        if "*" in raw_entries:  # explicit graduation to every chat
+            return True
+        if not raw_entries:  # empty allowlist DISABLES (never global-on)
+            return False
+        want = flyer_canonical_identity_key(chat_id, phone)
+        if not want:
+            return False
+        allow = {flyer_canonical_identity_key(entry) for entry in raw_entries}
+        allow.discard("")
+        return want in allow
+    except Exception:
+        return False
+
+
+def audit_front_brain_yielded(chat_id: str, *, intercept: str, message_id: str = "") -> None:
+    """Emit a `cf_router_intercepted` row with reason `front_brain_yielded` so
+    every hand-off from the deterministic net to the LLM is traceable on the
+    Phase-1 review surface. Best-effort (audit_intercepted already swallows
+    errors); `intercept` names which conversational intercept yielded."""
+    audit_intercepted(
+        reason="front_brain_yielded",
+        chat_id=chat_id,
+        subprocess_rc=0,
+        detail=f"intercept={intercept}; message_id={message_id}; front_brain=converse",
+    )
+
+
 # === Owner / employee identity ===
 
 def is_owner_chat(chat_id: str) -> bool:
