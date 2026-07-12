@@ -179,6 +179,10 @@ done
 # drops the patch cannot silently ship un-screened LLM replies to customers.
 grep -q "BEGIN shift-agent-front-brain-send" "$WA" || fail "$WA missing BEGIN shift-agent-front-brain-send marker (LLM outbound replies would send UN-screened)"
 grep -q "END shift-agent-front-brain-send" "$WA" || fail "$WA missing END shift-agent-front-brain-send marker"
+# edit_message() is the SECOND text-egress path (streamed drafts + finalized
+# answer via stream_consumer.py). Config-proof coverage requires screening it too.
+grep -q "BEGIN shift-agent-front-brain-edit" "$WA" || fail "$WA missing BEGIN shift-agent-front-brain-edit marker (streamed/finalized LLM edits would send UN-screened)"
+grep -q "END shift-agent-front-brain-edit" "$WA" || fail "$WA missing END shift-agent-front-brain-edit marker"
 
 # Bridge.js template-bypass patch — OBSOLETE in Hermes >= 0.12.0 (the
 # upstream chatter filter the patch extended was removed). The patch
@@ -225,6 +229,15 @@ FBA=$(grep -n "formatted = self.format_message(content)" "$WA" | head -1 | cut -
 [ -n "$FBB" ] && [ -n "$FBA" ] || fail "$WA missing front-brain-send marker or format_message anchor"
 DIFF4=$(( FBB > FBA ? FBB - FBA : FBA - FBB ))
 [ "$DIFF4" -le 10 ] || fail "$WA front-brain-send marker drifted from format_message anchor (delta=$DIFF4 lines)"
+
+# whatsapp.py: front-brain edit-screen inject site — the edit marker must sit
+# next to the bridge /edit relay anchor inside edit_message(). Drift => streamed
+# / finalized edits may no longer be screened.
+FEB=$(grep -n "BEGIN shift-agent-front-brain-edit" "$WA" | head -1 | cut -d: -f1)
+FEA=$(grep -n '/edit"' "$WA" | head -1 | cut -d: -f1)
+[ -n "$FEB" ] && [ -n "$FEA" ] || fail "$WA missing front-brain-edit marker or /edit anchor"
+DIFF5=$(( FEB > FEA ? FEB - FEA : FEA - FEB ))
+[ "$DIFF5" -le 10 ] || fail "$WA front-brain-edit marker drifted from /edit anchor (delta=$DIFF5 lines)"
 
 # Flyer Studio delivery depends on native media send support. Fail before
 # deploy if the pinned Hermes bridge lacks the companion endpoint used by
