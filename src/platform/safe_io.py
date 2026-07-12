@@ -1211,6 +1211,105 @@ def _front_brain_outbound_enforce(
     return safe_fallback
 
 
+def front_brain_screen_gateway_send(
+    jid: str,
+    message: str,
+    *,
+    fallback_template: "Optional[str]" = None,
+    action_context: "Optional[ActionExecutionContext]" = None,
+) -> str:
+    """Front-brain GATEWAY-ADAPTER send wrap (Phase-1 item 3 — the load-bearing
+    safety). LLM free-form replies exit via the Hermes platform adapter's
+    ``send()``, NOT via :func:`bridge_post`, so the P0-3a chokepoint never sees
+    them — this is the ONLY screen those replies get. The Hermes core-patch calls
+    this on the composed reply and sends the STRING it returns.
+
+    Flag/allowlist OFF (default) → returns ``message`` unchanged with ZERO side
+    effects (byte-identical send path). When the chat is admitted
+    (FRONT_BRAIN_OUTBOUND_ENFORCE + allowlist):
+
+      1. **Per-chat/day budget** — reserve one turn against the canonical chat
+         key. Exhausted OR any error → send the fallback template (review row
+         records what was actually sent); the composed reply is neither screened
+         nor sent.
+      2. **Free-form screen** — the composed reply runs through
+         ``enforce_free_form_text`` via :func:`_front_brain_outbound_enforce`:
+         PASS emits ``front_brain_reply_composed`` and returns the text; FAIL
+         emits ``front_brain_outbound_refused`` + a review row and returns the
+         fallback template.
+      3. **Latency bound** — the screen+decision is bounded by
+         ``compose_timeout_sec``; on timeout → fallback template + review row.
+
+    ALWAYS returns a sendable string. Fails TOWARD templates — never toward
+    silence, never toward un-screened text. Callers pass a curated de-escalation
+    template as ``fallback_template`` for the abuse path; otherwise
+    FRONT_BRAIN_SAFE_GENERIC_ACK is used. A verified regulated completion is not
+    clobbered (the ``action_context.verified_action_result`` flows through)."""
+    if not front_brain_outbound_enforce_enabled(jid):
+        return message
+
+    chat_hash = _front_brain_chat_key_hash(jid)
+    safe_fallback = (
+        fallback_template
+        if (fallback_template and str(fallback_template).strip())
+        else FRONT_BRAIN_SAFE_GENERIC_ACK
+    )
+
+    def _emit_template_review(reason: str) -> None:
+        _try_emit_audit_row(
+            "front_brain_reply_composed",
+            {
+                "chat_key_hash": chat_hash,
+                "reply_text": str(safe_fallback or "")[:2000],
+                "verdict": "passed",
+                "lint_classes_checked": [],
+                "template_fallback": True,
+            },
+        )
+        try:
+            sys.stderr.write(
+                f"FRONT_BRAIN gateway send -> template fallback ({reason})\n"
+            )
+        except Exception:
+            pass
+
+    # 1. Per-chat/day budget (P0-4). Fail toward SKIP on exhaustion OR any error
+    #    so a single looping chat can never run the LLM unbounded within a day.
+    try:
+        from front_brain_budget import reserve_chat_day_budget  # type: ignore
+        try:
+            from flyer_identity import canonical_identity_key  # type: ignore
+            budget_key = canonical_identity_key(jid) or _front_brain_normalize_chat_key(jid)
+        except Exception:
+            budget_key = _front_brain_normalize_chat_key(jid)
+        has_budget = reserve_chat_day_budget(budget_key)
+    except Exception:
+        has_budget = False
+    if not has_budget:
+        _emit_template_review("per_chat_day_budget")
+        return safe_fallback
+
+    # 2 + 3. Screen the composed reply, latency-bounded. A timeout or worker
+    #        error substitutes the template (never leaves the customer waiting,
+    #        never forwards un-screened text).
+    try:
+        from front_brain_budget import run_with_timeout  # type: ignore
+        result, used_fallback = run_with_timeout(
+            lambda: _front_brain_outbound_enforce(
+                jid, message, fallback_template=fallback_template,
+                action_context=action_context,
+            ),
+            fallback=safe_fallback,
+        )
+    except Exception:
+        _emit_template_review("screen_error")
+        return safe_fallback
+    if used_fallback:
+        _emit_template_review("compose_timeout")
+        return safe_fallback
+    return result
+
+
 class LiveBridgeSendInTestError(RuntimeError):
     """Test-only tripwire: a pytest-context send targeted the live WhatsApp
     bridge. Raised ONLY under pytest (never in production), so it cannot affect
