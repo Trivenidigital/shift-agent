@@ -326,10 +326,17 @@ def enforce_free_form_text(
 
     - promise_ban: forward commitments / guarantees / money-benefit promises.
     - invented_operational_claim: past-tense completion claims about a regulated
-      action (reuses lint_no_unverified_completion; `has_verified_action_result`
-      exempts this class ONLY — a verified action result never licenses a
-      forward promise).
-    - length_spam_cap: length + line-repetition sanity.
+      action (reuses lint_no_unverified_completion).
+    - length_spam_cap: length + line-repetition sanity (ALWAYS applies).
+
+    `has_verified_action_result=True` exempts BOTH content classes (promise_ban
+    and invented_operational_claim): a caller with evidence of a completed
+    action (payment webhook, deterministic-handler success audit row) may
+    reference it — e.g. a verified "your refund has been processed" must not be
+    clobbered. Consistent with the ActionExecutionContext contract, where the
+    verified flag is the evidence-backed escape hatch. Free-form replies (no
+    verified action) default to False → full screening. length_spam_cap is never
+    exempted.
     """
     body = str(text or "")
     hits: list[CustomerCopyHit] = []
@@ -342,18 +349,20 @@ def enforce_free_form_text(
                 hit_classes.append(class_name)
 
     # Class 1 — promise-ban (verbs word-boundary anchored; phrases substring).
+    # Exempted by a verified action result, like the claims class below.
     promise_hits: list[CustomerCopyHit] = []
-    seen_promise: set[str] = set()
-    for match in PROMISE_BAN_VERB_RE.finditer(body):
-        term = match.group(0).lower()
-        if term not in seen_promise:
-            seen_promise.add(term)
-            promise_hits.append(CustomerCopyHit(category="promise_ban", value=term))
-    lowered = body.casefold()
-    for phrase in PROMISE_BAN_PHRASES:
-        if phrase in lowered and phrase not in seen_promise:
-            seen_promise.add(phrase)
-            promise_hits.append(CustomerCopyHit(category="promise_ban", value=phrase))
+    if not has_verified_action_result:
+        seen_promise: set[str] = set()
+        for match in PROMISE_BAN_VERB_RE.finditer(body):
+            term = match.group(0).lower()
+            if term not in seen_promise:
+                seen_promise.add(term)
+                promise_hits.append(CustomerCopyHit(category="promise_ban", value=term))
+        lowered = body.casefold()
+        for phrase in PROMISE_BAN_PHRASES:
+            if phrase in lowered and phrase not in seen_promise:
+                seen_promise.add(phrase)
+                promise_hits.append(CustomerCopyHit(category="promise_ban", value=phrase))
     _record("promise_ban", promise_hits)
 
     # Class 2 — invented operational claims (relabel the reused lint hits so the

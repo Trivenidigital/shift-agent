@@ -26,7 +26,7 @@ import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional, Tuple, TypeVar
+from typing import Callable, Iterator, Optional, Tuple, TypeVar
 
 _T = TypeVar("_T")
 

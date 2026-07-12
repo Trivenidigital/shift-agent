@@ -1113,6 +1113,7 @@ def _front_brain_outbound_enforce(
     message: str,
     *,
     fallback_template: "Optional[str]" = None,
+    action_context: "Optional[ActionExecutionContext]" = None,
 ) -> str:
     """Screen a composed outbound reply and return the SAFE text to send.
 
@@ -1128,11 +1129,19 @@ def _front_brain_outbound_enforce(
     Never blocks the customer: always returns a sendable string. If the
     enforcement module is unavailable at runtime (deploy-integrity fault), fails
     toward the safe generic ack (content-safe) with a stderr signal rather than
-    forwarding an unverified composition."""
+    forwarding an unverified composition.
+
+    A verified regulated completion is not clobbered: the screen receives the
+    action_context's verified_action_result so an evidence-backed message (e.g.
+    "your refund has been processed") passes the content classes."""
     if not front_brain_outbound_enforce_enabled(jid):
         return message
 
     chat_hash = _front_brain_chat_key_hash(jid)
+    verified = bool(
+        action_context is not None
+        and getattr(action_context, "verified_action_result", False)
+    )
     safe_fallback = (
         fallback_template
         if (fallback_template and str(fallback_template).strip())
@@ -1146,7 +1155,7 @@ def _front_brain_outbound_enforce(
             )
         except Exception:  # pragma: no cover - deployed flat-module fallback
             from flyer_customer_copy_policy import enforce_free_form_text  # type: ignore
-        result = enforce_free_form_text(message)
+        result = enforce_free_form_text(message, has_verified_action_result=verified)
     except Exception as e:  # pragma: no cover - deploy-integrity fault
         sys.stderr.write(
             f"FRONT_BRAIN enforce unavailable ({type(e).__name__}: "
@@ -1309,6 +1318,7 @@ def bridge_post(
     # sees the safe text.
     message = _front_brain_outbound_enforce(
         jid, message, fallback_template=fallback_template,
+        action_context=action_context,
     )
     # PR-ζ chokepoint discipline. Refuses + emits audit row when None-context
     # caller is not allowlisted; commit 4 adds the lint dispatch.

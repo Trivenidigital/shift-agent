@@ -91,13 +91,21 @@ def test_invented_operational_claim_suppressed_when_verified():
     assert enforce_free_form_text(text, has_verified_action_result=True).passed is True
 
 
-def test_verified_action_result_does_not_exempt_promise_ban():
-    # Verified-action exemption is scoped to the claims class only; a forward
-    # commitment (guarantee/promise) still fails even with the flag set.
-    text = "We guarantee a full refund."
-    result = enforce_free_form_text(text, has_verified_action_result=True)
+def test_verified_action_result_exempts_promise_ban_and_claims():
+    # A verified action result (evidence-backed) exempts BOTH content classes so
+    # a legit verified completion is not clobbered — e.g. "your refund has been
+    # processed" (promise_ban 'refund' + claims 'processed') passes when verified.
+    text = "Your refund of $50 has been processed."
+    assert enforce_free_form_text(text).passed is False
+    assert enforce_free_form_text(text, has_verified_action_result=True).passed is True
+
+
+def test_length_spam_cap_not_exempted_by_verified():
+    # Only the two content classes are exempted; spam/length always applies.
+    spam = "\n".join(["BUY NOW BUY NOW"] * 8)
+    result = enforce_free_form_text(spam, has_verified_action_result=True)
     assert result.passed is False
-    assert "promise_ban" in result.hit_classes
+    assert result.hit_classes == ("length_spam_cap",)
 
 
 # ── length / spam sanity cap ────────────────────────────────────────────────

@@ -130,6 +130,42 @@ def test_fail_uses_caller_fallback_and_emits_both_rows(monkeypatch):
         ADAPTER.validate_python(r)
 
 
+def test_verified_regulated_completion_not_clobbered(monkeypatch):
+    # A verified regulated completion (evidence-backed) passes the content
+    # classes and is sent as-is — the verified_action_result flows from the
+    # action_context into the screen so front-brain does not clobber it.
+    from schemas import ActionExecutionContext
+    _enable(monkeypatch)
+    ctx = ActionExecutionContext(
+        action_id="commerce.payment.confirm",
+        is_regulated_action=True,
+        verified_action_result=True,
+        audit_row_id="row-123",
+    )
+    msg = "Your refund of $50 has been processed."
+    out = safe_io._front_brain_outbound_enforce("chat@c.us", msg, action_context=ctx)
+    assert out == msg
+    rows = _read_rows(monkeypatch)
+    composed = [r for r in rows if r["type"] == "front_brain_reply_composed"]
+    assert composed and composed[0]["template_fallback"] is False
+    assert not [r for r in rows if r["type"] == "front_brain_outbound_refused"]
+
+
+def test_unverified_regulated_completion_is_screened(monkeypatch):
+    # Same message WITHOUT verified evidence is screened + substituted.
+    from schemas import ActionExecutionContext
+    _enable(monkeypatch)
+    ctx = ActionExecutionContext(
+        action_id="commerce.payment.confirm",
+        is_regulated_action=True,
+        verified_action_result=False,
+    )
+    msg = "Your refund of $50 has been processed."
+    out = safe_io._front_brain_outbound_enforce("chat@c.us", msg, action_context=ctx)
+    assert out == safe_io.FRONT_BRAIN_SAFE_GENERIC_ACK
+    assert [r for r in _read_rows(monkeypatch) if r["type"] == "front_brain_outbound_refused"]
+
+
 def test_fail_without_fallback_uses_safe_generic_ack(monkeypatch):
     _enable(monkeypatch)
     out = safe_io._front_brain_outbound_enforce("chat@c.us", PROMISE_MSG)
