@@ -5049,11 +5049,13 @@ class FlyerBrandStyleDerived(_BaseEntry):
     """Style-transfer derivation audit (2026-07-11). One row per
     ``derive-flyer-brand-style`` attempt on a template asset. ``ok`` is whether a
     ``derived_style`` was persisted; ``screen_hits`` lists the fail-closed screen
-    violations (identity-import ban tokens / no-fact-law tokens) OR a non-screen
-    reason (``provider_unavailable``, ``not_a_template``, ``no_style_extracted``)
-    when nothing was persisted. ``model`` is the derivation model id. LOG-ONLY;
-    an emit failure never blocks the save ack — derivation is best-effort and
-    fails open to no-derived-style."""
+    violations (``identity_import:*`` / ``no_fact_law:*`` tokens) OR a non-screen
+    reason (``provider_unavailable``, ``source_missing``, ``unsupported_mime``,
+    ``no_style_extracted``, ``build_failed:*``, ``asset_removed_during_derivation``)
+    when nothing was persisted. (A ``kind: logo`` targeted by ``--asset-id`` is a
+    hard CLI error with no audit row, not an ``ok=false`` screen hit.) ``model`` is
+    the derivation model id. LOG-ONLY; an emit failure never blocks the save ack —
+    derivation is best-effort and fails open to no-derived-style."""
     type: Literal["flyer_brand_style_derived"] = "flyer_brand_style_derived"
     asset_id: str = Field(pattern=r"^B\d{4,}$")
     customer_id: str = Field(pattern=r"^CUST\d{4,}$")

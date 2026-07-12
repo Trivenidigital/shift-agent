@@ -296,6 +296,54 @@ def test_flag_off_prompt_and_attachments_byte_identical(monkeypatch, tmp_path):
     assert any(template_b64 in u for u in urls_ds)
 
 
+# ── MAJOR-2: flag-coupling telemetry (transfer strips template, no derived voice)
+
+def test_flag_coupling_telemetry_when_registers_off(monkeypatch, tmp_path, capsys):
+    # Transfer ON but FLYER_STYLE_REGISTERS OFF: the template is stripped from
+    # attachments yet the derived voice never renders (register path is off). This
+    # de-branding must be surfaced, not silent.
+    _write_customers(tmp_path, template_derived=True)
+    monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
+    monkeypatch.delenv("FLYER_STYLE_REGISTERS", raising=False)
+    monkeypatch.delenv("FLYER_STYLE_REGISTERS_ALLOWLIST", raising=False)
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_CUSTOMERS_PATH", str(tmp_path / "customers.json"))
+    monkeypatch.setenv("FLYER_BRAND_STYLE_TRANSFER", "1")
+    monkeypatch.setenv("FLYER_BRAND_STYLE_TRANSFER_ALLOWLIST", PHONE)
+    _ = _prompt(_project())
+    err = capsys.readouterr().err
+    assert "flyer_style_transfer_stripped_no_voice" in err
+    assert "reason=style_registers_off" in err
+
+
+def test_flag_coupling_telemetry_when_derived_absent(monkeypatch, tmp_path, capsys):
+    # Both flags on, active template present, but derivation not yet done: register
+    # voice carries the render, no derived voice — surfaced as derived_style_absent.
+    _write_customers(tmp_path, template_derived=False)
+    _registers_on(monkeypatch, tmp_path, transfer=True)
+    _ = _prompt(_project())
+    err = capsys.readouterr().err
+    assert "flyer_style_transfer_stripped_no_voice" in err
+    assert "reason=derived_style_absent" in err
+
+
+def test_no_flag_coupling_telemetry_when_derived_voice_emitted(monkeypatch, tmp_path, capsys):
+    # Both flags on + derived_style present → derived voice renders → NO telemetry.
+    _write_customers(tmp_path, template_derived=True)
+    _registers_on(monkeypatch, tmp_path, transfer=True)
+    p = _prompt(_project())
+    err = capsys.readouterr().err
+    assert "DERIVED BRAND STYLE" in p
+    assert "flyer_style_transfer_stripped_no_voice" not in err
+
+
+def test_no_flag_coupling_telemetry_when_transfer_off(monkeypatch, tmp_path, capsys):
+    _write_customers(tmp_path, template_derived=True)
+    _registers_on(monkeypatch, tmp_path, transfer=False)
+    _ = _prompt(_project())
+    assert "flyer_style_transfer_stripped_no_voice" not in capsys.readouterr().err
+
+
 # ── Gate semantics: empty allowlist disabled, wildcard admits ───────────────
 
 def test_transfer_gate_empty_allowlist_disabled_and_wildcard(monkeypatch, tmp_path):

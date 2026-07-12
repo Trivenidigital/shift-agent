@@ -2323,6 +2323,14 @@ def _style_registers_active(project: FlyerProject) -> bool:
 # a raw generation input. The flag+allowlist is the kill switch; when armed, the
 # customer's derived style OUTRANKS the operator register override (O1) — the
 # override is pre-configuration, not an emergency stop.
+#
+# BOTH FLAGS REQUIRED: the derived voice only reaches the prompt via the register/
+# typeset path (_resolve_style_directives runs only when _typeset_contract_applies).
+# So FLYER_BRAND_STYLE_TRANSFER must be enabled together with FLYER_STYLE_REGISTERS
+# (both flag + allowlist). Transfer alone still strips the template from attachments
+# but emits NO derived voice — a de-branded flyer — which _image_prompt surfaces as
+# a `flyer_style_transfer_stripped_no_voice` telemetry line rather than failing
+# silently.
 BRAND_STYLE_TRANSFER_ENABLED_ENV = "FLYER_BRAND_STYLE_TRANSFER"
 BRAND_STYLE_TRANSFER_ALLOWLIST_ENV = "FLYER_BRAND_STYLE_TRANSFER_ALLOWLIST"
 
@@ -2359,6 +2367,13 @@ def _active_derived_style(project: FlyerProject):
         if getattr(asset, "kind", "") == "template" and getattr(asset, "derived_style", None):
             derived = asset.derived_style  # last (most recently appended) wins
     return derived
+
+
+def _has_active_template(project: FlyerProject) -> bool:
+    """True if the customer has an active `kind: template` asset (which style
+    transfer strips from generation attachments). Used by the flag-coupling
+    telemetry to detect a stripped-but-no-derived-voice de-branding."""
+    return any(getattr(a, "kind", "") == "template" for a in _active_brand_assets(project))
 
 
 def _derived_style_block(derived, *, occasion: str, intensity: str) -> tuple[str, list[str]]:
@@ -2672,6 +2687,27 @@ Autonomous repair instruction:
             + _poster_copy_block(project, force_background_only=force_background_only)
         )
         ban_segment = ""
+    # MAJOR-2 flag-coupling telemetry: style transfer strips the customer's template
+    # from generation attachments independently of the register/typeset machinery.
+    # If a template was stripped but NO derived voice reached this prompt — because
+    # FLYER_STYLE_REGISTERS is off (the misconfiguration), the derived_style is not
+    # yet present (derivation pending/failed), or this is a non-typeset render path
+    # — the flyer silently loses its brand style. Surface it (precise-fallback-reason
+    # convention). Observability only; never alters the prompt.
+    if _brand_style_transfer_enabled(project) and _has_active_template(project):
+        _derived_voice = _registers_on and _active_derived_style(project) is not None
+        if not _derived_voice:
+            if not _style_registers_active(project):
+                _tx_reason = "style_registers_off"
+            elif _active_derived_style(project) is None:
+                _tx_reason = "derived_style_absent"
+            else:
+                _tx_reason = "non_typeset_render_path"
+            sys.stderr.write(
+                "flyer_style_transfer_stripped_no_voice "
+                f"project={getattr(project, 'project_id', '')} "
+                f"customer={getattr(project, 'customer_phone', '')} reason={_tx_reason}\n"
+            )
     return f"""Create a complete, finished customer-ready poster flyer for WhatsApp delivery.
 
 Design direction: {_design_direction(project, concept_id)}.

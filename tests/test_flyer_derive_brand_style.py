@@ -342,9 +342,12 @@ def test_screen_and_build_units(tmp_path, monkeypatch):
     assert module._screen_derived(_bright_style(), business_name="Lakshmi's Kitchen") == []
     # a lowercase generic suffix word is NOT a leak ("open-kitchen imagery" is style)
     assert module._screen_derived({"motifs": ["open kitchen imagery"]}, business_name="X") == []
-    # a capitalized MASTHEAD phrase (proper noun + org suffix) IS an identity leak
+    # MAJOR-1: a capitalized MASTHEAD phrase (org-suffix + non-suffix alike) IS a leak
     hits = module._screen_derived({"motifs": ["Taj Palace Restaurant banner"]}, business_name="X")
-    assert any("org_suffix" in h for h in hits)
+    assert any("proper_noun" in h for h in hits)
+    # MINOR: apostrophe-stripped base token — bare "lakshmi" (no apostrophe) screens
+    hits = module._screen_derived({"motifs": ["lakshmi swirl motif"]}, business_name="Lakshmi's Kitchen")
+    assert any(h == "identity_import:business_name:lakshmi" for h in hits)
     # digit leak
     hits = module._screen_derived({"typography": "bold 3d letters"}, business_name="X")
     assert any(h.startswith("no_fact_law:") for h in hits)
@@ -354,3 +357,21 @@ def test_screen_and_build_units(tmp_path, monkeypatch):
                                      source_sha256=SHA, model="m", now=now)
     assert ds.energy == "balanced"
     assert ds.source_sha256 == SHA
+
+
+def test_screen_broadened_catches_suffixless_masthead_and_non_latin(tmp_path, monkeypatch):
+    """MAJOR-1 review bypass cases — both now PASS (are caught) with the broadened
+    screen; the 'Saffron' Title-Case over-block stays fail-closed (acceptable)."""
+    module = _load_script(monkeypatch)
+    # (a) org-suffix-LESS masthead: "Triveni Express" bypassed the old suffix regex.
+    hits = module._screen_derived({"motifs": ["Triveni Express ribbon"]}, business_name="X")
+    assert any("proper_noun" in h for h in hits), hits
+    # (b) non-Latin (Telugu) masthead: an [A-Z]-only regex bypassed it.
+    hits = module._screen_derived({"palette": ["లక్ష్మి కిచెన్ red"]}, business_name="X")
+    assert "identity_import:non_latin_text" in hits, hits
+    # (c) accepted over-block: a Title-Cased palette word screens (fail-closed) — the
+    # model is instructed to lowercase, so this only rejects a non-conforming output.
+    hits = module._screen_derived({"palette": ["Saffron Orange"]}, business_name="X")
+    assert any("proper_noun" in h for h in hits), hits
+    # ...and a properly lowercased palette is clean.
+    assert module._screen_derived({"palette": ["saffron orange"]}, business_name="X") == []
