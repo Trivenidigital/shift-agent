@@ -158,3 +158,46 @@ def test_verified_completion_not_clobbered(enabled):
     out = safe_io.front_brain_screen_gateway_send(CHAT, msg, action_context=ctx)
     assert out == msg
     assert not [r for r in _rows() if r["type"] == "front_brain_outbound_refused"]
+
+
+# ── item 2: jid-duality — screen canonicalizes LID<->phone like admission ─────
+
+def test_lid_outbound_jid_matches_phone_allowlist(monkeypatch, tmp_path):
+    # A LID-form outbound jid must be screened when the enforce allowlist holds the
+    # PHONE form: front_brain_screen_gateway_send canonicalizes the jid (LID->phone
+    # via the lid-cache) BEFORE the enforce check, the SAME way converse-admission
+    # does. Without the fix the LID normalizes to its own digits, never matches the
+    # phone allowlist, and the reply goes out UN-screened.
+    cache = tmp_path / "lid-cache.json"
+    cache.write_text(
+        '{"schema_version":1,"pairs":[{"phone":"+17329837841","lid":"111222333444@lid"}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SHIFT_AGENT_LID_CACHE_PATH", str(cache))
+    monkeypatch.setenv("FRONT_BRAIN_OUTBOUND_ENFORCE", "1")
+    monkeypatch.setenv("FRONT_BRAIN_OUTBOUND_ENFORCE_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FRONT_BRAIN_CHAT_BUDGET_PATH", str(tmp_path / "budget.json"))
+    monkeypatch.setenv("FRONT_BRAIN_CHAT_DAILY_CAP", "30")
+    out = safe_io.front_brain_screen_gateway_send(
+        "111222333444@lid", PROMISE_MSG, fallback_template=FALLBACK
+    )
+    assert out == FALLBACK  # screened (promise tripped) -> template
+    assert [r for r in _rows() if r["type"] == "front_brain_outbound_refused"]
+
+
+# ── item 7: reserve_budget=False (progressive edit drafts) bypasses budget ────
+
+def test_reserve_budget_false_does_not_consume(monkeypatch, tmp_path):
+    monkeypatch.setenv("FRONT_BRAIN_OUTBOUND_ENFORCE", "1")
+    monkeypatch.setenv("FRONT_BRAIN_OUTBOUND_ENFORCE_ALLOWLIST", "*")
+    monkeypatch.setenv("FRONT_BRAIN_CHAT_BUDGET_PATH", str(tmp_path / "budget.json"))
+    monkeypatch.setenv("FRONT_BRAIN_CHAT_DAILY_CAP", "1")
+    # progressive drafts screen but consume NO budget
+    for _ in range(3):
+        assert safe_io.front_brain_screen_gateway_send(CHAT, CLEAN_MSG, reserve_budget=False) == CLEAN_MSG
+    # the finalized reply consumes the single unit
+    assert safe_io.front_brain_screen_gateway_send(CHAT, CLEAN_MSG) == CLEAN_MSG
+    # the NEXT finalized reply trips the exhausted per-chat/day cap -> template
+    assert safe_io.front_brain_screen_gateway_send(CHAT, CLEAN_MSG, fallback_template=FALLBACK) == FALLBACK
+    # a progressive draft AFTER exhaustion still screens (never budget-gated)
+    assert safe_io.front_brain_screen_gateway_send(CHAT, CLEAN_MSG, reserve_budget=False) == CLEAN_MSG

@@ -1217,26 +1217,31 @@ def front_brain_screen_gateway_send(
     *,
     fallback_template: "Optional[str]" = None,
     action_context: "Optional[ActionExecutionContext]" = None,
+    reserve_budget: bool = True,
 ) -> str:
-    """Front-brain GATEWAY-ADAPTER send wrap (Phase-1 item 3 — the load-bearing
+    """Front-brain GATEWAY-ADAPTER egress screen (Phase-1 item 3 — the load-bearing
     safety). LLM free-form replies exit via the Hermes platform adapter's
-    ``send()``, NOT via :func:`bridge_post`, so the P0-3a chokepoint never sees
-    them — this is the ONLY screen those replies get. The Hermes core-patch calls
-    this on the composed reply and sends the STRING it returns.
+    ``send()`` AND ``edit_message()`` (streamed drafts + the finalized answer),
+    NOT via :func:`bridge_post`, so the P0-3a chokepoint never sees them — this is
+    the ONLY screen those replies get. The Hermes core-patch calls this on the
+    composed reply and sends the STRING it returns.
 
     Flag/allowlist OFF (default) → returns ``message`` unchanged with ZERO side
     effects (byte-identical send path). When the chat is admitted
     (FRONT_BRAIN_OUTBOUND_ENFORCE + allowlist):
 
-      1. **Per-chat/day budget** — reserve one turn against the canonical chat
-         key. Exhausted OR any error → send the fallback template (review row
-         records what was actually sent); the composed reply is neither screened
-         nor sent.
+      1. **Per-chat/day budget** (only when ``reserve_budget`` — default True).
+         Bounds outbound SENDS per chat per day — NOT LLM compute (the model has
+         already run by the time we screen the composed reply). A streamed reply
+         must cost ONE unit, so ``edit_message`` passes ``reserve_budget=False``
+         for progressive drafts and reserves only on the finalized edit.
+         Exhausted OR any error → send the fallback template (review row records
+         what was actually sent); the composed reply is neither screened nor sent.
       2. **Free-form screen** — the composed reply runs through
          ``enforce_free_form_text`` via :func:`_front_brain_outbound_enforce`:
          PASS emits ``front_brain_reply_composed`` and returns the text; FAIL
          emits ``front_brain_outbound_refused`` + a review row and returns the
-         fallback template.
+         fallback template. EVERY edit (progressive draft) is screened.
       3. **Latency bound** — the screen+decision is bounded by
          ``compose_timeout_sec``; on timeout → fallback template + review row.
 
@@ -1245,10 +1250,21 @@ def front_brain_screen_gateway_send(
     template as ``fallback_template`` for the abuse path; otherwise
     FRONT_BRAIN_SAFE_GENERIC_ACK is used. A verified regulated completion is not
     clobbered (the ``action_context.verified_action_result`` flows through)."""
-    if not front_brain_outbound_enforce_enabled(jid):
+    # Canonicalize the outbound jid the SAME way converse-admission does
+    # (LID<->phone convergence via flyer_identity) BEFORE consulting the enforce
+    # tier and the budget, so the screen and admission can never diverge on
+    # LID vs phone forms (jid-duality). Fail-back to the simple chat-key normalize
+    # (front_brain_outbound_enforce_enabled normalizes again — idempotent).
+    try:
+        from flyer_identity import canonical_identity_key  # type: ignore
+        screen_jid = canonical_identity_key(jid) or _front_brain_normalize_chat_key(jid)
+    except Exception:
+        screen_jid = _front_brain_normalize_chat_key(jid)
+
+    if not front_brain_outbound_enforce_enabled(screen_jid):
         return message
 
-    chat_hash = _front_brain_chat_key_hash(jid)
+    chat_hash = _front_brain_chat_key_hash(screen_jid)
     safe_fallback = (
         fallback_template
         if (fallback_template and str(fallback_template).strip())
@@ -1273,21 +1289,19 @@ def front_brain_screen_gateway_send(
         except Exception:
             pass
 
-    # 1. Per-chat/day budget (P0-4). Fail toward SKIP on exhaustion OR any error
-    #    so a single looping chat can never run the LLM unbounded within a day.
-    try:
-        from front_brain_budget import reserve_chat_day_budget  # type: ignore
+    # 1. Per-chat/day budget (P0-4). Bounds SENDS per chat/day (not LLM compute).
+    #    Skipped for progressive streamed edits (reserve_budget=False) so a single
+    #    reply costs ONE unit, not one per token batch. Fail toward SKIP on
+    #    exhaustion OR any error so a looping chat can never send unbounded.
+    if reserve_budget:
         try:
-            from flyer_identity import canonical_identity_key  # type: ignore
-            budget_key = canonical_identity_key(jid) or _front_brain_normalize_chat_key(jid)
+            from front_brain_budget import reserve_chat_day_budget  # type: ignore
+            has_budget = reserve_chat_day_budget(screen_jid)
         except Exception:
-            budget_key = _front_brain_normalize_chat_key(jid)
-        has_budget = reserve_chat_day_budget(budget_key)
-    except Exception:
-        has_budget = False
-    if not has_budget:
-        _emit_template_review("per_chat_day_budget")
-        return safe_fallback
+            has_budget = False
+        if not has_budget:
+            _emit_template_review("per_chat_day_budget")
+            return safe_fallback
 
     # 2 + 3. Screen the composed reply, latency-bounded. A timeout or worker
     #        error substitutes the template (never leaves the customer waiting,
@@ -1296,7 +1310,7 @@ def front_brain_screen_gateway_send(
         from front_brain_budget import run_with_timeout  # type: ignore
         result, used_fallback = run_with_timeout(
             lambda: _front_brain_outbound_enforce(
-                jid, message, fallback_template=fallback_template,
+                screen_jid, message, fallback_template=fallback_template,
                 action_context=action_context,
             ),
             fallback=safe_fallback,
