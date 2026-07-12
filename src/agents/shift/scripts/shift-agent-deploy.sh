@@ -62,6 +62,14 @@ install_artifacts() {
     # Python modules — flat layout at /opt/shift-agent/ matches scripts' sys.path
     install -m 644 src/platform/schemas.py /opt/shift-agent/schemas.py
     install -m 644 src/platform/safe_io.py /opt/shift-agent/safe_io.py
+    # Canonical WhatsApp identity (LID<->phone convergence via lid-cache). Shared
+    # by the cf-router plugin, schemas.py intake-session keying, and flyer
+    # modules. Guarded for rollback compatibility with predating tarballs.
+    if [ -f src/platform/flyer_identity.py ]; then
+        install -m 644 src/platform/flyer_identity.py /opt/shift-agent/flyer_identity.py
+    else
+        rm -f /opt/shift-agent/flyer_identity.py
+    fi
     # No-response escalation sweep logic (imported by shift-agent-proposal-sweep). Guarded for
     # rollback compatibility with tarballs that predate this module.
     if [ -f src/platform/proposal_sweep.py ]; then

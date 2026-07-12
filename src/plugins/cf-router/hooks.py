@@ -2631,7 +2631,19 @@ def _try_flyer_regulated_account_guard(text: str, chat_id: str, event: Any) -> O
             return None
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
-    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
+    # sender_role census gap: a flyer CUSTOMER is not in roster/config, so
+    # identify-sender returns role=unknown + phone=None for their LID chat.
+    # Resolve the phone via the canonical identity key (lid-cache) so both the
+    # customer lookup and the audited sender_role reflect a known customer
+    # rather than the misleading `unknown`.
+    lookup_phone = phone
+    if not lookup_phone:
+        canonical = actions.flyer_canonical_identity_key(chat_id)
+        if canonical.startswith("+"):
+            lookup_phone = canonical
+    customer = actions.find_flyer_customer_by_sender(lookup_phone, chat_id)
+    if customer is not None and role == "unknown":
+        role = "customer"
     if customer is None:
         reply = (
             "Flyer Studio\n"
@@ -3195,6 +3207,23 @@ def _try_flyer_intake_intercept(
             intake_session_status=intake_status,
             inbound_script=inbound_script,
         )
+        # Close-on-handoff (P0-2b): the bypass hands this customer to the
+        # project-create flow, so a lingering intake session MUST be discarded
+        # here — otherwise a later revision reply is hijacked back into "choose a
+        # creation mode" (the 2026-06-02 stale-intake-session hijack). Only
+        # NON-protected statuses (choosing_language/choosing_mode) reach this
+        # branch; protected in-progress statuses block the bypass upstream
+        # (precondition 1 of should_bypass_intake_for_clear_intent).
+        if intake_session and actions.discard_flyer_intake_session_by_sender(phone, chat_id):
+            actions.audit_intercepted(
+                reason="flyer_intake_session_closed_on_handoff",
+                chat_id=chat_id,
+                subprocess_rc=0,
+                detail=(
+                    f"message_id={message_id}; bypass_reason={bypass_reason}; "
+                    f"intake_status={intake_status}; sender_role={role}"
+                )[:500],
+            )
         return None
     if not intake_session:
         return None

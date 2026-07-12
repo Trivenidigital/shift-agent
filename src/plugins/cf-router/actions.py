@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, get_args
@@ -95,6 +95,23 @@ def _ensure_local_src_path() -> None:
         p = str(src)
         if p not in sys.path:
             sys.path.insert(0, p)
+
+
+def flyer_canonical_identity_key(chat_id: str, phone: Optional[str] = None) -> str:
+    """Stable canonical identity key for the Flyer surface (LID<->phone
+    convergence via the lid-cache maintained by shift-agent-lid-learn/bridge.js).
+
+    Thin wrapper over the shared flat platform helper `flyer_identity`, with the
+    platform path ensured + a fail-open fallback to raw normalization so the
+    routing glue never raises on a missing/broken cache module. See
+    src/platform/flyer_identity.py."""
+    try:
+        _ensure_platform_path()
+        from flyer_identity import canonical_identity_key  # type: ignore
+        return canonical_identity_key(chat_id, phone)
+    except Exception:
+        # Fail open: preserve pre-canonical behavior (raw-normalized key).
+        return _normalize_flyer_intent_chat(phone or chat_id or "")
 
 
 # === Owner / employee identity ===
@@ -1054,7 +1071,16 @@ def _flyer_intent_shadow_llm_allowlisted(chat_id: str) -> bool:
     # separate privacy decision (the census does not set it).
     if "*" in allow:
         return True
-    return _normalize_flyer_intent_chat(chat_id) in allow
+    # Raw-entry match (fallback): an operator env band-aid that lists the LID
+    # verbatim still works.
+    if _normalize_flyer_intent_chat(chat_id) in allow:
+        return True
+    # Canonical match: a phone allowlist entry (e.g. +17329837841) admits the
+    # customer's LID chat too, once the lid-cache learns the pairing — the
+    # canonical key resolves the LID to its phone. Replaces the per-LID env
+    # band-aid with identity-aware membership.
+    canonical = flyer_canonical_identity_key(chat_id)
+    return bool(canonical) and _normalize_flyer_intent_chat(canonical) in allow
 
 
 def _flyer_intent_shadow_llm_model() -> str:
@@ -4011,21 +4037,76 @@ def find_flyer_onboarding_session_by_sender(phone: Optional[str], chat_id: str) 
         return None
 
 
+def _flyer_intake_ttl_hours() -> float:
+    """Flyer intake-session TTL in hours (schema helper; env-backed fallback)."""
+    try:
+        _ensure_platform_path()
+        from schemas import flyer_intake_ttl_hours  # type: ignore
+        return flyer_intake_ttl_hours()
+    except Exception:
+        try:
+            value = float(os.environ.get("FLYER_INTAKE_SESSION_TTL_HOURS", "4"))
+        except (TypeError, ValueError):
+            return 4.0
+        return value if value > 0 else 4.0
+
+
+def _flyer_intake_parse_ts(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _flyer_intake_session_expired(session: dict, now: datetime, ttl_hours: float) -> bool:
+    """Dict-mirror of FlyerIntakeSession.is_expired for the raw-JSON read path."""
+    ref = _flyer_intake_parse_ts(session.get("expires_at"))
+    if ref is None:
+        base = _flyer_intake_parse_ts(session.get("last_activity_at")) or _flyer_intake_parse_ts(
+            session.get("updated_at")
+        )
+        if base is None:
+            return False
+        ref = base + timedelta(hours=ttl_hours)
+    return now >= ref
+
+
 def find_flyer_intake_session_by_sender(phone: Optional[str], chat_id: str) -> Optional[dict]:
-    """Return in-progress Flyer intake session for this sender, if any."""
+    """Return in-progress Flyer intake session for this sender, if any.
+
+    Canonical-key aware: a session stored under EITHER WhatsApp identifier
+    (phone-JID or LID) resolves to the same customer once the lid-cache knows
+    the pairing, so a customer who switches identifier mid-conversation hits the
+    SAME session (2026-06-02 stale-intake-session hijack fix).
+
+    Read-time TTL (P0-2a): a session idle past FLYER_INTAKE_SESSION_TTL_HOURS is
+    treated as ABSENT so it can never intercept a later message; the periodic
+    sweep physically discards + audits it."""
     canonical = _canonical_phone(phone)
     if not FLYER_CUSTOMERS_PATH.exists():
         return None
     try:
         store = json.loads(FLYER_CUSTOMERS_PATH.read_text(encoding="utf-8"))
         sessions = store.get("intake_sessions") or []
+        want_key = flyer_canonical_identity_key(chat_id, phone)
+        now = datetime.now(timezone.utc)
+        ttl_hours = _flyer_intake_ttl_hours()
         for session in sessions:
             if not isinstance(session, dict):
                 continue
+            if _flyer_intake_session_expired(session, now, ttl_hours):
+                continue  # expired -> treat as absent (read-time TTL)
             sender_phone = _canonical_phone(session.get("sender_phone"))
             if canonical and sender_phone == canonical:
                 return session
             if session.get("sender_phone") is None and session.get("chat_id") == chat_id:
+                return session
+            if want_key and flyer_canonical_identity_key(
+                str(session.get("chat_id") or ""), session.get("sender_phone")
+            ) == want_key:
                 return session
         return None
     except Exception:
@@ -4041,6 +4122,7 @@ def discard_flyer_intake_session_by_sender(phone: Optional[str], chat_id: str) -
         _ensure_platform_path()
         from safe_io import FileLock, atomic_write_text  # type: ignore
 
+        want_key = flyer_canonical_identity_key(chat_id, phone)
         with FileLock(Path(str(FLYER_CUSTOMERS_PATH) + ".lock")):
             store = json.loads(FLYER_CUSTOMERS_PATH.read_text(encoding="utf-8"))
             sessions = store.get("intake_sessions") or []
@@ -4053,7 +4135,13 @@ def discard_flyer_intake_session_by_sender(phone: Optional[str], chat_id: str) -
                 sender_phone = _canonical_phone(session.get("sender_phone"))
                 matches_phone = bool(canonical and sender_phone == canonical)
                 matches_chat = bool(session.get("sender_phone") is None and session.get("chat_id") == chat_id)
-                if matches_phone or matches_chat:
+                matches_canonical = bool(
+                    want_key
+                    and flyer_canonical_identity_key(
+                        str(session.get("chat_id") or ""), session.get("sender_phone")
+                    ) == want_key
+                )
+                if matches_phone or matches_chat or matches_canonical:
                     removed = True
                     continue
                 kept.append(session)
