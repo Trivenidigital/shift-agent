@@ -5975,6 +5975,21 @@ class FrontBrainReplyComposed(_BaseEntry):
     template_fallback: bool = False
 
 
+class FrontBrainOutboundRefused(_BaseEntry):
+    """The front-brain enforcement tier refused a composed free-form reply
+    (one or more enforcement classes tripped). The composed text was NOT sent;
+    a fallback template / safe generic ack was sent instead — the customer is
+    never blocked silently. hit_values are truncated to 20 before construction
+    so a pathological reply still refuses cleanly (no ValidationError mid-refusal,
+    mirroring the PR-ζ lint-violation variant)."""
+    type: Literal["front_brain_outbound_refused"]
+    chat_key_hash: str = Field(default="", max_length=64)
+    hit_classes: list[str] = Field(..., max_length=10)
+    hit_values: list[str] = Field(default_factory=list, max_length=20)
+    message_preview: str = Field(..., max_length=120)
+    template_fallback_used: bool = True
+
+
 # ─────────────────────────────────────────────────────────────────
 # Commerce primitive LogEntry variants — slice 1 (PRD v2 §8)
 # Slice 1 emits: cart_started/updated/cleared/expired/checked_out,
@@ -6509,6 +6524,8 @@ LogEntry = Annotated[
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
         # Front-brain outbound enforcement — conversation-review surface (P0-5)
         Annotated[FrontBrainReplyComposed, Tag("front_brain_reply_composed")],
+        # Front-brain outbound enforcement — refusal audit (P0-3a)
+        Annotated[FrontBrainOutboundRefused, Tag("front_brain_outbound_refused")],
         # Commerce primitives slice 1 — PRD v2 §8
         Annotated[CommerceCartStarted, Tag("commerce_cart_started")],
         Annotated[CommerceCartUpdated, Tag("commerce_cart_updated")],

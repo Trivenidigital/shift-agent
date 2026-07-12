@@ -1044,6 +1044,164 @@ def _enforce_action_context_policy(
     return None  # passed lint, send proceeds
 
 
+# ─────────────────────────────────────────────────────────────────
+# Front-brain outbound enforcement (P0-3a, 2026-07-12) — DORMANT behind
+# FRONT_BRAIN_OUTBOUND_ENFORCE + FRONT_BRAIN_OUTBOUND_ENFORCE_ALLOWLIST.
+#
+# The FIRST outbound content control this system has ever had: today every send
+# that is non-regulated passes the chokepoint unexamined (see
+# _enforce_action_context_policy: is_regulated_action=False → return None). When
+# the flag+allowlist admit a chat, EVERY outbound text (regulated or not) is
+# screened by customer_copy_policy.enforce_free_form_text. On PASS the composed
+# text is sent and a review-surface row (P0-5) is emitted. On FAIL the composed
+# text is NOT sent; a caller-supplied fallback template (or a safe generic ack)
+# is sent instead + a refusal audit is emitted. The customer is NEVER blocked
+# silently. Flag OFF (the default) → the helper is a no-op and the send path is
+# byte-identical.
+# ─────────────────────────────────────────────────────────────────
+
+# Operator-reviewable safe generic acknowledgment — the last-resort fallback the
+# enforcement tier sends when the composed reply is refused and the caller
+# supplied no fallback template. Deliberately makes NO operational promise and
+# NO completion claim (it passes enforce_free_form_text itself).
+FRONT_BRAIN_SAFE_GENERIC_ACK = (
+    "Thanks for your message! I'm here to help — could you tell me a little "
+    "more about what you need?"
+)
+
+
+def _front_brain_normalize_chat_key(value: str) -> str:
+    """Mirror style_registers._normalize_phone: strip any @-JID suffix, drop
+    punctuation/plus, casefold — so an allowlist entry ``+17329837841`` matches
+    a caller passing a JID (``17329837841@c.us``) or an un-plussed form instead
+    of silently never firing (the phantom-lever setup)."""
+    v = (value or "").strip().casefold()
+    if "@" in v:
+        v = v.split("@", 1)[0]
+    return "".join(c for c in v if c.isalnum())
+
+
+def front_brain_outbound_enforce_enabled(jid: str) -> bool:
+    """ppv1 / #612 wildcard allowlist semantics — fail-closed: flag on AND
+    non-empty allowlist AND chat membership (both sides normalized). Empty
+    allowlist DISABLES (never global-on). A literal ``*`` entry graduates the
+    tier to EVERY chat — an EXPLICIT opt-in, never the empty-list flip; matched
+    on the RAW entries because normalization would strip the ``*``. Default unset
+    → OFF (byte-identical send path)."""
+    if os.environ.get("FRONT_BRAIN_OUTBOUND_ENFORCE", "") != "1":
+        return False
+    raw_entries = [p.strip() for p in
+                   os.environ.get("FRONT_BRAIN_OUTBOUND_ENFORCE_ALLOWLIST", "").split(",") if p.strip()]
+    if "*" in raw_entries:
+        return True
+    allowlist = {_front_brain_normalize_chat_key(p) for p in raw_entries}
+    allowlist.discard("")
+    if not allowlist:
+        return False
+    return _front_brain_normalize_chat_key(jid) in allowlist
+
+
+def _front_brain_chat_key_hash(jid: str) -> str:
+    """sha256[:32] of the raw jid — mirrors cf-router actions._short_hash so the
+    review surface never persists a raw chat identifier."""
+    import hashlib as _hashlib
+    return _hashlib.sha256(str(jid or "").encode("utf-8", errors="ignore")).hexdigest()[:32]
+
+
+def _front_brain_outbound_enforce(
+    jid: str,
+    message: str,
+    *,
+    fallback_template: "Optional[str]" = None,
+) -> str:
+    """Screen a composed outbound reply and return the SAFE text to send.
+
+    Flag/allowlist OFF (default) → returns ``message`` unchanged with ZERO side
+    effects (byte-identical send path). When admitted:
+      - PASS → emit ``front_brain_reply_composed`` (review surface), return the
+        composed text unchanged.
+      - FAIL → emit ``front_brain_outbound_refused`` (refusal audit), then return
+        the caller-supplied fallback template (trusted, not re-screened) or
+        FRONT_BRAIN_SAFE_GENERIC_ACK, and emit a review-surface row for the safe
+        text actually sent (template_fallback=True).
+
+    Never blocks the customer: always returns a sendable string. If the
+    enforcement module is unavailable at runtime (deploy-integrity fault), fails
+    toward the safe generic ack (content-safe) with a stderr signal rather than
+    forwarding an unverified composition."""
+    if not front_brain_outbound_enforce_enabled(jid):
+        return message
+
+    chat_hash = _front_brain_chat_key_hash(jid)
+    safe_fallback = (
+        fallback_template
+        if (fallback_template and str(fallback_template).strip())
+        else FRONT_BRAIN_SAFE_GENERIC_ACK
+    )
+
+    try:
+        try:
+            from agents.flyer.customer_copy_policy import (  # type: ignore
+                enforce_free_form_text,
+            )
+        except Exception:  # pragma: no cover - deployed flat-module fallback
+            from flyer_customer_copy_policy import enforce_free_form_text  # type: ignore
+        result = enforce_free_form_text(message)
+    except Exception as e:  # pragma: no cover - deploy-integrity fault
+        sys.stderr.write(
+            f"FRONT_BRAIN enforce unavailable ({type(e).__name__}: "
+            f"{str(e)[:120]}); sending safe generic ack\n"
+        )
+        _try_emit_audit_row(
+            "front_brain_reply_composed",
+            {
+                "chat_key_hash": chat_hash,
+                "reply_text": str(safe_fallback or "")[:2000],
+                "verdict": "passed",
+                "lint_classes_checked": [],
+                "template_fallback": True,
+            },
+        )
+        return safe_fallback
+
+    if result.passed:
+        _try_emit_audit_row(
+            "front_brain_reply_composed",
+            {
+                "chat_key_hash": chat_hash,
+                "reply_text": str(message or "")[:2000],
+                "verdict": "passed",
+                "lint_classes_checked": list(result.classes_checked),
+                "template_fallback": False,
+            },
+        )
+        return message
+
+    # FAIL — refusal audit for the blocked composed text, then substitute a safe
+    # text and record what we actually send on the review surface.
+    _try_emit_audit_row(
+        "front_brain_outbound_refused",
+        {
+            "chat_key_hash": chat_hash,
+            "hit_classes": list(result.hit_classes)[:10],
+            "hit_values": [h.value for h in result.hits][:20],
+            "message_preview": str(message or "")[:120],
+            "template_fallback_used": True,
+        },
+    )
+    _try_emit_audit_row(
+        "front_brain_reply_composed",
+        {
+            "chat_key_hash": chat_hash,
+            "reply_text": str(safe_fallback or "")[:2000],
+            "verdict": "passed",
+            "lint_classes_checked": list(result.classes_checked),
+            "template_fallback": True,
+        },
+    )
+    return safe_fallback
+
+
 class LiveBridgeSendInTestError(RuntimeError):
     """Test-only tripwire: a pytest-context send targeted the live WhatsApp
     bridge. Raised ONLY under pytest (never in production), so it cannot affect
@@ -1112,6 +1270,7 @@ def bridge_post(
     message: str,
     *,
     action_context: "Optional[ActionExecutionContext]" = None,
+    fallback_template: "Optional[str]" = None,
 ) -> Tuple[bool, str, str, str]:
     """POST to local Hermes bridge. Returns (success, message_id, error_str, status).
 
@@ -1129,6 +1288,12 @@ def bridge_post(
         verified_action_result=False AND message tripped a forbidden
         completion verb (PR-γ lint).
     Audit row written via _emit_audit_row before the refusal returns.
+
+    fallback_template (P0-3a): the safe text sent in place of `message` when the
+    front-brain outbound enforcement tier (DORMANT behind
+    FRONT_BRAIN_OUTBOUND_ENFORCE) refuses the composed reply. Ignored unless the
+    flag+allowlist admit `jid`; falls back to FRONT_BRAIN_SAFE_GENERIC_ACK when
+    None/blank. The tier never blocks the customer — it always sends something.
     """
     bad = validate_bridge_url(BRIDGE_URL)
     if bad:
@@ -1136,6 +1301,15 @@ def bridge_post(
     blocked = bridge_send_blocked_by_test_context(BRIDGE_URL)
     if blocked:
         return False, "", blocked, "connect_failed"
+    # P0-3a front-brain outbound enforcement (DORMANT behind
+    # FRONT_BRAIN_OUTBOUND_ENFORCE). No-op + byte-identical when OFF. When an
+    # admitted chat's composed reply fails the free-form screen, this rewrites
+    # `message` to a safe fallback (never blocks) and emits the review/refusal
+    # audit rows. Runs BEFORE the regulated-intent policy so the downstream lint
+    # sees the safe text.
+    message = _front_brain_outbound_enforce(
+        jid, message, fallback_template=fallback_template,
+    )
     # PR-ζ chokepoint discipline. Refuses + emits audit row when None-context
     # caller is not allowlisted; commit 4 adds the lint dispatch.
     refusal = _enforce_action_context_policy(
