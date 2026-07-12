@@ -404,7 +404,11 @@ PY
     # /opt/shift-agent/fonts/ — the flat-layout location premium_overlay._FONT_DIR
     # checks. Without these the premium renderer silently degrades to system
     # DejaVu / Pillow default, defeating Fix C's typography. Guarded for rollback
-    # compatibility with tarballs that predate the bundle.
+    # compatibility with tarballs that predate the bundle. Includes the
+    # brush-script headline face Pacifico-Regular.ttf (festive-vernacular
+    # register, Workstream B) — the *.ttf glob installs it, and the smoke
+    # font-gate (shift-agent-smoke-test.sh, driven by _ROLE_FILES.values())
+    # asserts it present + loadable, matching the Fix C precedent.
     if [ -d src/agents/flyer/fonts ] && compgen -G "src/agents/flyer/fonts/*.ttf" > /dev/null; then
         install -d -m 755 /opt/shift-agent/fonts
         install -m 644 src/agents/flyer/fonts/*.ttf /opt/shift-agent/fonts/

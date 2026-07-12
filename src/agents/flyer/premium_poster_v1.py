@@ -125,21 +125,36 @@ def _footer_line(facts) -> str:
 
 # ── fonts ───────────────────────────────────────────────────────────────────
 
-def _headline_font(size: int):
-    """Bold display headline (Montserrat-ExtraBold) for theatrical poster punch.
-    The vendored Montserrat is a VARIABLE font whose default instance is light,
-    so the weight axis is pinned to ExtraBold (800); static fonts raise and are
-    ignored. Loaded directly so premium_overlay stays untouched."""
+# The festive-vernacular register (Workstream B) swaps the theatrical Montserrat
+# headline for a BRUSH-SCRIPT hand-lettered face. Pacifico is a static
+# single-weight OFL face — no wght axis to pin (unlike Montserrat).
+_SCRIPT_REGISTER = "festive-vernacular"
+_SCRIPT_HEADLINE_FILE = "Pacifico-Regular.ttf"
+
+
+def _headline_font(size: int, register: str | None = None):
+    """Bold display headline for theatrical poster punch.
+
+    Default (``register`` unset or any non-script register): Montserrat-ExtraBold,
+    a VARIABLE font whose default instance is light, so the weight axis is pinned
+    to ExtraBold (800). For the ``festive-vernacular`` register the headline is a
+    BRUSH-SCRIPT hand-lettered face (Pacifico, static single-weight — no wght
+    axis). Static fonts raise on the weight pin and are ignored; a missing/corrupt
+    TTF falls back to PlayfairDisplay-Black. Loaded directly so premium_overlay
+    stays untouched."""
     from PIL import ImageFont
+    is_script = register == _SCRIPT_REGISTER
+    filename = _SCRIPT_HEADLINE_FILE if is_script else "Montserrat-ExtraBold.ttf"
     for base in _FONT_DIR_CANDIDATES:
-        p = base / "Montserrat-ExtraBold.ttf"
+        p = base / filename
         if p.exists():
             try:
                 f = ImageFont.truetype(str(p), size)
-                try:
-                    f.set_variation_by_axes([800])  # pin wght=ExtraBold
-                except Exception:
-                    pass
+                if not is_script:
+                    try:
+                        f.set_variation_by_axes([800])  # pin wght=ExtraBold
+                    except Exception:
+                        pass
                 return f
             except Exception:
                 break

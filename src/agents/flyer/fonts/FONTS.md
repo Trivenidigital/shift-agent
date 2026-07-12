@@ -12,6 +12,7 @@ All fonts are licensed under the **SIL Open Font License 1.1 (OFL 1.1)**.
 | `Montserrat-SemiBold.ttf` | https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf | SIL OFL 1.1 | **Substitution**: static instances unavailable; vendored the variable-weight TTF (`wght` axis 100–900). Serves `footer` role. |
 | `Montserrat-Bold.ttf` | https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf | SIL OFL 1.1 | **Substitution**: same variable TTF as above (identical bytes). Serves `kicker` role. |
 | `Montserrat-ExtraBold.ttf` | https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf | SIL OFL 1.1 | **Substitution**: same variable TTF as above (identical bytes). Vendored for future use in high-contrast headings. |
+| `Pacifico-Regular.ttf` | https://github.com/google/fonts/raw/main/ofl/pacifico/Pacifico-Regular.ttf | SIL OFL 1.1 | Brush-script hand-lettered display face (Workstream B). Serves the `script` role (`_premium_font`) and the `festive-vernacular` register headline (`premium_poster_v1._headline_font`). **STATIC single-weight** font — no `wght` axis, so it is intentionally NOT in `_ROLE_WEIGHT`. Full licence text vendored alongside as `Pacifico-OFL.txt`. sha256 `5b6c0d5334a7bf77dea52b975c5a0c408878c0f7115ed5b6fb151f634b7bf701`. |
 
 ## License Notes
 
@@ -28,4 +29,4 @@ Google Fonts removed static instances from these families in their repository; o
 
 `premium_overlay._premium_font` therefore applies the per-role target weight to the `wght` axis via `ImageFont.set_variation_by_axes([weight])` after loading. This is why a single Playfair file serves both `masthead` (700/Bold) and `title`/`offer_price` (900/Black) with visibly distinct, genuinely heavy weights — verified by `test_variable_font_weight_axis_differentiates` (Black glyphs are measurably wider than Bold at the same pixel size). The call is wrapped in try/except so static fonts or older Pillow builds degrade to the default weight without error.
 
-Available named instances per file (for reference): Regular, Medium, SemiBold, Bold, ExtraBold, Black. Role→weight mapping: masthead=700, kicker=700, title=900, offer_price=900, menu=600, footer=600.
+Available named instances per file (for reference): Regular, Medium, SemiBold, Bold, ExtraBold, Black. Role→weight mapping: masthead=700, kicker=700, title=900, offer_price=900, menu=600, footer=600. The `script` role (`Pacifico-Regular.ttf`) is a static single-weight brush-script face and carries no `wght` axis, so it takes no `_ROLE_WEIGHT` entry.
