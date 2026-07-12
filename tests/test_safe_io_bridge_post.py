@@ -406,6 +406,252 @@ class TestActionContextEnforcement:
         )
         assert ok is True
 
+    # ── Defect 2 (F0222): non-money lint violation → safe fallback, not silence ──
+
+    def _payload_message(self, urlopen) -> str:
+        """Decode the JSON body of the single urlopen POST to read the text
+        actually sent to the bridge."""
+        import json as _json
+        req = urlopen.call_args[0][0]
+        return _json.loads(req.data.decode("utf-8"))["message"]
+
+    @patch("urllib.request.urlopen")
+    def test_non_money_lint_violation_delivers_fallback_not_silence(
+        self, urlopen, safe_io_module, monkeypatch
+    ):
+        """A NON-money regulated send (clarification) that trips the lint on a
+        KEPT verb must DELIVER a safe fallback instead of dropping the send —
+        the customer is never left in silence (F0222). The lint-violation audit
+        is still emitted (observability preserved)."""
+        from schemas import ActionExecutionContext
+        emit_calls = []
+        monkeypatch.setattr(
+            safe_io_module, "_emit_audit_row",
+            lambda etype, fields: emit_calls.append((etype, fields)),
+        )
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.FALLBACK"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+
+        ctx = ActionExecutionContext(
+            action_id="flyer.project.clarification_request",
+            is_regulated_action=True, verified_action_result=False,
+        )
+        # "posted" is a KEPT forbidden verb; a customer echo of it in a
+        # clarification reply would otherwise be dropped.
+        ok, mid, err, status = safe_io_module.bridge_post(
+            "jid", "Do you mean the price you posted earlier?", action_context=ctx,
+        )
+        assert ok is True, f"non-money clarification was silenced: err={err!r}"
+        assert status == "sent"
+        assert mid == "wamid.FALLBACK"
+        # The safe fallback was sent — NOT the offending composed text.
+        sent = self._payload_message(urlopen)
+        assert sent == safe_io_module.REGULATED_LINT_SAFE_FALLBACK
+        assert "posted" not in sent
+        # Observability preserved: the lint-violation audit still fired.
+        assert any(e[0] == "regulated_send_lint_violation" for e in emit_calls)
+
+    @patch("urllib.request.urlopen")
+    def test_regulated_lint_safe_fallback_is_itself_lint_clean(
+        self, urlopen, safe_io_module
+    ):
+        """Defense-in-depth: the substituted fallback must pass the lint itself,
+        else the chokepoint would recurse into another refusal."""
+        import sys as _sys
+        from pathlib import Path as _Path
+        agents_flyer = _Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer"
+        _sys.path.insert(0, str(agents_flyer))
+        try:
+            from customer_copy_policy import lint_no_unverified_completion
+        finally:
+            _sys.path.pop(0)
+        scan = lint_no_unverified_completion(
+            safe_io_module.REGULATED_LINT_SAFE_FALLBACK,
+            has_verified_action_result=False,
+        )
+        assert scan.hits == (), (
+            f"REGULATED_LINT_SAFE_FALLBACK is not lint-clean: "
+            f"{[h.value for h in scan.hits]}"
+        )
+
+    @patch("urllib.request.urlopen")
+    def test_caller_fallback_template_used_when_provided(
+        self, urlopen, safe_io_module, monkeypatch
+    ):
+        """A caller-supplied fallback_template is sent (trusted) in place of the
+        generic ack when a non-money send trips the lint."""
+        from schemas import ActionExecutionContext
+        monkeypatch.setattr(safe_io_module, "_emit_audit_row", lambda e, f: None)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.OK"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ctx = ActionExecutionContext(
+            action_id="flyer.project.clarification_request",
+            is_regulated_action=True, verified_action_result=False,
+        )
+        ok, _, _, status = safe_io_module.bridge_post(
+            "jid", "Your order has been sent.", action_context=ctx,
+            fallback_template="Got it — I'm on it and will reply here soon.",
+        )
+        assert ok is True and status == "sent"
+        assert self._payload_message(urlopen) == "Got it — I'm on it and will reply here soon."
+
+    @patch("urllib.request.urlopen")
+    def test_money_marker_lint_violation_hard_blocks_no_fallback(
+        self, urlopen, safe_io_module, monkeypatch
+    ):
+        """A money send identified by action_id MARKER alone (no external_
+        irreversible mutation_class) must STILL hard-block — never fall back."""
+        from schemas import ActionExecutionContext
+        monkeypatch.setattr(safe_io_module, "_emit_audit_row", lambda e, f: None)
+        ctx = ActionExecutionContext(
+            action_id="flyer.billing.plan_menu",
+            is_regulated_action=True, verified_action_result=False,
+        )
+        ok, mid, err, status = safe_io_module.bridge_post(
+            "jid", "Your payment was processed.", action_context=ctx,
+        )
+        assert ok is False
+        assert err == "lint_violation"
+        assert status == "refused"
+        urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_f0222_incident_clarification_delivered_not_silenced(
+        self, urlopen, safe_io_module, monkeypatch
+    ):
+        """End-to-end F0222: the exact clarification reply cf-router composes for
+        the incident message — echoing the customer's word "applied" — must be
+        DELIVERED through the chokepoint post-fix (Defect 1 makes it pass the
+        lint outright, so the ORIGINAL text is sent, never silence)."""
+        from schemas import ActionExecutionContext
+        monkeypatch.setattr(safe_io_module, "_emit_audit_row", lambda e, f: None)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.F0222"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+
+        incident_body = (
+            "Can you highlight veg thali $16.99 similar to what is applied for "
+            "Non-veg thali $20.99"
+        )
+        reply = (
+            "I need one clarification before regenerating: I could not match "
+            "that change to the current flyer details. Please send the exact "
+            "item or text to change.\n\nI saw: " + incident_body
+        )
+        ctx = ActionExecutionContext(
+            action_id="flyer.project.clarification_request",
+            is_regulated_action=True, verified_action_result=False,
+        )
+        ok, mid, err, status = safe_io_module.bridge_post(
+            "jid", reply, action_context=ctx,
+        )
+        assert ok is True, f"F0222 incident reply silenced again: err={err!r}"
+        assert status == "sent"
+        # Defect 1: the ORIGINAL reply (with "applied") is delivered as-is.
+        assert self._payload_message(urlopen) == reply
+
+    @patch("urllib.request.urlopen")
+    def test_f0222_real_path_non_regulated_clarification_delivers_verbatim(
+        self, urlopen, safe_io_module
+    ):
+        """ROOT-FIX end-to-end: the PRODUCTION revision-clarification context is
+        built is_regulated_action=False (a clarification is a QUESTION, not a
+        completion claim), so the real question — even echoing KEPT-verb words
+        ("changed"/"cancelled") — is delivered VERBATIM through the chokepoint
+        (never linted, never substituted). No acknowledged-limbo."""
+        import sys as _sys
+        from pathlib import Path as _Path
+        flyer = _Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer"
+        _sys.path.insert(0, str(flyer))
+        try:
+            from action_registry import (  # type: ignore
+                PROJECT_ACTIONS, build_action_context_for_command,
+            )
+        finally:
+            _sys.path.pop(0)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.Q"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ctx = build_action_context_for_command(
+            PROJECT_ACTIONS, "clarification.request", is_regulated_action=False,
+        )
+        assert ctx.is_regulated_action is False
+        assert ctx.action_id == "flyer.project.clarification_request"
+        question = (
+            "I need one clarification before regenerating: I could not match "
+            "that change to the current flyer details. Please send the exact "
+            "item you changed or cancelled."
+        )
+        ok, mid, err, status = safe_io_module.bridge_post(
+            "jid", question, action_context=ctx,
+        )
+        assert ok is True and status == "sent", (
+            f"real clarification path silenced: err={err!r}"
+        )
+        assert self._payload_message(urlopen) == question  # verbatim, not substituted
+
+    @patch("urllib.request.urlopen")
+    def test_unclean_fallback_template_downgraded_to_safe_constant(
+        self, urlopen, safe_io_module, monkeypatch
+    ):
+        """HARDENING (reviewer residual 1): a caller-supplied fallback_template
+        that itself carries a completion claim must NOT bypass the lint it
+        replaces — it is re-screened and downgraded to the known-clean
+        REGULATED_LINT_SAFE_FALLBACK before sending."""
+        from schemas import ActionExecutionContext
+        monkeypatch.setattr(safe_io_module, "_emit_audit_row", lambda e, f: None)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"id": "wamid.OK"}'
+        urlopen.return_value.__enter__.return_value = mock_resp
+        ctx = ActionExecutionContext(
+            action_id="flyer.project.generic_reply",
+            is_regulated_action=True, verified_action_result=False,
+        )
+        ok, _, _, status = safe_io_module.bridge_post(
+            "jid", "Your order has been sent.", action_context=ctx,
+            fallback_template="Your refund has been processed.",  # completion claim
+        )
+        assert ok is True and status == "sent"
+        sent = self._payload_message(urlopen)
+        assert sent == safe_io_module.REGULATED_LINT_SAFE_FALLBACK
+        assert "processed" not in sent
+
+    def test_money_registry_actions_all_classified_money(self, safe_io_module):
+        """INVARIANT (reviewer residual + standing rule): every registry action
+        with effect in {payment_request, payment_activation} OR domain=="billing"
+        MUST be classified money by _action_context_is_money_or_approval, so a
+        future money action can never silently receive fallback-not-block. Turns
+        the maintained _MONEY_ACTION_ID_MARKERS list into a tested invariant."""
+        import sys as _sys
+        from pathlib import Path as _Path
+        flyer = _Path(__file__).resolve().parent.parent / "src" / "agents" / "flyer"
+        _sys.path.insert(0, str(flyer))
+        try:
+            from action_registry import (  # type: ignore
+                ACCOUNT_ACTIONS, PROJECT_ACTIONS, build_action_context_for_command,
+            )
+        finally:
+            _sys.path.pop(0)
+        money_effects = {"payment_request", "payment_activation"}
+        checked = 0
+        for registry in (ACCOUNT_ACTIONS, PROJECT_ACTIONS):
+            for command, defn in registry.items():
+                if defn.effect in money_effects or defn.domain == "billing":
+                    ctx = build_action_context_for_command(registry, command)
+                    assert safe_io_module._action_context_is_money_or_approval(ctx), (
+                        f"registry action {defn.action_id!r} (effect={defn.effect}, "
+                        f"domain={defn.domain}) is money/billing but classified "
+                        f"NON-money — it could get fallback instead of hard-block. "
+                        f"Add a marker to safe_io._MONEY_ACTION_ID_MARKERS."
+                    )
+                    checked += 1
+        assert checked >= 1, (
+            "no money/billing registry actions found — registry shape changed? "
+            "Update this invariant test to match."
+        )
+
     def test_audit_write_failure_returns_refusal_tuple_not_exception(
         self, safe_io_module, monkeypatch
     ):
@@ -500,10 +746,12 @@ class TestActionContextEnforcement:
     def test_more_than_twenty_verb_hits_fails_closed_not_loud(
         self, safe_io_module, monkeypatch
     ):
-        """A message tripping many forbidden verbs must refuse cleanly. The
-        chokepoint caps verb_hits[:20] before audit-row construction so the
+        """A MONEY send tripping many forbidden verbs must hard-block cleanly.
+        The chokepoint caps verb_hits[:20] before audit-row construction so the
         Pydantic max_length=20 constraint doesn't raise ValidationError
-        mid-refusal (which would convert fail-CLOSED into fail-LOUD)."""
+        mid-refusal (which would convert fail-CLOSED into fail-LOUD). A money
+        action_id keeps the hard block (F0222 fallback applies to non-money
+        sends only), so this still exercises the refusal cap path."""
         from schemas import ActionExecutionContext
         emit_calls = []
         monkeypatch.setattr(
@@ -511,9 +759,12 @@ class TestActionContextEnforcement:
             lambda etype, fields: emit_calls.append((etype, fields)),
         )
         ctx = ActionExecutionContext(
-            action_id="x", is_regulated_action=True, verified_action_result=False,
+            action_id="flyer.billing.request_plan_change",
+            is_regulated_action=True, verified_action_result=False,
+            mutation_class="external_irreversible",
         )
-        # All 16 distinct forbidden verbs from FORBIDDEN_COMPLETION_VERBS:
+        # Forbidden verbs from FORBIDDEN_COMPLETION_VERBS ("applied" was removed
+        # 2026-07-12 and is now a benign word here, not a hit).
         msg = (
             "processed completed upgraded downgraded changed confirmed sent "
             "approved paid posted pushed applied scheduled booked cancelled refunded"
@@ -525,6 +776,7 @@ class TestActionContextEnforcement:
         assert len(emit_calls) == 1
         _etype, fields = emit_calls[0]
         assert len(fields["verb_hits"]) <= 20
+        assert "applied" not in fields["verb_hits"]
 
     def test_dict_passed_as_context_propagates_attribute_error(
         self, safe_io_module

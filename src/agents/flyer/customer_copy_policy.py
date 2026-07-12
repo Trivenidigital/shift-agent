@@ -62,20 +62,49 @@ CUSTOMER_COPY_FORBIDDEN_RE = re.compile(
     re.IGNORECASE,
 )
 
-# PR-γ 2026-05-26 — forbidden completion verbs lint (measure/test mode only).
-# These verbs make a completion claim about a regulated action (billing,
-# payment, account, schedule, delivery). They MUST NOT appear in customer-
-# visible copy unless the system has a verified action result (e.g., payment
-# webhook received, deterministic-handler success audit row written).
+# PR-γ 2026-05-26 — forbidden completion verbs lint (now a live chokepoint via
+# safe_io.bridge_post). These verbs make a completion claim about a regulated
+# action (billing, payment, account, schedule, delivery). They MUST NOT appear
+# in customer-visible copy unless the system has a verified action result (e.g.,
+# payment webhook received, deterministic-handler success audit row written).
 #
-# This list is the basis for future PR-ζ chokepoint enforcement at
-# safe_io.bridge_post. PR-γ ships the constants + the peer lint function
-# (`lint_no_unverified_completion`) for static analysis and tests. NO
-# chokepoint hookup, NO ActionExecutionContext, NO send blocking in this PR.
 # Existing `scan_customer_text` is intentionally NOT modified — many replay
 # tests assert `not scan(text).hits` for legitimate Flyer copy that contains
-# words like "sent" / "scheduled" / "applied", and changing the existing scan
-# semantics would break them. The new lint function is a peer, not a wrapper.
+# words like "sent" / "scheduled", and changing the existing scan semantics
+# would break them. This lint function is a peer, not a wrapper.
+#
+# 2026-07-12 — bare "applied" REMOVED (F0222 SILENCE incident). The bare verb
+# "applied" false-positived on ANY customer echo of the word (the incident:
+# a revision reply echoing "...similar to what is applied for Non-veg thali..."
+# tripped the lint → the send was refused → the customer got SILENCE). The word
+# "applied" only signals a MONEY completion claim in a money context, and those
+# money contexts ("discount applied" / "credit applied" / "coupon applied") are
+# now covered by FORBIDDEN_COMPLETION_PHRASES below — so removing the bare verb
+# fixes the echo false-positive WITHOUT weakening money safety at this lint.
+#
+# Sibling-verb audit (same over-match-on-echo review). A bare verb is KEPT when
+# it catches a genuine standalone invented completion claim whose risk is NOT
+# already covered by a money phrase; it is only removable when its ONLY real
+# risk is a money-context phrase in FORBIDDEN_COMPLETION_PHRASES:
+#   - "applied"    REMOVE — money risk fully covered by the PHRASES list; the
+#                  bare verb's only other matches are benign echoes.
+#   - "sent"       KEEP — "your flyer/order has been sent" is a genuine delivery
+#                  completion claim; no covering money phrase exists.
+#   - "scheduled"  KEEP — "your delivery is scheduled" is a genuine schedule
+#                  claim; no covering money phrase exists.
+#   - "posted"     KEEP — "your payment has been posted" is a genuine accounting
+#                  claim; no covering money phrase exists.
+#   - "cancelled"/"canceled" KEEP — "your order/subscription has been cancelled"
+#                  is a genuine account/billing claim; no covering money phrase.
+#   - "confirmed"  KEEP — "your booking is confirmed" is a genuine confirmation
+#                  claim; no covering money phrase exists.
+#   - "booked"     KEEP — "your slot has been booked" is a genuine booking
+#                  claim; no covering money phrase exists.
+#   - "paid"       KEEP — "your invoice has been paid" is a direct money claim;
+#                  no covering money phrase exists.
+#   - "processed"/"completed"/"upgraded"/"downgraded"/"changed"/"approved"/
+#     "pushed"/"refunded" KEEP — each is a genuine standalone completion claim
+#                  (billing/account/delivery) with no covering money phrase.
 FORBIDDEN_COMPLETION_VERBS: tuple[str, ...] = (
     "processed",
     "completed",
@@ -88,7 +117,6 @@ FORBIDDEN_COMPLETION_VERBS: tuple[str, ...] = (
     "paid",
     "posted",
     "pushed",
-    "applied",
     "scheduled",
     "booked",
     "cancelled",
@@ -96,8 +124,27 @@ FORBIDDEN_COMPLETION_VERBS: tuple[str, ...] = (
     "refunded",
 )
 
+# Multiword money-completion phrases retained when bare "applied" was removed
+# (2026-07-12). Each phrase only matches a genuine MONEY context, so it cannot
+# false-positive on a bare echo of the word "applied". Kept at the regulated-
+# send lint (the only ACTIVE outbound money-safety wall while the front-brain
+# FRONT_BRAIN_OUTBOUND_ENFORCE tier is dormant) so a genuine unverified
+# money-completion claim still blocks. These mirror the money-"applied" entries
+# already in PROMISE_BAN_PHRASES, consumed by the separate front-brain screen.
+FORBIDDEN_COMPLETION_PHRASES: tuple[str, ...] = (
+    "discount applied",
+    "discount has been applied",
+    "credit applied",
+    "coupon applied",
+)
+
 FORBIDDEN_COMPLETION_VERB_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(v) for v in FORBIDDEN_COMPLETION_VERBS) + r")\b",
+    re.IGNORECASE,
+)
+
+FORBIDDEN_COMPLETION_PHRASE_RE = re.compile(
+    "|".join(re.escape(p) for p in FORBIDDEN_COMPLETION_PHRASES),
     re.IGNORECASE,
 )
 
@@ -279,8 +326,15 @@ def lint_no_unverified_completion(
 
     This is a PEER to `scan_customer_text`, not a wrapper. `scan_customer_text`
     remains unchanged so existing replay tests (which assert `not hits` for
-    legitimate Flyer copy containing words like "sent" / "scheduled" /
-    "applied") continue to pass.
+    legitimate Flyer copy containing words like "sent" / "scheduled") continue
+    to pass.
+
+    2026-07-12: bare "applied" was removed from FORBIDDEN_COMPLETION_VERBS (it
+    false-positived on any customer echo). Its genuine money-claim risk is
+    preserved via FORBIDDEN_COMPLETION_PHRASES (multiword, money-context only),
+    which this function scans in addition to the bare verbs — so a real
+    unverified money-completion claim ("discount applied") still returns a hit
+    while a benign echo ("what is applied for") does not.
     """
     body = str(text or "")
     if has_verified_action_result:
@@ -293,6 +347,12 @@ def lint_no_unverified_completion(
             continue
         seen.add(verb)
         hits.append(CustomerCopyHit(category="unverified_completion_verb", value=verb))
+    for match in FORBIDDEN_COMPLETION_PHRASE_RE.finditer(body):
+        phrase = match.group(0).lower()
+        if phrase in seen:
+            continue
+        seen.add(phrase)
+        hits.append(CustomerCopyHit(category="unverified_completion_verb", value=phrase))
     return CustomerCopyScan(text=body, hits=tuple(hits))
 
 
