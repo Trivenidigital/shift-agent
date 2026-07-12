@@ -29,6 +29,28 @@ MARK_END = "END shift-agent-sender-id"
 CTA_MARK_BEGIN = "BEGIN shift-agent-cta-buttons"
 BUTTON_RESPONSE_MARK_BEGIN = "BEGIN shift-agent-button-response-body"
 
+# ─── Front-brain Phase-1 outbound-send screen (2026-07-12) ─────────────────
+# LLM free-form replies exit via WhatsAppAdapter.send() (POST to the bridge
+# /send endpoint) — NOT via safe_io.bridge_post — so the P0-3a outbound
+# chokepoint never sees them. This patch wraps the composed `content` at the top
+# of send(), immediately before format/chunk/relay, routing it through
+# safe_io.front_brain_screen_gateway_send (per-chat/day budget + free-form
+# enforcement + latency bound; DORMANT and byte-identical unless the chat is
+# admitted by FRONT_BRAIN_OUTBOUND_ENFORCE + its allowlist).
+#
+# Authored/verified against Hermes checkout HEAD
+#   1e71b7180e5b4e84905b9a3086cf9cecca139562  (== the pinned baseline commit)
+# and unpatched gateway/platforms/whatsapp.py sha256
+#   d59426d5cdb18a09bed91b07521cd6d7e190a59a9222e2ed235d6a1b23513663
+# Stable anchors (symbol names, not line numbers): the module-level helper is
+# inserted before `class WhatsAppAdapter(BasePlatformAdapter):`; the one-line
+# call is injected immediately before `formatted = self.format_message(content)`
+# inside `async def send(`. check-shift-agent-patch.sh fail-closes on both
+# markers + anchor proximity so a Hermes upgrade that moves/removes them cannot
+# silently ship un-screened LLM replies.
+FB_SEND_MARK_BEGIN = "BEGIN shift-agent-front-brain-send"
+FB_SEND_MARK_END = "END shift-agent-front-brain-send"
+
 
 # ─── Patch payloads (Python files) ─────────────────────────────────────
 
@@ -124,6 +146,40 @@ RUN_PY_INJECT_BLOCK = '''
                 logger.warning("shift-agent: sender context inject failed: %s", _e)
                 # Fail closed — no partial block, no spoofing window.
         # END shift-agent-sender-id
+'''
+
+
+# ─── Patch payloads (front-brain outbound-send screen) ─────────────────
+
+# Module-level helper, inserted before `class WhatsAppAdapter(...)`. Lazily
+# imports safe_io from /opt/shift-agent (the flat platform install) and returns
+# the SAFE text to relay. Fail-OPEN to the ORIGINAL content if safe_io is
+# unimportable: LLM replies exit through send() UN-screened TODAY, so failing
+# open here is exactly today's behavior — it does NOT regress safety, it only
+# means the NEW control is absent, which the tier's default-off posture already
+# assumes. It must never crash the send path. The real gate lives INSIDE safe_io
+# (FRONT_BRAIN_OUTBOUND_ENFORCE + allowlist), so this wrapper is byte-identical
+# when the tier is off.
+WHATSAPP_FB_SEND_HELPER = '''# BEGIN shift-agent-front-brain-send
+def _shift_front_brain_screen_outbound(chat_id, content):
+    """Route a composed outbound reply through the front-brain gateway-send
+    screen and return the SAFE text to relay. See tools/patch-hermes.py."""
+    try:
+        import sys as _sys
+        if "/opt/shift-agent" not in _sys.path:
+            _sys.path.insert(0, "/opt/shift-agent")
+        from safe_io import front_brain_screen_gateway_send as _fb_screen
+        return _fb_screen(chat_id, content)
+    except Exception:
+        return content
+# END shift-agent-front-brain-send'''
+
+# One-line call injected at the top of send(), immediately before the
+# format/chunk/relay begins (anchor: the format_message assignment). 12-space
+# indent = method-try-block body.
+WHATSAPP_FB_SEND_INJECT = '''            # BEGIN shift-agent-front-brain-send
+            content = _shift_front_brain_screen_outbound(chat_id, content)
+            # END shift-agent-front-brain-send
 '''
 
 
@@ -333,6 +389,60 @@ def _patch_whatsapp_py():
     print(f"  ✓ patched {WA}")
 
 
+def _patch_whatsapp_py_front_brain_send():
+    """Insert the front-brain outbound-send screen into whatsapp.py.
+
+    Two edits, both anchored on stable symbols (never line numbers):
+      1. the module-level helper before `class WhatsAppAdapter(BasePlatformAdapter):`
+      2. the one-line screen call before `formatted = self.format_message(content)`
+         inside `async def send(` (bounded forward-scan, mirrors _patch_run_py).
+    Idempotent (marker check first); fail-closed (exit 1) if either anchor is
+    missing so a Hermes upgrade cannot silently no-op the LLM-reply screen.
+    """
+    text = WA.read_text(encoding="utf-8")
+    if FB_SEND_MARK_BEGIN in text:
+        print(f"  ✓ {WA} front-brain-send already patched")
+        return
+
+    class_anchor = "class WhatsAppAdapter(BasePlatformAdapter):"
+    if class_anchor not in text:
+        sys.stderr.write(
+            f"FAIL: cannot locate '{class_anchor}' in {WA} — "
+            f"Hermes may have renamed the adapter class.\n"
+        )
+        sys.exit(1)
+    text = text.replace(
+        class_anchor, WHATSAPP_FB_SEND_HELPER + "\n\n\n" + class_anchor, 1
+    )
+
+    send_def_re = re.compile(r"^    async def send\(", re.MULTILINE)
+    send_m = send_def_re.search(text)
+    if not send_m:
+        sys.stderr.write(f"FAIL: cannot find `async def send(` def in {WA}\n")
+        sys.exit(1)
+    fmt_re = re.compile(
+        r"^            formatted = self\.format_message\(content\)", re.MULTILINE
+    )
+    fmt_m = fmt_re.search(text, pos=send_m.end())
+    if not fmt_m:
+        sys.stderr.write(
+            f"FAIL: `formatted = self.format_message(content)` not found inside "
+            f"send() in {WA} — Hermes may have refactored the send path.\n"
+        )
+        sys.exit(1)
+    line_diff = text.count("\n", send_m.start(), fmt_m.start())
+    if line_diff > 40:
+        sys.stderr.write(
+            f"FAIL: format_message anchor is {line_diff} lines from `async def "
+            f"send(` — likely matched a different method's line.\n"
+        )
+        sys.exit(1)
+    text = text[:fmt_m.start()] + WHATSAPP_FB_SEND_INJECT.lstrip("\n") + text[fmt_m.start():]
+
+    WA.write_text(text, encoding="utf-8")
+    print(f"  ✓ patched {WA} (front-brain outbound-send screen)")
+
+
 def _patch_run_py():
     if _has_marker(RUN):
         print(f"  ✓ {RUN} already patched")
@@ -492,6 +602,7 @@ def main() -> int:
     _patch_whatsapp_py()
     _patch_run_py()
     _patch_bridge_js()
+    _patch_whatsapp_py_front_brain_send()
     print("Done.")
     return 0
 
