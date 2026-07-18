@@ -306,7 +306,12 @@ def handle_intake_message(
         )
 
     if session.status == "choosing_sample_idea":
-        choice = _parse_sample_choice(text)
+        ideas = starter_idea_choices(
+            customer.business_category if customer else "",
+            business_name=customer.business_name if customer else "",
+            language=session.preferred_language,
+        )
+        choice = _parse_sample_choice(text, num_samples=len(ideas))
         if choice is None:
             session = session.model_copy(update={"last_message_id": message_id, "updated_at": now, **media_update})
             store.replace_intake_session(session)
@@ -324,11 +329,6 @@ def handle_intake_message(
                 creation_mode="sample",
                 customer_id=customer.customer_id if customer else "",
             )
-        ideas = starter_idea_choices(
-            customer.business_category if customer else "",
-            business_name=customer.business_name if customer else "",
-            language=session.preferred_language,
-        )
         selected = ideas[choice]
         raw_request = _build_pending_brief_request(session, customer, selected, source="sample")
         session = session.model_copy(update={
@@ -867,12 +867,57 @@ def _is_cancel_reply(text: str) -> bool:
     return visible in {"cancel", "stop", "never mind", "nevermind"}
 
 
-def _parse_sample_choice(text: str) -> Optional[int]:
-    visible = _visible_reply_text(text).lower()
-    match = re.search(r"\b(?:option\s*)?([12])\b", visible)
-    if not match:
+# Ordinal words that map a natural reply to a 1-based sample number. These are
+# unambiguous selection markers, so they may match anywhere in the reply.
+_SAMPLE_ORDINAL_WORDS = {
+    "first": 1,
+    "1st": 1,
+    "second": 2,
+    "2nd": 2,
+}
+
+# F3: the bare cardinals "one"/"two" collide with ordinary prose ("no one likes
+# it", "give me one more", "two of my friends said no"), so they are NOT matched
+# free-floating. They select only as a near-standalone reply — the whole message,
+# once politeness / selection filler is stripped, is exactly the cardinal word.
+_SAMPLE_CARDINAL_STANDALONE = {"one": 1, "two": 2}
+_SAMPLE_POLITENESS_TOKENS = frozenset({
+    "please", "pls", "thanks", "thank", "you", "the", "just",
+    "option", "idea", "number", "sample", "ok", "okay",
+})
+
+
+def _parse_sample_choice(text: str, num_samples: int = 2) -> Optional[int]:
+    """Map a natural sample-idea reply to a 0-based index, or None.
+
+    Accepts literal digits ("1"/"2"), ordinal words ("first", "the first one",
+    "second"), a near-standalone cardinal ("one", "number two"), and "option N"
+    phrasing. The bare cardinals "one"/"two" only count when the reply is
+    essentially just that word (F3) — free-floating "one"/"two" inside prose is
+    ignored. Genuinely ambiguous replies ("yes", unrelated words) and any
+    selection outside the ``num_samples`` offered stay None so the caller
+    legitimately re-prompts.
+    """
+    visible = re.sub(r"[^a-z0-9 ]+", " ", _visible_reply_text(text).lower())
+    visible = " ".join(visible.split())
+    number: Optional[int] = None
+    for word, value in _SAMPLE_ORDINAL_WORDS.items():
+        if re.search(rf"\b{word}\b", visible):
+            number = value
+            break
+    if number is None:
+        match = re.search(r"\b(?:option\s*|number\s*)?([0-9]+)\b", visible)
+        if match:
+            number = int(match.group(1))
+    if number is None:
+        # Near-standalone cardinal: strip politeness / selection filler and
+        # require exactly the cardinal word to remain.
+        core = [t for t in visible.split() if t not in _SAMPLE_POLITENESS_TOKENS]
+        if len(core) == 1 and core[0] in _SAMPLE_CARDINAL_STANDALONE:
+            number = _SAMPLE_CARDINAL_STANDALONE[core[0]]
+    if number is None or not 1 <= number <= num_samples:
         return None
-    return int(match.group(1)) - 1
+    return number - 1
 
 
 def _build_pending_brief_request(

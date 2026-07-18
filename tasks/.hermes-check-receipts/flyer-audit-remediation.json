@@ -1,0 +1,19 @@
+{
+  "topic": "flyer-audit-remediation",
+  "task_text": "flyer-audit-remediation — patch legacy flyer text extractor (rupee/bare prices, bare menu lists, kill Dosa->Dosa Biryani fabrication + phantom multi-price item), broaden cf-router approval/intent/echo classifiers, invert wrong-brand ingest default to style-only + fail-closed QA masthead backstop, add price_conflict manual-review reason, brand-asset deactivation audit row, fact-key literal QA screen, generation-failure closure message, sample-choice parsing. Deterministic batch; extraction_v2 LLM graduation is a separate deferred track.",
+  "completed_at": "2026-07-13T13:03:47Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 5,
+  "hermes_step_count": 5,
+  "files_to_read_first": [
+    "src/platform/schemas.py",
+    "src/plugins/cf-router/actions.py",
+    "src/agents/flyer/facts.py",
+    "src/agents/flyer/render.py",
+    "src/agents/flyer/semantic_brief.py",
+    "src/agents/flyer/onboarding.py",
+    "src/agents/flyer/visual_qa.py",
+    "src/agents/flyer/intake.py",
+    "tests/test_catering_v02_scripts.py"
+  ]
+}

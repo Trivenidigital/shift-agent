@@ -1893,3 +1893,34 @@ def test_evening_snacks_sale_request_locks_price_offer_schedule_and_end(tmp_path
     assert facts["schedule"]["value"] == "Wednesday and Thursday"
     assert facts["promotion_end"]["value"] == "June 25"
     assert all(fact["value"].lower() != "any item" for fact in project["locked_facts"])
+
+
+def test_sw4_price_conflict_routes_to_manual_review(tmp_path, monkeypatch, capsys):
+    # SW-4 (E2E audit 2026-07-13): the brief prices the same item two ways; instead
+    # of silently shipping the first price, the project routes to manual review with
+    # reason_code=price_conflict for an operator to confirm the intended price.
+    module = _load_script(monkeypatch)
+    customers_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    _write_customer(
+        customers_path,
+        category="Indian Restaurant",
+        phone="+17329837841",
+        business_name="Lakshmis Kitchn",
+        business_address="90 Brybar Dr St Johns FL",
+        primary_chat_id="17329837841@s.whatsapp.net",
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "create-flyer-project",
+        "--customer-phone", "+17329837841",
+        "--chat-id", "17329837841@s.whatsapp.net",
+        "--message-id", "m-price-conflict",
+        "--raw-request", "weekend special flyer. Biryani $10. Biryani $12.",
+        "--state-path", str(projects_path),
+        "--customer-state-path", str(customers_path),
+    ])
+
+    assert module.main() == 0
+    project = json.loads(capsys.readouterr().out)
+    assert project["status"] == "manual_edit_required"
+    assert project["manual_review"]["reason"] == "price_conflict"

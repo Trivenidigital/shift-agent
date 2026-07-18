@@ -1780,6 +1780,33 @@ def _style_vocab_blockers(project: FlyerProject, extracted_text: str) -> list[st
     return blockers
 
 
+_FACT_KEY_LITERALS = (
+    "business_name", "contact_phone", "customer_phone", "locked_facts",
+    "sender_role", "raw_request", "campaign_title", "pricing_structure",
+    "fact_id", "project_id", "original_message_id", "schedule_line",
+)
+_FACT_KEY_ITEM_RE = re.compile(r"item:\d+:(?:name|price)")
+
+
+def _fact_key_literal_blockers(project: FlyerProject, extracted_text: str) -> list[str]:
+    """IN-1 (E2E audit 2026-07-13): internal fact-key / schema literals must never be
+    painted into the art (`item:0:name`, `business_name`, `sender_role`,
+    `raw_request`, ...). Distinct from the style-vocab screen — these are structural
+    keys the customer never intends to print. An entry that actually appears in the
+    customer's own brief is authorized (never punish the brief)."""
+    text = (extracted_text or "").casefold()
+    if not text.strip():
+        return []
+    pool = _authorized_text_pool(project)
+    seen: set[str] = set()
+    blockers: list[str] = []
+    for leaked in _FACT_KEY_ITEM_RE.findall(text) + [k for k in _FACT_KEY_LITERALS if k in text]:
+        if leaked not in pool and leaked not in seen:
+            seen.add(leaked)
+            blockers.append(f"internal fact key painted into art: {leaked}")
+    return blockers
+
+
 def _project_has_uniform_shared_price(project: FlyerProject) -> bool:
     """WS2's uniform detection over locked facts: exactly one distinct item
     price, exact-token present in the offer statement."""
@@ -1940,7 +1967,13 @@ def _uniform_price_column_blockers(project: FlyerProject, extracted_text: str,
     twice in the art (offer statement + price element). Three or more
     appearances is the repeated-price-column defect the strict alpha screen
     cannot see (numbers pass free). Marker-gated like the strict screen —
-    render-time contract only, never legacy renders or finals."""
+    render-time contract only, never legacy renders or finals.
+
+    IN-2 (E2E audit 2026-07-13) — kept marker-gated BY DESIGN: a legacy/non-
+    typeset render has no positional contract, so a uniform price can legitimately
+    repeat more than twice (header + per-item + footer). Screening it would
+    false-positive real menus. A safe legacy screen needs positional data the
+    legacy path does not carry — deferred to the render-side typeset contract."""
     try:
         if not _typeset_marker_applies(artifact_path):
             return []
@@ -2080,6 +2113,7 @@ def run_visual_qa(
     # Graduation commit 4 — QA hardening batch (exhibit-backed; see
     # tests/test_flyer_qa_hardening.py):
     blockers.extend(_style_vocab_blockers(project, extracted_text))
+    blockers.extend(_fact_key_literal_blockers(project, extracted_text))
     blockers.extend(_offer_qualifier_blockers(project, extracted_text))
     blockers.extend(_schedule_near_miss_blockers(project, extracted_text))
     blockers.extend(_extraneous_token_blockers(project, extracted_text,

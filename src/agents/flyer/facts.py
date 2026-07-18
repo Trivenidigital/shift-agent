@@ -64,6 +64,42 @@ _COMPLETE_DISH_RE = re.compile(
 )
 
 
+# BC-1: currency preservation. The extractor recognizes `$`, `₹`, and the Indian
+# rupee spellings (Rs / Rs. / rs / rupees) as price markers, plus BARE amounts
+# (no symbol). Emitted value keeps the customer's currency: `$` and bare amounts
+# render as "$N"; every rupee spelling normalizes to the single "₹N" form
+# (downstream QA understands `[$₹]`). A bare (symbol-less) amount is trusted as a
+# price ONLY when it carries a `.NN` decimal — a bare INTEGER collides with
+# quantities / years / phone digits and is never treated as a price.
+def _price_str(cur: str, amount: str) -> str:
+    c = (cur or "").strip().lower()
+    if c == "₹" or c.startswith("rs") or c.startswith("rupee"):
+        return f"₹{amount}"
+    return f"${amount}"
+
+
+# SW-2: category_suffix ("Biryani") is appended ONLY to bare protein/veg
+# modifiers that a complete dish name would follow ("Chicken" -> "Chicken
+# Biryani"). A complete dish ("Dosa", "Idli") is left untouched — appending the
+# suffix there fabricates a dish the customer never named.
+_BIRYANI_MODIFIER_RE = re.compile(
+    r"^(?:chicken|mutton|goat|lamb|veg|vegetable|veggie|paneer|egg|prawn|prawns|"
+    r"shrimp|fish|gosht|keema|kheema|beef|boneless|jumbo|hyderabadi|dum)(?:\s*65)?$",
+    re.IGNORECASE,
+)
+
+
+# BC-1: a BARE (symbol-less) price is only trusted on a tight menu line. Reject
+# the match when the name carries offer/sentence contamination so combo briefs
+# ("veg combo 39.99 includes ...", "with prices 49.99 for ...") never fabricate a
+# priced item. Symbol-marked prices ($ / ₹ / Rs) are exempt from this gate.
+_BARE_PRICE_NAME_REJECT_RE = re.compile(
+    r"\b(?:combo|meal|package|bundle|platter|for|with|includes?|including|price|"
+    r"prices|priced|pricing|cost|costs|total|per)\b",
+    re.IGNORECASE,
+)
+
+
 def _fact(
     fact_id: str,
     label: str,
@@ -245,36 +281,53 @@ def profile_locked_facts(
     return facts
 
 
-def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
+def _item_price_facts(
+    text: str, *, message_id: str = "", conflicts: list[str] | None = None
+) -> list[FlyerLockedFact]:
     text = _normalize_dashes(text or "")
     facts: list[FlyerLockedFact] = []
     category_suffix = ""
     if re.search(r"\bbiryani(?:'?s|s)?\b", text or "", flags=re.IGNORECASE):
         category_suffix = "Biryani"
+    # BC-1: `_CUR_PRE` matches a leading currency symbol ($ / ₹ / Rs / Rs. / rs);
+    # `_CUR_SUF` matches a trailing one ($ / dollars / ₹ / Rs / rupees).
     price_for_name = re.compile(
-        r"\$\s*(?P<price>\d+(?:\.\d{2})?)\s*(?:for|of)\s+"
+        r"(?P<cur>\$|₹|Rs\.?|rs\.?)\s*(?P<price>\d+(?:\.\d{2})?)\s*(?:for|of)\s+"
         r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,40}?)"
-        r"(?=\s+(?:and|or)\s+\$|[.!?,;]|$)",
+        r"(?=\s+(?:and|or)\s+(?:\$|₹|Rs\.?|rs\.?)|[.!?,;]|$)",
         flags=re.IGNORECASE,
     )
+    # BC-1: a currency prefix ($ / ₹ / Rs) allows an integer OR decimal price; a
+    # BARE (symbol-less) price MUST carry a .NN decimal. The `(?!\s*[%\d])`
+    # digit/percent rejection guards the BARE alternative ONLY — it refuses a bare
+    # decimal that is really the head of a longer number ("15.00%", "5.992") or a
+    # quantity, and it must NOT touch the symbol branch: a leading $/₹/Rs already
+    # disambiguates a price from a trailing quantity, so "Samosa $5.99 2pc" must
+    # keep the full $5.99 rather than backtrack the decimals to satisfy a shared
+    # lookahead. A bare integer is a quantity / year / phone digit and is refused
+    # by the decimal requirement on the bare branch.
     name_before_price = re.compile(
-        r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*(?:-|:)?\s*\$\s*(?P<price>\d+(?:\.\d{2})?)",
+        r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*(?:-|:)?\s*"
+        r"(?:(?P<cur>\$|₹|Rs\.?|rs\.?)\s*(?P<price>\d+(?:\.\d{1,2})?)"
+        r"|(?P<bareprice>\d+\.\d{1,2})(?!\s*[%\d]))",
         flags=re.IGNORECASE,
     )
     compact_name_before_price = re.compile(
-        r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*[-:]\s*\$?(?P<price>\d+(?:\.\d{1,2})?)\s*"
+        r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*[-:]\s*"
+        r"(?P<cur>\$|₹|Rs\.?|rs\.?)?\s*(?P<price>\d+(?:\.\d{1,2})?)\s*"
         r"(?:each|plate|per\s+plate)\b",
         flags=re.IGNORECASE,
     )
     price_before_name = re.compile(
-        r"\$\s*(?P<price>\d+(?:\.\d{2})?)\s*(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,50})",
+        r"(?P<cur>\$|₹|Rs\.?|rs\.?)\s*(?P<price>\d+(?:\.\d{2})?)\s*(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,50})",
         flags=re.IGNORECASE,
     )
     suffix_price = re.compile(
-        r"(?P<price>\d+(?:\.\d{1,2})?)\s*(?:\$|dollars?)\s*$",
+        r"(?P<price>\d+(?:\.\d{1,2})?)\s*(?P<cur>\$|dollars?|₹|Rs\.?|rupees?)\s*$",
         flags=re.IGNORECASE,
     )
     seen: set[str] = set()
+    seen_prices: dict[str, str] = {}
     promo_name = re.compile(r"^(?:save|coupon|discount|offer|deal|special|cashback|credit)\b", flags=re.IGNORECASE)
     bad_context = re.compile(r"\b(?:create|make|generate|design|flyer|flier|poster|banner|promoting|promote|promotion)\b", flags=re.IGNORECASE)
 
@@ -285,10 +338,11 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
     # match rejected as prompt-prefix/bad-context garbage, where the price belongs
     # to the trailing REAL item and the fallback must run.
     flat_price_subject = re.compile(
-        r"^(?:price\s+)?(?:any|every|each|all)\s+items?$", flags=re.IGNORECASE
+        r"^(?:price\s+)?(?:any|every|each|all)\s+items?$|^(?:everything|anything)$",
+        flags=re.IGNORECASE,
     )
 
-    def add_item(name: str, price: str) -> str:
+    def add_item(name: str, price: str, *, bare: bool = False) -> str:
         """Add a name/price item fact, returning a 3-state status:
 
         - "accepted"    — the name/price pair was recorded as an item fact.
@@ -320,6 +374,13 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             # A real name-first pattern matched but repeats an already-captured
             # item. It still CLAIMED the segment's price, so the fallback must not
             # mine trailing words — treat as a claim (deduped, not re-added).
+            # SW-4: a repeat with a DIFFERENT price is a silent conflict
+            # ("Biryani $10 Biryani $12"); record the name so the caller can route
+            # to manual review instead of last/first-wins shipping one price.
+            if conflicts is not None:
+                prev = seen_prices.get(name.lower(), "")
+                if prev and _price_norm(prev) != _price_norm(price) and name not in conflicts:
+                    conflicts.append(name)
             return "duplicate"
         # A flat-price subject ("any item", "price all items") claims the price for
         # the whole segment; the trailing phrase is not its own priced item. Detect
@@ -329,6 +390,11 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             return "flat_subject"
         lowered_original = original_name.lower()
         lowered = name.lower()
+        # BC-1: a BARE (symbol-less) price is only trusted on a tight menu line —
+        # reject offer/sentence contamination or an over-long name so combo/prose
+        # briefs never fabricate a priced item from a stray decimal.
+        if bare and (_BARE_PRICE_NAME_REJECT_RE.search(lowered) or len(name.split()) > 4):
+            return "rejected"
         if (
             lowered_original.startswith("for ")
             or lowered.endswith(" and")
@@ -340,11 +406,26 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
         if lowered in {
             "any item", "all item", "all items", "every item", "each item",
             "any items", "every items", "each items", "priced at",
+            # SW-3: connector / offer-filler words must never become priced items
+            # ("... and also $7.99 combo" -> no phantom "also").
+            "also", "and also", "plus", "or",
+            # SW-4: price-history / correction fillers ("Idly $8 (was $7)") are not
+            # items — without this the "(was $N)" annotation makes a phantom "was"
+            # item that repeats with two prices and trips the price-conflict gate on
+            # a legitimate correction.
+            "was", "were", "previously", "originally",
             "a", "an", "the", "and", "with", "include", "includes", "for", "on",
             "at", "each", "plate", "pc", "pcs", "piece", "pieces",
         }:
             return "rejected"
-        if category_suffix and category_suffix.lower() not in lowered and not _COMPLETE_DISH_RE.search(name):
+        # SW-2: only complete the suffix onto a bare protein/veg MODIFIER
+        # ("Chicken" -> "Chicken Biryani"); a complete dish ("Dosa") stays as-is.
+        if (
+            category_suffix
+            and category_suffix.lower() not in lowered
+            and not _COMPLETE_DISH_RE.search(name)
+            and _BIRYANI_MODIFIER_RE.match(name)
+        ):
             name = f"{name.title()} {category_suffix}"
         if name.lower() in {"a", "an", "the", "and", "with", "include", "includes", "for", "on", "at", "each", "plate", "pc", "pcs", "piece", "pieces"}:
             return "rejected"
@@ -362,6 +443,7 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
         if len(meaningful_words) > 5:
             return "rejected"
         seen.add(name.lower())
+        seen_prices[name.lower()] = price
         name_fact = _fact(f"item:{len(seen)-1}:name", "Item", name, "customer_text", message_id=message_id)
         price_fact = _fact(f"item:{len(seen)-1}:price", "Price", price, "customer_text", message_id=message_id)
         if name_fact:
@@ -375,17 +457,19 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
         if suffix_match:
             name = segment[: suffix_match.start()].strip()
             name = re.sub(r"[-:–—]+$", "", name).strip()
-            add_item(name, f"${suffix_match.group('price')}")
+            add_item(name, _price_str(suffix_match.group("cur"), suffix_match.group("price")))
             continue
         name_first_claimed = False
         for match in price_for_name.finditer(segment):
-            if add_item(match.group("name"), f"${match.group('price')}") in ("accepted", "flat_subject", "duplicate"):
+            if add_item(match.group("name"), _price_str(match.group("cur"), match.group("price"))) in ("accepted", "flat_subject", "duplicate"):
                 name_first_claimed = True
         for match in compact_name_before_price.finditer(segment):
-            if add_item(match.group("name"), f"${match.group('price')}") in ("accepted", "flat_subject", "duplicate"):
+            if add_item(match.group("name"), _price_str(match.group("cur"), match.group("price"))) in ("accepted", "flat_subject", "duplicate"):
                 name_first_claimed = True
         for match in name_before_price.finditer(segment):
-            if add_item(match.group("name"), f"${match.group('price')}") in ("accepted", "flat_subject", "duplicate"):
+            cur = match.group("cur")
+            raw_price = match.group("price") if cur else match.group("bareprice")
+            if add_item(match.group("name"), _price_str(cur, raw_price), bare=not cur) in ("accepted", "flat_subject", "duplicate"):
                 name_first_claimed = True
         if name_first_claimed:
             # A name-first pattern PAIRED an item OR claimed the price via a
@@ -399,8 +483,29 @@ def _item_price_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFac
             name = re.split(r"\b(?:and|with|include|includes|plus|for|on|at)\b|[.!?]", name, maxsplit=1, flags=re.IGNORECASE)[0]
             if not name.strip():
                 continue
-            add_item(name, f"${match.group('price')}")
+            add_item(name, _price_str(match.group("cur"), match.group("price")))
     return facts
+
+
+def price_conflict_signals(text: str) -> list[str]:
+    """SW-4: item names the brief prices MORE THAN ONE way ("Biryani $10 Biryani
+    $12"). `_item_price_facts` dedups such a repeat to the first price and drops
+    the second silently; running the same extraction with a `conflicts` sink
+    surfaces the conflicting names so the caller can route the project to manual
+    review (reason_code "price_conflict") instead of shipping one price blind.
+
+    Detection ONLY — never rewrites, merges, or picks a price. Returns the
+    conflicting item names (dedup, in first-seen order); [] when every repeat
+    agrees on price.
+
+    NOTE (cross-file wiring, left as a report note per task scope): turning a
+    non-empty result into a FlyerManualReview.reason_code="price_conflict" write
+    happens in the project-creation / QA gate script, OUTSIDE facts.py — that
+    call site is not wired here.
+    """
+    conflicts: list[str] = []
+    _item_price_facts(text or "", conflicts=conflicts)
+    return conflicts
 
 
 def _generic_item_price(text: str) -> str:
@@ -575,6 +680,80 @@ def _item_list_names(text: str) -> list[str]:
     return names
 
 
+# BC-2: a bare dish token is short, letters-only (spaces / & / ' / - allowed),
+# no digits or currency. Instruction / verb / day-time / context words disqualify
+# it so prompt text ("Create a weekend flyer", "open sat and sun morning") can
+# never be mistaken for a dish. `special/menu/weekend` etc. ARE disqualifiers —
+# they mark a heading or instruction, not a dish name.
+_BARE_NAME_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z '&/-]{0,40}$")
+_BARE_NAME_STOPWORD_RE = re.compile(
+    r"\b(?:create|make|makes|making|design|generate|build|want|wants|need|needs|"
+    r"please|help|use|used|using|include|includes|including|add|adds|feature|"
+    r"flyer|flier|poster|banner|promo|promote|promoting|promotion|sale|offer|"
+    r"special|specials|deal|deals|menu|catering|delivery|pickup|order|orders|"
+    r"open|opens|opening|closed|serve|serves|serving|cook|cooks|cooking|fresh|"
+    r"today|tomorrow|tonight|weekend|weekday|morning|evening|afternoon|night|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"mon|tue|wed|thu|fri|sat|sun|am|pm|for|with|and|or|the|my|our|your|"
+    r"restaurant|store|shop|kitchen|address|phone|contact|logo|colorful|modern|"
+    r"colors|color|background|style|theme|price|prices|"
+    # F2: color / style / adjective words are theme descriptors, never dish
+    # names — a bare "Green" / "Gold" line is a palette, not a menu item.
+    r"green|gold|golden|red|blue|maroon|royal|purple|violet|orange|yellow|pink|"
+    r"white|black|silver|grey|gray|navy|teal|crimson|"
+    r"elegant|festive|bright|dark|light|simple|classic|traditional|vibrant|bold|"
+    r"minimal|minimalist|clean|fancy|premium|luxury|rustic|vintage|retro|pastel|neon)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_bare_dish_token(tok: str) -> bool:
+    tok = (tok or "").strip().strip(".")
+    if not tok or not _BARE_NAME_TOKEN_RE.match(tok):
+        return False
+    if len(tok.split()) > 4:
+        return False
+    return not _BARE_NAME_STOPWORD_RE.search(tok)
+
+
+def _bare_menu_names(text: str) -> list[str]:
+    """BC-2: bounded bare (price-less) dish-name extraction.
+
+    Fires ONLY for two tightly-bounded shapes so instruction / prompt text never
+    becomes a phantom item:
+      (a) a RUN of >=2 consecutive newline lines each reading as a bare dish token
+          ("Idli\\nDosa\\nVada"); a lone bare line is not enough, and
+      (b) a whole trimmed brief that is NOTHING but a >=2-member comma list of
+          bare dish tokens ("Idli, Dosa, Vada").
+
+    Every other shape (sentences, single lines, day/time phrases, mixed prose,
+    priced text) yields []. Mixed-prose comma runs are deliberately OUT of scope.
+    Style / color / adjective lists ("green, gold", "modern, colorful") are
+    rejected by the `_BARE_NAME_STOPWORD_RE` disqualifier in `_is_bare_dish_token`
+    (F2): those tokens are never dish names, so neither branch (a) nor branch (b)
+    can turn them into items."""
+    names: list[str] = []
+    # (a) consecutive bare newline lines (run length >= 2).
+    run: list[str] = []
+    for line in (text or "").split("\n"):
+        line = line.strip()
+        if _is_bare_dish_token(line):
+            run.append(line)
+        else:
+            if len(run) >= 2:
+                names.extend(run)
+            run = []
+    if len(run) >= 2:
+        names.extend(run)
+    # (b) whole-input pure comma list (single line, all members bare dish tokens).
+    stripped = (text or "").strip()
+    if "\n" not in stripped and "," in stripped:
+        parts = [p.strip() for p in stripped.split(",") if p.strip()]
+        if len(parts) >= 2 and all(_is_bare_dish_token(p) for p in parts):
+            names.extend(parts)
+    return names
+
+
 def _item_name_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact]:
     facts: list[FlyerLockedFact] = []
     seen: set[str] = set()
@@ -637,6 +816,9 @@ def _item_name_facts(text: str, *, message_id: str = "") -> list[FlyerLockedFact
             add_item(part)
     # "N items: a, b, c" colon list (no "include" verb) — live F0164.
     for name in _item_list_names(text):
+        add_item(name)
+    # BC-2: bare (price-less) newline / pure-comma dish list.
+    for name in _bare_menu_names(text):
         add_item(name)
     return facts
 

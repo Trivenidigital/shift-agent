@@ -224,12 +224,16 @@ def test_template_excluded_from_generation_assets_when_transfer_on(monkeypatch, 
     assert "logo" in kinds                       # logo keeps identity mode
 
 
-def test_template_included_when_transfer_off(monkeypatch, tmp_path):
+def test_template_style_only_when_transfer_off(monkeypatch, tmp_path):
+    # SW-1a (E2E audit 2026-07-13): a `template` upload now defaults to STYLE-ONLY
+    # even with style-transfer OFF, so it is NOT attached raw as an identity source
+    # (the 2026-06-17 / F0217 wrong-brand vector). The owner's own logo still attaches.
     _write_customers(tmp_path, template_derived=True, include_logo=True)
     _registers_on(monkeypatch, tmp_path, transfer=False)
     proj = _project()
     kinds = [a.kind for a in R._generation_brand_assets(proj)]
-    assert "template" in kinds                   # legacy: template attached
+    assert "template" not in kinds               # SW-1a: template no longer attached raw
+    assert "logo" in kinds                        # owner's own logo still honored
 
 
 def test_template_bytes_never_in_attachments_when_transfer_on(monkeypatch, tmp_path):
@@ -291,9 +295,12 @@ def test_flag_off_prompt_and_attachments_byte_identical(monkeypatch, tmp_path):
     prompt_no, urls_no = _render(tmp_no)
     assert prompt_ds == prompt_no                 # derived_style field inert on prompt
     assert urls_ds == urls_no                      # ...and on attachments
-    # And legacy behavior holds: the template IS attached when the flag is off.
+    # SW-1a (E2E audit 2026-07-13): with the flag off the template now defaults to
+    # style-only and is NOT attached raw (F0217 wrong-brand fix); the owner's logo is.
     template_b64 = base64.b64encode(TEMPLATE_BYTES).decode("ascii")
-    assert any(template_b64 in u for u in urls_ds)
+    logo_b64 = base64.b64encode(LOGO_BYTES).decode("ascii")
+    assert all(template_b64 not in u for u in urls_ds)
+    assert any(logo_b64 in u for u in urls_ds)
 
 
 # ── MAJOR-2: flag-coupling telemetry (transfer strips template, no derived voice)

@@ -1919,7 +1919,7 @@ def _brand_asset_prompt_label(asset: FlyerAsset, *, style_only: bool = False) ->
 
 def _style_only_reference_requested(project: FlyerProject) -> bool:
     text = f"{project.raw_request or ''} {project.fields.notes or ''}".lower()
-    return any(
+    if any(
         marker in text
         for marker in (
             "customer chose path 2",
@@ -1928,6 +1928,63 @@ def _style_only_reference_requested(project: FlyerProject) -> bool:
             "reference/inspiration",
             "do not copy the source flyer branding",
             "do not copy another business",
+        )
+    ):
+        return True
+    # SW-1a — invert the default. A "make it look like this" upload (a `template`
+    # brand asset or a `reference_image` project asset) is treated as STYLE-ONLY by
+    # default — the model borrows palette/density/mood through the identity-stripped
+    # proxy (_style_reference_proxy_bytes) while identity comes from the registered
+    # profile — UNLESS the owner explicitly confirms the upload is her OWN brand
+    # asset. Root-causes the wrong-brand vector (2026-06-17 / F0217): a competitor
+    # flyer captioned "use this theme going forward" no longer becomes the identity
+    # source. Own-logo uploads are unaffected (a logo alone does not trigger this),
+    # and pure-text briefs never reach here. The QA masthead backstop (SW-1b) is the
+    # fail-closed catch for anything that renders anyway.
+    if _reference_upload_is_owner_confirmed(project):
+        return False
+    # A `reference_image` (ad-hoc "make it look like this" project upload) always
+    # defaults to style-only. A `template` brand asset defaults to style-only ONLY
+    # when the style-transfer feature is NOT handling it — when style transfer is
+    # enabled the template is safely consumed as DERIVED STYLE (never attached raw)
+    # by _generation_brand_assets + its own prompt branch, so we must not preempt it.
+    # The closed hole is the transfer-OFF path where a template was attached raw as
+    # the identity source (the 2026-06-17 / F0217 wrong-brand vector).
+    has_template = (
+        not _brand_style_transfer_enabled(project)
+        and any(getattr(a, "kind", "") == "template" for a in _active_brand_assets(project))
+    )
+    has_reference_image = any(
+        getattr(a, "kind", "") == "reference_image" and Path(a.path).exists()
+        for a in (project.assets or [])
+    )
+    return has_template or has_reference_image
+
+
+def _reference_upload_is_owner_confirmed(project: FlyerProject) -> bool:
+    """True only when the owner clearly claims the UPLOAD is her own brand asset.
+
+    Deliberately narrow and asset-referring: phrases that could describe the
+    OUTPUT ("make my flyer look like this") must NOT count as confirmation — that
+    is exactly the wrong-brand case. Only unambiguous asset-ownership claims here."""
+    text = f"{project.raw_request or ''} {project.fields.notes or ''}"
+    for asset in project.assets or []:
+        text += " " + str(getattr(asset, "notes", "") or "")
+    text = text.lower()
+    return any(
+        phrase in text
+        for phrase in (
+            "my logo",
+            "my own logo",
+            "our logo",
+            "this is my logo",
+            "my brand asset",
+            "preserve my brand",
+            "preserve my branding",
+            "preserve my logo",
+            "keep my branding",
+            "keep my logo",
+            "use my logo",
         )
     )
 

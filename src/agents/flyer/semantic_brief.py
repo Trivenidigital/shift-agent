@@ -31,6 +31,28 @@ _ORG_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+# SW-1b fail-closed masthead backstop: vocabulary that EXPLAINS a name-shaped line
+# as legitimate promotional / occasion copy rather than a business masthead. A
+# competitor masthead is a proper noun with none of these words ("Saravana Bhavan",
+# "Paradise Biryani"); a promo headline has at least one ("Weekend Special", "Grand
+# Opening"). NOTE: cuisine / food-course words are deliberately EXCLUDED here — a
+# competitor masthead frequently IS one ("Bombay Thali", "Madras Meals", "Sunday
+# Brunch", "Paradise Biryani"), so treating them as an explanation re-opens the
+# bypass. F4 (2026-07-18) removed the menu/course food tokens (combo(s)/buffet/
+# menu/thali/meal(s)/breakfast/brunch/lunch/dinner) that had leaked into this set
+# despite the note above. "feast" is retained as an occasion word ("Diwali Feast",
+# "Family Combo Feast") — it reads as celebration, not a specific dish/course.
+_OFFER_VOCAB_RE = re.compile(
+    r"\b(?:special|specials|offer|offers|sale|discount|discounts|deal|deals|feast|"
+    r"fresh|daily|weekly|weekend|weekday|today|tonight|tomorrow|now|open|opening|grand|"
+    r"celebrate|celebration|festival|festive|happy|welcome|new|season|seasonal|holiday|holidays|"
+    r"diwali|deepavali|holi|pongal|sankranti|ugadi|navratri|navaratri|dussehra|dasara|onam|eid|"
+    r"ramadan|ramzan|christmas|thanksgiving|"
+    r"catering|free|buy|save|savings|off|only|limited|"
+    r"party|event|celebrating|anniversary|launch|premium|value|weekender)\b",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class SemanticVisibilityPolicy:
@@ -614,6 +636,36 @@ def semantic_visibility_policy(project: FlyerProject) -> SemanticVisibilityPolic
     )
 
 
+def _project_ingested_external_reference(project: FlyerProject) -> bool:
+    """True when this project ingested an external flyer/template image — the only
+    context with a wrong-brand vector. The suffix-less masthead backstop (SW-1b) is
+    gated on this so it never fires on a pure-text brief, where a 2-3 word title-case
+    line like 'Pure Veg' / 'Home Delivery' / 'Taste Of India' is the owner's own
+    legitimate flyer copy, not a competitor identity. Org-suffix mastheads
+    (…Restaurant/Kitchen) still block regardless — that is the pre-existing behavior.
+
+    F5: a saved `template` BRAND ASSET on the customer record (the F0217 wrong-brand
+    vector) is an ingested external reference too, even though it is neither a
+    reference_extraction nor a project `reference_image` asset. Reuse render's
+    read-only store-read helper to detect it. Stays conditioned on saved/ingested
+    external assets only — never brief text — and falls back to False when there is
+    no customer or the store is unreadable."""
+    if getattr(project, "reference_extractions", None):
+        return True
+    for asset in getattr(project, "assets", None) or []:
+        if getattr(asset, "kind", "") == "reference_image":
+            return True
+    try:
+        from agents.flyer.render import _active_brand_assets
+
+        for asset in _active_brand_assets(project):
+            if getattr(asset, "kind", "") == "template":
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def visible_wrong_brand_blockers(project: FlyerProject, extracted_text: str) -> list[str]:
     """Conservative wrong-brand checks for visible identity claims.
 
@@ -630,6 +682,7 @@ def visible_wrong_brand_blockers(project: FlyerProject, extracted_text: str) -> 
             allowed.add(_norm(getattr(contract, "target_business_name", "") or ""))
     allowed.discard("")
     blockers: list[str] = []
+    external_ref = _project_ingested_external_reference(project)
 
     def allowed_identity_visible(value: str) -> bool:
         return any(_norm_contains(value, allowed_name) for allowed_name in allowed)
@@ -702,13 +755,34 @@ def visible_wrong_brand_blockers(project: FlyerProject, extracted_text: str) -> 
         mixed_org_masthead = suffix_final and any(ch.isupper() for ch in candidate) and any(ch.islower() for ch in candidate)
         if uppercase_ratio < 0.8 and not candidate.istitle() and not mixed_org_masthead:
             continue
-        if not _ORG_SUFFIX_RE.search(candidate):
+        # SW-1b — fail-closed masthead backstop. The old gate blocked ONLY lines
+        # containing an English org-suffix word (Kitchen/Restaurant/...), so an ethnic
+        # competitor masthead without a suffix (Saravana Bhavan, Paradise Biryani,
+        # Adyar Ananda Bhavan) sailed through and rendered alongside the owner's name.
+        # Now a 2-3 word proper-noun line (title-case OR all-caps) is business-name-
+        # shaped; unless we can EXPLAIN it as the owner's identity, the campaign title,
+        # a requested label, or promotional/occasion copy, it is an unexplained brand
+        # claim and fails closed to manual review. Cuisine words do NOT explain it (a
+        # competitor name is often a cuisine word), so the explanation set is offer/
+        # occasion vocabulary only. Org-suffix lines still always block.
+        has_org_suffix = bool(_ORG_SUFFIX_RE.search(candidate))
+        # SW-1b fix (adversarial review 2026-07-13): the suffix-less name-shaped
+        # block ONLY fires when an external reference/template was ingested — the
+        # sole wrong-brand vector. On a pure-text brief a 2-3 word title-case line
+        # is the owner's own copy ("Pure Veg", "Home Delivery") and must NOT be
+        # read as a competitor. Org-suffix lines still block unconditionally.
+        name_shaped = external_ref and bool(
+            2 <= len(words) <= 3 and (candidate.istitle() or uppercase_ratio >= 0.8)
+        )
+        if not has_org_suffix and not name_shaped:
             continue
         if is_campaign_title(candidate):
             continue
         if is_requested_non_identity_label(candidate):
             continue
         if allowed_identity_visible(candidate):
+            continue
+        if not has_org_suffix and _OFFER_VOCAB_RE.search(candidate):
             continue
         append_once(f"visible wrong business/brand: {candidate.title()}")
     return blockers

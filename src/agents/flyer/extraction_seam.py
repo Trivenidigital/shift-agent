@@ -18,8 +18,31 @@ never overrides registered identity (2026-05-15 lesson class).
 from __future__ import annotations
 
 import os
+import re
 
 _IDENTITY_FACT_IDS = ("business_name", "contact_phone", "location")
+
+# IN-4 (E2E audit 2026-07-13): bounded, deterministic festival -> occasion map for
+# the LEGACY extraction path so festival flyers theme correctly before v2 graduates.
+# Only the four FlyerOccasion enum values are producible, keyed off EXPLICIT festival
+# names (never generic "special"/"celebration"). Deliberately narrow — occasion is
+# LLM-classifiable and v2 owns the general case. NOTE: bare "independence day" is NOT
+# mapped to july4 — for an Indian SMB that is Aug 15, not the US July 4.
+_DETERMINISTIC_OCCASION_PATTERNS = (
+    (re.compile(r"\b(?:diwali|deepavali)\b", re.IGNORECASE), "diwali"),
+    (re.compile(r"\b(?:ramadan|ramzan|iftar|eid\s+al[\s-]?fitr|\beid\b)\b", re.IGNORECASE), "ramadan"),
+    (re.compile(r"\bthanksgiving\b", re.IGNORECASE), "thanksgiving"),
+    (re.compile(r"\b(?:july\s*4th?|4th\s+of\s+july|fourth\s+of\s+july)\b", re.IGNORECASE), "july4"),
+)
+
+
+def _derive_deterministic_occasion(raw_request: str) -> str:
+    """Return a FlyerOccasion enum value for an explicit festival name, else 'none'."""
+    text = raw_request or ""
+    for pattern, occasion in _DETERMINISTIC_OCCASION_PATTERNS:
+        if pattern.search(text):
+            return occasion
+    return "none"
 
 
 def extraction_v2_enabled() -> bool:
@@ -83,4 +106,10 @@ def extract_text_facts_seam(fields, raw_request, *, message_id="", report_out=No
             audit("semantic_brief_outcome", brief_provenance)
         except Exception:  # noqa: BLE001 — observability never blocks
             pass
+    # IN-4: derive the occasion deterministically on the legacy path (v2 sets it via
+    # the LLM above; when v2 is off/fell-back the sink would otherwise stay "none").
+    # Writes only to the report sink — never facts, never audit — so the flag-off
+    # "byte-identical + silent" contract holds.
+    if report_out is not None and str(report_out.get("occasion") or "none") == "none":
+        report_out["occasion"] = _derive_deterministic_occasion(raw_request)
     return facts
