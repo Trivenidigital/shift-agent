@@ -17,6 +17,7 @@ from schemas import (
     E164Phone,
     FLYER_AUTHORIZED_REQUESTER_LIMIT,
     FlyerBrandAsset,
+    FlyerBrandAssetStateChanged,
     FlyerCustomerProfile,
     FlyerCustomerStore,
     FlyerIntakeSession,
@@ -35,6 +36,84 @@ except ModuleNotFoundError:
     def atomic_write_text(path: Path, text: str) -> None:  # type: ignore[no-redef]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
+
+
+_DECISIONS_LOG_DEFAULT = Path("/opt/shift-agent/logs/decisions.log")
+
+
+def _resolve_decisions_log(audit_log_path: Optional[Path]) -> Path:
+    """Resolve the audit chokepoint path for a brand-asset deactivation row.
+
+    An explicit ``audit_log_path`` wins (tests + any caller that pins it).
+    Otherwise honor ``SHIFT_AGENT_DECISIONS_LOG_PATH`` — the same override the
+    rest of the platform + the conftest test-isolation fixture read — falling
+    back to the deployed VPS path. Resolved at call time so an env override set
+    after import takes effect.
+    """
+    if audit_log_path is not None:
+        return Path(audit_log_path)
+    override = os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH")
+    return Path(override) if override else _DECISIONS_LOG_DEFAULT
+
+
+def _audit_same_kind_reupload_deactivation(
+    *,
+    audit_log_path: Optional[Path],
+    customer_id: str,
+    deactivated_asset: FlyerBrandAsset,
+    replacement_asset: FlyerBrandAsset,
+    sender_phone: Optional[str],
+    now: datetime,
+) -> None:
+    """Audit an automatic same-kind re-upload deactivation of a saved brand asset.
+
+    §12b: re-uploading a logo/template flips the prior active same-kind asset to
+    inactive — an AUTOMATED reversal of owner-applied brand-asset state, the exact
+    class the sanctioned ``set-flyer-brand-asset-state`` path audits. Emit the same
+    ``FlyerBrandAssetStateChanged`` row through the canonical decisions.log
+    chokepoint so this reversal is never silent (the 2026-06-17 wrong-brand
+    deactivation left ZERO audit rows). Best-effort + non-fatal: an append failure
+    warns to stderr (journald-visible) but never blocks the customer save-ack.
+    """
+    log_path = _resolve_decisions_log(audit_log_path)
+    try:
+        entry = FlyerBrandAssetStateChanged(
+            type="flyer_brand_asset_state_changed",
+            ts=now,
+            asset_id=deactivated_asset.asset_id,
+            customer_id=customer_id,
+            prior_active=True,
+            new_active=False,
+            applied_by="system:same_kind_reupload",
+            reason=(
+                f"auto-deactivated {deactivated_asset.kind} {deactivated_asset.asset_id} "
+                f"on same-kind re-upload; new active asset {replacement_asset.asset_id}"
+                + (f"; phone {sender_phone}" if sender_phone else "")
+            )[:500],
+        )
+        line = entry.model_dump_json()
+        try:
+            from safe_io import FileLock, ndjson_append  # type: ignore
+        except Exception:  # noqa: BLE001 — tests / non-VPS layouts may lack safe_io (fcntl)
+            FileLock = None  # type: ignore
+            ndjson_append = None  # type: ignore
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        if FileLock is not None and ndjson_append is not None:
+            # Canonical chokepoint: hold the same ``<path>.lock`` FileLock that
+            # safe_io._emit_audit_row / set-flyer-brand-asset-state acquire.
+            with FileLock(Path(str(log_path) + ".lock")):
+                ndjson_append(log_path, line)
+        else:
+            # fcntl-less env (e.g. Windows dev / tests): plain append so the row
+            # is still emitted.
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+    except Exception as exc:  # noqa: BLE001 — §12b audit is non-fatal; never crash the save
+        import sys as _sys
+        _sys.stderr.write(
+            f"WARN: flyer brand-asset same-kind-reupload audit append failed "
+            f"(non-fatal): {type(exc).__name__}: {exc}\n"
+        )
 
 
 @dataclass(frozen=True)
@@ -68,6 +147,7 @@ def handle_onboarding_message(
     plan_tiers: Optional[list[FlyerPlanTier]] = None,
     payment_provider: str = "manual",
     payment_checkout_url_template: str = "",
+    audit_log_path: Optional[Path] = None,
 ) -> OnboardingResult:
     """Advance onboarding for an unknown or in-progress Flyer customer.
 
@@ -198,17 +278,30 @@ def handle_onboarding_message(
             if existing is None:
                 existing = _find_named_duplicate_customer(store, session)
             if existing and existing.status in {"active", "trial", "payment_pending"}:
+                deferred_recovery_audits: list[tuple[FlyerBrandAsset, FlyerBrandAsset]] = []
                 if existing.status in {"active", "trial"}:
-                    _connect_recovered_sender(
+                    deferred_recovery_audits = _connect_recovered_sender(
                         store=store,
                         customer=existing,
                         session=session,
                         sender_phone=sender_phone,
                         now=now,
+                        audit_log_path=audit_log_path,
                     )
                     existing = store.find_customer_by_id(existing.customer_id) or existing
                 _discard_session(store, session)
                 write_customer_store(state_path, store)
+                # F6: emit the recovery-merge deactivation audits only after the
+                # store write above lands.
+                for deactivated, replacement in deferred_recovery_audits:
+                    _audit_same_kind_reupload_deactivation(
+                        audit_log_path=audit_log_path,
+                        customer_id=existing.customer_id,
+                        deactivated_asset=deactivated,
+                        replacement_asset=replacement,
+                        sender_phone=sender_phone,
+                        now=now,
+                    )
                 if existing.status == "payment_pending":
                     return OnboardingResult(
                         True,
@@ -314,6 +407,7 @@ def store_brand_asset(
     text: str,
     sender_role: str = "",
     now: Optional[datetime] = None,
+    audit_log_path: Optional[Path] = None,
 ) -> OnboardingResult:
     """Store or replace a customer logo/template from WhatsApp media."""
     now = now or datetime.now(timezone.utc)
@@ -345,9 +439,16 @@ def store_brand_asset(
             owner_key=customer.customer_id,
         )
         updated = []
+        # §12b (AN-4): auto-deactivating a saved same-kind asset is an automated
+        # reversal of owner-applied brand-asset state — audit it through the same
+        # chokepoint set-flyer-brand-asset-state uses. F6: accumulate the flips and
+        # emit the audit rows only AFTER write_customer_store lands, so a persist
+        # failure never leaves a row claiming a deactivation that did not happen.
+        deferred_audits: list[FlyerBrandAsset] = []
         for existing in customer.brand_assets:
             if existing.kind == kind and existing.active:
                 updated.append(existing.model_copy(update={"active": False}))
+                deferred_audits.append(existing)
             else:
                 updated.append(existing)
         updated.append(asset)
@@ -357,6 +458,15 @@ def store_brand_asset(
             for row in store.customers
         ]
         write_customer_store(state_path, store)
+        for deactivated in deferred_audits:
+            _audit_same_kind_reupload_deactivation(
+                audit_log_path=audit_log_path,
+                customer_id=customer.customer_id,
+                deactivated_asset=deactivated,
+                replacement_asset=asset,
+                sender_phone=sender_phone,
+                now=now,
+            )
         return OnboardingResult(
             True,
             f"Flyer Studio\n------------\n{kind.title()} saved and will be used for future flyers.",
@@ -383,6 +493,12 @@ def store_brand_asset(
         notes=text,
         owner_key=_asset_owner_key(store, chat_id, sender_phone),
     )
+    # No audit row here (AN-4): these are PENDING session assets on an as-yet
+    # uncommitted onboarding — no customer_id exists (the FlyerBrandAssetStateChanged
+    # schema requires ^CUST\d{4,}$) and this is not a reversal of owner-applied
+    # durable state (§12b), just supersession of an asset the same sender uploaded
+    # moments earlier in-flow. The committed-state reversal at customer commit /
+    # recovery merge IS audited above and in _connect_recovered_sender.
     pending = []
     for existing in session.pending_brand_assets:
         if existing.kind == kind and existing.active:
@@ -590,7 +706,16 @@ def _connect_recovered_sender(
     session: FlyerOnboardingSession,
     sender_phone: Optional[str],
     now: datetime,
-) -> None:
+    audit_log_path: Optional[Path] = None,
+) -> list[tuple[FlyerBrandAsset, FlyerBrandAsset]]:
+    """Merge a recovered second sender's pending state into an existing customer.
+
+    F6: returns the deferred same-kind deactivation audits as
+    ``(deactivated_asset, replacement_asset)`` pairs so the CALLER emits them only
+    AFTER its write_customer_store lands — a persist failure must not leave an
+    audit row claiming a deactivation that never became durable.
+    """
+    deferred_audits: list[tuple[FlyerBrandAsset, FlyerBrandAsset]] = []
     updates: dict[str, object] = {"updated_at": now}
     canonical_sender = _phone_or_none(sender_phone)
     if canonical_sender and str(canonical_sender) not in customer.owned_phone_numbers():
@@ -609,6 +734,13 @@ def _connect_recovered_sender(
             if asset.sha256 in existing_hashes:
                 continue
             if asset.active:
+                # §12b (AN-4): recovering a second sender can merge a pending asset
+                # that supersedes the customer's committed active same-kind asset —
+                # an automated reversal of owner-applied state. Defer each flip's
+                # audit (same predicate as the merge below) to post-persist.
+                for old in merged_assets:
+                    if old.kind == asset.kind and old.active:
+                        deferred_audits.append((old, asset))
                 merged_assets = [
                     old.model_copy(update={"active": False})
                     if old.kind == asset.kind and old.active else old
@@ -619,11 +751,12 @@ def _connect_recovered_sender(
         updates["brand_assets"] = merged_assets
 
     if len(updates) == 1:
-        return
+        return deferred_audits
     store.customers = [
         row.model_copy(update=updates) if row.customer_id == customer.customer_id else row
         for row in store.customers
     ]
+    return deferred_audits
 
 
 def _reply_for_session(

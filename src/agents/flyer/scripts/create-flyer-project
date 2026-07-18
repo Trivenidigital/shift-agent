@@ -47,6 +47,7 @@ try:
         extract_text_facts,
         merge_locked_facts,
         missing_required_facts,
+        price_conflict_signals,
         profile_locked_facts,
         source_contract_locked_facts,
         _populate_forbidden_substrings,
@@ -57,6 +58,7 @@ except ImportError:
         extract_text_facts,
         merge_locked_facts,
         missing_required_facts,
+        price_conflict_signals,
         profile_locked_facts,
         source_contract_locked_facts,
         _populate_forbidden_substrings,
@@ -795,6 +797,17 @@ def main() -> int:
             and not args.manual_edit_required
             and not reference_manual_required
         )
+        # SW-4 (E2E audit 2026-07-13): the brief prices the SAME item two ways
+        # ("Biryani $10 Biryani $12"). The extractor silently keeps the first price;
+        # route to manual review so an operator confirms the intended price rather
+        # than shipping one blind. Lowest content-gate precedence.
+        price_conflicts = price_conflict_signals(args.raw_request)
+        price_conflict_queue = bool(
+            price_conflicts
+            and not args.manual_edit_required
+            and not reference_manual_required
+            and not missing_required_fact_queue
+        )
         if args.manual_edit_required and not reference_manual_required:
             manual_review = make_manual_review(
                 reason_code="source_edit_provider_unavailable",
@@ -807,7 +820,13 @@ def main() -> int:
                 detail=f"missing required fact slots: {', '.join(missing_ids)}",
                 queued_at=now,
             )
-        status = "manual_edit_required" if args.manual_edit_required or reference_manual_required or missing_required_fact_queue else "intake_started"
+        elif price_conflict_queue:
+            manual_review = make_manual_review(
+                reason_code="price_conflict",
+                detail=f"same item priced two ways: {', '.join(price_conflicts)}",
+                queued_at=now,
+            )
+        status = "manual_edit_required" if args.manual_edit_required or reference_manual_required or missing_required_fact_queue or price_conflict_queue else "intake_started"
         project = FlyerProject(
             project_id=project_id,
             status=status,

@@ -2509,7 +2509,25 @@ def _send_generation_failure_customer_update(
             action_context=action_context,
         )
     if proc_ok:
-        return True, "", ""
+        # IN-3 (Flyer Studio E2E audit 2026-07-13): generation failed for an
+        # UNCLASSIFIED reason (concurrency guard / unclassified crash) after the
+        # customer already received a processing-ack. This branch used to return
+        # silently, leaving the customer on "creating your flyer now" with no
+        # closure — only an audit row + the reactive "any update?" path existed.
+        # Send ONE plain-language closure so the customer knows the attempt
+        # ended, mirroring the send_flyer_text mechanism the regeneration /
+        # finalization failed-ack helpers use. gen_detail is deliberately NOT
+        # surfaced — the copy stays customer-facing (no internal reason codes).
+        return actions.send_flyer_text(
+            chat_id,
+            (
+                "Flyer Studio\n"
+                "------------\n"
+                "Sorry — I couldn't finish your flyer just now. "
+                "I'm looking into it and will follow up shortly."
+            ),
+            action_context=action_context,
+        )
     return actions.send_flyer_intake_ack(
         chat_id, project_id, action_context=action_context,
     )
@@ -3851,6 +3869,26 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
             "reason": f"cf-router flyer brand asset: {result.get('next_status')}"}
 
 
+# AN-1 (E2E audit 2026-07-13): statuses where a preview does not yet exist, so an
+# approval reply is premature. Used to send a progress reply instead of silently
+# rewriting the approval as a revision edit.
+_FLYER_PRE_PREVIEW_STATUSES = {"generating_concepts", "awaiting_concept_selection"}
+
+
+def _flyer_early_approval_progress_reply(status: str) -> Optional[str]:
+    """AN-1: progress copy for an approval that arrives BEFORE a preview exists, or
+    None when the status is not pre-preview (approval routes normally)."""
+    if status not in _FLYER_PRE_PREVIEW_STATUSES:
+        return None
+    if status == "awaiting_concept_selection":
+        body = ("Your flyer options are ready! Reply 1, 2, or 3 to pick one, "
+                "then you can approve the final.")
+    else:
+        body = ("Thanks! Your flyer is still being prepared — I'll send you the "
+                "preview to approve shortly.")
+    return f"Flyer Studio\n------------\n{body}"
+
+
 def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, media_path: Optional[str] = None) -> Optional[dict]:
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
@@ -4241,6 +4279,31 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
                         if is_source_edit_manual_status else
                         f"cf-router flyer status for {status_project_id}"
                     )}
+        # AN-1: an approval that arrives BEFORE a preview exists must not be silently
+        # rewritten as a revision edit. This is the last stop before the revision
+        # fallback — every finalize / concept-select / status handler above has
+        # already returned — so only a premature approval remains here. Send a clear
+        # progress reply instead of a confusing "what would you like to change?".
+        _early_reply = _flyer_early_approval_progress_reply(status)
+        if _early_reply is not None and actions.is_flyer_approval_text(body):
+            ack_ok, mid, err = actions.send_flyer_text(
+                chat_id, _early_reply,
+                action_context=build_action_context(
+                    action_id="flyer.project.early_approval_progress",
+                    is_regulated_action=False,
+                ),
+            )
+            actions.audit_intercepted(
+                reason="flyer_early_approval_progress" if ack_ok else "flyer_primary_failed",
+                chat_id=chat_id,
+                subprocess_rc=0 if ack_ok else 3,
+                detail=(
+                    f"project_id={project_id}; early_approval=true; status={status}; "
+                    f"sender_role={role}; ack_message_id={mid}; ack_error={err[:300]}"
+                ),
+            )
+            return {"action": "skip",
+                    "reason": f"cf-router flyer early approval progress for {project_id}"}
         ok, detail = actions.invoke_update_flyer_project(
             project_id,
             "--revision-text", body,

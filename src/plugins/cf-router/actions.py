@@ -1800,6 +1800,32 @@ def classify_catering(text: str) -> tuple[bool, list[str]]:
     return is_catering, signals
 
 
+_FLYER_CREATE_VERB_RE = re.compile(
+    r"\b(?:make|mak|create|creat|need|want|wnat|design|desing|generate|build|do|get|help|prepare|send)\b",
+    re.IGNORECASE,
+)
+# BC-4 (E2E audit 2026-07-13): a CURATED set of flyer/poster/banner misspellings.
+# Deterministic + collision-free by design — fuzzy edit-distance-1 would steal real
+# words ("roster"→"poster", "manner"→"banner") into Flyer. Exact spellings are
+# handled by `_FLYER_INTENT`; verb typos (`mak`/`wnat`) by `_FLYER_CREATE_VERB_RE`.
+_FLYER_NOUN_TYPOS = frozenset({
+    "flyr", "flyier", "flyar", "flyear", "flyler", "flyerr", "flayer", "flyor", "flyre",
+    "fyler", "fylr", "flier",
+    "postr", "postar", "posterr", "posetr",
+    "bannr", "baner", "banaer", "bannor", "bannner",
+})
+
+
+def _has_flyer_typo_intent(text: str) -> bool:
+    """Recognize a MISSPELLED flyer request (`flyr`/`postr`/`flyar`/`flyler`) when a
+    creation verb is present, so a typo does not silently miss Flyer Studio. Verb-
+    gated + curated to stay narrow — it must not steal generic food/event chatter."""
+    body = flyer_visible_message_text(text)
+    if not _FLYER_CREATE_VERB_RE.search(body):
+        return False
+    return bool(set(re.findall(r"[a-z]{4,10}", body.lower())) & _FLYER_NOUN_TYPOS)
+
+
 def classify_flyer_intent(text: str) -> tuple[bool, list[str]]:
     """Return True for explicit flyer/design requests.
 
@@ -1811,6 +1837,8 @@ def classify_flyer_intent(text: str) -> tuple[bool, list[str]]:
         return False, ["too_short"]
     if _FLYER_INTENT.search(text):
         return True, ["flyer_intent"]
+    if _has_flyer_typo_intent(text):
+        return True, ["flyer_intent_typo"]
     return False, ["rejected:no_flyer_intent"]
 
 
@@ -2046,26 +2074,63 @@ def flyer_campaign_source(text: str) -> str:
     return "new_flyer"
 
 
+# BC-3 (E2E audit 2026-07-13): a happy customer says far more than 9 words to
+# approve. Widen the vocabulary a real owner actually types. Exact-match is
+# preserved on purpose — "looks good but change the date" is NOT in this set, so
+# it will not approve and correctly routes to revision.
 _FLYER_APPROVAL_ALIASES = {
-    "approve",
-    "approved",
-    "ok",
-    "yes",
-    "looks good",
-    "go ahead",
-    "send it",
-    "finalize",
-    "finalise",
+    "approve", "approved", "ok", "okay", "yes", "yes please", "yep", "yeah", "yup",
+    "sure", "looks good", "looks great", "looks perfect", "looks good to me",
+    "great", "perfect", "love it", "i love it", "that works", "works for me",
+    "ship it", "good to go", "all good", "send it", "send it out", "go ahead",
+    "finalize", "finalise", "thumbs up", "this looks good", "this looks great",
 }
-_FLYER_DELIVERY_STATE_APPROVAL_ALIASES = _FLYER_APPROVAL_ALIASES - {"ok", "yes"}
+# Delivery-state guard runs when NO active flyer project resolves (it prevents a
+# fall-through to generic Hermes), so it must stay conservative — a bare "great"
+# out of flyer context must not be captured here. Pinned explicitly (decoupled
+# from the widened final-approval set above) to send/finalize-oriented tokens.
+_FLYER_DELIVERY_STATE_APPROVAL_ALIASES = {
+    "approve", "approved", "looks good", "go ahead", "send it", "send it out",
+    "finalize", "finalise", "ship it", "good to go",
+}
 _FLYER_FINAL_APPROVAL_STATUSES = {"revising_design", "awaiting_final_approval", "delivered_with_warning"}
+
+# AN-2 (E2E audit 2026-07-13): normalize decoration before the exact-match so
+# `*APPROVE*`, curly-quoted `“APPROVE”`, and `looks good 👍` approve; a bare 👍
+# approves; a 👎 never does.
+# F7 (2026-07-18): 🙏 (U+1F64F) is NOT a bare approval — in Indian-SMB usage it
+# reads as thanks/please, not "ship it". Only 👍 finalizes on its own; if 🙏 rides
+# alongside explicit approval text, the text path approves it anyway.
+_FLYER_REPLY_DECOR_RE = re.compile(r"[*_~`\"'“”‘’()\[\]]")
+_FLYER_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002190-\U000021FF"
+    "\U00002B00-\U00002BFF️‍]"
+)
+_FLYER_APPROVAL_EMOJI_RE = re.compile("[\U0001F44D]")  # thumbs-up
+_FLYER_DISAPPROVAL_EMOJI_RE = re.compile("[\U0001F44E]")          # thumbs-down
+
+
+def _normalize_flyer_reply_token(text: str) -> str:
+    """Visible reply, stripped of markdown/quote decoration and emoji, collapsed
+    and lowercased for exact-match against the approval vocabulary."""
+    body = " ".join(flyer_visible_message_text(text).split())
+    undecorated = _FLYER_EMOJI_RE.sub(" ", _FLYER_REPLY_DECOR_RE.sub("", body))
+    return " ".join(undecorated.split()).lower().strip(" .!,:;")
 
 
 def is_flyer_approval_text(text: str) -> bool:
-    """Return True for exact Flyer Studio final-approval replies."""
-    body = " ".join(flyer_visible_message_text(text).split())
-    normalized = body.lower().strip(" .!,:;")
-    return normalized in _FLYER_APPROVAL_ALIASES
+    """Return True for Flyer Studio final-approval replies (widened + decoration-
+    and emoji-tolerant). A message that carries more than an approval token does
+    NOT match, so 'looks good but change X' routes to revision, not approval."""
+    visible = flyer_visible_message_text(text)
+    if _FLYER_DISAPPROVAL_EMOJI_RE.search(visible):
+        return False
+    normalized = _normalize_flyer_reply_token(text)
+    if normalized in _FLYER_APPROVAL_ALIASES:
+        return True
+    if not normalized and _FLYER_APPROVAL_EMOJI_RE.search(visible):
+        return True
+    return False
 
 
 def flyer_routing_decision_preview(
@@ -2394,6 +2459,20 @@ def is_exact_reference_edit_request(text: str, *, has_media: bool = False) -> bo
     return bool(edit_verb and edit_target)
 
 
+# BC-5 (E2E audit 2026-07-13): a named festival is a concrete brief detail. Without
+# this, "create a new flyer for diwali" was classified vague and swallowed into the
+# open project as a revision (every Indian festival was absent from the detail cues).
+_FLYER_FESTIVAL_DETAIL_RE = re.compile(
+    r"\b(?:diwali|deepavali|holi|pongal|sankranti|makar\s+sankranti|ugadi|gudi\s+padwa|"
+    r"navratri|navaratri|dandiya|garba|dussehra|dasara|durga\s+puja|ganesh\s+chaturthi|"
+    r"ganesh|onam|baisakhi|vaisakhi|lohri|raksha\s+bandhan|rakhi|janmashtami|krishna\s+janmashtami|"
+    r"karva\s+chauth|eid|eid\s+al[\s-]?fitr|eid\s+al[\s-]?adha|bakrid|ramadan|ramzan|navroz|"
+    r"christmas|xmas|new\s+year|thanksgiving|halloween|valentine'?s?|easter|"
+    r"independence\s+day|republic\s+day|memorial\s+day|labor\s+day|july\s*4th?|4th\s+of\s+july)\b",
+    re.IGNORECASE,
+)
+
+
 def is_vague_flyer_start(text: str, *, has_media: bool = False) -> bool:
     """Return True when a flyer request should enter guided/text preflight.
 
@@ -2426,6 +2505,7 @@ def is_vague_flyer_start(text: str, *, has_media: bool = False) -> bool:
         or ":" in body
         or bool(re.search(r"\b\d{1,2}\s*(?:am|pm)\b", lower))
         or bool(re.search(r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|weekend|special|menu|sale|offer|discount|grand opening|graduation|party|parties|celebration|class|event|seo|aeo|geo|paid ads|content creation|combo|combos|banner|visual pictures?|photos?|pictures?)\b", lower))
+        or bool(_FLYER_FESTIVAL_DETAIL_RE.search(lower))
     )
     if has_detail:
         return False
@@ -3508,6 +3588,18 @@ def find_flyer_quote_echo_project(
         return None
 
 
+_FLYER_ECHO_NEW_RE = re.compile(
+    r"^(?:(?:pls|please|can\s+you|could\s+you|i(?:'d|\s+would)?\s+(?:like|want)|i\s+want|"
+    r"i\s+need|need|give\s+me|make|do|create|generate|start)\s+)*"
+    r"(?:me\s+)?(?:a\s+|an\s+|the\s+)?(?:new|fresh|another|different)"
+    r"(?:\s+(?:one|flyer|flier|poster|banner))?\s*$"
+    # F8: "redo"/"regenerate" also take a trailing object ("redo it"), matching
+    # the docstring's accepted forms.
+    r"|^(?:(?:redo|regenerate|re-?generate)(?:\s+it)?|start\s+over|do\s+over|one\s+more|again)\s*$",
+    re.IGNORECASE,
+)
+
+
 def classify_flyer_quote_echo_choice(text: str) -> Optional[str]:
     """Classify a reply to the quote-echo NEW/APPROVE disambiguation.
 
@@ -3518,7 +3610,10 @@ def classify_flyer_quote_echo_choice(text: str) -> Optional[str]:
     body = " ".join(flyer_visible_message_text(text).split()).lower().strip(" .!,:;")
     if not body:
         return None
-    if re.fullmatch(r"(?:new|new one|new flyer|fresh|fresh one)", body):
+    # AN-3 (E2E audit 2026-07-13): accept the natural ways a customer asks for a
+    # fresh flyer ("make a new one", "another one", "redo it") — not just the four
+    # rigid tokens. The APPROVE side rides the widened is_flyer_approval_text (BC-3).
+    if _FLYER_ECHO_NEW_RE.match(body):
         return "new"
     if is_flyer_approval_text(text):
         return "approve"
@@ -5713,6 +5808,7 @@ _FALLBACK_MANUAL_REVIEW_REASON_CODES = {
     "provider_timeout",
     "dependency_missing",
     "missing_required_facts",
+    "price_conflict",
 }
 
 

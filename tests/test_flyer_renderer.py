@@ -2215,7 +2215,15 @@ def test_project_reference_image_is_sent_to_image_model(tmp_path, monkeypatch):
         original_message_id="template1",
         received_at=datetime.now(timezone.utc),
     )
-    project = project.model_copy(update={"assets": [asset]})
+    # SW-1a (E2E audit 2026-07-13): reference uploads now default to STYLE-ONLY
+    # (identity-stripped proxy) so a competitor flyer is never handed to the model
+    # as identity source. This test verifies the IDENTITY-PRESERVE path, which now
+    # requires the owner to confirm the upload is her own brand. The style-only
+    # default is covered by tests/test_flyer_audit_remediation_sw1.py.
+    project = project.model_copy(update={
+        "assets": [asset],
+        "raw_request": "use my own logo and keep my branding on this flyer",
+    })
 
     content = _image_message_content(project, concept_id="C1", output_format="whatsapp_image", size=(1080, 1350))
 

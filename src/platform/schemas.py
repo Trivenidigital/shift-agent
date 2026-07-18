@@ -729,6 +729,7 @@ FlyerManualReviewReason = Literal[
     "provider_timeout",
     "dependency_missing",
     "missing_required_facts",
+    "price_conflict",
 ]
 
 
@@ -5704,6 +5705,9 @@ class CfRouterIntercepted(_BaseEntry):
         # drop); a follow-up NEW creates the fresh project from the same brief.
         "flyer_quote_echo_suppressed",
         "flyer_quote_echo_new_confirmed",
+        # AN-1 (E2E audit 2026-07-13): an approval that arrives before a preview
+        # exists gets a progress reply instead of being routed as a revision.
+        "flyer_early_approval_progress",
         # cf-router/hooks.py bare-flyer dispatch path (reconciled from the deployed
         # fix/flyer-customer-qa-cleanup branch into main 2026-06-06). Both ternary
         # branches of the spawn audit (dispatched on success, failed otherwise).

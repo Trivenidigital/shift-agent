@@ -188,6 +188,7 @@ def _operator_action_hint(reason_code: str) -> str:
         "reference_low_confidence": "Request a clearer source image or typed details before retry.",
         "reference_not_run": "Run reference extraction or route to manual edit with captured details.",
         "missing_required_facts": "Collect missing required facts from customer before regeneration.",
+        "price_conflict": "Same item priced two ways in the brief; confirm the correct price with the customer before regenerating.",
         "legacy_unknown": "Legacy row without deterministic reason; review raw request and set explicit disposition.",
     }
     return mapping.get(reason_code, "Review request details and choose complete vs close disposition.")

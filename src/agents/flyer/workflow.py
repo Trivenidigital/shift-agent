@@ -120,6 +120,10 @@ MANUAL_REVIEW_REASON_LINES: dict[str, str] = {
         "I hit a setup issue while generating this flyer. "
         "It's queued for review and I'll follow up here when it's ready."
     ),
+    "price_conflict": (
+        "I noticed the same item is listed with two different prices, so this is "
+        "queued for a quick review to confirm the correct price before your flyer goes out."
+    ),
 }
 
 
@@ -182,6 +186,10 @@ CLOSED_NO_SEND_REASON_LINES: dict[str, str] = {
     "dependency_missing": (
         "This flyer project was closed without delivering because a required setup component was unavailable. "
         "Please re-send your request and I'll start a fresh one."
+    ),
+    "price_conflict": (
+        "This flyer project was closed without delivering because the same item had two "
+        "different prices. Please re-send your request with one price per item and I'll start fresh."
     ),
 }
 
