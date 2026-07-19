@@ -1957,17 +1957,25 @@ class TestF7PrimaryMode:
         assert len(store["records"]) == 1 and store["records"][0]["lead_id"] == "L0011"
 
     def test_branch_b_active_lead_capture_failure_sends_retry_not_canonical(self, mods, state_env, monkeypatch):
-        """PR-R2A capture_failed outcome: when the sidecar store cannot be written
-        (here: its parent dir does not exist → fs-contract rejects), Branch B sends
-        a deterministic RETRY reply — NOT the canonical 'with the owner' reply that
-        would falsely imply the correction was recorded — still suppresses the LLM,
-        and audits reason=f7_primary_amendment_capture_failed."""
+        """PR-R2A capture_failed outcome: when the sidecar store fails the §4b
+        filesystem contract, Branch B sends a deterministic RETRY reply — NOT the
+        canonical 'with the owner' reply that would falsely imply the correction was
+        recorded — still suppresses the LLM, and audits
+        reason=f7_primary_amendment_capture_failed.
+
+        Failure is forced with a mode-0644 DATA file, which the contract rejects
+        (path_bad_mode) BEFORE any write. This is deterministic on POSIX and — unlike
+        a missing-parent path — survives safe_io's parent auto-creation (FileLock and
+        atomic_write both mkdir(parents=True), so a missing parent does NOT fail).
+        The valid env + owner is wired first so 0644 is the sole failing check. (This
+        file is Linux-only via the module-level skipif; mode is inert on Windows.)"""
         hooks_mod, actions_mod = mods
-        # Point the amendment store under a NON-EXISTENT parent → capture fails closed.
-        monkeypatch.setenv(
-            "SHIFT_AGENT_CATERING_AMENDMENTS_PATH",
-            str(state_env["state_dir"] / "missing-subdir" / "catering-amendments.json"),
-        )
+        _wire_amendment_capture(monkeypatch, state_env, hooks_mod)
+        amend_path = state_env["state_dir"] / "catering-amendments.json"
+        amend_path.write_text(
+            json.dumps({"schema_version": 1, "next_seq": 1, "records": []}), encoding="utf-8")
+        if os.name == "posix":
+            os.chmod(amend_path, 0o644)  # world-readable → rejected by the mode gate
         _seed_config(state_env)
         _seed_leads_multi(state_env, [
             {"lead_id": "L0011", "owner_approval_code": "#ABCDE",
@@ -3387,8 +3395,13 @@ class TestF7PrimaryMode:
         assert result["action"] == "skip"
         mock_trigger.assert_called_once()
 
-    def test_proposal_branch_disabled_keeps_existing_suppression(self, mods, state_env):
+    def test_proposal_branch_disabled_keeps_existing_suppression(self, mods, state_env, monkeypatch):
+        """With the proposal branch OFF, a proposal-flavored follow-up against an
+        active lead must still take the canonical Branch-B SUPPRESSION path (not
+        proposal handling). PR-R2A: the follow-up is durably captured first, so the
+        suppression reason (containing 'follow-up ... suppressed') is preserved."""
         hooks_mod, actions_mod = mods
+        _wire_amendment_capture(monkeypatch, state_env, hooks_mod)
         hooks_mod.F7_PROPOSAL_BRANCH_ENABLED = False
         _seed_config(state_env)
         _seed_leads_multi(state_env, [
