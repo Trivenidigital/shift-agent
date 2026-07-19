@@ -2334,6 +2334,50 @@ class CateringLeadStore(BaseModel):
     leads: list[CateringLead] = Field(default_factory=list)
 
 
+# ── PR-R2A: immutable catering-amendment capture (sidecar store) ──────────────
+class CateringAmendmentRecord(BaseModel):
+    """PR-R2A WRITE-side model for ONE immutable amendment-capture record.
+    `extra="forbid"` — STRICT for records R2A creates (validated before append).
+    The on-disk store keeps records as TOLERANT dicts (see CateringAmendmentStore),
+    so future R2B fields on OTHER records round-trip untouched; this model validates
+    ONLY the record being appended. Append-only: raw_text is never mutated. R2B-only
+    fields ship as None."""
+    model_config = ConfigDict(extra="forbid")
+    amendment_id: str = Field(pattern=r"^A[0-9]{4,}$")
+    lead_id: str = Field(min_length=1)          # canonical CateringLead id (no orphans)
+    sender_ref: str                              # canonical identity key, else raw ref
+    source_transport: str                        # e.g. "whatsapp" — gateway envelope
+    message_id: str                              # native inbound id; "" if none
+    envelope_fingerprint: str                    # transport fingerprint; "" if underivable
+    raw_text: str = Field(max_length=16384)      # BOUNDED prefix (NOT the complete text)
+    raw_text_truncated: bool                     # True iff inbound exceeded the bound
+    raw_text_original_length: int = Field(ge=0)
+    raw_text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")  # of the COMPLETE inbound text
+    captured_at: datetime
+    source: Literal["f7_branch_b"]
+    status: str                                  # R2A writes "captured"; read side any string
+    base_extracted_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")  # lead.extracted @ capture
+    proposal_ref: Optional[str] = None           # R2B-only
+    approval_code_ref: Optional[str] = None      # R2B-only (never minted here)
+    disposition: Optional[str] = None            # R2B-only
+    disposition_ts: Optional[datetime] = None    # R2B-only
+
+
+class CateringAmendmentStore(BaseModel):
+    """PR-R2A sidecar store (/opt/shift-agent/state/catering-amendments.json).
+    PRESERVATION-SAFE (deliberate, documented divergence from the extra="forbid"
+    state-store norm): `records` are TOLERANT dicts that round-trip as parsed JSON,
+    and `extra="allow"` preserves unknown top-level keys — so a future R2B field on
+    any record, an unknown status, or a nested future object survives an R2A append
+    untouched (SEMANTIC preservation). R2A validates ONLY the record it appends (via
+    CateringAmendmentRecord); it never normalizes existing records through a strict
+    schema."""
+    model_config = ConfigDict(extra="allow")
+    schema_version: int = Field(default=1, ge=1)
+    next_seq: int = Field(default=1, ge=1)
+    records: list[dict] = Field(default_factory=list)
+
+
 CateringProposalStatus = Literal[
     "DRAFT", "SENT", "SEND_FAILED", "SUPERSEDED",
     "SELECTING", "SELECTED", "SELECTED_OWNER_CARD_FAILED", "SELECT_FAILED",
@@ -3774,6 +3818,27 @@ class ApprovalCodeCollisionDetected(_BaseEntry):
     code: str = Field(max_length=16)
     pools: list[str] = Field(min_length=2, max_length=4)
     detected_by: str = Field(max_length=60)
+
+
+class CateringAmendmentCaptured(_BaseEntry):
+    """PR-R2A: an inbound amendment text was durably captured to the sidecar on the
+    Branch-B suppression path. PRIVACY: ids + source + text LENGTH only — never the
+    raw amendment text (which lives only in the sidecar, same content class as the
+    lead's raw_inquiry)."""
+    type: Literal["catering_amendment_captured"]
+    lead_id: str
+    amendment_id: str
+    message_id: str
+    source: str
+    text_len: int = Field(ge=0)
+
+
+class CateringAmendmentCaptureFailed(_BaseEntry):
+    """PR-R2A: an amendment capture attempt failed (lock / load / validate / write /
+    filesystem-contract). PRIVACY: lead_id + reason code ONLY — never raw text."""
+    type: Literal["catering_amendment_capture_failed"]
+    lead_id: str
+    reason: str
 
 
 class HealthCheckFailure(_BaseEntry):
@@ -5712,6 +5777,12 @@ class CfRouterIntercepted(_BaseEntry):
         "f9_sick_call_alert",
         "f7_primary_new_inquiry",          # PR-CF1d 2026-05-12
         "f7_primary_followup_suppressed",  # PR-CF1d 2026-05-12
+        # PR-R2A 2026-07-19: Branch-B durable amendment capture FAILED — the arm
+        # sent a deterministic retry ask and suppressed the LLM without recording
+        # the amendment. An intercept that bypasses the LLM must be telemetry-
+        # visible (dispatcher-accuracy pairing), so the failure arm gets its own
+        # reason rather than being swallowed as an invalid enum value.
+        "f7_primary_amendment_capture_failed",
         "f7_proposal_request",
         "f7_proposal_selection",
         "flyer_primary_project_created",
@@ -6483,6 +6554,8 @@ LogEntry = Annotated[
         Annotated[ValidateFailed, Tag("validate_failed")],
         Annotated[InvariantViolation, Tag("invariant_violation")],
         Annotated[ApprovalCodeCollisionDetected, Tag("approval_code_collision_detected")],
+        Annotated[CateringAmendmentCaptured, Tag("catering_amendment_captured")],
+        Annotated[CateringAmendmentCaptureFailed, Tag("catering_amendment_capture_failed")],
         Annotated[HealthCheckFailure, Tag("health_check_failure")],
         # Agent #41 Owner Wellbeing v0.1
         Annotated[OwnerNotificationSuppressed, Tag("owner_notification_suppressed")],
@@ -6838,6 +6911,8 @@ __all__ = [
     "OutboundResponse", "OutboundCapExceeded", "OutboundRefusedDisabled",
     "AgentStateChange", "UnknownSenderDeclined", "ValidateFailed", "InvariantViolation",
     "ApprovalCodeCollisionDetected", "HealthCheckFailure",
+    "CateringAmendmentRecord", "CateringAmendmentStore",
+    "CateringAmendmentCaptured", "CateringAmendmentCaptureFailed",
     "LidLearned", "DispatcherRouted",
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
     "EodSnapshot", "EodPushoverSent", "EodSkipped",

@@ -91,6 +91,18 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/approval_code_pools.py
     fi
+    # PR-R2A: durable Branch-B amendment capture (sidecar store) — imported by the
+    # cf-router plugin's F7 primary-mode follow-up-suppressed arm. WITHOUT this,
+    # `import catering_amendments` fails at plugin load -> the whole cf-router plugin
+    # fails to load. Guarded for rollback compatibility with tarballs that predate
+    # this module. (The sidecar LOCK is precreated below via
+    # initialize_approval_code_lock; the DATA file is first written by the
+    # shift-agent gateway so atomic replacement keeps a valid shift-agent owner.)
+    if [ -f src/platform/catering_amendments.py ]; then
+        install -m 644 src/platform/catering_amendments.py /opt/shift-agent/catering_amendments.py
+    else
+        rm -f /opt/shift-agent/catering_amendments.py
+    fi
     # Front-brain Phase-1: per-chat/day budget + latency fallback, imported by the
     # gateway-send screen (safe_io.front_brain_screen_gateway_send). WITHOUT this,
     # `from front_brain_budget import ...` fails at runtime -> the screen fails
@@ -1499,6 +1511,19 @@ case "$ACTION" in
         # the gateway restarts. No unlocked fallback path.
         initialize_approval_code_lock \
             "/opt/shift-agent/state/approval-code-pools.lock" \
+            "shift-agent" "shift-agent" "python3" "/opt/shift-agent"
+
+        # PR-R2A: precreate the SIDECAR amendment-store LOCK with the SAME reviewed
+        # routine (identical safety contract: symlink/regular/owner/group/mode reject,
+        # O_EXCL create, FileLock fd-identity verification). LOCK ONLY — the DATA file
+        # (/opt/shift-agent/state/catering-amendments.json) is intentionally NOT
+        # precreated here: it is first written by the shift-agent gateway via
+        # atomic_write_json so its inode is owned shift-agent:shift-agent from birth,
+        # keeping every subsequent atomic replacement's post-write owner check valid.
+        # Precreating the data file as root would poison that check. Same non-swallowed
+        # semantics: any FATAL aborts the deploy here, before the gateway restarts.
+        initialize_approval_code_lock \
+            "/opt/shift-agent/state/catering-amendments.json.lock" \
             "shift-agent" "shift-agent" "python3" "/opt/shift-agent"
 
         # CD v2 durable rollback scrub. `creative_direction` is Field(exclude=True)
