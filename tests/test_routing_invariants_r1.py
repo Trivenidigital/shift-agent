@@ -174,9 +174,30 @@ def _collision():
     return pools.CollisionResult(code="#DUP01", pools=("menu-pending", "catering-leads"))
 
 
+def _patch_notify(monkeypatch, fn):
+    """Patch the owner-alert chokepoint at the LIVE ``sys.modules['safe_io']`` —
+    the exact object the kernel resolves.
+
+    THE REAL SEAM is ``safe_io.notify_owner_with_fallback`` (approval_code_pools.
+    record_collision_event does a lazy ``from safe_io import
+    notify_owner_with_fallback``, resolved via sys.modules at CALL time). Patching
+    a module-level ``import safe_io`` reference bound at test-load time is NOT
+    robust: test_cf_router_plugin.py:76-77 pops ``safe_io`` from sys.modules, and
+    the plugin load (hooks.py -> actions._ensure_platform_path, actions.py:83-89)
+    inserts ``/opt/shift-agent`` onto sys.path; on a box with a deployed
+    /opt/shift-agent/safe_io.py the re-import rebinds sys.modules['safe_io'] to the
+    /opt copy. The stale ref then misses the kernel's call, the REAL chokepoint
+    runs (subprocess to an absent /usr/local/bin/shift-agent-notify-owner ->
+    returns False), and zero calls are captured (Linux-CI-only symptom). Resolving
+    the module fresh here always targets what the kernel imports."""
+    import importlib
+    sio = importlib.import_module("safe_io")  # == the live sys.modules['safe_io']
+    monkeypatch.setattr(sio, "notify_owner_with_fallback", fn)
+
+
 def test_collision_audit_emitted_every_call(state_dir, monkeypatch):
     log = Path(sys.modules["safe_io"]._decisions_log_path())  # conftest-isolated tmp path
-    monkeypatch.setattr(safe_io, "notify_owner_with_fallback", lambda *a, **k: True)
+    _patch_notify(monkeypatch, lambda *a, **k: True)
     pools.record_collision_event(_collision(), detected_by="unit")
     pools.record_collision_event(_collision(), detected_by="unit")
     rows = [r for r in read_log_rows(log) if r["type"] == "approval_code_collision_detected"]
@@ -185,7 +206,7 @@ def test_collision_audit_emitted_every_call(state_dir, monkeypatch):
 
 def test_collision_audit_privacy(state_dir, monkeypatch):
     log = Path(sys.modules["safe_io"]._decisions_log_path())
-    monkeypatch.setattr(safe_io, "notify_owner_with_fallback", lambda *a, **k: True)
+    _patch_notify(monkeypatch, lambda *a, **k: True)
     pools.record_collision_event(_collision(), detected_by="f8_intercept")
     row = [r for r in read_log_rows(log) if r["type"] == "approval_code_collision_detected"][-1]
     assert row["code"] == "#DUP01"
@@ -197,10 +218,8 @@ def test_collision_audit_privacy(state_dir, monkeypatch):
 
 def test_collision_notifies_owner_once_via_chokepoint(state_dir, monkeypatch):
     calls = []
-    monkeypatch.setattr(
-        safe_io, "notify_owner_with_fallback",
-        lambda title, message, **k: calls.append((title, message, k)) or True,
-    )
+    _patch_notify(monkeypatch,
+                  lambda title, message, **k: calls.append((title, message, k)) or True)
     pools.record_collision_event(_collision(), detected_by="unit")
     pools.record_collision_event(_collision(), detected_by="unit")
     pools.record_collision_event(_collision(), detected_by="unit")
@@ -214,8 +233,7 @@ def test_collision_notifies_owner_once_via_chokepoint(state_dir, monkeypatch):
 
 def test_collision_distinct_codes_each_notify(state_dir, monkeypatch):
     calls = []
-    monkeypatch.setattr(safe_io, "notify_owner_with_fallback",
-                        lambda t, m, **k: calls.append(m) or True)
+    _patch_notify(monkeypatch, lambda t, m, **k: calls.append(m) or True)
     pools.record_collision_event(
         pools.CollisionResult(code="#AAAAA", pools=("menu-pending", "shift")), detected_by="u")
     pools.record_collision_event(
@@ -418,7 +436,7 @@ def test_f8_real_registry_collision_end_to_end(state_dir, monkeypatch):
     hooks_mod, actions_mod = _load_plugin(state_dir)
     _write_pools(state_dir, menu={"confirmation_code": "#ABCDE"},
                  catering=[_catering_lead("#ABCDE")])
-    monkeypatch.setattr(safe_io, "notify_owner_with_fallback", lambda *a, **k: True)
+    _patch_notify(monkeypatch, lambda *a, **k: True)  # live sys.modules['safe_io'] seam
     owner = []
     monkeypatch.setattr(actions_mod, "invoke_apply_owner_decision", lambda *a, **k: owner.append(a) or 0)
     monkeypatch.setattr(actions_mod, "invoke_apply_menu_update", lambda *a, **k: owner.append(a) or 0)
@@ -697,7 +715,14 @@ def test_extract_receipt_no_code_exposed_before_commit(tmp_path, monkeypatch):
     er.LEADS_PATH = state / "leads.json"
     er.LOG_PATH = tmp_path / "logs" / "decisions.log"
     er.RECEIPTS_DIR = state / "receipts"
-    monkeypatch.setattr(er, "_atomic_copy_image", lambda s, d: (b"img", "s" * 64, "0" * 16))
+    # ExpenseLead.image_path (schemas.py:3141) requires image_path to be under
+    # EXPENSE_RECEIPTS_DIR (default /opt/...); point it at the real tmp receipts
+    # dir (posix, trailing slash) so the fully-valid ExpenseLead the commit builds
+    # passes the Linux `/`-separator validator (no schema weakening).
+    monkeypatch.setenv("EXPENSE_RECEIPTS_DIR", er.RECEIPTS_DIR.as_posix() + "/")
+    # hex hashes (image_byte_hash = sha256 hex, image_phash = 16 hex) so the real
+    # ExpenseLead validates on Linux.
+    monkeypatch.setattr(er, "_atomic_copy_image", lambda s, d: (b"img", "0" * 64, "0" * 16))
     monkeypatch.setattr(er, "_call_vision",
                         lambda *a, **k: {"total_cents": 1000, "line_items": [], "extraction_confidence": 0.9})
     monkeypatch.setattr(er, "_classify_text",
