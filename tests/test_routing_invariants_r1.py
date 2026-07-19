@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -81,6 +82,76 @@ def state_dir(tmp_path, monkeypatch):
     d.mkdir()
     monkeypatch.setenv("SHIFT_AGENT_STATE_DIR", str(d))
     return d
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# CI provenance + module binding — PROVEN, not just logged (reviewer-mandated)
+# ════════════════════════════════════════════════════════════════════════════
+# The 4 tests that are Linux-only (skip on the Windows dev box; RUN on CI). Named
+# here so the provenance diagnostic can print each with its evaluated skip cond.
+_LINUX_ONLY_TESTS = [
+    "test_lock_timeout_fails_closed",
+    "test_atomic_scan_and_commit_multiprocess_no_duplicate",
+    "test_extract_receipt_no_code_exposed_before_commit",
+    "test_cross_store_contention_multiprocess",
+]
+
+
+def test_ci_module_provenance_and_binding(tmp_path):
+    """Reproducibility PROOF (asserted, not merely logged): the safe_io /
+    approval_code_pools objects the kernel resolves come from THIS repo checkout,
+    the notify seam _patch_notify targets IS the object the kernel's lazy import
+    resolves, and the shared lock path is absolute + under the tmp state dir.
+    Clean-runner reproducible: no /opt copy, no machine state."""
+    import importlib
+    import platform as _plat
+    repo = Path(__file__).resolve().parent.parent  # <repo>/tests/.. == repo root
+
+    sio = importlib.import_module("safe_io")
+    acp = importlib.import_module("approval_code_pools")
+    sio_file = Path(sio.__file__).resolve()
+    acp_file = Path(acp.__file__).resolve()
+
+    # (a) provenance — both modules resolve UNDER this repo checkout (in-repo
+    #     re-import, no machine-level copy participates).
+    assert repo in sio_file.parents, f"safe_io not under repo checkout: {sio_file}"
+    assert repo in acp_file.parents, f"approval_code_pools not under repo checkout: {acp_file}"
+    if os.environ.get("GITHUB_ACTIONS"):
+        # ubuntu-latest is ephemeral with no /opt/shift-agent — prove it, so the
+        # provenance can only be the in-repo re-import (not a stray machine copy).
+        assert not Path("/opt/shift-agent/safe_io.py").exists(), \
+            "unexpected machine-level /opt/shift-agent/safe_io.py on the CI runner"
+
+    # (b) seam identity — the kernel's EXACT lazy import form resolves the same
+    #     object the live-module seam (_patch_notify) targets.
+    from safe_io import notify_owner_with_fallback as _kernel_notify
+    assert _kernel_notify is getattr(importlib.import_module("safe_io"),
+                                     "notify_owner_with_fallback"), \
+        "kernel lazy-import seam != live sys.modules['safe_io'] object"
+
+    # (c) shared lock path (kernel helper) is ABSOLUTE and under the tmp state dir.
+    state = tmp_path / "state"
+    state.mkdir()
+    lock = pools._resolve_lock_path(state)
+    assert lock.is_absolute(), f"lock path not absolute: {lock}"
+    assert str(lock).startswith(str(state.resolve())), f"lock {lock} not under {state}"
+
+    # (d) diagnostic block — visible with `pytest -s` (the CI diagnostics step).
+    skip_win32 = (sys.platform == "win32")
+    print("\n===== PR-R1 CI PROVENANCE / BINDING DIAGNOSTIC =====")
+    print(f"  repo root                    : {repo}")
+    print(f"  safe_io.__file__             : {sio_file}")
+    print(f"  approval_code_pools.__file__ : {acp_file}")
+    print(f"  shared lock path (tmp)       : {lock}  (absolute={lock.is_absolute()})")
+    print(f"  GITHUB_SHA                   : {os.environ.get('GITHUB_SHA', 'local')}")
+    print(f"  GITHUB_ACTIONS               : {os.environ.get('GITHUB_ACTIONS', '0')}")
+    print(f"  sys.platform                 : {sys.platform}  (python {_plat.python_version()})")
+    print(f"  /opt/shift-agent/safe_io.py  : exists={Path('/opt/shift-agent/safe_io.py').exists()}")
+    print(f"  notify seam id-match (kernel): {_kernel_notify is getattr(sio, 'notify_owner_with_fallback')}")
+    print("  Linux-only tests (skip-if sys.platform=='win32' evaluated):")
+    for name in _LINUX_ONLY_TESTS:
+        print(f"    - {name}: skipped={skip_win32}")
+    print("====================================================")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -181,15 +252,19 @@ def _patch_notify(monkeypatch, fn):
     THE REAL SEAM is ``safe_io.notify_owner_with_fallback`` (approval_code_pools.
     record_collision_event does a lazy ``from safe_io import
     notify_owner_with_fallback``, resolved via sys.modules at CALL time). Patching
-    a module-level ``import safe_io`` reference bound at test-load time is NOT
-    robust: test_cf_router_plugin.py:76-77 pops ``safe_io`` from sys.modules, and
-    the plugin load (hooks.py -> actions._ensure_platform_path, actions.py:83-89)
-    inserts ``/opt/shift-agent`` onto sys.path; on a box with a deployed
-    /opt/shift-agent/safe_io.py the re-import rebinds sys.modules['safe_io'] to the
-    /opt copy. The stale ref then misses the kernel's call, the REAL chokepoint
-    runs (subprocess to an absent /usr/local/bin/shift-agent-notify-owner ->
-    returns False), and zero calls are captured (Linux-CI-only symptom). Resolving
-    the module fresh here always targets what the kernel imports."""
+    a module-level ``import safe_io`` reference bound at THIS file's load time is
+    NOT robust: ``tests/test_cf_router_plugin.py::_load_plugin_modules`` (:75-77)
+    unconditionally pops ``safe_io``/``schemas`` from sys.modules and re-imports
+    them FROM THE REPO's ``src/platform`` (sys.path[0] = PLATFORM_DIR) — a FRESH
+    module object built from the SAME repo file, fully in-repo and reproducible on
+    a clean runner (no machine state, no /opt copy). After that pop+reimport the
+    stale module-level ref is a DIFFERENT object than sys.modules['safe_io'], so a
+    patch on it misses the kernel; the REAL chokepoint then runs (subprocess to an
+    absent /usr/local/bin/shift-agent-notify-owner -> returns False) and zero
+    calls are captured. Windows never fails because the popping plugin tests are
+    fcntl-skipped there. Resolving the module fresh here always targets exactly
+    what the kernel's lazy import resolves. (Provenance asserted in
+    test_ci_module_provenance_and_binding.)"""
     import importlib
     sio = importlib.import_module("safe_io")  # == the live sys.modules['safe_io']
     monkeypatch.setattr(sio, "notify_owner_with_fallback", fn)
@@ -788,16 +863,37 @@ def test_cross_store_contention_sequential(state_dir):
     """Windows-runnable proof of the shared boundary: an expense-pool commit and
     a catering-pool commit forced onto the SAME first candidate cannot both
     issue it — the second observes the first (all_live_codes spans both stores)
-    and regenerates. No duplicate code across the two stores."""
+    and regenerates. No duplicate code across the two stores.
+
+    Also proves PRODUCTION-OBJECT IDENTITY (reviewer point 10): the real
+    extract-receipt script module references the SAME atomic_scan_and_commit
+    function object this test drives — so the test exercises the production import
+    path, not a substitute."""
+    # Production-object identity: load the real extract-receipt script and assert
+    # its approval_code_pools.atomic_scan_and_commit IS the function under test.
+    er = load_script("er_prod_identity", SRC / "agents" / "expense_bookkeeper" / "scripts" / "extract-receipt")
+    assert er.approval_code_pools is pools, "extract-receipt binds a different approval_code_pools module"
+    assert er.approval_code_pools.atomic_scan_and_commit is pools.atomic_scan_and_commit, \
+        "extract-receipt's atomic_scan_and_commit is not the function object under test"
+
     exp, cat, write_exp, write_cat = _xstore_writers(state_dir)
     c_cat, _ = pools.atomic_scan_and_commit(
         write_cat, candidate_fn=_seq_candidate("#AAAAA", "#AAAAA"), state_dir=state_dir)
     c_exp, _ = pools.atomic_scan_and_commit(
         write_exp, candidate_fn=_seq_candidate("#AAAAA", "#CCCCC"), state_dir=state_dir)
     assert c_cat == "#AAAAA" and c_exp == "#CCCCC" and c_cat != c_exp
-    all_codes = ({l["owner_approval_code"] for l in json.loads(cat.read_text())["leads"]}
-                 | {l["owner_approval_code"] for l in json.loads(exp.read_text())["leads"]})
+    cat_codes = {l["owner_approval_code"] for l in json.loads(cat.read_text())["leads"]}
+    exp_codes = {l["owner_approval_code"] for l in json.loads(exp.read_text())["leads"]}
+    all_codes = cat_codes | exp_codes
     assert len(all_codes) == 2  # no duplicate across the two stores
+    print("\n----- CROSS-STORE CONTENTION (sequential) -----")
+    print(f"  winner (catering, forced #AAAAA) : {c_cat}")
+    print(f"  loser  (expense, retried past it): {c_exp}")
+    print(f"  catering-store codes             : {sorted(cat_codes)}")
+    print(f"  expense-store  codes             : {sorted(exp_codes)}")
+    print(f"  union (exactly-one-per-store)    : {sorted(all_codes)}")
+    print("  production-object identity        : extract-receipt.atomic_scan_and_commit IS under test")
+    print("-----------------------------------------------")
 
 
 _MP_XSTORE_WORKER = r'''
@@ -850,9 +946,21 @@ def test_cross_store_contention_multiprocess(state_dir, tmp_path):
     assert "#AAAAA" in set(outs), outs
     exp = json.loads((state_dir / "expense-bookkeeper" / "leads.json").read_text())
     cat = json.loads((state_dir / "catering-leads.json").read_text())
-    all_codes = ({l["owner_approval_code"] for l in exp["leads"]}
-                 | {l["owner_approval_code"] for l in cat["leads"]})
+    exp_codes = {l["owner_approval_code"] for l in exp["leads"]}
+    cat_codes = {l["owner_approval_code"] for l in cat["leads"]}
+    all_codes = exp_codes | cat_codes
     assert len(all_codes) == 2  # no cross-store duplicate durably committed
+    # outs order = [expense proc, catering proc]; winner is whoever kept #AAAAA.
+    winner = "#AAAAA"
+    loser = next(c for c in outs if c != "#AAAAA")
+    print("\n----- CROSS-STORE CONTENTION (multi-process, concurrent) -----")
+    print(f"  process outputs [expense, catering]: {outs}")
+    print(f"  winner (kept forced #AAAAA)        : {winner}")
+    print(f"  loser  (regenerated after retry)   : {loser}")
+    print(f"  expense-store  codes               : {sorted(exp_codes)}")
+    print(f"  catering-store codes               : {sorted(cat_codes)}")
+    print(f"  union (no cross-store duplicate)   : {sorted(all_codes)}")
+    print("--------------------------------------------------------------")
 
 
 # ════════════════════════════════════════════════════════════════════════════
