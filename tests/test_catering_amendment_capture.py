@@ -22,6 +22,7 @@ ownership / mode enforcement) are skipif win32.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import sys
@@ -30,6 +31,7 @@ import importlib.util
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
 
@@ -609,3 +611,70 @@ def test_wrong_expected_owner_rejected(tmp_path):
              expected_owner="definitely-not-a-real-user-xyz")
     assert not r.ok and "bad_owner" in r.reason
     assert _store(data) == before
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Static invariant — cf_router_intercepted reason-enum coverage (bug-CLASS guard)
+#
+# `actions.audit_intercepted()` ALWAYS builds a CfRouterIntercepted(reason=reason)
+# and swallows exceptions (best-effort). So any `reason=` literal it is called with
+# that is NOT a member of CfRouterIntercepted.reason raises a pydantic
+# ValidationError that is silently eaten → the LLM-suppressing intercept vanishes
+# from routing / dispatcher-accuracy telemetry. That is exactly the gap PR-R2A's
+# `f7_primary_amendment_capture_failed` reason hit (CI round 3). This static source
+# scan fails CI on any future emitter/enum drift instead. Pure ast parse — no plugin
+# import — so it runs on every platform (incl. Windows). Per the standing rule:
+# every documented invariant gets a test that fails if the invariant is violated.
+# ════════════════════════════════════════════════════════════════════════════
+def _cf_router_reason_enum() -> set:
+    import schemas  # fcntl already stubbed at module import
+    return set(get_args(schemas.CfRouterIntercepted.model_fields["reason"].annotation))
+
+
+def _audit_intercepted_reason_literals(path: Path) -> set:
+    """Every string literal that can be passed as the `reason` of an
+    `audit_intercepted(...)` call in `path`. Reads the `reason=` keyword (or the
+    first positional arg, matching the signature) and recurses into the expression
+    so a conditional `"a" if cond else "b"` contributes BOTH "a" and "b". Bare
+    variable reasons (no string constant anywhere) are not statically resolvable
+    and are skipped — the four-outcome routing tests cover the R2A reasons at
+    runtime. Comments are ignored inherently (ast parse, not text grep)."""
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    literals: set = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        fname = fn.attr if isinstance(fn, ast.Attribute) else (fn.id if isinstance(fn, ast.Name) else None)
+        if fname != "audit_intercepted":
+            continue
+        reason = next((kw.value for kw in node.keywords if kw.arg == "reason"), None)
+        if reason is None and node.args:
+            reason = node.args[0]  # audit_intercepted(reason, chat_id, ...)
+        if reason is None:
+            continue
+        literals.update(d.value for d in ast.walk(reason)
+                        if isinstance(d, ast.Constant) and isinstance(d.value, str))
+    return literals
+
+
+def test_audit_intercepted_literal_reasons_are_all_enum_members():
+    """Drift guard (bug-CLASS): every literal reason emitted to audit_intercepted()
+    across the cf-router plugin must be a CfRouterIntercepted.reason member, or the
+    best-effort audit swallows it into invisible telemetry."""
+    allowed = _cf_router_reason_enum()
+    emitted: set = set()
+    for name in ("hooks.py", "actions.py"):
+        emitted |= _audit_intercepted_reason_literals(PLUGIN_DIR / name)
+    assert emitted, "scan found zero literal reasons — the extractor regressed"
+    orphan = sorted(emitted - allowed)
+    assert not orphan, (
+        "audit_intercepted() emits reason literal(s) absent from "
+        "CfRouterIntercepted.reason — they would be swallowed into invisible "
+        f"routing telemetry: {orphan}"
+    )
+
+
+def test_r2a_capture_failed_reason_is_enum_member():
+    """Pin the specific PR-R2A reason whose omission caused the CI-round-3 gap."""
+    assert "f7_primary_amendment_capture_failed" in _cf_router_reason_enum()

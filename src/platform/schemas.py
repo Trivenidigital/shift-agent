@@ -5777,6 +5777,12 @@ class CfRouterIntercepted(_BaseEntry):
         "f9_sick_call_alert",
         "f7_primary_new_inquiry",          # PR-CF1d 2026-05-12
         "f7_primary_followup_suppressed",  # PR-CF1d 2026-05-12
+        # PR-R2A 2026-07-19: Branch-B durable amendment capture FAILED — the arm
+        # sent a deterministic retry ask and suppressed the LLM without recording
+        # the amendment. An intercept that bypasses the LLM must be telemetry-
+        # visible (dispatcher-accuracy pairing), so the failure arm gets its own
+        # reason rather than being swallowed as an invalid enum value.
+        "f7_primary_amendment_capture_failed",
         "f7_proposal_request",
         "f7_proposal_selection",
         "flyer_primary_project_created",
