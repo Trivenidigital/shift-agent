@@ -636,6 +636,201 @@ def test_valid_codes_resolve_per_pool(state_dir, which, code, status):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# No silent fallback — every generator imports approval_code_pools UNCONDITIONALLY
+# ════════════════════════════════════════════════════════════════════════════
+import re as _re
+
+_GENERATORS = [
+    SRC / "agents" / "shift" / "scripts" / "create-proposal",
+    SRC / "agents" / "catering" / "scripts" / "create-catering-lead",
+    SRC / "agents" / "catering" / "scripts" / "parse-menu-photo",
+    SRC / "agents" / "expense_bookkeeper" / "scripts" / "extract-receipt",
+]
+
+
+@pytest.mark.parametrize("gen", _GENERATORS, ids=lambda p: p.name)
+def test_generator_imports_pools_unconditionally(gen):
+    """Every generator must `import approval_code_pools` at module top-level with
+    NO try/except soft-fallback — a missing module on a box must hard-fail
+    (ImportError), never silently degrade to unlocked/inline scanning."""
+    text = gen.read_text(encoding="utf-8")
+    # top-level (column 0) unconditional import present
+    assert _re.search(r"^import approval_code_pools\b", text, _re.M), (
+        f"{gen.name} lacks a top-level `import approval_code_pools`")
+    # not guarded by a try: (which would allow a silent except-fallback)
+    assert not _re.search(r"try:\s*(?:#[^\n]*)?\n\s+import approval_code_pools\b", text), (
+        f"{gen.name} guards its approval_code_pools import in a try/except — "
+        f"that permits a silent fallback to unlocked scanning")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# extract-receipt issuance boundary — code NOT exposed before the durable commit
+# ════════════════════════════════════════════════════════════════════════════
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="ExpenseLead.image_path validator hardcodes '/' separators "
+                           "(whole extract-receipt suite is Linux-only); the shared-lock "
+                           "boundary is proven Windows-runnable by the cross-store sequential test")
+def test_extract_receipt_no_code_exposed_before_commit(tmp_path, monkeypatch):
+    """Load extract-receipt in-process (fcntl-stubbed), mock the network + image
+    + card, run main(), and assert the leads write CARRYING THE CODE precedes the
+    code-referencing audit AND the stdout that exposes the code — i.e. the code
+    is issued only via atomic_scan_and_commit's durable commit."""
+    import io
+    import contextlib
+    import yaml
+    er = load_script("er_boundary_test", SRC / "agents" / "expense_bookkeeper" / "scripts" / "extract-receipt")
+    state = tmp_path / "state" / "expense-bookkeeper"
+    (state / "receipts").mkdir(parents=True)
+    (tmp_path / "logs").mkdir()
+    img = tmp_path / "r.jpg"
+    img.write_bytes(b"x")
+    cfg = {
+        "schema_version": 1,
+        "customer": {"name": "T", "location_id": "l", "timezone": "America/New_York"},
+        "owner": {"name": "O", "phone": "+19045550100", "self_chat_jid": "19045550100@s.whatsapp.net"},
+        "limits": {}, "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "x@y"},
+        "expense_bookkeeper": {"enabled": True, "qbo_client_mode": "mock"},
+    }
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    er.CONFIG_PATH = tmp_path / "config.yaml"
+    er.LEADS_PATH = state / "leads.json"
+    er.LOG_PATH = tmp_path / "logs" / "decisions.log"
+    er.RECEIPTS_DIR = state / "receipts"
+    monkeypatch.setattr(er, "_atomic_copy_image", lambda s, d: (b"img", "s" * 64, "0" * 16))
+    monkeypatch.setattr(er, "_call_vision",
+                        lambda *a, **k: {"total_cents": 1000, "line_items": [], "extraction_confidence": 0.9})
+    monkeypatch.setattr(er, "_classify_text",
+                        lambda *a, **k: {"is_business": True, "confidence": 0.9,
+                                         "rationale": "t", "qbo_account": "Office Supplies"})
+    monkeypatch.setattr(er, "_build_approval_card", lambda *a, **k: ("tmpl", "card text"))
+
+    events: list[str] = []
+    real_write = er.atomic_write_json
+
+    def tracked_write(path, obj, **k):
+        if str(path).endswith("leads.json"):
+            leads = obj.get("leads") if isinstance(obj, dict) else []
+            events.append("commit_with_code" if any(l.get("owner_approval_code") for l in leads)
+                          else "write_no_code")
+        return real_write(path, obj, **k)
+    monkeypatch.setattr(er, "atomic_write_json", tracked_write)
+
+    real_log = er._log
+
+    def tracked_log(entry):
+        if getattr(entry, "type", "") == "expense_owner_approval_requested":
+            events.append("code_audit")
+        return real_log(entry)
+    monkeypatch.setattr(er, "_log", tracked_log)
+
+    monkeypatch.setattr(sys, "argv", [
+        "extract-receipt", "--image-path", str(img),
+        "--source-image-id", "wa1", "--owner-phone", "+19045550100",
+    ])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = er.main()
+    assert rc == er.EXIT_OK, buf.getvalue()
+    code = json.loads(buf.getvalue())["approval_code"]
+    assert code.startswith("#") and len(code) == 6
+    # the ONLY leads write carrying a code is the atomic commit, and it precedes
+    # the code-referencing audit (nothing exposes the code before the commit).
+    assert "commit_with_code" in events
+    assert events.index("commit_with_code") < events.index("code_audit"), events
+    stored = json.loads((state / "leads.json").read_text())
+    assert stored["leads"][-1]["owner_approval_code"] == code
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Cross-generator contention — extract-receipt vs create-catering-lead boundary
+# ════════════════════════════════════════════════════════════════════════════
+def _xstore_writers(state_dir):
+    exp = state_dir / "expense-bookkeeper" / "leads.json"
+    exp.parent.mkdir(parents=True, exist_ok=True)
+    cat = state_dir / "catering-leads.json"
+
+    def _append(path, code):
+        doc = json.loads(path.read_text()) if path.exists() else {"leads": []}
+        doc["leads"].append({"lead_id": "L", "owner_approval_code": code,
+                             "status": "AWAITING_OWNER_APPROVAL"})
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return code
+    return exp, cat, (lambda c: _append(exp, c)), (lambda c: _append(cat, c))
+
+
+def test_cross_store_contention_sequential(state_dir):
+    """Windows-runnable proof of the shared boundary: an expense-pool commit and
+    a catering-pool commit forced onto the SAME first candidate cannot both
+    issue it — the second observes the first (all_live_codes spans both stores)
+    and regenerates. No duplicate code across the two stores."""
+    exp, cat, write_exp, write_cat = _xstore_writers(state_dir)
+    c_cat, _ = pools.atomic_scan_and_commit(
+        write_cat, candidate_fn=_seq_candidate("#AAAAA", "#AAAAA"), state_dir=state_dir)
+    c_exp, _ = pools.atomic_scan_and_commit(
+        write_exp, candidate_fn=_seq_candidate("#AAAAA", "#CCCCC"), state_dir=state_dir)
+    assert c_cat == "#AAAAA" and c_exp == "#CCCCC" and c_cat != c_exp
+    all_codes = ({l["owner_approval_code"] for l in json.loads(cat.read_text())["leads"]}
+                 | {l["owner_approval_code"] for l in json.loads(exp.read_text())["leads"]})
+    assert len(all_codes) == 2  # no duplicate across the two stores
+
+
+_MP_XSTORE_WORKER = r'''
+import json, os, sys, time
+from pathlib import Path
+state_dir, first, fallback, pool = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+sys.path.insert(0, sys.argv[5])
+os.environ["SHIFT_AGENT_STATE_DIR"] = state_dir
+import approval_code_pools as p
+if pool == "expense":
+    path = Path(state_dir) / "expense-bookkeeper" / "leads.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+else:
+    path = Path(state_dir) / "catering-leads.json"
+n = {"i": 0}
+def cand():
+    n["i"] += 1
+    return first if n["i"] == 1 else fallback
+def write_fn(code):
+    doc = json.loads(path.read_text()) if path.exists() else {"leads": []}
+    doc["leads"].append({"lead_id": "L", "owner_approval_code": code,
+                         "status": "AWAITING_OWNER_APPROVAL"})
+    time.sleep(0.4)  # widen the critical section so the peers genuinely contend
+    path.write_text(json.dumps(doc))
+    return code
+code, _ = p.atomic_scan_and_commit(write_fn, candidate_fn=cand, state_dir=state_dir)
+print(code)
+'''
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="multi-process lock contention needs real fcntl.flock (stubbed on Windows)")
+def test_cross_store_contention_multiprocess(state_dir, tmp_path):
+    """Genuinely concurrent MULTI-PROCESS issuers — one on the expense store
+    (extract-receipt's boundary), one on the catering store (create-catering-lead
+    's) — forced onto the SAME first candidate. Exactly one durable issuance wins
+    it; the loser regenerates. No duplicate code across the two stores."""
+    import subprocess
+    worker = tmp_path / "mp_xstore.py"
+    worker.write_text(_MP_XSTORE_WORKER, encoding="utf-8")
+    platform_dir = str(SRC / "platform")
+    procs = [
+        subprocess.Popen([sys.executable, str(worker), str(state_dir), "#AAAAA", fb, pool, platform_dir],
+                         stdout=subprocess.PIPE, text=True)
+        for pool, fb in (("expense", "#DDDDD"), ("catering", "#EEEEE"))
+    ]
+    outs = [pr.communicate()[0].strip() for pr in procs]
+    assert all(pr.returncode == 0 for pr in procs), outs
+    assert len(set(outs)) == 2, f"duplicate code issued across stores under concurrency: {outs}"
+    assert "#AAAAA" in set(outs), outs
+    exp = json.loads((state_dir / "expense-bookkeeper" / "leads.json").read_text())
+    cat = json.loads((state_dir / "catering-leads.json").read_text())
+    all_codes = ({l["owner_approval_code"] for l in exp["leads"]}
+                 | {l["owner_approval_code"] for l in cat["leads"]})
+    assert len(all_codes) == 2  # no cross-store duplicate durably committed
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # Adapter drift — RESOLVE filters mirror the deployed authoritative helpers
 # ════════════════════════════════════════════════════════════════════════════
 _ALL_CATERING_STATUSES = [
