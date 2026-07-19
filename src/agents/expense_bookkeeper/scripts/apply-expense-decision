@@ -56,6 +56,7 @@ from schemas import (  # noqa: E402
     ExpensePushAttempted, ExpensePushed, ExpensePushFailed,
     ExpenseReversalRequested, ExpenseReversed,
     ExpenseNonOwnerUndoDeclined, ExpenseOrphanDetected,
+    ExpenseOwnerReplySent,
 )
 from qbo_client import (  # noqa: E402
     QBOClient, QBOPushError, RETRYABLE_ERROR_CLASSES,
@@ -183,6 +184,20 @@ def _log(entry):
     ndjson_append(LOG_PATH, entry.model_dump_json())
 
 
+def _emit_reply_sent(reason, expense_id=None):
+    """F0-4 §12b: best-effort audit for inline owner-reply nudges that were
+    otherwise silent. Never fatal — an audit failure must not block the reply."""
+    try:
+        _log(ExpenseOwnerReplySent(
+            ts=datetime.now(timezone.utc),
+            type="expense_owner_reply_sent",
+            reason=reason,
+            expense_id=expense_id,
+        ))
+    except Exception as e:
+        sys.stderr.write(f"WARN: audit emit failed for expense_owner_reply_sent: {e}\n")
+
+
 # ─────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────
@@ -291,6 +306,7 @@ def _handle_approve(parsed, owner_phone, owner_jid, sender_phone, raw_message,
             return EXIT_NOT_FOUND
 
         if lead.reconcile_required:
+            _emit_reply_sent("reconcile_notice", lead.expense_id)
             _bridge_post(
                 owner_jid,
                 f"Lead {lead.expense_id} needs operator reconciliation; "
@@ -623,6 +639,7 @@ def _handle_undo(parsed, owner_phone, owner_lid, owner_jid, sender_phone,
         if lead is None:
             return EXIT_NOT_FOUND
         if lead.status != "PUSHED":
+            _emit_reply_sent("undo_wrong_status", lead.expense_id)
             _bridge_post(
                 owner_jid,
                 f"{eid} is in status {lead.status}; can't undo.",
@@ -729,9 +746,11 @@ def _handle_missing_decimals(parsed, owner_jid):
         if lead is None:
             return EXIT_NOT_FOUND
         extracted = lead.extracted_total_cents or 0
+        expense_id = lead.expense_id
     msg = (
         f"Please include cents — reply '{parsed['code']} {_cents_to_str(extracted)}'."
     )
+    _emit_reply_sent("missing_decimals", expense_id)
     _bridge_post(owner_jid, msg)
     return EXIT_INVALID_INPUT
 
@@ -766,6 +785,7 @@ def main():
     parsed = parse_owner_message(args.raw_message)
     if parsed is None:
         # Friendly nudge
+        _emit_reply_sent("unrecognized")
         _bridge_post(
             owner_jid,
             "I didn't recognise that — reply '#CODE 12.34' to approve, "

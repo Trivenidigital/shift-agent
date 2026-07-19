@@ -9,6 +9,8 @@ description: Use to identify high-value repeat customers at point of contact and
 
 `cfg.vip.enabled = False`. Self-declines.
 
+When invoked while disabled, log `agent_declined` with `agent="vip"` + `reason="agent_disabled"` via `log-decision-direct` before the decline reply.
+
 ## Phase 1 (v0.2)
 
 Per portfolio.md.txt §298–326: match incoming contact against repeat-customer list, surface order history + dietary + family details (carefully scoped), prompt personal-touch outreach (birthday, anniversary, festival), flag at-risk drop-offs.

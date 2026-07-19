@@ -9,9 +9,13 @@ description: Use post-event for catering bookings — automated thank-you with p
 
 `cfg.catering_followup.enabled = False`. Self-declines.
 
+When invoked while disabled, log `agent_declined` with `agent="catering_followup"` + `reason="agent_disabled"` via `log-decision-direct` before the decline reply.
+
 ## Phase 1 (v0.2)
 
 Triggers when Agent #2 transitions a lead to `CLOSED` status. Sends thank-you (template) → feedback request (single-question) → schedules anniversary nudge for next year.
+
+> **Honesty note (not yet wired):** the Agent #2 lead→`CLOSED` trigger hook does NOT exist yet — nothing currently invokes this agent on lead closure. Activation trigger = wiring that hook into the Catering Lead close path at onboarding. Until then this agent only self-declines (Phase 0).
 
 ## Hard rules
 

@@ -9,6 +9,8 @@ description: Use for new-hire onboarding — paperwork tracking (W-4, I-9, food 
 
 `cfg.hiring.enabled = False`. Self-declines.
 
+When invoked while disabled, log `agent_declined` with `agent="hiring"` + `reason="agent_disabled"` via `log-decision-direct` before the decline reply.
+
 ## Phase 1 (v0.2)
 
 Per portfolio.md.txt §398–425: intake new-hire info, generate I-9/W-4 prompts (form-prep only, NEVER legal advice), schedule training, populate roster, chase missing forms.

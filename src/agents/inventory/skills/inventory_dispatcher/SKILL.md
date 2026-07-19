@@ -9,6 +9,8 @@ description: Use when staff or owner reports stock counts, low-stock concerns, o
 
 `cfg.inventory.enabled = False` by default. Reply: *"Inventory tracking is not yet enabled for this customer. POS integration required first."*
 
+When invoked while disabled, log `agent_declined` with `agent="inventory"` + `reason="agent_disabled"` via `log-decision-direct` before that reply.
+
 ## Phase 1 (v0.2 — pilot)
 
 Per portfolio.md.txt §198–229: text-based stock-count intake, threshold-based low-stock alerts, expiry-date warnings for perishables. POS-driven sales-velocity decrement deferred to phase 2.

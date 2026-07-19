@@ -14,6 +14,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+from fixtures_fleet import ensure_fcntl_stub, read_log_rows
+
+ensure_fcntl_stub()
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "src" / "agents" / "shift" / "scripts" / "handle-shift-sick-call"
@@ -205,3 +208,76 @@ def test_employee_sick_call_with_schedule_creates_owner_proposal(env_dir, monkey
     assert "checking coverage" in sent[0][1].lower()
     assert sent[1][0] == "19045550100@s.whatsapp.net"
     assert "owner proposal Anjali Rao #ABCDE" in sent[1][1]
+
+
+# ── F0-3 §12b: per-send audit rows (exercise the real _send_text) ─────────────
+
+def _employee_identity(_chat_id):
+    return {
+        "role": "employee", "employee_id": "e008", "name": "Srini Bangaru",
+        "phone_normalized": "+17329837841", "lid": "201975216009469@lid",
+    }
+
+
+def test_no_schedule_sends_emit_sick_call_send_rows(env_dir, monkeypatch, tmp_path):
+    """Real _send_text runs (bridge_post stubbed) → both no-schedule sends write
+    a sick_call_send row. Previously these sends were audit-silent."""
+    import safe_io
+    mod = _load_script()
+    mod.CONFIG_PATH = env_dir / "config.yaml"
+    mod.ROSTER_PATH = env_dir / "roster.json"
+    mod.PENDING_PATH = env_dir / "state" / "pending.json"
+    log = tmp_path / "logs" / "decisions.log"
+    mod.DECISIONS_LOG = log
+
+    monkeypatch.setattr(mod, "_identify_sender", _employee_identity)
+    monkeypatch.setattr(mod, "_notify_owner", lambda *a, **k: None)
+
+    calls = []
+
+    def fake_bridge_post(jid, message, action_context=None):
+        calls.append(jid)
+        return True, f"mid{len(calls)}", "", 200
+
+    monkeypatch.setattr(safe_io, "bridge_post", fake_bridge_post)
+
+    rc = mod.process_absence(
+        chat_id="201975216009469@lid",
+        text="Hey Boss! Down with fever, can't come today.",
+        message_id="wa-audit-1",
+    )
+    assert rc == 0
+    rows = [r for r in read_log_rows(log) if r["type"] == "sick_call_send"]
+    assert len(rows) == 2
+    action_ids = {r["action_id"] for r in rows}
+    assert action_ids == {
+        "shift.sick_call.employee_no_schedule_ack",
+        "shift.sick_call.owner_no_schedule_alert",
+    }
+    assert all(r["ok"] is True for r in rows)
+    assert all(r["outbound_message_id"] for r in rows)
+
+
+def test_failed_send_records_sick_call_send_with_error(env_dir, monkeypatch, tmp_path):
+    """A bridge failure still writes a sick_call_send row (ok=False + error)."""
+    import safe_io
+    mod = _load_script()
+    mod.CONFIG_PATH = env_dir / "config.yaml"
+    mod.ROSTER_PATH = env_dir / "roster.json"
+    mod.PENDING_PATH = env_dir / "state" / "pending.json"
+    log = tmp_path / "logs" / "decisions.log"
+    mod.DECISIONS_LOG = log
+
+    monkeypatch.setattr(mod, "_identify_sender", _employee_identity)
+    monkeypatch.setattr(mod, "_notify_owner", lambda *a, **k: None)
+    monkeypatch.setattr(safe_io, "bridge_post",
+                        lambda jid, message, action_context=None: (False, "", "bridge unreachable", 502))
+
+    mod.process_absence(
+        chat_id="201975216009469@lid",
+        text="fever, out today",
+        message_id="wa-audit-2",
+    )
+    rows = [r for r in read_log_rows(log) if r["type"] == "sick_call_send"]
+    assert rows and all(r["ok"] is False for r in rows)
+    assert all("bridge unreachable" in (r["error"] or "") for r in rows)

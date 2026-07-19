@@ -9,6 +9,8 @@ description: Use for multi-state sales tax tracking — per-state filing deadlin
 
 `cfg.sales_tax.enabled = False`. Self-declines.
 
+When invoked while disabled, log `agent_declined` with `agent="sales_tax"` + `reason="agent_disabled"` via `log-decision-direct` before the decline reply.
+
 ## Phase 1 (v0.2)
 
 Per portfolio.md.txt §531–558: per-state per-frequency (monthly/quarterly/annual) calendar, taxable-sales compilation (requires POS integration), filing-package preparation for owner/accountant.

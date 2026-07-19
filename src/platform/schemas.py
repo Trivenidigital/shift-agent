@@ -3642,6 +3642,17 @@ class AgentStateChange(_BaseEntry):
     reason: str
 
 
+class AgentDeclined(_BaseEntry):
+    """Generic self-decline audit for v0.1 stub agents invoked while disabled.
+    ONE shared variant (the `agent` field discriminates) rather than a per-agent
+    Literal type for each of the 8 stubs — mirrors the equipment_maintenance_
+    declined / pnl_anomaly_declined pattern without adding a schema variant per
+    agent. The stub SKILLs emit `agent_declined` via log-decision-direct."""
+    type: Literal["agent_declined"]
+    agent: str = Field(max_length=64)
+    reason: Literal["agent_disabled"] = "agent_disabled"
+
+
 class ConfigGateOverride(_BaseEntry):
     """Audit row: deploy-time `tools/check-hermes-config-yaml.sh` accepted an
     operator-supplied two-variable override (FIELD + REASON). Bypasses the
@@ -3772,6 +3783,38 @@ class OwnerNotificationSuppressed(_BaseEntry):
     quiet_end: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     quiet_days: list[str] = Field(min_length=1)
     suppressed_at_local: str = Field(pattern=r"^\d{2}:\d{2}:\d{2}$")
+
+
+class OwnerAlertDispatched(_BaseEntry):
+    """§12b: written by shift-agent-notify-owner BEFORE the delivery attempt so
+    every owner alert is traceable even when delivery later fails. Pairs with
+    OwnerAlertDelivered (success). Absent both, "no rows" is ambiguous between
+    delivered-cleanly and never-fired — the exact silent-failure §12b closes."""
+    type: Literal["owner_alert_dispatched"]
+    title: str = Field(max_length=250)
+    message_excerpt: str = Field(max_length=120)
+    priority: int = Field(ge=-2, le=2)
+
+
+class OwnerAlertDelivered(_BaseEntry):
+    """§12b: written by shift-agent-notify-owner on the first channel that
+    accepts the owner alert. Pairs with OwnerAlertDispatched."""
+    type: Literal["owner_alert_delivered"]
+    channel: Literal["pushover", "whatsapp_fallback"]
+    title: str = Field(max_length=250)
+    priority: int = Field(ge=-2, le=2)
+
+
+class SickCallSend(_BaseEntry):
+    """F0-3 §12b: per-send audit for handle-shift-sick-call bridge_post sends
+    (employee ack, owner proposal, no-schedule alerts). These were previously
+    silent — only proposal_created was logged, so a delivered/failed send left
+    no per-send row. Emitted by the script's _send_text chokepoint."""
+    type: Literal["sick_call_send"]
+    action_id: str = Field(max_length=120)
+    ok: bool
+    outbound_message_id: Optional[str] = None
+    error: Optional[str] = Field(default=None, max_length=300)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -4016,6 +4059,19 @@ class ExpenseOrphanDetected(_BaseEntry):
     expense_id: str
     last_known_status: ExpenseLeadStatus
     detected_by: Literal["startup_scan", "manual"]
+
+
+class ExpenseOwnerReplySent(_BaseEntry):
+    """F0-4 §12b: inline owner-reply nudges from apply-expense-decision that
+    previously fired with no audit row (reconcile notice, undo-wrong-status,
+    missing-decimals nudge, unrecognized-message nudge). One row per inline
+    reply so 'no rows' is not ambiguous between never-fired and delivered."""
+    type: Literal["expense_owner_reply_sent"]
+    reason: Literal[
+        "reconcile_notice", "undo_wrong_status",
+        "missing_decimals", "unrecognized",
+    ]
+    expense_id: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -6408,6 +6464,7 @@ LogEntry = Annotated[
         Annotated[OutboundCapExceeded, Tag("outbound_cap_exceeded")],
         Annotated[OutboundRefusedDisabled, Tag("outbound_refused_disabled")],
         Annotated[AgentStateChange, Tag("agent_state_change")],
+        Annotated[AgentDeclined, Tag("agent_declined")],
         # Hermes config.yaml shape gate override audit (M2 closure)
         Annotated[ConfigGateOverride, Tag("config_gate_override")],
         Annotated[UnknownSenderDeclined, Tag("unknown_sender_declined")],
@@ -6416,6 +6473,9 @@ LogEntry = Annotated[
         Annotated[HealthCheckFailure, Tag("health_check_failure")],
         # Agent #41 Owner Wellbeing v0.1
         Annotated[OwnerNotificationSuppressed, Tag("owner_notification_suppressed")],
+        Annotated[OwnerAlertDispatched, Tag("owner_alert_dispatched")],
+        Annotated[OwnerAlertDelivered, Tag("owner_alert_delivered")],
+        Annotated[SickCallSend, Tag("sick_call_send")],
         # BEGIN shift-agent-sender-id
         Annotated[LidLearned, Tag("lid_learned")],
         # END shift-agent-sender-id
@@ -6523,6 +6583,7 @@ LogEntry = Annotated[
         Annotated[ExpenseReceiptPruned, Tag("expense_receipt_pruned")],
         Annotated[ExpenseNonOwnerUndoDeclined, Tag("expense_non_owner_undo_declined")],
         Annotated[ExpenseOrphanDetected, Tag("expense_orphan_detected")],
+        Annotated[ExpenseOwnerReplySent, Tag("expense_owner_reply_sent")],
         # Hermes Flyer Studio
         Annotated[FlyerProjectCreated, Tag("flyer_project_created")],
         Annotated[FlyerStatusChange, Tag("flyer_status_change")],

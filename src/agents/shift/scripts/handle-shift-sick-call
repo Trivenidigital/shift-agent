@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, "/opt/shift-agent")
 
 import yaml  # noqa: E402
-from schemas import ActionExecutionContext, Config, Employee, Roster, ScheduleEntry  # noqa: E402
+from schemas import ActionExecutionContext, Config, Employee, Roster, ScheduleEntry, SickCallSend  # noqa: E402
 from exit_codes import (  # noqa: E402
     EXIT_DEPENDENCY_DOWN,
     EXIT_INVALID_INPUT,
@@ -37,6 +37,7 @@ from exit_codes import (  # noqa: E402
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
 ROSTER_PATH = Path("/opt/shift-agent/roster.json")
 PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
+DECISIONS_LOG = Path("/opt/shift-agent/logs/decisions.log")
 
 IDENTIFY_SENDER_BIN = Path("/usr/local/bin/identify-sender")
 CREATE_PROPOSAL_BIN = Path("/usr/local/bin/create-proposal")
@@ -287,6 +288,26 @@ def _create_proposal(
         return EXIT_SCHEMA_VIOLATION, {}, f"create-proposal emitted non-JSON: {detail[:200]}"
 
 
+def _audit_send(action_id: str, ok: bool, mid: str, err: str) -> None:
+    """F0-3 §12b: best-effort per-send audit row. Previously these sends were
+    silent (only proposal_created was logged). Never fatal — an audit failure
+    must not block the sick-call reply/coverage flow. Lazy safe_io import keeps
+    the module Windows-importable (mirrors _send_text's bridge_post import)."""
+    try:
+        from safe_io import ndjson_append, FileLock  # noqa: WPS433
+        entry = SickCallSend(
+            type="sick_call_send", ts=datetime.now(ZoneInfo("UTC")),
+            action_id=action_id[:120], ok=ok,
+            outbound_message_id=(mid or None),
+            error=(err[:300] if err else None),
+        )
+        DECISIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(DECISIONS_LOG.with_suffix(".log.lock")):
+            ndjson_append(DECISIONS_LOG, entry.model_dump_json())
+    except Exception:
+        pass
+
+
 def _send_text(jid: str, message: str, action_id: str) -> tuple[bool, str, str]:
     from safe_io import bridge_post  # noqa: WPS433 - lazy import keeps Windows tests importable
 
@@ -297,7 +318,9 @@ def _send_text(jid: str, message: str, action_id: str) -> tuple[bool, str, str]:
         mutation_class="external_irreversible",
     )
     ok, mid, err, status = bridge_post(jid, message, action_context=ctx)
-    return ok, mid, "" if ok else f"{status}: {err}"
+    detail = "" if ok else f"{status}: {err}"
+    _audit_send(action_id, ok, mid, detail)
+    return ok, mid, detail
 
 
 def _notify_owner(title: str, message: str, priority: int = 1) -> None:

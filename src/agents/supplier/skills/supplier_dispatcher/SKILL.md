@@ -9,6 +9,8 @@ description: Use for messages to/from a supplier — order placement, follow-ups
 
 `cfg.supplier.enabled = False`. Reply: *"Supplier coordination not yet configured. Add suppliers to roster first."*
 
+When invoked while disabled, log `agent_declined` with `agent="supplier"` + `reason="agent_disabled"` via `log-decision-direct` before that reply.
+
 ## Phase 1 (v0.2)
 
 Per portfolio.md.txt §231–258: route by supplier+SKU, format orders per supplier's preferred channel (PDF/WhatsApp/email), follow-up overdue orders, log disputes.

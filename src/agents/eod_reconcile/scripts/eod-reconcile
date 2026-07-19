@@ -125,7 +125,11 @@ def _aggregate_today(cfg: Config) -> tuple[dict, bool]:
     try:
         pending, status = load_model(PENDING_PATH, PendingStore)
         if status == "ok":
-            for p in pending.proposals:
+            # PendingStore.proposals is dict[str, Proposal]; iterate VALUES (iterating the
+            # dict yields id keys, so `p.status` on a str raised AttributeError — swallowed
+            # by the bare except below → proposals_resolved/unresolved stayed 0 and
+            # degraded=True for ANY non-empty store). Mirrors send-daily-brief fix.
+            for p in pending.proposals.values():
                 if is_terminal_status(p.status):
                     counts["proposals_resolved"] += 1
                 else:
