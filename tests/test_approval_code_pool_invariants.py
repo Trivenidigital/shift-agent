@@ -117,32 +117,110 @@ def test_no_generator_mints_without_collision_check():
         )
 
 
-# Each generator must consult at least one SIBLING agent's #XXXXX store (cross-pool), not
-# just its own — the dispatcher disambiguates a cross-pool collision only by state-file
-# priority, so an own-pool-only generator can mint a code that silently shadows a sibling's.
-# BL-SEC-04 (catering) / BL-SHIFT-13 (shift) closed the last two own-pool-only generators.
-_CROSS_POOL_SIBLING_REF = {
-    "create-proposal": "catering-leads.json",   # shift must also consult catering leads
-    "create-catering-lead": "pending.json",      # catering must also consult shift proposals
-    "parse-menu-photo": "pending.json",          # catering must also consult shift proposals
-    "extract-receipt": "catering-leads.json",    # expense must also consult a sibling pool
-}
-
-
 def test_all_generators_check_cross_pool():
-    """Every generator must reference at least one SIBLING agent's code store, closing the
-    S2-6 cross-pool gap. A future edit that drops the sibling scan (reverting a generator to
-    own-pool-only) trips this test.
+    """Every generator must draw its exclusion set from the ONE cross-pool source
+    (PR-R1: approval_code_pools.all_live_codes, which unions ALL FOUR pools),
+    closing the S2-6 cross-pool gap. A future edit that reverts a generator to an
+    own-pool-only scan (dropping the registry) trips this test.
 
-    Text-grep proxy (like the sibling test above): asserts the sibling store PATH is referenced,
-    not that it is behaviorally consulted — a full behavioral test needs the fcntl-dependent
-    scripts (Linux-only). Still strong enough to catch a dropped sibling scan.
+    Before PR-R1 each generator inlined its own sibling scan and this test grepped
+    for a specific sibling state-file path; the four inline scans are now a single
+    registry call, so the assertion tracks the single source instead.
+
+    Text-grep proxy (like the sibling tests above): asserts the registry call is
+    referenced, not that it is behaviorally consulted — the behavioral proof lives
+    in tests/test_routing_invariants_r1.py (per-generator planted-collision tests).
     """
     for path in GENERATOR_FILES:
         text = path.read_text(encoding="utf-8")
-        sibling = _CROSS_POOL_SIBLING_REF[path.name]
-        assert sibling in text, (
-            f"{path.name} does not reference sibling pool store {sibling!r} — it can mint a "
+        assert "all_live_codes" in text, (
+            f"{path.name} does not consult approval_code_pools.all_live_codes — it can mint a "
             f"code colliding with a live code in a sibling agent's pool (S2-6 cross-pool gap, "
-            f"BL-SEC-04/BL-SHIFT-13)"
+            f"BL-SEC-04/BL-SHIFT-13; PR-R1 single-source contract)"
         )
+
+
+# ── PR-R1: pool-order lives in ONE canonical source, and the dispatcher SKILL
+# prose conforms to it ────────────────────────────────────────────────────────
+
+def _load_pools_module():
+    import importlib
+    import sys as _sys
+    _sys.path.insert(0, str(SRC / "platform"))
+    return importlib.import_module("approval_code_pools")
+
+
+def test_canonical_pool_order_single_source():
+    """The canonical lookup order is exported from ONE constant."""
+    pools = _load_pools_module()
+    assert pools.CODE_POOL_CANONICAL_ORDER == (
+        "menu-pending", "catering-leads", "expense", "shift",
+    )
+
+
+# Map the state-file basename each jq lookup line targets -> pool name. Order in
+# this dict matters: expense-bookkeeper/leads.json is checked before the bare
+# "pending.json" so the expense line isn't mis-bucketed.
+_FILE_TO_POOL = {
+    "catering-menu-pending.json": "menu-pending",
+    "catering-leads.json": "catering-leads",
+    "expense-bookkeeper/leads.json": "expense",
+    "pending.json": "shift",
+}
+
+_SKILL_MD = SRC / "agents" / "shift" / "skills" / "dispatch_shift_agent" / "SKILL.md"
+
+
+def _parse_skill_pool_order(text: str) -> list[str]:
+    """Parse the SKILL's four jq lookup lines (top-to-bottom) into an ordered
+    pool list, first occurrence of each pool preserved in document order."""
+    order: list[str] = []
+    for line in text.splitlines():
+        if "jq " not in line:
+            continue
+        if "$c" not in line and "$CODE" not in line:
+            continue
+        for needle, pool in _FILE_TO_POOL.items():
+            if needle in line:
+                if pool not in order:
+                    order.append(pool)
+                break
+    return order
+
+
+def test_skill_md_pool_order_and_membership_match_registry():
+    """The dispatcher SKILL's documented pool-lookup block (its four jq lines,
+    read top-to-bottom) must resolve pools in the SAME order AND with the SAME
+    membership as the registry's CODE_POOL_CANONICAL_ORDER. This is how the prose
+    'consumes' the single executable source — if either drifts, this fails."""
+    pools = _load_pools_module()
+    order = _parse_skill_pool_order(_SKILL_MD.read_text(encoding="utf-8"))
+    # membership (set equality) + order (sequence equality)
+    assert set(order) == set(pools.CODE_POOL_CANONICAL_ORDER), (
+        f"SKILL.md pools {set(order)} != registry membership {set(pools.CODE_POOL_CANONICAL_ORDER)}"
+    )
+    assert tuple(order) == pools.CODE_POOL_CANONICAL_ORDER, (
+        f"SKILL.md order {order} != registry canonical order {pools.CODE_POOL_CANONICAL_ORDER}"
+    )
+
+
+def test_skill_order_parser_detects_reordering():
+    """Evidence the assertion actually FAILS on drift: parse a DELIBERATELY
+    reordered copy of the prose (menu <-> catering jq lines swapped) and assert
+    the parsed order differs from the registry tuple (so the real-file test above
+    would fail if the SKILL were reordered). Runs against a mutated STRING, never
+    the real file."""
+    pools = _load_pools_module()
+    text = _SKILL_MD.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    jq_idx = [i for i, ln in enumerate(lines)
+              if "jq " in ln and ("$c" in ln or "$CODE" in ln)]
+    assert len(jq_idx) >= 2, "expected >=2 jq lookup lines to mutate"
+    i0, i1 = jq_idx[0], jq_idx[1]
+    lines[i0], lines[i1] = lines[i1], lines[i0]  # swap first two lookup lines
+    mutated_order = _parse_skill_pool_order("\n".join(lines))
+    assert tuple(mutated_order) != pools.CODE_POOL_CANONICAL_ORDER, (
+        "parser failed to detect a reordered SKILL prose block — the order "
+        "assertion would not catch drift"
+    )
+    assert mutated_order[0] == "catering-leads", mutated_order  # menu/catering swapped

@@ -69,15 +69,13 @@ from exit_codes import (  # noqa: E402
     EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN,
 )
 from pydantic import ValidationError  # noqa: E402
+import approval_code_pools  # noqa: E402  # PR-R1: single-source cross-pool code contract
 
 
 # Module-level paths — patched by tests.
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
 LEADS_PATH = Path("/opt/shift-agent/state/expense-bookkeeper/leads.json")
 LEADS_LOCK = Path("/opt/shift-agent/state/expense-bookkeeper/leads.json.lock")
-CATERING_LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
-MENU_PENDING_PATH = Path("/opt/shift-agent/state/catering-menu-pending.json")
-PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
 RECEIPTS_DIR = Path("/opt/shift-agent/state/expense-bookkeeper/receipts")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 TEMPLATE_DIR = Path("/opt/shift-agent/templates")
@@ -243,65 +241,34 @@ def _atomic_copy_image(src_path: Path, dst_path: Path) -> tuple[bytes, str, str]
 
 
 # ─────────────────────────────────────────────────────────────────
-# Cross-state-file collision check (reviewer-a HIGH A2).
+# Cross-state-file collision check (reviewer-a HIGH A2; PR-R1 single source).
 # ─────────────────────────────────────────────────────────────────
 
 def _collect_active_codes(store: ExpenseLeadStore) -> set[str]:
-    """Loads all 4 state files and returns the set of active codes in the
-    shared 28.6M code pool. Includes our own store. Mirrors the dispatcher's
-    code-pool priority awareness."""
-    codes: set[str] = set()
-    # Our own
+    """Active codes across all four pools (PR-R1: the cross-pool set now comes
+    from the single-source approval_code_pools.all_live_codes instead of three
+    inline sibling reads). Own IN-MEMORY expense codes not yet written to disk
+    are unioned so an in-flight lead cannot be shadowed. Includes our own store."""
+    codes: set[str] = set(approval_code_pools.all_live_codes())
     for lead in store.leads:
         if lead.owner_approval_code and lead.status not in (
             "PUSHED", "REVERSED", "REJECTED", "EXPIRED",
         ):
             codes.add(lead.owner_approval_code)
-    # Catering leads
-    if CATERING_LEADS_PATH.exists():
-        try:
-            cs, st = load_model(CATERING_LEADS_PATH, CateringLeadStore,
-                                default=CateringLeadStore())
-            if st == "ok":
-                for cl in cs.leads:
-                    if cl.owner_approval_code and cl.status not in (
-                        "CLOSED", "OWNER_REJECTED", "STALE", "NOT_CATERING",
-                    ):
-                        codes.add(cl.owner_approval_code)
-        except Exception:
-            pass  # don't fail extraction on a stale catering store
-    # Catering menu pending
-    if MENU_PENDING_PATH.exists():
-        try:
-            mp, st = load_model(MENU_PENDING_PATH, MenuPendingUpdate)
-            if st == "ok" and getattr(mp, "confirmation_code", None):
-                codes.add(mp.confirmation_code)
-        except Exception:
-            pass
-    # Shift proposals (pending.json) — best-effort grep of raw JSON to avoid
-    # tight coupling to the Proposal schema if it changes.
-    if PENDING_PATH.exists():
-        try:
-            raw = json.loads(PENDING_PATH.read_text())
-            # pending.json stores proposals as an OBJECT keyed by id
-            # (dict[str,Proposal]); iterating the mapping directly yields id
-            # keys (strings), so .get("code") raised and this branch silently
-            # collected NOTHING — shift codes were never actually excluded.
-            proposals = raw.get("proposals", {})
-            iterable = proposals.values() if isinstance(proposals, dict) else proposals
-            for prop in iterable:
-                if isinstance(prop, dict) and prop.get("code"):
-                    codes.add(prop["code"])
-        except Exception:
-            pass
     return codes
 
 
 def _generate_unique_code(store: ExpenseLeadStore) -> str:
-    """Per drift-rules + reviewer-a HIGH A1: each agent inlines its own code
-    generator; this one ALSO checks across all 4 state files (catering leads /
-    menu-pending / shift proposals / our own) to avoid collisions in the
-    shared 28.6M pool."""
+    """5-char approval code absent from every pool's live codes (PR-R1 single
+    source via _collect_active_codes -> approval_code_pools.all_live_codes).
+
+    Best-effort: extract-receipt interleaves slow vision + classify calls between
+    this generation and its leads-store write, so — unlike the other three
+    generators — it does NOT hold approval_code_pools.code_generation_lock()
+    across the write (holding a cross-process lock across network I/O would
+    serialize all generation on vision latency). Its store write stays under its
+    own leads lock; cross-pool uniqueness here remains advisory, as it was before
+    this change."""
     active = _collect_active_codes(store)
     for _ in range(100):
         candidate = "#" + "".join(secrets.choice(_CODE_ALPHA) for _ in range(5))
