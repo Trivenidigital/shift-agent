@@ -1,16 +1,16 @@
 """ops/approval-lock-init — canonical approval-code lock initialization in the
-deploy script.
+deploy script (reviewer-refined #624).
 
-Two layers (repo static+extract style):
+Three layers (repo static+extract style):
   * STATIC assertions on the real shift-agent-deploy.sh text — run everywhere.
-  * EXTRACT-AND-RUN of the bash function in a tmp sandbox (SHIFT_AGENT_DEPLOY_
-    TEST_SANDBOX=1 + APPROVAL_LOCK_* overrides, current user as expected owner) —
-    Linux-only (needs bash + POSIX stat/chown + a python3 whose safe_io imports
-    fcntl; GH CI runs unprivileged so root chown-to-shift-agent / runuser cannot
-    run there, hence the sandbox uses the current user).
+  * EXTRACT-AND-RUN of the bash function in a tmp sandbox with DISPOSABLE positional
+    params (no env surface) — Linux-only.
+  * REAL-SCRIPT guard + ADVERSARIAL fd-interposition — Linux-only.
 
-The initializer touches NO product module: it only creates/validates the lock
-file and verifies acquire/release via the EXACT production safe_io.
+The initializer touches NO product module. It parameterizes every input
+positionally (production call site passes canonical literals) and validates the
+PRODUCTION safe_io.FileLock's OWN descriptor (fstat/lstat identity), bounded by a
+deploy-side SIGALRM. Production safe_io is UNMODIFIED.
 """
 from __future__ import annotations
 
@@ -26,16 +26,34 @@ REPO = Path(__file__).resolve().parent.parent
 DEPLOY = REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
 TEXT = DEPLOY.read_text(encoding="utf-8")
 LINES = TEXT.splitlines()
+PLATFORM = REPO / "src" / "platform"
 
 _BEGIN = "# BEGIN approval-code-lock-init"
 _END = "# END approval-code-lock-init"
 
 
 def _func_block() -> str:
-    """The BEGIN..END region containing the initialize_approval_code_lock fn."""
-    s = TEXT.index(_BEGIN)
-    e = TEXT.index(_END)
-    return TEXT[s:e]
+    return TEXT[TEXT.index(_BEGIN):TEXT.index(_END)]
+
+
+def _func_def_body() -> str:
+    """Only the function DEFINITION body (excludes the BEGIN prose comment that
+    legitimately names the sandbox var / chown / chmod)."""
+    fn = _func_block()
+    return fn[fn.index("initialize_approval_code_lock() {"):]
+
+
+def _code_lines(text: str) -> str:
+    return "\n".join(l for l in text.splitlines() if not l.strip().startswith("#"))
+
+
+def _extract_verifier() -> str:
+    """The PY_VERIFY heredoc body — the fd-identity verifier, runnable standalone
+    with argv (platform_dir, lock, timeout, owner, group, modes, hook)."""
+    fn = _func_block()
+    s = fn.index("<<'PY_VERIFY'\n") + len("<<'PY_VERIFY'\n")
+    e = fn.index("\nPY_VERIFY", s)
+    return fn[s:e]
 
 
 def _first_line(pred) -> int:
@@ -46,148 +64,143 @@ def _first_line(pred) -> int:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# STATIC — ordering, fail-before-activation, sandbox non-inheritance, TOCTOU
+# STATIC (run everywhere)
 # ════════════════════════════════════════════════════════════════════════════
 def test_init_invoked_after_install_before_first_restart():
-    """The bare call sits AFTER the forward install_artifacts and BEFORE the first
-    real service restart/start/reload — i.e. every check/creation/verification the
-    function performs runs before activation (item 3)."""
-    install_line = _first_line(lambda l: 'install_artifacts "$STAGING"' in l)
-    init_call_line = _first_line(lambda l: l.strip() == "initialize_approval_code_lock")
-    restart_line = _first_line(
-        lambda l: re.match(r"^\s*systemctl (restart|start|reload)\b", l))
-    assert install_line < init_call_line < restart_line, (
-        f"install={install_line} init_call={init_call_line} first_restart={restart_line}")
+    install = _first_line(lambda l: 'install_artifacts "$STAGING"' in l)
+    init_call = _first_line(lambda l: l.strip() == "initialize_approval_code_lock \\")
+    restart = _first_line(lambda l: re.match(r"^\s*systemctl (restart|start|reload)\b", l))
+    assert install < init_call < restart, f"install={install} init={init_call} restart={restart}"
 
 
-def test_init_call_is_bare_not_swallowed():
-    """The call is a bare statement — never `|| true`, `if …`, `&& …` or a
-    conditional context that would swallow its FATAL under `set -e`."""
-    call = next(l for l in LINES if l.strip() == "initialize_approval_code_lock")
-    assert call.strip() == "initialize_approval_code_lock"
-    # no other occurrence wraps it in a swallow/conditional
+def test_init_call_is_not_swallowed():
+    """The call (multi-line, positional literals) is a bare statement — no
+    `|| true`, `if`, `&&` swallow of its FATAL under `set -e`."""
+    idx = _first_line(lambda l: l.strip() == "initialize_approval_code_lock \\")
+    call = "\n".join(LINES[idx - 1:idx + 2])  # the 3-line invocation
+    assert "|| true" not in call and "&&" not in call
+    assert not call.strip().startswith("if ")
+
+
+def test_call_site_passes_canonical_literals():
+    idx = _first_line(lambda l: l.strip() == "initialize_approval_code_lock \\")
+    call = " ".join(l.strip() for l in LINES[idx - 1:idx + 2])
+    assert '"/opt/shift-agent/state/approval-code-pools.lock"' in call
+    assert '"shift-agent" "shift-agent"' in call
+    assert '"python3"' in call and '"/opt/shift-agent"' in call
+
+
+def test_function_takes_positional_and_reads_no_test_env():
+    body = _func_def_body()
+    assert 'local LOCK="$1" OWNER="$2" GROUP="$3" PYBIN="$4" PLATFORM_DIR="$5"' in body
+    code = _code_lines(body)
+    assert "APPROVAL_LOCK_" not in code, "function still reads APPROVAL_LOCK_* env"
+    assert "SHIFT_AGENT_DEPLOY_TEST_SANDBOX" not in code, "function still reads the sandbox flag"
+
+
+def test_top_guard_presence_based_and_source_gated():
+    guard = _first_line(lambda l: "SHIFT_AGENT_DEPLOY_TEST_SANDBOX is forbidden" in l)
+    cond = LINES[guard - 2]  # the `if [[ ... ]] && [[ -v ... ]]; then` line
+    assert '[[ -v SHIFT_AGENT_DEPLOY_TEST_SANDBOX ]]' in cond, cond
+    assert '"${BASH_SOURCE[0]}" == "$0"' in cond, cond
+
+
+def test_guard_precedes_any_side_effect():
+    guard = _first_line(lambda l: "-v SHIFT_AGENT_DEPLOY_TEST_SANDBOX" in l)
+    mkdir = _first_line(lambda l: re.match(r"^\s*mkdir -p", l))
+    install = _first_line(lambda l: 'install_artifacts "$STAGING"' in l)
+    assert guard < mkdir < install, f"guard={guard} mkdir={mkdir} install={install}"
+
+
+def test_deploy_script_never_assigns_the_sandbox_flag():
     for l in LINES:
-        if "initialize_approval_code_lock" in l and l.strip() != "initialize_approval_code_lock":
-            # allowed: the definition line and comment mentions only
-            assert (l.strip().startswith("#")
-                    or l.strip().startswith("initialize_approval_code_lock() {")), l
-            assert "|| true" not in l and "&&" not in l
+        if l.strip().startswith("#"):
+            continue
+        assert not re.search(r"(?:export\s+)?SHIFT_AGENT_DEPLOY_TEST_SANDBOX\s*=", l), \
+            f"deploy script assigns the sandbox flag: {l!r}"
 
 
-def test_set_euo_pipefail_present():
-    assert re.search(r"^set -euo pipefail", TEXT, re.M)
+def test_fd_battery_validates_real_filelock_descriptor():
+    v = _extract_verifier()
+    assert "from safe_io import FileLock" in v
+    assert 'getattr(fl, "fd", None)' in v
+    assert "os.fstat(fd)" in v and "os.lstat(lock)" in v
+    assert "st_fd.st_dev, st_fd.st_ino) != (st_ln.st_dev, st_ln.st_ino)" in v  # dev+ino match
+    assert "stat.S_ISREG(st_fd.st_mode)" in v
+    assert "stat.S_ISLNK(st_ln.st_mode)" in v
 
 
-def test_no_rm_of_canonical_lock_anywhere():
-    """No path (forward OR rollback) removes the canonical lock (item 5/6)."""
-    offenders = [l for l in LINES if re.search(r"\brm\b.*approval-code-pools\.lock", l)]
-    assert offenders == [], offenders
+def test_o_nofollow_preguard_present():
+    v = _extract_verifier()
+    assert "os.O_NOFOLLOW" in v
+    # it is an ADDITIONAL pre-guard, not the acquisition (FileLock is the acquire)
+    assert v.index("O_NOFOLLOW") < v.index("with FileLock(")
+
+
+def test_signal_alarm_bound_present_and_documented():
+    v = _extract_verifier()
+    assert "signal.alarm(max(1, int(float(timeout_s)))" in v
+    assert "signal.signal(signal.SIGALRM" in v
+    assert "TIMEOUT=5" in _func_def_body()  # deploy-side bound
+
+
+def test_production_passes_pre_acquire_hook_none():
+    """Production call passes 'none' as the last verifier argv; the hook is
+    test-only."""
+    assert '"640,660" "none" <<' in _func_def_body()
+
+
+def test_dual_identity_gate_on_euid_with_runuser():
+    body = _func_def_body()
+    assert '[ "$(id -u)" = "0" ]' in body  # gate on ACTUAL euid, not an env flag
+    assert '_fd_identity_verify "root"' in body
+    assert '_fd_identity_verify "gateway($OWNER)" runuser -u "$OWNER" --' in body
 
 
 def test_existing_file_branch_has_no_chown_or_chmod():
-    """The SAFE-existing branch leaves the file completely alone: no chown/chmod
-    between `if [ -e "$LOCK" ]` and the 'left untouched' echo (item 4)."""
     fn = _func_block()
     start = fn.index('if [ -e "$LOCK" ]; then')
     untouched = fn.index("left untouched")
-    # code lines only — comments legitimately NAME chown/chmod to say they're forbidden here.
-    code = "\n".join(l for l in fn[start:untouched].splitlines()
-                     if not l.strip().startswith("#"))
-    assert "chown" not in code, "chown COMMAND in existing-file branch (forbidden repair)"
-    assert "chmod" not in code, "chmod COMMAND in existing-file branch (forbidden repair)"
+    code = _code_lines(fn[start:untouched])
+    assert "chown" not in code and "chmod" not in code
     assert "touch" not in code and '> "$LOCK"' not in code
 
 
 def test_creation_branch_o_excl_and_mode_0660():
-    """Creation uses O_EXCL semantics (noclobber `set -C` + `: > "$LOCK"` under
-    umask 007 -> 0660) and re-verifies mode 660 (items 3/5)."""
     fn = _func_block()
-    assert "umask 007" in fn
-    assert "set -C" in fn
-    assert ': > "$LOCK"' in fn
-    assert "chmod 0660" in fn
-    assert '"$n_mode" != "660"' in fn  # re-lstat verify pins created mode
+    assert "umask 007" in fn and "set -C" in fn and ': > "$LOCK"' in fn
+    assert "chmod 0660" in fn and '"$n_mode" != "660"' in fn
 
 
-def test_symlink_checked_before_e_or_f():
-    """`[ -L ]` (lstat) is evaluated BEFORE `[ -e ]`/`[ -f ]` so a symlink is never
-    followed (item 5 lstat semantics)."""
+def test_symlink_checked_before_e():
     fn = _func_block()
-    l_idx = fn.index('[ -L "$LOCK" ]')
-    e_idx = fn.index('[ -e "$LOCK" ]')
-    assert l_idx < e_idx
+    assert fn.index('[ -L "$LOCK" ]') < fn.index('[ -e "$LOCK" ]')
 
 
-def test_dual_identity_verification_with_bounded_attempts():
-    """Root AND shift-agent (runuser) acquire/release via try_acquire_filelock_
-    with_retry with bounded attempts (items 2/3)."""
-    fn = _func_block()
-    assert '_approval_lock_acquire_release "root"' in fn
-    assert '_approval_lock_acquire_release "shift-agent" runuser -u shift-agent --' in fn
-    assert "try_acquire_filelock_with_retry" in fn
-    assert "ATTEMPTS=5" in fn and "attempts=attempts" in fn  # bounded
+def test_no_rm_of_canonical_lock_anywhere():
+    offenders = [l for l in LINES if re.search(r"\brm\b.*approval-code-pools\.lock", l)]
+    assert offenders == [], offenders
 
 
-def test_verifier_asserts_exact_safe_io_resolution_and_sys_path_insert():
-    """The verifier explicitly sys.path.insert(0, /opt/shift-agent) and ASSERTS
-    safe_io.__file__ == PLATFORM_DIR/safe_io.py (never ambient CWD) (item 2)."""
-    fn = _func_block()
-    assert "sys.path.insert(0, platform_dir)" in fn
-    assert "assert safe_io.__file__ == expected" in fn
-    assert 'os.path.join(platform_dir, "safe_io.py")' in fn
-    # production platform dir default is the canonical /opt/shift-agent
-    assert 'PLATFORM_DIR="/opt/shift-agent"' in fn
+def test_no_bash_flock_across_activation():
+    assert not re.search(r"\bflock\b[^\n]*approval-code-pools\.lock", TEXT)
 
 
-def test_verifier_prints_interpreter_module_lock_identity():
-    """Each acquisition prints interpreter + resolved module + lock + identity so
-    BOTH identities' evidence lands in the deploy log (item 2)."""
-    fn = _func_block()
-    assert "sys.executable" in fn
-    assert re.search(r"print\([^)]*safe_io\.__file__", fn), "safe_io.__file__ not printed"
-    assert re.search(r"print\([^)]*\block\b", fn), "lock path not printed"
-    assert "os.geteuid()" in fn and ("getpass" in fn or "pwd" in fn)
-
-
-def test_sandbox_flag_gates_overrides_production_defaults_hardcoded():
-    """Overrides honored ONLY under SHIFT_AGENT_DEPLOY_TEST_SANDBOX=1; the else
-    branch hard-codes production values (item 1)."""
-    fn = _func_block()
-    assert '"${SHIFT_AGENT_DEPLOY_TEST_SANDBOX:-0}" = "1"' in fn
-    # production else-branch: canonical path + shift-agent + on-box python + /opt
-    assert 'LOCK="/opt/shift-agent/state/approval-code-pools.lock"' in fn
-    assert 'OWNER="shift-agent"' in fn and 'GROUP="shift-agent"' in fn
-    assert 'PYBIN="python3"' in fn
-    # overrides only referenced inside the sandbox branch (guarded by the flag)
-    assert "APPROVAL_LOCK_PATH" in fn
-
-
-def test_deploy_script_never_sets_the_sandbox_flag():
-    """The deploy script itself must NEVER set SHIFT_AGENT_DEPLOY_TEST_SANDBOX
-    (only READ it via :-0). A production run can never inherit test mode (item 1)."""
-    for l in LINES:
-        if l.strip().startswith("#"):
-            continue  # comments describe the flag; they don't set it
-        # an actual assignment is `NAME=` (the `${NAME:-0}` reads have `:` not `=`).
-        assert not re.search(r"(?:export\s+)?SHIFT_AGENT_DEPLOY_TEST_SANDBOX\s*=", l), \
-            f"deploy script sets the sandbox flag: {l!r}"
-
-
-def test_script_never_holds_a_filelock_across_activation():
-    """The deploy script (bash) never holds the canonical lock across restart/smoke
-    — no bash `flock` on it; the only acquisition is the short-lived, released
-    verifier subprocess (item 7)."""
-    assert not re.search(r"\bflock\b[^\n]*approval-code-pools\.lock", TEXT), \
-        "bash flock on the canonical lock would hold it across activation"
+def test_verifier_prints_fd_identity_evidence():
+    v = _extract_verifier()
+    assert "sys.executable" in v
+    assert re.search(r"print\([^)]*safe_io\.__file__", v)
+    assert re.search(r"print\([^)]*FileLock\.fd", v)
+    assert "os.geteuid()" in v and "pwd.getpwuid" in v
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# EXTRACT-AND-RUN — the bash function in a tmp sandbox (Linux-only)
+# EXTRACT-AND-RUN — bash function with DISPOSABLE positional params (Linux-only)
 # ════════════════════════════════════════════════════════════════════════════
 _LINUX = pytest.mark.skipif(
     sys.platform == "win32",
     reason="extract-and-run needs bash + POSIX stat/chown + fcntl-capable python3 "
-           "(GH CI ubuntu runs these unprivileged; Windows dev box cannot)")
+           "(GH CI ubuntu runs these; Windows dev box cannot)")
 
 
 def _ids():
@@ -196,23 +209,16 @@ def _ids():
     return (pwd.getpwuid(os.getuid()).pw_name, grp.getgrgid(os.getgid()).gr_name)
 
 
-def _run_init(tmp_path, *, lock, owner=None, group=None, platform_dir=None,
-              pybin="python3"):
+def _run_init(tmp_path, *, lock, owner=None, group=None, platform_dir=None, pybin="python3"):
     user, ggroup = _ids()
-    func = _func_block()
     driver = tmp_path / "driver.sh"
-    driver.write_text("set -euo pipefail\n" + func + "\ninitialize_approval_code_lock\n",
+    driver.write_text("set -euo pipefail\n" + _func_block()
+                      + f'\ninitialize_approval_code_lock "{lock}" '
+                        f'"{owner if owner is not None else user}" '
+                        f'"{group if group is not None else ggroup}" '
+                        f'"{pybin}" "{platform_dir or PLATFORM}"\n',
                       encoding="utf-8")
-    env = {
-        **os.environ,
-        "SHIFT_AGENT_DEPLOY_TEST_SANDBOX": "1",
-        "APPROVAL_LOCK_PATH": str(lock),
-        "APPROVAL_LOCK_OWNER": owner if owner is not None else user,
-        "APPROVAL_LOCK_GROUP": group if group is not None else ggroup,
-        "APPROVAL_LOCK_PLATFORM_DIR": str(platform_dir or (REPO / "src" / "platform")),
-        "APPROVAL_LOCK_PYBIN": pybin,
-    }
-    return subprocess.run(["bash", str(driver)], env=env, capture_output=True, text=True)
+    return subprocess.run(["bash", str(driver)], capture_output=True, text=True)
 
 
 @_LINUX
@@ -221,9 +227,9 @@ def test_absent_path_creates_owner_group_mode_0660(tmp_path):
     lock.parent.mkdir(parents=True)
     r = _run_init(tmp_path, lock=lock)
     assert r.returncode == 0, r.stderr
-    st = os.stat(lock)
     import grp
     import pwd
+    st = os.stat(lock)
     assert not os.path.islink(lock) and os.path.isfile(lock)
     assert pwd.getpwuid(st.st_uid).pw_name == _ids()[0]
     assert grp.getgrgid(st.st_gid).gr_name == _ids()[1]
@@ -231,29 +237,25 @@ def test_absent_path_creates_owner_group_mode_0660(tmp_path):
 
 
 @_LINUX
-def test_safe_existing_file_left_untouched_inode_mtime_content(tmp_path):
+def test_safe_existing_left_untouched_inode_mtime_content(tmp_path):
     lock = tmp_path / "state" / "approval-code-pools.lock"
     lock.parent.mkdir(parents=True)
-    lock.write_text("preexisting-content")
+    lock.write_text("preexisting")
     os.chmod(lock, 0o660)
-    before = os.stat(lock)
-    before_content = lock.read_text()
+    before, before_c = os.stat(lock), lock.read_text()
     r = _run_init(tmp_path, lock=lock)
     assert r.returncode == 0, r.stderr
     after = os.stat(lock)
-    assert after.st_ino == before.st_ino, "inode changed — file was replaced"
-    assert after.st_mtime == before.st_mtime, "mtime changed — file was touched/rewritten"
-    assert lock.read_text() == before_content, "content changed — file was truncated/written"
-    assert "left untouched" in r.stdout
+    assert after.st_ino == before.st_ino and after.st_mtime == before.st_mtime
+    assert lock.read_text() == before_c and "left untouched" in r.stdout
 
 
 @_LINUX
 def test_symlink_is_fatal(tmp_path):
     lock = tmp_path / "state" / "approval-code-pools.lock"
     lock.parent.mkdir(parents=True)
-    target = tmp_path / "target"
-    target.write_text("x")
-    os.symlink(target, lock)
+    (tmp_path / "target").write_text("x")
+    os.symlink(tmp_path / "target", lock)
     r = _run_init(tmp_path, lock=lock)
     assert r.returncode != 0 and "SYMLINK" in r.stderr
 
@@ -268,14 +270,9 @@ def test_directory_is_fatal(tmp_path):
 
 @_LINUX
 def test_fifo_is_fatal(tmp_path):
-    if not hasattr(os, "mkfifo"):
-        pytest.skip("mkfifo unavailable")
     lock = tmp_path / "state" / "approval-code-pools.lock"
     lock.parent.mkdir(parents=True)
-    try:
-        os.mkfifo(lock)
-    except (AttributeError, OSError):
-        pytest.skip("mkfifo unsupported on this platform")
+    os.mkfifo(lock)
     r = _run_init(tmp_path, lock=lock)
     assert r.returncode != 0 and "NOT a regular file" in r.stderr
 
@@ -286,7 +283,6 @@ def test_wrong_owner_is_fatal(tmp_path):
     lock.parent.mkdir(parents=True)
     lock.write_text("")
     os.chmod(lock, 0o660)
-    # expected-owner override mismatch (file is owned by the current user)
     r = _run_init(tmp_path, lock=lock, owner="definitely-not-this-user")
     assert r.returncode != 0 and "owner:group" in r.stderr
 
@@ -304,8 +300,6 @@ def test_wrong_group_is_fatal(tmp_path):
 @_LINUX
 @pytest.mark.parametrize("mode", [0o666, 0o602, 0o600, 0o060])
 def test_unsafe_mode_is_fatal(tmp_path, mode):
-    """0666 world-writable, 0602/0600 missing group-rw, 0060 missing owner-rw —
-    all rejected by the {640,660} gate."""
     lock = tmp_path / "state" / "approval-code-pools.lock"
     lock.parent.mkdir(parents=True)
     lock.write_text("")
@@ -316,20 +310,93 @@ def test_unsafe_mode_is_fatal(tmp_path, mode):
 
 @_LINUX
 def test_acquire_verification_failure_is_fatal(tmp_path):
-    """Point the verifier's platform dir at a stub safe_io whose
-    try_acquire_filelock_with_retry raises → deployment FAILS (no unlocked path)."""
+    """A stub FileLock whose __enter__ raises → deployment FAILS (no unlocked path)."""
     stub = tmp_path / "platform"
     stub.mkdir()
     (stub / "safe_io.py").write_text(
-        "from contextlib import contextmanager\n"
-        "@contextmanager\n"
-        "def try_acquire_filelock_with_retry(*a, **k):\n"
-        "    raise RuntimeError('stub: acquire refused')\n"
-        "    yield\n",
-        encoding="utf-8",
-    )
+        "class FileLock:\n"
+        "    def __init__(self, path): self.fd = None\n"
+        "    def __enter__(self): raise RuntimeError('stub: cannot acquire')\n"
+        "    def __exit__(self, *a): return False\n",
+        encoding="utf-8")
     lock = tmp_path / "state" / "approval-code-pools.lock"
     lock.parent.mkdir(parents=True)
     r = _run_init(tmp_path, lock=lock, platform_dir=stub)
     assert r.returncode != 0
-    assert "acquire/release FAILED" in r.stderr or "stub: acquire refused" in (r.stderr + r.stdout)
+    assert "fd-identity verification FAILED" in r.stderr or "stub: cannot acquire" in (r.stderr + r.stdout)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# REAL-SCRIPT GUARD — sandbox var PRESENCE fails closed before any side effect
+# ════════════════════════════════════════════════════════════════════════════
+def _run_real_script(value):
+    env = {**os.environ, "SHIFT_AGENT_DEPLOY_TEST_SANDBOX": value}
+    return subprocess.run(["bash", str(DEPLOY), "deploy"], env=env,
+                          capture_output=True, text=True)
+
+
+@_LINUX
+def test_real_script_rejects_sandbox_var_set_to_1():
+    r = _run_real_script("1")
+    assert r.returncode != 0
+    assert "SHIFT_AGENT_DEPLOY_TEST_SANDBOX is forbidden" in r.stderr
+    assert "OK: approval-code lock" not in r.stdout  # never reached lock init / install
+
+
+@_LINUX
+def test_real_script_rejects_sandbox_var_set_to_empty():
+    r = _run_real_script("")  # presence, not value
+    assert r.returncode != 0
+    assert "SHIFT_AGENT_DEPLOY_TEST_SANDBOX is forbidden" in r.stderr
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ADVERSARIAL fd-INTERPOSITION — deterministic, NO sleeps (Linux-only)
+# ════════════════════════════════════════════════════════════════════════════
+def _run_verifier(tmp_path, *, lock, hook="none", platform_dir=None, owner=None, group=None):
+    user, ggroup = _ids()
+    vf = tmp_path / "verifier.py"
+    vf.write_text(_extract_verifier(), encoding="utf-8")
+    return subprocess.run(
+        ["python3", str(vf), str(platform_dir or PLATFORM), str(lock), "5",
+         owner if owner is not None else user, group if group is not None else ggroup,
+         "640,660", hook],
+        capture_output=True, text=True)
+
+
+@_LINUX
+def test_verifier_positive_valid_lock_passes(tmp_path):
+    lock = tmp_path / "approval-code-pools.lock"
+    lock.write_text("")
+    os.chmod(lock, 0o660)
+    r = _run_verifier(tmp_path, lock=lock, hook="none")
+    assert r.returncode == 0, r.stderr
+    assert "FileLock acquire/validate/release: OK" in r.stdout
+    assert "FileLock.fd" in r.stdout
+
+
+@_LINUX
+def test_verifier_symlink_interposition_fatal(tmp_path):
+    """Swap the path to a SYMLINK while the real FileLock holds its fd → refuse."""
+    lock = tmp_path / "approval-code-pools.lock"
+    lock.write_text("")
+    os.chmod(lock, 0o660)
+    (tmp_path / "elsewhere").write_text("")
+    r = _run_verifier(tmp_path, lock=lock, hook=f"symlink:{tmp_path / 'elsewhere'}")
+    assert r.returncode != 0
+    assert "SYMLINK" in r.stderr or "inode" in r.stderr
+
+
+@_LINUX
+def test_verifier_swap_inode_interposition_fatal(tmp_path):
+    """Swap the path to a DIFFERENT regular inode while the FileLock holds its fd
+    → dev/ino mismatch → refuse (never locks the replacement)."""
+    lock = tmp_path / "approval-code-pools.lock"
+    lock.write_text("")
+    os.chmod(lock, 0o660)
+    other = tmp_path / "other-regular"
+    other.write_text("")
+    os.chmod(other, 0o660)
+    r = _run_verifier(tmp_path, lock=lock, hook=f"swap:{other}")
+    assert r.returncode != 0
+    assert "inode" in r.stderr and "interposed swap" in r.stderr

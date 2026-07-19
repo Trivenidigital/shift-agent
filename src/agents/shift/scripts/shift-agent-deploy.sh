@@ -27,6 +27,16 @@ STAGING=/opt/shift-agent/staging-new
 DEPLOYS_DIR=/opt/shift-agent/deploys
 KEEP_TARBALLS=5
 
+# ops/approval-lock-init — PRODUCTION GUARD (executed path, before ANY side effect,
+# before install_artifacts and before lock init). The test-only sandbox env var
+# must NEVER be present during a real deployment. PRESENCE check (`-v`) so BOTH
+# `SHIFT_AGENT_DEPLOY_TEST_SANDBOX=1` AND `=""` fail closed. The `BASH_SOURCE==$0`
+# gate fires ONLY on direct execution, so test extraction/sourcing is unaffected.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]] && [[ -v SHIFT_AGENT_DEPLOY_TEST_SANDBOX ]]; then
+    echo "FATAL: SHIFT_AGENT_DEPLOY_TEST_SANDBOX is forbidden during production deployment." >&2
+    exit 1
+fi
+
 mkdir -p "$DEPLOYS_DIR"
 
 install_artifacts() {
@@ -1041,39 +1051,24 @@ wait_for_flyer_generation_drain() {
 # code issuance is refused. This initializer guarantees the lock exists as a
 # regular shift-agent:shift-agent file with group-rw BEFORE the gateway restarts.
 #
-# WHERE: called from the deploy path AFTER install_artifacts() completes (so the
-# just-installed /opt/shift-agent/safe_io.py exists to verify against) and BEFORE
-# any service restart / activation / issuance-capable smoke. Runs under the
-# script-wide `set -euo pipefail`; EVERY failure path is a FATAL `exit 1`, so the
-# deploy STOPS here, before the gateway restarts, with no unlocked fallback.
+# INPUTS ARE POSITIONAL (NO env consultation): $1 lock path, $2 owner, $3 group,
+# $4 python bin, $5 platform dir. The single production call site passes canonical
+# literals; tests drive this extracted function with disposable parameters. There
+# is NO deployment-test env surface inside this function — a real (executed, not
+# sourced) deploy fails CLOSED at the top-of-file guard if the test sandbox var is
+# even PRESENT (=1 or ="").
 #
-# TEST SANDBOXING (production-safe, non-inheritable): the APPROVAL_LOCK_* overrides
-# below are honored ONLY when SHIFT_AGENT_DEPLOY_TEST_SANDBOX=1 (set exclusively by
-# the extract-and-run tests, NEVER by this script). A production invocation leaves
-# the flag unset -> the else-branch hard-codes the canonical path +
-# shift-agent:shift-agent + on-box python3 + /opt/shift-agent and ignores every
-# override entirely.
+# WHERE: called from the deploy path AFTER install_artifacts() (so the just-
+# installed /opt/shift-agent/safe_io.py exists) and BEFORE any service restart /
+# activation. Runs under `set -euo pipefail`; EVERY failure is a FATAL `exit 1` —
+# the deploy STOPS here, before the gateway restarts, with no unlocked fallback.
 initialize_approval_code_lock() {
-    local LOCK OWNER GROUP PLATFORM_DIR PYBIN
-    local ATTEMPTS=5 SLEEP=0.5
-    if [ "${SHIFT_AGENT_DEPLOY_TEST_SANDBOX:-0}" = "1" ]; then
-        LOCK="${APPROVAL_LOCK_PATH:?SANDBOX requires APPROVAL_LOCK_PATH}"
-        OWNER="${APPROVAL_LOCK_OWNER:-shift-agent}"
-        GROUP="${APPROVAL_LOCK_GROUP:-shift-agent}"
-        PLATFORM_DIR="${APPROVAL_LOCK_PLATFORM_DIR:-/opt/shift-agent}"
-        PYBIN="${APPROVAL_LOCK_PYBIN:-python3}"
-    else
-        LOCK="/opt/shift-agent/state/approval-code-pools.lock"
-        OWNER="shift-agent"
-        GROUP="shift-agent"
-        PLATFORM_DIR="/opt/shift-agent"
-        PYBIN="python3"
-    fi
+    local LOCK="$1" OWNER="$2" GROUP="$3" PYBIN="$4" PLATFORM_DIR="$5"
+    local TIMEOUT=5   # deploy-side bound (seconds) on the real (blocking) FileLock acquire
 
-    # ── Reject unsafe existing objects. lstat semantics: -L (symlink) is checked
-    #    FIRST, before -e/-f, so a symlink can never be followed. ──
+    # ── Reject unsafe existing objects. lstat semantics: -L (symlink) FIRST. ──
     if [ -L "$LOCK" ]; then
-        echo "FATAL: approval-code lock '$LOCK' is a SYMLINK — refusing (attack surface). Deploy aborted BEFORE restart." >&2
+        echo "FATAL: approval-code lock '$LOCK' is a SYMLINK — refusing. Deploy aborted BEFORE restart." >&2
         exit 1
     fi
     if [ -e "$LOCK" ]; then
@@ -1082,36 +1077,31 @@ initialize_approval_code_lock() {
             exit 1
         fi
         local cur_owner cur_group cur_mode
-        cur_owner=$(stat -c '%U' "$LOCK")
-        cur_group=$(stat -c '%G' "$LOCK")
-        cur_mode=$(stat -c '%a' "$LOCK")
+        cur_owner=$(stat -c '%U' "$LOCK"); cur_group=$(stat -c '%G' "$LOCK"); cur_mode=$(stat -c '%a' "$LOCK")
         if [ "$cur_owner" != "$OWNER" ] || [ "$cur_group" != "$GROUP" ]; then
             echo "FATAL: approval-code lock '$LOCK' owner:group is '$cur_owner:$cur_group', expected '$OWNER:$GROUP'. Deploy aborted BEFORE restart." >&2
             exit 1
         fi
         if [ "$cur_mode" != "640" ] && [ "$cur_mode" != "660" ]; then
-            echo "FATAL: approval-code lock '$LOCK' mode is '$cur_mode', expected 640 or 660 (this rejects world-writable AND missing-owner-rw). Deploy aborted BEFORE restart." >&2
+            echo "FATAL: approval-code lock '$LOCK' mode is '$cur_mode', expected 640 or 660 (rejects world-writable AND missing-owner-rw). Deploy aborted BEFORE restart." >&2
             exit 1
         fi
-        # SAFE existing file (regular, shift-agent:shift-agent, 640|660): LEAVE IT
-        # COMPLETELY ALONE — preserve the inode, do NOT truncate/replace/rename, NO
-        # chown, NO chmod, NO touch (mtime untouched). The reviewer explicitly
-        # forbids a repair branch here; chown/chmod live ONLY in the creation branch.
+        # SAFE existing file: LEAVE IT COMPLETELY ALONE — inode preserved, no
+        # truncate/replace/rename, NO chown, NO chmod, NO touch (mtime untouched).
+        # chown/chmod live ONLY in the creation branch below (never a repair branch).
         echo "OK: approval-code lock '$LOCK' present + safe ($cur_owner:$cur_group $cur_mode) — left untouched (inode preserved)."
     else
-        # ── Absent: O_EXCL create (TOCTOU-safe). `set -C` (noclobber) turns the
-        #    `: > "$LOCK"` redirect into an O_EXCL create — if ANY object (a raced
-        #    symlink/file/dir) appears at the path between the checks above and now,
-        #    the create FAILS rather than following/replacing it. `umask 007` yields
-        #    mode 0660. This chown/chmod IS the CREATION branch (we just made this
-        #    inode) — DISTINCT from the forbidden existing-file repair branch above. ──
+        # ── Absent: O_EXCL create (TOCTOU-safe). `set -C` (noclobber) makes the
+        #    `: > "$LOCK"` redirect O_EXCL — a raced object at the path FAILS the
+        #    create rather than being followed/replaced. `umask 007` -> mode 0660.
+        #    This chown/chmod IS the CREATION branch (we just made this inode) —
+        #    DISTINCT from the forbidden existing-file repair branch above. ──
         if ! ( umask 007; set -C; : > "$LOCK" ) 2>/dev/null; then
-            echo "FATAL: could not O_EXCL-create approval-code lock '$LOCK' (raced object at path, or permission). Deploy aborted BEFORE restart." >&2
+            echo "FATAL: could not O_EXCL-create approval-code lock '$LOCK' (raced object, or permission). Deploy aborted BEFORE restart." >&2
             exit 1
         fi
         chown "$OWNER:$GROUP" "$LOCK" || { echo "FATAL: chown '$OWNER:$GROUP' '$LOCK' failed on the freshly-created lock. Deploy aborted BEFORE restart." >&2; exit 1; }
         chmod 0660 "$LOCK" || { echo "FATAL: chmod 0660 '$LOCK' failed on the freshly-created lock. Deploy aborted BEFORE restart." >&2; exit 1; }
-        # Re-lstat verify (lstat, not stat: a symlink swapped in post-create cannot masquerade).
         if [ -L "$LOCK" ]; then
             echo "FATAL: approval-code lock '$LOCK' became a SYMLINK after creation — refusing. Deploy aborted BEFORE restart." >&2
             exit 1
@@ -1125,59 +1115,107 @@ initialize_approval_code_lock() {
         echo "OK: approval-code lock '$LOCK' created ($n_owner:$n_group $n_mode)."
     fi
 
-    # ── Post-init acquire/release verification through the EXACT production safe_io.
-    #    The nested helper runs the identical bounded acquire twice: once as the
-    #    deploy identity (root on-box), once as shift-agent via runuser — so a
-    #    root-owned/mode regression that would EACCES the gateway is caught HERE,
-    #    before restart. Each run does sys.path.insert(0, PLATFORM_DIR) then ASSERTS
-    #    safe_io.__file__ == PLATFORM_DIR/safe_io.py (never ambient-CWD precedence)
-    #    and PRINTS interpreter + resolved module + lock + effective identity. The
-    #    flock is fd-scoped and released at context-manager exit + process exit — no
-    #    lock is held across the restart below. ──
-    _approval_lock_acquire_release() {
-        local label="$1"; shift  # remaining "$@" is the runner prefix (empty for root/sandbox)
-        echo "  [approval-lock verify: $label]"
-        if ! APPROVAL_LOCK_V_PATH="$LOCK" APPROVAL_LOCK_V_PLATFORM="$PLATFORM_DIR" \
-             APPROVAL_LOCK_V_ATTEMPTS="$ATTEMPTS" APPROVAL_LOCK_V_SLEEP="$SLEEP" \
-             "$@" "$PYBIN" - <<'PYEOF'
-import sys, os, getpass, pwd
-platform_dir = os.environ["APPROVAL_LOCK_V_PLATFORM"]
-lock = os.environ["APPROVAL_LOCK_V_PATH"]
-attempts = int(os.environ["APPROVAL_LOCK_V_ATTEMPTS"])
-sleep = float(os.environ["APPROVAL_LOCK_V_SLEEP"])
+    # ── FD-IDENTITY VERIFICATION on the PRODUCTION FileLock's OWN descriptor.
+    #    safe_io.FileLock.__enter__ sets self.fd (src/platform/safe_io.py:92 —
+    #    `self.fd = os.open(...)`) and returns self; try_acquire_filelock_with_retry
+    #    does a bare `yield` and exposes NO fd, so we enter the real FileLock and
+    #    bound its blocking flock with a deploy-side SIGALRM. An O_NOFOLLOW open is
+    #    an ADDITIONAL pre-guard (symlink -> ELOOP); it does NOT substitute for the
+    #    real acquisition. While HOLDING the real lock we validate FileLock.fd:
+    #    fstat(fd) vs lstat(path) dev+ino match, S_ISREG(fd), not S_ISLNK(lstat),
+    #    owner/group/mode on the fd stat. Runs for BOTH the deploy identity (root)
+    #    and the gateway identity (shift-agent via runuser) so a root-owned/mode
+    #    regression is caught HERE. Production FileLock is UNMODIFIED. The last argv
+    #    is a test-only `pre_acquire_hook`; the production call passes 'none'. ──
+    _fd_identity_verify() {
+        local label="$1"; shift  # remaining "$@" = runner prefix (empty for current identity)
+        echo "  [approval-lock fd-verify: $label]"
+        if ! "$@" "$PYBIN" - "$PLATFORM_DIR" "$LOCK" "$TIMEOUT" "$OWNER" "$GROUP" "640,660" "none" <<'PY_VERIFY'
+import sys, os, stat, signal, pwd, grp
+from pathlib import Path
+platform_dir, lock, timeout_s, exp_owner, exp_group, exp_modes, hook = sys.argv[1:8]
+accepted = set(exp_modes.split(","))
 sys.path.insert(0, platform_dir)
 import safe_io
 expected = os.path.join(platform_dir, "safe_io.py")
 assert safe_io.__file__ == expected, \
     "safe_io resolved from %r, expected %r (ambient-CWD precedence?)" % (safe_io.__file__, expected)
-from safe_io import try_acquire_filelock_with_retry
-from pathlib import Path
+from safe_io import FileLock  # production lock class; its __enter__ sets self.fd
+
+def _run_hook(spec, path):
+    # TEST-ONLY interposition (production passes 'none'). Swaps the pathname WHILE
+    # the FileLock holds its fd, so lstat(path) diverges from fstat(fd).
+    kind, _, arg = spec.partition(":")
+    if kind == "symlink":
+        os.remove(path); os.symlink(arg, path)
+    elif kind == "swap":
+        os.replace(arg, path)
+    else:
+        raise SystemExit("FATAL: unknown pre_acquire_hook %r" % spec)
+
+# Additional pre-guard (NOT the acquisition): O_NOFOLLOW rejects a symlink at the
+# path before FileLock (which follows). ELOOP -> refuse.
 try:
-    ident = pwd.getpwuid(os.geteuid()).pw_name
-except Exception:
-    ident = getpass.getuser()
-print("    interpreter :", sys.executable)
-print("    safe_io     :", safe_io.__file__)
-print("    lock        :", lock)
-print("    identity    :", ident, "(euid=%d)" % os.geteuid())
-with try_acquire_filelock_with_retry(Path(lock), attempts=attempts, sleep_sec=sleep):
-    pass  # fd-scoped flock acquired then released at context exit (+ process exit)
-print("    acquire/release: OK")
-PYEOF
+    _pg = os.open(lock, os.O_RDWR | os.O_NOFOLLOW)
+    os.close(_pg)
+except OSError as e:
+    raise SystemExit("FATAL: O_NOFOLLOW pre-guard open of '%s' failed (%s)" % (lock, e))
+
+# REAL acquisition via the production FileLock. Its flock is blocking, so bound it
+# with SIGALRM (deploy-side). If interrupted the process exits nonzero (fine here).
+def _timeout(signum, frame):
+    raise SystemExit("FATAL: FileLock acquisition timed out after %ss (deploy-side bound)" % timeout_s)
+signal.signal(signal.SIGALRM, _timeout)
+signal.alarm(max(1, int(float(timeout_s))))
+try:
+    with FileLock(Path(lock)) as fl:
+        signal.alarm(0)
+        fd = getattr(fl, "fd", None)
+        if fd is None:
+            raise SystemExit("FATAL: safe_io.FileLock did not expose a live .fd")
+        if hook != "none":
+            _run_hook(hook, lock)  # test-only: swap the path while the lock holds fd
+        st_fd = os.fstat(fd)          # the ACTUAL production-locked descriptor
+        st_ln = os.lstat(lock)        # the pathname (lstat: no symlink follow)
+        if stat.S_ISLNK(st_ln.st_mode):
+            raise SystemExit("FATAL: pathname is a SYMLINK at validation (interposed?)")
+        if not stat.S_ISREG(st_fd.st_mode):
+            raise SystemExit("FATAL: locked descriptor is not a regular file")
+        if (st_fd.st_dev, st_fd.st_ino) != (st_ln.st_dev, st_ln.st_ino):
+            raise SystemExit("FATAL: locked inode %s != pathname inode %s (interposed swap)"
+                             % ((st_fd.st_dev, st_fd.st_ino), (st_ln.st_dev, st_ln.st_ino)))
+        fd_owner = pwd.getpwuid(st_fd.st_uid).pw_name
+        fd_group = grp.getgrgid(st_fd.st_gid).gr_name
+        fd_mode = "%o" % (st_fd.st_mode & 0o777)
+        if fd_owner != exp_owner or fd_group != exp_group:
+            raise SystemExit("FATAL: locked-fd owner:group %s:%s != %s:%s" % (fd_owner, fd_group, exp_owner, exp_group))
+        if fd_mode not in accepted:
+            raise SystemExit("FATAL: locked-fd mode %s not in %s" % (fd_mode, sorted(accepted)))
+        print("    interpreter :", sys.executable)
+        print("    safe_io     :", safe_io.__file__)
+        print("    FileLock.fd :", fd, "-> inode", (st_fd.st_dev, st_fd.st_ino))
+        print("    fd owner:group:mode:", "%s:%s %s" % (fd_owner, fd_group, fd_mode))
+        print("    identity    :", pwd.getpwuid(os.geteuid()).pw_name, "(euid=%d)" % os.geteuid())
+        print("    FileLock acquire/validate/release: OK")
+finally:
+    signal.alarm(0)
+PY_VERIFY
         then
-            echo "FATAL: canonical-lock acquire/release FAILED as '$label' via $PYBIN ($PLATFORM_DIR/safe_io.py). Deploy aborted BEFORE restart." >&2
+            echo "FATAL: canonical-lock fd-identity verification FAILED as '$label' via $PYBIN ($PLATFORM_DIR/safe_io.py). Deploy aborted BEFORE restart." >&2
             exit 1
         fi
     }
 
-    if [ "${SHIFT_AGENT_DEPLOY_TEST_SANDBOX:-0}" = "1" ]; then
-        # Sandbox (unprivileged CI): current-user verification only — cannot runuser
-        # to shift-agent nor read a root-owned /opt. Exercises the exact acquire path
-        # + safe_io.__file__ resolution assert against the override platform dir.
-        _approval_lock_acquire_release "sandbox-current-user"
+    # Dual-identity in production (deploy runs as root): verify BOTH the deploy
+    # identity (root) and the gateway identity (shift-agent via runuser) can enter
+    # the real FileLock. Unprivileged (CI extract-and-run) cannot runuser -> single
+    # current-identity verify. Gate is on the ACTUAL euid (`id -u`), NOT a spoofable
+    # env flag.
+    if [ "$(id -u)" = "0" ]; then
+        _fd_identity_verify "root"
+        _fd_identity_verify "gateway($OWNER)" runuser -u "$OWNER" --
     else
-        _approval_lock_acquire_release "root"
-        _approval_lock_acquire_release "shift-agent" runuser -u shift-agent --
+        _fd_identity_verify "current-identity"
     fi
 }
 # END approval-code-lock-init
@@ -1455,10 +1493,13 @@ case "$ACTION" in
 
         # ops/approval-lock-init: initialize the canonical cross-pool code lock NOW —
         # AFTER install_artifacts() (so /opt/shift-agent/safe_io.py exists to verify
-        # against) and BEFORE any service restart / activation below. Bare call (no
-        # `|| true`, no `if`): under `set -euo pipefail` any FATAL inside aborts the
-        # deploy right here, before the gateway restarts. No unlocked fallback path.
-        initialize_approval_code_lock
+        # against) and BEFORE any service restart / activation below. POSITIONAL
+        # canonical literals (no env surface). Non-swallowed call: under
+        # `set -euo pipefail` any FATAL inside aborts the deploy right here, before
+        # the gateway restarts. No unlocked fallback path.
+        initialize_approval_code_lock \
+            "/opt/shift-agent/state/approval-code-pools.lock" \
+            "shift-agent" "shift-agent" "python3" "/opt/shift-agent"
 
         # CD v2 durable rollback scrub. `creative_direction` is Field(exclude=True)
         # so NEW writes never persist it, but rows written before that fix may

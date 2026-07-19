@@ -194,3 +194,33 @@ with an empty cache and zero collisions.
 - 2026-07-19: reviewer-mandated cross-user lock proof executed (disposable probes
   only). Root-first FAILS → deploy HELD; operational correction proposed above,
   awaiting reviewer ruling. No product code, runtime config, or data touched.
+
+## Implementation note — ops/approval-lock-init (SUPERSEDES the §"Smallest correction" sketch)
+
+The deploy-script correction as IMPLEMENTED (branch `ops/approval-lock-init`,
+`shift-agent-deploy.sh` + `tests/test_deploy_lock_init.py` + CI step) is stricter
+than the `install -o … /dev/null` + chown/chmod-repair sketch above, per reviewer
+refinements:
+
+- `initialize_approval_code_lock LOCK OWNER GROUP PYBIN PLATFORM_DIR` takes ONLY
+  positional inputs (NO env consultation); the single production call site passes
+  canonical literals. A top-of-script presence guard
+  (`[[ "${BASH_SOURCE[0]}" == "$0" ]] && [[ -v SHIFT_AGENT_DEPLOY_TEST_SANDBOX ]]`
+  → FATAL) fails a real deploy closed if the test sandbox var is even present
+  (`=1` OR `=""`), before any side effect. There is NO production-selectable
+  sandbox path.
+- The existing-file branch is validate-ONLY (symlink/non-regular/owner/group/mode
+  ∉ {640,660} → FATAL) and LEAVES a safe file completely alone (inode/mtime/
+  content preserved) — NO chown/chmod repair. Creation is O_EXCL
+  (`umask 007; set -C; : > "$LOCK"`) + chown + chmod 0660, not `install … /dev/null`.
+- Verification validates the PRODUCTION `safe_io.FileLock`'s OWN descriptor (read
+  `FileLock.fd` inside the context; fstat/lstat dev+ino match, S_ISREG, not
+  S_ISLNK, owner/group/mode on the fd), for BOTH root and shift-agent (via
+  `runuser`, gated on real `id -u`), with an O_NOFOLLOW pre-guard and a deploy-side
+  `SIGALRM` bound (FileLock's flock is blocking; `try_acquire_filelock_with_retry`
+  exposes no fd). Production `safe_io.FileLock` is UNMODIFIED. Rollback never
+  removes the lock.
+- Test count on Linux CI: 35 collected, all PASS, zero skipped (18 static + 11
+  extract-and-run + 2 real-script-guard + presence + adversarial fd-interposition
+  swaps). The `install -o … /dev/null` sketch in §"Smallest correction" is NOT what
+  shipped; this note is authoritative for the deploy-script behavior.
