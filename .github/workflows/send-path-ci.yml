@@ -65,3 +65,14 @@ jobs:
       # durable-winner proof directly from the CI log. -s keeps prints unbuffered.
       - name: PR-R1 provenance + contention diagnostics (reviewer-mandated)
         run: python -m pytest tests/test_routing_invariants_r1.py -v -s
+
+      # ops/approval-lock-init: direct-execution evidence for the deploy-lock init
+      # tests. Echo the checkout ref, then run every test individually (incl. the
+      # extract-and-run, real-script-guard, and adversarial fd-interposition cases
+      # that are Linux-only) so the reviewer can read PASSED lines + the fd-identity
+      # evidence directly from the CI log. On Linux ALL are collected + PASS (none
+      # skipped).
+      - name: ops/approval-lock-init deploy-lock diagnostics (reviewer-mandated)
+        run: |
+          echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
+          python -m pytest -vv tests/test_deploy_lock_init.py
