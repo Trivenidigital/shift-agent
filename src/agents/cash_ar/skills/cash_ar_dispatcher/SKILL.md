@@ -9,6 +9,8 @@ description: Use for tracking invoiced catering balances, sending payment remind
 
 `cfg.cash_ar.enabled = False`. Self-declines.
 
+When invoked while disabled, log `agent_declined` with `agent="cash_ar"` + `reason="agent_disabled"` via `log-decision-direct` before the decline reply.
+
 ## Phase 1 (v0.2)
 
 Per portfolio.md.txt §496–525: track open invoice balances, age them, send escalating reminders at reminder_cadence_days (default [7, 14, 30, 45]), escalate accounts past escalate_threshold_days to owner.

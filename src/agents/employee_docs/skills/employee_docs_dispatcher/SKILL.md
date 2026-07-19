@@ -9,6 +9,8 @@ description: Use for tracking expiring employee documents — H-1B work auth, I-
 
 `cfg.employee_docs.enabled = False`. Self-declines.
 
+When invoked while disabled, log `agent_declined` with `agent="employee_docs"` + `reason="agent_disabled"` via `log-decision-direct` before the decline reply.
+
 ## Phase 1 (v0.2)
 
 Per portfolio.md.txt §463–488: per-employee per-document calendar, escalating reminders at advance_warning_days (default [90, 60, 30, 14]), flag expired documents immediately.

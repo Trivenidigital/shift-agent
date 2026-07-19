@@ -1,0 +1,16 @@
+{
+  "topic": "production-readiness-sprint",
+  "task_text": "production-readiness-sprint",
+  "completed_at": "2026-07-18T03:05:00Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 6,
+  "hermes_step_count": 7,
+  "files_to_read_first": [
+    "src/agents/shift/skills/dispatch_shift_agent/SKILL.md",
+    "src/platform/schemas.py",
+    "src/platform/safe_io.py",
+    "tests/test_catering_v02_scripts.py",
+    "tasks/audits/feature-liveness-census-2026-07.md",
+    "src/agents/shift/scripts/shift-agent-deploy.sh"
+  ]
+}

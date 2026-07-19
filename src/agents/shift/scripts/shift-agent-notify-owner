@@ -53,7 +53,10 @@ if __name__ == "__main__" and hasattr(os, "geteuid") and os.geteuid() == 0:
 
 sys.path.insert(0, "/opt/shift-agent")
 from safe_io import customer_now, FileLock, ndjson_append  # noqa: E402
-from schemas import Config, OwnerNotificationSuppressed, OwnerWellbeingConfig  # noqa: E402
+from schemas import (  # noqa: E402
+    Config, OwnerNotificationSuppressed, OwnerWellbeingConfig,
+    OwnerAlertDispatched, OwnerAlertDelivered,
+)
 from exit_codes import EXIT_OK, EXIT_DEPENDENCY_DOWN, EXIT_SCHEMA_VIOLATION  # noqa: E402
 import yaml
 
@@ -219,6 +222,22 @@ def append_notify_failed(message: str, results: list[tuple[str, bool, str]]) -> 
             f.write(json.dumps(entry) + "\n")
 
 
+def _emit_audit(cfg: Config, entry) -> None:
+    """§12b: best-effort decisions.log append so every owner alert is traceable
+    (owner_alert_dispatched before the attempt, owner_alert_delivered on
+    success). An audit failure must NEVER block an owner alert — mirrors the
+    quiet-hours suppressed-path wrapper above."""
+    try:
+        DECISIONS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(DECISIONS_LOG_PATH.with_suffix(".log.lock")):
+            ndjson_append(DECISIONS_LOG_PATH, entry.model_dump_json())
+    except Exception as e:
+        print(
+            f"WARN: audit emit failed for {getattr(entry, 'type', '?')}: {e}",
+            file=sys.stderr,
+        )
+
+
 def main():
     ap = argparse.ArgumentParser(description="Out-of-band owner notification")
     ap.add_argument("message", help="Message body")
@@ -265,10 +284,22 @@ def main():
             )
         return EXIT_OK
 
+    # §12b: dispatched row BEFORE the delivery attempt — traceable even if all
+    # channels fail (total failure otherwise only lands in notify-failed.log).
+    _emit_audit(cfg, OwnerAlertDispatched(
+        type="owner_alert_dispatched", ts=customer_now(cfg.customer.timezone),
+        title=args.title[:250], message_excerpt=args.message[:120],
+        priority=args.priority,
+    ))
+
     # Primary: Pushover
     ok, detail = pushover_send(cfg, args.message, args.title, args.priority)
     results.append(("pushover", ok, detail))
     if ok:
+        _emit_audit(cfg, OwnerAlertDelivered(
+            type="owner_alert_delivered", ts=customer_now(cfg.customer.timezone),
+            channel="pushover", title=args.title[:250], priority=args.priority,
+        ))
         return EXIT_OK
 
     # Fallback: WhatsApp self-chat
@@ -276,6 +307,10 @@ def main():
     ok, detail = whatsapp_fallback(cfg, f"[{args.title}] {args.message}")
     results.append(("whatsapp", ok, detail))
     if ok:
+        _emit_audit(cfg, OwnerAlertDelivered(
+            type="owner_alert_delivered", ts=customer_now(cfg.customer.timezone),
+            channel="whatsapp_fallback", title=args.title[:250], priority=args.priority,
+        ))
         return EXIT_OK
 
     # Both failed — log + exit
