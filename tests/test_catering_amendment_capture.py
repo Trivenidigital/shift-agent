@@ -78,6 +78,26 @@ def _cap(data_path, *, lead=None, text="please make it 280 guests not 235",
         expected_owner=expected_owner, expected_group=expected_group, **kw)
 
 
+def _seed_store(path, content):
+    """Write a raw store fixture, then on POSIX chmod it to 0640.
+
+    The filesystem contract (correctly) rejects any store whose mode is not in
+    {640,660} BEFORE it reads content — and `write_text` under the default umask
+    produces 0644. In production the file is only ever written by
+    `atomic_write_json(mode=0o640)`, so 0644 never occurs; a fixture that seeds
+    0644 is testing an unreachable state. chmod'ing to 0640 makes these cells
+    exercise the LOAD path (corrupt / unexpected-shape / empty / seq-derivation)
+    they intend to, on POSIX CI as well as Windows (where mode is inert). The
+    dedicated mode-tamper cell seeds 0644 explicitly to assert rejection."""
+    p = Path(path)
+    if not isinstance(content, str):
+        content = json.dumps(content)
+    p.write_text(content, encoding="utf-8")
+    if os.name == "posix":
+        os.chmod(p, 0o640)
+    return p
+
+
 def _store(data_path):
     return json.loads(Path(data_path).read_text(encoding="utf-8"))
 
@@ -151,7 +171,7 @@ def test_replay_text_window_fallback_across_statuses(tmp_path):
     _cap(data, message_id="", provider_timestamp="", text="move date to July 19")
     doc = _store(data)
     doc["records"][0]["status"] = "some_future_terminal_status"
-    Path(data).write_text(json.dumps(doc), encoding="utf-8")
+    _seed_store(data, doc)
     again = _cap(data, message_id="", provider_timestamp="",
                  text="move date to July 19", now=FIXED_NOW + timedelta(hours=5))
     assert again.ok and again.idempotent and again.amendment_id == "A0001"
@@ -245,7 +265,7 @@ def test_forward_compat_preserves_unknown_fields_and_records(tmp_path):
             "envelope_fingerprint": "fp-old",
         }],
     }
-    Path(data).write_text(json.dumps(seed), encoding="utf-8")
+    _seed_store(data, seed)
     import copy
     pre_record = copy.deepcopy(seed["records"][0])
     pre_top = copy.deepcopy(seed["future_top_level_key"])
@@ -263,10 +283,10 @@ def test_forward_compat_preserves_unknown_fields_and_records(tmp_path):
 
 def test_next_seq_derived_when_absent(tmp_path):
     data = tmp_path / "catering-amendments.json"
-    Path(data).write_text(json.dumps({"records": [
+    _seed_store(data, {"records": [
         {"amendment_id": "A0007", "lead_id": "L1", "sender_ref": "s",
          "raw_text_sha256": "a" * 64, "captured_at": "2026-07-18T00:00:00+00:00"},
-    ]}), encoding="utf-8")
+    ]})
     r = _cap(data, lead={"lead_id": "L2", "extracted": {}}, message_id="wamid.X", text="hi")
     assert r.ok and r.amendment_id == "A0008", "next_seq must derive from max existing seq"
 
@@ -288,7 +308,7 @@ def test_restart_persistence_replays_after_reload(tmp_path):
 # ════════════════════════════════════════════════════════════════════════════
 def test_corrupt_store_preserved_not_quarantined(tmp_path):
     data = tmp_path / "catering-amendments.json"
-    Path(data).write_text("{ this is not valid json", encoding="utf-8")
+    _seed_store(data, "{ this is not valid json")
     r = _cap(data, message_id="wamid.x")
     assert not r.ok and r.reason == "corrupt_json"
     # file content UNCHANGED, and NO .corrupt-* sibling created (unlike safe_load_json)
@@ -299,7 +319,7 @@ def test_corrupt_store_preserved_not_quarantined(tmp_path):
 
 def test_unexpected_shape_preserved(tmp_path):
     data = tmp_path / "catering-amendments.json"
-    Path(data).write_text(json.dumps({"records": "not a list"}), encoding="utf-8")
+    _seed_store(data, {"records": "not a list"})
     r = _cap(data, message_id="wamid.x")
     assert not r.ok and r.reason == "unexpected_shape"
     assert _store(data) == {"records": "not a list"}
@@ -307,7 +327,7 @@ def test_unexpected_shape_preserved(tmp_path):
 
 def test_empty_store_treated_as_fresh(tmp_path):
     data = tmp_path / "catering-amendments.json"
-    Path(data).write_text("   \n", encoding="utf-8")
+    _seed_store(data, "   \n")
     r = _cap(data, message_id="wamid.x")
     assert r.ok and r.amendment_id == "A0001"
 
@@ -334,7 +354,7 @@ def test_write_failure_preserves_prior_store(tmp_path, monkeypatch):
 
 def test_capture_failed_audit_carries_reason_only(tmp_path):
     data = tmp_path / "catering-amendments.json"
-    Path(data).write_text("{bad", encoding="utf-8")
+    _seed_store(data, "{bad")
     _cap(data, message_id="wamid.x")
     row = [x for x in _audit_rows(tmp_path) if x["type"] == "catering_amendment_capture_failed"][0]
     assert set(row) <= {"type", "ts", "lead_id", "reason"}

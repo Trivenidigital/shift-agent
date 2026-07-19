@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import json
+import os
 import platform
 import sys
 import time
@@ -128,6 +129,30 @@ def state_env(tmp_path):
         "roster_path": tmp_path / "roster.json",
         "throttle_path": state / "cf-router-throttle.json",
     }
+
+
+def _wire_amendment_capture(monkeypatch, state_env, hooks_mod):
+    """Point the PR-R2A sidecar amendment store at the tmp state dir and align the
+    filesystem-contract owner/group to the running user, so a Branch-B capture
+    SUCCEEDS under the plugin harness (outcome=captured).
+
+    In production the gateway runs as `shift-agent` and `/opt/shift-agent/state` is
+    owned `shift-agent:shift-agent`, so the module's DEFAULT_OWNER/GROUP match. In
+    the test the tmp state dir is owned by the CI/dev user, so we align the module
+    defaults to that user on POSIX (a faithful stand-in for the prod invariant
+    'writer identity == state-dir owner'; a no-op on Windows where the mode/owner
+    checks are inert). Tests-only: no product file is modified."""
+    monkeypatch.setenv(
+        "SHIFT_AGENT_CATERING_AMENDMENTS_PATH",
+        str(state_env["state_dir"] / "catering-amendments.json"),
+    )
+    if os.name == "posix":
+        import grp
+        import pwd
+        monkeypatch.setattr(hooks_mod.catering_amendments, "DEFAULT_OWNER",
+                            pwd.getpwuid(os.getuid()).pw_name)
+        monkeypatch.setattr(hooks_mod.catering_amendments, "DEFAULT_GROUP",
+                            grp.getgrgid(os.getgid()).gr_name)
 
 
 @pytest.fixture
@@ -1883,12 +1908,14 @@ class TestF7PrimaryMode:
         mock_trigger.assert_called_once()
         assert mock_trigger.call_args.kwargs["customer_phone"] == "+19045550104"
 
-    def test_branch_b_active_lead_suppresses_with_canonical_reply(self, mods, state_env):
+    def test_branch_b_active_lead_suppresses_with_canonical_reply(self, mods, state_env, monkeypatch):
         """Customer-side catering inquiry with active lead → cf-router skips
-        without creating a new lead. With F7_PRIMARY_FOLLOWUP_REPLY=True,
+        without creating a new lead. With F7_PRIMARY_FOLLOWUP_REPLY=True, the
+        PR-R2A amendment is durably captured (outcome=captured) THEN
         send_canonical_followup_reply is invoked. Audit
         reason=f7_primary_followup_suppressed."""
         hooks_mod, actions_mod = mods
+        _wire_amendment_capture(monkeypatch, state_env, hooks_mod)
         _seed_config(state_env)
         _seed_leads_multi(state_env, [
             {"lead_id": "L0011", "owner_approval_code": "#ABCDE",
@@ -1923,6 +1950,50 @@ class TestF7PrimaryMode:
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
         assert len(audits) == 1
         assert audits[0]["reason"] == "f7_primary_followup_suppressed"
+        # PR-R2A: outcome=captured — the follow-up text is durably persisted to the
+        # sidecar BEFORE the canonical reply (closes the Branch-B data-loss gap).
+        store = json.loads(
+            (state_env["state_dir"] / "catering-amendments.json").read_text(encoding="utf-8"))
+        assert len(store["records"]) == 1 and store["records"][0]["lead_id"] == "L0011"
+
+    def test_branch_b_active_lead_capture_failure_sends_retry_not_canonical(self, mods, state_env, monkeypatch):
+        """PR-R2A capture_failed outcome: when the sidecar store cannot be written
+        (here: its parent dir does not exist → fs-contract rejects), Branch B sends
+        a deterministic RETRY reply — NOT the canonical 'with the owner' reply that
+        would falsely imply the correction was recorded — still suppresses the LLM,
+        and audits reason=f7_primary_amendment_capture_failed."""
+        hooks_mod, actions_mod = mods
+        # Point the amendment store under a NON-EXISTENT parent → capture fails closed.
+        monkeypatch.setenv(
+            "SHIFT_AGENT_CATERING_AMENDMENTS_PATH",
+            str(state_env["state_dir"] / "missing-subdir" / "catering-amendments.json"),
+        )
+        _seed_config(state_env)
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0011", "owner_approval_code": "#ABCDE",
+             "customer_phone": "+17329837841",
+             "status": "AWAITING_OWNER_APPROVAL"},
+        ])
+        fake_run = SimpleNamespace(returncode=0,
+                                   stdout='{"role":"customer","phone_normalized":"+17329837841"}',
+                                   stderr="")
+        hooks_mod.F7_PRIMARY_FOLLOWUP_REPLY = True
+        with patch("subprocess.run", return_value=fake_run), \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger, \
+             patch.object(actions_mod, "send_canonical_followup_reply") as mock_canonical, \
+             patch.object(hooks_mod, "_send_amendment_retry_reply", return_value=True) as mock_retry:
+            result = hooks_mod.pre_gateway_dispatch(_make_event(
+                text="catering for 50 people event Saturday food delivered",
+                chat_id="17329837841@s.whatsapp.net"))
+        assert result is not None and result["action"] == "skip"
+        assert "capture failed" in result["reason"]
+        mock_trigger.assert_not_called()
+        mock_canonical.assert_not_called()  # canonical reply must NOT fire on capture failure
+        mock_retry.assert_called_once_with("17329837841@s.whatsapp.net", "L0011")
+        rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
+        audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
+        assert len(audits) == 1
+        assert audits[0]["reason"] == "f7_primary_amendment_capture_failed"
 
     def test_explicit_flyer_intent_creates_flyer_project_even_with_active_catering_lead(self, mods, state_env):
         """Flyer requests should use deterministic Flyer primary-mode."""
@@ -3547,16 +3618,17 @@ class TestF7PrimaryMode:
         "Bro any update! She want to see two proposal menus mixing both non-veg and veg options. She will choose the best one from your two proposals.",
         "Will wait for two menu proposals. Thank you!",
     ])
-    def test_branch_b_active_lead_suppresses_weak_menu_followups(self, mods, state_env, text):
+    def test_branch_b_active_lead_suppresses_weak_menu_followups(self, mods, state_env, text, monkeypatch):
         """Active-lead follow-ups should not need new-inquiry-level evidence.
 
         Live 2026-05-13 regression: employee/customer follow-ups about menu
         proposals emitted only `food_keyword`, missed Branch B, and fell
         through to the generic LLM. Once an active lead exists for the sender,
         menu/proposal food signals are enough to use the canonical follow-up
-        path.
+        path (PR-R2A: the follow-up text is durably captured first).
         """
         hooks_mod, actions_mod = mods
+        _wire_amendment_capture(monkeypatch, state_env, hooks_mod)
         _seed_config(state_env)
         _seed_leads_multi(state_env, [
             {"lead_id": "L0014", "owner_approval_code": "#K6VPD",
