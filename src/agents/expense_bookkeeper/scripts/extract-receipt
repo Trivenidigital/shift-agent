@@ -69,15 +69,13 @@ from exit_codes import (  # noqa: E402
     EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN,
 )
 from pydantic import ValidationError  # noqa: E402
+import approval_code_pools  # noqa: E402  # PR-R1: single-source cross-pool code contract
 
 
 # Module-level paths — patched by tests.
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
 LEADS_PATH = Path("/opt/shift-agent/state/expense-bookkeeper/leads.json")
 LEADS_LOCK = Path("/opt/shift-agent/state/expense-bookkeeper/leads.json.lock")
-CATERING_LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
-MENU_PENDING_PATH = Path("/opt/shift-agent/state/catering-menu-pending.json")
-PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
 RECEIPTS_DIR = Path("/opt/shift-agent/state/expense-bookkeeper/receipts")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 TEMPLATE_DIR = Path("/opt/shift-agent/templates")
@@ -243,65 +241,33 @@ def _atomic_copy_image(src_path: Path, dst_path: Path) -> tuple[bytes, str, str]
 
 
 # ─────────────────────────────────────────────────────────────────
-# Cross-state-file collision check (reviewer-a HIGH A2).
+# Cross-state-file collision check (reviewer-a HIGH A2; PR-R1 single source).
 # ─────────────────────────────────────────────────────────────────
 
 def _collect_active_codes(store: ExpenseLeadStore) -> set[str]:
-    """Loads all 4 state files and returns the set of active codes in the
-    shared 28.6M code pool. Includes our own store. Mirrors the dispatcher's
-    code-pool priority awareness."""
-    codes: set[str] = set()
-    # Our own
+    """Active codes across all four pools (PR-R1: the cross-pool set now comes
+    from the single-source approval_code_pools.all_live_codes instead of three
+    inline sibling reads). Own IN-MEMORY expense codes not yet written to disk
+    are unioned so an in-flight lead cannot be shadowed. Includes our own store."""
+    codes: set[str] = set(approval_code_pools.all_live_codes())
     for lead in store.leads:
         if lead.owner_approval_code and lead.status not in (
             "PUSHED", "REVERSED", "REJECTED", "EXPIRED",
         ):
             codes.add(lead.owner_approval_code)
-    # Catering leads
-    if CATERING_LEADS_PATH.exists():
-        try:
-            cs, st = load_model(CATERING_LEADS_PATH, CateringLeadStore,
-                                default=CateringLeadStore())
-            if st == "ok":
-                for cl in cs.leads:
-                    if cl.owner_approval_code and cl.status not in (
-                        "CLOSED", "OWNER_REJECTED", "STALE", "NOT_CATERING",
-                    ):
-                        codes.add(cl.owner_approval_code)
-        except Exception:
-            pass  # don't fail extraction on a stale catering store
-    # Catering menu pending
-    if MENU_PENDING_PATH.exists():
-        try:
-            mp, st = load_model(MENU_PENDING_PATH, MenuPendingUpdate)
-            if st == "ok" and getattr(mp, "confirmation_code", None):
-                codes.add(mp.confirmation_code)
-        except Exception:
-            pass
-    # Shift proposals (pending.json) — best-effort grep of raw JSON to avoid
-    # tight coupling to the Proposal schema if it changes.
-    if PENDING_PATH.exists():
-        try:
-            raw = json.loads(PENDING_PATH.read_text())
-            # pending.json stores proposals as an OBJECT keyed by id
-            # (dict[str,Proposal]); iterating the mapping directly yields id
-            # keys (strings), so .get("code") raised and this branch silently
-            # collected NOTHING — shift codes were never actually excluded.
-            proposals = raw.get("proposals", {})
-            iterable = proposals.values() if isinstance(proposals, dict) else proposals
-            for prop in iterable:
-                if isinstance(prop, dict) and prop.get("code"):
-                    codes.add(prop["code"])
-        except Exception:
-            pass
     return codes
 
 
 def _generate_unique_code(store: ExpenseLeadStore) -> str:
-    """Per drift-rules + reviewer-a HIGH A1: each agent inlines its own code
-    generator; this one ALSO checks across all 4 state files (catering leads /
-    menu-pending / shift proposals / our own) to avoid collisions in the
-    shared 28.6M pool."""
+    """5-char approval code absent from every pool's live codes (PR-R1 single
+    source via _collect_active_codes -> approval_code_pools.all_live_codes).
+
+    NOTE: main()'s ACTUAL issuance no longer calls this — it uses
+    approval_code_pools.atomic_scan_and_commit so the scan + code generation +
+    the durable leads write are ONE atomic operation under the shared cross-pool
+    lock (guaranteed, not best-effort). This helper is retained as the tested
+    regeneration primitive (tests/test_expense_bookkeeper_extract.py monkeypatches
+    _collect_active_codes and calls it directly)."""
     active = _collect_active_codes(store)
     for _ in range(100):
         candidate = "#" + "".join(secrets.choice(_CODE_ALPHA) for _ in range(5))
@@ -553,6 +519,23 @@ def main():
     LEADS_PATH.parent.mkdir(parents=True, exist_ok=True)
     assert_local_disk(LEADS_PATH)
 
+    # PR-R1 follow-up — GUARANTEED (not best-effort) cross-pool code uniqueness.
+    # The issuance boundary is restructured into three phases so that ALL network
+    # work stays OUTSIDE the shared code-pool lock while the approval code is
+    # generated + the lead durably committed ATOMICALLY under it:
+    #   Phase 0  (short leads FileLock, no network, no code): load, orphan scan +
+    #            persist, idempotency early-return, expense_id, image copy, dedup,
+    #            receipt/duplicate audits.
+    #   Phase 2  (NO lock): vision + classify (the slow network calls).
+    #   Phase 3  (atomic_scan_and_commit → ONE shared code-pool lock → leads
+    #            FileLock INSIDE it, global→pool): all-pool scan + code generation
+    #            + durable leads-store write of the lead carrying the code.
+    #   Phase 4  (after the durable commit): code-referencing audits + approval
+    #            card render + stdout.
+    # NO approval code is returned, printed, rendered, or logged before Phase 3's
+    # durable commit completes.
+
+    # ── Phase 0: read-and-prepare under a SHORT leads-lock hold (no network). ──
     with flock(LEADS_PATH):
         store, st = load_model(LEADS_PATH, ExpenseLeadStore,
                                default=ExpenseLeadStore())
@@ -607,10 +590,7 @@ def main():
                 duplicate_match = prior
                 break
 
-        # Approval code (with cross-state-file collision check)
-        approval_code = _generate_unique_code(store)
-
-        # Receipt-received audit
+        # Receipt-received audit (no approval code)
         now = datetime.now(timezone.utc)
         _log(ExpenseReceiptReceived(
             ts=now, type="expense_receipt_received",
@@ -626,95 +606,138 @@ def main():
                 phash_distance=_hamming(duplicate_match.image_phash, dhash),
                 owner_override=False,
             ))
+        # Persist orphan flags now so they survive a Phase-2 vision failure.
+        _persist_orphan_flags_if_needed()
+    # ← leads lock released; `data` carries into the lockless vision calls below.
 
-        # Extract + classify (vision LLM calls)
-        try:
-            extracted_dict = _call_vision(data, EXTRACTION_PROMPT)
-            extraction = ReceiptExtraction.model_validate(extracted_dict)
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
-            sys.stderr.write(f"vision API error: {e}\n")
-            _persist_orphan_flags_if_needed()
-            return EXIT_DEPENDENCY_DOWN
-        except (ValidationError, json.JSONDecodeError, KeyError) as e:
-            sys.stderr.write(f"vision schema violation: {e}\n")
-            _persist_orphan_flags_if_needed()
-            return EXIT_SCHEMA_VIOLATION
+    # ── Phase 2 (NO lock): vision + classify. Network work stays OUTSIDE every
+    #    lock; nothing is committed here, so a failure leaves no new lead. ──
+    try:
+        extracted_dict = _call_vision(data, EXTRACTION_PROMPT)
+        extraction = ReceiptExtraction.model_validate(extracted_dict)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
+        sys.stderr.write(f"vision API error: {e}\n")
+        return EXIT_DEPENDENCY_DOWN
+    except (ValidationError, json.JSONDecodeError, KeyError) as e:
+        sys.stderr.write(f"vision schema violation: {e}\n")
+        return EXIT_SCHEMA_VIOLATION
 
-        try:
-            classify_dict = _classify_text(extraction)
-            classification = ExpenseClassification.model_validate(classify_dict)
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
-            sys.stderr.write(f"classify API error: {e}\n")
-            _persist_orphan_flags_if_needed()
-            return EXIT_DEPENDENCY_DOWN
-        except (ValidationError, json.JSONDecodeError, KeyError) as e:
-            sys.stderr.write(f"classify schema violation: {e}\n")
-            _persist_orphan_flags_if_needed()
-            return EXIT_SCHEMA_VIOLATION
+    try:
+        classify_dict = _classify_text(extraction)
+        classification = ExpenseClassification.model_validate(classify_dict)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
+        sys.stderr.write(f"classify API error: {e}\n")
+        return EXIT_DEPENDENCY_DOWN
+    except (ValidationError, json.JSONDecodeError, KeyError) as e:
+        sys.stderr.write(f"classify schema violation: {e}\n")
+        return EXIT_SCHEMA_VIOLATION
 
-        # Persist lead
-        lead = ExpenseLead(
-            expense_id=expense_id,
-            original_message_id=args.source_image_id,
-            sender_phone=args.owner_phone,
-            sender_lid=args.sender_lid or None,
-            received_at=now,
-            image_path=str(dst_path),
-            image_phash=dhash,
-            image_byte_hash=sha256,
-            extraction=extraction,
-            classification=classification,
-            qbo_account=classification.qbo_account,
-            owner_approval_code=approval_code,
-            extracted_total_cents=extraction.total_cents,
-            status="EXTRACTING",
-            duplicate_of=duplicate_match.expense_id if duplicate_match else None,
-        )
-        store.leads.append(lead)
-        store.last_id = next_id
+    # Extraction + classification audits (no approval code)
+    _log(ExpenseExtractionCompleted(
+        ts=now, type="expense_extraction_completed",
+        expense_id=expense_id,
+        extraction_confidence=extraction.extraction_confidence,
+        line_item_count=len(extraction.line_items),
+        extracted_total_cents=extraction.total_cents,
+    ))
+    _log(ExpenseClassificationProposed(
+        ts=now, type="expense_classification_proposed",
+        expense_id=expense_id,
+        is_business=classification.is_business,
+        classification_confidence=classification.confidence,
+        qbo_account=classification.qbo_account,
+    ))
 
-        # Audit: extraction + classification
-        _log(ExpenseExtractionCompleted(
-            ts=now, type="expense_extraction_completed",
-            expense_id=expense_id,
-            extraction_confidence=extraction.extraction_confidence,
-            line_item_count=len(extraction.line_items),
-            extracted_total_cents=extraction.total_cents,
-        ))
-        _log(ExpenseClassificationProposed(
-            ts=now, type="expense_classification_proposed",
-            expense_id=expense_id,
-            is_business=classification.is_business,
-            classification_confidence=classification.confidence,
-            qbo_account=classification.qbo_account,
-        ))
+    # ── Phase 3: atomic scan-and-commit. The ONE shared code-pool lock wraps the
+    #    all-pool scan + code generation + the durable leads write; the leads
+    #    FileLock is acquired INSIDE it (global→pool, matching the other three
+    #    generators). The commit RE-LOADS the store under the leads lock so it
+    #    never clobbers a concurrent apply-expense-decision status change that
+    #    could have interleaved while vision ran (the old single-lock structure
+    #    blocked that; moving vision out reintroduces the interleaving, so we
+    #    re-read). expense_id/lead-id allocation is unchanged (a pre-existing
+    #    single-writer property protected by the leads lock — not a cross-pool
+    #    concern; the cross-POOL code uniqueness is what the shared lock now
+    #    guarantees). ──
+    from schemas import is_expense_transition_allowed
+    _pool_state_dir = LEADS_PATH.parent.parent
+    _commit_out: dict = {}
 
-        # Transition EXTRACTING → AWAITING_OWNER_APPROVAL
-        from schemas import is_expense_transition_allowed
-        assert is_expense_transition_allowed("EXTRACTING", "AWAITING_OWNER_APPROVAL")
-        old = lead.status
-        lead.status = "AWAITING_OWNER_APPROVAL"
-        _log(ExpenseLeadStatusChange(
-            ts=now, type="expense_lead_status_change",
-            expense_id=expense_id, from_status=old,
-            to_status="AWAITING_OWNER_APPROVAL", reason="extraction complete",
-        ))
+    def _commit(code: str) -> str:
+        with flock(LEADS_PATH):
+            store2, st2 = load_model(LEADS_PATH, ExpenseLeadStore,
+                                     default=ExpenseLeadStore())
+            if st2 not in ("ok", "missing", "empty"):
+                _commit_out["rc"] = EXIT_SCHEMA_VIOLATION
+                return code
+            for l in store2.leads:
+                if l.original_message_id == args.source_image_id:
+                    _commit_out["idempotent"] = l  # raced: another writer committed
+                    return code
+            lead = ExpenseLead(
+                expense_id=expense_id,
+                original_message_id=args.source_image_id,
+                sender_phone=args.owner_phone,
+                sender_lid=args.sender_lid or None,
+                received_at=now,
+                image_path=str(dst_path),
+                image_phash=dhash,
+                image_byte_hash=sha256,
+                extraction=extraction,
+                classification=classification,
+                qbo_account=classification.qbo_account,
+                owner_approval_code=code,
+                extracted_total_cents=extraction.total_cents,
+                status="EXTRACTING",
+                duplicate_of=duplicate_match.expense_id if duplicate_match else None,
+            )
+            assert is_expense_transition_allowed("EXTRACTING", "AWAITING_OWNER_APPROVAL")
+            lead.status = "AWAITING_OWNER_APPROVAL"
+            store2.leads.append(lead)
+            store2.last_id = max(store2.last_id, next_id)
+            atomic_write_json(LEADS_PATH, store2.model_dump(mode="json"))
+            _commit_out["lead"] = lead
+        return code
 
-        # Render approval card
-        _log(ExpenseOwnerApprovalRequested(
-            ts=now, type="expense_owner_approval_requested",
-            expense_id=expense_id, owner_approval_code=approval_code,
-            extracted_total_cents=extraction.total_cents or 0,
-            routed_to="whatsapp",
-        ))
+    approval_code, _ = approval_code_pools.atomic_scan_and_commit(
+        _commit,
+        paths=approval_code_pools.pool_paths_under(_pool_state_dir),
+        state_dir=_pool_state_dir,
+    )
 
-        # Persist
-        atomic_write_json(LEADS_PATH, store.model_dump(mode="json"))
-        template_name, card_text = _build_approval_card(
-            lead, extraction, classification, cfg, duplicate_match
-        )
+    if _commit_out.get("rc"):
+        return _commit_out["rc"]
+    if "idempotent" in _commit_out:
+        l = _commit_out["idempotent"]
+        print(json.dumps({
+            "expense_id": l.expense_id,
+            "approval_code": l.owner_approval_code or "",
+            "extraction_confidence": (
+                l.extraction.extraction_confidence if l.extraction else 0.0
+            ),
+            "image_phash": l.image_phash,
+            "duplicate_of": l.duplicate_of,
+            "approval_card_text": "(idempotency hit; original card already sent)",
+        }))
+        return EXIT_IDEMPOTENCY
+    lead = _commit_out["lead"]
 
-    # Output
+    # ── Phase 4 (AFTER the durable commit): code-referencing audits + card + output. ──
+    _log(ExpenseLeadStatusChange(
+        ts=now, type="expense_lead_status_change",
+        expense_id=expense_id, from_status="EXTRACTING",
+        to_status="AWAITING_OWNER_APPROVAL", reason="extraction complete",
+    ))
+    _log(ExpenseOwnerApprovalRequested(
+        ts=now, type="expense_owner_approval_requested",
+        expense_id=expense_id, owner_approval_code=approval_code,
+        extracted_total_cents=extraction.total_cents or 0,
+        routed_to="whatsapp",
+    ))
+    template_name, card_text = _build_approval_card(
+        lead, extraction, classification, cfg, duplicate_match
+    )
+
     print(json.dumps({
         "expense_id": expense_id,
         "approval_code": approval_code,

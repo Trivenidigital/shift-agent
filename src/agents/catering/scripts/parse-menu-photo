@@ -57,6 +57,7 @@ from exit_codes import (  # noqa: E402
     EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN,
 )
 from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
+import approval_code_pools  # noqa: E402  # PR-R1: single-source cross-pool code contract
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
 # PR-D2 commit 1: SHIFT_AGENT_CONFIG_PATH env var override (test-only).
@@ -112,68 +113,14 @@ Return ONLY the JSON object. No markdown fences, no explanation, no preamble.
 """
 
 
-# Shared #XXXXX code pool: codes are namespaced across agents and the
-# dispatcher disambiguates a collision only by state-file priority, so a
-# colliding code silently shadows the lower-priority item. This generator
-# previously did NO collision check at all — it now excludes codes already
-# active across the reachable pools (own menu-pending + catering leads +
-# shift proposals), mirroring the cross-pool intent of extract-receipt.
-# Per reviewer-a HIGH A1 each agent inlines its own generator (no shared
-# module), so this is inlined rather than imported.
-CATERING_LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
-SHIFT_PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
-
-
-def _collect_active_codes() -> set[str]:
-    """Active codes across the shared pool, best-effort — never fail extraction
-    on a stale or unreadable sibling store.
-
-    Reads are RAW json.loads rather than load_model on purpose: load_model routes
-    through safe_load_json which RENAMES a corrupt file to .corrupt-<epoch> as a
-    side effect. This scan is advisory collision-avoidance; it must not quarantine
-    a sibling agent's state file (masking a corruption signal that the owning
-    script surfaces loudly via assert_load_status_clean).
-    """
-    codes: set[str] = set()
-    # Our own prior menu-pending update (single-slot file).
-    if PENDING_PATH.exists():
-        try:
-            raw = json.loads(PENDING_PATH.read_text())
-            if raw.get("confirmation_code"):
-                codes.add(raw["confirmation_code"])
-        except Exception:
-            pass
-    # Catering leads (exclude terminal statuses that can no longer be actioned).
-    if CATERING_LEADS_PATH.exists():
-        try:
-            raw = json.loads(CATERING_LEADS_PATH.read_text())
-            for cl in raw.get("leads", []):
-                if (isinstance(cl, dict) and cl.get("owner_approval_code")
-                        and cl.get("status") not in (
-                            "CLOSED", "OWNER_REJECTED", "STALE", "NOT_CATERING")):
-                    codes.add(cl["owner_approval_code"])
-        except Exception:
-            pass
-    # Shift proposals. pending.json stores proposals as an OBJECT keyed by id
-    # (dict[str,Proposal]), so iterate .values(); iterating the mapping directly
-    # would yield id keys and silently collect nothing.
-    if SHIFT_PENDING_PATH.exists():
-        try:
-            raw = json.loads(SHIFT_PENDING_PATH.read_text())
-            proposals = raw.get("proposals", {})
-            iterable = proposals.values() if isinstance(proposals, dict) else proposals
-            for prop in iterable:
-                if isinstance(prop, dict) and prop.get("code"):
-                    codes.add(prop["code"])
-        except Exception:
-            pass
-    return codes
-
-
 def _generate_unique_code() -> str:
-    """5-char approval code in the shared pool, avoiding codes already active
-    across catering leads / menu-pending / shift proposals."""
-    active = _collect_active_codes()
+    """5-char approval code absent from EVERY pool's live codes (PR-R1: single
+    source via approval_code_pools.all_live_codes — own menu-pending + catering /
+    expense / shift codes; the dispatcher disambiguates a cross-pool collision
+    only by state-file priority). The caller holds
+    approval_code_pools.code_generation_lock() across generation + the
+    menu-pending write so check-and-commit is atomic across pools."""
+    active = approval_code_pools.all_live_codes()
     for _ in range(100):
         candidate = "#" + "".join(secrets.choice(_CODE_ALPHA) for _ in range(5))
         if candidate not in active:
@@ -384,23 +331,26 @@ def main() -> int:
         }, indent=2, default=str))
         return EXIT_OK
 
-    # Write pending file + audit
+    # Write pending file + audit. PR-R1: hold the ONE cross-pool code-generation
+    # lock across generation + the menu-pending write (global-code-lock BEFORE
+    # the pending-store lock) so check-and-commit is atomic against every other
+    # generator.
     update_id = _next_update_id()
-    confirmation_code = _generate_unique_code()
     now = customer_now(cfg.customer.timezone)
 
-    pending = MenuPendingUpdate(
-        update_id=update_id,
-        proposed_at=now,
-        source_image_id=args.source_image_id,
-        extracted_items=items,
-        confirmation_code=confirmation_code,
-        parser_notes=parser_notes,
-    )
-
-    PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with FileLock(PENDING_LOCK):
-        atomic_write_json(PENDING_PATH, pending)
+    with approval_code_pools.code_generation_lock(state_dir=PENDING_PATH.parent):
+        confirmation_code = _generate_unique_code()
+        pending = MenuPendingUpdate(
+            update_id=update_id,
+            proposed_at=now,
+            source_image_id=args.source_image_id,
+            extracted_items=items,
+            confirmation_code=confirmation_code,
+            parser_notes=parser_notes,
+        )
+        PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(PENDING_LOCK):
+            atomic_write_json(PENDING_PATH, pending)
 
     _log(TypeAdapter(MenuUpdateProposed), MenuUpdateProposed(
         type="menu_update_proposed", ts=now,

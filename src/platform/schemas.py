@@ -3764,6 +3764,18 @@ class InvariantViolation(_BaseEntry):
     detail: str
 
 
+class ApprovalCodeCollisionDetected(_BaseEntry):
+    """PR-R1: a #XXXXX approval code matched >=2 code pools at lookup time.
+    Fail-closed — the caller (F8 / dispatcher) REFUSES to act and notifies the
+    owner via the notify-owner chokepoint. PRIVACY: records ONLY the code and
+    the matching pool names + where it was detected — never customer phone,
+    message text, or chat ids."""
+    type: Literal["approval_code_collision_detected"]
+    code: str = Field(max_length=16)
+    pools: list[str] = Field(min_length=2, max_length=4)
+    detected_by: str = Field(max_length=60)
+
+
 class HealthCheckFailure(_BaseEntry):
     type: Literal["health_check_failure"]
     check: str
@@ -6470,6 +6482,7 @@ LogEntry = Annotated[
         Annotated[UnknownSenderDeclined, Tag("unknown_sender_declined")],
         Annotated[ValidateFailed, Tag("validate_failed")],
         Annotated[InvariantViolation, Tag("invariant_violation")],
+        Annotated[ApprovalCodeCollisionDetected, Tag("approval_code_collision_detected")],
         Annotated[HealthCheckFailure, Tag("health_check_failure")],
         # Agent #41 Owner Wellbeing v0.1
         Annotated[OwnerNotificationSuppressed, Tag("owner_notification_suppressed")],
@@ -6823,7 +6836,8 @@ __all__ = [
     "RawInbound", "ProposalCreated", "ProposalStatusChange",
     "OutboundAttempted", "OutboundSent", "OutboundSendFailed",
     "OutboundResponse", "OutboundCapExceeded", "OutboundRefusedDisabled",
-    "AgentStateChange", "UnknownSenderDeclined", "ValidateFailed", "InvariantViolation", "HealthCheckFailure",
+    "AgentStateChange", "UnknownSenderDeclined", "ValidateFailed", "InvariantViolation",
+    "ApprovalCodeCollisionDetected", "HealthCheckFailure",
     "LidLearned", "DispatcherRouted",
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
     "EodSnapshot", "EodPushoverSent", "EodSkipped",

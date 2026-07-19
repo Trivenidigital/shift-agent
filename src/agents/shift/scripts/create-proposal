@@ -46,6 +46,7 @@ from schemas import (  # noqa: E402
 from safe_io import (  # noqa: E402
     FileLock, load_model, dump_model, ndjson_append, customer_now,
 )
+import approval_code_pools  # noqa: E402  # PR-R1: single-source cross-pool code contract
 from exit_codes import EXIT_OK, EXIT_INVALID_INPUT, EXIT_SCHEMA_VIOLATION  # noqa: E402
 from pydantic import TypeAdapter
 import yaml
@@ -59,48 +60,19 @@ PENDING_LOCK = Path("/opt/shift-agent/state/pending.json.lock")
 # tmp file instead of the production chokepoint. Defaults to the VPS path.
 LOG_PATH = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
 LOG_LOCK = Path(str(LOG_PATH) + ".lock")
-# Sibling agent's code store — shared #XXXXX pool cross-pool collision avoidance (BL-SHIFT-13).
-CATERING_LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 
 # 5-char code alphabet: uppercase alphanumeric excluding visually ambiguous 0/O/1/I/L
 _CODE_ALPHA = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
 
-def _active_catering_codes() -> set[str]:
-    """Catering-lead codes active in the shared #XXXXX pool (best-effort, raw read).
-
-    Codes are namespaced across agents and the dispatcher disambiguates a collision only by
-    state-file priority, so a shift code that collides with a live catering code can be silently
-    shadowed. Mirrors the inline sibling scan in parse-menu-photo / extract-receipt. Raw
-    json.loads (not load_model) so an unreadable sibling store is never quarantined here — the
-    owning script surfaces its own corruption loudly.
-    """
-    codes: set[str] = set()
-    if CATERING_LEADS_PATH.exists():
-        try:
-            raw = json.loads(CATERING_LEADS_PATH.read_text(encoding="utf-8"))
-            for cl in raw.get("leads", []):
-                if (isinstance(cl, dict) and cl.get("owner_approval_code")
-                        and cl.get("status") not in (
-                            "CLOSED", "OWNER_REJECTED", "STALE", "NOT_CATERING")):
-                    codes.add(cl["owner_approval_code"])
-        except Exception:
-            pass
-    return codes
-
-
-def generate_unique_code(store: PendingStore, max_attempts: int = 50) -> str:
-    """Generate a 5-char code not active in the shared #XXXXX pool — non-terminal shift
-    proposals AND live catering leads (cross-pool: the dispatcher disambiguates a collision
-    only by state-file priority)."""
-    active_codes = {
-        p.code for p in store.proposals.values()
-        if p.status not in {
-            "accepted", "declined", "denied_by_owner", "expired",
-            "cancelled", "no_response_timeout",
-        }
-    }
-    active_codes |= _active_catering_codes()
+def generate_unique_code(max_attempts: int = 50) -> str:
+    """Generate a 5-char code absent from EVERY pool's live codes (PR-R1:
+    single source via approval_code_pools.all_live_codes — non-terminal shift
+    proposals AND catering / menu / expense codes; the dispatcher disambiguates
+    a cross-pool collision only by state-file priority). The caller holds
+    approval_code_pools.code_generation_lock() across generation + the store
+    write so check-and-commit is atomic across pools."""
+    active_codes = approval_code_pools.all_live_codes()
     for _ in range(max_attempts):
         candidate = "#" + "".join(secrets.choice(_CODE_ALPHA) for _ in range(5))
         if candidate not in active_codes:
@@ -132,8 +104,11 @@ def main():
 
     now = customer_now(cfg.customer.timezone)
 
-    # flock pending.json for the entire read-modify-write
-    with FileLock(PENDING_LOCK):
+    # flock pending.json for the entire read-modify-write. PR-R1: hold the ONE
+    # cross-pool code-generation lock OUTSIDE the pending-store lock (global-code
+    # -lock BEFORE pool-store-lock) so the exclusion-scan + code write are atomic
+    # against every other generator.
+    with approval_code_pools.code_generation_lock(state_dir=PENDING_PATH.parent), FileLock(PENDING_LOCK):
         store, status = load_model(PENDING_PATH, PendingStore, default=PendingStore())
         if status not in ("ok", "missing", "empty"):
             print(f"ERROR: pending.json {status}", file=sys.stderr)
@@ -145,7 +120,7 @@ def main():
 
         # Generate unique code
         try:
-            code = generate_unique_code(store)
+            code = generate_unique_code()
         except RuntimeError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return EXIT_SCHEMA_VIOLATION

@@ -410,7 +410,25 @@ def find_active_catering_lead_by_sender(
     try:
         with LEADS_PATH.open() as f:
             store = json.load(f)
-        matches: list[dict] = []
+        # PR-R1: canonical LID<->phone convergence is a strict FALLBACK match
+        # criterion (priority 4). The existing 3 direct priorities ALWAYS win —
+        # canonical candidates are used ONLY when NO direct match exists, so:
+        #   * behavior is byte-identical to pre-PR-R1 whenever any direct match
+        #     exists (a conflicting/stale cache can NEVER override an authoritative
+        #     direct phone/LID match);
+        #   * canonical only ADDS resolution in the case that today returns None
+        #     (a LID sender vs a phone-stored lead, or vice-versa, that the
+        #     lid-cache pairs).
+        # Identity resolution ONLY — selection semantics (most-recent-wins,
+        # ACTIONABLE statuses) unchanged; never raises, never writes to the
+        # lid-cache or leads. Empty/missing/stale/malformed cache -> no canonical
+        # match (census 2026-07-19: lid-cache empty, so this is a current no-op).
+        direct_matches: list[dict] = []
+        canonical_matches: list[dict] = []
+        try:
+            sender_key = flyer_canonical_identity_key(chat_id or "", phone)
+        except Exception:
+            sender_key = ""
         for lead in store.get("leads", []):
             if lead.get("status") not in ACTIONABLE_LEAD_STATUSES:
                 continue
@@ -418,16 +436,27 @@ def find_active_catering_lead_by_sender(
             cl = lead.get("customer_lid")
             # Priority 1: E.164 phone match
             if phone and cp == phone:
-                matches.append(lead)
+                direct_matches.append(lead)
                 continue
             # Priority 2: LID direct match
             if chat_id and cl == chat_id:
-                matches.append(lead)
+                direct_matches.append(lead)
                 continue
             # Priority 3: LID-as-fake-phone legacy match (most common today)
             if lid_digits and cp == f"+{lid_digits}":
-                matches.append(lead)
+                direct_matches.append(lead)
                 continue
+            # Priority 4 (PR-R1): canonical-identity convergence via the lid-cache
+            # — collected as a FALLBACK candidate only (used iff no direct match).
+            if sender_key:
+                try:
+                    lead_key = flyer_canonical_identity_key(cl or "", cp)
+                except Exception:
+                    lead_key = ""
+                if lead_key and lead_key == sender_key:
+                    canonical_matches.append(lead)
+        # Direct (existing) matches ALWAYS win; canonical only when direct empty.
+        matches = direct_matches if direct_matches else canonical_matches
         if not matches:
             return None
         # Most-recent by created_at (ISO-8601 lexically sortable)

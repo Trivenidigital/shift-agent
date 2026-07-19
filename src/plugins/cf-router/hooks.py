@@ -42,6 +42,10 @@ from . import actions
 # send (customer silently misses the lint protection).
 actions._ensure_platform_path()  # type: ignore[attr-defined]
 from schemas import ActionExecutionContext  # type: ignore  # noqa: E402
+# PR-R1: centralized approval-code pool contract (canonical resolve order +
+# fail-closed cross-pool collision refusal). Imported flat like schemas above so
+# an import failure surfaces LOUD at plugin-load time, not at first #code send.
+import approval_code_pools  # type: ignore  # noqa: E402
 
 # PR-ζ.1b 2026-05-26 — registry + helpers for the migrated send-path
 # callsites. Deployed-flat-module fallback mirrors safe_io.py:815-818 +
@@ -915,9 +919,44 @@ def _try_f8_intercept(text: str, chat_id: str) -> Optional[dict]:
     has_reject = bool(_VERB_REJECT.search(text))
     has_edit = bool(_VERB_EDIT.search(text))
 
-    # Try catering lead first (more common path)
-    lead = actions.find_catering_lead_by_code(code)
-    if lead is not None:
+    # PR-R1: resolve the code through the centralized pool registry, in the
+    # canonical order (menu-pending -> catering-leads -> expense -> shift). A
+    # code matching >=2 pools is a fail-closed CollisionResult — we REFUSE to
+    # apply any approval, record the collision (audit every time + owner alert
+    # once), and fall through returning None (no new reply). Thread actions' own
+    # configurable state dir so the registry reads the SAME state files this
+    # plugin is configured for (tests patch actions.LEADS_PATH; prod is /opt).
+    _pool_paths = approval_code_pools.pool_paths_under(actions.LEADS_PATH.parent)
+    resolved = approval_code_pools.resolve_code(code, paths=_pool_paths)
+    if isinstance(resolved, approval_code_pools.CollisionResult):
+        approval_code_pools.record_collision_event(resolved, detected_by="f8_intercept")
+        return None
+    if resolved is None:
+        # Code didn't match any open pool — let LLM handle (might be a stale
+        # reference; LLM can tell the owner).
+        return None
+
+    pool_name, row = resolved
+
+    if pool_name == approval_code_pools.POOL_MENU_PENDING:
+        if has_approve:  # "yes" matches _VERB_APPROVE
+            rc = actions.invoke_apply_menu_update(code, "yes")
+            return _build_skip_or_passthrough(
+                rc=rc, chat_id=chat_id, code=code,
+                reason="f8_menu_yes", detail="",
+                action_label=f"apply-menu-update yes for {code}",
+            )
+        if has_reject:  # "no" matches _VERB_REJECT
+            rc = actions.invoke_apply_menu_update(code, "no")
+            return _build_skip_or_passthrough(
+                rc=rc, chat_id=chat_id, code=code,
+                reason="f8_menu_no", detail="",
+                action_label=f"apply-menu-update no for {code}",
+            )
+        return None
+
+    if pool_name == approval_code_pools.POOL_CATERING_LEADS:
+        lead = row
         lead_status = lead.get("status")
         # Edit needs LLM extraction — let LLM handle
         if has_edit:
@@ -941,27 +980,8 @@ def _try_f8_intercept(text: str, chat_id: str) -> Optional[dict]:
         # Code matched but no clear verb — let LLM ask for clarification
         return None
 
-    # Try menu-pending
-    menu_pending = actions.find_menu_pending_by_code(code)
-    if menu_pending is not None:
-        if has_approve:  # "yes" matches _VERB_APPROVE
-            rc = actions.invoke_apply_menu_update(code, "yes")
-            return _build_skip_or_passthrough(
-                rc=rc, chat_id=chat_id, code=code,
-                reason="f8_menu_yes", detail="",
-                action_label=f"apply-menu-update yes for {code}",
-            )
-        if has_reject:  # "no" matches _VERB_REJECT
-            rc = actions.invoke_apply_menu_update(code, "no")
-            return _build_skip_or_passthrough(
-                rc=rc, chat_id=chat_id, code=code,
-                reason="f8_menu_no", detail="",
-                action_label=f"apply-menu-update no for {code}",
-            )
-        return None
-
-    # Code didn't match any open lead/pending — let LLM handle (might be
-    # a stale reference; LLM can tell the owner)
+    # Expense / shift codes are not F8's responsibility (owner self-chat handles
+    # only menu + catering here) — fall through so the LLM/dispatcher routes them.
     return None
 
 

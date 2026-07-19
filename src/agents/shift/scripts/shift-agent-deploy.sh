@@ -70,6 +70,17 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/flyer_identity.py
     fi
+    # PR-R1: centralized #XXXXX approval-code pool contract — imported by the
+    # cf-router plugin (F8 resolve + collision refusal) and all four code
+    # generators (all_live_codes exclusion set + shared generation lock).
+    # WITHOUT this, `import approval_code_pools` fails at runtime -> F8 breaks and
+    # generators cannot mint codes. Guarded for rollback compatibility with
+    # tarballs that predate this module.
+    if [ -f src/platform/approval_code_pools.py ]; then
+        install -m 644 src/platform/approval_code_pools.py /opt/shift-agent/approval_code_pools.py
+    else
+        rm -f /opt/shift-agent/approval_code_pools.py
+    fi
     # Front-brain Phase-1: per-chat/day budget + latency fallback, imported by the
     # gateway-send screen (safe_io.front_brain_screen_gateway_send). WITHOUT this,
     # `from front_brain_budget import ...` fails at runtime -> the screen fails

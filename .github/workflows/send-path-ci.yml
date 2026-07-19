@@ -57,3 +57,11 @@ jobs:
         run: |
           mapfile -t TESTS < <(find tests -maxdepth 1 -type f -name 'test_*.py' ! -name 'test_flyer*' | sort)
           python -m pytest -q -p no:cacheprovider "${TESTS[@]}"
+
+      # PR-R1: surface per-test collection/execution/PASSED lines for EVERY test
+      # (incl. the 4 Linux-only ones that are skipped on the Windows dev box), the
+      # module-provenance/binding diagnostic block, and the cross-store contention
+      # winner/loser evidence — so the reviewer can read provenance + exactly-one-
+      # durable-winner proof directly from the CI log. -s keeps prints unbuffered.
+      - name: PR-R1 provenance + contention diagnostics (reviewer-mandated)
+        run: python -m pytest tests/test_routing_invariants_r1.py -v -s
