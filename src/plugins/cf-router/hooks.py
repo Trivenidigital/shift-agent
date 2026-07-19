@@ -46,6 +46,10 @@ from schemas import ActionExecutionContext  # type: ignore  # noqa: E402
 # fail-closed cross-pool collision refusal). Imported flat like schemas above so
 # an import failure surfaces LOUD at plugin-load time, not at first #code send.
 import approval_code_pools  # type: ignore  # noqa: E402
+# PR-R2A: durable Branch-B amendment capture (sidecar store). Imported flat like
+# approval_code_pools above so an import failure surfaces LOUD at plugin-load
+# time, not silently at the first suppressed amendment.
+import catering_amendments  # type: ignore  # noqa: E402
 
 # PR-ζ.1b 2026-05-26 — registry + helpers for the migrated send-path
 # callsites. Deployed-flat-module fallback mirrors safe_io.py:815-818 +
@@ -5074,15 +5078,63 @@ def _try_f7_primary_intercept(
                     "reason": f"cf-router F7 proposal request for {lead_id}"}
         return None
 
+    # PR-R2A 2026-07-19 — durable amendment capture BEFORE the canonical reply.
+    # The KNOWN GAP documented above dropped the follow-up TEXT silently. Now the
+    # inbound is persisted to the sidecar amendment store FIRST, and the customer
+    # only sees the canonical "with the owner" reply once capture has succeeded.
+    #
+    # Four outcomes, all returning skip (the amendment path NEVER falls through to
+    # generic LLM routing or new-lead creation — that would re-expose the
+    # fabrication class F7 primary-mode exists to prevent and double-handle the
+    # inbound):
+    #   captured  → ok, new record  → send UNCHANGED canonical reply
+    #   replay    → ok, idempotent  → send UNCHANGED canonical reply, no new record
+    #   captured/replay both audit `f7_primary_followup_suppressed`.
+    #   capture_failed → not-ok → send a deterministic RETRY reply (never the
+    #     canonical reply — that would falsely imply the update was recorded) and
+    #     audit `f7_primary_amendment_capture_failed`.
+    # The capture repository holds ONLY the sidecar lock and releases it before
+    # returning, so every customer send below happens with no lock held.
+    capture = catering_amendments.capture_branch_b_amendment(
+        lead=active_lead,
+        text=text,
+        chat_id=chat_id,
+        phone=phone,
+        message_id=_extract_native_message_id(event),
+        source_transport=_event_transport(event),
+        provider_timestamp=_event_provider_timestamp(event),
+    )
+    if capture.ok:
+        # captured OR replay — identical canonical reply, gated by the existing
+        # UX flag so silent-suppression mode is preserved exactly as before R2A.
+        if F7_PRIMARY_FOLLOWUP_REPLY:
+            actions.send_canonical_followup_reply(chat_id, lead_id)
+        actions.audit_intercepted(
+            reason="f7_primary_followup_suppressed", chat_id=chat_id,
+            code=approval_code,
+            detail=(f"active {lead_id} status={active_lead.get('status')}; "
+                    f"amendment {'replayed' if capture.idempotent else 'captured'} "
+                    f"{capture.amendment_id}; LLM bypassed"),
+        )
+        return {"action": "skip",
+                "reason": f"cf-router F7 primary: follow-up to active {lead_id} suppressed"}
+
+    # capture_failed — DO NOT send the canonical reply (it implies the correction
+    # was recorded). Send the deterministic retry ask (gated by the same UX flag)
+    # and still suppress the LLM. The capture_failed audit row is emitted by the
+    # repository AND recorded here, so the loss is never silent even in flag-off
+    # silent-suppression mode.
     if F7_PRIMARY_FOLLOWUP_REPLY:
-        actions.send_canonical_followup_reply(chat_id, lead_id)
+        _send_amendment_retry_reply(chat_id, lead_id)
     actions.audit_intercepted(
-        reason="f7_primary_followup_suppressed", chat_id=chat_id,
+        reason="f7_primary_amendment_capture_failed", chat_id=chat_id,
         code=approval_code,
-        detail=f"active {lead_id} status={active_lead.get('status')}; LLM bypassed",
+        detail=(f"active {lead_id} status={active_lead.get('status')}; "
+                f"capture_failed reason={capture.reason}; retry requested; LLM bypassed"),
     )
     return {"action": "skip",
-            "reason": f"cf-router F7 primary: follow-up to active {lead_id} suppressed"}
+            "reason": (f"cf-router F7 primary: amendment capture failed for "
+                       f"{lead_id}, retry requested")}
 
 
 def _build_skip_or_passthrough(*, rc: int, chat_id: str, code: str,
@@ -5237,6 +5289,110 @@ def _extract_native_message_id(event: Any) -> str:
                 if isinstance(val, str) and val:
                     return val
     return ""
+
+
+def _event_transport(event: Any) -> str:
+    """Best-effort inbound-transport label for PR-R2A amendment idempotency keying.
+
+    Same defensive top-or-nested lookup shape as _extract_native_message_id.
+    Defaults to "whatsapp" — the only transport F7 primary-mode routes today —
+    so the primary idempotency tuple stays stable when the adapter omits it.
+    """
+    for attr in ("transport", "platform", "channel"):
+        val = getattr(event, attr, None)
+        if isinstance(val, str) and val:
+            return val
+        if isinstance(event, dict):
+            val = event.get(attr)
+            if isinstance(val, str) and val:
+                return val
+    source = getattr(event, "source", None)
+    if source is None and isinstance(event, dict):
+        source = event.get("source")
+    if source is not None:
+        for attr in ("transport", "platform", "channel"):
+            val = getattr(source, attr, None)
+            if isinstance(val, str) and val:
+                return val
+            if isinstance(source, dict):
+                val = source.get(attr)
+                if isinstance(val, str) and val:
+                    return val
+    return "whatsapp"
+
+
+def _event_provider_timestamp(event: Any) -> str:
+    """Best-effort provider-side envelope timestamp for PR-R2A.
+
+    Used ONLY to strengthen the secondary idempotency fingerprint. Returns "" when
+    the adapter exposes none — the amendment store then treats the fingerprint as
+    underivable and relies on the primary (native-id) + text-window tiers. bool is
+    excluded (it subclasses int but is never a timestamp).
+    """
+    def _coerce(val: Any) -> str:
+        if isinstance(val, bool):
+            return ""
+        if isinstance(val, str) and val:
+            return val
+        if isinstance(val, int):
+            return str(val)
+        return ""
+
+    for attr in ("timestamp", "provider_timestamp", "ts", "t", "messageTimestamp"):
+        got = _coerce(getattr(event, attr, None))
+        if got:
+            return got
+        if isinstance(event, dict):
+            got = _coerce(event.get(attr))
+            if got:
+                return got
+    source = getattr(event, "source", None)
+    if source is None and isinstance(event, dict):
+        source = event.get("source")
+    if source is not None:
+        for attr in ("timestamp", "provider_timestamp", "ts", "t", "messageTimestamp"):
+            got = _coerce(getattr(source, attr, None))
+            if got:
+                return got
+            if isinstance(source, dict):
+                got = _coerce(source.get(attr))
+                if got:
+                    return got
+    return ""
+
+
+def _send_amendment_retry_reply(chat_id: str, lead_id: str) -> bool:
+    """Deterministic retry ask sent when durable amendment capture FAILED (PR-R2A).
+
+    Distinct from actions.send_canonical_followup_reply: it must NOT imply the
+    update was recorded (capture failed) — only that the customer should resend.
+    Hard-coded template (HARD RULES: no LLM, no prices, no menu items, no
+    promises). Reuses the send-catering-ack subprocess (canonical bridge prefix +
+    @s.whatsapp.net/@lid JID handling), mirroring send_canonical_followup_reply.
+    actions.py is not modified for R2A, so this small twin lives here and reuses
+    actions.SEND_CATERING_ACK_BIN + actions.SUBPROCESS_TIMEOUT_SEC. Failures are
+    non-fatal: the caller still writes the capture-failed audit row and skips.
+    """
+    import subprocess
+
+    template = (
+        f"Sorry — we couldn't record your update to inquiry {lead_id} just now. "
+        f"Please resend it in a few minutes so we can add it for the owner."
+    )
+    try:
+        result = subprocess.run(
+            [
+                str(actions.SEND_CATERING_ACK_BIN),
+                "--customer-jid", chat_id,
+                "--message-text", template,
+                "--lead-id", lead_id,
+            ],
+            capture_output=True, text=True,
+            timeout=actions.SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode == 0
+    except (subprocess.SubprocessError, OSError):
+        return False
 
 
 def _schedule_f7_rescue(text: str, chat_id: str, message_id: str,
