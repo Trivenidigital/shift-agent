@@ -79,3 +79,81 @@ coverage) · DEPRECATE-CANDIDATE (recommend shelve/delete; operator sign-off req
 ## Approvals log
 
 - 2026-07-18: operator "go" on sprint plan (session dd4a8de7) — authorized Phase 0 (read-only). This matrix is its deliverable. Phases 1–4: PENDING approval of the scope above.
+
+---
+
+# FINAL SPRINT UPDATE (2026-07-20) — Phase 4 closeout
+
+**Shipped + LIVE since the Phase-0 matrix (all merged AND deployed; production =
+`69195c5`, deploy-20260719-223246-69195c5b):**
+- #622 sprint fix batch: eod counting fix, §12b owner-alert dispatched/delivered
+  rows, sick-call + expense send audits, stub decline prose, 24 tests.
+- #623 PR-R1 routing invariants: approval-code pool kernel (canonical order, fail-
+  closed collision refusal, atomic scan-and-commit across all 4 generators),
+  catering canonical-identity fallback.
+- #624 canonical-lock deploy initialization (dual-identity fd-verified).
+- #625 PR-R2A immutable Branch-B amendment capture (sidecar; four proven outcomes).
+
+**Verdict changes vs Phase 0:**
+- eod_reconcile: NEEDS-FIX → **READY** (bug fixed + regression-tested + live).
+- shift: audit-gap items (a)/(b) CLOSED (sick-call send rows + owner-notify
+  dispatched/delivered pair live); remaining NEEDS-FIX driver = the operator-owned
+  coverage rehearsal only.
+- expense_bookkeeper: READY-DORMANT, gaps narrowed (inline replies audited; prune
+  lifecycle + §12b alert now tested).
+- catering: NEEDS-FIX (unproven) → NEEDS-FIX (unproven) but the amendment DATA-LOSS
+  half is closed (R2A live); C3/C4 remain operator-owned; P1-1 flyer-swallow and
+  duplicate-lead modes remain OPEN pending R2B.
+- Fleet-wide: code-pool collision class closed at generation AND lookup; owner-alert
+  chokepoint no longer audit-silent.
+
+**Deliverables:** `tasks/DEPLOY_CHECKLIST.md` + `tasks/HUMAN_PUNCHLIST.md` written
+2026-07-20 (the sprint's three-file operator interface, with this matrix). Deferred
+debt: `tasks/DEFERRED.md`.
+
+## Phase-3 decision appendix (reviewer-mandated evidence; full detail in session
+## evidence report 2026-07-20 — all four verified at HEAD 69195c5)
+
+**A — compliance_dispatcher stub → REMOVE (or formally deprecate).** References:
+the SKILL itself, the skills-manifest hash line, audit docs only. Production
+reachability ZERO — dispatcher matrix routes compliance to compliance_owner_query
+(SKILL.md:101); live path = owner_query + check-compliance-deadlines cron. Wiring
+would duplicate the live path. Removal cost LOW: delete SKILL dir + regenerate
+tools/skills-manifest.txt (deploy gate otherwise fail-closes). Files: the SKILL dir,
+skills-manifest.txt.
+
+**B — multi_location_query → SHELVE + explicit NOT-WIRED marker.** References: the
+SKILL, manifest line, credential_readiness.py capability entry, sibling-SKILL prose,
+CrossLocationQuery schema. Reachability ZERO (no dispatch row; owner text falls to
+handle_owner_command). Promise: owner cross-location queries — but its DEGRADED MODE
+(roster without location_id → returns ALL employees) is prose-only; safe wiring
+REQUIRES code-enforced location scoping + roster location_id population + a
+configured multi-location customer (none exist). Shelve cost LOW (marker edit +
+manifest regen). Files: the SKILL.md (marker), skills-manifest.txt; wiring would add
+a dispatcher row + scoping helper.
+
+**C — dead_man_alert.txt → REMOVE.** Zero functional references (only audit docs);
+render-coverage-template CAN render it but no caller ever passes it; the
+health-alert/dead-man contract it promises is ALREADY served by
+shift-agent-notify-owner (health-check:151, health-watchdog:33) and
+shift-agent-proposal-sweep. Not in the skills manifest → no gate impact. Files:
+delete the template only.
+
+**D — commerce owner-approval gate → DEFER to Stripe onboarding; preserve contract
+in docs.** The machinery is scaffolded end-to-end (threshold field schemas.py:2598,
+awaiting_approval status, 2 reserved LogEntry variants schemas.py:6409/6415 +
+union :6782, exception, LEGAL_TRANSITIONS edges) and invoked by ZERO code — dormant
+by design ("operator-only paths land in slice 2+", order_state.py:7-8). Do NOT
+remove (money-path schema churn). Preserve: paragraph in
+docs/runbooks/commerce-stripe-onboarding.md naming the activation trigger (provider
+live + operator sets the threshold) + the existing reserved-variants comment.
+Files: the runbook (docs paragraph only).
+
+**Execution of A-D: NOT performed — awaiting operator confirmation of the rulings
+(HUMAN_PUNCHLIST item 7); then one small implementation PR.**
+
+## Approvals log (additions)
+- 2026-07-20: reviewer authorized docs-only R2B plan + Phase-4 docs + Phase-3
+  evidence appendix + Pushover runbook (prepare-only) + a controlled R2A canary
+  (blocked on feasibility finding; reviewer ruling pending). This update + the two
+  deliverable files are that documentation work. No implementation performed.
