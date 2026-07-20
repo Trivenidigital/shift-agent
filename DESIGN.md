@@ -106,8 +106,7 @@ All state under `/opt/shift-agent/`. Owned by `shift-agent:shift-agent`.
 └── templates/
     ├── proposal_to_owner.txt
     ├── coverage_message_to_candidate.txt
-    ├── owner_confirmation_after_accept.txt
-    └── dead_man_alert.txt
+    └── owner_confirmation_after_accept.txt
 
 /usr/local/bin/
 ├── identify-sender
