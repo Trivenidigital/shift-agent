@@ -2605,6 +2605,7 @@ class CommerceConfig(BaseModel):
     per_vps_excluded_categories: tuple[str, ...] = ()
     # Approval threshold — fail-closed (Reviewer B HIGH-3): None means UNCONFIGURED.
     # Callers that invoke the approval-gated path without operator config raise.
+    # NOT YET INVOKED — see commerce slice-2+ (docs/runbooks/commerce-stripe-onboarding.md).
     owner_approval_amount_cents_threshold: Optional[int] = Field(default=None, ge=0)
     # Payment-link template (slice 1: placeholder substitution only).
     # Empty -> assert_payment_url_renderable raises; callers MUST emit
