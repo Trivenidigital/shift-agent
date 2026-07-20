@@ -101,3 +101,28 @@ runtime configuration or production data change. Code+docs-only tarball from cle
 - 2026-07-20: reviewer accepted #627 merge closeout; instructed this READ-ONLY
   package. Deployment: PENDING explicit authorization. All operational activations
   separately held.
+- 2026-07-20: reviewer authorized deployment of exact target `ecbefcf3` (revised
+  per §3 after PR #629 merged as the removal correction). **EXECUTED + ACCEPTED.**
+  - Deployment identifier: `deploy-20260720-152550-ecbefcf3` (main-vps).
+  - SHAs: production `3409629` → `ecbefcf3e4a5109f80e446053e16eb66fa2cd31d`
+    (= main; reviewed two-commit range #627 + #629, nothing else).
+  - Removal + manifest results: `dead_man_alert.txt` removed via the
+    descriptor-anchored operation (parent anchored `O_DIRECTORY|O_NOFOLLOW`,
+    identity verified by descriptor, leaf confirmed regular, unlinked by
+    `dir_fd`) and verified absent BEFORE restart; `compliance_dispatcher`
+    removed by the reviewed `--delete` skill synchronization; installed
+    manifest pinned at 32 skills with zero `compliance_dispatcher` entries;
+    all 18 unrelated templates preserved; gateway restarted active and
+    error-clean; all smoke checks passed.
+  - Dormant discriminator confirmed: R2B-1 deployed but OFF — zero
+    discriminator/amendment env vars, zero `conflict_discriminator` audit
+    rows, zero discriminator telemetry, no Hermes call; allowlist/wildcard
+    absent.
+  - Rollback: NOT invoked; prior artifact `deploy-20260720-042204-34096295.tgz`
+    retained (contains both removed artifacts + the 33-skill manifest, so
+    rollback restores them by construction).
+  - All unrelated holds unchanged: discriminator arming, allowlist/wildcard,
+    production canary, Pushover un-mute (standing muted warning accepted as a
+    known held condition, not a regression), Stripe/commerce activation,
+    multi-location wiring, R2B-2..4, R3/R4, runtime configuration, production
+    data. R2A locks + sidecar preserved inode-intact.
