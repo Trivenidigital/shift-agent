@@ -39,6 +39,59 @@ fi
 
 mkdir -p "$DEPLOYS_DIR"
 
+# BEGIN retired-template-removal (#627; extract-and-run test boundary)
+# Artifact-aware removal of the ONE retired shift template, dead_man_alert.txt.
+# The preceding templates glob install is ADDITIVE, so a template DROPPED from the
+# artifact would otherwise linger on the box. This removes EXACTLY the retired canonical
+# path — never a wildcard, never a template-dir rsync-delete. Positional params so the
+# extract-and-run test drives tmp paths; the production call site passes the canonical
+# literals.
+#
+# Rollback safety: a rolled-back tarball that STILL SHIPS the template (retained
+# 3409629) has the staged source present → this does nothing → the additive glob
+# restores the installed copy automatically.
+remove_retired_shift_template() {
+    local STAGED="$1" CANONICAL="$2"
+    if [ -e "$STAGED" ]; then
+        echo "OK: retired-template check — artifact still ships '$STAGED'; canonical copy left as-is (rollback-restore path)."
+        return 0
+    fi
+    # Artifact OMITS it → ensure no stale installed copy lingers. lstat-FIRST: a symlink
+    # is rejected BEFORE any -e/-f test could follow it off-path.
+    if [ -L "$CANONICAL" ]; then
+        echo "FATAL: retired template path '$CANONICAL' is a SYMLINK — refusing to remove (would follow off-path). Deploy aborted BEFORE restart." >&2
+        exit 1
+    fi
+    if [ ! -e "$CANONICAL" ]; then
+        echo "OK: retired template '$CANONICAL' already absent (idempotent)."
+        return 0
+    fi
+    if [ -f "$CANONICAL" ]; then
+        rm -f "$CANONICAL" || { echo "FATAL: rm -f '$CANONICAL' failed. Deploy aborted BEFORE restart." >&2; exit 1; }
+        echo "OK: removed lingering retired template '$CANONICAL'."
+        return 0
+    fi
+    echo "FATAL: retired template path '$CANONICAL' exists but is NOT a regular file (directory / FIFO / socket / other) — refusing. Deploy aborted BEFORE restart." >&2
+    exit 1
+}
+
+# Post-install verification (verification/smoke section): when the artifact OMITTED the
+# retired template, its canonical path MUST NOT linger — neither a regular file nor a
+# symlink may remain. A lingering object here means removal regressed → FATAL before any
+# restart. When the artifact ships the template (rollback), presence is correct → pass.
+verify_retired_shift_template_absent() {
+    local STAGED="$1" CANONICAL="$2"
+    if [ -e "$STAGED" ]; then
+        return 0
+    fi
+    if [ -e "$CANONICAL" ] || [ -L "$CANONICAL" ]; then
+        echo "FATAL: post-deploy verification — retired template '$CANONICAL' STILL PRESENT after removal (lingering artifact). Deploy aborted BEFORE restart." >&2
+        exit 1
+    fi
+    echo "✓ deploy gate: retired template '$CANONICAL' verified absent."
+}
+# END retired-template-removal
+
 install_artifacts() {
     local src_root="$1"
     cd "$src_root"
@@ -250,6 +303,13 @@ install_artifacts() {
     # Templates — Shift-Agent message templates (idempotent: shared dir filled by multiple agents below)
     install -d /opt/shift-agent/templates
     install -m 644 src/agents/shift/templates/* /opt/shift-agent/templates/
+    # #627: the retired dead_man_alert.txt template is dropped from the artifact. The
+    # glob above is additive, so remove any lingering installed copy — artifact-aware,
+    # EXACTLY the one canonical literal path (no wildcard, no rsync --delete). Runs well
+    # before any service restart; FATALs on an unsafe object at the path.
+    remove_retired_shift_template \
+        "src/agents/shift/templates/dead_man_alert.txt" \
+        "/opt/shift-agent/templates/dead_man_alert.txt"
 
     # Skills → Hermes — Shift-Agent SKILL files
     #
@@ -922,6 +982,14 @@ PY
     else
         echo "WARN: /usr/local/bin/vision-auth-smoke not installed — skipping vision-auth gate" >&2
     fi
+
+    # #627 post-install verification: prove the retired template did not linger when the
+    # artifact omitted it (defense-in-depth over the removal above; catches a silent rm
+    # failure or a re-appeared copy). Same canonical literal path; fails visibly before
+    # any restart.
+    verify_retired_shift_template_absent \
+        "src/agents/shift/templates/dead_man_alert.txt" \
+        "/opt/shift-agent/templates/dead_man_alert.txt"
 
     # Enable + start cron timers. Run daemon-reload after all per-agent units
     # are installed so fresh tarball deploys can start newly added timers.
