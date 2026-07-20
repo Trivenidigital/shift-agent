@@ -1,8 +1,0 @@
-⚕ *Shift Agent — Health Alert*
-────────────
-AGENT STATUS: {summary}
-
-Components with issues:
-{failing_list}
-
-Please handle sick-call coverage manually until the agent is restored. If this persists, reply KILL to fully disable the agent, or see the runbook for troubleshooting.

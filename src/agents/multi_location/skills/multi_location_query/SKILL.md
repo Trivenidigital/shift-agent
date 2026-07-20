@@ -3,6 +3,27 @@ name: multi_location_query
 description: Use this skill when the OWNER asks a cross-location question — "who's at Houston tomorrow?", "what's stock at the Dallas store?", "is the Atlanta location open Monday?". The skill resolves location aliases (city names, location_ids) against config.multi_location.locations, then answers from per-location data. For single-location customers OR when multi-location isn't configured, the skill politely declines.
 ---
 
+> ## STATUS: NOT_WIRED — shelved (Phase-3 decision, 2026-07-19)
+>
+> This skill has **no dispatcher routing row**. Owner cross-location queries
+> currently fall through to `handle_owner_command`; nothing routes to this file,
+> so it is dormant and unreachable as written.
+>
+> **ACTIVATION REQUIRES (all four, before this SKILL may be relied on):**
+> 1. A **dispatcher routing row** (in `dispatch_shift_agent`) that routes owner
+>    cross-location queries here.
+> 2. **CODE-ENFORCED location scoping** replacing the prose-only *DEGRADED MODE*
+>    below. Privacy invariant: roster rows lacking a `location_id` MUST NOT be
+>    returned cross-location. The current prose fallback ("return ALL employees
+>    when roster lacks `location_id`") is a cross-location data leak if wired
+>    as-is, and must become an enforced code path, not documentation.
+> 3. A **privacy review** sign-off on the scoping enforcement.
+> 4. A **configured multi-location customer** (`cfg.multi_location.locations`
+>    non-empty).
+>
+> Until all four land this file is documentation only. The behavior text below is
+> the unchanged v0.1 draft and is NOT active.
+
 # Multi-Location Query (Agent #3)
 
 You are the cross-location query handler. The OWNER (and only the owner) asks

@@ -351,6 +351,34 @@ ssh main-vps 'grep -E "commerce_payment_(confirmed|confirmation_failed)|catering
 
 ---
 
+## Owner-approval gate (dormant, slice 2+)
+
+An order-approval gate is **scaffolded but not wired**. No caller invokes it today;
+the pieces below exist so it can be activated without a schema change:
+
+- **`CommerceConfig.owner_approval_amount_cents_threshold`** (`src/platform/schemas.py:2598`)
+  — `Optional[int]`, default `None`. `None` means UNCONFIGURED and is **fail-closed**:
+  a caller that reaches the approval-gated path without an operator-set threshold
+  raises rather than silently skipping approval.
+- **`awaiting_approval` order status** (`src/platform/schemas.py:2693`) — the parked
+  state an order enters when it needs owner sign-off before payment.
+- **Reserved audit LogEntry variants** (`src/platform/schemas.py:6409` `CommerceOrderOwnerApprovalRequired`,
+  `:6415` `CommerceOrderOwnerApprovalThresholdUnconfigured`) — already in the
+  `LogEntry` union, ready for the gate to emit.
+- **`LEGAL_TRANSITIONS` edges** (`src/platform/commerce/order_state.py`) —
+  `pending_payment → awaiting_approval`, and `awaiting_approval → {paid, pending_payment, cancelled}`
+  are already legal, so the state machine accepts the gated flow.
+
+**ACTIVATION TRIGGER:** the Stripe provider is live **AND** the operator sets
+`owner_approval_amount_cents_threshold`. **Wiring the gate is REQUIRED at Stripe
+onboarding** — with a real payment provider live, orders at or above the operator's
+threshold must route through owner approval before a payment link is minted. Until
+then the gate stays dormant (threshold `None` = fail-closed on the approval path).
+Cross-reference: `tasks/HUMAN_PUNCHLIST.md` item 5 (operator punchlist — owner-approval
+threshold configuration).
+
+---
+
 ## What slice 3 still doesn't cover
 
 Per `tasks/hermes-commerce-slice3-provider-webhook-design.md` §13:
