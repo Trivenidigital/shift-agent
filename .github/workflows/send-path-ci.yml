@@ -66,6 +66,16 @@ jobs:
       - name: PR-R1 provenance + contention diagnostics (reviewer-mandated)
         run: python -m pytest tests/test_routing_invariants_r1.py -v -s
 
+      - name: R2B-1 conflict-routing diagnostics (reviewer-mandated)
+        # Individually named results for the R2B-1 evidence package: the full
+        # 42-cell conflict-routing suite plus the two Linux-only dispatch cells
+        # (exact production-canary replay; flag-off byte-identical behavior).
+        run: |
+          echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
+          python -m pytest -vv tests/test_amendment_conflict_routing.py \
+            "tests/test_cf_router_plugin.py::TestF7PrimaryMode::test_r2b1_conflict_canary_captures_amendment_flyer_arm_not_invoked" \
+            "tests/test_cf_router_plugin.py::TestF7PrimaryMode::test_r2b1_flag_off_canary_is_byte_identical_flyer_revision"
+
       # ops/approval-lock-init: direct-execution evidence for the deploy-lock init
       # tests. Echo the checkout ref, then run every test individually (incl. the
       # extract-and-run, real-script-guard, and adversarial fd-interposition cases
