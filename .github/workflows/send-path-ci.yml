@@ -86,3 +86,13 @@ jobs:
         run: |
           echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
           python -m pytest -vv tests/test_deploy_lock_init.py
+
+      # ops/retired-template-removal: the dir_fd-anchored deletion evidence. On Linux
+      # ALL cells COLLECT + PASS with ZERO skips (the extract-and-run cells are
+      # skipif-win32; win32 is false here). The reviewer reads the parent-anchor
+      # evidence line + the swapped-symlink target-survives + symlinked-parent-FATAL
+      # PASSED lines directly from the CI log.
+      - name: Retired-template removal diagnostics (reviewer-mandated)
+        run: |
+          echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
+          python -m pytest -vv tests/test_deploy_retired_template.py
