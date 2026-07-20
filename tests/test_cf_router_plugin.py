@@ -2559,6 +2559,84 @@ class TestF7PrimaryMode:
         mock_trigger.assert_not_called()
         mock_reply.assert_not_called()
 
+    def _seed_r2b1_canary(self, state_env):
+        """The exact production-canary state: a sender with a non-delivered flyer
+        project (F0003, revising) AND one eligible catering lead (L0015)."""
+        _seed_config(state_env, flyer_enabled=True)
+        _seed_leads_multi(state_env, [
+            {"lead_id": "L0015", "owner_approval_code": "#GEMAZ",
+             "customer_phone": "+19045550104", "status": "AWAITING_OWNER_APPROVAL"},
+        ])
+        _seed_flyer_projects(state_env, [
+            {"project_id": "F0003", "status": "revising_design",
+             "customer_phone": "+19045550104", "created_at": "2026-05-15T01:00:00Z",
+             "updated_at": "2026-05-15T01:05:00Z", "original_message_id": "msg-flyer-1",
+             "raw_request": "Need flyer for Ugadi Specials", "fields": {}, "assets": [],
+             "concepts": [], "selected_concept_id": None, "revisions": [], "version": 1,
+             "final_asset_ids": [], "approved_message_id": ""},
+        ])
+
+    def test_r2b1_conflict_canary_captures_amendment_flyer_arm_not_invoked(self, mods, state_env, monkeypatch):
+        """EXACT production-canary replay: the headcount amendment that
+        flyer_reference_exact_edit_queued terminally consumed. With the gate armed and
+        the discriminator (mocked) saying catering_amendment, the message is captured
+        (source=conflict_discriminator) and the flyer active-project arm is NEVER
+        invoked — proving the hoisted gate pre-empts the flyer terminal arm."""
+        hooks_mod, actions_mod = mods
+        from catering_amendments import CaptureResult
+        monkeypatch.setenv("CATERING_AMENDMENT_DISCRIMINATOR", "1")
+        monkeypatch.setenv("CATERING_AMENDMENT_DISCRIMINATOR_CHATS", "*")
+        self._seed_r2b1_canary(state_env)
+        captured = {}
+
+        def _cap(**kw):
+            captured.update(kw)
+            return CaptureResult(ok=True, amendment_id="A0007", idempotent=False)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "customer")), \
+             patch.object(actions_mod, "run_catering_amendment_discriminator",
+                          return_value={"decision": "catering_amendment", "cause": "ok",
+                                        "called": True, "latency_ms": 30}) as mock_disc, \
+             patch.object(hooks_mod.catering_amendments, "capture_branch_b_amendment", _cap), \
+             patch.object(actions_mod, "send_canonical_followup_reply") as mock_reply, \
+             patch.object(hooks_mod, "_try_flyer_active_project_intercept") as mock_flyer, \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger:
+            result = hooks_mod.pre_gateway_dispatch(_make_event(
+                text="actually make it 60 guests not 45", chat_id="201975216009469@lid"))
+
+        assert result["action"] == "skip" and "captured for L0015" in result["reason"]
+        mock_flyer.assert_not_called()                 # flyer terminal arm pre-empted
+        mock_disc.assert_called_once()                 # exactly one Hermes call
+        mock_trigger.assert_not_called()               # amendment NEVER creates a lead
+        mock_reply.assert_called_once()                # R2A canonical reply fired
+        assert captured.get("source") == "conflict_discriminator"
+
+    def test_r2b1_flag_off_canary_is_byte_identical_flyer_revision(self, mods, state_env, monkeypatch):
+        """Flag OFF ⇒ the canary shape produces TODAY's outcome exactly (the flyer
+        active-project arm captures the revision) and the discriminator is never
+        called — the PR ships dormant."""
+        hooks_mod, actions_mod = mods
+        monkeypatch.delenv("CATERING_AMENDMENT_DISCRIMINATOR", raising=False)
+        monkeypatch.delenv("CATERING_AMENDMENT_DISCRIMINATOR_CHATS", raising=False)
+        self._seed_r2b1_canary(state_env)
+
+        with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
+                          return_value=("+19045550104", "customer")), \
+             patch.object(actions_mod, "run_catering_amendment_discriminator") as mock_disc, \
+             patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger, \
+             patch.object(actions_mod, "send_canonical_followup_reply") as mock_reply:
+            result = hooks_mod.pre_gateway_dispatch(_make_event(
+                text="actually make it 60 guests not 45", chat_id="201975216009469@lid"))
+
+        assert result == {
+            "action": "skip",
+            "reason": "cf-router flyer active: revision captured for F0003",
+        }
+        mock_disc.assert_not_called()                  # flag off ⇒ NO model call
+        mock_trigger.assert_not_called()
+        mock_reply.assert_not_called()
+
     def test_active_flyer_approve_is_case_insensitive_and_finalizes(self, mods, state_env):
         hooks_mod, actions_mod = mods
         _seed_config(state_env, flyer_enabled=True)
