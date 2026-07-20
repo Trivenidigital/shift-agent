@@ -42,53 +42,110 @@ mkdir -p "$DEPLOYS_DIR"
 # BEGIN retired-template-removal (#627; extract-and-run test boundary)
 # Artifact-aware removal of the ONE retired shift template, dead_man_alert.txt.
 # The preceding templates glob install is ADDITIVE, so a template DROPPED from the
-# artifact would otherwise linger on the box. This removes EXACTLY the retired canonical
-# path — never a wildcard, never a template-dir rsync-delete. Positional params so the
-# extract-and-run test drives tmp paths; the production call site passes the canonical
-# literals.
+# artifact would otherwise linger on the box. Removes EXACTLY the retired entry name in
+# EXACTLY one parent dir — never a wildcard, never a template-dir rsync-delete.
+#
+# WHY dir_fd-ANCHORED (not pathname rm): the parent /opt/shift-agent/templates is
+# runtime-writable (verified on box: shift-agent:shift-agent 0755, `runuser -u
+# shift-agent -- test -w` succeeds). A protected-parent assumption is therefore FALSE,
+# so a pathname `rm` would be TOCTOU-exposed. This opens the parent ONCE (O_DIRECTORY |
+# O_NOFOLLOW → a symlinked parent is FATAL), anchors every subsequent lstat/unlink to
+# that directory INODE via dir_fd (immune to a parent-path swap), and unlink NEVER
+# follows the leaf. Deploy-only, root-executed python3 heredoc — no production ownership
+# change, no product code. Positional params so the extract-and-run test drives tmp
+# paths; the production call site passes the canonical literals.
 #
 # Rollback safety: a rolled-back tarball that STILL SHIPS the template (retained
 # 3409629) has the staged source present → this does nothing → the additive glob
 # restores the installed copy automatically.
 remove_retired_shift_template() {
-    local STAGED="$1" CANONICAL="$2"
+    local STAGED="$1" PARENT="$2" NAME="$3" PYBIN="${4:-python3}"
     if [ -e "$STAGED" ]; then
         echo "OK: retired-template check — artifact still ships '$STAGED'; canonical copy left as-is (rollback-restore path)."
         return 0
     fi
-    # Artifact OMITS it → ensure no stale installed copy lingers. lstat-FIRST: a symlink
-    # is rejected BEFORE any -e/-f test could follow it off-path.
-    if [ -L "$CANONICAL" ]; then
-        echo "FATAL: retired template path '$CANONICAL' is a SYMLINK — refusing to remove (would follow off-path). Deploy aborted BEFORE restart." >&2
-        exit 1
-    fi
-    if [ ! -e "$CANONICAL" ]; then
-        echo "OK: retired template '$CANONICAL' already absent (idempotent)."
-        return 0
-    fi
-    if [ -f "$CANONICAL" ]; then
-        rm -f "$CANONICAL" || { echo "FATAL: rm -f '$CANONICAL' failed. Deploy aborted BEFORE restart." >&2; exit 1; }
-        echo "OK: removed lingering retired template '$CANONICAL'."
-        return 0
-    fi
-    echo "FATAL: retired template path '$CANONICAL' exists but is NOT a regular file (directory / FIFO / socket / other) — refusing. Deploy aborted BEFORE restart." >&2
-    exit 1
+    # Artifact OMITS it → dir_fd-anchored removal under the opened parent inode.
+    "$PYBIN" - "$PARENT" "$NAME" <<'PY_RTR' || exit 1
+import os, stat, sys
+try:
+    import pwd, grp
+except Exception:
+    pwd = grp = None
+parent, name = sys.argv[1], sys.argv[2]
+try:
+    pfd = os.open(parent, os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError as e:
+    sys.stderr.write("FATAL: retired-template — cannot open parent %r as a non-symlink directory (%s). Deploy aborted BEFORE restart.\n" % (parent, e))
+    sys.exit(1)
+try:
+    st = os.fstat(pfd)
+    real = os.stat(os.path.realpath(parent))
+    if (st.st_dev, st.st_ino) != (real.st_dev, real.st_ino):
+        sys.stderr.write("FATAL: retired-template — parent %r fd-inode (%s,%s) != realpath-inode (%s,%s): parent-path swap. Deploy aborted BEFORE restart.\n"
+                         % (parent, st.st_dev, st.st_ino, real.st_dev, real.st_ino))
+        sys.exit(1)
+    owner = pwd.getpwuid(st.st_uid).pw_name if pwd else str(st.st_uid)
+    group = grp.getgrgid(st.st_gid).gr_name if grp else str(st.st_gid)
+    # Parent ownership/mode is REPORTED, not asserted: the parent is runtime-writable by
+    # design (shift-agent:shift-agent 0755), which is exactly WHY the dir_fd anchor — not
+    # a protected-parent assumption — is what secures the unlink.
+    sys.stderr.write("  [retired-template] parent %r anchored: owner=%s group=%s mode=%s dev=%s ino=%s\n"
+                     % (parent, owner, group, oct(st.st_mode & 0o777), st.st_dev, st.st_ino))
+    try:
+        est = os.lstat(name, dir_fd=pfd)
+    except FileNotFoundError:
+        sys.stderr.write("OK: retired template %r already absent under %r (idempotent).\n" % (name, parent))
+        sys.exit(0)
+    if stat.S_ISDIR(est.st_mode):
+        sys.stderr.write("FATAL: retired-template entry %r under %r is a DIRECTORY — unlink cannot remove it and recursive removal is forbidden. Deploy aborted BEFORE restart.\n" % (name, parent))
+        sys.exit(1)
+    kind = ("symlink" if stat.S_ISLNK(est.st_mode) else "regular" if stat.S_ISREG(est.st_mode)
+            else "fifo" if stat.S_ISFIFO(est.st_mode) else "other")
+    # Any NON-directory object at the retired name IS retired: os.unlink is anchored to
+    # this exact directory inode (immune to a parent-path swap) and NEVER follows the
+    # leaf, so a concurrently swapped-in symlink/file/FIFO at the name is simply unlinked
+    # — for a symlink the referent is untouched (unlink removes the link, not the target).
+    try:
+        os.unlink(name, dir_fd=pfd)
+    except OSError as e:
+        sys.stderr.write("FATAL: retired-template — unlink(%r, dir_fd) failed under %r (%s). Deploy aborted BEFORE restart.\n" % (name, parent, e))
+        sys.exit(1)
+    sys.stderr.write("OK: removed lingering retired template %r (%s) under %r.\n" % (name, kind, parent))
+    sys.exit(0)
+finally:
+    os.close(pfd)
+PY_RTR
 }
 
 # Post-install verification (verification/smoke section): when the artifact OMITTED the
-# retired template, its canonical path MUST NOT linger — neither a regular file nor a
-# symlink may remain. A lingering object here means removal regressed → FATAL before any
-# restart. When the artifact ships the template (rollback), presence is correct → pass.
+# retired template, its entry MUST NOT linger under the anchored parent — the SAME
+# dir_fd-anchored lstat, read-only. A lingering object (any type) means removal
+# regressed → FATAL before any restart. When the artifact ships the template (rollback),
+# presence is correct → pass.
 verify_retired_shift_template_absent() {
-    local STAGED="$1" CANONICAL="$2"
+    local STAGED="$1" PARENT="$2" NAME="$3" PYBIN="${4:-python3}"
     if [ -e "$STAGED" ]; then
         return 0
     fi
-    if [ -e "$CANONICAL" ] || [ -L "$CANONICAL" ]; then
-        echo "FATAL: post-deploy verification — retired template '$CANONICAL' STILL PRESENT after removal (lingering artifact). Deploy aborted BEFORE restart." >&2
-        exit 1
-    fi
-    echo "✓ deploy gate: retired template '$CANONICAL' verified absent."
+    "$PYBIN" - "$PARENT" "$NAME" <<'PY_RTV' || exit 1
+import os, sys
+parent, name = sys.argv[1], sys.argv[2]
+try:
+    pfd = os.open(parent, os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError as e:
+    sys.stderr.write("FATAL: retired-template verify — cannot open parent %r as a non-symlink directory (%s). Deploy aborted BEFORE restart.\n" % (parent, e))
+    sys.exit(1)
+try:
+    try:
+        os.lstat(name, dir_fd=pfd)
+    except FileNotFoundError:
+        sys.stderr.write("OK deploy gate: retired template %r verified absent under %r.\n" % (name, parent))
+        sys.exit(0)
+    sys.stderr.write("FATAL: retired-template verify — %r STILL PRESENT under %r after removal (lingering artifact). Deploy aborted BEFORE restart.\n" % (name, parent))
+    sys.exit(1)
+finally:
+    os.close(pfd)
+PY_RTV
 }
 # END retired-template-removal
 
@@ -304,12 +361,15 @@ install_artifacts() {
     install -d /opt/shift-agent/templates
     install -m 644 src/agents/shift/templates/* /opt/shift-agent/templates/
     # #627: the retired dead_man_alert.txt template is dropped from the artifact. The
-    # glob above is additive, so remove any lingering installed copy — artifact-aware,
-    # EXACTLY the one canonical literal path (no wildcard, no rsync --delete). Runs well
-    # before any service restart; FATALs on an unsafe object at the path.
+    # glob above is additive, so remove any lingering installed copy — dir_fd-anchored,
+    # EXACTLY the one entry name under the one parent (no wildcard, no rsync --delete).
+    # Runs well before any service restart; FATALs on a symlinked parent, a directory at
+    # the name, or any unlink failure.
     remove_retired_shift_template \
         "src/agents/shift/templates/dead_man_alert.txt" \
-        "/opt/shift-agent/templates/dead_man_alert.txt"
+        "/opt/shift-agent/templates" \
+        "dead_man_alert.txt" \
+        "python3"
 
     # Skills → Hermes — Shift-Agent SKILL files
     #
@@ -984,12 +1044,14 @@ PY
     fi
 
     # #627 post-install verification: prove the retired template did not linger when the
-    # artifact omitted it (defense-in-depth over the removal above; catches a silent rm
-    # failure or a re-appeared copy). Same canonical literal path; fails visibly before
-    # any restart.
+    # artifact omitted it (defense-in-depth over the removal above; catches a silent
+    # unlink failure or a re-appeared copy). Same dir_fd-anchored parent + entry name;
+    # fails visibly before any restart.
     verify_retired_shift_template_absent \
         "src/agents/shift/templates/dead_man_alert.txt" \
-        "/opt/shift-agent/templates/dead_man_alert.txt"
+        "/opt/shift-agent/templates" \
+        "dead_man_alert.txt" \
+        "python3"
 
     # Enable + start cron timers. Run daemon-reload after all per-agent units
     # are installed so fresh tarball deploys can start newly added timers.

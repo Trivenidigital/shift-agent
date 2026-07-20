@@ -32,14 +32,25 @@ tools/skills-manifest.txt (regenerated, 32 skills).
   /opt/shift-agent/templates/`, no deletion pass) → without correction,
   dead_man_alert.txt would LINGER on-box as an inert stale file after deploy.
   **RESOLVED-BY the ops/retired-template-removal PR (reviewer-mandated release-
-  integrity correction):** artifact-aware deletion of the exact canonical path —
-  staged-present → normal install (rollback-restore path); staged-omitted →
-  lstat-first inspection (absent = idempotent success; regular file = removed;
-  symlink/directory/FIFO/other = FATAL before restart); plus a lingering-file
-  verification assert in the smoke section. No wildcards, no template-dir
-  `rsync --delete`, unrelated templates untouched. **The revised deployment
-  target becomes that PR's squash SHA once merged** (superseding 9fb8543 as
-  the deploy target; this package's other sections carry forward unchanged).
+  integrity correction):** artifact-aware, **dir_fd-ANCHORED** deletion of the
+  exact entry name under the exact parent. The reviewer's protected-parent contract
+  FAILED on box (`/opt/shift-agent/templates` is runtime-writable: shift-agent:
+  shift-agent 0755, `runuser -u shift-agent -- test -w` SUCCEEDS), so a pathname `rm`
+  would be TOCTOU-exposed. The deploy-only, root-executed python3 helper instead opens
+  the parent ONCE with `O_DIRECTORY | O_NOFOLLOW` (a symlinked parent → FATAL),
+  validates it via `fstat` against the realpath inode (same-inode anchor) and REPORTS
+  owner/group/mode into the deploy log (parent-writability is disclosed, not asserted —
+  it is exactly why the anchor is required), then `lstat`/`unlink` the entry ANCHORED to
+  that directory fd (immune to parent-path swaps; unlink never follows the leaf).
+  Outcomes: staged-present → normal install (rollback-restore path); staged-omitted →
+  absent = idempotent success; a DIRECTORY at the name = FATAL before restart (unlink
+  cannot remove it, recursive removal forbidden); any other object (regular / symlink /
+  FIFO / …) = unlinked (a swapped-in symlink is unlinked with its target untouched —
+  any object at the retired name IS retired). A same-anchor `lstat` verification assert
+  in the smoke section fails the deploy if the entry lingers. No wildcards, no
+  template-dir `rsync --delete`, unrelated templates untouched. **The revised deployment
+  target becomes that PR's squash SHA once merged** (superseding 9fb8543 as the deploy
+  target; this package's other sections carry forward unchanged).
 
 ## 4. Zero live runtime consumers (both artifacts)
 Re-verified at the merged tree: zero functional references repo-wide; dispatcher
