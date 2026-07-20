@@ -2346,6 +2346,10 @@ class CateringAmendmentRecord(BaseModel):
     amendment_id: str = Field(pattern=r"^A[0-9]{4,}$")
     lead_id: str = Field(min_length=1)          # canonical CateringLead id (no orphans)
     sender_ref: str                              # canonical identity key, else raw ref
+    # source_transport = ENVELOPE transport (how the message arrived): "whatsapp" etc.
+    # DISTINCT from `source` below (which capture ROUTE detected the amendment). Never
+    # conflate the two: transport answers "over which channel", source answers "which
+    # cf-router arm captured it".
     source_transport: str                        # e.g. "whatsapp" — gateway envelope
     message_id: str                              # native inbound id; "" if none
     envelope_fingerprint: str                    # transport fingerprint; "" if underivable
@@ -2354,7 +2358,13 @@ class CateringAmendmentRecord(BaseModel):
     raw_text_original_length: int = Field(ge=0)
     raw_text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")  # of the COMPLETE inbound text
     captured_at: datetime
-    source: Literal["f7_branch_b"]
+    # source = capture ROUTE (which cf-router arm produced this record), NOT transport:
+    #   "f7_branch_b"           — R2A Branch-B follow-up-suppression arm (LIVE)
+    #   "conflict_discriminator" — R2B-1 flyer/catering conflict gate, discriminator=amendment
+    # Write-side is strict (this Literal); the on-disk store reads records as tolerant
+    # dicts, so a rollback to the deployed R2A reader preserves a conflict_discriminator
+    # record untouched (read side is str-typed — never re-validated through this Literal).
+    source: Literal["f7_branch_b", "conflict_discriminator"]
     status: str                                  # R2A writes "captured"; read side any string
     base_extracted_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")  # lead.extracted @ capture
     proposal_ref: Optional[str] = None           # R2B-only
@@ -5783,6 +5793,19 @@ class CfRouterIntercepted(_BaseEntry):
         # visible (dispatcher-accuracy pairing), so the failure arm gets its own
         # reason rather than being swallowed as an invalid enum value.
         "f7_primary_amendment_capture_failed",
+        # PR-R2B-1 2026-07-20: flyer/catering amendment-conflict gate (dormant until
+        # armed). captured = discriminator→catering_amendment, R2A capture ok; flyer_edit
+        # = discriminator→flyer_edit, fell through to the unchanged flyer arm; clarify =
+        # deterministic multi-lead OR discriminator→clarify; discriminator_failed =
+        # timeout/error/out-of-enum/budget/no-key → clarify (Hermes-failure telemetry);
+        # capture_failed = amendment decision but capture failed → retry + suppression;
+        # resolved = the clarification reply was routed (choice=flyer|catering).
+        "catering_amendment_conflict_captured",
+        "catering_amendment_conflict_flyer_edit",
+        "catering_amendment_conflict_clarify",
+        "catering_amendment_conflict_discriminator_failed",
+        "catering_amendment_conflict_capture_failed",
+        "catering_amendment_conflict_resolved",
         "f7_proposal_request",
         "f7_proposal_selection",
         "flyer_primary_project_created",

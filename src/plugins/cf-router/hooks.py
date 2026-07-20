@@ -511,6 +511,16 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 if flyer_result is not None:
                     return flyer_result
             if flyer_generation_enabled:
+                # PR-R2B-1: SINGLE hoisted amendment/flyer conflict gate — runs ONCE,
+                # BEFORE the flyer active-project arm commits any revision (the canary
+                # lesson: logic after the flyer terminal arm is ineffective). Fires the
+                # bounded discriminator ONLY in the exactly-one-eligible-lead conflict
+                # cell; dormant + byte-identical fall-through when the flag is off, the
+                # sender is not allowlisted, or there is no eligible catering lead.
+                amendment_conflict_result = _try_amendment_conflict_intercept(
+                    text, chat_id, event, media_path)
+                if amendment_conflict_result is not None:
+                    return amendment_conflict_result
                 flyer_result = _try_flyer_active_project_intercept(text, chat_id, event, media_path)
                 if flyer_result is not None:
                     return flyer_result
@@ -791,6 +801,14 @@ def _try_revenue_route_clarification_choice(
         return None
     if not pending:
         return None
+    # PR-R2B-1: an amendment-conflict clarification routes DIFFERENTLY from the
+    # revenue-route (new-inquiry) one — "catering" enters R2A capture on the EXISTING
+    # lead, never create-catering-lead. Branch before the revenue-route flow.
+    if pending.get("kind") == "amendment_conflict":
+        return _handle_amendment_conflict_choice(
+            text, chat_id, event, pending,
+            flyer_generation_enabled=flyer_generation_enabled,
+            flyer_workflow_enabled=flyer_workflow_enabled)
     choice = actions.classify_revenue_route_choice(text)
     if choice is None:
         return None
@@ -855,6 +873,84 @@ def _try_revenue_route_clarification_choice(
         )
 
     return None
+
+
+def _handle_amendment_conflict_choice(
+    text: str, chat_id: str, event: Any, pending: dict, *,
+    flyer_generation_enabled: bool, flyer_workflow_enabled: bool,
+) -> Optional[dict]:
+    """Resolve the customer's reply to an amendment-conflict clarification.
+
+    "flyer"    → route the STORED original text to the unchanged flyer active-project
+                 arm (a flyer revision, now that the customer chose flyer).
+    "catering" → route the STORED text into R2A CAPTURE on the EXISTING lead
+                 (source=conflict_discriminator) — NEVER create-catering-lead. When a
+                 single eligible lead cannot be determined, re-ask (never silent-choose).
+    No discriminator/model call happens here (one-call-max is a gate property). An
+    unrecognized reply leaves the pending in place and defers to normal routing."""
+    choice = actions.classify_revenue_route_choice(text)
+    if choice not in ("flyer", "catering"):
+        return None  # unrecognized → keep pending; let normal routing handle the reply
+
+    pending = actions.pop_revenue_route_clarification(chat_id) or pending
+    original_text = str(pending.get("original_text") or "").strip()
+    if not original_text:
+        return None
+    original_message_id = str(pending.get("message_id") or "").strip() \
+        or _extract_message_id(event, chat_id, original_text)
+    original_event = _clarified_text_event(
+        text=original_text, chat_id=chat_id, message_id=original_message_id)
+    stored_lead_ids = [str(x) for x in (pending.get("lead_ids") or []) if x]
+
+    if choice == "flyer":
+        actions.audit_intercepted(
+            reason="catering_amendment_conflict_resolved", chat_id=chat_id,
+            detail=f"choice=flyer; lead_ids={','.join(stored_lead_ids)}")
+        if flyer_generation_enabled:
+            return _try_flyer_active_project_intercept(original_text, chat_id, original_event)
+        return None
+
+    # choice == "catering" → capture into the EXISTING lead (never create-lead).
+    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    eligible = actions.find_all_eligible_catering_leads_by_sender(phone, chat_id)
+    target = None
+    if len(eligible) == 1:
+        target = eligible[0]
+    elif stored_lead_ids:
+        by_id = {str(l.get("lead_id")): l for l in eligible}
+        still = [by_id[i] for i in stored_lead_ids if i in by_id]
+        if len(still) == 1:
+            target = still[0]
+    if target is None:
+        # Cannot pick a single lead deterministically → NEVER silently choose. Re-ask.
+        return _send_amendment_conflict_clarification(
+            text=original_text, chat_id=chat_id, event=original_event,
+            leads=eligible or [{"lead_id": i} for i in stored_lead_ids],
+            project_id="", cause="multi_lead_choice", latency_ms=0,
+            reason="catering_amendment_conflict_clarify")
+
+    lead_id = str(target.get("lead_id") or "")
+    capture = catering_amendments.capture_branch_b_amendment(
+        lead=target, text=original_text, chat_id=chat_id, phone=phone,
+        message_id=original_message_id, source_transport=_event_transport(event),
+        provider_timestamp=_event_provider_timestamp(event),
+        source="conflict_discriminator")
+    if capture.ok:
+        if F7_PRIMARY_FOLLOWUP_REPLY:
+            actions.send_canonical_followup_reply(chat_id, lead_id)
+        actions.audit_intercepted(
+            reason="catering_amendment_conflict_resolved", chat_id=chat_id,
+            detail=(f"choice=catering; lead_id={lead_id}; amendment_id={capture.amendment_id}; "
+                    f"{'replayed' if capture.idempotent else 'captured'}"))
+        return {"action": "skip",
+                "reason": f"cf-router R2B-1: amendment captured for {lead_id} via clarification"}
+    if F7_PRIMARY_FOLLOWUP_REPLY:
+        _send_amendment_retry_reply(chat_id, lead_id)
+    actions.audit_intercepted(
+        reason="catering_amendment_conflict_capture_failed", chat_id=chat_id,
+        detail=f"choice=catering; lead_id={lead_id}; capture_failed reason={capture.reason}; retry requested")
+    return {"action": "skip",
+            "reason": f"cf-router R2B-1: amendment capture failed for {lead_id}, retry requested"}
 
 
 def _try_revenue_route_clarification_start(
@@ -3911,6 +4007,145 @@ def _flyer_early_approval_progress_reply(status: str) -> Optional[str]:
         body = ("Thanks! Your flyer is still being prepared — I'll send you the "
                 "preview to approve shortly.")
     return f"Flyer Studio\n------------\n{body}"
+
+
+def _try_amendment_conflict_intercept(
+    text: str, chat_id: str, event: Any, media_path: Optional[str] = None,
+) -> Optional[dict]:
+    """PR-R2B-1 flyer/catering amendment-conflict gate (SINGLE hoisted chokepoint,
+    runs ONCE before the flyer active-project arm commits).
+
+    Fires the bounded Hermes discriminator ONLY in the exactly-one-eligible-lead
+    conflict cell; otherwise returns None (byte-identical fall-through to the flyer
+    arm). Deterministic gating BEFORE any model call:
+      * flag off ....................... None (no lookup, no call)
+      * no non-delivered flyer project . None (nothing would consume it → no conflict)
+      * zero eligible catering leads ... None (pure flyer path unchanged)
+      * sender not allowlisted ......... None (no call)
+      * MULTIPLE eligible leads ........ clarify (NEVER silently choose; no call)
+      * exactly ONE eligible lead ...... run the discriminator (AT MOST one call)
+    Discriminator routing:
+      * flyer_edit ..................... None (UNCHANGED flyer path)
+      * catering_amendment ............. R2A capture (source=conflict_discriminator)
+                                         BEFORE any reply; on capture failure → retry +
+                                         TOTAL suppression (no flyer, no LLM, no lead)
+      * clarify / any failure .......... deterministic clarification (creates nothing)
+    Hermes NEVER selects a lead — association is deterministic and computed here."""
+    if not actions.catering_amendment_discriminator_enabled():
+        return None  # DORMANT: flag off ⇒ byte-identical to today (flyer wins)
+    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    # Only messages the flyer active-project arm would CONSUME are in the conflict set:
+    # the sender must have a non-delivered active flyer project (role is neither
+    # authorization nor exclusion — association + lead state alone decide).
+    if not actions.has_non_delivered_flyer_project_by_sender(phone, chat_id):
+        return None
+    # DETERMINISTIC association (before Hermes sees anything): the sender's eligible
+    # (ACTIONABLE) catering leads. Zero ⇒ no conflict; pure flyer path unchanged.
+    eligible = actions.find_all_eligible_catering_leads_by_sender(phone, chat_id)
+    if not eligible:
+        return None
+    # Canonical-identity allowlist gate. Not armed for this sender ⇒ no model call,
+    # byte-identical fall-through.
+    if not actions.catering_amendment_discriminator_allowlisted(chat_id):
+        return None
+
+    project = actions.find_active_flyer_project_by_sender(phone, chat_id) or {}
+    project_id = str(project.get("project_id") or "")
+
+    if len(eligible) > 1:
+        # Multiple eligible leads → NEVER silently choose → clarify (no model call).
+        return _send_amendment_conflict_clarification(
+            text=text, chat_id=chat_id, event=event, leads=eligible,
+            project_id=project_id, cause="multi_lead", latency_ms=0,
+            reason="catering_amendment_conflict_clarify")
+
+    lead = eligible[0]
+    lead_id = str(lead.get("lead_id") or "")
+    result = actions.run_catering_amendment_discriminator(
+        text=text, lead_id=lead_id, lead_status=str(lead.get("status") or ""))
+    decision, cause, latency = result["decision"], result["cause"], result["latency_ms"]
+
+    if cause != "ok":
+        # Discriminator unavailable/failed (timeout/error/out_of_enum/budget/no_key) →
+        # deterministic clarify with a DEDICATED reason (Hermes-failure telemetry).
+        return _send_amendment_conflict_clarification(
+            text=text, chat_id=chat_id, event=event, leads=eligible,
+            project_id=project_id, cause=cause, latency_ms=latency,
+            reason="catering_amendment_conflict_discriminator_failed")
+
+    if decision == "flyer_edit":
+        actions.audit_intercepted(
+            reason="catering_amendment_conflict_flyer_edit", chat_id=chat_id,
+            detail=(f"lead_id={lead_id}; project_id={project_id}; latency_ms={latency}; "
+                    f"fell through to unchanged flyer path"))
+        return None  # UNCHANGED flyer path — the arm below runs exactly as today
+
+    if decision == "catering_amendment":
+        capture = catering_amendments.capture_branch_b_amendment(
+            lead=lead, text=text, chat_id=chat_id, phone=phone,
+            message_id=_extract_native_message_id(event),
+            source_transport=_event_transport(event),
+            provider_timestamp=_event_provider_timestamp(event),
+            source="conflict_discriminator")
+        if capture.ok:
+            if F7_PRIMARY_FOLLOWUP_REPLY:
+                actions.send_canonical_followup_reply(chat_id, lead_id)
+            actions.audit_intercepted(
+                reason="catering_amendment_conflict_captured", chat_id=chat_id,
+                detail=(f"lead_id={lead_id}; project_id={project_id}; "
+                        f"amendment_id={capture.amendment_id}; "
+                        f"{'replayed' if capture.idempotent else 'captured'}; "
+                        f"latency_ms={latency}; flyer routing suppressed"))
+            return {"action": "skip",
+                    "reason": f"cf-router R2B-1: catering amendment captured for {lead_id} (flyer suppressed)"}
+        # Capture failure → deterministic retry + TOTAL suppression (flyer AND generic
+        # LLM AND lead creation all suppressed; NEVER fall back to the flyer arm).
+        if F7_PRIMARY_FOLLOWUP_REPLY:
+            _send_amendment_retry_reply(chat_id, lead_id)
+        actions.audit_intercepted(
+            reason="catering_amendment_conflict_capture_failed", chat_id=chat_id,
+            detail=(f"lead_id={lead_id}; project_id={project_id}; "
+                    f"capture_failed reason={capture.reason}; latency_ms={latency}; "
+                    f"retry requested; flyer+LLM suppressed"))
+        return {"action": "skip",
+                "reason": f"cf-router R2B-1: amendment capture failed for {lead_id}, retry requested"}
+
+    # decision == "clarify" (genuine model ambiguity) → deterministic clarification.
+    return _send_amendment_conflict_clarification(
+        text=text, chat_id=chat_id, event=event, leads=eligible,
+        project_id=project_id, cause="discriminator_clarify", latency_ms=latency,
+        reason="catering_amendment_conflict_clarify")
+
+
+def _send_amendment_conflict_clarification(
+    *, text: str, chat_id: str, event: Any, leads: list, project_id: str,
+    cause: str, latency_ms: int, reason: str,
+) -> dict:
+    """Send the deterministic flyer-vs-catering clarification for the conflict gate and
+    park a single-turn pending choice (kind=amendment_conflict). Creates NEITHER a
+    flyer revision NOR a catering lead — only asks + stores. Metadata-only audit."""
+    lead_ids = [str(l.get("lead_id") or "") for l in leads if l.get("lead_id")]
+    message_id = _extract_message_id(event, chat_id, text)
+    try:
+        actions.save_revenue_route_clarification(
+            chat_id=chat_id, original_text=text, message_id=message_id,
+            sender_phone="", sender_role="",
+            signals=[f"amendment_conflict:{cause}"],
+            kind="amendment_conflict", lead_ids=lead_ids)
+    except Exception:
+        pass  # storing the pending is best-effort; the ask still goes out
+    reply = actions.amendment_conflict_clarification_reply(lead_ids)
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id, reply,
+        action_context=build_action_context(
+            action_id="catering.routing.amendment_conflict_clarification",
+            is_regulated_action=False))
+    actions.audit_intercepted(
+        reason=reason, chat_id=chat_id, subprocess_rc=0 if ack_ok else 3,
+        detail=(f"cause={cause}; lead_ids={','.join(lead_ids)}; project_id={project_id}; "
+                f"latency_ms={latency_ms}; ack_message_id={mid}; ack_error={err[:200]}"))
+    return {"action": "skip",
+            "reason": "cf-router R2B-1: amendment/flyer clarification sent"}
 
 
 def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, media_path: Optional[str] = None) -> Optional[dict]:

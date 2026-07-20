@@ -308,6 +308,7 @@ def capture_branch_b_amendment(
     source_transport: str,
     provider_timestamp: Optional[str] = None,
     now: Optional[datetime] = None,
+    source: str = "f7_branch_b",
     data_path=None,
     lock_path=None,
     expected_owner: Optional[str] = None,
@@ -319,7 +320,12 @@ def capture_branch_b_amendment(
     """Durably capture a Branch-B amendment. Returns CaptureResult(ok=...). On ANY
     failure the store is PRESERVED, a metadata-only capture_failed row is emitted,
     and ok=False (the caller sends the deterministic retry reply). Success is never
-    claimed on failure. `now` is an INJECTED tz-aware clock (24h-window determinism)."""
+    claimed on failure. `now` is an INJECTED tz-aware clock (24h-window determinism).
+
+    `source` records the capture ROUTE on the persisted record + captured audit row
+    (NOT the envelope transport, which is `source_transport`): "f7_branch_b" (R2A
+    Branch-B arm, default) or "conflict_discriminator" (R2B-1 flyer/catering conflict
+    gate). The idempotency + persistence path is otherwise identical for both routes."""
     from safe_io import LockUnavailable, try_acquire_filelock_with_retry  # lazy
 
     now = now or datetime.now(timezone.utc)
@@ -370,7 +376,7 @@ def capture_branch_b_amendment(
                     source_transport=source_transport or "", message_id=native_id,
                     envelope_fingerprint=fingerprint, raw_text=prefix,
                     raw_text_truncated=truncated, raw_text_original_length=orig_len,
-                    raw_text_sha256=complete_sha, captured_at=now, source="f7_branch_b",
+                    raw_text_sha256=complete_sha, captured_at=now, source=source,
                     status="captured", base_extracted_sha256=base_sha,
                 )
             except Exception:
@@ -390,7 +396,7 @@ def capture_branch_b_amendment(
                 _emit_failed(lead_id, "postwrite_" + post_reason, emit_audit)
                 return CaptureResult(ok=False, reason="postwrite_" + post_reason)
 
-            _emit_captured(lead_id, amendment_id, native_id, "f7_branch_b", orig_len, emit_audit)
+            _emit_captured(lead_id, amendment_id, native_id, source, orig_len, emit_audit)
             return CaptureResult(ok=True, amendment_id=amendment_id)
     except LockUnavailable:
         _emit_failed(lead_id, "lock_unavailable", emit_audit)

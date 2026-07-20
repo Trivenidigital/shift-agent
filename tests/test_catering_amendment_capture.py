@@ -133,6 +133,29 @@ def test_captured_writes_one_record_and_audits(tmp_path):
     assert rows[0]["amendment_id"] == "A0001" and rows[0]["text_len"] == rec["raw_text_original_length"]
 
 
+def test_source_conflict_discriminator_persists_and_is_rollback_safe(tmp_path):
+    """PR-R2B-1: the ONLY R2A persistence change is the new `source` value. Write-side
+    accepts "conflict_discriminator"; the record round-trips; and the deployed R2A
+    reader (_load_store, which reads records as tolerant dicts — never re-validates the
+    strict source Literal) preserves it on a rollback. The default stays f7_branch_b."""
+    data = tmp_path / "catering-amendments.json"
+    r = _cap(data, message_id="wamid.CD", source="conflict_discriminator")
+    assert r.ok
+    rec = _store(data)["records"][0]
+    assert rec["source"] == "conflict_discriminator"
+    assert rec["source_transport"] == "whatsapp"  # transport is DISTINCT from source
+    # rollback-safe read: the R2A loader preserves the future source value untouched
+    store, reason = ca._load_store(data)
+    assert reason is None and store["records"][0]["source"] == "conflict_discriminator"
+    # the captured audit row carries the route without any content
+    row = [x for x in _audit_rows(tmp_path) if x["type"] == "catering_amendment_captured"][0]
+    assert row["source"] == "conflict_discriminator"
+    # default is unchanged (R2A Branch-B route)
+    d2 = tmp_path / "d2.json"
+    assert _cap(d2, message_id="wamid.def").ok
+    assert _store(d2)["records"][0]["source"] == "f7_branch_b"
+
+
 def test_base_extracted_sha_tracks_lead_state(tmp_path):
     a = _cap(tmp_path / "a.json", lead={"lead_id": "L1", "extracted": {"g": 100}})
     b = _cap(tmp_path / "b.json", lead={"lead_id": "L1", "extracted": {"g": 200}})

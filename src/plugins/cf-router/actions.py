@@ -397,8 +397,25 @@ def find_active_catering_lead_by_sender(
     transient state between owner-approve and quote-sent). Returns the
     most-recent matching lead (sorted by created_at desc), or None.
     """
+    leads = find_all_eligible_catering_leads_by_sender(phone, chat_id)
+    return leads[0] if leads else None
+
+
+def find_all_eligible_catering_leads_by_sender(
+    phone: Optional[str], chat_id: Optional[str],
+) -> list[dict]:
+    """PR-R2B-1: the FULL set of ACTIONABLE catering leads deterministically
+    associated with the sender, most-recent first.
+
+    This is the EXACT 4-priority canonical association that
+    find_active_catering_lead_by_sender uses (that function now delegates here and
+    returns element 0), WITHOUT collapsing to a single lead. The R2B-1 conflict gate
+    needs the count to distinguish zero (pure flyer) / exactly-one (discriminator
+    fires) / multiple (never-silent-choice → clarify) — Hermes NEVER selects a lead.
+    Selection semantics (ACTIONABLE statuses, most-recent-wins) are unchanged; never
+    raises, never writes."""
     if not phone and not chat_id:
-        return None
+        return []
 
     # Extract LID digits if chat_id is @lid-formatted (for priority 3 match)
     lid_digits: Optional[str] = None
@@ -457,13 +474,11 @@ def find_active_catering_lead_by_sender(
                     canonical_matches.append(lead)
         # Direct (existing) matches ALWAYS win; canonical only when direct empty.
         matches = direct_matches if direct_matches else canonical_matches
-        if not matches:
-            return None
         # Most-recent by created_at (ISO-8601 lexically sortable)
         matches.sort(key=lambda l: l.get("created_at", ""), reverse=True)
-        return matches[0]
+        return matches
     except Exception:
-        return None
+        return []
 
 
 def find_menu_pending_by_code(code: str) -> Optional[dict]:
@@ -1336,6 +1351,260 @@ def _build_flyer_intent_llm_classifier() -> Callable[[Any], dict] | None:
     return classifier
 
 
+# === R2B-1 amendment / flyer conflict discriminator ===
+#
+# When a customer has BOTH an open catering inquiry AND an in-progress flyer design,
+# an edit-shaped message ("change headcount from 45 to 60") is ambiguous — the flyer
+# active-project arm would silently consume it as a flyer revision (the canary). This
+# bounded, SINGLE-call Hermes discriminator classifies the message into exactly one of
+# {catering_amendment, flyer_edit, clarify} so the cf-router conflict gate can route
+# it. Reuses the B1 shadow-LLM plumbing (canonical allowlist, per-UTC-day budget,
+# OpenRouter POST, tight timeout). STRICTLY gated (flag + allowlist + budget); the whole
+# path is DORMANT until an operator arms it. ANY failure/timeout/parse/out-of-enum →
+# "clarify" (deterministic — never a guessed route). The model sees ONLY the message
+# text plus the SINGLE lead's id + state — no other customer/lead data leaves the box.
+
+CATERING_AMENDMENT_DISCRIMINATOR_ENV = "CATERING_AMENDMENT_DISCRIMINATOR"
+CATERING_AMENDMENT_DISCRIMINATOR_CHATS_ENV = "CATERING_AMENDMENT_DISCRIMINATOR_CHATS"
+CATERING_AMENDMENT_DISCRIMINATOR_TIMEOUT_SEC = 8   # bounded single call (~6-8s)
+CATERING_AMENDMENT_DISCRIMINATOR_BUDGET_PATH = Path(
+    "/opt/shift-agent/state/catering/amendment_discriminator_budget.json")
+CATERING_AMENDMENT_DISCRIMINATOR_DAILY_CAP_DEFAULT = 200
+AMENDMENT_DISCRIMINATOR_DECISIONS = ("catering_amendment", "flyer_edit", "clarify")
+
+# Strict 3-enum response schema. Sent as a request-side json_schema hint AND enforced
+# in-code on parse (the in-code enum check is the real guarantee; an out-of-enum or
+# malformed reply is coerced to "clarify").
+CATERING_AMENDMENT_DISCRIMINATOR_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {"decision": {"type": "string",
+                                "enum": list(AMENDMENT_DISCRIMINATOR_DECISIONS)}},
+    "required": ["decision"],
+    "additionalProperties": False,
+}
+
+CATERING_AMENDMENT_DISCRIMINATOR_PROMPT = (
+    "You are a strict message router for a small-business assistant. The customer has "
+    "ONE open catering inquiry AND an in-progress flyer/poster design, and just sent a "
+    "short message. Decide what the message is about and reply with ONLY a JSON object "
+    '{"decision": "<value>"} where <value> is EXACTLY one of:\n'
+    "- catering_amendment: it changes the CATERING order (guest/head count, menu, date, "
+    "dietary needs, budget, delivery/pickup).\n"
+    "- flyer_edit: it changes the FLYER/poster design (headline or body text, the price "
+    "shown on the flyer, colours, layout, imagery).\n"
+    "- clarify: genuinely ambiguous, or you cannot tell which one it is.\n"
+    "Use ONLY the message and the provided inquiry id/state as context. Never invent "
+    "details. When unsure, answer clarify."
+)
+
+
+def catering_amendment_discriminator_enabled() -> bool:
+    """Master kill switch. OFF unless the env value is exactly '1' (default OFF)."""
+    return os.environ.get(CATERING_AMENDMENT_DISCRIMINATOR_ENV, "") == "1"
+
+
+def _catering_amendment_discriminator_allowlist() -> set[str]:
+    raw = os.environ.get(CATERING_AMENDMENT_DISCRIMINATOR_CHATS_ENV, "") or ""
+    return {n for n in (_normalize_flyer_intent_chat(c) for c in raw.split(",")) if n}
+
+
+def catering_amendment_discriminator_allowlisted(chat_id: str) -> bool:
+    """Canonical-identity per-chat allowlist (mirrors the B1 shadow-LLM gate).
+    Empty/unset ⇒ disabled-for-all (never global-on). Only a literal '*' entry
+    graduates to every chat. Otherwise matches a raw phone/LID entry OR — via the
+    canonical identity key — the paired LID/phone. Malformed entries normalize to ''
+    and are dropped, so a malformed or empty value can NEVER activate the gate."""
+    allow = _catering_amendment_discriminator_allowlist()
+    if not allow:
+        return False
+    if "*" in allow:
+        return True
+    if _normalize_flyer_intent_chat(chat_id) in allow:
+        return True
+    canonical = flyer_canonical_identity_key(chat_id)
+    return bool(canonical) and _normalize_flyer_intent_chat(canonical) in allow
+
+
+def _catering_amendment_discriminator_daily_cap() -> int:
+    try:
+        return max(0, int(os.environ.get(
+            "CATERING_AMENDMENT_DISCRIMINATOR_DAILY_CAP",
+            str(CATERING_AMENDMENT_DISCRIMINATOR_DAILY_CAP_DEFAULT))))
+    except Exception:
+        return CATERING_AMENDMENT_DISCRIMINATOR_DAILY_CAP_DEFAULT
+
+
+@contextmanager
+def _catering_amendment_discriminator_budget_lock() -> Iterator[None]:
+    try:
+        _ensure_platform_path()
+        from safe_io import flock  # type: ignore
+    except Exception:
+        yield
+        return
+    with flock(CATERING_AMENDMENT_DISCRIMINATOR_BUDGET_PATH):
+        yield
+
+
+def _catering_amendment_discriminator_reserve_budget() -> bool:
+    """Reserve one discriminator fire against the per-UTC-day cap. Fail-closed:
+    returns False on cap-exhaustion OR any read/write error (a broken counter must
+    never let the discriminator burn unbounded OpenRouter spend)."""
+    cap = _catering_amendment_discriminator_daily_cap()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    path = CATERING_AMENDMENT_DISCRIMINATOR_BUDGET_PATH
+    try:
+        with _catering_amendment_discriminator_budget_lock():
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(doc, dict):
+                    doc = {}
+            except (OSError, ValueError):
+                doc = {}
+            if str(doc.get("utc_day") or "") != today:
+                doc = {"utc_day": today, "count": 0}
+            count = int(doc.get("count") or 0)
+            if count >= cap:
+                return False
+            doc["count"] = count + 1
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+            tmp.write_text(json.dumps(doc), encoding="utf-8")
+            os.replace(tmp, path)
+            return True
+    except Exception:
+        return False
+
+
+def _build_catering_amendment_discriminator_classifier() -> Callable[[str], dict] | None:
+    """OpenRouter classifier closure returning the decoded decision dict, or RAISING on
+    any network/HTTP/non-JSON failure (the bounded runner maps a raise to cause="error").
+    Returns None when no key is configured (→ deterministic clarify, no call)."""
+    import urllib.request
+    key = _resolve_openrouter_key_for_flyer_intent()
+    if not key or "PLACEHOLDER" in key:
+        return None
+    model = os.environ.get("CATERING_AMENDMENT_DISCRIMINATOR_MODEL") or "openai/gpt-4o-mini"
+
+    def classifier(user_content: str) -> dict:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": CATERING_AMENDMENT_DISCRIMINATOR_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "amendment_route", "strict": True,
+                                "schema": CATERING_AMENDMENT_DISCRIMINATOR_RESPONSE_SCHEMA},
+            },
+            "temperature": 0.0,
+        }
+        req = urllib.request.Request(
+            OPENROUTER_INTENT_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=CATERING_AMENDMENT_DISCRIMINATOR_TIMEOUT_SEC) as resp:
+            body = resp.read().decode("utf-8")
+        doc = json.loads(body)
+        content = doc["choices"][0]["message"]["content"]
+        return json.loads(content)
+
+    return classifier
+
+
+_DISCRIMINATOR_DEFAULT = object()  # sentinel: build the real OpenRouter classifier
+
+
+def run_catering_amendment_discriminator(
+    *,
+    text: str,
+    lead_id: str,
+    lead_status: str,
+    classifier: Any = _DISCRIMINATOR_DEFAULT,
+    timeout_sec: Optional[float] = None,
+    reserve_budget: bool = True,
+) -> dict:
+    """Fire the bounded discriminator AT MOST ONCE. Returns
+    {"decision": one-of-3, "cause": str, "called": bool, "latency_ms": int}.
+
+    - EXACTLY one classifier invocation on the call path (no retry, no loop). `called`
+      is False only when the model is never invoked (no key / budget exhausted) — those
+      also map to "clarify".
+    - cause="ok" ⇒ `decision` is the model's valid 3-enum answer. Any other cause
+      (no_classifier | budget | timeout | error | out_of_enum) ⇒ decision forced to
+      "clarify" (deterministic; NEVER a guessed route). Distinct causes make Hermes-
+      failure frequency measurable in telemetry.
+    - The model sees ONLY `text` + the single `lead_id`/`lead_status` — no other data."""
+    import concurrent.futures
+    import time as _time
+
+    if timeout_sec is None:
+        timeout_sec = CATERING_AMENDMENT_DISCRIMINATOR_TIMEOUT_SEC
+    if classifier is _DISCRIMINATOR_DEFAULT:
+        classifier = _build_catering_amendment_discriminator_classifier()
+    start = _time.monotonic()
+
+    def _done(decision: str, cause: str, called: bool) -> dict:
+        return {"decision": decision, "cause": cause, "called": called,
+                "latency_ms": max(0, int((_time.monotonic() - start) * 1000))}
+
+    if classifier is None:
+        return _done("clarify", "no_classifier", False)
+    if reserve_budget and not _catering_amendment_discriminator_reserve_budget():
+        return _done("clarify", "budget", False)
+
+    user_content = json.dumps(
+        {"message": str(text or ""), "catering_inquiry_id": lead_id,
+         "catering_inquiry_state": lead_status},
+        ensure_ascii=False,
+    )
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(classifier, user_content)
+    try:
+        payload = future.result(timeout=max(0.001, timeout_sec))
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        return _done("clarify", "timeout", True)
+    except Exception:
+        executor.shutdown(wait=False, cancel_futures=True)
+        return _done("clarify", "error", True)
+    executor.shutdown(wait=False)
+
+    decision: Any = None
+    if isinstance(payload, dict):
+        decision = payload.get("decision")
+    elif isinstance(payload, str):
+        try:
+            parsed = json.loads(payload)
+            decision = parsed.get("decision") if isinstance(parsed, dict) else None
+        except Exception:
+            decision = None
+    if decision in AMENDMENT_DISCRIMINATOR_DECISIONS:
+        return _done(decision, "ok", True)
+    return _done("clarify", "out_of_enum", True)
+
+
+def amendment_conflict_clarification_reply(lead_ids: list[str]) -> str:
+    """Deterministic flyer-vs-catering clarification for the amendment-conflict gate.
+    Names the eligible catering inquiry id(s) as metadata so the customer can tell us
+    which they mean; creates NOTHING on its own (the choice reply routes later)."""
+    ids = [str(lid) for lid in (lead_ids or []) if lid]
+    if len(ids) == 1:
+        subject = f"a change to your catering inquiry {ids[0]}"
+    elif len(ids) > 1:
+        subject = f"a change to one of your catering inquiries ({', '.join(ids[:5])})"
+    else:
+        subject = "a change to your catering order"
+    return (
+        f"Quick check — is this {subject}, or an edit to your flyer design? "
+        f"Reply \"catering\" or \"flyer\" and I'll take it from there."
+    )
+
+
 # === Audit ===
 
 _QUOTE_ATTR_PAT = re.compile(r"quot|context|reply|stanza|participant", re.IGNORECASE)
@@ -1964,7 +2233,19 @@ def save_revenue_route_clarification(
     sender_phone: Optional[str],
     sender_role: str,
     signals: list[str],
+    kind: str = "revenue_route",
+    lead_ids: Optional[list[str]] = None,
 ) -> None:
+    """Store a pending single-turn clarification for `chat_id` (one per chat).
+
+    PR-R2B-1 additive fields (default preserves the revenue-route behavior):
+      kind      — "revenue_route" (flyer/catering NEW-inquiry ambiguity) or
+                  "amendment_conflict" (flyer-edit vs catering-amendment on an
+                  EXISTING lead). The choice handler branches on this so an
+                  amendment-conflict "catering" reply routes into R2A capture, NEVER
+                  create-catering-lead.
+      lead_ids  — the eligible lead id(s) the amendment could target (metadata only;
+                  used by the choice handler; never any other lead/customer data)."""
     _ensure_platform_path()
     from safe_io import flock  # type: ignore
 
@@ -1978,6 +2259,8 @@ def save_revenue_route_clarification(
             "sender_phone": sender_phone,
             "sender_role": sender_role,
             "signals": [str(sig)[:80] for sig in signals[:20]],
+            "kind": kind,
+            "lead_ids": [str(lid) for lid in (lead_ids or []) if lid][:20],
         }
         _write_revenue_route_clarification_doc(doc)
 
