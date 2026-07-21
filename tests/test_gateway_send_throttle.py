@@ -16,7 +16,6 @@ policy, so REPO/src is on the path (agents.flyer.customer_copy_policy).
 """
 from __future__ import annotations
 
-import importlib
 import json
 import sys
 from pathlib import Path
@@ -41,12 +40,26 @@ FALLBACK = "I couldn't finish that reply — tell me what you need and I'll help
 CHAT = "17329837841@c.us"
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def safe_io_module():
-    """Import safe_io fresh; the throttle accessors read env at call time, so no
-    per-test state leaks across tests."""
-    importlib.reload(safe_io)
-    return safe_io
+    """Re-resolve safe_io + schemas from sys.modules at call time and drive the
+    LIVE objects the screen path also imports.
+
+    Order-determinism (Linux): test_cf_router_plugin's loader does
+    ``sys.modules.pop("safe_io"/"schemas")`` + reloads FRESH objects, and it is
+    NOT skipped on Linux where it sorts (cf...) before this file (g...). A stale
+    top-level ``import safe_io`` — or an ``importlib.reload()`` of that stale
+    object — then breaks with ``ImportError: module safe_io not in sys.modules``.
+    Mirrors test_front_brain_outbound_enforcement._rebind_safe_io_to_live_module:
+    bind the live module. No reload is needed — the throttle accessors read env
+    at call time and hold no module-level mutable state. Autouse so module-level
+    ``safe_io`` / ``schemas`` references also resolve to the live objects."""
+    import sys as _sys
+    live = _sys.modules.get("safe_io") or safe_io
+    live_schemas = _sys.modules.get("schemas") or schemas
+    globals()["safe_io"] = live
+    globals()["schemas"] = live_schemas
+    return live
 
 
 @pytest.fixture
