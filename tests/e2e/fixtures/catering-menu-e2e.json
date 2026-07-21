@@ -1,0 +1,853 @@
+{
+  "version": 2,
+  "updated_at": "2026-05-05T20:36:25.980731-04:00",
+  "updated_by": "photo-ocr",
+  "source_image_id": "undefined",
+  "items": [
+    {
+      "name": "Idly (3 PCS)",
+      "price_usd": 5.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Sambar Idly (2 Pcs)",
+      "price_usd": 6.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Ghee Karari Idly (3 Pcs)",
+      "price_usd": 7.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Idly Vada (2 Pcs)",
+      "price_usd": 6.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Upma",
+      "price_usd": 7.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Pongal",
+      "price_usd": 7.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Plain Dosa",
+      "price_usd": 9.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Masala Dosa",
+      "price_usd": 10.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Onion Dosa",
+      "price_usd": 10.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Guntur Karam Dosa",
+      "price_usd": 10.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Tofu Dosa",
+      "price_usd": 11.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Paneer Dosa",
+      "price_usd": 11.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Chocolate Dosa",
+      "price_usd": 10.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Egg Dosa",
+      "price_usd": 10.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Chicken 65 Dosa",
+      "price_usd": 12.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Chicken Tikka Dosa",
+      "price_usd": 12.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Rawa Dosa",
+      "price_usd": 10.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Rawa Masala Dosa",
+      "price_usd": 11.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Poori Bhaji (3 Pcs)",
+      "price_usd": 9.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Poori Goat Curry",
+      "price_usd": 12.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Chole Poori (3 Pcs)",
+      "price_usd": 9.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Extra Masala",
+      "price_usd": 1.99,
+      "category": "side",
+      "dietary_tags": [],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Vada Pav",
+      "price_usd": 5.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Pani Puri (2 Pcs)",
+      "price_usd": 7.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Dahi Puri",
+      "price_usd": 7.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Bhel Puri",
+      "price_usd": 5.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Sev Puri",
+      "price_usd": 5.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Pav Bhaji (3 Pcs)",
+      "price_usd": 9.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Extra Pav",
+      "price_usd": 1.99,
+      "category": "side",
+      "dietary_tags": [],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Grilled Veg Sandwich",
+      "price_usd": 9.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Bombay Grill Sandwich",
+      "price_usd": 10.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Paneer Sandwich",
+      "price_usd": 10.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Paneer Frankie",
+      "price_usd": 10.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Chicken Tikka Frankie",
+      "price_usd": 12.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Samosa (2 Pcs)",
+      "price_usd": 4.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Samosa (6 Pcs)",
+      "price_usd": 13.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Chicken Sandwich",
+      "price_usd": 10.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Chaat Masala",
+      "price_usd": 1.99,
+      "category": "side",
+      "dietary_tags": [],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Paneer Tikka (2 Pcs)",
+      "price_usd": 12.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Paneer Tikka (4 Pcs)",
+      "price_usd": 19.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Chicken Seekh Kebab",
+      "price_usd": 13.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Paneer Tikka Kebab (8 PCS)",
+      "price_usd": 12.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Malai Tikka (2 PCS)",
+      "price_usd": 12.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Achari Tikka (2 PCS)",
+      "price_usd": 12.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Achari Tandoori (2 PCS)",
+      "price_usd": 12.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Chicken Tandoori (1 PCS)",
+      "price_usd": 12.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Fish Tikka",
+      "price_usd": 15.99,
+      "category": "appetizer",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Fish Masala",
+      "price_usd": 15.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Paneer Butter Masala",
+      "price_usd": 12.99,
+      "category": "main",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Malai Kofta",
+      "price_usd": 12.99,
+      "category": "main",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Chana Masala",
+      "price_usd": 11.99,
+      "category": "main",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Dal Makhani",
+      "price_usd": 11.99,
+      "category": "main",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Egg Masala",
+      "price_usd": 12.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Butter Chicken",
+      "price_usd": 14.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Chicken Curry",
+      "price_usd": 14.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Goat Curry",
+      "price_usd": 15.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Kadai Chicken",
+      "price_usd": 15.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Fish Curry",
+      "price_usd": 15.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Shrimp Masala",
+      "price_usd": 15.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Paneer Tikka Masala",
+      "price_usd": 12.99,
+      "category": "main",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Vegetable Curry",
+      "price_usd": 11.99,
+      "category": "main",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Palak Paneer",
+      "price_usd": 12.99,
+      "category": "main",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Chowmein",
+      "price_usd": 10.99,
+      "category": "main",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Veg Fried Rice",
+      "price_usd": 9.99,
+      "category": "main",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Egg Fried Rice",
+      "price_usd": 10.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Chicken Fried Rice",
+      "price_usd": 11.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Shrimp Fried Rice",
+      "price_usd": 12.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Veg Biryani",
+      "price_usd": 14.99,
+      "category": "main",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Chicken Biryani",
+      "price_usd": 15.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Goat Biryani",
+      "price_usd": 16.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Paneer Biryani",
+      "price_usd": 15.99,
+      "category": "main",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Veg Pulao",
+      "price_usd": 12.99,
+      "category": "main",
+      "dietary_tags": [
+        "veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Chicken Pulao",
+      "price_usd": 13.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Goat Pulao",
+      "price_usd": 14.99,
+      "category": "main",
+      "dietary_tags": [
+        "non-veg"
+      ],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Dessert Cup Shots",
+      "price_usd": 4.99,
+      "category": "dessert",
+      "dietary_tags": [],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "1 Scoop",
+      "price_usd": 3.99,
+      "category": "dessert",
+      "dietary_tags": [],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "2 Scoop",
+      "price_usd": 5.99,
+      "category": "dessert",
+      "dietary_tags": [],
+      "available": true,
+      "notes": "",
+      "serves": null
+    },
+    {
+      "name": "Paan",
+      "price_usd": 2.99,
+      "category": "dessert",
+      "dietary_tags": [],
+      "available": true,
+      "notes": "",
+      "serves": null
+    }
+  ],
+  "notes": ""
+}

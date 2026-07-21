@@ -127,3 +127,6 @@ shift-agent-deploy.tgz
 # / so subdir test fixtures (e.g. tests/fixtures/.golden_output.txt) are
 # NOT silently ignored.
 /.[A-Za-z]*.txt
+
+# E2E harness run artifacts (regenerated on each run)
+/tests/e2e/artifacts/

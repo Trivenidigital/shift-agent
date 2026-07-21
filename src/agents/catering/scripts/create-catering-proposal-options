@@ -31,9 +31,12 @@ from schemas import (  # noqa: E402
     CateringProposalSet,
     CateringProposalStore,
     CateringProposalsGenerated,
+    CateringRecomposedMenuSent,
+    CateringRecomposeClarifySent,
     Menu,
     MenuItem,
 )
+from catering_recompose import recompose_plan  # noqa: E402  # PR-D mix-and-match assist
 
 PROPOSALS_PATH = Path("/opt/shift-agent/state/catering-proposals.json")
 PROPOSALS_LOCK = Path("/opt/shift-agent/state/catering-proposals.json.lock")
@@ -57,6 +60,7 @@ OPTION_TITLES = {
     "balanced_mixed": "Option {n}: Balanced Veg and Non-Veg Menu",
     "premium_mixed": "Option {n}: Premium Celebration Menu",
     "classic_family": "Option {n}: Classic Family Favorites",
+    "custom_mix": "Your Custom Menu",  # PR-D mix-and-match recomposition
 }
 CATEGORY_ORDER = [
     "package",
@@ -360,6 +364,118 @@ def _mark_sent_and_supersede(lead_id: str, proposal_set_id: str, outbound_messag
         atomic_write_json(PROPOSALS_PATH, store)
 
 
+def _load_latest_sent_set(lead_id: str) -> dict | None:
+    """Most-recent SENT proposal set for the lead (raw dict), or None."""
+    try:
+        with PROPOSALS_PATH.open(encoding="utf-8") as f:
+            store = json.load(f)
+    except Exception:
+        return None
+    sent = [s for s in store.get("sets", [])
+            if isinstance(s, dict) and s.get("lead_id") == lead_id and s.get("status") == "SENT"]
+    if not sent:
+        return None
+    sent.sort(key=lambda s: _proposal_sequence(str(s.get("proposal_set_id", ""))))
+    return sent[-1]
+
+
+def _render_recomposed(item_names: list[str], menu_items: dict[str, MenuItem],
+                       combination: str) -> tuple[str, set[str]]:
+    """Render the deterministic combined menu. Reuses the catalog-exact discipline
+    (KeyError on unknown item) + the NO_PRICE_RE guard. Returns (body, category set)."""
+    # Validate item shape via the same option model used everywhere else.
+    CateringProposalOption(option_id="1", style_key="custom_mix", tier="balanced",
+                           item_names=item_names)
+    by_category: dict[str, list[str]] = {}
+    for name in item_names:
+        item = menu_items.get(name)
+        if item is None:
+            raise KeyError(name)
+        by_category.setdefault(item.category, []).append(item.name)
+    title = OPTION_TITLES["custom_mix"]
+    lines = [f"*{title} ({combination})*"] if combination else [f"*{title}*"]
+    for category in CATEGORY_ORDER:
+        names = by_category.get(category)
+        if not names:
+            continue
+        lines.append(f"{category.replace('_', ' ').title()}:")
+        lines.extend(f"- {name}" for name in names)
+    body = BRIDGE_PREFIX + "\n".join(lines)
+    _assert_no_forbidden_customer_text(body)
+    return body, set(by_category.keys())
+
+
+def _run_recompose(args) -> int:
+    """PR-D mix-and-match: deterministically combine sections of already-SENT
+    options. The payload is pulled verbatim from the sent options (never composed
+    by an LLM), and a sections-match assertion runs in this chokepoint before send
+    so prose-matches-payload is TESTED per send. Any imperfect request clarifies."""
+    try:
+        lead = _load_lead(args.lead_id)
+    except Exception as e:
+        sys.stderr.write(f"lead load failed: {e}\n")
+        return EXIT_NOT_FOUND
+    if lead is None:
+        _fail_generation(args.lead_id, "lead_not_found", "lead not found")
+        sys.stderr.write(f"lead {args.lead_id} not found\n")
+        return EXIT_NOT_FOUND
+    try:
+        menu_items = _load_menu_items()
+    except Exception as e:
+        _fail_generation(args.lead_id, "menu_missing", str(e))
+        sys.stderr.write(f"menu load failed: {e}\n")
+        return EXIT_NOT_FOUND
+
+    menu_by_name = {name: item.category for name, item in menu_items.items()}
+    plan = recompose_plan(args.request_text, _load_latest_sent_set(args.lead_id), menu_by_name)
+
+    if plan["kind"] == "clarify":
+        ok, mid_or_err = _bridge_post(args.customer_jid, BRIDGE_PREFIX + plan["message"])
+        if not ok:
+            _fail_generation(args.lead_id, "bridge_unreachable", mid_or_err)
+            print(json.dumps({"mode": "clarify", "sent": False}))
+            return EXIT_DEPENDENCY_DOWN
+        _append_audit(CateringRecomposeClarifySent(
+            type="catering_recompose_clarify_sent", ts=_now(), lead_id=args.lead_id,
+            reason=plan["reason"], outbound_message_id=mid_or_err,
+            detail=plan["message"][:2000]))
+        print(json.dumps({"mode": "clarify", "reason": plan["reason"], "sent": True}))
+        return EXIT_OK
+
+    # kind == merge
+    try:
+        body, rendered_cats = _render_recomposed(plan["item_names"], menu_items, plan["combination"])
+    except KeyError as e:
+        _fail_generation(args.lead_id, "unknown_menu_item", str(e))
+        sys.stderr.write(f"unknown menu item: {e}\n")
+        return EXIT_INVALID_INPUT
+    except ValueError as e:
+        _fail_generation(args.lead_id, "forbidden_customer_text", str(e))
+        sys.stderr.write(f"forbidden_customer_text: {e}\n")
+        return EXIT_INVALID_INPUT
+
+    # Sections-match chokepoint (condition 2): the rendered combined menu must
+    # contain EXACTLY the requested sections — no more, no fewer. Fail closed.
+    if rendered_cats != set(plan["sections"]):
+        detail = f"requested={sorted(plan['sections'])} rendered={sorted(rendered_cats)}"
+        _fail_generation(args.lead_id, "recompose_sections_mismatch", detail)
+        sys.stderr.write(f"recompose_sections_mismatch: {detail}\n")
+        return EXIT_INVALID_INPUT
+
+    ok, mid_or_err = _bridge_post(args.customer_jid, body)
+    if not ok:
+        _fail_generation(args.lead_id, "bridge_unreachable", mid_or_err)
+        print(json.dumps({"mode": "recomposed", "sent": False}))
+        return EXIT_DEPENDENCY_DOWN
+    _append_audit(CateringRecomposedMenuSent(
+        type="catering_recomposed_menu_sent", ts=_now(), lead_id=args.lead_id,
+        combination=plan["combination"][:200], section_count=len(plan["sections"]),
+        item_count=len(plan["item_names"]), outbound_message_id=mid_or_err))
+    print(json.dumps({"mode": "recomposed", "combination": plan["combination"],
+                      "sent": True, "outbound_message_id": mid_or_err}))
+    return EXIT_OK
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lead-id", required=True)
@@ -368,7 +484,13 @@ def main() -> int:
     parser.add_argument("--request-text", required=True)
     parser.add_argument("--options-json")
     parser.add_argument("--auto-generate-from-menu", action="store_true")
+    parser.add_argument("--recompose-from-sent", action="store_true",
+                        help="PR-D mix-and-match: deterministically combine sections of "
+                             "already-SENT options named in --request-text (clarify if imperfect)")
     args = parser.parse_args()
+
+    if args.recompose_from_sent:
+        return _run_recompose(args)
 
     try:
         lead = _load_lead(args.lead_id)
