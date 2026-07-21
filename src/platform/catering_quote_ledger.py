@@ -45,6 +45,14 @@ from typing import Any, Optional, Tuple
 QUOTE_TEXT_MAX = 16384                      # bounded stored quote prefix
 DEFAULT_OWNER = "shift-agent"
 DEFAULT_GROUP = "shift-agent"
+# Test/host affordance for the POSIX fs-owner contract. Production leaves these
+# UNSET → the ledger enforces shift-agent:shift-agent (the deployed state-dir
+# owner). A subprocess integration test whose tmp state dir is owned by the CI
+# runner (not shift-agent) sets these to the runner's user/group so _validate_fs
+# passes — mirrors how catering_amendments' subprocess/MP tests pass an explicit
+# expected_owner. An explicit expected_owner= argument still wins over the env.
+_OWNER_ENV = "SHIFT_AGENT_CATERING_QUOTE_LEDGER_OWNER"
+_GROUP_ENV = "SHIFT_AGENT_CATERING_QUOTE_LEDGER_GROUP"
 _ACCEPTED_MODES = ("640", "660")
 _DEFAULT_STATE_DIR = "/opt/shift-agent/state"
 _DATA_NAME = "catering-quote-ledger.json"
@@ -356,8 +364,8 @@ def append_version(
     created_at = created_at or datetime.now(timezone.utc)
     data_path = Path(data_path) if data_path else _data_path()
     lock_path = Path(lock_path) if lock_path else _lock_path(data_path)
-    expected_owner = expected_owner or DEFAULT_OWNER
-    expected_group = expected_group or DEFAULT_GROUP
+    expected_owner = expected_owner or os.environ.get(_OWNER_ENV) or DEFAULT_OWNER
+    expected_group = expected_group or os.environ.get(_GROUP_ENV) or DEFAULT_GROUP
 
     lead_id = lead_id or ""
     if not lead_id:

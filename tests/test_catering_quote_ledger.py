@@ -311,6 +311,35 @@ def test_next_seq_derived_when_absent(tmp_path):
     assert r.ok and r.ledger_entry_id == "Q0008", "next_seq derives from max existing seq"
 
 
+def test_expected_owner_group_resolve_from_env(tmp_path, monkeypatch):
+    """CROSS-PLATFORM wiring guard for the fs-owner contract. `_validate_fs`'s
+    owner/group enforcement is POSIX-only (a no-op off POSIX), so a Windows-only
+    dev loop can't observe it — which is exactly how a subprocess script that used
+    the default shift-agent owner passed locally but failed on the runner-owned CI
+    tmp dir. This pins the env-override WIRING deterministically on every platform:
+    the SHIFT_AGENT_CATERING_QUOTE_LEDGER_OWNER/_GROUP env values must reach
+    _validate_fs, and an explicit argument must still win over the env."""
+    seen: dict = {}
+
+    def _spy(path, owner, group):
+        seen["owner"], seen["group"] = owner, group
+        return "path_symlink"  # short-circuit before any write; deterministic fail
+    monkeypatch.setattr(ql, "_validate_fs", _spy)
+    monkeypatch.setenv("SHIFT_AGENT_CATERING_QUOTE_LEDGER_OWNER", "ci-runner")
+    monkeypatch.setenv("SHIFT_AGENT_CATERING_QUOTE_LEDGER_GROUP", "ci-group")
+    data = tmp_path / "catering-quote-ledger.json"
+    r = ql.append_version(lead_id="L1", quote_text="q", quote_total_usd=1,
+                          selected_items=[], source="owner_edit", data_path=data)
+    assert not r.ok and r.reason == "fs_path_symlink"
+    assert seen == {"owner": "ci-runner", "group": "ci-group"}, "env owner/group must reach _validate_fs"
+
+    seen.clear()
+    ql.append_version(lead_id="L1", quote_text="q", quote_total_usd=1, selected_items=[],
+                      source="owner_edit", data_path=data,
+                      expected_owner="explicit-o", expected_group="explicit-g")
+    assert seen == {"owner": "explicit-o", "group": "explicit-g"}, "explicit arg wins over env"
+
+
 def test_corrupt_store_preserved_not_quarantined(tmp_path):
     data = tmp_path / "catering-quote-ledger.json"
     _seed_store(data, "{ this is not valid json")
@@ -479,6 +508,37 @@ def _write_lead(path: Path, code="#ABCDE"):
     path.write_text(json.dumps({"leads": [lead]}), encoding="utf-8")
 
 
+_APPLY_SCRIPT = REPO / "src" / "agents" / "catering" / "scripts" / "apply-catering-owner-decision"
+
+
+def _apply_edit_env(tmp_path, ledger, decisions_log):
+    """Subprocess env for the real apply-script. Threads the ledger PATH + the
+    runner's OWNER/GROUP (the ledger's POSIX fs-owner check defaults to shift-agent,
+    which the runner-owned tmp dir would fail) + a tmp decisions log so the ledger's
+    committed/append_failed audit rows land assertably."""
+    state = ledger.parent
+    return {
+        **os.environ,
+        "SHIFT_AGENT_CONFIG_PATH": str(tmp_path / "config.yaml"),
+        "SHIFT_AGENT_LEADS_PATH": str(state / "catering-leads.json"),
+        "SHIFT_AGENT_LEADS_LOCK": str(state / "catering-leads.json.lock"),
+        "SHIFT_AGENT_LOG_PATH": str(decisions_log),
+        "SHIFT_AGENT_DECISIONS_LOG_PATH": str(decisions_log),
+        "SHIFT_AGENT_CATERING_QUOTE_LEDGER_PATH": str(ledger),
+        "SHIFT_AGENT_CATERING_QUOTE_LEDGER_OWNER": OWNER,
+        "SHIFT_AGENT_CATERING_QUOTE_LEDGER_GROUP": GROUP,
+        "PYTHONPATH": f"{PLATFORM_DIR}{os.pathsep}{os.environ.get('PYTHONPATH', '')}",
+    }
+
+
+def _run_apply_edit(env):
+    return subprocess.run(
+        [sys.executable, str(_APPLY_SCRIPT), "--code", "#ABCDE", "--decision", "edit",
+         "--edit-text", "add appetizer platter; cap at $400", "--sender-role", "owner"],
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+
+
 @pytest.mark.skipif(platform.system() == "Windows",
                     reason="apply script imports safe_io (fcntl) — Linux-only")
 def test_owner_edit_appends_exactly_one_ledger_version(tmp_path):
@@ -489,27 +549,46 @@ def test_owner_edit_appends_exactly_one_ledger_version(tmp_path):
     _write_config(tmp_path / "config.yaml")
     _write_lead(state / "catering-leads.json")
     ledger = state / "catering-quote-ledger.json"
-    apply_script = REPO / "src" / "agents" / "catering" / "scripts" / "apply-catering-owner-decision"
-    env = {
-        **os.environ,
-        "SHIFT_AGENT_CONFIG_PATH": str(tmp_path / "config.yaml"),
-        "SHIFT_AGENT_LEADS_PATH": str(state / "catering-leads.json"),
-        "SHIFT_AGENT_LEADS_LOCK": str(state / "catering-leads.json.lock"),
-        "SHIFT_AGENT_LOG_PATH": str(logs / "decisions.log"),
-        "SHIFT_AGENT_CATERING_QUOTE_LEDGER_PATH": str(ledger),
-        "PYTHONPATH": f"{PLATFORM_DIR}{os.pathsep}{os.environ.get('PYTHONPATH', '')}",
-    }
-    result = subprocess.run(
-        [sys.executable, str(apply_script), "--code", "#ABCDE", "--decision", "edit",
-         "--edit-text", "add appetizer platter; cap at $400", "--sender-role", "owner"],
-        env=env, capture_output=True, text=True, timeout=30,
-    )
+    result = _run_apply_edit(_apply_edit_env(tmp_path, ledger, logs / "decisions.log"))
     assert result.returncode == 0, f"stderr={result.stderr!r}"
     assert ledger.exists(), "owner edit must append a committed version to the ledger"
     records = json.loads(ledger.read_text(encoding="utf-8"))["records"]
     assert len(records) == 1, f"exactly one version expected, got {len(records)}"
     assert records[0]["version"] == 1 and records[0]["source"] == "owner_edit"
     assert records[0]["approval_code"] == "#ABCDE" and records[0]["lead_id"] == "L0007"
+
+
+@pytest.mark.skipif(platform.system() == "Windows",
+                    reason="apply script imports safe_io (fcntl) — Linux-only")
+def test_owner_edit_ledger_failure_does_not_block_lead_write_and_alarms(tmp_path):
+    """NEGATIVE / best-effort-with-alarm contract: when the ledger append CANNOT
+    persist (here the ledger path is a directory → fs_path_not_regular), the owner
+    edit STILL commits the lead (OWNER_EDITED) AND the failure is surfaced — a
+    stderr WARN at the write site + a catering_quote_ledger_append_failed audit
+    row. The append is never a silent hole."""
+    state = tmp_path / "state"
+    logs = tmp_path / "logs"
+    state.mkdir()
+    logs.mkdir()
+    _write_config(tmp_path / "config.yaml")
+    _write_lead(state / "catering-leads.json")
+    ledger = state / "catering-quote-ledger.json"
+    ledger.mkdir()  # a directory where the ledger file should be → append cannot write
+    decisions_log = logs / "decisions.log"
+    result = _run_apply_edit(_apply_edit_env(tmp_path, ledger, decisions_log))
+
+    # Lead write succeeded — the best-effort append never fails the script.
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    lead = json.loads((state / "catering-leads.json").read_text(encoding="utf-8"))["leads"][0]
+    assert lead["status"] == "OWNER_EDITED"
+    # No committed version (the directory is untouched, no records file written).
+    assert not (ledger / "records").exists()
+    # Alarm fired both ways: stderr WARN at the write site + append_failed audit row.
+    assert "quote-ledger append failed" in result.stderr
+    rows = [json.loads(ln) for ln in decisions_log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    failed = [r for r in rows if r.get("type") == "catering_quote_ledger_append_failed"]
+    assert failed and failed[0]["source"] == "owner_edit"
+    assert failed[0]["reason"] == "fs_path_not_regular"
 
 
 # ════════════════════════════════════════════════════════════════════════════

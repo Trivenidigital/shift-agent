@@ -39,6 +39,23 @@ TEMPLATES_DIR = REPO / "src" / "agents" / "catering" / "templates"
 PLATFORM_DIR = REPO / "src" / "platform"
 
 
+def _runner_ids():
+    """Owner/group the CI runner writes tmp files as. The PR-B quote ledger's
+    _validate_fs enforces owner:group on POSIX (default shift-agent:shift-agent);
+    the subprocess-driven scripts run as the runner, whose tmp state dir is NOT
+    owned by shift-agent, so the finalize/apply subprocess cells pass these to the
+    ledger via SHIFT_AGENT_CATERING_QUOTE_LEDGER_OWNER/_GROUP. Non-POSIX value is
+    inert (the whole module skips on Windows)."""
+    if os.name == "posix":
+        import grp
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name, grp.getgrgid(os.getgid()).gr_name
+    return ("shift-agent", "shift-agent")
+
+
+_LEDGER_OWNER, _LEDGER_GROUP = _runner_ids()
+
+
 class _BridgeStub(BaseHTTPRequestHandler):
     requests: list = []
     response_mode = "ok"  # "ok" | "down"
@@ -201,7 +218,11 @@ print(json.dumps({{"rc": rc, "stdout": buf.getvalue()}}))
         # finalize-catering-menu script; stub port keeps the tripwire dormant.
         env={**os.environ,
              "HERMES_BRIDGE_URL": f"http://127.0.0.1:{bridge_port}/send",
-             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1"},
+             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1",
+             # PR-B: the ledger's POSIX fs-owner check defaults to shift-agent;
+             # the runner-owned tmp state dir needs the runner's ids to pass.
+             "SHIFT_AGENT_CATERING_QUOTE_LEDGER_OWNER": _LEDGER_OWNER,
+             "SHIFT_AGENT_CATERING_QUOTE_LEDGER_GROUP": _LEDGER_GROUP},
     )
     out_lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
     parsed = json.loads(out_lines[-1]) if out_lines else {"rc": -1, "stdout": ""}
@@ -1011,7 +1032,11 @@ print(json.dumps({{"rc": rc, "stdout": buf.getvalue()}}))
         capture_output=True, text=True, timeout=15,
         env={**os.environ,
              "HERMES_BRIDGE_URL": f"http://127.0.0.1:{bridge_port}/send",
-             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1"},
+             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1",
+             # PR-B: the ledger's POSIX fs-owner check defaults to shift-agent;
+             # the runner-owned tmp state dir needs the runner's ids to pass.
+             "SHIFT_AGENT_CATERING_QUOTE_LEDGER_OWNER": _LEDGER_OWNER,
+             "SHIFT_AGENT_CATERING_QUOTE_LEDGER_GROUP": _LEDGER_GROUP},
     )
     out_lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
     parsed = json.loads(out_lines[-1]) if out_lines else {"rc": -1, "stdout": ""}
