@@ -84,32 +84,52 @@ def installed_platform_modules(deploy_text: str) -> tuple[set[str], list[str]]:
     return installed, unclassified
 
 
-def _is_python_source(path: Path, text: str) -> bool:
-    """A .py file, or an extension-less script with a python shebang (the deployed scripts)."""
-    if path.suffix == ".py":
+def _is_inscope_python_candidate(path: Path) -> bool:
+    """True iff ``path`` is genuine in-scope Python SOURCE — decided WITHOUT decoding
+    the body, so compiled bytecode never reaches the fail-closed unparseable path.
+
+    In-scope = NOT under a ``__pycache__`` component AND either an exact ``.py`` suffix
+    OR an extension-less file whose shebang names python (the deployed scripts, which
+    are run as ``#!/usr/bin/env python3`` with no ``.py`` extension). A ``.pyc`` has
+    suffix ``.pyc`` (neither ``.py`` nor empty) → excluded; a bash script has suffix
+    ``.sh`` or a non-python shebang → excluded. The shebang peek reads BYTES, so a
+    stray binary here can never raise a decode error.
+    """
+    if "__pycache__" in path.parts:
+        return False
+    suffix = path.suffix
+    if suffix == ".py":
         return True
-    first = text.split("\n", 1)[0]
-    return first.startswith("#!") and "python" in first
+    if suffix == "":
+        try:
+            with path.open("rb") as fh:
+                head = fh.readline(256)
+        except OSError:
+            return False  # unreadable / a directory — not a source candidate
+        return head.startswith(b"#!") and b"python" in head
+    return False
 
 
 def imported_platform_modules(files, platform_modules: set[str]) -> tuple[set[str], list[Path]]:
     """(imported_set, unparseable_files) across ``files``.
 
     Collects level-0 ``import <name>`` / ``from <name> import ...`` targets whose top
-    module name is a flat ``src/platform`` module. A Python file that cannot be read or
-    AST-parsed is returned in ``unparseable_files`` (fail-closed: we cannot prove it
-    contains no such import). Non-Python files (bash scripts) are skipped.
+    module name is a flat ``src/platform`` module. Only genuine in-scope Python source
+    (see ``_is_inscope_python_candidate``) is considered; a candidate that then cannot be
+    decoded or AST-parsed is returned in ``unparseable_files`` (fail-closed: we cannot
+    prove it contains no such import). Non-Python files (bash scripts, ``.pyc`` bytecode,
+    anything under ``__pycache__``) are skipped BEFORE any text read.
     """
     imported: set[str] = set()
     unparseable: list[Path] = []
     for f in files:
         path = Path(f)
+        if not _is_inscope_python_candidate(path):
+            continue
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             unparseable.append(path)
-            continue
-        if not _is_python_source(path, text):
             continue
         try:
             tree = ast.parse(text, filename=str(path))
@@ -226,6 +246,23 @@ def test_guard_fails_closed_on_unparseable_python_negative_selftest(tmp_path):
     broken.write_text("#!/usr/bin/env python3\ndef (:\n", encoding="utf-8")
     _imported, unparseable = imported_platform_modules([broken], {"anything"})
     assert unparseable == [broken]
+
+
+def test_pycache_bytecode_is_not_selected_negative_selftest(tmp_path):
+    """Reproduces the PR #638 CI failure: a __pycache__/*.pyc under a scan root (present
+    on Linux where prior runs compiled bytecode, absent on the Windows worktree) must be
+    excluded WITHOUT being read — binary bytecode must never reach the fail-closed
+    unparseable path. A real .py sibling proves selection still works alongside it."""
+    scripts = tmp_path / "agents" / "svc" / "scripts"
+    (scripts / "__pycache__").mkdir(parents=True)
+    pyc = scripts / "__pycache__" / "foo.cpython-311.pyc"
+    pyc.write_bytes(b"\x42\x0d\x0d\x0a\x00\x00\x00\x00\xff\xfe not-utf8 bytecode")
+    (scripts / "real.py").write_text("import os\n", encoding="utf-8")
+
+    assert _is_inscope_python_candidate(pyc) is False
+    imported, unparseable = imported_platform_modules(sorted(scripts.rglob("*")), {"os"})
+    assert unparseable == [], "bytecode/__pycache__ must not reach the unparseable path"
+    assert imported == {"os"}, "the real .py sibling must still be parsed"
 
 
 def test_guard_fails_closed_on_unclassified_install_line_negative_selftest():
