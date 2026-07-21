@@ -6299,6 +6299,25 @@ class _RegulatedSendLintViolation(_BaseEntry):
     message_preview: str = Field(..., max_length=120)
 
 
+class _ConversationSendThrottleBreach(_BaseEntry):
+    """The bridge_post chokepoint DROPPED a send because the conversation
+    exceeded its per-window send ceiling (2026-07-21 incident limiter). A row
+    here is a BUG REPORT, not routine operation: the designed reply flow for one
+    conversation is an ack + the proposal set + at most one follow-up line, so
+    the ceiling is generous and a breach means a send loop is spiraling. The
+    breaching message was neither sent nor queued (drop-and-alert); the operator
+    is paged via the §12b owner-alert at the breach site. `window_count` is the
+    number of sends already recorded in the sliding window when the ceiling was
+    hit (>= limit)."""
+    type: Literal["conversation_send_throttle_breach"]
+    jid: str = Field(..., max_length=200)
+    caller_script: str = Field(default="", max_length=200)
+    window_count: int = Field(..., ge=0)
+    limit: int = Field(..., ge=1)
+    window_sec: int = Field(..., ge=1)
+    message_preview: str = Field(default="", max_length=120)
+
+
 # ─────────────────────────────────────────────────────────────────
 # Front-brain outbound enforcement — conversation-review surface (P0-5)
 # ─────────────────────────────────────────────────────────────────
@@ -6906,6 +6925,8 @@ LogEntry = Annotated[
         # PR-ζ 2026-05-26 — chokepoint refusal audit variants
         Annotated[_RegulatedSendMissingActionContext, Tag("regulated_send_missing_action_context")],
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
+        # 2026-07-21 — per-conversation bridge_post send throttle (incident limiter)
+        Annotated[_ConversationSendThrottleBreach, Tag("conversation_send_throttle_breach")],
         # Front-brain outbound enforcement — conversation-review surface (P0-5)
         Annotated[FrontBrainReplyComposed, Tag("front_brain_reply_composed")],
         # Front-brain outbound enforcement — refusal audit (P0-3a)

@@ -1476,6 +1476,239 @@ def bridge_send_blocked_by_test_context(target_url: Optional[str] = None) -> Opt
     return None
 
 
+# ─────────────────────────────────────────────────────────────────
+# Per-conversation bridge_post send throttle (2026-07-21 incident limiter)
+#
+# On 2026-07-21 the Hermes gateway loop spiraled to 28 send_message calls in a
+# SINGLE conversation. This throttle is an INCIDENT LIMITER at the bridge_post
+# chokepoint, NOT a fix: the designed reply flow for one conversation is an ack
+# + the proposal set + at most one follow-up line, so 5 sends per 10 minutes is
+# generous and 28 becomes structurally impossible. If it ever fires in
+# production that is a BUG REPORT (a send loop), which is why a breach DROPS the
+# send (never queues — a backlog just delivers the malfunction late) and PAGES
+# the operator (§12b) rather than failing silently.
+#
+# Gated default-OFF behind BRIDGE_CONVERSATION_THROTTLE_ENABLED (rollout
+# scaffolding — graduate to on-by-default once soaked; see the standing
+# rollout-scaffolding-needs-graduation rule). Flag OFF → byte-identical send
+# path (no state file touched, no counting). The ceiling + window are env-
+# overridable config (mirrors front_brain_budget.chat_daily_cap()).
+#
+# Fail-open asymmetry (intentional): a BREACH drops the send, but a throttle-
+# STATE failure (lock / IO / decode error) ALLOWS the send and logs. Dropping a
+# legitimate send because the throttle's own bookkeeping broke is worse than the
+# throttle being briefly ineffective; the breach path is the opposite because a
+# breach is a known-bad flood, not an infra hiccup.
+# ─────────────────────────────────────────────────────────────────
+
+DEFAULT_CONVERSATION_THROTTLE_LIMIT = 5
+DEFAULT_CONVERSATION_THROTTLE_WINDOW_SEC = 600  # 10 minutes
+
+# Deployed default; overridable via env for tests + operator tuning. Mirrors
+# front_brain_budget's state-path convention (JSON-on-disk under state/).
+CONVERSATION_THROTTLE_STATE_PATH = Path(
+    "/opt/shift-agent/state/bridge_conversation_throttle.json"
+)
+
+
+def conversation_throttle_enabled() -> bool:
+    """True only when BRIDGE_CONVERSATION_THROTTLE_ENABLED == "1". Default OFF →
+    the throttle is fully inert and the send path is byte-identical to pre-
+    throttle bridge_post (rollout scaffolding; graduate per the standing rule)."""
+    return os.environ.get("BRIDGE_CONVERSATION_THROTTLE_ENABLED", "") == "1"
+
+
+def conversation_throttle_limit() -> int:
+    """Max sends per conversation per window. Env
+    BRIDGE_CONVERSATION_THROTTLE_LIMIT (default 5). A malformed / <1 value falls
+    back to the default (never 0 — a 0 ceiling would drop every send)."""
+    try:
+        v = int(os.environ.get(
+            "BRIDGE_CONVERSATION_THROTTLE_LIMIT",
+            str(DEFAULT_CONVERSATION_THROTTLE_LIMIT),
+        ))
+        return v if v >= 1 else DEFAULT_CONVERSATION_THROTTLE_LIMIT
+    except (TypeError, ValueError):
+        return DEFAULT_CONVERSATION_THROTTLE_LIMIT
+
+
+def conversation_throttle_window_sec() -> float:
+    """Sliding-window width in seconds. Env
+    BRIDGE_CONVERSATION_THROTTLE_WINDOW_SEC (default 600 = 10 min). A malformed /
+    non-positive value falls back to the default."""
+    default = float(DEFAULT_CONVERSATION_THROTTLE_WINDOW_SEC)
+    try:
+        v = float(os.environ.get(
+            "BRIDGE_CONVERSATION_THROTTLE_WINDOW_SEC",
+            str(DEFAULT_CONVERSATION_THROTTLE_WINDOW_SEC),
+        ))
+        return v if v > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _conversation_throttle_state_path() -> Path:
+    return Path(
+        os.environ.get("BRIDGE_CONVERSATION_THROTTLE_STATE_PATH")
+        or CONVERSATION_THROTTLE_STATE_PATH
+    )
+
+
+def conversation_throttle_decision(
+    timestamps: list[float],
+    now: float,
+    *,
+    limit: int,
+    window_sec: float,
+) -> Tuple[bool, list[float]]:
+    """PURE sliding-window decision — no I/O, no fcntl (Windows-unit-testable).
+
+    Given the send timestamps already recorded for a conversation, decide whether
+    a send at `now` is admitted under `limit` sends per `window_sec`:
+      - Evict timestamps at or before ``now - window_sec`` (they slid out).
+      - If the surviving in-window count is >= ``limit`` → BREACH: return
+        ``(False, evicted)`` with ``now`` NOT appended — the breaching send is
+        dropped, never recorded, so a stuck loop can't ratchet the window.
+      - Otherwise → ALLOW: return ``(True, evicted + [now])``.
+
+    Sliding, not fixed-bucket: the window is always the trailing ``window_sec``
+    ending at ``now``, so there is no bucket boundary a burst can straddle to
+    double up. Public (no leading underscore) so the pure window math is unit-
+    testable on Windows where safe_io's fcntl-backed paths can't run."""
+    cutoff = now - window_sec
+    kept = [t for t in timestamps if t > cutoff]
+    if len(kept) >= limit:
+        return False, kept
+    kept.append(now)
+    return True, kept
+
+
+def _load_conversation_throttle_state(path: Path) -> dict:
+    """Load the throttle state doc; return {} on missing / empty / corrupt (the
+    canonical safe_load_json renames a corrupt file so the next run starts
+    fresh). Fail toward an empty window rather than crashing the send path."""
+    doc, _status = safe_load_json(path, default={})
+    return doc if isinstance(doc, dict) else {}
+
+
+def _conversation_throttle_reserve(
+    jid: str,
+    *,
+    now: Optional[float] = None,
+    limit: Optional[int] = None,
+    window_sec: Optional[float] = None,
+    state_path: "Optional[Path]" = None,
+) -> Tuple[bool, bool, int]:
+    """Atomically reserve one send for ``jid``'s sliding window under the state
+    file's FileLock. Returns ``(allow_send, breached, window_count)``:
+
+      - Normal admit → ``(True, False, count_including_this_send)``.
+      - Breach       → ``(False, True, count_in_window)``. Caller MUST drop.
+      - Infra fault  → ``(True, False, -1)``. FAIL OPEN: a lock / IO / decode
+        error must NOT drop a legitimate send (asymmetric with breach — see the
+        section comment; a broken counter is an infra hiccup, not a flood).
+
+    The bucket key is the normalized chat key (``_front_brain_normalize_chat_key``
+    strips the @-JID suffix / punctuation / case) so LID / phone / JID forms of
+    one conversation share a bucket. A key that normalizes to empty fails OPEN —
+    a nameless chat can't be bounded and must not be dropped."""
+    key = _front_brain_normalize_chat_key(jid)
+    if not key:
+        return True, False, -1
+    eff_limit = conversation_throttle_limit() if limit is None else max(1, int(limit))
+    eff_window = conversation_throttle_window_sec() if window_sec is None else float(window_sec)
+    ts_now = time.time() if now is None else float(now)
+    path = Path(state_path) if state_path is not None else _conversation_throttle_state_path()
+    try:
+        with FileLock(Path(str(path) + ".lock")):
+            doc = _load_conversation_throttle_state(path)
+            conversations = doc.get("conversations")
+            if not isinstance(conversations, dict):
+                conversations = {}
+            raw = conversations.get(key)
+            timestamps = [float(t) for t in raw] if isinstance(raw, list) else []
+            allowed, updated = conversation_throttle_decision(
+                timestamps, ts_now, limit=eff_limit, window_sec=eff_window,
+            )
+            # Persist the evicted window on BOTH allow and breach: eviction is
+            # pure pruning (bounds the file), and on breach `updated` excludes
+            # the dropped send, so a breach never grows the stored window.
+            conversations[key] = updated
+            doc["conversations"] = conversations
+            atomic_write_json(path, doc)
+            return allowed, (not allowed), len(updated)
+    except Exception as e:  # noqa: BLE001 — fail OPEN on any throttle-infra fault
+        try:
+            sys.stderr.write(
+                f"conversation_send_throttle state error ({type(e).__name__}: "
+                f"{str(e)[:160]}); failing OPEN (send proceeds)\n"
+            )
+        except Exception:
+            pass
+        return True, False, -1
+
+
+def _emit_conversation_throttle_breach(
+    jid: str, message: str, window_count: int, limit: int, window_sec: float,
+) -> None:
+    """Record the drop (suppression audit row) AND page the operator (§12b) at
+    the breach site. A breach is a malfunction, so the operator must be told.
+
+    The audit row is best-effort (`_try_emit_audit_row` never propagates — the
+    send is already dropped, don't compound it by crashing the handler). The
+    §12b alert reuses `notify_owner_with_fallback` (plain text — no Markdown, so
+    the underscore-bearing reason/jid can't be mangled) and is bracketed by
+    `*_alert_dispatched` / `*_alert_delivered` stderr lines so every fire is
+    traceable in journalctl regardless of whether delivery succeeded."""
+    caller = _resolve_caller_script_name()
+    _try_emit_audit_row(
+        "conversation_send_throttle_breach",
+        {
+            "jid": jid,
+            "caller_script": caller,
+            "window_count": max(0, int(window_count)),
+            "limit": int(limit),
+            "window_sec": int(window_sec),
+            "message_preview": str(message or "")[:120],
+        },
+    )
+    title = "conversation send throttle breach"
+    body = (
+        f"DROPPED a send: conversation {jid} exceeded {limit} sends / "
+        f"{int(window_sec)}s (in-window={window_count}, caller={caller}). "
+        f"This is an incident limiter firing — a send loop is likely spiraling; "
+        f"investigate the conversation."
+    )
+    try:
+        sys.stderr.write(
+            f"conversation_send_throttle_breach_alert_dispatched jid={jid} "
+            f"count={window_count} limit={limit} window_sec={int(window_sec)} "
+            f"caller={caller}\n"
+        )
+    except Exception:
+        pass
+    delivered = False
+    try:
+        delivered = notify_owner_with_fallback(
+            title, body, priority=1, source="bridge_post_conversation_throttle",
+        )
+    except Exception as e:  # noqa: BLE001 — alerting must never crash the drop path
+        try:
+            sys.stderr.write(
+                f"conversation_send_throttle_breach alert raised "
+                f"({type(e).__name__}: {str(e)[:160]})\n"
+            )
+        except Exception:
+            pass
+    try:
+        sys.stderr.write(
+            f"conversation_send_throttle_breach_alert_delivered jid={jid} "
+            f"delivered={delivered}\n"
+        )
+    except Exception:
+        pass
+
+
 def bridge_post(
     jid: str,
     message: str,
@@ -1486,7 +1719,15 @@ def bridge_post(
     """POST to local Hermes bridge. Returns (success, message_id, error_str, status).
 
     status ∈ {'sent', 'connect_failed', 'http_error', 'send_uncertain',
-              'unknown_error', 'refused'}
+              'unknown_error', 'refused', 'throttled'}
+
+    'throttled' (2026-07-21 incident limiter) = the per-conversation send
+    throttle dropped this send because the conversation exceeded its per-window
+    ceiling (default-OFF behind BRIDGE_CONVERSATION_THROTTLE_ENABLED). The send
+    did NOT go out; err_str is 'conversation_send_throttle_breach'. Distinct from
+    'refused' so callers can tell an incident-throttle drop from a regulated-
+    intent refusal. Caller MUST NOT auto-retry (the ceiling would re-trip). A
+    suppression audit row + a §12b operator page are emitted at the breach.
 
     'send_uncertain' = bridge ACCEPTED (2xx) but ack body unparseable; message
     likely was delivered. Caller MUST NOT auto-retry (would duplicate).
@@ -1558,6 +1799,25 @@ def bridge_post(
             # fall through to send the safe fallback `message`
         else:
             return refusal
+    # Per-conversation send throttle (incident limiter, default-OFF). Placed
+    # HERE — after the regulated-intent policy resolved and after the front-brain
+    # screen — so it counts only DELIVERED-INTENT sends: a regulated hard-refusal
+    # already returned above (nothing went out → not counted); a front-brain
+    # rewrite or a non-money lint fallback fell through to `message` (something
+    # IS going out → counts as one send). On breach: DROP the send + alert; the
+    # distinct 'throttled' status stops callers treating it as delivered or
+    # auto-retrying. Fail-open on throttle-infra error (the reserve helper).
+    if conversation_throttle_enabled():
+        # Proceed unless this send BREACHED the ceiling. A throttle-infra fault
+        # fails OPEN inside the reserve (breached=False), so it also proceeds.
+        _allow_send, breached, window_count = _conversation_throttle_reserve(jid)
+        if breached:
+            _emit_conversation_throttle_breach(
+                jid, message, window_count,
+                conversation_throttle_limit(),
+                conversation_throttle_window_sec(),
+            )
+            return False, "", "conversation_send_throttle_breach", "throttled"
     payload = json.dumps({"chatId": jid, "message": message}).encode("utf-8")
     req = urllib.request.Request(
         BRIDGE_URL, data=payload,
