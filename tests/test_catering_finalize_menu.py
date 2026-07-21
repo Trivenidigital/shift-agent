@@ -39,6 +39,23 @@ TEMPLATES_DIR = REPO / "src" / "agents" / "catering" / "templates"
 PLATFORM_DIR = REPO / "src" / "platform"
 
 
+def _runner_ids():
+    """Owner/group the CI runner writes tmp files as. The PR-B quote ledger's
+    _validate_fs enforces owner:group on POSIX (default shift-agent:shift-agent);
+    the subprocess-driven scripts run as the runner, whose tmp state dir is NOT
+    owned by shift-agent, so the finalize/apply subprocess cells pass these to the
+    ledger via SHIFT_AGENT_CATERING_QUOTE_LEDGER_OWNER/_GROUP. Non-POSIX value is
+    inert (the whole module skips on Windows)."""
+    if os.name == "posix":
+        import grp
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name, grp.getgrgid(os.getgid()).gr_name
+    return ("shift-agent", "shift-agent")
+
+
+_LEDGER_OWNER, _LEDGER_GROUP = _runner_ids()
+
+
 class _BridgeStub(BaseHTTPRequestHandler):
     requests: list = []
     response_mode = "ok"  # "ok" | "down"
@@ -179,6 +196,7 @@ mod.LEADS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json.lock
 mod.MENU_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-menu.json')!r})
 mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
 mod.LOG_LOCK = pathlib.Path({str(env_dir / 'logs' / 'decisions.log.lock')!r})
+mod.LEDGER_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-quote-ledger.json')!r})
 mod.TEMPLATE_DIR = pathlib.Path({str(env_dir / 'templates')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
 buf = io.StringIO()
@@ -200,7 +218,11 @@ print(json.dumps({{"rc": rc, "stdout": buf.getvalue()}}))
         # finalize-catering-menu script; stub port keeps the tripwire dormant.
         env={**os.environ,
              "HERMES_BRIDGE_URL": f"http://127.0.0.1:{bridge_port}/send",
-             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1"},
+             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1",
+             # PR-B: the ledger's POSIX fs-owner check defaults to shift-agent;
+             # the runner-owned tmp state dir needs the runner's ids to pass.
+             "SHIFT_AGENT_CATERING_QUOTE_LEDGER_OWNER": _LEDGER_OWNER,
+             "SHIFT_AGENT_CATERING_QUOTE_LEDGER_GROUP": _LEDGER_GROUP},
     )
     out_lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
     parsed = json.loads(out_lines[-1]) if out_lines else {"rc": -1, "stdout": ""}
@@ -225,6 +247,14 @@ def _read_audit(env_dir):
     if not log_file.exists():
         return []
     return [json.loads(l) for l in log_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+def _read_ledger(env_dir):
+    """PR-B: returns the committed quote-version records ([] if absent)."""
+    f = env_dir / "state" / "catering-quote-ledger.json"
+    if not f.exists():
+        return []
+    return json.loads(f.read_text(encoding="utf-8")).get("records", [])
 
 
 # Standard menu fixture used across most tests.
@@ -983,6 +1013,7 @@ mod.PROPOSALS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-proposals.j
 mod.MENU_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-menu.json')!r})
 mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
 mod.LOG_LOCK = pathlib.Path({str(env_dir / 'logs' / 'decisions.log.lock')!r})
+mod.LEDGER_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-quote-ledger.json')!r})
 mod.TEMPLATE_DIR = pathlib.Path({str(env_dir / 'templates')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
 buf = io.StringIO()
@@ -1001,7 +1032,11 @@ print(json.dumps({{"rc": rc, "stdout": buf.getvalue()}}))
         capture_output=True, text=True, timeout=15,
         env={**os.environ,
              "HERMES_BRIDGE_URL": f"http://127.0.0.1:{bridge_port}/send",
-             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1"},
+             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1",
+             # PR-B: the ledger's POSIX fs-owner check defaults to shift-agent;
+             # the runner-owned tmp state dir needs the runner's ids to pass.
+             "SHIFT_AGENT_CATERING_QUOTE_LEDGER_OWNER": _LEDGER_OWNER,
+             "SHIFT_AGENT_CATERING_QUOTE_LEDGER_GROUP": _LEDGER_GROUP},
     )
     out_lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
     parsed = json.loads(out_lines[-1]) if out_lines else {"rc": -1, "stdout": ""}
@@ -1119,3 +1154,62 @@ class TestAutoDefaultProposalGuard:
         assert parsed["rc"] == 0, f"stderr: {result.stderr}"
         assert _read_lead(env_dir, "#ABCDE")["status"] == "CUSTOMER_FINALIZED"
         assert len(stub.requests) == 1
+
+
+# ============================================================================
+# PR-B — quote-ledger write-site integration + version-bearing owner card
+# ============================================================================
+
+
+class TestQuoteLedgerWriteSite:
+    def test_finalize_appends_one_version_and_card_shows_it(self, bridge_server, env_dir):
+        """customer_finalize appends exactly one committed version (source=
+        customer_finalize) and the owner card carries 'Quote version 1' with no
+        diff line (reviewer criterion 1, first version)."""
+        port, stub = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        items = [{"name": "Aloo Paratha", "qty": 2, "price_usd": 4},
+                 {"name": "Gulab Jamun", "qty": 5, "price_usd": 3}]
+        result, parsed = _run_script(
+            env_dir, port, selected_items_json=json.dumps(items), quote_total_usd=23,
+        )
+        assert parsed["rc"] == 0, f"stderr: {result.stderr}"
+
+        records = _read_ledger(env_dir)
+        assert len(records) == 1, f"exactly one version expected, got {len(records)}"
+        rec = records[0]
+        assert rec["version"] == 1 and rec["source"] == "customer_finalize"
+        assert rec["lead_id"] == "L0001" and rec["quote_total_usd"] == 23
+        assert rec["source_message_id"] == "msg_finalize_001"
+        assert {it["name"] for it in rec["selected_items"]} == {"Aloo Paratha", "Gulab Jamun"}
+
+        card = stub.requests[-1].get("message", "")
+        assert "Quote version 1" in card
+        assert "Changes since" not in card, "first version card has no diff line"
+
+    def test_re_finalize_appends_second_version_and_card_shows_diff(self, bridge_server, env_dir):
+        """A re-finalize (different message id) commits version 2 and the owner
+        card carries 'Quote version 2' + a diff line vs v1."""
+        port, stub = bridge_server
+        _seed_menu(env_dir, DEFAULT_MENU)
+        _seed_lead(env_dir, "L0001", "#ABCDE")
+        first = [{"name": "Aloo Paratha", "qty": 2, "price_usd": 4}]
+        r1, p1 = _run_script(env_dir, port, customer_message_id="msg_v1",
+                             selected_items_json=json.dumps(first), quote_total_usd=8)
+        assert p1["rc"] == 0, f"stderr: {r1.stderr}"
+
+        second = [{"name": "Aloo Paratha", "qty": 2, "price_usd": 4},
+                  {"name": "Chicken Biryani", "qty": 1, "price_usd": 15}]
+        r2, p2 = _run_script(env_dir, port, customer_message_id="msg_v2",
+                             selected_items_json=json.dumps(second), quote_total_usd=23)
+        assert p2["rc"] == 0, f"stderr: {r2.stderr}"
+
+        records = _read_ledger(env_dir)
+        assert [r["version"] for r in records] == [1, 2]
+        assert records[1]["source"] == "customer_finalize"
+
+        card = stub.requests[-1].get("message", "")
+        assert "Quote version 2" in card
+        assert "Changes since v1:" in card
+        assert "+1 item" in card and "total +$15" in card
