@@ -149,6 +149,76 @@ PY_RTV
 }
 # END retired-template-removal
 
+# BEGIN ops/deploy-preserve-timer-state (#634; extract-and-run test boundary)
+# Preserve the operator's PRE-DEPLOYMENT enablement state of
+# flyer-recovery-watchdog.timer across a deploy. Scope is EXACTLY this one timer.
+#
+# Incident (2026-07-21): the config-gated unit install ran an unconditional
+# `systemctl enable --now flyer-recovery-watchdog.timer`, silently reversing an
+# operator-ruled `systemctl disable --now`. The timer's service is broken by
+# foreign drop-ins, so re-enabling resumed a 5-min owner-alert storm. The deploy
+# must therefore honor the operator's choice, not the config's re-enable intent.
+#
+# Classify by the PRINTED token of `systemctl is-enabled` — NOT by exit code:
+# is-enabled prints "disabled" with rc=1, so rc alone is not a failure signal.
+#   * enabled / enabled-runtime → preserve today's behavior: enable --now + the
+#       is-active verification + the existing FAIL path (start failure still fatal).
+#   * disabled                  → do NOT enable, do NOT start; then defensively
+#       verify it is STILL disabled AND inactive (something re-activating it is fatal).
+#   * anything else (masked / static / not-found / empty token) OR a systemctl
+#       invocation error (e.g. command-not-found rc=127, garbage output) → FATAL
+#       BEFORE any activation, echoing the captured token+rc (fail-closed).
+# Emits `[timer-state] before=<token> after=<token>` evidence on every non-fatal path.
+#
+# Rollback safety: this is called from install_artifacts (the shared install path),
+# so a rollback that re-runs the install with a disabled timer ALSO preserves
+# disabled. A prior tarball whose deploy script PREDATES this guard runs its own
+# (pre-guard) enable logic on rollback — that is out of scope by construction.
+preserve_or_enable_flyer_recovery_timer() {
+    local before after rc
+    # Pre-activation state query (stdout token + exit code). `if`-form keeps this
+    # set -e-safe because is-enabled legitimately exits 1 for the "disabled" token.
+    if before="$(systemctl is-enabled flyer-recovery-watchdog.timer 2>/dev/null)"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    case "$before" in
+        enabled|enabled-runtime)
+            # Was enabled → keep today's activation behavior verbatim.
+            if ! systemctl enable --now flyer-recovery-watchdog.timer; then
+                echo "FAIL: flyer-recovery-watchdog.timer enable/start failed" >&2
+                exit 1
+            fi
+            if ! systemctl is-active --quiet flyer-recovery-watchdog.timer; then
+                echo "FAIL: flyer-recovery-watchdog.timer not active after enable" >&2
+                exit 1
+            fi
+            ;;
+        disabled)
+            # Operator-disabled → do NOT enable, do NOT start.
+            echo "[timer-state] preserving operator-disabled state: flyer-recovery-watchdog.timer remains disabled"
+            after="$(systemctl is-enabled flyer-recovery-watchdog.timer 2>/dev/null)" || true
+            if [ "$after" != "disabled" ]; then
+                echo "FATAL: flyer-recovery-watchdog.timer expected to remain disabled but is-enabled=${after:-<empty>} after preserve — something re-activated it. Deploy aborted BEFORE restart." >&2
+                exit 1
+            fi
+            if systemctl is-active --quiet flyer-recovery-watchdog.timer; then
+                echo "FATAL: flyer-recovery-watchdog.timer preserved-disabled but is ACTIVE. Deploy aborted BEFORE restart." >&2
+                exit 1
+            fi
+            ;;
+        *)
+            # masked / static / not-found / empty token / systemctl invocation error.
+            echo "FATAL: flyer-recovery-watchdog.timer unexpected pre-deploy state (is-enabled token=${before:-<empty>} rc=$rc); refusing to activate. Deploy aborted BEFORE restart." >&2
+            exit 1
+            ;;
+    esac
+    after="$(systemctl is-enabled flyer-recovery-watchdog.timer 2>/dev/null)" || true
+    echo "[timer-state] before=${before:-<empty>} after=${after:-<empty>}"
+}
+# END ops/deploy-preserve-timer-state
+
 install_artifacts() {
     local src_root="$1"
     cd "$src_root"
@@ -909,14 +979,11 @@ cfg = Config.model_validate(yaml.safe_load(open("/opt/shift-agent/config.yaml"))
 raise SystemExit(0 if cfg.flyer.recovery.enable_timer and cfg.flyer.recovery.mode != "off" else 1)
 PY
     then
-        if ! systemctl enable --now flyer-recovery-watchdog.timer; then
-            echo "FAIL: flyer-recovery-watchdog.timer enable/start failed" >&2
-            exit 1
-        fi
-        if ! systemctl is-active --quiet flyer-recovery-watchdog.timer; then
-            echo "FAIL: flyer-recovery-watchdog.timer not active after enable" >&2
-            exit 1
-        fi
+        # ops/deploy-preserve-timer-state — config wants the timer ON, but do NOT
+        # unconditionally re-enable: preserve the operator's pre-deploy state so an
+        # operator-ruled `systemctl disable --now` survives the deploy. The full
+        # state machine + fail-closed rules live in the guarded function above.
+        preserve_or_enable_flyer_recovery_timer
     else
         systemctl disable --now flyer-recovery-watchdog.timer 2>/dev/null || true
     fi

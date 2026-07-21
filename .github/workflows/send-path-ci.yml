@@ -105,3 +105,12 @@ jobs:
         run: |
           echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
           python -m pytest -vv tests/test_flyer_ttl0_observe.py
+
+      # Deploy timer-state preservation (ops/deploy-preserve-timer-state): the
+      # extract-and-run cells (enabled / disabled / missing-unit / query-failure /
+      # start-failure / rollback / fail-before-activation) are Linux-only, so this
+      # -vv step is where their individual PASSED lines become reviewable evidence.
+      - name: Timer-state preservation diagnostics
+        run: |
+          echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
+          python -m pytest -vv tests/test_deploy_timer_state_preservation.py
