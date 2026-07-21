@@ -283,6 +283,37 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/catering_amendments.py
     fi
+    # PR-D catering platform modules (2026-07-21 incident: these 3 were added to the
+    # tree but NEVER to this explicit per-file install list, so create-catering-
+    # proposal-options ImportError'd in production the first time a proposal inbound
+    # reached it — the flat /opt/shift-agent layout means a script's
+    # `from catering_recompose import ...` resolves ONLY if the module was installed
+    # here). Placed adjacent to catering_amendments.py (same catering-family tier) and
+    # guarded identically for rollback compatibility with tarballs that predate each
+    # module. The drift-guard test (tests/test_deploy_platform_install_completeness.py)
+    # plus the pre-restart import gate below now fail-closed if any of these is dropped
+    # from the list again.
+    # catering_recompose — deterministic mix-and-match recomposition planner; imported
+    # by create-catering-proposal-options (the proposal surface the incident broke).
+    if [ -f src/platform/catering_recompose.py ]; then
+        install -m 644 src/platform/catering_recompose.py /opt/shift-agent/catering_recompose.py
+    else
+        rm -f /opt/shift-agent/catering_recompose.py
+    fi
+    # catering_quote_ledger — append-only per-lead quote-version ledger; imported by
+    # apply-catering-owner-decision, catering-quote-status, finalize-catering-menu.
+    if [ -f src/platform/catering_quote_ledger.py ]; then
+        install -m 644 src/platform/catering_quote_ledger.py /opt/shift-agent/catering_quote_ledger.py
+    else
+        rm -f /opt/shift-agent/catering_quote_ledger.py
+    fi
+    # catering_lead_sweep — stale-lead TTL sweep helper; imported by
+    # catering-lead-ttl-sweep.
+    if [ -f src/platform/catering_lead_sweep.py ]; then
+        install -m 644 src/platform/catering_lead_sweep.py /opt/shift-agent/catering_lead_sweep.py
+    else
+        rm -f /opt/shift-agent/catering_lead_sweep.py
+    fi
     # Front-brain Phase-1: per-chat/day budget + latency fallback, imported by the
     # gateway-send screen (safe_io.front_brain_screen_gateway_send). WITHOUT this,
     # `from front_brain_budget import ...` fails at runtime -> the screen fails
@@ -1820,8 +1851,18 @@ PY
         # PR-D1 R3-H-Gate1: chained check-audit-helpers-symbols.
         # Both gate scripts use #!/usr/bin/env python3 (system Python, no
         # pydantic). Invoke through the Hermes venv so schemas import works.
+        #
+        # Loadability > presence (2026-07-21 incident): the install list dropping
+        # catering_recompose/catering_quote_ledger/catering_lead_sweep did not fail
+        # any presence check — the ImportError only surfaced when a live proposal
+        # inbound hit create-catering-proposal-options. Import-test the flat catering
+        # platform modules here (they are stdlib-only, so this loads them for real,
+        # not just stat()s the files) so a future missing-module regression rolls back
+        # BEFORE the gateway restarts onto the broken proposal surface. The ImportError
+        # traceback (naming the missing module) is left on stderr for the deploy log.
         if ! "$VENV_PY" /usr/local/bin/check-safe-io-symbols > /dev/null \
-              || ! "$VENV_PY" /usr/local/bin/check-audit-helpers-symbols > /dev/null; then
+              || ! "$VENV_PY" /usr/local/bin/check-audit-helpers-symbols > /dev/null \
+              || ! "$VENV_PY" -c "import sys; sys.path.insert(0, '/opt/shift-agent'); import catering_recompose, catering_quote_ledger, catering_lead_sweep, catering_amendments" > /dev/null; then
             echo "FAIL: pre-restart import gate — refusing to restart hermes-gateway" >&2
             if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
                 "$0" rollback "$PREV_TAG"
