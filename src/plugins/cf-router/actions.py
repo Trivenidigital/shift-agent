@@ -2082,6 +2082,32 @@ def is_amendment_phrased(text: str) -> bool:
     return bool(_CATERING_AMENDMENT_PHRASE_RE.search(" ".join((text or "").split())))
 
 
+def is_mix_and_match_request(text: str) -> bool:
+    """Return True when the customer asks to COMBINE sections of already-SENT
+    proposal options ("option 1 starters with the option 2 mains"). Deterministic;
+    NO LLM.
+
+    PR-B2 (2026-07-21): cf-router takes PLAIN active-lead proposal generation back
+    onto the deterministic --auto-generate-from-menu path, but a mix-and-match
+    recompose is a DIFFERENT (already-deterministic) script mode
+    (--recompose-from-sent) that reads the SENT options. Those requests keep
+    falling through to the Hermes catering_dispatcher SKILL, which routes them to
+    the recompose script. This detector is the fork: a request carrying an
+    `option N <section>` reference is a recompose (escape to Hermes); one without
+    is plain generation (cf-router generates). Reuses the PR-D recompose grammar
+    (`catering_recompose.parse_section_refs`) so the fork and the downstream merge
+    share ONE definition of a section reference. Fail-safe: if the recompose module
+    cannot be imported, returns False so the request takes the deterministic
+    generation path rather than the (reversed) Hermes creative path."""
+    try:
+        _ensure_platform_path()
+        from catering_recompose import parse_section_refs  # type: ignore
+
+        return bool(parse_section_refs(text))
+    except Exception:
+        return False
+
+
 def find_selectable_proposal_set(lead_id: str) -> Optional[dict]:
     """Return latest proposal row only when it is selectable."""
     if not lead_id:

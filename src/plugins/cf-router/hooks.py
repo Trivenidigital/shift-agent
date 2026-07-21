@@ -5554,6 +5554,35 @@ def _open_fresh_lead_over_stale(*, text: str, chat_id: str, message_id: str,
     return new_lead_id
 
 
+def _generate_proposals_deterministically(
+    *, lead_id: str, chat_id: str, message_id: str, text: str,
+    approval_code: str, detail: str,
+) -> Optional[dict]:
+    """Generate proposal options for an active lead via the DETERMINISTIC
+    menu-grounded script (create-catering-proposal-options --auto-generate-from-menu)
+    and return the F7 skip result.
+
+    PR-B2 2026-07-21 — this restores the pre-PR-A F7_PROPOSAL_BRANCH generation
+    path (which had live evidence of working) after PR-A moved active-lead
+    generation onto the Hermes creative path (which spiraled to 28 sends and
+    returned "unable to process" on the real gpt-4o-mini gateway). NO LLM composes
+    the menu: the script builds it from catering-menu.json. Same shape as the
+    pre-PR-A branch — a handled rc ({0,2,4,6,11}: ok / invalid-input / not-found /
+    bridge-down / truth-guard, all cases the script has already owned incl. owner
+    notification) skips the LLM; any other rc returns None so the LLM can surface
+    the failure. Mirrors invoke_select_catering_proposal's rc guard."""
+    rc = actions.invoke_create_catering_proposals(lead_id, chat_id, message_id, text)
+    actions.audit_intercepted(
+        reason="f7_proposal_request_deterministic_generation",
+        chat_id=chat_id, code=approval_code, subprocess_rc=rc,
+        detail=detail,
+    )
+    if rc in {0, 2, 4, 6, 11}:
+        return {"action": "skip",
+                "reason": f"cf-router F7 primary: proposals generated deterministically for {lead_id}"}
+    return None
+
+
 def _try_f7_primary_intercept(
     text: str, chat_id: str, event: Any,
     signals: Optional[list[str]] = None,
@@ -5637,24 +5666,31 @@ def _try_f7_primary_intercept(
                         "reason": f"cf-router F7 proposal selection for {lead_id}"}
             return None
 
-    # PR-A 2026-07-21 — fresh-vs-stale discriminator + proposal-request escape,
-    # BEFORE the durable follow-up capture. This is the L0017 13:59 fix: a fresh
-    # inquiry + proposal request against a stale AWAITING_OWNER_APPROVAL lead was
-    # captured as a follow-up (`f7_primary_followup_suppressed`) and never reached
-    # the Hermes dispatcher. Gated by F7_PROPOSAL_BRANCH_ENABLED — the same flag
-    # that gated the prior cf-router-side proposal invoke this block replaces — so
-    # flag-off is a clean rollback to pre-PR-A suppression. Amendment-phrased
-    # follow-ups (update/change/revise/instead/actually/make it) are EXCLUDED here
-    # and keep the unchanged R2A capture path below.
+    # PR-A 2026-07-21 + PR-B2 2026-07-21 — fresh-vs-stale discriminator +
+    # DETERMINISTIC proposal generation, BEFORE the durable follow-up capture. This
+    # is the L0017 13:59 fix: a fresh inquiry + proposal request against a stale
+    # AWAITING_OWNER_APPROVAL lead was captured as a follow-up
+    # (`f7_primary_followup_suppressed`) and never generated proposals. PR-A first
+    # routed generation to the Hermes creative path; PR-B2 reversed that (no live
+    # evidence it worked — the real gpt-4o-mini gateway spiraled to 28 sends) and
+    # took PLAIN generation back onto the deterministic --auto-generate-from-menu
+    # script. Gated by F7_PROPOSAL_BRANCH_ENABLED so flag-off is a clean rollback to
+    # pre-PR-A suppression. Amendment-phrased follow-ups (update/change/revise/
+    # instead/actually/make it) are EXCLUDED here and keep the R2A capture path.
     #
     #   contradiction (fresh inquiry vs open lead date/headcount) → open a NEW
     #     lead + one-line cross-reference ack (f7_fresh_inquiry_new_lead_over_stale);
-    #     if the SAME message is also a proposal request, fall through to Hermes so
-    #     proposals generate against the NEW lead.
-    #   proposal request (no contradiction) → fall through (return None) to the
-    #     Hermes catering_dispatcher SKILL, whose proposal path delegates to
-    #     creative_catering_proposals (f7_proposal_request_escaped_to_dispatcher).
-    #     Supersedes the prior cf-router-side invoke_create_catering_proposals.
+    #     if the SAME message is also a proposal request, GENERATE proposals
+    #     deterministically against the NEW lead (f7_proposal_request_deterministic_
+    #     generation) — no fall-through to Hermes.
+    #   PLAIN proposal request (no contradiction, no mix-and-match) → GENERATE
+    #     proposals deterministically against the active lead
+    #     (f7_proposal_request_deterministic_generation); the LLM is bypassed.
+    #   MIX-AND-MATCH recompose request (combine sections of already-SENT options)
+    #     → fall through (return None) to the Hermes catering_dispatcher SKILL, which
+    #     routes it to create-catering-proposal-options --recompose-from-sent
+    #     (f7_proposal_request_escaped_to_dispatcher). Recompose is a different,
+    #     already-deterministic script mode; only plain generation is taken back.
     #   inquiry-shaped but neither contradiction nor proposal request (ambiguous) →
     #     ONE clarification (f7_fresh_inquiry_ambiguous_clarification); no lead, no
     #     capture.
@@ -5670,26 +5706,40 @@ def _try_f7_primary_intercept(
             )
             if new_lead_id is not None:
                 if proposal_escape:
-                    actions.audit_intercepted(
-                        reason="f7_proposal_request_escaped_to_dispatcher",
-                        chat_id=chat_id, code=approval_code,
+                    # A fresh contradicting inquiry has no SENT options to recompose,
+                    # so a proposal ask here is always plain generation against the
+                    # NEW lead. (rc-unhandled → helper returns None → LLM surfaces it.)
+                    return _generate_proposals_deterministically(
+                        lead_id=new_lead_id, chat_id=chat_id, message_id=message_id,
+                        text=text, approval_code=approval_code,
                         detail=(f"new {new_lead_id} over stale {lead_id}; proposal "
-                                f"request escaped to Hermes dispatcher; LLM handles"),
+                                f"request generated deterministically against the new "
+                                f"lead; LLM bypassed"),
                     )
-                    return None
                 return {"action": "skip",
                         "reason": (f"cf-router F7 primary: fresh inquiry {new_lead_id} "
                                    f"opened over stale {lead_id}")}
             # Creation could not complete — fall through to the durable capture below
             # so the inbound is never lost.
         elif proposal_escape:
-            actions.audit_intercepted(
-                reason="f7_proposal_request_escaped_to_dispatcher",
-                chat_id=chat_id, code=approval_code,
-                detail=(f"active {lead_id}; proposal request escaped to Hermes "
-                        f"dispatcher; LLM handles"),
+            if actions.is_mix_and_match_request(text):
+                # Mix-and-match recompose stays with Hermes: the catering_dispatcher
+                # SKILL routes it to create-catering-proposal-options
+                # --recompose-from-sent, which pulls the named sections VERBATIM from
+                # the SENT options. Only PLAIN menu generation is taken back here.
+                actions.audit_intercepted(
+                    reason="f7_proposal_request_escaped_to_dispatcher",
+                    chat_id=chat_id, code=approval_code,
+                    detail=(f"active {lead_id}; mix-and-match recompose escaped to "
+                            f"Hermes dispatcher; LLM routes to recompose script"),
+                )
+                return None
+            return _generate_proposals_deterministically(
+                lead_id=lead_id, chat_id=chat_id, message_id=message_id,
+                text=text, approval_code=approval_code,
+                detail=(f"active {lead_id}; proposal request generated "
+                        f"deterministically from menu; LLM bypassed"),
             )
-            return None
         elif is_inquiry:
             if F7_PRIMARY_FOLLOWUP_REPLY:
                 _send_fresh_inquiry_clarification(chat_id, lead_id)
