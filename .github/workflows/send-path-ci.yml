@@ -96,3 +96,12 @@ jobs:
         run: |
           echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
           python -m pytest -vv tests/test_deploy_retired_template.py
+
+      # TTL-0 observe-only sweep (PR #633): the read-only-by-construction evidence.
+      # Echo the checkout ref, then run the full suite — incident partition, the A1-A6
+      # semantic pins, and the fail-closed AST no-write guard (module + CLI) — so the
+      # reviewer reads the observe-only proof + PASSED lines directly from the CI log.
+      - name: TTL-0 observe diagnostics (reviewer-mandated)
+        run: |
+          echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
+          python -m pytest -vv tests/test_flyer_ttl0_observe.py

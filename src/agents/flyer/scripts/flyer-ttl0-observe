@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""TTL-0 observe-only stale flyer-project sweep CLI (read-only, no mutations).
+
+Default OFF: unless FLYER_TTL0_OBSERVE_ENABLED=1 the CLI prints
+`{"enabled": false, "candidates_scanned": 0}` and does nothing else. When
+enabled, --as-of is REQUIRED (deterministic/idempotent — no wall-clock default)
+and the CLI prints a metadata-only stale-candidate digest, optionally atomically
+written to --digest-path. See agents/flyer/ttl_observe.py for the ruled spec.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+
+SRC_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(SRC_ROOT / "platform"))
+sys.path.insert(0, str(SRC_ROOT))
+
+try:
+    from flyer_ttl_observe import (  # type: ignore  # noqa: E402
+        build_ttl0_digest,
+        disabled_digest,
+        is_observe_enabled,
+        load_store,
+        parse_utc,
+        serialize_digest,
+        _write_digest_file,
+    )
+except ImportError:
+    from agents.flyer.ttl_observe import (  # noqa: E402
+        build_ttl0_digest,
+        disabled_digest,
+        is_observe_enabled,
+        load_store,
+        parse_utc,
+        serialize_digest,
+        _write_digest_file,
+    )
+
+
+STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="TTL-0 observe-only stale flyer sweep")
+    parser.add_argument("--state-path", default=str(STATE_PATH))
+    parser.add_argument("--as-of", default="",
+                        help="ISO8601 as-of instant; REQUIRED when the feature flag is on.")
+    parser.add_argument("--digest-path", default="",
+                        help="Optional file to atomically write the digest JSON to.")
+    args = parser.parse_args(argv)
+
+    # Flag-off is a strict no-op: this MUST return before any store read, so a
+    # disabled sweep never opens --state-path (proven by the flag-off tests).
+    if not is_observe_enabled(os.environ):
+        print(json.dumps(disabled_digest(), sort_keys=True))
+        return 0
+
+    if not args.as_of.strip():
+        raise SystemExit("--as-of is REQUIRED when the feature flag is on")
+
+    as_of = parse_utc(args.as_of)
+    store = load_store(Path(args.state_path))
+    digest = build_ttl0_digest(store, as_of=as_of)
+    payload = serialize_digest(digest)
+    if args.digest_path.strip():
+        _write_digest_file(Path(args.digest_path), payload)
+    print(payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
