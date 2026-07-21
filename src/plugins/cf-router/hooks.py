@@ -5420,6 +5420,140 @@ def _create_catering_lead_from_inbound(
             "reason": "cf-router F7 primary: catering inquiry routed deterministically"}
 
 
+# ── PR-A fresh-vs-stale discriminator (deterministic identity comparison) ─────
+# A fresh inquiry that contradicts the open lead on event date or headcount is a
+# DIFFERENT event, not a follow-up. Reuses the deployed deterministic extractors
+# (_parse_month_day_event_date + classify_catering's headcount signal). Venue is
+# intentionally omitted — no deployed venue pattern exists, and a fragile venue
+# regex would do more harm than good — so the comparison is date + headcount only.
+_HEADCOUNT_CONTRADICTION_TOLERANCE = 5
+
+
+def _inbound_event_identity(text: str, signals: list[str]) -> tuple[Optional[str], Optional[int]]:
+    """Deterministically extract (event_date ISO, headcount) from the inbound."""
+    return (
+        _parse_month_day_event_date(text),
+        _parse_headcount_from_signals(signals or []),
+    )
+
+
+def _material_contradiction(inbound_date: Optional[str], inbound_headcount: Optional[int],
+                            lead: dict) -> bool:
+    """True when the inbound MATERIALLY contradicts the open lead on an identity
+    field the lead actually has set: a different event date, or a headcount
+    differing beyond a small tolerance. A field absent on either side is never a
+    contradiction (absence is not disagreement)."""
+    extracted = (lead or {}).get("extracted") or {}
+    lead_date = extracted.get("event_date")
+    lead_headcount = extracted.get("headcount")
+    if inbound_date and lead_date and inbound_date != lead_date:
+        return True
+    if (inbound_headcount is not None and lead_headcount is not None
+            and abs(inbound_headcount - lead_headcount) > _HEADCOUNT_CONTRADICTION_TOLERANCE):
+        return True
+    return False
+
+
+def _send_fresh_lead_cross_reference_ack(chat_id: str, new_lead_id: str,
+                                         prior_lead_id: str) -> bool:
+    """One-line cross-reference note sent after a fresh inquiry opens a NEW lead
+    over an older one (PR-A fresh-vs-stale). Distinct from create-catering-lead's
+    own customer ack — it only points at the earlier inquiry so the customer can
+    disambiguate. Hard-coded (HARD RULES: no LLM, no prices, no menu items),
+    reusing the send-catering-ack subprocess like send_canonical_followup_reply."""
+    import subprocess
+
+    template = (
+        f"I've also got your earlier inquiry {prior_lead_id} on file — is this a "
+        f"separate event? I've started {new_lead_id} for this one."
+    )
+    try:
+        result = subprocess.run(
+            [
+                str(actions.SEND_CATERING_ACK_BIN),
+                "--customer-jid", chat_id,
+                "--message-text", template,
+                "--lead-id", new_lead_id,
+            ],
+            capture_output=True, text=True,
+            timeout=actions.SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode == 0
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
+def _send_fresh_inquiry_clarification(chat_id: str, lead_id: str) -> bool:
+    """One clarification for an inquiry-shaped follow-up that neither clearly
+    contradicts nor amends the open lead (PR-A ambiguous branch). Hard-coded one-
+    liner via the existing send-catering-ack subprocess — no new template system,
+    no LLM, no lead mutation. Mirrors send_canonical_followup_reply's shape."""
+    import subprocess
+
+    template = (
+        f"Just to confirm — is this about your existing inquiry {lead_id}, or a "
+        f"new event? Reply and I'll route it to the right one."
+    )
+    try:
+        result = subprocess.run(
+            [
+                str(actions.SEND_CATERING_ACK_BIN),
+                "--customer-jid", chat_id,
+                "--message-text", template,
+                "--lead-id", lead_id,
+            ],
+            capture_output=True, text=True,
+            timeout=actions.SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode == 0
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
+def _open_fresh_lead_over_stale(*, text: str, chat_id: str, message_id: str,
+                                signals: list[str], phone: Optional[str],
+                                prior_lead_id: str) -> Optional[str]:
+    """Open a NEW catering lead for a fresh inquiry that contradicts an older open
+    lead, via the existing create-catering-lead path (idempotent on
+    (customer_phone, message_id) inside that script), then send the one-line
+    cross-reference ack. Returns the new lead_id on success, else None so the
+    caller falls through to the durable R2A capture (the message is never lost).
+    Emits `f7_fresh_inquiry_new_lead_over_stale`."""
+    if phone:
+        customer_phone_arg = phone
+    elif chat_id.endswith("@lid"):
+        customer_phone_arg = "+" + chat_id[: -len("@lid")]
+    else:
+        return None
+
+    extracted = _extract_catering_fields_from_text(text, signals or [])
+    ok, detail = actions.trigger_create_catering_lead(
+        customer_phone=customer_phone_arg,
+        customer_name="",
+        raw_inquiry=text,
+        message_id=message_id,
+        extracted_fields=extracted,
+    )
+    new_lead_id = _lead_id_from_create_detail(detail) if ok else ""
+    if not ok or not new_lead_id:
+        actions.audit_intercepted(
+            reason="f7_fresh_inquiry_new_lead_over_stale", chat_id=chat_id,
+            subprocess_rc=0 if ok else 2,
+            detail=(f"create-over-stale {prior_lead_id} incomplete "
+                    f"(ok={ok}); {detail[:400]}"),
+        )
+        return None
+    actions.audit_intercepted(
+        reason="f7_fresh_inquiry_new_lead_over_stale", chat_id=chat_id,
+        subprocess_rc=0,
+        detail=(f"new {new_lead_id} over stale {prior_lead_id}; fresh inquiry "
+                f"contradicts open lead identity; LLM bypassed"),
+    )
+    if F7_PRIMARY_FOLLOWUP_REPLY:
+        _send_fresh_lead_cross_reference_ack(chat_id, new_lead_id, prior_lead_id)
+    return new_lead_id
+
+
 def _try_f7_primary_intercept(
     text: str, chat_id: str, event: Any,
     signals: Optional[list[str]] = None,
@@ -5503,19 +5637,72 @@ def _try_f7_primary_intercept(
                         "reason": f"cf-router F7 proposal selection for {lead_id}"}
             return None
 
-    if F7_PROPOSAL_BRANCH_ENABLED and actions.is_proposal_request(text):
-        rc = actions.invoke_create_catering_proposals(
-            lead_id, chat_id, message_id, text,
-        )
-        actions.audit_intercepted(
-            reason="f7_proposal_request", chat_id=chat_id,
-            code=approval_code, subprocess_rc=rc,
-            detail=f"active {lead_id}; proposal request handled by cf-router",
-        )
-        if rc in {0, 2, 4, 6, 11}:
+    # PR-A 2026-07-21 — fresh-vs-stale discriminator + proposal-request escape,
+    # BEFORE the durable follow-up capture. This is the L0017 13:59 fix: a fresh
+    # inquiry + proposal request against a stale AWAITING_OWNER_APPROVAL lead was
+    # captured as a follow-up (`f7_primary_followup_suppressed`) and never reached
+    # the Hermes dispatcher. Gated by F7_PROPOSAL_BRANCH_ENABLED — the same flag
+    # that gated the prior cf-router-side proposal invoke this block replaces — so
+    # flag-off is a clean rollback to pre-PR-A suppression. Amendment-phrased
+    # follow-ups (update/change/revise/instead/actually/make it) are EXCLUDED here
+    # and keep the unchanged R2A capture path below.
+    #
+    #   contradiction (fresh inquiry vs open lead date/headcount) → open a NEW
+    #     lead + one-line cross-reference ack (f7_fresh_inquiry_new_lead_over_stale);
+    #     if the SAME message is also a proposal request, fall through to Hermes so
+    #     proposals generate against the NEW lead.
+    #   proposal request (no contradiction) → fall through (return None) to the
+    #     Hermes catering_dispatcher SKILL, whose proposal path delegates to
+    #     creative_catering_proposals (f7_proposal_request_escaped_to_dispatcher).
+    #     Supersedes the prior cf-router-side invoke_create_catering_proposals.
+    #   inquiry-shaped but neither contradiction nor proposal request (ambiguous) →
+    #     ONE clarification (f7_fresh_inquiry_ambiguous_clarification); no lead, no
+    #     capture.
+    #   none of the above → fall through to the unchanged R2A durable capture.
+    if F7_PROPOSAL_BRANCH_ENABLED and not actions.is_amendment_phrased(text):
+        is_inquiry, disc_signals = actions.classify_catering(text)
+        proposal_escape = actions.is_proposal_request_escape(text)
+        inbound_date, inbound_headcount = _inbound_event_identity(text, disc_signals)
+        if is_inquiry and _material_contradiction(inbound_date, inbound_headcount, active_lead):
+            new_lead_id = _open_fresh_lead_over_stale(
+                text=text, chat_id=chat_id, message_id=message_id,
+                signals=disc_signals, phone=phone, prior_lead_id=lead_id,
+            )
+            if new_lead_id is not None:
+                if proposal_escape:
+                    actions.audit_intercepted(
+                        reason="f7_proposal_request_escaped_to_dispatcher",
+                        chat_id=chat_id, code=approval_code,
+                        detail=(f"new {new_lead_id} over stale {lead_id}; proposal "
+                                f"request escaped to Hermes dispatcher; LLM handles"),
+                    )
+                    return None
+                return {"action": "skip",
+                        "reason": (f"cf-router F7 primary: fresh inquiry {new_lead_id} "
+                                   f"opened over stale {lead_id}")}
+            # Creation could not complete — fall through to the durable capture below
+            # so the inbound is never lost.
+        elif proposal_escape:
+            actions.audit_intercepted(
+                reason="f7_proposal_request_escaped_to_dispatcher",
+                chat_id=chat_id, code=approval_code,
+                detail=(f"active {lead_id}; proposal request escaped to Hermes "
+                        f"dispatcher; LLM handles"),
+            )
+            return None
+        elif is_inquiry:
+            if F7_PRIMARY_FOLLOWUP_REPLY:
+                _send_fresh_inquiry_clarification(chat_id, lead_id)
+            actions.audit_intercepted(
+                reason="f7_fresh_inquiry_ambiguous_clarification",
+                chat_id=chat_id, code=approval_code,
+                detail=(f"active {lead_id} status={active_lead.get('status')}; "
+                        f"inquiry-shaped follow-up with no contradicting identity "
+                        f"fields; one clarification sent; LLM bypassed"),
+            )
             return {"action": "skip",
-                    "reason": f"cf-router F7 proposal request for {lead_id}"}
-        return None
+                    "reason": (f"cf-router F7 primary: ambiguous fresh inquiry vs "
+                               f"{lead_id} clarified")}
 
     # PR-R2A 2026-07-19 — durable amendment capture BEFORE the canonical reply.
     # The KNOWN GAP documented above dropped the follow-up TEXT silently. Now the

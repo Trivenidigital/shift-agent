@@ -1909,11 +1909,13 @@ class TestF7PrimaryMode:
         assert mock_trigger.call_args.kwargs["customer_phone"] == "+19045550104"
 
     def test_branch_b_active_lead_suppresses_with_canonical_reply(self, mods, state_env, monkeypatch):
-        """Customer-side catering inquiry with active lead → cf-router skips
-        without creating a new lead. With F7_PRIMARY_FOLLOWUP_REPLY=True, the
-        PR-R2A amendment is durably captured (outcome=captured) THEN
+        """Amendment-phrased follow-up with an active lead → cf-router skips without
+        creating a new lead. With F7_PRIMARY_FOLLOWUP_REPLY=True, the PR-R2A
+        amendment is durably captured (outcome=captured) THEN
         send_canonical_followup_reply is invoked. Audit
-        reason=f7_primary_followup_suppressed."""
+        reason=f7_primary_followup_suppressed. (PR-A: amendment-phrased text keeps the
+        R2A path; an inquiry-shaped follow-up now takes the fresh-vs-stale
+        discriminator instead — covered in test_catering_pra_reachability.)"""
         hooks_mod, actions_mod = mods
         _wire_amendment_capture(monkeypatch, state_env, hooks_mod)
         _seed_config(state_env)
@@ -1934,7 +1936,7 @@ class TestF7PrimaryMode:
              patch.object(actions_mod, "send_canonical_followup_reply",
                           return_value=True) as mock_reply:
             event = _make_event(
-                text="catering for 50 people event Saturday food delivered",
+                text="Actually, please change it to 50 people for the Saturday event.",
                 chat_id="17329837841@s.whatsapp.net",
             )
             result = hooks_mod.pre_gateway_dispatch(event)
@@ -1991,7 +1993,7 @@ class TestF7PrimaryMode:
              patch.object(actions_mod, "send_canonical_followup_reply") as mock_canonical, \
              patch.object(hooks_mod, "_send_amendment_retry_reply", return_value=True) as mock_retry:
             result = hooks_mod.pre_gateway_dispatch(_make_event(
-                text="catering for 50 people event Saturday food delivered",
+                text="Actually, please change it to 50 people for the Saturday event.",
                 chat_id="17329837841@s.whatsapp.net"))
         assert result is not None and result["action"] == "skip"
         assert "capture failed" in result["reason"]
@@ -3504,7 +3506,11 @@ class TestF7PrimaryMode:
         assert result["action"] == "skip"
         assert "follow-up" in result["reason"]
 
-    def test_proposal_request_actionable_invokes_script_when_flag_enabled(self, mods, state_env):
+    def test_proposal_request_escapes_to_dispatcher_when_flag_enabled(self, mods, state_env):
+        """PR-A: a proposal request against an active lead no longer invokes
+        create-catering-proposal-options inside cf-router — it FALLS THROUGH to the
+        Hermes catering_dispatcher SKILL (return None + f7_proposal_request_escaped_
+        to_dispatcher). Supersedes the prior cf-router-side invoke."""
         hooks_mod, actions_mod = mods
         hooks_mod.F7_PROPOSAL_BRANCH_ENABLED = True
         _seed_config(state_env)
@@ -3528,24 +3534,19 @@ class TestF7PrimaryMode:
                 ),
             )
 
-        assert result is not None
-        assert result["action"] == "skip"
-        assert "proposal request" in result["reason"]
-        mock_create.assert_called_once_with(
-            "L0001",
-            "201975216009469@lid",
-            "msg-proposal-request-1",
-            "She wants one mixed option and one premium option.",
-        )
+        # Escape → let the LLM (Hermes dispatcher) handle it: cf-router returns None.
+        assert result is None
+        mock_create.assert_not_called()  # cf-router no longer invokes proposals itself
         mock_reply.assert_not_called()
         rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
         assert len(audits) == 1
-        assert audits[0]["reason"] == "f7_proposal_request"
-        assert audits[0]["subprocess_rc"] == 0
+        assert audits[0]["reason"] == "f7_proposal_request_escaped_to_dispatcher"
 
-    @pytest.mark.parametrize("handled_rc", [2, 4, 6, 11])
-    def test_proposal_request_handled_exit_codes_skip_llm(self, mods, state_env, handled_rc):
+    def test_proposal_request_escape_never_invokes_cf_router_proposals(self, mods, state_env):
+        """PR-A companion: a differently-phrased proposal ask against an active lead
+        also escapes; the cf-router create-catering-proposal-options invoke (and its
+        exit-code handling) is fully retired for the active-lead proposal path."""
         hooks_mod, actions_mod = mods
         hooks_mod.F7_PROPOSAL_BRANCH_ENABLED = True
         _seed_config(state_env)
@@ -3559,7 +3560,7 @@ class TestF7PrimaryMode:
              patch.object(actions_mod, "lid_to_phone_via_identify_sender",
                           return_value=("+19045550104", "customer")), \
              patch.object(actions_mod, "invoke_create_catering_proposals",
-                          return_value=handled_rc), \
+                          return_value=0) as mock_create, \
              patch.object(actions_mod, "send_canonical_followup_reply") as mock_reply:
             result = hooks_mod.pre_gateway_dispatch(
                 SimpleNamespace(
@@ -3569,14 +3570,13 @@ class TestF7PrimaryMode:
                 ),
             )
 
-        assert result is not None
-        assert result["action"] == "skip"
+        assert result is None
+        mock_create.assert_not_called()
         mock_reply.assert_not_called()
         rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
         assert len(audits) == 1
-        assert audits[0]["reason"] == "f7_proposal_request"
-        assert audits[0]["subprocess_rc"] == handled_rc
+        assert audits[0]["reason"] == "f7_proposal_request_escaped_to_dispatcher"
 
     def test_passive_wait_still_suppresses_when_flag_enabled(self, mods, state_env):
         hooks_mod, actions_mod = mods

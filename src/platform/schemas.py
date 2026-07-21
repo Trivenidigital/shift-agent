@@ -5809,6 +5809,21 @@ class CfRouterIntercepted(_BaseEntry):
         "catering_amendment_conflict_resolved",
         "f7_proposal_request",
         "f7_proposal_selection",
+        # PR-A 2026-07-21 — F7 proposal-request escape + fresh-vs-stale discriminator
+        # (reachability/lifecycle). Pins the L0017 13:59 incident: a fresh inquiry +
+        # proposal request against a stale AWAITING_OWNER_APPROVAL lead was captured as
+        # a follow-up (`f7_primary_followup_suppressed`) and never reached Hermes.
+        #   f7_proposal_request_escaped_to_dispatcher — active-lead proposal request
+        #     falls through to the Hermes catering_dispatcher SKILL (LLM handles it via
+        #     creative_catering_proposals); cf-router no longer invokes proposals itself.
+        #   f7_fresh_inquiry_new_lead_over_stale — a fresh inquiry that materially
+        #     contradicts the open lead on date/headcount opens a NEW lead + one-line
+        #     cross-reference to the earlier one.
+        #   f7_fresh_inquiry_ambiguous_clarification — inquiry-shaped but no contradicting
+        #     identity fields → one clarification, no lead created, no capture.
+        "f7_proposal_request_escaped_to_dispatcher",
+        "f7_fresh_inquiry_new_lead_over_stale",
+        "f7_fresh_inquiry_ambiguous_clarification",
         "flyer_primary_project_created",
         "flyer_primary_failed",
         "flyer_project_status",
