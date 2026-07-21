@@ -5318,6 +5318,9 @@ class CateringProposalGenerationFailed(_BaseEntry):
     reason: Literal[
         "unknown_menu_item", "forbidden_customer_text", "bridge_unreachable",
         "lead_not_found", "menu_missing", "invalid_options",
+        # PR-D mix-and-match recomposition (fail-closed before send): the merged
+        # option's rendered sections did not exactly match the parsed request.
+        "recompose_sections_mismatch",
     ]
     detail: str = Field(default="", max_length=2000)
 
@@ -5340,6 +5343,32 @@ class CateringProposalSelectionFailed(_BaseEntry):
         "lead_not_found", "finalize_exit_2", "finalize_exit_4",
         "finalize_exit_11", "finalize_exit_other",
     ]
+    detail: str = Field(default="", max_length=2000)
+
+
+class CateringRecomposedMenuSent(_BaseEntry):
+    """PR-D mix-and-match: a deterministic combined menu (sections pulled verbatim
+    from already-SENT options) was rendered and sent to the customer. Not a
+    CateringProposalSet — a single fulfilled combination, so the >=2-option
+    proposal-set invariant is preserved."""
+    type: Literal["catering_recomposed_menu_sent"]
+    lead_id: str = Field(min_length=1)
+    combination: str = Field(default="", max_length=200)
+    section_count: int = Field(ge=1, le=9)
+    item_count: int = Field(ge=1, le=60)
+    outbound_message_id: str = Field(min_length=1)
+
+
+class CateringRecomposeClarifySent(_BaseEntry):
+    """PR-D mix-and-match: the request did not cleanly resolve against the SENT
+    options, so ONE clarifying question was sent (never a best-guess merge)."""
+    type: Literal["catering_recompose_clarify_sent"]
+    lead_id: str = Field(min_length=1)
+    reason: Literal[
+        "no_sent_set", "underspecified", "ambiguous_section",
+        "unknown_option", "missing_section",
+    ]
+    outbound_message_id: str = ""
     detail: str = Field(default="", max_length=2000)
 
 
@@ -6656,6 +6685,9 @@ LogEntry = Annotated[
         Annotated[CateringProposalGenerationFailed, Tag("catering_proposal_generation_failed")],
         Annotated[CateringProposalSelected, Tag("catering_proposal_selected")],
         Annotated[CateringProposalSelectionFailed, Tag("catering_proposal_selection_failed")],
+        # PR-D mix-and-match recomposition (deterministic combined menu / clarify)
+        Annotated[CateringRecomposedMenuSent, Tag("catering_recomposed_menu_sent")],
+        Annotated[CateringRecomposeClarifySent, Tag("catering_recompose_clarify_sent")],
         # v0.3: idempotency anchors + state-transition coverage
         Annotated[CateringQuoteAttempted, Tag("catering_quote_attempted")],
         Annotated[CateringOwnerApprovalCardAttempted, Tag("catering_owner_approval_card_attempted")],
@@ -6981,6 +7013,7 @@ __all__ = [
     "CateringOwnerApprovalRequested", "CateringOwnerDecision", "CateringQuoteSent",
     "CateringProposalsGenerated", "CateringProposalGenerationFailed",
     "CateringProposalSelected", "CateringProposalSelectionFailed",
+    "CateringRecomposedMenuSent", "CateringRecomposeClarifySent",
     # v0.3 catering audit classes
     "CateringQuoteAttempted", "CateringOwnerApprovalCardAttempted",
     "CateringOwnerApprovalCardFailed", "CateringOwnerApprovalCardSkipped",

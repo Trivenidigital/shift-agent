@@ -625,3 +625,139 @@ else:
     )
     parsed = json.loads(result.stdout.splitlines()[-1])
     assert parsed["raised"] is True
+
+
+# ── PR-D mix-and-match recomposition (deterministic combine of SENT sections) ──
+
+_RECOMPOSE_MENU = [
+    {"name": "Samosa", "price_usd": 3.0, "category": "appetizer",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Chicken Biryani", "price_usd": 15.0, "category": "main",
+     "dietary_tags": ["non-veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Goat Curry", "price_usd": 16.0, "category": "main",
+     "dietary_tags": ["non-veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Gulab Jamun", "price_usd": 3.0, "category": "dessert",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+]
+
+
+def _seed_recompose_sent_set(env_dir: Path) -> None:
+    """SENT set: option 1 = appetizer + main; option 2 = main + dessert (no appetizer)."""
+    sent = {
+        "proposal_set_id": "CPS-L0014-000001", "lead_id": "L0014", "status": "SENT",
+        "created_at": "2026-04-30T10:00:00-04:00", "sent_at": "2026-04-30T10:01:00-04:00",
+        "outbound_message_id": "old_msg", "source_message_id": "msg_old",
+        "request_text": "two ideas",
+        "options": [
+            {"option_id": "1", "style_key": "balanced_mixed", "tier": "balanced",
+             "item_names": ["Samosa", "Chicken Biryani"]},
+            {"option_id": "2", "style_key": "premium_mixed", "tier": "premium",
+             "item_names": ["Goat Curry", "Gulab Jamun"]},
+        ],
+        "selected_option_id": None, "failure_reason": "",
+    }
+    (env_dir / "state" / "catering-proposals.json").write_text(
+        json.dumps({"schema_version": 1, "next_sequence": 2, "sets": [sent]}), encoding="utf-8")
+
+
+def _run_recompose(env_dir: Path, bridge_port: int, request_text: str):
+    sys_argv = [
+        "create-catering-proposal-options", "--lead-id", "L0014",
+        "--customer-jid", "19045550199@s.whatsapp.net",
+        "--source-message-id", "msg_src_recompose",
+        "--request-text", request_text, "--recompose-from-sent",
+    ]
+    wrapper = f"""
+import io, json, pathlib, sys
+sys.argv = {sys_argv!r}
+sys.path.insert(0, {str(PLATFORM_DIR)!r})
+from importlib.machinery import SourceFileLoader
+mod = SourceFileLoader("ccpo_recompose_loaded", {str(SCRIPT)!r}).load_module()
+mod.PROPOSALS_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-proposals.json')!r})
+mod.PROPOSALS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-proposals.json.lock')!r})
+mod.LEADS_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json')!r})
+mod.LEADS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json.lock')!r})
+mod.MENU_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-menu.json')!r})
+mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
+mod.LOG_LOCK = pathlib.Path({str(env_dir / 'logs' / 'decisions.log.lock')!r})
+mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
+buf = io.StringIO(); sys.stdout = buf; rc = -99
+try:
+    rc = mod.main()
+except SystemExit as se:
+    rc = se.code if isinstance(se.code, int) else -1
+finally:
+    sys.stdout = sys.__stdout__
+print(json.dumps({{"rc": rc, "stdout": buf.getvalue()}}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", wrapper], capture_output=True, text=True, timeout=15,
+        env={**os.environ, "HERMES_BRIDGE_URL": f"http://127.0.0.1:{bridge_port}/send",
+             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1"})
+    lines = [l for l in result.stdout.splitlines() if l.strip()]
+    return result, (json.loads(lines[-1]) if lines else {"rc": -1, "stdout": ""})
+
+
+def test_recompose_clean_merge_sends_exact_sections(bridge_server, env_dir):
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir)
+    _seed_recompose_sent_set(env_dir)
+    result, parsed = _run_recompose(env_dir, port, "option 1 starters with the option 2 mains")
+    assert parsed["rc"] == 0, result.stderr
+    out = json.loads(parsed["stdout"].splitlines()[-1])
+    assert out["mode"] == "recomposed" and out["sent"] is True
+    body = stub.requests[-1]["message"]
+    # Exactly the requested sections: starters from opt1 (Samosa), mains from opt2 (Goat Curry).
+    assert "Appetizer:" in body and "- Samosa" in body
+    assert "Main:" in body and "- Goat Curry" in body
+    assert "Dessert:" not in body and "Chicken Biryani" not in body  # opt1 main NOT pulled
+    # No proposal SET created (recomposition is a single fulfilled menu).
+    store = _read_store(env_dir)
+    assert [s["proposal_set_id"] for s in store["sets"]] == ["CPS-L0014-000001"]
+    audit = _read_audit(env_dir)
+    assert any(e["type"] == "catering_recomposed_menu_sent" and e["section_count"] == 2 for e in audit)
+
+
+def test_recompose_missing_section_clarifies_no_merge(bridge_server, env_dir):
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir)
+    _seed_recompose_sent_set(env_dir)
+    # Option 2 has no appetizer → clarify, never a best-guess merge.
+    result, parsed = _run_recompose(env_dir, port, "option 2 starters with option 1 mains")
+    assert parsed["rc"] == 0, result.stderr
+    out = json.loads(parsed["stdout"].splitlines()[-1])
+    assert out["mode"] == "clarify" and out["reason"] == "missing_section"
+    body = stub.requests[-1]["message"]
+    assert "starters" in body.lower()
+    audit = _read_audit(env_dir)
+    assert any(e["type"] == "catering_recompose_clarify_sent" and e["reason"] == "missing_section"
+               for e in audit)
+    # No recomposed-menu audit, no proposal set mutation.
+    assert not any(e["type"] == "catering_recomposed_menu_sent" for e in audit)
+
+
+def test_recompose_unknown_option_clarifies(bridge_server, env_dir):
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir)
+    _seed_recompose_sent_set(env_dir)
+    # Only options 1 and 2 were sent — "option 3" cannot resolve.
+    result, parsed = _run_recompose(env_dir, port, "can we mix in option 3's desserts with option 1 starters?")
+    assert parsed["rc"] == 0, result.stderr
+    out = json.loads(parsed["stdout"].splitlines()[-1])
+    assert out["mode"] == "clarify" and out["reason"] == "unknown_option"
+    assert "options 1 and 2" in stub.requests[-1]["message"]
+
+
+def test_recompose_price_free_on_combined_menu(bridge_server, env_dir):
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir)
+    _seed_recompose_sent_set(env_dir)
+    result, parsed = _run_recompose(env_dir, port, "option 1 starters with option 2 mains")
+    assert parsed["rc"] == 0
+    body = stub.requests[-1]["message"]
+    import re
+    assert not re.search(r"\$\s*\d|\bprice|\bcost|\bdeposit|\bpayment", body, re.I)
