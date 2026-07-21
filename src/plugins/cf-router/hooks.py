@@ -26,7 +26,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from . import actions
 
@@ -324,6 +324,11 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
         actions.audit_raw_body(event, chat_id, message_id, text)
         flyer_generation_enabled = actions.is_flyer_enabled()
         flyer_workflow_enabled = flyer_generation_enabled or actions.is_flyer_workflow_enabled()
+        # P1-1 send-now-compound fix: ONE dispatch-scoped single-flight memo shared
+        # by the line-456 send-now compound check and the escape gate so the
+        # underlying classify_catering runs at most once per inbound (see
+        # _make_classify_catering_memo — it caches + re-raises exceptions too).
+        classify_catering_memo = _make_classify_catering_memo()
 
         # F8 path — owner self-chat + #XXXXX code → bypass LLM
         if actions.is_owner_chat(chat_id):
@@ -450,8 +455,15 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             regulated_account_result = _try_flyer_regulated_account_guard(text, chat_id, event)
             if regulated_account_result is not None:
                 return regulated_account_result
+            # P1-1 send-now-compound fix: the whole-message approval-text arm is
+            # UNCHANGED (proven safe, zero classifier involvement — it short-circuits
+            # the `or`). The send-now arm now takes the early finalize path ONLY for a
+            # PURE send-now; a compound "send it now + <fresh catering>" (or a
+            # classifier error) is NOT early-pathed, so it falls through the normal
+            # ladder → R2B-1 keeps precedence → the escape gate raises ONE clarification.
             if flyer_generation_enabled and (
-                actions.is_flyer_approval_text(text) or actions.is_flyer_send_now_intent(text)
+                actions.is_flyer_approval_text(text)
+                or _flyer_send_now_early_path_allowed(text, classify_catering_memo)
             ):
                 flyer_result = _try_flyer_active_project_intercept(text, chat_id, event, media_path)
                 if flyer_result is not None:
@@ -521,6 +533,20 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                     text, chat_id, event, media_path)
                 if amendment_conflict_result is not None:
                     return amendment_conflict_result
+                # P1-1: fresh-intent catering escape gate. A fresh catering
+                # inquiry from a customer with a LIVE flyer project must reach
+                # catering (F7), not be captured as a flyer edit/revision (the
+                # F0224 `flyer_reference_exact_edit_queued` defect). ONE shared
+                # gate, placed AFTER the R2B-1 gate (precedence preserved) and
+                # BEFORE the active-project intercept so no terminal flyer arm
+                # can claim the message first. Returns the fall-through sentinel
+                # only when the inbound is not catering (byte-identical flyer
+                # path); every other outcome (escape / clarify / F7-declined)
+                # returns from dispatch here.
+                escape_result = _try_flyer_catering_escape_gate(
+                    text, chat_id, event, media_path, classify_fn=classify_catering_memo)
+                if escape_result is not _GATE_FALLTHROUGH:
+                    return escape_result
                 flyer_result = _try_flyer_active_project_intercept(text, chat_id, event, media_path)
                 if flyer_result is not None:
                     return flyer_result
@@ -4146,6 +4172,184 @@ def _send_amendment_conflict_clarification(
                 f"latency_ms={latency_ms}; ack_message_id={mid}; ack_error={err[:200]}"))
     return {"action": "skip",
             "reason": "cf-router R2B-1: amendment/flyer clarification sent"}
+
+
+# P1-1 escape-gate sentinel. `_try_flyer_catering_escape_gate` returns this
+# (NOT None) for the fall-through case, so the caller can distinguish "not
+# catering — run the flyer arms unchanged" from "escaped to F7 which itself
+# declined (owner / lead-create failure) → return None and let the LLM handle,
+# but do NOT let the flyer active-project arms capture the catering inbound".
+_GATE_FALLTHROUGH = object()
+
+
+def _make_classify_catering_memo() -> Callable[[str], tuple]:
+    """Return a dispatch-scoped single-flight memo around `actions.classify_catering`.
+
+    The underlying classifier runs AT MOST ONCE per inbound even on the failure
+    path: the first call caches the result OR the exception, and later calls
+    return the cached tuple or RE-RAISE the cached exception without invoking the
+    classifier again. Shared by the line-456 send-now compound check and the P1-1
+    escape gate so the send-now-compound route costs exactly one classifier call.
+    """
+    cache: dict = {}
+
+    def _memo(text: str) -> tuple:
+        if "value" in cache:
+            return cache["value"]
+        if "error" in cache:
+            raise cache["error"]
+        try:
+            cache["value"] = actions.classify_catering(text)
+        except Exception as exc:  # noqa: BLE001 — cache + re-raise (single-flight)
+            cache["error"] = exc
+            raise
+        return cache["value"]
+
+    return _memo
+
+
+def _flyer_send_now_early_path_allowed(text: str, classify_memo: Callable[[str], tuple]) -> bool:
+    """True only for a PURE "send now" (no fresh catering intent) so the line-456
+    approval/finalization arm still fires byte-identically.
+
+    A compound "send it now + <fresh catering>" — or ANY classifier error —
+    returns False so the inbound falls through the normal dispatch ladder (R2B-1
+    keeps precedence) to the escape gate, which raises ONE flyer-vs-catering
+    clarification. The whole-message approval-text arm is UNCHANGED and never
+    reaches this check (it short-circuits the `or` before us), so approval
+    replies stay classifier-free."""
+    if not actions.is_flyer_send_now_intent(text):
+        return False
+    try:
+        is_catering, _signals = classify_memo(text)
+    except Exception:  # noqa: BLE001 — classifier error ⇒ treat as compound ⇒ clarify downstream
+        return False
+    return not is_catering
+
+
+def _flyer_edit_signal_present(text: str, *, has_media: bool) -> bool:
+    """True when the inbound carries an EXPLICIT flyer edit/approval signal.
+
+    Reuses the deployed deterministic flyer classifiers — no new NLP. Kept
+    narrow on purpose: a genuine catering amendment ("add 20 veg meals for the
+    party") must NOT read as a flyer signal, so `is_flyer_revision_intent`
+    (which matches such follow-ups) is deliberately excluded. Only an explicit
+    flyer/poster/banner mention, a pure approval/send-now token, or a
+    source-preserving edit on attached artwork counts."""
+    return bool(
+        actions.classify_flyer_intent(text)[0]
+        or actions.is_flyer_approval_text(text)
+        or actions.is_flyer_send_now_intent(text)
+        or actions.is_exact_reference_edit_request(text, has_media=has_media)
+    )
+
+
+def _send_flyer_catering_intent_clarification(
+    *, text: str, chat_id: str, event: Any, project_id: str, status: str,
+    role: str, cause: str,
+) -> dict:
+    """P1-1 ambiguous / gate-error outcome: send ONE flyer-vs-catering question
+    and park a single pending choice so the customer's "flyer"/"catering" reply
+    routes through the EXISTING revenue-route resolver (`_try_revenue_route_
+    clarification_choice`). Creates NEITHER a flyer revision NOR a catering lead
+    — only asks + stores. Metadata-only audit (no raw text / phone)."""
+    message_id = _extract_message_id(event, chat_id, text)
+    try:
+        actions.save_revenue_route_clarification(
+            chat_id=chat_id, original_text=text, message_id=message_id,
+            sender_phone="", sender_role=role,
+            signals=[f"flyer_catering_intent:{cause}"],
+        )
+    except Exception:
+        pass  # storing the pending is best-effort; the ask still goes out
+    reply = actions.revenue_route_clarification_reply()
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id, reply,
+        action_context=build_action_context(
+            action_id="flyer.routing.flyer_catering_intent_clarification",
+            is_regulated_action=False,
+        ),
+    )
+    actions.audit_intercepted(
+        reason="flyer_catering_intent_clarification",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 3,
+        detail=(f"cause={cause}; project_id={project_id}; status={status}; "
+                f"sender_role={role}; ack_message_id={mid}; ack_error={err[:200]}"),
+    )
+    return {"action": "skip",
+            "reason": "cf-router flyer/catering intent clarification sent"}
+
+
+def _try_flyer_catering_escape_gate(
+    text: str, chat_id: str, event: Any, media_path: Optional[str] = None,
+    *, classify_fn: Optional[Callable[[str], tuple]] = None,
+) -> Any:
+    """P1-1 fresh-intent catering escape gate (single shared site).
+
+    A customer with a LIVE flyer project sent a fresh catering inquiry
+    (F0224 incident: a "wedding for 120 guests, send me two sample menus"
+    message was captured by the flyer active-project intercept as
+    `flyer_reference_exact_edit_queued` and catering never saw it). This gate
+    runs AFTER the R2B-1 amendment-conflict gate (its precedence is preserved)
+    and BEFORE `_try_flyer_active_project_intercept`, so no terminal flyer arm
+    can claim the message first.
+
+    `classify_fn` is the dispatch-scoped single-flight `classify_catering` memo
+    (defaults to `actions.classify_catering` so every direct-call test keeps
+    working unchanged). Passing the memo lets the send-now compound check at the
+    line-456 approval arm and this gate SHARE a single underlying classifier call
+    per inbound (the memo re-raises a cached exception, which this gate's
+    try/except turns into a clarification — never a guessed route).
+
+    Scoped to an EXISTING active flyer project so a catering inquiry from a
+    sender with no project flows the normal F7 path unchanged (and the escape
+    audit row stays truthful). `classify_catering` is invoked AT MOST ONCE.
+
+    Decision table:
+      catering=False                     → _GATE_FALLTHROUGH (flyer arms run unchanged)
+      catering=True, no flyer signal     → delegate to the F7 new-catering path
+      catering=True, flyer signal (ambiguous) → one flyer-vs-catering clarification
+      any exception inside the gate      → clarification (never a guessed route)
+
+    Returns:
+      _GATE_FALLTHROUGH — caller runs the flyer active-project intercept unchanged.
+      dict              — handled (F7 skip result, or clarification sent).
+      None              — escape delegated to F7 which declined (owner / lead-create
+                          failure); caller returns None so the LLM handles it and the
+                          flyer active-project arms are NOT run.
+    """
+    try:
+        phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+        active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)
+        if active_project is None:
+            return _GATE_FALLTHROUGH
+        is_catering, signals = (classify_fn or actions.classify_catering)(text)
+        if not is_catering:
+            return _GATE_FALLTHROUGH
+        project_id = str(active_project.get("project_id") or "")
+        status = str(active_project.get("status") or "")
+        if _flyer_edit_signal_present(text, has_media=bool(media_path)):
+            return _send_flyer_catering_intent_clarification(
+                text=text, chat_id=chat_id, event=event,
+                project_id=project_id, status=status, role=role,
+                cause="ambiguous_flyer_and_catering",
+            )
+        actions.audit_intercepted(
+            reason="flyer_active_project_catering_intent_escape",
+            chat_id=chat_id,
+            detail=(f"project_id={project_id}; status={status}; sender_role={role}; "
+                    f"signals={','.join(signals)[:200]}"),
+        )
+        return _try_f7_primary_intercept(
+            text, chat_id, event, signals=signals, allow_new_lead=True,
+        )
+    except Exception as exc:  # noqa: BLE001 — a gate error must never guess a route
+        return _send_flyer_catering_intent_clarification(
+            text=text, chat_id=chat_id, event=event,
+            project_id="", status="", role="",
+            cause=f"gate_error:{type(exc).__name__}",
+        )
 
 
 def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, media_path: Optional[str] = None) -> Optional[dict]:

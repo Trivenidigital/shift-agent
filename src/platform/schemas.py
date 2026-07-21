@@ -5849,6 +5849,15 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_delivery_state_guard",
         "flyer_delivery_state_status_surfaced",
         "flyer_active_project_bypassed",
+        # P1-1 2026-07-20: fresh-intent catering escape gate. A customer with a
+        # LIVE flyer project sent a fresh catering inquiry; the gate routed it to
+        # the F7 catering path instead of letting a terminal flyer active-project
+        # arm capture it (the F0224 `flyer_reference_exact_edit_queued` defect).
+        # The clarification reason fires when the inbound carries BOTH catering
+        # and explicit-flyer signals (ambiguous) or when the gate itself errored —
+        # one flyer-vs-catering question, creating neither a lead nor a revision.
+        "flyer_active_project_catering_intent_escape",
+        "flyer_catering_intent_clarification",
         "flyer_brief_approved",
         "flyer_brief_project_create_failed",
         "flyer_starter_preference_off",
