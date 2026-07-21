@@ -28,6 +28,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from fixtures_fleet import ensure_fcntl_stub
 
 ensure_fcntl_stub()
@@ -355,40 +357,10 @@ def test_armed_r2b1_fires_first_and_escape_gate_never_invoked(monkeypatch):
     assert classify_calls["n"] == 0, "R2B-1 armed ⇒ escape gate's classify_catering MUST NOT run"
 
 
-# ── Reviewer-required cell 4: SEND-NOW COMPOUND RESIDUAL (documented, not gated) ──
-#
-# PRE-EXISTING PRODUCTION BEHAVIOR — NOT A REGRESSION — DISCLOSED FOR REVIEWER RULING.
-#
-# `_FLYER_SEND_NOW_PATTERN` (actions.py:5024) is START-ANCHORED but NOT whole-message,
-# so a compound inbound like "Send it now — also, can you cater 120 guests for a
-# wedding August 8?" matches `is_flyer_send_now_intent` AND classifies catering=True.
-# Such a message enters the flyer approval/send-now dispatch arm at hooks.py:~456 —
-# which runs BEFORE the P1-1 escape gate (hooks.py:534) — so the flyer FINALIZES and
-# the catering tail is silently dropped. This cell PINS that current outcome.
-#
-# It is deliberately NOT gated in THIS PR. The escape gate is hoisted to sit AFTER the
-# R2B-1 amendment-conflict gate (the ruling's required precedence). Hoisting the escape
-# gate above the line-456 approval arm would break that R2B-1-first ordering, and gating
-# line 456 separately would risk the at-most-one-`classify_catering` invariant. Note
-# `is_flyer_approval_text` is UNAFFECTED — it requires a whole-message approval token, so
-# only the start-anchored send-now form leaks. Left for the reviewer's ruling on scope.
-def test_send_now_compound_residual_456_path_pins_finalization(monkeypatch):
-    hooks_mod, actions_mod = _load_plugin()
-    COMPOUND = "Send it now — also, can you cater 120 guests for a wedding August 8?"
-    # The residual mechanism: start-anchored send-now AND catering both fire; the
-    # whole-message approval-text classifier does NOT (that form stays safe).
-    assert actions_mod.is_flyer_send_now_intent(COMPOUND) is True
-    assert actions_mod.is_flyer_approval_text(COMPOUND) is False
-    assert actions_mod.classify_catering(COMPOUND)[0] is True
-
-    audits: list = []
-    _neutralize_pre_gate_intercepts(monkeypatch, hooks_mod, actions_mod, audits=audits)
-    monkeypatch.setattr(actions_mod, "lid_to_phone_via_identify_sender", lambda cid: (PHONE, "customer"))
-    # Leaf deps so the REAL active-project approval arm finalizes deterministically
-    # (probe-verified outcome). NOTHING here stubs `_try_flyer_active_project_intercept`
-    # itself — it runs REAL so the pinned outcome is genuine.
-    proj = {"project_id": "F0300", "status": "awaiting_final_approval", "customer_phone": PHONE,
-            "manual_review": {}, "pending_revision_confirmation": {}, "concepts": []}
+def _real_finalize_leaf_deps(monkeypatch, actions_mod, proj):
+    """Stub the leaf deps of the REAL `_try_flyer_active_project_intercept` so its
+    approval/send-now arm finalizes deterministically (probe-verified outcome:
+    result `cf-router flyer active: finalized F0300`, audit `flyer_primary_project_created`)."""
     monkeypatch.setattr(actions_mod, "find_flyer_customer_by_sender",
                         lambda p, c: {"status": "active", "customer_id": "CUST0001"})
     monkeypatch.setattr(actions_mod, "find_active_flyer_project_by_sender", lambda p, c: proj)
@@ -399,10 +371,83 @@ def test_send_now_compound_residual_456_path_pins_finalization(monkeypatch):
     monkeypatch.setattr(actions_mod, "should_bypass_active_flyer_project_for_fresh_request", lambda *a, **k: False)
     monkeypatch.setattr(actions_mod, "is_stale_for_new_request", lambda ap: False)
     monkeypatch.setattr(actions_mod, "find_reserved_flyer_guest_order", lambda *a, **k: None)
+    monkeypatch.setattr(actions_mod, "find_paid_flyer_guest_order", lambda *a, **k: None)
     monkeypatch.setattr(actions_mod, "send_flyer_text", lambda cid, txt, **k: (True, "mid1", ""))
     monkeypatch.setattr(actions_mod, "invoke_update_flyer_project", lambda *a, **k: (True, "{}"))
     monkeypatch.setattr(actions_mod, "finalize_and_send_flyer", lambda *a, **k: (True, "sent"))
 
+
+COMPOUND = "Send it now — also, can you cater 120 guests for a wedding August 8?"
+
+
+# ── Reviewer-required cell 4 (REWRITTEN): send-now compound is now GATED ──
+# The reviewer ruled the residual should be fixed. A compound "send it now +
+# <fresh catering>" no longer takes the line-456 early finalize path; it falls
+# through the normal ladder (R2B-1 precedence preserved) to the escape gate,
+# which raises ONE flyer-vs-catering clarification — no finalization, no revision,
+# no catering lead. `classify_catering` runs EXACTLY ONCE end-to-end (dispatch memo).
+def test_send_now_compound_now_clarifies_no_finalization_single_classify(monkeypatch):
+    hooks_mod, actions_mod = _load_plugin()
+    # Residual mechanism (unchanged facts): start-anchored send-now AND catering both
+    # fire; the whole-message approval-text classifier does NOT.
+    assert actions_mod.is_flyer_send_now_intent(COMPOUND) is True
+    assert actions_mod.is_flyer_approval_text(COMPOUND) is False
+    assert actions_mod.classify_catering(COMPOUND)[0] is True
+
+    audits: list = []
+    _neutralize_pre_gate_intercepts(monkeypatch, hooks_mod, actions_mod, audits=audits)
+    monkeypatch.setattr(actions_mod, "lid_to_phone_via_identify_sender", lambda cid: (PHONE, "customer"))
+    monkeypatch.setattr(actions_mod, "catering_amendment_discriminator_enabled", lambda: False)  # R2B-1 dormant
+    monkeypatch.setattr(actions_mod, "find_active_flyer_project_by_sender",
+                        lambda p, c: _project("awaiting_final_approval", "F0300"))
+    sent, clar_saved, update_calls, lead_writes = [], [], [], []
+    monkeypatch.setattr(actions_mod, "save_revenue_route_clarification", lambda **kw: clar_saved.append(kw))
+    monkeypatch.setattr(actions_mod, "send_flyer_text", lambda cid, txt, **kw: sent.append((cid, txt)) or (True, "mid1", ""))
+    monkeypatch.setattr(actions_mod, "invoke_update_flyer_project", lambda *a, **k: update_calls.append(a) or (True, "{}"))
+    monkeypatch.setattr(actions_mod, "trigger_create_catering_lead", lambda **kw: lead_writes.append(kw) or (True, "lead_created"))
+    monkeypatch.setattr(actions_mod, "find_active_catering_lead_by_sender", lambda p, c: None)
+    # Spy the finalize arm: it must NEVER be reached for the compound.
+    arm_calls: list = []
+    monkeypatch.setattr(hooks_mod, "_try_flyer_active_project_intercept",
+                        lambda *a, **k: arm_calls.append(a) or {"action": "skip", "reason": "cf-router flyer active: finalized F0300"})
+    # Count the UNDERLYING classify_catering beneath the dispatch memo.
+    classify_calls = {"n": 0}
+    _real = actions_mod.classify_catering
+
+    def _count(t):
+        classify_calls["n"] += 1
+        return _real(t)
+    monkeypatch.setattr(actions_mod, "classify_catering", _count)
+
+    result = hooks_mod._pre_gateway_dispatch_impl(SimpleNamespace(
+        text=COMPOUND, chat_id=CHAT, message_id="wamid.CMP"))
+
+    # NEW pinned outcome: ONE flyer-vs-catering clarification; NO finalization.
+    assert result == {"action": "skip", "reason": "cf-router flyer/catering intent clarification sent"}, result
+    assert [a.get("reason") for a in audits] == ["flyer_catering_intent_clarification"]
+    assert "flyer_primary_project_created" not in [a.get("reason") for a in audits], "must NOT finalize"
+    assert len(sent) == 1 and len(clar_saved) == 1, "exactly one clarification + one parked pending"
+    assert arm_calls == [], "the line-456 finalize arm is pre-empted"
+    assert update_calls == [] and lead_writes == [], "no revision/queued edit, no catering lead"
+    assert classify_calls["n"] == 1, "AT MOST ONE classifier call per inbound (dispatch memo shared)"
+
+
+# ── Reviewer-required cell 5: pure send-now REGRESSION — finalization unchanged ──
+@pytest.mark.parametrize("pure_send_now", ["Send it now", "please send my flyer now"])
+def test_pure_send_now_finalization_unchanged(monkeypatch, pure_send_now):
+    """A PURE send-now (no fresh catering) still takes the line-456 early path and
+    finalizes byte-identically to pre-patch — the exact result + audit the old cell
+    #4 pinned. The escape gate is never reached."""
+    hooks_mod, actions_mod = _load_plugin()
+    assert actions_mod.is_flyer_send_now_intent(pure_send_now) is True
+    assert actions_mod.classify_catering(pure_send_now)[0] is False  # not catering ⇒ pure
+
+    audits: list = []
+    _neutralize_pre_gate_intercepts(monkeypatch, hooks_mod, actions_mod, audits=audits)
+    monkeypatch.setattr(actions_mod, "lid_to_phone_via_identify_sender", lambda cid: (PHONE, "customer"))
+    proj = {"project_id": "F0300", "status": "awaiting_final_approval", "customer_phone": PHONE,
+            "manual_review": {}, "pending_revision_confirmation": {}, "concepts": []}
+    _real_finalize_leaf_deps(monkeypatch, actions_mod, proj)  # REAL arm finalizes
     escape_calls = {"n": 0}
 
     def _escape(*a, **k):
@@ -411,14 +456,81 @@ def test_send_now_compound_residual_456_path_pins_finalization(monkeypatch):
     monkeypatch.setattr(hooks_mod, "_try_flyer_catering_escape_gate", _escape)
 
     result = hooks_mod._pre_gateway_dispatch_impl(SimpleNamespace(
-        text=COMPOUND, chat_id=CHAT, message_id="wamid.CMP"))
+        text=pure_send_now, chat_id=CHAT, message_id="wamid.PURE"))
 
-    # PINNED current outcome: the line-456 approval arm finalizes the flyer; the
-    # catering tail ("cater 120 guests for a wedding") is dropped.
     assert result == {"action": "skip", "reason": "cf-router flyer active: finalized F0300"}, result
     assert "flyer_primary_project_created" in [a.get("reason") for a in audits]
-    # The escape gate is PRE-EMPTED by the line-456 arm — never reached (residual).
-    assert escape_calls["n"] == 0
+    assert escape_calls["n"] == 0, "pure send-now stays on the early path; escape gate not reached"
+
+
+# ── Reviewer-required cell 6: compound + classifier EXCEPTION → clarify, exactly one call ──
+def test_send_now_compound_classifier_exception_clarifies_single_call(monkeypatch):
+    """When the classifier RAISES on a compound send-now, both the line-456 check
+    (try/except → treat as compound) and the escape gate (memo re-raises → gate
+    except → clarify) resolve to ONE clarification, and the underlying
+    classify_catering is invoked EXACTLY ONCE (the memo caches + re-raises)."""
+    hooks_mod, actions_mod = _load_plugin()
+    audits: list = []
+    _neutralize_pre_gate_intercepts(monkeypatch, hooks_mod, actions_mod, audits=audits)
+    monkeypatch.setattr(actions_mod, "lid_to_phone_via_identify_sender", lambda cid: (PHONE, "customer"))
+    monkeypatch.setattr(actions_mod, "catering_amendment_discriminator_enabled", lambda: False)
+    monkeypatch.setattr(actions_mod, "find_active_flyer_project_by_sender",
+                        lambda p, c: _project("awaiting_final_approval", "F0300"))
+    sent, clar_saved = [], []
+    monkeypatch.setattr(actions_mod, "save_revenue_route_clarification", lambda **kw: clar_saved.append(kw))
+    monkeypatch.setattr(actions_mod, "send_flyer_text", lambda cid, txt, **kw: sent.append((cid, txt)) or (True, "mid1", ""))
+    arm_calls: list = []
+    monkeypatch.setattr(hooks_mod, "_try_flyer_active_project_intercept",
+                        lambda *a, **k: arm_calls.append(a) or {"action": "skip", "reason": "cf-router flyer active: finalized F0300"})
+    f7_calls: list = []
+    monkeypatch.setattr(hooks_mod, "_try_f7_primary_intercept", lambda *a, **k: f7_calls.append((a, k)) or None)
+    # Spy the REAL classifier BENEATH the memo — it must be invoked exactly once.
+    classify_calls = {"n": 0}
+
+    def _boom(_t):
+        classify_calls["n"] += 1
+        raise RuntimeError("classifier exploded")
+    monkeypatch.setattr(actions_mod, "classify_catering", _boom)
+
+    result = hooks_mod._pre_gateway_dispatch_impl(SimpleNamespace(
+        text=COMPOUND, chat_id=CHAT, message_id="wamid.BOOM"))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer/catering intent clarification sent"}, result
+    assert [a.get("reason") for a in audits] == ["flyer_catering_intent_clarification"]
+    assert len(sent) == 1 and len(clar_saved) == 1
+    assert arm_calls == [] and f7_calls == [], "classifier error must NOT finalize or guess a route"
+    assert classify_calls["n"] == 1, "the underlying classifier runs exactly once even on the failure path"
+
+
+# ── Design point 3: no-active-project compound stays behaviorally identical ──
+def test_no_active_project_compound_reaches_delivery_state_guard(monkeypatch):
+    """A compound send-now with NO active flyer project is unchanged by the patch:
+    line 456 does not early-path (compound), the escape gate falls through on the
+    no-project scope check, and the delivery-state guard handles the send-now as
+    today — no clarification, no finalization. classify_catering runs once."""
+    hooks_mod, actions_mod = _load_plugin()
+    audits: list = []
+    _neutralize_pre_gate_intercepts(monkeypatch, hooks_mod, actions_mod, audits=audits)
+    monkeypatch.setattr(actions_mod, "lid_to_phone_via_identify_sender", lambda cid: (PHONE, "customer"))
+    monkeypatch.setattr(actions_mod, "catering_amendment_discriminator_enabled", lambda: False)
+    monkeypatch.setattr(actions_mod, "find_active_flyer_project_by_sender", lambda p, c: None)
+    monkeypatch.setattr(actions_mod, "find_flyer_customer_by_sender", lambda p, c: None)
+    monkeypatch.setattr(actions_mod, "send_flyer_text", lambda cid, txt, **k: (True, "mid1", ""))
+    classify_calls = {"n": 0}
+    _real = actions_mod.classify_catering
+
+    def _count(t):
+        classify_calls["n"] += 1
+        return _real(t)
+    monkeypatch.setattr(actions_mod, "classify_catering", _count)
+
+    result = hooks_mod._pre_gateway_dispatch_impl(SimpleNamespace(
+        text=COMPOUND, chat_id=CHAT, message_id="wamid.NP"))
+
+    assert result == {"action": "skip", "reason": "cf-router flyer delivery state guard"}, result
+    assert [a.get("reason") for a in audits] == ["flyer_delivery_state_guard"]
+    assert "flyer_catering_intent_clarification" not in [a.get("reason") for a in audits]
+    assert classify_calls["n"] == 1
 
 
 # ── Static placement proof (runs on every platform) ─────────────────────────
