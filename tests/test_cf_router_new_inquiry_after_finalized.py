@@ -172,7 +172,7 @@ def test_birthday_catering_inquiry_preserves_date_and_veg_split(tmp_path):
     assert proposal_calls[0][3] == text
 
 
-def test_active_lead_sample_menu_request_invokes_menu_grounded_proposals(tmp_path):
+def test_active_lead_sample_menu_request_escapes_to_dispatcher(tmp_path):
     hooks_mod, actions_mod = _load_plugin_modules()
     state = tmp_path / "state"
     state.mkdir()
@@ -221,15 +221,16 @@ def test_active_lead_sample_menu_request_invokes_menu_grounded_proposals(tmp_pat
         message_id="msg-sample-menus",
     ))
 
-    assert result == {
-        "action": "skip",
-        "reason": "cf-router F7 proposal request for L0016",
-    }
-    assert [kind for kind, _payload in calls].count("proposal") == 1
+    # PR-A: proposal request against an active lead escapes to the Hermes dispatcher
+    # (return None) instead of cf-router invoking create-catering-proposal-options.
+    assert result is None
+    assert not any(kind == "proposal" for kind, _payload in calls)
     assert not any(kind == "reply" for kind, _payload in calls)
+    audit_reasons = [payload.get("reason") for kind, payload in calls if kind == "audit"]
+    assert "f7_proposal_request_escaped_to_dispatcher" in audit_reasons
 
 
-def test_active_lead_menu_constraints_regenerate_proposals_not_owner_wait_reply(tmp_path):
+def test_active_lead_menu_constraints_escape_not_owner_wait_reply(tmp_path):
     hooks_mod, actions_mod = _load_plugin_modules()
     state = tmp_path / "state"
     state.mkdir()
@@ -281,9 +282,10 @@ def test_active_lead_menu_constraints_regenerate_proposals_not_owner_wait_reply(
         message_id="msg-menu-constraints",
     ))
 
-    assert result == {
-        "action": "skip",
-        "reason": "cf-router F7 proposal request for L0016",
-    }
-    assert [kind for kind, _payload in calls].count("proposal") == 1
+    # PR-A: escapes to the Hermes dispatcher; cf-router no longer regenerates
+    # proposals itself, and no owner-wait canonical reply is sent.
+    assert result is None
+    assert not any(kind == "proposal" for kind, _payload in calls)
     assert not any(kind == "reply" for kind, _payload in calls)
+    audit_reasons = [payload.get("reason") for kind, payload in calls if kind == "audit"]
+    assert "f7_proposal_request_escaped_to_dispatcher" in audit_reasons

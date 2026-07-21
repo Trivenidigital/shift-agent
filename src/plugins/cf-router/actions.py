@@ -2008,6 +2008,80 @@ def is_proposal_selection(text: str) -> bool:
     )
 
 
+# PR-A F7 escape-gate proposal-request net. A SUPERSET of is_proposal_request:
+# it additionally catches menu/proposal asks phrased WITHOUT one of
+# is_proposal_request's request verbs — "provide me two best sample menus",
+# "what menus do you have", "your best menus", a bare "two-three menus" ask.
+# The verbatim L0017 13:59 incident ("Provide me two best sample menus of yours")
+# is exactly this gap: "provide" is not an is_proposal_request verb, so the
+# fresh proposal ask was suppressed as a follow-up. Escaping is a SAFE
+# fallthrough (the Hermes catering_dispatcher SKILL handles the request), so the
+# net is intentionally a touch wider than is_proposal_request while still
+# requiring an explicit proposal/menu object plus a request verb or request
+# framing. Conservative + multi-signal like classify_catering; NO LLM.
+_PROPOSAL_ESCAPE_OBJECT = re.compile(
+    r"\b(?:sample\s+menus?|menu\s+options?|menu\s+proposals?|proposal\s+menus?|"
+    r"combination\s+menus?|combinations?\s+menus?|proposals?|packages?|menus?)\b",
+    re.IGNORECASE,
+)
+_PROPOSAL_ESCAPE_VERB = re.compile(
+    r"\b(?:send|share|show|give|provide|offer|create|make|prepare|draft|"
+    r"suggest|propose|build|generate|want|wanted|need|needed|request|"
+    r"requested|see|view|choose|decide)\b",
+    re.IGNORECASE,
+)
+_PROPOSAL_ESCAPE_FRAMING = re.compile(
+    r"\b(?:best|what|which|two|three|couple|few|top|\d{1,2})\b",
+    re.IGNORECASE,
+)
+
+
+def is_proposal_request_escape(text: str) -> bool:
+    """Broader proposal-request net for the F7 escape gate (PR-A).
+
+    Superset of is_proposal_request. Returns True when the customer is asking to
+    see menus / proposals / options / packages, including phrasings
+    is_proposal_request misses because they lack one of its request verbs
+    ("provide me two best sample menus", "what menus do you have", "your best
+    menus"). Passive status texts ("will wait for two menu proposals") stay
+    False. NO LLM.
+    """
+    if is_proposal_request(text):
+        return True
+    normalized = " ".join((text or "").split())
+    if not normalized or _PROPOSAL_PASSIVE_WAIT.search(normalized):
+        return False
+    for obj in _PROPOSAL_ESCAPE_OBJECT.finditer(normalized):
+        window = normalized[max(0, obj.start() - 80):obj.start()]
+        if _PROPOSAL_ESCAPE_VERB.search(window) or _PROPOSAL_ESCAPE_FRAMING.search(window):
+            return True
+    return False
+
+
+# PR-A amendment-phrase guard for the fresh-vs-stale discriminator. An inbound
+# that AMENDS an open lead ("update the headcount from 45 to 60", "actually make
+# it vegetarian", "change the date") must keep the existing R2A durable-capture
+# path — it must NEVER be read as a fresh contradicting inquiry (which would open
+# a spurious second lead). classify_catering returns True for such messages (they
+# carry catering + headcount signals), so the discriminator gates on
+# `classify_catering AND NOT is_amendment_phrased`. Word list is the reviewer's
+# exact rule; R2A itself captures ALL follow-ups regardless of phrasing, so there
+# is no prior phrasing detector to reuse.
+_CATERING_AMENDMENT_PHRASE_RE = re.compile(
+    r"\b(?:update|updated|change|changed|revise|revised|instead|actually)\b"
+    r"|\bmake\s+it\b",
+    re.IGNORECASE,
+)
+
+
+def is_amendment_phrased(text: str) -> bool:
+    """Return True when the inbound is phrased as an amendment to an existing
+    request (update / change / revise / instead / actually / make it). Deterministic;
+    NO LLM. Used by the F7 fresh-vs-stale discriminator to keep amendment-phrased
+    messages on the R2A capture path instead of opening a new lead."""
+    return bool(_CATERING_AMENDMENT_PHRASE_RE.search(" ".join((text or "").split())))
+
+
 def find_selectable_proposal_set(lead_id: str) -> Optional[dict]:
     """Return latest proposal row only when it is selectable."""
     if not lead_id:

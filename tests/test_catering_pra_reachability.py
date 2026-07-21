@@ -1,0 +1,276 @@
+"""PR-A — F7 catering reachability: proposal-request escape + fresh-vs-stale
+discriminator (unit-level).
+
+Exercises `_try_f7_primary_intercept`'s Branch-B decision table in isolation with the
+intercept's dependencies monkeypatched, so every branch is deterministic and network-free.
+The classifiers (classify_catering / is_proposal_request_escape / is_amendment_phrased) and
+the discriminator helpers run REAL, so the pins reflect production classification of the
+verbatim L0017 13:59 incident. Windows-runnable via the fcntl stub.
+
+Reviewer proof obligations covered: the exact-incident replay opens a NEW lead over the stale
+one, sends the cross-reference ack, escapes to the Hermes dispatcher, and is NEVER
+`f7_primary_followup_suppressed` · a bare proposal request escapes with NO new lead · the R2A
+canary amendment keeps the unchanged capture path · an inquiry-shaped follow-up with matching
+identity clarifies once (no lead, no capture) · a date-only or headcount-only contradiction
+opens a new lead each · idempotency (same message id twice ⇒ one lead) · the new reason
+literals are declared enum members.
+"""
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from fixtures_fleet import ensure_fcntl_stub
+
+ensure_fcntl_stub()
+
+REPO = Path(__file__).resolve().parent.parent
+SRC = REPO / "src"
+PLUGIN_DIR = SRC / "plugins" / "cf-router"
+for _p in (SRC, SRC / "platform"):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+PHONE = "+17329837841"
+CHAT = "17329837841@lid"
+
+# The verbatim 5th-reproduction production message (routing-validation / L0017 13:59).
+INCIDENT = (
+    "Hello I have a wedding coming up for 120 guests on August 8th, out of 120 "
+    "guests 90 are non-vegetarian and 30 vegetarian. Provide me two best sample "
+    "menus of yours , so that I can decide."
+)
+
+
+def _load_plugin():
+    pkg = "cf_router_pra_pkg"
+    for m in list(sys.modules):
+        if m == pkg or m.startswith(pkg + "."):
+            del sys.modules[m]
+    spec = importlib.machinery.ModuleSpec(pkg, loader=None, is_package=True)
+    spec.submodule_search_locations = [str(PLUGIN_DIR)]
+    sys.modules[pkg] = importlib.util.module_from_spec(spec)
+
+    def _load(name):
+        full = f"{pkg}.{name}"
+        loader = importlib.machinery.SourceFileLoader(full, str(PLUGIN_DIR / f"{name}.py"))
+        sp = importlib.util.spec_from_loader(full, loader)
+        mod = importlib.util.module_from_spec(sp)
+        sys.modules[full] = mod
+        loader.exec_module(mod)
+        return mod
+
+    actions_mod = _load("actions")
+    hooks_mod = _load("hooks")
+    return hooks_mod, actions_mod
+
+
+def _event(message_id="wamid.INCIDENT"):
+    return SimpleNamespace(message_id=message_id, chat_id=CHAT, timestamp="1721480400",
+                           transport="whatsapp")
+
+
+def _stale_lead(lead_id="L0017", event_date="2026-07-04", headcount=60,
+                status="AWAITING_OWNER_APPROVAL"):
+    return {
+        "lead_id": lead_id, "status": status, "owner_approval_code": "#GEMAZ",
+        "customer_phone": PHONE, "created_at": "2026-06-09T00:00:00+00:00",
+        "updated_at": "2026-06-09T00:00:00+00:00",
+        "extracted": {"event_date": event_date, "headcount": headcount},
+    }
+
+
+class _Spies:
+    def __init__(self):
+        self.audits = []
+        self.creates = []
+        self.cross_ref = []
+        self.clarify = []
+        self.canonical = []
+        self.captures = []
+
+
+def _wire(monkeypatch, hooks_mod, actions_mod, *, active_lead, role="customer",
+          create_returns=None, capture_ok=True):
+    """Monkeypatch every dependency `_try_f7_primary_intercept` touches; the REAL
+    classifiers + discriminator run. Returns a _Spies recorder."""
+    from catering_amendments import CaptureResult
+    s = _Spies()
+    hooks_mod.F7_PROPOSAL_BRANCH_ENABLED = True
+    hooks_mod.F7_PRIMARY_FOLLOWUP_REPLY = True
+
+    monkeypatch.setattr(actions_mod, "lid_to_phone_via_identify_sender", lambda cid: (PHONE, role))
+    monkeypatch.setattr(actions_mod, "find_active_catering_lead_by_sender", lambda p, c: active_lead)
+    monkeypatch.setattr(actions_mod, "audit_intercepted", lambda **kw: s.audits.append(kw))
+
+    def _create(**kw):
+        s.creates.append(kw)
+        if callable(create_returns):
+            return create_returns(kw)
+        return (True, '{"lead_id":"L0099"}')
+    monkeypatch.setattr(actions_mod, "trigger_create_catering_lead", _create)
+    monkeypatch.setattr(actions_mod, "send_canonical_followup_reply",
+                        lambda cid, lid: s.canonical.append((cid, lid)) or True)
+    monkeypatch.setattr(hooks_mod, "_send_fresh_lead_cross_reference_ack",
+                        lambda cid, new, prior: s.cross_ref.append((cid, new, prior)) or True)
+    monkeypatch.setattr(hooks_mod, "_send_fresh_inquiry_clarification",
+                        lambda cid, lid: s.clarify.append((cid, lid)) or True)
+    monkeypatch.setattr(hooks_mod.catering_amendments, "capture_branch_b_amendment",
+                        lambda **kw: s.captures.append(kw) or CaptureResult(
+                            ok=capture_ok, amendment_id="A0001", idempotent=False))
+    return s
+
+
+def _reasons(s):
+    return [a["reason"] for a in s.audits]
+
+
+# ── Incident replay: new lead over stale + escape, never suppressed ─────────
+def test_incident_replay_opens_new_lead_and_escapes(monkeypatch):
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, active_lead=_stale_lead())
+    out = hooks_mod._try_f7_primary_intercept(INCIDENT, CHAT, _event(), allow_new_lead=True)
+    # Falls through to Hermes so proposals generate against the NEW lead.
+    assert out is None
+    assert len(s.creates) == 1, "exactly one new lead opened over the stale one"
+    assert len(s.cross_ref) == 1 and s.cross_ref[0][2] == "L0017", "cross-reference to the stale lead"
+    assert _reasons(s) == [
+        "f7_fresh_inquiry_new_lead_over_stale",
+        "f7_proposal_request_escaped_to_dispatcher",
+    ]
+    assert "f7_primary_followup_suppressed" not in _reasons(s)
+    assert s.captures == [], "the fresh inquiry must NOT be captured as a follow-up"
+    assert s.canonical == [], "the 'with the owner' canonical reply must NOT fire"
+
+
+# ── Bare proposal request → escape, no new lead ─────────────────────────────
+def test_proposal_request_only_escapes_no_new_lead(monkeypatch):
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, active_lead=_stale_lead())
+    out = hooks_mod._try_f7_primary_intercept(
+        "Can you send me two sample menus?", CHAT, _event("wamid.PR"), allow_new_lead=True)
+    assert out is None
+    assert s.creates == [], "a bare proposal request must NOT open a new lead"
+    assert _reasons(s) == ["f7_proposal_request_escaped_to_dispatcher"]
+    assert s.captures == [] and s.canonical == []
+
+
+# ── R2A canary amendment → unchanged durable-capture path ───────────────────
+def test_r2a_canary_amendment_keeps_capture_path(monkeypatch):
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, active_lead=_stale_lead())
+    out = hooks_mod._try_f7_primary_intercept(
+        "Please update the headcount for my catering request from 45 to 60 guests",
+        CHAT, _event("wamid.AMEND"), allow_new_lead=True)
+    assert out is not None and out["action"] == "skip"
+    assert "follow-up" in out["reason"]
+    assert len(s.captures) == 1, "amendment-phrased text is durably captured (R2A)"
+    assert s.creates == [], "an amendment must NEVER open a second lead"
+    assert _reasons(s) == ["f7_primary_followup_suppressed"]
+    assert len(s.canonical) == 1
+
+
+# ── Inquiry-shaped, matching identity → one clarification, no lead/capture ──
+def test_inquiry_matching_identity_clarifies_once(monkeypatch):
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod,
+              active_lead=_stale_lead(event_date="2026-08-08", headcount=120))
+    out = hooks_mod._try_f7_primary_intercept(
+        "We're finalizing catering for 120 guests for the wedding on August 8th.",
+        CHAT, _event("wamid.SAME"), allow_new_lead=True)
+    assert out is not None and out["action"] == "skip" and "clarified" in out["reason"]
+    assert len(s.clarify) == 1, "exactly one clarification"
+    assert s.creates == [] and s.captures == [], "no lead created, no capture"
+    assert _reasons(s) == ["f7_fresh_inquiry_ambiguous_clarification"]
+
+
+# ── Contradiction on date only / headcount only → a new lead each ───────────
+def test_contradiction_date_only_opens_new_lead(monkeypatch):
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod,
+              active_lead=_stale_lead(event_date="2026-07-04", headcount=120))
+    out = hooks_mod._try_f7_primary_intercept(
+        "Catering for 120 guests for the wedding on August 8th please.",
+        CHAT, _event("wamid.DATE"), allow_new_lead=True)
+    assert out is not None and out["action"] == "skip" and "fresh inquiry" in out["reason"]
+    assert len(s.creates) == 1 and len(s.cross_ref) == 1
+    assert _reasons(s) == ["f7_fresh_inquiry_new_lead_over_stale"]
+
+
+def test_contradiction_headcount_only_opens_new_lead(monkeypatch):
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod,
+              active_lead=_stale_lead(event_date=None, headcount=60))
+    out = hooks_mod._try_f7_primary_intercept(
+        "Need catering for 200 guests at the reception.",
+        CHAT, _event("wamid.HC"), allow_new_lead=True)
+    assert out is not None and out["action"] == "skip" and "fresh inquiry" in out["reason"]
+    assert len(s.creates) == 1
+    assert _reasons(s) == ["f7_fresh_inquiry_new_lead_over_stale"]
+
+
+# ── Idempotency: same message id twice → one lead ───────────────────────────
+def test_idempotency_same_message_twice_one_lead(monkeypatch):
+    hooks_mod, actions_mod = _load_plugin()
+    seen: dict = {}
+
+    def _dedup_create(kw):
+        mid = kw["message_id"]
+        if mid in seen:
+            return (True, seen[mid])
+        detail = '{"lead_id":"L0%03d"}' % (99 + len(seen))
+        seen[mid] = detail
+        return (True, detail)
+
+    s = _wire(monkeypatch, hooks_mod, actions_mod,
+              active_lead=_stale_lead(event_date="2026-07-04", headcount=60),
+              create_returns=_dedup_create)
+    ev = _event("wamid.DUP")
+    hooks_mod._try_f7_primary_intercept(
+        "Catering for 200 guests for the wedding on August 8th.", CHAT, ev, allow_new_lead=True)
+    hooks_mod._try_f7_primary_intercept(
+        "Catering for 200 guests for the wedding on August 8th.", CHAT, ev, allow_new_lead=True)
+    # create-catering-lead dedups on (customer_phone, message_id): two calls, one unique lead.
+    assert len(s.creates) == 2, "both inbounds reach the create path"
+    assert len(seen) == 1, "the same message id yields exactly ONE lead (idempotent)"
+
+
+# ── Amendment-phrased proposal request → amendment precedence (R2A) ─────────
+def test_amendment_phrased_proposal_request_stays_r2a(monkeypatch):
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, active_lead=_stale_lead())
+    out = hooks_mod._try_f7_primary_intercept(
+        "Actually, please change the sample menus you send.", CHAT, _event("wamid.AMPR"),
+        allow_new_lead=True)
+    assert out is not None and out["action"] == "skip" and "follow-up" in out["reason"]
+    assert len(s.captures) == 1
+    assert s.creates == []
+    assert _reasons(s) == ["f7_primary_followup_suppressed"]
+
+
+# ── Flag-off rollback → discriminator/escape dormant, R2A capture unchanged ─
+def test_flag_off_falls_back_to_r2a_capture(monkeypatch):
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, active_lead=_stale_lead())
+    hooks_mod.F7_PROPOSAL_BRANCH_ENABLED = False
+    out = hooks_mod._try_f7_primary_intercept(INCIDENT, CHAT, _event("wamid.OFF"), allow_new_lead=True)
+    # PR-A block skipped → pre-PR-A behavior: durable capture + canonical reply.
+    assert out is not None and out["action"] == "skip" and "follow-up" in out["reason"]
+    assert len(s.captures) == 1 and s.creates == []
+    assert _reasons(s) == ["f7_primary_followup_suppressed"]
+
+
+# ── Enum-literal declaration guard ──────────────────────────────────────────
+def test_new_reason_literals_are_enum_members():
+    from typing import get_args
+    import schemas
+    allowed = set(get_args(schemas.CfRouterIntercepted.model_fields["reason"].annotation))
+    for reason in (
+        "f7_proposal_request_escaped_to_dispatcher",
+        "f7_fresh_inquiry_new_lead_over_stale",
+        "f7_fresh_inquiry_ambiguous_clarification",
+    ):
+        assert reason in allowed, f"{reason} missing from CfRouterIntercepted.reason"
