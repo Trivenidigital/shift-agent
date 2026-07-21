@@ -6318,6 +6318,32 @@ class _ConversationSendThrottleBreach(_BaseEntry):
     message_preview: str = Field(default="", max_length=120)
 
 
+class _GatewaySendThrottleBreach(_BaseEntry):
+    """The GATEWAY-SEND seam breached its per-conversation per-window ceiling
+    (2026-07-21 incident limiter). SIBLING of `conversation_send_throttle_breach`
+    with a DISTINCT literal so the §12b page can name WHICH seam is spiraling:
+    the 28-send incident was the Hermes gateway agent loop (send_message tool →
+    platform adapter send()/edit_message() → `front_brain_screen_gateway_send`,
+    the egress screen for LLM free-form replies), which NEVER passes through
+    bridge_post — so the bridge_post throttle can't see it. A row here is a BUG
+    REPORT, not routine operation: the designed reply flow is an ack + the
+    proposal set + at most one follow-up line, so the ceiling is generous and a
+    breach means a send loop is spiraling. Unlike the bridge_post throttle's true
+    DROP, the gateway seam ALWAYS relays the string it returns, so the breaching
+    turn SUBSTITUTES the safe fallback template (the seam's established
+    suppression shape, identical to how the sibling per-chat/day budget handles
+    exhaustion) rather than dropping to silence; the operator is paged via the
+    §12b owner-alert at the breach site. `window_count` is the number of sends
+    already recorded in the sliding window when the ceiling was hit (>= limit)."""
+    type: Literal["gateway_send_throttle_breach"]
+    jid: str = Field(..., max_length=200)
+    caller_script: str = Field(default="", max_length=200)
+    window_count: int = Field(..., ge=0)
+    limit: int = Field(..., ge=1)
+    window_sec: int = Field(..., ge=1)
+    message_preview: str = Field(default="", max_length=120)
+
+
 # ─────────────────────────────────────────────────────────────────
 # Front-brain outbound enforcement — conversation-review surface (P0-5)
 # ─────────────────────────────────────────────────────────────────
@@ -6927,6 +6953,9 @@ LogEntry = Annotated[
         Annotated[_RegulatedSendLintViolation, Tag("regulated_send_lint_violation")],
         # 2026-07-21 — per-conversation bridge_post send throttle (incident limiter)
         Annotated[_ConversationSendThrottleBreach, Tag("conversation_send_throttle_breach")],
+        # 2026-07-21 — sibling throttle on the gateway-send seam (the seam the
+        # 28-send incident actually spiraled on; bridge_post never sees it)
+        Annotated[_GatewaySendThrottleBreach, Tag("gateway_send_throttle_breach")],
         # Front-brain outbound enforcement — conversation-review surface (P0-5)
         Annotated[FrontBrainReplyComposed, Tag("front_brain_reply_composed")],
         # Front-brain outbound enforcement — refusal audit (P0-3a)
