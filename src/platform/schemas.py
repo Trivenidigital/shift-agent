@@ -2388,6 +2388,53 @@ class CateringAmendmentStore(BaseModel):
     records: list[dict] = Field(default_factory=list)
 
 
+# ── PR-B: retained immutable catering quote-version ledger (sidecar store) ────
+class CateringQuoteLedgerRecord(BaseModel):
+    """PR-B WRITE-side model for ONE immutable committed quote version.
+    `extra="forbid"` — STRICT for records the ledger appends (validated before
+    append). The on-disk store keeps records as TOLERANT dicts (see
+    CateringQuoteLedgerStore), so future fields on OTHER records round-trip
+    untouched; this model validates ONLY the record being appended. Append-only:
+    once committed a version is never rewritten (the module exposes no update API
+    and refuses a duplicate (lead_id, version) append).
+
+    `version` is monotonic PER lead (1, 2, 3, ...) — the ledger assigns it as
+    max(existing versions for the lead) + 1. `ledger_entry_id` is the store-global
+    sequence id ("Q0001", ...) mirroring CateringAmendmentRecord.amendment_id.
+    `quote_total_usd` is whole dollars (int) — mirrors CateringSelectedItem /
+    CateringMenuFinalized whole-dollar discipline (no float accumulation)."""
+    model_config = ConfigDict(extra="forbid")
+    ledger_entry_id: str = Field(pattern=r"^Q[0-9]{4,}$")
+    lead_id: str = Field(min_length=1)               # canonical CateringLead id
+    version: int = Field(ge=1)                        # monotonic per lead
+    quote_text: str = Field(default="", max_length=16384)  # committed customer quote
+    quote_total_usd: int = Field(ge=0)               # server-authoritative dollars
+    selected_items: list[CateringSelectedItem] = Field(default_factory=list, max_length=50)
+    # source = which write-site committed this version:
+    #   "initial_draft"     — first server-composed quote at lead creation (reserved)
+    #   "owner_edit"         — owner sent `#XXXXX edit ...` (apply-catering-owner-decision)
+    #   "customer_finalize"  — customer finalized their menu (finalize-catering-menu)
+    #   "amendment_applied"  — an R2A amendment materialised into a new version (reserved)
+    source: Literal["initial_draft", "owner_edit", "customer_finalize", "amendment_applied"]
+    source_message_id: Optional[str] = Field(default=None, max_length=200)
+    approval_code: Optional[str] = Field(default=None, pattern=r"^#[A-HJKMNPQR-Z2-9]{5}$")
+    created_at: datetime
+
+
+class CateringQuoteLedgerStore(BaseModel):
+    """PR-B sidecar store (/opt/shift-agent/state/catering-quote-ledger.json).
+    PRESERVATION-SAFE, mirroring CateringAmendmentStore: `records` are TOLERANT
+    dicts that round-trip as parsed JSON and `extra="allow"` preserves unknown
+    top-level keys, so a future field on any record survives an append untouched
+    (SEMANTIC preservation). The ledger validates ONLY the record it appends (via
+    CateringQuoteLedgerRecord); it never normalizes existing records through a
+    strict schema. Append-only by construction — no update path exists."""
+    model_config = ConfigDict(extra="allow")
+    schema_version: int = Field(default=1, ge=1)
+    next_seq: int = Field(default=1, ge=1)
+    records: list[dict] = Field(default_factory=list)
+
+
 CateringProposalStatus = Literal[
     "DRAFT", "SENT", "SEND_FAILED", "SUPERSEDED",
     "SELECTING", "SELECTED", "SELECTED_OWNER_CARD_FAILED", "SELECT_FAILED",
@@ -3849,6 +3896,31 @@ class CateringAmendmentCaptureFailed(_BaseEntry):
     filesystem-contract). PRIVACY: lead_id + reason code ONLY — never raw text."""
     type: Literal["catering_amendment_capture_failed"]
     lead_id: str
+    reason: str
+
+
+class CateringQuoteVersionCommitted(_BaseEntry):
+    """PR-B: a committed quote version was durably appended to the quote ledger.
+    PRIVACY: ids + version + source + numeric total + item COUNT only — never the
+    raw quote_text (which lives only in the ledger sidecar, same content class as
+    the lead's raw_inquiry / the amendment sidecar's raw_text)."""
+    type: Literal["catering_quote_version_committed"]
+    lead_id: str
+    ledger_entry_id: str
+    version: int = Field(ge=1)
+    source: str
+    quote_total_usd: int = Field(ge=0)
+    item_count: int = Field(ge=0)
+
+
+class CateringQuoteLedgerAppendFailed(_BaseEntry):
+    """PR-B: a quote-ledger append attempt failed (lock / load / validate / write /
+    filesystem-contract / duplicate version). PRIVACY: lead_id + source + reason
+    code ONLY — never raw quote text. Best-effort: the caller's lead-store commit
+    already succeeded and is NEVER rolled back on an append failure."""
+    type: Literal["catering_quote_ledger_append_failed"]
+    lead_id: str
+    source: str
     reason: str
 
 
@@ -6604,6 +6676,9 @@ LogEntry = Annotated[
         Annotated[ApprovalCodeCollisionDetected, Tag("approval_code_collision_detected")],
         Annotated[CateringAmendmentCaptured, Tag("catering_amendment_captured")],
         Annotated[CateringAmendmentCaptureFailed, Tag("catering_amendment_capture_failed")],
+        # PR-B: retained immutable quote-version ledger
+        Annotated[CateringQuoteVersionCommitted, Tag("catering_quote_version_committed")],
+        Annotated[CateringQuoteLedgerAppendFailed, Tag("catering_quote_ledger_append_failed")],
         Annotated[HealthCheckFailure, Tag("health_check_failure")],
         # Agent #41 Owner Wellbeing v0.1
         Annotated[OwnerNotificationSuppressed, Tag("owner_notification_suppressed")],
@@ -6961,6 +7036,8 @@ __all__ = [
     "ApprovalCodeCollisionDetected", "HealthCheckFailure",
     "CateringAmendmentRecord", "CateringAmendmentStore",
     "CateringAmendmentCaptured", "CateringAmendmentCaptureFailed",
+    "CateringQuoteLedgerRecord", "CateringQuoteLedgerStore",
+    "CateringQuoteVersionCommitted", "CateringQuoteLedgerAppendFailed",
     "LidLearned", "DispatcherRouted",
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
     "EodSnapshot", "EodPushoverSent", "EodSkipped",

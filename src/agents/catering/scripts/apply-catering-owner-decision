@@ -79,6 +79,10 @@ CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/c
 LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
 LEADS_LOCK = Path(os.environ.get("SHIFT_AGENT_LEADS_LOCK", str(LEADS_PATH) + ".lock"))
 LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+# PR-B: retained immutable quote-version ledger sidecar (own lock; additive).
+LEDGER_PATH = Path(os.environ.get(
+    "SHIFT_AGENT_CATERING_QUOTE_LEDGER_PATH",
+    "/opt/shift-agent/state/catering-quote-ledger.json"))
 
 # PR-B v3 — drafted-quote stdin caps and Unicode strip categories.
 # 8KB stdin read cap is generous (LLM drafts run ~300-500 chars in practice);
@@ -202,6 +206,34 @@ def _emit_quote_skill_failed_best_effort(lead_id: str, code: str,
         sys.stderr.write(
             f"WARN: failed to emit CateringQuoteSkillFailed audit row: "
             f"{type(e).__name__}: {e}\n"
+        )
+
+
+def _append_quote_ledger_best_effort(lead, *, source: str, now) -> None:
+    """PR-B: append the lead's committed quote state to the quote ledger AFTER the
+    lead-store commit succeeded and LEADS_LOCK is released (leaf lock held alone).
+    BEST-EFFORT — a ledger failure NEVER rolls back the lead write; it logs loudly.
+    Used on the owner-EDIT path so each owner revision is a durable committed
+    version. `lead` is the updated CateringLead model."""
+    try:
+        import catering_quote_ledger as _ql  # lazy; module is deployed flat
+        selected = [{"name": it.name, "qty": it.qty, "price_usd": it.price_usd}
+                    for it in (lead.selected_items or [])]
+        res = _ql.append_version(
+            lead_id=lead.lead_id, quote_text=lead.quote_text or "",
+            quote_total_usd=lead.quote_total_usd or 0, selected_items=selected,
+            source=source, approval_code=lead.owner_approval_code, created_at=now,
+            data_path=LEDGER_PATH,
+        )
+        if not res.ok:
+            sys.stderr.write(
+                f"WARN: quote-ledger append failed (non-fatal) for {lead.lead_id} "
+                f"source={source}: {res.reason}\n"
+            )
+    except Exception as e:  # noqa: BLE001 — ledger is a best-effort sidecar
+        sys.stderr.write(
+            f"WARN: quote-ledger append raised (non-fatal) for "
+            f"{getattr(lead, 'lead_id', '?')}: {type(e).__name__}: {e}\n"
         )
 
 
@@ -696,6 +728,14 @@ def main() -> int:
                     bridge_post_outcome="unknown",
                 ),
             )
+
+    # PR-B: on owner EDIT, commit a new immutable quote version to the ledger.
+    # Done here — AFTER the LEADS_LOCK block released — so the ledger's own lock is
+    # held ALONE (leaf lock). Best-effort: never rolls back the OWNER_EDITED write.
+    # (approve does NOT append here: the finalize path already ledgered the version
+    # the owner is approving; reject leaves the quote unchanged.)
+    if args.decision == "edit":
+        _append_quote_ledger_best_effort(lead, source="owner_edit", now=now)
 
     # Outside lock: handle outbound for approve
     if args.decision != "approve":

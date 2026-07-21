@@ -92,6 +92,11 @@ TEMPLATE_DIR = Path("/opt/shift-agent/templates")
 # default basket cannot silently override an option-picker flow (SENT proposal).
 PROPOSALS_PATH = Path("/opt/shift-agent/state/catering-proposals.json")
 PROPOSALS_LOCK = Path("/opt/shift-agent/state/catering-proposals.json.lock")
+# PR-B: retained immutable quote-version ledger sidecar (own lock; additive — the
+# leads store is unchanged). Env-overridable so tests route it to a tmp path.
+LEDGER_PATH = Path(os.environ.get(
+    "SHIFT_AGENT_CATERING_QUOTE_LEDGER_PATH",
+    "/opt/shift-agent/state/catering-quote-ledger.json"))
 
 # Quote validation tolerance: stricter of 5% or $25 absolute.
 QUOTE_TOLERANCE_PCT = 0.05
@@ -229,6 +234,8 @@ def _render_owner_card(
     server_total: int,
     price_drift: bool,
     min_per_guest_usd: float | None = None,
+    quote_version: int | None = None,
+    quote_diff_line: str = "",
 ) -> str:
     """Render owner card. Caller passes (name, qty, price) tuples — on FIRST
     finalize the prices are current-menu values; on REPLAY the caller passes
@@ -238,8 +245,20 @@ def _render_owner_card(
     When min_per_guest_usd is set and the total implies an implausibly low
     per-guest spend (BL-CATER-03 unscaled-basket bug), a warning is surfaced so
     the owner edits before approving (mirrors the deposit-mint fail-closed guard).
+
+    PR-B: when `quote_version` is set, the card carries a "Quote version N" line
+    so the owner approves a specific committed VERSION (reviewer criterion 1),
+    plus a short diff line vs N-1 when `quote_diff_line` is non-empty (N>1).
     """
     template_path = TEMPLATE_DIR / "catering_finalized_menu_to_owner.txt"
+    # PR-B version banner (empty when no committed version is available — the
+    # ledger append is best-effort, so the card degrades to no-version rather
+    # than blocking the owner-approval send).
+    quote_version_line = ""
+    if quote_version is not None:
+        quote_version_line = f"Quote version {quote_version}\n"
+        if quote_diff_line:
+            quote_version_line += f"Changes since v{quote_version - 1}: {quote_diff_line}\n"
     items_section = "\n".join(
         f"  - {name} × {qty}  ${qty * price}"
         for name, qty, price in items_with_prices
@@ -278,6 +297,7 @@ def _render_owner_card(
         "quote_total_usd": server_total,
         "price_drift_note": drift_note,
         "price_warning": price_warning,
+        "quote_version_line": quote_version_line,
     }
     if template_path.exists():
         try:
@@ -295,6 +315,7 @@ def _render_owner_card(
     return (
         f"⚕ *Catering Agent*\n────────────\n"
         f"Catering menu ready — your approval needed\n\n"
+        f"{quote_version_line}"
         f"{price_warning}"
         f"Lead: {fmt_fields['lead_id']}    Code: {fmt_fields['approval_code']}\n"
         f"Customer: {fmt_fields['customer_name']} ({fmt_fields['customer_phone']})\n"
@@ -313,6 +334,71 @@ def _render_owner_card(
         f"To decline:\n"
         f"  Reply: {fmt_fields['approval_code']} reject <reason>\n"
     )
+
+
+def _selected_items_snapshot(lead: CateringLead) -> list[dict]:
+    """Plain (name, qty, price_usd) dicts for the ledger record."""
+    return [{"name": it.name, "qty": it.qty, "price_usd": it.price_usd}
+            for it in (lead.selected_items or [])]
+
+
+def _diff_line_for(lead_id: str, version: int | None) -> str:
+    """Short diff vs N-1 for the owner card (empty for version 1 / on any error)."""
+    if not version or version <= 1:
+        return ""
+    try:
+        import catering_quote_ledger as _ql
+        d = _ql.diff(lead_id, version - 1, version, data_path=LEDGER_PATH)
+        return d.summary_line() if d is not None else ""
+    except Exception:  # noqa: BLE001 — card diff is decorative, never blocks
+        return ""
+
+
+def _append_quote_ledger_best_effort(
+    lead: CateringLead, *, source: str, source_message_id: str | None, now: datetime,
+) -> tuple[int | None, str]:
+    """PR-B: append the lead's committed quote to the ledger AFTER the lead-store
+    commit succeeded and LEADS_LOCK is released (leaf lock held alone). BEST-EFFORT
+    — a ledger failure NEVER rolls back the finalized lead; it logs loudly and the
+    card degrades to no-version. Returns (version|None, diff_line)."""
+    try:
+        import catering_quote_ledger as _ql
+        res = _ql.append_version(
+            lead_id=lead.lead_id, quote_text=lead.quote_text or "",
+            quote_total_usd=lead.quote_total_usd or 0,
+            selected_items=_selected_items_snapshot(lead),
+            source=source, source_message_id=source_message_id,
+            approval_code=lead.owner_approval_code, created_at=now,
+            data_path=LEDGER_PATH,
+        )
+        if not res.ok:
+            sys.stderr.write(
+                f"WARN: quote-ledger append failed (non-fatal) for {lead.lead_id} "
+                f"source={source}: {res.reason}\n"
+            )
+            return None, ""
+        return res.version, _diff_line_for(lead.lead_id, res.version)
+    except Exception as e:  # noqa: BLE001 — ledger is a best-effort sidecar
+        sys.stderr.write(
+            f"WARN: quote-ledger append raised (non-fatal) for "
+            f"{getattr(lead, 'lead_id', '?')}: {type(e).__name__}: {e}\n"
+        )
+        return None, ""
+
+
+def _latest_ledger_version_for_card(lead: CateringLead) -> tuple[int | None, str]:
+    """PR-B: read the LATEST committed version for the card on the REPLAY path
+    (no new version is appended). Best-effort; (None, "") on any error."""
+    try:
+        import catering_quote_ledger as _ql
+        rec = _ql.latest_committed(lead.lead_id, data_path=LEDGER_PATH)
+        if rec is None:
+            return None, ""
+        v = rec.get("version")
+        v = int(v) if isinstance(v, int) else None
+        return v, _diff_line_for(lead.lead_id, v)
+    except Exception:  # noqa: BLE001 — card version is best-effort
+        return None, ""
 
 
 def _recent_resend_for(lead_id: str, now: datetime) -> bool:
@@ -665,6 +751,27 @@ def main() -> int:
             atomic_write_json(LEADS_PATH, store)
             persisted_items_with_prices = fresh_items_with_prices
 
+    # PR-B: append the committed quote version to the ledger. Done AFTER the
+    # LEADS_LOCK block above releases so the ledger's own lock is held ALONE (leaf
+    # lock — never nested under LEADS_LOCK). Best-effort: a ledger failure never
+    # rolls back the finalized lead. On a real / re-finalize we append a new
+    # version; on replay we read the latest committed one so the resent card still
+    # carries its version. Feeds the version-bearing owner card (reviewer crit 1).
+    quote_version_for_card: Optional[int] = None
+    quote_diff_line_for_card: str = ""
+    if target is not None:
+        if replay:
+            quote_version_for_card, quote_diff_line_for_card = (
+                _latest_ledger_version_for_card(target)
+            )
+        else:
+            quote_version_for_card, quote_diff_line_for_card = (
+                _append_quote_ledger_best_effort(
+                    target, source="customer_finalize",
+                    source_message_id=args.customer_message_id, now=now,
+                )
+            )
+
     # Step 5: status-change audit (separate LOG_LOCK, OUT of LEADS_LOCK).
     # R2.B1 fix: emit on EVERY non-replay finalize, including the
     # CUSTOMER_FINALIZED -> CUSTOMER_FINALIZED self-edge (re-finalize). The
@@ -707,6 +814,8 @@ def main() -> int:
         card_text = _render_owner_card(
             target, persisted_items_with_prices, card_total, price_drift,
             min_per_guest_usd=cfg.catering.min_per_guest_usd,
+            quote_version=quote_version_for_card,
+            quote_diff_line=quote_diff_line_for_card,
         )
         ok, mid_or_err = _bridge_post(cfg.owner.self_chat_jid, card_text)
         if ok:

@@ -2,7 +2,7 @@
 ────────────
 Catering menu ready — your approval needed
 
-{price_warning}Lead: {lead_id}    Code: {approval_code}
+{quote_version_line}{price_warning}Lead: {lead_id}    Code: {approval_code}
 Customer: {customer_name} ({customer_phone})
 Event: {event_date} at {event_time} — {headcount} guests
 Dietary: {dietary}

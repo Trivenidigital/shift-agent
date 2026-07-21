@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""catering-quote-status — render the LATEST committed quote version for a lead.
+
+PR-B read-side CLI. Prints a human-readable status of the latest COMMITTED quote
+version for a catering lead — reference, version number, lead status, event
+details, menu items, and total — rendered STRICTLY from the quote ledger + the
+lead's own state, never reconstructed from the conversation transcript. This is
+the "show me where we are" surface; conversational wiring (a SKILL / cf-router
+reply path) is deferred to PR-D (there is no existing catering status-reply path
+to hook today).
+
+Usage:
+  catering-quote-status --lead-id L0007
+
+Exit codes:
+  0  — rendered (or lead found but no committed version yet)
+  2  — invalid input
+  4  — lead not found
+  5  — leads store unreadable
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    load_model, assert_load_status_clean, LoadStatusError,
+)
+from schemas import CateringLeadStore  # noqa: E402
+import catering_quote_ledger as ql  # noqa: E402
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND, EXIT_SCHEMA_VIOLATION,
+)
+
+LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
+LEDGER_PATH = Path(os.environ.get(
+    "SHIFT_AGENT_CATERING_QUOTE_LEDGER_PATH",
+    "/opt/shift-agent/state/catering-quote-ledger.json"))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--lead-id", required=True, help="catering lead id, e.g. L0007")
+    args = ap.parse_args()
+
+    lead_id = (args.lead_id or "").strip()
+    if not lead_id:
+        sys.stderr.write("--lead-id required\n")
+        return EXIT_INVALID_INPUT
+
+    store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+    try:
+        assert_load_status_clean(LEADS_PATH, status, context="catering-quote-status load")
+    except LoadStatusError as e:
+        sys.stderr.write(f"{e}\n")
+        return EXIT_SCHEMA_VIOLATION
+
+    lead = next((l for l in store.leads if l.lead_id == lead_id), None)
+    if lead is None:
+        sys.stderr.write(f"lead {lead_id} not found\n")
+        return EXIT_NOT_FOUND
+
+    rendered = ql.render_latest_committed(lead=lead, data_path=LEDGER_PATH)
+    if rendered is None:
+        print(f"Lead {lead_id} ({lead.status}) has no committed quote version yet.")
+        return EXIT_OK
+    print(rendered)
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
