@@ -252,6 +252,38 @@ class TestReviewerGates:
         assert seen["count_before"] == 2       # sees consumed count, not reset to 0
         assert budget.count == 4               # 2 outer + 1 nested + 1 child, ONE shared counter
 
+    def test_draft_relay_bound_cannot_be_reset_through_nested_reentry(self, budget_on):
+        # The SEPARATE draft-relay bound lives on the SAME frozen budget object as
+        # the finalized counter, so a nested tool/model re-entry within one turn
+        # sees the already-consumed draft_count — NEVER a fresh draft cap. (Default
+        # draft ceiling = limit x 10 = 50 here, so all 4 drafts admit; the property
+        # under test is persistence of draft_count across re-entry, not exhaustion.)
+        async def _turn():
+            safe_io.begin_inbound_turn_send_budget()
+            budget = safe_io._TURN_SEND_BUDGET.get()
+            assert safe_io.turn_send_budget_gate(CHAT, "d", reserve_budget=False) is True  # draft 1
+            assert safe_io.turn_send_budget_gate(CHAT, "d", reserve_budget=False) is True  # draft 2
+
+            seen = {}
+
+            async def _nested_tool_reentry():
+                b = safe_io._TURN_SEND_BUDGET.get()
+                seen["draft_count_before"] = b.draft_count
+                assert safe_io.turn_send_budget_gate(CHAT, "d", reserve_budget=False) is True  # draft 3
+
+            await _nested_tool_reentry()
+
+            async def _child_task():
+                return safe_io.turn_send_budget_gate(CHAT, "d", reserve_budget=False)  # draft 4
+
+            assert await asyncio.create_task(_child_task()) is True
+            return budget, seen
+
+        budget, seen = asyncio.run(_turn())
+        assert seen["draft_count_before"] == 2   # nested re-entry saw consumed draft budget, not 0
+        assert budget.draft_count == 4           # ONE shared draft counter across re-entry
+        assert budget.count == 0                 # drafts never touched the finalized counter
+
     def test_exactly_one_page_per_exhausted_turn_then_resets(self, budget_on):
         # 28 dropped sends in one exhausted turn → operator paged EXACTLY once (not
         # 23×). budget_on spies the §12b page helper.
@@ -570,6 +602,38 @@ class TestEndToEndAdapterSuppression:
         # even fully concurrent, the synchronous reserve admits EXACTLY LIMIT
         assert sum(1 for r in results if r is not None) == 5
         assert len(adapter.relayed) == 5
+
+    def test_concurrent_draft_edits_cannot_overshoot_draft_bound_at_transport(
+        self, tmp_path, e2e_env, monkeypatch
+    ):
+        # ITEM 2 parallel proof: the draft-relay ceiling bounds ACTUAL transport
+        # calls, not merely logical increments. Launch draft_limit + K concurrent
+        # progressive edits in one turn; the synchronous reserve (no await in the
+        # critical section) admits EXACTLY draft_limit — the real relay total
+        # (adapter.relayed) never overshoots. Finalized cap set high so only the
+        # draft ceiling is in play.
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_LIMIT", "20")
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_DRAFT_LIMIT", "5")
+        monkeypatch.setattr(safe_io, "_emit_audit_row", lambda t, f: None)
+        adapter = _build_patched_adapter(tmp_path)
+
+        async def _run():
+            safe_io.begin_inbound_turn_send_budget()
+
+            async def _one():
+                await asyncio.sleep(0)  # yield so all 28 are in-flight before any reserve
+                return await adapter.edit_message(CHAT, "m", "draft", finalize=False)
+
+            return await asyncio.gather(*[_one() for _ in range(28)])
+
+        results = asyncio.run(_run())
+        # ACTUAL transport relays — not logical counters — bounded to EXACTLY the
+        # draft ceiling, never draft_limit + overshoot.
+        draft_relays = [r for r in adapter.relayed if r[0] == "edit" and r[2] is False]
+        assert len(draft_relays) == 5
+        assert len(adapter.relayed) == 5
+        assert sum(1 for r in results if r is not None) == 5
+        assert results.count(None) == 23
 
     def test_28_progressive_edits_are_bounded_not_28(self, tmp_path, e2e_env, monkeypatch):
         # ITEM 2: progressive draft edits RELAY to transport; without a bound, 28
