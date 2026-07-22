@@ -60,6 +60,24 @@ FB_SEND_MARK_END = "END shift-agent-front-brain-send"
 FB_EDIT_MARK_BEGIN = "BEGIN shift-agent-front-brain-edit"
 FB_EDIT_MARK_END = "END shift-agent-front-brain-edit"
 
+# ─── Per-INBOUND-TURN outbound-send budget (2026-07-22) ────────────────────
+# The #641 gateway throttle (safe_io.front_brain_screen_gateway_send) can only
+# SUBSTITUTE a safe template + page — never SUPPRESS a send — because its contract
+# is `-> str` (always returns a sendable string) and the send wrapper below
+# unconditionally relays that string. This companion adds the TRUE volume cap the
+# reviewer ruled: a per-inbound-turn send-COUNT cap enforced WHERE sends can be
+# suppressed. run.py sets a fresh per-turn budget in a safe_io ContextVar at the
+# inbound-turn boundary (the _prepare_inbound_message_text inject, same site as
+# the sender-id block); the send wrapper consults safe_io.turn_send_budget_gate
+# and, once the turn is exhausted, returns the module-level `_SHIFT_DROP_SEND`
+# sentinel so send()/edit_message() relay NOTHING and return a well-formed no-op.
+# Fail-CLOSED (the opposite of #641's fail-open): a missing/corrupt turn context
+# suppresses. Default-OFF (GATEWAY_TURN_SEND_BUDGET_ENABLED) → byte-identical.
+# Distinct marker so check-shift-agent-patch.sh fail-closes if a Hermes upgrade
+# drops it.
+TURN_BUDGET_MARK_BEGIN = "BEGIN shift-agent-turn-send-budget"
+TURN_BUDGET_MARK_END = "END shift-agent-turn-send-budget"
+
 
 # ─── Patch payloads (Python files) ─────────────────────────────────────
 
@@ -157,6 +175,42 @@ RUN_PY_INJECT_BLOCK = '''
         # END shift-agent-sender-id
 '''
 
+# Module-level flag for the per-inbound-turn send budget. Default OFF → the
+# inject block below is skipped entirely (byte-identical). Distinct env var from
+# the #641 gateway throttle.
+RUN_PY_TURN_BUDGET_FLAG_BLOCK = '''
+# BEGIN shift-agent-turn-send-budget
+_TURN_SEND_BUDGET_INJECT = (
+    os.environ.get("GATEWAY_TURN_SEND_BUDGET_ENABLED", "0") == "1"
+)
+# END shift-agent-turn-send-budget
+'''
+
+# In _prepare_inbound_message_text — the once-per-inbound-message prep that is
+# awaited inside the message-handler task, upstream of the agent loop — set a
+# FRESH per-turn send budget in the safe_io ContextVar. Every send()/edit_message()
+# of this inbound turn shares that one counter (the ContextVar carries the same
+# object by reference into child tasks the agent loop spawns); a fresh inbound turn
+# calls begin_* again and resets it. Independent of the sender-id flag; guarded by
+# _TURN_SEND_BUDGET_INJECT so the whole block is byte-identical when the feature is
+# OFF. If begin fails, the turn has NO budget context → the adapter wrapper
+# FAILS CLOSED (suppresses) rather than flooding.
+RUN_PY_TURN_BUDGET_INJECT_BLOCK = '''
+        # BEGIN shift-agent-turn-send-budget
+        if _TURN_SEND_BUDGET_INJECT:
+            try:
+                import sys as _shift_sys
+                if "/opt/shift-agent" not in _shift_sys.path:
+                    _shift_sys.path.insert(0, "/opt/shift-agent")
+                import safe_io as _shift_safe_io
+                _shift_safe_io.begin_inbound_turn_send_budget()
+            except Exception as _e:
+                logger.warning("shift-agent: turn-send-budget begin failed: %s", _e)
+                # Fail toward NO context: a send with no per-turn budget context
+                # FAILS CLOSED (suppressed) in the adapter wrapper — never floods.
+        # END shift-agent-turn-send-budget
+'''
+
 
 # ─── Patch payloads (front-brain outbound-send screen) ─────────────────
 
@@ -170,21 +224,55 @@ RUN_PY_INJECT_BLOCK = '''
 # (FRONT_BRAIN_OUTBOUND_ENFORCE + allowlist), so this wrapper is byte-identical
 # when the tier is off.
 WHATSAPP_FB_SEND_HELPER = '''# BEGIN shift-agent-front-brain-send
+class _ShiftDropSend:
+    """Not-send sentinel (per-inbound-turn send budget, 2026-07-22). When the
+    outbound screen returns this singleton, send()/edit_message() relay NOTHING and
+    return a well-formed no-op result — a TRUE suppression the #641 content screen
+    (contractually `-> str`) cannot express. Identity-compared, never sent."""
+    __slots__ = ()
+
+    def __repr__(self):  # pragma: no cover - debug aid only
+        return "<shift-agent DROP_SEND>"
+
+
+_SHIFT_DROP_SEND = _ShiftDropSend()
+
+
 def _shift_front_brain_screen_outbound(chat_id, content, reserve_budget=True):
-    """Route a composed outbound reply through the front-brain gateway-send
-    screen and return the SAFE text to relay. `reserve_budget` is False for
-    progressive streamed edit drafts (a streamed reply costs ONE budget unit,
-    reserved only on the finalized edit). See tools/patch-hermes.py."""
+    """Screen a composed outbound reply; return either the SAFE text to relay OR
+    the `_SHIFT_DROP_SEND` sentinel (caller must relay NOTHING). Two layers, in
+    order:
+
+      1. Per-INBOUND-TURN send budget (default-OFF, GATEWAY_TURN_SEND_BUDGET_*) —
+         a TRUE volume cap. `safe_io.turn_send_budget_gate` returns None (feature
+         off → passthrough), True (admitted), or False (SUPPRESS → return the
+         sentinel). FAIL-CLOSED when enabled (the opposite of #641's fail-open):
+         a missing/corrupt turn context suppresses. Consulted via getattr so an
+         older/partial safe_io without the gate is byte-identical (budget absent).
+      2. The #641 content screen (front_brain_screen_gateway_send) for PERMITTED
+         sends, unchanged — the budget is a gate AROUND it, not a replacement.
+
+    `reserve_budget` is False for progressive streamed edit drafts (a streamed
+    reply costs ONE budget unit, reserved only on the finalized edit); it is
+    threaded to BOTH the budget gate and the content screen. See
+    tools/patch-hermes.py."""
     try:
         import sys as _sys
         if "/opt/shift-agent" not in _sys.path:
             _sys.path.insert(0, "/opt/shift-agent")
-        from safe_io import front_brain_screen_gateway_send as _fb_screen
-        return _fb_screen(chat_id, content, reserve_budget=reserve_budget)
+        import safe_io as _sio
+        _gate = getattr(_sio, "turn_send_budget_gate", None)
+        if _gate is not None and _gate(chat_id, content, reserve_budget=reserve_budget) is False:
+            return _SHIFT_DROP_SEND
+        return _sio.front_brain_screen_gateway_send(chat_id, content, reserve_budget=reserve_budget)
     except Exception as _e:
-        # §12b: screen-disarm must NEVER be silent. Keep fail-open (return the
-        # ORIGINAL text == today's un-screened behavior) but emit a structured
-        # stderr line so the operator can see the screen was bypassed.
+        # §12b: screen-disarm must NEVER be silent. The CONTENT screen keeps fail-
+        # open (return the ORIGINAL text == today's un-screened behavior) so a
+        # deploy-integrity fault never crashes the send path; emit a structured
+        # stderr line so the operator can see the screen was bypassed. (The budget
+        # gate itself never raises and fails CLOSED internally when enabled — this
+        # fail-open covers only a total safe_io-unavailable deploy fault, where the
+        # default-OFF budget feature cannot coherently be "on".)
         try:
             import sys as _sys2
             _sys2.stderr.write(
@@ -195,20 +283,29 @@ def _shift_front_brain_screen_outbound(chat_id, content, reserve_budget=True):
         return content
 # END shift-agent-front-brain-send'''
 
-# One-line call injected at the top of send(), immediately before the
+# Screen-call + drop-check injected at the top of send(), immediately before the
 # format/chunk/relay begins (anchor: the format_message assignment). 12-space
-# indent = method-try-block body.
+# indent = method-try-block body. When the per-turn budget is exhausted the screen
+# returns `_SHIFT_DROP_SEND` and send() returns None — a well-formed not-sent
+# result (send()'s own empty-content guard upstream already returns None, so the
+# caller tolerates it) — relaying NOTHING, so the transport is never hit.
 WHATSAPP_FB_SEND_INJECT = '''            # BEGIN shift-agent-front-brain-send
             content = _shift_front_brain_screen_outbound(chat_id, content)
+            if content is _SHIFT_DROP_SEND:
+                return None
             # END shift-agent-front-brain-send
 '''
 
-# One-line call injected at the top of edit_message(), immediately after
-# `import aiohttp` and before the bridge /edit relay. Screens EVERY edit
+# Screen-call + drop-check injected at the top of edit_message(), immediately
+# after `import aiohttp` and before the bridge /edit relay. Screens EVERY edit
 # (progressive drafts are customer-visible); reserve_budget=finalize so a whole
-# streamed reply costs ONE budget unit (reserved on the finalized edit only).
+# streamed reply costs ONE budget unit (reserved on the finalized edit only). On
+# an exhausted turn the screen returns `_SHIFT_DROP_SEND` and edit_message()
+# returns None (relays NOTHING) — the same TRUE suppression as send().
 WHATSAPP_FB_EDIT_INJECT = '''            # BEGIN shift-agent-front-brain-edit
             content = _shift_front_brain_screen_outbound(chat_id, content, reserve_budget=finalize)
+            if content is _SHIFT_DROP_SEND:
+                return None
             # END shift-agent-front-brain-edit
 '''
 
@@ -554,6 +651,67 @@ def _patch_run_py():
     print(f"  ✓ patched {RUN}")
 
 
+def _patch_run_py_turn_send_budget():
+    """Insert the per-inbound-turn send-budget boundary into run.py.
+
+    Two edits under one marker (shift-agent-turn-send-budget), idempotent + fail-
+    closed on missing anchors so a Hermes upgrade cannot silently no-op the turn
+    boundary (which would leave the adapter wrapper with no context → every send
+    fails closed, a loud failure, but the pin gate catches it before deploy):
+      1. the module-level flag block after the standalone `import os` line.
+      2. the begin_inbound_turn_send_budget() call inside
+         _prepare_inbound_message_text, BEFORE the `if _is_shared_multi_user`
+         user-name prefix (same site as the sender-id inject; independent flag).
+
+    Runs AFTER _patch_run_py in main(): the sender-id patch may have already
+    inserted its own blocks at the same two anchors (`import os` line still exists;
+    the `if _is_shared_multi_user` anchor is preserved), so both features coexist.
+    """
+    text = RUN.read_text(encoding="utf-8")
+    if TURN_BUDGET_MARK_BEGIN in text:
+        print(f"  ✓ {RUN} turn-send-budget already patched")
+        return
+
+    # 1. Module-level flag block after the standalone `import os` line.
+    anchor_re = re.compile(r"^import os$", re.MULTILINE)
+    if not anchor_re.search(text):
+        sys.stderr.write(
+            f"FAIL: cannot locate standalone `import os` line in {RUN} for "
+            f"turn-send-budget flag block\n"
+        )
+        sys.exit(1)
+    text = anchor_re.sub("import os" + RUN_PY_TURN_BUDGET_FLAG_BLOCK, text, count=1)
+
+    # 2. begin() call inside _prepare_inbound_message_text, before the anchor.
+    func_def_re = re.compile(r"^    async def _prepare_inbound_message_text\b", re.MULTILINE)
+    func_match = func_def_re.search(text)
+    if not func_match:
+        sys.stderr.write(
+            f"FAIL: cannot find _prepare_inbound_message_text def in {RUN} for "
+            f"turn-send-budget inject\n"
+        )
+        sys.exit(1)
+    anchor_re2 = re.compile(r"^        if _is_shared_multi_user.*$", re.MULTILINE)
+    anchor_match = anchor_re2.search(text, pos=func_match.end())
+    if not anchor_match:
+        sys.stderr.write(
+            f"FAIL: `if _is_shared_multi_user` line not found in {RUN} after function "
+            f"def for turn-send-budget — Hermes may have refactored the function.\n"
+        )
+        sys.exit(1)
+    line_diff = text.count("\n", func_match.start(), anchor_match.start())
+    if line_diff > 60:
+        sys.stderr.write(
+            f"FAIL: anchor `if _is_shared_multi_user` is {line_diff} lines from "
+            f"function def (turn-send-budget) — likely matched a different function.\n"
+        )
+        sys.exit(1)
+    text = text[:anchor_match.start()] + RUN_PY_TURN_BUDGET_INJECT_BLOCK.lstrip("\n") + text[anchor_match.start():]
+
+    RUN.write_text(text, encoding="utf-8")
+    print(f"  ✓ patched {RUN} (per-inbound-turn send budget boundary)")
+
+
 def _patch_bridge_js():
     if _has_marker(BR):
         print(f"  ✓ {BR} sender-id already patched")
@@ -669,6 +827,7 @@ def main() -> int:
     _patch_run_py()
     _patch_bridge_js()
     _patch_whatsapp_py_front_brain_send()
+    _patch_run_py_turn_send_budget()
     print("Done.")
     return 0
 

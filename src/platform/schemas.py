@@ -6356,6 +6356,35 @@ class _GatewaySendThrottleBreach(_BaseEntry):
     message_preview: str = Field(default="", max_length=120)
 
 
+class _SendBudgetExhausted(_BaseEntry):
+    """The per-INBOUND-TURN send budget SUPPRESSED an outbound send at the adapter
+    seam (2026-07-22 volume-cap companion to the #641 gateway throttle). Unlike the
+    two throttle-breach rows above — which SUBSTITUTE a safe template because the
+    gateway seam always relays a string — this is a TRUE drop: the adapter wrapper
+    returned the not-send sentinel and the send never went out. A row here is a BUG
+    REPORT, not routine operation: one inbound turn's designed reply flow is an ack
+    + the proposal set + at most one follow-up line, so the per-turn cap is generous
+    and hitting it means a send loop is spiraling. `reason` distinguishes turn
+    EXHAUSTION (the finalized cap — `exhausted`; or the SEPARATE progressive-draft
+    transport ceiling — `draft_exhausted`) from a FAIL-CLOSED drop when the per-turn
+    budget context was missing/corrupt (`missing_turn_context`), the budget
+    machinery faulted (`budget_fault`), or the config could not be read at the turn
+    boundary (`config_failed`) — the deliberate opposite of the throttle's
+    fail-open. Metadata-ONLY (no message content): `turn_id` groups every drop of
+    one turn, `count` is the finalized sends already admitted this turn (<= limit).
+    The operator is paged EXACTLY ONCE per exhausted turn via the §12b owner-alert
+    at the suppression site."""
+    type: Literal["send_budget_exhausted"]
+    jid: str = Field(default="", max_length=200)
+    turn_id: str = Field(default="", max_length=64)
+    reason: Literal[
+        "exhausted", "draft_exhausted", "missing_turn_context",
+        "budget_fault", "config_failed",
+    ]
+    count: int = Field(..., ge=0)
+    limit: int = Field(..., ge=1)
+
+
 # ─────────────────────────────────────────────────────────────────
 # Front-brain outbound enforcement — conversation-review surface (P0-5)
 # ─────────────────────────────────────────────────────────────────
@@ -6968,6 +6997,9 @@ LogEntry = Annotated[
         # 2026-07-21 — sibling throttle on the gateway-send seam (the seam the
         # 28-send incident actually spiraled on; bridge_post never sees it)
         Annotated[_GatewaySendThrottleBreach, Tag("gateway_send_throttle_breach")],
+        # 2026-07-22 — per-inbound-turn send budget: TRUE adapter-seam suppression
+        # (the volume cap the gateway throttle above could only substitute-a-template for)
+        Annotated[_SendBudgetExhausted, Tag("send_budget_exhausted")],
         # Front-brain outbound enforcement — conversation-review surface (P0-5)
         Annotated[FrontBrainReplyComposed, Tag("front_brain_reply_composed")],
         # Front-brain outbound enforcement — refusal audit (P0-3a)

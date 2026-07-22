@@ -184,6 +184,17 @@ grep -q "END shift-agent-front-brain-send" "$WA" || fail "$WA missing END shift-
 grep -q "BEGIN shift-agent-front-brain-edit" "$WA" || fail "$WA missing BEGIN shift-agent-front-brain-edit marker (streamed/finalized LLM edits would send UN-screened)"
 grep -q "END shift-agent-front-brain-edit" "$WA" || fail "$WA missing END shift-agent-front-brain-edit marker"
 
+# Per-INBOUND-TURN send budget (2026-07-22 — the TRUE volume cap #641 couldn't
+# provide). run.py sets a fresh per-turn budget at the inbound-turn boundary; the
+# adapter wrapper returns a not-send sentinel once the turn is exhausted so
+# send()/edit_message() relay NOTHING. Fail-closed so a Hermes upgrade that drops
+# EITHER half (the run.py boundary OR the adapter sentinel drop-check) cannot
+# silently ship the un-capped send path.
+grep -q "BEGIN shift-agent-turn-send-budget" "$RUN" || fail "$RUN missing BEGIN shift-agent-turn-send-budget marker (per-turn send cap boundary would be absent → sends would fail closed)"
+grep -q "END shift-agent-turn-send-budget" "$RUN" || fail "$RUN missing END shift-agent-turn-send-budget marker"
+grep -q "_SHIFT_DROP_SEND = " "$WA" || fail "$WA missing _SHIFT_DROP_SEND sentinel definition (per-turn send cap could not suppress a relay)"
+grep -q "content is _SHIFT_DROP_SEND" "$WA" || fail "$WA missing 'content is _SHIFT_DROP_SEND' drop-check in send()/edit_message() (per-turn send cap would never suppress)"
+
 # Bridge.js template-bypass patch — OBSOLETE in Hermes >= 0.12.0 (the
 # upstream chatter filter the patch extended was removed). The patch
 # script (tools/patch-bridge-filter.py) was deleted in the 2026-05-04
@@ -238,6 +249,17 @@ FEA=$(grep -n '/edit"' "$WA" | head -1 | cut -d: -f1)
 [ -n "$FEB" ] && [ -n "$FEA" ] || fail "$WA missing front-brain-edit marker or /edit anchor"
 DIFF5=$(( FEB > FEA ? FEB - FEA : FEA - FEB ))
 [ "$DIFF5" -le 10 ] || fail "$WA front-brain-edit marker drifted from /edit anchor (delta=$DIFF5 lines)"
+
+# run.py: per-inbound-turn send-budget inject site. The LAST turn-send-budget
+# BEGIN marker (the begin() call inside _prepare_inbound_message_text, after the
+# module-level flag block) must sit next to the _prepare_inbound_message_text
+# anchor. Drift => the per-turn budget may not be set at the inbound-turn boundary,
+# so every send in an enabled turn fails closed.
+TBB=$(grep -n "BEGIN shift-agent-turn-send-budget" "$RUN" | tail -1 | cut -d: -f1)
+TBA=$(grep -n "_prepare_inbound_message_text" "$RUN" | head -1 | cut -d: -f1)
+[ -n "$TBB" ] && [ -n "$TBA" ] || fail "$RUN missing turn-send-budget marker or _prepare_inbound_message_text anchor"
+DIFF6=$(( TBB > TBA ? TBB - TBA : TBA - TBB ))
+[ "$DIFF6" -le 60 ] || fail "$RUN turn-send-budget marker drifted from _prepare_inbound_message_text anchor (delta=$DIFF6 lines)"
 
 # Flyer Studio delivery depends on native media send support. Fail before
 # deploy if the pinned Hermes bridge lacks the companion endpoint used by

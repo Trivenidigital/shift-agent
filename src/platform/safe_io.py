@@ -33,6 +33,7 @@ go in audit_helpers.py).
 """
 
 from __future__ import annotations
+import contextvars  # 2026-07-22 — per-inbound-turn send-budget identity (turn-budget companion)
 import fcntl
 import inspect  # PR-ζ 2026-05-26 — caller introspection in _resolve_caller_script_name
 import json
@@ -41,6 +42,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid  # 2026-07-22 — per-inbound-turn id (turn-budget companion)
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TypeVar, Type, Any, Optional, Tuple
@@ -1915,6 +1917,438 @@ def _emit_gateway_send_throttle_breach(
     try:
         sys.stderr.write(
             f"gateway_send_throttle_breach_alert_delivered jid={jid} "
+            f"delivered={delivered}\n"
+        )
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────
+# Per-INBOUND-TURN outbound send budget (2026-07-22 — the TRUE volume cap the
+# #641 gateway throttle could not provide)
+#
+# WHY THIS EXISTS (reviewer ruling). The #641 gateway-send throttle above is a
+# per-conversation SLIDING WINDOW that can only SUBSTITUTE a safe template + page
+# — never SUPPRESS a send — because front_brain_screen_gateway_send is
+# contractually `-> str` (always returns a sendable string) and the injected
+# adapter wrapper unconditionally relays that string. Content-bounding + paging
+# is NOT sufficient for a demonstrated 28-send spiral: the customer still gets 28
+# (templated) messages. This companion enforces an ACTUAL per-turn send-COUNT cap
+# WHERE sends can be suppressed — the adapter send()/edit_message() — via a
+# not-send sentinel the wrapper returns and the inject honors with a well-formed
+# no-op result. It is a gate BEFORE/AROUND the #641 content screen, not a
+# replacement: permitted sends (under the cap) still flow through
+# front_brain_screen_gateway_send unchanged.
+#
+# TURN IDENTITY. One budget is shared by ALL sends of one inbound turn. The
+# budget object lives in a ContextVar set ONCE at the inbound-turn boundary
+# (the run.py `_prepare_inbound_message_text` inject — tools/patch-hermes.py
+# `RUN_PY_TURN_BUDGET_INJECT_BLOCK`). That function is `await`ed inside the
+# per-inbound-message handler task, and awaiting does NOT fork the context, so a
+# ContextVar.set there persists to every later send in the same task; child tasks
+# the agent loop spawns copy the context AT CREATION (after the set) and share the
+# SAME budget OBJECT by reference. A fresh inbound turn calls begin_* again and
+# `.set`s a new object, so the counter resets per turn with no teardown needed.
+#
+# TWO BOUNDS. Finalized sends (send() + finalized edits) count against `limit`
+# (default 5, hard-capped at MAX_TURN_SEND_BUDGET_LIMIT so a huge configured value
+# can't silently DISABLE the cap). Progressive DRAFT edits relay to the bridge but
+# don't consume a finalized slot, so they have a SEPARATE per-turn transport
+# ceiling (`draft_limit`, default limit x DEFAULT_TURN_SEND_BUDGET_DRAFT_FACTOR) —
+# without it a stream of draft edits could spam transport unboundedly past the
+# finalized cap. A draft is dropped once EITHER the finalized cap is exhausted or
+# its own ceiling is hit.
+#
+# ATOMICITY (parallel safety). The send path is asyncio (single event loop). The
+# reserve is a SYNCHRONOUS check-and-increment on the shared object with NO await
+# in the critical section, so no coroutine can interleave mid-reserve — two
+# concurrent sends can never both slip past the cap.
+#
+# FAIL-CLOSED — the DELIBERATE OPPOSITE of the #641 throttle's fail-OPEN. When the
+# feature is ON and the budget context is missing / corrupt / faulted at a send —
+# OR the config itself can't be READ (the enabled/limit machinery throws, frozen
+# at the turn boundary) — the send is SUPPRESSED (not relayed). #641 fails open (a
+# broken counter must not drop a legitimate send) because it is a content-bounding
+# limiter; this companion fails closed because a spiraling turn with broken budget
+# state must STOP, not flood, and a config failure must not pass unlimited sends.
+# A CLEAN read of OFF is the one passthrough (returns None, byte-identical); only a
+# config EXCEPTION suppresses. When the feature is OFF the gate is fully inert.
+#
+# SUPPRESSION IS SILENT TO THE CUSTOMER. A dropped send emits a metadata-only
+# `send_budget_exhausted` audit row (turn-id / count / limit / reason — NEVER
+# message content) and, for a genuinely exhausted turn, pages the operator EXACTLY
+# ONCE (a per-turn `paged` flag). No retry, no recursive summary, no "you hit a
+# limit" reply. The missing-context fail-closed path audits every drop but does
+# NOT page (there is no per-turn object to dedup against, so per-send paging would
+# itself flood §12b) — the audit-row count + stderr surface the wiring fault.
+# ─────────────────────────────────────────────────────────────────
+
+DEFAULT_TURN_SEND_BUDGET_LIMIT = 5
+# HARD ceiling on the configurable finalized-send limit. The designed one-turn
+# reply flow is an ack + the proposal set + at most one follow-up, so a handful of
+# sends is the real envelope; 20 (4x the generous default) sits comfortably above
+# any legitimate reply while still bounding a spiral to a small number. ANY
+# configured value above this is a config error or an attempt to DISABLE the cap
+# (e.g. 500000), so it falls back to the bounded default — the same treatment as
+# malformed / <1. Without a hard max, `GATEWAY_TURN_SEND_BUDGET_LIMIT=500000`
+# would silently neuter the whole cap.
+MAX_TURN_SEND_BUDGET_LIMIT = 20
+
+# Default multiplier for the SEPARATE per-turn progressive-draft transport ceiling
+# (draft_limit = limit x this): a streamed reply's value is its FINAL frame, so a
+# handful of intermediate draft frames per finalized reply is ample; beyond that,
+# extra frames add no value and a runaway draft loop must be bounded. Overridable
+# via GATEWAY_TURN_SEND_BUDGET_DRAFT_LIMIT (absolute).
+DEFAULT_TURN_SEND_BUDGET_DRAFT_FACTOR = 10
+# Absolute hard ceiling on the draft-transport bound (bounds even a huge factor x
+# a max limit); a draft spam past this is always dropped.
+MAX_TURN_SEND_BUDGET_DRAFT_LIMIT = 500
+
+# Dedup guard for the malformed / out-of-range finalized-limit warning: a config
+# typo is a STANDING condition, so log once per distinct offending value for the
+# life of the process (not once per call — turn_send_budget_limit is read every
+# turn boundary + on the fail-closed audit paths).
+_TURN_SEND_BUDGET_LIMIT_WARNED: "set[str]" = set()
+
+
+def turn_send_budget_enabled() -> bool:
+    """True only when GATEWAY_TURN_SEND_BUDGET_ENABLED == "1". Default OFF → the
+    per-turn budget is fully inert: no context is set at the turn boundary, the
+    adapter gate returns None (byte-identical passthrough), and nothing is
+    suppressed. Distinct flag from the #641 gateway throttle
+    (GATEWAY_SEND_THROTTLE_ENABLED) — the two limiters are independent. Rollout
+    scaffolding; graduate per the standing rollout-scaffolding-needs-graduation
+    rule."""
+    return os.environ.get("GATEWAY_TURN_SEND_BUDGET_ENABLED", "") == "1"
+
+
+def _warn_bad_turn_send_budget_limit(raw: str) -> None:
+    """Metadata-only, DEDUPLICATED (once per offending value) stderr warning that a
+    configured finalized-limit was rejected and the bounded default substituted.
+    Carries ONLY the offending value + the fallback — never message content."""
+    if raw in _TURN_SEND_BUDGET_LIMIT_WARNED:
+        return
+    _TURN_SEND_BUDGET_LIMIT_WARNED.add(raw)
+    try:
+        sys.stderr.write(
+            f"turn_send_budget_limit invalid config value={raw!r} "
+            f"(allowed 1..{MAX_TURN_SEND_BUDGET_LIMIT}); using bounded default "
+            f"{DEFAULT_TURN_SEND_BUDGET_LIMIT}\n"
+        )
+    except Exception:
+        pass
+
+
+def turn_send_budget_limit() -> int:
+    """Max FINALIZED sends per inbound turn. Env GATEWAY_TURN_SEND_BUDGET_LIMIT
+    (default 5 — the same generous ceiling as the #641 throttle). Malformed / <1 /
+    ABOVE the hard max (MAX_TURN_SEND_BUDGET_LIMIT) all fall back to the bounded
+    default (never 0 — a 0 ceiling would suppress every send; never unbounded — a
+    huge value would silently DISABLE the cap). A rejected value emits a
+    deduplicated metadata-only warning."""
+    raw = os.environ.get(
+        "GATEWAY_TURN_SEND_BUDGET_LIMIT", str(DEFAULT_TURN_SEND_BUDGET_LIMIT),
+    )
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        _warn_bad_turn_send_budget_limit(str(raw))
+        return DEFAULT_TURN_SEND_BUDGET_LIMIT
+    if v < 1 or v > MAX_TURN_SEND_BUDGET_LIMIT:
+        _warn_bad_turn_send_budget_limit(str(raw))
+        return DEFAULT_TURN_SEND_BUDGET_LIMIT
+    return v
+
+
+def turn_send_budget_draft_limit(limit: int) -> int:
+    """Per-turn ceiling on progressive-DRAFT transport relays — a SEPARATELY
+    ENFORCED bound from the finalized-send cap so a stream of draft edits (which
+    relay to the bridge but do NOT consume a finalized slot) cannot spam transport
+    unboundedly. Defaults to ``limit x DEFAULT_TURN_SEND_BUDGET_DRAFT_FACTOR``;
+    GATEWAY_TURN_SEND_BUDGET_DRAFT_LIMIT overrides with an absolute value.
+    Malformed / <1 / above MAX_TURN_SEND_BUDGET_DRAFT_LIMIT → the computed default
+    (always bounded, never unbounded)."""
+    default = min(
+        max(1, int(limit)) * DEFAULT_TURN_SEND_BUDGET_DRAFT_FACTOR,
+        MAX_TURN_SEND_BUDGET_DRAFT_LIMIT,
+    )
+    raw = os.environ.get("GATEWAY_TURN_SEND_BUDGET_DRAFT_LIMIT")
+    if raw is None:
+        return default
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return default
+    if v < 1 or v > MAX_TURN_SEND_BUDGET_DRAFT_LIMIT:
+        return default
+    return v
+
+
+class _TurnSendBudget:
+    """Mutable per-inbound-turn send counter, shared by every send of one turn via
+    the ``_TURN_SEND_BUDGET`` ContextVar (all coroutines / child tasks of the turn
+    hold the SAME object by reference). ``reserve`` is synchronous so it is atomic
+    under asyncio's single event loop.
+
+    Two SEPARATE bounds:
+      - ``count`` / ``limit`` — FINALIZED sends (send() + finalized edits). One
+        streamed reply reserves ONE finalized slot.
+      - ``draft_count`` / ``draft_limit`` — progressive DRAFT edit-transport
+        relays. Drafts relay to the bridge but don't consume a finalized slot, so
+        without their own bound a draft stream could spam transport unboundedly;
+        this ceiling caps that independently.
+
+    ``config_failed`` marks a turn whose config could not be read at the boundary
+    (item 3 fail-closed): every send that turn is suppressed."""
+
+    __slots__ = ("turn_id", "limit", "count", "paged", "draft_limit", "draft_count", "config_failed")
+
+    def __init__(
+        self, turn_id: str, limit: int, draft_limit: int, *, config_failed: bool = False,
+    ) -> None:
+        self.turn_id = turn_id
+        self.limit = limit
+        self.count = 0
+        self.paged = False
+        self.draft_limit = draft_limit
+        self.draft_count = 0
+        self.config_failed = config_failed
+
+    def reserve(self, consume: bool) -> bool:
+        """Atomically decide whether this send may go out. SYNCHRONOUS — NO await
+        in the critical section, so two concurrent coroutines can never both slip
+        past the cap.
+
+          - Finalized send (``consume=True``): dropped when the finalized cap is
+            hit (``count >= limit``); otherwise admitted + increments ``count``.
+          - Progressive draft (``consume=False``): dropped when the finalized cap
+            is exhausted (``count >= limit`` — once the turn is capped EVERY further
+            customer-visible send stops) OR the SEPARATE draft-transport ceiling is
+            hit (``draft_count >= draft_limit`` — so a draft stream can't spam the
+            bridge unboundedly even before the finalized cap); otherwise admitted +
+            increments ``draft_count`` (never ``count`` — a whole streamed reply
+            still costs ONE finalized unit)."""
+        if consume:
+            if self.count >= self.limit:
+                return False
+            self.count += 1
+            return True
+        if self.count >= self.limit or self.draft_count >= self.draft_limit:
+            return False
+        self.draft_count += 1
+        return True
+
+
+_TURN_SEND_BUDGET: "contextvars.ContextVar[Optional[_TurnSendBudget]]" = (
+    contextvars.ContextVar("shift_turn_send_budget", default=None)
+)
+
+
+def begin_inbound_turn_send_budget() -> Optional[str]:
+    """FREEZE the enabled + limit + draft-limit config ONCE at the inbound-turn
+    boundary (called from the run.py `_prepare_inbound_message_text` inject) into a
+    fresh budget in the ContextVar. Three outcomes:
+
+      - Clean read of OFF → set NO budget (None) and return None; downstream sends
+        pass through unchanged (byte-identical).
+      - Clean read of ON → freeze a budget (finalized limit + draft ceiling) and
+        return its turn_id.
+      - Config-READ EXCEPTION → freeze a CONFIG-FAILED budget and return its
+        turn_id: every send this turn is SUPPRESSED (item 3 fail-closed — a config
+        machinery failure must NOT pass unlimited sends). Audited once at the first
+        suppressed send (which has a jid).
+
+    Per-send `turn_send_budget_gate` reads the FROZEN decision — the config is not
+    re-read per send."""
+    try:
+        enabled = turn_send_budget_enabled()
+    except Exception as e:  # noqa: BLE001 — config read threw → FAIL CLOSED this turn
+        budget = _TurnSendBudget(
+            uuid.uuid4().hex, DEFAULT_TURN_SEND_BUDGET_LIMIT, 0, config_failed=True,
+        )
+        _TURN_SEND_BUDGET.set(budget)
+        try:
+            sys.stderr.write(
+                f"turn_send_budget begin config-read failed ({type(e).__name__}: "
+                f"{str(e)[:120]}); FAIL-CLOSED for turn {budget.turn_id}\n"
+            )
+        except Exception:
+            pass
+        return budget.turn_id
+    if not enabled:
+        # Clean OFF: clear any stale context so a send this turn passes through.
+        _TURN_SEND_BUDGET.set(None)
+        return None
+    limit = turn_send_budget_limit()
+    budget = _TurnSendBudget(uuid.uuid4().hex, limit, turn_send_budget_draft_limit(limit))
+    _TURN_SEND_BUDGET.set(budget)
+    return budget.turn_id
+
+
+def turn_send_budget_gate(
+    jid: str, message: str, *, reserve_budget: bool = True,
+) -> Optional[bool]:
+    """Per-turn budget decision at the adapter send()/edit_message() seam, reading
+    the FROZEN turn config. Never raises. Returns:
+
+      - ``None``  — feature DISABLED → caller proceeds to the content screen
+        (byte-identical passthrough).
+      - ``True``  — enabled + ADMITTED (under cap, context valid) → caller screens
+        + relays.
+      - ``False`` — SUPPRESS this send. FAIL-CLOSED (the deliberate opposite of the
+        #641 throttle's fail-open): triggered by turn EXHAUSTION (finalized cap or
+        the separate draft ceiling), a MISSING / CORRUPT / FAULTED budget, OR a
+        CONFIG-read failure (item 3) — none of which may pass unlimited sends.
+
+    ``message`` is accepted for signature parity with the content screen but is
+    NEVER recorded (telemetry is metadata-only: turn-id / count / limit / reason).
+    ``reserve_budget`` is False for progressive streamed edit drafts (screened but
+    non-slot-consuming) and True for a send() / finalized edit."""
+    try:
+        budget = _TURN_SEND_BUDGET.get()
+
+        # A frozen CONFIG-FAILED turn (config read threw at the boundary): suppress
+        # EVERY send this turn; audit + page ONCE (guarded by `paged`).
+        if isinstance(budget, _TurnSendBudget) and budget.config_failed:
+            if not budget.paged:
+                budget.paged = True
+                _emit_turn_send_budget_suppressed(
+                    jid, budget.turn_id, "config_failed", 0, budget.limit,
+                )
+                _page_turn_send_budget_exhausted(
+                    jid, budget.turn_id, 0, budget.limit,
+                )
+            return False
+
+        # No frozen budget → disambiguate OFF (passthrough) from ON-but-boundary-
+        # missing (fail closed). The flag read HERE is the only config read on this
+        # path, and a config-read EXCEPTION here ALSO fails closed (item 3).
+        if not isinstance(budget, _TurnSendBudget):
+            try:
+                enabled = turn_send_budget_enabled()
+            except Exception as e:  # noqa: BLE001 — config read threw → FAIL CLOSED
+                try:
+                    sys.stderr.write(
+                        f"turn_send_budget gate config-read failed "
+                        f"({type(e).__name__}: {str(e)[:120]}); FAIL-CLOSED "
+                        f"(send suppressed)\n"
+                    )
+                except Exception:
+                    pass
+                _emit_turn_send_budget_suppressed(
+                    jid, "", "config_failed", 0, DEFAULT_TURN_SEND_BUDGET_LIMIT,
+                )
+                return False
+            if not enabled:
+                return None  # known OFF → passthrough (byte-identical)
+            # ON but the turn boundary never froze a budget → missing context, FAIL
+            # CLOSED. Audit every drop but do NOT page: with no per-turn object
+            # there is nothing to dedup a page against, and per-send paging would
+            # itself flood §12b.
+            _emit_turn_send_budget_suppressed(
+                jid, "", "missing_turn_context", 0, turn_send_budget_limit(),
+            )
+            return False
+
+        # Enabled + valid frozen budget → atomic reserve.
+        allow = budget.reserve(bool(reserve_budget))
+        if allow:
+            return True
+        # Suppress. `exhausted` = finalized cap hit (or a draft after the finalized
+        # cap); `draft_exhausted` = the separate draft-transport ceiling hit while
+        # the finalized cap still has room. Audit each drop; page ONCE per turn.
+        reason = "exhausted" if (reserve_budget or budget.count >= budget.limit) else "draft_exhausted"
+        _emit_turn_send_budget_suppressed(
+            jid, budget.turn_id, reason, budget.count, budget.limit,
+        )
+        if not budget.paged:
+            budget.paged = True
+            _page_turn_send_budget_exhausted(
+                jid, budget.turn_id, budget.count, budget.limit,
+            )
+        return False
+    except Exception as e:  # noqa: BLE001 — any machinery fault → FAIL CLOSED
+        try:
+            sys.stderr.write(
+                f"turn_send_budget gate fault ({type(e).__name__}: "
+                f"{str(e)[:160]}); FAIL-CLOSED (send suppressed)\n"
+            )
+        except Exception:
+            pass
+        try:
+            _emit_turn_send_budget_suppressed(
+                jid, "", "budget_fault", 0, DEFAULT_TURN_SEND_BUDGET_LIMIT,
+            )
+        except Exception:
+            pass
+        return False
+
+
+def _emit_turn_send_budget_suppressed(
+    jid: str, turn_id: str, reason: str, count: int, limit: int,
+) -> None:
+    """Record a per-turn send suppression (metadata-only `send_budget_exhausted`
+    audit row) + a deterministic stderr marker. NEVER carries message content
+    (telemetry metadata-only). Best-effort (`_try_emit_audit_row` never
+    propagates — the send is already suppressed, don't compound it by raising)."""
+    _try_emit_audit_row(
+        "send_budget_exhausted",
+        {
+            "jid": str(jid or ""),
+            "turn_id": str(turn_id or ""),
+            "reason": reason,
+            "count": max(0, int(count)),
+            "limit": max(1, int(limit)),
+        },
+    )
+    try:
+        sys.stderr.write(
+            f"turn_send_budget_suppressed turn_id={turn_id} reason={reason} "
+            f"count={count} limit={limit} jid={jid}\n"
+        )
+    except Exception:
+        pass
+
+
+def _page_turn_send_budget_exhausted(
+    jid: str, turn_id: str, count: int, limit: int,
+) -> None:
+    """Page the operator ONCE for an exhausted inbound turn, through the §12b
+    owner-alert path (plain text — no Markdown, so the underscore-bearing turn-id
+    can't be mangled) bracketed by `*_alert_dispatched` / `*_alert_delivered`
+    stderr lines so every fire is traceable in journalctl regardless of delivery.
+    Caller guards this to ONE call per turn via the budget's `paged` flag."""
+    title = "per-turn send budget exhausted"
+    body = (
+        f"SUPPRESSED further sends: inbound turn {turn_id} for conversation {jid} "
+        f"hit its per-turn send cap ({limit}). Every further send this turn is "
+        f"DROPPED at the adapter seam (a TRUE suppression, not a template "
+        f"substitute) — a send loop is likely spiraling; investigate the "
+        f"conversation. Message content is withheld from this alert by design."
+    )
+    try:
+        sys.stderr.write(
+            f"send_budget_exhausted_alert_dispatched turn_id={turn_id} "
+            f"count={count} limit={limit} jid={jid}\n"
+        )
+    except Exception:
+        pass
+    delivered = False
+    try:
+        delivered = notify_owner_with_fallback(
+            title, body, priority=1, source="gateway_turn_send_budget",
+        )
+    except Exception as e:  # noqa: BLE001 — alerting must never crash the drop path
+        try:
+            sys.stderr.write(
+                f"send_budget_exhausted alert raised "
+                f"({type(e).__name__}: {str(e)[:160]})\n"
+            )
+        except Exception:
+            pass
+    try:
+        sys.stderr.write(
+            f"send_budget_exhausted_alert_delivered turn_id={turn_id} "
             f"delivered={delivered}\n"
         )
     except Exception:
