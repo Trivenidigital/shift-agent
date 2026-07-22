@@ -1378,6 +1378,33 @@ def front_brain_screen_gateway_send(
         except Exception:
             pass
 
+    # 0. Per-conversation GATEWAY-SEND throttle (incident limiter, default-OFF).
+    #    The OUTERMOST send gate: catches a spiraling send loop BEFORE the day
+    #    budget / screen, and (unlike the day budget) counts EVERY finalized send
+    #    attempt so a spiral that runs past the day cap is still bounded. Counts
+    #    the SAME unit the day budget counts — one per FINALIZED send — so it is
+    #    gated on `reserve_budget`: a progressive streamed draft (reserve_budget
+    #    =False) consumes NO throttle budget, exactly like the day budget, so a
+    #    10-draft streamed reply that finalizes once costs ONE. On breach:
+    #    SUBSTITUTE the safe template (the seam always relays its return, so this
+    #    is the seam's suppression shape — see the section note above; NOT a true
+    #    drop) and page the operator (§12b) via the distinct
+    #    `gateway_send_throttle_breach`. `_emit_template_review` keeps the human-
+    #    review surface's "one row per sent text" invariant intact (the template
+    #    went out). Fail-open on throttle-infra fault (the reserve returns
+    #    breached=False), so a broken counter never substitutes. Flag-OFF → the
+    #    block is skipped, byte-identical, and the state file is never touched.
+    if reserve_budget and gateway_send_throttle_enabled():
+        _allow_send, breached, window_count = _gateway_send_throttle_reserve(screen_jid)
+        if breached:
+            _emit_gateway_send_throttle_breach(
+                screen_jid, message, window_count,
+                gateway_send_throttle_limit(),
+                gateway_send_throttle_window_sec(),
+            )
+            _emit_template_review("gateway_send_throttle")
+            return safe_fallback
+
     # 1. Per-chat/day budget (P0-4). Bounds SENDS per chat/day (not LLM compute).
     #    Skipped for progressive streamed edits (reserve_budget=False) so a single
     #    reply costs ONE unit, not one per token batch. Fail toward SKIP on
@@ -1598,6 +1625,7 @@ def _conversation_throttle_reserve(
     limit: Optional[int] = None,
     window_sec: Optional[float] = None,
     state_path: "Optional[Path]" = None,
+    label: str = "conversation_send_throttle",
 ) -> Tuple[bool, bool, int]:
     """Atomically reserve one send for ``jid``'s sliding window under the state
     file's FileLock. Returns ``(allow_send, breached, window_count)``:
@@ -1611,7 +1639,12 @@ def _conversation_throttle_reserve(
     The bucket key is the normalized chat key (``_front_brain_normalize_chat_key``
     strips the @-JID suffix / punctuation / case) so LID / phone / JID forms of
     one conversation share a bucket. A key that normalizes to empty fails OPEN —
-    a nameless chat can't be bounded and must not be dropped."""
+    a nameless chat can't be bounded and must not be dropped.
+
+    ``label`` (default the bridge_post throttle's name) prefixes the fail-open
+    stderr line so the SIBLING gateway-send throttle — which reuses this same
+    lock/state/window machinery against a SEPARATE state file — logs a seam-
+    distinct fault marker (§12a: which seam's throttle state broke)."""
     key = _front_brain_normalize_chat_key(jid)
     if not key:
         return True, False, -1
@@ -1640,7 +1673,7 @@ def _conversation_throttle_reserve(
     except Exception as e:  # noqa: BLE001 — fail OPEN on any throttle-infra fault
         try:
             sys.stderr.write(
-                f"conversation_send_throttle state error ({type(e).__name__}: "
+                f"{label} state error ({type(e).__name__}: "
                 f"{str(e)[:160]}); failing OPEN (send proceeds)\n"
             )
         except Exception:
@@ -1703,6 +1736,185 @@ def _emit_conversation_throttle_breach(
     try:
         sys.stderr.write(
             f"conversation_send_throttle_breach_alert_delivered jid={jid} "
+            f"delivered={delivered}\n"
+        )
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────
+# Per-conversation GATEWAY-SEND throttle (2026-07-21 incident limiter — the
+# seam the 28-send spiral actually ran on)
+#
+# SIBLING of the bridge_post throttle above. The 2026-07-21 28-send spiral was
+# the Hermes GATEWAY agent loop: the send_message tool → the platform adapter's
+# send()/edit_message() → front_brain_screen_gateway_send (the egress screen for
+# LLM free-form replies). That path does NOT pass through bridge_post, so the
+# bridge_post throttle above never sees it. The gateway seam is bounded today
+# ONLY by front_brain_budget.reserve_chat_day_budget — a per-chat-per-DAY cap
+# (default 30). 28-in-minutes slid under a 30/day cap because a daily volume cap
+# is the wrong SHAPE for a spiral; this throttle adds the missing per-conversation
+# SLIDING WINDOW at the gateway seam.
+#
+# Distinct from the bridge throttle on every operator-facing surface so §12b can
+# name WHICH seam is spiraling: distinct enable flag, distinct config env vars, a
+# SEPARATE state file + lock, and a DISTINCT breach reason literal
+# (`gateway_send_throttle_breach`). It SHARES only the pure window math
+# (conversation_throttle_decision) and the FileLock/state mechanics
+# (_conversation_throttle_reserve, called with the gateway config + state path).
+#
+# ARCHITECTURAL NOTE (load-bearing — differs from the bridge throttle): the
+# gateway seam's contract is "ALWAYS return a sendable string". The injected
+# adapter wrapper (tools/patch-hermes.py `_shift_front_brain_screen_outbound`)
+# assigns the return to `content` and the adapter UNCONDITIONALLY relays it —
+# the empty-content guard in send() sits UPSTREAM of the inject point and
+# edit_message has none — and the wrapper fail-opens (returns the ORIGINAL text)
+# on any exception. So a breach here CANNOT drop-to-silence the way bridge_post
+# can (bridge_post owns the socket and returns success=False), and it cannot
+# raise a signal back into the agent loop (the wrapper swallows it, and send()/
+# edit_message() are the delivery leg AFTER the model's turn — their return is
+# not a tool result). Instead the breach SUBSTITUTES the safe fallback template
+# (the seam's established suppression shape — identical to how the sibling per-
+# chat/day budget handles exhaustion) AND pages the operator. This bounds the
+# spiraling CONTENT + alerts, but the breaching turn still emits ONE outbound
+# message (the template), NOT zero. A true gateway drop-to-silence (or a
+# tool-error signal into the loop) needs the adapter wrapper to honor a not-send
+# sentinel — a tools/patch-hermes.py change, out of this PR's safe_io-only scope;
+# tracked as the volume-capping follow-up. Same fail-open asymmetry as the bridge
+# throttle: a BREACH substitutes+alerts, but a throttle-STATE fault (lock / IO /
+# decode) ALLOWS the send.
+# ─────────────────────────────────────────────────────────────────
+
+DEFAULT_GATEWAY_SEND_THROTTLE_LIMIT = 5
+DEFAULT_GATEWAY_SEND_THROTTLE_WINDOW_SEC = 600  # 10 minutes
+
+# Deployed default; overridable via env for tests + operator tuning. SEPARATE
+# from the bridge throttle's state file so the two windows never share a bucket.
+GATEWAY_SEND_THROTTLE_STATE_PATH = Path(
+    "/opt/shift-agent/state/gateway_send_throttle.json"
+)
+
+
+def gateway_send_throttle_enabled() -> bool:
+    """True only when GATEWAY_SEND_THROTTLE_ENABLED == "1". Default OFF → the
+    gateway throttle is fully inert and front_brain_screen_gateway_send is byte-
+    identical to its pre-throttle behavior (the state file is never touched).
+    Rollout scaffolding; graduate per the standing rollout-scaffolding-needs-
+    graduation rule."""
+    return os.environ.get("GATEWAY_SEND_THROTTLE_ENABLED", "") == "1"
+
+
+def gateway_send_throttle_limit() -> int:
+    """Max FINALIZED gateway sends per conversation per window. Env
+    GATEWAY_SEND_THROTTLE_LIMIT (default 5). A malformed / <1 value falls back to
+    the default (never 0 — a 0 ceiling would suppress every send)."""
+    try:
+        v = int(os.environ.get(
+            "GATEWAY_SEND_THROTTLE_LIMIT",
+            str(DEFAULT_GATEWAY_SEND_THROTTLE_LIMIT),
+        ))
+        return v if v >= 1 else DEFAULT_GATEWAY_SEND_THROTTLE_LIMIT
+    except (TypeError, ValueError):
+        return DEFAULT_GATEWAY_SEND_THROTTLE_LIMIT
+
+
+def gateway_send_throttle_window_sec() -> float:
+    """Sliding-window width in seconds. Env GATEWAY_SEND_THROTTLE_WINDOW_SEC
+    (default 600 = 10 min). A malformed / non-positive value falls back to the
+    default."""
+    default = float(DEFAULT_GATEWAY_SEND_THROTTLE_WINDOW_SEC)
+    try:
+        v = float(os.environ.get(
+            "GATEWAY_SEND_THROTTLE_WINDOW_SEC",
+            str(DEFAULT_GATEWAY_SEND_THROTTLE_WINDOW_SEC),
+        ))
+        return v if v > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _gateway_send_throttle_state_path() -> Path:
+    return Path(
+        os.environ.get("GATEWAY_SEND_THROTTLE_STATE_PATH")
+        or GATEWAY_SEND_THROTTLE_STATE_PATH
+    )
+
+
+def _gateway_send_throttle_reserve(
+    jid: str, *, now: Optional[float] = None,
+) -> Tuple[bool, bool, int]:
+    """Atomically reserve one finalized gateway send for ``jid``'s sliding
+    window. Thin wrapper over :func:`_conversation_throttle_reserve` (shared
+    FileLock + state I/O + the public ``conversation_throttle_decision`` window
+    math) bound to the GATEWAY config + a SEPARATE state file / lock, so the two
+    throttles never share a bucket. Same return contract
+    ``(allow_send, breached, window_count)``; an infra fault fails OPEN
+    ``(True, False, -1)`` with a gateway-branded log line."""
+    return _conversation_throttle_reserve(
+        jid,
+        now=now,
+        limit=gateway_send_throttle_limit(),
+        window_sec=gateway_send_throttle_window_sec(),
+        state_path=_gateway_send_throttle_state_path(),
+        label="gateway_send_throttle",
+    )
+
+
+def _emit_gateway_send_throttle_breach(
+    jid: str, message: str, window_count: int, limit: int, window_sec: float,
+) -> None:
+    """Record the gateway-seam breach (distinct suppression audit row) AND page
+    the operator (§12b) at the breach site. Mirrors
+    :func:`_emit_conversation_throttle_breach` but emits the DISTINCT
+    `gateway_send_throttle_breach` literal + a gateway-branded alert so §12b
+    tells the operator WHICH seam is spiraling. The alert is plain text (no
+    Markdown, so the underscore-bearing reason / jid can't be mangled) and is
+    bracketed by `*_alert_dispatched` / `*_alert_delivered` stderr lines so every
+    fire is traceable in journalctl regardless of whether delivery succeeded."""
+    caller = _resolve_caller_script_name()
+    _try_emit_audit_row(
+        "gateway_send_throttle_breach",
+        {
+            "jid": jid,
+            "caller_script": caller,
+            "window_count": max(0, int(window_count)),
+            "limit": int(limit),
+            "window_sec": int(window_sec),
+            "message_preview": str(message or "")[:120],
+        },
+    )
+    title = "gateway send throttle breach"
+    body = (
+        f"SUBSTITUTED the safe template for a send: conversation {jid} exceeded "
+        f"{limit} gateway sends / {int(window_sec)}s (in-window={window_count}). "
+        f"This is an incident limiter firing on the GATEWAY seam (LLM free-form "
+        f"replies, NOT bridge_post) — a send loop is likely spiraling; "
+        f"investigate the conversation. NOTE: the gateway seam always relays a "
+        f"string, so the breaching turn still sent the template (not a true drop)."
+    )
+    try:
+        sys.stderr.write(
+            f"gateway_send_throttle_breach_alert_dispatched jid={jid} "
+            f"count={window_count} limit={limit} window_sec={int(window_sec)}\n"
+        )
+    except Exception:
+        pass
+    delivered = False
+    try:
+        delivered = notify_owner_with_fallback(
+            title, body, priority=1, source="gateway_send_conversation_throttle",
+        )
+    except Exception as e:  # noqa: BLE001 — alerting must never crash the drop path
+        try:
+            sys.stderr.write(
+                f"gateway_send_throttle_breach alert raised "
+                f"({type(e).__name__}: {str(e)[:160]})\n"
+            )
+        except Exception:
+            pass
+    try:
+        sys.stderr.write(
+            f"gateway_send_throttle_breach_alert_delivered jid={jid} "
             f"delivered={delivered}\n"
         )
     except Exception:
