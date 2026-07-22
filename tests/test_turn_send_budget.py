@@ -69,6 +69,9 @@ def _live_modules():
     # leak a budget into the next (asyncio.run harness tests set it in a COPIED
     # context, so those never leak — but the direct-call gate tests do).
     live._TURN_SEND_BUDGET.set(None)
+    # Reset the config-warning dedup set so the once-per-value warning test is
+    # isolated from other tests that trip malformed-config fallbacks.
+    live._TURN_SEND_BUDGET_LIMIT_WARNED.clear()
     return live
 
 
@@ -90,23 +93,31 @@ def budget_on(monkeypatch):
 
 class TestReserveIsAtomicCounter:
     def test_finalized_sends_cap_at_limit(self):
-        b = safe_io._TurnSendBudget("t", 3)
+        b = safe_io._TurnSendBudget("t", 3, 30)
         assert [b.reserve(True) for _ in range(5)] == [True, True, True, False, False]
         assert b.count == 3  # never ratchets past the cap
 
     def test_progressive_drafts_admit_without_consuming(self):
-        b = safe_io._TurnSendBudget("t", 2)
-        # drafts (consume=False) admit and DON'T increment
-        assert b.reserve(False) is True and b.count == 0
-        assert b.reserve(False) is True and b.count == 0
-        # a finalized send consumes
+        b = safe_io._TurnSendBudget("t", 2, 10)
+        # drafts (consume=False) admit and DON'T increment the finalized counter
+        assert b.reserve(False) is True and b.count == 0 and b.draft_count == 1
+        assert b.reserve(False) is True and b.count == 0 and b.draft_count == 2
+        # a finalized send consumes the finalized slot
         assert b.reserve(True) is True and b.count == 1
 
     def test_every_send_drops_after_exhaustion_drafts_included(self):
-        b = safe_io._TurnSendBudget("t", 1)
+        b = safe_io._TurnSendBudget("t", 1, 10)
         assert b.reserve(True) is True  # count -> 1 (== limit)
         assert b.reserve(True) is False   # finalized dropped
-        assert b.reserve(False) is False  # draft ALSO dropped after exhaustion
+        assert b.reserve(False) is False  # draft ALSO dropped after finalized exhaustion
+
+    def test_drafts_bounded_by_separate_ceiling_before_finalized_exhaustion(self):
+        # high finalized cap, low draft ceiling: drafts drop on THEIR OWN bound even
+        # though the finalized counter still has room (the transport-spam guard).
+        b = safe_io._TurnSendBudget("t", 100, 3)
+        assert [b.reserve(False) for _ in range(5)] == [True, True, True, False, False]
+        assert b.draft_count == 3
+        assert b.count == 0  # drafts never touched the finalized counter
 
     def test_reserve_has_no_await_point(self):
         # Atomicity rests on reserve being purely synchronous (no await in the
@@ -179,7 +190,7 @@ class TestGateDecision:
         class _Boom(safe_io._TurnSendBudget):
             def reserve(self, consume):
                 raise RuntimeError("counter corrupt")
-        safe_io._TURN_SEND_BUDGET.set(_Boom("t", 5))
+        safe_io._TURN_SEND_BUDGET.set(_Boom("t", 5, 50))
         assert safe_io.turn_send_budget_gate(CHAT, "x") is False
 
     def test_fresh_turn_resets_the_budget(self, monkeypatch):
@@ -320,6 +331,83 @@ class TestReviewerGates:
             # exactly DEFAULT admitted, the rest suppressed — the cap is ENFORCED,
             # not disabled, under every malformed config value.
             assert admits == default
+
+    def test_hard_max_ceiling_rejects_cap_disabling_value(self, monkeypatch, capsys):
+        # ITEM 1: a huge configured limit (which would effectively DISABLE the cap)
+        # falls back to the bounded default, same as malformed/<1; a value at/below
+        # the hard max is honored; the rejection warns ONCE across repeated calls.
+        default = safe_io.DEFAULT_TURN_SEND_BUDGET_LIMIT
+        hard_max = safe_io.MAX_TURN_SEND_BUDGET_LIMIT
+        # a cap-disabling value → bounded default
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_LIMIT", "500000")
+        assert safe_io.turn_send_budget_limit() == default
+        # a value AT the hard max is honored (not clamped away)
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_LIMIT", str(hard_max))
+        assert safe_io.turn_send_budget_limit() == hard_max
+        # a value one above the hard max → bounded default
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_LIMIT", str(hard_max + 1))
+        assert safe_io.turn_send_budget_limit() == default
+
+    def test_invalid_limit_warning_is_deduplicated(self, monkeypatch, capsys):
+        # ITEM 1: the metadata-only warning fires ONCE per offending value across
+        # repeated calls (a config typo is a standing condition, not per-call noise),
+        # and carries only the bad value + fallback — never message content.
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_LIMIT", "500000")
+        for _ in range(10):
+            safe_io.turn_send_budget_limit()
+        err = capsys.readouterr().err
+        assert err.count("turn_send_budget_limit invalid config") == 1
+        assert "500000" in err
+        # a DIFFERENT bad value warns once more (dedup is keyed per value)
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_LIMIT", "abc")
+        for _ in range(5):
+            safe_io.turn_send_budget_limit()
+        assert capsys.readouterr().err.count("turn_send_budget_limit invalid config") == 1
+
+    def test_config_read_exception_fails_closed_at_gate(self, monkeypatch):
+        # ITEM 3: a config-read EXCEPTION (enabled-flag machinery throws) must
+        # SUPPRESS, not passthrough-unlimited. No frozen budget + flag read raises →
+        # fail closed + config_failed audit (metadata only).
+        emit = []
+        monkeypatch.setattr(safe_io, "_emit_audit_row", lambda t, f: emit.append((t, f)))
+        monkeypatch.setattr(safe_io, "notify_owner_with_fallback", lambda *a, **k: True)
+
+        def _boom():
+            raise RuntimeError("config store unreadable")
+
+        monkeypatch.setattr(safe_io, "turn_send_budget_enabled", _boom)
+        assert safe_io.turn_send_budget_gate(CHAT, "x") is False  # suppressed, NOT None
+        rows = [f for t, f in emit if t == "send_budget_exhausted"]
+        assert rows and rows[0]["reason"] == "config_failed"
+        assert all("message" not in f and "reply_text" not in f for f in rows)
+
+    def test_config_read_exception_at_boundary_freezes_failed_turn(self, monkeypatch):
+        # ITEM 3: if the config read throws at begin() (the turn boundary), the turn
+        # is frozen CONFIG-FAILED → EVERY send that turn is suppressed, paged once.
+        pages = []
+        monkeypatch.setattr(
+            safe_io, "notify_owner_with_fallback",
+            lambda *a, **k: pages.append(k.get("source")) or True,
+        )
+        monkeypatch.setattr(safe_io, "_emit_audit_row", lambda t, f: None)
+
+        def _boom():
+            raise RuntimeError("config frozen unreadable")
+
+        monkeypatch.setattr(safe_io, "turn_send_budget_enabled", _boom)
+        tid = safe_io.begin_inbound_turn_send_budget()
+        assert tid  # a (config-failed) turn id was frozen
+        assert safe_io.turn_send_budget_gate(CHAT, "a") is False
+        assert safe_io.turn_send_budget_gate(CHAT, "b") is False  # every send suppressed
+        assert pages == ["gateway_turn_send_budget"]  # paged EXACTLY once
+
+    def test_clean_off_frozen_at_boundary_is_passthrough(self, monkeypatch):
+        # ITEM 3 contrast: a CLEAN read of OFF at the boundary is the one passthrough
+        # — begin sets no budget and the gate returns None (byte-identical), NOT a
+        # suppression.
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_ENABLED", "0")
+        assert safe_io.begin_inbound_turn_send_budget() is None
+        assert safe_io.turn_send_budget_gate(CHAT, "x") is None
 
 
 # ── Layer 3: end-to-end through the REAL patch (countable transport) ──────────
@@ -482,6 +570,72 @@ class TestEndToEndAdapterSuppression:
         # even fully concurrent, the synchronous reserve admits EXACTLY LIMIT
         assert sum(1 for r in results if r is not None) == 5
         assert len(adapter.relayed) == 5
+
+    def test_28_progressive_edits_are_bounded_not_28(self, tmp_path, e2e_env, monkeypatch):
+        # ITEM 2: progressive draft edits RELAY to transport; without a bound, 28
+        # draft edits = 28 relays bypassing the finalized cap. The separate draft
+        # ceiling bounds the transport count.
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_LIMIT", "5")
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_DRAFT_LIMIT", "10")
+        monkeypatch.setattr(safe_io, "_emit_audit_row", lambda t, f: None)
+        adapter = _build_patched_adapter(tmp_path)
+
+        async def _run():
+            safe_io.begin_inbound_turn_send_budget()
+            return [
+                await adapter.edit_message(CHAT, "m", "draft", finalize=False)
+                for _ in range(28)
+            ]
+
+        results = asyncio.run(_run())
+        assert len(adapter.relayed) == 10   # transport BOUNDED to the draft ceiling, not 28
+        assert results.count(None) == 18    # the excess drafts were dropped
+
+    def test_mixed_sends_and_edits_combined_bound_holds(self, tmp_path, e2e_env, monkeypatch):
+        # ITEM 2: both bounds enforced in one turn — finalized sends capped by
+        # `limit`, progressive drafts capped by the separate draft ceiling.
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_LIMIT", "3")
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_DRAFT_LIMIT", "4")
+        monkeypatch.setattr(safe_io, "_emit_audit_row", lambda t, f: None)
+        adapter = _build_patched_adapter(tmp_path)
+
+        async def _run():
+            safe_io.begin_inbound_turn_send_budget()
+            # drafts first (finalized cap not yet exhausted) → bounded by draft ceiling
+            for _ in range(10):
+                await adapter.edit_message(CHAT, "m", "draft", finalize=False)
+            # then finalized sends → bounded by the finalized cap
+            for _ in range(10):
+                await adapter.send(CHAT, "final")
+
+        asyncio.run(_run())
+        sends = [r for r in adapter.relayed if r[0] == "send"]
+        drafts = [r for r in adapter.relayed if r[0] == "edit" and r[2] is False]
+        assert len(sends) == 3    # finalized cap
+        assert len(drafts) == 4   # separate draft ceiling
+        assert len(adapter.relayed) == 7  # combined transport bounded
+
+    def test_multiple_streams_each_finalize_one_slot_drafts_bounded(self, tmp_path, e2e_env, monkeypatch):
+        # ITEM 2: multiple streams (finalize=True sequences) in one turn — each
+        # finalize consumes ONE finalized slot (total <= limit); drafts across all
+        # streams share the one bounded draft ceiling.
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_LIMIT", "3")
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_DRAFT_LIMIT", "6")
+        monkeypatch.setattr(safe_io, "_emit_audit_row", lambda t, f: None)
+        adapter = _build_patched_adapter(tmp_path)
+
+        async def _run():
+            safe_io.begin_inbound_turn_send_budget()
+            for _ in range(5):  # 5 streams, each = 3 drafts then 1 finalize
+                for _ in range(3):
+                    await adapter.edit_message(CHAT, "m", "draft", finalize=False)
+                await adapter.edit_message(CHAT, "m", "final", finalize=True)
+
+        asyncio.run(_run())
+        finals = [r for r in adapter.relayed if r[0] == "edit" and r[2] is True]
+        drafts = [r for r in adapter.relayed if r[0] == "edit" and r[2] is False]
+        assert len(finals) == 3   # each finalize = one slot; total finalized <= limit
+        assert len(drafts) == 6   # drafts bounded by the separate ceiling
 
     def test_flag_off_is_byte_identical_all_sends_relay(self, tmp_path, monkeypatch):
         monkeypatch.setitem(sys.modules, "aiohttp", types.ModuleType("aiohttp"))
