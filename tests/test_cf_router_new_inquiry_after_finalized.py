@@ -172,7 +172,7 @@ def test_birthday_catering_inquiry_preserves_date_and_veg_split(tmp_path):
     assert proposal_calls[0][3] == text
 
 
-def test_active_lead_sample_menu_request_escapes_to_dispatcher(tmp_path):
+def test_active_lead_sample_menu_request_generates_deterministically(tmp_path):
     hooks_mod, actions_mod = _load_plugin_modules()
     state = tmp_path / "state"
     state.mkdir()
@@ -215,22 +215,31 @@ def test_active_lead_sample_menu_request_escapes_to_dispatcher(tmp_path):
 
     text = "Can you create two sample menus mix n match."
     assert actions_mod.is_proposal_request(text) is True
+    # No `option N <section>` refs ⇒ not a recompose; a PLAIN proposal request.
+    assert actions_mod.is_mix_and_match_request(text) is False
     result = hooks_mod.pre_gateway_dispatch(SimpleNamespace(
         text=text,
         chat_id="201975216009469@lid",
         message_id="msg-sample-menus",
     ))
 
-    # PR-A: proposal request against an active lead escapes to the Hermes dispatcher
-    # (return None) instead of cf-router invoking create-catering-proposal-options.
-    assert result is None
-    assert not any(kind == "proposal" for kind, _payload in calls)
+    # PR-B2 (2026-07-21): a plain proposal request against an active lead is GENERATED
+    # deterministically by cf-router (create-catering-proposal-options
+    # --auto-generate-from-menu), reversing PR-A's escape-to-Hermes; the LLM is bypassed
+    # and no owner-wait canonical reply is sent.
+    assert result == {
+        "action": "skip",
+        "reason": "cf-router F7 primary: proposals generated deterministically for L0016",
+    }
+    proposal_calls = [payload for kind, payload in calls if kind == "proposal"]
+    assert len(proposal_calls) == 1 and proposal_calls[0][0] == "L0016"
     assert not any(kind == "reply" for kind, _payload in calls)
     audit_reasons = [payload.get("reason") for kind, payload in calls if kind == "audit"]
-    assert "f7_proposal_request_escaped_to_dispatcher" in audit_reasons
+    assert "f7_proposal_request_deterministic_generation" in audit_reasons
+    assert "f7_proposal_request_escaped_to_dispatcher" not in audit_reasons
 
 
-def test_active_lead_menu_constraints_escape_not_owner_wait_reply(tmp_path):
+def test_active_lead_menu_constraints_generate_not_owner_wait_reply(tmp_path):
     hooks_mod, actions_mod = _load_plugin_modules()
     state = tmp_path / "state"
     state.mkdir()
@@ -276,16 +285,23 @@ def test_active_lead_menu_constraints_escape_not_owner_wait_reply(tmp_path):
         "and non-veg options. Add more appetizers, mains."
     )
     assert actions_mod.is_proposal_request(text) is True
+    # A menu-constraint proposal request with no option-section refs ⇒ plain generation.
+    assert actions_mod.is_mix_and_match_request(text) is False
     result = hooks_mod.pre_gateway_dispatch(SimpleNamespace(
         text=text,
         chat_id="201975216009469@lid",
         message_id="msg-menu-constraints",
     ))
 
-    # PR-A: escapes to the Hermes dispatcher; cf-router no longer regenerates
-    # proposals itself, and no owner-wait canonical reply is sent.
-    assert result is None
-    assert not any(kind == "proposal" for kind, _payload in calls)
+    # PR-B2 (2026-07-21): generated deterministically by cf-router (LLM bypassed);
+    # no owner-wait canonical reply is sent. Reverses PR-A's escape-to-Hermes.
+    assert result == {
+        "action": "skip",
+        "reason": "cf-router F7 primary: proposals generated deterministically for L0016",
+    }
+    proposal_calls = [payload for kind, payload in calls if kind == "proposal"]
+    assert len(proposal_calls) == 1 and proposal_calls[0][0] == "L0016"
     assert not any(kind == "reply" for kind, _payload in calls)
     audit_reasons = [payload.get("reason") for kind, payload in calls if kind == "audit"]
-    assert "f7_proposal_request_escaped_to_dispatcher" in audit_reasons
+    assert "f7_proposal_request_deterministic_generation" in audit_reasons
+    assert "f7_proposal_request_escaped_to_dispatcher" not in audit_reasons

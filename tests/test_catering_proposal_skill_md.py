@@ -20,7 +20,12 @@ def test_creative_skill_invokes_proposal_script_with_required_flags():
     assert "--customer-jid" in text
     assert "--source-message-id" in text
     assert "--request-text" in text
-    assert "--options-json -" in text
+    # PR-B2 (2026-07-21): the skill no longer instructs the LLM to compose an
+    # options JSON (`--options-json -`). Plain generation now uses the deterministic
+    # `--auto-generate-from-menu` mode; mix-and-match uses `--recompose-from-sent`.
+    assert "--auto-generate-from-menu" in text
+    assert "--recompose-from-sent" in text
+    assert "--options-json -" not in text
 
 
 def test_catering_dispatcher_has_proposal_decision_matrix():

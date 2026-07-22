@@ -50,6 +50,12 @@ CF_ROUTER_DISPATCHER_EQUIV_REASONS = frozenset({
     # Catering F7 paths (pre-existing).
     "f7_proposal_request",
     "f7_proposal_selection",
+    # PR-B2 2026-07-21: active-lead PLAIN proposal generation taken back onto the
+    # deterministic script (LLM bypassed) — dispatcher-equivalent, like the paths
+    # above. The escape reasons (f7_proposal_request_escaped_to_dispatcher, etc.) are
+    # intentionally ABSENT: they let the Hermes LLM run, so their raw_inbound pairs
+    # with dispatcher_routed, not the cf-router escape.
+    "f7_proposal_request_deterministic_generation",
     # Flyer paths (added 2026-05-18). Order matches schemas.py for diffability.
     "flyer_primary_project_created",
     "flyer_intake_started",

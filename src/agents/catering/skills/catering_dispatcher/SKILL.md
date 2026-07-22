@@ -29,7 +29,9 @@ You are a sub-dispatcher. Your job is **routing via tool calls**, not improvisat
 4. **FOURTH — delegate** via `skill_view` to one of:
    - `parse_catering_inquiry` (new customer inquiry)
    - `handle_catering_owner_approval` (owner reply with #XXXXX code)
-   - `creative_catering_proposals` (proposal options for an active lead)
+   - `creative_catering_proposals` (ONLY a mix-and-match recompose of already-sent
+     options — PLAIN proposal generation for an active lead is done deterministically
+     by cf-router before this skill runs; see the Proposal-request path in Step 2)
    - `handle_catering_menu_finalize` (customer with active lead expressing finalize-intent)
    - `select-catering-proposal` handler/script (customer selection from a sent proposal set)
 
@@ -75,8 +77,14 @@ Apply this matrix in priority order:
    `select-catering-proposal` handler/script with lead id, customer jid,
    message id, and selection text.
 3. **Proposal-request path** — if `sender_role != "owner"` AND the sender has
-   an active lead AND the proposal-request classifier matches, delegate to
-   `creative_catering_proposals`.
+   an active lead AND the proposal-request classifier matches: PLAIN proposal
+   generation is handled DETERMINISTICALLY by cf-router
+   (`create-catering-proposal-options --auto-generate-from-menu`) BEFORE this skill
+   runs, so you normally never reach this path for a plain "send me menu options"
+   request. A MIX-AND-MATCH recompose (combine sections of already-sent options)
+   still reaches you — delegate it to `creative_catering_proposals`, which runs the
+   deterministic `--recompose-from-sent` merge. Never compose or invent proposal
+   items yourself.
 4. **Customer-finalize path** — if `sender_role != "owner"` AND the sender has
    an active lead AND the existing customer-finalize terms match, delegate to
    `handle_catering_menu_finalize`.
@@ -110,17 +118,16 @@ catering lead exists for the sender AND a selectable `SENT` proposal set exists:
 **Proposal-request path** — if `sender_role != "owner"` AND a non-terminal
 catering lead exists for the sender:
 
-- The proposal-request classifier requires a request verb within 80 chars
-  before the request object. Request verbs include `send`, `share`, `show`,
-  `make`, `create`, `give`, `build`, `prepare`, `can you`, `could you`, and
-  `please`. Request objects include `option`, `options`, `proposal`,
-  `proposals`, `menu option`, `menu options`, `package`, and `packages`.
+- **Plain proposal generation is NOT yours.** cf-router intercepts a plain
+  active-lead proposal request ("send me two sample menus", "provide your best
+  menu options") BEFORE this skill runs and generates the options deterministically
+  via `create-catering-proposal-options --auto-generate-from-menu` — no LLM composes
+  the menu. Do NOT compose or generate proposal options yourself for an active lead;
+  the ONLY proposal work that reaches this skill is a mix-and-match recompose (below).
 - Passive wait/status language remains status/follow-up suppression, not
   proposal generation. Suppress proposal generation for `will wait`,
   `waiting`, `wait for`, bare `Any update?`, `thank you`, and similar passive
   status replies.
-- If the classifier matches, delegate to `creative_catering_proposals` with
-  the active lead id, sender context, message id, and request text.
 - **Mix-and-match / recomposition** — if the customer asks to combine parts of
   already-sent options (e.g. "option 1 starters with the option 2 mains",
   "keep option 2's mains but option 1's desserts"), this is a **proposal

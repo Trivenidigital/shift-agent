@@ -712,7 +712,10 @@ def assess(turn_no, res, menu_names, no_price_re):
     if turn_no == 1:
         A.append(("new_lead_created_not_L0017", any(l != "L0017" for l in lead_ids), f"leads={lead_ids}"))
         A.append(("audit_f7_fresh_inquiry_new_lead_over_stale", "f7_fresh_inquiry_new_lead_over_stale" in rslist, f"reasons={rslist}"))
-        A.append(("audit_f7_proposal_request_escaped_to_dispatcher", "f7_proposal_request_escaped_to_dispatcher" in rslist, f"reasons={rslist}"))
+        # PR-B2 (2026-07-21): the incident's fresh inquiry + proposal request now GENERATES
+        # proposals deterministically against the new lead (LIVE evidence overruled the
+        # emulated escape-to-Hermes path, which spiraled on the real gpt-4o-mini gateway).
+        A.append(("audit_f7_proposal_request_deterministic_generation", "f7_proposal_request_deterministic_generation" in rslist, f"reasons={rslist}"))
         xref = [s for s in csends if "earlier inquiry L0017" in s["message"]]
         A.append(("cross_reference_ack_mentions_earlier_inquiry", len(xref) >= 1, "found" if xref else "MISSING"))
         opt = len(re.findall(r"^\*Option \d", pbody, re.M))
