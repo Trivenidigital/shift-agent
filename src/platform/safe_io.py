@@ -33,6 +33,7 @@ go in audit_helpers.py).
 """
 
 from __future__ import annotations
+import contextvars  # 2026-07-22 — per-inbound-turn send-budget identity (turn-budget companion)
 import fcntl
 import inspect  # PR-ζ 2026-05-26 — caller introspection in _resolve_caller_script_name
 import json
@@ -41,6 +42,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid  # 2026-07-22 — per-inbound-turn id (turn-budget companion)
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TypeVar, Type, Any, Optional, Tuple
@@ -1915,6 +1917,273 @@ def _emit_gateway_send_throttle_breach(
     try:
         sys.stderr.write(
             f"gateway_send_throttle_breach_alert_delivered jid={jid} "
+            f"delivered={delivered}\n"
+        )
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────
+# Per-INBOUND-TURN outbound send budget (2026-07-22 — the TRUE volume cap the
+# #641 gateway throttle could not provide)
+#
+# WHY THIS EXISTS (reviewer ruling). The #641 gateway-send throttle above is a
+# per-conversation SLIDING WINDOW that can only SUBSTITUTE a safe template + page
+# — never SUPPRESS a send — because front_brain_screen_gateway_send is
+# contractually `-> str` (always returns a sendable string) and the injected
+# adapter wrapper unconditionally relays that string. Content-bounding + paging
+# is NOT sufficient for a demonstrated 28-send spiral: the customer still gets 28
+# (templated) messages. This companion enforces an ACTUAL per-turn send-COUNT cap
+# WHERE sends can be suppressed — the adapter send()/edit_message() — via a
+# not-send sentinel the wrapper returns and the inject honors with a well-formed
+# no-op result. It is a gate BEFORE/AROUND the #641 content screen, not a
+# replacement: permitted sends (under the cap) still flow through
+# front_brain_screen_gateway_send unchanged.
+#
+# TURN IDENTITY. One budget is shared by ALL sends of one inbound turn. The
+# budget object lives in a ContextVar set ONCE at the inbound-turn boundary
+# (the run.py `_prepare_inbound_message_text` inject — tools/patch-hermes.py
+# `RUN_PY_TURN_BUDGET_INJECT_BLOCK`). That function is `await`ed inside the
+# per-inbound-message handler task, and awaiting does NOT fork the context, so a
+# ContextVar.set there persists to every later send in the same task; child tasks
+# the agent loop spawns copy the context AT CREATION (after the set) and share the
+# SAME budget OBJECT by reference. A fresh inbound turn calls begin_* again and
+# `.set`s a new object, so the counter resets per turn with no teardown needed.
+#
+# ATOMICITY (parallel safety). The send path is asyncio (single event loop). The
+# reserve is a SYNCHRONOUS check-and-increment on the shared object with NO await
+# in the critical section, so no coroutine can interleave mid-reserve — two
+# concurrent sends can never both slip past the cap.
+#
+# FAIL-CLOSED — the DELIBERATE OPPOSITE of the #641 throttle's fail-OPEN. When the
+# feature is ON and the budget context is missing / corrupt / faulted at a send,
+# the send is SUPPRESSED (not relayed). #641 fails open (a broken counter must not
+# drop a legitimate send) because it is a content-bounding limiter; this companion
+# fails closed because a spiraling turn with broken budget state must STOP, not
+# flood. When the feature is OFF the gate is fully inert (returns None) and the
+# send path is byte-identical.
+#
+# SUPPRESSION IS SILENT TO THE CUSTOMER. A dropped send emits a metadata-only
+# `send_budget_exhausted` audit row (turn-id / count / limit / reason — NEVER
+# message content) and, for a genuinely exhausted turn, pages the operator EXACTLY
+# ONCE (a per-turn `paged` flag). No retry, no recursive summary, no "you hit a
+# limit" reply. The missing-context fail-closed path audits every drop but does
+# NOT page (there is no per-turn object to dedup against, so per-send paging would
+# itself flood §12b) — the audit-row count + stderr surface the wiring fault.
+# ─────────────────────────────────────────────────────────────────
+
+DEFAULT_TURN_SEND_BUDGET_LIMIT = 5
+
+
+def turn_send_budget_enabled() -> bool:
+    """True only when GATEWAY_TURN_SEND_BUDGET_ENABLED == "1". Default OFF → the
+    per-turn budget is fully inert: no context is set at the turn boundary, the
+    adapter gate returns None (byte-identical passthrough), and nothing is
+    suppressed. Distinct flag from the #641 gateway throttle
+    (GATEWAY_SEND_THROTTLE_ENABLED) — the two limiters are independent. Rollout
+    scaffolding; graduate per the standing rollout-scaffolding-needs-graduation
+    rule."""
+    return os.environ.get("GATEWAY_TURN_SEND_BUDGET_ENABLED", "") == "1"
+
+
+def turn_send_budget_limit() -> int:
+    """Max FINALIZED sends per inbound turn. Env GATEWAY_TURN_SEND_BUDGET_LIMIT
+    (default 5 — the same generous ceiling as the #641 throttle). A malformed /
+    <1 value falls back to the default (never 0 — a 0 ceiling would suppress every
+    send)."""
+    try:
+        v = int(os.environ.get(
+            "GATEWAY_TURN_SEND_BUDGET_LIMIT",
+            str(DEFAULT_TURN_SEND_BUDGET_LIMIT),
+        ))
+        return v if v >= 1 else DEFAULT_TURN_SEND_BUDGET_LIMIT
+    except (TypeError, ValueError):
+        return DEFAULT_TURN_SEND_BUDGET_LIMIT
+
+
+class _TurnSendBudget:
+    """Mutable per-inbound-turn send counter, shared by every send of one turn via
+    the ``_TURN_SEND_BUDGET`` ContextVar (all coroutines / child tasks of the turn
+    hold the SAME object by reference). ``reserve`` is synchronous so it is atomic
+    under asyncio's single event loop."""
+
+    __slots__ = ("turn_id", "limit", "count", "paged")
+
+    def __init__(self, turn_id: str, limit: int) -> None:
+        self.turn_id = turn_id
+        self.limit = limit
+        self.count = 0
+        self.paged = False
+
+    def reserve(self, consume: bool) -> bool:
+        """Atomically decide whether this send may go out. SYNCHRONOUS — NO await
+        in the critical section, so two concurrent coroutines can never both slip
+        past the cap.
+
+          - Exhausted (``count >= limit``) → ``False`` (SUPPRESS) for BOTH a
+            finalized send AND a progressive draft — once the turn is capped,
+            EVERY further customer-visible send is dropped.
+          - Otherwise → ``True`` (ADMIT). A finalized send (``consume=True``)
+            increments the counter; a progressive streamed draft
+            (``consume=False``) admits WITHOUT incrementing, so a whole streamed
+            reply costs ONE unit (parity with the per-chat/day budget + #641)."""
+        if self.count >= self.limit:
+            return False
+        if consume:
+            self.count += 1
+        return True
+
+
+_TURN_SEND_BUDGET: "contextvars.ContextVar[Optional[_TurnSendBudget]]" = (
+    contextvars.ContextVar("shift_turn_send_budget", default=None)
+)
+
+
+def begin_inbound_turn_send_budget() -> Optional[str]:
+    """Set a FRESH per-turn send budget in the ContextVar at the inbound-turn
+    boundary (called from the run.py `_prepare_inbound_message_text` inject).
+    No-op returning None when the feature is OFF (byte-identical). Returns the new
+    turn_id when a budget was set (for logging / tests)."""
+    if not turn_send_budget_enabled():
+        return None
+    budget = _TurnSendBudget(uuid.uuid4().hex, turn_send_budget_limit())
+    _TURN_SEND_BUDGET.set(budget)
+    return budget.turn_id
+
+
+def turn_send_budget_gate(
+    jid: str, message: str, *, reserve_budget: bool = True,
+) -> Optional[bool]:
+    """Per-turn budget decision at the adapter send()/edit_message() seam. Never
+    raises. Returns:
+
+      - ``None``  — feature DISABLED → caller proceeds to the content screen
+        (byte-identical passthrough).
+      - ``True``  — enabled + ADMITTED (under cap, context valid) → caller screens
+        + relays.
+      - ``False`` — enabled + SUPPRESS this send. FAIL-CLOSED (the deliberate
+        opposite of the #641 throttle's fail-open): triggered by turn EXHAUSTION
+        or by MISSING / CORRUPT / FAULTED budget state — a spiraling turn with
+        broken budget state must stop, not flood.
+
+    ``message`` is accepted for signature parity with the content screen but is
+    NEVER recorded (telemetry is metadata-only: turn-id / count / limit / reason).
+    ``reserve_budget`` is False for progressive streamed edit drafts (screened but
+    non-consuming) and True for a send() / finalized edit."""
+    try:
+        if not turn_send_budget_enabled():
+            return None
+    except Exception:
+        # Can't even read the flag → treat as disabled (preserve byte-identical
+        # when off; the feature is default-OFF, enabling it presupposes a healthy
+        # process).
+        return None
+    try:
+        budget = _TURN_SEND_BUDGET.get()
+        if not isinstance(budget, _TurnSendBudget):
+            # Missing / corrupt turn context, feature ON → FAIL CLOSED. Audit every
+            # drop but do NOT page: with no per-turn object there is nothing to
+            # dedup a page against, and per-send paging would itself flood §12b.
+            _emit_turn_send_budget_suppressed(
+                jid, "", "missing_turn_context", 0, turn_send_budget_limit(),
+            )
+            return False
+        allow = budget.reserve(bool(reserve_budget))
+        if allow:
+            return True
+        # Exhausted → suppress. Audit each drop (so every suppressed send is
+        # recorded); page the operator EXACTLY ONCE per turn.
+        _emit_turn_send_budget_suppressed(
+            jid, budget.turn_id, "exhausted", budget.count, budget.limit,
+        )
+        if not budget.paged:
+            budget.paged = True
+            _page_turn_send_budget_exhausted(
+                jid, budget.turn_id, budget.count, budget.limit,
+            )
+        return False
+    except Exception as e:  # noqa: BLE001 — enabled + machinery fault → FAIL CLOSED
+        try:
+            sys.stderr.write(
+                f"turn_send_budget gate fault ({type(e).__name__}: "
+                f"{str(e)[:160]}); FAIL-CLOSED (send suppressed)\n"
+            )
+        except Exception:
+            pass
+        try:
+            _emit_turn_send_budget_suppressed(
+                jid, "", "budget_fault", 0, turn_send_budget_limit(),
+            )
+        except Exception:
+            pass
+        return False
+
+
+def _emit_turn_send_budget_suppressed(
+    jid: str, turn_id: str, reason: str, count: int, limit: int,
+) -> None:
+    """Record a per-turn send suppression (metadata-only `send_budget_exhausted`
+    audit row) + a deterministic stderr marker. NEVER carries message content
+    (telemetry metadata-only). Best-effort (`_try_emit_audit_row` never
+    propagates — the send is already suppressed, don't compound it by raising)."""
+    _try_emit_audit_row(
+        "send_budget_exhausted",
+        {
+            "jid": str(jid or ""),
+            "turn_id": str(turn_id or ""),
+            "reason": reason,
+            "count": max(0, int(count)),
+            "limit": max(1, int(limit)),
+        },
+    )
+    try:
+        sys.stderr.write(
+            f"turn_send_budget_suppressed turn_id={turn_id} reason={reason} "
+            f"count={count} limit={limit} jid={jid}\n"
+        )
+    except Exception:
+        pass
+
+
+def _page_turn_send_budget_exhausted(
+    jid: str, turn_id: str, count: int, limit: int,
+) -> None:
+    """Page the operator ONCE for an exhausted inbound turn, through the §12b
+    owner-alert path (plain text — no Markdown, so the underscore-bearing turn-id
+    can't be mangled) bracketed by `*_alert_dispatched` / `*_alert_delivered`
+    stderr lines so every fire is traceable in journalctl regardless of delivery.
+    Caller guards this to ONE call per turn via the budget's `paged` flag."""
+    title = "per-turn send budget exhausted"
+    body = (
+        f"SUPPRESSED further sends: inbound turn {turn_id} for conversation {jid} "
+        f"hit its per-turn send cap ({limit}). Every further send this turn is "
+        f"DROPPED at the adapter seam (a TRUE suppression, not a template "
+        f"substitute) — a send loop is likely spiraling; investigate the "
+        f"conversation. Message content is withheld from this alert by design."
+    )
+    try:
+        sys.stderr.write(
+            f"send_budget_exhausted_alert_dispatched turn_id={turn_id} "
+            f"count={count} limit={limit} jid={jid}\n"
+        )
+    except Exception:
+        pass
+    delivered = False
+    try:
+        delivered = notify_owner_with_fallback(
+            title, body, priority=1, source="gateway_turn_send_budget",
+        )
+    except Exception as e:  # noqa: BLE001 — alerting must never crash the drop path
+        try:
+            sys.stderr.write(
+                f"send_budget_exhausted alert raised "
+                f"({type(e).__name__}: {str(e)[:160]})\n"
+            )
+        except Exception:
+            pass
+    try:
+        sys.stderr.write(
+            f"send_budget_exhausted_alert_delivered turn_id={turn_id} "
             f"delivered={delivered}\n"
         )
     except Exception:

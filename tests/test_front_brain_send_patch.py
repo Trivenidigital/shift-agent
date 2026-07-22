@@ -118,13 +118,23 @@ def test_patch_applies_idempotently_and_parses(tmp_path):
     assert src.index("def _shift_front_brain_screen_outbound(") < src.index(
         "class WhatsAppAdapter(BasePlatformAdapter):"
     )
+    # not-send sentinel is defined module-level, before the class
+    assert "_SHIFT_DROP_SEND = " in src
+    assert src.index("_SHIFT_DROP_SEND = ") < src.index(
+        "class WhatsAppAdapter(BasePlatformAdapter):"
+    )
     lines = src.splitlines()
-    # send inject sits immediately before the format/relay
+    # send inject sits immediately before the format/relay, followed by the
+    # sentinel drop-check that returns a no-op (None) so the transport is skipped.
     si = next(i for i, l in enumerate(lines) if "formatted = self.format_message(content)" in l)
-    assert "content = _shift_front_brain_screen_outbound(chat_id, content)" in lines[si - 2]
-    # edit inject reserves budget only on finalize
+    assert "content = _shift_front_brain_screen_outbound(chat_id, content)" in lines[si - 4]
+    assert "if content is _SHIFT_DROP_SEND:" in lines[si - 3]
+    assert "return None" in lines[si - 2]
+    # edit inject reserves budget only on finalize, then the same drop-check
     ei = next(i for i, l in enumerate(lines) if "reserve_budget=finalize" in l)
     assert "_shift_front_brain_screen_outbound(chat_id, content, reserve_budget=finalize)" in lines[ei]
+    assert "if content is _SHIFT_DROP_SEND:" in lines[ei + 1]
+    assert "return None" in lines[ei + 2]
 
 
 def test_patch_failclosed_on_missing_class_anchor(tmp_path):
@@ -192,6 +202,61 @@ def test_inserted_helper_threads_reserve_budget(tmp_path, monkeypatch):
     assert seen["reserve_budget"] is False
     fn("chat@c.us", "final")  # send / finalized default
     assert seen["reserve_budget"] is True
+
+
+# ── inserted helper: per-turn budget gate → not-send sentinel ─────────────────
+
+def _exec_helper_ns(tmp_path):
+    ph = _load_ph(tmp_path)
+    ns: dict = {}
+    exec(ph.WHATSAPP_FB_SEND_HELPER, ns)
+    return ns
+
+
+def test_inserted_helper_returns_drop_sentinel_when_budget_gate_suppresses(tmp_path, monkeypatch):
+    ns = _exec_helper_ns(tmp_path)
+    fn = ns["_shift_front_brain_screen_outbound"]
+    sentinel = ns["_SHIFT_DROP_SEND"]
+    import types
+    screened = []
+    stub = types.ModuleType("safe_io")
+    stub.turn_send_budget_gate = lambda cid, c, reserve_budget=True: False  # SUPPRESS
+    stub.front_brain_screen_gateway_send = lambda cid, c, reserve_budget=True: screened.append(c) or c
+    monkeypatch.setitem(sys.modules, "safe_io", stub)
+    # Gate False → the drop sentinel is returned BEFORE the content screen runs.
+    assert fn("chat@c.us", "spiral") is sentinel
+    assert screened == []  # budget gate suppresses AROUND the content screen
+
+
+def test_inserted_helper_admits_and_threads_reserve_to_gate(tmp_path, monkeypatch):
+    ns = _exec_helper_ns(tmp_path)
+    fn = ns["_shift_front_brain_screen_outbound"]
+    import types
+    seen = {}
+    stub = types.ModuleType("safe_io")
+
+    def _gate(cid, c, reserve_budget=True):
+        seen["gate_reserve"] = reserve_budget
+        return True  # ADMIT → the content screen runs
+
+    stub.turn_send_budget_gate = _gate
+    stub.front_brain_screen_gateway_send = lambda cid, c, reserve_budget=True: "SCREENED::" + c
+    monkeypatch.setitem(sys.modules, "safe_io", stub)
+    assert fn("chat@c.us", "hi", reserve_budget=False) == "SCREENED::hi"
+    assert seen["gate_reserve"] is False  # reserve_budget threaded to the gate too
+
+
+def test_inserted_helper_gate_none_is_byte_identical_passthrough(tmp_path, monkeypatch):
+    # gate returns None (feature off) → the #641 content screen runs exactly as
+    # before (byte-identical): the budget layer adds nothing.
+    ns = _exec_helper_ns(tmp_path)
+    fn = ns["_shift_front_brain_screen_outbound"]
+    import types
+    stub = types.ModuleType("safe_io")
+    stub.turn_send_budget_gate = lambda cid, c, reserve_budget=True: None
+    stub.front_brain_screen_gateway_send = lambda cid, c, reserve_budget=True: "SCREENED::" + c
+    monkeypatch.setitem(sys.modules, "safe_io", stub)
+    assert fn("chat@c.us", "hi") == "SCREENED::hi"
 
 
 # ── deploy-gate front-brain predicates (mirror check-shift-agent-patch.sh) ────
@@ -272,3 +337,13 @@ def test_gate_script_wires_front_brain_checks():
     assert 'grep -q "BEGIN shift-agent-front-brain-edit" "$WA"' in gate
     assert "front-brain-send marker drifted from format_message anchor" in gate
     assert "front-brain-edit marker drifted from /edit anchor" in gate
+
+
+def test_gate_script_wires_turn_send_budget_checks():
+    gate = GATE_SCRIPT.read_text(encoding="utf-8")
+    # run.py boundary marker + adapter-seam sentinel + drop-check are all pinned.
+    assert 'grep -q "BEGIN shift-agent-turn-send-budget" "$RUN"' in gate
+    assert 'grep -q "END shift-agent-turn-send-budget" "$RUN"' in gate
+    assert 'grep -q "_SHIFT_DROP_SEND = " "$WA"' in gate
+    assert 'grep -q "content is _SHIFT_DROP_SEND" "$WA"' in gate
+    assert "turn-send-budget marker drifted from _prepare_inbound_message_text anchor" in gate
