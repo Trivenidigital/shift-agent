@@ -5986,6 +5986,23 @@ class CfRouterIntercepted(_BaseEntry):
         # one flyer-vs-catering question, creating neither a lead nor a revision.
         "flyer_active_project_catering_intent_escape",
         "flyer_catering_intent_clarification",
+        # P1-1 open-lead routing (2026-07-24): the durable root fix for the live
+        # recurrence. A customer mid-catering-conversation (OPEN lead) whose
+        # menu/proposal follow-up scored classify_catering=weak was captured by
+        # the flyer active-project intercept (`flyer_reference_exact_edit_queued`,
+        # stale project) instead of reaching catering.
+        #   flyer_active_project_open_lead_catering_escape — the escape gate saw an
+        #     open catering lead + a proposal/menu request (is_proposal_request_escape
+        #     or is_mix_and_match_request) that is NOT an explicit flyer create/edit,
+        #     and routed it to the F7 catering path BEFORE the flyer active-project
+        #     intercept could claim it.
+        #   customer_complaint_escalation — a complaint/frustration/escalation
+        #     message ("are you crazy", "this is broken", "not working", "useless",
+        #     profanity) arrived while a catering lead OR flyer project was live; the
+        #     gate sent one escalation ack instead of letting it be swallowed as a
+        #     flyer queued-edit. Creates neither a lead nor a revision.
+        "flyer_active_project_open_lead_catering_escape",
+        "customer_complaint_escalation",
         "flyer_brief_approved",
         "flyer_brief_project_create_failed",
         "flyer_starter_preference_off",

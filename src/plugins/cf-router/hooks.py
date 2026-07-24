@@ -4281,6 +4281,33 @@ def _send_flyer_catering_intent_clarification(
             "reason": "cf-router flyer/catering intent clarification sent"}
 
 
+def _send_customer_complaint_escalation(
+    *, text: str, chat_id: str, event: Any, role: str,
+    project_id: str, lead_id: str,
+) -> dict:
+    """P1-1 complaint outcome: a customer venting at the agent while a catering
+    lead or flyer project is live gets ONE escalation acknowledgement instead of
+    being captured as a flyer queued-edit. Creates NEITHER a flyer revision NOR a
+    catering lead — only sends + audits. Metadata-only audit (no raw text/phone)."""
+    reply = actions.customer_complaint_escalation_reply()
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id, reply,
+        action_context=build_action_context(
+            action_id="flyer.routing.customer_complaint_escalation",
+            is_regulated_action=False,
+        ),
+    )
+    actions.audit_intercepted(
+        reason="customer_complaint_escalation",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 3,
+        detail=(f"project_id={project_id}; lead_id={lead_id}; sender_role={role}; "
+                f"ack_message_id={mid}; ack_error={err[:200]}"),
+    )
+    return {"action": "skip",
+            "reason": "cf-router customer complaint escalation sent"}
+
+
 def _try_flyer_catering_escape_gate(
     text: str, chat_id: str, event: Any, media_path: Optional[str] = None,
     *, classify_fn: Optional[Callable[[str], tuple]] = None,
@@ -4307,7 +4334,10 @@ def _try_flyer_catering_escape_gate(
     audit row stays truthful). `classify_catering` is invoked AT MOST ONCE.
 
     Decision table:
-      catering=False                     → _GATE_FALLTHROUGH (flyer arms run unchanged)
+      complaint + (open lead OR project) → one escalation ack (customer_complaint_escalation)
+      catering=False, open lead + proposal/menu ask, not a flyer edit
+                                         → delegate to the F7 catering path (open-lead escape)
+      catering=False, otherwise          → _GATE_FALLTHROUGH (flyer arms run unchanged)
       catering=True, no flyer signal     → delegate to the F7 new-catering path
       catering=True, flyer signal (ambiguous) → one flyer-vs-catering clarification
       any exception inside the gate      → clarification (never a guessed route)
@@ -4322,13 +4352,50 @@ def _try_flyer_catering_escape_gate(
     try:
         phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
         active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)
+        open_lead = actions.find_active_catering_lead_by_sender(phone, chat_id)
+        # Complaint / frustration guard (highest precedence inside the gate): a
+        # customer venting at the agent while a catering lead OR flyer project is
+        # live must never be captured as a flyer queued-edit. One escalation ack;
+        # no classifier call, no lead, no revision.
+        if (active_project is not None or open_lead is not None) and actions.is_customer_complaint(text):
+            return _send_customer_complaint_escalation(
+                text=text, chat_id=chat_id, event=event, role=role,
+                project_id=str((active_project or {}).get("project_id") or ""),
+                lead_id=str((open_lead or {}).get("lead_id") or ""),
+            )
         if active_project is None:
-            return _GATE_FALLTHROUGH
-        is_catering, signals = (classify_fn or actions.classify_catering)(text)
-        if not is_catering:
             return _GATE_FALLTHROUGH
         project_id = str(active_project.get("project_id") or "")
         status = str(active_project.get("status") or "")
+        is_catering, signals = (classify_fn or actions.classify_catering)(text)
+        if not is_catering:
+            # Open-lead proposal/menu escape (P1-1 durable root fix): a customer
+            # mid-catering-conversation (OPEN lead) asking to see/select menus must
+            # reach catering even when classify_catering is weak — UNLESS the
+            # message is an explicit flyer create/edit. Placed BEFORE the flyer
+            # active-project intercept so no terminal flyer arm can claim it. Only
+            # clear proposal/menu language with an open lead escapes; the same
+            # deterministic flyer-signal exclusion the ambiguous arm uses keeps a
+            # genuine flyer edit on the flyer path. Reuses F7's canonical open-lead
+            # lookup (find_active_catering_lead_by_sender) so the gate and F7 agree
+            # on what an open lead is; classify_catering is NOT re-invoked (signals
+            # from the single memo call above are forwarded).
+            if (
+                open_lead is not None
+                and (actions.is_proposal_request_escape(text)
+                     or actions.is_mix_and_match_request(text))
+                and not _flyer_edit_signal_present(text, has_media=bool(media_path))
+            ):
+                actions.audit_intercepted(
+                    reason="flyer_active_project_open_lead_catering_escape",
+                    chat_id=chat_id,
+                    detail=(f"project_id={project_id}; status={status}; "
+                            f"sender_role={role}; open_lead={open_lead.get('lead_id')}"),
+                )
+                return _try_f7_primary_intercept(
+                    text, chat_id, event, signals=signals, allow_new_lead=True,
+                )
+            return _GATE_FALLTHROUGH
         if _flyer_edit_signal_present(text, has_media=bool(media_path)):
             return _send_flyer_catering_intent_clarification(
                 text=text, chat_id=chat_id, event=event,

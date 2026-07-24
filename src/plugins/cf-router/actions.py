@@ -2108,6 +2108,36 @@ def is_mix_and_match_request(text: str) -> bool:
         return False
 
 
+# P1-1 open-lead routing (2026-07-24): a customer venting at the agent ("are you
+# crazy", "this is broken", "not working", "useless", profanity) while a catering
+# lead OR flyer project is live must never be swallowed as a flyer queued-edit.
+# Conservative, agent-directed phrase set — deterministic, NO LLM. Single
+# ambiguous words ("broken", "crazy") only match inside a frustration frame
+# ("it's broken", "are you crazy") so ordinary catering/flyer copy never trips it.
+_CUSTOMER_COMPLAINT_RE = re.compile(
+    r"\b(?:"
+    r"are\s+(?:you|u|ya)\s+(?:crazy|kidding|serious|insane|nuts|dumb|stupid|for\s+real)"
+    r"|(?:you\s*(?:'re|\s+are)|u\s+r|ur)\s+(?:crazy|useless|stupid|dumb|insane|ridiculous|pathetic|an?\s+idiot)"
+    r"|this\s+is\s+(?:broken|useless|ridiculous|nonsense|crazy|insane|stupid|garbage|unacceptable|pathetic|a\s+joke|a\s+waste)"
+    r"|(?:it'?s|its)\s+broken"
+    r"|not\s+working|does\s*n'?t\s+work|do\s*n'?t\s+work|is\s*n'?t\s+working|wo\s*n'?t\s+work|stopped\s+working"
+    r"|what(?:'?s|\s+is)\s+wrong\s+with\s+(?:you|u|this)"
+    r"|shut\s+up|useless|ridiculous"
+    r"|wtf|bullshit|fuck|f\*+k|damn\s+it|dammit"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_customer_complaint(text: str) -> bool:
+    """Return True when the inbound is a complaint / frustration / escalation
+    signal aimed at the agent ("are you crazy", "this is broken", "not working",
+    "useless", profanity-at-agent). Conservative + deterministic; NO LLM. Used by
+    the P1-1 escape gate to keep a venting customer's message from being captured
+    as a flyer queued-edit while a catering lead or flyer project is live."""
+    return bool(_CUSTOMER_COMPLAINT_RE.search(" ".join((text or "").split())))
+
+
 def find_selectable_proposal_set(lead_id: str) -> Optional[dict]:
     """Return latest proposal row only when it is selectable."""
     if not lead_id:
@@ -2299,6 +2329,13 @@ def revenue_route_clarification_reply() -> str:
 
 def revenue_route_both_reply() -> str:
     return "I can help with both. Which should I start first: promotional flyer or catering/order request?"
+
+
+def customer_complaint_escalation_reply() -> str:
+    """P1-1 escalation ack for a complaint/frustration message caught while a
+    catering lead or flyer project is live. Neutral, non-committal, human-handoff."""
+    return ("I'm sorry for the trouble. I've flagged this to our team so someone "
+            "can help you directly — you'll hear back shortly.")
 
 
 def _load_revenue_route_clarification_doc() -> dict:
