@@ -1,20 +1,30 @@
-"""Item 3 + 7 — Hermes-side front-brain egress patch (patch-hermes.py) + gate.
+"""Installer-correctness tests for the Hermes-core turn-budget + front-brain patch
+(tools/patch-hermes.py) and the deploy gate (tools/check-shift-agent-patch.sh).
 
-Covers BOTH text-egress paths: send() and edit_message(). We do NOT vendor Hermes
-source in-repo; each test SYNTHESIZES the minimal anchor shape patch-hermes.py
-keys on, applies the real patch function, and verifies markers, placement,
-idempotency, parse, fail-closed on missing anchors, the inserted helper's
-fail-open-loudly (§12b) + reserve_budget threading, and the deploy-gate
-marker+proximity predicates. The full check-shift-agent-patch.sh runs at deploy
-time (needs the live git/bridge tree); here we exercise its front-brain
-predicates verbatim and assert the script wires them.
+The turn-budget ADAPTER pieces — the ``_SHIFT_DROP_SEND`` sentinel + budget screen,
+the ``send()`` drop-check, and the ``edit_message()`` drop-check — each carry their
+OWN marker, INDEPENDENT of ``shift-agent-front-brain-send``, so the volume cap
+installs on a tree that ALREADY carries the front-brain screen (= production). That
+independence is the #643 defect this fixes: the old bundled shape skipped the whole
+cap when the front-brain-send marker was already present.
 
-Pure text/ast (patch-hermes.py has no fcntl) -> Windows + Docker. The bash
-predicate tests skip when a POSIX bash is unavailable.
+whatsapp.py + run.py are patched ALL-OR-NOTHING: staged in memory, validated
+(ast.parse + every required marker), then written atomically with rollback — a
+missing anchor or a mid-apply write fault leaves EVERY target byte-identical.
+
+We synthesize the minimal anchor shapes patch-hermes.py keys on and assert:
+independent-marker install across every prior state, byte-idempotency, the all-or-
+nothing guarantees, the inserted helpers' fail-open (content screen) / fail-closed
+(budget) semantics + reserve_budget threading, and the deploy-gate marker+proximity
+predicates.
+
+Pure text/ast (patch-hermes.py has no fcntl) -> Windows + Docker. The bash predicate
+tests skip when a POSIX bash is unavailable.
 """
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.machinery
 import importlib.util
 import itertools
@@ -23,6 +33,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -47,7 +58,7 @@ _EDIT_METHOD = '''    async def edit_message(self, chat_id, message_id, content,
 
 '''
 
-# Minimal file carrying the exact anchor shapes patch-hermes.py keys on.
+# Minimal whatsapp.py carrying the exact anchor shapes patch-hermes.py keys on.
 GOOD_SNIPPET = '''"""stub gateway adapter for patch tests."""
 
 
@@ -75,6 +86,25 @@ class WhatsAppAdapter(BasePlatformAdapter):
         return [formatted]
 '''
 
+# Minimal run.py carrying the boundary anchors (`import os`, the prepare fn, the
+# `if _is_shared_multi_user` user-name prefix, and pre_gateway_dispatch).
+GOOD_RUN = '''"""stub gateway run.py for patch tests."""
+from __future__ import annotations
+import os
+
+logger = None
+
+
+class Gateway:
+    async def _prepare_inbound_message_text(self, event, source, message_text):
+        if _is_shared_multi_user and source.user_name:
+            message_text = f"[{source.user_name}] {message_text}"
+        return message_text
+
+    async def pre_gateway_dispatch(self, event):
+        return event
+'''
+
 NO_FORMAT_ANCHOR = GOOD_SNIPPET.replace(
     "            formatted = self.format_message(content)\n", ""
 )
@@ -82,6 +112,12 @@ NO_CLASS_ANCHOR = GOOD_SNIPPET.replace(
     "class WhatsAppAdapter(BasePlatformAdapter):", "class SomethingElse:"
 )
 NO_EDIT_ANCHOR = GOOD_SNIPPET.replace(_EDIT_METHOD, "")
+
+_WA_TURN_MARKERS = (
+    "BEGIN shift-agent-turn-budget-sentinel",
+    "BEGIN shift-agent-turn-budget-send-drop",
+    "BEGIN shift-agent-turn-budget-edit-drop",
+)
 
 
 def _load_ph(home: Path):
@@ -102,93 +138,53 @@ def _write_wa(home: Path, content: str) -> Path:
     return wa
 
 
-# ── patch application: send + edit ────────────────────────────────────────────
+def _write_run(home: Path, content: str = GOOD_RUN) -> Path:
+    run = home / "gateway" / "run.py"
+    run.parent.mkdir(parents=True, exist_ok=True)
+    run.write_text(content, encoding="utf-8")
+    return run
 
-def test_patch_applies_idempotently_and_parses(tmp_path):
+
+def _sha(p: Path) -> str:
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def _full_apply(tmp_path):
+    """Fresh unpatched WA+RUN → full all-or-nothing apply. Returns (wa, run)."""
     wa = _write_wa(tmp_path, GOOD_SNIPPET)
-    ph = _load_ph(tmp_path)
-    ph._patch_whatsapp_py_front_brain_send()
-    ph._patch_whatsapp_py_front_brain_send()  # idempotent
-
-    src = wa.read_text(encoding="utf-8")
-    ast.parse(src)
-    assert src.count("BEGIN shift-agent-front-brain-send") == 2  # helper + send inject
-    assert src.count("BEGIN shift-agent-front-brain-edit") == 1
-    assert "def _shift_front_brain_screen_outbound(chat_id, content, reserve_budget=True):" in src
-    assert src.index("def _shift_front_brain_screen_outbound(") < src.index(
-        "class WhatsAppAdapter(BasePlatformAdapter):"
-    )
-    # not-send sentinel is defined module-level, before the class
-    assert "_SHIFT_DROP_SEND = " in src
-    assert src.index("_SHIFT_DROP_SEND = ") < src.index(
-        "class WhatsAppAdapter(BasePlatformAdapter):"
-    )
-    lines = src.splitlines()
-    # send inject sits immediately before the format/relay, followed by the
-    # sentinel drop-check that returns a no-op (None) so the transport is skipped.
-    si = next(i for i, l in enumerate(lines) if "formatted = self.format_message(content)" in l)
-    assert "content = _shift_front_brain_screen_outbound(chat_id, content)" in lines[si - 4]
-    assert "if content is _SHIFT_DROP_SEND:" in lines[si - 3]
-    assert "return None" in lines[si - 2]
-    # edit inject reserves budget only on finalize, then the same drop-check
-    ei = next(i for i, l in enumerate(lines) if "reserve_budget=finalize" in l)
-    assert "_shift_front_brain_screen_outbound(chat_id, content, reserve_budget=finalize)" in lines[ei]
-    assert "if content is _SHIFT_DROP_SEND:" in lines[ei + 1]
-    assert "return None" in lines[ei + 2]
+    run = _write_run(tmp_path)
+    _load_ph(tmp_path)._apply_wa_run()
+    return wa, run
 
 
-def test_patch_failclosed_on_missing_class_anchor(tmp_path):
-    _write_wa(tmp_path, NO_CLASS_ANCHOR)
-    with pytest.raises(SystemExit) as e:
-        _load_ph(tmp_path)._patch_whatsapp_py_front_brain_send()
-    assert e.value.code == 1
+# ── content screen helper (_shift_front_brain_screen_outbound) — fail-OPEN ─────
 
-
-def test_patch_failclosed_on_missing_format_anchor(tmp_path):
-    _write_wa(tmp_path, NO_FORMAT_ANCHOR)
-    with pytest.raises(SystemExit) as e:
-        _load_ph(tmp_path)._patch_whatsapp_py_front_brain_send()
-    assert e.value.code == 1
-
-
-def test_patch_failclosed_on_missing_edit_anchor(tmp_path):
-    _write_wa(tmp_path, NO_EDIT_ANCHOR)
-    with pytest.raises(SystemExit) as e:
-        _load_ph(tmp_path)._patch_whatsapp_py_front_brain_send()
-    assert e.value.code == 1
-
-
-# ── inserted helper: fail-open-loudly (§12b) + reserve_budget threading ───────
-
-def _exec_helper(tmp_path):
+def _exec_content_screen(tmp_path):
     ph = _load_ph(tmp_path)
     ns: dict = {}
     exec(ph.WHATSAPP_FB_SEND_HELPER, ns)  # markers are comments; body is a def
     return ns["_shift_front_brain_screen_outbound"]
 
 
-def test_inserted_helper_fails_open_loudly_when_safe_io_broken(tmp_path, monkeypatch, capsys):
-    fn = _exec_helper(tmp_path)
-    import types
+def test_content_screen_fails_open_loudly_when_safe_io_broken(tmp_path, monkeypatch, capsys):
+    fn = _exec_content_screen(tmp_path)
     broken = types.ModuleType("safe_io")  # lacks front_brain_screen_gateway_send
     monkeypatch.setitem(sys.modules, "safe_io", broken)
     assert fn("chat@c.us", "hello there") == "hello there"  # original text unchanged
-    # §12b: disarm must NOT be silent
+    # §12b: content-screen disarm must NOT be silent
     assert "front_brain_screen_disarmed reason=" in capsys.readouterr().err
 
 
-def test_inserted_helper_routes_through_safe_io(tmp_path, monkeypatch):
-    fn = _exec_helper(tmp_path)
-    import types
+def test_content_screen_routes_through_safe_io(tmp_path, monkeypatch):
+    fn = _exec_content_screen(tmp_path)
     stub = types.ModuleType("safe_io")
     stub.front_brain_screen_gateway_send = lambda cid, c, reserve_budget=True: f"SCREENED::{c}"
     monkeypatch.setitem(sys.modules, "safe_io", stub)
     assert fn("chat@c.us", "hello") == "SCREENED::hello"
 
 
-def test_inserted_helper_threads_reserve_budget(tmp_path, monkeypatch):
-    fn = _exec_helper(tmp_path)
-    import types
+def test_content_screen_threads_reserve_budget(tmp_path, monkeypatch):
+    fn = _exec_content_screen(tmp_path)
     seen = {}
     stub = types.ModuleType("safe_io")
 
@@ -198,138 +194,263 @@ def test_inserted_helper_threads_reserve_budget(tmp_path, monkeypatch):
 
     stub.front_brain_screen_gateway_send = _screen
     monkeypatch.setitem(sys.modules, "safe_io", stub)
-    fn("chat@c.us", "draft", reserve_budget=False)  # edit progressive-draft call
+    fn("chat@c.us", "draft", reserve_budget=False)  # progressive edit draft
     assert seen["reserve_budget"] is False
     fn("chat@c.us", "final")  # send / finalized default
     assert seen["reserve_budget"] is True
 
 
-# ── inserted helper: per-turn budget gate → not-send sentinel ─────────────────
+# ── budget screen (_shift_turn_send_budget_screen) → not-send sentinel ─────────
 
-def _exec_helper_ns(tmp_path):
+def _exec_budget_screen(tmp_path):
     ph = _load_ph(tmp_path)
     ns: dict = {}
-    exec(ph.WHATSAPP_FB_SEND_HELPER, ns)
+    exec(ph.WHATSAPP_TURN_BUDGET_SENTINEL, ns)
     return ns
 
 
-def test_inserted_helper_returns_drop_sentinel_when_budget_gate_suppresses(tmp_path, monkeypatch):
-    ns = _exec_helper_ns(tmp_path)
-    fn = ns["_shift_front_brain_screen_outbound"]
+def test_budget_screen_returns_sentinel_when_gate_suppresses(tmp_path, monkeypatch):
+    ns = _exec_budget_screen(tmp_path)
+    fn = ns["_shift_turn_send_budget_screen"]
     sentinel = ns["_SHIFT_DROP_SEND"]
-    import types
-    screened = []
     stub = types.ModuleType("safe_io")
     stub.turn_send_budget_gate = lambda cid, c, reserve_budget=True: False  # SUPPRESS
-    stub.front_brain_screen_gateway_send = lambda cid, c, reserve_budget=True: screened.append(c) or c
     monkeypatch.setitem(sys.modules, "safe_io", stub)
-    # Gate False → the drop sentinel is returned BEFORE the content screen runs.
     assert fn("chat@c.us", "spiral") is sentinel
-    assert screened == []  # budget gate suppresses AROUND the content screen
 
 
-def test_inserted_helper_admits_and_threads_reserve_to_gate(tmp_path, monkeypatch):
-    ns = _exec_helper_ns(tmp_path)
-    fn = ns["_shift_front_brain_screen_outbound"]
-    import types
+def test_budget_screen_admits_and_threads_reserve_to_gate(tmp_path, monkeypatch):
+    ns = _exec_budget_screen(tmp_path)
+    fn = ns["_shift_turn_send_budget_screen"]
     seen = {}
     stub = types.ModuleType("safe_io")
 
     def _gate(cid, c, reserve_budget=True):
         seen["gate_reserve"] = reserve_budget
-        return True  # ADMIT → the content screen runs
+        return True  # ADMIT → content passes through
 
     stub.turn_send_budget_gate = _gate
-    stub.front_brain_screen_gateway_send = lambda cid, c, reserve_budget=True: "SCREENED::" + c
     monkeypatch.setitem(sys.modules, "safe_io", stub)
-    assert fn("chat@c.us", "hi", reserve_budget=False) == "SCREENED::hi"
-    assert seen["gate_reserve"] is False  # reserve_budget threaded to the gate too
+    assert fn("chat@c.us", "hi", reserve_budget=False) == "hi"
+    assert seen["gate_reserve"] is False  # reserve_budget threaded to the gate
 
 
-def test_inserted_helper_gate_none_is_byte_identical_passthrough(tmp_path, monkeypatch):
-    # gate returns None (feature off) → the #641 content screen runs exactly as
-    # before (byte-identical): the budget layer adds nothing.
-    ns = _exec_helper_ns(tmp_path)
-    fn = ns["_shift_front_brain_screen_outbound"]
-    import types
+def test_budget_screen_gate_none_is_byte_identical_passthrough(tmp_path, monkeypatch):
+    ns = _exec_budget_screen(tmp_path)
+    fn = ns["_shift_turn_send_budget_screen"]
     stub = types.ModuleType("safe_io")
-    stub.turn_send_budget_gate = lambda cid, c, reserve_budget=True: None
-    stub.front_brain_screen_gateway_send = lambda cid, c, reserve_budget=True: "SCREENED::" + c
+    stub.turn_send_budget_gate = lambda cid, c, reserve_budget=True: None  # feature off
     monkeypatch.setitem(sys.modules, "safe_io", stub)
-    assert fn("chat@c.us", "hi") == "SCREENED::hi"
+    assert fn("chat@c.us", "hi") == "hi"
 
 
-# ── deploy-gate front-brain predicates (mirror check-shift-agent-patch.sh) ────
-
-_GATE_PREDICATE = r'''
-WA="$1"
-grep -q "BEGIN shift-agent-front-brain-send" "$WA" || { echo FAIL_SEND_MARKER; exit 1; }
-grep -q "BEGIN shift-agent-front-brain-edit" "$WA" || { echo FAIL_EDIT_MARKER; exit 1; }
-FBB=$(grep -n "BEGIN shift-agent-front-brain-send" "$WA" | tail -1 | cut -d: -f1)
-FBA=$(grep -n "formatted = self.format_message(content)" "$WA" | head -1 | cut -d: -f1)
-[ -n "$FBB" ] && [ -n "$FBA" ] || { echo FAIL_SEND_ANCHOR; exit 1; }
-D=$(( FBB > FBA ? FBB - FBA : FBA - FBB )); [ "$D" -le 10 ] || { echo FAIL_SEND_PROXIMITY; exit 1; }
-FEB=$(grep -n "BEGIN shift-agent-front-brain-edit" "$WA" | head -1 | cut -d: -f1)
-FEA=$(grep -n '/edit"' "$WA" | head -1 | cut -d: -f1)
-[ -n "$FEB" ] && [ -n "$FEA" ] || { echo FAIL_EDIT_ANCHOR; exit 1; }
-D2=$(( FEB > FEA ? FEB - FEA : FEA - FEB )); [ "$D2" -le 10 ] || { echo FAIL_EDIT_PROXIMITY; exit 1; }
-echo OK
-'''
-
-bash_required = pytest.mark.skipif(
-    platform.system() == "Windows" or shutil.which("bash") is None,
-    reason="gate predicates need a working POSIX bash (Linux/Docker)",
-)
+def test_budget_screen_missing_gate_is_passthrough(tmp_path, monkeypatch):
+    # An older/partial safe_io without the gate → budget absent → content unchanged.
+    ns = _exec_budget_screen(tmp_path)
+    fn = ns["_shift_turn_send_budget_screen"]
+    monkeypatch.setitem(sys.modules, "safe_io", types.ModuleType("safe_io"))
+    assert fn("chat@c.us", "hi") == "hi"
 
 
-def _run_predicate(wa: Path):
-    return subprocess.run(
-        ["bash", "-c", _GATE_PREDICATE, "_", str(wa)], capture_output=True, text=True
+def test_budget_screen_safe_io_unimportable_is_passthrough(tmp_path, monkeypatch):
+    # A TOTAL safe_io-unavailable deploy fault → pass content through, never raise
+    # (the default-OFF budget cannot coherently be "on"; the content screen's own
+    # §12b fail-open-loudly covers deploy-fault visibility).
+    ns = _exec_budget_screen(tmp_path)
+    fn = ns["_shift_turn_send_budget_screen"]
+    monkeypatch.setitem(sys.modules, "safe_io", None)  # `import safe_io` raises
+    assert fn("chat@c.us", "hi") == "hi"
+
+
+# ── all-or-nothing apply: prior-state coverage (the reviewer's enumeration) ────
+
+def test_fresh_tree_installs_everything_and_parses(tmp_path):
+    wa, run = _full_apply(tmp_path)
+    wa_src = wa.read_text(encoding="utf-8")
+    ast.parse(wa_src)
+    ast.parse(run.read_text(encoding="utf-8"))
+    for mk in _WA_TURN_MARKERS:
+        assert mk in wa_src
+    assert "BEGIN shift-agent-front-brain-send" in wa_src
+    assert "BEGIN shift-agent-front-brain-edit" in wa_src
+    assert "BEGIN shift-agent-turn-send-budget" in run.read_text(encoding="utf-8")
+
+
+def test_front_brain_send_present_still_installs_turn_budget(tmp_path):
+    # THE CORE REGRESSION: a tree that already carries the front-brain-send screen
+    # (= production) must STILL get the sentinel + BOTH drop-checks.
+    ph = _load_ph(tmp_path)
+    wa = _write_wa(tmp_path, ph._apply_wa_front_brain(GOOD_SNIPPET))
+    _write_run(tmp_path)
+    assert "BEGIN shift-agent-front-brain-send" in wa.read_text(encoding="utf-8")
+    assert "BEGIN shift-agent-turn-budget-sentinel" not in wa.read_text(encoding="utf-8")
+    ph._apply_wa_run()
+    src = wa.read_text(encoding="utf-8")
+    ast.parse(src)
+    for mk in _WA_TURN_MARKERS:
+        assert mk in src  # sentinel + send-drop + edit-drop all installed independently
+
+
+def test_only_turn_boundary_present_installs_adapter_parts(tmp_path):
+    # run.py carries ONLY the boundary; whatsapp.py is unpatched → apply installs the
+    # whatsapp.py adapter parts (sentinel + both drop-checks).
+    ph = _load_ph(tmp_path)
+    wa = _write_wa(tmp_path, GOOD_SNIPPET)
+    run = _write_run(tmp_path, ph._apply_run_turn_budget_boundary(GOOD_RUN))
+    assert "BEGIN shift-agent-turn-send-budget" in run.read_text(encoding="utf-8")
+    ph._apply_wa_run()
+    src = wa.read_text(encoding="utf-8")
+    ast.parse(src)
+    for mk in _WA_TURN_MARKERS:
+        assert mk in src
+
+
+def test_partial_adapter_state_converges(tmp_path):
+    # sentinel present, send-drop stripped → re-apply re-installs ONLY the send-drop
+    # (idempotent per marker), no duplication, no half state.
+    ph = _load_ph(tmp_path)
+    wa = _write_wa(tmp_path, GOOD_SNIPPET)
+    _write_run(tmp_path)
+    ph._apply_wa_run()  # full
+    src = wa.read_text(encoding="utf-8")
+    send_drop = ph.WHATSAPP_TURN_BUDGET_SEND_DROP.lstrip("\n")
+    assert send_drop in src
+    wa.write_text(src.replace(send_drop, ""), encoding="utf-8")  # strip ONLY send-drop
+    assert "BEGIN shift-agent-turn-budget-send-drop" not in wa.read_text(encoding="utf-8")
+    ph._apply_wa_run()  # converge
+    converged = wa.read_text(encoding="utf-8")
+    ast.parse(converged)
+    assert converged.count("BEGIN shift-agent-turn-budget-send-drop") == 1
+    assert converged.count("BEGIN shift-agent-turn-budget-sentinel") == 1  # not duplicated
+    assert converged.count("BEGIN shift-agent-turn-budget-edit-drop") == 1
+
+
+def test_fully_patched_tree_is_byte_idempotent(tmp_path):
+    wa, run = _full_apply(tmp_path)
+    before = (_sha(wa), _sha(run))
+    _load_ph(tmp_path)._apply_wa_run()  # re-run on the fully-patched tree
+    assert (_sha(wa), _sha(run)) == before
+
+
+def test_missing_format_anchor_leaves_targets_byte_identical(tmp_path):
+    ph = _load_ph(tmp_path)
+    wa = _write_wa(tmp_path, NO_FORMAT_ANCHOR)
+    run = _write_run(tmp_path)
+    wa_before, run_before = _sha(wa), _sha(run)
+    with pytest.raises(ph.PatchError):
+        ph._apply_wa_run()
+    assert _sha(wa) == wa_before
+    assert _sha(run) == run_before
+
+
+def test_missing_class_anchor_leaves_targets_byte_identical(tmp_path):
+    # Unsupported version (adapter class renamed) → anchors don't match → nothing
+    # written to ANY target (fail closed, no partial).
+    ph = _load_ph(tmp_path)
+    wa = _write_wa(tmp_path, NO_CLASS_ANCHOR)
+    run = _write_run(tmp_path)
+    wa_before, run_before = _sha(wa), _sha(run)
+    with pytest.raises(ph.PatchError):
+        ph._apply_wa_run()
+    assert _sha(wa) == wa_before
+    assert _sha(run) == run_before
+
+
+def test_missing_edit_anchor_leaves_targets_byte_identical(tmp_path):
+    # send() half transforms cleanly in memory but edit_message() anchor is gone →
+    # PatchError before any write; both targets byte-identical.
+    ph = _load_ph(tmp_path)
+    wa = _write_wa(tmp_path, NO_EDIT_ANCHOR)
+    run = _write_run(tmp_path)
+    wa_before, run_before = _sha(wa), _sha(run)
+    with pytest.raises(ph.PatchError):
+        ph._apply_wa_run()
+    assert _sha(wa) == wa_before
+    assert _sha(run) == run_before
+
+
+def test_missing_run_anchor_leaves_targets_byte_identical(tmp_path):
+    # whatsapp.py transforms cleanly in memory, but run.py's anchor is gone → NOTHING
+    # is written to either target (staging + validate happen before any write).
+    ph = _load_ph(tmp_path)
+    wa = _write_wa(tmp_path, GOOD_SNIPPET)
+    run = _write_run(tmp_path, GOOD_RUN.replace("_is_shared_multi_user", "_renamed_flag"))
+    wa_before, run_before = _sha(wa), _sha(run)
+    with pytest.raises(ph.PatchError):
+        ph._apply_wa_run()
+    assert _sha(wa) == wa_before
+    assert _sha(run) == run_before
+
+
+def test_write_fault_on_second_file_rolls_back_first(tmp_path, monkeypatch):
+    # whatsapp.py stages + writes; the run.py write raises → whatsapp.py is rolled
+    # back to its ORIGINAL bytes (all-or-nothing proof).
+    ph = _load_ph(tmp_path)
+    wa = _write_wa(tmp_path, GOOD_SNIPPET)
+    run = _write_run(tmp_path)
+    wa_before, run_before = _sha(wa), _sha(run)
+    real_write = ph._write_text_atomic
+
+    def _boom(path, text):
+        if str(path).endswith("run.py"):
+            raise OSError("simulated disk-full writing run.py")
+        return real_write(path, text)
+
+    monkeypatch.setattr(ph, "_write_text_atomic", _boom)
+    with pytest.raises(OSError):
+        ph._apply_wa_run()
+    assert _sha(wa) == wa_before   # first file rolled back to original bytes
+    assert _sha(run) == run_before  # second file never written
+
+
+def test_final_tree_has_four_distinct_markers(tmp_path):
+    wa, run = _full_apply(tmp_path)
+    wa_src = wa.read_text(encoding="utf-8")
+    run_src = run.read_text(encoding="utf-8")
+    present = {
+        "boundary": "BEGIN shift-agent-turn-send-budget" in run_src,
+        "sentinel": "BEGIN shift-agent-turn-budget-sentinel" in wa_src,
+        "send_drop": "BEGIN shift-agent-turn-budget-send-drop" in wa_src,
+        "edit_drop": "BEGIN shift-agent-turn-budget-edit-drop" in wa_src,
+    }
+    assert all(present.values())
+    # the four marker slugs are distinct (independent installation surfaces)
+    assert len({
+        "shift-agent-turn-send-budget", "shift-agent-turn-budget-sentinel",
+        "shift-agent-turn-budget-send-drop", "shift-agent-turn-budget-edit-drop",
+    }) == 4
+
+
+def test_send_and_edit_layout_budget_before_screen(tmp_path):
+    # send(): budget drop-check sits ABOVE the front-brain screen call, which sits
+    # immediately before the format_message relay → budget suppression is checked
+    # first, then the content screen substitutes.
+    wa, _ = _full_apply(tmp_path)
+    lines = wa.read_text(encoding="utf-8").splitlines()
+    si = next(i for i, l in enumerate(lines) if "formatted = self.format_message(content)" in l)
+    assert "END shift-agent-front-brain-send" in lines[si - 1]
+    assert "content = _shift_front_brain_screen_outbound(chat_id, content)" in lines[si - 2]
+    assert "BEGIN shift-agent-front-brain-send" in lines[si - 3]
+    assert "END shift-agent-turn-budget-send-drop" in lines[si - 4]
+    assert "return None" in lines[si - 5]
+    assert "if content is _SHIFT_DROP_SEND:" in lines[si - 6]
+    assert "content = _shift_turn_send_budget_screen(chat_id, content)" in lines[si - 7]
+    assert "BEGIN shift-agent-turn-budget-send-drop" in lines[si - 8]
+    # edit_message(): the edit drop-check reserves only on finalize and precedes the
+    # front-brain-edit screen call.
+    di = next(
+        i for i, l in enumerate(lines)
+        if "_shift_turn_send_budget_screen(chat_id, content, reserve_budget=finalize)" in l
     )
+    assert "BEGIN shift-agent-turn-budget-edit-drop" in lines[di - 1]
+    assert "if content is _SHIFT_DROP_SEND:" in lines[di + 1]
+    assert "return None" in lines[di + 2]
+    assert "END shift-agent-turn-budget-edit-drop" in lines[di + 3]
+    assert "BEGIN shift-agent-front-brain-edit" in lines[di + 4]
+    assert "_shift_front_brain_screen_outbound(chat_id, content, reserve_budget=finalize)" in lines[di + 5]
 
 
-@bash_required
-def test_gate_predicate_passes_on_patched(tmp_path):
-    wa = _write_wa(tmp_path, GOOD_SNIPPET)
-    _load_ph(tmp_path)._patch_whatsapp_py_front_brain_send()
-    r = _run_predicate(wa)
-    assert r.returncode == 0 and "OK" in r.stdout
-
-
-@bash_required
-def test_gate_predicate_fails_on_unpatched(tmp_path):
-    wa = _write_wa(tmp_path, GOOD_SNIPPET)
-    r = _run_predicate(wa)
-    assert r.returncode == 1 and "FAIL_SEND_MARKER" in r.stdout
-
-
-@bash_required
-def test_gate_predicate_fails_on_missing_edit_marker(tmp_path):
-    # Helper + send present, edit absent (partial patch) -> edit marker check fires.
-    ph = _load_ph(tmp_path)
-    wa = _write_wa(tmp_path, GOOD_SNIPPET)
-    ph._patch_whatsapp_py_front_brain_send()
-    src = wa.read_text(encoding="utf-8")
-    # strip the edit inject block -> edit marker gone, send intact
-    src = src.replace(ph.WHATSAPP_FB_EDIT_INJECT, "")
-    wa.write_text(src, encoding="utf-8")
-    r = _run_predicate(wa)
-    assert r.returncode == 1 and "FAIL_EDIT_MARKER" in r.stdout
-
-
-@bash_required
-def test_gate_predicate_fails_on_mangled_send_proximity(tmp_path):
-    # Full patch, then remove ONLY the send inject block -> the last send BEGIN is
-    # the module-level helper, far from format_message -> send proximity fails.
-    ph = _load_ph(tmp_path)
-    wa = _write_wa(tmp_path, GOOD_SNIPPET)
-    ph._patch_whatsapp_py_front_brain_send()
-    src = wa.read_text(encoding="utf-8")
-    src = src.replace(ph.WHATSAPP_FB_SEND_INJECT.lstrip("\n"), "")
-    wa.write_text(src, encoding="utf-8")
-    r = _run_predicate(wa)
-    assert r.returncode == 1 and "FAIL_SEND_PROXIMITY" in r.stdout
-
+# ── deploy-gate wiring (the real check-shift-agent-patch.sh text) ──────────────
 
 def test_gate_script_wires_front_brain_checks():
     gate = GATE_SCRIPT.read_text(encoding="utf-8")
@@ -339,11 +460,90 @@ def test_gate_script_wires_front_brain_checks():
     assert "front-brain-edit marker drifted from /edit anchor" in gate
 
 
-def test_gate_script_wires_turn_send_budget_checks():
+def test_gate_script_wires_turn_budget_checks():
     gate = GATE_SCRIPT.read_text(encoding="utf-8")
-    # run.py boundary marker + adapter-seam sentinel + drop-check are all pinned.
+    # run.py boundary + adapter sentinel + BOTH drop-check markers are all pinned.
     assert 'grep -q "BEGIN shift-agent-turn-send-budget" "$RUN"' in gate
     assert 'grep -q "END shift-agent-turn-send-budget" "$RUN"' in gate
+    assert 'grep -q "BEGIN shift-agent-turn-budget-sentinel" "$WA"' in gate
+    assert 'grep -q "END shift-agent-turn-budget-sentinel" "$WA"' in gate
+    assert 'grep -q "BEGIN shift-agent-turn-budget-send-drop" "$WA"' in gate
+    assert 'grep -q "END shift-agent-turn-budget-send-drop" "$WA"' in gate
+    assert 'grep -q "BEGIN shift-agent-turn-budget-edit-drop" "$WA"' in gate
+    assert 'grep -q "END shift-agent-turn-budget-edit-drop" "$WA"' in gate
     assert 'grep -q "_SHIFT_DROP_SEND = " "$WA"' in gate
     assert 'grep -q "content is _SHIFT_DROP_SEND" "$WA"' in gate
     assert "turn-send-budget marker drifted from _prepare_inbound_message_text anchor" in gate
+    assert "turn-budget-send-drop marker drifted from format_message anchor" in gate
+    assert "turn-budget-edit-drop marker drifted from /edit anchor" in gate
+
+
+# ── deploy-gate predicates driven against fixture trees (mirror the gate) ──────
+
+_TURN_BUDGET_PREDICATE = r'''
+WA="$1"; RUN="$2"
+grep -q "BEGIN shift-agent-turn-send-budget" "$RUN" || { echo FAIL_BOUNDARY; exit 1; }
+grep -q "BEGIN shift-agent-turn-budget-sentinel" "$WA" || { echo FAIL_SENTINEL; exit 1; }
+grep -q "BEGIN shift-agent-turn-budget-send-drop" "$WA" || { echo FAIL_SEND_DROP; exit 1; }
+grep -q "BEGIN shift-agent-turn-budget-edit-drop" "$WA" || { echo FAIL_EDIT_DROP; exit 1; }
+grep -q "_SHIFT_DROP_SEND = " "$WA" || { echo FAIL_SENTINEL_DEF; exit 1; }
+grep -q "content is _SHIFT_DROP_SEND" "$WA" || { echo FAIL_DROP_CHECK; exit 1; }
+echo OK
+'''
+
+bash_required = pytest.mark.skipif(
+    platform.system() == "Windows" or shutil.which("bash") is None,
+    reason="gate predicates need a working POSIX bash (Linux/Docker)",
+)
+
+
+def _run_turn_predicate(wa: Path, run: Path):
+    return subprocess.run(
+        ["bash", "-c", _TURN_BUDGET_PREDICATE, "_", str(wa), str(run)],
+        capture_output=True, text=True,
+    )
+
+
+def _strip_marker_lines(wa: Path, marker: str):
+    src = wa.read_text(encoding="utf-8")
+    wa.write_text("\n".join(l for l in src.splitlines() if marker not in l), encoding="utf-8")
+
+
+@bash_required
+def test_gate_predicate_passes_on_fully_patched(tmp_path):
+    wa, run = _full_apply(tmp_path)
+    r = _run_turn_predicate(wa, run)
+    assert r.returncode == 0 and "OK" in r.stdout
+
+
+@bash_required
+@pytest.mark.parametrize("marker,expect", [
+    ("BEGIN shift-agent-turn-budget-sentinel", "FAIL_SENTINEL"),
+    ("BEGIN shift-agent-turn-budget-send-drop", "FAIL_SEND_DROP"),
+    ("BEGIN shift-agent-turn-budget-edit-drop", "FAIL_EDIT_DROP"),
+])
+def test_gate_predicate_rejects_each_partial_combination(tmp_path, marker, expect):
+    # Drop exactly one adapter marker → the gate rejects the partial combination.
+    wa, run = _full_apply(tmp_path)
+    _strip_marker_lines(wa, marker)
+    r = _run_turn_predicate(wa, run)
+    assert r.returncode == 1 and expect in r.stdout
+
+
+@bash_required
+def test_gate_predicate_rejects_boundary_present_but_send_drop_absent(tmp_path):
+    # The reviewer's explicit example: run.py boundary present, whatsapp.py send-drop
+    # absent → FAIL (no half-capped tree ships).
+    wa, run = _full_apply(tmp_path)
+    _strip_marker_lines(wa, "shift-agent-turn-budget-send-drop")
+    assert "BEGIN shift-agent-turn-send-budget" in run.read_text(encoding="utf-8")
+    r = _run_turn_predicate(wa, run)
+    assert r.returncode == 1 and "FAIL_SEND_DROP" in r.stdout
+
+
+@bash_required
+def test_gate_predicate_rejects_unpatched(tmp_path):
+    wa = _write_wa(tmp_path, GOOD_SNIPPET)
+    run = _write_run(tmp_path)
+    r = _run_turn_predicate(wa, run)
+    assert r.returncode == 1 and "FAIL_BOUNDARY" in r.stdout

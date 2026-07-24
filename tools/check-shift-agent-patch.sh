@@ -194,6 +194,18 @@ grep -q "BEGIN shift-agent-turn-send-budget" "$RUN" || fail "$RUN missing BEGIN 
 grep -q "END shift-agent-turn-send-budget" "$RUN" || fail "$RUN missing END shift-agent-turn-send-budget marker"
 grep -q "_SHIFT_DROP_SEND = " "$WA" || fail "$WA missing _SHIFT_DROP_SEND sentinel definition (per-turn send cap could not suppress a relay)"
 grep -q "content is _SHIFT_DROP_SEND" "$WA" || fail "$WA missing 'content is _SHIFT_DROP_SEND' drop-check in send()/edit_message() (per-turn send cap would never suppress)"
+# INSTALLER-CORRECTNESS (2026-07-24): the adapter-side sentinel + send() drop-check
+# + edit_message() drop-check now each carry their OWN marker (independent of
+# shift-agent-front-brain-send) so the volume cap installs on a tree that already
+# carries the front-brain screen. REQUIRE all three unconditionally so EVERY partial
+# combination fails closed (e.g. run.py boundary present but the send-drop absent →
+# the send-drop grep below fails → deploy blocked); no half-capped tree ships.
+grep -q "BEGIN shift-agent-turn-budget-sentinel" "$WA" || fail "$WA missing BEGIN shift-agent-turn-budget-sentinel marker (per-turn send cap sentinel absent → cap cannot suppress a relay)"
+grep -q "END shift-agent-turn-budget-sentinel" "$WA" || fail "$WA missing END shift-agent-turn-budget-sentinel marker"
+grep -q "BEGIN shift-agent-turn-budget-send-drop" "$WA" || fail "$WA missing BEGIN shift-agent-turn-budget-send-drop marker (send() would never suppress on an exhausted turn)"
+grep -q "END shift-agent-turn-budget-send-drop" "$WA" || fail "$WA missing END shift-agent-turn-budget-send-drop marker"
+grep -q "BEGIN shift-agent-turn-budget-edit-drop" "$WA" || fail "$WA missing BEGIN shift-agent-turn-budget-edit-drop marker (edit_message() would never suppress on an exhausted turn)"
+grep -q "END shift-agent-turn-budget-edit-drop" "$WA" || fail "$WA missing END shift-agent-turn-budget-edit-drop marker"
 
 # Bridge.js template-bypass patch — OBSOLETE in Hermes >= 0.12.0 (the
 # upstream chatter filter the patch extended was removed). The patch
@@ -249,6 +261,25 @@ FEA=$(grep -n '/edit"' "$WA" | head -1 | cut -d: -f1)
 [ -n "$FEB" ] && [ -n "$FEA" ] || fail "$WA missing front-brain-edit marker or /edit anchor"
 DIFF5=$(( FEB > FEA ? FEB - FEA : FEA - FEB ))
 [ "$DIFF5" -le 10 ] || fail "$WA front-brain-edit marker drifted from /edit anchor (delta=$DIFF5 lines)"
+
+# whatsapp.py: turn-budget send-drop inject site. The send drop-check sits just
+# above the front-brain-send screen call, so it must stay next to the
+# format_message(content) relay anchor. Drift => the volume cap no longer guards
+# the send path.
+TSB=$(grep -n "BEGIN shift-agent-turn-budget-send-drop" "$WA" | tail -1 | cut -d: -f1)
+TSA=$(grep -n "formatted = self.format_message(content)" "$WA" | head -1 | cut -d: -f1)
+[ -n "$TSB" ] && [ -n "$TSA" ] || fail "$WA missing turn-budget-send-drop marker or format_message anchor"
+DIFF7=$(( TSB > TSA ? TSB - TSA : TSA - TSB ))
+[ "$DIFF7" -le 12 ] || fail "$WA turn-budget-send-drop marker drifted from format_message anchor (delta=$DIFF7 lines)"
+
+# whatsapp.py: turn-budget edit-drop inject site — must stay next to the /edit
+# relay anchor (it sits just above the front-brain-edit screen call). Drift => the
+# volume cap no longer guards the streamed/finalized edit path.
+TEB=$(grep -n "BEGIN shift-agent-turn-budget-edit-drop" "$WA" | head -1 | cut -d: -f1)
+TEA=$(grep -n '/edit"' "$WA" | head -1 | cut -d: -f1)
+[ -n "$TEB" ] && [ -n "$TEA" ] || fail "$WA missing turn-budget-edit-drop marker or /edit anchor"
+DIFF8=$(( TEB > TEA ? TEB - TEA : TEA - TEB ))
+[ "$DIFF8" -le 15 ] || fail "$WA turn-budget-edit-drop marker drifted from /edit anchor (delta=$DIFF8 lines)"
 
 # run.py: per-inbound-turn send-budget inject site. The LAST turn-send-budget
 # BEGIN marker (the begin() call inside _prepare_inbound_message_text, after the
