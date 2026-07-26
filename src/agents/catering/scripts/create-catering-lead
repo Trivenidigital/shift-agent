@@ -452,6 +452,13 @@ def main() -> int:
                           "Pass - or /dev/stdin to read from stdin "
                           "(use stdin form when JSON may contain shell "
                           "metacharacters such as apostrophes or quotes)."))
+    ap.add_argument("--suppress-customer-ack", action="store_true",
+                    help=("Turn-arbitration 2026-07-26: send the owner approval card "
+                          "but NOT the F14 customer proposal. cf-router sets this when "
+                          "it will immediately generate the tiered proposal set for the "
+                          "new lead, so the customer receives ONE bounded response (the "
+                          "generated options) instead of an F14 sample menu AND a "
+                          "tiered set as two independent sends. Default: send the F14 ack."))
     args = ap.parse_args()
 
     # Stdin sentinel — bulletproof path for JSON containing shell metachars
@@ -634,6 +641,19 @@ def main() -> int:
         print(json.dumps({"lead_id": lead_id, "approval_code": approval_code,
                           "card_sent": False, "reason": mid_or_err}))
         return EXIT_DEPENDENCY_DOWN
+
+    # Turn-arbitration 2026-07-26: when cf-router will IMMEDIATELY generate the tiered
+    # proposal set for this new lead, the F14 sample-menu send would be a redundant
+    # SECOND customer outbound in the same turn. --suppress-customer-ack skips it so the
+    # generated options are the single bounded response; the owner card above still went
+    # out, and the lead is fully persisted, so the customer is never left silent.
+    if args.suppress_customer_ack:
+        print(json.dumps({
+            "lead_id": lead_id, "approval_code": approval_code,
+            "card_sent": True, "outbound_message_id": mid_or_err,
+            "proposal_sent": False, "proposal_suppressed": True,
+        }))
+        return EXIT_OK
 
     # F14 2026-05-01: send the customer proposal automatically — full menu-rendered
     # template (filtered by dietary). This is the reply the customer sees IMMEDIATELY,

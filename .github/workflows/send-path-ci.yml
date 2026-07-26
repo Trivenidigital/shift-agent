@@ -76,6 +76,19 @@ jobs:
             "tests/test_cf_router_plugin.py::TestF7PrimaryMode::test_r2b1_conflict_canary_captures_amendment_flyer_arm_not_invoked" \
             "tests/test_cf_router_plugin.py::TestF7PrimaryMode::test_r2b1_flag_off_canary_is_byte_identical_flyer_revision"
 
+      # Turn-arbitration (#646): named Linux PASSED evidence for the two UNCHANGED
+      # branch-B tests (skipif-win32 — they execute ONLY on Linux, so this is where
+      # their execution + pass becomes reviewable; the whole regression class was
+      # a Windows skip hiding a Linux result) plus the unmocked end-to-end transcript
+      # test. On Linux ALL are collected + PASS with ZERO skips.
+      - name: Turn-arbitration branch-B + unmocked e2e diagnostics (reviewer-mandated)
+        run: |
+          echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
+          python -m pytest -vv \
+            "tests/test_cf_router_plugin.py::TestF7PrimaryMode::test_branch_b_active_lead_suppresses_with_canonical_reply" \
+            "tests/test_cf_router_plugin.py::TestF7PrimaryMode::test_branch_b_active_lead_capture_failure_sends_retry_not_canonical" \
+            tests/test_catering_turn_arbitration_e2e.py
+
       # ops/approval-lock-init: direct-execution evidence for the deploy-lock init
       # tests. Echo the checkout ref, then run every test individually (incl. the
       # extract-and-run, real-script-guard, and adversarial fd-interposition cases

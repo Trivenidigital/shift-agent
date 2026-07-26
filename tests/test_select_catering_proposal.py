@@ -263,10 +263,53 @@ def test_option_number_selection_calls_finalize_with_code(bridge_server, env_dir
     assert selected == [{"name": "Gulab Jamun", "qty": 1, "price_usd": 3}]
     assert "--quote-total-usd" in argv
     assert argv[argv.index("--quote-total-usd") + 1] == "3"
-    selected_audit = _read_audit(env_dir)[-1]
-    assert selected_audit["type"] == "catering_proposal_selected"
+    # The selection ack now appends a catering_customer_ack_sent row after the selected
+    # row (turn-arbitration 2026-07-26), so find the selected row by type, not position.
+    selected_audit = next(a for a in _read_audit(env_dir) if a["type"] == "catering_proposal_selected")
     assert selected_audit["option_id"] == "2"
     assert selected_audit["finalize_exit_code"] == 0
+
+
+def test_selection_ack_records_outbound_message_id(bridge_server, env_dir, monkeypatch):
+    """Turn-arbitration 2026-07-26: the customer-facing selection ack is traceable — its
+    bridge outbound message id lands in the audit via catering_customer_ack_sent. Also
+    pins that a COMPOUND select+pricing message resolves to the named option (cf-router
+    routes such messages straight to this script), not a clarification."""
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_proposals(env_dir, [_proposal_set("CPS-L0014-000001", "SENT")])
+    _seed_menu(env_dir)
+    mod, calls = _load_script(env_dir, port, monkeypatch)
+
+    rc = _run_main(mod, "I like Option 2. Can you send me quote and prices.")
+
+    assert rc == 0, "compound select+pricing records the selection, not a clarification"
+    assert len(calls) == 1 and "--code" in calls[0], "finalize ran for the resolved option"
+    # Exactly one customer ack was sent, and its bridge outbound id is captured in audit.
+    assert len(stub.requests) == 1 and "Option 2" in stub.requests[0]["message"]
+    audits = _read_audit(env_dir)
+    ack_rows = [a for a in audits if a["type"] == "catering_customer_ack_sent"]
+    assert len(ack_rows) == 1, f"one selection-ack audit row expected: {[a['type'] for a in audits]}"
+    assert ack_rows[0]["outbound_message_id"].startswith("msg_"), "ack audit carries the bridge outbound id"
+    assert ack_rows[0]["lead_id"] == "L0014"
+    assert any(a["type"] == "catering_proposal_selected" for a in audits), "selection still recorded"
+
+
+def test_ambiguous_multiple_named_options_clarifies_no_finalize(bridge_server, env_dir, monkeypatch):
+    """Naming MULTIPLE distinct options is ambiguous — clarify, never guess or finalize."""
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_proposals(env_dir, [_proposal_set("CPS-L0014-000001", "SENT")])
+    _seed_menu(env_dir)
+    mod, calls = _load_script(env_dir, port, monkeypatch)
+
+    rc = _run_main(mod, "I like option 1 and option 2 both")
+
+    assert rc == 2
+    assert calls == [], "no finalize on an ambiguous selection"
+    assert "Please reply" in stub.requests[-1]["message"]
+    failed = [a for a in _read_audit(env_dir) if a["type"] == "catering_proposal_selection_failed"]
+    assert failed and failed[-1]["reason"] == "ambiguous_selection"
 
 
 def test_finalize_runs_after_proposals_lock_is_released(bridge_server, env_dir, monkeypatch):
@@ -511,8 +554,7 @@ def test_finalize_exit_code_handling(
     assert selected_set["status"] == expected_status
     if expect_selected:
         assert selected_set["selected_option_id"] == "2"
-        selected_audit = _read_audit(env_dir)[-1]
-        assert selected_audit["type"] == "catering_proposal_selected"
+        selected_audit = next(a for a in _read_audit(env_dir) if a["type"] == "catering_proposal_selected")
         assert selected_audit["finalize_exit_code"] == finalize_rc
         if finalize_rc == 6:
             notify_call = next(call for call in calls if str(mod.NOTIFY_OWNER_BIN) in call)

@@ -94,17 +94,21 @@ class _Spies:
     def __init__(self):
         self.audits = []
         self.creates = []
-        self.cross_ref = []
         self.clarify = []
         self.canonical = []
         self.captures = []
         self.proposals = []  # (lead_id, chat_id, message_id, text) per deterministic invoke
+        self.selects = []    # (lead_id, chat_id, message_id, text) per selection invoke
 
 
 def _wire(monkeypatch, hooks_mod, actions_mod, *, active_lead, role="customer",
-          create_returns=None, capture_ok=True):
+          create_returns=None, capture_ok=True, selectable_set=None, select_rc=0):
     """Monkeypatch every dependency `_try_f7_primary_intercept` touches; the REAL
-    classifiers + discriminator run. Returns a _Spies recorder."""
+    classifiers + discriminator run. Returns a _Spies recorder.
+
+    `selectable_set` (turn-arbitration 2026-07-26): the dict returned by
+    find_selectable_proposal_set — None (default) means no SENT set exists for the lead,
+    so the compound-intent selection branch is dormant."""
     from catering_amendments import CaptureResult
     s = _Spies()
     hooks_mod.F7_PROPOSAL_BRANCH_ENABLED = True
@@ -123,10 +127,12 @@ def _wire(monkeypatch, hooks_mod, actions_mod, *, active_lead, role="customer",
     # Deterministic generator (PR-B2): spy the subprocess invoke; rc=0 ⇒ handled ⇒ skip.
     monkeypatch.setattr(actions_mod, "invoke_create_catering_proposals",
                         lambda lead, cid, mid, txt: s.proposals.append((lead, cid, mid, txt)) or 0)
+    # Selection branch (turn-arbitration): SENT-set presence + the select invoke.
+    monkeypatch.setattr(actions_mod, "find_selectable_proposal_set", lambda lid: selectable_set)
+    monkeypatch.setattr(actions_mod, "invoke_select_catering_proposal",
+                        lambda lid, cid, mid, txt: s.selects.append((lid, cid, mid, txt)) or select_rc)
     monkeypatch.setattr(actions_mod, "send_canonical_followup_reply",
                         lambda cid, lid: s.canonical.append((cid, lid)) or True)
-    monkeypatch.setattr(hooks_mod, "_send_fresh_lead_cross_reference_ack",
-                        lambda cid, new, prior: s.cross_ref.append((cid, new, prior)) or True)
     monkeypatch.setattr(hooks_mod, "_send_fresh_inquiry_clarification",
                         lambda cid, lid: s.clarify.append((cid, lid)) or True)
     monkeypatch.setattr(hooks_mod.catering_amendments, "capture_branch_b_amendment",
@@ -148,7 +154,11 @@ def test_incident_replay_opens_new_lead_and_generates_deterministically(monkeypa
     # bypassed ⇒ skip), NOT escaped to Hermes.
     assert out is not None and out["action"] == "skip"
     assert len(s.creates) == 1, "exactly one new lead opened over the stale one"
-    assert len(s.cross_ref) == 1 and s.cross_ref[0][2] == "L0017", "cross-reference to the stale lead"
+    # Turn-arbitration 2026-07-26: ONE bounded response. The create SUPPRESSES its F14
+    # sample menu (a proposal ask follows), NO cross-reference "is this separate?"
+    # question is sent (the contradiction already makes the event distinct), and the
+    # generated tiered set is the single customer send.
+    assert s.creates[0]["suppress_customer_ack"] is True, "F14 suppressed; tiered set is the one send"
     # A SENT set is created for the NEW lead (L0099 from the create spy), deterministically.
     assert len(s.proposals) == 1 and s.proposals[0][0] == "L0099", \
         "proposals generated against the new lead via --auto-generate-from-menu"
@@ -171,6 +181,7 @@ def test_proposal_request_only_generates_no_new_lead(monkeypatch):
     # PR-B2: plain proposal request GENERATES against the existing active lead.
     assert out is not None and out["action"] == "skip"
     assert s.creates == [], "a plain proposal request must NOT open a new lead"
+    assert s.selects == [], "a plain proposal request is not a selection"
     assert len(s.proposals) == 1 and s.proposals[0][0] == "L0017", \
         "generated deterministically against the existing active lead"
     assert _reasons(s) == ["f7_proposal_request_deterministic_generation"]
@@ -233,7 +244,11 @@ def test_contradiction_date_only_opens_new_lead(monkeypatch):
         "Catering for 120 guests for the wedding on August 8th please.",
         CHAT, _event("wamid.DATE"), allow_new_lead=True)
     assert out is not None and out["action"] == "skip" and "fresh inquiry" in out["reason"]
-    assert len(s.creates) == 1 and len(s.cross_ref) == 1
+    # Distinct event with NO proposal ask → new lead, F14 kept as the one response,
+    # NO cross-reference question (turn-arbitration 2026-07-26).
+    assert len(s.creates) == 1
+    assert s.creates[0]["suppress_customer_ack"] is False, "no proposal ask → F14 is the one send"
+    assert s.proposals == [], "no proposal ask → no tiered generation"
     assert _reasons(s) == ["f7_fresh_inquiry_new_lead_over_stale"]
 
 
@@ -298,6 +313,109 @@ def test_flag_off_falls_back_to_r2a_capture(monkeypatch):
     assert out is not None and out["action"] == "skip" and "follow-up" in out["reason"]
     assert len(s.captures) == 1 and s.creates == []
     assert _reasons(s) == ["f7_primary_followup_suppressed"]
+
+
+# ── Turn-arbitration: outbound-count proxy ──────────────────────────────────
+def _customer_sends(s) -> int:
+    """Count customer-facing outbounds a turn produced (unit-level proxy). A create
+    sends its F14 sample menu IFF suppress_customer_ack is False; the cross-reference
+    send is gone; every other channel is one send each."""
+    f14 = sum(1 for c in s.creates if not c.get("suppress_customer_ack"))
+    return f14 + len(s.proposals) + len(s.clarify) + len(s.canonical) + len(s.selects)
+
+
+def _sent_set(lead_id="L0017"):
+    return {"proposal_set_id": f"CPS-{lead_id}-000001", "lead_id": lead_id,
+            "status": "SENT", "outbound_message_id": "mid_sent"}
+
+
+# ── Compound intent: "I like Option 2 + pricing" is a SELECTION, not regen ──
+def test_compound_selection_plus_pricing_records_once_no_regeneration(monkeypatch):
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, active_lead=_stale_lead(),
+              selectable_set=_sent_set("L0017"))
+    out = hooks_mod._try_f7_primary_intercept(
+        "I like Option 2. Can you send me quote and prices.", CHAT, _event("wamid.SEL2"),
+        allow_new_lead=True)
+    assert out is not None and out["action"] == "skip" and "selection" in out["reason"]
+    assert len(s.selects) == 1 and s.selects[0][0] == "L0017", "recorded the selection ONCE"
+    assert s.proposals == [], "must NOT regenerate or re-send the menus"
+    assert s.creates == [], "must NOT open a new lead"
+    assert s.captures == [], "a compound selection is NOT an amendment capture"
+    assert _reasons(s) == ["f7_proposal_selection"]
+    assert _customer_sends(s) == 1, "one bounded response (the selection ack)"
+
+
+# ── Redundant bare "Option 2" after the selection is idempotent (no double-select) ──
+def test_redundant_option_after_selection_is_idempotent(monkeypatch):
+    hooks_mod, actions_mod = _load_plugin()
+    # Once the selection was recorded the set is SELECTED (no longer SENT), so
+    # find_selectable_proposal_set returns None and the redundant "Option 2" cannot
+    # re-enter the selection branch — no second select fires.
+    s = _wire(monkeypatch, hooks_mod, actions_mod, active_lead=_stale_lead(), selectable_set=None)
+    hooks_mod._try_f7_primary_intercept("Option 2", CHAT, _event("wamid.SEL3"), allow_new_lead=True)
+    assert s.selects == [], "no second selection fires (no SENT set remains)"
+    assert s.proposals == [], "and no regeneration"
+    assert s.creates == [], "and no new lead"
+
+
+# ── Amendment-phrased tier change stays R2A even when it names a tier ────────
+def test_amendment_named_tier_stays_capture_not_selection(monkeypatch):
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, active_lead=_stale_lead(),
+              selectable_set=_sent_set("L0017"))
+    out = hooks_mod._try_f7_primary_intercept(
+        "Actually make it premium instead.", CHAT, _event("wamid.AMT"), allow_new_lead=True)
+    assert out is not None and "follow-up" in out["reason"]
+    assert s.selects == [], "amendment-phrased tier change must NOT be read as a selection"
+    assert len(s.captures) == 1, "it keeps the R2A durable-capture path"
+    assert _reasons(s) == ["f7_primary_followup_suppressed"]
+
+
+# ── Full 3-message live-transcript reproduction (2026-07-26 smoke) ───────────
+def test_live_transcript_three_messages_one_response_each(monkeypatch):
+    """The exact 2026-07-26 smoke: (1) wedding/180 fresh inquiry over an open stale
+    lead → ONE bounded response (new lead, F14 suppressed, tiered set, NO 'is this
+    separate?' question); (2) compound select+pricing → records Option 2 once, advances,
+    no menu re-send; (3) redundant 'Option 2' → idempotent (no double-select)."""
+    hooks_mod, actions_mod = _load_plugin()
+
+    # Message 1 — fresh wedding inquiry (distinct: 180 vs stale 60) that also asks for menus.
+    s1 = _wire(monkeypatch, hooks_mod, actions_mod,
+               active_lead=_stale_lead(lead_id="L0019", event_date="2026-07-04", headcount=60),
+               selectable_set=None)
+    msg1 = ("Hello I have a wedding coming up for 180 guests. Please send me two sample "
+            "menus so I can decide.")
+    out1 = hooks_mod._try_f7_primary_intercept(msg1, CHAT, _event("wamid.M1"), allow_new_lead=True)
+    assert out1 is not None and out1["action"] == "skip"
+    assert len(s1.creates) == 1 and s1.creates[0]["suppress_customer_ack"] is True
+    assert len(s1.proposals) == 1, "tiered options generated as the single response"
+    assert _reasons(s1) == [
+        "f7_fresh_inquiry_new_lead_over_stale",
+        "f7_proposal_request_deterministic_generation",
+    ], "no independent ack + dup-warning + proposal — one composed outcome"
+    assert s1.clarify == [] and s1.canonical == [] and s1.captures == []
+    assert _customer_sends(s1) == 1, "message 1 → exactly ONE customer outbound"
+
+    # Message 2 — compound selection + pricing against the now-active lead's SENT set.
+    s2 = _wire(monkeypatch, hooks_mod, actions_mod,
+               active_lead=_stale_lead(lead_id="L0020", event_date="2026-07-04", headcount=180),
+               selectable_set=_sent_set("L0020"))
+    out2 = hooks_mod._try_f7_primary_intercept(
+        "I like Option 2. Can you send me quote and prices.", CHAT, _event("wamid.M2"),
+        allow_new_lead=True)
+    assert out2 is not None and "selection" in out2["reason"]
+    assert len(s2.selects) == 1 and s2.selects[0][0] == "L0020", "Option 2 recorded once"
+    assert s2.proposals == [], "menus NOT re-sent"
+    assert _customer_sends(s2) == 1, "message 2 → exactly ONE customer outbound"
+
+    # Message 3 — redundant "Option 2" after the set is consumed → no double-select.
+    s3 = _wire(monkeypatch, hooks_mod, actions_mod,
+               active_lead=_stale_lead(lead_id="L0020", event_date="2026-07-04", headcount=180),
+               selectable_set=None)
+    hooks_mod._try_f7_primary_intercept("Option 2", CHAT, _event("wamid.M3"), allow_new_lead=True)
+    assert s3.selects == [], "redundant selection is idempotent — no double-select"
+    assert s3.proposals == [] and s3.creates == []
 
 
 # ── Enum-literal declaration guard ──────────────────────────────────────────

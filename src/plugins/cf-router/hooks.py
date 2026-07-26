@@ -5397,12 +5397,19 @@ def _create_catering_lead_from_inbound(
 
     extracted = _extract_catering_fields_from_text(text, signals or [])
 
+    # Turn-arbitration 2026-07-26: when this new inquiry also asks for proposals we
+    # immediately generate the tiered options below, so suppress create-catering-lead's
+    # F14 sample menu — the generated set is the customer's SINGLE bounded response.
+    # A new inquiry WITHOUT a proposal ask keeps the F14 menu as its one response.
+    will_generate_proposals = actions.is_proposal_request(text)
+
     ok, detail = actions.trigger_create_catering_lead(
         customer_phone=customer_phone_arg,
         customer_name="",
         raw_inquiry=text,
         message_id=message_id,
         extracted_fields=extracted,
+        suppress_customer_ack=will_generate_proposals,
     )
     actions.audit_intercepted(
         reason="f7_primary_new_inquiry", chat_id=chat_id,
@@ -5454,35 +5461,6 @@ def _material_contradiction(inbound_date: Optional[str], inbound_headcount: Opti
     return False
 
 
-def _send_fresh_lead_cross_reference_ack(chat_id: str, new_lead_id: str,
-                                         prior_lead_id: str) -> bool:
-    """One-line cross-reference note sent after a fresh inquiry opens a NEW lead
-    over an older one (PR-A fresh-vs-stale). Distinct from create-catering-lead's
-    own customer ack — it only points at the earlier inquiry so the customer can
-    disambiguate. Hard-coded (HARD RULES: no LLM, no prices, no menu items),
-    reusing the send-catering-ack subprocess like send_canonical_followup_reply."""
-    import subprocess
-
-    template = (
-        f"I've also got your earlier inquiry {prior_lead_id} on file — is this a "
-        f"separate event? I've started {new_lead_id} for this one."
-    )
-    try:
-        result = subprocess.run(
-            [
-                str(actions.SEND_CATERING_ACK_BIN),
-                "--customer-jid", chat_id,
-                "--message-text", template,
-                "--lead-id", new_lead_id,
-            ],
-            capture_output=True, text=True,
-            timeout=actions.SUBPROCESS_TIMEOUT_SEC,
-        )
-        return result.returncode == 0
-    except (subprocess.SubprocessError, OSError):
-        return False
-
-
 def _send_fresh_inquiry_clarification(chat_id: str, lead_id: str) -> bool:
     """One clarification for an inquiry-shaped follow-up that neither clearly
     contradicts nor amends the open lead (PR-A ambiguous branch). Hard-coded one-
@@ -5512,13 +5490,22 @@ def _send_fresh_inquiry_clarification(chat_id: str, lead_id: str) -> bool:
 
 def _open_fresh_lead_over_stale(*, text: str, chat_id: str, message_id: str,
                                 signals: list[str], phone: Optional[str],
-                                prior_lead_id: str) -> Optional[str]:
-    """Open a NEW catering lead for a fresh inquiry that contradicts an older open
-    lead, via the existing create-catering-lead path (idempotent on
-    (customer_phone, message_id) inside that script), then send the one-line
-    cross-reference ack. Returns the new lead_id on success, else None so the
+                                prior_lead_id: str,
+                                suppress_customer_ack: bool = False) -> Optional[str]:
+    """Open a NEW catering lead for a fresh inquiry whose event identity is
+    DETERMINISTICALLY DISTINCT from an older open lead (date/headcount contradiction),
+    via the existing create-catering-lead path (idempotent on (customer_phone,
+    message_id) inside that script). Returns the new lead_id on success, else None so the
     caller falls through to the durable R2A capture (the message is never lost).
-    Emits `f7_fresh_inquiry_new_lead_over_stale`."""
+    Emits `f7_fresh_inquiry_new_lead_over_stale`.
+
+    Turn-arbitration 2026-07-26: a distinct event is created WITHOUT a "is this a separate
+    event?" question — the deterministic date/headcount contradiction already establishes a
+    different event, so no clarification is warranted (the clarification is reserved for the
+    genuinely AMBIGUOUS branch, which creates NO lead). And when the same inbound also asks
+    for proposals, `suppress_customer_ack` skips create-catering-lead's F14 sample menu so
+    the immediately-generated tiered options are the customer's SINGLE bounded response —
+    not an F14 menu AND a cross-reference AND a tiered set as three independent sends."""
     if phone:
         customer_phone_arg = phone
     elif chat_id.endswith("@lid"):
@@ -5533,6 +5520,7 @@ def _open_fresh_lead_over_stale(*, text: str, chat_id: str, message_id: str,
         raw_inquiry=text,
         message_id=message_id,
         extracted_fields=extracted,
+        suppress_customer_ack=suppress_customer_ack,
     )
     new_lead_id = _lead_id_from_create_detail(detail) if ok else ""
     if not ok or not new_lead_id:
@@ -5547,10 +5535,9 @@ def _open_fresh_lead_over_stale(*, text: str, chat_id: str, message_id: str,
         reason="f7_fresh_inquiry_new_lead_over_stale", chat_id=chat_id,
         subprocess_rc=0,
         detail=(f"new {new_lead_id} over stale {prior_lead_id}; fresh inquiry "
-                f"contradicts open lead identity; LLM bypassed"),
+                f"contradicts open lead identity; distinct event, no clarification; "
+                f"LLM bypassed"),
     )
-    if F7_PRIMARY_FOLLOWUP_REPLY:
-        _send_fresh_lead_cross_reference_ack(chat_id, new_lead_id, prior_lead_id)
     return new_lead_id
 
 
@@ -5651,8 +5638,26 @@ def _try_f7_primary_intercept(
         if result is not None:
             return result
 
-    if F7_PROPOSAL_BRANCH_ENABLED and actions.is_proposal_selection(text):
-        if actions.find_selectable_proposal_set(lead_id):
+    # Compound-intent-aware SELECTION — turn-arbitration 2026-07-26. Runs BEFORE the
+    # proposal-request-regeneration path. When a SENT selectable set already exists for
+    # the lead, a message that NAMES a specific option is a SELECTION, not a request to
+    # regenerate menus. This catches the compound "I like Option 2. Can you send me quote
+    # and prices." that is_proposal_selection misses ("like" is not an action verb) and
+    # is_proposal_request then mis-reads as a regeneration ask. Recording the selection
+    # ONCE (via select-catering-proposal) acknowledges it and advances to the
+    # deterministic owner-approval/quote path — "send me quote/prices" is a pricing-
+    # advance signal, not a new-proposal request; the menus are NOT re-sent. An explicit
+    # action-verb selection still wins; the weaker NAMES signal excludes amendment-phrased
+    # text ("actually make it premium instead" keeps the R2A capture path) and mix-and-
+    # match recompose (which reaches the escape branch below).
+    if F7_PROPOSAL_BRANCH_ENABLED:
+        selectable = actions.find_selectable_proposal_set(lead_id)
+        names_option = (
+            not actions.is_amendment_phrased(text)
+            and actions.names_proposal_option(text)
+        )
+        if (selectable and not actions.is_mix_and_match_request(text)
+                and (actions.is_proposal_selection(text) or names_option)):
             rc = actions.invoke_select_catering_proposal(
                 lead_id, chat_id, message_id, text,
             )
@@ -5678,11 +5683,13 @@ def _try_f7_primary_intercept(
     # pre-PR-A suppression. Amendment-phrased follow-ups (update/change/revise/
     # instead/actually/make it) are EXCLUDED here and keep the R2A capture path.
     #
-    #   contradiction (fresh inquiry vs open lead date/headcount) → open a NEW
-    #     lead + one-line cross-reference ack (f7_fresh_inquiry_new_lead_over_stale);
-    #     if the SAME message is also a proposal request, GENERATE proposals
-    #     deterministically against the NEW lead (f7_proposal_request_deterministic_
-    #     generation) — no fall-through to Hermes.
+    #   contradiction (fresh inquiry vs open lead date/headcount) → open a NEW lead
+    #     (f7_fresh_inquiry_new_lead_over_stale). The contradiction already makes the
+    #     event distinct, so NO "is this a separate event?" question is sent (turn-
+    #     arbitration 2026-07-26). If the SAME message is also a proposal request,
+    #     GENERATE proposals deterministically against the NEW lead — with the create's
+    #     F14 sample menu SUPPRESSED so the tiered set is the ONE bounded response
+    #     (f7_proposal_request_deterministic_generation) — no fall-through to Hermes.
     #   PLAIN proposal request (no contradiction, no mix-and-match) → GENERATE
     #     proposals deterministically against the active lead
     #     (f7_proposal_request_deterministic_generation); the LLM is bypassed.
@@ -5700,9 +5707,14 @@ def _try_f7_primary_intercept(
         proposal_escape = actions.is_proposal_request_escape(text)
         inbound_date, inbound_headcount = _inbound_event_identity(text, disc_signals)
         if is_inquiry and _material_contradiction(inbound_date, inbound_headcount, active_lead):
+            # Suppress create-catering-lead's F14 sample menu when we will immediately
+            # generate the tiered options — the generated set is the ONE bounded response
+            # (turn-arbitration 2026-07-26). No cross-reference question is sent: the
+            # contradiction already establishes a distinct event.
             new_lead_id = _open_fresh_lead_over_stale(
                 text=text, chat_id=chat_id, message_id=message_id,
                 signals=disc_signals, phone=phone, prior_lead_id=lead_id,
+                suppress_customer_ack=proposal_escape,
             )
             if new_lead_id is not None:
                 if proposal_escape:

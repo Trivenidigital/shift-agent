@@ -2008,6 +2008,46 @@ def is_proposal_selection(text: str) -> bool:
     )
 
 
+# Turn-arbitration 2026-07-26 — compound-intent selection net. is_proposal_selection
+# requires an ACTION verb (choose/go with/take/...) adjacent to the option, so a
+# compound "I like Option 2. Can you send me quote and prices." misses it ("like" is
+# not an action verb) and is_proposal_request's "like"+"option" window then mis-reads
+# it as a proposal REGENERATION request. This weaker net matches a message that merely
+# NAMES a specific option (option/proposal/menu N, or a tier alias) with NO action verb.
+# It is intentionally used ONLY when a SENT selectable set already exists for the lead
+# (the caller gates on find_selectable_proposal_set), so "name an option" can only mean
+# "select the one you were shown", never a fresh inquiry that happens to say "option".
+# Deterministic; NO LLM. Excludes bare counts like "2 options" (requires the option word
+# to PRECEDE the number, e.g. "option 2").
+_PROPOSAL_OPTION_NAMED_REF = re.compile(
+    r"\b(?:option|proposal|menu)\s*#?\s*[1-3]\b"
+    r"|\b(?:premium|balanced|classic)\b",
+    re.IGNORECASE,
+)
+# A message that merely ASKS ABOUT an option ("can you tell me about option 2?", "what's
+# in option 2?", "which is better?") is a QUESTION, not a selection — it must stay on its
+# prior routing (fall through), never be read as choosing that option. Fail-safe: an
+# info-query phrase suppresses the weak NAMES signal so only genuine preferences select.
+_PROPOSAL_INFO_QUERY_RE = re.compile(
+    r"(?i)\b(?:tell me|what(?:'?s| is| are| does)?|which|describe|explain|"
+    r"details?|difference|compare|"
+    r"know (?:more )?about|hear (?:more )?about|learn (?:more )?about|more about)\b"
+)
+
+
+def names_proposal_option(text: str) -> bool:
+    """Return True when the inbound NAMES a specific already-sent option (option N /
+    proposal N / menu N / a tier alias) even without an explicit action verb, and is NOT
+    an information-seeking question about that option. Weaker than is_proposal_selection;
+    only meaningful when a SENT selectable set exists for the lead. Deterministic; NO LLM."""
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return False
+    if _PROPOSAL_INFO_QUERY_RE.search(normalized):
+        return False
+    return bool(_PROPOSAL_OPTION_NAMED_REF.search(normalized))
+
+
 # PR-A F7 escape-gate proposal-request net. A SUPERSET of is_proposal_request:
 # it additionally catches menu/proposal asks phrased WITHOUT one of
 # is_proposal_request's request verbs — "provide me two best sample menus",
@@ -7110,8 +7150,17 @@ def spawn_derive_flyer_brand_style(customer_id: str) -> bool:
 def trigger_create_catering_lead(
     customer_phone: str, customer_name: str, raw_inquiry: str, message_id: str,
     extracted_fields: Optional[dict] = None,
+    suppress_customer_ack: bool = False,
 ) -> tuple[bool, str]:
     """Invoke create-catering-lead.
+
+    `suppress_customer_ack` (turn-arbitration 2026-07-26): when True, pass
+    `--suppress-customer-ack` so create-catering-lead sends the owner approval card
+    but NOT the F14 customer proposal. cf-router sets this when it will IMMEDIATELY
+    generate the tiered proposal set for the new lead — the generated options are then
+    the customer's SINGLE bounded response for the turn, instead of an F14 sample menu
+    AND a tiered proposal set firing as two independent sends. Default False preserves
+    every other caller (rescue path, Branch-A inquiries with no proposal ask).
 
     `extracted_fields` (PR-CF1d Commit 4 2026-05-12): optional dict to merge
     into the default all-null fields_json. Used by F7 primary-mode to forward
@@ -7144,16 +7193,19 @@ def trigger_create_catering_lead(
     if extracted_fields:
         fields.update(extracted_fields)
     fields_json = json.dumps(fields)
+    argv = [
+        str(CREATE_LEAD_BIN),
+        "--customer-phone", customer_phone,
+        "--customer-name", customer_name,
+        "--raw-inquiry", raw_inquiry[:1000],
+        "--message-id", message_id,
+        "--fields-json", fields_json,
+    ]
+    if suppress_customer_ack:
+        argv.append("--suppress-customer-ack")
     try:
         result = subprocess.run(
-            [
-                str(CREATE_LEAD_BIN),
-                "--customer-phone", customer_phone,
-                "--customer-name", customer_name,
-                "--raw-inquiry", raw_inquiry[:1000],
-                "--message-id", message_id,
-                "--fields-json", fields_json,
-            ],
+            argv,
             capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
         )
         if result.returncode == 0:

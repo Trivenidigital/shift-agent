@@ -20,6 +20,8 @@ from exit_codes import EXIT_DEPENDENCY_DOWN, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
 from safe_io import FileLock, assert_load_status_clean, atomic_write_json, load_model, ndjson_append  # noqa: E402
 from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402  # PR-ε: chokepoint consolidation
 from schemas import (  # noqa: E402
+    CateringCustomerAckFailed,
+    CateringCustomerAckSent,
     CateringLeadStore,
     CateringProposalOption,
     CateringProposalSelected,
@@ -46,6 +48,19 @@ BRIDGE_PREFIX = "\u2695 *Catering Agent*\n------------\n"
 OPTION_RE = re.compile(r"(?i)(?:option|proposal|menu)?\s*#?\s*([1-3])\b")
 ACTION_OPTION_RE = re.compile(
     r"(?i)\b(?:go with|choose|select|take|pick|finalize|confirm|lock in|proceed with|we'?ll take|i'?ll take|she'?ll take)\b.{0,40}\b(?:option|proposal|menu)?\s*#?\s*([1-3])\b"
+)
+# Turn-arbitration 2026-07-26: an EMBEDDED named option ("I like Option 2. Can you send
+# me quote and prices.") — the option word immediately before the number — is a selection
+# even without an action verb. cf-router routes such compound select+pricing messages here,
+# so the resolver must record the named option instead of dead-ending on a clarification.
+# Requires the option word to PRECEDE the number (not a bare "2 options" count).
+OPTION_NAMED_RE = re.compile(r"(?i)\b(?:option|proposal|menu)\s*#?\s*([1-3])\b")
+# An information-seeking question about an option ("can you tell me about option 2?",
+# "what's in option 2?") is NOT a selection — keep clarifying rather than auto-selecting.
+INFO_QUERY_RE = re.compile(
+    r"(?i)\b(?:tell me|what(?:'?s| is| are| does)?|which|describe|explain|"
+    r"details?|difference|compare|"
+    r"know (?:more )?about|hear (?:more )?about|learn (?:more )?about|more about)\b"
 )
 TIER_RE = re.compile(r"(?i)\b(premium|balanced|classic)\b")
 
@@ -122,6 +137,33 @@ def _audit_failed(lead_id: str, reason: str, detail: str = "", proposal_set_id: 
     )
 
 
+def _audit_ack(lead_id: str, customer_jid: str, ok: bool, message_id_or_error: str) -> None:
+    """Record the selection-acknowledgment send so every customer-facing outbound in the
+    arbitrated turn is traceable by its bridge outbound message id (turn-arbitration
+    2026-07-26). Mirrors create-catering-lead's F14 ack audit (catering_customer_ack_sent /
+    catering_customer_ack_failed). Best-effort: a selection that already succeeded must not
+    be undone by an audit-emit hiccup, so failures are swallowed to stderr."""
+    try:
+        if ok and str(message_id_or_error).strip():
+            _append_audit(CateringCustomerAckSent(
+                type="catering_customer_ack_sent",
+                ts=_now(),
+                customer_jid=customer_jid,
+                outbound_message_id=message_id_or_error,
+                lead_id=lead_id,
+            ))
+        else:
+            _append_audit(CateringCustomerAckFailed(
+                type="catering_customer_ack_failed",
+                ts=_now(),
+                customer_jid=customer_jid,
+                reason="bridge_unreachable",
+                detail=str(message_id_or_error)[:2000],
+            ))
+    except Exception as e:  # noqa: BLE001 - audit is best-effort
+        sys.stderr.write(f"WARN: selection-ack audit emit failed (non-fatal): {type(e).__name__}: {e}\n")
+
+
 def _resolve_selection(text: str, options: list[CateringProposalOption]) -> tuple[str | None, str]:
     """Resolve customer text to a proposal option id, or return a failure reason."""
     action = ACTION_OPTION_RE.search(text or "")
@@ -137,6 +179,21 @@ def _resolve_selection(text: str, options: list[CateringProposalOption]) -> tupl
         if any(option.option_id == wanted for option in options):
             return wanted, "option_number"
         return None, "invalid_selection"
+
+    # Embedded named option without an action verb (compound select+pricing). Resolve
+    # only when the message names EXACTLY ONE distinct option AND is not an info-seeking
+    # question about the option — multiple distinct options ("option 1 and option 2") is
+    # ambiguous and must never be guessed; a question ("tell me about option 2") stays a
+    # clarification. (A mix-and-match recompose is routed to the recompose script upstream.)
+    named = OPTION_NAMED_RE.findall(text or "")
+    if named and not INFO_QUERY_RE.search(text or ""):
+        distinct = set(named)
+        if len(distinct) == 1:
+            wanted = next(iter(distinct))
+            if any(option.option_id == wanted for option in options):
+                return wanted, "option_number"
+            return None, "invalid_selection"
+        return None, "ambiguous_selection"
 
     tier = TIER_RE.search(text or "")
     if tier:
@@ -550,7 +607,10 @@ def main() -> int:
         _audit_selected(args.lead_id, result.proposal_set_id, result.option_id, args.customer_message_id, finalize_rc)
         if finalize_rc == EXIT_DEPENDENCY_DOWN:
             _notify_owner_card_failed(args.lead_id, result.proposal_set_id, result.option_id)
-        _bridge_post(args.customer_jid, _ack_text(result.option_id))
+        # Capture the ack's bridge outbound message id so the customer-facing selection
+        # (and compound selection+pricing) response is traceable in the audit trail.
+        ack_ok, ack_mid_or_err = _bridge_post(args.customer_jid, _ack_text(result.option_id))
+        _audit_ack(args.lead_id, args.customer_jid, ack_ok, ack_mid_or_err)
         return finalize_rc
 
     _audit_failed(
