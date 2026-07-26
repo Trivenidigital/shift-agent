@@ -192,7 +192,8 @@ def _run_main(mod, argv, stdin_text=None):
     return rc, out.getvalue(), err.getvalue()
 
 
-def run_create_lead(*, customer_phone, customer_name, raw_inquiry, message_id, fields_json):
+def run_create_lead(*, customer_phone, customer_name, raw_inquiry, message_id, fields_json,
+                     suppress_customer_ack=False):
     mod = _load_patched("e2e_ccl", "create-catering-lead", {
         "CONFIG_PATH": CONFIG_PATH, "LEADS_PATH": LEADS_PATH,
         "LEADS_LOCK": Path(str(LEADS_PATH) + ".lock"), "LOG_PATH": DECISIONS_LOG,
@@ -202,6 +203,8 @@ def run_create_lead(*, customer_phone, customer_name, raw_inquiry, message_id, f
     argv = ["create-catering-lead", "--customer-phone", customer_phone,
             "--customer-name", customer_name, "--raw-inquiry", raw_inquiry[:1000],
             "--message-id", message_id, "--fields-json", fields_json]
+    if suppress_customer_ack:
+        argv.append("--suppress-customer-ack")
     return _run_main(mod, argv)
 
 
@@ -324,7 +327,7 @@ def wire(hooks, actions):
 
     # Subprocess-boundary → real scripts in-process against the sandbox.
     def _trigger_create_lead(customer_phone, customer_name, raw_inquiry, message_id,
-                             extracted_fields=None):
+                             extracted_fields=None, suppress_customer_ack=False):
         fields = {"headcount": None, "event_date": None, "event_time": None,
                   "menu_preferences": [], "off_menu_items": [], "dietary_restrictions": [],
                   "delivery_or_pickup": "unknown", "budget_hint_usd": None,
@@ -333,7 +336,8 @@ def wire(hooks, actions):
             fields.update(extracted_fields)
         rc, out, err = run_create_lead(customer_phone=customer_phone, customer_name=customer_name,
                                        raw_inquiry=raw_inquiry, message_id=message_id,
-                                       fields_json=json.dumps(fields))
+                                       fields_json=json.dumps(fields),
+                                       suppress_customer_ack=suppress_customer_ack)
         if rc == 0:
             return True, out.strip().splitlines()[-1] if out.strip() else ""
         return False, f"exit={rc} stderr={err[:500]}"
@@ -354,13 +358,9 @@ def wire(hooks, actions):
     actions.invoke_select_catering_proposal = _select
 
     # hooks-level ack helpers (subprocess → in-process send-catering-ack).
-    def _cross_ref(chat_id, new_lead_id, prior_lead_id):
-        template = (f"I've also got your earlier inquiry {prior_lead_id} on file — is this a "
-                    f"separate event? I've started {new_lead_id} for this one.")
-        rc, _o, _e = run_send_ack(chat_id, template, new_lead_id)
-        return rc == 0
-    hooks._send_fresh_lead_cross_reference_ack = _cross_ref
-
+    # Turn-arbitration 2026-07-26: the fresh-vs-stale cross-reference "is this a separate
+    # event?" ack was removed — a deterministically distinct event opens the new lead with
+    # NO question, and the F14/tiered send is the single bounded response.
     def _clarify(chat_id, lead_id):
         template = (f"Just to confirm — is this about your existing inquiry {lead_id}, or a "
                     f"new event? Reply and I'll route it to the right one.")
@@ -716,8 +716,14 @@ def assess(turn_no, res, menu_names, no_price_re):
         # proposals deterministically against the new lead (LIVE evidence overruled the
         # emulated escape-to-Hermes path, which spiraled on the real gpt-4o-mini gateway).
         A.append(("audit_f7_proposal_request_deterministic_generation", "f7_proposal_request_deterministic_generation" in rslist, f"reasons={rslist}"))
-        xref = [s for s in csends if "earlier inquiry L0017" in s["message"]]
-        A.append(("cross_reference_ack_mentions_earlier_inquiry", len(xref) >= 1, "found" if xref else "MISSING"))
+        # Turn-arbitration 2026-07-26: a deterministically distinct event opens the new
+        # lead with NO "is this a separate event?" cross-reference question, and — since
+        # the same inbound asks for menus — the F14 sample menu is suppressed so the tiered
+        # proposal set is the SINGLE bounded customer response (not ack + dup-warning +
+        # proposals as three sends).
+        xref = [s for s in csends if re.search(r"earlier inquiry|separate event\?", s["message"], re.I)]
+        A.append(("no_cross_reference_question_distinct_event", len(xref) == 0, "clean" if not xref else f"UNEXPECTED xref={len(xref)}"))
+        A.append(("single_bounded_customer_response", len(csends) == 1, f"customer_sends={len(csends)}"))
         opt = len(re.findall(r"^\*Option \d", pbody, re.M))
         A.append(("two_options_generated", opt == 2, f"option_titles={opt}"))
         bad = [i for i in _menu_items_in(pbody) if i not in menu_names]
@@ -787,8 +793,12 @@ def assess(turn_no, res, menu_names, no_price_re):
     elif turn_no == 7:
         A.append(("lead_number_three_opened", len(lead_ids) >= 3, f"leads={lead_ids}"))
         A.append(("discriminator_fresh_over_stale", "f7_fresh_inquiry_new_lead_over_stale" in rslist, f"reasons={rslist}"))
-        xref = [s for s in csends if "earlier inquiry" in s["message"]]
-        A.append(("cross_reference_present", len(xref) >= 1, "found" if xref else "MISSING"))
+        # Turn-arbitration 2026-07-26: the customer already said "separate event" — a
+        # distinct event opens the new lead with NO cross-reference question; the F14
+        # sample menu is the single bounded response.
+        xref = [s for s in csends if re.search(r"earlier inquiry|separate event\?", s["message"], re.I)]
+        A.append(("no_cross_reference_question_distinct_event", len(xref) == 0, "clean" if not xref else f"UNEXPECTED xref={len(xref)}"))
+        A.append(("single_bounded_customer_response", len(csends) == 1, f"customer_sends={len(csends)}"))
     elif turn_no == 8:
         A.append(("zero_unprompted_outbound", len(sends) == 0, f"sends={len(sends)}"))
     return A
@@ -796,9 +806,9 @@ def assess(turn_no, res, menu_names, no_price_re):
 
 def tone_judge(res):
     """Reviewer tone rule, scoped to the FREE-FLOW brain's composed prose (PR-D's
-    target). Deterministic script sends (the PR-A cross-reference ack, the canonical
-    R2A 'with the owner' reply, the create-lead ack) are pre-existing shipped copy
-    the task said to keep as-is, so they are NOT judged here. Flags on brain prose:
+    target). Deterministic script sends (the canonical R2A 'with the owner' reply, the
+    create-lead ack) are pre-existing shipped copy the task said to keep as-is, so they
+    are NOT judged here. Flags on brain prose:
     stalls-with-nothing-behind, internal-flow leakage, and (turn 4/6) menu re-dumps
     answering a non-proposal question."""
     problems = []

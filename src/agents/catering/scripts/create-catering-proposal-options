@@ -73,6 +73,17 @@ CATEGORY_ORDER = [
     "beverage",
     "special",
 ]
+# Turn-arbitration 2026-07-26 — the meal-defining sections a credible event menu
+# spans (rice/biryani/breads live under main/side in the MenuCategory schema). Used
+# by both the balanced composition and the fail-closed section-balance guard.
+CORE_SECTION_CATEGORIES = ("appetizer", "main", "side", "dessert")
+
+
+class SectionBalanceError(ValueError):
+    """Raised when a mixed veg/non-veg event would receive a degenerate proposal —
+    single-diet or too few sections despite the menu offering the variety. Subclasses
+    ValueError so main()'s section-balance handler catches it before the generic
+    ValueError branch and fails closed (owner notified, no incoherent send)."""
 
 
 def _now() -> datetime:
@@ -128,6 +139,33 @@ def _append_unique(target: list[str], items: list[MenuItem], *, limit: int) -> N
             target.append(item.name)
 
 
+def _ensure_diet_balance(
+    selected: list[str], menu_items: dict[str, MenuItem],
+    veg_items: list[MenuItem], non_veg_items: list[MenuItem],
+) -> None:
+    """Guarantee BOTH a veg and a non-veg item appear when the menu offers both —
+    a mixed veg/non-veg event must never receive a single-diet option."""
+    if non_veg_items and not any(_is_non_veg(menu_items[name]) for name in selected):
+        _append_unique(selected, non_veg_items, limit=len(selected) + 1)
+    if veg_items and not any(not _is_non_veg(menu_items[name]) for name in selected):
+        _append_unique(selected, veg_items, limit=len(selected) + 1)
+
+
+def _ensure_section_coverage(
+    selected: list[str], menu_items: dict[str, MenuItem], available: list[MenuItem],
+) -> None:
+    """Guarantee each CORE meal section the menu actually offers is represented —
+    the fix for the idli/dosa-dominated (appetizer-only) failure mode."""
+    covered = {menu_items[name].category for name in selected}
+    for category in CORE_SECTION_CATEGORIES:
+        if category in covered:
+            continue
+        if any(item.category == category for item in available):
+            _append_unique(selected, _items_in_categories(available, (category,)),
+                           limit=len(selected) + 1)
+            covered.add(category)
+
+
 def _auto_option_items(menu_items: dict[str, MenuItem], *, style_key: str) -> list[str]:
     available = list(menu_items.values())
     if not available:
@@ -164,6 +202,13 @@ def _auto_option_items(menu_items: dict[str, MenuItem], *, style_key: str) -> li
     else:
         _append_unique(selected, _items_in_categories(available, ("package", "main", "side", "dessert")), limit=6)
 
+    # Turn-arbitration 2026-07-26 — coherence guarantees layered ON TOP of the style
+    # seed so a mixed veg/non-veg event never receives a single-diet or single-section
+    # menu when the menu offers the variety. Both are menu-relative (add nothing the
+    # menu lacks) and additive (only extend `selected`), so small menus stay valid.
+    _ensure_diet_balance(selected, menu_items, veg_items, non_veg_items)
+    _ensure_section_coverage(selected, menu_items, available)
+
     _append_unique(selected, available, limit=8)
     return selected
 
@@ -189,6 +234,57 @@ def _auto_generate_options(
             )
         )
     return options
+
+
+def _lead_is_mixed_diet(lead) -> bool:
+    """True when the lead's guest mix spans BOTH veg and non-veg (a wedding-scale
+    mixed event). Reads extracted.dietary_restrictions first, then falls back to
+    scanning raw_inquiry + notes for an explicit vegetarian mention alongside a
+    non-veg mention. Deterministic; the "veg" inside "non-veg" is stripped before the
+    veg scan so a non-veg-only lead is not mis-read as mixed."""
+    tags = {str(tag).lower() for tag in (lead.extracted.dietary_restrictions or [])}
+    has_veg = bool(tags & {"veg", "vegetarian", "vegan", "jain"})
+    has_non_veg = bool(tags & {"non-veg", "nonveg", "non-vegetarian", "halal"})
+    if has_veg and has_non_veg:
+        return True
+    blob = f"{lead.raw_inquiry} {getattr(lead.extracted, 'notes', '') or ''}".lower()
+    non_veg_text = bool(re.search(r"non[\s-]?veg", blob))
+    veg_scan = re.sub(r"non[\s-]?veg\w*", " ", blob)
+    veg_text = bool(re.search(r"\bveg", veg_scan))
+    return non_veg_text and veg_text
+
+
+def _assert_section_balance(
+    options: list[CateringProposalOption], menu_items: dict[str, MenuItem],
+    *, lead_is_mixed: bool,
+) -> None:
+    """Fail-closed menu-quality guard (turn-arbitration 2026-07-26). A mixed veg/non-veg
+    event must not receive a degenerate proposal — single-diet, or spanning too few
+    sections, or missing a main course — WHEN the menu itself offers the variety. The
+    check is menu-relative so a genuinely small menu is not rejected. Raises
+    SectionBalanceError (→ fail_generation, no send) rather than deliver an incoherent
+    menu. No-op when the lead is not a mixed-diet event."""
+    if not lead_is_mixed:
+        return
+    menu_has_veg = any(not _is_non_veg(item) for item in menu_items.values())
+    menu_has_non_veg = any(_is_non_veg(item) for item in menu_items.values())
+    menu_categories = {item.category for item in menu_items.values()}
+    required_sections = min(3, len(menu_categories))
+    for option in options:
+        items = [menu_items[name] for name in option.item_names if name in menu_items]
+        opt_has_veg = any(not _is_non_veg(item) for item in items)
+        opt_has_non_veg = any(_is_non_veg(item) for item in items)
+        if menu_has_veg and menu_has_non_veg and not (opt_has_veg and opt_has_non_veg):
+            raise SectionBalanceError(
+                f"option {option.option_id} is single-diet "
+                f"(veg={opt_has_veg} non_veg={opt_has_non_veg}) for a mixed event")
+        opt_categories = {item.category for item in items}
+        if len(opt_categories) < required_sections:
+            raise SectionBalanceError(
+                f"option {option.option_id} spans {sorted(opt_categories)}; a mixed "
+                f"event needs >= {required_sections} sections")
+        if "main" in menu_categories and "main" not in opt_categories:
+            raise SectionBalanceError(f"option {option.option_id} has no main course")
 
 
 def _load_lead(lead_id: str):
@@ -521,7 +617,12 @@ def main() -> int:
         allowed = _allowed_option_count(args.request_text)
         if len(options) != allowed:
             raise ValueError(f"{len(options)} options supplied; expected exactly {allowed}")
+        _assert_section_balance(options, menu_items, lead_is_mixed=_lead_is_mixed_diet(lead))
         body = _render_body(options, menu_items)
+    except SectionBalanceError as e:
+        _fail_generation(args.lead_id, "insufficient_section_balance", str(e))
+        sys.stderr.write(f"insufficient_section_balance: {e}\n")
+        return EXIT_INVALID_INPUT
     except KeyError as e:
         _fail_generation(args.lead_id, "unknown_menu_item", str(e))
         sys.stderr.write(f"unknown menu item: {e}\n")

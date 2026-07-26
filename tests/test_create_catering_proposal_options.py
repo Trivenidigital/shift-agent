@@ -109,13 +109,14 @@ def _seed_menu(env_dir: Path, items=None) -> None:
     (env_dir / "state" / "catering-menu.json").write_text(json.dumps(menu), encoding="utf-8")
 
 
-def _seed_lead(env_dir: Path, lead_id: str = "L0014") -> None:
+def _seed_lead(env_dir: Path, lead_id: str = "L0014", dietary=None,
+               raw_inquiry: str = "Need catering ideas") -> None:
     lead = {
         "lead_id": lead_id,
         "status": "AWAITING_OWNER_APPROVAL",
         "customer_phone": "+19045550199",
         "customer_name": "Test Customer",
-        "raw_inquiry": "Need catering ideas",
+        "raw_inquiry": raw_inquiry,
         "original_message_id": "msg_orig",
         "created_at": "2026-04-30T10:00:00-04:00",
         "updated_at": "2026-04-30T10:00:00-04:00",
@@ -125,7 +126,7 @@ def _seed_lead(env_dir: Path, lead_id: str = "L0014") -> None:
             "event_time": None,
             "menu_preferences": [],
             "off_menu_items": [],
-            "dietary_restrictions": [],
+            "dietary_restrictions": dietary or [],
             "delivery_or_pickup": "delivery",
             "budget_hint_usd": None,
             "notes": "",
@@ -625,6 +626,114 @@ else:
     )
     parsed = json.loads(result.stdout.splitlines()[-1])
     assert parsed["raised"] is True
+
+
+# ── Turn-arbitration 2026-07-26: menu-quality section balance ────────────────
+
+# A wedding-scale menu: appetizers (incl. the idli/dosa trap items), mains, sides
+# (rice + bread), desserts, across BOTH veg and non-veg.
+WEDDING_MENU = [
+    {"name": "Idli", "price_usd": 2.0, "category": "appetizer",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Masala Dosa", "price_usd": 4.0, "category": "appetizer",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Vegetable Samosa", "price_usd": 3.0, "category": "appetizer",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Chicken 65", "price_usd": 9.0, "category": "appetizer",
+     "dietary_tags": ["non-veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Paneer Butter Masala", "price_usd": 11.0, "category": "main",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Vegetable Biryani", "price_usd": 10.0, "category": "main",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Chicken Biryani", "price_usd": 15.0, "category": "main",
+     "dietary_tags": ["non-veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Goat Curry", "price_usd": 16.0, "category": "main",
+     "dietary_tags": ["non-veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Garlic Naan", "price_usd": 3.0, "category": "side",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Jeera Rice", "price_usd": 4.0, "category": "side",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Gulab Jamun", "price_usd": 3.0, "category": "dessert",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Gajar Halwa", "price_usd": 4.0, "category": "dessert",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+]
+
+_NON_VEG_NAMES = {"Chicken 65", "Chicken Biryani", "Goat Curry"}
+
+
+def _cat_of(name: str) -> str:
+    return next(item["category"] for item in WEDDING_MENU if item["name"] == name)
+
+
+def test_auto_generate_mixed_wedding_menu_is_section_balanced(bridge_server, env_dir):
+    """A mixed veg/non-veg wedding proposal MUST be balanced — each option spans
+    multiple sections (appetizer + main + dessert, plus a side) AND includes BOTH a
+    vegetarian and a non-vegetarian item — NOT idli/dosa-dominated."""
+    port, stub = bridge_server
+    _seed_lead(env_dir, dietary=["veg", "non-veg"],
+               raw_inquiry="Wedding for 180 guests, 90 non-vegetarian and 90 vegetarian")
+    _seed_menu(env_dir, WEDDING_MENU)
+
+    result, parsed = _run_script(
+        env_dir, port,
+        request_text="Please send two sample menus for a mixed veg and non-veg wedding.",
+        auto_generate=True,
+    )
+    assert parsed["rc"] == 0, result.stderr
+    sent = [s for s in _read_store(env_dir)["sets"] if s["status"] == "SENT"]
+    assert len(sent) == 1 and len(sent[0]["options"]) == 2
+    for option in sent[0]["options"]:
+        names = option["item_names"]
+        cats = {_cat_of(n) for n in names}
+        has_non_veg = any(n in _NON_VEG_NAMES for n in names)
+        has_veg = any(n not in _NON_VEG_NAMES for n in names)
+        assert has_veg and has_non_veg, f"option {option['option_id']} not veg/non-veg balanced: {names}"
+        assert len(cats) >= 3, f"option {option['option_id']} spans too few sections: {sorted(cats)}"
+        assert "main" in cats, f"option {option['option_id']} has no main course: {names}"
+        assert cats != {"appetizer"}, "must not be idli/dosa (appetizer) dominated"
+
+
+def test_mixed_lead_degenerate_options_fail_closed_no_send(bridge_server, env_dir):
+    """A mixed-diet event with owner-supplied SINGLE-DIET options fails closed (no
+    incoherent send) rather than delivering a veg-only menu when the menu has non-veg."""
+    port, stub = bridge_server
+    _seed_lead(env_dir, dietary=["veg", "non-veg"])
+    _seed_menu(env_dir, WEDDING_MENU)
+    veg_only = [
+        {"option_id": "1", "style_key": "balanced_mixed", "tier": "balanced",
+         "item_names": ["Idli", "Masala Dosa"]},           # appetizer-only, veg-only
+        {"option_id": "2", "style_key": "premium_mixed", "tier": "premium",
+         "item_names": ["Gulab Jamun", "Gajar Halwa"]},    # dessert-only, veg-only
+    ]
+
+    result, parsed = _run_script(env_dir, port, options=veg_only)
+
+    assert parsed["rc"] == 2, result.stderr
+    assert stub.requests == [], "no incoherent menu is sent"
+    failed = [row for row in _read_audit(env_dir)
+              if row["type"] == "catering_proposal_generation_failed"]
+    assert failed and failed[0]["reason"] == "insufficient_section_balance"
+    assert parsed["notify_calls"], "owner is alerted on fail-closed"
+
+
+def test_non_mixed_lead_skips_section_balance_guard(bridge_server, env_dir):
+    """The guard is a no-op for a non-mixed lead — a single-diet menu is a legitimate
+    delivery when the event is not a mixed veg/non-veg event."""
+    port, stub = bridge_server
+    _seed_lead(env_dir, dietary=[])  # no mixed-diet signal
+    _seed_menu(env_dir, WEDDING_MENU)
+    veg_only = [
+        {"option_id": "1", "style_key": "balanced_mixed", "tier": "balanced",
+         "item_names": ["Idli", "Gulab Jamun"]},
+        {"option_id": "2", "style_key": "premium_mixed", "tier": "premium",
+         "item_names": ["Masala Dosa", "Gajar Halwa"]},
+    ]
+
+    result, parsed = _run_script(env_dir, port, options=veg_only)
+
+    assert parsed["rc"] == 0, result.stderr
+    assert len(stub.requests) == 1, "single-diet menu delivered for a non-mixed event"
 
 
 # ── PR-D mix-and-match recomposition (deterministic combine of SENT sections) ──
