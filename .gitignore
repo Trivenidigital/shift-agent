@@ -130,3 +130,7 @@ shift-agent-deploy.tgz
 
 # E2E harness run artifacts (regenerated on each run)
 /tests/e2e/artifacts/
+
+# Part-1 catering review evidence workspace — PII-bearing, never commit (aliased ledger lives in docs/reviews/)
+tasks/audits/catering-review-part1-2026-07-26/evidence/
+tasks/audits/catering-review-part1-2026-07-26/investigation-log.md
