@@ -244,22 +244,49 @@ def test_budget_screen_gate_none_is_byte_identical_passthrough(tmp_path, monkeyp
     assert fn("chat@c.us", "hi") == "hi"
 
 
-def test_budget_screen_missing_gate_is_passthrough(tmp_path, monkeypatch):
-    # An older/partial safe_io without the gate → budget absent → content unchanged.
+def test_budget_screen_missing_gate_is_passthrough_when_disabled(tmp_path, monkeypatch):
+    # DISABLED case: an older/partial safe_io without the gate + the budget NOT armed →
+    # byte-identical passthrough (never inject a suppression the operator didn't arm).
+    monkeypatch.delenv("GATEWAY_TURN_SEND_BUDGET_ENABLED", raising=False)
     ns = _exec_budget_screen(tmp_path)
     fn = ns["_shift_turn_send_budget_screen"]
     monkeypatch.setitem(sys.modules, "safe_io", types.ModuleType("safe_io"))
     assert fn("chat@c.us", "hi") == "hi"
 
 
-def test_budget_screen_safe_io_unimportable_is_passthrough(tmp_path, monkeypatch):
-    # A TOTAL safe_io-unavailable deploy fault → pass content through, never raise
-    # (the default-OFF budget cannot coherently be "on"; the content screen's own
-    # §12b fail-open-loudly covers deploy-fault visibility).
+def test_budget_screen_safe_io_unimportable_is_passthrough_when_disabled(tmp_path, monkeypatch):
+    # DISABLED case: a TOTAL safe_io-unavailable deploy fault + the budget NOT armed →
+    # pass content through, never raise (no suppression the operator didn't arm).
+    monkeypatch.delenv("GATEWAY_TURN_SEND_BUDGET_ENABLED", raising=False)
     ns = _exec_budget_screen(tmp_path)
     fn = ns["_shift_turn_send_budget_screen"]
     monkeypatch.setitem(sys.modules, "safe_io", None)  # `import safe_io` raises
     assert fn("chat@c.us", "hi") == "hi"
+
+
+def test_budget_screen_missing_gate_suppresses_when_enabled(tmp_path, monkeypatch):
+    # F1: version skew (safe_io present but WITHOUT turn_send_budget_gate) while the
+    # budget is ARMED → the wrapper reads GATEWAY_TURN_SEND_BUDGET_ENABLED DIRECTLY
+    # from the env (independent of safe_io) and FAILS CLOSED (not-send sentinel), never
+    # relays. A cap that cannot be consulted must suppress, not flood.
+    monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_ENABLED", "1")
+    ns = _exec_budget_screen(tmp_path)
+    fn = ns["_shift_turn_send_budget_screen"]
+    sentinel = ns["_SHIFT_DROP_SEND"]
+    monkeypatch.setitem(sys.modules, "safe_io", types.ModuleType("safe_io"))  # no gate symbol
+    assert fn("chat@c.us", "spiral") is sentinel  # non-vacuous: identity is the sentinel
+
+
+def test_budget_screen_safe_io_unimportable_suppresses_when_enabled(tmp_path, monkeypatch, capsys):
+    # F1: safe_io totally unimportable while the budget is ARMED → the env-read enable
+    # flag drives a FAIL-CLOSED suppression + a distinct stderr disarm line.
+    monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_ENABLED", "1")
+    ns = _exec_budget_screen(tmp_path)
+    fn = ns["_shift_turn_send_budget_screen"]
+    sentinel = ns["_SHIFT_DROP_SEND"]
+    monkeypatch.setitem(sys.modules, "safe_io", None)  # `import safe_io` raises
+    assert fn("chat@c.us", "spiral") is sentinel  # non-vacuous: identity is the sentinel
+    assert "ENABLED but gate unavailable" in capsys.readouterr().err
 
 
 # ── all-or-nothing apply: prior-state coverage (the reviewer's enumeration) ────
@@ -403,6 +430,30 @@ def test_write_fault_on_second_file_rolls_back_first(tmp_path, monkeypatch):
     assert _sha(run) == run_before  # second file never written
 
 
+def test_atomic_write_does_not_follow_symlinked_target(tmp_path):
+    # Escape prevention: the patch must never write THROUGH a symlink to mutate a
+    # shared inode outside the intended tree (the .env-symlink class of failure).
+    # _write_text_atomic stages a fresh temp file and os.replace()s it over the target
+    # PATH — os.replace removes/replaces a symlink AT that path rather than following
+    # it to the shared inode. Proven directly on the writer: a symlinked target's
+    # backing file is left byte-identical and the link is swapped for the regular
+    # patched file.
+    real = tmp_path / "shared_real.py"
+    real.write_text("ORIGINAL SHARED CONTENT\n", encoding="utf-8")
+    link = tmp_path / "whatsapp.py"
+    try:
+        os.symlink(real, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable (needs privilege on Windows)")
+    ph = _load_ph(tmp_path)
+    ph._write_text_atomic(link, "PATCHED\n")
+    # the shared inode behind the symlink is UNTOUCHED (no write-through escape)
+    assert real.read_text(encoding="utf-8") == "ORIGINAL SHARED CONTENT\n"
+    # the symlink at the target path was replaced by the regular patched file
+    assert not link.is_symlink()
+    assert link.read_text(encoding="utf-8") == "PATCHED\n"
+
+
 def test_final_tree_has_four_distinct_markers(tmp_path):
     wa, run = _full_apply(tmp_path)
     wa_src = wa.read_text(encoding="utf-8")
@@ -476,6 +527,11 @@ def test_gate_script_wires_turn_budget_checks():
     assert "turn-send-budget marker drifted from _prepare_inbound_message_text anchor" in gate
     assert "turn-budget-send-drop marker drifted from format_message anchor" in gate
     assert "turn-budget-edit-drop marker drifted from /edit anchor" in gate
+    # F2: the deploy gate asserts the enforcing safe_io symbol exists when the adapter
+    # patch is present (version-skew closure), gated to the sentinel marker.
+    assert 'PLATFORM=/opt/shift-agent' in gate
+    assert 'grep -q "def turn_send_budget_gate" "$PLATFORM/safe_io.py"' in gate
+    assert 'if grep -q "BEGIN shift-agent-turn-budget-sentinel" "$WA"; then' in gate
 
 
 # ── deploy-gate predicates driven against fixture trees (mirror the gate) ──────
@@ -547,3 +603,55 @@ def test_gate_predicate_rejects_unpatched(tmp_path):
     run = _write_run(tmp_path)
     r = _run_turn_predicate(wa, run)
     assert r.returncode == 1 and "FAIL_BOUNDARY" in r.stdout
+
+
+# ── F2 deploy-gate predicate: enforcing-symbol presence (version-skew closure) ─
+
+_SYMBOL_SKEW_PREDICATE = r'''
+WA="$1"; PLATFORM="$2"
+if grep -q "BEGIN shift-agent-turn-budget-sentinel" "$WA"; then
+  [ -f "$PLATFORM/safe_io.py" ] || { echo FAIL_NO_SAFE_IO; exit 1; }
+  grep -q "def turn_send_budget_gate" "$PLATFORM/safe_io.py" || { echo FAIL_NO_GATE_SYMBOL; exit 1; }
+fi
+echo OK
+'''
+
+
+def _run_symbol_skew_predicate(wa: Path, platform_dir: Path):
+    return subprocess.run(
+        ["bash", "-c", _SYMBOL_SKEW_PREDICATE, "_", str(wa), str(platform_dir)],
+        capture_output=True, text=True,
+    )
+
+
+@bash_required
+def test_symbol_gate_passes_when_patched_and_symbol_present(tmp_path):
+    wa, _ = _full_apply(tmp_path)  # carries the sentinel marker
+    platform_dir = tmp_path / "platform"
+    platform_dir.mkdir()
+    (platform_dir / "safe_io.py").write_text("def turn_send_budget_gate(jid, m):\n    ...\n", encoding="utf-8")
+    r = _run_symbol_skew_predicate(wa, platform_dir)
+    assert r.returncode == 0 and "OK" in r.stdout
+
+
+@bash_required
+def test_symbol_gate_rejects_patched_adapter_with_stale_safe_io(tmp_path):
+    # THE F2 SKEW: adapter patched (sentinel present) but the deployed safe_io.py lacks
+    # the enforcing gate symbol → fail closed at deploy, not at runtime.
+    wa, _ = _full_apply(tmp_path)
+    platform_dir = tmp_path / "platform"
+    platform_dir.mkdir()
+    (platform_dir / "safe_io.py").write_text("# stale safe_io without the gate symbol\n", encoding="utf-8")
+    r = _run_symbol_skew_predicate(wa, platform_dir)
+    assert r.returncode == 1 and "FAIL_NO_GATE_SYMBOL" in r.stdout
+
+
+@bash_required
+def test_symbol_gate_does_not_fire_when_budget_patch_absent(tmp_path):
+    # Unpatched adapter (no sentinel marker) → the symbol check is gated OFF, so a
+    # missing safe_io.py does NOT fail the gate (a tree without the budget patch is fine).
+    wa = _write_wa(tmp_path, GOOD_SNIPPET)
+    platform_dir = tmp_path / "platform"
+    platform_dir.mkdir()  # deliberately no safe_io.py
+    r = _run_symbol_skew_predicate(wa, platform_dir)
+    assert r.returncode == 0 and "OK" in r.stdout

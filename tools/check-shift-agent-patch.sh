@@ -207,6 +207,18 @@ grep -q "END shift-agent-turn-budget-send-drop" "$WA" || fail "$WA missing END s
 grep -q "BEGIN shift-agent-turn-budget-edit-drop" "$WA" || fail "$WA missing BEGIN shift-agent-turn-budget-edit-drop marker (edit_message() would never suppress on an exhausted turn)"
 grep -q "END shift-agent-turn-budget-edit-drop" "$WA" || fail "$WA missing END shift-agent-turn-budget-edit-drop marker"
 
+# F2 (version-skew closure): the turn-budget ADAPTER lazily imports safe_io from the
+# flat platform install and calls turn_send_budget_gate. If the adapter is patched but
+# the deployed /opt/shift-agent/safe_io.py lacks that enforcing symbol (whatsapp.py and
+# safe_io.py shipped out of lockstep), an ARMED budget cannot be consulted. Assert the
+# symbol at DEPLOY so the skew is caught here, not at runtime. Gated to the sentinel
+# marker so a tree WITHOUT the budget patch does not require it.
+PLATFORM=/opt/shift-agent
+if grep -q "BEGIN shift-agent-turn-budget-sentinel" "$WA"; then
+    [ -f "$PLATFORM/safe_io.py" ] || fail "$PLATFORM/safe_io.py missing while the turn-budget adapter patch is installed (enforcing gate symbol cannot be present)"
+    grep -q "def turn_send_budget_gate" "$PLATFORM/safe_io.py" || fail "$PLATFORM/safe_io.py missing 'def turn_send_budget_gate' while the turn-budget adapter patch is installed (version skew: armed adapter, no enforcing gate)"
+fi
+
 # Bridge.js template-bypass patch — OBSOLETE in Hermes >= 0.12.0 (the
 # upstream chatter filter the patch extended was removed). The patch
 # script (tools/patch-bridge-filter.py) was deleted in the 2026-05-04

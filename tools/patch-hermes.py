@@ -268,29 +268,58 @@ _SHIFT_DROP_SEND = _ShiftDropSend()
 
 def _shift_turn_send_budget_screen(chat_id, content, reserve_budget=True):
     """Per-INBOUND-TURN send budget (default-OFF, GATEWAY_TURN_SEND_BUDGET_*) — a
-    TRUE volume cap enforced WHERE sends can be suppressed. `safe_io.turn_send_budget_gate`
-    returns None (feature off → passthrough), True (admitted), or False (SUPPRESS →
-    return the `_SHIFT_DROP_SEND` sentinel; the caller relays NOTHING). FAIL-CLOSED
-    when enabled: the gate itself suppresses on a missing/corrupt turn context. This
-    wrapper only passes content through on a TOTAL safe_io-unavailable deploy fault,
-    where the default-OFF budget feature cannot coherently be "on". Consulted via
-    getattr so an older/partial safe_io without the gate is byte-identical (budget
-    absent). `reserve_budget` is False for progressive streamed edit drafts (a
-    streamed reply costs ONE budget unit, reserved only on the finalized edit) and
-    is threaded through to the gate."""
+    TRUE volume cap enforced WHERE sends can be suppressed. When
+    `safe_io.turn_send_budget_gate` is reachable it returns None (feature off →
+    passthrough), True (admitted), or False (SUPPRESS → return the `_SHIFT_DROP_SEND`
+    sentinel; the caller relays NOTHING). FAIL-CLOSED when enabled: the gate itself
+    suppresses on a missing/corrupt turn context. If the gate is UNAVAILABLE (version
+    skew where safe_io lacks the symbol, or safe_io unimportable), the enable flag is
+    read DIRECTLY from the environment — independent of safe_io, the very thing that is
+    unavailable — so a cap that cannot be consulted still fails the right way: ARMED
+    (GATEWAY_TURN_SEND_BUDGET_ENABLED == "1") → SUPPRESS fail-closed (a volume cap that
+    can't be consulted must never flood) plus a distinct stderr disarm line; DISABLED →
+    byte-identical passthrough (never inject a suppression the operator did not arm).
+    `reserve_budget` is False for progressive streamed edit drafts (a streamed reply
+    costs ONE budget unit, reserved only on the finalized edit) and is threaded through
+    to the gate."""
+    import os as _os
+    _enabled = _os.environ.get("GATEWAY_TURN_SEND_BUDGET_ENABLED", "") == "1"
     try:
         import sys as _sys
         if "/opt/shift-agent" not in _sys.path:
             _sys.path.insert(0, "/opt/shift-agent")
         import safe_io as _sio
         _gate = getattr(_sio, "turn_send_budget_gate", None)
-        if _gate is not None and _gate(chat_id, content, reserve_budget=reserve_budget) is False:
+        if _gate is None:
+            # Version skew: safe_io present but the enforcing gate symbol is absent.
+            # ARMED → fail CLOSED (an armed cap that can't be consulted must never
+            # flood); DISABLED → byte-identical passthrough.
+            if _enabled:
+                try:
+                    _sys.stderr.write(
+                        "shift-agent turn-send-budget: ENABLED but gate unavailable "
+                        "— suppressing (fail-closed)\\n"
+                    )
+                except Exception:
+                    pass
+                return _SHIFT_DROP_SEND
+            return content
+        if _gate(chat_id, content, reserve_budget=reserve_budget) is False:
             return _SHIFT_DROP_SEND
     except Exception:
-        # Total safe_io-unavailable deploy fault: pass content through. The default-
-        # OFF budget feature cannot coherently be "on" here, and the front-brain
-        # content screen's own §12b fail-open-loudly (below) emits the disarm line.
-        pass
+        # safe_io unimportable, or the gate raised. Same rule, decided by the env flag
+        # read ABOVE the try (independent of safe_io): ARMED → suppress fail-closed;
+        # DISABLED → byte-identical passthrough.
+        if _enabled:
+            try:
+                import sys as _sys2
+                _sys2.stderr.write(
+                    "shift-agent turn-send-budget: ENABLED but gate unavailable "
+                    "— suppressing (fail-closed)\\n"
+                )
+            except Exception:
+                pass
+            return _SHIFT_DROP_SEND
     return content
 # END shift-agent-turn-budget-sentinel'''
 
@@ -785,6 +814,18 @@ def _transform_run_py(text: str) -> str:
 
 
 # ─── All-or-nothing apply (staging + validate + atomic write + rollback) ────────
+#
+# ROLLBACK / UNINSTALL:
+#   - On-apply rollback: a missing anchor or a mid-apply write fault leaves EVERY
+#     target byte-identical (validate-in-memory-before-write + captured-original
+#     restore in _apply_wa_run below) — no half-patched tree ever ships.
+#   - Deactivation: the installed patch is byte-behaviour-identical to a no-op while
+#     GATEWAY_TURN_SEND_BUDGET_ENABLED is unset/"0" (the default), so rolling back an
+#     ACTIVE budget is a flag flip, not a code change.
+#   - Clean uninstall: Hermes is a git checkout (check-shift-agent-patch.sh pins its
+#     HEAD), so `git -C $HERMES_HOME checkout -- gateway/platforms/whatsapp.py
+#     gateway/run.py` restores the pinned baseline; equivalently every inserted block
+#     is BEGIN/END-marker-fenced and removable mechanically.
 
 def _write_text_atomic(path: Path, text: str) -> None:
     """Write via a temp file + atomic rename on the same filesystem. Isolated so a
