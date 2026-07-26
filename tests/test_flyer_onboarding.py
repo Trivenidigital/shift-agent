@@ -58,7 +58,7 @@ def test_flyer_plan_tiers_are_data_driven_defaults():
 
 def test_customer_store_default_keeps_starter_prompts_auto():
     now = datetime(2026, 5, 18, tzinfo=timezone.utc)
-    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+17329837841", now=now)
+    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+15550100001", now=now)
     store = FlyerCustomerStore(customers=[customer])
 
     assert store.starter_prompt_mode(customer.customer_id) == "auto"
@@ -67,7 +67,7 @@ def test_customer_store_default_keeps_starter_prompts_auto():
 
 def test_customer_store_claim_allows_only_one_auto_starter_prompt():
     now = datetime(2026, 5, 18, tzinfo=timezone.utc)
-    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+17329837841", now=now)
+    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+15550100001", now=now)
     store = FlyerCustomerStore(customers=[customer])
 
     assert store.claim_starter_prompt_send(customer.customer_id) is True
@@ -76,7 +76,7 @@ def test_customer_store_claim_allows_only_one_auto_starter_prompt():
 
 def test_customer_store_preference_top_level_is_rollback_safe():
     now = datetime(2026, 5, 18, tzinfo=timezone.utc)
-    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+17329837841", now=now)
+    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+15550100001", now=now)
     raw = json.loads(FlyerCustomerStore(customers=[customer]).model_dump_json())
     raw["starter_prompt_preferences"] = {"CUST0001": "off"}
     raw["starter_prompt_sent_counts"] = {"CUST0001": 1}
@@ -108,8 +108,8 @@ def test_onboarding_collects_required_business_and_plan_fields(tmp_path):
     flow = [
         ("m2", "Triveni Pineville", "collecting_business_address", "business address"),
         ("m3", "300 S Polk St, Pineville, NC 28134", "collecting_public_phone", "public business phone"),
-        ("m4", "(704) 324-3322", "collecting_business_whatsapp", "business WhatsApp number"),
-        ("m5", "+1 704 324 3322", "collecting_authorized_request_number", "authorized flyer request number"),
+        ("m4", "(555) 010-0003", "collecting_business_whatsapp", "business WhatsApp number"),
+        ("m5", "+1 555 010 0003", "collecting_authorized_request_number", "authorized flyer request number"),
         ("m6", "+1 904 555 0104", "collecting_business_profile", "business type"),
         ("m7", "Indian grocery and food court, English", "choosing_plan", "choose a plan"),
         ("m8", "3", "confirming_summary", "confirm"),
@@ -132,7 +132,7 @@ def test_onboarding_collects_required_business_and_plan_fields(tmp_path):
     customer = store.customers[0]
     assert customer.customer_id == "CUST0001"
     assert customer.business_name == "Triveni Pineville"
-    assert customer.business_whatsapp_number == "+17043243322"
+    assert customer.business_whatsapp_number == "+15550100003"
     assert customer.authorized_request_numbers == ["+19045550104"]
     assert customer.plan_id == "growth"
     assert customer.status == "payment_pending"
@@ -148,8 +148,8 @@ def test_onboarding_malformed_checkout_template_fails_closed(tmp_path):
         ("m1", "hello"),
         ("m2", "Triveni Pineville"),
         ("m3", "300 S Polk St, Pineville, NC 28134"),
-        ("m4", "+1 704 324 3322"),
-        ("m5", "+1 704 324 3322"),
+        ("m4", "+1 555 010 0003"),
+        ("m5", "+1 555 010 0003"),
         ("m6", "+1 904 555 0104"),
         ("m7", "Indian grocery and food court, English"),
         ("m8", "2"),
@@ -182,26 +182,26 @@ def test_change_plan_malformed_checkout_template_fails_closed(tmp_path):
     customer = store.new_customer(
         business_name="Triveni",
         business_address="300 S Polk St",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
-        authorized_request_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
+        authorized_request_number="+15550100003",
         business_category="restaurant",
         preferred_language="en",
         plan_id="starter",
         now=now,
-        onboarded_by_phone="+17043243322",
+        onboarded_by_phone="+15550100003",
     ).model_copy(update={"status": "active"})
     store.customers.append(customer)
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
 
     request = handle_account_command(
-        state_path=state_path, sender_phone="+17043243322", sender_role="customer",
-        chat_id="17043243322@s.whatsapp.net", text="CHANGE PLAN GROWTH", now=now,
+        state_path=state_path, sender_phone="+15550100003", sender_role="customer",
+        chat_id="15550100003@s.whatsapp.net", text="CHANGE PLAN GROWTH", now=now,
     )
     assert request.ok is True
     confirm = handle_account_command(
-        state_path=state_path, sender_phone="+17043243322", sender_role="customer",
-        chat_id="17043243322@s.whatsapp.net", text="CONFIRM UPDATE", now=now,
+        state_path=state_path, sender_phone="+15550100003", sender_role="customer",
+        chat_id="15550100003@s.whatsapp.net", text="CONFIRM UPDATE", now=now,
         payment_provider="stripe",
         payment_checkout_url_template="https://pay.example/{missing_placeholder}",
     )
@@ -220,23 +220,23 @@ def test_upgrade_plan_shows_plan_menu_without_mutating_customer(tmp_path):
     customer = store.new_customer(
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr, St Johns, FL",
-        public_phone="+17329837841",
-        business_whatsapp_number="+17329837841",
-        authorized_request_number="+17329837841",
+        public_phone="+15550100001",
+        business_whatsapp_number="+15550100001",
+        authorized_request_number="+15550100001",
         business_category="restaurant",
         preferred_language="en",
         plan_id="trial",
         now=now,
-        onboarded_by_phone="+17329837841",
+        onboarded_by_phone="+15550100001",
     ).model_copy(update={"status": "trial"})
     store.customers.append(customer)
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
 
     result = handle_account_command(
         state_path=state_path,
-        sender_phone="+17329837841",
+        sender_phone="+15550100001",
         sender_role="customer",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         text="UPGRADE PLAN - show Flyer Studio plans",
         now=now,
     )
@@ -259,14 +259,14 @@ def test_upgrade_plan_for_authorized_requester_does_not_offer_billing_commands(t
     customer = store.new_customer(
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr, St Johns, FL",
-        public_phone="+17329837841",
-        business_whatsapp_number="+17329837841",
+        public_phone="+15550100001",
+        business_whatsapp_number="+15550100001",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
         plan_id="trial",
         now=now,
-        onboarded_by_phone="+17329837841",
+        onboarded_by_phone="+15550100001",
     ).model_copy(update={"status": "trial"})
     store.customers.append(customer)
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
@@ -295,14 +295,14 @@ def test_change_plan_from_authorized_requester_gets_owner_path_not_dead_end(tmp_
     customer = store.new_customer(
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr, St Johns, FL",
-        public_phone="+17329837841",
-        business_whatsapp_number="+17329837841",
+        public_phone="+15550100001",
+        business_whatsapp_number="+15550100001",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
         plan_id="trial",
         now=now,
-        onboarded_by_phone="+17329837841",
+        onboarded_by_phone="+15550100001",
     ).model_copy(update={"status": "trial"})
     store.customers.append(customer)
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
@@ -319,7 +319,7 @@ def test_change_plan_from_authorized_requester_gets_owner_path_not_dead_end(tmp_
     assert result.ok is True
     assert result.handled is True
     assert "Plan changes must be requested from the business WhatsApp number" in result.reply_text
-    assert "+17329837841" in result.reply_text
+    assert "+15550100001" in result.reply_text
     assert "Only the business WhatsApp number" not in result.reply_text
     updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8")).customers[0]
     assert updated.pending_plan_id == ""
@@ -332,15 +332,15 @@ def test_business_whatsapp_chat_can_change_plan_when_sender_phone_missing(tmp_pa
     customer = store.new_customer(
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr, St Johns, FL",
-        public_phone="+17329837841",
-        business_whatsapp_number="+17329837841",
+        public_phone="+15550100001",
+        business_whatsapp_number="+15550100001",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
         plan_id="trial",
         now=now,
-        primary_chat_id="17329837841@s.whatsapp.net",
-        onboarded_by_phone="+17329837841",
+        primary_chat_id="15550100001@s.whatsapp.net",
+        onboarded_by_phone="+15550100001",
     ).model_copy(update={"status": "trial"})
     store.customers.append(customer)
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
@@ -349,7 +349,7 @@ def test_business_whatsapp_chat_can_change_plan_when_sender_phone_missing(tmp_pa
         state_path=state_path,
         sender_phone=None,
         sender_role="customer",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         text="UPGRADE PLAN - show Flyer Studio plans",
         now=now,
     )
@@ -361,7 +361,7 @@ def test_business_whatsapp_chat_can_change_plan_when_sender_phone_missing(tmp_pa
         state_path=state_path,
         sender_phone=None,
         sender_role="customer",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         text="Upgrade plan to Growth",
         now=now,
     )
@@ -377,7 +377,7 @@ def test_business_whatsapp_chat_can_change_plan_when_sender_phone_missing(tmp_pa
         state_path=state_path,
         sender_phone=None,
         sender_role="customer",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         text="CONFIRM UPDATE",
         now=now,
     )
@@ -395,24 +395,24 @@ def test_natural_upgrade_to_growth_uses_guarded_plan_change_flow(tmp_path):
     customer = store.new_customer(
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr, St Johns, FL",
-        public_phone="+17329837841",
-        business_whatsapp_number="+17329837841",
-        authorized_request_number="+17329837841",
+        public_phone="+15550100001",
+        business_whatsapp_number="+15550100001",
+        authorized_request_number="+15550100001",
         business_category="restaurant",
         preferred_language="en",
         plan_id="trial",
         now=now,
-        primary_chat_id="17329837841@s.whatsapp.net",
-        onboarded_by_phone="+17329837841",
+        primary_chat_id="15550100001@s.whatsapp.net",
+        onboarded_by_phone="+15550100001",
     ).model_copy(update={"status": "trial"})
     store.customers.append(customer)
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
 
     result = handle_account_command(
         state_path=state_path,
-        sender_phone="+17329837841",
+        sender_phone="+15550100001",
         sender_role="customer",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         text="Upgrade to Growth",
         now=now,
     )
@@ -427,9 +427,9 @@ def test_natural_upgrade_to_growth_uses_guarded_plan_change_flow(tmp_path):
 
     confirmed = handle_account_command(
         state_path=state_path,
-        sender_phone="+17329837841",
+        sender_phone="+15550100001",
         sender_role="customer",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         text="CONFIRM UPDATE",
         now=now,
     )
@@ -451,24 +451,24 @@ def test_semantic_sixty_flyers_plan_phrase_uses_registry_flow(tmp_path):
     customer = store.new_customer(
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr, St Johns, FL",
-        public_phone="+17329837841",
-        business_whatsapp_number="+17329837841",
-        authorized_request_number="+17329837841",
+        public_phone="+15550100001",
+        business_whatsapp_number="+15550100001",
+        authorized_request_number="+15550100001",
         business_category="restaurant",
         preferred_language="en",
         plan_id="trial",
         now=now,
-        primary_chat_id="17329837841@s.whatsapp.net",
-        onboarded_by_phone="+17329837841",
+        primary_chat_id="15550100001@s.whatsapp.net",
+        onboarded_by_phone="+15550100001",
     ).model_copy(update={"status": "trial"})
     store.customers.append(customer)
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
 
     result = handle_account_command(
         state_path=state_path,
-        sender_phone="+17329837841",
+        sender_phone="+15550100001",
         sender_role="customer",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         text="I want the 60 flyers per month plan",
         now=now,
     )
@@ -487,24 +487,24 @@ def test_semantic_business_whatsapp_update_is_confirmation_gated(tmp_path):
     customer = store.new_customer(
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr, St Johns, FL",
-        public_phone="+17329837841",
-        business_whatsapp_number="+17329837841",
-        authorized_request_number="+17329837841",
+        public_phone="+15550100001",
+        business_whatsapp_number="+15550100001",
+        authorized_request_number="+15550100001",
         business_category="restaurant",
         preferred_language="en",
         plan_id="trial",
         now=now,
-        primary_chat_id="17329837841@s.whatsapp.net",
-        onboarded_by_phone="+17329837841",
+        primary_chat_id="15550100001@s.whatsapp.net",
+        onboarded_by_phone="+15550100001",
     ).model_copy(update={"status": "trial"})
     store.customers.append(customer)
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
 
     result = handle_account_command(
         state_path=state_path,
-        sender_phone="+17329837841",
+        sender_phone="+15550100001",
         sender_role="customer",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         text="Please change the flyer request number to +1 904 555 0199",
         now=now,
     )
@@ -512,7 +512,7 @@ def test_semantic_business_whatsapp_update_is_confirmation_gated(tmp_path):
     assert result.ok is True
     assert "Please reply CONFIRM UPDATE" in result.reply_text
     updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8")).customers[0]
-    assert updated.business_whatsapp_number == "+17329837841"
+    assert updated.business_whatsapp_number == "+15550100001"
     assert updated.pending_account_command == "update_whatsapp"
 
 
@@ -523,15 +523,15 @@ def test_primary_lid_chat_can_change_plan_when_sender_phone_missing(tmp_path):
     customer = store.new_customer(
         business_name="Chloe Hair Studio",
         business_address="11111 Gainsborough Ct, Fairfax, VA",
-        public_phone="+19803826497",
-        business_whatsapp_number="+19803826497",
+        public_phone="+15550100004",
+        business_whatsapp_number="+15550100004",
         authorized_request_number="+19045550104",
         business_category="salon",
         preferred_language="en",
         plan_id="trial",
         now=now,
         primary_chat_id="84593927557152@lid",
-        onboarded_by_phone="+19803826497",
+        onboarded_by_phone="+15550100004",
     ).model_copy(update={"status": "trial"})
     store.customers.append(customer)
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
@@ -771,12 +771,12 @@ def test_paid_back_from_confirming_summary_returns_to_choosing_plan(tmp_path):
 def test_compound_confirm_finishes_trial_onboarding(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)
-    chat_id = "17329837841@s.whatsapp.net"
+    chat_id = "15550100001@s.whatsapp.net"
 
     first = handle_onboarding_message(
         state_path=state_path,
         chat_id=chat_id,
-        sender_phone="+17329837841",
+        sender_phone="+15550100001",
         message_id="trial-start",
         text="Start Free Trial",
         now=now,
@@ -794,7 +794,7 @@ def test_compound_confirm_finishes_trial_onboarding(tmp_path):
         handle_onboarding_message(
             state_path=state_path,
             chat_id=chat_id,
-            sender_phone="+17329837841",
+            sender_phone="+15550100001",
             message_id=message_id,
             text=text,
             now=now,
@@ -803,7 +803,7 @@ def test_compound_confirm_finishes_trial_onboarding(tmp_path):
     result = handle_onboarding_message(
         state_path=state_path,
         chat_id=chat_id,
-        sender_phone="+17329837841",
+        sender_phone="+15550100001",
         message_id="trial-confirm",
         text=(
             "CONFIRM. Create a breakfast menu for tomorrow from 8 AM to 10 AM. "
@@ -828,17 +828,17 @@ def test_alias_compound_confirm_finishes_trial_without_starter(tmp_path, text):
     now = datetime(2026, 5, 18, tzinfo=timezone.utc)
     store = FlyerCustomerStore()
     store.onboarding_sessions.append(FlyerOnboardingSession(
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         status="confirming_summary",
         started_at=now,
         updated_at=now,
         last_message_id="summary",
         business_name="Demo Salon",
         business_address="90 Brybar Dr, St Johns, FL",
-        public_phone="+17329837841",
-        business_whatsapp_number="+17329837841",
-        authorized_request_number="+17329837841",
+        public_phone="+15550100001",
+        business_whatsapp_number="+15550100001",
+        authorized_request_number="+15550100001",
         business_category="salon",
         preferred_language="en",
         plan_id="trial",
@@ -847,8 +847,8 @@ def test_alias_compound_confirm_finishes_trial_without_starter(tmp_path, text):
 
     result = handle_onboarding_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="confirm-alias",
         text=text,
         now=now,
@@ -866,24 +866,24 @@ def test_duplicate_confirm_for_same_sender_recovers_existing_trial_account(tmp_p
     existing_customer = _trial_customer(
         customer_id="CUST0001",
         business_name="Lakshmis Kitchn",
-        phone="+17329837841",
+        phone="+15550100001",
         now=now,
     )
     store = FlyerCustomerStore(
         next_customer_sequence=2,
         customers=[existing_customer],
         onboarding_sessions=[FlyerOnboardingSession(
-            chat_id="17329837841@s.whatsapp.net",
-            sender_phone="+17329837841",
+            chat_id="15550100001@s.whatsapp.net",
+            sender_phone="+15550100001",
             status="confirming_summary",
             started_at=now,
             updated_at=now,
             last_message_id="summary",
             business_name="Lakshmi's Kitchen",
             business_address="90 Brybar FL",
-            public_phone="+17329837841",
-            business_whatsapp_number="+17329837841",
-            authorized_request_number="+17329837841",
+            public_phone="+15550100001",
+            business_whatsapp_number="+15550100001",
+            authorized_request_number="+15550100001",
             business_category="English and Telugu",
             preferred_language="te",
             plan_id="trial",
@@ -893,8 +893,8 @@ def test_duplicate_confirm_for_same_sender_recovers_existing_trial_account(tmp_p
 
     result = handle_onboarding_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="confirm-again",
         text="CONFIRM",
         now=now,
@@ -916,14 +916,14 @@ def test_duplicate_confirm_for_same_business_connects_new_sender_and_clears_sess
     existing_customer = _trial_customer(
         customer_id="CUST0001",
         business_name="Lakshmis Kitchn",
-        phone="+17329837841",
+        phone="+15550100001",
         now=now,
     )
     store = FlyerCustomerStore(
         next_customer_sequence=2,
         customers=[existing_customer],
         onboarding_sessions=[FlyerOnboardingSession(
-            chat_id="201975216009469@lid",
+            chat_id="100000000000001@lid",
             sender_phone="+19045550104",
             status="confirming_summary",
             started_at=now,
@@ -931,9 +931,9 @@ def test_duplicate_confirm_for_same_business_connects_new_sender_and_clears_sess
             last_message_id="summary",
             business_name="Lakshmis Kitchen",
             business_address="90 Brybar Dr",
-            public_phone="+17329837841",
-            business_whatsapp_number="+17329837841",
-            authorized_request_number="+17329837841",
+            public_phone="+15550100001",
+            business_whatsapp_number="+15550100001",
+            authorized_request_number="+15550100001",
             business_category="English and Telugu",
             preferred_language="te",
             plan_id="trial",
@@ -943,7 +943,7 @@ def test_duplicate_confirm_for_same_business_connects_new_sender_and_clears_sess
 
     result = handle_onboarding_message(
         state_path=state_path,
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         sender_phone="+19045550104",
         message_id="confirm-conflict",
         text="CONFIRM",
@@ -966,24 +966,24 @@ def test_registered_trial_customer_with_stale_session_can_start_flyer_and_clears
     existing_customer = _trial_customer(
         customer_id="CUST0001",
         business_name="Lakshmi's Kitchen",
-        phone="+17329837841",
+        phone="+15550100001",
         now=now,
     )
     store = FlyerCustomerStore(
         next_customer_sequence=2,
         customers=[existing_customer],
         onboarding_sessions=[FlyerOnboardingSession(
-            chat_id="17329837841@s.whatsapp.net",
-            sender_phone="+17329837841",
+            chat_id="15550100001@s.whatsapp.net",
+            sender_phone="+15550100001",
             status="confirming_summary",
             started_at=now,
             updated_at=now,
             last_message_id="summary",
             business_name="Lakshmi's Kitchen",
             business_address="90 Brybar FL",
-            public_phone="+17329837841",
-            business_whatsapp_number="+17329837841",
-            authorized_request_number="+17329837841",
+            public_phone="+15550100001",
+            business_whatsapp_number="+15550100001",
+            authorized_request_number="+15550100001",
             business_category="restaurant",
             preferred_language="en",
             plan_id="trial",
@@ -993,8 +993,8 @@ def test_registered_trial_customer_with_stale_session_can_start_flyer_and_clears
 
     result = handle_onboarding_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="flyer-after-stale-session",
         text="Create a breakfast menu flyer for tomorrow from 8 AM to 10 AM",
         now=now,
@@ -1013,31 +1013,31 @@ def test_duplicate_confirm_for_same_sender_recovers_existing_payment_pending_acc
     customer = store.new_customer(
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr, St Johns, FL",
-        public_phone="+17329837841",
-        business_whatsapp_number="+17329837841",
-        authorized_request_number="+17329837841",
+        public_phone="+15550100001",
+        business_whatsapp_number="+15550100001",
+        authorized_request_number="+15550100001",
         business_category="restaurant",
         preferred_language="en",
         plan_id="starter",
         now=now,
         payment_checkout_url="https://pay.example/CUST0001",
-        primary_chat_id="17329837841@s.whatsapp.net",
-        onboarded_by_phone="+17329837841",
+        primary_chat_id="15550100001@s.whatsapp.net",
+        onboarded_by_phone="+15550100001",
     )
     store.customers.append(customer)
     store.next_customer_sequence = 2
     store.onboarding_sessions.append(FlyerOnboardingSession(
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         status="confirming_summary",
         started_at=now,
         updated_at=now,
         last_message_id="summary",
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar FL",
-        public_phone="+17329837841",
-        business_whatsapp_number="+17329837841",
-        authorized_request_number="+17329837841",
+        public_phone="+15550100001",
+        business_whatsapp_number="+15550100001",
+        authorized_request_number="+15550100001",
         business_category="restaurant",
         preferred_language="en",
         plan_id="starter",
@@ -1046,8 +1046,8 @@ def test_duplicate_confirm_for_same_sender_recovers_existing_payment_pending_acc
 
     result = handle_onboarding_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="confirm-again",
         text="CONFIRM",
         now=now,
@@ -1068,7 +1068,7 @@ def test_duplicate_confirm_for_different_customer_stays_blocked(tmp_path):
     existing_customer = _trial_customer(
         customer_id="CUST0001",
         business_name="Other Business",
-        phone="+17329837841",
+        phone="+15550100001",
         now=now,
     )
     store = FlyerCustomerStore(
@@ -1084,7 +1084,7 @@ def test_duplicate_confirm_for_different_customer_stays_blocked(tmp_path):
             business_name="New Business",
             business_address="100 Main St",
             public_phone="+19045550199",
-            business_whatsapp_number="+17329837841",
+            business_whatsapp_number="+15550100001",
             authorized_request_number="+19045550199",
             business_category="Retail",
             preferred_language="en",
@@ -1134,7 +1134,7 @@ def test_campaign_cta_restarts_stale_partial_onboarding_instead_of_parsing_as_ph
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)
     store = FlyerCustomerStore()
     store.onboarding_sessions.append(FlyerOnboardingSession(
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         sender_phone="+19045550104",
         status="collecting_public_phone",
         started_at=now,
@@ -1147,7 +1147,7 @@ def test_campaign_cta_restarts_stale_partial_onboarding_instead_of_parsing_as_ph
 
     result = handle_onboarding_message(
         state_path=state_path,
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         sender_phone="+19045550104",
         message_id="trial-button-retry",
         text="Help me create a beautiful flyer for my business",
@@ -1169,7 +1169,7 @@ def test_act_now_campaign_cta_restarts_stale_partial_onboarding_without_trial_pl
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)
     store = FlyerCustomerStore()
     store.onboarding_sessions.append(FlyerOnboardingSession(
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         sender_phone="+19045550104",
         status="collecting_public_phone",
         started_at=now,
@@ -1183,7 +1183,7 @@ def test_act_now_campaign_cta_restarts_stale_partial_onboarding_without_trial_pl
 
     result = handle_onboarding_message(
         state_path=state_path,
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         sender_phone="+19045550104",
         message_id="act-now-retry",
         text="I want to set up Flyer Studio for my business",
@@ -1205,7 +1205,7 @@ def test_invalid_onboarding_field_reply_returns_prompt_instead_of_crashing(tmp_p
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)
     store = FlyerCustomerStore()
     store.onboarding_sessions.append(FlyerOnboardingSession(
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         sender_phone="+19045550104",
         status="collecting_business_name",
         started_at=now,
@@ -1217,7 +1217,7 @@ def test_invalid_onboarding_field_reply_returns_prompt_instead_of_crashing(tmp_p
 
     result = handle_onboarding_message(
         state_path=state_path,
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         sender_phone="+19045550104",
         message_id="bad-name",
         text="1",
@@ -1282,7 +1282,7 @@ def test_phone_resolved_after_lid_only_start_finds_chat_bound_session(tmp_path):
     result = handle_onboarding_message(
         state_path=state_path,
         chat_id="158024815611933@lid",
-        sender_phone="+19803826497",
+        sender_phone="+15550100004",
         message_id="address",
         text="123 Main St, Charlotte, NC",
         now=now,
@@ -1306,9 +1306,9 @@ def test_onboarding_accepts_ok_proceed_as_confirmation(tmp_path):
         last_message_id="summary",
         business_name="Hisaku",
         business_address="101 Kavitha Palace, KPHB, Hyderabad, Telangana 500085",
-        public_phone="+918985741562",
-        business_whatsapp_number="+918985741562",
-        authorized_request_number="+918985741562",
+        public_phone="+15550100006",
+        business_whatsapp_number="+15550100006",
+        authorized_request_number="+15550100006",
         business_category="Digital Marketing",
         preferred_language="en",
         plan_id="trial",
@@ -1342,9 +1342,9 @@ def test_trial_completion_suggests_business_category_starter_brief(tmp_path):
         last_message_id="summary",
         business_name="Hisaku",
         business_address="101 Kavitha Palace, KPHB, Hyderabad, Telangana 500085",
-        public_phone="+918985741562",
-        business_whatsapp_number="+918985741562",
-        authorized_request_number="+918985741562",
+        public_phone="+15550100006",
+        business_whatsapp_number="+15550100006",
+        authorized_request_number="+15550100006",
         business_category="Digital Marketing",
         preferred_language="en",
         plan_id="trial",
@@ -1382,9 +1382,9 @@ def test_guided_trial_completion_does_not_append_full_starter_brief(tmp_path):
         last_message_id="summary",
         business_name="Hisaku",
         business_address="101 Kavitha Palace, KPHB, Hyderabad, Telangana 500085",
-        public_phone="+918985741562",
-        business_whatsapp_number="+918985741562",
-        authorized_request_number="+918985741562",
+        public_phone="+15550100006",
+        business_whatsapp_number="+15550100006",
+        authorized_request_number="+15550100006",
         business_category="Digital Marketing",
         preferred_language="en",
         plan_id="trial",
@@ -1422,9 +1422,9 @@ def test_sample_trial_completion_opens_compact_idea_picker(tmp_path):
         last_message_id="summary",
         business_name="Lakshmis Kitchn",
         business_address="90 Brybar Dr, St Johns, FL",
-        public_phone="+17329837841",
-        business_whatsapp_number="+17329837841",
-        authorized_request_number="+17329837841",
+        public_phone="+15550100001",
+        business_whatsapp_number="+15550100001",
+        authorized_request_number="+15550100001",
         business_category="restaurant",
         preferred_language="en",
         plan_id="trial",
@@ -1458,7 +1458,7 @@ def test_text_mode_ready_includes_category_starter_brief(tmp_path):
     customer = _trial_customer(
         customer_id="CUST0001",
         business_name="Spark Growth",
-        phone="+17329837841",
+        phone="+15550100001",
         now=now,
     ).model_copy(update={"business_category": "digital marketing agency"})
     store = FlyerCustomerStore(
@@ -1470,8 +1470,8 @@ def test_text_mode_ready_includes_category_starter_brief(tmp_path):
 
     start = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="start",
         text="Create flyer",
         start_source="new_flyer",
@@ -1480,8 +1480,8 @@ def test_text_mode_ready_includes_category_starter_brief(tmp_path):
     assert start.action == "choose_language"
     language = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="language",
         text="English",
         now=now,
@@ -1489,8 +1489,8 @@ def test_text_mode_ready_includes_category_starter_brief(tmp_path):
     assert language.action == "choose_mode"
     result = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="mode",
         text="3",
         now=now,
@@ -1506,8 +1506,8 @@ def test_text_mode_ready_includes_category_starter_brief(tmp_path):
 
     preview = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="brief",
         text="Create Flyer for breakfast specials from 8-11 AM Monday to Thursday",
         now=now,
@@ -1520,8 +1520,8 @@ def test_text_mode_ready_includes_category_starter_brief(tmp_path):
 
     approved = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="approve",
         text="[shift-agent-sender v=1 role=customer]\nApprove.",
         now=now,
@@ -1538,7 +1538,7 @@ def test_sample_idea_flow_previews_before_project_creation(tmp_path):
     customer = _trial_customer(
         customer_id="CUST0001",
         business_name="Lakshmis Kitchn",
-        phone="+17329837841",
+        phone="+15550100001",
         now=now,
     ).model_copy(update={"business_category": "restaurant"})
     store = FlyerCustomerStore(next_customer_sequence=2, customers=[customer])
@@ -1546,8 +1546,8 @@ def test_sample_idea_flow_previews_before_project_creation(tmp_path):
 
     start = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="sample-start",
         text="Create flyer",
         start_source="sample_idea",
@@ -1558,8 +1558,8 @@ def test_sample_idea_flow_previews_before_project_creation(tmp_path):
 
     preview = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="sample-choice",
         text="option 1",
         now=now,
@@ -1574,8 +1574,8 @@ def test_sample_idea_flow_previews_before_project_creation(tmp_path):
 
     approved = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="sample-approve",
         text="looks good",
         now=now,
@@ -1592,10 +1592,10 @@ def test_lid_only_active_customer_sample_idea_uses_saved_profile(tmp_path):
     customer = _trial_customer(
         customer_id="CUST0001",
         business_name="Lakshmis Kitchn",
-        phone="+17329837841",
+        phone="+15550100001",
         now=now,
     ).model_copy(update={
-        "primary_chat_id": "201975216009469@lid",
+        "primary_chat_id": "100000000000001@lid",
         "preferred_language": "hi",
         "business_category": "restaurant",
     })
@@ -1604,7 +1604,7 @@ def test_lid_only_active_customer_sample_idea_uses_saved_profile(tmp_path):
 
     start = handle_intake_message(
         state_path=state_path,
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         sender_phone=None,
         message_id="lid-sample-start",
         text="Create flyer",
@@ -1617,7 +1617,7 @@ def test_lid_only_active_customer_sample_idea_uses_saved_profile(tmp_path):
     assert "1." in start.reply_text
     updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     assert updated.intake_sessions[0].sender_phone is None
-    assert updated.intake_sessions[0].chat_id == "201975216009469@lid"
+    assert updated.intake_sessions[0].chat_id == "100000000000001@lid"
     assert updated.intake_sessions[0].preferred_language == "hi"
 
 
@@ -1627,15 +1627,15 @@ def test_brief_preview_hides_internal_parser_scaffolding(tmp_path):
     customer = _trial_customer(
         customer_id="CUST0001",
         business_name="Lakshmis Kitchn",
-        phone="+17329837841",
+        phone="+15550100001",
         now=now,
     )
     store = FlyerCustomerStore(next_customer_sequence=2, customers=[customer])
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
     handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="start",
         text="Create flyer",
         start_source="sample_idea",
@@ -1644,8 +1644,8 @@ def test_brief_preview_hides_internal_parser_scaffolding(tmp_path):
 
     preview = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="choice",
         text="1",
         now=now,
@@ -1664,13 +1664,13 @@ def test_old_mode_prompt_numbering_is_preserved_for_in_flight_sessions(tmp_path)
     customer = _trial_customer(
         customer_id="CUST0001",
         business_name="Lakshmis Kitchn",
-        phone="+17329837841",
+        phone="+15550100001",
         now=now,
     )
     store = FlyerCustomerStore(next_customer_sequence=2, customers=[customer])
     store.intake_sessions.append(FlyerIntakeSession(
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         status="choosing_mode",
         source="new_flyer",
         started_at=now,
@@ -1683,8 +1683,8 @@ def test_old_mode_prompt_numbering_is_preserved_for_in_flight_sessions(tmp_path)
 
     guided = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="old-reply",
         text="1",
         now=now,
@@ -1701,7 +1701,7 @@ def test_text_mode_ready_respects_starter_prompt_opt_out(tmp_path):
     customer = _trial_customer(
         customer_id="CUST0001",
         business_name="Demo Salon",
-        phone="+17329837841",
+        phone="+15550100001",
         now=now,
     ).model_copy(update={"business_category": "salon"})
     store = FlyerCustomerStore(next_customer_sequence=2, customers=[customer])
@@ -1710,8 +1710,8 @@ def test_text_mode_ready_respects_starter_prompt_opt_out(tmp_path):
 
     start = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="start",
         text="Create flyer",
         start_source="new_flyer",
@@ -1720,8 +1720,8 @@ def test_text_mode_ready_respects_starter_prompt_opt_out(tmp_path):
     assert start.action == "choose_language"
     language = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="lang",
         text="English",
         now=now,
@@ -1729,8 +1729,8 @@ def test_text_mode_ready_respects_starter_prompt_opt_out(tmp_path):
     assert language.action == "choose_mode"
     result = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="mode",
         text="3",
         now=now,
@@ -1756,7 +1756,7 @@ def test_business_whatsapp_can_be_skipped_with_no_business_account(tmp_path):
         last_message_id="public-phone",
         business_name="Hisaku",
         business_address="101 Kavitha Palace, KPHB, Hyderabad, Telangana 500085",
-        public_phone="+918985741562",
+        public_phone="+15550100006",
         plan_id="trial",
     ))
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
@@ -1772,7 +1772,7 @@ def test_business_whatsapp_can_be_skipped_with_no_business_account(tmp_path):
 
     updated = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     assert result.next_status == "collecting_authorized_request_number"
-    assert updated.onboarding_sessions[0].business_whatsapp_number == "+918985741562"
+    assert updated.onboarding_sessions[0].business_whatsapp_number == "+15550100006"
 
 
 def test_profile_language_english_overrides_initial_mixed_choice(tmp_path):
@@ -1788,9 +1788,9 @@ def test_profile_language_english_overrides_initial_mixed_choice(tmp_path):
         last_message_id="authorized",
         business_name="Hisaku",
         business_address="101 Kavitha Palace, KPHB, Hyderabad, Telangana 500085",
-        public_phone="+918985741562",
-        business_whatsapp_number="+918985741562",
-        authorized_request_number="+918985741562",
+        public_phone="+15550100006",
+        business_whatsapp_number="+15550100006",
+        authorized_request_number="+15550100006",
         preferred_language="mixed",
         plan_id="trial",
     ))
@@ -1818,16 +1818,16 @@ def test_language_only_business_profile_reply_is_rejected(tmp_path):
     store = FlyerCustomerStore()
     store.onboarding_sessions.append(FlyerOnboardingSession(
         chat_id="74290284261595@lid",
-        sender_phone="+19803826497",
+        sender_phone="+15550100004",
         status="collecting_business_profile",
         started_at=now,
         updated_at=now,
         last_message_id="authorized",
         business_name="Chloe Hair Studio",
         business_address="11111 Gainsborough Ct, Fairfax, VA 22030",
-        public_phone="+19803826497",
-        business_whatsapp_number="+19803826497",
-        authorized_request_number="+19803826497",
+        public_phone="+15550100004",
+        business_whatsapp_number="+15550100004",
+        authorized_request_number="+15550100004",
         preferred_language="en",
         plan_id="trial",
     ))
@@ -1836,7 +1836,7 @@ def test_language_only_business_profile_reply_is_rejected(tmp_path):
     result = handle_onboarding_message(
         state_path=state_path,
         chat_id="74290284261595@lid",
-        sender_phone="+19803826497",
+        sender_phone="+15550100004",
         message_id="profile-language-only",
         text="English",
         now=now,
@@ -1903,8 +1903,8 @@ def test_registered_authorized_number_does_not_restart_onboarding(tmp_path):
     store.customers.append(store.new_customer(
         business_name="Triveni",
         business_address="300 S Polk St",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
@@ -1947,8 +1947,8 @@ def test_brand_assets_uploaded_during_onboarding_transfer_to_customer(tmp_path, 
     for message_id, text in [
         ("m2", "Triveni Pineville"),
         ("m3", "300 S Polk St, Pineville, NC 28134"),
-        ("m4", "(704) 324-3322"),
-        ("m5", "+1 704 324 3322"),
+        ("m4", "(555) 010-0003"),
+        ("m5", "+1 555 010 0003"),
         ("m6", "+1 904 555 0104"),
         ("m7", "Indian grocery and food court, English"),
         ("m8", "2"),
@@ -1979,8 +1979,8 @@ def test_registered_customer_can_replace_logo_any_time(tmp_path, monkeypatch):
     store.customers.append(store.new_customer(
         business_name="Triveni",
         business_address="300 S Polk St",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
@@ -1996,8 +1996,8 @@ def test_registered_customer_can_replace_logo_any_time(tmp_path, monkeypatch):
 
     store_brand_asset(
         state_path=state_path,
-        chat_id="17043243322@s.whatsapp.net",
-        sender_phone="+17043243322",
+        chat_id="15550100003@s.whatsapp.net",
+        sender_phone="+15550100003",
         message_id="logo1",
         media_path=first_logo,
         text="logo",
@@ -2005,8 +2005,8 @@ def test_registered_customer_can_replace_logo_any_time(tmp_path, monkeypatch):
     )
     store_brand_asset(
         state_path=state_path,
-        chat_id="17043243322@s.whatsapp.net",
-        sender_phone="+17043243322",
+        chat_id="15550100003@s.whatsapp.net",
+        sender_phone="+15550100003",
         message_id="logo2",
         media_path=second_logo,
         text="replace logo",
@@ -2028,8 +2028,8 @@ def test_non_admin_cannot_replace_saved_brand_asset(tmp_path, monkeypatch):
     store.customers.append(store.new_customer(
         business_name="Triveni",
         business_address="300 S Polk St",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
@@ -2063,8 +2063,8 @@ def test_menu_or_price_image_upload_is_classified_as_template(tmp_path, monkeypa
     store.customers.append(store.new_customer(
         business_name="Triveni",
         business_address="300 S Polk St",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
@@ -2077,8 +2077,8 @@ def test_menu_or_price_image_upload_is_classified_as_template(tmp_path, monkeypa
 
     store_brand_asset(
         state_path=state_path,
-        chat_id="17043243322@s.whatsapp.net",
-        sender_phone="+17043243322",
+        chat_id="15550100003@s.whatsapp.net",
+        sender_phone="+15550100003",
         message_id="template1",
         media_path=media_path,
         text="change non-veg combo price from $14.99 to $16.99",
@@ -2205,8 +2205,8 @@ def test_account_activation_is_idempotent_and_reference_unique(tmp_path):
     c1 = store.new_customer(
         business_name="A",
         business_address="1 Main",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
@@ -2271,8 +2271,8 @@ def test_account_activation_replay_mismatch_on_same_customer_is_rejected(tmp_pat
     customer = store.new_customer(
         business_name="A",
         business_address="1 Main",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
@@ -2318,8 +2318,8 @@ def test_account_activation_replay_requires_active_or_trial_customer(tmp_path):
     customer = store.new_customer(
         business_name="A",
         business_address="1 Main",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
@@ -2354,8 +2354,8 @@ def test_account_activation_normalizes_provider_and_payment_reference(tmp_path):
     customer = store.new_customer(
         business_name="A",
         business_address="1 Main",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
@@ -2389,8 +2389,8 @@ def test_account_activation_duplicate_reference_compares_normalized_values(tmp_p
     c1 = store.new_customer(
         business_name="A",
         business_address="1 Main",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
@@ -2444,14 +2444,14 @@ def test_non_admin_cannot_mutate_account_but_can_status(tmp_path):
     customer = store.new_customer(
         business_name="Triveni",
         business_address="300 S Polk St",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
         plan_id="starter",
         now=now,
-        onboarded_by_phone="+17043243322",
+        onboarded_by_phone="+15550100003",
     ).model_copy(update={"status": "active"})
     store.customers.append(customer)
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
@@ -2485,23 +2485,23 @@ def test_admin_can_add_second_authorized_number_but_third_is_rejected(tmp_path):
     customer = store.new_customer(
         business_name="Triveni",
         business_address="300 S Polk St",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
         plan_id="trial",
         now=now,
-        onboarded_by_phone="+17043243322",
+        onboarded_by_phone="+15550100003",
     ).model_copy(update={"status": "trial"})
     store.customers.append(customer)
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
 
     second = handle_account_command(
         state_path=state_path,
-        sender_phone="+17043243322",
+        sender_phone="+15550100003",
         sender_role="customer",
-        chat_id="17043243322@s.whatsapp.net",
+        chat_id="15550100003@s.whatsapp.net",
         text="ADD AUTHORIZED NUMBER +1 904 555 0105",
         now=now,
     )
@@ -2516,9 +2516,9 @@ def test_admin_can_add_second_authorized_number_but_third_is_rejected(tmp_path):
 
     third = handle_account_command(
         state_path=state_path,
-        sender_phone="+17043243322",
+        sender_phone="+15550100003",
         sender_role="customer",
-        chat_id="17043243322@s.whatsapp.net",
+        chat_id="15550100003@s.whatsapp.net",
         text="ADD AUTHORIZED NUMBER +1 904 555 0106",
         now=now,
     )
@@ -2536,16 +2536,16 @@ def test_admin_can_add_second_authorized_number_but_third_is_rejected(tmp_path):
 def test_customer_can_turn_sample_prompts_off_and_on(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 18, tzinfo=timezone.utc)
-    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+17329837841", now=now)
+    customer = _trial_customer(customer_id="CUST0001", business_name="Demo Salon", phone="+15550100001", now=now)
     store = FlyerCustomerStore(customers=[customer])
     assert store.claim_starter_prompt_send(customer.customer_id) is True
     state_path.write_text(store.model_dump_json(), encoding="utf-8")
 
     off = handle_account_command(
         state_path=state_path,
-        sender_phone="+17329837841",
+        sender_phone="+15550100001",
         sender_role="customer",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         text="don't show sample prompts",
         now=now,
     )
@@ -2557,9 +2557,9 @@ def test_customer_can_turn_sample_prompts_off_and_on(tmp_path):
 
     on = handle_account_command(
         state_path=state_path,
-        sender_phone="+17329837841",
+        sender_phone="+15550100001",
         sender_role="customer",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         text="show sample prompts again",
         now=now,
     )
@@ -2571,7 +2571,7 @@ def test_customer_can_turn_sample_prompts_off_and_on(tmp_path):
 
 
 def test_account_phone_normalizer_keeps_actor_phone_for_audit_and_pending_changes():
-    assert _phone_or_none("+1 732 983 7841") == "+17329837841"
+    assert _phone_or_none("+1 555 010 0001") == "+15550100001"
     assert _phone_or_none("not a phone") is None
 
 
@@ -2581,16 +2581,16 @@ def test_lid_only_customer_can_turn_sample_prompts_off(tmp_path):
     customer = _trial_customer(
         customer_id="CUST0001",
         business_name="Demo Salon",
-        phone="+17329837841",
+        phone="+15550100001",
         now=now,
-    ).model_copy(update={"primary_chat_id": "201975216009469@lid"})
+    ).model_copy(update={"primary_chat_id": "100000000000001@lid"})
     state_path.write_text(FlyerCustomerStore(customers=[customer]).model_dump_json(), encoding="utf-8")
 
     result = handle_account_command(
         state_path=state_path,
         sender_phone=None,
         sender_role="customer",
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         text="[shift-agent-sender v=1 role=customer]\ndon't show sample prompts",
         now=now,
     )
@@ -2603,14 +2603,14 @@ def test_lid_only_customer_can_turn_sample_prompts_off(tmp_path):
 def test_account_admin_can_update_business_name_from_whatsapp(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 22, tzinfo=timezone.utc)
-    customer = _trial_customer(customer_id="CUST0001", business_name="Lakshmis Kitchn", phone="+17329837841", now=now)
+    customer = _trial_customer(customer_id="CUST0001", business_name="Lakshmis Kitchn", phone="+15550100001", now=now)
     state_path.write_text(FlyerCustomerStore(customers=[customer]).model_dump_json(), encoding="utf-8")
 
     result = handle_account_command(
         state_path=state_path,
-        sender_phone="+17329837841",
+        sender_phone="+15550100001",
         sender_role="customer",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         text="update business name to Lakshmi's Kitchen",
         now=now,
     )
@@ -2629,8 +2629,8 @@ def test_quota_counts_latest_reservation_state_once(tmp_path):
     customer = store.new_customer(
         business_name="Triveni",
         business_address="300 S Polk St",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
@@ -2677,8 +2677,8 @@ def test_quota_is_shared_across_two_authorized_requesters(tmp_path):
     customer = store.new_customer(
         business_name="Triveni",
         business_address="300 S Polk St",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
@@ -2733,23 +2733,23 @@ def test_intake_language_and_text_mode_for_existing_customer(tmp_path):
     customer = store.new_customer(
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr",
-        public_phone="+17329837841",
-        business_whatsapp_number="+17329837841",
-        authorized_request_number="+17329837841",
+        public_phone="+15550100001",
+        business_whatsapp_number="+15550100001",
+        authorized_request_number="+15550100001",
         business_category="restaurant",
         preferred_language="en",
         plan_id="trial",
         now=now,
-        primary_chat_id="17329837841@s.whatsapp.net",
-        onboarded_by_phone="+17329837841",
+        primary_chat_id="15550100001@s.whatsapp.net",
+        onboarded_by_phone="+15550100001",
     ).model_copy(update={"status": "trial"})
     store.customers.append(customer)
     state_path.write_text(store.model_dump_json(), encoding="utf-8")
 
     start = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="i1",
         text="Start Free Trial",
         start_source="start_trial",
@@ -2759,8 +2759,8 @@ def test_intake_language_and_text_mode_for_existing_customer(tmp_path):
     assert "Malayalam" in start.reply_text
     lang = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="i2",
         text="Tamil",
         now=now,
@@ -2769,8 +2769,8 @@ def test_intake_language_and_text_mode_for_existing_customer(tmp_path):
     assert "Tamil" in lang.reply_text
     ready = handle_intake_message(
         state_path=state_path,
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         message_id="i3",
         text="3",
         now=now,
@@ -2789,9 +2789,9 @@ def test_guided_intake_synthesizes_flyer_request(tmp_path):
     store.customers.append(store.new_customer(
         business_name="Triveni",
         business_address="Pineville",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
-        authorized_request_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
+        authorized_request_number="+15550100003",
         business_category="grocery",
         preferred_language="en",
         plan_id="trial",
@@ -2799,20 +2799,20 @@ def test_guided_intake_synthesizes_flyer_request(tmp_path):
     ).model_copy(update={"status": "trial"}))
     state_path.write_text(store.model_dump_json(), encoding="utf-8")
 
-    chat_id = "17043243322@s.whatsapp.net"
-    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g1", text="Create flyer", start_source="new_flyer", now=now)
-    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g2", text="English", now=now)
-    first_question = handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g3", text="2", now=now)
+    chat_id = "15550100003@s.whatsapp.net"
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100003", message_id="g1", text="Create flyer", start_source="new_flyer", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100003", message_id="g2", text="English", now=now)
+    first_question = handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100003", message_id="g3", text="2", now=now)
     assert first_question.action == "guided_question"
     assert "what are you promoting" in first_question.reply_text.lower()
-    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g4", text="Weekend breakfast specials", now=now)
-    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g5", text="Saturday and Sunday 8 AM to 11 AM", now=now)
-    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g6", text="Idli $4.99, Dosa $8.99", now=now)
-    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g7", text="Use saved", now=now)
-    preview = handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g8", text="Use logo, festive style", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100003", message_id="g4", text="Weekend breakfast specials", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100003", message_id="g5", text="Saturday and Sunday 8 AM to 11 AM", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100003", message_id="g6", text="Idli $4.99, Dosa $8.99", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100003", message_id="g7", text="Use saved", now=now)
+    preview = handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100003", message_id="g8", text="Use logo, festive style", now=now)
     assert preview.action == "brief_preview"
     assert "I will create this flyer" in preview.reply_text
-    done = handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17043243322", message_id="g9", text="yes create it", now=now)
+    done = handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100003", message_id="g9", text="yes create it", now=now)
     assert done.action == "create_project"
     assert "Weekend breakfast specials" in done.raw_request
     assert "Idli $4.99" in done.raw_request
@@ -2826,9 +2826,9 @@ def test_guided_intake_preserves_attached_sample_for_project_creation(tmp_path):
     store.customers.append(store.new_customer(
         business_name="Lakshmis Kitchen",
         business_address="90 Brybar Dr St Johns FL",
-        public_phone="+17329837841",
-        business_whatsapp_number="+17329837841",
-        authorized_request_number="+17329837841",
+        public_phone="+15550100001",
+        business_whatsapp_number="+15550100001",
+        authorized_request_number="+15550100001",
         business_category="grocery",
         preferred_language="en",
         plan_id="trial",
@@ -2836,26 +2836,26 @@ def test_guided_intake_preserves_attached_sample_for_project_creation(tmp_path):
     ).model_copy(update={"status": "trial"}))
     state_path.write_text(store.model_dump_json(), encoding="utf-8")
 
-    chat_id = "17329837841@s.whatsapp.net"
+    chat_id = "15550100001@s.whatsapp.net"
     sample_path = "/opt/shift-agent/.hermes/image_cache/img_sample_di lives here.jpg"
-    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17329837841", message_id="m1", text="Create flyer", start_source="new_flyer", now=now)
-    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17329837841", message_id="m2", text="Telugu", now=now)
-    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17329837841", message_id="m3", text="2", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100001", message_id="m1", text="Create flyer", start_source="new_flyer", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100001", message_id="m2", text="Telugu", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100001", message_id="m3", text="2", now=now)
     handle_intake_message(
         state_path=state_path,
         chat_id=chat_id,
-        sender_phone="+17329837841",
+        sender_phone="+15550100001",
         message_id="m4",
         text="Diwali Grocery Sale. Use items in this flyer and create one for Lakshmis Kitchen",
         media_path=sample_path,
         now=now,
     )
-    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17329837841", message_id="m5", text="May 22 to May 25", now=now)
-    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17329837841", message_id="m6", text="Extract items and prices from the sample flyer attached", now=now)
-    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17329837841", message_id="m7", text="90 Brybar Saint Johns FL", now=now)
-    preview = handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17329837841", message_id="m8", text="SKIP", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100001", message_id="m5", text="May 22 to May 25", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100001", message_id="m6", text="Extract items and prices from the sample flyer attached", now=now)
+    handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100001", message_id="m7", text="90 Brybar Saint Johns FL", now=now)
+    preview = handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100001", message_id="m8", text="SKIP", now=now)
     assert preview.action == "brief_preview"
-    done = handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+17329837841", message_id="m9", text="APPROVE", now=now)
+    done = handle_intake_message(state_path=state_path, chat_id=chat_id, sender_phone="+15550100001", message_id="m9", text="APPROVE", now=now)
 
     assert done.action == "create_project"
     assert done.reference_media_path == sample_path

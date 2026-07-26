@@ -133,12 +133,12 @@ def test_render_final_package_direct_path_writes_pdf_twin(tmp_path, monkeypatch)
     img.save(preview)
 
     project = FlyerProject(
-        project_id="F9501", status="finalizing_assets", customer_phone="+17329837841",
+        project_id="F9501", status="finalizing_assets", customer_phone="+15550100001",
         created_at=now, updated_at=now, original_message_id="m-ws5",
         raw_request="Create a flyer for the weekend special.",
         fields=FlyerRequestFields(),
         locked_facts=[_F("business_name", "Lakshmi's Kitchen"),
-                      _F("contact_phone", "+17329837841")],
+                      _F("contact_phone", "+15550100001")],
         assets=[FlyerAsset(asset_id="A0001", kind="concept_preview", source="rendered",
                            path=str(preview), mime_type="image/png", sha256="a" * 64,
                            original_message_id="m-ws5", received_at=now)],
@@ -213,7 +213,7 @@ def test_finalize_routes_pdf_qa_to_twin_and_stamps_pdf_qa_status(tmp_path, monke
 
     now = datetime.now(timezone.utc)
     project = FlyerProject(
-        project_id="F9503", status="finalizing_assets", customer_phone="+17329837841",
+        project_id="F9503", status="finalizing_assets", customer_phone="+15550100001",
         created_at=now, updated_at=now, original_message_id="m-ws5-fin",
         raw_request="Need flyer",
         fields=FlyerRequestFields(event_or_business_name="Daily Lunch Specials"),
@@ -301,7 +301,7 @@ def test_finalize_without_twin_keeps_legacy_dropped_pdf_and_marks_twin_missing(t
 
     now = datetime.now(timezone.utc)
     project = FlyerProject(
-        project_id="F9504", status="finalizing_assets", customer_phone="+17329837841",
+        project_id="F9504", status="finalizing_assets", customer_phone="+15550100001",
         created_at=now, updated_at=now, original_message_id="m-ws5-legacy",
         raw_request="Need flyer",
         fields=FlyerRequestFields(event_or_business_name="Daily Lunch Specials"),
@@ -397,7 +397,7 @@ def _backfill_store(tmp_path: Path, *, with_preview: bool) -> Path:
                              delivery_status="sent", outbound_message_id="wamid-1",
                              delivered_at=now))
     project = FlyerProject(
-        project_id="F9505", status="delivered", customer_phone="+17329837841",
+        project_id="F9505", status="delivered", customer_phone="+15550100001",
         created_at=now, updated_at=now, original_message_id="m-bf",
         raw_request="Create flyer. Headline: Premium Clean Chicken.",
         fields=FlyerRequestFields(),

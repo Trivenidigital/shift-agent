@@ -33,7 +33,7 @@ from agents.flyer.semantic_brief import (
 )
 from schemas import FlyerRequestFields
 
-PHONE = "+17329837841"
+PHONE = "+15550100001"
 REPO = Path(__file__).resolve().parent.parent
 PLUGIN_DIR = REPO / "src" / "plugins" / "cf-router"
 
@@ -179,7 +179,7 @@ def _write_customer_store_with_template(tmp_path, *, with_template: bool):
         "customers": [{
             "customer_id": "CUST0001", "business_name": "Lakshmi's Kitchen",
             "business_address": "90 Brybar Dr St Johns FL",
-            "primary_chat_id": "17329837841@s.whatsapp.net",
+            "primary_chat_id": "15550100001@s.whatsapp.net",
             "onboarded_by_phone": PHONE, "public_phone": PHONE,
             "business_whatsapp_number": PHONE, "authorized_request_numbers": [PHONE],
             "business_category": "Indian Restaurant", "preferred_language": "en",
@@ -231,7 +231,7 @@ def _active_logo_customer_store(state_path: Path, now: datetime):
     store = FlyerCustomerStore()
     store.customers.append(store.new_customer(
         business_name="Triveni", business_address="300 S Polk St",
-        public_phone="+17043243322", business_whatsapp_number="+17043243322",
+        public_phone="+15550100003", business_whatsapp_number="+15550100003",
         authorized_request_number="+19045550104", business_category="restaurant",
         preferred_language="en", plan_id="starter", now=now,
     ).model_copy(update={"status": "active"}))
@@ -251,8 +251,8 @@ def test_f6_site1_no_audit_row_when_persist_fails(tmp_path, monkeypatch):
     first = tmp_path / "logo1.png"; first.write_bytes(b"first")
     second = tmp_path / "logo2.png"; second.write_bytes(b"second")
     onboarding.store_brand_asset(
-        state_path=state_path, chat_id="17043243322@s.whatsapp.net",
-        sender_phone="+17043243322", message_id="logo1", media_path=first,
+        state_path=state_path, chat_id="15550100003@s.whatsapp.net",
+        sender_phone="+15550100003", message_id="logo1", media_path=first,
         text="logo", now=now, audit_log_path=log_path)
     assert _brand_asset_rows(log_path) == []  # first upload reverses nothing
 
@@ -261,8 +261,8 @@ def test_f6_site1_no_audit_row_when_persist_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(onboarding, "write_customer_store", _boom)
     with pytest.raises(RuntimeError):
         onboarding.store_brand_asset(
-            state_path=state_path, chat_id="17043243322@s.whatsapp.net",
-            sender_phone="+17043243322", message_id="logo2", media_path=second,
+            state_path=state_path, chat_id="15550100003@s.whatsapp.net",
+            sender_phone="+15550100003", message_id="logo2", media_path=second,
             text="replace logo", now=now, audit_log_path=log_path)
     assert _brand_asset_rows(log_path) == [], "audit row emitted despite failed persist"
 
@@ -282,7 +282,7 @@ def test_f6_site2_connect_recovered_sender_defers_audit_emission(tmp_path, monke
         business_name="Triveni Cafe", business_address="300 S Polk St, Dallas TX",
         public_phone=PHONE, business_whatsapp_number=PHONE, authorized_request_number=PHONE,
         business_category="restaurant", preferred_language="en", plan_id="trial",
-        now=now, primary_chat_id="17329837841@s.whatsapp.net", onboarded_by_phone=PHONE,
+        now=now, primary_chat_id="15550100001@s.whatsapp.net", onboarded_by_phone=PHONE,
     ).model_copy(update={
         "status": "trial",
         "brand_assets": [FlyerBrandAsset(

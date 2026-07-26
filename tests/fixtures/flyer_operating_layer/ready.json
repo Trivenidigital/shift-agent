@@ -4,7 +4,7 @@
   "customers": [
     {
       "customer_id": "CUST0001",
-      "business_name": "Lakshmis Kitchn",
+      "business_name": "Sample Caterer",
       "business_category": "restaurant",
       "preferred_language": "en",
       "status": "trial",

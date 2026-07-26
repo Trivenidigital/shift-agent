@@ -43,7 +43,7 @@ def _snack_fixture():
         _fact("item:6:name", "Punjabi Samosa"),
         _fact("schedule", "Saturday & Sunday"),
         _fact("location", "90 Brybar Dr St Johns FL"),
-        _fact("contact_phone", "+17329837841"),
+        _fact("contact_phone", "+15550100001"),
     ]
 
 
@@ -211,7 +211,7 @@ def test_premium_poster_v1_dormant_by_default_in_render(monkeypatch):
     from types import SimpleNamespace
     from agents.flyer import render as render_mod
     monkeypatch.delenv("FLYER_PREMIUM_POSTER_V1", raising=False)
-    assert render_mod._premium_poster_v1_armed(SimpleNamespace(customer_phone="+17329837841")) is False
+    assert render_mod._premium_poster_v1_armed(SimpleNamespace(customer_phone="+15550100001")) is False
 
 
 def test_golden_artifact_committed():
@@ -232,7 +232,7 @@ def _long_footer_facts():
     return base + [
         _fact("schedule", "Saturday & Sunday, 11 AM - 8 PM, dine-in and takeout available"),
         _fact("location", "90 Brybar Drive, Suite 210, St Johns, Florida 32259"),
-        _fact("contact_phone", "+17329837841"),
+        _fact("contact_phone", "+15550100001"),
     ]
 
 
@@ -242,7 +242,7 @@ def test_fit_footer_dense_line_fits_width_no_clip():
 
     draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
     footer = _footer_line(_long_footer_facts())
-    assert "+17329837841" in footer
+    assert "+15550100001" in footer
     max_w = int(1080 * 0.94)
     foot_px, lines = _fit_footer(draw, footer, max_w=max_w, max_px=max(24, int(1080 * 0.026)))
     # The dense footer must actually exercise the fit machinery: either it shrank
@@ -253,7 +253,7 @@ def test_fit_footer_dense_line_fits_width_no_clip():
     for line in lines:
         assert _text_w(draw, line, _premium_font("footer", foot_px)) <= max_w
     # The trailing contact/phone is never split mid-token: it lives intact on one line.
-    assert any("+17329837841" in line for line in lines)
+    assert any("+15550100001" in line for line in lines)
     # Fit stays readable (never below the footer floor).
     assert foot_px >= 22
 
@@ -267,7 +267,7 @@ def test_fit_footer_wraps_to_two_lines_at_floor_on_separator_only():
     draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
     footer = ("Monday through Sunday, 10:30 AM - 9:30 PM, dine-in, takeout and catering"
               "  ·  4280 Southside Boulevard, Suite 1400, Jacksonville, Florida 32216"
-              "  ·  +17329837841")
+              "  ·  +15550100001")
     max_w = int(1080 * 0.94)
     foot_px, lines = _fit_footer(draw, footer, max_w=max_w, max_px=28)
     assert len(lines) == 2
@@ -277,7 +277,7 @@ def test_fit_footer_wraps_to_two_lines_at_floor_on_separator_only():
     # Reassembling the lines with the separator reproduces the exact footer: no
     # token was dropped, reordered, or split.
     assert "  ·  ".join(lines) == footer
-    assert any("+17329837841" in line for line in lines)
+    assert any("+15550100001" in line for line in lines)
 
 
 def test_compose_dense_footer_phone_fully_rendered(tmp_path):

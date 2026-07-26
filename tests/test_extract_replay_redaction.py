@@ -48,34 +48,34 @@ def script():
 
 def test_exact_phone_substitution(script):
     """Exact phone string from sender_block is substituted in raw_text."""
-    text = "Hi, my phone is +17329837841. Call me."
-    sender_block = {"phone": "+17329837841"}
+    text = "Hi, my phone is +15550100001. Call me."
+    sender_block = {"phone": "+15550100001"}
     redacted, residuals = script._redact_text_from_structured_fields(text, sender_block, idx=42)
-    assert "+17329837841" not in redacted
+    assert "+15550100001" not in redacted
     assert "+15555000042" in redacted
-    # Residuals: "17329837841" (without +) is NOT in the text; substitution
+    # Residuals: "15550100001" (without +) is NOT in the text; substitution
     # also handles the no-+ variant. Should be 0.
     assert residuals == 0
 
 
 def test_exact_phone_no_plus_variant(script):
     """When raw_text contains the phone WITHOUT the leading +, also substitute."""
-    text = "msg from 17329837841: hello"
-    sender_block = {"phone": "+17329837841"}
+    text = "msg from 15550100001: hello"
+    sender_block = {"phone": "+15550100001"}
     redacted, _ = script._redact_text_from_structured_fields(text, sender_block, idx=42)
-    assert "17329837841" not in redacted
+    assert "15550100001" not in redacted
 
 
 def test_lid_and_jid_substitution(script):
     """LID and JID values from sender_block get substituted."""
-    text = "lid=201975216009469@lid chat_id=918522041562@s.whatsapp.net"
+    text = "lid=100000000000001@lid chat_id=15550100002@s.whatsapp.net"
     sender_block = {
-        "lid": "201975216009469@lid",
-        "chat_id": "918522041562@s.whatsapp.net",
+        "lid": "100000000000001@lid",
+        "chat_id": "15550100002@s.whatsapp.net",
     }
     redacted, _ = script._redact_text_from_structured_fields(text, sender_block, idx=99)
-    assert "201975216009469@lid" not in redacted
-    assert "918522041562" not in redacted
+    assert "100000000000001@lid" not in redacted
+    assert "15550100002" not in redacted
 
 
 def test_residual_digits_warned_user_typed_phone(script):
@@ -83,7 +83,7 @@ def test_residual_digits_warned_user_typed_phone(script):
     # Sender block has the OWNER's phone; the message body contains a CUSTOMER's
     # phone in (555)-format that we can't reliably match.
     text = "Customer left number (555) 123-4567 for callback"
-    sender_block = {"phone": "+17329837841"}
+    sender_block = {"phone": "+15550100001"}
     redacted, residuals = script._redact_text_from_structured_fields(text, sender_block, idx=1)
     # Owner phone wasn't in the text, so no substitution happened.
     assert redacted == text
@@ -97,7 +97,7 @@ def test_residual_digits_warned_user_typed_phone(script):
 def test_residual_digits_warned_dot_format(script):
     """Dot-separated phone format flagged as residual."""
     text = "Reach out at 555.123.4567 next week"
-    sender_block = {"phone": "+17329837841"}
+    sender_block = {"phone": "+15550100001"}
     _, residuals = script._redact_text_from_structured_fields(text, sender_block, idx=2)
     assert residuals >= 1
 
@@ -112,7 +112,7 @@ def test_residual_digits_warns_on_iso_timestamp(script):
     negatives would silently leak PII.
     """
     text = "raw audit at 2026-05-01T12:34:56 with 1234567890 hash"
-    sender_block = {"phone": "+17329837841"}
+    sender_block = {"phone": "+15550100001"}
     _, residuals = script._redact_text_from_structured_fields(text, sender_block, idx=3)
     # Both the ISO timestamp's digits and the 10-digit hash trigger warnings.
     assert residuals >= 1
@@ -129,7 +129,7 @@ def test_synth_phone_unique_across_index_range(script):
 
 def test_no_substitution_when_sender_block_empty(script):
     """Empty sender_block → no substitution, but residual scan still runs."""
-    text = "Hello +17329837841 world"
+    text = "Hello +15550100001 world"
     redacted, residuals = script._redact_text_from_structured_fields(text, {}, idx=0)
     assert redacted == text  # nothing to substitute against
     assert residuals >= 1  # residual scan caught the digit sequence
@@ -138,7 +138,7 @@ def test_no_substitution_when_sender_block_empty(script):
 def test_redaction_preserves_short_codes(script):
     """5-char approval codes like #A3F2X aren't digit sequences and don't trigger residual warning."""
     text = "Owner replied: #A3F2X approve. Sent at 2026-05-01T00:00:00."
-    sender_block = {"phone": "+17329837841"}
+    sender_block = {"phone": "+15550100001"}
     redacted, residuals = script._redact_text_from_structured_fields(text, sender_block, idx=4)
     assert "#A3F2X" in redacted  # short codes preserved
     # ISO timestamp triggers a warning — that's expected (see test above).

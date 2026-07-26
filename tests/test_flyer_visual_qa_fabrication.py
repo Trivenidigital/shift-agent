@@ -14,7 +14,7 @@ def _proj(facts):
     return FlyerProject(
         project_id="F9001",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-test",

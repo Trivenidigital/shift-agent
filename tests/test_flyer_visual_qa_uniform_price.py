@@ -28,7 +28,7 @@ def _uniform_project():
     """F0201's live shape: shared $5.99 offer, per-item $5.99 propagated."""
     now = datetime(2026, 7, 3, tzinfo=timezone.utc)
     return FlyerProject(
-        project_id="F9301", status="generating_concepts", customer_phone="+17329837841",
+        project_id="F9301", status="generating_concepts", customer_phone="+15550100001",
         created_at=now, updated_at=now, original_message_id="m-ws2",
         raw_request="Create a flyer for Lakshmi's Kitchen weekend special $5.99 each ...",
         locked_facts=[
@@ -59,7 +59,7 @@ Medu Vada
 Upma
 Pongal
 Saturday and Sunday only
-90 Brybar Dr St Johns FL +17329837841
+90 Brybar Dr St Johns FL +15550100001
 """
 
 

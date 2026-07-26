@@ -437,7 +437,7 @@ def test_operator_brief_groups_flyer_self_evaluation_and_redacts_sensitive_lines
                         "type": "manual_source_edit_stale",
                         "severity": "high",
                         "project_id": "F9101",
-                        "suggested_action": "Burn down queue. OPENAI_API_KEY=sk-leaky +17329837841",
+                        "suggested_action": "Burn down queue. OPENAI_API_KEY=sk-leaky +15550100001",
                         "evidence_details": {
                             "queued_age_minutes": 91.5,
                             "active_customer_risk": True,
@@ -463,7 +463,7 @@ def test_operator_brief_groups_flyer_self_evaluation_and_redacts_sensitive_lines
                         "type": "source_contract_missing",
                         "severity": "high",
                         "project_id": "F9102",
-                        "suggested_action": "Add source contract. Bearer secret-token 17329837841@lid",
+                        "suggested_action": "Add source contract. Bearer secret-token 15550100001@lid",
                         "evidence_details": {"has_reference_media": True, "active_customer_risk": True},
                     },
                     {
@@ -489,7 +489,7 @@ def test_operator_brief_groups_flyer_self_evaluation_and_redacts_sensitive_lines
                     },
                 ],
                 "eval_candidates": [],
-                "needs_srini": ["manual_source_edit_stale F9101 +17329837841"],
+                "needs_srini": ["manual_source_edit_stale F9101 +15550100001"],
             }
         ),
         encoding="utf-8",
@@ -517,8 +517,8 @@ def test_operator_brief_groups_flyer_self_evaluation_and_redacts_sensitive_lines
     assert "OPENAI_API_KEY" not in markdown
     assert "sk-leaky" not in markdown
     assert "secret-token" not in markdown
-    assert "+17329837841" not in markdown
-    assert "17329837841@lid" not in markdown
+    assert "+15550100001" not in markdown
+    assert "15550100001@lid" not in markdown
     assert "C:\\private\\report.json" not in markdown
     assert "[redacted" in markdown
 

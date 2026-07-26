@@ -78,7 +78,7 @@ def _load_plugin_modules():
 
 
 PHONE = "+19045550104"
-CHAT = "201975216009469@lid"
+CHAT = "100000000000001@lid"
 
 
 def _now_iso(delta_hours: float = 0.0) -> str:

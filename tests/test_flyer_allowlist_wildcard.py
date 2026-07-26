@@ -45,7 +45,7 @@ import bare_render as B  # noqa: E402
 import render as R  # noqa: E402
 import style_registers as S  # noqa: E402
 
-PHONE = "+17329837841"       # the historical validation-era number
+PHONE = "+15550100001"       # the historical validation-era number
 OTHER = "+19998887777"       # a second listed number
 STRANGER = "+15550009999"    # never listed — the CUST0007 stand-in
 

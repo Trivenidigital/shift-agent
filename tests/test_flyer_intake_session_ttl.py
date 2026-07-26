@@ -30,8 +30,8 @@ NOW = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
 
 def _session(updated_at: datetime, *, status="choosing_mode", expires_at=None, last_activity_at=None):
     return schemas.FlyerIntakeSession(
-        chat_id="17329837841@s.whatsapp.net",
-        sender_phone="+17329837841",
+        chat_id="15550100001@s.whatsapp.net",
+        sender_phone="+15550100001",
         status=status,
         source="start_trial",
         started_at=updated_at,
@@ -98,8 +98,8 @@ def test_replace_intake_session_stamps_ttl(monkeypatch):
 
 def test_old_row_without_ttl_fields_loads():
     row = {
-        "chat_id": "17329837841@s.whatsapp.net",
-        "sender_phone": "+17329837841",
+        "chat_id": "15550100001@s.whatsapp.net",
+        "sender_phone": "+15550100001",
         "status": "choosing_mode",
         "source": "start_trial",
         "started_at": "2026-06-02T17:50:00Z",
@@ -130,8 +130,8 @@ def _write_customers(path: Path, updated_at: str):
                 "customers": [],
                 "intake_sessions": [
                     {
-                        "chat_id": "17329837841@s.whatsapp.net",
-                        "sender_phone": "+17329837841",
+                        "chat_id": "15550100001@s.whatsapp.net",
+                        "sender_phone": "+15550100001",
                         "status": "choosing_mode",
                         "source": "start_trial",
                         "started_at": updated_at,
@@ -151,7 +151,7 @@ def test_finder_treats_expired_session_as_absent(tmp_path, monkeypatch):
     actions.FLYER_CUSTOMERS_PATH = cust
     # Idle 5h -> expired.
     _write_customers(cust, (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat())
-    assert actions.find_flyer_intake_session_by_sender("+17329837841", "17329837841@s.whatsapp.net") is None
+    assert actions.find_flyer_intake_session_by_sender("+15550100001", "15550100001@s.whatsapp.net") is None
 
 
 def test_finder_returns_fresh_session(tmp_path, monkeypatch):
@@ -160,7 +160,7 @@ def test_finder_returns_fresh_session(tmp_path, monkeypatch):
     cust = tmp_path / "customers.json"
     actions.FLYER_CUSTOMERS_PATH = cust
     _write_customers(cust, (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat())
-    found = actions.find_flyer_intake_session_by_sender("+17329837841", "17329837841@s.whatsapp.net")
+    found = actions.find_flyer_intake_session_by_sender("+15550100001", "15550100001@s.whatsapp.net")
     assert found is not None
 
 
@@ -185,7 +185,7 @@ def test_sweep_discards_expired_keeps_fresh_and_audits(tmp_path):
     cust = tmp_path / "customers.json"
     log = tmp_path / "decisions.log"
     stale = {
-        "chat_id": "17329837841@s.whatsapp.net", "sender_phone": "+17329837841",
+        "chat_id": "15550100001@s.whatsapp.net", "sender_phone": "+15550100001",
         "status": "choosing_mode", "source": "start_trial",
         "started_at": (NOW - timedelta(hours=6)).isoformat(),
         "updated_at": (NOW - timedelta(hours=6)).isoformat(),
@@ -226,7 +226,7 @@ def test_sweep_no_expired_is_noop(tmp_path):
     cust = tmp_path / "customers.json"
     log = tmp_path / "decisions.log"
     fresh = {
-        "chat_id": "17329837841@s.whatsapp.net", "sender_phone": "+17329837841",
+        "chat_id": "15550100001@s.whatsapp.net", "sender_phone": "+15550100001",
         "status": "choosing_mode", "source": "start_trial",
         "started_at": (NOW - timedelta(hours=1)).isoformat(),
         "updated_at": (NOW - timedelta(hours=1)).isoformat(),

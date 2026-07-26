@@ -50,8 +50,8 @@ for _p in (str(PLATFORM), str(SRC), str(REPO / "tests")):
 
 import yaml  # noqa: E402
 
-PHONE = "+17329837841"
-CHAT = "17329837841@lid"
+PHONE = "+15550100001"
+CHAT = "15550100001@lid"
 OWNER_JID = "19045550100@s.whatsapp.net"
 
 
@@ -294,7 +294,7 @@ def _drive(hooks, actions, text, mid):
 
 
 def _customer_sends(sends):
-    return [s for s in sends if str(s["jid"]).startswith("17329837841")]
+    return [s for s in sends if str(s["jid"]).startswith("15550100001")]
 
 
 def _rows_of(sb: _Sandbox, type_):

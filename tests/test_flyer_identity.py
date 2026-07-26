@@ -22,9 +22,9 @@ if str(_PLATFORM) not in sys.path:
 
 import flyer_identity as FI  # noqa: E402
 
-PHONE = "+17329837841"
-PHONE_JID = "17329837841@s.whatsapp.net"
-LID = "201975216009469@lid"
+PHONE = "+15550100001"
+PHONE_JID = "15550100001@s.whatsapp.net"
+LID = "100000000000001@lid"
 OTHER_LID = "998877665544332@lid"
 
 
@@ -106,7 +106,7 @@ def test_mtime_cache_refreshes_on_change(tmp_path: Path):
 
 
 def test_normalize_identifier_mirrors_sender_norm():
-    assert FI.normalize_identifier("+1 (732) 983-7841") == "17329837841"
-    assert FI.normalize_identifier(PHONE_JID) == "17329837841"
-    assert FI.normalize_identifier(LID) == "201975216009469"
+    assert FI.normalize_identifier("+1 (555) 010-0001") == "15550100001"
+    assert FI.normalize_identifier(PHONE_JID) == "15550100001"
+    assert FI.normalize_identifier(LID) == "100000000000001"
     assert FI.normalize_identifier("") == ""

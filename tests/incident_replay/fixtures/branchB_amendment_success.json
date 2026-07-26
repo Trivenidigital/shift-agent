@@ -1,0 +1,47 @@
+{
+  "incident_id": "branchB-amendment-success",
+  "description": "A branch-B amendment (change to an already-finalized order) is captured immutably to the durable sidecar store; the finalized proposal is preserved unchanged. Deterministic proof: test_catering_amendment_capture.py + test_catering_turn_arbitration_e2e.py.",
+  "pseudonymized_transcript": [
+    {
+      "from": "+15550100003",
+      "text": "Actually, can we change the dessert on the finalized order to gulab jamun?"
+    }
+  ],
+  "initial_state": {
+    "catering_leads": [
+      {
+        "lead_id": "LEAD-0001",
+        "status": "finalized"
+      }
+    ],
+    "amendment_sidecar": []
+  },
+  "expected_route": "catering_amendment_capture",
+  "expected_mutations": [
+    "append_amendment_to_sidecar_store",
+    "audit:branchB_amendment_captured"
+  ],
+  "forbidden_mutations": [
+    "mutate_finalized_proposal_in_place",
+    "drop_amendment"
+  ],
+  "expected_logical_sends": 1,
+  "expected_audit_identities": [
+    "+15550100003"
+  ],
+  "expected_final_state": {
+    "catering_leads": [
+      {
+        "lead_id": "LEAD-0001",
+        "status": "finalized"
+      }
+    ],
+    "amendment_sidecar": [
+      {
+        "status": "captured"
+      }
+    ]
+  },
+  "pii_safe": true,
+  "additive_only": true
+}

@@ -33,11 +33,11 @@ def fixture_dir(tmp_path):
                 "id": "e004",
                 "name": "Anjali Iyer",
                 "role": "cashier",
-                "phone": "+17329837841",
+                "phone": "+15550100001",
                 "languages": ["en"],
                 "can_cover_roles": ["cashier"],
                 "status": "active",
-                "lid": "201975216009469@lid",
+                "lid": "100000000000001@lid",
             },
             {
                 "id": "e006",
@@ -62,8 +62,8 @@ def fixture_dir(tmp_path):
         },
         "owner": {
             "name": "Owner",
-            "phone": "+918522041562",
-            "self_chat_jid": "918522041562@s.whatsapp.net",
+            "phone": "+15550100002",
+            "self_chat_jid": "15550100002@s.whatsapp.net",
         },
         "limits": {
             "max_outbound_per_day": 6,
@@ -102,22 +102,22 @@ def _run(arg, fixture_dir):
 
 
 def test_phone_resolves_employee_with_lid(fixture_dir):
-    r = _run("+17329837841", fixture_dir)
+    r = _run("+15550100001", fixture_dir)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out["role"] == "employee"
     assert out["employee_id"] == "e004"
     assert out["name"] == "Anjali Iyer"
-    assert out["lid"] == "201975216009469@lid"
+    assert out["lid"] == "100000000000001@lid"
 
 
 def test_lid_input_resolves_employee(fixture_dir):
-    r = _run("201975216009469@lid", fixture_dir)
+    r = _run("100000000000001@lid", fixture_dir)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out["role"] == "employee"
     assert out["employee_id"] == "e004"
-    assert out["lid"] == "201975216009469@lid"
+    assert out["lid"] == "100000000000001@lid"
 
 
 def test_lid_input_unknown(fixture_dir):
@@ -130,19 +130,19 @@ def test_lid_input_unknown(fixture_dir):
 
 
 def test_phone_jid_suffix_stripped(fixture_dir):
-    r = _run("17329837841@s.whatsapp.net", fixture_dir)
+    r = _run("15550100001@s.whatsapp.net", fixture_dir)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out["role"] == "employee"
-    assert out["phone_normalized"] == "+17329837841"
+    assert out["phone_normalized"] == "+15550100001"
 
 
 def test_owner_phone(fixture_dir):
-    r = _run("+918522041562", fixture_dir)
+    r = _run("+15550100002", fixture_dir)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out["role"] == "owner"
-    assert out["phone_normalized"] == "+918522041562"
+    assert out["phone_normalized"] == "+15550100002"
 
 
 def test_garbage_input_exit_2(fixture_dir):
@@ -162,13 +162,13 @@ def test_employee_without_lid_returns_lid_none(fixture_dir):
 # ── roster-load failure must FAIL SAFE (role="error", non-zero exit, never a
 # fabricated real role). The dispatcher treats role="error" as fail-closed and
 # can surface the load failure to the owner; identify-sender must never invent
-# an identity from an unreadable/invalid roster. +17329837841 (e004) WOULD
+# an identity from an unreadable/invalid roster. +15550100001 (e004) WOULD
 # resolve to an employee with a valid roster — so role="error" here proves the
 # failure path wins over identity resolution.
 
 def test_corrupt_roster_fails_safe(fixture_dir):
     (fixture_dir / "roster.json").write_text("{ this is not valid json ")
-    r = _run("+17329837841", fixture_dir)
+    r = _run("+15550100001", fixture_dir)
     assert r.returncode != 0, r.stdout
     out = json.loads(r.stdout)
     assert out["role"] == "error", out
@@ -180,7 +180,7 @@ def test_schema_invalid_roster_fails_safe(fixture_dir):
     (fixture_dir / "roster.json").write_text(
         json.dumps({"location": {}, "employees": [{"id": "x"}], "schedule": {}})
     )
-    r = _run("+17329837841", fixture_dir)
+    r = _run("+15550100001", fixture_dir)
     assert r.returncode != 0, r.stdout
     out = json.loads(r.stdout)
     assert out["role"] == "error", out
@@ -188,11 +188,11 @@ def test_schema_invalid_roster_fails_safe(fixture_dir):
 
 def test_missing_roster_fails_safe(fixture_dir):
     (fixture_dir / "roster.json").unlink()
-    r = _run("+17329837841", fixture_dir)
+    r = _run("+15550100001", fixture_dir)
     assert r.returncode != 0, r.stdout
     out = json.loads(r.stdout)
     assert out["role"] == "error", out
     # even the owner phone must not resolve when the roster cannot be loaded
-    r2 = _run("+918522041562", fixture_dir)  # owner phone in the fixture config
+    r2 = _run("+15550100002", fixture_dir)  # owner phone in the fixture config
     assert r2.returncode != 0, r2.stdout
     assert json.loads(r2.stdout)["role"] == "error"

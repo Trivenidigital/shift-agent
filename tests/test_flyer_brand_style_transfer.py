@@ -21,7 +21,7 @@ from agents.flyer import render as R
 from agents.flyer.render import build_image_generation_prompt
 from schemas import FlyerLockedFact, FlyerProject, FlyerRequestFields
 
-PHONE = "+17329837841"
+PHONE = "+15550100001"
 
 TEMPLATE_BYTES = b"\x89PNG\r\n\x1a\nTEMPLATE-UNIQUE-BYTES-0001"
 LOGO_BYTES = b"\x89PNG\r\n\x1a\nLOGO-UNIQUE-BYTES-0002"
@@ -102,7 +102,7 @@ def _write_customers(tmp_path, *, template_derived=True, include_logo=False,
         "customers": [{
             "customer_id": "CUST0001", "business_name": "Lakshmi's Kitchen",
             "business_address": "90 Brybar Dr St Johns FL",
-            "primary_chat_id": "17329837841@s.whatsapp.net",
+            "primary_chat_id": "15550100001@s.whatsapp.net",
             "onboarded_by_phone": PHONE, "public_phone": PHONE,
             "business_whatsapp_number": PHONE, "authorized_request_numbers": [PHONE],
             "business_category": "Indian Restaurant", "preferred_language": "en",

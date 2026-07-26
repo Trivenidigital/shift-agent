@@ -37,7 +37,7 @@ def _project(
     manual_status: str = "none",
     reason_code: str = "unclassified",
     business_name: str = "Lakshmis Kitchen",
-    contact: str = "+17329837841",
+    contact: str = "+15550100001",
 ) -> FlyerProject:
     now = _now()
     return FlyerProject(
@@ -407,7 +407,7 @@ def test_status_request_classifier_recognizes_common_check_in_phrases():
     # And conversely, real revision/correction text must NOT route to status.
     for edit_text in [
         "change the date to next Saturday",
-        "update the phone to +1 732 983 7841",
+        "update the phone to +1 555 010 0001",
         "replace Idly with Dosa",
         "remove extra 08:00",
     ]:

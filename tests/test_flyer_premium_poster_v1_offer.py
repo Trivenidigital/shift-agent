@@ -39,7 +39,7 @@ def _snack():
         _fact("item:3:name", "Veg Lollipop"), _fact("item:4:name", "Cut Mirchi"), _fact("item:5:name", "Onion Pakora"),
         _fact("item:6:name", "Punjabi Samosa"),
         _fact("schedule", "Saturday & Sunday"), _fact("location", "90 Brybar Dr St Johns FL"),
-        _fact("contact_phone", "+17329837841"),
+        _fact("contact_phone", "+15550100001"),
     ]
 
 
@@ -147,4 +147,4 @@ def test_premium_poster_v1_dormant_by_default_in_render(monkeypatch):
     from types import SimpleNamespace
     from agents.flyer import render as render_mod
     monkeypatch.delenv("FLYER_PREMIUM_POSTER_V1", raising=False)
-    assert render_mod._premium_poster_v1_armed(SimpleNamespace(customer_phone="+17329837841")) is False
+    assert render_mod._premium_poster_v1_armed(SimpleNamespace(customer_phone="+15550100001")) is False

@@ -181,8 +181,8 @@ def test_self_evaluation_redacts_operating_layer_customer_identifiers(tmp_path):
     projects.write_text('{"projects":[]}\n', encoding="utf-8")
     decisions.write_text("", encoding="utf-8")
     payload = _load(PARTIAL_FIXTURE)
-    payload["customers"][0]["customer_id"] = "+17329837841"
-    payload["platform_truthfulness"]["reason"] = "operator note for +17329837841"
+    payload["customers"][0]["customer_id"] = "+15550100001"
+    payload["platform_truthfulness"]["reason"] = "operator note for +15550100001"
     operating_input.write_text(json.dumps(payload), encoding="utf-8")
 
     result = subprocess.run(
@@ -204,5 +204,5 @@ def test_self_evaluation_redacts_operating_layer_customer_identifiers(tmp_path):
         check=True,
     )
 
-    assert "+17329837841" not in result.stdout
+    assert "+15550100001" not in result.stdout
     assert "[redacted-phone]" in result.stdout

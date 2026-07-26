@@ -982,11 +982,11 @@ def test_script_reroll_sends_invite_caption_and_audits_reroll_sent(monkeypatch):
     monkeypatch.setattr(script, "mark_recent_flyer", lambda *a, **k: None)
     monkeypatch.setattr(script, "log", lambda msg: calls["logs"].append(msg))
 
-    rc = script.main(["--chat-id", "201975216009469@lid", "--no-ack",
+    rc = script.main(["--chat-id", "100000000000001@lid", "--no-ack",
                       "--brief", "I did not like, please generate this flyer again."])
     assert rc == 0
     assert calls["images"] == [(br.REROLL_INVITE, "flyer.bare.image_send")]   # invite caption on the variant
-    assert calls["committed"] == ["201975216009469@lid"]                       # session committed after delivery
+    assert calls["committed"] == ["100000000000001@lid"]                       # session committed after delivery
     assert any("OUTCOME=reroll_sent" in m for m in calls["logs"])              # audited as a re-roll
 
 

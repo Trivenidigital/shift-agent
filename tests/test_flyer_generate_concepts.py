@@ -62,7 +62,7 @@ def _project_with_failed_reference() -> dict:
     return {
         "project_id": "F0001",
         "status": "intake_started",
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "created_at": now,
         "updated_at": now,
         "original_message_id": "m-ref",
@@ -224,7 +224,7 @@ def test_generate_persists_structured_generation_prompt_not_raw_request(monkeypa
         "projects": [{
             "project_id": "F0120",
             "status": "intake_started",
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "created_at": now,
             "updated_at": now,
             "original_message_id": "m-indochinese",
@@ -232,7 +232,7 @@ def test_generate_persists_structured_generation_prompt_not_raw_request(monkeypa
             "fields": {
                 "event_or_business_name": "Indo-Chinese Specials",
                 "venue_or_location": "90 Brybar Dr St Johns FL",
-                "contact_info": "+17329837841",
+                "contact_info": "+15550100001",
                 "notes": raw,
                 "style_preference": "professional local food menu flyer",
             },
@@ -240,7 +240,7 @@ def test_generate_persists_structured_generation_prompt_not_raw_request(monkeypa
                 {"fact_id": "business_name", "label": "Business", "value": "Lakshmi's Kitchen", "source": "customer_profile", "required": True},
                 {"fact_id": "campaign_title", "label": "Campaign", "value": "Indo-Chinese Specials", "source": "customer_text", "required": True},
                 {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr St Johns FL", "source": "customer_profile", "required": True},
-                {"fact_id": "contact_phone", "label": "Contact", "value": "+17329837841", "source": "customer_profile", "required": True},
+                {"fact_id": "contact_phone", "label": "Contact", "value": "+15550100001", "source": "customer_profile", "required": True},
                 {"fact_id": "item:0:name", "label": "Item", "value": "Veg Manchurian", "source": "customer_text", "required": True},
                 {"fact_id": "item:0:price", "label": "Price", "value": "$9.99", "source": "customer_text", "required": True},
             ],
@@ -316,7 +316,7 @@ def test_generate_deferred_source_edit_template_extracts_source_contract_before_
     project["reference_extractions"][0]["role"] = "source_edit_template"
     project["locked_facts"] = [
         {"fact_id": "business_name", "label": "Business", "value": "Lakshmi's Kitchen", "source": "customer_profile", "required": True},
-        {"fact_id": "contact_phone", "label": "Contact", "value": "+17329837841", "source": "customer_profile", "required": True},
+        {"fact_id": "contact_phone", "label": "Contact", "value": "+15550100001", "source": "customer_profile", "required": True},
     ]
     state_path.write_text(json.dumps({
         "schema_version": 1,
@@ -616,7 +616,7 @@ def test_generate_source_edit_provider_unavailable_queues_manual_review(monkeypa
     # Mark as source-edit so the script takes the render_source_edit_preview
     # branch. The raw_request keyword `edit uploaded flyer/source artwork`
     # is the dispatcher signal `_is_source_edit_project` keys on.
-    project["raw_request"] = "edit uploaded flyer/source artwork: change phone to +17329837841"
+    project["raw_request"] = "edit uploaded flyer/source artwork: change phone to +15550100001"
     # Reference is already extracted (not in failure state) so the script
     # bypasses the reference-failure manual-review path and reaches the
     # source-edit render call.
@@ -670,7 +670,7 @@ def test_fix5_source_edit_under_killswitch_routes_to_manual_without_render(monke
     reference = asset_dir / "F0001-reference.png"
     reference.write_bytes(b"fake image bytes")
     project = _project_with_pending_reference(reference)
-    project["raw_request"] = "edit uploaded flyer/source artwork: change phone to +17329837841"
+    project["raw_request"] = "edit uploaded flyer/source artwork: change phone to +15550100001"
     project["reference_extractions"][0]["provider"] = "openai"
     project["reference_extractions"][0]["status"] = "ok"
     project["reference_extractions"][0]["detail"] = "extracted"
@@ -839,7 +839,7 @@ def test_generate_source_edit_dependency_missing_queues_manual_review(monkeypatc
     reference = asset_dir / "F0001-reference.png"
     reference.write_bytes(b"fake image bytes")
     project = _project_with_pending_reference(reference)
-    project["raw_request"] = "edit uploaded flyer/source artwork: change phone to +17329837841"
+    project["raw_request"] = "edit uploaded flyer/source artwork: change phone to +15550100001"
     project["reference_extractions"][0]["provider"] = "openai"
     project["reference_extractions"][0]["status"] = "ok"
     project["reference_extractions"][0]["detail"] = "extracted"
@@ -977,9 +977,9 @@ def test_generate_source_edit_fact_fit_failure_queues_visual_qa_failed(monkeypat
                 {"fact_id": "pricing_structure", "label": "Pricing", "value": "All items 5-10% off", "source": "customer_text"},
                 {"fact_id": "offer:0", "label": "Offer", "value": "Lucky draw eligible with purchase above $100", "source": "customer_text"},
                 {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr St Johns FL", "source": "customer_profile"},
-                {"fact_id": "contact_phone", "label": "Contact", "value": "+17329837841", "source": "customer_profile"},
+                {"fact_id": "contact_phone", "label": "Contact", "value": "+15550100001", "source": "customer_profile"},
             ],
-            "Lakshmis Kitchen\nDIWALI SALE\nALL ITEMS 5-10% OFF\nLucky Draw Eligible\nAbove $100 purchase\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+            "Lakshmis Kitchen\nDIWALI SALE\nALL ITEMS 5-10% OFF\nLucky Draw Eligible\nAbove $100 purchase\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
         ),
         (
             "F0107",
@@ -992,9 +992,9 @@ def test_generate_source_edit_fact_fit_failure_queues_visual_qa_failed(monkeypat
                 {"fact_id": "schedule", "label": "Schedule", "value": "Wednesday and Thursday", "source": "customer_text"},
                 {"fact_id": "promotion_end", "label": "Promotion end", "value": "June 25", "source": "customer_text"},
                 {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr St Johns FL", "source": "customer_profile"},
-                {"fact_id": "contact_phone", "label": "Contact", "value": "+17329837841", "source": "customer_profile"},
+                {"fact_id": "contact_phone", "label": "Contact", "value": "+15550100001", "source": "customer_profile"},
             ],
-            "Lakshmis Kitchen\nEVENING SNACKS SALE\nWednesday and Thursday\nAny item $7.99\nFree Masala Chai with purchase above $12\nOffer valid until June 25\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+            "Lakshmis Kitchen\nEVENING SNACKS SALE\nWednesday and Thursday\nAny item $7.99\nFree Masala Chai with purchase above $12\nOffer valid until June 25\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
         ),
     ],
 )
@@ -1019,7 +1019,7 @@ def test_generate_replay_incident_semantic_briefs_pass_visual_qa(
         "projects": [{
             "project_id": project_id,
             "status": "intake_started",
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "created_at": now,
             "updated_at": now,
             "original_message_id": f"m-{project_id}",
@@ -1086,12 +1086,12 @@ def test_generate_missing_required_facts_project_does_not_enter_source_edit_rend
     project = {
         "project_id": "F0002",
         "status": "manual_edit_required",
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "created_at": now,
         "updated_at": now,
         "original_message_id": "m-missing",
         "raw_request": "Make a flyer please.",
-        "fields": {"event_or_business_name": "Pending Customer", "contact_info": "+17329837841"},
+        "fields": {"event_or_business_name": "Pending Customer", "contact_info": "+15550100001"},
         "assets": [],  # no reference_image -> not a source-edit project
         "manual_review": {
             "status": "queued",
@@ -1346,7 +1346,7 @@ def test_generate_exact_text_qa_failure_uses_overlay_fallback_before_manual_revi
     project = {
         "project_id": "F0152",
         "status": "manual_edit_required",
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "customer_id": "CUST0001",
         "created_at": now,
         "updated_at": now,
@@ -1355,7 +1355,7 @@ def test_generate_exact_text_qa_failure_uses_overlay_fallback_before_manual_revi
         "fields": {
             "event_or_business_name": "Lakshmi's Kitchen",
             "venue_or_location": "90 Brybar Dr St Johns FL",
-            "contact_info": "+1 732 983 7841",
+            "contact_info": "+1 555 010 0001",
             "notes": "Customer chose path 2: use the source flyer only as a reference/inspiration.",
         },
         "locked_facts": [
@@ -1368,7 +1368,7 @@ def test_generate_exact_text_qa_failure_uses_overlay_fallback_before_manual_revi
             {"fact_id": "item:3:name", "label": "Item", "value": "Veg Lollipop", "source": "reference_vision", "required": True},
             {"fact_id": "item:4:name", "label": "Item", "value": "Mirchi Bhajji", "source": "reference_vision", "required": True},
             {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr St Johns FL", "source": "customer_profile", "required": True},
-            {"fact_id": "contact_phone", "label": "Contact", "value": "+1 732 983 7841", "source": "customer_profile", "required": True},
+            {"fact_id": "contact_phone", "label": "Contact", "value": "+1 555 010 0001", "source": "customer_profile", "required": True},
         ],
         "reference_extractions": [],
         "assets": [{
@@ -1693,7 +1693,7 @@ def test_generate_autorepairs_f0105_style_visual_qa_failure_before_manual_review
         "projects": [{
             "project_id": "F0105",
             "status": "generating_concepts",
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "created_at": now,
             "updated_at": now,
             "original_message_id": "wamid.F0105",
@@ -1820,7 +1820,7 @@ def test_generate_autorepair_preserves_repaired_asset_when_renderer_reuses_path(
         "projects": [{
             "project_id": "F0105",
             "status": "generating_concepts",
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "created_at": now,
             "updated_at": now,
             "original_message_id": "wamid.F0105",
@@ -1942,7 +1942,7 @@ def test_generate_autorepair_failure_preserves_failed_preview_for_manual_review(
         "projects": [{
             "project_id": "F0106",
             "status": "generating_concepts",
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "created_at": now,
             "updated_at": now,
             "original_message_id": "wamid.F0106",
@@ -2055,7 +2055,7 @@ def test_generate_autorepair_failure_preserves_original_asset_when_renderer_reus
         "projects": [{
             "project_id": "F0105",
             "status": "generating_concepts",
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "created_at": now,
             "updated_at": now,
             "original_message_id": "wamid.F0105",
@@ -2180,7 +2180,7 @@ def test_generate_autorepair_render_exception_exhausts_and_queues_manual_review(
         "projects": [{
             "project_id": "F0107",
             "status": "generating_concepts",
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "created_at": now,
             "updated_at": now,
             "original_message_id": "wamid.F0107",
@@ -2260,7 +2260,7 @@ def test_generate_autorepair_audit_failure_does_not_block_manual_review(monkeypa
         "projects": [{
             "project_id": "F0108",
             "status": "generating_concepts",
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "created_at": now,
             "updated_at": now,
             "original_message_id": "wamid.F0108",
@@ -2352,7 +2352,7 @@ def _setup_warn_tier_project_state(state_path: Path, project_id: str = "F0108") 
         "projects": [{
             "project_id": project_id,
             "status": "generating_concepts",
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "created_at": now,
             "updated_at": now,
             "original_message_id": f"wamid.{project_id}",
@@ -2579,7 +2579,7 @@ def test_generate_concepts_warn_tier_clears_stale_manual_review_payload(monkeypa
         "projects": [{
             "project_id": "F0110",
             "status": "generating_concepts",
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "created_at": now,
             "updated_at": now,
             "original_message_id": "wamid.F0110",
@@ -3048,7 +3048,7 @@ def _basic_food_project_dict(project_id, asset_dir, *, status="generating_concep
     return {
         "project_id": project_id,
         "status": status,
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "customer_id": "CUST0001",
         "created_at": now,
         "updated_at": now,
@@ -3057,13 +3057,13 @@ def _basic_food_project_dict(project_id, asset_dir, *, status="generating_concep
         "fields": {
             "event_or_business_name": "Lakshmi Kitchen",
             "venue_or_location": "90 Brybar Dr St Johns FL",
-            "contact_info": "+1 732 983 7841",
+            "contact_info": "+1 555 010 0001",
             "notes": "Punugulu; Egg Bonda",
         },
         "locked_facts": [
             {"fact_id": "business_name", "label": "Business", "value": "Lakshmi Kitchen", "source": "customer_profile", "required": True},
             {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr St Johns FL", "source": "customer_profile", "required": True},
-            {"fact_id": "contact_phone", "label": "Contact", "value": "+1 732 983 7841", "source": "customer_profile", "required": True},
+            {"fact_id": "contact_phone", "label": "Contact", "value": "+1 555 010 0001", "source": "customer_profile", "required": True},
             {"fact_id": "item:0:name", "label": "Item", "value": "Punugulu", "source": "customer_text", "required": True},
             {"fact_id": "item:1:name", "label": "Item", "value": "Egg Bonda", "source": "customer_text", "required": True},
         ],
@@ -3546,7 +3546,7 @@ def _byte_identical_food_project(project_id="F0001"):
     return FlyerProject(
         project_id=project_id,
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         customer_id="CUST0001",
         created_at=now,
         updated_at=now,
@@ -3555,7 +3555,7 @@ def _byte_identical_food_project(project_id="F0001"):
         fields=FlyerRequestFields(
             event_or_business_name="Lakshmi Kitchen",
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+1 732 983 7841",
+            contact_info="+1 555 010 0001",
             preferred_language="en",
             notes="Dosa $6.99; Idli $5.99; Vada $4.99",
             style_preference="warm festive south-indian, premium readable",
@@ -3563,7 +3563,7 @@ def _byte_identical_food_project(project_id="F0001"):
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+1 732 983 7841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+1 555 010 0001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="item:0:name", label="Item", value="Dosa", source="customer_text", required=True),
             FlyerLockedFact(fact_id="item:0:price", label="Price", value="$6.99", source="customer_text", required=True),
             FlyerLockedFact(fact_id="item:1:name", label="Item", value="Idli", source="customer_text", required=True),
@@ -4388,7 +4388,7 @@ def _run_premium_repair_case(monkeypatch, tmp_path, *, repair_passes_on, flag="1
         monkeypatch.delenv("FLYER_PREMIUM_REPAIR", raising=False)
     else:
         monkeypatch.setenv("FLYER_PREMIUM_REPAIR", flag)
-    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
 
     state_path = tmp_path / "projects.json"
     audit_path = tmp_path / "decisions.log"
@@ -4556,7 +4556,7 @@ def test_premium_repair_introducing_fabrication_is_discarded(monkeypatch, tmp_pa
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
 
     state_path = tmp_path / "projects.json"
     audit_path = tmp_path / "decisions.log"
@@ -4647,7 +4647,7 @@ def test_failed_premium_repair_leaves_original_preview_byte_identical(monkeypatc
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
 
     state_path = tmp_path / "projects.json"
     audit_path = tmp_path / "decisions.log"
@@ -4756,7 +4756,7 @@ def test_premium_repair_non_flyer_render_error_does_not_crash_run(monkeypatch, t
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
 
     state_path = tmp_path / "projects.json"
     audit_path = tmp_path / "decisions.log"
@@ -4909,7 +4909,7 @@ def test_shipped_flyer_with_premium_repair_qa_not_made_manual_by_backfill(monkey
     shipped = {
         "project_id": "F0001",
         "status": "awaiting_final_approval",
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "created_at": now,
         "updated_at": now,
         "original_message_id": "wamid.f0001",
@@ -4924,7 +4924,7 @@ def test_shipped_flyer_with_premium_repair_qa_not_made_manual_by_backfill(monkey
     control = {
         "project_id": "F0002",
         "status": "awaiting_final_approval",
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "created_at": now,
         "updated_at": now,
         "original_message_id": "wamid.f0002",
@@ -5010,7 +5010,7 @@ def test_premium_repair_skipped_no_instruction(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
 
     state_path = tmp_path / "projects.json"
     audit_path = tmp_path / "decisions.log"
@@ -5116,7 +5116,7 @@ def _run_multi_concept_premium_repair_case(monkeypatch, tmp_path, *, per_concept
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
 
     state_path = tmp_path / "projects.json"
     audit_path = tmp_path / "decisions.log"
@@ -5260,7 +5260,7 @@ def _project_lakshmi(monkeypatch_module, locked_fact_ids):
             continue
         facts.append(FlyerLockedFact(fact_id=fid, label=fid, value="x", source="customer_text"))
     return FlyerProject(
-        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        project_id="F0174", status="intake_started", customer_phone="+15550100001",
         created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
         updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
         original_message_id="m-F0174", raw_request="Any item $7.99", locked_facts=facts,
@@ -5323,7 +5323,7 @@ def _f0174_state(tmp_path):
     now = datetime(2026, 6, 18, tzinfo=timezone.utc).isoformat()
     facts = [
         {"fact_id": "business_name", "label": "Business", "value": "Lakshmi's Kitchen", "source": "customer_profile"},
-        {"fact_id": "contact_phone", "label": "Contact", "value": "+17329837841", "source": "customer_profile"},
+        {"fact_id": "contact_phone", "label": "Contact", "value": "+15550100001", "source": "customer_profile"},
         {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr St Johns FL", "source": "customer_profile"},
         {"fact_id": "campaign_title", "label": "Campaign", "value": "Weekend Specials", "source": "customer_text"},
         {"fact_id": "pricing_structure", "label": "Pricing", "value": "Any item $7.99", "source": "customer_text"},
@@ -5335,7 +5335,7 @@ def _f0174_state(tmp_path):
         facts.append({"fact_id": f"item:{i}:price", "label": f"Price {i}", "value": "$7.99", "source": "customer_text"})
     state_path = tmp_path / "projects.json"
     state_path.write_text(json.dumps({"schema_version": 1, "next_sequence": 175, "projects": [{
-        "project_id": "F0174", "status": "generating_concepts", "customer_phone": "+17329837841",
+        "project_id": "F0174", "status": "generating_concepts", "customer_phone": "+15550100001",
         "created_at": now, "updated_at": now, "original_message_id": "m-F0174",
         "raw_request": "Weekend Specials. Any item $7.99. Idli, Dosa, Vada, Uttapam, Pongal, Sambar.",
         "locked_facts": facts,
@@ -5357,7 +5357,7 @@ def test_rung_recovers_f0174_ships_on_qa_pass(monkeypatch, tmp_path, capsys):
     state_path = _f0174_state(tmp_path)
     asset_dir = tmp_path / "assets"; asset_dir.mkdir()
     monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     state = {"n": 0, "forced": False}
     def fake_render(project, _dir, **kwargs):
@@ -5396,7 +5396,7 @@ def test_rung_qa_fail_falls_through_to_manual(monkeypatch, tmp_path):
     state_path = _f0174_state(tmp_path)
     asset_dir = tmp_path / "assets"; asset_dir.mkdir()
     monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     def fake_render(project, _dir, **kwargs):
         p = asset_dir / f"{project.project_id}-C1.png"; p.write_bytes(b"x")
@@ -5474,7 +5474,7 @@ def test_rung_qa_fail_fenced_to_manual(monkeypatch, tmp_path):
     state_path = _f0174_state(tmp_path)
     asset_dir = tmp_path / "assets"; asset_dir.mkdir()
     monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     def fake_render(project, _dir, **kwargs):
         p = asset_dir / f"{project.project_id}-C1.png"; p.write_bytes(b"x")
@@ -5512,7 +5512,7 @@ def test_rung_success_does_not_double_emit_integrated_passed(monkeypatch, tmp_pa
     state_path = _f0174_state(tmp_path)
     asset_dir = tmp_path / "assets"; asset_dir.mkdir()
     monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
 
     appended_entries = []
@@ -5567,7 +5567,7 @@ def test_rung_render_exception_fails_closed_to_manual(monkeypatch, tmp_path, cap
     state_path = _f0174_state(tmp_path)
     asset_dir = tmp_path / "assets"; asset_dir.mkdir()
     monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
 
     render_n = {"n": 0}
@@ -5630,7 +5630,7 @@ def test_rung_success_persists_deterministic_recovery_flag(monkeypatch, tmp_path
     state_path = _f0174_state(tmp_path)
     asset_dir = tmp_path / "assets"; asset_dir.mkdir()
     monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     call_count = {"n": 0}
 

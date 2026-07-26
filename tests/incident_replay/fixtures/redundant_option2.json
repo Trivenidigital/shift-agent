@@ -1,0 +1,41 @@
+{
+  "incident_id": "redundant-option2",
+  "description": "A redundant 'Option 2' repeated after Option 2 is already selected is idempotent: a single acknowledgement, no new proposal set, no re-quote, no duplicate selection. Deterministic proof: test_catering_turn_arbitration_e2e.py.",
+  "pseudonymized_transcript": [
+    {
+      "from": "+15550100003",
+      "text": "Option 2 please."
+    }
+  ],
+  "initial_state": {
+    "proposal_sets": [
+      {
+        "set_id": "PSET-0001",
+        "selected": "Option 2",
+        "quote_status": "priced"
+      }
+    ]
+  },
+  "expected_route": "catering_redundant_selection",
+  "expected_mutations": [],
+  "forbidden_mutations": [
+    "create_duplicate_proposal_set",
+    "duplicate_selection",
+    "requote_selected_option"
+  ],
+  "expected_logical_sends": 1,
+  "expected_audit_identities": [
+    "+15550100003"
+  ],
+  "expected_final_state": {
+    "proposal_sets": [
+      {
+        "set_id": "PSET-0001",
+        "selected": "Option 2",
+        "quote_status": "priced"
+      }
+    ]
+  },
+  "pii_safe": true,
+  "additive_only": true
+}

@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from agents.flyer.render import build_image_generation_prompt
 from schemas import FlyerLockedFact, FlyerProject, FlyerRequestFields
 
-PHONE = "+17329837841"
+PHONE = "+15550100001"
 
 
 def _F(fid, value):
@@ -95,7 +95,7 @@ def test_flag_on_keeps_fact_keys_out_of_renderable_text(monkeypatch):
     assert "business_name" not in section
     assert "pricing_structure" not in section
     assert "item:0" not in section
-    assert "Call +17329837841" in section  # phone typeset as display text
+    assert "Call +15550100001" in section  # phone typeset as display text
 
 
 def test_flag_on_uniform_price_items_are_name_only(monkeypatch):

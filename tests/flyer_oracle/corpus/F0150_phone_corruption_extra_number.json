@@ -1,8 +1,8 @@
 {
   "id": "F0150",
   "title": "phone corruption - extra wrong phone alongside the correct one must block (P1-1)",
-  "request": "Lunch combo flyer: Idli $8.99, Dosa $8.99. Call +1 732 983 7841.",
-  "profile": {"business_name": "Lakshmis Kitchen", "public_phone": "+1 732 983 7841", "business_address": "90 Brybar Dr"},
+  "request": "Lunch combo flyer: Idli $8.99, Dosa $8.99. Call +1 555 010 0001.",
+  "profile": {"business_name": "Sample Caterer", "public_phone": "+1 555 010 0001", "business_address": "100 Example Rd"},
   "config": {"creative_planner": {"enabled": false, "enabled_categories": []}},
   "expect": {
     "locked_facts": [
@@ -14,7 +14,7 @@
     "expected_total_items": 2,
     "visual_qa": {
       "status": "failed",
-      "ocr_text": "Lakshmis Kitchen Lunch Combo Idli $8.99 Dosa $8.99 Call +1 732 983 7841 or +1 732 983 7899",
+      "ocr_text": "Sample Caterer Lunch Combo Idli $8.99 Dosa $8.99 Call +1 555 010 0001 or +1 555 010 0099",
       "must_include_blockers": ["unverified phone number visible"]
     }
   }

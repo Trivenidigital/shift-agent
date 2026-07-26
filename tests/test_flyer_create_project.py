@@ -126,10 +126,10 @@ def test_evening_snacks_request_uses_profile_business_and_campaign_title(tmp_pat
     _write_customer(
         customers_path,
         category="Indian Restaurant",
-        phone="+17329837841",
+        phone="+15550100001",
         business_name="Lakshmis Kitchn",
         business_address="90 Brybar Dr St Johns FL",
-        primary_chat_id="17329837841@s.whatsapp.net",
+        primary_chat_id="15550100001@s.whatsapp.net",
     )
 
     raw_request = (
@@ -138,8 +138,8 @@ def test_evening_snacks_request_uses_profile_business_and_campaign_title(tmp_pat
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
-        "--chat-id", "17329837841@s.whatsapp.net",
+        "--customer-phone", "+15550100001",
+        "--chat-id", "15550100001@s.whatsapp.net",
         "--message-id", "m-evening-snacks",
         "--raw-request", raw_request,
         "--state-path", str(projects_path),
@@ -152,11 +152,11 @@ def test_evening_snacks_request_uses_profile_business_and_campaign_title(tmp_pat
 
     assert project["status"] == "intake_started"
     assert project["customer_id"] == "CUST0001"
-    assert project["chat_id"] == "17329837841@s.whatsapp.net"
+    assert project["chat_id"] == "15550100001@s.whatsapp.net"
     assert project["fields"]["event_or_business_name"] == "Evening Snacks"
     assert facts["business_name"]["value"] == "Lakshmis Kitchn"
     assert facts["business_name"]["source"] == "customer_profile"
-    assert facts["contact_phone"]["value"] == "+17329837841"
+    assert facts["contact_phone"]["value"] == "+15550100001"
     assert facts["contact_phone"]["source"] == "customer_profile"
     assert facts["location"]["value"] == "90 Brybar Dr St Johns FL"
     assert facts["location"]["source"] == "customer_profile"
@@ -179,7 +179,7 @@ def test_flyer_project_store_accepts_legacy_rows_without_origin_fields():
         "projects": [{
             "project_id": "F0001",
             "status": "intake_started",
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "created_at": now,
             "updated_at": now,
             "original_message_id": "wamid.legacy",
@@ -198,7 +198,7 @@ def test_sample_snacks_request_locks_unpriced_menu_items(tmp_path, monkeypatch, 
     _write_customer(
         customers_path,
         category="Indian Restaurant",
-        phone="+15713830763",
+        phone="+15550100005",
         business_name="MK kitchen",
         business_address="23596 prosperity ridge pl Ashburn Va 20148",
         primary_chat_id="104805909434618@lid",
@@ -212,7 +212,7 @@ def test_sample_snacks_request_locks_unpriced_menu_items(tmp_path, monkeypatch, 
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+15713830763",
+        "--customer-phone", "+15550100005",
         "--chat-id", "104805909434618@lid",
         "--message-id", "m-mk-snacks",
         "--raw-request", raw_request,
@@ -242,10 +242,10 @@ def test_biryani_price_for_request_locks_real_items_not_instruction_fragments(tm
     _write_customer(
         customers_path,
         category="Indian Restaurant",
-        phone="+17329837841",
+        phone="+15550100001",
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr St Johns FL",
-        primary_chat_id="201975216009469@lid",
+        primary_chat_id="100000000000001@lid",
     )
 
     raw_request = (
@@ -256,8 +256,8 @@ def test_biryani_price_for_request_locks_real_items_not_instruction_fragments(tm
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
-        "--chat-id", "201975216009469@lid",
+        "--customer-phone", "+15550100001",
+        "--chat-id", "100000000000001@lid",
         "--message-id", "m-biryani-prices",
         "--raw-request", raw_request,
         "--state-path", str(projects_path),
@@ -284,10 +284,10 @@ def test_indochinese_famous_items_request_expands_menu_and_uses_profile_location
     _write_customer(
         customers_path,
         category="Indian Restaurant",
-        phone="+17329837841",
+        phone="+15550100001",
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr St Johns FL",
-        primary_chat_id="201975216009469@lid",
+        primary_chat_id="100000000000001@lid",
     )
 
     raw_request = (
@@ -297,8 +297,8 @@ def test_indochinese_famous_items_request_expands_menu_and_uses_profile_location
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
-        "--chat-id", "201975216009469@lid",
+        "--customer-phone", "+15550100001",
+        "--chat-id", "100000000000001@lid",
         "--message-id", "m-indochinese",
         "--raw-request", raw_request,
         "--state-path", str(projects_path),
@@ -333,10 +333,10 @@ def test_lakshmi_south_indian_snack_request_reaches_integrated_menu_path(tmp_pat
     _write_customer(
         customers_path,
         category="Indian Restaurant",
-        phone="+17329837841",
+        phone="+15550100001",
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr St Johns FL",
-        primary_chat_id="201975216009469@lid",
+        primary_chat_id="100000000000001@lid",
     )
 
     raw_request = (
@@ -345,8 +345,8 @@ def test_lakshmi_south_indian_snack_request_reaches_integrated_menu_path(tmp_pat
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
-        "--chat-id", "201975216009469@lid",
+        "--customer-phone", "+15550100001",
+        "--chat-id", "100000000000001@lid",
         "--message-id", "m-lakshmi-snacks",
         "--raw-request", raw_request,
         "--state-path", str(projects_path),
@@ -390,10 +390,10 @@ def test_discount_offer_does_not_become_menu_item_prices(tmp_path, monkeypatch, 
     _write_customer(
         customers_path,
         category="Indian Restaurant",
-        phone="+17329837841",
+        phone="+15550100001",
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr St Johns FL",
-        primary_chat_id="201975216009469@lid",
+        primary_chat_id="100000000000001@lid",
     )
 
     raw_request = (
@@ -402,8 +402,8 @@ def test_discount_offer_does_not_become_menu_item_prices(tmp_path, monkeypatch, 
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
-        "--chat-id", "201975216009469@lid",
+        "--customer-phone", "+15550100001",
+        "--chat-id", "100000000000001@lid",
         "--message-id", "m-discount-not-price",
         "--raw-request", raw_request,
         "--state-path", str(projects_path),
@@ -427,10 +427,10 @@ def test_explicit_item_prices_outrank_famous_item_expansion(tmp_path, monkeypatc
     _write_customer(
         customers_path,
         category="Indian Restaurant",
-        phone="+17329837841",
+        phone="+15550100001",
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr St Johns FL",
-        primary_chat_id="201975216009469@lid",
+        primary_chat_id="100000000000001@lid",
     )
 
     raw_request = (
@@ -439,8 +439,8 @@ def test_explicit_item_prices_outrank_famous_item_expansion(tmp_path, monkeypatc
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
-        "--chat-id", "201975216009469@lid",
+        "--customer-phone", "+15550100001",
+        "--chat-id", "100000000000001@lid",
         "--message-id", "m-explicit-indochinese",
         "--raw-request", raw_request,
         "--state-path", str(projects_path),
@@ -465,10 +465,10 @@ def test_indochinese_famous_item_expansion_supports_ten_items(tmp_path, monkeypa
     _write_customer(
         customers_path,
         category="Indian Restaurant",
-        phone="+17329837841",
+        phone="+15550100001",
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr St Johns FL",
-        primary_chat_id="201975216009469@lid",
+        primary_chat_id="100000000000001@lid",
     )
 
     raw_request = (
@@ -477,8 +477,8 @@ def test_indochinese_famous_item_expansion_supports_ten_items(tmp_path, monkeypa
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
-        "--chat-id", "201975216009469@lid",
+        "--customer-phone", "+15550100001",
+        "--chat-id", "100000000000001@lid",
         "--message-id", "m-indochinese-ten",
         "--raw-request", raw_request,
         "--state-path", str(projects_path),
@@ -504,13 +504,13 @@ def test_profile_hydration_uses_chat_id_when_phone_does_not_match(tmp_path, monk
         phone="+19045550104",
         business_name="Lakshmis Kitchn",
         business_address="90 Brybar Dr St Johns FL",
-        primary_chat_id="17329837841@lid",
+        primary_chat_id="15550100001@lid",
     )
 
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
         "--customer-phone", "+19999999999",
-        "--chat-id", "17329837841@lid",
+        "--chat-id", "15550100001@lid",
         "--message-id", "m-lid-profile",
         "--raw-request", "Create flyer for weekend lunch specials. Contact from customer profile.",
         "--state-path", str(projects_path),
@@ -552,16 +552,16 @@ def test_explicit_business_name_override_is_allowed_and_auditable(
     _write_customer(
         customers_path,
         category="Indian Restaurant",
-        phone="+17329837841",
+        phone="+15550100001",
         business_name="Lakshmis Kitchn",
         business_address="90 Brybar Dr St Johns FL",
-        primary_chat_id="17329837841@s.whatsapp.net",
+        primary_chat_id="15550100001@s.whatsapp.net",
     )
 
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
-        "--chat-id", "17329837841@s.whatsapp.net",
+        "--customer-phone", "+15550100001",
+        "--chat-id", "15550100001@s.whatsapp.net",
         "--message-id", "m-business-override",
         "--raw-request", raw_request,
         "--state-path", str(projects_path),
@@ -670,11 +670,11 @@ def test_create_project_extracts_lakshmi_dosa_special_without_wrong_business_ble
             "customer_id": "CUST0001",
             "business_name": "Lakshmi's Kitchen",
             "business_address": "90 Brybar Dr St Johns FL",
-            "primary_chat_id": "201975216009469@lid",
-            "onboarded_by_phone": "+17329837841",
-            "public_phone": "+17329837841",
-            "business_whatsapp_number": "+17329837841",
-            "authorized_request_numbers": ["+17329837841"],
+            "primary_chat_id": "100000000000001@lid",
+            "onboarded_by_phone": "+15550100001",
+            "public_phone": "+15550100001",
+            "business_whatsapp_number": "+15550100001",
+            "authorized_request_numbers": ["+15550100001"],
             "business_category": "Indian restaurant",
             "preferred_language": "mixed",
             "plan_id": "trial",
@@ -691,7 +691,7 @@ def test_create_project_extracts_lakshmi_dosa_special_without_wrong_business_ble
 
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
+        "--customer-phone", "+15550100001",
         "--message-id", "lakshmi-dosa-brief",
         "--raw-request", (
             "Create a flyer for Dosa special night, every Thursday from 7 to 10 PM, "
@@ -706,11 +706,11 @@ def test_create_project_extracts_lakshmi_dosa_special_without_wrong_business_ble
     fields = project["fields"]
 
     assert project["customer_id"] == "CUST0001"
-    assert project["chat_id"] == "201975216009469@lid"
+    assert project["chat_id"] == "100000000000001@lid"
     assert fields["event_or_business_name"] == "Dosa special night"
     assert fields["event_time"] == "Every Thursday from 7 to 10 PM"
     assert fields["venue_or_location"] == "90 Brybar Dr St Johns FL"
-    assert fields["contact_info"] == "+17329837841"
+    assert fields["contact_info"] == "+15550100001"
     assert "$6.99" in fields["notes"]
     assert "Triveni" not in json.dumps(project)
     assert module.FlyerProject.model_validate(project).fields.missing_required_fields() == []
@@ -760,11 +760,11 @@ def test_create_project_cleans_logo_prompt_business_and_bad_venue(tmp_path, monk
             "customer_id": "CUST0001",
             "business_name": "Lakshmis Kitchn",
             "business_address": "90 Brybar Dr St Johns FL",
-            "primary_chat_id": "17329837841@s.whatsapp.net",
-            "onboarded_by_phone": "+17329837841",
-            "public_phone": "+17329837841",
-            "business_whatsapp_number": "+17329837841",
-            "authorized_request_numbers": ["+17329837841"],
+            "primary_chat_id": "15550100001@s.whatsapp.net",
+            "onboarded_by_phone": "+15550100001",
+            "public_phone": "+15550100001",
+            "business_whatsapp_number": "+15550100001",
+            "authorized_request_numbers": ["+15550100001"],
             "business_category": "Indian Restaurant",
             "preferred_language": "en",
             "plan_id": "trial",
@@ -781,7 +781,7 @@ def test_create_project_cleans_logo_prompt_business_and_bad_venue(tmp_path, monk
 
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
+        "--customer-phone", "+15550100001",
         "--message-id", "m-logo",
         "--raw-request", (
             "Create a premium local restaurant flyer for Lakshmis Kitchn using the attached logo. "
@@ -821,11 +821,11 @@ def test_create_project_records_reference_extraction_provider_failure(monkeypatc
             "customer_id": "CUST0001",
             "business_name": "Lakshmis Kitchn",
             "business_address": "90 Brybar Dr St Johns FL",
-            "primary_chat_id": "17329837841@s.whatsapp.net",
-            "onboarded_by_phone": "+17329837841",
-            "public_phone": "+17329837841",
-            "business_whatsapp_number": "+17329837841",
-            "authorized_request_numbers": ["+17329837841"],
+            "primary_chat_id": "15550100001@s.whatsapp.net",
+            "onboarded_by_phone": "+15550100001",
+            "public_phone": "+15550100001",
+            "business_whatsapp_number": "+15550100001",
+            "authorized_request_numbers": ["+15550100001"],
             "business_category": "Indian Restaurant",
             "preferred_language": "en",
             "plan_id": "trial",
@@ -841,7 +841,7 @@ def test_create_project_records_reference_extraction_provider_failure(monkeypatc
     }), encoding="utf-8")
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
+        "--customer-phone", "+15550100001",
         "--message-id", "m-reference",
         "--raw-request", "Create flyer. Extract item names and prices from attached sample flyer.",
         "--reference-media-path", str(reference),
@@ -871,10 +871,10 @@ def test_create_project_reference_inspiration_low_confidence_does_not_dead_end(m
     _write_customer(
         customers_path,
         category="Indian restaurant",
-        phone="+17329837841",
+        phone="+15550100001",
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr St Johns FL",
-        primary_chat_id="17329837841@s.whatsapp.net",
+        primary_chat_id="15550100001@s.whatsapp.net",
     )
 
     class NoPriceReferenceProvider:
@@ -891,8 +891,8 @@ def test_create_project_reference_inspiration_low_confidence_does_not_dead_end(m
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
-        "--chat-id", "17329837841@s.whatsapp.net",
+        "--customer-phone", "+15550100001",
+        "--chat-id", "15550100001@s.whatsapp.net",
         "--message-id", "m-reference-inspiration",
         "--raw-request", (
             "Create a festive flyer for Lakshmi's Kitchen. "
@@ -924,7 +924,7 @@ def test_create_project_image_reference_extracts_locked_menu_facts(monkeypatch, 
     asset_dir = tmp_path / "assets"
     reference = tmp_path / "menu.png"
     reference.write_bytes(b"fake image bytes")
-    _write_customer(customers_path, category="Indian grocery", phone="+17329837841")
+    _write_customer(customers_path, category="Indian grocery", phone="+15550100001")
 
     class FakeReferenceProvider:
         provider_name = "fake_vision"
@@ -940,7 +940,7 @@ def test_create_project_image_reference_extracts_locked_menu_facts(monkeypatch, 
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
+        "--customer-phone", "+15550100001",
         "--message-id", "m-image-menu",
         "--raw-request", "Create a menu flyer. Extract item names and prices from attached sample flyer.",
         "--reference-media-path", str(reference),
@@ -969,7 +969,7 @@ def test_create_project_typed_facts_override_reference_facts(monkeypatch, tmp_pa
     projects_path = tmp_path / "projects.json"
     reference = tmp_path / "menu.png"
     reference.write_bytes(b"fake image bytes")
-    _write_customer(customers_path, category="Indian grocery", phone="+17329837841")
+    _write_customer(customers_path, category="Indian grocery", phone="+15550100001")
 
     class FakeReferenceProvider:
         provider_name = "fake_vision"
@@ -985,7 +985,7 @@ def test_create_project_typed_facts_override_reference_facts(monkeypatch, tmp_pa
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
+        "--customer-phone", "+15550100001",
         "--message-id", "m-typed-wins",
         "--raw-request", (
             "Create a menu flyer with Idly $6.50 and Dosa $8.50. "
@@ -1014,7 +1014,7 @@ def test_create_project_logo_only_image_does_not_become_menu_facts(monkeypatch, 
     projects_path = tmp_path / "projects.json"
     reference = tmp_path / "logo.png"
     reference.write_bytes(b"fake image bytes")
-    _write_customer(customers_path, category="Indian grocery", phone="+17329837841")
+    _write_customer(customers_path, category="Indian grocery", phone="+15550100001")
 
     class ExplodingReferenceProvider:
         provider_name = "should_not_run"
@@ -1030,7 +1030,7 @@ def test_create_project_logo_only_image_does_not_become_menu_facts(monkeypatch, 
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
+        "--customer-phone", "+15550100001",
         "--message-id", "m-logo-ref",
         "--raw-request", "Create a premium flyer for Lakshmis Kitchen using this as our logo.",
         "--reference-media-path", str(reference),
@@ -1054,10 +1054,10 @@ def test_create_project_pdf_reference_queues_manual_review(monkeypatch, tmp_path
     projects_path = tmp_path / "projects.json"
     reference = tmp_path / "menu.pdf"
     reference.write_bytes(b"%PDF-1.4 fake")
-    _write_customer(customers_path, category="Indian grocery", phone="+17329837841")
+    _write_customer(customers_path, category="Indian grocery", phone="+15550100001")
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
+        "--customer-phone", "+15550100001",
         "--message-id", "m-pdf-menu",
         "--raw-request", "Create a menu flyer. Extract item names and prices from attached sample menu.",
         "--reference-media-path", str(reference),
@@ -1083,10 +1083,10 @@ def test_create_project_pdf_logo_queues_manual_review_not_generic_generation(mon
     projects_path = tmp_path / "projects.json"
     reference = tmp_path / "logo.pdf"
     reference.write_bytes(b"%PDF-1.4 fake")
-    _write_customer(customers_path, category="Indian grocery", phone="+17329837841")
+    _write_customer(customers_path, category="Indian grocery", phone="+15550100001")
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
+        "--customer-phone", "+15550100001",
         "--message-id", "m-pdf-logo",
         "--raw-request", "Create a premium flyer for Lakshmis Kitchen using this as our logo.",
         "--reference-media-path", str(reference),
@@ -1154,11 +1154,11 @@ def test_create_project_names_recurring_breakfast_specials_cleanly(tmp_path, mon
             "customer_id": "CUST0001",
             "business_name": "Lakshmis Kitchn",
             "business_address": "90 Brybar Dr St Johns FL",
-            "primary_chat_id": "201975216009469@lid",
+            "primary_chat_id": "100000000000001@lid",
             "onboarded_by_phone": "+19045550104",
-            "public_phone": "+17329837841",
-            "business_whatsapp_number": "+17329837841",
-            "authorized_request_numbers": ["+17329837841", "+19045550104"],
+            "public_phone": "+15550100001",
+            "business_whatsapp_number": "+15550100001",
+            "authorized_request_numbers": ["+15550100001", "+19045550104"],
             "business_category": "Indian restaurant",
             "preferred_language": "te",
             "plan_id": "trial",
@@ -1189,7 +1189,7 @@ def test_create_project_names_recurring_breakfast_specials_cleanly(tmp_path, mon
     project = json.loads(capsys.readouterr().out)
 
     assert project["fields"]["event_or_business_name"] == "Weekend Breakfast Specials"
-    assert project["fields"]["contact_info"] == "+17329837841"
+    assert project["fields"]["contact_info"] == "+15550100001"
 
 
 def test_create_project_parses_chloe_salon_service_request_without_prompt_leak(monkeypatch):
@@ -1232,10 +1232,10 @@ def test_create_project_keeps_explicit_english_only_over_profile_language(tmp_pa
     _write_customer(
         customers_path,
         category="Indian Restaurant",
-        phone="+17329837841",
+        phone="+15550100001",
         business_name="Lakshmis Kitchn",
         business_address="90 Brybar Dr St Johns FL",
-        primary_chat_id="17329837841@s.whatsapp.net",
+        primary_chat_id="15550100001@s.whatsapp.net",
     )
     store = json.loads(customers_path.read_text(encoding="utf-8"))
     store["customers"][0]["preferred_language"] = "te"
@@ -1243,8 +1243,8 @@ def test_create_project_keeps_explicit_english_only_over_profile_language(tmp_pa
 
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
-        "--chat-id", "17329837841@s.whatsapp.net",
+        "--customer-phone", "+15550100001",
+        "--chat-id", "15550100001@s.whatsapp.net",
         "--message-id", "m-english-only",
         "--raw-request", (
             "Create a Ganesh festival flyer. Language: English only. "
@@ -1273,11 +1273,11 @@ def test_create_project_can_queue_exact_reference_edit_without_template_title(tm
             "customer_id": "CUST0001",
             "business_name": "Lakshmis Kitchen",
             "business_address": "90 Brybar Dr St Johns FL",
-            "primary_chat_id": "201975216009469@lid",
+            "primary_chat_id": "100000000000001@lid",
             "onboarded_by_phone": "+19045550104",
-            "public_phone": "+17329837841",
-            "business_whatsapp_number": "+17329837841",
-            "authorized_request_numbers": ["+17329837841", "+19045550104"],
+            "public_phone": "+15550100001",
+            "business_whatsapp_number": "+15550100001",
+            "authorized_request_numbers": ["+15550100001", "+19045550104"],
             "business_category": "Indian restaurant",
             "preferred_language": "en",
             "plan_id": "trial",
@@ -1403,7 +1403,7 @@ def test_create_flyer_project_queues_manual_review_on_missing_required_facts(tmp
 
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
+        "--customer-phone", "+15550100001",
         "--message-id", "missing-required-msg",
         "--raw-request", "Make a flyer please.",
         "--state-path", str(projects_path),
@@ -1447,11 +1447,11 @@ def test_create_flyer_project_does_not_queue_when_required_facts_present(tmp_pat
 
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
+        "--customer-phone", "+15550100001",
         "--message-id", "complete-msg",
         "--raw-request", (
             "Create flyer for Lakshmis Kitchen Thursday dinner special. "
-            "Contact +17329837841. Idly $7 and Dosa $8."
+            "Contact +15550100001. Idly $7 and Dosa $8."
         ),
         "--state-path", str(projects_path),
         "--customer-state-path", str(customers_path),
@@ -1590,7 +1590,7 @@ def test_populate_forbidden_substrings_brand_phone_but_not_menu_item(tmp_path):
         requested_replacements={
             "Triveni Express": "Lakshmi's Kitchen",
             "Rice": "Jeera Rice",
-            "555-010-0100": "+17329837841",
+            "555-010-0100": "+15550100001",
         },
     )
     _populate_forbidden_substrings(contract)
@@ -1673,7 +1673,7 @@ def test_create_project_emits_source_contract_extracted_audit(monkeypatch, tmp_p
     asset_dir = tmp_path / "assets"
     reference = tmp_path / "src.png"
     reference.write_bytes(b"fake")
-    _write_customer(customers_path, category="Indian grocery", phone="+17329837841")
+    _write_customer(customers_path, category="Indian grocery", phone="+15550100001")
 
     captured = []
 
@@ -1725,7 +1725,7 @@ def test_create_project_emits_source_contract_extracted_audit(monkeypatch, tmp_p
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
+        "--customer-phone", "+15550100001",
         "--message-id", "m-audit",
         "--raw-request",
         # Must contain a `replace|change|edit` verb + `this/attached/source flyer`
@@ -1760,7 +1760,7 @@ def test_create_project_emits_audit_even_on_provider_unavailable(monkeypatch, tm
     asset_dir = tmp_path / "assets"
     reference = tmp_path / "src.png"
     reference.write_bytes(b"fake")
-    _write_customer(customers_path, category="Indian grocery", phone="+17329837841")
+    _write_customer(customers_path, category="Indian grocery", phone="+15550100001")
 
     captured = []
 
@@ -1800,7 +1800,7 @@ def test_create_project_emits_audit_even_on_provider_unavailable(monkeypatch, tm
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
+        "--customer-phone", "+15550100001",
         "--message-id", "m-audit-pu",
         "--raw-request",
         # Must contain a `replace|change|edit` verb + `this/attached/source flyer`
@@ -1826,10 +1826,10 @@ def test_diwali_sale_request_locks_semantic_campaign_pricing_and_offer(tmp_path,
     _write_customer(
         customers_path,
         category="Indian Restaurant",
-        phone="+17329837841",
+        phone="+15550100001",
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr St Johns FL",
-        primary_chat_id="17329837841@s.whatsapp.net",
+        primary_chat_id="15550100001@s.whatsapp.net",
     )
     raw_request = (
         "Create a flyer for Diwali sale, All items 5-10% off. "
@@ -1837,8 +1837,8 @@ def test_diwali_sale_request_locks_semantic_campaign_pricing_and_offer(tmp_path,
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
-        "--chat-id", "17329837841@s.whatsapp.net",
+        "--customer-phone", "+15550100001",
+        "--chat-id", "15550100001@s.whatsapp.net",
         "--message-id", "m-diwali",
         "--raw-request", raw_request,
         "--state-path", str(projects_path),
@@ -1864,10 +1864,10 @@ def test_evening_snacks_sale_request_locks_price_offer_schedule_and_end(tmp_path
     _write_customer(
         customers_path,
         category="Indian Restaurant",
-        phone="+17329837841",
+        phone="+15550100001",
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr St Johns FL",
-        primary_chat_id="17329837841@s.whatsapp.net",
+        primary_chat_id="15550100001@s.whatsapp.net",
     )
     raw_request = (
         "Create a flyer for evening snacks sale, Wednesday and Thursday, any item $7.99. "
@@ -1875,8 +1875,8 @@ def test_evening_snacks_sale_request_locks_price_offer_schedule_and_end(tmp_path
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
-        "--chat-id", "17329837841@s.whatsapp.net",
+        "--customer-phone", "+15550100001",
+        "--chat-id", "15550100001@s.whatsapp.net",
         "--message-id", "m-snacks",
         "--raw-request", raw_request,
         "--state-path", str(projects_path),
@@ -1905,15 +1905,15 @@ def test_sw4_price_conflict_routes_to_manual_review(tmp_path, monkeypatch, capsy
     _write_customer(
         customers_path,
         category="Indian Restaurant",
-        phone="+17329837841",
+        phone="+15550100001",
         business_name="Lakshmis Kitchn",
         business_address="90 Brybar Dr St Johns FL",
-        primary_chat_id="17329837841@s.whatsapp.net",
+        primary_chat_id="15550100001@s.whatsapp.net",
     )
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
-        "--chat-id", "17329837841@s.whatsapp.net",
+        "--customer-phone", "+15550100001",
+        "--chat-id", "15550100001@s.whatsapp.net",
         "--message-id", "m-price-conflict",
         "--raw-request", "weekend special flyer. Biryani $10. Biryani $12.",
         "--state-path", str(projects_path),

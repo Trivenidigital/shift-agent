@@ -7,11 +7,11 @@ def test_includes_missing_and_removes_fabricated():
                 "fabricated price visible: $3.99",
                 "fabricated offer claim visible: Limited Time Deal"]
     locked = {"business_name": "Lakshmi's Kitchen",
-              "contact_phone": "+1 732-983-7841",
+              "contact_phone": "+1 555-010-0001",
               "item_0": "Punugulu $6.99"}
     instr = build_repair_instruction(blockers, locked)
     # include side
-    assert "+1 732-983-7841" in instr
+    assert "+1 555-010-0001" in instr
     assert "Punugulu $6.99" in instr
     # remove side
     assert "remove" in instr.lower()
@@ -21,9 +21,9 @@ def test_includes_missing_and_removes_fabricated():
 def test_no_fabrication_only_include():
     blockers = ["missing required visible fact: contact_phone"]
     locked = {"business_name": "Lakshmi's Kitchen",
-              "contact_phone": "+1 732-983-7841"}
+              "contact_phone": "+1 555-010-0001"}
     instr = build_repair_instruction(blockers, locked)
-    assert "+1 732-983-7841" in instr
+    assert "+1 555-010-0001" in instr
     # remove-clause still present but with no specific fabricated items
     assert "remove" in instr.lower()
 
@@ -35,12 +35,12 @@ def test_empty_blockers_still_returns_constraint():
 def test_missing_clause_resolves_to_value():
     blockers = ["missing required visible fact: contact_phone"]
     locked = {"business_name": "Lakshmi's Kitchen",
-              "contact_phone": "+1 732-983-7841"}
+              "contact_phone": "+1 555-010-0001"}
     instr = build_repair_instruction(blockers, locked)
     # the value (not the fact_id) must appear inside the ENSURE clause
     ensure_idx = instr.find("clearly visible: ")
     assert ensure_idx != -1
-    assert "+1 732-983-7841" in instr[ensure_idx:]
+    assert "+1 555-010-0001" in instr[ensure_idx:]
     assert "contact_phone" not in instr[ensure_idx:]
 
 def test_empty_locked_is_clean():
@@ -144,7 +144,7 @@ def test_premium_instruction_omits_unknown_or_dangerous_prefixes():
         "unverified phone number visible: 614-956-1099",
         "some unrecognized blocker shape",
     ]
-    locked = {"business_name": "Lakshmi's Kitchen", "contact_phone": "+17329837841"}
+    locked = {"business_name": "Lakshmi's Kitchen", "contact_phone": "+15550100001"}
     instr = build_premium_repair_instruction(blockers, locked)
     # No fabricated/phone value leaks into the instruction.
     assert "$3.99" not in instr

@@ -16,7 +16,7 @@ from agents.flyer.render import _creative_director_v2_enabled
 from schemas import FlyerProject
 
 
-def _project(phone: str = "+17329837841") -> FlyerProject:
+def _project(phone: str = "+15550100001") -> FlyerProject:
     return FlyerProject(
         project_id="F0250",
         status="intake_started",
@@ -30,19 +30,19 @@ def _project(phone: str = "+17329837841") -> FlyerProject:
 
 def test_env_unset_returns_false_even_for_allowlisted(monkeypatch):
     monkeypatch.delenv("FLYER_CREATIVE_DIRECTOR_V2", raising=False)
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
-    assert _creative_director_v2_enabled(_project("+17329837841")) is False
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
+    assert _creative_director_v2_enabled(_project("+15550100001")) is False
 
 
 def test_env_on_allowlisted_number_returns_true(monkeypatch):
     monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
-    assert _creative_director_v2_enabled(_project("+17329837841")) is True
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
+    assert _creative_director_v2_enabled(_project("+15550100001")) is True
 
 
 def test_env_on_other_number_returns_false(monkeypatch):
     monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     assert _creative_director_v2_enabled(_project("+19998887777")) is False
 
 
@@ -50,14 +50,14 @@ def test_env_on_empty_allowlist_is_disabled(monkeypatch):
     """FINDING 2 (MAJOR, Codex FINAL review): Flag "1" + UNSET allowlist => DISABLED,
     NOT global. CD v2 must NOT inherit the sibling gates' empty-allowlist-means-global
     behavior — empty/unset allowlist is the broadening footgun the scoped rollout
-    (+17329837841 only) must reject. Pre-fix this returned True (global); post-fix
+    (+15550100001 only) must reject. Pre-fix this returned True (global); post-fix
     False."""
     monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
     monkeypatch.delenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", raising=False)
     assert _creative_director_v2_enabled(_project("+19998887777")) is False
     # Even the intended allowlisted phone is DISABLED when the allowlist is unset —
     # CD v2 requires an explicitly-set non-empty allowlist.
-    assert _creative_director_v2_enabled(_project("+17329837841")) is False
+    assert _creative_director_v2_enabled(_project("+15550100001")) is False
 
 
 def test_env_on_empty_string_allowlist_is_disabled(monkeypatch):
@@ -66,7 +66,7 @@ def test_env_on_empty_string_allowlist_is_disabled(monkeypatch):
     rejects it for every phone (including the intended one)."""
     monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "")
-    assert _creative_director_v2_enabled(_project("+17329837841")) is False
+    assert _creative_director_v2_enabled(_project("+15550100001")) is False
     assert _creative_director_v2_enabled(_project("+19998887777")) is False
 
 
@@ -75,7 +75,7 @@ def test_env_on_whitespace_allowlist_is_disabled(monkeypatch):
     => DISABLED (no member can ever match an empty set)."""
     monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", " , , ")
-    assert _creative_director_v2_enabled(_project("+17329837841")) is False
+    assert _creative_director_v2_enabled(_project("+15550100001")) is False
 
 
 def test_env_const_name(monkeypatch):
@@ -118,7 +118,7 @@ def _facts() -> list[FlyerLockedFact]:
     ]
 
 
-def _project_with_facts(phone: str = "+17329837841") -> FlyerProject:
+def _project_with_facts(phone: str = "+15550100001") -> FlyerProject:
     p = _project(phone)
     p.locked_facts = _facts()
     return p
@@ -161,12 +161,12 @@ def test_render_flag_on_populates_carrier_from_resolved(monkeypatch, tmp_path):
     locked facts (a shared price + weekend schedule → the weekend_one_price headline),
     NOT from the brain's free-text narrative."""
     monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     monkeypatch.setattr(render_module, "propose_creative_brief_v2",
                         lambda *a, **k: _proposed_brief(), raising=True)
     _patch_render_io(monkeypatch)
 
-    project = _project_with_facts("+17329837841")
+    project = _project_with_facts("+15550100001")
     # Give the facts a weekend schedule + title so CCA classifies weekend_one_price.
     project.locked_facts = project.locked_facts + [
         FlyerLockedFact(fact_id="schedule", label="Schedule",
@@ -191,7 +191,7 @@ def test_render_flag_off_skips_propose_and_leaves_carrier_none(monkeypatch, tmp_
     """Flag OFF: creative_direction stays None, propose is NEVER called, and
     locked_facts is unchanged (no materialize_spans mutation)."""
     monkeypatch.delenv("FLYER_CREATIVE_DIRECTOR_V2", raising=False)
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     calls: list[int] = []
 
     def _spy(*_a, **_k):
@@ -201,7 +201,7 @@ def test_render_flag_off_skips_propose_and_leaves_carrier_none(monkeypatch, tmp_
     monkeypatch.setattr(render_module, "propose_creative_brief_v2", _spy, raising=True)
     _patch_render_io(monkeypatch)
 
-    project = _project_with_facts("+17329837841")
+    project = _project_with_facts("+15550100001")
     facts_before = [f.model_dump() for f in project.locked_facts]
     render_module._render_model(
         project, tmp_path / "out.png", concept_id="C1",
@@ -218,12 +218,12 @@ def test_render_flag_on_does_not_mutate_locked_facts(monkeypatch, tmp_path):
     """Flag ON: the V2 propose path NEVER mutates project.locked_facts (no
     materialize_spans on the V2 path). The carrier is populated, facts untouched."""
     monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     monkeypatch.setattr(render_module, "propose_creative_brief_v2",
                         lambda *a, **k: _proposed_brief(), raising=True)
     _patch_render_io(monkeypatch)
 
-    project = _project_with_facts("+17329837841")
+    project = _project_with_facts("+15550100001")
     facts_before = [f.model_dump() for f in project.locked_facts]
     render_module._render_model(
         project, tmp_path / "out.png", concept_id="C1",
@@ -240,12 +240,12 @@ def test_render_flag_on_propose_none_falls_back_to_empty_brief(monkeypatch, tmp_
     from the EMPTY-brief deterministic defaults (hero_name = first item), render NOT
     blocked."""
     monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     monkeypatch.setattr(render_module, "propose_creative_brief_v2",
                         lambda *a, **k: None, raising=True)
     _patch_render_io(monkeypatch)
 
-    project = _project_with_facts("+17329837841")
+    project = _project_with_facts("+15550100001")
     render_module._render_model(
         project, tmp_path / "out.png", concept_id="C1",
         output_format="concept_preview", size=(1080, 1350),
@@ -262,7 +262,7 @@ def test_render_flag_on_propose_raises_leaves_carrier_none(monkeypatch, tmp_path
     """A truly unexpected error in propose/resolve must NOT block the render: the
     block is wrapped, leaving creative_direction None, and _render_model completes."""
     monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
 
     def _boom(*_a, **_k):
         raise RuntimeError("unexpected")
@@ -270,7 +270,7 @@ def test_render_flag_on_propose_raises_leaves_carrier_none(monkeypatch, tmp_path
     monkeypatch.setattr(render_module, "propose_creative_brief_v2", _boom, raising=True)
     _patch_render_io(monkeypatch)
 
-    project = _project_with_facts("+17329837841")
+    project = _project_with_facts("+15550100001")
     render_module._render_model(
         project, tmp_path / "out.png", concept_id="C1",
         output_format="concept_preview", size=(1080, 1350),
@@ -300,12 +300,12 @@ def _intent_brief(request_intent: str) -> FlyerBrief:
 def test_render_flag_on_carries_poster_archetype_message_first(monkeypatch, tmp_path):
     """Flag ON + a menu-intent brief ⇒ creative_direction["poster_archetype"] == message_first."""
     monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     monkeypatch.setattr(render_module, "propose_creative_brief_v2",
                         lambda *a, **k: _intent_brief("menu"), raising=True)
     _patch_render_io(monkeypatch)
 
-    project = _project_with_facts("+17329837841")
+    project = _project_with_facts("+15550100001")
     render_module._render_model(
         project, tmp_path / "out.png", concept_id="C1",
         output_format="concept_preview", size=(1080, 1350),
@@ -317,12 +317,12 @@ def test_render_flag_on_carries_poster_archetype_message_first(monkeypatch, tmp_
 def test_render_flag_on_carries_poster_archetype_offer_first(monkeypatch, tmp_path):
     """Flag ON + a combo_offer-intent brief ⇒ poster_archetype == offer_first."""
     monkeypatch.setenv("FLYER_CREATIVE_DIRECTOR_V2", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     monkeypatch.setattr(render_module, "propose_creative_brief_v2",
                         lambda *a, **k: _intent_brief("combo_offer"), raising=True)
     _patch_render_io(monkeypatch)
 
-    project = _project_with_facts("+17329837841")
+    project = _project_with_facts("+15550100001")
     render_module._render_model(
         project, tmp_path / "out.png", concept_id="C1",
         output_format="concept_preview", size=(1080, 1350),
@@ -334,12 +334,12 @@ def test_render_flag_on_carries_poster_archetype_offer_first(monkeypatch, tmp_pa
 def test_render_flag_off_carrier_none_no_poster_archetype(monkeypatch, tmp_path):
     """Flag OFF ⇒ creative_direction stays None (unchanged); no poster_archetype."""
     monkeypatch.delenv("FLYER_CREATIVE_DIRECTOR_V2", raising=False)
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     monkeypatch.setattr(render_module, "propose_creative_brief_v2",
                         lambda *a, **k: _intent_brief("menu"), raising=True)
     _patch_render_io(monkeypatch)
 
-    project = _project_with_facts("+17329837841")
+    project = _project_with_facts("+15550100001")
     render_module._render_model(
         project, tmp_path / "out.png", concept_id="C1",
         output_format="concept_preview", size=(1080, 1350),
@@ -442,7 +442,7 @@ _FIXED_PREMIUM_HERO_DIRECTIVE = (
 )
 
 
-def _premium_food_project(phone: str = "+17329837841") -> FlyerProject:
+def _premium_food_project(phone: str = "+15550100001") -> FlyerProject:
     """A minimal food project that reaches the PREMIUM background branch.
 
     No FLYER_ALLOW_INTEGRATED_POSTER ⇒ not integrated-eligible; plus we pass
@@ -457,7 +457,7 @@ def test_bg_prompt_flag_off_carrier_none_is_byte_identical(monkeypatch):
     """Carrier None (flag off) ⇒ the premium directive is byte-identical to today's
     fixed string (the fixed HERO directive appears verbatim, hero name NOT injected)."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
     project = _premium_food_project()
     assert project.creative_direction is None
     out = render_module._poster_layout_requirements(project, force_background_only=True)
@@ -468,7 +468,7 @@ def test_bg_prompt_empty_carrier_fields_is_byte_identical(monkeypatch):
     """Carrier present but hero/theme/mood empty ⇒ no fragments injected; the fixed
     HERO directive appears verbatim (byte-identical to flag-off)."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
     project = _premium_food_project()
     project.creative_direction = {"hero_name": "", "theme_family": "", "mood": ""}
     out = render_module._poster_layout_requirements(project, force_background_only=True)
@@ -478,7 +478,7 @@ def test_bg_prompt_empty_carrier_fields_is_byte_identical(monkeypatch):
 def test_bg_prompt_empty_carrier_matches_flag_off_exactly(monkeypatch):
     """Stronger guard: empty-carrier output == flag-off output, byte-for-byte."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
     p_off = _premium_food_project()
     out_off = render_module._poster_layout_requirements(p_off, force_background_only=True)
     p_empty = _premium_food_project()
@@ -492,7 +492,7 @@ def test_bg_prompt_populated_carrier_names_hero_theme_mood(monkeypatch):
     AND reflects the theme AND the mood — while STILL being a textless directive
     (the existing 'absolutely NO text' clause remains)."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
     project = _premium_food_project()
     project.creative_direction = {
         "hero_name": "Dosa",
@@ -513,7 +513,7 @@ def test_bg_prompt_populated_carrier_differs_from_fixed(monkeypatch):
     """Sanity: a populated carrier actually CHANGES the output (otherwise the
     byte-identical guards would be vacuous)."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
     p_off = _premium_food_project()
     out_off = render_module._poster_layout_requirements(p_off, force_background_only=True)
     p_on = _premium_food_project()
@@ -540,7 +540,7 @@ from pathlib import Path  # noqa: E402
 
 
 def _premium_overlay_project(creative_direction=None) -> FlyerProject:
-    p = _project("+17329837841")
+    p = _project("+15550100001")
     p.creative_direction = creative_direction
     return p
 

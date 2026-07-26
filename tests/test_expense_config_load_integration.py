@@ -60,7 +60,7 @@ def _write_config(path: Path, *, enabled: bool = True) -> None:
             "name": "Owner",
             "phone": "+19045550100",
             "self_chat_jid": "19045550100@s.whatsapp.net",
-            "lid": "201975216009469@lid",
+            "lid": "100000000000001@lid",
         },
         "limits": {},
         "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},

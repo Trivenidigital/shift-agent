@@ -27,8 +27,8 @@ def _active_customer_store(state_path: Path, now: datetime) -> FlyerCustomerStor
     store.customers.append(store.new_customer(
         business_name="Triveni",
         business_address="300 S Polk St",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_number="+19045550104",
         business_category="restaurant",
         preferred_language="en",
@@ -67,8 +67,8 @@ def test_same_kind_logo_reupload_writes_deactivation_audit_row(tmp_path, monkeyp
 
     store_brand_asset(
         state_path=state_path,
-        chat_id="17043243322@s.whatsapp.net",
-        sender_phone="+17043243322",
+        chat_id="15550100003@s.whatsapp.net",
+        sender_phone="+15550100003",
         message_id="logo1",
         media_path=first_logo,
         text="logo",
@@ -80,8 +80,8 @@ def test_same_kind_logo_reupload_writes_deactivation_audit_row(tmp_path, monkeyp
 
     result = store_brand_asset(
         state_path=state_path,
-        chat_id="17043243322@s.whatsapp.net",
-        sender_phone="+17043243322",
+        chat_id="15550100003@s.whatsapp.net",
+        sender_phone="+15550100003",
         message_id="logo2",
         media_path=second_logo,
         text="replace logo",
@@ -124,15 +124,15 @@ def test_recovered_sender_merge_audits_same_kind_deactivation(tmp_path, monkeypa
     existing = store.new_customer(
         business_name="Triveni Cafe",
         business_address="300 S Polk St, Dallas TX",
-        public_phone="+17329837841",
-        business_whatsapp_number="+17329837841",
-        authorized_request_number="+17329837841",
+        public_phone="+15550100001",
+        business_whatsapp_number="+15550100001",
+        authorized_request_number="+15550100001",
         business_category="restaurant",
         preferred_language="en",
         plan_id="trial",
         now=now,
-        primary_chat_id="17329837841@s.whatsapp.net",
-        onboarded_by_phone="+17329837841",
+        primary_chat_id="15550100001@s.whatsapp.net",
+        onboarded_by_phone="+15550100001",
     )
     existing = existing.model_copy(update={
         "status": "trial",
@@ -159,7 +159,7 @@ def test_recovered_sender_merge_audits_same_kind_deactivation(tmp_path, monkeypa
         business_name="Triveni Cafe",
         business_address="100 Main St, Dallas TX",
         public_phone="+19045550199",
-        business_whatsapp_number="+17329837841",
+        business_whatsapp_number="+15550100001",
         authorized_request_number="+19045550199",
         business_category="restaurant",
         preferred_language="en",

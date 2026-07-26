@@ -359,7 +359,7 @@ def test_shadow_context_emits_terminal_route_not_intermediate_bypass(monkeypatch
 
     token = actions.begin_flyer_intent_shadow(
         text="Create flyer for evening snacks",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="wamid.test",
         has_media=False,
     )
@@ -404,7 +404,7 @@ def test_shadow_context_uses_injected_gateway_classifier_after_route(monkeypatch
 
     token = actions.begin_flyer_intent_shadow(
         text="Create flyer for evening snacks",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="wamid.test",
         has_media=False,
     )
@@ -436,7 +436,7 @@ def test_active_context_uses_deterministic_baseline_without_gateway(monkeypatch)
 
     token = actions.begin_flyer_intent_shadow(
         text="I want the 60 flyers per month plan",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="wamid.plan",
         has_media=False,
     )
@@ -473,7 +473,7 @@ def test_shadow_context_classifier_runs_after_finalizer_returns(monkeypatch):
 
     token = actions.begin_flyer_intent_shadow(
         text="Create flyer for evening snacks",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="wamid.test",
         has_media=False,
     )
@@ -512,7 +512,7 @@ def test_shadow_context_does_not_call_classifier_for_passthrough_candidate(monke
 
     token = actions.begin_flyer_intent_shadow(
         text="Create flyer maybe later",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="wamid.test",
         has_media=False,
     )
@@ -538,7 +538,7 @@ def test_shadow_context_contains_gateway_classifier_failures(monkeypatch):
 
     token = actions.begin_flyer_intent_shadow(
         text="Create flyer for evening snacks",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="wamid.test",
         has_media=False,
     )
@@ -588,7 +588,7 @@ def test_shadow_context_off_mode_emits_nothing(monkeypatch):
 
     token = actions.begin_flyer_intent_shadow(
         text="Create flyer for evening snacks",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="wamid.test",
     )
     actions.finalize_flyer_intent_shadow(hook_result=None)
@@ -737,14 +737,14 @@ def test_shadow_llm_allowlist_semantics(monkeypatch):
     monkeypatch.setattr(
         actions, "_build_flyer_intent_llm_classifier", lambda: _stub_local_classifier
     )
-    chat = "17329837841@s.whatsapp.net"
+    chat = "15550100001@s.whatsapp.net"
 
     # empty/unset allowlist ⇒ disabled-for-all (never global-on), even armed.
     monkeypatch.delenv("FLYER_INTENT_SHADOW_LLM_CHATS", raising=False)
     assert actions._flyer_classifier_callable_from_gateway(None, chat_id=chat) is None
 
     # member (normalized across +/punctuation/JID-suffix) ⇒ armed.
-    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "+1 (732) 983-7841, 55501")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "+1 (555) 010-0001, 55501")
     assert actions._flyer_classifier_callable_from_gateway(None, chat_id=chat) is _stub_local_classifier
 
     # non-member ⇒ off.
@@ -763,7 +763,7 @@ def test_shadow_llm_allowlist_semantics(monkeypatch):
 def test_gateway_classifier_precedes_local_shadow_llm(monkeypatch):
     actions = _load_actions()
     monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
-    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "17329837841")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "15550100001")
     monkeypatch.setattr(
         actions, "_build_flyer_intent_llm_classifier", lambda: _stub_local_classifier
     )
@@ -774,7 +774,7 @@ def test_gateway_classifier_precedes_local_shadow_llm(monkeypatch):
 
     gw = Gateway()
     got = actions._flyer_classifier_callable_from_gateway(
-        gw, chat_id="17329837841@s.whatsapp.net"
+        gw, chat_id="15550100001@s.whatsapp.net"
     )
     assert got == gw.flyer_intent_classifier  # gateway attr wins over the local LLM
 
@@ -782,13 +782,13 @@ def test_gateway_classifier_precedes_local_shadow_llm(monkeypatch):
 def test_shadow_llm_not_armed_when_flag_unset(monkeypatch):
     actions = _load_actions()
     monkeypatch.delenv("FLYER_INTENT_SHADOW_LLM", raising=False)
-    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "17329837841")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "15550100001")
     monkeypatch.setattr(
         actions, "_build_flyer_intent_llm_classifier", lambda: _stub_local_classifier
     )
     assert (
         actions._flyer_classifier_callable_from_gateway(
-            None, chat_id="17329837841@s.whatsapp.net"
+            None, chat_id="15550100001@s.whatsapp.net"
         )
         is None
     )
@@ -827,7 +827,7 @@ def test_shadow_llm_over_budget_records_skipped_budget(monkeypatch, tmp_path):
     counter: dict = {}
     monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")
     monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
-    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "17329837841")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "15550100001")
     monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_DAILY_CAP", "0")  # no budget today
     monkeypatch.setattr(actions, "FLYER_INTENT_SHADOW_LLM_BUDGET_PATH", tmp_path / "budget.json")
     monkeypatch.setattr(actions, "audit_flyer_hermes_intent_decision", lambda **kw: emitted.append(kw))
@@ -835,7 +835,7 @@ def test_shadow_llm_over_budget_records_skipped_budget(monkeypatch, tmp_path):
 
     token = actions.begin_flyer_intent_shadow(
         text="approve",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="wamid.budget",
         has_media=False,
     )
@@ -863,7 +863,7 @@ def test_shadow_llm_under_budget_fires_worker(monkeypatch, tmp_path):
     counter: dict = {}
     monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")
     monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
-    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "17329837841")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "15550100001")
     monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_DAILY_CAP", "5")
     monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "1000")
     monkeypatch.setattr(actions, "FLYER_INTENT_SHADOW_LLM_BUDGET_PATH", tmp_path / "budget.json")
@@ -872,7 +872,7 @@ def test_shadow_llm_under_budget_fires_worker(monkeypatch, tmp_path):
 
     token = actions.begin_flyer_intent_shadow(
         text="approve",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="wamid.fire",
         has_media=False,
     )
@@ -1007,13 +1007,13 @@ def _load_hooks_and_actions():
 
 def test_shadow_llm_mutating_advisory_never_changes_routing(monkeypatch, tmp_path):
     hooks, actions = _load_hooks_and_actions()
-    chat = "17329837841@s.whatsapp.net"
+    chat = "15550100001@s.whatsapp.net"
 
     # Arm the B1 shadow LLM with a MUTATING advisory (approve_project) that would
     # be dangerous if it ever leaked into routing.
     monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER", "shadow")
     monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM", "1")
-    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "17329837841")
+    monkeypatch.setenv("FLYER_INTENT_SHADOW_LLM_CHATS", "15550100001")
     monkeypatch.setenv("FLYER_HERMES_INTENT_CLASSIFIER_TIMEOUT_MS", "1000")
     monkeypatch.setattr(actions, "FLYER_INTENT_SHADOW_LLM_BUDGET_PATH", tmp_path / "budget.json")
     captured: list[dict] = []

@@ -223,7 +223,7 @@ def test_cf_router_reason_accepts_flyer_intercepts(reason):
         type="cf_router_intercepted",
         ts=_now(),
         reason=reason,
-        chat_id="918985741562@s.whatsapp.net",
+        chat_id="15550100006@s.whatsapp.net",
         subprocess_rc=0,
     )
     assert row.reason == reason

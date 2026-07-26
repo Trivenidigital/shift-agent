@@ -18,7 +18,7 @@ def _project():
     return FlyerProject(
         project_id="F9002",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-qa",
@@ -54,7 +54,7 @@ def _dessert_catalog_project():
         FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchen", source="customer_profile", required=True),
         FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Graduation Dessert Specials", source="customer_text", required=True),
         FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
-        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
     ]
     for idx, (name, price) in enumerate(expected):
         locked.append(FlyerLockedFact(fact_id=f"item:{idx}:name", label="Item", value=name, source="customer_text", required=True))
@@ -62,14 +62,14 @@ def _dessert_catalog_project():
     return FlyerProject(
         project_id="F9016",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-dessert-qa",
         raw_request="Graduation dessert specials with itemized prices.",
         fields=FlyerRequestFields(
             event_or_business_name="Graduation Dessert Specials",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="90 Brybar Dr St Johns FL",
             preferred_language="en",
         ),
@@ -100,7 +100,7 @@ Kurbanika meeta - small tray - $70
 Carrot halwa - small tray - $55
 Khalakhand - 100 count - $100
 LOCATION: 90 BRYBAR DR ST JOHNS FL
-CONTACT: +17329837841""",
+CONTACT: +15550100001""",
         encoding="utf-8",
     )
 
@@ -134,7 +134,7 @@ Kurbanika meeta - small tray - $70
 Carrot halwa - small tray - $55
 Khalakhand - 100 count - $100
 LOCATION: 90 BRYBAR DR ST JOHNS FL
-CONTACT: +17329837841""",
+CONTACT: +15550100001""",
         encoding="utf-8",
     )
 
@@ -168,7 +168,7 @@ Kurbanika meeta - small tray - $70
 Carrot halwa - small tray - $55
 Khalakhand - 100 count - $100
 LOCATION: 90 BRYBAR DR ST JOHNS FL
-CONTACT: +17329837841""",
+CONTACT: +15550100001""",
         encoding="utf-8",
     )
 
@@ -201,7 +201,7 @@ Kurbanika meeta - small tray - $70
 Carrot halwa - small tray - $55
 Khalakhand - 100 count - $100
 LOCATION: 90 BRYBAR DR ST JOHNS FL
-CONTACT: +17329837841""",
+CONTACT: +15550100001""",
         encoding="utf-8",
     )
 
@@ -235,7 +235,7 @@ Kurbanika meeta - small tray - $70
 Carrot halwa - small tray - $55
 Khalakhand - 100 count - $100
 LOCATION: 90 BRYBAR DR ST JOHNS FL
-CONTACT: +17329837841""",
+CONTACT: +15550100001""",
         encoding="utf-8",
     )
 
@@ -390,7 +390,7 @@ def test_visual_qa_passes_with_matching_locked_facts(tmp_path):
 
     artifact = _write_sidecar(
         tmp_path,
-        "Fresh Meats. Premium Clean Chicken. Clean bird. Strong life. Kheema Dosa $13.99 +1 732 983 7841",
+        "Fresh Meats. Premium Clean Chicken. Clean bird. Strong life. Kheema Dosa $13.99 +1 555 010 0001",
     )
     report = run_visual_qa(_project(), artifact, output_format="concept_preview", allow_sidecar=True)
     assert report.status == "passed", report.blockers
@@ -937,7 +937,7 @@ def test_visual_qa_requires_business_campaign_contact_and_profile_location(tmp_p
     project = FlyerProject(
         project_id="F0065",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-evening",
@@ -945,14 +945,14 @@ def test_visual_qa_requires_business_campaign_contact_and_profile_location(tmp_p
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchn", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
     )
 
     artifact = _write_sidecar(
         tmp_path,
-        "Lakshmis Kitchn Evening Snacks Call +1 732 983 7841",
+        "Lakshmis Kitchn Evening Snacks Call +1 555 010 0001",
     )
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
     assert report.status == "failed"
@@ -960,7 +960,7 @@ def test_visual_qa_requires_business_campaign_contact_and_profile_location(tmp_p
 
     artifact = _write_sidecar(
         tmp_path,
-        "Lakshmis Kitchn Call +1 732 983 7841 90 Brybar Dr St Johns FL",
+        "Lakshmis Kitchn Call +1 555 010 0001 90 Brybar Dr St Johns FL",
     )
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
     assert report.status == "failed"
@@ -974,7 +974,7 @@ def test_visual_qa_allows_campaign_title_with_profile_anchors_without_exact_bran
     project = FlyerProject(
         project_id="F0103",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-biryani",
@@ -985,14 +985,14 @@ def test_visual_qa_allows_campaign_title_with_profile_anchors_without_exact_bran
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Special Biryani's", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
     )
     artifact = _write_sidecar(
         tmp_path,
         "SPECIAL BIRYANI'S\nChicken Biryani $16.99\nGoat Biryani $18.99\n"
-        "90 Brybar Dr, St Johns FL\n+1 732 983 7841",
+        "90 Brybar Dr, St Johns FL\n+1 555 010 0001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1015,7 +1015,7 @@ def test_visual_qa_allows_campaign_titles_that_contain_org_suffix_words(tmp_path
         project = FlyerProject(
             project_id=f"F02{index:02d}",
             status="awaiting_final_approval",
-            customer_phone="+17329837841",
+            customer_phone="+15550100001",
             created_at=now,
             updated_at=now,
             original_message_id=f"m-campaign-org-word-{index}",
@@ -1023,13 +1023,13 @@ def test_visual_qa_allows_campaign_titles_that_contain_org_suffix_words(tmp_path
             locked_facts=[
                 FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
                 FlyerLockedFact(fact_id="campaign_title", label="Campaign", value=title, source="customer_text", required=True),
-                FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+                FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
                 FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
             ],
         )
         artifact = _write_sidecar(
             tmp_path,
-            f"{title}\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+            f"{title}\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
             filename=f"campaign-{index}.png",
         )
 
@@ -1045,7 +1045,7 @@ def test_visual_qa_still_requires_campaign_and_profile_anchors_when_brand_absent
     project = FlyerProject(
         project_id="F0103",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-biryani",
@@ -1053,14 +1053,14 @@ def test_visual_qa_still_requires_campaign_and_profile_anchors_when_brand_absent
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Special Biryani's", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
     )
 
     missing_campaign = _write_sidecar(
         tmp_path,
-        "Chicken Biryani $16.99\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "Chicken Biryani $16.99\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
     )
     report = run_visual_qa(project, missing_campaign, output_format="concept_preview", allow_sidecar=True)
     assert report.status == "failed"
@@ -1068,7 +1068,7 @@ def test_visual_qa_still_requires_campaign_and_profile_anchors_when_brand_absent
 
     missing_address = _write_sidecar(
         tmp_path,
-        "SPECIAL BIRYANI'S\nChicken Biryani $16.99\n+1 732 983 7841",
+        "SPECIAL BIRYANI'S\nChicken Biryani $16.99\n+1 555 010 0001",
         filename="flyer2.png",
     )
     report = run_visual_qa(project, missing_address, output_format="concept_preview", allow_sidecar=True)
@@ -1084,7 +1084,7 @@ def test_visual_qa_does_not_skip_business_name_with_customer_text_anchors(tmp_pa
     project = FlyerProject(
         project_id="F0115",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-customer-text-anchors",
@@ -1117,7 +1117,7 @@ def test_visual_qa_requires_exact_business_name_for_integrated_menu_candidate(tm
     project = FlyerProject(
         project_id="F9100",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
         original_message_id="m-integrated-menu",
@@ -1130,7 +1130,7 @@ def test_visual_qa_requires_exact_business_name_for_integrated_menu_candidate(tm
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="South Indian Snacks", source="customer_text", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="item:0:name", label="Item", value="Gavvalu 1 Lb", source="customer_text", required=True),
             FlyerLockedFact(fact_id="item:0:price", label="Price", value="$8.99", source="customer_text", required=True),
             FlyerLockedFact(fact_id="item:1:name", label="Item", value="Chekkalu 1 lb", source="customer_text", required=True),
@@ -1142,7 +1142,7 @@ def test_visual_qa_requires_exact_business_name_for_integrated_menu_candidate(tm
     artifact = _write_sidecar(
         tmp_path,
         "South Indian Snacks\nGavvalu 1 Lb $8.99\nChekkalu 1 lb $8.99\n"
-        "Arisalu 1 Lb $10.99\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "Arisalu 1 Lb $10.99\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1156,7 +1156,7 @@ def test_visual_qa_blocks_regional_script_for_integrated_english_menu_candidate(
     project = FlyerProject(
         project_id="F9101",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
         original_message_id="m-integrated-menu-profile-language",
@@ -1166,7 +1166,7 @@ def test_visual_qa_blocks_regional_script_for_integrated_english_menu_candidate(
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="South Indian Snacks", source="customer_text", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="item:0:name", label="Item", value="Gavvalu 1 Lb", source="customer_text", required=True),
             FlyerLockedFact(fact_id="item:0:price", label="Price", value="$8.99", source="customer_text", required=True),
         ],
@@ -1174,7 +1174,7 @@ def test_visual_qa_blocks_regional_script_for_integrated_english_menu_candidate(
     artifact = _write_sidecar(
         tmp_path,
         "Lakshmi's Kitchen\nSouth Indian Snacks\nGavvalu 1 Lb $8.99\n"
-        "90 Brybar Dr St Johns FL\n+1 732 983 7841\nతెలుగు",
+        "90 Brybar Dr St Johns FL\n+1 555 010 0001\nతెలుగు",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1188,7 +1188,7 @@ def test_visual_qa_allows_regional_script_for_explicit_localized_menu(tmp_path):
     project = FlyerProject(
         project_id="F9102",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
         original_message_id="m-localized-menu",
@@ -1198,7 +1198,7 @@ def test_visual_qa_allows_regional_script_for_explicit_localized_menu(tmp_path):
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="South Indian Snacks", source="customer_text", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="item:0:name", label="Item", value="Gavvalu 1 Lb", source="customer_text", required=True),
             FlyerLockedFact(fact_id="item:0:price", label="Price", value="$8.99", source="customer_text", required=True),
         ],
@@ -1206,7 +1206,7 @@ def test_visual_qa_allows_regional_script_for_explicit_localized_menu(tmp_path):
     artifact = _write_sidecar(
         tmp_path,
         "Lakshmi's Kitchen\nSouth Indian Snacks\nతెలుగు\nGavvalu 1 Lb $8.99\n"
-        "90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "90 Brybar Dr St Johns FL\n+1 555 010 0001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1222,7 +1222,7 @@ def test_visual_qa_requires_exact_business_name_for_saved_brand_requests(tmp_pat
     project = FlyerProject(
         project_id="F0104",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-brand",
@@ -1230,13 +1230,13 @@ def test_visual_qa_requires_exact_business_name_for_saved_brand_requests(tmp_pat
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Daily Specials", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
     )
     artifact = _write_sidecar(
         tmp_path,
-        "DAILY SPECIALS\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "DAILY SPECIALS\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1252,7 +1252,7 @@ def test_visual_qa_allows_saved_contact_policy_without_exact_brand(tmp_path):
     project = FlyerProject(
         project_id="F0116",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-saved-contact",
@@ -1260,13 +1260,13 @@ def test_visual_qa_allows_saved_contact_policy_without_exact_brand(tmp_path):
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Special Biryani's", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
     )
     artifact = _write_sidecar(
         tmp_path,
-        "SPECIAL BIRYANI'S\nChicken Biryani $16.99\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "SPECIAL BIRYANI'S\nChicken Biryani $16.99\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1281,7 +1281,7 @@ def test_visual_qa_requires_exact_business_name_for_use_logo_requests(tmp_path):
     project = FlyerProject(
         project_id="F0114",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-use-logo",
@@ -1289,13 +1289,13 @@ def test_visual_qa_requires_exact_business_name_for_use_logo_requests(tmp_path):
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Daily Specials", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
     )
     artifact = _write_sidecar(
         tmp_path,
-        "DAILY SPECIALS\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "DAILY SPECIALS\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1311,7 +1311,7 @@ def test_visual_qa_blocks_explicit_wrong_business_label_even_with_profile_anchor
     project = FlyerProject(
         project_id="F0106",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-wrong-brand",
@@ -1319,13 +1319,13 @@ def test_visual_qa_blocks_explicit_wrong_business_label_even_with_profile_anchor
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Special Biryani's", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
     )
     artifact = _write_sidecar(
         tmp_path,
-        "Business: Other Restaurant\nSPECIAL BIRYANI'S\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "Business: Other Restaurant\nSPECIAL BIRYANI'S\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1341,7 +1341,7 @@ def test_visual_qa_blocks_unlabeled_wrong_business_masthead_even_with_profile_an
     project = FlyerProject(
         project_id="F0107",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-wrong-masthead",
@@ -1349,13 +1349,13 @@ def test_visual_qa_blocks_unlabeled_wrong_business_masthead_even_with_profile_an
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Special Biryani's", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
     )
     artifact = _write_sidecar(
         tmp_path,
-        "OTHER RESTAURANT\nSPECIAL BIRYANI'S\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "OTHER RESTAURANT\nSPECIAL BIRYANI'S\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1371,7 +1371,7 @@ def test_visual_qa_blocks_titlecase_wrong_business_masthead_even_with_profile_an
     project = FlyerProject(
         project_id="F0117",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-wrong-titlecase",
@@ -1379,13 +1379,13 @@ def test_visual_qa_blocks_titlecase_wrong_business_masthead_even_with_profile_an
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Special Biryani's", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
     )
     artifact = _write_sidecar(
         tmp_path,
-        "Other Restaurant\nSPECIAL BIRYANI'S\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "Other Restaurant\nSPECIAL BIRYANI'S\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1401,7 +1401,7 @@ def test_visual_qa_blocks_mixed_case_org_suffix_wrong_masthead_even_with_profile
     project = FlyerProject(
         project_id="F0112",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-source-edit-recomposed",
@@ -1409,7 +1409,7 @@ def test_visual_qa_blocks_mixed_case_org_suffix_wrong_masthead_even_with_profile
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Specials", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="offer:0", label="Offer", value="Pick Any 4 Dosa", source="customer_text", required=True),
         ],
@@ -1422,7 +1422,7 @@ def test_visual_qa_blocks_mixed_case_org_suffix_wrong_masthead_even_with_profile
         "Business: Lakshmi's Kitchen\n"
         "Specials\n"
         "Location: 90 Brybar Dr St Johns FL\n"
-        "Contact: +1 732 983 7841\n"
+        "Contact: +1 555 010 0001\n"
         "Detail: Pick Any 4 Dosa",
     )
 
@@ -1439,7 +1439,7 @@ def test_visual_qa_allows_sentence_case_org_word_tagline_with_profile_anchors(tm
     project = FlyerProject(
         project_id="F0118",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-tagline",
@@ -1447,7 +1447,7 @@ def test_visual_qa_allows_sentence_case_org_word_tagline_with_profile_anchors(tm
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Daily Specials", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
     )
@@ -1457,7 +1457,7 @@ def test_visual_qa_allows_sentence_case_org_word_tagline_with_profile_anchors(tm
         "Daily Specials\n"
         "Made fresh in our kitchen\n"
         "90 Brybar Dr St Johns FL\n"
-        "Contact: +1 732 983 7841",
+        "Contact: +1 555 010 0001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1472,7 +1472,7 @@ def test_visual_qa_blocks_source_contract_business_name_without_forbidden_substr
     project = FlyerProject(
         project_id="F0108",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-source-brand",
@@ -1480,7 +1480,7 @@ def test_visual_qa_blocks_source_contract_business_name_without_forbidden_substr
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Special Biryani's", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
         reference_extractions=[
@@ -1499,7 +1499,7 @@ def test_visual_qa_blocks_source_contract_business_name_without_forbidden_substr
     )
     artifact = _write_sidecar(
         tmp_path,
-        "Other Restaurant\nSPECIAL BIRYANI'S\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "Other Restaurant\nSPECIAL BIRYANI'S\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1522,7 +1522,7 @@ def test_visual_qa_accepts_saint_johns_address_variant(tmp_path):
         raw_request="source edit",
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
     )
@@ -1533,7 +1533,7 @@ def test_visual_qa_accepts_saint_johns_address_variant(tmp_path):
         "Veg Thali Special\n"
         "Moringa Dal\nJeera Rice\n"
         "90 Brybar Dr,\nSaint Johns, FL\n"
-        "+17329837841",
+        "+15550100001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1549,14 +1549,14 @@ def test_visual_qa_accepts_digit_heavy_location_split_across_ocr_lines(tmp_path)
     project = FlyerProject(
         project_id="F0080",
         status="awaiting_final_approval",
-        customer_phone="+15713830763",
+        customer_phone="+15550100005",
         created_at=now,
         updated_at=now,
         original_message_id="m-mk-kitchen",
         raw_request="evening snacks",
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="MK kitchen", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15713830763", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100005", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="23596 prosperity ridge pl Ashburn Va 20148", source="customer_profile", required=True),
         ],
     )
@@ -1568,7 +1568,7 @@ def test_visual_qa_accepts_digit_heavy_location_split_across_ocr_lines(tmp_path)
         "Wednesday To Saturday | 4 PM TO 7 PM\n"
         "23596 prosperity ridge pl\n"
         "Ashburn Va 20148\n"
-        "+15713830763",
+        "+15550100005",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1584,7 +1584,7 @@ def test_visual_qa_blocks_regional_script_when_customer_requested_english_only(t
     project = FlyerProject(
         project_id="F0081",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-english-only",
@@ -1595,12 +1595,12 @@ def test_visual_qa_blocks_regional_script_when_customer_requested_english_only(t
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchn", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Ganesh Festival", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
         ],
     )
     artifact = _write_sidecar(
         tmp_path,
-        "Lakshmis Kitchn Ganesh Festival Call +17329837841 \u0c17\u0c23\u0c47\u0c36",
+        "Lakshmis Kitchn Ganesh Festival Call +15550100001 \u0c17\u0c23\u0c47\u0c36",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1616,7 +1616,7 @@ def test_visual_qa_allows_english_text_when_customer_requested_english_only(tmp_
     project = FlyerProject(
         project_id="F0081",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-english-only",
@@ -1624,10 +1624,10 @@ def test_visual_qa_allows_english_text_when_customer_requested_english_only(tmp_
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchn", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Ganesh Festival", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
         ],
     )
-    artifact = _write_sidecar(tmp_path, "Lakshmis Kitchn Ganesh Festival Call +17329837841")
+    artifact = _write_sidecar(tmp_path, "Lakshmis Kitchn Ganesh Festival Call +15550100001")
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
 
@@ -1641,7 +1641,7 @@ def test_visual_qa_blocks_regional_script_when_request_says_only_english(tmp_pat
     project = FlyerProject(
         project_id="F0082",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-only-english",
@@ -1657,7 +1657,7 @@ def test_visual_qa_blocks_regional_script_when_request_says_only_english(tmp_pat
             FlyerLockedFact(
                 fact_id="contact_phone",
                 label="Contact",
-                value="+17329837841",
+                value="+15550100001",
                 source="customer_profile",
                 required=True,
             ),
@@ -1665,7 +1665,7 @@ def test_visual_qa_blocks_regional_script_when_request_says_only_english(tmp_pat
     )
     artifact = _write_sidecar(
         tmp_path,
-        "Lakshmis Kitchn Weekend Offer Call +17329837841 \u0c17\u0c23\u0c47\u0c36",
+        "Lakshmis Kitchn Weekend Offer Call +15550100001 \u0c17\u0c23\u0c47\u0c36",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -1690,7 +1690,7 @@ def test_visual_qa_fails_on_template_placeholder_strings(tmp_path):
 
 
 def test_visual_qa_normalizes_phone_formatting(tmp_path):
-    """OCR commonly emits +1 732 983 7841 or (732) 983-7841 while locked-fact has +17329837841.
+    """OCR commonly emits +1 555 010 0001 or (555) 010-0001 while locked-fact has +15550100001.
     The digits-only path must accept the formatted version as a match."""
     from agents.flyer.visual_qa import run_visual_qa
     from schemas import FlyerLockedFact
@@ -1698,11 +1698,11 @@ def test_visual_qa_normalizes_phone_formatting(tmp_path):
     project = _project().model_copy(update={
         "locked_facts": [
             FlyerLockedFact(fact_id="business_name", label="Business", value="Fresh Meats", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
         ],
     })
 
-    artifact = _write_sidecar(tmp_path, "Fresh Meats Contact: +1 (732) 983-7841")
+    artifact = _write_sidecar(tmp_path, "Fresh Meats Contact: +1 (555) 010-0001")
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
     assert report.status == "passed", report.blockers
     assert not any("contact_phone" in b for b in report.blockers)
@@ -1738,7 +1738,7 @@ def test_visual_qa_fails_when_phone_completely_wrong(tmp_path):
     project = _project().model_copy(update={
         "locked_facts": [
             FlyerLockedFact(fact_id="business_name", label="Business", value="Fresh Meats", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
         ],
     })
 
@@ -1890,7 +1890,7 @@ def test_visual_qa_does_not_match_business_name_as_prefix_of_unrelated_brand(tmp
 
 
 def test_visual_qa_phone_must_be_in_contiguous_run_not_globbed_across_text(tmp_path):
-    """Regression for review HIGH: locked phone '+17329837841' must NOT match
+    """Regression for review HIGH: locked phone '+15550100001' must NOT match
     if its digits only appear by concatenating across unrelated text regions
     (e.g. 'Order 17 — discount 32-98-37841'). Phone digits-only checked WITHIN
     a single contiguous digit-bearing run, not against the whole-OCR digit
@@ -1901,7 +1901,7 @@ def test_visual_qa_phone_must_be_in_contiguous_run_not_globbed_across_text(tmp_p
     project = _project().model_copy(update={
         "locked_facts": [
             FlyerLockedFact(fact_id="business_name", label="Business", value="Fresh Meats", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
         ],
     })
 
@@ -1926,10 +1926,10 @@ def test_visual_qa_short_local_number_is_not_treated_as_phone(tmp_path):
         ],
     })
 
-    # OCR has '17329837841' as a phone, which contains digits "7329837" as substring.
+    # OCR has '15550100001' as a phone, which contains digits "7329837" as substring.
     # Phone-path is disabled for sub-10-digit values → text path applies → word-boundary check on
-    # "7329837" against text "+17329837841" — fails because the digits are inside a longer digit run.
-    artifact = _write_sidecar(tmp_path, "Fresh Meats Contact: +17329837841 today")
+    # "7329837" against text "+15550100001" — fails because the digits are inside a longer digit run.
+    artifact = _write_sidecar(tmp_path, "Fresh Meats Contact: +15550100001 today")
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
     assert report.status == "failed"
     assert any("sku" in b for b in report.blockers)
@@ -1962,7 +1962,7 @@ def _source_contract_project(forbidden, required_text=None, required_facts=None)
     return FlyerProject(
         project_id="F9091",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-source-qa",
@@ -2015,7 +2015,7 @@ def test_visual_qa_blocks_source_brand_even_when_campaign_and_profile_anchors_ma
     project = FlyerProject(
         project_id="F0105",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-source-brand",
@@ -2023,7 +2023,7 @@ def test_visual_qa_blocks_source_brand_even_when_campaign_and_profile_anchors_ma
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Special Biryani's", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
         reference_extractions=[
@@ -2043,7 +2043,7 @@ def test_visual_qa_blocks_source_brand_even_when_campaign_and_profile_anchors_ma
     )
     artifact = _write_sidecar_for_source(
         tmp_path,
-        "SPECIAL BIRYANI'S\nOther Restaurant\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "SPECIAL BIRYANI'S\nOther Restaurant\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -2098,7 +2098,7 @@ def test_visual_qa_semantically_accepts_diwali_campaign_and_offer_facts(tmp_path
     project = FlyerProject(
         project_id="F0106",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
         updated_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
         original_message_id="m-diwali",
@@ -2109,12 +2109,12 @@ def test_visual_qa_semantically_accepts_diwali_campaign_and_offer_facts(tmp_path
             FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="All items 5-10% off", source="customer_text", required=True),
             FlyerLockedFact(fact_id="offer:0", label="Offer", value="Lucky draw eligible with purchase above $100", source="customer_text", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
         ],
     )
     artifact = _write_sidecar(
         tmp_path,
-        "Lakshmis Kitchen\nDIWALI SALE\nALL ITEMS 5-10% OFF\nLucky Draw Eligible\nAbove $100 purchase\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "Lakshmis Kitchen\nDIWALI SALE\nALL ITEMS 5-10% OFF\nLucky Draw Eligible\nAbove $100 purchase\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -2128,14 +2128,14 @@ def test_visual_qa_accepts_requested_catering_label_as_non_identity(tmp_path):
     project = FlyerProject(
         project_id="F0105",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
         updated_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
         original_message_id="m-f0105",
         raw_request="Create a daily thali specials flyer. Include veg, chicken, and goat specials, sides, catering note, address, phone.",
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="item:0:name", label="Item", value="veg", source="customer_text", required=True),
             FlyerLockedFact(fact_id="item:1:name", label="Item", value="chicken", source="customer_text", required=True),
@@ -2145,7 +2145,7 @@ def test_visual_qa_accepts_requested_catering_label_as_non_identity(tmp_path):
     )
     artifact = _write_sidecar(
         tmp_path,
-        "Lakshmi's Kitchen\nCATERING\nDAILY THALI SPECIALS\nVEG THALI\nCHICKEN THALI\nGOAT THALI\nSIDES & DESSERTS\n90 BRYBAR DR ST JOHNS FL\nCONTACT: +17329837841",
+        "Lakshmi's Kitchen\nCATERING\nDAILY THALI SPECIALS\nVEG THALI\nCHICKEN THALI\nGOAT THALI\nSIDES & DESSERTS\n90 BRYBAR DR ST JOHNS FL\nCONTACT: +15550100001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -2159,14 +2159,14 @@ def test_visual_qa_still_blocks_unrequested_catering_identity(tmp_path):
     project = _project().model_copy(update={
         "locked_facts": [
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
         "raw_request": "Create a daily thali specials flyer.",
     })
     artifact = _write_sidecar(
         tmp_path,
-        "Lakshmi's Kitchen\nCATERING\nDAILY THALI SPECIALS\n90 Brybar Dr St Johns FL\nCONTACT: +17329837841",
+        "Lakshmi's Kitchen\nCATERING\nDAILY THALI SPECIALS\n90 Brybar Dr St Johns FL\nCONTACT: +15550100001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -2181,14 +2181,14 @@ def test_visual_qa_blocks_source_contract_catering_suffix_masthead(tmp_path):
     project = FlyerProject(
         project_id="F0118",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-source-catering",
         raw_request="Use Acme Catering reference only as inspiration for Lakshmi's Kitchen.",
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
         reference_extractions=[
@@ -2207,7 +2207,7 @@ def test_visual_qa_blocks_source_contract_catering_suffix_masthead(tmp_path):
     )
     artifact = _write_sidecar(
         tmp_path,
-        "Lakshmi's Kitchen\nCATERING\nDAILY THALI SPECIALS\n90 Brybar Dr St Johns FL\nCONTACT: +17329837841",
+        "Lakshmi's Kitchen\nCATERING\nDAILY THALI SPECIALS\n90 Brybar Dr St Johns FL\nCONTACT: +15550100001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -2221,26 +2221,26 @@ def test_visual_qa_item_name_semantics_reject_negative_or_note_only_mentions(tmp
     project = FlyerProject(
         project_id="F0105",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
         updated_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
         original_message_id="m-f0105",
         raw_request="Create a daily thali specials flyer. Include veg, chicken, and goat specials, sides, catering note, address, phone.",
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="item:2:name", label="Item", value="goat specials", source="customer_text", required=True),
         ],
     )
     negative = _write_sidecar(
         tmp_path,
-        "Lakshmi's Kitchen\nDAILY THALI SPECIALS\nNO GOAT AVAILABLE TODAY\n90 Brybar Dr St Johns FL\nCONTACT: +17329837841",
+        "Lakshmi's Kitchen\nDAILY THALI SPECIALS\nNO GOAT AVAILABLE TODAY\n90 Brybar Dr St Johns FL\nCONTACT: +15550100001",
         filename="negative.png",
     )
     note_only = _write_sidecar(
         tmp_path,
-        "Lakshmi's Kitchen\nDAILY THALI SPECIALS\nCATERING NOTE: ASK ABOUT GOAT OPTIONS\n90 Brybar Dr St Johns FL\nCONTACT: +17329837841",
+        "Lakshmi's Kitchen\nDAILY THALI SPECIALS\nCATERING NOTE: ASK ABOUT GOAT OPTIONS\n90 Brybar Dr St Johns FL\nCONTACT: +15550100001",
         filename="note.png",
     )
 
@@ -2258,11 +2258,11 @@ def test_visual_qa_does_not_accept_bare_event_word_for_campaign_title(tmp_path):
         "locked_facts": [
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Diwali Sale", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
     })
-    artifact = _write_sidecar(tmp_path, "Lakshmis Kitchen\nDIWALI\n90 Brybar Dr St Johns FL\n+1 732 983 7841")
+    artifact = _write_sidecar(tmp_path, "Lakshmis Kitchen\nDIWALI\n90 Brybar Dr St Johns FL\n+1 555 010 0001")
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
 
@@ -2277,13 +2277,13 @@ def test_visual_qa_requires_campaign_title_phrase_proximity(tmp_path):
         "locked_facts": [
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Diwali Sale", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         ],
     })
     artifact = _write_sidecar(
         tmp_path,
-        "Lakshmis Kitchen\nDiwali decorations and sweets\nWeekly sale starts soon\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "Lakshmis Kitchen\nDiwali decorations and sweets\nWeekly sale starts soon\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -2298,7 +2298,7 @@ def test_visual_qa_requires_expiry_context_for_promotion_end(tmp_path):
     project = FlyerProject(
         project_id="F0107",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
         updated_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
         original_message_id="m-snacks",
@@ -2311,17 +2311,17 @@ def test_visual_qa_requires_expiry_context_for_promotion_end(tmp_path):
             FlyerLockedFact(fact_id="schedule", label="Schedule", value="Wednesday and Thursday", source="customer_text", required=True),
             FlyerLockedFact(fact_id="promotion_end", label="Promotion end", value="June 25", source="customer_text", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
         ],
     )
     good_artifact = _write_sidecar(
         tmp_path,
-        "Lakshmis Kitchen\nEVENING SNACKS SALE\nWednesday and Thursday\nAny item $7.99\nFree Masala Chai with purchase above $12\nOffer valid until June 25\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "Lakshmis Kitchen\nEVENING SNACKS SALE\nWednesday and Thursday\nAny item $7.99\nFree Masala Chai with purchase above $12\nOffer valid until June 25\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
         filename="good.png",
     )
     bad_artifact = _write_sidecar(
         tmp_path,
-        "Lakshmis Kitchen\nEVENING SNACKS SALE\nWednesday and Thursday\nAny item $7.99\nFree Masala Chai with purchase above $12\nJune 25\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "Lakshmis Kitchen\nEVENING SNACKS SALE\nWednesday and Thursday\nAny item $7.99\nFree Masala Chai with purchase above $12\nJune 25\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
         filename="bad.png",
     )
 
@@ -2339,7 +2339,7 @@ def test_visual_qa_accepts_explicit_promotion_end_label(tmp_path):
     project = FlyerProject(
         project_id="F0107",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
         updated_at=datetime(2026, 5, 27, tzinfo=timezone.utc),
         original_message_id="m-snacks",
@@ -2349,12 +2349,12 @@ def test_visual_qa_accepts_explicit_promotion_end_label(tmp_path):
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks Sale", source="customer_text", required=True),
             FlyerLockedFact(fact_id="promotion_end", label="Promotion end", value="June 25", source="customer_text", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
         ],
     )
     artifact = _write_sidecar(
         tmp_path,
-        "Lakshmis Kitchen\nEVENING SNACKS SALE\nPROMOTION END: JUNE 25\n90 Brybar Dr St Johns FL\n+1 732 983 7841",
+        "Lakshmis Kitchen\nEVENING SNACKS SALE\nPROMOTION END: JUNE 25\n90 Brybar Dr St Johns FL\n+1 555 010 0001",
     )
 
     report = run_visual_qa(project, artifact, output_format="concept_preview", allow_sidecar=True)
@@ -2376,7 +2376,7 @@ def _classifier_project(business_name: str = "Lakshmi's Kitchen") -> FlyerProjec
     return FlyerProject(
         project_id="F0108",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-test",
@@ -2606,7 +2606,7 @@ def _project_with_inferred(items):
         facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label="Item", value=name,
                                      source="hermes_inferred"))
     return FlyerProject(
-        project_id="F9003", status="awaiting_final_approval", customer_phone="+17329837841",
+        project_id="F9003", status="awaiting_final_approval", customer_phone="+15550100001",
         created_at=now, updated_at=now, original_message_id="m-qa",
         raw_request="Flyer for Lakshmis Kitchen, include breakfast items",
         locked_facts=facts,
@@ -2650,7 +2650,7 @@ def _project_inferred_count(items, raw_request):
         facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label="Item", value=name,
                                      source="hermes_inferred"))
     return FlyerProject(
-        project_id="F9004", status="awaiting_final_approval", customer_phone="+17329837841",
+        project_id="F9004", status="awaiting_final_approval", customer_phone="+15550100001",
         created_at=now, updated_at=now, original_message_id="m-qa",
         raw_request=raw_request, locked_facts=facts,
     )
@@ -2684,7 +2684,7 @@ def test_intent_count_qa_inert_without_inferred_items():
     from agents.flyer.visual_qa import _inferred_intent_count_blockers
     now = datetime(2026, 5, 19, tzinfo=timezone.utc)
     project = FlyerProject(
-        project_id="F9005", status="awaiting_final_approval", customer_phone="+17329837841",
+        project_id="F9005", status="awaiting_final_approval", customer_phone="+15550100001",
         created_at=now, updated_at=now, original_message_id="m-qa",
         raw_request="include 3 famous south indian items",
         locked_facts=[FlyerLockedFact(fact_id="item:0:name", label="Item", value="Idli",
@@ -2705,14 +2705,14 @@ def _phone_project(extra_facts=()):
     return FlyerProject(
         project_id="F9050",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-qa",
         raw_request="Lunch combo flyer.",
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchen", source="customer_text", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact phone", value="+1 732 983 7841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact phone", value="+1 555 010 0001", source="customer_profile", required=True),
             *extra_facts,
         ],
     )
@@ -2721,9 +2721,9 @@ def _phone_project(extra_facts=()):
 def test_unexpected_phone_blocked_when_extra_wrong_number_present():
     # P1-1: the correct phone present AND an extra/corrupted one — flag only the wrong one.
     from agents.flyer.visual_qa import _unexpected_phone_blockers
-    blockers = _unexpected_phone_blockers(_phone_project(), "Call +1 732 983 7841 or +1 732 983 7899")
-    assert blockers and any("7899" in b for b in blockers)
-    assert not any("7841" in b for b in blockers)
+    blockers = _unexpected_phone_blockers(_phone_project(), "Call +1 555 010 0001 or +1 555 010 0099")
+    assert blockers and any("0099" in b for b in blockers)
+    assert not any("0001" in b for b in blockers)
 
 
 def test_unexpected_phone_no_false_positive_for_correct_phone_variants():
@@ -2732,10 +2732,10 @@ def test_unexpected_phone_no_false_positive_for_correct_phone_variants():
     from agents.flyer.visual_qa import _unexpected_phone_blockers
     project = _phone_project()
     for ocr in [
-        "Call 732-983-7841 today",
-        "Call +1 (732) 983-7841",
-        "Header +1 732 983 7841 ... Footer 732.983.7841",
-        "WhatsApp 17329837841",
+        "Call 555-010-0001 today",
+        "Call +1 (555) 010-0001",
+        "Header +1 555 010 0001 ... Footer 555.010.0001",
+        "WhatsApp 15550100001",
     ]:
         assert _unexpected_phone_blockers(project, ocr) == [], ocr
 
@@ -2743,7 +2743,7 @@ def test_unexpected_phone_no_false_positive_for_correct_phone_variants():
 def test_unexpected_phone_not_flagged_for_menu_prices():
     # A price-dense menu must not synthesize a false phone-shaped run.
     from agents.flyer.visual_qa import _unexpected_phone_blockers
-    ocr = "Idli $2 Vada $3 Dosa $4 Pongal $5 Upma $6 Poori $7 Call +1 732 983 7841"
+    ocr = "Idli $2 Vada $3 Dosa $4 Pongal $5 Upma $6 Poori $7 Call +1 555 010 0001"
     assert _unexpected_phone_blockers(_phone_project(), ocr) == []
 
 
@@ -2752,7 +2752,7 @@ def test_unexpected_phone_skipped_when_no_locked_phone():
     from agents.flyer.visual_qa import _unexpected_phone_blockers
     now = datetime(2026, 5, 19, tzinfo=timezone.utc)
     project = FlyerProject(
-        project_id="F9051", status="awaiting_final_approval", customer_phone="+17329837841",
+        project_id="F9051", status="awaiting_final_approval", customer_phone="+15550100001",
         created_at=now, updated_at=now, original_message_id="m-qa", raw_request="x",
         locked_facts=[FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchen", source="customer_text", required=True)],
     )
@@ -2761,7 +2761,7 @@ def test_unexpected_phone_skipped_when_no_locked_phone():
 
 def test_unexpected_phone_blocker_is_block_tier():
     from agents.flyer.visual_qa import classify_qa_severity
-    sev = classify_qa_severity(["unverified phone number visible: +1 732 983 7899"], project=_phone_project())
+    sev = classify_qa_severity(["unverified phone number visible: +1 555 010 0099"], project=_phone_project())
     assert sev == "block"
 
 
@@ -2770,7 +2770,7 @@ def test_unexpected_phone_integration_via_run_visual_qa(tmp_path):
     artifact = tmp_path / "flyer.png"
     artifact.write_bytes(b"bytes")
     (tmp_path / "flyer.png.ocr.txt").write_text(
-        "Lakshmis Kitchen Lunch Combo Idli $8.99 Call +1 732 983 7841 or +1 732 983 7899",
+        "Lakshmis Kitchen Lunch Combo Idli $8.99 Call +1 555 010 0001 or +1 555 010 0099",
         encoding="utf-8",
     )
     project = _phone_project([
@@ -2786,22 +2786,22 @@ def test_unexpected_phone_blocked_when_glob_adjacent_to_correct_phone():
     # Codex HIGH-1: two numbers joined by " / " must not glob into one >15-digit run
     # that escapes the length check — the wrong one is still flagged.
     from agents.flyer.visual_qa import _unexpected_phone_blockers
-    blockers = _unexpected_phone_blockers(_phone_project(), "Call +1 732 983 7841 / +1 732 983 7899")
-    assert any("7899" in b for b in blockers)
+    blockers = _unexpected_phone_blockers(_phone_project(), "Call +1 555 010 0001 / +1 555 010 0099")
+    assert any("0099" in b for b in blockers)
 
 
 def test_unexpected_phone_blocked_for_suffix_digit_corruption():
     # Codex HIGH-2: a number that CONTAINS the locked digits plus an extra digit is
     # NOT the registered phone — national-number compare (not substring) flags it.
     from agents.flyer.visual_qa import _unexpected_phone_blockers
-    blockers = _unexpected_phone_blockers(_phone_project(), "Call +1 732 983 7841 then +1 732 983 78410")
-    assert any("78410" in b for b in blockers)
+    blockers = _unexpected_phone_blockers(_phone_project(), "Call +1 555 010 0001 then +1 555 010 00010")
+    assert any("00010" in b for b in blockers)
 
 
 def test_unexpected_phone_not_flagged_for_bare_price_column():
     # Codex MEDIUM: a bare decimal/price column must not be read as a phone.
     from agents.flyer.visual_qa import _unexpected_phone_blockers
-    ocr = "Weekend specials 12.99 8.99 5.49 6.49 9.99 Call +1 732 983 7841"
+    ocr = "Weekend specials 12.99 8.99 5.49 6.49 9.99 Call +1 555 010 0001"
     assert _unexpected_phone_blockers(_phone_project(), ocr) == []
 
 
@@ -2809,15 +2809,15 @@ def test_unexpected_phone_blocked_for_wrong_country_code():
     # Codex HIGH-3: same national digits under a DIFFERENT country code (+91 vs the
     # registered +1) is a wrong number — calling it reaches a different country.
     from agents.flyer.visual_qa import _unexpected_phone_blockers
-    blockers = _unexpected_phone_blockers(_phone_project(), "Call +91 732 983 7841")
+    blockers = _unexpected_phone_blockers(_phone_project(), "Call +91 555 010 0001")
     assert any("+91" in b for b in blockers)
 
 
 def test_unexpected_phone_allows_correct_number_with_or_without_plus_one():
     # +1 and bare 10-digit are the same NANP domestic line — never flagged.
     from agents.flyer.visual_qa import _unexpected_phone_blockers
-    assert _unexpected_phone_blockers(_phone_project(), "Call +1 732 983 7841") == []
-    assert _unexpected_phone_blockers(_phone_project(), "Call 732 983 7841") == []
+    assert _unexpected_phone_blockers(_phone_project(), "Call +1 555 010 0001") == []
+    assert _unexpected_phone_blockers(_phone_project(), "Call 555 010 0001") == []
 
 
 def test_unexpected_phone_blocked_for_country_code_split_from_national_digits():
@@ -2825,9 +2825,9 @@ def test_unexpected_phone_blocked_for_country_code_split_from_national_digits():
     # gap, a newline, or a leading paren must still be caught (independent cc scan).
     from agents.flyer.visual_qa import _unexpected_phone_blockers
     for ocr in [
-        "Call +91   732 983 7841",
-        "Call +91\n732 983 7841",
-        "Call +91 (732) 983-7841",
+        "Call +91   555 010 0001",
+        "Call +91\n555 010 0001",
+        "Call +91 (555) 010-0001",
     ]:
         blockers = _unexpected_phone_blockers(_phone_project(), ocr)
         assert any("+91" in b for b in blockers), ocr
@@ -2836,7 +2836,7 @@ def test_unexpected_phone_blocked_for_country_code_split_from_national_digits():
 def test_unexpected_phone_no_false_positive_for_math_or_promo_plus():
     # A "+N" used for math/promotions (not a country code prefixing a phone) must not flag.
     from agents.flyer.visual_qa import _unexpected_phone_blockers
-    ocr = "Mix 2 + 3 toppings free, spend $50+ for delivery. Call +1 732 983 7841"
+    ocr = "Mix 2 + 3 toppings free, spend $50+ for delivery. Call +1 555 010 0001"
     assert _unexpected_phone_blockers(_phone_project(), ocr) == []
 
 
@@ -2845,9 +2845,9 @@ def test_unexpected_phone_no_false_positive_for_address_or_price_adjacent_to_pho
     # glob into it and be misread as a country code — the correct phone still passes.
     from agents.flyer.visual_qa import _unexpected_phone_blockers
     for ocr in [
-        "90 Brybar Dr St Johns FL 32259\n(732) 983-7841",
-        "90 Brybar Dr St Johns FL 32259 (732) 983-7841",
-        "Lunch special $9\n732 983 7841",
+        "90 Brybar Dr St Johns FL 32259\n(555) 010-0001",
+        "90 Brybar Dr St Johns FL 32259 (555) 010-0001",
+        "Lunch special $9\n555 010 0001",
     ]:
         assert _unexpected_phone_blockers(_phone_project(), ocr) == [], ocr
 
@@ -2915,7 +2915,7 @@ def test_run_visual_qa_blocks_on_duplicate_text_note(tmp_path, monkeypatch):
     # Integration: a duplicate-text quality note from the vision path fails QA closed.
     from agents.flyer import visual_qa as vq
     monkeypatch.setattr(vq, "_vision_text", lambda artifact, *, model=None: (
-        "Lakshmis Kitchen Lakshmis Kitchen Idli $8.99 Call +1 732 983 7841", "openrouter", "ocr_vision",
+        "Lakshmis Kitchen Lakshmis Kitchen Idli $8.99 Call +1 555 010 0001", "openrouter", "ocr_vision",
         ["business name appears duplicated"]))
     artifact = tmp_path / "flyer.png"
     artifact.write_bytes(b"bytes")
@@ -3071,7 +3071,7 @@ def _project_with_brand(name: str):
     from schemas import FlyerProject, FlyerLockedFact
     from datetime import datetime, timezone
     return FlyerProject(
-        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        project_id="F0174", status="intake_started", customer_phone="+15550100001",
         created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
         updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
         original_message_id="m-F0174", raw_request="x",
@@ -3094,7 +3094,7 @@ def test_is_own_brand_variant_false_when_no_registered_brand():
     from schemas import FlyerProject
     from datetime import datetime, timezone
     proj = FlyerProject(
-        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        project_id="F0174", status="intake_started", customer_phone="+15550100001",
         created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
         updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
         original_message_id="m", raw_request="x", locked_facts=[],
@@ -3110,7 +3110,7 @@ def test_f0176_endash_schedule_replay():
     from agents.flyer.visual_qa import _value_present_in, _normalize_text_for_match
     ocr = _normalize_text_for_match(
         "lakshmi's kitchen weekend specials saturday & sunday, 4 pm-8 pm "
-        "any item $7.99 idli $7.99 90 brybar dr st johns fl +17329837841"
+        "any item $7.99 idli $7.99 90 brybar dr st johns fl +15550100001"
     )
     assert _value_present_in(ocr, "Saturday & Sunday, 4 PM–8 PM", schedule_match=True) is True
 
@@ -3157,7 +3157,7 @@ def test_price_strict_unchanged():
 
 def test_phone_strict_unchanged():
     from agents.flyer.visual_qa import _value_present_in as _V, _normalize_text_for_match as _Nt
-    assert _V(_Nt("call +1 732 983 7842"), "+17329837841", phone_match=True) is False  # wrong digit
+    assert _V(_Nt("call +1 555 010 0002"), "+15550100001", phone_match=True) is False  # wrong digit
 
 
 def test_descriptive_word_boundary_unchanged():
@@ -3168,7 +3168,7 @@ def test_descriptive_word_boundary_unchanged():
 def test_business_identity_gate_unchanged():
     from agents.flyer.visual_qa import is_own_brand_variant
     proj = FlyerProject(
-        project_id="F0001", status="intake_started", customer_phone="+17329837841",
+        project_id="F0001", status="intake_started", customer_phone="+15550100001",
         created_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
         updated_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
         original_message_id="m", raw_request="x",
@@ -3200,11 +3200,11 @@ def _masthead_qa_project(*, with_phone: bool = False) -> FlyerProject:
         FlyerLockedFact(fact_id="item:0:price", label="Price", value="$12.99", source="customer_text", required=True),
     ]
     if with_phone:
-        locked.append(FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True))
+        locked.append(FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True))
     return FlyerProject(
         project_id="F9200",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-masthead-qa",

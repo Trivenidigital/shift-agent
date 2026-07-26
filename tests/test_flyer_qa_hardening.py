@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from agents.flyer.visual_qa import run_visual_qa
 from schemas import FlyerLockedFact, FlyerProject, FlyerRequestFields
 
-PHONE = "+17329837841"
+PHONE = "+15550100001"
 
 
 def _F(fid, value):

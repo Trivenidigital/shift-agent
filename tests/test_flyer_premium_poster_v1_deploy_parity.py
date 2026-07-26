@@ -115,7 +115,7 @@ def test_render_premium_branch_compose_import_resolves():
     # render_premium_poster_v1's compose import is try-flat/except-package; on this
     # machine the package arm resolves. Inject everything else so no model call runs.
     from agents.flyer import render
-    proj = SimpleNamespace(customer_phone="+17329837841", locked_facts=[
+    proj = SimpleNamespace(customer_phone="+15550100001", locked_facts=[
         SimpleNamespace(fact_id="business_name", value="Lakshmi's Kitchen"),
         SimpleNamespace(fact_id="pricing_structure", value="Any 2 snacks $9.99"),
         SimpleNamespace(fact_id="item:0:name", value="Punugulu"),
@@ -145,7 +145,7 @@ def test_flag_off_remains_noop():
     from agents.flyer import render
     saved = os.environ.pop("FLYER_PREMIUM_POSTER_V1", None)
     try:
-        assert render._premium_poster_v1_armed(SimpleNamespace(customer_phone="+17329837841")) is False
+        assert render._premium_poster_v1_armed(SimpleNamespace(customer_phone="+15550100001")) is False
     finally:
         if saved is not None:
             os.environ["FLYER_PREMIUM_POSTER_V1"] = saved
@@ -157,9 +157,9 @@ def test_flag_on_not_allowlisted_remains_noop():
     try:
         os.environ["FLYER_PREMIUM_POSTER_V1"] = "1"
         os.environ.pop("FLYER_PREMIUM_POSTER_V1_ALLOWLIST", None)  # empty allowlist => DISABLED
-        assert render._premium_poster_v1_armed(SimpleNamespace(customer_phone="+17329837841")) is False
+        assert render._premium_poster_v1_armed(SimpleNamespace(customer_phone="+15550100001")) is False
         os.environ["FLYER_PREMIUM_POSTER_V1_ALLOWLIST"] = "+19998887777"  # different number
-        assert render._premium_poster_v1_armed(SimpleNamespace(customer_phone="+17329837841")) is False
+        assert render._premium_poster_v1_armed(SimpleNamespace(customer_phone="+15550100001")) is False
     finally:
         for k, v in saved.items():
             os.environ.pop(k, None)

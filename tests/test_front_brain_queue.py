@@ -50,7 +50,7 @@ def qpath(monkeypatch, tmp_path):
 
 def test_queue_persists_item_and_emits_audit(qpath):
     item = fbq.queue_unfulfillable_request(
-        chat_key="+17329837841",
+        chat_key="+15550100001",
         request_text="Can you make the flyer look festive with diyas?",
         request_kind="theme_change",
     )

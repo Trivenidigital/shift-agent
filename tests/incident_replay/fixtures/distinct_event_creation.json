@@ -1,0 +1,45 @@
+{
+  "incident_id": "distinct-event-creation",
+  "description": "A clearly-distinct second event inquiry creates a new, separate lead rather than merging into the existing one. Deterministic proof: test_catering_turn_arbitration_e2e.py.",
+  "pseudonymized_transcript": [
+    {
+      "from": "+15550100003",
+      "text": "Separately, I also need catering for a corporate lunch for 40 people on a different date."
+    }
+  ],
+  "initial_state": {
+    "catering_leads": [
+      {
+        "lead_id": "LEAD-0001",
+        "status": "qualifying",
+        "event": "wedding"
+      }
+    ]
+  },
+  "expected_route": "catering_new_inquiry",
+  "expected_mutations": [
+    "create_distinct_catering_lead"
+  ],
+  "forbidden_mutations": [
+    "merge_into_existing_lead",
+    "overwrite_existing_lead"
+  ],
+  "expected_logical_sends": 1,
+  "expected_audit_identities": [
+    "+15550100003"
+  ],
+  "expected_final_state": {
+    "catering_leads": [
+      {
+        "lead_id": "LEAD-0001",
+        "event": "wedding"
+      },
+      {
+        "status": "new",
+        "event": "corporate_lunch"
+      }
+    ]
+  },
+  "pii_safe": true,
+  "additive_only": true
+}

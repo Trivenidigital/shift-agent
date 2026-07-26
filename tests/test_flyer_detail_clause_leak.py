@@ -35,7 +35,7 @@ def _F(fid, value):
 def _project(raw=RAW, notes=None, facts=None):
     now = datetime(2026, 7, 3, tzinfo=timezone.utc)
     return FlyerProject(
-        project_id="F9501", status="generating_concepts", customer_phone="+17329837841",
+        project_id="F9501", status="generating_concepts", customer_phone="+15550100001",
         created_at=now, updated_at=now, original_message_id="m-leak",
         raw_request=raw, fields=FlyerRequestFields(notes=notes if notes is not None else raw),
         locked_facts=facts if facts is not None else [

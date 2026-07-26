@@ -26,8 +26,8 @@ import bare_render as br  # noqa: E402
 from flyer_brief import VisualDirection  # noqa: E402
 from schemas import FlyerProject, FlyerLockedFact, FlyerRequestFields  # noqa: E402
 
-CHAT = "201975216009469@lid"
-SENDER = "+17329837841"
+CHAT = "100000000000001@lid"
+SENDER = "+15550100001"
 _VD = VisualDirection(theme_family="Graduation celebration",
                       visual_subjects=["two students in caps facing away"], motifs=["caps"],
                       palette=["royal blue", "gold"])

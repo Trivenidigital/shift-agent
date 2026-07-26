@@ -63,8 +63,8 @@ AMEND_PATH = ST / "catering-amendments.json"
 DECISIONS_LOG = LOGS / "decisions.log"
 TEMPLATES = STATE / "templates"
 
-PHONE = "+17329837841"
-CHAT = "17329837841@lid"
+PHONE = "+15550100001"
+CHAT = "15550100001@lid"
 OWNER_JID = "19045550100@s.whatsapp.net"
 
 MODEL = os.environ.get("E2E_LLM_MODEL", "openai/gpt-4o-mini")
@@ -661,7 +661,7 @@ def drive_turn(hooks, actions, n, text, mid):
 
 # -- Assertions (PR-D free-flow) --------------------------------------------
 def customer_sends(sends):
-    return [s for s in sends if s["jid"].startswith("17329837841")]
+    return [s for s in sends if s["jid"].startswith("15550100001")]
 
 
 def proposal_sends(sends):
@@ -847,7 +847,7 @@ def append_transcript(T, res, assertions, tone):
     if res["sends"]:
         T.append("**Outbound sends (verbatim):**\n")
         for s in res["sends"]:
-            tag = "CUSTOMER" if s["jid"].startswith("17329837841") else ("OWNER-CARD" if s["jid"] == OWNER_JID else "OTHER")
+            tag = "CUSTOMER" if s["jid"].startswith("15550100001") else ("OWNER-CARD" if s["jid"] == OWNER_JID else "OTHER")
             T.append(f"<details><summary>[{tag}] via {s['via']} -> {s['jid']}</summary>\n\n```\n{s['message']}\n```\n</details>\n")
     else:
         T.append("**Outbound sends:** _(none)_\n")

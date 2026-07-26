@@ -51,7 +51,7 @@ import schemas  # noqa: E402
 
 PATCH_HERMES = REPO / "tools" / "patch-hermes.py"
 
-CHAT = "17329837841@c.us"
+CHAT = "15550100001@c.us"
 _counter = itertools.count()
 
 

@@ -20,7 +20,7 @@ def _project(**overrides) -> FlyerProject:
     base = dict(
         project_id="F0250",
         status="intake_started",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
         updated_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
         original_message_id="m",

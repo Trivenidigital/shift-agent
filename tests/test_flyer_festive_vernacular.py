@@ -96,7 +96,7 @@ def test_festive_vernacular_jargon_consumed_by_visual_qa_union():
 def test_brush_script_leak_blocks_end_to_end(tmp_path):
     # jargon painted into the art (OCR sidecar) must block, via the same screen
     # that catches 'letterspaced'/'scalloped' (test_flyer_qa_hardening exhibits).
-    phone = "+17329837841"
+    phone = "+15550100001"
     now = datetime(2026, 7, 4, tzinfo=timezone.utc)
     project = FlyerProject(
         project_id="F9702", status="generating_concepts", customer_phone=phone,

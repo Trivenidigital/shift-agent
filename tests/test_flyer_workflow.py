@@ -54,7 +54,7 @@ def test_build_project_status_reply_covers_all_flyer_states():
         project = FlyerProject(
             project_id="F9003",
             status=status,
-            customer_phone="+17329837841",
+            customer_phone="+15550100001",
             created_at=now,
             updated_at=now,
             original_message_id="m-status",
@@ -265,7 +265,7 @@ def test_mixed_visual_and_price_revision_is_actionable():
     project = _project(FlyerRequestFields(
         event_or_business_name="Chloe Hair Studio",
         venue_or_location="11111 Gainsborough Ct, Fairfax, VA, 22030",
-        contact_info="+19803826497",
+        contact_info="+15550100004",
         notes=(
             "Create flyer for Chloe Hair Studio promoting men haircut $20, perms $80, "
             "and other hair services."
@@ -293,7 +293,7 @@ def test_layout_focus_revision_with_create_new_wording_is_actionable():
     project = _project(FlyerRequestFields(
         event_or_business_name="Chloe Hair Studio",
         venue_or_location="11111 Gainsborough Ct, Fairfax, VA, 22030",
-        contact_info="+19803826497",
+        contact_info="+15550100004",
         notes=(
             "Create flyer for Chloe Hair Studio with service cards for men haircut, "
             "perms, beard trim, and other hair services. Show contact number and address."
@@ -336,9 +336,9 @@ def test_extract_revision_field_updates_handles_date_and_time_change():
 def test_extract_revision_patch_handles_price_title_phone_and_venue_changes():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast",
-        contact_info="+1 704 324 3322",
+        contact_info="+1 555 010 0003",
         venue_or_location="Triveni Pineville",
-        notes="Thursday Dosa Night Special. Non-veg combo $14.99. Phone: +1 704 324 3322. Location: Triveni Pineville",
+        notes="Thursday Dosa Night Special. Non-veg combo $14.99. Phone: +1 555 010 0003. Location: Triveni Pineville",
     ))
     patch = extract_revision_patch(
         project,
@@ -358,7 +358,7 @@ def test_extract_revision_patch_handles_price_title_phone_and_venue_changes():
 def test_extract_revision_patch_flags_repeated_price_ambiguity():
     project = _project(FlyerRequestFields(
         event_or_business_name="Dosa Night",
-        contact_info="+1 704 324 3322",
+        contact_info="+1 555 010 0003",
         notes="Veg combo $14.99. Non-veg combo $14.99.",
     ))
     patch = extract_revision_patch(project, "Change price from $14.99 to $16.99.")
@@ -370,7 +370,7 @@ def test_extract_revision_patch_flags_repeated_price_ambiguity():
 def test_extract_revision_patch_flags_old_text_not_found():
     project = _project(FlyerRequestFields(
         event_or_business_name="Dosa Night",
-        contact_info="+1 704 324 3322",
+        contact_info="+1 555 010 0003",
         notes="Veg combo $12.99.",
     ))
     patch = extract_revision_patch(project, "Change price from $14.99 to $16.99.")
@@ -382,7 +382,7 @@ def test_extract_revision_patch_flags_old_text_not_found():
 def test_extract_revision_patch_replaces_visible_text_without_confirmation_when_exact():
     project = _project(FlyerRequestFields(
         event_or_business_name="Evening Snacks",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="Green badge text: Price any event - $9.99.",
     ))
     patch = extract_revision_patch(project, 'Replace "Price any event" with "Any Item".')
@@ -396,7 +396,7 @@ def test_extract_revision_patch_replaces_visible_text_without_confirmation_when_
 def test_extract_revision_patch_flags_fuzzy_visible_text_replace_for_confirmation():
     project = _project(FlyerRequestFields(
         event_or_business_name="Evening Snacks",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="Green badge text:\nPrice any\nevent - $9.99.",
     ))
     patch = extract_revision_patch(project, 'Replace "Price any event" with "Any Item".')
@@ -409,7 +409,7 @@ def test_extract_revision_patch_flags_fuzzy_visible_text_replace_for_confirmatio
 def test_extract_revision_patch_parses_replace_with_hyphen_variant():
     project = _project(FlyerRequestFields(
         event_or_business_name="Evening Snacks",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="Green badge text: Price any event - $9.99.",
     ))
     patch = extract_revision_patch(project, 'Replace "Price any event" - with " Any Item".')
@@ -422,7 +422,7 @@ def test_extract_revision_patch_parses_replace_with_hyphen_variant():
 def test_extract_revision_patch_parses_replace_with_mismatched_curly_quotes():
     project = _project(FlyerRequestFields(
         event_or_business_name="Evening Snacks",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="Green badge text: Price any event - $9.99.",
     ))
     patch = extract_revision_patch(project, "Replace “Price any event -“ with “ Any Item”.")
@@ -435,7 +435,7 @@ def test_extract_revision_patch_parses_replace_with_mismatched_curly_quotes():
 def test_extract_revision_patch_falls_back_to_instruction_when_old_text_not_in_details():
     project = _project(FlyerRequestFields(
         event_or_business_name="Evening Snacks",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="",
     ))
     patch = extract_revision_patch(project, 'Replace "Price any event -" with "Any Item".')
@@ -448,7 +448,7 @@ def test_extract_revision_patch_falls_back_to_instruction_when_old_text_not_in_d
 def test_extract_revision_patch_parses_replace_with_backticks():
     project = _project(FlyerRequestFields(
         event_or_business_name="Evening Snacks",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="Green badge text: Price any event - $9.99.",
     ))
     patch = extract_revision_patch(project, "Replace `Price any event` with `Any Item`.")
@@ -460,7 +460,7 @@ def test_extract_revision_patch_parses_replace_with_backticks():
 def test_extract_revision_patch_parses_replace_without_quotes_confirmation_gated():
     project = _project(FlyerRequestFields(
         event_or_business_name="Evening Snacks",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="",
     ))
     patch = extract_revision_patch(project, "Replace Price any event with Any Item.")
@@ -473,7 +473,7 @@ def test_extract_revision_patch_parses_replace_without_quotes_confirmation_gated
 def test_extract_revision_patch_handles_offer_arrow_with_price_delta():
     project = _project(FlyerRequestFields(
         event_or_business_name="Dosa Specials",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes=(
             "Pick Any 3 Dosa for $20. "
             "Items: Masala Dosa $8.99, Onion Dosa $8.99, Rava Dosa $8.99."
@@ -495,7 +495,7 @@ def test_extract_revision_patch_handles_offer_arrow_with_price_delta():
 def test_extract_revision_patch_handles_change_offer_with_price_delta_without_leaking_instruction():
     project = _project(FlyerRequestFields(
         event_or_business_name="Dosa Specials",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes=(
             "Pick Any 3 Dosa for $20. "
             "Items: Masala Dosa $8.99, Onion Dosa $8.99, Rava Dosa $8.99."
@@ -517,7 +517,7 @@ def test_extract_revision_patch_handles_change_offer_with_price_delta_without_le
 def test_extract_revision_patch_handles_prefixed_offer_arrow_with_price_delta():
     project = _project(FlyerRequestFields(
         event_or_business_name="Dosa Specials",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="Pick Any 3 Dosa for $20. Items: Masala Dosa $8.99.",
     ))
 
@@ -535,7 +535,7 @@ def test_extract_revision_patch_handles_prefixed_offer_arrow_with_price_delta():
 def test_extract_revision_patch_handles_colon_prefixed_offer_arrow_with_price_delta():
     project = _project(FlyerRequestFields(
         event_or_business_name="Dosa Specials",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="Pick Any 3 Dosa for $20. Items: Masala Dosa $8.99.",
     ))
 
@@ -552,7 +552,7 @@ def test_extract_revision_patch_handles_colon_prefixed_offer_arrow_with_price_de
 def test_extract_revision_patch_handles_do_this_prefixed_offer_arrow_with_price_delta():
     project = _project(FlyerRequestFields(
         event_or_business_name="Dosa Specials",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="Pick Any 3 Dosa for $20. Items: Masala Dosa $8.99.",
     ))
 
@@ -569,7 +569,7 @@ def test_extract_revision_patch_handles_do_this_prefixed_offer_arrow_with_price_
 def test_extract_revision_patch_applies_price_delta_after_fuzzy_offer_match():
     project = _project(FlyerRequestFields(
         event_or_business_name="Dosa Specials",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="Pick Any 3    Dosa for $20. Items: Masala Dosa $8.99.",
     ))
 
@@ -588,7 +588,7 @@ def test_extract_revision_patch_applies_price_delta_after_fuzzy_offer_match():
 def test_extract_revision_patch_fails_closed_when_offer_price_delta_has_no_nearby_price():
     project = _project(FlyerRequestFields(
         event_or_business_name="Dosa Specials",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="Pick Any 3 Dosa. Items: Masala Dosa $8.99, Onion Dosa $8.99.",
     ))
 
@@ -606,7 +606,7 @@ def test_extract_revision_patch_fails_closed_when_notes_have_repeated_offer_text
     project = _project(
         FlyerRequestFields(
             event_or_business_name="Dosa Specials",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             notes="Pick Any 3 Dosa for $20. Pick Any 3 Dosa for $20.",
         )
     ).model_copy(update={"raw_request": "Pick Any 3 Dosa for $20."})
@@ -624,7 +624,7 @@ def test_extract_revision_patch_fails_closed_when_notes_have_repeated_offer_text
 def test_extract_revision_patch_fails_closed_on_multiple_price_deltas():
     project = _project(FlyerRequestFields(
         event_or_business_name="Dosa Specials",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="Pick Any 3 Dosa for $20. Drink Special for $5.",
     ))
 
@@ -641,7 +641,7 @@ def test_extract_revision_patch_fails_closed_on_multiple_price_deltas():
 def test_extract_revision_patch_does_not_double_apply_when_new_contains_old():
     project = _project(FlyerRequestFields(
         event_or_business_name="Happy Hour",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="Happy Hour Special.",
     )).model_copy(update={"raw_request": "Happy Hour Special."})
 
@@ -660,7 +660,7 @@ def test_extract_revision_patch_does_not_double_apply_when_new_contains_old():
 def test_extract_revision_patch_does_not_double_apply_whitespace_variant_when_new_contains_old():
     project = _project(FlyerRequestFields(
         event_or_business_name="Happy Hour",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="Happy   Hour Special.",
     )).model_copy(update={"raw_request": "Happy Hour   Special."})
 
@@ -679,7 +679,7 @@ def test_extract_revision_patch_does_not_double_apply_whitespace_variant_when_ne
 def test_extract_revision_patch_fails_closed_on_whitespace_ambiguous_old_and_new():
     project = _project(FlyerRequestFields(
         event_or_business_name="Happy Hour",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="Happy   Hour and Happy    Hour Special.",
     )).model_copy(update={"raw_request": "Happy   Hour and Happy    Hour Special."})
 
@@ -700,7 +700,7 @@ def test_extract_revision_patch_handles_menu_item_swap_without_clarification():
         event_or_business_name="Weekend Breakfast Specials",
         event_time="07:00",
         venue_or_location="90 Brybar Dr",
-        contact_info="+1 732 983 7841",
+        contact_info="+1 555 010 0001",
         notes="Exclude Thatte Idly from original flyer. Items: Idly, Dosa with Chicken Curry, Tatte Idly.",
     ))
     patch = extract_revision_patch(
@@ -720,7 +720,7 @@ def test_extract_revision_patch_handles_extra_time_removal_and_item_add():
         event_or_business_name="Weekend Breakfast Specials",
         event_time="08:00",
         venue_or_location="90 Brybar Dr",
-        contact_info="+1 732 983 7841",
+        contact_info="+1 555 010 0001",
         notes="Weekend Breakfast Specials. Timings 8 AM to 11 AM. Extra 08:00 appears in the template.",
     ))
 
@@ -738,7 +738,7 @@ def test_extract_revision_patch_handles_visible_time_text_before_duplicate_marke
         event_or_business_name="Evening Snacks",
         event_time="16:00",
         venue_or_location="90 Brybar Dr",
-        contact_info="+1 732 983 7841",
+        contact_info="+1 555 010 0001",
         notes="Evening Snacks. Schedule 4 PM to 7 PM. Preview also shows Time: 16:00.",
     ))
 
@@ -758,7 +758,7 @@ def test_extract_revision_patch_handles_remove_time_without_duplicate_marker():
         event_or_business_name="Evening Snacks",
         event_time="16:00",
         venue_or_location="90 Brybar Dr",
-        contact_info="+1 732 983 7841",
+        contact_info="+1 555 010 0001",
         notes="Evening Snacks. Schedule 4 PM to 7 PM. Preview also shows Time: 16:00.",
     ))
     patch = extract_revision_patch(project, "Why that 16:00 in the flyer. Please remove 16:00.")
@@ -772,7 +772,7 @@ def test_extract_revision_patch_handles_remove_time_with_ampm_without_duplicate_
         event_or_business_name="Evening Snacks",
         event_time="16:00",
         venue_or_location="90 Brybar Dr",
-        contact_info="+1 732 983 7841",
+        contact_info="+1 555 010 0001",
         notes="Evening Snacks. Schedule 4 PM to 7 PM. Preview also shows Time: 4 PM.",
     ))
     patch = extract_revision_patch(project, "Why that 4 PM in the flyer. Please remove 4 PM.")
@@ -786,7 +786,7 @@ def test_extract_revision_patch_does_not_parse_later_price_as_extra_time():
         event_or_business_name="Weekend Breakfast Specials",
         event_time="08:00",
         venue_or_location="90 Brybar Dr",
-        contact_info="+1 732 983 7841",
+        contact_info="+1 555 010 0001",
         notes="Weekend Breakfast Specials. Extra 08:00 appears in the template.",
     ))
 
@@ -800,7 +800,7 @@ def test_extract_revision_patch_does_not_parse_later_price_as_extra_time():
 def test_extract_revision_patch_handles_item_swap_with_price():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",
-        contact_info="+1 732 983 7841",
+        contact_info="+1 555 010 0001",
         notes="Items: Poori $8.99, Kheema Dosa $12.99.",
     ))
 
@@ -815,7 +815,7 @@ def test_extract_revision_patch_handles_item_swap_with_price():
 def test_extract_revision_patch_handles_remove_and_add_item_same_price():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",
-        contact_info="+1 732 983 7841",
+        contact_info="+1 555 010 0001",
         notes="Items: Tatte Idly $8.99, Poori $8.99.",
     ))
 
@@ -830,7 +830,7 @@ def test_extract_revision_patch_handles_remove_and_add_item_same_price():
 def test_extract_revision_patch_handles_item_specific_price_to_new_price():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",
-        contact_info="+1 732 983 7841",
+        contact_info="+1 555 010 0001",
         notes="Items: Poori with Chicken $14.99, Kheema Dosa $12.99, Vada $8.99.",
     ))
 
@@ -846,7 +846,7 @@ def test_extract_revision_patch_handles_item_specific_price_to_new_price():
 def test_extract_revision_patch_handles_category_price_to_new_price():
     project = _project(FlyerRequestFields(
         event_or_business_name="Mid-Night Biryani",
-        contact_info="+1 732 983 7841",
+        contact_info="+1 555 010 0001",
         notes=(
             "Create a flyer for mid-night biryani. Include all famous biryanis, "
             "all you can eat @ $25.99"
@@ -864,7 +864,7 @@ def test_extract_revision_patch_handles_category_price_to_new_price():
 def test_extract_revision_patch_replaces_decimal_price_before_period():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",
-        contact_info="+1 732 983 7841",
+        contact_info="+1 555 010 0001",
         notes="Items: Poori with Chicken $14.99; Kheema Dosa $12.99. Thursday to Sunday.",
     ))
 
@@ -880,7 +880,7 @@ def test_extract_revision_patch_replaces_decimal_price_before_period():
 def test_extract_revision_patch_flags_item_specific_price_without_adjacent_price():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",
-        contact_info="+1 732 983 7841",
+        contact_info="+1 555 010 0001",
         notes="Items: Kheema Dosa, Poori $8.99.",
     ))
 
@@ -894,7 +894,7 @@ def test_extract_revision_patch_flags_item_specific_price_without_adjacent_price
 def test_location_from_to_revision_does_not_change_title():
     project = _project(FlyerRequestFields(
         event_or_business_name="Weekend Breakfast",
-        contact_info="+1 704 324 3322",
+        contact_info="+1 555 010 0003",
         venue_or_location="Triveni Pineville",
         notes="Breakfast menu",
     ))
@@ -905,7 +905,7 @@ def test_location_from_to_revision_does_not_change_title():
 def test_extract_revision_patch_updates_day_range_without_corrupting_business_name():
     project = _project(FlyerRequestFields(
         event_or_business_name="MK kitchen",
-        contact_info="+1 571 383 0763",
+        contact_info="+1 555 010 0005",
         venue_or_location="23596 prosperity ridge pl Ashburn Va 20148",
         notes=(
             "Create a professional flyer for MK kitchen. Evening snacks from 4 PM to 7 PM, "

@@ -40,8 +40,8 @@ for _p in (SRC, SRC / "platform"):
 
 from catering_amendments import CaptureResult  # noqa: E402
 
-PHONE = "+17329837841"
-CHAT = "17329837841@lid"
+PHONE = "+15550100001"
+CHAT = "15550100001@lid"
 
 
 def _load_plugin():
@@ -381,8 +381,8 @@ def test_runner_timeout_is_bounded():
     ("   ", False),                    # blank = disabled
     (",, ,", False),                   # malformed (only separators) = disabled
     ("*", True),                       # explicit wildcard graduates
-    ("17329837841", True),             # raw digits entry
-    ("+17329837841", True),            # phone entry admits the LID chat (normalized)
+    ("15550100001", True),             # raw digits entry
+    ("+15550100001", True),            # phone entry admits the LID chat (normalized)
     ("19999999999", False),            # non-matching entry
 ])
 def test_allowlist_semantics(monkeypatch, value, expect):

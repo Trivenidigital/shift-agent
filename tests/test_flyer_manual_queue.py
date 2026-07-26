@@ -22,7 +22,7 @@ def _manual_project():
     return FlyerProject(
         project_id="F9100",
         status="manual_edit_required",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-manual",
@@ -360,11 +360,11 @@ def test_triage_summary_groups_by_customer_and_aggregates_reasons():
     from agents.flyer.manual_queue import triage_summary
 
     store = FlyerProjectStore(projects=[
-        _project("F0036", "+19803826497", age_hours=19, reason_code="visual_qa_failed"),
-        _project("F0043", "+19803826497", age_hours=18, reason_code="visual_qa_failed"),
-        _project("F0045", "+19803826497", age_hours=17, reason_code="legacy_unknown"),
+        _project("F0036", "+15550100004", age_hours=19, reason_code="visual_qa_failed"),
+        _project("F0043", "+15550100004", age_hours=18, reason_code="visual_qa_failed"),
+        _project("F0045", "+15550100004", age_hours=17, reason_code="legacy_unknown"),
         _project("F0052", "+19045550104", age_hours=13, reason_code="source_edit_provider_unavailable"),
-        _project("F0056", "+17329837841", age_hours=12, reason_code="source_edit_provider_unavailable"),
+        _project("F0056", "+15550100001", age_hours=12, reason_code="source_edit_provider_unavailable"),
     ])
 
     summary = triage_summary(store, now=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc))
@@ -377,7 +377,7 @@ def test_triage_summary_groups_by_customer_and_aggregates_reasons():
         "source_edit_provider_unavailable": 2,
         "legacy_unknown": 1,
     }
-    assert [g["customer_phone"] for g in summary["groups"]] == ["+19803826497", "+19045550104", "+17329837841"]
+    assert [g["customer_phone"] for g in summary["groups"]] == ["+15550100004", "+19045550104", "+15550100001"]
     chloe = summary["groups"][0]
     assert chloe["count"] == 3
     assert chloe["stale_count"] == 3
@@ -863,7 +863,7 @@ def _two_customer_store(tmp_path, *, alpha_chat=True, beta_chat=True):
         {
             "customer_id": "CUST0001",
             "business_name": "Lakshmis Kitchen",
-            "primary_chat_id": "201975216009469@lid" if alpha_chat else "",
+            "primary_chat_id": "100000000000001@lid" if alpha_chat else "",
             "business_whatsapp_number": "+19045550104",
             "authorized_request_numbers": ["+19045550104"],
         },
@@ -883,7 +883,7 @@ def _two_customer_store(tmp_path, *, alpha_chat=True, beta_chat=True):
 def test_resolve_customer_chat_id_by_phone_finds_owning_customer(tmp_path):
     from agents.flyer.manual_queue import resolve_customer_chat_id_by_phone
     path = _two_customer_store(tmp_path)
-    assert resolve_customer_chat_id_by_phone(path, "+19045550104") == "201975216009469@lid"
+    assert resolve_customer_chat_id_by_phone(path, "+19045550104") == "100000000000001@lid"
     assert resolve_customer_chat_id_by_phone(path, "+19048626362") == "201234567890123@lid"
 
 
@@ -915,7 +915,7 @@ def test_recent_inbound_chat_id_ignores_synthetic_status_jids(tmp_path):
             json.dumps({
                 "type": "cf_router_intercepted",
                 "reason": "flyer_primary_project_created",
-                "chat_id": "201975216009469@lid",
+                "chat_id": "100000000000001@lid",
                 "detail": "project_id=F0102; sender_role=employee",
             }),
             json.dumps({
@@ -928,7 +928,7 @@ def test_recent_inbound_chat_id_ignores_synthetic_status_jids(tmp_path):
         encoding="utf-8",
     )
 
-    assert find_recent_inbound_chat_id_for_project(decisions, "F0102") == "201975216009469@lid"
+    assert find_recent_inbound_chat_id_for_project(decisions, "F0102") == "100000000000001@lid"
 
 
 def _closed_store(*, phone="+19045550104", reason_code="source_edit_provider_unavailable"):
@@ -975,7 +975,7 @@ def test_notify_customer_of_closure_success_path(tmp_path):
     )
     assert len(sent) == 1, "bridge_post must be called exactly once for success path"
     chat_id, text = sent[0]
-    assert chat_id == "201975216009469@lid"  # owning customer's chat_id
+    assert chat_id == "100000000000001@lid"  # owning customer's chat_id
     assert "F0058" not in text
     assert "apply that source-flyer edit" in text  # CLOSED_NO_SEND_REASON_LINES copy
     assert len(audited) == 1
@@ -986,7 +986,7 @@ def test_notify_customer_of_closure_success_path(tmp_path):
     assert parsed["project_id"] == "F0058"
     assert parsed["customer_phone"] == "+19045550104"
     assert parsed["reason_code"] == "source_edit_provider_unavailable"
-    assert parsed["chat_id"] == "201975216009469@lid"
+    assert parsed["chat_id"] == "100000000000001@lid"
     assert parsed["send_ok"] is True
     assert parsed["outbound_message_id"] == "mid-123"
     assert parsed["error"] == ""
@@ -1045,7 +1045,7 @@ def test_notify_customer_of_closure_bridge_failure(tmp_path):
     assert len(audited) == 1
     parsed = json.loads(audited[0])
     assert parsed["send_ok"] is False
-    assert parsed["chat_id"] == "201975216009469@lid"
+    assert parsed["chat_id"] == "100000000000001@lid"
     assert "connect_failed" in parsed["error"]
     assert "connection refused" in parsed["error"]
 
@@ -1069,7 +1069,7 @@ def test_notify_customer_of_closure_sends_to_owning_customer_only(tmp_path):
         bridge_send=bridge,
         audit_append=lambda *_a: None,
     )
-    assert sent == ["201975216009469@lid"]
+    assert sent == ["100000000000001@lid"]
     assert "201234567890123@lid" not in sent  # CUST0002 unaffected
 
 

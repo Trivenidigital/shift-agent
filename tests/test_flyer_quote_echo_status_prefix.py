@@ -30,8 +30,8 @@ pytestmark = pytest.mark.skipif(
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = REPO / "src" / "plugins" / "cf-router"
 PLATFORM_DIR = REPO / "src" / "platform"
-CHAT = "17329837841@c.us"
-PHONE = "+17329837841"
+CHAT = "15550100001@c.us"
+PHONE = "+15550100001"
 
 
 def _load():

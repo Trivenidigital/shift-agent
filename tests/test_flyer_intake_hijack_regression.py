@@ -33,9 +33,9 @@ for _p in (str(REPO / "src" / "platform"), str(REPO / "src")):
 
 _WINDOWS = platform.system() == "Windows"
 
-PHONE = "+17329837841"
-PHONE_JID = "17329837841@s.whatsapp.net"
-LID = "201975216009469@lid"
+PHONE = "+15550100001"
+PHONE_JID = "15550100001@s.whatsapp.net"
+LID = "100000000000001@lid"
 
 
 def _load_plugin_modules():

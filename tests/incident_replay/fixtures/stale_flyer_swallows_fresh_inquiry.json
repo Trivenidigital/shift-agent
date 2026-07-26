@@ -1,0 +1,48 @@
+{
+  "incident_id": "stale-flyer-swallows-fresh-inquiry",
+  "description": "A stale/active flyer project must not swallow a fresh wedding catering inquiry. The P1-1 escape gate routes the fresh catering intent to catering rather than appending it to the stale flyer project. Deterministic proof: test_cf_router_catering_escape_gate.py.",
+  "pseudonymized_transcript": [
+    {
+      "from": "+15550100003",
+      "text": "Hi, I need catering for my daughter's wedding, about 180 guests next month."
+    }
+  ],
+  "initial_state": {
+    "flyer_project": {
+      "status": "active",
+      "stale": true,
+      "project_id": "FLYPRJ-0001"
+    },
+    "catering_leads": []
+  },
+  "expected_route": "catering_new_inquiry",
+  "expected_mutations": [
+    "create_catering_lead",
+    "audit:flyer_active_project_bypassed",
+    "audit:catering_escape_gate_fired"
+  ],
+  "forbidden_mutations": [
+    "invoke_update_flyer_project",
+    "append_message_to_flyer_project",
+    "duplicate_initial_ack"
+  ],
+  "expected_logical_sends": 1,
+  "expected_audit_identities": [
+    "+15550100003"
+  ],
+  "expected_final_state": {
+    "flyer_project": {
+      "status": "active",
+      "untouched": true,
+      "project_id": "FLYPRJ-0001"
+    },
+    "catering_leads": [
+      {
+        "status": "new",
+        "source": "escape_gate"
+      }
+    ]
+  },
+  "pii_safe": true,
+  "additive_only": true
+}

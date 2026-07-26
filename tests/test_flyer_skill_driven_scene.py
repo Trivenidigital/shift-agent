@@ -43,7 +43,7 @@ _FOOD_VD = VisualDirection(
 def _project(business="Lakshmi's Kitchen", title="2026 Graduation Parties"):
     now = datetime(2026, 6, 7, tzinfo=timezone.utc)
     return FlyerProject(
-        project_id="F0200", status="awaiting_final_approval", customer_phone="+17329837841",
+        project_id="F0200", status="awaiting_final_approval", customer_phone="+15550100001",
         created_at=now, updated_at=now, original_message_id="m",
         raw_request=f"Create a flyer for {business}",
         fields=FlyerRequestFields(event_or_business_name=business),
@@ -142,7 +142,7 @@ def test_advise_scene_direction_returns_visual_direction_on_success(monkeypatch)
 
 # ── (5) gate decoupled from the CD flag; off/not-allowlisted -> no skill call ─
 def test_skill_driven_scene_gate_matrix(monkeypatch):
-    sender = "+17329837841"
+    sender = "+15550100001"
     monkeypatch.delenv(br.SKILL_DRIVEN_SCENE_ENABLED_ENV, raising=False)
     monkeypatch.delenv(br.SKILL_DRIVEN_SCENE_ALLOWLIST_ENV, raising=False)
     assert br._skill_driven_scene_armed(sender) is False           # flag unset
@@ -155,7 +155,7 @@ def test_skill_driven_scene_gate_matrix(monkeypatch):
 
 
 def test_advisory_scene_direction_not_armed_never_calls_skill(monkeypatch):
-    sender = "+17329837841"
+    sender = "+15550100001"
     monkeypatch.delenv(br.SKILL_DRIVEN_SCENE_ENABLED_ENV, raising=False)
     # decoupled from the CD flag: even with CD enabled+allowlisted, scene gate is its own
     monkeypatch.setenv(br.CREATIVE_DIRECTOR_ENABLED_ENV, "1")

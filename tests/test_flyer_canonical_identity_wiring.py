@@ -1,8 +1,8 @@
 """Canonical-identity wiring — LID<->phone convergence across the Flyer surface.
 
 Reconstructs the 2026-06-02 identity split (F0133 keyed to the LID
-`201975216009469@lid`; a stale intake session keyed to the phone-JID for the
-SAME customer +17329837841) and asserts the three wiring targets converge once
+`100000000000001@lid`; a stale intake session keyed to the phone-JID for the
+SAME customer +15550100001) and asserts the three wiring targets converge once
 the lid-cache knows the pairing:
   (1) FlyerIntakeSession keying/lookup (cf-router finder/discard + schemas store)
   (2) the B1 shadow-LLM allowlist gate
@@ -29,9 +29,9 @@ for _p in (str(PLATFORM), str(REPO / "src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-PHONE = "+17329837841"
-PHONE_JID = "17329837841@s.whatsapp.net"
-LID = "201975216009469@lid"
+PHONE = "+15550100001"
+PHONE_JID = "15550100001@s.whatsapp.net"
+LID = "100000000000001@lid"
 UNMAPPED_LID = "555000111222333@lid"
 
 

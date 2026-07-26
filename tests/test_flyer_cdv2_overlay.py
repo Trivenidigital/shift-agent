@@ -36,7 +36,7 @@ def _base_facts():
         FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Any item $7.99", source="customer_text", required=True),
         FlyerLockedFact(fact_id="schedule", label="Schedule", value="Saturday & Sunday, 4 PM-8 PM", source="customer_text", required=True),
         FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
-        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
     ]
     for i, nm in enumerate(["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar"]):
         f.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item {i}", value=nm, source="customer_text", required=True))
@@ -47,7 +47,7 @@ def _project(creative_direction=None, facts=None, pid="F0250"):
     return FlyerProject(
         project_id=pid,
         status="intake_started",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
         updated_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
         original_message_id="m",

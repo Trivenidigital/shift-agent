@@ -49,11 +49,11 @@ def test_pair_by_message_id_happy_path(now):
     """raw_inbound + dispatcher_routed with same message_id pair cleanly."""
     entries = [
         {"type": "raw_inbound", "ts": _ts(now), "message_id": "wa:abc",
-         "sender_phone": "+918522041562", "input_message": "#X9KRV yes"},
+         "sender_phone": "+15550100002", "input_message": "#X9KRV yes"},
         {"type": "dispatcher_routed", "ts": _ts(now, 2), "message_id": "wa:abc",
          "sender_role": "owner", "message_shape": "approval_code",
          "routed_to_skill": "handle_owner_command",
-         "sender_phone": "+918522041562"},
+         "sender_phone": "+15550100002"},
     ]
     paired, unpaired = mod.pair_inbounds(entries)
     assert len(paired) == 1
@@ -67,7 +67,7 @@ def test_unpaired_when_no_dispatcher_routed(now):
     """raw_inbound with no matching dispatcher_routed = Kimi skipped dispatch."""
     entries = [
         {"type": "raw_inbound", "ts": _ts(now), "message_id": "wa:abc",
-         "sender_phone": "+918522041562", "input_message": "Bro can't come"},
+         "sender_phone": "+15550100002", "input_message": "Bro can't come"},
     ]
     paired, unpaired = mod.pair_inbounds(entries)
     assert len(paired) == 0
@@ -109,9 +109,9 @@ def test_unknown_sender_declined_pairs_by_lid(now):
     """LID-only senders (no phone) pair via sender_lid match."""
     entries = [
         {"type": "raw_inbound", "ts": _ts(now), "message_id": "wa:lid1",
-         "sender_lid": "201975216009469@lid", "input_message": "hi"},
+         "sender_lid": "100000000000001@lid", "input_message": "hi"},
         {"type": "unknown_sender_declined", "ts": _ts(now, 1),
-         "sender_lid": "201975216009469@lid",
+         "sender_lid": "100000000000001@lid",
          "input_message_truncated": "hi"},
     ]
     paired, unpaired = mod.pair_inbounds(entries)
@@ -305,18 +305,18 @@ def test_mixed_traffic_realistic_scenario(now):
     JSONL post-mortem (~57% first-attempt accuracy floor)."""
     entries = [
         {"type": "raw_inbound", "ts": _ts(now, 0), "message_id": "m1",
-         "sender_phone": "+918522041562", "input_message": "#A1B2C yes"},
+         "sender_phone": "+15550100002", "input_message": "#A1B2C yes"},
         {"type": "dispatcher_routed", "ts": _ts(now, 1), "message_id": "m1",
          "sender_role": "owner", "message_shape": "approval_code",
          "routed_to_skill": "handle_owner_command"},
         {"type": "raw_inbound", "ts": _ts(now, 30), "message_id": "m2",
-         "sender_phone": "+17329837841", "input_message": "do you do catering?"},
+         "sender_phone": "+15550100001", "input_message": "do you do catering?"},
         {"type": "dispatcher_routed", "ts": _ts(now, 32), "message_id": "m2",
          "sender_role": "employee", "message_shape": "text",
          "routed_to_skill": "catering_dispatcher"},
         # m3 has no dispatcher_routed — Kimi skipped dispatch on this one
         {"type": "raw_inbound", "ts": _ts(now, 60), "message_id": "m3",
-         "sender_phone": "+918522041562", "input_message": "I can't come"},
+         "sender_phone": "+15550100002", "input_message": "I can't come"},
     ]
     paired, unpaired = mod.pair_inbounds(entries)
     assert len(paired) == 2
@@ -441,7 +441,7 @@ def test_main_renders_json_to_stdout(tmp_path, now, capsys):
     log = tmp_path / "decisions.log"
     _write_log(log, [
         {"type": "raw_inbound", "ts": _ts(now), "message_id": "m1",
-         "sender_phone": "+918522041562", "input_message": "test"},
+         "sender_phone": "+15550100002", "input_message": "test"},
         {"type": "dispatcher_routed", "ts": _ts(now, 1), "message_id": "m1",
          "sender_role": "owner", "message_shape": "text",
          "routed_to_skill": "handle_owner_command"},

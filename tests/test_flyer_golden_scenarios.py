@@ -219,13 +219,13 @@ _SCENARIOS: list[GoldenScenario] = [
         category="restaurant",
         raw_request=(
             "Create flyer for Lakshmis Kitchen Thursday Dosa Night Special. "
-            "Contact +17329837841. Idly $7, Dosa $8, Veg combo $12.99."
+            "Contact +15550100001. Idly $7, Dosa $8, Veg combo $12.99."
         ),
         # The extractor identifies the brand name as the business signal.
         # Trailing event/special phrasing is not part of the locked brand.
         expected_locked_facts={
             "business_name": "Lakshmis Kitchen",
-            "contact_phone": "+17329837841",
+            "contact_phone": "+15550100001",
         },
     ),
     GoldenScenario(
@@ -259,12 +259,12 @@ _SCENARIOS: list[GoldenScenario] = [
         description="Salon service-pricing flyer (non-food category).",
         category="salon",
         raw_request=(
-            "Create flyer for Chloe Hair Studio. Contact +19803826497. "
+            "Create flyer for Chloe Hair Studio. Contact +15550100004. "
             "Men haircut $20, Perms $80, Kids trim $7."
         ),
         expected_locked_facts={
             "business_name": "Chloe Hair Studio",
-            "contact_phone": "+19803826497",
+            "contact_phone": "+15550100004",
         },
     ),
     GoldenScenario(
@@ -286,11 +286,11 @@ _SCENARIOS: list[GoldenScenario] = [
         category="event",
         raw_request=(
             "Create flyer for Sri Venkateswara Temple Ugadi celebration. "
-            "Contact +17329837841. April 9 6pm-9pm, free entry."
+            "Contact +15550100001. April 9 6pm-9pm, free entry."
         ),
         expected_locked_facts={
             "business_name": "Sri Venkateswara Temple",
-            "contact_phone": "+17329837841",
+            "contact_phone": "+15550100001",
         },
     ),
 
@@ -301,12 +301,12 @@ _SCENARIOS: list[GoldenScenario] = [
         category="restaurant",
         raw_request=(
             "Create flyer for Lakshmis Kitchen with corrected prices. "
-            "Contact +17329837841. Idly $8 (was $7), Dosa $9 (was $8)."
+            "Contact +15550100001. Idly $8 (was $7), Dosa $9 (was $8)."
         ),
         # Brand name only — "with corrected prices" is intent, not brand.
         expected_locked_facts={
             "business_name": "Lakshmis Kitchen",
-            "contact_phone": "+17329837841",
+            "contact_phone": "+15550100001",
         },
     ),
     GoldenScenario(
@@ -315,14 +315,14 @@ _SCENARIOS: list[GoldenScenario] = [
         category="restaurant",
         raw_request=(
             "Create flyer for Lakshmis Kitchen in Telugu. "
-            "Contact +17329837841. Idly $7, Dosa $8."
+            "Contact +15550100001. Idly $7, Dosa $8."
         ),
         # Language detection happens upstream; the locked_facts assertion only
         # pins business brand + contact. Telugu rendering is exercised by the
         # render-side tests, not this routing assertion.
         expected_locked_facts={
             "business_name": "Lakshmis Kitchen",
-            "contact_phone": "+17329837841",
+            "contact_phone": "+15550100001",
         },
     ),
 
@@ -475,7 +475,7 @@ def test_golden_scenario_deterministic(scenario: GoldenScenario, tmp_path, monke
 
     argv = [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
+        "--customer-phone", "+15550100001",
         "--message-id", f"m-{scenario.id}",
         "--raw-request", scenario.raw_request,
         "--state-path", str(state_path),
