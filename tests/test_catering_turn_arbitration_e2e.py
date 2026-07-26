@@ -14,6 +14,12 @@ Runs cross-platform via the fcntl stub — same script code paths, one interpret
 E2E-harness convention: "Windows/fcntl forces in-process over subprocess; same code paths").
 The transcript is fully deterministic through cf-router, so NO LLM/network is involved. This
 is the unmocked companion to the pra transcript unit test (which is kept as the fast twin).
+
+End-state framing per message: msg1 opens exactly one distinct lead (NOT an amendment);
+msg2 records the selection once (NOT an amendment); msg3 is ONE benign R2A follow-up —
+idempotent (no re-select/finalize/set/owner-card, no quote/selection regression) AND
+distinguishable from the selection (a follow-up suppression recorded exactly once, not a
+catering_proposal_selected).
 """
 from __future__ import annotations
 
@@ -239,7 +245,7 @@ class _Wiring:
         self.amend_captures: list = []
 
 
-def _wire(hooks, actions, sb: _Sandbox, *, ack_ok: bool = True) -> _Wiring:
+def _wire(hooks, actions, sb: _Sandbox, monkeypatch, *, ack_ok: bool = True) -> _Wiring:
     from catering_amendments import CaptureResult
     w = _Wiring()
     hooks.F7_PROPOSAL_BRANCH_ENABLED = True
@@ -267,10 +273,14 @@ def _wire(hooks, actions, sb: _Sandbox, *, ack_ok: bool = True) -> _Wiring:
     actions.send_canonical_followup_reply = _canonical
 
     # R2A amendment sidecar → captured (count captures without the sidecar's own I/O).
+    # MUST use monkeypatch (auto-restored): catering_amendments is a SHARED module (not the
+    # per-test-loaded plugin), so a raw assignment would leak this stub into every later
+    # test in the process — notably test_cf_router_plugin's Linux-only branch-b tests, which
+    # skip on Windows (so the leak is invisible on the dev box but red on Linux CI).
     def _capture_amend(**kw):
         w.amend_captures.append(kw)
         return CaptureResult(ok=True, amendment_id=f"A{len(w.amend_captures):04d}", idempotent=False)
-    hooks.catering_amendments.capture_branch_b_amendment = _capture_amend
+    monkeypatch.setattr(hooks.catering_amendments, "capture_branch_b_amendment", _capture_amend)
     return w
 
 
@@ -301,10 +311,10 @@ MSG2 = "I like Option 2. Can you send me quote and prices."
 MSG3 = "Option 2"
 
 
-def test_live_transcript_unmocked_end_to_end(tmp_path):
+def test_live_transcript_unmocked_end_to_end(tmp_path, monkeypatch):
     sb = _build_sandbox(tmp_path)
     hooks, actions = _load_plugin()
-    w = _wire(hooks, actions, sb)
+    w = _wire(hooks, actions, sb, monkeypatch)
 
     # ── Message 1: fresh distinct inquiry + proposal ask over the open stale lead ──
     n0 = len(w.sends)
@@ -356,16 +366,42 @@ def test_live_transcript_unmocked_end_to_end(tmp_path):
     assert len(m2_customer) == 1 and m2_customer[0]["via"] == "select-catering-proposal"
     assert w.amend_captures == [], "the selection is NOT captured as an amendment"
 
-    # ── Message 3: redundant "Option 2" → idempotent (no double-select) ──
+    # ── Message 3: redundant "Option 2" → ONE benign R2A follow-up ──
+    # Expected final state is a SINGLE benign R2A follow-up that is idempotent AND
+    # distinguishable from the msg2 selection+pricing action. It must meet all of:
+    #   (1) no re-select / re-finalize; (2) no second proposal set / owner card;
+    #   (3) no reopen/regress of the quote or selection state; (4) recorded EXACTLY ONCE
+    #   (an R2A amendment-capture); (5) a DIFFERENT action type than the selection (a
+    #   follow-up suppression, not a catering_proposal_selected).
+    lead_after_m2 = next(l for l in json.loads(sb.leads.read_text())["leads"] if l["lead_id"] == new_lead_id)
+    set_after_m2 = next(s for s in json.loads(sb.proposals.read_text())["sets"] if s["lead_id"] == new_lead_id)
+    captures_before_m3 = len(w.amend_captures)
     n2 = len(w.sends)
     finals_before3 = len(w.finalize_calls)
-    _drive(hooks, actions, MSG3, "wamid.M3")
+    out3 = _drive(hooks, actions, MSG3, "wamid.M3")
+
+    # (1) does NOT select or finalize again.
     assert len(_rows_of(sb, "catering_proposal_selected")) == 1, "no double-select"
-    assert len(w.finalize_calls) == finals_before3, "no second finalize / owner card"
+    assert len(w.finalize_calls) == finals_before3, "no second finalize invocation"
+    # (2) no second proposal set, and no second owner card (no finalize AND no new create-lead).
     sets3 = json.loads(sb.proposals.read_text())["sets"]
     assert len([s for s in sets3 if s["lead_id"] == new_lead_id]) == 1, "no new proposal set"
+    assert not any(s["via"] == "create-catering-lead" for s in w.sends[n2:]), "no second owner card"
+    # (3) does NOT reopen or regress the selection/quote status — lead + selected set unchanged.
+    lead_after_m3 = next(l for l in json.loads(sb.leads.read_text())["leads"] if l["lead_id"] == new_lead_id)
+    assert lead_after_m3 == lead_after_m2, "lead quote/selection state unchanged by the redundant follow-up"
+    set_after_m3 = next(s for s in sets3 if s["lead_id"] == new_lead_id)
+    assert set_after_m3["status"] == "SELECTED" and set_after_m3["selected_option_id"] == "2", \
+        "selection stays SELECTED / option 2 — not reopened or regressed"
+    assert set_after_m3 == set_after_m2, "the selected proposal set is byte-identical (no regression)"
+    # (4) records the follow-up EXACTLY ONCE.
+    assert len(w.amend_captures) == captures_before_m3 + 1, "exactly one R2A follow-up recorded on msg3"
+    # (5) DISTINGUISHABLE from the msg2 selection: a follow-up suppression (not a selection),
+    # whose one bounded customer send is the canonical follow-up reply, not a select-ack.
+    assert out3 is not None and "follow-up" in out3["reason"] and "selection" not in out3["reason"]
     m3_customer = _customer_sends(w.sends[n2:])
-    assert len(m3_customer) == 1, "message 3 → one bounded customer send (redundant follow-up)"
+    assert len(m3_customer) == 1 and m3_customer[0]["via"] == "canonical", \
+        "one bounded customer send — the benign R2A follow-up, distinct from the selection ack"
 
     # No flyer/commerce mutation anywhere in the arbitrated turn.
     all_types = {r.get("type") for r in read_log_rows(sb.log)}
@@ -387,7 +423,7 @@ def _seed_sent_set(sb: _Sandbox, lead_id: str) -> None:
     }]}), encoding="utf-8")
 
 
-def test_selection_ack_bridge_failure_records_ack_failed_metadata_only(tmp_path):
+def test_selection_ack_bridge_failure_records_ack_failed_metadata_only(tmp_path, monkeypatch):
     """A missing/malformed bridge ack on the selection is metadata-only traceable through
     the REAL script: catering_customer_ack_failed (no fabricated outbound id), and the
     selection is still recorded exactly once (no double-handling)."""
@@ -407,7 +443,7 @@ def test_selection_ack_bridge_failure_records_ack_failed_metadata_only(tmp_path)
     _seed_sent_set(sb, "L0018")
 
     hooks, actions = _load_plugin()
-    w = _wire(hooks, actions, sb, ack_ok=False)  # bridge POST fails on the ack send
+    w = _wire(hooks, actions, sb, monkeypatch, ack_ok=False)  # bridge POST fails on the ack send
 
     out = _drive(hooks, actions, MSG2, "wamid.F2")
     assert out is not None and out["action"] == "skip"
