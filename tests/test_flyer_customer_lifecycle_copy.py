@@ -100,7 +100,7 @@ def test_initial_ack_helpers_are_outcome_only(monkeypatch):
         actions.send_flyer_manual_edit_ack,
     ):
         ok, _mid, err = helper(
-            "17329837841@s.whatsapp.net",
+            "15550100001@s.whatsapp.net",
             "F0065",
             action_context=_action_context(),
         )
@@ -118,12 +118,12 @@ def test_status_replies_hide_project_ids_and_internal_terms(monkeypatch):
     project = FlyerProject(
         project_id="F9001",
         status="manual_edit_required",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-status",
         raw_request="Create flyer for evening snacks.",
-        fields=FlyerRequestFields(event_or_business_name="Evening Snacks", contact_info="+17329837841"),
+        fields=FlyerRequestFields(event_or_business_name="Evening Snacks", contact_info="+15550100001"),
         manual_review=FlyerManualReview(
             status="queued",
             reason="source_edit_provider_unavailable",
@@ -157,7 +157,7 @@ def test_regeneration_failure_copy_hides_project_id(monkeypatch):
     monkeypatch.setattr(actions, "send_flyer_text", lambda _chat_id, text, **_kwargs: (sent.append(text) is None, "mid", ""))
 
     ok, _mid, err = hooks._send_flyer_regeneration_failed_ack(
-        "17329837841@s.whatsapp.net",
+        "15550100001@s.whatsapp.net",
         "F0065",
         action_context=_action_context(),
     )

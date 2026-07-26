@@ -118,7 +118,7 @@ def env_dir(tmp_path):
                      "timezone": "America/New_York"},
         "owner": {"name": "Owner", "phone": "+19045550100",
                   "self_chat_jid": "19045550100@s.whatsapp.net",
-                  "lid": "201975216009469@lid"},
+                  "lid": "100000000000001@lid"},
         "limits": {},
         "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
         "backup": {"gpg_recipient_email": "x@y"},
@@ -381,7 +381,7 @@ def test_lid_only_owner_can_undo(env_dir, bridge_server):
     sys.argv = [str(APPLY_PATH),
                 "--raw-message", "undo E0001",
                 "--sender-phone", "",  # empty phone
-                "--sender-lid", "201975216009469@lid"]  # matches cfg.owner.lid
+                "--sender-lid", "100000000000001@lid"]  # matches cfg.owner.lid
     rc = mod.main()
     # Should reach window-check (not silently decline)
     assert rc == mod.EXIT_OUTSIDE_WINDOW

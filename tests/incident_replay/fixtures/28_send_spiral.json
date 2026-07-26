@@ -1,0 +1,42 @@
+{
+  "incident_id": "28-send-spiral",
+  "description": "KNOWN-UNSAFE / MISSING PROTECTION. On 2026-07-21 a single inbound turn spiralled to 28 outbound sends in one conversation. There is no installed hard transport budget on the live path: the per-turn outbound-send budget (#643, GATEWAY_TURN_SEND_BUDGET_ENABLED) is default OFF and the per-conversation bridge_post throttle is default OFF. This fixture's oracle caps a single turn at expected_logical_sends; the suite marks the enforcing assertion xfail(strict) until PR-3 activates the budget. Seam unit tests: test_gateway_send_throttle.py, test_turn_send_budget.py.",
+  "pseudonymized_transcript": [
+    {
+      "from": "+15550100003",
+      "text": "hello?"
+    }
+  ],
+  "initial_state": {
+    "path": "gateway_conversational",
+    "turn_send_budget_installed": false,
+    "conversation_throttle_enabled": false
+  },
+  "expected_route": "gateway_conversational",
+  "expected_mutations": [
+    "record_send_within_budget",
+    "drop_send_on_budget_breach",
+    "audit:transport_budget_breach_operator_paged"
+  ],
+  "forbidden_mutations": [
+    "outbound_sends_exceeding_expected_logical_sends",
+    "unbounded_gateway_send_loop",
+    "silent_budget_breach"
+  ],
+  "expected_logical_sends": 3,
+  "expected_audit_identities": [
+    "+15550100003"
+  ],
+  "expected_final_state": {
+    "outbound_sends_this_turn": {
+      "max": 3,
+      "observed_incident": 28
+    },
+    "budget_breach": {
+      "dropped": true,
+      "operator_paged": true
+    }
+  },
+  "pii_safe": true,
+  "additive_only": true
+}

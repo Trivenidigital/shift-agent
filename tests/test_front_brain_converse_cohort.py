@@ -42,7 +42,7 @@ def _load_actions():
 
 actions = _load_actions()
 
-CHAT = "17329837841@c.us"
+CHAT = "15550100001@c.us"
 
 
 def _set(monkeypatch, *, converse=None, converse_chats=None, enforce=None, enforce_allow=None):
@@ -81,7 +81,7 @@ def test_empty_converse_allowlist_denies(monkeypatch):
 
 
 def test_both_admit_returns_true(monkeypatch):
-    _both(monkeypatch, converse_chats="+1 732 983 7841", enforce_allow="+17329837841")
+    _both(monkeypatch, converse_chats="+1 555 010 0001", enforce_allow="+15550100001")
     assert actions.front_brain_converse_admits(CHAT) is True
     assert actions.front_brain_converse_admits("19999999999@c.us") is False
 
@@ -108,7 +108,7 @@ def test_enforce_wildcard_satisfies_coupling(monkeypatch):
 def test_converse_wildcard_still_capped_by_enforce_allowlist(monkeypatch):
     # CONVERSE graduates all chats, but enforcement only admits the listed chat,
     # so converse is capped to that chat.
-    _both(monkeypatch, converse_chats="*", enforce_allow="+17329837841")
+    _both(monkeypatch, converse_chats="*", enforce_allow="+15550100001")
     assert actions.front_brain_converse_admits(CHAT) is True
     assert actions.front_brain_converse_admits("18005551234@c.us") is False
 
@@ -119,11 +119,11 @@ def test_lid_and_phone_converge_on_converse_side(monkeypatch, tmp_path):
     lid = "111222333444@lid"
     cache = tmp_path / "lid-cache.json"
     cache.write_text(
-        '{"schema_version":1,"pairs":[{"phone":"+17329837841","lid":"111222333444@lid"}]}',
+        '{"schema_version":1,"pairs":[{"phone":"+15550100001","lid":"111222333444@lid"}]}',
         encoding="utf-8",
     )
     monkeypatch.setenv("SHIFT_AGENT_LID_CACHE_PATH", str(cache))
-    _both(monkeypatch, converse_chats="+17329837841", enforce_allow="*")
+    _both(monkeypatch, converse_chats="+15550100001", enforce_allow="*")
     assert actions.front_brain_converse_admits(lid) is True
     assert actions.front_brain_converse_admits("999888777666@lid") is False
 

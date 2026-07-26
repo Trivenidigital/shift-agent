@@ -85,18 +85,18 @@ def test_style_text_contains_no_fact_like_content():
 def test_flag_semantics_empty_allowlist_is_off(monkeypatch):
     monkeypatch.setenv("FLYER_STYLE_REGISTERS", "1")
     monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", "")
-    assert style_registers_enabled("+17329837841") is False  # empty = DISABLED
-    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", "+17329837841")
-    assert style_registers_enabled("+17329837841") is True
+    assert style_registers_enabled("+15550100001") is False  # empty = DISABLED
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", "+15550100001")
+    assert style_registers_enabled("+15550100001") is True
     assert style_registers_enabled("+15550000000") is False
     monkeypatch.setenv("FLYER_STYLE_REGISTERS", "0")
-    assert style_registers_enabled("+17329837841") is False
+    assert style_registers_enabled("+15550100001") is False
 
 
 def test_flag_default_off(monkeypatch):
     monkeypatch.delenv("FLYER_STYLE_REGISTERS", raising=False)
     monkeypatch.delenv("FLYER_STYLE_REGISTERS_ALLOWLIST", raising=False)
-    assert style_registers_enabled("+17329837841") is False
+    assert style_registers_enabled("+15550100001") is False
 
 
 def test_all_register_jargon_screened():
@@ -120,10 +120,10 @@ def test_all_register_jargon_screened():
 def test_phone_normalization_matches_jid_and_unplussed(monkeypatch):
     # PR #543 review F3: allowlist "+1..." must match JID / un-plussed callers.
     monkeypatch.setenv("FLYER_STYLE_REGISTERS", "1")
-    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", "+17329837841")
-    assert style_registers_enabled("17329837841@s.whatsapp.net") is True
-    assert style_registers_enabled("17329837841") is True
-    assert style_registers_enabled("+1 (732) 983-7841") is True
+    monkeypatch.setenv("FLYER_STYLE_REGISTERS_ALLOWLIST", "+15550100001")
+    assert style_registers_enabled("15550100001@s.whatsapp.net") is True
+    assert style_registers_enabled("15550100001") is True
+    assert style_registers_enabled("+1 (555) 010-0001") is True
     assert style_registers_enabled("15550000000@s.whatsapp.net") is False
 
 

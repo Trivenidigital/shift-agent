@@ -1,0 +1,41 @@
+{
+  "incident_id": "duplicate-event-ambiguity",
+  "description": "A follow-up inquiry that could match an existing event triggers a single clarification \u2014 the agent clarifies ONCE and does not create a duplicate lead before disambiguation. Deterministic proof: test_catering_pra_reachability.py::test_inquiry_matching_identity_clarifies_once.",
+  "pseudonymized_transcript": [
+    {
+      "from": "+15550100003",
+      "text": "Following up about the catering order."
+    }
+  ],
+  "initial_state": {
+    "catering_leads": [
+      {
+        "lead_id": "LEAD-0001",
+        "status": "qualifying"
+      }
+    ]
+  },
+  "expected_route": "catering_clarify",
+  "expected_mutations": [
+    "record_clarification_prompt"
+  ],
+  "forbidden_mutations": [
+    "create_duplicate_lead",
+    "repeat_clarification"
+  ],
+  "expected_logical_sends": 1,
+  "expected_audit_identities": [
+    "+15550100003"
+  ],
+  "expected_final_state": {
+    "catering_leads": [
+      {
+        "lead_id": "LEAD-0001",
+        "status": "qualifying"
+      }
+    ],
+    "clarification_sent_count": 1
+  },
+  "pii_safe": true,
+  "additive_only": true
+}

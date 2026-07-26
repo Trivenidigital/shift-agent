@@ -69,7 +69,7 @@ def test_flag_on_v2_failure_falls_back_to_legacy_and_audits(monkeypatch):
 def test_identity_suppressed_when_profile_owns_it(monkeypatch):
     monkeypatch.setenv("FLYER_EXTRACTION_V2", "1")
     fake_facts = [extraction_v2._fact("business_name", "Lakshmi's Kitchen"),
-                  extraction_v2._fact("contact_phone", "+17329837841"),
+                  extraction_v2._fact("contact_phone", "+15550100001"),
                   extraction_v2._fact("location", "90 Brybar Dr"),
                   extraction_v2._fact("campaign_title", "Breakfast Combo"),
                   extraction_v2._fact("item:0:name", "idli")]

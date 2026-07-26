@@ -143,7 +143,7 @@ def _read_audit(env_dir):
 def test_phone_jid_happy_path_prepends_prefix(bridge_server, env_dir):
     port, stub = bridge_server
     res = _run_script(env_dir, port,
-                      customer_jid="17329837841@s.whatsapp.net",
+                      customer_jid="15550100001@s.whatsapp.net",
                       message_text="Thanks — we got your inquiry, we'll be back to you shortly.",
                       lead_id="L0014")
     parsed = json.loads(res.stdout.strip().splitlines()[-1])
@@ -152,7 +152,7 @@ def test_phone_jid_happy_path_prepends_prefix(bridge_server, env_dir):
     sent_msg = stub.requests[0]["message"]
     assert sent_msg.startswith(EXPECTED_PREFIX), f"prefix missing: {sent_msg[:80]!r}"
     assert sent_msg.endswith("we'll be back to you shortly.")
-    assert stub.requests[0]["chatId"] == "17329837841@s.whatsapp.net"
+    assert stub.requests[0]["chatId"] == "15550100001@s.whatsapp.net"
 
     audit = _read_audit(env_dir)
     assert any(e["type"] == "catering_customer_ack_sent" and e["lead_id"] == "L0014"
@@ -173,7 +173,7 @@ def test_lid_jid_happy_path(bridge_server, env_dir):
 def test_returns_outbound_message_id_on_stdout(bridge_server, env_dir):
     port, _ = bridge_server
     res = _run_script(env_dir, port,
-                      customer_jid="17329837841@s.whatsapp.net",
+                      customer_jid="15550100001@s.whatsapp.net",
                       message_text="hello")
     parsed = json.loads(res.stdout.strip().splitlines()[-1])
     assert parsed["rc"] == 0
@@ -185,8 +185,8 @@ def test_returns_outbound_message_id_on_stdout(bridge_server, env_dir):
 # ---------- Bad input ----------
 
 @pytest.mark.parametrize("bad_jid", [
-    "17329837841",                           # no @suffix
-    "17329837841@c.us",                       # wrong suffix
+    "15550100001",                           # no @suffix
+    "15550100001@c.us",                       # wrong suffix
     "@s.whatsapp.net",                        # empty local part (regression: must fail closed)
     "@lid",                                   # empty local part, lid suffix
     "user@example.com",                       # email-shaped
@@ -205,7 +205,7 @@ def test_bad_jid_rejected_with_exit_2(bridge_server, env_dir, bad_jid):
 def test_empty_message_text_rejected(bridge_server, env_dir):
     port, stub = bridge_server
     res = _run_script(env_dir, port,
-                      customer_jid="17329837841@s.whatsapp.net",
+                      customer_jid="15550100001@s.whatsapp.net",
                       message_text="   ")  # whitespace-only
     parsed = json.loads(res.stdout.strip().splitlines()[-1])
     assert parsed["rc"] == 2
@@ -215,7 +215,7 @@ def test_empty_message_text_rejected(bridge_server, env_dir):
 def test_message_text_too_long_rejected(bridge_server, env_dir):
     port, stub = bridge_server
     res = _run_script(env_dir, port,
-                      customer_jid="17329837841@s.whatsapp.net",
+                      customer_jid="15550100001@s.whatsapp.net",
                       message_text="a" * 3501)
     parsed = json.loads(res.stdout.strip().splitlines()[-1])
     assert parsed["rc"] == 2
@@ -227,7 +227,7 @@ def test_message_text_too_long_rejected(bridge_server, env_dir):
 def test_bridge_unreachable_returns_exit_6(env_dir):
     # No bridge server fixture — port 1 is unreachable
     res = _run_script(env_dir, bridge_port=1,
-                      customer_jid="17329837841@s.whatsapp.net",
+                      customer_jid="15550100001@s.whatsapp.net",
                       message_text="hi")
     parsed = json.loads(res.stdout.strip().splitlines()[-1])
     assert parsed["rc"] == 6, f"expected exit 6 (DEPENDENCY_DOWN); got {parsed}"
@@ -240,7 +240,7 @@ def test_bridge_returns_no_message_id(bridge_server, env_dir):
     port, stub = bridge_server
     stub.response_mode = "no_mid"
     res = _run_script(env_dir, port,
-                      customer_jid="17329837841@s.whatsapp.net",
+                      customer_jid="15550100001@s.whatsapp.net",
                       message_text="hi")
     parsed = json.loads(res.stdout.strip().splitlines()[-1])
     assert parsed["rc"] == 6
@@ -262,7 +262,7 @@ def test_prefix_matches_bridge_template_bypass_regex(bridge_server, env_dir):
     import re
     port, stub = bridge_server
     res = _run_script(env_dir, port,
-                      customer_jid="17329837841@s.whatsapp.net",
+                      customer_jid="15550100001@s.whatsapp.net",
                       message_text="anything")
     parsed = json.loads(res.stdout.strip().splitlines()[-1])
     assert parsed["rc"] == 0

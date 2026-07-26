@@ -21,29 +21,29 @@ parse = mod.parse
 def test_happy_path_all_fields():
     line = (
         '[shift-agent-sender v=1 platform=whatsapp '
-        'phone="+17329837841" lid="201975216009469@lid" '
-        'fromMe=true chat_id="918522041562@s.whatsapp.net"]'
+        'phone="+15550100001" lid="100000000000001@lid" '
+        'fromMe=true chat_id="15550100002@s.whatsapp.net"]'
     )
     out = parse(line)
     assert out["valid"] is True
     assert out["v"] == 1
     assert out["platform"] == "whatsapp"
-    assert out["phone"] == "+17329837841"
-    assert out["lid"] == "201975216009469@lid"
+    assert out["phone"] == "+15550100001"
+    assert out["lid"] == "100000000000001@lid"
     assert out["fromMe"] is True
-    assert out["chat_id"] == "918522041562@s.whatsapp.net"
+    assert out["chat_id"] == "15550100002@s.whatsapp.net"
 
 
 def test_phone_null_lid_set():
     line = (
         '[shift-agent-sender v=1 platform=whatsapp '
-        'phone=null lid="201975216009469@lid" '
-        'fromMe=false chat_id="918522041562@s.whatsapp.net"]'
+        'phone=null lid="100000000000001@lid" '
+        'fromMe=false chat_id="15550100002@s.whatsapp.net"]'
     )
     out = parse(line)
     assert out["valid"] is True
     assert out["phone"] is None
-    assert out["lid"] == "201975216009469@lid"
+    assert out["lid"] == "100000000000001@lid"
     assert out["fromMe"] is False
 
 
@@ -62,7 +62,7 @@ def test_both_phone_and_lid_null():
 def test_missing_v_marker_invalid():
     line = (
         '[shift-agent-sender platform=whatsapp '
-        'phone="+17329837841" lid=null fromMe=true chat_id=null]'
+        'phone="+15550100001" lid=null fromMe=true chat_id=null]'
     )
     assert parse(line)["valid"] is False
 
@@ -70,7 +70,7 @@ def test_missing_v_marker_invalid():
 def test_wrong_v_invalid():
     line = (
         '[shift-agent-sender v=2 platform=whatsapp '
-        'phone="+17329837841" lid=null fromMe=true chat_id=null]'
+        'phone="+15550100001" lid=null fromMe=true chat_id=null]'
     )
     assert parse(line)["valid"] is False
 
@@ -79,7 +79,7 @@ def test_unknown_platform_still_parses():
     """We accept any platform identifier — Hermes adds new platforms over time."""
     line = (
         '[shift-agent-sender v=1 platform=signal '
-        'phone="+17329837841" lid=null fromMe=false chat_id=null]'
+        'phone="+15550100001" lid=null fromMe=false chat_id=null]'
     )
     out = parse(line)
     assert out["valid"] is True
@@ -111,7 +111,7 @@ def test_extra_trailing_content_rejected():
     means the line was tampered with."""
     line = (
         '[shift-agent-sender v=1 platform=whatsapp '
-        'phone="+17329837841" lid=null fromMe=true chat_id=null] EXTRA'
+        'phone="+15550100001" lid=null fromMe=true chat_id=null] EXTRA'
     )
     assert parse(line)["valid"] is False
 
@@ -121,9 +121,9 @@ def test_cli_via_subprocess():
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "--line",
          '[shift-agent-sender v=1 platform=whatsapp '
-         'phone="+17329837841" lid=null fromMe=true chat_id=null]'],
+         'phone="+15550100001" lid=null fromMe=true chat_id=null]'],
         capture_output=True, text=True, check=True,
     )
     out = json.loads(result.stdout.strip())
     assert out["valid"] is True
-    assert out["phone"] == "+17329837841"
+    assert out["phone"] == "+15550100001"

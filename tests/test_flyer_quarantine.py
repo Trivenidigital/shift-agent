@@ -295,7 +295,7 @@ def test_generate_script_deterministic_recovery_quarantines_failed_original(monk
     monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
     # allowlist-semantics unification: empty allowlist = DISABLED, so the
     # recovery gate needs the project's phone explicitly allowed
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     state_path = tmp_path / "projects.json"
     asset_dir = tmp_path / "assets"
     asset_dir.mkdir()
@@ -306,7 +306,7 @@ def test_generate_script_deterministic_recovery_quarantines_failed_original(monk
         "projects": [{
             "project_id": "F0208",
             "status": "generating_concepts",
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "created_at": now,
             "updated_at": now,
             "original_message_id": "m-f0208",
@@ -314,12 +314,12 @@ def test_generate_script_deterministic_recovery_quarantines_failed_original(monk
             "fields": {
                 "event_or_business_name": "Lakshmi's Kitchen",
                 "venue_or_location": "90 Brybar Dr St Johns FL",
-                "contact_info": "+1 732 983 7841",
+                "contact_info": "+1 555 010 0001",
             },
             "locked_facts": [
                 {"fact_id": "business_name", "label": "Business", "value": "Lakshmi's Kitchen", "source": "customer_profile", "required": True},
                 {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr St Johns FL", "source": "customer_profile", "required": True},
-                {"fact_id": "contact_phone", "label": "Contact", "value": "+1 732 983 7841", "source": "customer_profile", "required": True},
+                {"fact_id": "contact_phone", "label": "Contact", "value": "+1 555 010 0001", "source": "customer_profile", "required": True},
             ],
         }],
     }), encoding="utf-8")

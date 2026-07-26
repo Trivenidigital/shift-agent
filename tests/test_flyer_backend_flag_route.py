@@ -140,7 +140,7 @@ def _seed_project_state(
     now = datetime(2026, 5, 28, tzinfo=timezone.utc).isoformat()
     project = {
         "project_id": project_id, "status": status,
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "created_at": now, "updated_at": now,
         "original_message_id": f"wamid.{project_id}",
         "raw_request": "Create a flyer for Dosa Night.",

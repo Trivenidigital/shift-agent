@@ -33,7 +33,7 @@ def _project(**updates):
     base = {
         "project_id": "F9001",
         "status": "intake_started",
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "created_at": now,
         "updated_at": now,
         "original_message_id": "m-1",
@@ -41,7 +41,7 @@ def _project(**updates):
         "fields": {
             "event_or_business_name": "Lakshmis Kitchn",
             "venue_or_location": "90 Brybar Dr St Johns FL",
-            "contact_info": "+17329837841",
+            "contact_info": "+15550100001",
             "notes": "Headline: Family Combo Feast. Tagline: Fresh food. Happy family. Idly $7, Dosa $8.",
         },
     }
@@ -62,7 +62,7 @@ def test_flyer_project_accepts_locked_facts_with_provenance():
         {
             "fact_id": "contact_phone",
             "label": "Contact",
-            "value": "+17329837841",
+            "value": "+15550100001",
             "source": "customer_profile",
             "required": True,
         },
@@ -95,7 +95,7 @@ def test_extract_text_facts_splits_visible_copy_from_style_instructions():
 
     fields = FlyerRequestFields(
         event_or_business_name="Lakshmis Kitchn",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes=(
             "Headline: Family Combo Feast. Tagline: Fresh food. Happy family. "
             "Idly $7, Dosa $8. Use green, gold, and warm rustic textures."
@@ -190,7 +190,7 @@ def test_extract_text_facts_applies_generic_any_item_price_to_all_included_items
     )
     fields = FlyerRequestFields(
         event_or_business_name="Weekend Breakfast Specials",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes=raw_request,
     )
 
@@ -217,11 +217,11 @@ def test_extract_text_facts_splits_colon_item_list_into_item_facts():
     raw_request = (
         "Create a flyer for Weekend Specials. Any item $7.99. "
         "6 famous South Indian items: Idli, Dosa, Vada, Uttapam, Pongal, Sambar. "
-        "Available Saturday & Sunday, 4 PM-8 PM. Phone: +1 732-983-7841"
+        "Available Saturday & Sunday, 4 PM-8 PM. Phone: +1 555-010-0001"
     )
     fields = FlyerRequestFields(
         event_or_business_name="Weekend Specials",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes=raw_request,
     )
 
@@ -260,7 +260,7 @@ def test_extract_text_facts_item_list_offer_is_not_locked_as_compound_offer(monk
         "6 famous South Indian items: Idli, Dosa, Vada, Uttapam, Pongal, Sambar."
     )
     facts = facts_module.extract_text_facts(
-        FlyerRequestFields(contact_info="+17329837841"), raw, message_id="m-f0164b",
+        FlyerRequestFields(contact_info="+15550100001"), raw, message_id="m-f0164b",
     )
     by_id = facts_module.facts_by_id(type("P", (), {"locked_facts": facts})())
 
@@ -491,7 +491,7 @@ def test_extract_text_facts_locks_all_you_can_eat_offer_price():
     )
     fields = FlyerRequestFields(
         event_or_business_name="Mid-night biryani",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes=raw_request,
     )
 
@@ -514,7 +514,7 @@ def test_extract_text_facts_handles_price_for_protein_biryani_items():
     )
     fields = FlyerRequestFields(
         event_or_business_name="Special Biryani's",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes=raw_request,
     )
 
@@ -540,7 +540,7 @@ def test_extract_text_facts_keeps_price_pairs_when_include_clause_names_category
     )
     fields = FlyerRequestFields(
         event_or_business_name="Special Biryani's",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes=raw_request,
     )
 
@@ -567,9 +567,9 @@ def test_profile_facts_keep_account_business_when_request_names_campaign_flyer()
         customer_id="CUST0001",
         business_name="Lakshmi's Kitchen",
         business_address="90 Brybar Dr St Johns FL",
-        public_phone="+17329837841",
-        business_whatsapp_number="+17329837841",
-        primary_chat_id="17329837841@s.whatsapp.net",
+        public_phone="+15550100001",
+        business_whatsapp_number="+15550100001",
+        primary_chat_id="15550100001@s.whatsapp.net",
         business_category="Indian restaurant",
         plan_id="trial",
         status="trial",
@@ -578,7 +578,7 @@ def test_profile_facts_keep_account_business_when_request_names_campaign_flyer()
     )
     fields = FlyerRequestFields(
         event_or_business_name="Special Biryani's",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes=raw_request,
     )
 
@@ -682,7 +682,7 @@ def test_missing_required_facts_empty_value_counts_as_missing():
 
     project = _project(locked_facts=[
         {"fact_id": "business_name", "label": "Business", "value": " ", "source": "customer_text"},
-        {"fact_id": "contact_phone", "label": "Contact", "value": "+17329837841", "source": "customer_profile"},
+        {"fact_id": "contact_phone", "label": "Contact", "value": "+15550100001", "source": "customer_profile"},
     ])
 
     # whitespace-only values must not count as satisfying the requirement.
@@ -694,7 +694,7 @@ def test_missing_required_facts_returns_empty_when_all_slots_present():
 
     project = _project(locked_facts=[
         {"fact_id": "business_name", "label": "Business", "value": "Lakshmis", "source": "customer_text"},
-        {"fact_id": "contact_phone", "label": "Contact", "value": "+17329837841", "source": "customer_profile"},
+        {"fact_id": "contact_phone", "label": "Contact", "value": "+15550100001", "source": "customer_profile"},
     ])
 
     assert missing_required_facts(project) == []
@@ -786,12 +786,12 @@ def test_typed_phone_overrides_profile_phone_in_merge():
         FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+19045550104", source="customer_profile"),
     ]
     typed_facts = [
-        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_text"),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_text"),
     ]
 
     merged = merge_locked_facts(profile_facts, typed_facts)
     by_id = {fact.fact_id: fact for fact in merged}
-    assert by_id["contact_phone"].value == "+17329837841"
+    assert by_id["contact_phone"].value == "+15550100001"
     assert by_id["contact_phone"].source == "customer_text"
 
 
@@ -1240,7 +1240,7 @@ def test_extract_text_facts_dessert_end_to_end_reconciled():
     from schemas import FlyerRequestFields
     brief = ("Create a flyer for Festival Dessert Specials. Gulab Jamun – $7.99 "
              "Rasmalai Tres Leches – $9.99 Apricot Delight – $8.99 Limited Weekend Special. "
-             "Available Friday through Sunday. Phone: +1 732-983-7841")
+             "Available Friday through Sunday. Phone: +1 555-010-0001")
     fields = FlyerRequestFields(event_or_business_name="Lakshmi's Kitchen", preferred_language="en", notes=brief)
     facts = extract_text_facts(fields, brief, message_id="m", profile_business_name="Lakshmi's Kitchen", allow_text_identity=False)
     m = _items_map(facts)

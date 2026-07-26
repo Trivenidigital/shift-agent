@@ -27,8 +27,8 @@ def test_guest_order_starts_pending_payment_with_four_dollar_link(tmp_path):
 
     result = start_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="cta-1",
         checkout_url_template="https://pay.example/quick/{order_id}?amount={amount_cents}",
         now=now,
@@ -40,7 +40,7 @@ def test_guest_order_starts_pending_payment_with_four_dollar_link(tmp_path):
     assert "$4" in result.reply_text
     assert "https://pay.example/quick/GUEST0001?amount=400" in result.reply_text
     store = load_guest_order_store(state)
-    assert store.orders[0].sender_phone == "+17329837841"
+    assert store.orders[0].sender_phone == "+15550100001"
 
 
 
@@ -50,8 +50,8 @@ def test_guest_order_malformed_checkout_template_fails_closed(tmp_path):
 
     result = start_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="cta-bad-template",
         checkout_url_template="https://pay.example/quick/{missing_placeholder}",
         now=now,
@@ -70,8 +70,8 @@ def test_guest_order_activation_then_single_use_consumes_order(tmp_path):
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)
     start_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="cta-1",
         now=now,
     )
@@ -87,21 +87,21 @@ def test_guest_order_activation_then_single_use_consumes_order(tmp_path):
     assert load_guest_order_store(state).orders[0].payment_state == "payment_confirmed"
     assert find_paid_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
     ) is not None
     reserve_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         project_id="F0020",
         now=now,
     )
 
     used = consume_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         project_id="F0020",
         now=now,
     )
@@ -109,8 +109,8 @@ def test_guest_order_activation_then_single_use_consumes_order(tmp_path):
     assert used.status == "used"
     assert find_paid_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
     ) is None
 
 
@@ -119,8 +119,8 @@ def test_guest_order_activation_requires_payment_reference(tmp_path):
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)
     start_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="cta-1",
         now=now,
     )
@@ -144,8 +144,8 @@ def test_guest_order_consume_requires_matching_reservation(tmp_path):
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)
     start_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="cta-1",
         now=now,
     )
@@ -158,8 +158,8 @@ def test_guest_order_consume_requires_matching_reservation(tmp_path):
 
     used = consume_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         project_id="F0020",
         now=now,
     )
@@ -173,8 +173,8 @@ def test_guest_order_reservation_prevents_parallel_paid_use_until_release(tmp_pa
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)
     start_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="cta-1",
         now=now,
     )
@@ -187,8 +187,8 @@ def test_guest_order_reservation_prevents_parallel_paid_use_until_release(tmp_pa
 
     reserved = reserve_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         project_id="F0020",
         now=now,
     )
@@ -197,14 +197,14 @@ def test_guest_order_reservation_prevents_parallel_paid_use_until_release(tmp_pa
     assert reserved.status == "reserved"
     assert find_paid_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
     ) is None
 
     released = release_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         project_id="F0020",
         now=now,
     )
@@ -213,8 +213,8 @@ def test_guest_order_reservation_prevents_parallel_paid_use_until_release(tmp_pa
     assert released.status == "paid"
     assert find_paid_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
     ) is not None
 
 
@@ -223,8 +223,8 @@ def test_reserved_guest_order_consumes_only_matching_project(tmp_path):
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)
     start_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="cta-1",
         now=now,
     )
@@ -236,16 +236,16 @@ def test_reserved_guest_order_consumes_only_matching_project(tmp_path):
     )
     reserve_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         project_id="F0020",
         now=now,
     )
 
     wrong_project = consume_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         project_id="F9999",
         now=now,
     )
@@ -253,8 +253,8 @@ def test_reserved_guest_order_consumes_only_matching_project(tmp_path):
 
     used = consume_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         project_id="F0020",
         now=now,
     )
@@ -269,25 +269,25 @@ def test_consume_guest_order_idempotent_on_replay(tmp_path):
     state = tmp_path / "guest_orders.json"
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)
     start_guest_order(
-        state_path=state, sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net", message_id="cta-1", now=now,
+        state_path=state, sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net", message_id="cta-1", now=now,
     )
     activate_guest_order(
         state_path=state, order_id="GUEST0001",
         payment_reference="pi_idem_1", now=now,
     )
     reserve_guest_order(
-        state_path=state, sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net", project_id="F0050", now=now,
+        state_path=state, sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net", project_id="F0050", now=now,
     )
 
     first = consume_guest_order(
-        state_path=state, sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net", project_id="F0050", now=now,
+        state_path=state, sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net", project_id="F0050", now=now,
     )
     second = consume_guest_order(
-        state_path=state, sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net", project_id="F0050", now=now,
+        state_path=state, sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net", project_id="F0050", now=now,
     )
 
     assert first.ok is True
@@ -310,24 +310,24 @@ def test_consume_guest_order_replay_on_different_chat_id(tmp_path):
     state = tmp_path / "guest_orders.json"
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)
     start_guest_order(
-        state_path=state, sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net", message_id="cta-2", now=now,
+        state_path=state, sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net", message_id="cta-2", now=now,
     )
     activate_guest_order(
         state_path=state, order_id="GUEST0001",
         payment_reference="pi_idem_2", now=now,
     )
     reserve_guest_order(
-        state_path=state, sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net", project_id="F0060", now=now,
+        state_path=state, sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net", project_id="F0060", now=now,
     )
 
     first = consume_guest_order(
-        state_path=state, sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net", project_id="F0060", now=now,
+        state_path=state, sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net", project_id="F0060", now=now,
     )
     second = consume_guest_order(
-        state_path=state, sender_phone="+17329837841",
+        state_path=state, sender_phone="+15550100001",
         chat_id="999999999@g.us",  # different chat
         project_id="F0060", now=now,
     )
@@ -344,25 +344,25 @@ def test_consume_guest_order_replay_does_not_match_unrelated_project(tmp_path):
     state = tmp_path / "guest_orders.json"
     now = datetime(2026, 5, 17, tzinfo=timezone.utc)
     start_guest_order(
-        state_path=state, sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net", message_id="cta-3", now=now,
+        state_path=state, sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net", message_id="cta-3", now=now,
     )
     activate_guest_order(
         state_path=state, order_id="GUEST0001",
         payment_reference="pi_idem_3", now=now,
     )
     reserve_guest_order(
-        state_path=state, sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net", project_id="F0070", now=now,
+        state_path=state, sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net", project_id="F0070", now=now,
     )
     consume_guest_order(
-        state_path=state, sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net", project_id="F0070", now=now,
+        state_path=state, sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net", project_id="F0070", now=now,
     )
 
     other = consume_guest_order(
-        state_path=state, sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net", project_id="F0071", now=now,
+        state_path=state, sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net", project_id="F0071", now=now,
     )
     assert other.ok is False
     assert other.detail == "reserved_guest_order_not_found"
@@ -377,8 +377,8 @@ def test_guest_order_cli_dry_flow(tmp_path):
             sys.executable,
             str(script),
             "--start",
-            "--sender-phone", "+17329837841",
-            "--chat-id", "17329837841@s.whatsapp.net",
+            "--sender-phone", "+15550100001",
+            "--chat-id", "15550100001@s.whatsapp.net",
             "--message-id", "cta-1",
             "--state-path", str(state),
             "--config-path", str(tmp_path / "missing.yaml"),
@@ -410,8 +410,8 @@ def test_guest_order_cli_dry_flow(tmp_path):
             sys.executable,
             str(script),
             "--reserve",
-            "--sender-phone", "+17329837841",
-            "--chat-id", "17329837841@s.whatsapp.net",
+            "--sender-phone", "+15550100001",
+            "--chat-id", "15550100001@s.whatsapp.net",
             "--project-id", "F0020",
             "--state-path", str(state),
             "--config-path", str(tmp_path / "missing.yaml"),
@@ -427,8 +427,8 @@ def test_guest_order_cli_dry_flow(tmp_path):
             sys.executable,
             str(script),
             "--release",
-            "--sender-phone", "+17329837841",
-            "--chat-id", "17329837841@s.whatsapp.net",
+            "--sender-phone", "+15550100001",
+            "--chat-id", "15550100001@s.whatsapp.net",
             "--project-id", "F0020",
             "--state-path", str(state),
             "--config-path", str(tmp_path / "missing.yaml"),
@@ -447,8 +447,8 @@ def test_guest_order_cli_finds_reserved_project(tmp_path):
 
     subprocess.run(
         [sys.executable, str(script), "--start",
-         "--sender-phone", "+17329837841",
-         "--chat-id", "17329837841@s.whatsapp.net",
+         "--sender-phone", "+15550100001",
+         "--chat-id", "15550100001@s.whatsapp.net",
          "--message-id", "cta-1", *common],
         capture_output=True, text=True, check=True,
     )
@@ -460,16 +460,16 @@ def test_guest_order_cli_finds_reserved_project(tmp_path):
     )
     subprocess.run(
         [sys.executable, str(script), "--reserve",
-         "--sender-phone", "+17329837841",
-         "--chat-id", "17329837841@s.whatsapp.net",
+         "--sender-phone", "+15550100001",
+         "--chat-id", "15550100001@s.whatsapp.net",
          "--project-id", "F0020", *common],
         capture_output=True, text=True, check=True,
     )
 
     found = subprocess.run(
         [sys.executable, str(script), "--find-reserved",
-         "--sender-phone", "+17329837841",
-         "--chat-id", "17329837841@s.whatsapp.net",
+         "--sender-phone", "+15550100001",
+         "--chat-id", "15550100001@s.whatsapp.net",
          "--project-id", "F0020", *common],
         capture_output=True, text=True, check=True,
     )
@@ -490,8 +490,8 @@ def test_guest_order_cli_consume_idempotent_on_replay(tmp_path):
 
     subprocess.run(
         [sys.executable, str(script), "--start",
-         "--sender-phone", "+17329837841",
-         "--chat-id", "17329837841@s.whatsapp.net",
+         "--sender-phone", "+15550100001",
+         "--chat-id", "15550100001@s.whatsapp.net",
          "--message-id", "cta-1", *common],
         capture_output=True, text=True, check=True,
     )
@@ -503,16 +503,16 @@ def test_guest_order_cli_consume_idempotent_on_replay(tmp_path):
     )
     subprocess.run(
         [sys.executable, str(script), "--reserve",
-         "--sender-phone", "+17329837841",
-         "--chat-id", "17329837841@s.whatsapp.net",
+         "--sender-phone", "+15550100001",
+         "--chat-id", "15550100001@s.whatsapp.net",
          "--project-id", "F0090", *common],
         capture_output=True, text=True, check=True,
     )
 
     first = subprocess.run(
         [sys.executable, str(script), "--consume",
-         "--sender-phone", "+17329837841",
-         "--chat-id", "17329837841@s.whatsapp.net",
+         "--sender-phone", "+15550100001",
+         "--chat-id", "15550100001@s.whatsapp.net",
          "--project-id", "F0090", *common],
         capture_output=True, text=True,
     )
@@ -525,8 +525,8 @@ def test_guest_order_cli_consume_idempotent_on_replay(tmp_path):
     # as a failed consume.
     second = subprocess.run(
         [sys.executable, str(script), "--consume",
-         "--sender-phone", "+17329837841",
-         "--chat-id", "17329837841@s.whatsapp.net",
+         "--sender-phone", "+15550100001",
+         "--chat-id", "15550100001@s.whatsapp.net",
          "--project-id", "F0090", *common],
         capture_output=True, text=True,
     )
@@ -544,8 +544,8 @@ def test_guest_order_cli_rejects_activation_without_payment_reference(tmp_path):
             sys.executable,
             str(script),
             "--start",
-            "--sender-phone", "+17329837841",
-            "--chat-id", "17329837841@s.whatsapp.net",
+            "--sender-phone", "+15550100001",
+            "--chat-id", "15550100001@s.whatsapp.net",
             "--message-id", "cta-1",
             "--state-path", str(state),
             "--config-path", str(tmp_path / "missing.yaml"),
@@ -580,8 +580,8 @@ def test_guest_order_duplicate_reference_is_provider_scoped(tmp_path):
 
     start_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="cta-1",
         unit_price_cents=4999,
         currency="USD",
@@ -589,8 +589,8 @@ def test_guest_order_duplicate_reference_is_provider_scoped(tmp_path):
     )
     start_guest_order(
         state_path=state,
-        sender_phone="+17329837842",
-        chat_id="17329837842@s.whatsapp.net",
+        sender_phone="+15550100002",
+        chat_id="15550100002@s.whatsapp.net",
         message_id="cta-2",
         unit_price_cents=4999,
         currency="USD",
@@ -626,8 +626,8 @@ def test_guest_order_duplicate_reference_compares_normalized_values(tmp_path):
 
     start_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="cta-1",
         unit_price_cents=4999,
         currency="USD",
@@ -635,8 +635,8 @@ def test_guest_order_duplicate_reference_compares_normalized_values(tmp_path):
     )
     start_guest_order(
         state_path=state,
-        sender_phone="+17329837842",
-        chat_id="17329837842@s.whatsapp.net",
+        sender_phone="+15550100002",
+        chat_id="15550100002@s.whatsapp.net",
         message_id="cta-2",
         unit_price_cents=4999,
         currency="USD",
@@ -673,8 +673,8 @@ def test_guest_order_paid_replay_requires_matching_payment_reference(tmp_path):
 
     start_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="cta-1",
         unit_price_cents=4999,
         currency="USD",
@@ -710,8 +710,8 @@ def test_guest_order_activation_rejects_amount_mismatch(tmp_path):
 
     start_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="cta-1",
         unit_price_cents=6999,
         currency="USD",
@@ -738,8 +738,8 @@ def test_guest_order_activation_rejects_currency_mismatch(tmp_path):
 
     start_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="cta-1",
         unit_price_cents=4999,
         currency="INR",
@@ -766,8 +766,8 @@ def test_guest_order_activation_rejects_invalid_provider(tmp_path):
 
     start_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="cta-1",
         unit_price_cents=4999,
         currency="USD",
@@ -794,8 +794,8 @@ def test_guest_order_activation_normalizes_provider_and_payment_reference(tmp_pa
 
     start_guest_order(
         state_path=state,
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="cta-1",
         unit_price_cents=4999,
         currency="USD",
@@ -826,8 +826,8 @@ def test_guest_order_cli_rejects_activation_amount_mismatch(tmp_path):
             sys.executable,
             str(script),
             "--start",
-            "--sender-phone", "+17329837841",
-            "--chat-id", "17329837841@s.whatsapp.net",
+            "--sender-phone", "+15550100001",
+            "--chat-id", "15550100001@s.whatsapp.net",
             "--message-id", "cta-1",
             "--state-path", str(state),
             "--config-path", str(tmp_path / "missing.yaml"),

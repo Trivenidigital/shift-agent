@@ -185,7 +185,7 @@ def mods(state_env):
     return hooks_mod, actions_mod
 
 
-def _seed_config(state_env, owner_jid="918522041562@s.whatsapp.net", flyer_enabled=False):
+def _seed_config(state_env, owner_jid="15550100002@s.whatsapp.net", flyer_enabled=False):
     flyer_block = "flyer:\n  enabled: true\n" if flyer_enabled else ""
     state_env["config_path"].write_text(
         f"owner:\n  self_chat_jid: {owner_jid}\n{flyer_block}", encoding="utf-8",
@@ -366,7 +366,7 @@ class TestF8OwnerApprove:
         _seed_lead(state_env, code="#ABCDE", status="AWAITING_OWNER_APPROVAL")
 
         with patch.object(actions_mod, "invoke_apply_owner_decision", return_value=0) as mock_apply:
-            event = _make_event("#ABCDE approve", "918522041562@s.whatsapp.net")
+            event = _make_event("#ABCDE approve", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
 
         assert result is not None
@@ -383,7 +383,7 @@ class TestF8OwnerApprove:
         _seed_lead(state_env, code="#ABCDE")
 
         with patch.object(actions_mod, "invoke_apply_owner_decision", return_value=0) as mock_apply:
-            event = _make_event("#ABCDE reject not interested", "918522041562@s.whatsapp.net")
+            event = _make_event("#ABCDE reject not interested", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
 
         assert result is not None
@@ -397,7 +397,7 @@ class TestF8OwnerApprove:
         _seed_lead(state_env, code="#ABCDE")
 
         with patch.object(actions_mod, "invoke_apply_owner_decision") as mock_apply:
-            event = _make_event("#ABCDE edit change to 100 guests", "918522041562@s.whatsapp.net")
+            event = _make_event("#ABCDE edit change to 100 guests", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
 
         assert result is None  # LLM handles
@@ -406,7 +406,7 @@ class TestF8OwnerApprove:
     def test_non_owner_chat_NOT_intercepted(self, mods, state_env):
         """Code in text but sender is NOT owner → let LLM handle."""
         hooks_mod, actions_mod = mods
-        _seed_config(state_env, owner_jid="918522041562@s.whatsapp.net")
+        _seed_config(state_env, owner_jid="15550100002@s.whatsapp.net")
         _seed_lead(state_env, code="#ABCDE")
 
         with patch.object(actions_mod, "invoke_apply_owner_decision") as mock_apply:
@@ -420,7 +420,7 @@ class TestF8OwnerApprove:
         hooks_mod, actions_mod = mods
         _seed_config(state_env)
 
-        event = _make_event("Hi can you help me", "918522041562@s.whatsapp.net")
+        event = _make_event("Hi can you help me", "15550100002@s.whatsapp.net")
         result = hooks_mod.pre_gateway_dispatch(event)
 
         assert result is None
@@ -432,7 +432,7 @@ class TestF8OwnerApprove:
         _seed_lead(state_env, code="#ZZZZZ")  # different code from what owner sent
 
         with patch.object(actions_mod, "invoke_apply_owner_decision") as mock_apply:
-            event = _make_event("#ABCDE approve", "918522041562@s.whatsapp.net")
+            event = _make_event("#ABCDE approve", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
 
         assert result is None
@@ -445,7 +445,7 @@ class TestF8OwnerApprove:
         _seed_lead(state_env, code="#ABCDE", status="CLOSED")
 
         with patch.object(actions_mod, "invoke_apply_owner_decision") as mock_apply:
-            event = _make_event("#ABCDE approve", "918522041562@s.whatsapp.net")
+            event = _make_event("#ABCDE approve", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
 
         assert result is None
@@ -457,7 +457,7 @@ class TestF8OwnerApprove:
         _seed_lead(state_env, code="#ABCDE")
 
         with patch.object(actions_mod, "invoke_apply_owner_decision", return_value=0):
-            event = _make_event("#ABCDE approve", "918522041562@s.whatsapp.net")
+            event = _make_event("#ABCDE approve", "15550100002@s.whatsapp.net")
             hooks_mod.pre_gateway_dispatch(event)
 
         # Audit row written
@@ -465,7 +465,7 @@ class TestF8OwnerApprove:
         f8_rows = [r for r in audit if r["type"] == "cf_router_intercepted" and r["reason"] == "f8_owner_approve"]
         assert len(f8_rows) == 1
         assert f8_rows[0]["code"] == "#ABCDE"
-        assert f8_rows[0]["chat_id"] == "918522041562@s.whatsapp.net"
+        assert f8_rows[0]["chat_id"] == "15550100002@s.whatsapp.net"
         assert f8_rows[0]["subprocess_rc"] == 0
 
     def test_owner_approve_past_tense_intercepted(self, mods, state_env):
@@ -475,7 +475,7 @@ class TestF8OwnerApprove:
         _seed_lead(state_env, code="#ABCDE")
 
         with patch.object(actions_mod, "invoke_apply_owner_decision", return_value=0) as mock_apply:
-            event = _make_event("#ABCDE approved", "918522041562@s.whatsapp.net")
+            event = _make_event("#ABCDE approved", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
 
         assert result is not None and result["action"] == "skip"
@@ -487,7 +487,7 @@ class TestF8OwnerApprove:
         _seed_lead(state_env, code="#ABCDE")
 
         with patch.object(actions_mod, "invoke_apply_owner_decision", return_value=0) as mock_apply:
-            event = _make_event("#ABCDE rejected", "918522041562@s.whatsapp.net")
+            event = _make_event("#ABCDE rejected", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
 
         assert result is not None and result["action"] == "skip"
@@ -502,7 +502,7 @@ class TestF8OwnerApprove:
         _seed_lead(state_env, code="#ABCDE")
 
         with patch.object(actions_mod, "invoke_apply_owner_decision", return_value=9):
-            event = _make_event("#ABCDE approve", "918522041562@s.whatsapp.net")
+            event = _make_event("#ABCDE approve", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
 
         # Non-zero rc → fall back to LLM (don't silently eat the message)
@@ -518,7 +518,7 @@ class TestF8OwnerApprove:
         identify-sender → role=owner.
         """
         hooks_mod, actions_mod = mods
-        _seed_config(state_env, owner_jid="918522041562@s.whatsapp.net")
+        _seed_config(state_env, owner_jid="15550100002@s.whatsapp.net")
         _seed_lead(state_env, code="#ABCDE")
         owner_lid = "211390371475536@lid"
 
@@ -585,7 +585,7 @@ class TestF8ParserEdgeCases:
             "#ABCOE approve",   # contains O
         ):
             with patch.object(actions_mod, "invoke_apply_owner_decision") as mock:
-                event = _make_event(bad_text, "918522041562@s.whatsapp.net")
+                event = _make_event(bad_text, "15550100002@s.whatsapp.net")
                 result = hooks_mod.pre_gateway_dispatch(event)
             assert result is None, f"Should not intercept invalid code in {bad_text!r}"
             mock.assert_not_called()
@@ -598,7 +598,7 @@ class TestF8ParserEdgeCases:
             "#ABCDEF approve",   # 6 chars — note this MAY match (regex finds first 5)
         ):
             with patch.object(actions_mod, "invoke_apply_owner_decision"):
-                event = _make_event(bad_text, "918522041562@s.whatsapp.net")
+                event = _make_event(bad_text, "15550100002@s.whatsapp.net")
                 result = hooks_mod.pre_gateway_dispatch(event)
             # 4-char fails; 6-char actually matches the first 5 — document
             # this, not blocking. We only assert the 4-char case here.
@@ -609,7 +609,7 @@ class TestF8ParserEdgeCases:
         """`#ABCDE` alone (no approve/reject/edit) should let LLM ask for clarification."""
         hooks_mod, actions_mod = mods
         with patch.object(actions_mod, "invoke_apply_owner_decision") as mock:
-            event = _make_event("#ABCDE", "918522041562@s.whatsapp.net")
+            event = _make_event("#ABCDE", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
         assert result is None
         mock.assert_not_called()
@@ -618,7 +618,7 @@ class TestF8ParserEdgeCases:
         """`approve` alone (no `#XXXXX`) shouldn't match — there's nothing to apply to."""
         hooks_mod, actions_mod = mods
         with patch.object(actions_mod, "invoke_apply_owner_decision") as mock:
-            event = _make_event("approve", "918522041562@s.whatsapp.net")
+            event = _make_event("approve", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
         assert result is None
         mock.assert_not_called()
@@ -627,7 +627,7 @@ class TestF8ParserEdgeCases:
         """`#ABCDE confirm` — code matches but `confirm` isn't in the verb set."""
         hooks_mod, actions_mod = mods
         with patch.object(actions_mod, "invoke_apply_owner_decision") as mock:
-            event = _make_event("#ABCDE confirm please", "918522041562@s.whatsapp.net")
+            event = _make_event("#ABCDE confirm please", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
         assert result is None
         mock.assert_not_called()
@@ -637,7 +637,7 @@ class TestF8ParserEdgeCases:
         Both regexes run as re.search on full text — order doesn't matter."""
         hooks_mod, actions_mod = mods
         with patch.object(actions_mod, "invoke_apply_owner_decision", return_value=0) as mock:
-            event = _make_event("approve #ABCDE please", "918522041562@s.whatsapp.net")
+            event = _make_event("approve #ABCDE please", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
         assert result is not None and result["action"] == "skip"
         mock.assert_called_once()
@@ -646,7 +646,7 @@ class TestF8ParserEdgeCases:
         """Lowercase code in inbound — _try_f8_intercept calls .upper() before lookup."""
         hooks_mod, actions_mod = mods
         with patch.object(actions_mod, "invoke_apply_owner_decision", return_value=0) as mock:
-            event = _make_event("#abcde approve", "918522041562@s.whatsapp.net")
+            event = _make_event("#abcde approve", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
         # _CODE_PATTERN has no IGNORECASE (per PR-CF6 audit fix), so this
         # MUST NOT match. The watchdog's parser DID accept lowercase; the
@@ -658,7 +658,7 @@ class TestF8ParserEdgeCases:
         """Empty / whitespace-only text — _extract_text returns None, plugin returns None."""
         hooks_mod, _ = mods
         for empty in ("", "   ", "\n\n"):
-            event = _make_event(empty, "918522041562@s.whatsapp.net")
+            event = _make_event(empty, "15550100002@s.whatsapp.net")
             # _make_event won't preserve empty text since SimpleNamespace doesn't
             # care; but the hook's _extract_text uses .strip() and returns None
             # on empty results, which short-circuits to None.
@@ -673,7 +673,7 @@ class TestF8MenuYesNo:
         _seed_menu_pending(state_env, code="#YDW6J")
 
         with patch.object(actions_mod, "invoke_apply_menu_update", return_value=0) as mock_apply:
-            event = _make_event("#YDW6J yes", "918522041562@s.whatsapp.net")
+            event = _make_event("#YDW6J yes", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
 
         assert result is not None
@@ -686,7 +686,7 @@ class TestF8MenuYesNo:
         _seed_menu_pending(state_env, code="#YDW6J")
 
         with patch.object(actions_mod, "invoke_apply_menu_update", return_value=0) as mock_apply:
-            event = _make_event("#YDW6J no looks wrong", "918522041562@s.whatsapp.net")
+            event = _make_event("#YDW6J no looks wrong", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
 
         assert result is not None
@@ -714,8 +714,8 @@ class TestF9SickCallAlert:
         with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
              patch.object(actions_mod, "identify_sender_metadata",
                           return_value={"role": "employee", "employee_id": "e008",
-                                        "phone_normalized": "+17329837841",
-                                        "lid": "201975216009469@lid"}), \
+                                        "phone_normalized": "+15550100001",
+                                        "lid": "100000000000001@lid"}), \
              patch.object(actions_mod, "fire_pushover_alert"), \
              patch.object(actions_mod, "audit_dispatcher_routed", create=True) as mock_routed, \
              patch.object(actions_mod, "invoke_shift_sick_call",
@@ -723,7 +723,7 @@ class TestF9SickCallAlert:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     "Hey Boss! I am down with fever, I can't come for shift today. Sorry for inconvenience.",
-                    "201975216009469@lid",
+                    "100000000000001@lid",
                     message_id="wa-live-1538",
                 ),
             )
@@ -773,11 +773,11 @@ class TestF9SickCallAlert:
         _seed_config(state_env)
         state_env["roster_path"].write_text(json.dumps({
             "employees": [{
-                "id": "e008", "name": "Srini", "phone": "+17329837841",
+                "id": "e008", "name": "Srini", "phone": "+15550100001",
                 "role": "floor", "status": "active",
                 "can_cover_roles": ["cashier", "floor"], "languages": ["en"],
                 "phone_history": [], "restrictions": None,
-                "lid": "201975216009469@lid",
+                "lid": "100000000000001@lid",
             }],
         }), encoding="utf-8")
 
@@ -788,7 +788,7 @@ class TestF9SickCallAlert:
              patch.object(actions_mod, "invoke_shift_sick_call", return_value=(0, "ok", ""), create=True) as mock_shift:
             event = _make_event(
                 "Hey Boss! I am down with fever, I can't come for shift today. Sorry for inconvenience.",
-                "201975216009469@lid",
+                "100000000000001@lid",
                 message_id="wa-live-1414",
             )
             result = hooks_mod.pre_gateway_dispatch(event)
@@ -800,12 +800,12 @@ class TestF9SickCallAlert:
         mock_pushover.assert_called_once()
         mock_routed.assert_called_once_with(
             message_id="wa-live-1414",
-            chat_id="201975216009469@lid",
+            chat_id="100000000000001@lid",
             routed_to_skill="handle_sick_call",
             message_shape="text",
         )
         mock_shift.assert_called_once_with(
-            chat_id="201975216009469@lid",
+            chat_id="100000000000001@lid",
             text="Hey Boss! I am down with fever, I can't come for shift today. Sorry for inconvenience.",
             message_id="wa-live-1414",
         )
@@ -955,7 +955,7 @@ class TestRobustness:
         """No config.yaml → plugin returns None, doesn't raise."""
         hooks_mod, actions_mod = mods
         # Don't seed config
-        event = _make_event("#ABCDE approve", "918522041562@s.whatsapp.net")
+        event = _make_event("#ABCDE approve", "15550100002@s.whatsapp.net")
         result = hooks_mod.pre_gateway_dispatch(event)
         assert result is None  # graceful degradation
 
@@ -980,7 +980,7 @@ class TestRobustness:
         with patch.object(actions_mod, "invoke_apply_owner_decision", return_value=0) as mock_apply:
             event = SimpleNamespace(
                 text="#ABCDE approve",
-                source=SimpleNamespace(chat_id="918522041562@s.whatsapp.net"),
+                source=SimpleNamespace(chat_id="15550100002@s.whatsapp.net"),
             )
             result = hooks_mod.pre_gateway_dispatch(event)
 
@@ -1156,12 +1156,12 @@ class TestF7DispatcherWatchdog:
         _seed_config(state_env)
         # Mock identify-sender to return owner role
         fake_run = SimpleNamespace(
-            returncode=0, stdout='{"role":"owner","phone_normalized":"+918522041562"}', stderr="",
+            returncode=0, stdout='{"role":"owner","phone_normalized":"+15550100002"}', stderr="",
         )
         with patch("subprocess.run", return_value=fake_run), \
              patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger:
             actions_mod.f7_rescue_check(
-                text="catering inquiry text", chat_id="918522041562@s.whatsapp.net",
+                text="catering inquiry text", chat_id="15550100002@s.whatsapp.net",
                 message_id="msg_owner", signals=["primary:catering", "headcount:50"],
                 ts_at_schedule=time.time(),
             )
@@ -1234,7 +1234,7 @@ class TestF7DispatcherWatchdog:
         with patch("subprocess.run", side_effect=_fake_run):
             actions_mod.f7_rescue_check(
                 text="This is a catering inquiry for my cousin's wedding on July 12 for 80 people",
-                chat_id="201975216009469@lid",
+                chat_id="100000000000001@lid",
                 message_id="msg_employee_customer",
                 signals=["primary:catering", "headcount:80", "event_keyword"],
                 ts_at_schedule=time.time(),
@@ -1325,7 +1325,7 @@ def _seed_proposal_sets(state_env, sets):
     }), encoding="utf-8")
 
 
-def _seed_revenue_route_clarification(state_env, chat_id="201975216009469@lid",
+def _seed_revenue_route_clarification(state_env, chat_id="100000000000001@lid",
                                       original_text=DESSERT_GRADUATION_AMBIGUOUS_BRIEF):
     state_env["revenue_route_clarification_path"].write_text(json.dumps({
         "version": 1,
@@ -1335,7 +1335,7 @@ def _seed_revenue_route_clarification(state_env, chat_id="201975216009469@lid",
                 "original_text": original_text,
                 "message_id": "msg-dessert-graduation",
                 "created_at": "2026-06-07T19:40:28+00:00",
-                "sender_phone": "+17329837841",
+                "sender_phone": "+15550100001",
                 "sender_role": "customer",
                 "signals": ["price_amount", "event_keyword", "order_quantity"],
             },
@@ -1365,7 +1365,7 @@ class TestRevenueRouteClarification:
         _seed_leads_multi(state_env, [])
 
         with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
-                          return_value=("+17329837841", "customer")), \
+                          return_value=("+15550100001", "customer")), \
              patch.object(actions_mod, "send_flyer_text",
                           return_value=(True, "msg-clarify", "")) as mock_send, \
              patch.object(actions_mod, "trigger_create_flyer_project") as mock_flyer, \
@@ -1373,7 +1373,7 @@ class TestRevenueRouteClarification:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text=DESSERT_GRADUATION_AMBIGUOUS_BRIEF,
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                     message_id="msg-dessert-graduation",
                 ),
             )
@@ -1390,7 +1390,7 @@ class TestRevenueRouteClarification:
         assert "catering/order request" in reply
 
         doc = json.loads(state_env["revenue_route_clarification_path"].read_text(encoding="utf-8"))
-        pending = doc["pending"]["201975216009469@lid"]
+        pending = doc["pending"]["100000000000001@lid"]
         assert pending["original_text"] == DESSERT_GRADUATION_AMBIGUOUS_BRIEF
         assert pending["message_id"] == "msg-dessert-graduation"
 
@@ -1404,7 +1404,7 @@ class TestRevenueRouteClarification:
         _seed_leads_multi(state_env, [])
 
         with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
-                          return_value=("+17329837841", "customer")), \
+                          return_value=("+15550100001", "customer")), \
              patch.object(actions_mod, "send_flyer_text",
                           return_value=(True, "msg-clarify", "")) as mock_send, \
              patch.object(actions_mod, "trigger_create_flyer_project") as mock_flyer, \
@@ -1412,7 +1412,7 @@ class TestRevenueRouteClarification:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text=DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF,
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                     message_id="msg-dessert-graduation-suffix",
                 ),
             )
@@ -1427,7 +1427,7 @@ class TestRevenueRouteClarification:
         assert "promotional flyer" in reply
         assert "catering/order request" in reply
         doc = json.loads(state_env["revenue_route_clarification_path"].read_text(encoding="utf-8"))
-        assert doc["pending"]["201975216009469@lid"]["original_text"] == DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF
+        assert doc["pending"]["100000000000001@lid"]["original_text"] == DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF
 
     def test_plain_graduation_text_without_items_or_prices_does_not_route(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -1435,12 +1435,12 @@ class TestRevenueRouteClarification:
         text = "Graduation is here and time to celebrate our kids."
 
         with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
-                          return_value=("+17329837841", "customer")), \
+                          return_value=("+15550100001", "customer")), \
              patch.object(actions_mod, "send_flyer_text") as mock_send, \
              patch.object(actions_mod, "trigger_create_flyer_project") as mock_flyer, \
              patch.object(actions_mod, "trigger_create_catering_lead") as mock_catering:
             result = hooks_mod.pre_gateway_dispatch(
-                _make_event(text=text, chat_id="201975216009469@lid", message_id="msg-graduation-plain"),
+                _make_event(text=text, chat_id="100000000000001@lid", message_id="msg-graduation-plain"),
             )
 
         assert result is None
@@ -1462,7 +1462,7 @@ class TestRevenueRouteClarification:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text=DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF,
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                     message_id="msg-unknown-suffix",
                 ),
             )
@@ -1487,15 +1487,15 @@ class TestRevenueRouteClarification:
         with patch.object(actions_mod, "is_verified_employee_chat", return_value=True), \
              patch.object(actions_mod, "identify_sender_metadata",
                           return_value={"role": "employee", "employee_id": "e008",
-                                        "phone_normalized": "+17329837841",
-                                        "lid": "201975216009469@lid"}), \
+                                        "phone_normalized": "+15550100001",
+                                        "lid": "100000000000001@lid"}), \
              patch.object(actions_mod, "fire_pushover_alert"), \
              patch.object(actions_mod, "audit_dispatcher_routed", create=True) as mock_routed, \
              patch.object(actions_mod, "invoke_shift_sick_call",
                           return_value=(0, "ok", ""), create=True) as mock_shift, \
              patch.object(actions_mod, "send_flyer_text") as mock_send:
             result = hooks_mod.pre_gateway_dispatch(
-                _make_event(text=text, chat_id="201975216009469@lid", message_id="msg-sick-suffix-price"),
+                _make_event(text=text, chat_id="100000000000001@lid", message_id="msg-sick-suffix-price"),
             )
 
         assert result == {
@@ -1512,14 +1512,14 @@ class TestRevenueRouteClarification:
         _seed_revenue_route_clarification(state_env, original_text=DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF)
 
         with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
-                          return_value=("+17329837841", "customer")), \
+                          return_value=("+15550100001", "customer")), \
              patch.object(actions_mod, "find_flyer_customer_by_sender", return_value=None), \
              patch.object(actions_mod, "trigger_create_flyer_project",
                           return_value=(True, "created", {"project_id": "F0999"})) as mock_flyer, \
              patch.object(actions_mod, "send_flyer_text",
                           return_value=(True, "msg-flyer", "")):
             result = hooks_mod.pre_gateway_dispatch(
-                _make_event(text="flyer", chat_id="201975216009469@lid", message_id="msg-choice-flyer"),
+                _make_event(text="flyer", chat_id="100000000000001@lid", message_id="msg-choice-flyer"),
             )
 
         assert result == {
@@ -1530,7 +1530,7 @@ class TestRevenueRouteClarification:
             " ".join(DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF.split())
         )
         doc = json.loads(state_env["revenue_route_clarification_path"].read_text(encoding="utf-8"))
-        assert "201975216009469@lid" not in doc["pending"]
+        assert "100000000000001@lid" not in doc["pending"]
 
     def test_revenue_route_reply_catering_uses_saved_brief(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -1539,11 +1539,11 @@ class TestRevenueRouteClarification:
         _seed_revenue_route_clarification(state_env, original_text=DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF)
 
         with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
-                          return_value=("+17329837841", "customer")), \
+                          return_value=("+15550100001", "customer")), \
              patch.object(actions_mod, "trigger_create_catering_lead",
                           return_value=(True, "lead_created")) as mock_catering:
             result = hooks_mod.pre_gateway_dispatch(
-                _make_event(text="catering", chat_id="201975216009469@lid", message_id="msg-choice-catering"),
+                _make_event(text="catering", chat_id="100000000000001@lid", message_id="msg-choice-catering"),
             )
 
         assert result == {
@@ -1552,7 +1552,7 @@ class TestRevenueRouteClarification:
         }
         assert mock_catering.call_args.kwargs["raw_inquiry"] == DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF
         doc = json.loads(state_env["revenue_route_clarification_path"].read_text(encoding="utf-8"))
-        assert "201975216009469@lid" not in doc["pending"]
+        assert "100000000000001@lid" not in doc["pending"]
 
     def test_revenue_route_reply_both_asks_which_route_first_and_keeps_context(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -1564,7 +1564,7 @@ class TestRevenueRouteClarification:
              patch.object(actions_mod, "trigger_create_flyer_project") as mock_flyer, \
              patch.object(actions_mod, "trigger_create_catering_lead") as mock_catering:
             result = hooks_mod.pre_gateway_dispatch(
-                _make_event(text="both", chat_id="201975216009469@lid", message_id="msg-choice-both"),
+                _make_event(text="both", chat_id="100000000000001@lid", message_id="msg-choice-both"),
             )
 
         assert result == {
@@ -1579,7 +1579,7 @@ class TestRevenueRouteClarification:
         assert "catering/order request" in reply
 
         doc = json.loads(state_env["revenue_route_clarification_path"].read_text(encoding="utf-8"))
-        assert doc["pending"]["201975216009469@lid"]["original_text"] == DESSERT_GRADUATION_AMBIGUOUS_BRIEF
+        assert doc["pending"]["100000000000001@lid"]["original_text"] == DESSERT_GRADUATION_AMBIGUOUS_BRIEF
         rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
         assert audits[-1]["reason"] == "revenue_route_clarification_sent"
@@ -1591,7 +1591,7 @@ class TestRevenueRouteClarification:
         text = "Weekend dessert special: Mango cake $4.99, Rasmalai cups $5.99. Use my saved business details."
 
         with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
-                          return_value=("+17329837841", "customer")), \
+                          return_value=("+15550100001", "customer")), \
              patch.object(actions_mod, "find_flyer_customer_by_sender",
                           return_value={"customer_id": "CUST0001", "status": "trial", "business_name": "Lakshmi"}), \
              patch.object(actions_mod, "trigger_create_flyer_project",
@@ -1599,7 +1599,7 @@ class TestRevenueRouteClarification:
              patch.object(actions_mod, "send_flyer_text",
                           return_value=(True, "msg-flyer", "")):
             result = hooks_mod.pre_gateway_dispatch(
-                _make_event(text=text, chat_id="201975216009469@lid", message_id="msg-active-flyer"),
+                _make_event(text=text, chat_id="100000000000001@lid", message_id="msg-active-flyer"),
             )
 
         assert result == {
@@ -1617,17 +1617,17 @@ class TestFindActiveCateringLeadBySender:
         _, actions_mod = mods
         _seed_leads_multi(state_env, [])
         assert actions_mod.find_active_catering_lead_by_sender(
-            phone="+17329837841", chat_id="17329837841@s.whatsapp.net",
+            phone="+15550100001", chat_id="15550100001@s.whatsapp.net",
         ) is None
 
     def test_match_by_phone(self, mods, state_env):
         """Priority 1: E.164 phone exact-match on customer_phone."""
         _, actions_mod = mods
         _seed_leads_multi(state_env, [
-            {"lead_id": "L0001", "customer_phone": "+17329837841"},
+            {"lead_id": "L0001", "customer_phone": "+15550100001"},
         ])
         result = actions_mod.find_active_catering_lead_by_sender(
-            phone="+17329837841", chat_id=None,
+            phone="+15550100001", chat_id=None,
         )
         assert result is not None
         assert result["lead_id"] == "L0001"
@@ -1638,10 +1638,10 @@ class TestFindActiveCateringLeadBySender:
         _seed_leads_multi(state_env, [
             {"lead_id": "L0002",
              "customer_phone": None,
-             "customer_lid": "201975216009469@lid"},
+             "customer_lid": "100000000000001@lid"},
         ])
         result = actions_mod.find_active_catering_lead_by_sender(
-            phone=None, chat_id="201975216009469@lid",
+            phone=None, chat_id="100000000000001@lid",
         )
         assert result is not None
         assert result["lead_id"] == "L0002"
@@ -1652,11 +1652,11 @@ class TestFindActiveCateringLeadBySender:
         _, actions_mod = mods
         _seed_leads_multi(state_env, [
             {"lead_id": "L0003",
-             "customer_phone": "+201975216009469",
+             "customer_phone": "+100000000000001",
              "customer_lid": None},
         ])
         result = actions_mod.find_active_catering_lead_by_sender(
-            phone=None, chat_id="201975216009469@lid",
+            phone=None, chat_id="100000000000001@lid",
         )
         assert result is not None
         assert result["lead_id"] == "L0003"
@@ -1667,14 +1667,14 @@ class TestFindActiveCateringLeadBySender:
         _, actions_mod = mods
         _seed_leads_multi(state_env, [
             {"lead_id": "L0004",
-             "customer_phone": "+17329837841",
+             "customer_phone": "+15550100001",
              "status": "SENT_TO_CUSTOMER"},
             {"lead_id": "L0005",
-             "customer_phone": "+17329837841",
+             "customer_phone": "+15550100001",
              "status": "OWNER_REJECTED"},
         ])
         assert actions_mod.find_active_catering_lead_by_sender(
-            phone="+17329837841", chat_id=None,
+            phone="+15550100001", chat_id=None,
         ) is None
 
     def test_returns_most_recent_when_multiple_active(self, mods, state_env):
@@ -1684,17 +1684,17 @@ class TestFindActiveCateringLeadBySender:
         _, actions_mod = mods
         _seed_leads_multi(state_env, [
             {"lead_id": "L0006",
-             "customer_phone": "+17329837841",
+             "customer_phone": "+15550100001",
              "created_at": "2026-05-01T10:00:00-04:00"},
             {"lead_id": "L0007",
-             "customer_phone": "+17329837841",
+             "customer_phone": "+15550100001",
              "created_at": "2026-05-10T10:00:00-04:00"},
             {"lead_id": "L0008",
-             "customer_phone": "+17329837841",
+             "customer_phone": "+15550100001",
              "created_at": "2026-05-05T10:00:00-04:00"},
         ])
         result = actions_mod.find_active_catering_lead_by_sender(
-            phone="+17329837841", chat_id=None,
+            phone="+15550100001", chat_id=None,
         )
         assert result is not None
         assert result["lead_id"] == "L0007"
@@ -1725,11 +1725,11 @@ class TestFindActiveCateringLeadBySender:
         assert active_status in actions_mod.ACTIONABLE_LEAD_STATUSES
         _seed_leads_multi(state_env, [
             {"lead_id": "L0100",
-             "customer_phone": "+17329837841",
+             "customer_phone": "+15550100001",
              "status": active_status},
         ])
         result = actions_mod.find_active_catering_lead_by_sender(
-            phone="+17329837841", chat_id=None,
+            phone="+15550100001", chat_id=None,
         )
         assert result is not None, f"expected match for status {active_status!r}"
         assert result["lead_id"] == "L0100"
@@ -1788,7 +1788,7 @@ class TestSendCanonicalFollowupReply:
         fake_run = SimpleNamespace(returncode=0, stdout="ok", stderr="")
         with patch("subprocess.run", return_value=fake_run) as mock_run:
             ok = actions_mod.send_canonical_followup_reply(
-                chat_id="201975216009469@lid", lead_id="L0011",
+                chat_id="100000000000001@lid", lead_id="L0011",
             )
         assert ok is True
         mock_run.assert_called_once()
@@ -1796,7 +1796,7 @@ class TestSendCanonicalFollowupReply:
         cmd = args[0]
         assert str(actions_mod.SEND_CATERING_ACK_BIN) in cmd[0]
         assert "--customer-jid" in cmd
-        assert "201975216009469@lid" in cmd
+        assert "100000000000001@lid" in cmd
         assert "--message-text" in cmd
         # Locate the message body argument
         msg_idx = cmd.index("--message-text") + 1
@@ -1816,7 +1816,7 @@ class TestSendCanonicalFollowupReply:
         fake_run = SimpleNamespace(returncode=2, stdout="", stderr="bridge unreachable")
         with patch("subprocess.run", return_value=fake_run):
             ok = actions_mod.send_canonical_followup_reply(
-                chat_id="201975216009469@lid", lead_id="L0011",
+                chat_id="100000000000001@lid", lead_id="L0011",
             )
         assert ok is False
 
@@ -1826,7 +1826,7 @@ class TestSendCanonicalFollowupReply:
         _, actions_mod = mods
         with patch("subprocess.run", side_effect=OSError("kaboom")):
             ok = actions_mod.send_canonical_followup_reply(
-                chat_id="201975216009469@lid", lead_id="L0011",
+                chat_id="100000000000001@lid", lead_id="L0011",
             )
         assert ok is False
 
@@ -1850,7 +1850,7 @@ class TestF7PrimaryMode:
         # identify-sender returns customer (non-owner, non-employee)
         fake_run = SimpleNamespace(
             returncode=0,
-            stdout='{"role":"customer","phone_normalized":"+17329837841"}',
+            stdout='{"role":"customer","phone_normalized":"+15550100001"}',
             stderr="",
         )
         with patch("subprocess.run", return_value=fake_run), \
@@ -1858,7 +1858,7 @@ class TestF7PrimaryMode:
                           return_value=(True, "lead_created")) as mock_trigger:
             event = _make_event(
                 text="catering for 50 people event Saturday food delivered",
-                chat_id="17329837841@s.whatsapp.net",
+                chat_id="15550100001@s.whatsapp.net",
             )
             result = hooks_mod.pre_gateway_dispatch(event)
         assert result == {
@@ -1897,7 +1897,7 @@ class TestF7PrimaryMode:
                           return_value=(True, "lead_created")) as mock_trigger:
             event = _make_event(
                 text="This is a catering inquiry for my cousin's wedding on July 12 for 80 people",
-                chat_id="201975216009469@lid",
+                chat_id="100000000000001@lid",
             )
             result = hooks_mod.pre_gateway_dispatch(event)
 
@@ -1921,12 +1921,12 @@ class TestF7PrimaryMode:
         _seed_config(state_env)
         _seed_leads_multi(state_env, [
             {"lead_id": "L0011", "owner_approval_code": "#ABCDE",
-             "customer_phone": "+17329837841",
+             "customer_phone": "+15550100001",
              "status": "AWAITING_OWNER_APPROVAL"},
         ])
         fake_run = SimpleNamespace(
             returncode=0,
-            stdout='{"role":"customer","phone_normalized":"+17329837841"}',
+            stdout='{"role":"customer","phone_normalized":"+15550100001"}',
             stderr="",
         )
         # Ensure F7_PRIMARY_FOLLOWUP_REPLY is True for this test
@@ -1937,7 +1937,7 @@ class TestF7PrimaryMode:
                           return_value=True) as mock_reply:
             event = _make_event(
                 text="Actually, please change it to 50 people for the Saturday event.",
-                chat_id="17329837841@s.whatsapp.net",
+                chat_id="15550100001@s.whatsapp.net",
             )
             result = hooks_mod.pre_gateway_dispatch(event)
         assert result is not None
@@ -1946,7 +1946,7 @@ class TestF7PrimaryMode:
         # No new lead created
         mock_trigger.assert_not_called()
         # Canonical follow-up reply sent
-        mock_reply.assert_called_once_with("17329837841@s.whatsapp.net", "L0011")
+        mock_reply.assert_called_once_with("15550100001@s.whatsapp.net", "L0011")
         # Suppressed audit row
         rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
@@ -1981,11 +1981,11 @@ class TestF7PrimaryMode:
         _seed_config(state_env)
         _seed_leads_multi(state_env, [
             {"lead_id": "L0011", "owner_approval_code": "#ABCDE",
-             "customer_phone": "+17329837841",
+             "customer_phone": "+15550100001",
              "status": "AWAITING_OWNER_APPROVAL"},
         ])
         fake_run = SimpleNamespace(returncode=0,
-                                   stdout='{"role":"customer","phone_normalized":"+17329837841"}',
+                                   stdout='{"role":"customer","phone_normalized":"+15550100001"}',
                                    stderr="")
         hooks_mod.F7_PRIMARY_FOLLOWUP_REPLY = True
         with patch("subprocess.run", return_value=fake_run), \
@@ -1994,12 +1994,12 @@ class TestF7PrimaryMode:
              patch.object(hooks_mod, "_send_amendment_retry_reply", return_value=True) as mock_retry:
             result = hooks_mod.pre_gateway_dispatch(_make_event(
                 text="Actually, please change it to 50 people for the Saturday event.",
-                chat_id="17329837841@s.whatsapp.net"))
+                chat_id="15550100001@s.whatsapp.net"))
         assert result is not None and result["action"] == "skip"
         assert "capture failed" in result["reason"]
         mock_trigger.assert_not_called()
         mock_canonical.assert_not_called()  # canonical reply must NOT fire on capture failure
-        mock_retry.assert_called_once_with("17329837841@s.whatsapp.net", "L0011")
+        mock_retry.assert_called_once_with("15550100001@s.whatsapp.net", "L0011")
         rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
         assert len(audits) == 1
@@ -2030,7 +2030,7 @@ class TestF7PrimaryMode:
                         "Contact +1 904 555 0123. Telugu festive food specials style. "
                         "Need WhatsApp, Instagram post, story, printable PDF."
                     ),
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -2081,7 +2081,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Create a flyer for Weekend Breakfast. Idly $4.99. Contact +1 904 555 0104.",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                     message_id="normal-preview-fail-1",
                 ),
             )
@@ -2131,7 +2131,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Create a flyer for Weekend Breakfast. Idly $4.99. Contact +1 904 555 0104.",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                     message_id="normal-preview-partial-1",
                 ),
             )
@@ -2152,7 +2152,7 @@ class TestF7PrimaryMode:
         _seed_config(state_env, flyer_enabled=True)
         event = _make_event(
             "I'd like you to Remove that extra 08:00. Add Any Item for $9.99.",
-            "201975216009469@lid",
+            "100000000000001@lid",
             message_id="exact-edit-1",
         )
         event.media_path = "/opt/shift-agent/.hermes/image_cache/existing-flyer.jpg"
@@ -2196,10 +2196,10 @@ class TestF7PrimaryMode:
         assert mock_create.call_args.kwargs["raw_request"].startswith("Edit uploaded flyer/source artwork")
         mock_reserve.assert_called_once()
         mock_processing.assert_called_once()
-        assert mock_processing.call_args.args == ("201975216009469@lid", "F0029")
+        assert mock_processing.call_args.args == ("100000000000001@lid", "F0029")
         mock_generate.assert_called_once_with("F0029")
         mock_finalize.assert_called_once()
-        mock_preview.assert_called_once_with("201975216009469@lid", "F0029")
+        mock_preview.assert_called_once_with("100000000000001@lid", "F0029")
         mock_manual_ack.assert_not_called()
 
     def test_reference_scope_no_spend_defers_exact_source_edit_without_scope_spend(self, mods, monkeypatch):
@@ -2263,7 +2263,7 @@ class TestF7PrimaryMode:
         _seed_config(state_env, flyer_enabled=True)
         event = _make_event(
             "Remove extra 08:00 from this flyer.",
-            "201975216009469@lid",
+            "100000000000001@lid",
             message_id="exact-edit-preflight-1",
         )
         event.media_path = "/opt/shift-agent/.hermes/image_cache/existing-flyer.pdf"
@@ -2309,7 +2309,7 @@ class TestF7PrimaryMode:
         mock_generate.assert_not_called()
         mock_manual_ack.assert_called_once()
         assert mock_manual_ack.call_args.args == (
-            "201975216009469@lid",
+            "100000000000001@lid",
             "F0099",
             "Remove extra 08:00 from this flyer.",
         )
@@ -2320,7 +2320,7 @@ class TestF7PrimaryMode:
         _seed_config(state_env, flyer_enabled=True)
         event = _make_event(
             "Remove extra 08:00 from this flyer.",
-            "201975216009469@lid",
+            "100000000000001@lid",
             message_id="exact-edit-delivery-fail-1",
         )
         event.media_path = "/opt/shift-agent/.hermes/image_cache/existing-flyer.jpg"
@@ -2367,7 +2367,7 @@ class TestF7PrimaryMode:
         _seed_config(state_env, flyer_enabled=True)
         event = _make_event(
             "Remove extra 08:00 from this flyer.",
-            "201975216009469@lid",
+            "100000000000001@lid",
             message_id="exact-edit-fail-1",
         )
         event.media_path = "/opt/shift-agent/.hermes/image_cache/existing-flyer.jpg"
@@ -2413,7 +2413,7 @@ class TestF7PrimaryMode:
         _seed_config(state_env, flyer_enabled=True)
 
         with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
-                          return_value=("+17329837841", "customer")), \
+                          return_value=("+15550100001", "customer")), \
              patch.object(actions_mod, "find_active_flyer_project_by_sender",
                           return_value=None), \
              patch.object(actions_mod, "trigger_create_flyer_project",
@@ -2421,7 +2421,7 @@ class TestF7PrimaryMode:
                               "project_id": "F0020",
                               "fields": {
                                   "event_or_business_name": "Quick Promo",
-                                  "contact_info": "+17329837841",
+                                  "contact_info": "+15550100001",
                                   "notes": "Items: Promo $4",
                               },
                           })), \
@@ -2440,8 +2440,8 @@ class TestF7PrimaryMode:
                           return_value=(True, "msg-preview", "")):
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
-                    text="Create a flyer for Quick Promo. Contact +1 732 983 7841. Offer $4 today.",
-                    chat_id="17329837841@s.whatsapp.net",
+                    text="Create a flyer for Quick Promo. Contact +1 555 010 0001. Offer $4 today.",
+                    chat_id="15550100001@s.whatsapp.net",
                     message_id="guest-brief-1",
                 ),
             )
@@ -2450,17 +2450,17 @@ class TestF7PrimaryMode:
             "action": "skip",
             "reason": "cf-router flyer primary: project F0020 created",
         }
-        mock_find_guest.assert_any_call("+17329837841", "17329837841@s.whatsapp.net")
+        mock_find_guest.assert_any_call("+15550100001", "15550100001@s.whatsapp.net")
         assert mock_find_guest.call_count >= 1
         mock_reserve_guest.assert_called_once_with(
-            sender_phone="+17329837841",
-            chat_id="17329837841@s.whatsapp.net",
+            sender_phone="+15550100001",
+            chat_id="15550100001@s.whatsapp.net",
             project_id="F0020",
         )
         mock_reserve.assert_not_called()
         mock_consume.assert_called_once_with(
-            sender_phone="+17329837841",
-            chat_id="17329837841@s.whatsapp.net",
+            sender_phone="+15550100001",
+            chat_id="15550100001@s.whatsapp.net",
             project_id="F0020",
         )
 
@@ -2469,7 +2469,7 @@ class TestF7PrimaryMode:
         _seed_config(state_env, flyer_enabled=True)
 
         with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
-                          return_value=("+17329837841", "customer")), \
+                          return_value=("+15550100001", "customer")), \
              patch.object(actions_mod, "find_active_flyer_project_by_sender",
                           return_value=None), \
              patch.object(actions_mod, "trigger_create_flyer_project",
@@ -2477,7 +2477,7 @@ class TestF7PrimaryMode:
                               "project_id": "F0020",
                               "fields": {
                                   "event_or_business_name": "Quick Promo",
-                                  "contact_info": "+17329837841",
+                                  "contact_info": "+15550100001",
                                   "notes": "Items: Promo $4",
                               },
                           })), \
@@ -2496,8 +2496,8 @@ class TestF7PrimaryMode:
                           return_value=(False, "", "bridge failed")):
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
-                    text="Create a flyer for Quick Promo. Contact +1 732 983 7841. Offer $4 today.",
-                    chat_id="17329837841@s.whatsapp.net",
+                    text="Create a flyer for Quick Promo. Contact +1 555 010 0001. Offer $4 today.",
+                    chat_id="15550100001@s.whatsapp.net",
                     message_id="guest-brief-1",
                 ),
             )
@@ -2509,8 +2509,8 @@ class TestF7PrimaryMode:
         mock_reserve_guest.assert_called_once()
         mock_consume.assert_not_called()
         mock_release_guest.assert_called_once_with(
-            sender_phone="+17329837841",
-            chat_id="17329837841@s.whatsapp.net",
+            sender_phone="+15550100001",
+            chat_id="15550100001@s.whatsapp.net",
             project_id="F0020",
         )
 
@@ -2550,7 +2550,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="make the food photo bigger and Telugu title brighter",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -2605,7 +2605,7 @@ class TestF7PrimaryMode:
              patch.object(hooks_mod, "_try_flyer_active_project_intercept") as mock_flyer, \
              patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger:
             result = hooks_mod.pre_gateway_dispatch(_make_event(
-                text="actually make it 60 guests not 45", chat_id="201975216009469@lid"))
+                text="actually make it 60 guests not 45", chat_id="100000000000001@lid"))
 
         assert result["action"] == "skip" and "captured for L0015" in result["reason"]
         mock_flyer.assert_not_called()                 # flyer terminal arm pre-empted
@@ -2629,7 +2629,7 @@ class TestF7PrimaryMode:
              patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger, \
              patch.object(actions_mod, "send_canonical_followup_reply") as mock_reply:
             result = hooks_mod.pre_gateway_dispatch(_make_event(
-                text="actually make it 60 guests not 45", chat_id="201975216009469@lid"))
+                text="actually make it 60 guests not 45", chat_id="100000000000001@lid"))
 
         assert result == {
             "action": "skip",
@@ -2644,7 +2644,7 @@ class TestF7PrimaryMode:
         _seed_config(state_env, flyer_enabled=True)
 
         with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
-                          return_value=("+17329837841", "customer")), \
+                          return_value=("+15550100001", "customer")), \
              patch.object(actions_mod, "find_active_flyer_project_by_sender",
                           return_value={
                               "project_id": "F0018",
@@ -2657,7 +2657,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Approve",
-                    chat_id="17329837841@s.whatsapp.net",
+                    chat_id="15550100001@s.whatsapp.net",
                     message_id="approve-msg-1",
                 ),
             )
@@ -2666,7 +2666,7 @@ class TestF7PrimaryMode:
             "action": "skip",
             "reason": "cf-router flyer active: finalized F0018",
         }
-        mock_finalize.assert_called_once_with("17329837841@s.whatsapp.net", "F0018", "approve-msg-1")
+        mock_finalize.assert_called_once_with("15550100001@s.whatsapp.net", "F0018", "approve-msg-1")
         mock_update.assert_not_called()
 
     def test_active_flyer_approve_outranks_stale_intake_session(self, mods, state_env):
@@ -2674,7 +2674,7 @@ class TestF7PrimaryMode:
         _seed_config(state_env, flyer_enabled=True)
 
         with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
-                          return_value=("+17329837841", "customer")), \
+                          return_value=("+15550100001", "customer")), \
              patch.object(actions_mod, "find_flyer_customer_by_sender",
                           return_value={"customer_id": "CUST0001", "status": "trial"}), \
              patch.object(actions_mod, "find_flyer_intake_session_by_sender",
@@ -2696,7 +2696,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="APPROVE",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                     message_id="approve-msg-2",
                 ),
             )
@@ -2706,7 +2706,7 @@ class TestF7PrimaryMode:
             "reason": "cf-router flyer active: finalized F0117",
         }
         mock_intake.assert_not_called()
-        mock_finalize.assert_called_once_with("201975216009469@lid", "F0117", "approve-msg-2")
+        mock_finalize.assert_called_once_with("100000000000001@lid", "F0117", "approve-msg-2")
 
     def test_explicit_flyer_intent_starts_new_work_over_active_project(self, mods, state_env):
         hooks_mod, actions_mod = mods
@@ -2730,7 +2730,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Need flyer for Ugadi Specials March 29",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -2764,7 +2764,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Help me create a beautiful flyer for my business",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -2782,7 +2782,7 @@ class TestF7PrimaryMode:
         _seed_config(state_env, flyer_enabled=True)
 
         with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
-                          return_value=("+17329837841", "customer")), \
+                          return_value=("+15550100001", "customer")), \
              patch.object(actions_mod, "trigger_start_flyer_guest_order",
                           return_value=(True, "guest", {
                               "reply_text": "Flyer Studio\n------------\nCreate one professional flyer for $4.\nPay here: https://pay.example/GUEST0001",
@@ -2795,7 +2795,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Create One Flyer - $4",
-                    chat_id="17329837841@s.whatsapp.net",
+                    chat_id="15550100001@s.whatsapp.net",
                 ),
             )
 
@@ -2825,7 +2825,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="English",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -2840,7 +2840,7 @@ class TestF7PrimaryMode:
         hooks_mod, actions_mod = mods
         _seed_config(state_env, flyer_enabled=True)
         _seed_flyer_customers(state_env, onboarding_sessions=[{
-            "chat_id": "201975216009469@lid",
+            "chat_id": "100000000000001@lid",
             "sender_phone": "+19045550104",
             "status": "collecting_business_name",
             "started_at": "2026-05-17T00:43:00Z",
@@ -2860,7 +2860,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Start Free Trial",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -2887,7 +2887,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Act Now! Save Time and Money",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -2916,7 +2916,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Start Free Trial",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -2943,7 +2943,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Act Now! Save Time and Money",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -2960,7 +2960,7 @@ class TestF7PrimaryMode:
         _seed_config(state_env, flyer_enabled=True)
         live_text = (
             '[shift-agent-sender v=1 platform=whatsapp phone=null '
-            'lid="201975216009469@lid" fromMe=false chat_id="201975216009469@lid"]\n'
+            'lid="100000000000001@lid" fromMe=false chat_id="100000000000001@lid"]\n'
             "Help me create a beautiful flyer for my business"
         )
 
@@ -2975,7 +2975,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text=live_text,
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -2996,7 +2996,7 @@ class TestF7PrimaryMode:
         )
 
         with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
-                          return_value=("+918985741562", "customer")), \
+                          return_value=("+15550100006", "customer")), \
              patch.object(actions_mod, "trigger_flyer_intake",
                           return_value=(True, "intake", {
                               "handled": True,
@@ -3011,7 +3011,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text=live_text,
-                    chat_id="918985741562@s.whatsapp.net",
+                    chat_id="15550100006@s.whatsapp.net",
                 ),
             )
 
@@ -3028,7 +3028,7 @@ class TestF7PrimaryMode:
         _seed_config(state_env, flyer_enabled=True)
 
         with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
-                          return_value=("+918985741562", "customer")), \
+                          return_value=("+15550100006", "customer")), \
              patch.object(actions_mod, "find_flyer_customer_by_sender",
                           return_value=None), \
              patch.object(actions_mod, "trigger_flyer_intake",
@@ -3046,7 +3046,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Hi I want to create a marketing flyer for my marketing business service",
-                    chat_id="918985741562@s.whatsapp.net",
+                    chat_id="15550100006@s.whatsapp.net",
                 ),
             )
 
@@ -3126,7 +3126,7 @@ class TestF7PrimaryMode:
         hooks_mod, actions_mod = mods
         _seed_config(state_env, flyer_enabled=True)
         _seed_flyer_customers(state_env, onboarding_sessions=[{
-            "chat_id": "201975216009469@lid",
+            "chat_id": "100000000000001@lid",
             "sender_phone": "+19045550104",
             "status": "collecting_business_name",
             "started_at": "2026-05-17T00:43:00Z",
@@ -3150,7 +3150,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="1",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -3165,7 +3165,7 @@ class TestF7PrimaryMode:
         hooks_mod, actions_mod = mods
         _seed_config(state_env, flyer_enabled=True)
         _seed_flyer_customers(state_env, onboarding_sessions=[{
-            "chat_id": "201975216009469@lid",
+            "chat_id": "100000000000001@lid",
             "sender_phone": "+19045550104",
             "status": "collecting_business_name",
             "started_at": "2026-05-17T00:43:00Z",
@@ -3189,7 +3189,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Need flyer for my business",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -3204,17 +3204,17 @@ class TestF7PrimaryMode:
         hooks_mod, actions_mod = mods
         _seed_config(state_env, flyer_enabled=True)
         _seed_flyer_customers(state_env, onboarding_sessions=[{
-            "chat_id": "17329837841@s.whatsapp.net",
-            "sender_phone": "+17329837841",
+            "chat_id": "15550100001@s.whatsapp.net",
+            "sender_phone": "+15550100001",
             "status": "confirming_summary",
             "started_at": "2026-05-17T15:41:00Z",
             "updated_at": "2026-05-17T15:41:00Z",
             "last_message_id": "stale-summary",
             "business_name": "Lakshmis Kitchen",
             "business_address": "90 Brybar",
-            "public_phone": "+17329837841",
-            "business_whatsapp_number": "+17329837841",
-            "authorized_request_number": "+17329837841",
+            "public_phone": "+15550100001",
+            "business_whatsapp_number": "+15550100001",
+            "authorized_request_number": "+15550100001",
             "business_category": "English and Telugu",
             "preferred_language": "te",
             "plan_id": "trial",
@@ -3225,7 +3225,7 @@ class TestF7PrimaryMode:
             "Kheema Dosa $12.99. Timings 8 AM to 11 AM. Thursday to Sunday."
         )
         with patch.object(actions_mod, "lid_to_phone_via_identify_sender",
-                          return_value=("+17329837841", "customer")), \
+                          return_value=("+15550100001", "customer")), \
              patch.object(actions_mod, "find_flyer_customer_by_sender",
                           return_value={"customer_id": "CUST0001", "status": "trial", "business_name": "Lakshmis Kitchn"}), \
              patch.object(actions_mod, "trigger_flyer_onboarding") as mock_onboarding, \
@@ -3234,7 +3234,7 @@ class TestF7PrimaryMode:
              patch.object(actions_mod, "send_flyer_intake_ack",
                           return_value=(True, "msg-project", "")):
             result = hooks_mod.pre_gateway_dispatch(
-                _make_event(text=request, chat_id="17329837841@s.whatsapp.net"),
+                _make_event(text=request, chat_id="15550100001@s.whatsapp.net"),
             )
 
         assert result == {
@@ -3249,7 +3249,7 @@ class TestF7PrimaryMode:
         hooks_mod, actions_mod = mods
         _seed_config(state_env, flyer_enabled=True)
         _seed_flyer_customers(state_env, onboarding_sessions=[{
-            "chat_id": "201975216009469@lid",
+            "chat_id": "100000000000001@lid",
             "sender_phone": "+19045550104",
             "status": "confirming_summary",
             "started_at": "2026-05-17T00:43:00Z",
@@ -3257,9 +3257,9 @@ class TestF7PrimaryMode:
             "last_message_id": "trial-summary",
             "business_name": "Lakshmis Kitchn",
             "business_address": "90 Brybar Dr St Johns FL",
-            "public_phone": "+17329837841",
-            "business_whatsapp_number": "+17329837841",
-            "authorized_request_number": "+17329837841",
+            "public_phone": "+15550100001",
+            "business_whatsapp_number": "+15550100001",
+            "authorized_request_number": "+15550100001",
             "business_category": "Indian Restaurant",
             "preferred_language": "te",
             "plan_id": "trial",
@@ -3286,7 +3286,7 @@ class TestF7PrimaryMode:
                         "CONFIRM. Create a breakfast menu for tomorrow from 8 AM to 10 AM. "
                         "Items to include in the flyer Idli - $4.99."
                     ),
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -3314,7 +3314,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 SimpleNamespace(
                     text="",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                     media_path="/tmp/flyer-campaign-image.png",
                 ),
             )
@@ -3341,7 +3341,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 SimpleNamespace(
                     text="Use this logo",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                     media_path="/tmp/logo.png",
                 ),
             )
@@ -3357,7 +3357,7 @@ class TestF7PrimaryMode:
         _seed_config(state_env, flyer_enabled=True)
         event = _make_event(
             "SKIP",
-            "201975216009469@lid",
+            "100000000000001@lid",
             message_id="guided-final-1",
         )
         event.media_path = "/opt/shift-agent/.hermes/image_cache/img_di iwali.png"
@@ -3382,7 +3382,7 @@ class TestF7PrimaryMode:
                               "project_id": "F0024",
                               "fields": {
                                   "event_or_business_name": "Diwali Grocery Sale",
-                                  "contact_info": "+17329837841",
+                                  "contact_info": "+15550100001",
                                   "notes": "Extract items and prices from attached sample.",
                               },
                               "assets": [{"kind": "reference_image"}],
@@ -3438,7 +3438,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="7329837841",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -3458,7 +3458,7 @@ class TestF7PrimaryMode:
         _seed_leads_multi(state_env, [])
         fake_run = SimpleNamespace(
             returncode=0,
-            stdout='{"role":"customer","phone_normalized":"+17329837841"}',
+            stdout='{"role":"customer","phone_normalized":"+15550100001"}',
             stderr="",
         )
         with patch("subprocess.run", return_value=fake_run), \
@@ -3467,7 +3467,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Need catering for 80 people event Saturday food delivered",
-                    chat_id="17329837841@s.whatsapp.net",
+                    chat_id="15550100001@s.whatsapp.net",
                 ),
             )
 
@@ -3498,7 +3498,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="She wants one mixed option and one premium option.",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -3530,7 +3530,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 SimpleNamespace(
                     text="She wants one mixed option and one premium option.",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                     message_id="msg-proposal-request-1",
                 ),
             )
@@ -3571,7 +3571,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 SimpleNamespace(
                     text="Please send two proposal menus for my cousin's wedding.",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                     message_id="msg-proposal-request-fail",
                 ),
             )
@@ -3606,7 +3606,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Will wait for two menu proposals. Thank you!",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                 ),
             )
 
@@ -3632,7 +3632,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 SimpleNamespace(
                     text="go with option 2",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                     message_id="msg-select-1",
                 ),
             )
@@ -3641,7 +3641,7 @@ class TestF7PrimaryMode:
         assert result["action"] == "skip"
         mock_select.assert_called_once_with(
             "L0001",
-            "201975216009469@lid",
+            "100000000000001@lid",
             "msg-select-1",
             "go with option 2",
         )
@@ -3670,7 +3670,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 SimpleNamespace(
                     text="go with option 2",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                     message_id="msg-select-fail",
                 ),
             )
@@ -3702,7 +3702,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 SimpleNamespace(
                     text="go with option 2",
-                    chat_id="201975216009469@lid",
+                    chat_id="100000000000001@lid",
                     message_id="msg-select-handled",
                 ),
             )
@@ -3747,14 +3747,14 @@ class TestF7PrimaryMode:
              patch.object(actions_mod, "send_canonical_followup_reply",
                           return_value=True) as mock_reply:
             result = hooks_mod.pre_gateway_dispatch(
-                _make_event(text=text, chat_id="201975216009469@lid"),
+                _make_event(text=text, chat_id="100000000000001@lid"),
             )
 
         assert result is not None
         assert result["action"] == "skip"
         assert "follow-up to active L0014 suppressed" in result["reason"]
         mock_trigger.assert_not_called()
-        mock_reply.assert_called_once_with("201975216009469@lid", "L0014")
+        mock_reply.assert_called_once_with("100000000000001@lid", "L0014")
         rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
         assert len(audits) == 1
@@ -3767,7 +3767,7 @@ class TestF7PrimaryMode:
         _seed_leads_multi(state_env, [])
         fake_run = SimpleNamespace(
             returncode=0,
-            stdout='{"role":"customer","phone_normalized":"+17329837841"}',
+            stdout='{"role":"customer","phone_normalized":"+15550100001"}',
             stderr="",
         )
         with patch("subprocess.run", return_value=fake_run), \
@@ -3775,7 +3775,7 @@ class TestF7PrimaryMode:
             result = hooks_mod.pre_gateway_dispatch(
                 _make_event(
                     text="Will wait for two menu proposals. Thank you!",
-                    chat_id="17329837841@s.whatsapp.net",
+                    chat_id="15550100001@s.whatsapp.net",
                 ),
             )
 
@@ -3795,7 +3795,7 @@ class TestF7PrimaryMode:
              patch.object(actions_mod, "trigger_create_catering_lead") as mock_trigger:
             event = _make_event(
                 text="catering for 50 people event Saturday food delivered",
-                chat_id="918522041562@s.whatsapp.net",
+                chat_id="15550100002@s.whatsapp.net",
             )
             result = hooks_mod.pre_gateway_dispatch(event)
         # is_owner_chat=True + no #XXXXX code in text → _try_f8_intercept
@@ -3815,7 +3815,7 @@ class TestF7PrimaryMode:
                  patch.object(actions_mod, "lid_to_phone_via_identify_sender") as mock_ident:
                 event = _make_event(
                     text="catering for 50 people event Saturday food delivered",
-                    chat_id="17329837841@s.whatsapp.net",
+                    chat_id="15550100001@s.whatsapp.net",
                 )
                 result = hooks_mod.pre_gateway_dispatch(event)
             assert result is None
@@ -3835,7 +3835,7 @@ class TestF7PrimaryMode:
         _seed_leads_multi(state_env, [])
         fake_run = SimpleNamespace(
             returncode=0,
-            stdout='{"role":"customer","phone_normalized":"+17329837841"}',
+            stdout='{"role":"customer","phone_normalized":"+15550100001"}',
             stderr="",
         )
         with patch("subprocess.run", return_value=fake_run), \
@@ -3843,7 +3843,7 @@ class TestF7PrimaryMode:
                           return_value=(True, "ok")) as mock_trigger:
             event = _make_event(
                 text="catering for 80 people event Saturday food delivered vegetarian",
-                chat_id="17329837841@s.whatsapp.net",
+                chat_id="15550100001@s.whatsapp.net",
             )
             result = hooks_mod.pre_gateway_dispatch(event)
         assert result is not None and result["action"] == "skip"
@@ -3865,7 +3865,7 @@ class TestF7PrimaryMode:
         _seed_leads_multi(state_env, [])
         fake_run = SimpleNamespace(
             returncode=0,
-            stdout='{"role":"customer","phone_normalized":"+17329837841"}',
+            stdout='{"role":"customer","phone_normalized":"+15550100001"}',
             stderr="",
         )
         # This text has catering+event but no headcount digit
@@ -3874,7 +3874,7 @@ class TestF7PrimaryMode:
                           return_value=(True, "ok")) as mock_trigger:
             event = _make_event(
                 text="hi looking for catering for our wedding reception food delivered",
-                chat_id="17329837841@s.whatsapp.net",
+                chat_id="15550100001@s.whatsapp.net",
             )
             result = hooks_mod.pre_gateway_dispatch(event)
         if result is None:

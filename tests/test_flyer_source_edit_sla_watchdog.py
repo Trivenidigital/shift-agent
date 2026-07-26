@@ -21,12 +21,12 @@ def _project(
     status: str = "manual_edit_required",
     manual_status: str = "queued",
     reason_code: str = "source_edit_provider_unavailable",
-    raw_request: str = "Edit this flyer. Secret phone +17329837841.",
+    raw_request: str = "Edit this flyer. Secret phone +15550100001.",
 ) -> dict:
     return {
         "project_id": project_id,
         "status": status,
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "created_at": "2026-05-21T00:00:00Z",
         "updated_at": queued_at,
         "original_message_id": f"msg-{project_id}",
@@ -83,7 +83,7 @@ def test_stale_source_edit_queue_row_pages_operator_and_writes_alert_state(tmp_p
     assert calls[0]["priority"] == 2
     assert "F9001" in calls[0]["message"]
     assert "visual_qa_failed" in calls[0]["message"]
-    assert "+17329837841" not in calls[0]["message"]
+    assert "+15550100001" not in calls[0]["message"]
     assert "Secret phone" not in calls[0]["message"]
 
     saved = json.loads(state.read_text(encoding="utf-8"))
@@ -403,13 +403,13 @@ def test_stale_manual_queue_sends_customer_update_after_customer_threshold(tmp_p
         customer_update_minutes=30,
         customer_repeat_minutes=120,
         notify_func=lambda **_: True,
-        customer_chat_resolver=lambda project: ("17329837841@lid", "audit"),
+        customer_chat_resolver=lambda project: ("15550100001@lid", "audit"),
         customer_notify_func=lambda chat_id, message: (customer_calls.append({"chat_id": chat_id, "message": message}) or (True, "m-customer", "")),
     )
 
     assert result["status"] == "alerted"
     assert result["customer_updates"]["sent_project_ids"] == ["F9012"]
-    assert customer_calls[0]["chat_id"] == "17329837841@lid"
+    assert customer_calls[0]["chat_id"] == "15550100001@lid"
     assert "still in progress" in customer_calls[0]["message"]
     assert "visual_qa_failed" not in customer_calls[0]["message"]
     saved = json.loads(state.read_text(encoding="utf-8"))
@@ -446,7 +446,7 @@ def test_customer_update_sends_once_per_chat_for_multiple_stale_projects(tmp_pat
         customer_update_minutes=30,
         customer_repeat_minutes=120,
         notify_func=lambda **_: True,
-        customer_chat_resolver=lambda _project: ("17329837841@lid", "audit"),
+        customer_chat_resolver=lambda _project: ("15550100001@lid", "audit"),
         customer_notify_func=lambda chat_id, message: (customer_calls.append({"chat_id": chat_id, "message": message}) or (True, "m-customer", "")),
     )
 
@@ -662,7 +662,7 @@ def test_non_positive_repeat_minutes_disable_throttle(tmp_path):
         customer_update_minutes=10,
         customer_repeat_minutes=-1,
         notify_func=lambda **_: True,
-        customer_chat_resolver=lambda _project: ("17329837841@lid", "audit"),
+        customer_chat_resolver=lambda _project: ("15550100001@lid", "audit"),
         customer_notify_func=lambda _chat_id, _message: (customer_calls.append("sent") or (True, "mid-1", "")),
     )
 

@@ -66,12 +66,12 @@ def _rawless_project(tmp_path, monkeypatch):
     preview = tmp_path / "F9401-C1-preview.png"
     _pinned_preview(preview)
     return FlyerProject(
-        project_id="F9401", status="finalizing_assets", customer_phone="+17329837841",
+        project_id="F9401", status="finalizing_assets", customer_phone="+15550100001",
         created_at=now, updated_at=now, original_message_id="m-ws2b",
         raw_request="Create a flyer for the weekend special.",
         fields=FlyerRequestFields(),
         locked_facts=[_F("business_name", "Lakshmi's Kitchen"),
-                      _F("contact_phone", "+17329837841")],
+                      _F("contact_phone", "+15550100001")],
         assets=[FlyerAsset(asset_id="A0001", kind="concept_preview", source="rendered",
                            path=str(preview), mime_type="image/png", sha256="a" * 64,
                            original_message_id="m-ws2b", received_at=now)],

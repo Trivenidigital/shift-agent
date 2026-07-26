@@ -31,7 +31,7 @@ pytestmark = pytest.mark.skipif(
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = REPO / "src" / "plugins" / "cf-router"
 PLATFORM_DIR = REPO / "src" / "platform"
-CHAT = "17329837841@c.us"
+CHAT = "15550100001@c.us"
 
 
 def _load():
@@ -71,7 +71,7 @@ def wired(monkeypatch):
     set_a("is_flyer_workflow_enabled", lambda: True)
     set_a("is_owner_chat", lambda _c: False)
     set_a("is_verified_employee_chat", lambda _c: False)
-    set_a("lid_to_phone_via_identify_sender", lambda _c: ("+17329837841", "customer"))
+    set_a("lid_to_phone_via_identify_sender", lambda _c: ("+15550100001", "customer"))
     set_a("find_flyer_customer_by_sender", lambda *_a: {"customer_id": "C1", "status": "trial"})
     set_h("_is_sick_call", lambda _t: False)
     monkeypatch.setattr(hooks, "F7_ENABLED", False, raising=False)

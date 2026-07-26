@@ -37,7 +37,7 @@ import schemas  # noqa: E402
 
 CLEAN = "Happy to help with that flyer! What should it promote?"
 FALLBACK = "I couldn't finish that reply — tell me what you need and I'll help."
-CHAT = "17329837841@c.us"
+CHAT = "15550100001@c.us"
 
 
 @pytest.fixture(autouse=True)
@@ -170,7 +170,7 @@ class TestGatewayThrottleIntegration:
     ):
         monkeypatch.setenv("GATEWAY_SEND_THROTTLE_LIMIT", "3")
         monkeypatch.setattr(safe_io_module, "notify_owner_with_fallback", lambda *a, **k: True)
-        alice = "17329837841@c.us"
+        alice = "15550100001@c.us"
         bob = "19998887777@c.us"
         for _ in range(3):
             assert safe_io_module.front_brain_screen_gateway_send(alice, CLEAN) == CLEAN

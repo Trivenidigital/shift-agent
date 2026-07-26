@@ -1452,7 +1452,7 @@ def test_report_output_redacts_sensitive_values_from_json_and_markdown(tmp_path)
     source.write_text(
         """
 def send_flyer_manual_edit_ack(project_id):
-    body = "Original customer request: OPENAI_API_KEY=sk-testsecret123456789 +17329837841 17329837841@lid /opt/shift-agent/state/flyer/private.png"
+    body = "Original customer request: OPENAI_API_KEY=sk-testsecret123456789 +15550100001 15550100001@lid /opt/shift-agent/state/flyer/private.png"
     return send_flyer_text(body)
 """,
         encoding="utf-8",
@@ -1464,7 +1464,7 @@ def send_flyer_manual_edit_ack(project_id):
             {
                 "type": "cf_router_intercepted",
                 "project_id": "F9014",
-                "outbound_text": "Requested edit: Bearer verysecret987 +17329837841 17329837841@s.whatsapp.net C:\\secret\\asset.png",
+                "outbound_text": "Requested edit: Bearer verysecret987 +15550100001 15550100001@s.whatsapp.net C:\\secret\\asset.png",
             }
         ],
         now=module.parse_utc("2026-05-20T11:05:00Z"),
@@ -1474,9 +1474,9 @@ def send_flyer_manual_edit_ack(project_id):
 
     assert "sk-testsecret123456789" not in blob
     assert "verysecret987" not in blob
-    assert "+17329837841" not in blob
-    assert "17329837841@lid" not in blob
-    assert "17329837841@s.whatsapp.net" not in blob
+    assert "+15550100001" not in blob
+    assert "15550100001@lid" not in blob
+    assert "15550100001@s.whatsapp.net" not in blob
     assert "/opt/shift-agent/state/flyer/private.png" not in blob
     assert "C:\\secret\\asset.png" not in blob
     assert "[redacted" in blob
@@ -1490,7 +1490,7 @@ def test_redaction_handles_secret_keys_and_formatted_phone_values():
             "access_token": "plainsecret",
             "api_key": "anothersecret",
             "nested": {
-                "message": "Call 7329837841 or (732) 983-7841 or +17329837841",
+                "message": "Call 7329837841 or (555) 010-0001 or +15550100001",
             },
         }
     )
@@ -1499,8 +1499,8 @@ def test_redaction_handles_secret_keys_and_formatted_phone_values():
     assert "plainsecret" not in blob
     assert "anothersecret" not in blob
     assert "7329837841" not in blob
-    assert "(732) 983-7841" not in blob
-    assert "+17329837841" not in blob
+    assert "(555) 010-0001" not in blob
+    assert "+15550100001" not in blob
     assert "[redacted" in blob
 
 

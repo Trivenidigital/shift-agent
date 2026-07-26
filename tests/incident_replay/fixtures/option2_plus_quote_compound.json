@@ -1,0 +1,47 @@
+{
+  "incident_id": "option2-plus-quote-compound",
+  "description": "A compound 'Option 2 + quote and prices' intent is handled in a single turn: option 2 is selected AND the priced quote is produced together \u2014 not selection now, pricing later. Deterministic proof: test_catering_turn_arbitration_e2e.py + test_select_catering_proposal.py.",
+  "pseudonymized_transcript": [
+    {
+      "from": "+15550100003",
+      "text": "Let's go with Option 2, and can you send the quote with prices?"
+    }
+  ],
+  "initial_state": {
+    "proposal_sets": [
+      {
+        "set_id": "PSET-0001",
+        "options": [
+          "Option 1",
+          "Option 2",
+          "Option 3"
+        ],
+        "selected": null
+      }
+    ]
+  },
+  "expected_route": "catering_select_and_quote",
+  "expected_mutations": [
+    "select_proposal_option_2",
+    "emit_priced_quote"
+  ],
+  "forbidden_mutations": [
+    "select_without_pricing",
+    "two_separate_sends_for_compound_intent"
+  ],
+  "expected_logical_sends": 1,
+  "expected_audit_identities": [
+    "+15550100003"
+  ],
+  "expected_final_state": {
+    "proposal_sets": [
+      {
+        "set_id": "PSET-0001",
+        "selected": "Option 2",
+        "quote_status": "priced"
+      }
+    ]
+  },
+  "pii_safe": true,
+  "additive_only": true
+}

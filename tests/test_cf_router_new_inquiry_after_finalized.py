@@ -89,7 +89,7 @@ def test_strong_new_inquiry_after_customer_finalized_creates_new_lead(tmp_path):
 
     result = hooks_mod.pre_gateway_dispatch(SimpleNamespace(
         text="Need catering for 80 people next Friday. Mix veg and non-veg options.",
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         message_id="msg-new-event-after-finalized",
     ))
 
@@ -130,7 +130,7 @@ def test_birthday_catering_inquiry_preserves_date_and_veg_split(tmp_path):
     actions_mod.is_owner_chat = lambda _chat_id: False
     actions_mod.is_employee_chat = lambda _chat_id: False
     actions_mod.lid_to_phone_via_identify_sender = (
-        lambda _chat_id: ("+17329837841", "customer")
+        lambda _chat_id: ("+15550100001", "customer")
     )
     actions_mod.get_revenue_route_clarification = lambda _chat_id: None
     actions_mod.trigger_create_catering_lead = (
@@ -149,7 +149,7 @@ def test_birthday_catering_inquiry_preserves_date_and_veg_split(tmp_path):
     )
     result = hooks_mod.pre_gateway_dispatch(SimpleNamespace(
         text=text,
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         message_id="msg-birthday-catering",
     ))
 
@@ -188,7 +188,7 @@ def test_active_lead_sample_menu_request_generates_deterministically(tmp_path):
             "lead_id": "L0016",
             "owner_approval_code": "#GWXSR",
             "status": "AWAITING_OWNER_APPROVAL",
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "customer_lid": None,
             "created_at": "2026-06-08T08:24:09-04:00",
         }],
@@ -202,7 +202,7 @@ def test_active_lead_sample_menu_request_generates_deterministically(tmp_path):
     actions_mod.is_owner_chat = lambda _chat_id: False
     actions_mod.is_employee_chat = lambda _chat_id: False
     actions_mod.lid_to_phone_via_identify_sender = (
-        lambda _chat_id: ("+17329837841", "customer")
+        lambda _chat_id: ("+15550100001", "customer")
     )
     actions_mod.get_revenue_route_clarification = lambda _chat_id: None
     actions_mod.invoke_create_catering_proposals = (
@@ -219,7 +219,7 @@ def test_active_lead_sample_menu_request_generates_deterministically(tmp_path):
     assert actions_mod.is_mix_and_match_request(text) is False
     result = hooks_mod.pre_gateway_dispatch(SimpleNamespace(
         text=text,
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         message_id="msg-sample-menus",
     ))
 
@@ -255,7 +255,7 @@ def test_active_lead_menu_constraints_generate_not_owner_wait_reply(tmp_path):
             "lead_id": "L0016",
             "owner_approval_code": "#GWXSR",
             "status": "AWAITING_OWNER_APPROVAL",
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "customer_lid": None,
             "created_at": "2026-06-08T08:24:09-04:00",
         }],
@@ -269,7 +269,7 @@ def test_active_lead_menu_constraints_generate_not_owner_wait_reply(tmp_path):
     actions_mod.is_owner_chat = lambda _chat_id: False
     actions_mod.is_employee_chat = lambda _chat_id: False
     actions_mod.lid_to_phone_via_identify_sender = (
-        lambda _chat_id: ("+17329837841", "customer")
+        lambda _chat_id: ("+15550100001", "customer")
     )
     actions_mod.get_revenue_route_clarification = lambda _chat_id: None
     actions_mod.invoke_create_catering_proposals = (
@@ -289,7 +289,7 @@ def test_active_lead_menu_constraints_generate_not_owner_wait_reply(tmp_path):
     assert actions_mod.is_mix_and_match_request(text) is False
     result = hooks_mod.pre_gateway_dispatch(SimpleNamespace(
         text=text,
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         message_id="msg-menu-constraints",
     ))
 

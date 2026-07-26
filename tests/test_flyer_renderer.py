@@ -62,7 +62,7 @@ def _english_project() -> FlyerProject:
     """Simple English typed menu project eligible for integrated poster mode."""
     return _complete_project().model_copy(update={"fields": FlyerRequestFields(
         event_or_business_name="Lakshmi's Kitchen",
-        contact_info="+1 732 983 7841",
+        contact_info="+1 555 010 0001",
         venue_or_location="90 Brybar Dr St Johns FL",
         preferred_language="en",
         notes="Dosa $6.99; Idli $5.99",
@@ -108,7 +108,7 @@ def _dessert_graduation_project() -> FlyerProject:
     now = datetime(2026, 6, 7, tzinfo=timezone.utc)
     fields = FlyerRequestFields(
         event_or_business_name="Graduation Dessert Specials",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         venue_or_location="90 Brybar Dr St Johns FL",
         preferred_language="en",
         notes=DESSERT_GRADUATION_SUFFIX_PRICE_BRIEF,
@@ -124,7 +124,7 @@ def _dessert_graduation_project() -> FlyerProject:
         FlyerLockedFact(
             fact_id="contact_phone",
             label="Contact",
-            value="+17329837841",
+            value="+15550100001",
             source="customer_profile",
             required=True,
         ),
@@ -139,7 +139,7 @@ def _dessert_graduation_project() -> FlyerProject:
     return FlyerProject(
         project_id="F9014",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="wamid.dessert-graduation",
@@ -199,7 +199,7 @@ def _triveni_shared_price_reference_project() -> FlyerProject:
         FlyerLockedFact(
             fact_id="contact_phone",
             label="Contact",
-            value="+17329837841",
+            value="+15550100001",
             source="customer_profile",
             required=True,
         ),
@@ -224,7 +224,7 @@ def _triveni_shared_price_reference_project() -> FlyerProject:
     return FlyerProject(
         project_id="F0144",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="wamid.triveni-reference",
@@ -232,7 +232,7 @@ def _triveni_shared_price_reference_project() -> FlyerProject:
         fields=FlyerRequestFields(
             event_or_business_name="Lakshmi's kitchen, same content, but I'd like you to use Lakshmi's kitchen theme",
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             notes="use as reference",
             preferred_language="en",
             style_preference="Lakshmi's Kitchen theme",
@@ -343,7 +343,7 @@ def test_collect_text_facts_ignores_unrequested_hermes_inferred_items():
     ]
     locked_facts = [
         FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
-        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
         FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
         FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Memorial Day Weekend Meal Combos", source="customer_text", required=True),
         FlyerLockedFact(
@@ -370,7 +370,7 @@ def test_collect_text_facts_ignores_unrequested_hermes_inferred_items():
         "fields": FlyerRequestFields(
             event_or_business_name="Memorial Day Weekend Meal Combos",
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             notes=raw_request,
             preferred_language="en",
         ),
@@ -395,7 +395,7 @@ def test_semantic_offer_facts_feed_text_manifest_and_generation_prompt():
         ),
         "locked_facts": [
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile"),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile"),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile"),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks Sale", source="customer_text"),
             FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Any item $7.99", source="customer_text"),
@@ -423,7 +423,7 @@ def test_collect_text_facts_avoids_duplicate_time_when_schedule_has_time_range()
         event_or_business_name="Evening Snacks",
         event_time="16:00",
         venue_or_location="90 Brybar Dr St Johns FL",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes="Evening snacks offer. Schedule 4 PM to 7 PM. Wednesday through Saturday.",
     )
     project = project.model_copy(update={"fields": fields})
@@ -458,7 +458,7 @@ def test_collect_text_facts_separates_business_brand_from_campaign_title():
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchn", source="customer_profile"),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks", source="customer_text"),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile"),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile"),
         ],
     })
 
@@ -466,7 +466,7 @@ def test_collect_text_facts_separates_business_brand_from_campaign_title():
     assert facts["brand"] == "Lakshmis Kitchn"
     assert facts["title"] == "Evening Snacks"
     assert facts["location"] == "90 Brybar Dr St Johns FL"
-    assert facts["contact"] == "+17329837841"
+    assert facts["contact"] == "+15550100001"
     assert _menu_overlay_payload(project)["title"] == "Evening Snacks"
     assert "Business/brand: Lakshmis Kitchn" in _image_prompt(
         project,
@@ -487,14 +487,14 @@ def test_collect_text_facts_uses_headline_when_campaign_title_is_absent():
         "fields": FlyerRequestFields(
             event_or_business_name="Lakshmis Kitchn",
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             notes="Headline: Family Combo Feast",
         ),
         "locked_facts": [
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmis Kitchn", source="customer_profile"),
             FlyerLockedFact(fact_id="headline", label="Headline", value="Family Combo Feast", source="customer_text"),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile"),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile"),
         ],
     })
 
@@ -511,7 +511,7 @@ def test_collect_text_facts_falls_back_to_fields_when_locked_slot_missing():
         "fields": FlyerRequestFields(
             event_or_business_name="Lakshmis Kitchn",
             venue_or_location="St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             notes="-",
         ),
         "locked_facts": [],  # no locked facts at all
@@ -520,7 +520,7 @@ def test_collect_text_facts_falls_back_to_fields_when_locked_slot_missing():
     facts = {fact.fact_id: fact.text for fact in collect_text_facts(project)}
     assert facts["title"] == "Lakshmis Kitchn"
     assert facts["location"] == "St Johns FL"
-    assert facts["contact"] == "+17329837841"
+    assert facts["contact"] == "+15550100001"
 
 
 def test_collect_text_facts_drops_instruction_field_title_fallbacks():
@@ -529,13 +529,13 @@ def test_collect_text_facts_drops_instruction_field_title_fallbacks():
             "fields": FlyerRequestFields(
                 event_or_business_name=poisoned_title,
                 venue_or_location="St Johns FL",
-                contact_info="+17329837841",
+                contact_info="+15550100001",
                 notes="Create flyer with menu details.",
             ),
             "locked_facts": [
                 FlyerLockedFact(fact_id="business_name", label="Business", value="MK kitchen", source="customer_profile"),
                 FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile"),
-                FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+                FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile"),
             ],
         })
 
@@ -773,7 +773,7 @@ def test_collect_text_facts_preserves_multi_offer_celebration_contract():
         event_or_business_name="One Year Grand Celebration",
         event_date="2026-05-30",
         venue_or_location="90 Brybar Dr St Johns FL",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes=(
             "Create a one year grand celebration flyer, which must include "
             "grand sale 30% of all dine-In orders and 20% on all Take Away orders. "
@@ -797,7 +797,7 @@ def test_image_prompt_preserves_multi_offer_celebration_contract():
         event_or_business_name="One Year Grand Celebration",
         event_date="2026-05-30",
         venue_or_location="90 Brybar Dr St Johns FL",
-        contact_info="+17329837841",
+        contact_info="+15550100001",
         notes=(
             "Create a one year grand celebration flyer, which must include "
             "grand sale 30% of all dine-In orders and 20% on all Take Away orders. "
@@ -834,7 +834,7 @@ def test_collect_text_facts_suppresses_old_phone_from_notes_after_revision():
 def test_collect_text_facts_accepts_ten_item_menu_and_daily_schedule():
     fields = FlyerRequestFields(
         event_or_business_name="Daily Lunch Specials",
-        contact_info="+1 704 324 3322",
+        contact_info="+1 555 010 0003",
         notes="Daily lunch buffet 11 AM-3 PM. " + "; ".join(
             f"Item {idx} ${idx}.99" for idx in range(1, 11)
         ),
@@ -849,7 +849,7 @@ def test_collect_text_facts_accepts_ten_item_menu_and_daily_schedule():
 def test_render_concept_previews_accepts_ten_item_menu(tmp_path):
     fields = FlyerRequestFields(
         event_or_business_name="Daily Lunch Specials",
-        contact_info="+1 704 324 3322",
+        contact_info="+1 555 010 0003",
         notes="Daily lunch buffet 11 AM-3 PM. " + "; ".join(
             f"Item {idx} ${idx}.99" for idx in range(1, 11)
         ),
@@ -1280,7 +1280,7 @@ def test_image_prompt_extracts_single_day_every_week_schedule():
             event_date=None,
             event_time=None,
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             notes=raw_request,
         ),
     })
@@ -1302,7 +1302,7 @@ def test_image_prompt_uses_locked_schedule_as_source_of_truth():
             event_date=None,
             event_time=None,
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             notes="Create a flyer with stored details.",
         ),
         "locked_facts": [
@@ -1333,14 +1333,14 @@ def test_image_prompt_uses_clean_biryani_copy_without_price_instruction_leak():
             event_date=None,
             event_time=None,
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             notes=raw_request,
         ),
         "locked_facts": [
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile"),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Special Biryani's", source="customer_text"),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile"),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile"),
             FlyerLockedFact(fact_id="item:0:name", label="Item", value="Chicken Biryani", source="customer_text"),
             FlyerLockedFact(fact_id="item:0:price", label="Price", value="$16.99", source="customer_text"),
             FlyerLockedFact(fact_id="item:1:name", label="Item", value="Goat Biryani", source="customer_text"),
@@ -1377,7 +1377,7 @@ def test_image_prompt_for_indochinese_menu_uses_structured_item_cards_not_raw_re
         FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
         FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Indo-Chinese Specials", source="customer_text", required=True),
         FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
-        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
         FlyerLockedFact(fact_id="schedule", label="Schedule", value="Wednesday", source="customer_text", required=True),
     ]
     for idx, name in enumerate(names):
@@ -1390,7 +1390,7 @@ def test_image_prompt_for_indochinese_menu_uses_structured_item_cards_not_raw_re
     project = FlyerProject(
         project_id="F0120",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-indochinese",
@@ -1398,7 +1398,7 @@ def test_image_prompt_for_indochinese_menu_uses_structured_item_cards_not_raw_re
         fields=FlyerRequestFields(
             event_or_business_name="Indo-Chinese Specials",
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             notes=raw,
             style_preference="professional local food menu flyer",
         ),
@@ -1427,7 +1427,7 @@ def test_image_prompt_for_south_indian_snacks_rejects_family_scene_collision():
     project = FlyerProject(
         project_id="F0122",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-snacks",
@@ -1435,7 +1435,7 @@ def test_image_prompt_for_south_indian_snacks_rejects_family_scene_collision():
         fields=FlyerRequestFields(
             event_or_business_name="South Indian Snacks",
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             notes=raw,
             style_preference=(
                 "professional local food menu flyer with appetizing photography, "
@@ -1446,7 +1446,7 @@ def test_image_prompt_for_south_indian_snacks_rejects_family_scene_collision():
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="South Indian Snacks", source="customer_text", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="item:0:name", label="Item", value="Gavvalu 1 Lb", source="customer_text", required=True),
             FlyerLockedFact(fact_id="item:0:price", label="Price", value="$8.99", source="customer_text", required=True),
             FlyerLockedFact(fact_id="item:1:name", label="Item", value="Chekkalu 1 lb", source="customer_text", required=True),
@@ -1476,7 +1476,7 @@ def test_menu_overlay_payload_drops_aggregate_raw_item_sentence():
     project = FlyerProject(
         project_id="F0123",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-snacks",
@@ -1484,7 +1484,7 @@ def test_menu_overlay_payload_drops_aggregate_raw_item_sentence():
         fields=FlyerRequestFields(
             event_or_business_name="South Indian Snacks",
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             notes=raw,
         ),
         locked_facts=[
@@ -1522,7 +1522,7 @@ def test_menu_overlay_payload_drops_same_price_aggregate_item_sentence():
     project = FlyerProject(
         project_id="F0125",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-same-price",
@@ -1567,12 +1567,12 @@ def test_menu_overlay_fits_ten_item_phone_preview(tmp_path):
     project = FlyerProject(
         project_id="F0126",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-ten-items",
         raw_request="Create a flyer with 10 snacks, all $9.99",
-        fields=FlyerRequestFields(event_or_business_name="Indo-Chinese Specials", contact_info="+17329837841"),
+        fields=FlyerRequestFields(event_or_business_name="Indo-Chinese Specials", contact_info="+15550100001"),
         locked_facts=locked,
     )
 
@@ -1595,12 +1595,12 @@ def test_menu_overlay_fits_many_item_final_formats(tmp_path, monkeypatch):
     project = FlyerProject(
         project_id="F0127",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-eight-items",
         raw_request="Create a flyer with eight snack specials",
-        fields=FlyerRequestFields(event_or_business_name="Snack Specials", contact_info="+17329837841"),
+        fields=FlyerRequestFields(event_or_business_name="Snack Specials", contact_info="+15550100001"),
         locked_facts=locked,
     )
     preview = render_concept_previews(project, tmp_path, model="google/gemini-2.5-flash-image")[0]
@@ -1658,7 +1658,7 @@ def test_system_overlay_fallback_draws_menu_schedule(tmp_path, monkeypatch):
     project = FlyerProject(
         project_id="F0132",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-breakfast",
@@ -1669,7 +1669,7 @@ def test_system_overlay_fallback_draws_menu_schedule(tmp_path, monkeypatch):
         ),
         fields=FlyerRequestFields(
             event_or_business_name="Weekend Breakfast Specials",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="90 Brybar Dr St Johns FL",
             preferred_language="en",
         ),
@@ -1812,7 +1812,7 @@ def test_menu_overlay_uses_large_lightweight_poster_panels(tmp_path):
     project = _english_project().model_copy(update={
         "fields": FlyerRequestFields(
             event_or_business_name="South Indian Snacks",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="90 Brybar Dr St Johns FL",
             preferred_language="en",
             notes="Gavvalu 1 Lb $8.99, Chekkalu 1 lb $8.99 and Arisalu 1 Lb $10.99",
@@ -1844,7 +1844,7 @@ def test_image_prompt_preserves_explicit_family_festival_menu_scene():
     project = FlyerProject(
         project_id="F0123",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-festival-snacks",
@@ -1852,7 +1852,7 @@ def test_image_prompt_preserves_explicit_family_festival_menu_scene():
         fields=FlyerRequestFields(
             event_or_business_name="Diwali Family Snacks",
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             notes=raw,
             style_preference="Diwali festival theme for families with appetizing snacks",
         ),
@@ -1933,7 +1933,7 @@ def test_image_prompt_enforces_explicit_english_only_language_constraint():
         "fields": FlyerRequestFields(
             event_or_business_name="Ganesh Festival",
             venue_or_location="Community Hall",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             preferred_language="en",
             notes=(
                 "Language: English only. Do NOT use Telugu, Hindi, or any regional Indian language."
@@ -1955,7 +1955,7 @@ def test_image_prompt_does_not_turn_weekend_special_badge_into_schedule():
         "fields": FlyerRequestFields(
             event_or_business_name="Lakshmis Kitchn",
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             notes=(
                 "Headline: Family Combo Feast. Include badges Fresh, Homemade, Weekend Special. "
                 "Use green, gold, and warm rustic textures."
@@ -2048,8 +2048,8 @@ def test_image_prompt_sanitizes_style_and_brand_asset_notes(tmp_path, monkeypatc
             "customer_id": "CUST0001",
             "business_name": "Triveni",
             "business_address": "300 S Polk St",
-            "public_phone": "+17043243322",
-            "business_whatsapp_number": "+17043243322",
+            "public_phone": "+15550100003",
+            "business_whatsapp_number": "+15550100003",
             "authorized_request_numbers": ["+19045550123"],
             "business_category": "restaurant",
             "preferred_language": "en",
@@ -2104,8 +2104,8 @@ def test_image_prompt_includes_customer_brand_assets(tmp_path, monkeypatch):
             "customer_id": "CUST0001",
             "business_name": "Triveni",
             "business_address": "300 S Polk St",
-            "public_phone": "+17043243322",
-            "business_whatsapp_number": "+17043243322",
+            "public_phone": "+15550100003",
+            "business_whatsapp_number": "+15550100003",
             "authorized_request_numbers": ["+19045550123"],
             "business_category": "restaurant",
             "preferred_language": "en",
@@ -2154,8 +2154,8 @@ def test_render_control_fact_disables_saved_customer_brand_assets(tmp_path, monk
             "customer_id": "CUST0001",
             "business_name": "Triveni",
             "business_address": "300 S Polk St",
-            "public_phone": "+17043243322",
-            "business_whatsapp_number": "+17043243322",
+            "public_phone": "+15550100003",
+            "business_whatsapp_number": "+15550100003",
             "authorized_request_numbers": ["+19045550123"],
             "business_category": "restaurant",
             "preferred_language": "en",
@@ -2350,7 +2350,7 @@ def test_telugu_poster_prompt_is_background_only_overlay_owns_text():
             event_or_business_name="Weekend Breakfast Specials",
             event_time="08:00",
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             preferred_language="te",
             notes=(
                 'Create a breakfast flyer with these items "Poori with Chicken $14.99, '
@@ -2378,7 +2378,7 @@ def test_telugu_poster_prompt_is_background_only_overlay_owns_text():
     assert "Weekend Breakfast Specials" in prompt
     assert "Poori with Chicken - $14.99" in prompt
     assert "Kheema Dosa - $12.99" in prompt
-    assert "+17329837841" in prompt
+    assert "+15550100001" in prompt
     # The language hint is now IMAGERY-only under background-only — it must NOT
     # instruct the model to render Telugu text (which it garbles).
     assert "Reflect Telugu / South-Indian cultural styling in the imagery" in prompt
@@ -2393,7 +2393,7 @@ def test_background_only_contract_stays_for_non_integrated_paths(tmp_path, monke
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
 
     english_service = _complete_project().model_copy(update={"fields": FlyerRequestFields(
-        event_or_business_name="Lakshmi's Kitchen", contact_info="+1 732 983 7841",
+        event_or_business_name="Lakshmi's Kitchen", contact_info="+1 555 010 0001",
         preferred_language="en", notes="Grand opening this week")})
     p_en = _image_prompt(english_service, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
     assert "decorative BACKGROUND image only" in p_en
@@ -2504,21 +2504,21 @@ def test_english_combo_offer_can_opt_into_integrated_poster_prompt(monkeypatch):
     project = FlyerProject(
         project_id="F0067",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="wamid.combo",
         raw_request=raw,
         fields=FlyerRequestFields(
             event_or_business_name="Veg And Non Veg",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="90 Brybar Dr St Johns FL",
             preferred_language="en",
             notes=raw,
         ),
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Memorial Day Weekend Meal Combos", source="customer_text", required=True),
             FlyerLockedFact(
@@ -2656,7 +2656,7 @@ def test_direct_poster_prompt_does_not_make_request_sentence_flyer_copy(monkeypa
             event_or_business_name="Weekend Breakfast Specials",
             event_time="08:00",
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             preferred_language="te",
             notes=(
                 "Hey! Create a breakfast flyer from 8 AM to 11 AM, its Thursday to Sunday. "
@@ -2697,7 +2697,7 @@ def test_direct_poster_prompt_extracts_items_and_prices_from_sample_reference(mo
             event_date="2026-05-22",
             event_time="May 22 to May 25",
             venue_or_location="90 Brybar Saint Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             preferred_language="te",
             notes="Extract items and prices from the sample flyer attached.",
         ),
@@ -3002,7 +3002,7 @@ def test_source_edit_integrity_manifest_allows_long_edit_instruction(tmp_path, m
         "fields": FlyerRequestFields(
             event_or_business_name="Chloe hair studio",
             venue_or_location="11111 Gainsborough Ct, Fairfax, VA, 22030",
-            contact_info="+19803826497",
+            contact_info="+15550100004",
             preferred_language="en",
             notes=long_instruction,
         ),
@@ -3495,12 +3495,12 @@ def test_openai_source_edit_bytes_fails_closed_on_lowercase_placeholder_key(tmp_
     project = FlyerProject.model_validate({
         "project_id": "F9102",
         "status": "manual_edit_required",
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "created_at": now,
         "updated_at": now,
         "original_message_id": "m-1",
         "raw_request": "Edit uploaded flyer/source artwork. Change date.",
-        "fields": {"event_or_business_name": "Lakshmis", "contact_info": "+17329837841"},
+        "fields": {"event_or_business_name": "Lakshmis", "contact_info": "+15550100001"},
         "assets": [{
             "asset_id": "A0001",
             "kind": "reference_image",
@@ -3534,12 +3534,12 @@ def test_openai_source_edit_bytes_fails_closed_on_malformed_json_shape(tmp_path,
     project = FlyerProject.model_validate({
         "project_id": "F9103",
         "status": "manual_edit_required",
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "created_at": now,
         "updated_at": now,
         "original_message_id": "m-1",
         "raw_request": "Edit uploaded flyer/source artwork. Change date.",
-        "fields": {"event_or_business_name": "Lakshmis", "contact_info": "+17329837841"},
+        "fields": {"event_or_business_name": "Lakshmis", "contact_info": "+15550100001"},
         "assets": [{
             "asset_id": "A0001",
             "kind": "reference_image",
@@ -3669,11 +3669,11 @@ def test_direct_poster_prompt_uses_registered_business_name_not_reference_brand(
             "customer_id": "CUST0001",
             "business_name": "Lakshmis Kitchn",
             "business_address": "90 Brybar Dr St Johns FL",
-            "primary_chat_id": "201975216009469@lid",
+            "primary_chat_id": "100000000000001@lid",
             "onboarded_by_phone": "+19045550104",
-            "public_phone": "+17329837841",
-            "business_whatsapp_number": "+17329837841",
-            "authorized_request_numbers": ["+17329837841", "+19045550104"],
+            "public_phone": "+15550100001",
+            "business_whatsapp_number": "+15550100001",
+            "authorized_request_numbers": ["+15550100001", "+19045550104"],
             "business_category": "Indian restaurant",
             "preferred_language": "te",
             "plan_id": "trial",
@@ -3707,7 +3707,7 @@ def test_direct_poster_prompt_uses_registered_business_name_not_reference_brand(
             event_or_business_name="Weekend Breakfast Specials",
             event_time="08:00",
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             preferred_language="te",
             notes="Take items from breakfast section in the attached reference flyer.",
         ),
@@ -3730,11 +3730,11 @@ def test_explicit_business_override_reaches_direct_and_source_edit_prompts(tmp_p
             "customer_id": "CUST0001",
             "business_name": "Old Brand",
             "business_address": "90 Brybar Dr St Johns FL",
-            "primary_chat_id": "201975216009469@lid",
+            "primary_chat_id": "100000000000001@lid",
             "onboarded_by_phone": "+19045550104",
-            "public_phone": "+17329837841",
-            "business_whatsapp_number": "+17329837841",
-            "authorized_request_numbers": ["+17329837841", "+19045550104"],
+            "public_phone": "+15550100001",
+            "business_whatsapp_number": "+15550100001",
+            "authorized_request_numbers": ["+15550100001", "+19045550104"],
             "business_category": "Indian restaurant",
             "preferred_language": "te",
             "plan_id": "trial",
@@ -3756,7 +3756,7 @@ def test_explicit_business_override_reaches_direct_and_source_edit_prompts(tmp_p
         "locked_facts": [
             FlyerLockedFact(fact_id="business_name", label="Business", value="New Brand", source="customer_text"),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Evening Snacks", source="customer_text"),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile"),
         ],
     })
 
@@ -3817,7 +3817,7 @@ def test_exact_identity_overlay_reserves_contact_with_long_schedule_and_address(
         "fields": FlyerRequestFields(
             event_or_business_name="Special Biryani's",
             venue_or_location="12345 Very Long Commercial Plaza Suite 200 Near Market District Saint Johns Florida 32259",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             notes="Create a flyer.",
         ),
         "locked_facts": [
@@ -3834,7 +3834,7 @@ def test_exact_identity_overlay_reserves_contact_with_long_schedule_and_address(
                 value="12345 Very Long Commercial Plaza Suite 200 Near Market District Saint Johns Florida 32259",
                 source="customer_profile",
             ),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile"),
         ],
     })
 
@@ -3843,7 +3843,7 @@ def test_exact_identity_overlay_reserves_contact_with_long_schedule_and_address(
     text = manifest.read_text(encoding="utf-8")
 
     assert "Wednesday and Thursday every week" in text
-    assert "+17329837841" in text
+    assert "+15550100001" in text
     assert target.exists()
 
 
@@ -4180,7 +4180,7 @@ def test_breakfast_menu_facts_are_customer_flyer_copy_not_raw_prompt():
             event_or_business_name="Weekend Breakfast Specials",
             event_time="08:00",
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             preferred_language="te",
             notes=(
                 'Create a breakfast flyer with these items "Poori with Chicken $14.99, '
@@ -4216,7 +4216,7 @@ def test_chloe_salon_prompt_is_not_food_or_festival_themed():
         "fields": FlyerRequestFields(
             event_or_business_name="Chloe Hair Studio",
             venue_or_location="11111 Gainsborough Ct, Fairfax, VA 22030",
-            contact_info="+19803826497",
+            contact_info="+15550100004",
             preferred_language="en",
             style_preference="modern salon and beauty studio promotion",
             notes="Men haircut $20; Perms $80; Other hair services.",
@@ -4245,7 +4245,7 @@ def test_text_manifest_blocks_customer_instruction_leak(tmp_path):
         "fields": FlyerRequestFields(
             event_or_business_name="chloe hair studio promoting the $20 men haircut",
             venue_or_location="11111 Gainsborough Ct, Fairfax, VA 22030",
-            contact_info="+19803826497",
+            contact_info="+15550100004",
             notes="Create flyer for chloe hair studio promoting the $20",
         ),
     })
@@ -4594,12 +4594,12 @@ def test_is_source_edit_project_requires_marker_or_reference_image(tmp_path, mon
     now = datetime(2026, 5, 19, tzinfo=timezone.utc)
     base = {
         "project_id": "F9100",
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "created_at": now,
         "updated_at": now,
         "original_message_id": "m-1",
         "raw_request": "Make a flyer please.",
-        "fields": {"event_or_business_name": "Bare", "contact_info": "+17329837841"},
+        "fields": {"event_or_business_name": "Bare", "contact_info": "+15550100001"},
     }
 
     # 1) manual_edit_required + no marker + no reference_image -> NOT source-edit.
@@ -4650,12 +4650,12 @@ def test_openai_source_edit_bytes_fails_closed_on_placeholder_key(tmp_path, monk
     project = FlyerProject.model_validate({
         "project_id": "F9101",
         "status": "manual_edit_required",
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "created_at": now,
         "updated_at": now,
         "original_message_id": "m-1",
         "raw_request": "Edit uploaded flyer/source artwork. Change date.",
-        "fields": {"event_or_business_name": "Lakshmis", "contact_info": "+17329837841"},
+        "fields": {"event_or_business_name": "Lakshmis", "contact_info": "+15550100001"},
         "assets": [{
             "asset_id": "A0001",
             "kind": "reference_image",
@@ -4783,20 +4783,20 @@ def test_multiline_promo_brief_keeps_discount_line_separate_from_long_service_co
     project = FlyerProject(
         project_id="F0066",
         status="generating_concepts",
-        customer_phone="+15713830763",
+        customer_phone="+15550100005",
         created_at=now,
         updated_at=now,
         original_message_id="wamid.66",
         raw_request=raw,
         fields=FlyerRequestFields(
             event_or_business_name="MK kitchen",
-            contact_info="+15713830763",
+            contact_info="+15550100005",
             venue_or_location="23596 prosperity ridge pl Ashburn Va 20148",
             notes=raw,
         ),
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="MK kitchen", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15713830763", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100005", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="23596 prosperity ridge pl Ashburn Va 20148", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="2026 Graduation Parties", source="customer_text", required=True),
             FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="10% off on entire order", source="customer_text", required=True),
@@ -4848,18 +4848,18 @@ def test_flattened_runon_request_does_not_fail_render_graduation_live_2026_06_06
     assert len(flattened_notes) > 180   # one run-on clause exceeds the per-clause limit
 
     project = FlyerProject(
-        project_id="F0145", status="generating_concepts", customer_phone="+17329837841",
+        project_id="F0145", status="generating_concepts", customer_phone="+15550100001",
         created_at=now, updated_at=now, original_message_id="wamid.145",
         raw_request=raw,
         fields=FlyerRequestFields(
             event_or_business_name="MK kitchen",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="90 Brybar Dr",
             notes=flattened_notes,
         ),
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="MK kitchen", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="2026 Graduation Party Special", source="customer_text", required=True),
             FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="10% off entire catering order", source="customer_text", required=True),
@@ -4982,7 +4982,7 @@ def test_premium_repair_enabled_flag_gating(monkeypatch):
     project = _english_project()
     # OFF by default.
     monkeypatch.delenv("FLYER_PREMIUM_REPAIR", raising=False)
-    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
     assert render_module._premium_repair_enabled(project) is False
     # Anything other than exactly "1" is OFF.
     monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "true")
@@ -4999,22 +4999,22 @@ def test_premium_repair_enabled_flag_gating(monkeypatch):
 
 
 def test_premium_repair_enabled_allowlist_scopes_by_customer_phone(monkeypatch):
-    project = _english_project().model_copy(update={"customer_phone": "+17329837841"})
+    project = _english_project().model_copy(update={"customer_phone": "+15550100001"})
     monkeypatch.setenv("FLYER_PREMIUM_REPAIR", "1")
     # Allowlist set but does NOT contain this sender → OFF.
     monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "+19998887777")
     assert render_module._premium_repair_enabled(project) is False
     # Allowlist contains this sender (format-variant tolerant) → ON.
-    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "1 732-983-7841, +19998887777")
+    monkeypatch.setenv("FLYER_PREMIUM_REPAIR_ALLOWLIST", "1 555-010-0001, +19998887777")
     assert render_module._premium_repair_enabled(project) is True
 
 
 def _repair_project() -> FlyerProject:
     return _complete_project().model_copy(update={
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "locked_facts": [
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile", required=True),
-            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+            FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr", source="customer_profile", required=True),
             FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Street Snack Specials", source="customer_text", required=True),
         ],
@@ -5112,7 +5112,7 @@ def test_deterministic_recovery_enabled_respects_flag_and_allowlist(monkeypatch)
     from schemas import FlyerProject
     from datetime import datetime, timezone
     proj = FlyerProject(
-        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        project_id="F0174", status="intake_started", customer_phone="+15550100001",
         created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
         updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
         original_message_id="m", raw_request="x", locked_facts=[],
@@ -5120,7 +5120,7 @@ def test_deterministic_recovery_enabled_respects_flag_and_allowlist(monkeypatch)
     monkeypatch.delenv("FLYER_DETERMINISTIC_RECOVERY", raising=False)
     assert r._deterministic_recovery_enabled(proj) is False
     monkeypatch.setenv("FLYER_DETERMINISTIC_RECOVERY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     assert r._deterministic_recovery_enabled(proj) is True
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+19999999999")
     assert r._deterministic_recovery_enabled(proj) is False
@@ -5132,7 +5132,7 @@ def test_force_background_only_uses_overlay_for_integrated_eligible(monkeypatch,
     from datetime import datetime, timezone
     import pathlib
     proj = FlyerProject(
-        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        project_id="F0174", status="intake_started", customer_phone="+15550100001",
         created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
         updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
         original_message_id="m", raw_request="Any item $7.99",
@@ -5170,7 +5170,7 @@ def test_build_image_generation_prompt_force_background_only_emits_textless_cont
     proj = FlyerProject(
         project_id="F0174",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
         updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
         original_message_id="m-F0174",
@@ -5178,7 +5178,7 @@ def test_build_image_generation_prompt_force_background_only_emits_textless_cont
         fields=FlyerRequestFields(
             event_or_business_name="Lakshmi's Kitchen",
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
         ),
         locked_facts=[
             FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile"),
@@ -5212,14 +5212,14 @@ def _f0174_integrated_project():
         FlyerLockedFact(fact_id="business_name", label="Business", value="Lakshmi's Kitchen", source="customer_profile"),
         FlyerLockedFact(fact_id="campaign_title", label="Campaign", value="Weekend Specials", source="customer_text"),
         FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Any item $7.99", source="customer_text"),
-        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile"),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile"),
         FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr", source="customer_profile"),
     ]
     for i, nm in enumerate(["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar"]):
         facts.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item{i}", value=nm, source="customer_text"))
         facts.append(FlyerLockedFact(fact_id=f"item:{i}:price", label=f"Price{i}", value="$7.99", source="customer_text"))
     return FlyerProject(
-        project_id="F0174", status="intake_started", customer_phone="+17329837841",
+        project_id="F0174", status="intake_started", customer_phone="+15550100001",
         created_at=datetime(2026, 6, 18, tzinfo=timezone.utc), updated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
         original_message_id="m", raw_request="Weekend Specials. Any item $7.99. Idli, Dosa, Vada, Uttapam, Pongal, Sambar.",
         locked_facts=facts,
@@ -5364,7 +5364,7 @@ def test_background_only_prompt_requests_food_hero_no_people(monkeypatch):
     from agents.flyer import render as r
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
     p = _f0174_integrated_project()  # existing helper in this file
     tok = r._FORCE_BACKGROUND_ONLY.set(True)
     try:
@@ -5403,7 +5403,7 @@ def test_w1_scoped_prompt_is_restaurant_promo_single_hero(monkeypatch):
     from agents.flyer import render as r
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
     p = _f0174_integrated_project()
     tok = r._FORCE_BACKGROUND_ONLY.set(True)
     try:
@@ -5492,7 +5492,7 @@ def _premium_food_project():
     return FlyerProject(
         project_id="F0179",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
         original_message_id="wamid.flyer.premium.degrade",
@@ -5503,7 +5503,7 @@ def _premium_food_project():
 
 def _enable_premium(monkeypatch):
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
     from agents.flyer import render as r
     monkeypatch.setattr(r, "_is_food_or_grocery_project", lambda p: True)
 
@@ -5640,7 +5640,7 @@ def test_premium_subprocess_sys_path_excludes_venv_site_packages():
     assert all("dist-packages" not in p for p in roots)
 
 
-def _df_project(facts, *, biz="Lakshmi's Kitchen", phone="+17329837841", notes=""):
+def _df_project(facts, *, biz="Lakshmi's Kitchen", phone="+15550100001", notes=""):
     """Build a food FlyerProject with the given locked_facts (dicts)."""
     return FlyerProject.model_validate({
         "project_id": "F9100",
@@ -5664,7 +5664,7 @@ def _weekend_project():  # F0179 Weekend Specials — dense (>=2 items + currenc
     facts = [
         _fact("business_name", "Lakshmi's Kitchen"),
         _fact("campaign_title", "Weekend Specials"),
-        _fact("contact_phone", "+17329837841"),
+        _fact("contact_phone", "+15550100001"),
         _fact("location", "90 Brybar Dr St Johns FL"),
         _fact("pricing_structure", "Any item $7.99"),
         _fact("schedule", "Saturday & Sunday, 4 PM-8 PM"),
@@ -5677,7 +5677,7 @@ def _weekend_project():  # F0179 Weekend Specials — dense (>=2 items + currenc
 def _combo_project():  # Veg/Non-Veg Combo — dense (>=2 offers)
     facts = [
         _fact("business_name", "Lakshmi's Kitchen"),
-        _fact("contact_phone", "+17329837841"),
+        _fact("contact_phone", "+15550100001"),
         _fact("offer:0", "Veg Combo $12.99"),
         _fact("offer:1", "Non-Veg Combo $15.99"),
     ]
@@ -5687,7 +5687,7 @@ def _combo_project():  # Veg/Non-Veg Combo — dense (>=2 offers)
 def _dessert_project():  # Festival Dessert — dense (>=2 items + >=2 item prices)
     facts = [
         _fact("business_name", "Lakshmi's Kitchen"),
-        _fact("contact_phone", "+17329837841"),
+        _fact("contact_phone", "+15550100001"),
         _fact("item:0:name", "Gulab Jamun"), _fact("item:0:price", "$5.99"),
         _fact("item:1:name", "Kaju Katli"), _fact("item:1:price", "$6.99"),
         _fact("item:2:name", "Rasmalai"), _fact("item:2:price", "$5.99"),
@@ -5699,7 +5699,7 @@ def _sparse_project():  # sparse control — single creative flyer, no list/pric
     facts = [
         _fact("business_name", "Lakshmi's Kitchen"),
         _fact("campaign_title", "Now Hiring"),
-        _fact("contact_phone", "+17329837841"),
+        _fact("contact_phone", "+15550100001"),
     ]
     return _df_project(facts, notes="Now hiring kitchen staff, apply in store")
 
@@ -5773,7 +5773,7 @@ def test_deterministic_first_disabled_when_no_allowlist(monkeypatch):
 
 def test_deterministic_first_enabled_allowlist_scoped(monkeypatch):
     monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     assert render_module._deterministic_first_enabled(_weekend_project()) is True
     other = _weekend_project().model_copy(update={"customer_phone": "+19998887777"})
     assert render_module._deterministic_first_enabled(other) is False
@@ -5781,7 +5781,7 @@ def test_deterministic_first_enabled_allowlist_scoped(monkeypatch):
 
 def _enable_integrated(monkeypatch):
     monkeypatch.setenv("FLYER_ALLOW_INTEGRATED_POSTER", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")  # unified semantics: empty=disabled
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")  # unified semantics: empty=disabled
 
 
 def test_dense_flag_on_routes_to_mode2(monkeypatch):
@@ -5795,7 +5795,7 @@ def test_dense_flag_on_routes_to_mode2(monkeypatch):
 def test_sparse_flag_on_stays_integrated(monkeypatch):
     _enable_integrated(monkeypatch)
     monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     assert render_module._integrated_poster_eligible(_sparse_project()) is True
 
 
@@ -5815,9 +5815,9 @@ def test_flag_off_byte_identical_dense_and_sparse(monkeypatch):
 def test_dense_flag_on_premium_overlay_interaction(monkeypatch):
     _enable_integrated(monkeypatch)
     monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     p = _weekend_project()
     assert render_module._integrated_poster_eligible(p) is False
     assert render_module._premium_overlay_enabled(p) is True
@@ -5826,6 +5826,6 @@ def test_dense_flag_on_premium_overlay_interaction(monkeypatch):
 def test_dense_flag_on_scoped_other_number_unaffected(monkeypatch):
     _enable_integrated(monkeypatch)
     monkeypatch.setenv("FLYER_DETERMINISTIC_FIRST", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     other = _weekend_project().model_copy(update={"customer_phone": "+19998887777"})
     assert render_module._integrated_poster_eligible(other) is True   # still integrated

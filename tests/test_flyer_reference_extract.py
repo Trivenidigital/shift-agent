@@ -293,7 +293,7 @@ F0061_RAW_REQUEST = (
     "Do not change anything else in the flyer, except the changes asked explicitly. "
     "Changes I want. "
     "1. Replace Triveni Express with Lakshmi's Kitchen branding. "
-    "2. Replace phone number to +17329837841. "
+    "2. Replace phone number to +15550100001. "
     "3. Veg Thali Special, replace Rice with Jeera Rice. "
     "4. Change address to 90 Brybar Dr, Saint Johns, FL."
 )

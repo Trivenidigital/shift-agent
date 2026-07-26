@@ -88,13 +88,13 @@ def _enable(monkeypatch, allowlist="*"):
 
 def test_disabled_by_default(monkeypatch):
     monkeypatch.delenv("FRONT_BRAIN_OUTBOUND_ENFORCE", raising=False)
-    assert safe_io.front_brain_outbound_enforce_enabled("17329837841@c.us") is False
+    assert safe_io.front_brain_outbound_enforce_enabled("15550100001@c.us") is False
 
 
 def test_empty_allowlist_disables(monkeypatch):
     monkeypatch.setenv("FRONT_BRAIN_OUTBOUND_ENFORCE", "1")
     monkeypatch.setenv("FRONT_BRAIN_OUTBOUND_ENFORCE_ALLOWLIST", "")
-    assert safe_io.front_brain_outbound_enforce_enabled("17329837841@c.us") is False
+    assert safe_io.front_brain_outbound_enforce_enabled("15550100001@c.us") is False
 
 
 def test_wildcard_graduates_all(monkeypatch):
@@ -103,8 +103,8 @@ def test_wildcard_graduates_all(monkeypatch):
 
 
 def test_membership_normalized(monkeypatch):
-    _enable(monkeypatch, "+1 732 983 7841")
-    assert safe_io.front_brain_outbound_enforce_enabled("17329837841@c.us") is True
+    _enable(monkeypatch, "+1 555 010 0001")
+    assert safe_io.front_brain_outbound_enforce_enabled("15550100001@c.us") is True
     assert safe_io.front_brain_outbound_enforce_enabled("19999999999@c.us") is False
 
 

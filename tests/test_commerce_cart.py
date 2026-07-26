@@ -73,8 +73,8 @@ def test_add_item_creates_cart_with_lid_only(state_path, decisions_log_path):
         state_path=state_path,
         decisions_log_path=decisions_log_path,
         sender_phone=None,
-        sender_lid="201975216009469@lid",
-        chat_id="201975216009469@lid",
+        sender_lid="100000000000001@lid",
+        chat_id="100000000000001@lid",
         sku="GROC-DAL-1KG",
         display_name="Toor Dal 1kg",
         quantity=1,
@@ -84,7 +84,7 @@ def test_add_item_creates_cart_with_lid_only(state_path, decisions_log_path):
     )
     assert result.ok
     assert result.cart.sender_phone is None
-    assert result.cart.sender_lid == "201975216009469@lid"
+    assert result.cart.sender_lid == "100000000000001@lid"
 
 
 def test_add_item_appends_to_existing_cart(state_path, decisions_log_path):

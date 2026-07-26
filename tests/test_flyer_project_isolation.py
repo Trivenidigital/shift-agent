@@ -135,9 +135,9 @@ def _stale_project(*, project_id: str, status: str, hours_old: float, raw_reques
     return {
         "project_id": project_id,
         "status": status,
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "raw_request": raw_request,
-        "fields": {"event_or_business_name": "Old Project", "contact_info": "+17329837841"},
+        "fields": {"event_or_business_name": "Old Project", "contact_info": "+15550100001"},
         "concepts": [],
         "revisions": [],
         "updated_at": updated,
@@ -146,7 +146,7 @@ def _stale_project(*, project_id: str, status: str, hours_old: float, raw_reques
 
 
 def _patch_basic_lookups(hooks, actions, monkeypatch, active_project: dict | None):
-    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+17329837841", "customer"))
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _chat_id: ("+15550100001", "customer"))
     monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: {"customer_id": "CUST0001", "status": "trial"})
     monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _phone, _chat_id: active_project)
     monkeypatch.setattr(actions, "find_paid_flyer_guest_order", lambda _phone, _chat_id: None)
@@ -168,7 +168,7 @@ def test_scenario1_old_awaiting_approval_does_not_swallow_complete_new_request(m
 
     result = hooks._try_flyer_active_project_intercept(
         "Create flyer for Eid grocery special, Saturday 2pm-9pm, $20 off",
-        "17329837841@s.whatsapp.net",
+        "15550100001@s.whatsapp.net",
         {"message_id": "new-eid-1"},
     )
     # None means: bail out of active-project intercept; the new-project path takes over.
@@ -188,7 +188,7 @@ def test_scenario2_old_manual_edit_required_does_not_swallow_distinct_poster_req
 
     result = hooks._try_flyer_active_project_intercept(
         "I need a flyer for the youth temple event next month",
-        "17329837841@s.whatsapp.net",
+        "15550100001@s.whatsapp.net",
         {"message_id": "new-temple"},
     )
     assert result is None
@@ -223,7 +223,7 @@ def test_scenario3_status_check_on_stale_manual_edit_still_returns_manual_status
 
     result = hooks._try_flyer_active_project_intercept(
         "any update?",
-        "17329837841@s.whatsapp.net",
+        "15550100001@s.whatsapp.net",
         {"message_id": "status-check"},
     )
     assert result == {"action": "skip", "reason": "cf-router flyer exact edit status for F0902"}
@@ -254,7 +254,7 @@ def test_scenario3_status_check_keeps_active_manual_row_when_newer_status_row_ex
 
     result = hooks._try_flyer_active_project_intercept(
         "any update?",
-        "17329837841@s.whatsapp.net",
+        "15550100001@s.whatsapp.net",
         {"message_id": "status-check-newer"},
     )
     assert result == {"action": "skip", "reason": "cf-router flyer exact edit status for F0903"}
@@ -276,14 +276,14 @@ def test_scenario4_correction_after_delivery_targets_latest_active_project(monke
             {
                 "project_id": "F0800",
                 "status": "delivered",
-                "customer_phone": "+17329837841",
+                "customer_phone": "+15550100001",
                 "updated_at": older_iso,
                 "created_at": older_iso,
             },
             {
                 "project_id": "F0801",
                 "status": "manual_edit_required",
-                "customer_phone": "+17329837841",
+                "customer_phone": "+15550100001",
                 "updated_at": newer_iso,
                 "created_at": newer_iso,
             },
@@ -300,7 +300,7 @@ def test_scenario4_correction_after_delivery_targets_latest_active_project(monke
             monkeypatch_ctx.setattr(actions, "FLYER_PROJECTS_PATH", path)
             monkeypatch_ctx.setattr(actions, "find_flyer_customer_by_sender", lambda _phone, _chat_id: None)
             monkeypatch_ctx.setattr(actions, "_canonical_phone", lambda v: v)
-            picked = actions.find_active_flyer_project_by_sender("+17329837841", "17329837841@s.whatsapp.net")
+            picked = actions.find_active_flyer_project_by_sender("+15550100001", "15550100001@s.whatsapp.net")
             assert picked is not None and picked["project_id"] == "F0801"
         finally:
             monkeypatch_ctx.undo()
@@ -317,7 +317,7 @@ def test_closed_no_send_project_is_not_active_for_sender(monkeypatch):
             {
                 "project_id": "F0802",
                 "status": "closed_no_send",
-                "customer_phone": "+17329837841",
+                "customer_phone": "+15550100001",
                 "updated_at": now,
                 "created_at": now,
             },
@@ -330,7 +330,7 @@ def test_closed_no_send_project_is_not_active_for_sender(monkeypatch):
         path = Path(fh.name)
     monkeypatch.setattr(actions, "FLYER_PROJECTS_PATH", path)
     try:
-        assert actions.find_active_flyer_project_by_sender("+17329837841", "17329837841@s.whatsapp.net") is None
+        assert actions.find_active_flyer_project_by_sender("+15550100001", "15550100001@s.whatsapp.net") is None
     finally:
         path.unlink(missing_ok=True)
 
@@ -340,7 +340,7 @@ def test_scenario5_authorized_request_phone_resolves_to_same_account_project(mon
     account's active project, not start a new one as a stranger."""
     actions = _load_actions()
     customer_phone = "+19045550104"
-    authorized_phone = "+17329837841"  # different physical handset, same account
+    authorized_phone = "+15550100001"  # different physical handset, same account
     now = datetime.now(timezone.utc)
     updated_iso = (now - timedelta(minutes=10)).isoformat()
     fake_store = {
@@ -375,7 +375,7 @@ def test_scenario5_authorized_request_phone_resolves_to_same_account_project(mon
                 },
             )
             monkeypatch_ctx.setattr(actions, "_canonical_phone", lambda v: v)
-            picked = actions.find_active_flyer_project_by_sender(authorized_phone, "17329837841@s.whatsapp.net")
+            picked = actions.find_active_flyer_project_by_sender(authorized_phone, "15550100001@s.whatsapp.net")
         finally:
             monkeypatch_ctx.undo()
     finally:
@@ -403,7 +403,7 @@ def test_scenario6_fresh_active_project_still_attaches_revision_correction(monke
     # (status reply for manual queue, because the project IS in the manual queue).
     result = hooks._try_flyer_active_project_intercept(
         "change the date to next Saturday",
-        "17329837841@s.whatsapp.net",
+        "15550100001@s.whatsapp.net",
         {"message_id": "revision-1"},
     )
     # On fresh manual_edit_required, the intercept handles the message — does NOT return None.
@@ -430,7 +430,7 @@ def test_stale_guard_does_not_drop_concept_selection_after_threshold(monkeypatch
 
     result = hooks._try_flyer_active_project_intercept(
         "1",
-        "17329837841@s.whatsapp.net",
+        "15550100001@s.whatsapp.net",
         {"message_id": "select-concept-1"},
     )
     assert result is not None, "concept selection text must not be dropped by stale guard"
@@ -456,7 +456,7 @@ def test_stale_guard_does_not_drop_approval_text_after_threshold(monkeypatch):
 
     result = hooks._try_flyer_active_project_intercept(
         "approve",
-        "17329837841@s.whatsapp.net",
+        "15550100001@s.whatsapp.net",
         {"message_id": "approve-stale"},
     )
     # The result is whatever the approval handler returns; the key invariant is "not None"
@@ -488,7 +488,7 @@ def test_stale_guard_does_not_drop_non_english_reply(monkeypatch):
     # it to the existing project for downstream forwarding.
     result = hooks._try_flyer_active_project_intercept(
         "edaina update unda?",
-        "17329837841@s.whatsapp.net",
+        "15550100001@s.whatsapp.net",
         {"message_id": "non-english-status"},
     )
     assert result is not None, "non-English short reply must not be dropped by stale guard"
@@ -511,7 +511,7 @@ def test_stale_guard_lets_status_check_through_on_stale_project(monkeypatch):
 
     result = hooks._try_flyer_active_project_intercept(
         "any update?",
-        "17329837841@s.whatsapp.net",
+        "15550100001@s.whatsapp.net",
         {"message_id": "status-stale"},
     )
     assert result is not None
@@ -567,7 +567,7 @@ def test_isolation_invariant_create_flyer_project_uses_only_current_message_cont
     prior_project = {
         "project_id": "F0700",
         "status": "delivered",
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "created_at": "2026-05-18T00:00:00+00:00",
         "updated_at": "2026-05-18T00:00:00+00:00",
         "original_message_id": "prior-msg",
@@ -575,7 +575,7 @@ def test_isolation_invariant_create_flyer_project_uses_only_current_message_cont
         "fields": {
             "event_or_business_name": "Lakshmi Kitchen",
             "venue_or_location": "Pineville",
-            "contact_info": "+17329837841",
+            "contact_info": "+15550100001",
             "notes": "Diwali sweets",
         },
         "locked_facts": [
@@ -603,7 +603,7 @@ def test_isolation_invariant_create_flyer_project_uses_only_current_message_cont
     distinct_request = "Create flyer for Eid biryani special, Saturday 2pm-9pm"
     monkeypatch.setattr(sys, "argv", [
         "create-flyer-project",
-        "--customer-phone", "+17329837841",
+        "--customer-phone", "+15550100001",
         "--message-id", "new-eid-msg",
         "--raw-request", distinct_request,
         "--state-path", str(state_path),

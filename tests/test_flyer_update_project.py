@@ -86,7 +86,7 @@ def _project_store_json(tmp_path: Path, *, status: str, raw_request: str = "Week
         "projects": [{
             "project_id": "F9001",
             "status": status,
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "created_at": now.isoformat(),
             "updated_at": now.isoformat(),
             "original_message_id": "m-original",
@@ -97,7 +97,7 @@ def _project_store_json(tmp_path: Path, *, status: str, raw_request: str = "Week
                 "schedule": "8 AM to 11 AM",
                 "items": ["Idli $4.99", "Dosa $8.99"],
                 "venue_or_location": "90 Brybar Dr",
-                "contact_info": "+17329837841",
+                "contact_info": "+15550100001",
                 "notes": "Reference flyer provided.",
             },
             "assets": [
@@ -217,7 +217,7 @@ def test_offer_text_revision_with_price_delta_rerenders_generated_project(tmp_pa
     )
     store["projects"][0]["locked_facts"] = [
         {"fact_id": "business_name", "label": "Business", "value": "Lakshmis Kitchen", "source": "customer_profile", "required": True},
-        {"fact_id": "contact_phone", "label": "Contact", "value": "+17329837841", "source": "customer_profile", "required": True},
+        {"fact_id": "contact_phone", "label": "Contact", "value": "+15550100001", "source": "customer_profile", "required": True},
         {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr", "source": "customer_profile", "required": True},
         {"fact_id": "offer:0", "label": "Offer", "value": "Pick Any 3 Dosa for $20", "source": "customer_text", "required": True},
     ]
@@ -261,7 +261,7 @@ def test_contact_and_location_revision_updates_render_locked_facts(tmp_path, mon
     ))
     store["projects"][0]["locked_facts"] = [
         {"fact_id": "business_name", "label": "Business", "value": "Lakshmis Kitchen", "source": "customer_profile", "required": True},
-        {"fact_id": "contact_phone", "label": "Contact", "value": "+1 732 983 7841", "source": "customer_profile", "required": True},
+        {"fact_id": "contact_phone", "label": "Contact", "value": "+1 555 010 0001", "source": "customer_profile", "required": True},
         {"fact_id": "location", "label": "Location", "value": "90 Brybar Dr", "source": "customer_profile", "required": True},
     ]
     state_path.write_text(json.dumps(store), encoding="utf-8")
@@ -309,7 +309,7 @@ def test_pending_contact_revision_apply_updates_render_locked_fact(tmp_path, mon
     now = "2026-05-18T12:00:00Z"
     store["projects"][0]["locked_facts"] = [
         {"fact_id": "business_name", "label": "Business", "value": "Lakshmis Kitchen", "source": "customer_profile", "required": True},
-        {"fact_id": "contact_phone", "label": "Contact", "value": "+1 732 983 7841", "source": "customer_profile", "required": True},
+        {"fact_id": "contact_phone", "label": "Contact", "value": "+1 555 010 0001", "source": "customer_profile", "required": True},
     ]
     store["projects"][0]["revisions"] = [{
         "revision_id": "R001",
@@ -324,7 +324,7 @@ def test_pending_contact_revision_apply_updates_render_locked_fact(tmp_path, mon
         "expires_at": "2026-12-31T16:00:00Z",
         "request_message_id": "m-pending-contact",
         "request_text": "Change phone number to +1 980 200 5022.",
-        "proposal_summary": "Applied: Contact '+1 732 983 7841' -> '+1 980 200 5022'.",
+        "proposal_summary": "Applied: Contact '+1 555 010 0001' -> '+1 980 200 5022'.",
         "patch": {
             "field_updates": {"contact_info": "+1 980 200 5022"},
             "changed": True,

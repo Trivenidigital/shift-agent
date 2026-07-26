@@ -51,7 +51,7 @@ def _snack_fixture():
         _fact("item:6:name", "Punjabi Samosa"),
         _fact("schedule", "Saturday & Sunday"),
         _fact("location", "90 Brybar Dr St Johns FL"),
-        _fact("contact_phone", "+17329837841"),
+        _fact("contact_phone", "+15550100001"),
     ]
 
 
@@ -112,7 +112,7 @@ def test_prompt_uses_items_as_food_style_not_copy():
     assert "Punugulu" in prompt and "Onion Pakora" in prompt
     # but sensitive copy (price, phone, address) is NEVER injected into the image prompt
     assert "$9.99" not in prompt and "Any 2 snacks" not in prompt
-    assert "+17329837841" not in prompt
+    assert "+15550100001" not in prompt
     assert "90 Brybar Dr" not in prompt
 
 
@@ -208,7 +208,7 @@ def test_premium_poster_v1_dormant_by_default_in_render(monkeypatch):
     render_src = (REPO / "src" / "agents" / "flyer" / "render.py").read_text(encoding="utf-8")
     assert "compose_premium_poster_with_generated_background" not in render_src
     monkeypatch.delenv("FLYER_PREMIUM_POSTER_V1", raising=False)
-    assert render_mod._premium_poster_v1_armed(SimpleNamespace(customer_phone="+17329837841")) is False
+    assert render_mod._premium_poster_v1_armed(SimpleNamespace(customer_phone="+15550100001")) is False
 
 
 def test_unit_result_never_returns_unvalidated_path():

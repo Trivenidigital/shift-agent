@@ -86,9 +86,9 @@ def test_style_only_reference_menu_with_materialized_facts_uses_overlay_not_inte
     project = FlyerProject(
         project_id="F0151",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         customer_id="CUST0001",
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
         original_message_id="wamid.f0151",
@@ -96,7 +96,7 @@ def test_style_only_reference_menu_with_materialized_facts_uses_overlay_not_inte
         fields=FlyerRequestFields(
             event_or_business_name="Lakshmi's Kitchen Menu",
             venue_or_location="90 Brybar Dr St Johns FL",
-            contact_info="+1 732 983 7841",
+            contact_info="+1 555 010 0001",
             preferred_language="en",
             notes="Customer chose path 2: use the source flyer only as a reference/inspiration.",
             style_preference="Lakshmi's Kitchen theme",
@@ -137,7 +137,7 @@ def test_visual_qa_blocks_near_duplicate_snack_item_typo():
     project = FlyerProject(
         project_id="F0151",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
         original_message_id="wamid.f0151",

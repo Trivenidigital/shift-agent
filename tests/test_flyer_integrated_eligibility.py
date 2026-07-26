@@ -40,14 +40,14 @@ def _base_food_project(**overrides) -> FlyerProject:
     defaults = dict(
         project_id="F9900",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=_NOW,
         updated_at=_NOW,
         original_message_id="wamid.eligibility-test",
         raw_request="Dosa $6.99; Idli $5.99; Vada $4.99",
         fields=FlyerRequestFields(
             event_or_business_name="Lakshmi's Kitchen",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="90 Brybar Dr St Johns FL",
             preferred_language="en",
             notes="Dosa $6.99; Idli $5.99; Vada $4.99",
@@ -63,7 +63,7 @@ def _base_food_project(**overrides) -> FlyerProject:
             FlyerLockedFact(
                 fact_id="contact_phone",
                 label="Contact",
-                value="+17329837841",
+                value="+15550100001",
                 source="customer_profile",
                 required=True,
             ),
@@ -95,7 +95,7 @@ def test_case1_english_food_8_items_eligible(monkeypatch):
         raw_request=notes,
         fields=FlyerRequestFields(
             event_or_business_name="Lakshmi's Kitchen",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="90 Brybar Dr St Johns FL",
             preferred_language="en",
             notes=notes,
@@ -144,7 +144,7 @@ def test_case2_english_food_dense_menu_eligible(monkeypatch):
         raw_request="Lakshmi's Kitchen weekend menu",
         fields=FlyerRequestFields(
             event_or_business_name="Lakshmi's Kitchen",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="90 Brybar Dr St Johns FL",
             preferred_language="en",
             notes="-",
@@ -160,7 +160,7 @@ def test_case2_english_food_dense_menu_eligible(monkeypatch):
             FlyerLockedFact(
                 fact_id="contact_phone",
                 label="Contact",
-                value="+17329837841",
+                value="+15550100001",
                 source="customer_profile",
                 required=True,
             ),
@@ -192,7 +192,7 @@ def test_case3_telugu_food_project_eligible(monkeypatch):
         raw_request="Lakshmi's Kitchen specials. Use Telugu language. Dosa $6.99",
         fields=FlyerRequestFields(
             event_or_business_name="Lakshmi's Kitchen",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="90 Brybar Dr St Johns FL",
             preferred_language="te",
             notes="Dosa $6.99; Idli $5.99; Use Telugu language.",
@@ -236,7 +236,7 @@ def test_case4_reference_menu_materialized_facts_stays_on_overlay(monkeypatch):
         FlyerLockedFact(
             fact_id="contact_phone",
             label="Contact",
-            value="+17329837841",
+            value="+15550100001",
             source="customer_profile",
             required=True,
         ),
@@ -274,7 +274,7 @@ def test_case4_reference_menu_materialized_facts_stays_on_overlay(monkeypatch):
         raw_request=raw,
         fields=FlyerRequestFields(
             event_or_business_name="Lakshmi's Kitchen",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="90 Brybar Dr St Johns FL",
             preferred_language="en",
             notes="use as reference",
@@ -301,7 +301,7 @@ def test_case5_source_edit_excluded(monkeypatch):
         raw_request="edit uploaded flyer/source artwork - change the price to $8.99",
         fields=FlyerRequestFields(
             event_or_business_name="Lakshmi's Kitchen",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="90 Brybar Dr St Johns FL",
             preferred_language="en",
             notes="Dosa $8.99",
@@ -346,7 +346,7 @@ def test_case6_reference_extraction_pending_excluded(monkeypatch, tmp_path):
         raw_request=raw,
         fields=FlyerRequestFields(
             event_or_business_name="Lakshmi's Kitchen",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="90 Brybar Dr St Johns FL",
             preferred_language="en",
             notes=raw,
@@ -369,7 +369,7 @@ def test_case7_non_food_excluded(monkeypatch):
         raw_request="Grand opening haircut promotion",
         fields=FlyerRequestFields(
             event_or_business_name="Glamour Salon",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="123 Main St",
             preferred_language="en",
             notes="Haircut $25; Blowdry $35; Perm $80",
@@ -385,7 +385,7 @@ def test_case7_non_food_excluded(monkeypatch):
             FlyerLockedFact(
                 fact_id="contact_phone",
                 label="Contact",
-                value="+17329837841",
+                value="+15550100001",
                 source="customer_profile",
                 required=True,
             ),
@@ -427,7 +427,7 @@ def test_integrated_telugu_content_prompt_uses_regional_instruction(monkeypatch)
         raw_request="లక్ష్మీ కిచెన్ మెనూ - దోస $6.99; ఇడ్లీ $5.99",
         fields=FlyerRequestFields(
             event_or_business_name="Lakshmi's Kitchen",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="90 Brybar Dr St Johns FL",
             preferred_language="te",
             notes="దోస $6.99; ఇడ్లీ $5.99",
@@ -443,7 +443,7 @@ def test_integrated_telugu_content_prompt_uses_regional_instruction(monkeypatch)
             FlyerLockedFact(
                 fact_id="contact_phone",
                 label="Contact",
-                value="+17329837841",
+                value="+15550100001",
                 source="customer_profile",
                 required=True,
             ),
@@ -507,7 +507,7 @@ def test_dense_plain_notes_project_is_ineligible_and_does_not_raise(monkeypatch)
         raw_request=notes_16,
         fields=FlyerRequestFields(
             event_or_business_name="Lakshmi's Kitchen",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="90 Brybar Dr St Johns FL",
             preferred_language="en",
             notes=notes_16,

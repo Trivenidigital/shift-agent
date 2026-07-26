@@ -115,7 +115,7 @@ def _make_project(
     return FlyerProject(
         project_id="F9999",
         status="awaiting_final_approval",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=_NOW,
         updated_at=_NOW,
         original_message_id="m-regional-test",

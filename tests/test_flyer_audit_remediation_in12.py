@@ -17,7 +17,7 @@ def _project(locked_facts, raw_request="weekend flyer"):
     now = datetime(2026, 5, 19, tzinfo=timezone.utc)
     return FlyerProject.model_validate({
         "project_id": "F9001", "status": "intake_started",
-        "customer_phone": "+17329837841", "created_at": now, "updated_at": now,
+        "customer_phone": "+15550100001", "created_at": now, "updated_at": now,
         "original_message_id": "m-1", "raw_request": raw_request,
         "fields": {"event_or_business_name": "Lakshmis Kitchen"},
         "locked_facts": locked_facts,

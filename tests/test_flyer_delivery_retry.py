@@ -107,7 +107,7 @@ def _project(tmp_path: Path) -> FlyerProject:
         raw_request="Need flyer",
         fields=FlyerRequestFields(
             event_or_business_name="Daily Lunch Specials",
-            contact_info="+1 704 324 3322",
+            contact_info="+1 555 010 0003",
             notes="Item 1 $1.99",
         ),
         assets=assets,

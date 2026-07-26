@@ -111,7 +111,7 @@ def _bg(tmp_path):
 def _project6():
     facts = [{"fact_id":"business_name","label":"Business","value":"Lakshmi's Kitchen","required":True,"source":"customer_text"},
              {"fact_id":"campaign_title","label":"Campaign","value":"Weekend Specials","required":True,"source":"customer_text"},
-             {"fact_id":"contact_phone","label":"Contact","value":"+17329837841","required":True,"source":"customer_text"},
+             {"fact_id":"contact_phone","label":"Contact","value":"+15550100001","required":True,"source":"customer_text"},
              {"fact_id":"location","label":"Location","value":"90 Brybar Dr St Johns FL","required":True,"source":"customer_text"},
              {"fact_id":"pricing_structure","label":"Pricing","value":"Any item $7.99","required":True,"source":"customer_text"},
              {"fact_id":"schedule","label":"Schedule","value":"Saturday & Sunday, 4 PM-8 PM","required":True,"source":"customer_text"}]
@@ -122,9 +122,9 @@ def _project6():
     # not a locked fact, so the referee does not require it either. Regression
     # guard for the "fail-closes the flagship case to manual" bug.
     return FlyerProject.model_validate({"project_id":"F9001","status":"generating_concepts",
-        "customer_phone":"+17329837841","customer_id":"CUST0001","created_at":"2026-06-18T00:00:00Z",
+        "customer_phone":"+15550100001","customer_id":"CUST0001","created_at":"2026-06-18T00:00:00Z",
         "updated_at":"2026-06-18T00:00:00Z","original_message_id":"wamid.F9001",
-        "raw_request":"Create a flyer for Weekend Specials. Any item $7.99. Idli, Dosa, Vada, Uttapam, Pongal, Sambar. Sat & Sun 4-8 PM. +1 732-983-7841",
+        "raw_request":"Create a flyer for Weekend Specials. Any item $7.99. Idli, Dosa, Vada, Uttapam, Pongal, Sambar. Sat & Sun 4-8 PM. +1 555-010-0001",
         "fields":{"event_or_business_name":"Weekend Specials","preferred_language":"en"},"locked_facts":facts})
 
 
@@ -173,14 +173,14 @@ def test_render_premium_overlay_does_not_fail_on_raw_request_echo(tmp_path):
     import pytest  # noqa: F401  (kept for parity with sibling tests)
     facts = [{"fact_id":"business_name","label":"B","value":"Lakshmi's Kitchen","required":True,"source":"customer_text"},
              {"fact_id":"campaign_title","label":"C","value":"Weekend Specials","required":True,"source":"customer_text"},
-             {"fact_id":"contact_phone","label":"P","value":"+17329837841","required":True,"source":"customer_text"},
+             {"fact_id":"contact_phone","label":"P","value":"+15550100001","required":True,"source":"customer_text"},
              {"fact_id":"location","label":"L","value":"90 Brybar Dr St Johns FL","required":True,"source":"customer_text"},
              {"fact_id":"pricing_structure","label":"Pr","value":"Any item $7.99","required":True,"source":"customer_text"},
              {"fact_id":"schedule","label":"S","value":"Saturday & Sunday, 4 PM-8 PM","required":True,"source":"customer_text"}]
     for i, n in enumerate(["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar"]):
         facts.append({"fact_id":f"item:{i}:name","label":"I","value":n,"required":True,"source":"customer_text"})
     proj = FlyerProject.model_validate({"project_id":"F9002","status":"generating_concepts",
-        "customer_phone":"+17329837841","customer_id":"CUST0001","created_at":"2026-06-18T00:00:00Z",
+        "customer_phone":"+15550100001","customer_id":"CUST0001","created_at":"2026-06-18T00:00:00Z",
         "updated_at":"2026-06-18T00:00:00Z","original_message_id":"wamid.F9002",
         "raw_request":"Weekend Specials any item $7.99",
         "fields":{"event_or_business_name":"Weekend Specials","preferred_language":"en"},"locked_facts":facts})
@@ -201,7 +201,7 @@ def test_render_premium_overlay_does_not_fail_on_raw_request_echo(tmp_path):
 
 def _proj(facts, pid="F9300"):
     return FlyerProject.model_validate({"project_id":pid,"status":"generating_concepts",
-        "customer_phone":"+17329837841","customer_id":"CUST0001","created_at":"2026-06-18T00:00:00Z",
+        "customer_phone":"+15550100001","customer_id":"CUST0001","created_at":"2026-06-18T00:00:00Z",
         "updated_at":"2026-06-18T00:00:00Z","original_message_id":"wamid.X","raw_request":"x",
         "fields":{"event_or_business_name":"Weekend Specials","preferred_language":"en"},"locked_facts":facts})
 
@@ -209,7 +209,7 @@ def _proj(facts, pid="F9300"):
 def _core_facts():
     return [{"fact_id":"business_name","label":"B","value":"Lakshmi's Kitchen","required":True,"source":"customer_text"},
             {"fact_id":"campaign_title","label":"C","value":"Weekend Specials","required":True,"source":"customer_text"},
-            {"fact_id":"contact_phone","label":"P","value":"+17329837841","required":True,"source":"customer_text"},
+            {"fact_id":"contact_phone","label":"P","value":"+15550100001","required":True,"source":"customer_text"},
             {"fact_id":"location","label":"L","value":"St Johns FL","required":True,"source":"customer_text"}]
 
 
@@ -350,7 +350,7 @@ def _v2_project_6item():
         FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Any item $7.99", source="customer_text", required=True),
         FlyerLockedFact(fact_id="schedule", label="Schedule", value="Saturday & Sunday, 4 PM-8 PM", source="customer_text", required=True),
         FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
-        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
     ]
     for i, nm in enumerate(["Idli", "Dosa", "Vada", "Uttapam", "Pongal", "Sambar"]):
         f.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item {i}", value=nm, source="customer_text", required=True))
@@ -358,7 +358,7 @@ def _v2_project_6item():
     return FlyerProject(
         project_id="F0199",
         status="intake_started",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
         updated_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
         original_message_id="m",
@@ -504,7 +504,7 @@ def test_flag_off_uses_legacy_not_premium(tmp_path, monkeypatch):
 
 def test_flag_on_food_project_uses_premium(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     from agents.flyer import render, premium_overlay
     called = {"premium": 0, "legacy": 0}
     monkeypatch.setattr(premium_overlay, "render_premium_overlay",
@@ -522,7 +522,7 @@ def test_flag_on_premium_render_error_degrades_to_flat(tmp_path, monkeypatch):
     through to the legacy flat overlay. Fix C is strictly >= today's fallback:
     premium when it fits, flat when it can't, never manual-worse-than-flat."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     from agents.flyer import render, premium_overlay
     legacy = {"n": 0}
     monkeypatch.setattr(premium_overlay, "render_premium_overlay",
@@ -542,7 +542,7 @@ def test_allowlist_containing_project_phone_uses_premium(tmp_path, monkeypatch):
     """flag on + FLYER_PREMIUM_OVERLAY_ALLOWLIST containing the project's
     customer_phone → premium path is taken."""
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841,+19998887776")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001,+19998887776")
     from agents.flyer import render, premium_overlay
     called = {"premium": 0, "legacy": 0}
     monkeypatch.setattr(premium_overlay, "render_premium_overlay",
@@ -590,7 +590,7 @@ def test_flag_on_no_allowlist_uses_legacy(tmp_path, monkeypatch):
 def test_flag_off_allowlist_set_still_uses_legacy(tmp_path, monkeypatch):
     """flag off → legacy used regardless of allowlist."""
     monkeypatch.delenv("FLYER_PREMIUM_OVERLAY", raising=False)
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     from agents.flyer import render, premium_overlay
     called = {"premium": 0, "legacy": 0}
     monkeypatch.setattr(premium_overlay, "render_premium_overlay",
@@ -624,7 +624,7 @@ def _bg_only_project():
 def test_background_prompt_has_textsafe_zones_when_flag_on(monkeypatch):
     from agents.flyer import render
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     # Pin the eligibility predicate so the background-only branch is entered
     # regardless of FLYER_ALLOW_INTEGRATED_POSTER state in CI.
     monkeypatch.setattr(render, "_background_only_eligible", lambda _p: True)
@@ -697,7 +697,7 @@ def test_apply_critical_text_overlay_flat_premium_import(tmp_path, monkeypatch):
     fallback)."""
     import sys
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY", "1")
-    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     from agents.flyer import render, premium_overlay
     # Register premium_overlay under its FLAT deployed name so the
     # `import flyer_premium_overlay` arm in _apply_critical_text_overlay binds.
@@ -733,7 +733,7 @@ def _v2_project_n_items(n):
         FlyerLockedFact(fact_id="pricing_structure", label="Pricing", value="Any item $7.99", source="customer_text", required=True),
         FlyerLockedFact(fact_id="schedule", label="Schedule", value="Saturday & Sunday, 4 PM-8 PM", source="customer_text", required=True),
         FlyerLockedFact(fact_id="location", label="Location", value="90 Brybar Dr St Johns FL", source="customer_profile", required=True),
-        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+17329837841", source="customer_profile", required=True),
+        FlyerLockedFact(fact_id="contact_phone", label="Contact", value="+15550100001", source="customer_profile", required=True),
     ]
     for i in range(n):
         f.append(FlyerLockedFact(fact_id=f"item:{i}:name", label=f"Item {i}", value=f"Item{i + 1}", source="customer_text", required=True))
@@ -741,7 +741,7 @@ def _v2_project_n_items(n):
     return FlyerProject(
         project_id=f"F02{n:02d}",
         status="intake_started",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
         updated_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
         original_message_id="m",

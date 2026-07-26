@@ -481,7 +481,7 @@ def test_format_warn_tier_correction_summary_accepts_pydantic_project_shape():
     project = FlyerProject(
         project_id="F0108",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-1",

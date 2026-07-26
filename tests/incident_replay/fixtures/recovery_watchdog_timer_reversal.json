@@ -1,0 +1,41 @@
+{
+  "incident_id": "recovery-watchdog-timer-reversal",
+  "description": "Deployment-state-preservation fixture (charter \u00a71.5.1). An armed recovery-watchdog timer must survive a deploy: the deploy preserves the frozen timer-state snapshot and does not reset/reverse the armed timer. No customer-facing send. Deterministic proof: test_deploy_timer_state_preservation.py.",
+  "pseudonymized_transcript": [
+    {
+      "from": "system:deploy-watchdog",
+      "text": "deploy started; recovery watchdog timer armed pre-deploy"
+    },
+    {
+      "from": "+15550100002",
+      "text": "deploy the release candidate"
+    }
+  ],
+  "initial_state": {
+    "recovery_watchdog_timer": {
+      "armed": true,
+      "fires_at_epoch": 1770001000
+    }
+  },
+  "expected_route": "deploy_timer_state_preserved",
+  "expected_mutations": [
+    "preserve_timer_state_snapshot_across_deploy"
+  ],
+  "forbidden_mutations": [
+    "reset_recovery_watchdog_timer",
+    "reverse_armed_timer_on_deploy"
+  ],
+  "expected_logical_sends": 0,
+  "expected_audit_identities": [
+    "+15550100002"
+  ],
+  "expected_final_state": {
+    "recovery_watchdog_timer": {
+      "armed": true,
+      "fires_at_epoch": 1770001000,
+      "preserved_across_deploy": true
+    }
+  },
+  "pii_safe": true,
+  "additive_only": true
+}

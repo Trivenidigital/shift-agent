@@ -1,0 +1,43 @@
+{
+  "incident_id": "180-guest-wedding-two-menus",
+  "description": "A mixed 180-guest wedding inquiry requesting two menus (veg + non-veg) is arbitrated in a single turn into ONE lead with a proposal set carrying both menus \u2014 never two leads or two proposal sets. Deterministic proof: test_catering_turn_arbitration_e2e.py.",
+  "pseudonymized_transcript": [
+    {
+      "from": "+15550100003",
+      "text": "Wedding for 180 guests. I want one vegetarian menu and one non-veg menu, with prices."
+    }
+  ],
+  "initial_state": {
+    "catering_leads": [],
+    "proposal_sets": []
+  },
+  "expected_route": "catering_new_inquiry",
+  "expected_mutations": [
+    "create_catering_lead",
+    "create_proposal_set_with_two_menus"
+  ],
+  "forbidden_mutations": [
+    "create_duplicate_lead",
+    "create_duplicate_proposal_set",
+    "split_into_two_leads"
+  ],
+  "expected_logical_sends": 1,
+  "expected_audit_identities": [
+    "+15550100003"
+  ],
+  "expected_final_state": {
+    "catering_leads": [
+      {
+        "status": "qualifying",
+        "guest_count": 180
+      }
+    ],
+    "proposal_sets": [
+      {
+        "menus": 2
+      }
+    ]
+  },
+  "pii_safe": true,
+  "additive_only": true
+}

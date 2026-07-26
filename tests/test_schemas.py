@@ -377,7 +377,7 @@ def test_dispatcher_routed_happy_path(now_aware):
         "sender_role": "owner",
         "message_shape": "approval_code",
         "routed_to_skill": "handle_owner_command",
-        "sender_phone": "+918522041562",
+        "sender_phone": "+15550100002",
     })
     assert isinstance(entry, DispatcherRouted)
     assert entry.routed_to_skill == "handle_owner_command"
@@ -483,7 +483,7 @@ def test_validate_failed_distinct_from_unknown_sender_declined(now_aware):
     usd = adapter.validate_python({
         "type": "unknown_sender_declined",
         "ts": now_aware.isoformat(),
-        "sender_lid": "201975216009469@lid",
+        "sender_lid": "100000000000001@lid",
         "input_message_truncated": "hi",
     })
     assert isinstance(vf, ValidateFailed)

@@ -1,0 +1,46 @@
+{
+  "incident_id": "missing-outbound-id",
+  "description": "When an ack send returns no outbound-message ID, the agent records ack_failed metadata only \u2014 it does not fabricate an ID, does not mark the send successful, and does not blindly resend. Deterministic proof: test_catering_turn_arbitration_e2e.py (...ack_failure_records_ack_failed_metadata_only).",
+  "pseudonymized_transcript": [
+    {
+      "from": "+15550100003",
+      "text": "Can you confirm you received my catering request?"
+    }
+  ],
+  "initial_state": {
+    "catering_leads": [
+      {
+        "lead_id": "LEAD-0001",
+        "status": "qualifying"
+      }
+    ],
+    "bridge_ack_returns_outbound_id": false
+  },
+  "expected_route": "catering_ack",
+  "expected_mutations": [
+    "record_ack_failed_metadata_only"
+  ],
+  "forbidden_mutations": [
+    "fabricate_outbound_message_id",
+    "mark_send_successful_without_id",
+    "blind_resend"
+  ],
+  "expected_logical_sends": 1,
+  "expected_audit_identities": [
+    "+15550100003"
+  ],
+  "expected_final_state": {
+    "catering_leads": [
+      {
+        "lead_id": "LEAD-0001",
+        "status": "qualifying"
+      }
+    ],
+    "ack_metadata": {
+      "status": "ack_failed",
+      "outbound_id": null
+    }
+  },
+  "pii_safe": true,
+  "additive_only": true
+}

@@ -1,0 +1,44 @@
+{
+  "incident_id": "branchB-amendment-failure",
+  "description": "When a branch-B amendment capture FAILS (e.g. sidecar write error) the failure is surfaced and audited \u2014 never a silent drop reported as success, never a partial write. Deterministic proof: test_catering_amendment_capture.py.",
+  "pseudonymized_transcript": [
+    {
+      "from": "+15550100003",
+      "text": "Please change the delivery time on the finalized order to 6pm."
+    }
+  ],
+  "initial_state": {
+    "catering_leads": [
+      {
+        "lead_id": "LEAD-0001",
+        "status": "finalized"
+      }
+    ],
+    "amendment_sidecar": [],
+    "sidecar_write": "will_fail"
+  },
+  "expected_route": "catering_amendment_capture",
+  "expected_mutations": [
+    "audit:branchB_amendment_capture_failed"
+  ],
+  "forbidden_mutations": [
+    "silent_success_ack_on_failed_capture",
+    "partial_amendment_write"
+  ],
+  "expected_logical_sends": 1,
+  "expected_audit_identities": [
+    "+15550100003"
+  ],
+  "expected_final_state": {
+    "catering_leads": [
+      {
+        "lead_id": "LEAD-0001",
+        "status": "finalized"
+      }
+    ],
+    "amendment_sidecar": [],
+    "failure_audited": true
+  },
+  "pii_safe": true,
+  "additive_only": true
+}

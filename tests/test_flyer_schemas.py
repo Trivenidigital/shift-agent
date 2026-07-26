@@ -497,8 +497,8 @@ def test_guest_order_store_tracks_payment_first_one_off_order():
     now = datetime.now(timezone.utc)
     store = FlyerGuestOrderStore()
     order = store.new_order(
-        sender_phone="+17329837841",
-        chat_id="17329837841@s.whatsapp.net",
+        sender_phone="+15550100001",
+        chat_id="15550100001@s.whatsapp.net",
         message_id="cta-1",
         now=now,
         checkout_url="https://pay.example/GUEST0001",
@@ -510,7 +510,7 @@ def test_guest_order_store_tracks_payment_first_one_off_order():
     assert order.can_create_flyer() is False
     paid = order.model_copy(update={"status": "paid", "paid_at": now, "updated_at": now})
     assert paid.can_create_flyer() is True
-    assert store.find_open_order_by_sender("+17329837841", "17329837841@s.whatsapp.net").order_id == "GUEST0001"
+    assert store.find_open_order_by_sender("+15550100001", "15550100001@s.whatsapp.net").order_id == "GUEST0001"
     assert FlyerGuestOrder.model_validate(paid.model_dump()).remaining() == 1
 
 
@@ -518,8 +518,8 @@ def test_flyer_intake_session_accepts_brief_builder_statuses_and_fields():
     now = datetime(2026, 5, 21, tzinfo=timezone.utc)
     for status in ("text_awaiting_brief", "choosing_sample_idea", "brief_pending_approval"):
         session = FlyerIntakeSession(
-            chat_id="17329837841@s.whatsapp.net",
-            sender_phone="+17329837841",
+            chat_id="15550100001@s.whatsapp.net",
+            sender_phone="+15550100001",
             status=status,
             source="new_flyer",
             started_at=now,
@@ -544,8 +544,8 @@ def test_flyer_intake_session_still_rejects_unknown_brief_fields():
     now = datetime(2026, 5, 21, tzinfo=timezone.utc)
     with pytest.raises(ValidationError):
         FlyerIntakeSession.model_validate({
-            "chat_id": "17329837841@s.whatsapp.net",
-            "sender_phone": "+17329837841",
+            "chat_id": "15550100001@s.whatsapp.net",
+            "sender_phone": "+15550100001",
             "status": "brief_pending_approval",
             "source": "new_flyer",
             "started_at": now,
@@ -576,7 +576,7 @@ def test_recurring_schedule_request_does_not_require_fake_event_date():
         event_or_business_name="Weekend Breakfast",
         event_time="08:00",
         venue_or_location="Triveni Pineville, 300 S Polk St, Pineville, NC 28134",
-        contact_info="(704) 324-3322",
+        contact_info="(555) 010-0003",
         notes="Starts from 8 AM on both Saturday and Sunday.",
     )
     assert fields.missing_required_fields() == []
@@ -598,7 +598,7 @@ def test_service_list_flyer_does_not_require_event_date_time_or_venue():
     fields = FlyerRequestFields(
         event_or_business_name="Marketing Services",
         venue_or_location="101 Kavitha Palace, KPHB, Hyderabad, Telangana 500085",
-        contact_info="+918985741562",
+        contact_info="+15550100006",
         notes=(
             "Services: Social media marketing, Performance marketing, SEO, "
             "AEO, GEO, AI Marketing, Content Creation, Paid Ads"
@@ -811,8 +811,8 @@ def test_customer_profile_catalog_is_additive_backward_compatible():
         customer_id="CUST0001",
         business_name="Triveni",
         business_address="300 S Polk",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_numbers=["+19045550104"],
         plan_id="starter",
         status="active",
@@ -841,8 +841,8 @@ def test_customer_profile_defaults_and_quota_latest_state():
         customer_id="CUST0001",
         business_name="Triveni",
         business_address="300 S Polk",
-        public_phone="+17043243322",
-        business_whatsapp_number="+17043243322",
+        public_phone="+15550100003",
+        business_whatsapp_number="+15550100003",
         authorized_request_numbers=["+19045550104"],
         plan_id="starter",
         status="active",
@@ -880,7 +880,7 @@ def test_customer_profile_defaults_and_quota_latest_state():
     assert customer.primary_chat_id == ""
     assert customer.usage_count_for_current_period() == 1
     assert customer.quota_remaining(FlyerConfig().plan_tiers) == 29
-    assert customer.is_account_admin("+17043243322", "shared@g.us", "unknown") is True
+    assert customer.is_account_admin("+15550100003", "shared@g.us", "unknown") is True
     assert customer.is_account_admin("+19045550104", "shared@g.us", "unknown") is False
 
 
@@ -970,7 +970,7 @@ def test_flyer_status_resent_round_trips_through_log_entry():
         ts=now,
         project_id="F0070",
         customer_phone="+19045550104",
-        chat_id="17329837841@s.whatsapp.net",
+        chat_id="15550100001@s.whatsapp.net",
         chat_id_source="primary_chat_id",
         send_ok=True,
         outbound_message_id="MID1",
@@ -980,7 +980,7 @@ def test_flyer_status_resent_round_trips_through_log_entry():
     assert parsed.__class__.__name__ == "FlyerStatusResent"
     assert parsed.type == "flyer_status_resent"
     assert parsed.send_ok is True
-    assert parsed.chat_id == "17329837841@s.whatsapp.net"
+    assert parsed.chat_id == "15550100001@s.whatsapp.net"
 
 
 def test_flyer_manual_queue_customer_update_round_trips_through_log_entry():
@@ -1024,7 +1024,7 @@ def test_flyer_source_vs_new_chosen_round_trips_through_log_entry():
     now = datetime.now(timezone.utc)
     entry = FlyerSourceVsNewChosen(
         ts=now,
-        sender_phone="+17329837841",
+        sender_phone="+15550100001",
         customer_id="CUST0001",
         original_intent="exact_source_edit",
         choice="clarification_sent",
@@ -1552,7 +1552,7 @@ def test_flyer_workflow_status_includes_delivered_with_warning():
     project = FlyerProject(
         project_id="F0108",
         status="delivered_with_warning",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-1",
@@ -1716,7 +1716,7 @@ def test_flyer_project_warning_defaults_to_none():
     project = FlyerProject(
         project_id="F0001",
         status="intake_started",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-1",
@@ -1739,7 +1739,7 @@ def test_flyer_project_accepts_populated_warning_payload():
     project = FlyerProject(
         project_id="F0108",
         status="delivered_with_warning",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=now,
         updated_at=now,
         original_message_id="m-1",

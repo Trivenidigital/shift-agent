@@ -40,14 +40,14 @@ def _base_food_project(**overrides) -> FlyerProject:
     defaults = dict(
         project_id="F9901",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=_NOW,
         updated_at=_NOW,
         original_message_id="wamid.mr-guard-test",
         raw_request="Dosa $6.99; Idli $5.99; Vada $4.99",
         fields=FlyerRequestFields(
             event_or_business_name="Lakshmi's Kitchen",
-            contact_info="+17329837841",
+            contact_info="+15550100001",
             venue_or_location="90 Brybar Dr St Johns FL",
             preferred_language="en",
             notes="Dosa $6.99; Idli $5.99; Vada $4.99",
@@ -63,7 +63,7 @@ def _base_food_project(**overrides) -> FlyerProject:
             FlyerLockedFact(
                 fact_id="contact_phone",
                 label="Contact",
-                value="+17329837841",
+                value="+15550100001",
                 source="customer_profile",
                 required=True,
             ),

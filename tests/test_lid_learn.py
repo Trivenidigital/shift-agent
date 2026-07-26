@@ -26,7 +26,7 @@ def fixture_dir(tmp_path):
         "location": {"id": "loc_test", "name": "Test", "timezone": "America/New_York"},
         "employees": [
             {"id": "e004", "name": "Anjali Iyer", "role": "cashier",
-             "phone": "+17329837841", "languages": ["en"],
+             "phone": "+15550100001", "languages": ["en"],
              "can_cover_roles": ["cashier"], "status": "active"},
             {"id": "e006", "name": "Lakshmi Rao", "role": "sweets",
              "phone": "+19802005022", "languages": ["en"],
@@ -38,8 +38,8 @@ def fixture_dir(tmp_path):
         "schema_version": 1,
         "customer": {"name": "Test", "location_id": "loc_test",
                      "timezone": "America/New_York", "languages": ["en"]},
-        "owner": {"name": "Owner", "phone": "+918522041562",
-                  "self_chat_jid": "918522041562@s.whatsapp.net"},
+        "owner": {"name": "Owner", "phone": "+15550100002",
+                  "self_chat_jid": "15550100002@s.whatsapp.net"},
         "limits": {"max_outbound_per_day": 6, "max_outbound_per_minute": 30,
                    "pending_proposal_ttl_hours": 4,
                    "per_message_timeout_sec": 120, "send_failure_retry_count": 1},
@@ -78,7 +78,7 @@ def _content_hash(p: Path) -> str:
 def test_apply_lid_to_employee(fixture_dir):
     cache = {
         "schema_version": 1,
-        "pairs": [{"phone": "+17329837841", "lid": "201975216009469@lid",
+        "pairs": [{"phone": "+15550100001", "lid": "100000000000001@lid",
                    "learned_ts": "2026-04-28T00:00:00+00:00"}],
     }
     r = _run(fixture_dir, cache)
@@ -86,7 +86,7 @@ def test_apply_lid_to_employee(fixture_dir):
 
     roster = json.loads((fixture_dir / "roster.json").read_text())
     e004 = next(e for e in roster["employees"] if e["id"] == "e004")
-    assert e004["lid"] == "201975216009469@lid"
+    assert e004["lid"] == "100000000000001@lid"
 
     log = (fixture_dir / "decisions.log").read_text().strip().split("\n")
     assert len(log) == 1
@@ -94,14 +94,14 @@ def test_apply_lid_to_employee(fixture_dir):
     assert entry["type"] == "lid_learned"
     assert entry["target"] == "employee"
     assert entry["employee_id"] == "e004"
-    assert entry["new_lid"] == "201975216009469@lid"
+    assert entry["new_lid"] == "100000000000001@lid"
     assert entry["old_lid"] is None
 
 
 def test_apply_lid_to_owner(fixture_dir):
     cache = {
         "schema_version": 1,
-        "pairs": [{"phone": "+918522041562", "lid": "211390371475536@lid",
+        "pairs": [{"phone": "+15550100002", "lid": "211390371475536@lid",
                    "learned_ts": "2026-04-28T00:00:00+00:00"}],
     }
     r = _run(fixture_dir, cache)
@@ -120,7 +120,7 @@ def test_apply_lid_to_owner(fixture_dir):
 def test_idempotent_no_rewrite_when_already_set(fixture_dir):
     cache = {
         "schema_version": 1,
-        "pairs": [{"phone": "+17329837841", "lid": "201975216009469@lid",
+        "pairs": [{"phone": "+15550100001", "lid": "100000000000001@lid",
                    "learned_ts": "2026-04-28T00:00:00+00:00"}],
     }
     _run(fixture_dir, cache)  # first run: applies
@@ -145,14 +145,14 @@ def test_conflict_detection_logged(fixture_dir):
 
     # First: set initial LID
     cache1 = {"schema_version": 1, "pairs": [
-        {"phone": "+17329837841", "lid": OLD_LID,
+        {"phone": "+15550100001", "lid": OLD_LID,
          "learned_ts": "2026-04-28T00:00:00+00:00"}
     ]}
     _run(fixture_dir, cache1)
 
     # Then: re-pair with new LID
     cache2 = {"schema_version": 1, "pairs": [
-        {"phone": "+17329837841", "lid": NEW_LID,
+        {"phone": "+15550100001", "lid": NEW_LID,
          "learned_ts": "2026-04-28T01:00:00+00:00"}
     ]}
     r = _run(fixture_dir, cache2)
@@ -207,7 +207,7 @@ def test_empty_cache_file_safe(fixture_dir):
 
 def test_cache_trimmed_after_apply(fixture_dir):
     cache = {"schema_version": 1, "pairs": [
-        {"phone": "+17329837841", "lid": "201975216009469@lid",
+        {"phone": "+15550100001", "lid": "100000000000001@lid",
          "learned_ts": "2026-04-28T00:00:00+00:00"},
         {"phone": "+15551234567", "lid": "999999999999@lid",  # unknown
          "learned_ts": "2026-04-28T00:00:00+00:00"},
@@ -216,5 +216,5 @@ def test_cache_trimmed_after_apply(fixture_dir):
     # After apply: applied phones removed from cache; unknown phone retained
     final_cache = json.loads((fixture_dir / "lid-cache.json").read_text())
     phones = {p["phone"] for p in final_cache["pairs"]}
-    assert "+17329837841" not in phones  # applied → trimmed
+    assert "+15550100001" not in phones  # applied → trimmed
     assert "+15551234567" in phones  # unknown → kept for retry

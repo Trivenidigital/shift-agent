@@ -20,7 +20,7 @@ from schemas import FlyerLockedFact, FlyerProject, FlyerRequestFields  # noqa: E
 
 REPO = Path(__file__).resolve().parent.parent
 FIXTURE = REPO / "tests" / "fixtures" / "premium_poster_v1" / "textless_food_scene.png"
-ALLOW = "+17329837841"
+ALLOW = "+15550100001"
 SIZE = (1080, 1350)
 
 

@@ -43,7 +43,7 @@ except ModuleNotFoundError:  # pragma: no cover - Windows (no fcntl)
 PROMISE_MSG = "We guarantee a full refund and free delivery by Friday."
 CLEAN_MSG = "Happy to help with that flyer! What should it promote?"
 FALLBACK = "I couldn't finish that reply — tell me what you need and I'll help."
-CHAT = "17329837841@c.us"
+CHAT = "15550100001@c.us"
 
 
 def _rows() -> list[dict]:
@@ -170,12 +170,12 @@ def test_lid_outbound_jid_matches_phone_allowlist(monkeypatch, tmp_path):
     # phone allowlist, and the reply goes out UN-screened.
     cache = tmp_path / "lid-cache.json"
     cache.write_text(
-        '{"schema_version":1,"pairs":[{"phone":"+17329837841","lid":"111222333444@lid"}]}',
+        '{"schema_version":1,"pairs":[{"phone":"+15550100001","lid":"111222333444@lid"}]}',
         encoding="utf-8",
     )
     monkeypatch.setenv("SHIFT_AGENT_LID_CACHE_PATH", str(cache))
     monkeypatch.setenv("FRONT_BRAIN_OUTBOUND_ENFORCE", "1")
-    monkeypatch.setenv("FRONT_BRAIN_OUTBOUND_ENFORCE_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FRONT_BRAIN_OUTBOUND_ENFORCE_ALLOWLIST", "+15550100001")
     monkeypatch.setenv("FRONT_BRAIN_CHAT_BUDGET_PATH", str(tmp_path / "budget.json"))
     monkeypatch.setenv("FRONT_BRAIN_CHAT_DAILY_CAP", "30")
     out = safe_io.front_brain_screen_gateway_send(

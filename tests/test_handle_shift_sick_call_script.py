@@ -59,13 +59,13 @@ def env_dir(tmp_path):
             "id": "e008",
             "name": "Srini Bangaru",
             "role": "floor",
-            "phone": "+17329837841",
+            "phone": "+15550100001",
             "languages": ["en"],
             "can_cover_roles": ["floor", "cashier"],
             "status": "active",
             "phone_history": [],
             "restrictions": None,
-            "lid": "201975216009469@lid",
+            "lid": "100000000000001@lid",
         }],
         "schedule": {},
     }), encoding="utf-8")
@@ -87,8 +87,8 @@ def test_employee_sick_call_without_schedule_acknowledges_and_alerts_owner(env_d
             "role": "employee",
             "employee_id": "e008",
             "name": "Srini Bangaru",
-            "phone_normalized": "+17329837841",
-            "lid": "201975216009469@lid",
+            "phone_normalized": "+15550100001",
+            "lid": "100000000000001@lid",
         },
     )
     monkeypatch.setattr(
@@ -100,13 +100,13 @@ def test_employee_sick_call_without_schedule_acknowledges_and_alerts_owner(env_d
     monkeypatch.setattr(mod, "_create_proposal", lambda **_kwargs: pytest.fail("no schedule should not create proposal"))
 
     rc = mod.process_absence(
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         text="Hey Boss! I am down with fever, I can't come for shift today.",
         message_id="wa-live-1414",
     )
 
     assert rc == 0
-    assert sent[0][0] == "201975216009469@lid"
+    assert sent[0][0] == "100000000000001@lid"
     assert "no scheduled shift" in sent[0][1].lower()
     assert sent[1][0] == "19045550100@s.whatsapp.net"
     assert "reported an absence" in sent[1][1].lower()
@@ -125,13 +125,13 @@ def test_employee_sick_call_with_schedule_creates_owner_proposal(env_dir, monkey
                 "id": "e008",
                 "name": "Srini Bangaru",
                 "role": "floor",
-                "phone": "+17329837841",
+                "phone": "+15550100001",
                 "languages": ["en", "te"],
                 "can_cover_roles": ["floor", "cashier"],
                 "status": "active",
                 "phone_history": [],
                 "restrictions": None,
-                "lid": "201975216009469@lid",
+                "lid": "100000000000001@lid",
             },
             {
                 "id": "e009",
@@ -163,8 +163,8 @@ def test_employee_sick_call_with_schedule_creates_owner_proposal(env_dir, monkey
             "role": "employee",
             "employee_id": "e008",
             "name": "Srini Bangaru",
-            "phone_normalized": "+17329837841",
-            "lid": "201975216009469@lid",
+            "phone_normalized": "+15550100001",
+            "lid": "100000000000001@lid",
         },
     )
     monkeypatch.setattr(
@@ -193,7 +193,7 @@ def test_employee_sick_call_with_schedule_creates_owner_proposal(env_dir, monkey
     monkeypatch.setattr(mod, "_create_proposal", fake_create)
 
     rc = mod.process_absence(
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         text="I have fever, cannot come for shift on 2026-06-07",
         message_id="wa-live-scheduled",
     )
@@ -204,7 +204,7 @@ def test_employee_sick_call_with_schedule_creates_owner_proposal(env_dir, monkey
     assert create_calls[0]["absent_shift"] == "10:00-18:00"
     assert create_calls[0]["absent_role"] == "floor"
     assert create_calls[0]["absent_reason"] == "health: fever"
-    assert sent[0][0] == "201975216009469@lid"
+    assert sent[0][0] == "100000000000001@lid"
     assert "checking coverage" in sent[0][1].lower()
     assert sent[1][0] == "19045550100@s.whatsapp.net"
     assert "owner proposal Anjali Rao #ABCDE" in sent[1][1]
@@ -215,7 +215,7 @@ def test_employee_sick_call_with_schedule_creates_owner_proposal(env_dir, monkey
 def _employee_identity(_chat_id):
     return {
         "role": "employee", "employee_id": "e008", "name": "Srini Bangaru",
-        "phone_normalized": "+17329837841", "lid": "201975216009469@lid",
+        "phone_normalized": "+15550100001", "lid": "100000000000001@lid",
     }
 
 
@@ -242,7 +242,7 @@ def test_no_schedule_sends_emit_sick_call_send_rows(env_dir, monkeypatch, tmp_pa
     monkeypatch.setattr(safe_io, "bridge_post", fake_bridge_post)
 
     rc = mod.process_absence(
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         text="Hey Boss! Down with fever, can't come today.",
         message_id="wa-audit-1",
     )
@@ -274,7 +274,7 @@ def test_failed_send_records_sick_call_send_with_error(env_dir, monkeypatch, tmp
                         lambda jid, message, action_context=None: (False, "", "bridge unreachable", 502))
 
     mod.process_absence(
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
         text="fever, out today",
         message_id="wa-audit-2",
     )

@@ -32,7 +32,7 @@ def test_front_brain_yielded_reason_validates_through_union():
             "type": "cf_router_intercepted",
             "ts": "2026-07-12T00:00:00Z",
             "reason": "front_brain_yielded",
-            "chat_id": "17329837841@c.us",
+            "chat_id": "15550100001@c.us",
             "subprocess_rc": 0,
             "detail": "intercept=vague_start; message_id=m1; front_brain=converse",
         }

@@ -63,7 +63,7 @@ def _project(
     customer_id: str,
     updated_at: str | None = "2026-07-06T00:00:00Z",
     created_at: str | None = "2026-07-01T00:00:00Z",
-    customer_phone: str = "+17329837841",
+    customer_phone: str = "+15550100001",
     assets: list[dict] | None = None,
     manual_review: dict | None = None,
     chat_id: str = "",
@@ -135,10 +135,10 @@ def _incident_store() -> dict:
             updated_at=ts,
             # Seed one row with a chat_id + locked fact so the privacy scan has
             # phone/chat_id/fact strings present in the store to prove non-leak.
-            chat_id="201975216009469@lid" if i == 0 else "",
+            chat_id="100000000000001@lid" if i == 0 else "",
             locked_facts=[{
                 "fact_id": "phone1", "label": "Business phone",
-                "value": "+17329837841", "source": "customer_text",
+                "value": "+15550100001", "source": "customer_text",
             }] if i == 0 else None,
         ))
 

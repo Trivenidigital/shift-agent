@@ -25,7 +25,7 @@ def _project(**updates):
     base = {
         "project_id": "F9001",
         "status": "intake_started",
-        "customer_phone": "+17329837841",
+        "customer_phone": "+15550100001",
         "created_at": now,
         "updated_at": now,
         "original_message_id": "m-1",
@@ -33,7 +33,7 @@ def _project(**updates):
         "fields": {
             "event_or_business_name": "Lakshmis Kitchen",
             "venue_or_location": "90 Brybar Dr St Johns FL",
-            "contact_info": "+17329837841",
+            "contact_info": "+15550100001",
             "notes": "",
         },
         "locked_facts": [

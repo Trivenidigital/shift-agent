@@ -92,7 +92,7 @@ flyer:
             "type": "cf_router_intercepted",
             "ts": current_ts,
             "reason": "flyer_primary_failed",
-            "chat_id": "17329837841@s.whatsapp.net",
+            "chat_id": "15550100001@s.whatsapp.net",
             "message_id": "wamid.current",
             "subprocess_rc": 2,
             "detail": "project_id=F0065; concept_generation_failed: exit=2 provider down",
@@ -101,7 +101,7 @@ flyer:
             "type": "cf_router_intercepted",
             "ts": old_ts,
             "reason": "flyer_primary_failed",
-            "chat_id": "17329837841@s.whatsapp.net",
+            "chat_id": "15550100001@s.whatsapp.net",
             "message_id": "wamid.old",
             "subprocess_rc": 2,
             "detail": "project_id=F0001; concept_generation_failed: exit=2 old provider down",
@@ -171,7 +171,7 @@ flyer:
                     {
                         "project_id": "F0102",
                         "status": "manual_edit_required",
-                        "customer_phone": "+17329837841",
+                        "customer_phone": "+15550100001",
                         "raw_request": "Create Special Biryani flyer",
                         "manual_review": {
                             "status": "queued",
@@ -237,7 +237,7 @@ def test_watchdog_write_repair_bundle_is_explicit_operator_action(tmp_path):
         "type": "cf_router_intercepted",
         "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "reason": "flyer_primary_failed",
-        "chat_id": "17329837841@s.whatsapp.net",
+        "chat_id": "15550100001@s.whatsapp.net",
         "message_id": "wamid.current",
         "subprocess_rc": 2,
         "detail": "project_id=F0065; concept_generation_failed: exit=2 provider down",
@@ -255,8 +255,8 @@ def test_watchdog_write_repair_bundle_is_explicit_operator_action(tmp_path):
                     {
                         "project_id": "F0065",
                         "status": "manual_edit_required",
-                        "customer_phone": "+17329837841",
-                        "raw_request": "Create flyer with contact +17329837841",
+                        "customer_phone": "+15550100001",
+                        "raw_request": "Create flyer with contact +15550100001",
                         "manual_review": {
                             "status": "queued",
                             "reason_code": "source_edit_generation_failed",
@@ -298,8 +298,8 @@ def test_watchdog_write_repair_bundle_is_explicit_operator_action(tmp_path):
     assert "bundle_written=" in result.stdout
     doc = json.loads((bundle_dir / "FRI20260523-0001.json").read_text(encoding="utf-8"))
     serialized = json.dumps(doc)
-    assert "+17329837841" not in serialized
-    assert "17329837841@s.whatsapp.net" not in serialized
+    assert "+15550100001" not in serialized
+    assert "15550100001@s.whatsapp.net" not in serialized
     assert doc["audit_excerpt"][0]["chat_id_hash"].startswith("sha256:")
     assert "chat_id" not in doc["audit_excerpt"][0]
     assert doc["project_excerpt"]["project_id"] == "F0065"
@@ -347,7 +347,7 @@ flyer:
                         "source_fingerprint": "fp-stale",
                         "ack_dedupe_key": "ack-stale",
                         "project_id": "F1234",
-                        "chat_id": "17329837841@s.whatsapp.net",
+                        "chat_id": "15550100001@s.whatsapp.net",
                         "chat_id_hash": "sha256:chat",
                         "sender_phone_hash": "",
                         "root_message_id": "wamid.stale",
@@ -533,7 +533,7 @@ flyer:
                         "source_fingerprint": "fp-actionctx",
                         "ack_dedupe_key": "ack-actionctx",
                         "project_id": "F1236",
-                        "chat_id": "17329837841@s.whatsapp.net",
+                        "chat_id": "15550100001@s.whatsapp.net",
                         "chat_id_hash": "sha256:chat",
                         "sender_phone_hash": "",
                         "root_message_id": "wamid.actionctx",
@@ -635,7 +635,7 @@ flyer:
                 "pending": [
                     {
                         "chat_id": "74290284261595@lid",
-                        "sender_phone": "+19803826497",
+                        "sender_phone": "+15550100004",
                         "customer": {"customer_id": "CUST0004", "business_name": "Chloe hair studio"},
                         "media_path": "/tmp/chloe.jpg",
                         "raw_request": "Existing flyer add the chsnge to this flyer",
@@ -708,7 +708,7 @@ flyer:
     now = datetime.now(timezone.utc)
     repair_ts = (now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
     chat_hash = recovery.sha256_text("74290284261595@lid")
-    other_chat_hash = recovery.sha256_text("17329837841@s.whatsapp.net")
+    other_chat_hash = recovery.sha256_text("15550100001@s.whatsapp.net")
     log.write_text(
         json.dumps(
             {
@@ -782,7 +782,7 @@ flyer:
                         "source_fingerprint": "fp-other",
                         "ack_dedupe_key": "ack-other",
                         "project_id": "F0098",
-                        "chat_id": "17329837841@s.whatsapp.net",
+                        "chat_id": "15550100001@s.whatsapp.net",
                         "chat_id_hash": other_chat_hash,
                         "sender_phone_hash": "",
                         "root_message_id": "wamid.other",
@@ -874,7 +874,7 @@ flyer:
         "type": "flyer_assets_delivered",
         "ts": delivered_ts,
         "project_id": "F0097",
-        "customer_phone": "+19803826497",
+        "customer_phone": "+15550100004",
         "asset_ids": ["A0001"],
         "outbound_message_ids": ["wamid.delivered"],
     }
@@ -963,7 +963,7 @@ flyer:
         "type": "cf_router_intercepted",
         "ts": failure_ts,
         "reason": "flyer_primary_project_created",
-        "chat_id": "201975216009469@lid",
+        "chat_id": "100000000000001@lid",
         "message_id": "wamid.old",
         "subprocess_rc": 0,
         "detail": (
@@ -1242,9 +1242,9 @@ def test_stale_manual_project_signal_uses_persisted_project_origin():
         {
             "project_id": "F0105",
             "status": "manual_edit_required",
-            "customer_phone": "+17329837841",
+            "customer_phone": "+15550100001",
             "customer_id": "CUST0001",
-            "chat_id": "201975216009469@lid",
+            "chat_id": "100000000000001@lid",
             "original_message_id": "wamid.f0105",
             "manual_review": {
                 "status": "queued",
@@ -1259,7 +1259,7 @@ def test_stale_manual_project_signal_uses_persisted_project_origin():
 
     assert signal is not None
     assert signal.failure_class == "concept_generation_failed"
-    assert signal.chat_id == "201975216009469@lid"
+    assert signal.chat_id == "100000000000001@lid"
     assert signal.evidence_quality == "strong"
     assert signal.provider_message_id == "wamid.f0105"
 
@@ -1272,7 +1272,7 @@ def test_stale_claimed_manual_project_signal_includes_claim_owner():
         {
             "project_id": "F0106",
             "status": "manual_edit_required",
-            "chat_id": "201975216009469@lid",
+            "chat_id": "100000000000001@lid",
             "original_message_id": "wamid.f0106",
             "manual_review": {
                 "status": "in_progress",
@@ -1339,8 +1339,8 @@ def test_worker_draft_operator_action_alert_is_audited_once(tmp_path):
             "source_fingerprint": "fp-f0105",
             "ack_dedupe_key": "ack-f0105",
             "project_id": "F0105",
-            "chat_id": "201975216009469@lid",
-            "chat_id_hash": recovery.sha256_text("201975216009469@lid"),
+            "chat_id": "100000000000001@lid",
+            "chat_id_hash": recovery.sha256_text("100000000000001@lid"),
             "sender_phone_hash": "",
             "root_message_id": "wamid.f0105",
             "provider_message_id_hash": "sha256:msg",
@@ -1399,8 +1399,8 @@ def test_failed_owner_alert_retries_after_cooldown(tmp_path):
             "source_fingerprint": "fp-retry",
             "ack_dedupe_key": "ack-retry",
             "project_id": "F0105",
-            "chat_id": "201975216009469@lid",
-            "chat_id_hash": recovery.sha256_text("201975216009469@lid"),
+            "chat_id": "100000000000001@lid",
+            "chat_id_hash": recovery.sha256_text("100000000000001@lid"),
             "sender_phone_hash": "",
             "root_message_id": "wamid.f0105",
             "provider_message_id_hash": "sha256:msg",
@@ -1462,8 +1462,8 @@ def test_customer_ack_missing_origin_suppression_alerts_in_customer_ack_mode(tmp
             "source_fingerprint": "fp-weak",
             "ack_dedupe_key": "ack-weak",
             "project_id": "F0105",
-            "chat_id": "201975216009469@lid",
-            "chat_id_hash": recovery.sha256_text("201975216009469@lid"),
+            "chat_id": "100000000000001@lid",
+            "chat_id_hash": recovery.sha256_text("100000000000001@lid"),
             "sender_phone_hash": "",
             "root_message_id": "",
             "provider_message_id_hash": "",

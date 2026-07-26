@@ -41,8 +41,8 @@ for _p in (SRC, SRC / "platform"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-PHONE = "+17329837841"
-CHAT = "17329837841@lid"
+PHONE = "+15550100001"
+CHAT = "15550100001@lid"
 
 # The verbatim 5th-reproduction production message (routing-validation P1-1).
 INCIDENT = (

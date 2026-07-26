@@ -17,7 +17,7 @@ from agents.flyer import recovery  # noqa: E402
 NOW = datetime(2026, 5, 23, 16, 0, tzinfo=timezone.utc)
 
 
-def _row(detail: str, *, reason: str = "flyer_primary_failed", chat_id: str = "17329837841@s.whatsapp.net") -> dict:
+def _row(detail: str, *, reason: str = "flyer_primary_failed", chat_id: str = "15550100001@s.whatsapp.net") -> dict:
     return {
         "type": "cf_router_intercepted",
         "ts": NOW.isoformat(),
@@ -71,7 +71,7 @@ def test_router_success_with_nonblank_ack_error_is_recovery_incident():
         "project_id=F0102; sender_role=employee; ack_message_id=mid; "
         "ack_error=concept_generation_failed: exit=2 {\"visual_qa_failed\": []}",
         reason="flyer_primary_project_created",
-        chat_id="201975216009469@lid",
+        chat_id="100000000000001@lid",
     )
     row["subprocess_rc"] = 0
 
@@ -551,18 +551,18 @@ def test_repeated_timer_cycles_do_not_resend_after_first_terminal_state():
 
 def test_write_repair_bundle_redacts_customer_identifiers(tmp_path):
     incident = _incident()
-    incident["chat_id_hash"] = recovery.sha256_text("17329837841@s.whatsapp.net")
-    incident["sender_phone_hash"] = recovery.sha256_text("+17329837841")
+    incident["chat_id_hash"] = recovery.sha256_text("15550100001@s.whatsapp.net")
+    incident["sender_phone_hash"] = recovery.sha256_text("+15550100001")
     bundle_path = recovery.write_repair_bundle(
         incident,
         tmp_path,
         audit_rows=[_row("project_id=F0065; concept_generation_failed: exit=2")],
-        project_excerpt={"project_id": "F0065", "customer_phone": "+17329837841"},
+        project_excerpt={"project_id": "F0065", "customer_phone": "+15550100001"},
     )
 
     doc = json.loads(bundle_path.read_text(encoding="utf-8"))
     serialized = json.dumps(doc)
-    assert "+17329837841" not in serialized
-    assert "17329837841@s.whatsapp.net" not in serialized
+    assert "+15550100001" not in serialized
+    assert "15550100001@s.whatsapp.net" not in serialized
     assert doc["incident_id"] == incident["incident_id"]
     assert doc["sanitized_context"]["chat_id_hash"].startswith("sha256:")

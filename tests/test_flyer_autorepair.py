@@ -17,7 +17,7 @@ def _project() -> FlyerProject:
     return FlyerProject(
         project_id="F0105",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
         original_message_id="wamid.F0105",
@@ -133,7 +133,7 @@ def test_autorepair_classifier_does_not_repair_unstructured_stray_item_blockers(
     project = FlyerProject(
         project_id="F0999",
         status="generating_concepts",
-        customer_phone="+17329837841",
+        customer_phone="+15550100001",
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
         original_message_id="wamid.generic",

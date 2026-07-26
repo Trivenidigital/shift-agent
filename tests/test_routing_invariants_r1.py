@@ -541,7 +541,7 @@ def test_f8_real_registry_menu_before_catering_no_collision(state_dir, monkeypat
 # ════════════════════════════════════════════════════════════════════════════
 LID = "200000000000001@lid"
 LID_DIGITS = "200000000000001"
-PHONE = "+17329837841"
+PHONE = "+15550100001"
 
 
 @pytest.fixture
@@ -638,10 +638,10 @@ def test_identity_legacy_L0005_L0006_shape_unchanged(actions_id):
     actions_mod, _, cache = actions_id
     _paired_cache(cache)
     _seed_leads(actions_mod, [
-        _lead("L0005", phone="+201975216009469", status="SENT_TO_CUSTOMER"),
-        _lead("L0006", phone="+201975216009469", status="SENT_TO_CUSTOMER"),
+        _lead("L0005", phone="+100000000000001", status="SENT_TO_CUSTOMER"),
+        _lead("L0006", phone="+100000000000001", status="SENT_TO_CUSTOMER"),
     ])
-    assert actions_mod.find_active_catering_lead_by_sender("+201975216009469", None) is None
+    assert actions_mod.find_active_catering_lead_by_sender("+100000000000001", None) is None
 
 
 def test_identity_repeated_lookup_idempotent(actions_id):

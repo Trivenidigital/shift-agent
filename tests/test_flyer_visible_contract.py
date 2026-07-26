@@ -22,7 +22,7 @@ def _fact(fact_id, value, *, label="", required=True):
     )
 
 
-def _project(facts, *, raw_request="", phone="+17329837841"):
+def _project(facts, *, raw_request="", phone="+15550100001"):
     has_name = any(getattr(f, "fact_id", "") == "business_name" for f in facts)
     if not has_name:
         facts = [_fact("business_name", BNAME, label="Business")] + facts
@@ -50,7 +50,7 @@ def test_placeholder_price_slot_blocks_revision():
 
 def test_every_item_699_with_placeholder_blocks():
     p = _project([_fact("pricing_structure", "Every item $6.99"), _fact("item:0:price", "$2", label="Price")])
-    out = _blockers(p, f"{BNAME} Every item [price] Tea $2 Location 90 Brybar Dr Contact +17329837841")
+    out = _blockers(p, f"{BNAME} Every item [price] Tea $2 Location 90 Brybar Dr Contact +15550100001")
     assert _has(out, "placeholder/garbled slot visible")
     # $6.99 absent from a substantive read -> absence blocker too
     assert _has(out, "requested price not visible: 6.99")
@@ -65,13 +65,13 @@ def test_garbled_bracket_token_rice_blocks():
 # ── 3: qualifier flip (Any -> Every) ────────────────────────────────────────────
 def test_any_item_must_not_become_every_item():
     p = _project([_fact("pricing_structure", "Any item $7.99")])
-    out = _blockers(p, f"{BNAME} Every item $7.99 Location 90 Brybar Dr Contact +17329837841")
+    out = _blockers(p, f"{BNAME} Every item $7.99 Location 90 Brybar Dr Contact +15550100001")
     assert _has(out, "pricing qualifier changed")
 
 
 def test_any_item_rendered_as_any_item_is_clean():
     p = _project([_fact("pricing_structure", "Any item $7.99")])
-    out = _blockers(p, f"{BNAME} Any item $7.99 Location 90 Brybar Dr St Johns FL Contact +17329837841")
+    out = _blockers(p, f"{BNAME} Any item $7.99 Location 90 Brybar Dr St Johns FL Contact +15550100001")
     assert not _has(out, "pricing qualifier changed")
     assert not _has(out, "unexpected price")
 
@@ -82,18 +82,18 @@ def test_invented_price_when_no_prices_requested_blocks():
     # be a time/rating/version). The no-price flyer's leaked "[price]" slot is what fails
     # closed in the bare-decimal case (test_garbled_bracket_token_rice_blocks).
     p = _project([])
-    out = _blockers(p, f"{BNAME} Punugulu $6.00 Samosa 1/- Location 90 Brybar Dr Contact +17329837841")
+    out = _blockers(p, f"{BNAME} Punugulu $6.00 Samosa 1/- Location 90 Brybar Dr Contact +15550100001")
     assert _has(out, "invented price visible")
 
 
 def test_no_price_request_with_address_phone_zip_does_not_false_positive():
     # The real MK-kitchen flyer text: address + ZIP + phone + times + "Est 2010" must NOT
     # be read as invented prices (the whole point of the strict price-token shape).
-    p = _project([], phone="+15713830763")
+    p = _project([], phone="+15550100005")
     out = _blockers(
         p,
         "MK kitchen Location 23596 prosperity ridge pl Ashburn Va 20148 "
-        "Contact +15713830763 Open 9 AM to 5 PM Est 2010",
+        "Contact +15550100005 Open 9 AM to 5 PM Est 2010",
     )
     assert out == [], f"unexpected blockers on a clean no-price flyer: {out}"
 
@@ -112,7 +112,7 @@ def test_dessert_locked_prices_block_invented_package_prices():
         p,
         f"{BNAME} Graduation Specials Celebration Sweet Box $29.99 "
         "Graduation Party Platter $49.99 Custom Treat Bags $12.99 each "
-        "Location 90 Brybar Dr Contact +17329837841",
+        "Location 90 Brybar Dr Contact +15550100001",
     )
     assert _has(out, "unexpected price visible")
     assert _has(out, "$29.99")
@@ -133,7 +133,7 @@ def test_dessert_locked_prices_allow_normalized_clean_render():
         p,
         f"{BNAME} Graduation Dessert Specials Mango tresleches half tray $75 "
         "Rasmalai tresleches half tray $70 Khalakhandh 100 count $100 "
-        "Location 90 Brybar Dr Contact +17329837841",
+        "Location 90 Brybar Dr Contact +15550100001",
     )
     assert out == [], f"clean dessert price render should pass: {out}"
 
@@ -144,7 +144,7 @@ def test_requested_badges_missing_blocks_when_substantive():
         [_fact("offer:0", "We cater both veg and non-veg", label="Offer")],
         raw_request="Daily thali specials. We cater. Delivery available. Zelle accepted.",
     )
-    out = _blockers(p, f"{BNAME} Daily Thali Specials Location 90 Brybar Dr St Johns FL Contact +17329837841")
+    out = _blockers(p, f"{BNAME} Daily Thali Specials Location 90 Brybar Dr St Johns FL Contact +15550100001")
     assert _has(out, "requested catering note not visible")
     assert _has(out, "requested delivery note not visible")
     assert _has(out, "requested payment note not visible")
@@ -158,7 +158,7 @@ def test_requested_badges_present_is_clean():
     out = _blockers(
         p,
         f"{BNAME} Daily Thali Specials We cater Delivery available Zelle accepted "
-        "Location 90 Brybar Dr Contact +17329837841",
+        "Location 90 Brybar Dr Contact +15550100001",
     )
     assert not _has(out, "note not visible")
 
@@ -181,7 +181,7 @@ def test_combo_price_corruption_blocks():
         _fact("offer:0", "Non veg combo $49.99 includes 2 non veg curries and 1 dessert", label="Offer"),
         _fact("offer:1", "Veg combo $39.99 includes 2 veg curries and 1 dessert", label="Offer"),
     ])
-    out = _blockers(p, f"{BNAME} Non Veg Combo $49.99 Veg Combo $99 Location 90 Brybar Dr Contact +17329837841")
+    out = _blockers(p, f"{BNAME} Non Veg Combo $49.99 Veg Combo $99 Location 90 Brybar Dr Contact +15550100001")
     assert _has(out, "unexpected price visible")
     assert _has(out, "$99")
 
@@ -193,7 +193,7 @@ def test_combo_correct_prices_is_clean():
     ])
     out = _blockers(
         p,
-        f"{BNAME} Non Veg Combo $49.99 Veg Combo $39.99 Location 90 Brybar Dr Contact +17329837841",
+        f"{BNAME} Non Veg Combo $49.99 Veg Combo $39.99 Location 90 Brybar Dr Contact +15550100001",
     )
     assert out == [], f"clean combo should pass: {out}"
 
@@ -201,14 +201,14 @@ def test_combo_correct_prices_is_clean():
 # ── 7: internal asset ids must not be visible ───────────────────────────────────
 def test_internal_asset_id_blocks():
     p = _project([_fact("item:0:price", "$8.99", label="Price")])
-    out = _blockers(p, f"{BNAME} B0002 Veg Combo $8.99 Location 90 Brybar Dr Contact +17329837841")
+    out = _blockers(p, f"{BNAME} B0002 Veg Combo $8.99 Location 90 Brybar Dr Contact +15550100001")
     assert _has(out, "internal id visible: B0002")
 
 
 # ── medium-word title leak ──────────────────────────────────────────────────────
 def test_raw_medium_word_title_leak_blocks():
     p = _project([])
-    out = _blockers(p, f"{BNAME} Daily Thali Specials Flyer Location 90 Brybar Dr Contact +17329837841")
+    out = _blockers(p, f"{BNAME} Daily Thali Specials Flyer Location 90 Brybar Dr Contact +15550100001")
     assert _has(out, "raw medium word")
 
 
@@ -220,7 +220,7 @@ def test_decimal_times_measurements_dates_are_not_prices():
     out = _blockers(
         p,
         f"{BNAME} Open 9.00 AM to 5.00 PM Bag 1.50 lb Date 06.07.2026 "
-        "Location 90 Brybar Dr Contact +17329837841",
+        "Location 90 Brybar Dr Contact +15550100001",
     )
     assert out == [], f"decimal time/measurement/date wrongly flagged: {out}"
 
@@ -231,7 +231,7 @@ def test_decimal_hour_ranges_are_not_prices():
     p = _project([])
     out = _blockers(
         p,
-        f"{BNAME} Open 4.00 - 7.00 PM Hours 10.00 to 2.00 PM Contact +17329837841 Location 90 Brybar Dr",
+        f"{BNAME} Open 4.00 - 7.00 PM Hours 10.00 to 2.00 PM Contact +15550100001 Location 90 Brybar Dr",
     )
     assert out == [], f"decimal hour range wrongly flagged: {out}"
 
@@ -241,14 +241,14 @@ def test_legit_bracket_labels_are_not_placeholders():
     out = _blockers(
         p,
         f"{BNAME} [Veg] Premium Thali $8.99 [Limited Time] [Weekend Special] "
-        "Location 90 Brybar Dr Contact +17329837841",
+        "Location 90 Brybar Dr Contact +15550100001",
     )
     assert not _has(out, "placeholder/garbled slot visible")
 
 
 def test_capitalized_price_slot_still_blocks():
     p = _project([_fact("item:0:price", "$8.99", label="Price")])
-    out = _blockers(p, f"{BNAME} Premium Thali [Price] Contact +17329837841")
+    out = _blockers(p, f"{BNAME} Premium Thali [Price] Contact +15550100001")
     assert _has(out, "placeholder/garbled slot visible")
 
 
@@ -256,16 +256,16 @@ def test_missing_requested_price_blocks_on_substantive_read():
     # Brand name read back (substantive) but the requested price is absent -> the flyer
     # omitted it -> fail closed (Codex 2026-06-07: single missing price must block).
     p = _project([_fact("item:0:price", "$8.99", label="Price")])
-    out = _blockers(p, f"{BNAME} Location 90 Brybar Dr St Johns FL Contact +17329837841 Open 4 PM to 7 PM")
+    out = _blockers(p, f"{BNAME} Location 90 Brybar Dr St Johns FL Contact +15550100001 Open 4 PM to 7 PM")
     assert _has(out, "requested price not visible")
 
 
 def test_thousands_separator_price_is_parsed_and_matched():
     # $1,299.00 must parse as one price (129900), not "$1,29" + "299.00".
     p = _project([_fact("offer:0", "Catering package $1,299.00 for 50 guests", label="Offer")])
-    clean = _blockers(p, f"{BNAME} Catering Package $1,299.00 for 50 guests Contact +17329837841")
+    clean = _blockers(p, f"{BNAME} Catering Package $1,299.00 for 50 guests Contact +15550100001")
     assert clean == [], f"thousands-separator price wrongly flagged: {clean}"
-    wrong = _blockers(p, f"{BNAME} Catering Package $99 for 50 guests Contact +17329837841")
+    wrong = _blockers(p, f"{BNAME} Catering Package $99 for 50 guests Contact +15550100001")
     assert _has(wrong, "unexpected price visible")
 
 
@@ -275,7 +275,7 @@ def test_negated_badge_is_not_required():
         [_fact("business_name", BNAME, label="Business")],
         raw_request="Daily thali specials. No delivery. We do not cater.",
     )
-    out = _blockers(p, f"{BNAME} Daily Thali Specials Location 90 Brybar Dr Contact +17329837841")
+    out = _blockers(p, f"{BNAME} Daily Thali Specials Location 90 Brybar Dr Contact +15550100001")
     assert not _has(out, "delivery note not visible")
     assert not _has(out, "catering note not visible")
 
@@ -287,13 +287,13 @@ def test_affirmative_badge_after_negation_is_still_required():
         [_fact("business_name", BNAME, label="Business")],
         raw_request="No delivery fee. Delivery available all week. Daily thali specials.",
     )
-    out = _blockers(p, f"{BNAME} Daily Thali Specials Location 90 Brybar Dr Contact +17329837841")
+    out = _blockers(p, f"{BNAME} Daily Thali Specials Location 90 Brybar Dr Contact +15550100001")
     assert _has(out, "delivery note not visible")
 
 
 def test_decimal_percent_is_not_a_price():
     p = _project([])
-    out = _blockers(p, f"{BNAME} 50.00% off everything Contact +17329837841 Location 90 Brybar Dr")
+    out = _blockers(p, f"{BNAME} 50.00% off everything Contact +15550100001 Location 90 Brybar Dr")
     assert not _has(out, "invented price")
 
 
@@ -303,7 +303,7 @@ def test_absence_skipped_when_business_name_not_read():
         [_fact("item:0:price", "$8.99", label="Price")],
         raw_request="We cater. Delivery available.",
     )
-    out = _blockers(p, "Some Other Header Location 90 Brybar Dr Contact +17329837841 Open 4 PM to 7 PM today")
+    out = _blockers(p, "Some Other Header Location 90 Brybar Dr Contact +15550100001 Open 4 PM to 7 PM today")
     assert not _has(out, "requested price not visible")
     assert not _has(out, "note not visible")
 
@@ -312,7 +312,7 @@ def test_absence_skipped_when_business_name_not_read():
 def _arm(monkeypatch, tmp_path):
     from agents.flyer import bare_render as BR
     monkeypatch.setenv("FLYER_VISIBLE_CONTRACT", "1")
-    monkeypatch.setenv("FLYER_VISIBLE_CONTRACT_ALLOWLIST", "+17329837841")
+    monkeypatch.setenv("FLYER_VISIBLE_CONTRACT_ALLOWLIST", "+15550100001")
     monkeypatch.setenv("FLYER_BARE_SKIP_VISUAL_QA", "1")  # broad QA off, exactly like the box
     monkeypatch.setattr(BR, "AUDIT_LOG_PATH", tmp_path / "decisions.log")
     return BR
@@ -325,7 +325,7 @@ def _patch_vision(monkeypatch, text, notes=None):
 
 def test_gate_blocks_on_violation_when_armed(monkeypatch, tmp_path):
     BR = _arm(monkeypatch, tmp_path)
-    _patch_vision(monkeypatch, f"{BNAME} Veg Combo $99 Contact +17329837841")
+    _patch_vision(monkeypatch, f"{BNAME} Veg Combo $99 Contact +15550100001")
     p = _project([_fact("offer:0", "Veg combo $39.99 includes 2 curries", label="Offer")])
     ok, blockers = BR.run_visual_qa(b"png-bytes", p)
     assert ok is False
@@ -344,7 +344,7 @@ def test_gate_unverified_sends_anyway_when_read_empty(monkeypatch, tmp_path):
 
 def test_gate_passes_clean_and_logs_pass(monkeypatch, tmp_path):
     BR = _arm(monkeypatch, tmp_path)
-    _patch_vision(monkeypatch, f"{BNAME} Premium Thali $8.99 Location 90 Brybar Dr Contact +17329837841 open 4 pm")
+    _patch_vision(monkeypatch, f"{BNAME} Premium Thali $8.99 Location 90 Brybar Dr Contact +15550100001 open 4 pm")
     p = _project([_fact("item:0:name", "Premium Thali", label="Item"), _fact("item:0:price", "$8.99", label="Price")])
     ok, _blk = BR.run_visual_qa(b"png-bytes", p)
     assert ok is True
@@ -364,7 +364,7 @@ def _capture_vision_model(monkeypatch, text):
     return captured
 
 
-def _regional_project(facts, *, preferred_language="en", phone="+17329837841"):
+def _regional_project(facts, *, preferred_language="en", phone="+15550100001"):
     from schemas import FlyerRequestFields
     has_name = any(getattr(f, "fact_id", "") == "business_name" for f in facts)
     if not has_name:
@@ -383,7 +383,7 @@ def test_gate_uses_regional_model_for_telugu_project(monkeypatch, tmp_path):
     # for a regional (Telugu) project, not the weak English default.
     from agents.flyer import visual_qa as VQ
     BR = _arm(monkeypatch, tmp_path)
-    captured = _capture_vision_model(monkeypatch, f"{BNAME} Special $8.99 Location 90 Brybar Dr Contact +17329837841")
+    captured = _capture_vision_model(monkeypatch, f"{BNAME} Special $8.99 Location 90 Brybar Dr Contact +15550100001")
     p = _regional_project([_fact("item:0:price", "$8.99", label="Price")], preferred_language="te")
     BR.run_visual_qa(b"png-bytes", p)
     assert captured.get("model") == VQ.REGIONAL_QA_MODEL
@@ -394,7 +394,7 @@ def test_gate_uses_default_model_for_english_project(monkeypatch, tmp_path):
     # English project: the gate's OCR stays on the default vision model.
     from agents.flyer import visual_qa as VQ
     BR = _arm(monkeypatch, tmp_path)
-    captured = _capture_vision_model(monkeypatch, f"{BNAME} Special $8.99 Location 90 Brybar Dr Contact +17329837841")
+    captured = _capture_vision_model(monkeypatch, f"{BNAME} Special $8.99 Location 90 Brybar Dr Contact +15550100001")
     p = _regional_project([_fact("item:0:price", "$8.99", label="Price")], preferred_language="en")
     BR.run_visual_qa(b"png-bytes", p)
     assert captured.get("model") == VQ.VISION_QA_MODEL
@@ -418,7 +418,7 @@ def test_gate_infra_error_sends_anyway(monkeypatch, tmp_path):
     # The referee module not being deployed (or any infra failure) must send-anyway +
     # log unverified, NEVER crash or hold the render (Codex 2026-06-07 BLOCKER).
     BR = _arm(monkeypatch, tmp_path)
-    _patch_vision(monkeypatch, f"{BNAME} Veg Combo $99 Contact +17329837841")  # would block if reached
+    _patch_vision(monkeypatch, f"{BNAME} Veg Combo $99 Contact +15550100001")  # would block if reached
 
     def _boom():
         raise ImportError("flyer_visible_contract not deployed")
@@ -438,7 +438,7 @@ def test_clean_flyer_passes():
     ])
     out = _blockers(
         p,
-        f"{BNAME} Premium Thali $8.99 Location 90 Brybar Dr St Johns FL Contact +17329837841 "
+        f"{BNAME} Premium Thali $8.99 Location 90 Brybar Dr St Johns FL Contact +15550100001 "
         "Schedule Wednesday to Saturday 4 PM to 7 PM",
     )
     assert out == [], f"clean flyer should pass: {out}"
