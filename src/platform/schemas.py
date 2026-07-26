@@ -5373,6 +5373,13 @@ class CateringQuoteSent(_BaseEntry):
     lead_id: str = Field(min_length=1)
     customer_phone: E164Phone
     outbound_message_id: str = Field(min_length=1)
+    # PR-4 (charter §4.3/§4.2): additive outbound audit identity. logical_turn_id
+    # links every send caused by one inbound; send_attempt_id is per-send (retries
+    # reuse it). Defaults keep pre-PR-4 rows/tests valid under extra="forbid".
+    # destination = customer_phone; provider id = outbound_message_id (present).
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
+    outcome: str = ""
 
 
 class CateringProposalsGenerated(_BaseEntry):
@@ -5381,12 +5388,24 @@ class CateringProposalsGenerated(_BaseEntry):
     proposal_set_id: str = Field(min_length=1)
     option_count: int = Field(ge=2, le=3)
     outbound_message_id: str = Field(min_length=1)
+    # PR-4 outbound audit identity (see CateringQuoteSent). provider id present
+    # (outbound_message_id); destination + outcome added.
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
+    transport_destination: str = ""
+    outcome: str = ""
 
 
 class CateringProposalGenerationFailed(_BaseEntry):
     type: Literal["catering_proposal_generation_failed"]
     lead_id: str = Field(min_length=1)
     proposal_set_id: str = ""
+    # PR-4 outbound audit identity (failed send row — see CateringQuoteSent).
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
+    transport_destination: str = ""
+    provider_message_id: str = ""
+    outcome: str = ""
     reason: Literal[
         "unknown_menu_item", "forbidden_customer_text", "bridge_unreachable",
         "lead_not_found", "menu_missing", "invalid_options",
@@ -5409,12 +5428,24 @@ class CateringProposalSelected(_BaseEntry):
     option_id: str = Field(pattern=r"^[1-3]$")
     customer_message_id: str = Field(min_length=1, max_length=200)
     finalize_exit_code: int = Field(ge=0)
+    # PR-4 outbound audit identity: this arbitration/decision row shares the turn's
+    # logical_turn_id + the accompanying customer-ack send_attempt_id so the whole
+    # turn links (the send itself is CateringCustomerAckSent). customer_message_id
+    # is the inbound id, i.e. the logical_turn_id source when no override is passed.
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
 
 
 class CateringProposalSelectionFailed(_BaseEntry):
     type: Literal["catering_proposal_selection_failed"]
     lead_id: str = Field(min_length=1)
     proposal_set_id: str = ""
+    # PR-4 outbound audit identity (failed send row — see CateringQuoteSent).
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
+    transport_destination: str = ""
+    provider_message_id: str = ""
+    outcome: str = ""
     reason: Literal[
         "no_sent_proposal", "ambiguous_selection", "invalid_selection",
         "lead_not_found", "finalize_exit_2", "finalize_exit_4",
@@ -5434,6 +5465,12 @@ class CateringRecomposedMenuSent(_BaseEntry):
     section_count: int = Field(ge=1, le=9)
     item_count: int = Field(ge=1, le=60)
     outbound_message_id: str = Field(min_length=1)
+    # PR-4 outbound audit identity (see CateringQuoteSent). provider id present
+    # (outbound_message_id); destination + outcome added.
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
+    transport_destination: str = ""
+    outcome: str = ""
 
 
 class CateringRecomposeClarifySent(_BaseEntry):
@@ -5447,6 +5484,12 @@ class CateringRecomposeClarifySent(_BaseEntry):
     ]
     outbound_message_id: str = ""
     detail: str = Field(default="", max_length=2000)
+    # PR-4 outbound audit identity (see CateringQuoteSent). provider id present
+    # (outbound_message_id); destination + outcome added.
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
+    transport_destination: str = ""
+    outcome: str = ""
 
 
 # v0.3 NEW audit classes — idempotency anchors + state-transition coverage
@@ -5475,6 +5518,12 @@ class CateringQuoteAttempted(_BaseEntry):
     original_message_id: str = Field(min_length=1)
     code: str = Field(pattern=_CODE_FULL_PATTERN)
     bridge_post_outcome: Literal["success", "failed", "unknown"] = "unknown"
+    # PR-4 (charter §4.3/§4.2): the send_attempt_id is minted at this ATTEMPTED
+    # anchor and REUSED across a reconcile-retry of the SAME logical send (the
+    # retry tail-scans this anchor and reuses its id); a genuinely new turn mints
+    # a new one. logical_turn_id = the owner's approval inbound id when supplied.
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
 
 
 class CateringOwnerApprovalCardAttempted(_BaseEntry):
@@ -5488,6 +5537,21 @@ class CateringOwnerApprovalCardAttempted(_BaseEntry):
     original_message_id: str = Field(min_length=1)
 
 
+class CateringOwnerApprovalCardSent(_BaseEntry):
+    """PR-4 (charter §4.3): the owner-approval card (create-catering-lead F6 flow)
+    was delivered to the owner self-chat. Previously this OWNER send had NO audit
+    row at all (only stdout `card_sent`) — the most severe §4.3 gap. Distinct
+    OWNER-side outbound identity from the customer ack of the same inbound: its own
+    send_attempt_id, sharing the inbound's logical_turn_id."""
+    type: Literal["catering_owner_approval_card_sent"]
+    lead_id: str = Field(min_length=1)
+    owner_card_outbound_id: str = Field(min_length=1)
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
+    transport_destination: str = ""      # owner self-chat jid
+    outcome: str = ""
+
+
 class CateringOwnerApprovalCardFailed(_BaseEntry):
     """v0.3: bridge POST for owner-approval card failed (timeout, 5xx, etc.).
     Distinguishes 'card sent' from 'card failed' in the audit log."""
@@ -5495,6 +5559,11 @@ class CateringOwnerApprovalCardFailed(_BaseEntry):
     lead_id: str = Field(min_length=1)
     reason: str = Field(min_length=1, max_length=500)
     bridge_error: str = Field(default="", max_length=2000)
+    # PR-4 outbound audit identity (failed OWNER send row).
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
+    transport_destination: str = ""
+    outcome: str = ""
 
 
 class CateringOwnerApprovalCardSkipped(_BaseEntry):
@@ -5575,6 +5644,11 @@ class CateringQuoteSentLeadMissing(_BaseEntry):
     customer_phone_at_approve: E164Phone
     outbound_message_id: str = Field(min_length=1)
     detail: str = Field(default="", max_length=500)
+    # PR-4 (charter §4.3): the customer DID receive the quote (outbound_message_id
+    # present), so this divergence row IS a real customer-send record — stamp the
+    # same send_attempt_id as the quote attempt (when available) + logical_turn_id.
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
 
 
 class CateringQuoteSkillFailed(_BaseEntry):
@@ -5662,6 +5736,12 @@ class CateringMenuFinalized(_BaseEntry):
         description="Bridge messageId of the customer finalize message. Optional"
                     " for backward-compat with PR-CF1-vintage rows.",
     )
+    # PR-4 outbound audit identity (OWNER-facing send row — see CateringQuoteSent).
+    # Distinct from the customer rows: provider id = owner_card_outbound_id, outcome
+    # = the existing `outcome` literal; destination = owner self-chat jid.
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
+    transport_destination: str = ""
 
 
 class CateringCustomerAckSent(_BaseEntry):
@@ -5681,6 +5761,11 @@ class CateringCustomerAckSent(_BaseEntry):
     customer_jid: str = Field(min_length=1, max_length=200)
     outbound_message_id: str = Field(min_length=1)
     lead_id: str = Field(default="", description="optional lead linkage when ack follows lead creation")
+    # PR-4 outbound audit identity (see CateringQuoteSent). destination = customer_jid;
+    # provider id = outbound_message_id (present). outcome added.
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
+    outcome: str = ""
 
 
 class CateringCustomerAckFailed(_BaseEntry):
@@ -5697,6 +5782,13 @@ class CateringCustomerAckFailed(_BaseEntry):
     customer_jid: str = Field(min_length=1, max_length=200)
     reason: Literal["bridge_unreachable", "empty_response", "bad_input"]
     detail: str = Field(default="", max_length=2000)
+    # PR-4 outbound audit identity (failed send row — see CateringQuoteSent).
+    # No outbound_message_id here (metadata-only failure row); provider_message_id
+    # stays "" so the "no fabricated id" invariant holds.
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
+    provider_message_id: str = ""
+    outcome: str = ""
 
 
 class CateringDispatcherWatchdogFired(_BaseEntry):
@@ -6414,6 +6506,11 @@ class FrontBrainReplyComposed(_BaseEntry):
     verdict: Literal["passed"] = "passed"
     lint_classes_checked: list[str] = Field(default_factory=list, max_length=10)
     template_fallback: bool = False
+    # PR-4 outbound audit identity. logical_turn_id is the #643 per-inbound turn id
+    # when that context is present (else ""); send_attempt_id is per screened send.
+    # Destination stays hashed-only (chat_key_hash) by design; verdict is the outcome.
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
 
 
 class FrontBrainOutboundRefused(_BaseEntry):
@@ -6857,6 +6954,7 @@ LogEntry = Annotated[
         # v0.3: idempotency anchors + state-transition coverage
         Annotated[CateringQuoteAttempted, Tag("catering_quote_attempted")],
         Annotated[CateringOwnerApprovalCardAttempted, Tag("catering_owner_approval_card_attempted")],
+        Annotated[CateringOwnerApprovalCardSent, Tag("catering_owner_approval_card_sent")],
         Annotated[CateringOwnerApprovalCardFailed, Tag("catering_owner_approval_card_failed")],
         Annotated[CateringOwnerApprovalCardSkipped, Tag("catering_owner_approval_card_skipped")],
         Annotated[CateringOwnerEdited, Tag("catering_owner_edited")],
@@ -7192,6 +7290,7 @@ __all__ = [
     "CateringRecomposedMenuSent", "CateringRecomposeClarifySent",
     # v0.3 catering audit classes
     "CateringQuoteAttempted", "CateringOwnerApprovalCardAttempted",
+    "CateringOwnerApprovalCardSent",
     "CateringOwnerApprovalCardFailed", "CateringOwnerApprovalCardSkipped",
     "CateringOwnerEdited", "CateringDeclineAttempted",
     # PR-D1

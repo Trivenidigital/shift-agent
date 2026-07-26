@@ -1287,7 +1287,7 @@ def test_bare_flyer_intent_outranks_stale_catering_lead_when_legacy_generation_o
         "owner_approval_code": "#GAJSA",
         "status": "AWAITING_OWNER_APPROVAL",
     })
-    monkeypatch.setattr(actions, "send_canonical_followup_reply", lambda _chat_id, lead_id: catering_replies.append(lead_id) or True)
+    monkeypatch.setattr(actions, "send_canonical_followup_reply", lambda _chat_id, lead_id, message_id="": catering_replies.append(lead_id) or True)
     monkeypatch.setattr(actions, "audit_intercepted", lambda **_kwargs: None)
 
     def fake_spawn(chat_id, brief, **kwargs):

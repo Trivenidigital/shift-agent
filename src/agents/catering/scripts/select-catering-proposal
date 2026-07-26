@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -104,6 +105,19 @@ def _proposal_sequence(row: CateringProposalSet) -> int:
     return int(match.group(1)) if match else -1
 
 
+# PR-4 (charter §4.3/§4.2): outbound audit identity for the current invocation.
+# Set once in main() from CLI args; read by the audit emitters so every row for
+# this selection turn shares one logical_turn_id + the turn's send_attempt_id (the
+# customer-facing send is the ack). A mutable dict avoids the `global` statement.
+_RUN_IDENTITY = {"logical_turn_id": "", "send_attempt_id": "", "transport_destination": ""}
+
+
+def _set_run_identity(*, logical_turn_id: str, send_attempt_id: str, transport_destination: str) -> None:
+    _RUN_IDENTITY["logical_turn_id"] = logical_turn_id
+    _RUN_IDENTITY["send_attempt_id"] = send_attempt_id
+    _RUN_IDENTITY["transport_destination"] = transport_destination
+
+
 def _append_audit(entry) -> None:
     adapter = TypeAdapter(type(entry))
     with FileLock(LOG_LOCK):
@@ -120,6 +134,8 @@ def _audit_selected(lead_id: str, proposal_set_id: str, option_id: str, customer
             option_id=option_id,
             customer_message_id=customer_message_id,
             finalize_exit_code=rc,
+            logical_turn_id=_RUN_IDENTITY["logical_turn_id"],
+            send_attempt_id=_RUN_IDENTITY["send_attempt_id"],
         )
     )
 
@@ -133,6 +149,10 @@ def _audit_failed(lead_id: str, reason: str, detail: str = "", proposal_set_id: 
             proposal_set_id=proposal_set_id,
             reason=reason,
             detail=detail[:2000],
+            logical_turn_id=_RUN_IDENTITY["logical_turn_id"],
+            send_attempt_id=_RUN_IDENTITY["send_attempt_id"],
+            transport_destination=_RUN_IDENTITY["transport_destination"],
+            outcome=reason,
         )
     )
 
@@ -151,6 +171,9 @@ def _audit_ack(lead_id: str, customer_jid: str, ok: bool, message_id_or_error: s
                 customer_jid=customer_jid,
                 outbound_message_id=message_id_or_error,
                 lead_id=lead_id,
+                logical_turn_id=_RUN_IDENTITY["logical_turn_id"],
+                send_attempt_id=_RUN_IDENTITY["send_attempt_id"],
+                outcome="sent",
             ))
         else:
             _append_audit(CateringCustomerAckFailed(
@@ -159,6 +182,9 @@ def _audit_ack(lead_id: str, customer_jid: str, ok: bool, message_id_or_error: s
                 customer_jid=customer_jid,
                 reason="bridge_unreachable",
                 detail=str(message_id_or_error)[:2000],
+                logical_turn_id=_RUN_IDENTITY["logical_turn_id"],
+                send_attempt_id=_RUN_IDENTITY["send_attempt_id"],
+                outcome="bridge_unreachable",
             ))
     except Exception as e:  # noqa: BLE001 - audit is best-effort
         sys.stderr.write(f"WARN: selection-ack audit emit failed (non-fatal): {type(e).__name__}: {e}\n")
@@ -484,7 +510,8 @@ def _fail_claim_after_finalize_exception(
         return options
 
 
-def _finalize(code: str, customer_message_id: str, selected_items: list[dict], total: int) -> int:
+def _finalize(code: str, customer_message_id: str, selected_items: list[dict], total: int,
+              logical_turn_id: str) -> int:
     cmd = [
         str(PYTHON_BIN),
         str(FINALIZE_BIN),
@@ -492,6 +519,10 @@ def _finalize(code: str, customer_message_id: str, selected_items: list[dict], t
         code,
         "--customer-message-id",
         customer_message_id,
+        # PR-4: forward the turn's logical id so the OWNER-card finalize row links
+        # to the SAME inbound as the customer selection/ack rows.
+        "--logical-turn-id",
+        logical_turn_id,
         "--selected-items-json",
         json.dumps(selected_items),
         "--quote-total-usd",
@@ -535,8 +566,19 @@ def main() -> int:
     parser.add_argument("--lead-id", required=True)
     parser.add_argument("--customer-jid", required=True)
     parser.add_argument("--customer-message-id", required=True)
+    # PR-4: logical_turn_id = the inbound native message id (charter §4.2). Defaults
+    # to --customer-message-id (this path's inbound id) when the caller omits it.
+    parser.add_argument("--logical-turn-id", default="")
     parser.add_argument("--selection-text", required=True)
     args = parser.parse_args()
+
+    # PR-4: one logical_turn_id for the turn + one send_attempt_id for the customer
+    # send(s) this invocation makes (retries reuse it).
+    _set_run_identity(
+        logical_turn_id=(args.logical_turn_id or args.customer_message_id),
+        send_attempt_id=uuid.uuid4().hex,
+        transport_destination=args.customer_jid,
+    )
 
     try:
         proposal = _latest_proposal_for_lead(args.lead_id)
@@ -587,7 +629,8 @@ def main() -> int:
         return claim.exit_code
 
     try:
-        finalize_rc = _finalize(code, args.customer_message_id, claim.selected_items, claim.quote_total_usd)
+        finalize_rc = _finalize(code, args.customer_message_id, claim.selected_items, claim.quote_total_usd,
+                                _RUN_IDENTITY["logical_turn_id"])
     except Exception as e:
         detail = f"{type(e).__name__}: {e}"
         options = _fail_claim_after_finalize_exception(claim.proposal_set_id, claim.option_id, detail)

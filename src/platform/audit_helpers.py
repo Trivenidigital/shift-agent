@@ -97,6 +97,8 @@ def log_quote_sent_lead_missing_best_effort(
     outbound_message_id: str,
     detail: str = "",
     log_path: Optional[Path] = None,
+    logical_turn_id: str = "",
+    send_attempt_id: str = "",
 ) -> None:
     """Best-effort emission of state-vs-outbound divergence audit row.
     Same swallow-all-errors contract as log_config_load_failed_best_effort.
@@ -104,6 +106,10 @@ def log_quote_sent_lead_missing_best_effort(
     Caller (apply-catering-owner-decision post-bridge re-load) MUST also
     fire Pushover priority=2 — this audit row is the durable trace, but
     the high-priority alert is the operator-visibility surface.
+
+    PR-4: the customer DID receive the quote (outbound_message_id present), so this
+    is a real customer-send record — carry the SAME send_attempt_id as the quote
+    attempt (when the caller has it) + the logical_turn_id.
     """
     try:
         entry = CateringQuoteSentLeadMissing(
@@ -114,6 +120,8 @@ def log_quote_sent_lead_missing_best_effort(
             customer_phone_at_approve=customer_phone_at_approve,
             outbound_message_id=outbound_message_id,
             detail=detail[:500],
+            logical_turn_id=logical_turn_id,
+            send_attempt_id=send_attempt_id,
         )
         line = TypeAdapter(CateringQuoteSentLeadMissing).dump_json(entry).decode("utf-8")
         _append_best_effort(line, log_path or _default_log_path())

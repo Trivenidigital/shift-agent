@@ -331,7 +331,7 @@ def test_armed_r2b1_fires_first_and_escape_gate_never_invoked(monkeypatch):
                         lambda **kw: {"decision": "catering_amendment", "cause": "ok", "called": True, "latency_ms": 30})
     monkeypatch.setattr(hooks_mod.catering_amendments, "capture_branch_b_amendment",
                         lambda **kw: CaptureResult(ok=True, amendment_id="A0007", idempotent=False))
-    monkeypatch.setattr(actions_mod, "send_canonical_followup_reply", lambda cid, lid: True)
+    monkeypatch.setattr(actions_mod, "send_canonical_followup_reply", lambda cid, lid, message_id="": True)
 
     # Count both the escape gate and classify_catering — BOTH must be untouched.
     escape_calls = {"n": 0}

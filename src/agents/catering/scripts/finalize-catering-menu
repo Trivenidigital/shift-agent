@@ -55,6 +55,7 @@ import json
 import os
 import re
 import sys
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -440,6 +441,7 @@ def _recent_resend_for(lead_id: str, now: datetime) -> bool:
 
 def _emit_quote_mismatch_audit(
     *, now: datetime, args, items, server_total: int, llm_total: int, price_drift: bool,
+    logical_turn_id: str, send_attempt_id: str,
 ) -> None:
     """Audit-only: writes CateringMenuFinalized with outcome='rejected_quote_mismatch'.
 
@@ -479,6 +481,11 @@ def _emit_quote_mismatch_audit(
                     price_drift_detected=price_drift,
                     prior_total_usd=None, prior_item_count=None,
                     customer_message_id=args.customer_message_id,  # PR-CF2
+                    # PR-4: no owner send on rejection → transport_destination="";
+                    # outcome is the existing rejected_quote_mismatch literal.
+                    logical_turn_id=logical_turn_id,
+                    send_attempt_id=send_attempt_id,
+                    transport_destination="",
                 ).model_dump_json(),
             )
     except Exception as e:
@@ -572,6 +579,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--code", required=True)
     parser.add_argument("--customer-message-id", required=True)
+    # PR-4: logical_turn_id = the inbound native message id (charter §4.2). Defaults
+    # to --customer-message-id when omitted. This OWNER-card send links to the same
+    # inbound as the customer selection/ack rows via the shared logical_turn_id.
+    parser.add_argument("--logical-turn-id", default="")
     # PR-CF1b 2026-05-12: --selected-items-json and --quote-total-usd are no
     # longer required when --auto-default is set. The script builds the
     # basket server-side via _build_default_basket().
@@ -591,6 +602,11 @@ def main() -> int:
              "catering-menu.json instead.",
     )
     args = parser.parse_args()
+
+    # PR-4: one logical_turn_id for the turn + one send_attempt_id for the OWNER
+    # card send this invocation makes (an internal retry would reuse it).
+    logical_turn_id = args.logical_turn_id or args.customer_message_id
+    send_attempt_id = uuid.uuid4().hex
 
     # Cache config once
     cfg = _load_config()
@@ -638,6 +654,7 @@ def main() -> int:
             now=now, args=args, items=items,
             server_total=server_total, llm_total=llm_total,
             price_drift=price_drift,
+            logical_turn_id=logical_turn_id, send_attempt_id=send_attempt_id,
         )
         sys.stderr.write(
             f"quote total mismatch: server={server_total} llm={llm_total} "
@@ -870,6 +887,12 @@ def main() -> int:
                     prior_total_usd=prior_total,
                     prior_item_count=prior_item_count,
                     customer_message_id=args.customer_message_id,  # PR-CF2
+                    # PR-4 OWNER-card audit identity: distinct from the customer
+                    # rows (provider id = owner_card_outbound_id), linked by the
+                    # shared logical_turn_id. Destination = the owner self-chat jid.
+                    logical_turn_id=logical_turn_id,
+                    send_attempt_id=send_attempt_id,
+                    transport_destination=cfg.owner.self_chat_jid or "",
                 ).model_dump_json(),
             )
     except Exception as e:

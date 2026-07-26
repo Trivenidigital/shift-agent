@@ -343,7 +343,7 @@ def wire(hooks, actions):
         return False, f"exit={rc} stderr={err[:500]}"
     actions.trigger_create_catering_lead = _trigger_create_lead
 
-    def _send_canonical(chat_id, lead_id):
+    def _send_canonical(chat_id, lead_id, message_id=""):
         template = (f"Your inquiry {lead_id} is with the owner for review. "
                     f"They'll send a final quote within 24 hours. "
                     f"Reply here if you need to adjust the inquiry.")

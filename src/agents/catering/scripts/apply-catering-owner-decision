@@ -40,6 +40,7 @@ import os
 import re
 import sys
 import unicodedata
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -358,6 +359,10 @@ def main() -> int:
     ap.add_argument("--decision", required=True, choices=["approve", "reject", "edit"])
     ap.add_argument("--edit-text", default="", help="required when decision=edit")
     ap.add_argument("--reason", default="", help="optional rejection reason")
+    # PR-4 (charter §4.2): the owner's approval inbound message id — the logical
+    # turn that caused the customer quote delivery. Defaults to "" (this path had
+    # no inbound-id arg previously); cf-router F8 passes it.
+    ap.add_argument("--logical-turn-id", default="")
     ap.add_argument(
         "--quote-text-stdin", action="store_true",
         help="PR-B v3: read drafted customer quote text from stdin (required "
@@ -413,6 +418,13 @@ def main() -> int:
     if not code.startswith("#") or len(code) != 6:
         sys.stderr.write(f"invalid code format (expected #XXXXX): {code!r}\n")
         return EXIT_INVALID_INPUT
+
+    # PR-4 (charter §4.3/§4.2): outbound audit identity for the customer quote send.
+    # logical_turn_id = the owner's approval inbound id (when supplied). send_attempt_id
+    # is resolved at the ATTEMPTED anchor (below): reused from a prior anchor on a
+    # reconcile-retry of the SAME logical send, freshly minted otherwise.
+    logical_turn_id = args.logical_turn_id.strip()
+    send_attempt_id = ""
 
     # Load config — PR-D2 commit 1: load_yaml_model + best-effort audit
     try:
@@ -718,6 +730,17 @@ def main() -> int:
         # tail-scan finds anchor=unknown → re-attempts bridge (Case C row 3
         # in commit 4's retry-state-machine).
         if args.decision == "approve":
+            # PR-4: resolve the send_attempt_id BEFORE the first anchor write. A
+            # reconcile-retry of the same logical send re-enters here after a prior
+            # anchor (unknown/failed) exists but no quote_sent — reuse that anchor's
+            # id so retries share ONE send identity (charter: retries reuse it). A
+            # genuinely new turn (no prior anchor) mints a fresh id.
+            _prior_anchor = _tail_scan_anchor(LOG_PATH, code)
+            send_attempt_id = (
+                _prior_anchor.send_attempt_id
+                if (_prior_anchor is not None and _prior_anchor.send_attempt_id)
+                else uuid.uuid4().hex
+            )
             _append_log_with_outer_leadslock(
                 TypeAdapter(CateringQuoteAttempted),
                 CateringQuoteAttempted(
@@ -726,6 +749,8 @@ def main() -> int:
                     original_message_id=f"_no_inbound_msg_{lead.lead_id}",  # R5 BLOCKER fix: min_length=1
                     code=code,
                     bridge_post_outcome="unknown",
+                    logical_turn_id=logical_turn_id,
+                    send_attempt_id=send_attempt_id,
                 ),
             )
 
@@ -778,6 +803,8 @@ def main() -> int:
                         original_message_id=f"_no_inbound_msg_{lead_id_for_output}",  # R5 BLOCKER fix
                         code=code,
                         bridge_post_outcome="failed",
+                        logical_turn_id=logical_turn_id,
+                        send_attempt_id=send_attempt_id,  # PR-4: same id → retry reuses it
                     ),
                 )
         except Exception as _e:  # noqa: BLE001 — best-effort audit
@@ -850,6 +877,10 @@ def main() -> int:
                 outbound_message_id=mid_or_err,
                 detail=divergence_msg[:500],
                 log_path=LOG_PATH,
+                # PR-4: reuse the SAME send_attempt_id as this quote's anchors, and
+                # the owner-approval logical_turn_id — the customer got this send.
+                logical_turn_id=logical_turn_id,
+                send_attempt_id=send_attempt_id,
             )
             try:
                 import subprocess as _sp
@@ -883,6 +914,12 @@ def main() -> int:
                 lead_id=lead_id_for_output,
                 customer_phone=store.leads[matched_idx].customer_phone,
                 outbound_message_id=mid_or_err,
+                # PR-4: same logical_turn_id + send_attempt_id as the anchors — a
+                # reconcile-retry that finally delivers reuses the anchor's id.
+                # (destination = customer_phone above; no separate transport field.)
+                logical_turn_id=logical_turn_id,
+                send_attempt_id=send_attempt_id,
+                outcome="sent",
             ),
         )
 
@@ -895,6 +932,8 @@ def main() -> int:
                 original_message_id=f"_no_inbound_msg_{lead_id_for_output}",  # R5 BLOCKER fix
                 code=code,
                 bridge_post_outcome="success",
+                logical_turn_id=logical_turn_id,
+                send_attempt_id=send_attempt_id,  # PR-4
             ),
         )
 
