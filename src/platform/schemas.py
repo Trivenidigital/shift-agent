@@ -5393,6 +5393,11 @@ class CateringProposalGenerationFailed(_BaseEntry):
         # PR-D mix-and-match recomposition (fail-closed before send): the merged
         # option's rendered sections did not exactly match the parsed request.
         "recompose_sections_mismatch",
+        # Turn-arbitration 2026-07-26 (menu-quality guard): a mixed veg/non-veg
+        # event would have received a degenerate, single-diet or single-section
+        # proposal despite the menu offering the variety. Fail closed (notify
+        # owner, no send) rather than deliver an incoherent menu.
+        "insufficient_section_balance",
     ]
     detail: str = Field(default="", max_length=2000)
 

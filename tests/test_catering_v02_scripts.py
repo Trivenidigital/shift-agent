@@ -107,13 +107,16 @@ def _patch_paths_in_script(script_text: str, env_dir: Path) -> str:
 
 def _run_create(env_dir, bridge_port, fields, customer_phone="+19045550199",
                 customer_name="Priya", raw="Need catering 50ppl Saturday",
-                message_id="msg_1", now_override=None, customer_tz=None):
+                message_id="msg_1", now_override=None, customer_tz=None,
+                suppress_customer_ack=False):
     """Invoke create-catering-lead via a wrapper that overrides the hardcoded paths.
 
     now_override: if set (tz-aware datetime ISO string), patches mod.customer_now
                   so test sees deterministic "today" in customer tz.
     customer_tz:  if set, rewrites env_dir's config.yaml to use this tz before
                   the script runs. Composes with now_override.
+    suppress_customer_ack: if True, pass --suppress-customer-ack (owner card only,
+                  no F14 customer proposal).
     """
     if customer_tz is not None:
         cfg_path = env_dir / "config.yaml"
@@ -123,6 +126,7 @@ def _run_create(env_dir, bridge_port, fields, customer_phone="+19045550199",
 
     now_iso = now_override.isoformat() if hasattr(now_override, "isoformat") else now_override
     use_now_override = now_override is not None
+    extra_flags = ["--suppress-customer-ack"] if suppress_customer_ack else []
     wrapper = f"""
 import os, sys
 sys.argv = [
@@ -132,7 +136,7 @@ sys.argv = [
     "--raw-inquiry", {raw!r},
     "--message-id", {message_id!r},
     "--fields-json", {json.dumps(fields)!r},
-]
+] + {extra_flags!r}
 import pathlib
 import importlib.machinery
 import importlib.util
@@ -272,6 +276,38 @@ def test_create_lead_writes_state_and_sends_card(env_dir, bridge_server):
     owner_cards = _requests_to(BridgeStub.requests, "19045550100@s.whatsapp.net")
     assert len(owner_cards) == 1
     assert out["approval_code"] in owner_cards[0]["message"]
+
+
+def test_create_lead_suppress_customer_ack_skips_f14_keeps_owner_card(env_dir, bridge_server):
+    """Turn-arbitration 2026-07-26: --suppress-customer-ack sends the owner approval
+    card but NOT the F14 customer proposal, so cf-router can make the immediately-
+    generated tiered set the customer's single bounded response."""
+    port, BridgeStub = bridge_server
+    fields = {"headcount": 50, "event_date": (date.today() + timedelta(days=30)).isoformat()}
+    r = _run_create(env_dir, port, fields, suppress_customer_ack=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["card_sent"] is True
+    assert out["proposal_sent"] is False and out.get("proposal_suppressed") is True
+    # Owner card sent; NO customer F14 proposal.
+    assert len(_requests_to(BridgeStub.requests, "19045550100@s.whatsapp.net")) == 1
+    assert _requests_to(BridgeStub.requests, "19045550199@s.whatsapp.net") == []
+    # Lead still fully persisted (customer never left without a record).
+    leads = _read_leads(env_dir)
+    assert len(leads["leads"]) == 1 and leads["leads"][0]["status"] == "AWAITING_OWNER_APPROVAL"
+
+
+def test_create_lead_default_still_sends_customer_ack(env_dir, bridge_server):
+    """Default (no flag) preserves the F14 customer proposal — one owner card + one
+    customer ack."""
+    port, BridgeStub = bridge_server
+    fields = {"headcount": 50, "event_date": (date.today() + timedelta(days=30)).isoformat()}
+    r = _run_create(env_dir, port, fields)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["proposal_sent"] is True
+    assert len(_requests_to(BridgeStub.requests, "19045550100@s.whatsapp.net")) == 1
+    assert len(_requests_to(BridgeStub.requests, "19045550199@s.whatsapp.net")) == 1
 
 
 def test_create_lead_idempotent_replay(env_dir, bridge_server):

@@ -72,10 +72,12 @@ Apply this matrix in priority order:
    matches an active catering lead, delegate to
    `handle_catering_owner_approval`.
 2. **Proposal-selection path** — if `sender_role != "owner"` AND the sender
-   has an active lead AND the proposal-selection classifier matches AND a
-   selectable `SENT` proposal set exists, invoke/select the
-   `select-catering-proposal` handler/script with lead id, customer jid,
-   message id, and selection text.
+   has an active lead AND a selectable `SENT` proposal set exists AND the message
+   NAMES a sent option (an explicit selection, OR a compound "I like Option 2 —
+   send me quote and prices"), invoke/select the `select-catering-proposal`
+   handler/script with lead id, customer jid, message id, and selection text.
+   This path takes precedence over proposal-request regeneration: naming an
+   already-sent option is a SELECTION, never a request for new menus.
 3. **Proposal-request path** — if `sender_role != "owner"` AND the sender has
    an active lead AND the proposal-request classifier matches: PLAIN proposal
    generation is handled DETERMINISTICALLY by cf-router
@@ -112,6 +114,13 @@ catering lead exists for the sender AND a selectable `SENT` proposal set exists:
 - Regex examples: `(?i)\b(option|proposal)\s*[123]\b`,
   `(?i)\b(first|second|third)\s+option\b`,
   `(?i)\b(balanced|premium|classic)\b`.
+- **Naming a sent option is a SELECTION even without an action verb, and even
+  when bundled with a pricing/quote ask.** A compound message like "I like
+  Option 2. Can you send me quote and prices." is ONE selection: record Option 2
+  once, then advance to the owner-approval/quote path. "Send me quote/prices" is
+  a pricing-advance signal, NOT a request for new menus — do NOT re-send or
+  regenerate the proposal options. cf-router already applies this precedence
+  deterministically before this skill runs; if you reach it, mirror it.
 - Use `select-catering-proposal` with lead id, customer jid, message id, and
   selection text. Do not send a customer message directly.
 
