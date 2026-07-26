@@ -127,3 +127,14 @@ jobs:
         run: |
           echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
           python -m pytest -vv tests/test_deploy_timer_state_preservation.py
+
+      # Deploy artifact->runtime closure (PR-2; F-8 / DGT-21): the extract-and-run
+      # cells (stale-orphan / installer-refresh / missing-import / extra-orphan /
+      # stale-import / clean / dotted-fallback / usage) are Linux-only (skipif-win32),
+      # so they SKIP on the Windows dev box. This named -vv step runs them explicitly
+      # on ubuntu so their individual PASSED lines are reviewable and a silent Linux
+      # skip surfaces as a named result, not buried in the aggregate glob.
+      - name: Deploy artifact-runtime closure diagnostics (reviewer-mandated)
+        run: |
+          echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
+          python -m pytest -vv tests/test_deploy_artifact_runtime_closure.py
