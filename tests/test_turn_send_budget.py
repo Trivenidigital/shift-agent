@@ -284,6 +284,25 @@ class TestReviewerGates:
         assert budget.draft_count == 4           # ONE shared draft counter across re-entry
         assert budget.count == 0                 # drafts never touched the finalized counter
 
+    def test_transport_split_across_jids_shares_one_turn_budget(self, budget_on):
+        # A transport split (one logical reply delivered to BOTH the phone jid AND the
+        # @lid jid in ONE inbound turn) draws down the SAME per-turn budget: the cap is
+        # turn-scoped, NOT per-jid (the gate uses jid for telemetry only, never to key
+        # the counter). Charter §14.1 requires the budget cover transport splits — if
+        # the gate ever keyed on jid, a split would hand each destination a fresh cap
+        # and the spiral would escape. limit 5: three sends to the phone jid + three to
+        # the @lid jid = six attempts in one turn → exactly 5 admitted across BOTH
+        # transports, the 6th suppressed regardless of which jid it targets.
+        phone_jid = "17329837841@s.whatsapp.net"
+        lid_jid = "112233445566@lid"
+        safe_io.begin_inbound_turn_send_budget()
+        decisions = [safe_io.turn_send_budget_gate(phone_jid, "reply") for _ in range(3)]
+        decisions += [safe_io.turn_send_budget_gate(lid_jid, "reply") for _ in range(3)]
+        assert decisions.count(True) == 5   # exactly LIMIT across BOTH transports
+        assert decisions.count(False) == 1  # the 6th (any jid) suppressed
+        # the split is bounded even though it spanned two distinct destinations
+        assert safe_io._TURN_SEND_BUDGET.get().count == 5
+
     def test_exactly_one_page_per_exhausted_turn_then_resets(self, budget_on):
         # 28 dropped sends in one exhausted turn → operator paged EXACTLY once (not
         # 23×). budget_on spies the §12b page helper.
