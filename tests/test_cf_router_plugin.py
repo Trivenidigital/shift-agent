@@ -1949,7 +1949,7 @@ class TestF7PrimaryMode:
         # No new lead created
         mock_trigger.assert_not_called()
         # Canonical follow-up reply sent
-        mock_reply.assert_called_once_with("15550100001@s.whatsapp.net", "L0011")
+        mock_reply.assert_called_once_with("15550100001@s.whatsapp.net", "L0011", "")
         # Suppressed audit row
         rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
@@ -3757,7 +3757,7 @@ class TestF7PrimaryMode:
         assert result["action"] == "skip"
         assert "follow-up to active L0014 suppressed" in result["reason"]
         mock_trigger.assert_not_called()
-        mock_reply.assert_called_once_with("100000000000001@lid", "L0014")
+        mock_reply.assert_called_once_with("100000000000001@lid", "L0014", "")
         rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
         assert len(audits) == 1
