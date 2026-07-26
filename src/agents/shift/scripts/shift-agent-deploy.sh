@@ -843,10 +843,25 @@ PY
     else
         rm -f /opt/shift-agent/flyer_creative_planner.py
     fi
+    # creative_firewall — the flyer fact-safety firewall. Two flat names are laid
+    # down from the SAME source and refreshed on EVERY deploy:
+    #   * creative_firewall.py       — the name LIVE code imports
+    #     (flyer_brief_validator.py: `from creative_firewall import ...`). PR-2 fix
+    #     (F-8/DGT-21): the installer previously wrote ONLY the flyer_-prefixed name
+    #     below, so the bare copy the code actually loads was never refreshed and a
+    #     stale 2026-06-05 orphan survived across deploys — the deployed runtime was
+    #     not byte-identical to the approved release. Installing the bare name closes
+    #     that: the imported module is rewritten from the artifact every deploy.
+    #   * flyer_creative_firewall.py — the name the deploy smoke-test module-import
+    #     probe loads (shift-agent-smoke-test.sh:111). Kept so the smoke gate is
+    #     unchanged. Both are byte-identical copies of the one source; the
+    #     post-install artifact->runtime closure gate verifies both against the
+    #     artifact and fails closed if either drifts.
     if [ -f src/agents/flyer/creative_firewall.py ]; then
+        install -m 644 src/agents/flyer/creative_firewall.py /opt/shift-agent/creative_firewall.py
         install -m 644 src/agents/flyer/creative_firewall.py /opt/shift-agent/flyer_creative_firewall.py
     else
-        rm -f /opt/shift-agent/flyer_creative_firewall.py
+        rm -f /opt/shift-agent/creative_firewall.py /opt/shift-agent/flyer_creative_firewall.py
     fi
     if [ -f src/agents/flyer/reference_extract.py ]; then
         install -m 644 src/agents/flyer/reference_extract.py /opt/shift-agent/flyer_reference_extract.py
@@ -1879,6 +1894,41 @@ PY
                 rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
             fi
             exit 1
+        fi
+
+        # Pre-restart artifact->runtime closure gate (PR-2; F-8 / DGT-21 / SP-GO-10).
+        # The flat /opt/shift-agent layout means live code imports modules by flat
+        # name, so a renamed install target can leave the OLD flat name behind as a
+        # stale orphan the installer never refreshes (the 2026-06-05
+        # creative_firewall.py incident). This gate re-derives the whole flat-module
+        # set FROM THE ARTIFACT — no hand-maintained list that can drift — and fails
+        # closed if ANY installed flat module is not byte-identical to a file in the
+        # approved artifact (stale/orphan) or any imported flat dependency is
+        # missing/stale. Runs after install_artifacts (all flat copies laid down) and
+        # BEFORE the gateway restart, so a failure rolls back onto the old code.
+        # Rollback-safe: a pre-gate tarball lacks the helper -> WARN-skip (that
+        # tarball also predates the modules the gate would verify), mirroring the
+        # skills-manifest content gate's rollback posture.
+        CLOSURE_CHECK="$STAGING/tools/verify-artifact-runtime-closure.sh"
+        if [ -f "$CLOSURE_CHECK" ]; then
+            if ! bash "$CLOSURE_CHECK" "$STAGING" /opt/shift-agent; then
+                echo "FAIL: pre-restart artifact-runtime closure gate — refusing to restart hermes-gateway" >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    "$0" rollback "$PREV_TAG"
+                    # Evict the broken tarball so the next deploy doesn't surface it
+                    # as a candidate rollback target (mirrors the import-gate eviction).
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED at artifact-runtime closure gate, no prior tarball" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG failed the artifact-runtime closure check (a flat runtime module is stale/orphaned, or an imported flat dependency is missing/stale). New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately. Re-run the check read-only: bash $CLOSURE_CHECK $STAGING /opt/shift-agent" 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            fi
+        else
+            echo "WARN: $CLOSURE_CHECK absent from staging (pre-gate rollback tarball) — skipping artifact-runtime closure gate" >&2
         fi
 
         # Determine ONCE whether commerce is active-for-Stripe on this VPS. Both
