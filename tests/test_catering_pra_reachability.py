@@ -132,7 +132,7 @@ def _wire(monkeypatch, hooks_mod, actions_mod, *, active_lead, role="customer",
     monkeypatch.setattr(actions_mod, "invoke_select_catering_proposal",
                         lambda lid, cid, mid, txt: s.selects.append((lid, cid, mid, txt)) or select_rc)
     monkeypatch.setattr(actions_mod, "send_canonical_followup_reply",
-                        lambda cid, lid: s.canonical.append((cid, lid)) or True)
+                        lambda cid, lid, message_id="": s.canonical.append((cid, lid)) or True)
     monkeypatch.setattr(hooks_mod, "_send_fresh_inquiry_clarification",
                         lambda cid, lid: s.clarify.append((cid, lid)) or True)
     monkeypatch.setattr(hooks_mod.catering_amendments, "capture_branch_b_amendment",

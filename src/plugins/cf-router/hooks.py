@@ -332,7 +332,7 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
 
         # F8 path — owner self-chat + #XXXXX code → bypass LLM
         if actions.is_owner_chat(chat_id):
-            f8_result = _try_f8_intercept(text, chat_id)
+            f8_result = _try_f8_intercept(text, chat_id, message_id)
             if f8_result is not None:
                 return f8_result
 
@@ -963,7 +963,7 @@ def _handle_amendment_conflict_choice(
         source="conflict_discriminator")
     if capture.ok:
         if F7_PRIMARY_FOLLOWUP_REPLY:
-            actions.send_canonical_followup_reply(chat_id, lead_id)
+            actions.send_canonical_followup_reply(chat_id, lead_id, original_message_id)
         actions.audit_intercepted(
             reason="catering_amendment_conflict_resolved", chat_id=chat_id,
             detail=(f"choice=catering; lead_id={lead_id}; amendment_id={capture.amendment_id}; "
@@ -1024,7 +1024,7 @@ def _try_revenue_route_clarification_start(
     return {"action": "skip", "reason": "cf-router revenue route clarification sent"}
 
 
-def _try_f8_intercept(text: str, chat_id: str) -> Optional[dict]:
+def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional[dict]:
     """Owner sent something in self-chat. Look for #XXXXX + verb.
 
     Returns:
@@ -1088,7 +1088,7 @@ def _try_f8_intercept(text: str, chat_id: str) -> Optional[dict]:
         if has_edit:
             return None
         if has_approve:
-            rc = actions.invoke_apply_owner_decision(code, "approve", lead=lead)
+            rc = actions.invoke_apply_owner_decision(code, "approve", lead=lead, message_id=message_id)
             return _build_skip_or_passthrough(
                 rc=rc, chat_id=chat_id, code=code,
                 reason="f8_owner_approve",
@@ -1096,7 +1096,7 @@ def _try_f8_intercept(text: str, chat_id: str) -> Optional[dict]:
                 action_label=f"apply-owner-decision approve for {code}",
             )
         if has_reject:
-            rc = actions.invoke_apply_owner_decision(code, "reject")
+            rc = actions.invoke_apply_owner_decision(code, "reject", message_id=message_id)
             return _build_skip_or_passthrough(
                 rc=rc, chat_id=chat_id, code=code,
                 reason="f8_owner_reject",
@@ -4115,7 +4115,7 @@ def _try_amendment_conflict_intercept(
             source="conflict_discriminator")
         if capture.ok:
             if F7_PRIMARY_FOLLOWUP_REPLY:
-                actions.send_canonical_followup_reply(chat_id, lead_id)
+                actions.send_canonical_followup_reply(chat_id, lead_id, _extract_native_message_id(event))
             actions.audit_intercepted(
                 reason="catering_amendment_conflict_captured", chat_id=chat_id,
                 detail=(f"lead_id={lead_id}; project_id={project_id}; "
@@ -5796,7 +5796,7 @@ def _try_f7_primary_intercept(
         # captured OR replay — identical canonical reply, gated by the existing
         # UX flag so silent-suppression mode is preserved exactly as before R2A.
         if F7_PRIMARY_FOLLOWUP_REPLY:
-            actions.send_canonical_followup_reply(chat_id, lead_id)
+            actions.send_canonical_followup_reply(chat_id, lead_id, _extract_native_message_id(event))
         actions.audit_intercepted(
             reason="f7_primary_followup_suppressed", chat_id=chat_id,
             code=approval_code,

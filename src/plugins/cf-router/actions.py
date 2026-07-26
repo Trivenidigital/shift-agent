@@ -329,7 +329,7 @@ def find_catering_lead_by_code(code: str) -> Optional[dict]:
         return None
 
 
-def send_canonical_followup_reply(chat_id: str, lead_id: str) -> bool:
+def send_canonical_followup_reply(chat_id: str, lead_id: str, message_id: str = "") -> bool:
     """Send the UX-mitigation reply on F7 primary-mode followup-suppressed paths.
 
     PR-CF1d 2026-05-12. When cf-router F7 primary-mode detects an active
@@ -355,14 +355,19 @@ def send_canonical_followup_reply(chat_id: str, lead_id: str) -> bool:
         f"They'll send a final quote within 24 hours. "
         f"Reply here if you need to adjust the inquiry."
     )
+    cmd = [
+        str(SEND_CATERING_ACK_BIN),
+        "--customer-jid", chat_id,
+        "--message-text", template,
+        "--lead-id", lead_id,
+    ]
+    # PR-4 (charter §4.2): pass the inbound native message id as logical_turn_id
+    # when the caller has it, so this follow-up ack links to the turn's other sends.
+    if message_id:
+        cmd += ["--logical-turn-id", message_id]
     try:
         result = subprocess.run(
-            [
-                str(SEND_CATERING_ACK_BIN),
-                "--customer-jid", chat_id,
-                "--message-text", template,
-                "--lead-id", lead_id,
-            ],
+            cmd,
             capture_output=True, text=True,
             timeout=SUBPROCESS_TIMEOUT_SEC,
         )
@@ -499,7 +504,8 @@ def find_menu_pending_by_code(code: str) -> Optional[dict]:
 # === Subprocess invocations ===
 
 def invoke_apply_owner_decision(code: str, decision: str,
-                                lead: Optional[dict] = None) -> int:
+                                lead: Optional[dict] = None,
+                                message_id: str = "") -> int:
     """Invoke apply-catering-owner-decision; returns exit code.
 
     For `approve`: caller passes the lead dict (snapshot from
@@ -522,6 +528,10 @@ def invoke_apply_owner_decision(code: str, decision: str,
         cmd = [str(PYTHON_BIN), str(APPLY_OWNER_DECISION_BIN),
                "--code", code, "--decision", decision,
                "--sender-role", "owner"]
+        # PR-4 (charter §4.2): forward the owner's approval inbound id as the
+        # logical_turn_id so the customer quote-delivery send rows link to it.
+        if message_id:
+            cmd += ["--logical-turn-id", message_id]
         stdin_text: Optional[str] = None
         if decision == "approve":
             if lead is None:
@@ -583,6 +593,9 @@ def invoke_select_catering_proposal(lead_id: str, chat_id: str, message_id: str,
                 "--lead-id", lead_id,
                 "--customer-jid", chat_id,
                 "--customer-message-id", message_id,
+                # PR-4 (charter §4.2): the inbound native message id is the
+                # logical_turn_id — every send this turn causes carries it.
+                "--logical-turn-id", message_id,
                 "--selection-text", text,
             ],
             capture_output=True, text=True,
@@ -606,6 +619,9 @@ def invoke_create_catering_proposals(lead_id: str, chat_id: str, message_id: str
                 "--lead-id", lead_id,
                 "--customer-jid", chat_id,
                 "--source-message-id", message_id,
+                # PR-4 (charter §4.2): the inbound native message id is the
+                # logical_turn_id — every send this turn causes carries it.
+                "--logical-turn-id", message_id,
                 "--request-text", text,
                 "--auto-generate-from-menu",
             ],

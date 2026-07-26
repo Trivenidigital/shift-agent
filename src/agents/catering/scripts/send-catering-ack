@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -70,7 +71,8 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _emit_ack_failed(jid: str, reason: str, detail: str) -> None:
+def _emit_ack_failed(jid: str, reason: str, detail: str, *,
+                     logical_turn_id: str, send_attempt_id: str) -> None:
     try:
         entry = CateringCustomerAckFailed(
             ts=_now_iso(),
@@ -78,13 +80,17 @@ def _emit_ack_failed(jid: str, reason: str, detail: str) -> None:
             customer_jid=jid,
             reason=reason,
             detail=detail[:2000],
+            logical_turn_id=logical_turn_id,
+            send_attempt_id=send_attempt_id,
+            outcome=reason,
         )
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
         sys.stderr.write(f"audit emit failed (non-fatal): {e}\n")
 
 
-def _emit_ack_sent(jid: str, mid: str, lead_id: str) -> None:
+def _emit_ack_sent(jid: str, mid: str, lead_id: str, *,
+                   logical_turn_id: str, send_attempt_id: str) -> None:
     try:
         entry = CateringCustomerAckSent(
             ts=_now_iso(),
@@ -92,6 +98,9 @@ def _emit_ack_sent(jid: str, mid: str, lead_id: str) -> None:
             customer_jid=jid,
             outbound_message_id=mid,
             lead_id=lead_id,
+            logical_turn_id=logical_turn_id,
+            send_attempt_id=send_attempt_id,
+            outcome="sent",
         )
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
@@ -103,10 +112,19 @@ def main() -> int:
     p.add_argument("--customer-jid", required=True, help="JID, e.g. 17329837841@s.whatsapp.net or 269612545511591@lid")
     p.add_argument("--message-text", required=True, help="Ack body without the prefix; ≤3500 chars")
     p.add_argument("--lead-id", default="", help="Optional lead linkage")
+    # PR-4: logical_turn_id = the inbound native message id that caused this send
+    # (one per inbound; shared by every send of the turn). This path has no
+    # inbound-id arg of its own, so it defaults to "" when the caller omits it —
+    # cf-router passes it on the followup path.
+    p.add_argument("--logical-turn-id", default="", help="Inbound native message id (charter §4.2)")
     args = p.parse_args()
 
     jid = args.customer_jid.strip()
     body = args.message_text.strip()
+    logical_turn_id = args.logical_turn_id.strip()
+    # One send_attempt_id per invocation (per logical send attempt); an internal
+    # retry would reuse it. cf-router re-invoking = a new process = a new id.
+    send_attempt_id = uuid.uuid4().hex
 
     # Resolve the matched suffix and its local part. Fail closed unless the JID
     # ends with a valid suffix AND carries a non-empty local part — e.g.
@@ -120,21 +138,23 @@ def main() -> int:
             jid_local = jid[: -len(_suffix)]
             break
 
+    _ids = {"logical_turn_id": logical_turn_id, "send_attempt_id": send_attempt_id}
+
     if not jid or not jid_suffix_ok or not jid_local:
         _emit_ack_failed(jid or "<empty>", "bad_input",
                          f"jid must be <local>@suffix with a non-empty local part; "
-                         f"suffix one of {_VALID_JID_SUFFIXES}")
+                         f"suffix one of {_VALID_JID_SUFFIXES}", **_ids)
         sys.stderr.write(f"invalid --customer-jid: {jid!r}\n")
         return EXIT_INVALID_INPUT
 
     if not body:
-        _emit_ack_failed(jid, "bad_input", "empty message-text")
+        _emit_ack_failed(jid, "bad_input", "empty message-text", **_ids)
         sys.stderr.write("--message-text is empty after strip\n")
         return EXIT_INVALID_INPUT
 
     if len(body) > MAX_ACK_BODY_CHARS:
         _emit_ack_failed(jid, "bad_input",
-                         f"message-text {len(body)} chars exceeds {MAX_ACK_BODY_CHARS}")
+                         f"message-text {len(body)} chars exceeds {MAX_ACK_BODY_CHARS}", **_ids)
         sys.stderr.write(f"--message-text {len(body)} chars > {MAX_ACK_BODY_CHARS}\n")
         return EXIT_INVALID_INPUT
 
@@ -142,16 +162,16 @@ def main() -> int:
     ok, mid_or_err = _bridge_post(jid, full_message)
 
     if not ok:
-        _emit_ack_failed(jid, "bridge_unreachable", mid_or_err)
+        _emit_ack_failed(jid, "bridge_unreachable", mid_or_err, **_ids)
         sys.stderr.write(f"bridge_post failed: {mid_or_err}\n")
         return EXIT_DEPENDENCY_DOWN
 
     if not mid_or_err:
-        _emit_ack_failed(jid, "empty_response", "bridge returned ok with no messageId")
+        _emit_ack_failed(jid, "empty_response", "bridge returned ok with no messageId", **_ids)
         sys.stderr.write("bridge returned ok with no messageId\n")
         return EXIT_DEPENDENCY_DOWN
 
-    _emit_ack_sent(jid, mid_or_err, args.lead_id)
+    _emit_ack_sent(jid, mid_or_err, args.lead_id, **_ids)
     json.dump({"ok": True, "outbound_message_id": mid_or_err}, sys.stdout)
     sys.stdout.write("\n")
     return EXIT_OK

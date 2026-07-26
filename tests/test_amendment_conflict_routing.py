@@ -117,7 +117,7 @@ def _wire(monkeypatch, hooks_mod, actions_mod, *, enabled=True, allowlisted=True
     monkeypatch.setattr(hooks_mod.catering_amendments, "capture_branch_b_amendment", _cap)
 
     monkeypatch.setattr(actions_mod, "send_canonical_followup_reply",
-                        lambda cid, lid: s.canonical.append((cid, lid)) or True)
+                        lambda cid, lid, message_id="": s.canonical.append((cid, lid)) or True)
     monkeypatch.setattr(hooks_mod, "_send_amendment_retry_reply",
                         lambda cid, lid: s.retry.append((cid, lid)) or True)
     monkeypatch.setattr(actions_mod, "audit_intercepted",
@@ -414,7 +414,7 @@ def _wire_choice(monkeypatch, hooks_mod, actions_mod, *, pending, eligible, capt
     monkeypatch.setattr(actions_mod, "find_all_eligible_catering_leads_by_sender", lambda p, c: list(eligible))
     monkeypatch.setattr(actions_mod, "audit_intercepted", lambda **kw: s.audits.append(kw))
     monkeypatch.setattr(actions_mod, "send_canonical_followup_reply",
-                        lambda cid, lid: s.canonical.append((cid, lid)) or True)
+                        lambda cid, lid, message_id="": s.canonical.append((cid, lid)) or True)
     monkeypatch.setattr(actions_mod, "send_flyer_text",
                         lambda cid, txt, **kw: s.sent.append((cid, txt)) or (True, "mid", ""))
     monkeypatch.setattr(actions_mod, "save_revenue_route_clarification",

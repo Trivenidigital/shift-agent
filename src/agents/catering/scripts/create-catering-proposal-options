@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -327,6 +328,21 @@ def _render_body(options: list[CateringProposalOption], menu_items: dict[str, Me
     return body
 
 
+# PR-4 (charter §4.3/§4.2): outbound audit identity for the current invocation.
+# Set once in main()/_run_recompose from CLI args; read by the audit emitters so
+# every *_sent / *_failed row for this turn carries one logical_turn_id + a
+# per-send send_attempt_id (an internal retry reuses it; a re-invocation mints a
+# new one). A mutable dict avoids the `global` statement and is per-invocation
+# safe (tests load this script as a fresh module).
+_RUN_IDENTITY = {"logical_turn_id": "", "send_attempt_id": "", "transport_destination": ""}
+
+
+def _set_run_identity(*, logical_turn_id: str, send_attempt_id: str, transport_destination: str) -> None:
+    _RUN_IDENTITY["logical_turn_id"] = logical_turn_id
+    _RUN_IDENTITY["send_attempt_id"] = send_attempt_id
+    _RUN_IDENTITY["transport_destination"] = transport_destination
+
+
 def _append_audit(entry) -> None:
     adapter = TypeAdapter(type(entry))
     with FileLock(LOG_LOCK):
@@ -342,6 +358,10 @@ def _audit_failure(lead_id: str, reason: str, detail: str = "", proposal_set_id:
             proposal_set_id=proposal_set_id,
             reason=reason,
             detail=detail[:2000],
+            logical_turn_id=_RUN_IDENTITY["logical_turn_id"],
+            send_attempt_id=_RUN_IDENTITY["send_attempt_id"],
+            transport_destination=_RUN_IDENTITY["transport_destination"],
+            outcome=reason,
         )
     )
 
@@ -506,6 +526,11 @@ def _run_recompose(args) -> int:
     options. The payload is pulled verbatim from the sent options (never composed
     by an LLM), and a sections-match assertion runs in this chokepoint before send
     so prose-matches-payload is TESTED per send. Any imperfect request clarifies."""
+    _set_run_identity(
+        logical_turn_id=(args.logical_turn_id or args.source_message_id),
+        send_attempt_id=uuid.uuid4().hex,
+        transport_destination=args.customer_jid,
+    )
     try:
         lead = _load_lead(args.lead_id)
     except Exception as e:
@@ -534,7 +559,11 @@ def _run_recompose(args) -> int:
         _append_audit(CateringRecomposeClarifySent(
             type="catering_recompose_clarify_sent", ts=_now(), lead_id=args.lead_id,
             reason=plan["reason"], outbound_message_id=mid_or_err,
-            detail=plan["message"][:2000]))
+            detail=plan["message"][:2000],
+            logical_turn_id=_RUN_IDENTITY["logical_turn_id"],
+            send_attempt_id=_RUN_IDENTITY["send_attempt_id"],
+            transport_destination=_RUN_IDENTITY["transport_destination"],
+            outcome="sent"))
         print(json.dumps({"mode": "clarify", "reason": plan["reason"], "sent": True}))
         return EXIT_OK
 
@@ -566,7 +595,11 @@ def _run_recompose(args) -> int:
     _append_audit(CateringRecomposedMenuSent(
         type="catering_recomposed_menu_sent", ts=_now(), lead_id=args.lead_id,
         combination=plan["combination"][:200], section_count=len(plan["sections"]),
-        item_count=len(plan["item_names"]), outbound_message_id=mid_or_err))
+        item_count=len(plan["item_names"]), outbound_message_id=mid_or_err,
+        logical_turn_id=_RUN_IDENTITY["logical_turn_id"],
+        send_attempt_id=_RUN_IDENTITY["send_attempt_id"],
+        transport_destination=_RUN_IDENTITY["transport_destination"],
+        outcome="sent"))
     print(json.dumps({"mode": "recomposed", "combination": plan["combination"],
                       "sent": True, "outbound_message_id": mid_or_err}))
     return EXIT_OK
@@ -577,6 +610,9 @@ def main() -> int:
     parser.add_argument("--lead-id", required=True)
     parser.add_argument("--customer-jid", required=True)
     parser.add_argument("--source-message-id", required=True)
+    # PR-4: logical_turn_id = the inbound native message id (charter §4.2). Defaults
+    # to --source-message-id when the caller omits it, so nothing breaks.
+    parser.add_argument("--logical-turn-id", default="")
     parser.add_argument("--request-text", required=True)
     parser.add_argument("--options-json")
     parser.add_argument("--auto-generate-from-menu", action="store_true")
@@ -587,6 +623,13 @@ def main() -> int:
 
     if args.recompose_from_sent:
         return _run_recompose(args)
+
+    # PR-4: one logical_turn_id for the turn + one send_attempt_id for this send.
+    _set_run_identity(
+        logical_turn_id=(args.logical_turn_id or args.source_message_id),
+        send_attempt_id=uuid.uuid4().hex,
+        transport_destination=args.customer_jid,
+    )
 
     try:
         lead = _load_lead(args.lead_id)
@@ -661,6 +704,10 @@ def main() -> int:
             proposal_set_id=proposal_set_id,
             option_count=len(options),
             outbound_message_id=message_id_or_error,
+            logical_turn_id=_RUN_IDENTITY["logical_turn_id"],
+            send_attempt_id=_RUN_IDENTITY["send_attempt_id"],
+            transport_destination=_RUN_IDENTITY["transport_destination"],
+            outcome="sent",
         )
     )
     print(

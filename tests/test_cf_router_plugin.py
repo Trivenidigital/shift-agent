@@ -388,7 +388,10 @@ class TestF8OwnerApprove:
 
         assert result is not None
         assert result["action"] == "skip"
-        mock_apply.assert_called_once_with("#ABCDE", "reject")  # reject doesn't pass lead
+        mock_apply.assert_called_once()
+        call = mock_apply.call_args
+        assert call.args[:2] == ("#ABCDE", "reject")  # reject doesn't pass lead
+        assert call.kwargs.get("lead") is None  # PR-4: only message_id (logical_turn_id) added
 
     def test_owner_edit_NOT_intercepted_lets_LLM_handle(self, mods, state_env):
         """Edit needs LLM extraction — plugin should let LLM handle."""

@@ -1199,12 +1199,32 @@ def _front_brain_chat_key_hash(jid: str) -> str:
     return _hashlib.sha256(str(jid or "").encode("utf-8", errors="ignore")).hexdigest()[:32]
 
 
+def _current_logical_turn_id() -> str:
+    """PR-4: the per-inbound logical_turn_id for the front-brain egress seam.
+
+    The gateway/adapter send path has no inbound native message id in scope (unlike
+    the catering subprocesses, which get it as ``--source-message-id``). The only
+    per-inbound-turn anchor available here is the #643 turn-send budget's ``turn_id``
+    — frozen ONCE at the inbound-turn boundary, so every send of the turn shares it.
+    When #643 is OFF (prod default) there is no shared anchor at this seam → "".
+    Never raises."""
+    try:
+        budget = _TURN_SEND_BUDGET.get()
+        if isinstance(budget, _TurnSendBudget):
+            return str(budget.turn_id or "")
+    except Exception:
+        pass
+    return ""
+
+
 def _front_brain_outbound_enforce(
     jid: str,
     message: str,
     *,
     fallback_template: "Optional[str]" = None,
     action_context: "Optional[ActionExecutionContext]" = None,
+    logical_turn_id: str = "",
+    send_attempt_id: str = "",
 ) -> str:
     """Screen a composed outbound reply and return the SAFE text to send.
 
@@ -1229,6 +1249,12 @@ def _front_brain_outbound_enforce(
         return message
 
     chat_hash = _front_brain_chat_key_hash(jid)
+    # PR-4 (charter §4.3/§4.2): stamp every front_brain_reply_composed row with the
+    # turn's logical_turn_id + a per-send send_attempt_id. Callers (the gateway
+    # screen) pass these; the bridge_post P0-3a screen caller does not, so resolve
+    # them here so BOTH front-brain seams carry internal identity (never dropped).
+    turn_id = logical_turn_id or _current_logical_turn_id()
+    attempt_id = send_attempt_id or uuid.uuid4().hex
     verified = bool(
         action_context is not None
         and getattr(action_context, "verified_action_result", False)
@@ -1260,6 +1286,8 @@ def _front_brain_outbound_enforce(
                 "verdict": "passed",
                 "lint_classes_checked": [],
                 "template_fallback": True,
+                "logical_turn_id": turn_id,
+                "send_attempt_id": attempt_id,
             },
         )
         return safe_fallback
@@ -1273,6 +1301,8 @@ def _front_brain_outbound_enforce(
                 "verdict": "passed",
                 "lint_classes_checked": list(result.classes_checked),
                 "template_fallback": False,
+                "logical_turn_id": turn_id,
+                "send_attempt_id": attempt_id,
             },
         )
         return message
@@ -1297,6 +1327,8 @@ def _front_brain_outbound_enforce(
             "verdict": "passed",
             "lint_classes_checked": list(result.classes_checked),
             "template_fallback": True,
+            "logical_turn_id": turn_id,
+            "send_attempt_id": attempt_id,
         },
     )
     return safe_fallback
@@ -1356,6 +1388,11 @@ def front_brain_screen_gateway_send(
         return message
 
     chat_hash = _front_brain_chat_key_hash(screen_jid)
+    # PR-4 (charter §4.3/§4.2): outbound audit identity for this screened send.
+    # logical_turn_id = the #643 per-inbound turn id when present (else ""), so a
+    # multi-send turn links; send_attempt_id = one per screened send (this call).
+    logical_turn_id = _current_logical_turn_id()
+    send_attempt_id = uuid.uuid4().hex
     safe_fallback = (
         fallback_template
         if (fallback_template and str(fallback_template).strip())
@@ -1371,6 +1408,8 @@ def front_brain_screen_gateway_send(
                 "verdict": "passed",
                 "lint_classes_checked": [],
                 "template_fallback": True,
+                "logical_turn_id": logical_turn_id,
+                "send_attempt_id": send_attempt_id,
             },
         )
         try:
@@ -1430,6 +1469,7 @@ def front_brain_screen_gateway_send(
             lambda: _front_brain_outbound_enforce(
                 screen_jid, message, fallback_template=fallback_template,
                 action_context=action_context,
+                logical_turn_id=logical_turn_id, send_attempt_id=send_attempt_id,
             ),
             fallback=safe_fallback,
         )

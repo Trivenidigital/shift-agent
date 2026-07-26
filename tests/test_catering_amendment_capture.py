@@ -451,7 +451,7 @@ def _wire_branch_b(hooks_mod, actions_mod, monkeypatch, capture_result):
     monkeypatch.setattr(hooks_mod.catering_amendments, "capture_branch_b_amendment",
                         lambda **kw: capture_result)
     monkeypatch.setattr(actions_mod, "send_canonical_followup_reply",
-                        lambda chat_id, lead_id: spies.canonical.append((chat_id, lead_id)))
+                        lambda chat_id, lead_id, message_id="": spies.canonical.append((chat_id, lead_id)))
     monkeypatch.setattr(hooks_mod, "_send_amendment_retry_reply",
                         lambda chat_id, lead_id: spies.retry.append((chat_id, lead_id)))
     monkeypatch.setattr(actions_mod, "audit_intercepted",

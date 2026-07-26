@@ -67,6 +67,7 @@ from schemas import (  # noqa: E402
     CateringOwnerApprovalRequested,
     Menu, MenuItem,
     CateringCustomerAckSent, CateringCustomerAckFailed,
+    CateringOwnerApprovalCardSent, CateringOwnerApprovalCardFailed,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_DISABLED,
@@ -633,14 +634,47 @@ def main() -> int:
         lead_id, approval_code, args.customer_phone, args.customer_name,
         args.raw_inquiry, extracted,
     )
+    # PR-4 (charter §4.3): this OWNER-facing card send is a distinct outbound from
+    # the customer ack of the same inbound — its OWN send_attempt_id, sharing the
+    # inbound's logical_turn_id (= --message-id). Previously it had NO audit row.
+    logical_turn_id = args.message_id
+    owner_card_send_attempt_id = uuid.uuid4().hex
     ok, mid_or_err = _bridge_post(cfg.owner.self_chat_jid, card_text)
     if not ok:
         sys.stderr.write(f"bridge_post failed: {mid_or_err}\n")
+        try:
+            with FileLock(LEADS_LOCK):
+                ndjson_append(LOG_PATH, CateringOwnerApprovalCardFailed(
+                    ts=now, type="catering_owner_approval_card_failed",
+                    lead_id=lead_id, reason="bridge_unreachable",
+                    bridge_error=str(mid_or_err)[:2000],
+                    logical_turn_id=logical_turn_id,
+                    send_attempt_id=owner_card_send_attempt_id,
+                    transport_destination=cfg.owner.self_chat_jid,
+                    outcome="bridge_unreachable",
+                ).model_dump_json())
+        except Exception as e:  # noqa: BLE001 — audit is best-effort
+            sys.stderr.write(f"audit emit (owner_card_failed) failed (non-fatal): {e}\n")
         # Lead is saved; owner just doesn't get the card. Return DEPENDENCY_DOWN
         # so caller can fire Pushover separately. State is consistent.
         print(json.dumps({"lead_id": lead_id, "approval_code": approval_code,
                           "card_sent": False, "reason": mid_or_err}))
         return EXIT_DEPENDENCY_DOWN
+
+    # Owner card delivered — record the OWNER-side outbound (distinct from the
+    # customer ack below; same logical_turn_id, different send_attempt_id).
+    try:
+        with FileLock(LEADS_LOCK):
+            ndjson_append(LOG_PATH, CateringOwnerApprovalCardSent(
+                ts=now, type="catering_owner_approval_card_sent",
+                lead_id=lead_id, owner_card_outbound_id=mid_or_err,
+                logical_turn_id=logical_turn_id,
+                send_attempt_id=owner_card_send_attempt_id,
+                transport_destination=cfg.owner.self_chat_jid,
+                outcome="sent",
+            ).model_dump_json())
+    except Exception as e:  # noqa: BLE001 — audit is best-effort
+        sys.stderr.write(f"audit emit (owner_card_sent) failed (non-fatal): {e}\n")
 
     # Turn-arbitration 2026-07-26: when cf-router will IMMEDIATELY generate the tiered
     # proposal set for this new lead, the F14 sample-menu send would be a redundant
@@ -675,6 +709,10 @@ def main() -> int:
     else:
         customer_jid = f"{_cp}@s.whatsapp.net"      # standard phone path
     proposal_text = _render_proposal(lead_id, args.customer_name, extracted)
+    # PR-4 (charter §4.3/§4.2): the customer ack shares the turn's logical_turn_id
+    # (set above with the owner card) but gets its OWN send_attempt_id — distinct
+    # customer- vs owner-side outbound identity for the same inbound.
+    send_attempt_id = uuid.uuid4().hex
     proposal_ok, proposal_mid_or_err = _bridge_post(customer_jid, proposal_text)
     if proposal_ok:
         try:
@@ -684,6 +722,9 @@ def main() -> int:
                 customer_jid=customer_jid,
                 outbound_message_id=proposal_mid_or_err,
                 lead_id=lead_id,
+                logical_turn_id=logical_turn_id,
+                send_attempt_id=send_attempt_id,
+                outcome="sent",
             )
             with FileLock(LEADS_LOCK):
                 ndjson_append(LOG_PATH, ack_entry.model_dump_json())
@@ -698,6 +739,9 @@ def main() -> int:
                 customer_jid=customer_jid,
                 reason="bridge_unreachable",
                 detail=proposal_mid_or_err[:2000],
+                logical_turn_id=logical_turn_id,
+                send_attempt_id=send_attempt_id,
+                outcome="bridge_unreachable",
             )
             with FileLock(LEADS_LOCK):
                 ndjson_append(LOG_PATH, fail_entry.model_dump_json())

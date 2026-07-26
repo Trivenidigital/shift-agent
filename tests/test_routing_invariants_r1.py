@@ -477,7 +477,7 @@ def test_f8_reflects_registry_catering_result(state_dir, monkeypatch):
     hooks_mod, actions_mod = _load_plugin(state_dir)
     calls = []
     monkeypatch.setattr(actions_mod, "invoke_apply_owner_decision",
-                        lambda code, decision, lead=None: calls.append((code, decision, lead)) or 0)
+                        lambda code, decision, lead=None, message_id="": calls.append((code, decision, lead)) or 0)
     lead = _catering_lead("#ABCDE")
     monkeypatch.setattr(hooks_mod.approval_code_pools, "resolve_code",
                         lambda code, **k: (pools.POOL_CATERING_LEADS, lead))
@@ -530,7 +530,7 @@ def test_f8_real_registry_menu_before_catering_no_collision(state_dir, monkeypat
     _write_pools(state_dir, catering=[_catering_lead("#ABCDE")])
     calls = []
     monkeypatch.setattr(actions_mod, "invoke_apply_owner_decision",
-                        lambda code, decision, lead=None: calls.append((code, decision)) or 0)
+                        lambda code, decision, lead=None, message_id="": calls.append((code, decision)) or 0)
     out = hooks_mod._try_f8_intercept("#ABCDE approve", "owner@c.us")
     assert calls == [("#ABCDE", "approve")]
     assert out["action"] == "skip"
