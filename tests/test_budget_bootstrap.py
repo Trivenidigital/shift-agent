@@ -412,9 +412,13 @@ post_install_gates_and_restart() {
             _tb_gate_fail closure
         fi
     fi
-    # (6) restart — mirror the real BARE restart (point of no return; a restart failure
-    # aborts under set -e WITHOUT inline rollback, leaving the sentinel IN_PROGRESS for
-    # Phase-0 recovery on the next run).
+    # (6) restart — mirror the real function's restart sequence: the bootstrap-mode
+    # restart_pending stamp (6-scope #1) then the BARE restart (point of no return; a
+    # restart failure aborts under set -e WITHOUT inline rollback, leaving the sentinel
+    # restart_pending so Phase-0 FINALIZES on the next run).
+    if [ "$POST_INSTALL_MODE" = bootstrap ]; then
+        bootstrap_stamp_restart_pending
+    fi
     systemctl restart hermes-gateway
     # (7) smoke gate — the real function rolls back on smoke failure
     if ! "${TESTBIN}/shift-agent-smoke-test.sh"; then
@@ -607,6 +611,16 @@ class Sandbox:
     def snapshot_dir(self) -> Path:
         return self.state / "budget-prebudget-hermes-snapshot"
 
+    def sentinel_json(self) -> dict:
+        import json
+        return json.loads(self.sentinel.read_text(encoding="utf-8"))
+
+    def sentinel_state(self) -> str:
+        return self.sentinel_json().get("state", "")
+
+    def sentinel_new_tag(self) -> str:
+        return self.sentinel_json().get("new_tag", "")
+
     def hermes_is_pre_budget(self) -> bool:
         run_t = self.run_py.read_text(encoding="utf-8")
         wa_t = self.wa_py.read_text(encoding="utf-8")
@@ -790,24 +804,33 @@ def test_scenario_05_import_gate_fails_dual_tree_rollback(sandbox):
     sandbox.assert_clean_rollback()
 
 
-# ── Scenario 6 — gateway restart fails (PONR) → sentinel left for Phase-0 ────
+# ── Scenario 6 — gateway restart fails (PONR) → restart_pending → Phase-0 FINALIZES ──
 @posix_only
-def test_scenario_06_restart_fails_leaves_sentinel_then_phase0_recovers(sandbox):
+def test_scenario_06_restart_fails_stamps_restart_pending_then_phase0_finalizes(sandbox):
+    """6-scope #1: a restart-COMMAND fault at the point of no return leaves the tree
+    fully installed + consistent (post-budget, budget OFF) with the sentinel stamped
+    restart_pending — NOT rewound. Re-running budget-bootstrap FINALIZES (completes the
+    deferred restart), it does NOT rewind a healthy deploy."""
     sandbox.arm(".ctl-restart-fail-once")
     r = sandbox.run("budget-bootstrap")
     assert r.returncode != 0, r.stdout
-    # Impl-faithful: the real function's restart is BARE (point of no return); a restart
-    # failure aborts WITHOUT inline rollback, leaving the tree post-patch + the sentinel
-    # IN_PROGRESS. (design Phase 7 says "any failure in 3-6 rolls back"; the impl's
-    # crash-idempotent answer for a restart fault is Phase-0 recovery on re-run — see
-    # report.) At this point Hermes is still patched and the sentinel persists.
-    assert sandbox.sentinel.exists(), "restart-fault must leave the IN_PROGRESS sentinel"
+    # Restart fault: tree post-budget-consistent, sentinel stamped restart_pending.
+    assert sandbox.sentinel.exists(), "restart-fault must leave the sentinel"
+    assert sandbox.sentinel_state() == "restart_pending", sandbox.sentinel_json()
     assert "BEGIN shift-agent-turn-send-budget" in sandbox.run_py.read_text(encoding="utf-8")
-    # Re-run → Phase-0 recovery restores BOTH trees + clears the sentinel.
+    assert "def turn_send_budget_gate" in (sandbox.shift / "safe_io.py").read_text(encoding="utf-8")
+    assert "RESTART_PENDING" in (r.stdout + r.stderr) or "restart_pending" in (r.stdout + r.stderr)
+    # Re-run → Phase-0 FINALIZES (the fail-once seam is spent, so the restart now succeeds).
     r2 = sandbox.run("budget-bootstrap")
-    assert r2.returncode != 0
-    assert "Phase 0" in (r2.stdout + r2.stderr) or "recover" in (r2.stdout + r2.stderr).lower()
-    sandbox.assert_clean_rollback()
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    assert "finalized" in (r2.stdout + r2.stderr).lower()
+    assert not sandbox.sentinel.exists(), "finalize must clear the sentinel"
+    # The healthy deploy was NOT rewound: budget markers + gate + front-brain all remain.
+    run_t = sandbox.run_py.read_text(encoding="utf-8")
+    assert "BEGIN shift-agent-turn-send-budget" in run_t
+    assert "BEGIN shift-agent-front-brain-send" in sandbox.wa_py.read_text(encoding="utf-8")
+    assert "def turn_send_budget_gate" in (sandbox.shift / "safe_io.py").read_text(encoding="utf-8")
+    sandbox.assert_state_untouched()
 
 
 # ── Scenario 7 — smoke fails (Phase 6) → dual-tree rollback ──────────────────
@@ -848,20 +871,28 @@ def test_scenario_09b_missing_staged_safe_io_refused_no_mutation(sandbox):
     sandbox.assert_no_mutation()
 
 
-# ── Scenario 10 — SIGKILL mid-transaction → Phase-0 recovery restores both ──
+# ── Scenario 10 — SIGKILL mid-transaction → Phase-0 REWIND restores both (+ #2 evict) ──
 @posix_only
-def test_scenario_10_sigkill_midtransaction_phase0_recovers(sandbox):
+def test_scenario_10_sigkill_midtransaction_phase0_rewinds_and_evicts_new_tag(sandbox):
     sandbox.arm(".ctl-install-sigkill")
     r = sandbox.run("budget-bootstrap")
-    # hard-killed mid Phase-4: signal death (-9 / 137), Hermes PATCHED, sentinel present
+    # hard-killed mid Phase-4 (BEFORE the restart stamp): Hermes PATCHED, sentinel present
+    # with state=in_progress and new_tag recorded (stamped just before install).
     assert r.returncode != 0
-    assert sandbox.sentinel.exists(), "SIGKILL must leave the IN_PROGRESS sentinel"
+    assert sandbox.sentinel.exists(), "SIGKILL must leave the in_progress sentinel"
+    assert sandbox.sentinel_state() == "in_progress", sandbox.sentinel_json()
     assert "BEGIN shift-agent-turn-send-budget" in sandbox.run_py.read_text(encoding="utf-8")
-    # Re-run → Phase-0 detects the sentinel and restores BOTH trees to pre-budget.
+    # #2: the abandoned post-budget RC tarball is on disk + recorded in the sentinel.
+    new_tag = sandbox.sentinel_new_tag()
+    assert new_tag, sandbox.sentinel_json()
+    new_tarball = sandbox.deploys / f"{new_tag}.tgz"
+    assert new_tarball.exists(), "the RC tarball should exist after the killed Phase 4"
+    # Re-run → Phase-0 REWINDS both trees to pre-budget AND evicts the abandoned tarball.
     r2 = sandbox.run("budget-bootstrap")
     assert r2.returncode != 0
-    assert "Phase 0" in (r2.stdout + r2.stderr) or "recover" in (r2.stdout + r2.stderr).lower()
+    assert "rewind" in (r2.stdout + r2.stderr).lower() or "recover" in (r2.stdout + r2.stderr).lower()
     sandbox.assert_clean_rollback()
+    assert not new_tarball.exists(), "#2: the abandoned post-budget RC tarball must be evicted on rewind"
 
 
 # ── un-budget-bootstrap coupled reverse-transaction (design §S6/1c) ─────────
