@@ -1665,6 +1665,12 @@ bootstrap_snapshot_hermes() {
     cp -p "$HERMES_RUN" "$dir/run.py"
     cp -p "$HERMES_WA" "$dir/whatsapp.py"
     cp -p "$HERMES_BR" "$dir/bridge.js"
+    # #4: record the Hermes commit the snapshot was captured against, so a LATER
+    # un-budget-bootstrap can refuse to restore these bytes onto an upgraded Hermes.
+    local _h_real
+    _h_real="$(readlink -f "$HERMES_HOME" 2>/dev/null || echo "$HERMES_HOME")"
+    git -c "safe.directory=$_h_real" -C "$HERMES_HOME" rev-parse HEAD > "$dir/hermes-commit.txt" 2>/dev/null \
+        || echo "unknown" > "$dir/hermes-commit.txt"
 }
 
 _bootstrap_cp_hermes_from() {
@@ -1698,6 +1704,10 @@ bootstrap_assert_budget_off() {
             return 1
         fi
     fi
+    # #5 KNOWN EDGE (documented, deliberately NOT fixed): with the gateway STOPPED (MainPID=0)
+    # the /proc source is unavailable, so a flag armed ONLY via a drop-in SECOND EnvironmentFile
+    # (not .env, not Environment=) could be missed here; all realistic arming paths (.env +
+    # systemctl-show Environment=) are covered, so a stopped-gateway drop-in is out of scope.
     return 0
 }
 
@@ -1754,6 +1764,19 @@ bootstrap_restore_hermes_prebudget() {
         echo "FATAL: un-budget-bootstrap — retained snapshot at '$snap' is missing front-brain/sender-id; refusing to restore a degraded Hermes." >&2
         exit 1
     fi
+    # #4 pin-check: the snapshot bytes were captured against a specific Hermes commit. If
+    # Hermes has been UPGRADED since (git HEAD moved), restoring these stale run.py/whatsapp.py
+    # would DOWNGRADE the gateway to the old version. Refuse unless the current Hermes commit
+    # == the one recorded at snapshot time. (Absent record → legacy snapshot → skip, back-compat.)
+    local _recorded _current _h_real
+    _recorded="$(cat "$snap/hermes-commit.txt" 2>/dev/null | tr -d '[:space:]')"
+    _h_real="$(readlink -f "$HERMES_HOME" 2>/dev/null || echo "$HERMES_HOME")"
+    _current="$(git -c "safe.directory=$_h_real" -C "$HERMES_HOME" rev-parse HEAD 2>/dev/null || echo unknown)"
+    if [ -n "$_recorded" ] && [ "$_recorded" != "unknown" ] && [ "$_recorded" != "$_current" ]; then
+        echo "FATAL: un-budget-bootstrap — the retained pre-budget snapshot was captured against Hermes commit $_recorded but Hermes is now at $_current (upgraded since). Restoring it would DOWNGRADE run.py/whatsapp.py to the stale version. Refusing." >&2
+        echo "  Resolve the Hermes version first (or re-establish a matching snapshot); do NOT force a cross-version restore." >&2
+        exit 1
+    fi
     _bootstrap_cp_hermes_from "$snap"
     echo "  [un-budget-bootstrap] Hermes core restored from retained pre-budget snapshot ($snap)"
 }
@@ -1778,6 +1801,57 @@ bootstrap_verify_pre_budget_state() {
         exit 1
     fi
     echo "  [budget-bootstrap] pre-budget consistency verified (no budget markers, front-brain intact, budget OFF)"
+}
+
+check_env_symlink_integrity() {
+    # #6: shared env-symlink integrity check (factored from the deploy) inline gate so
+    # budget-bootstrap runs the SAME check before it restarts the gateway). $1 = the .env
+    # path that MUST be a symlink; $2 = the required symlink target. Prints the same
+    # guidance and RETURNS non-zero (callers decide the failure action: deploy) exits;
+    # budget-bootstrap reverts). Catches: regular file replacing the symlink, drifted
+    # target, missing file, unreadable target — the /opt/shift-agent/.env → /root/.hermes/.env
+    # `sed -i` footgun.
+    local envp="$1" target="$2" cur
+    if [ ! -L "$envp" ]; then
+        echo "ERROR: $envp is not a symlink." >&2
+        if [ -e "$envp" ]; then
+            echo "  got: $(stat -c '%F' "$envp")" >&2
+        else
+            echo "  got: missing" >&2
+        fi
+        echo "  expected: symlink → $target" >&2
+        echo "" >&2
+        echo "  Which scenario is this?" >&2
+        echo "    A) Fresh customer VPS — never migrated. ls -la would show a regular" >&2
+        echo "       file with handful-of-keys content matching the provisioning template." >&2
+        echo "       Action: run the migration:" >&2
+        echo "         sudo $STAGING/tools/migrate-env-to-symlink.sh" >&2
+        echo "" >&2
+        echo "    B) Post-migration breakage — symlink was replaced (mv, tarball with .env," >&2
+        echo "       editor save-as-new-file). ls -la would show a regular file with" >&2
+        echo "       hand-written content, OR ${envp}.pre-symlink-backup-* exists." >&2
+        echo "       Action: restore the symlink:" >&2
+        echo "         sudo rm -f $envp" >&2
+        echo "         sudo ln -s $target $envp" >&2
+        return 1
+    fi
+    cur=$(readlink "$envp")
+    if [ "$cur" != "$target" ]; then
+        echo "ERROR: $envp symlink target drifted." >&2
+        echo "  expected: $target" >&2
+        echo "  got:      $cur" >&2
+        echo "  Recovery: sudo ln -sf $target $envp  &&  retry" >&2
+        return 1
+    fi
+    if [ ! -r "$envp" ]; then
+        echo "ERROR: $envp symlink target unreadable." >&2
+        echo "  $target may have been deleted or permissions changed." >&2
+        echo "  Recovery: ls -la $target  (check existence + perms);" >&2
+        echo "            verify shift-agent user can read it." >&2
+        return 1
+    fi
+    echo "OK: env symlink intact ($cur)"
+    return 0
 }
 
 post_install_gates_and_restart() {
@@ -2433,49 +2507,7 @@ case "$ACTION" in
         # canonical check — run it after any change to gate logic. PR #17 Low-5
         # backlogs bats infrastructure as the long-term answer.
         echo "=== Env symlink integrity gate ==="
-        if [ ! -L /opt/shift-agent/.env ]; then
-            echo "ERROR: /opt/shift-agent/.env is not a symlink." >&2
-            if [ -e /opt/shift-agent/.env ]; then
-                # `stat -c` is GNU-specific. This script is Linux-only by design
-                # (Hermes runtime requires fcntl etc.); BSD/macOS would need
-                # `stat -f '%HT'`. Not worth abstracting — production target
-                # is the customer Linux VPS.
-                echo "  got: $(stat -c '%F' /opt/shift-agent/.env)" >&2
-            else
-                echo "  got: missing" >&2
-            fi
-            echo "  expected: symlink → /root/.hermes/.env" >&2
-            echo "" >&2
-            echo "  Which scenario is this?" >&2
-            echo "    A) Fresh customer VPS — never migrated. ls -la would show a regular" >&2
-            echo "       file with handful-of-keys content matching the provisioning template." >&2
-            echo "       Action: run the migration:" >&2
-            echo "         sudo $STAGING/tools/migrate-env-to-symlink.sh" >&2
-            echo "" >&2
-            echo "    B) Post-migration breakage — symlink was replaced (mv, tarball with .env," >&2
-            echo "       editor save-as-new-file). ls -la would show a regular file with" >&2
-            echo "       hand-written content, OR /opt/shift-agent/.env.pre-symlink-backup-* exists." >&2
-            echo "       Action: restore the symlink:" >&2
-            echo "         sudo rm -f /opt/shift-agent/.env" >&2
-            echo "         sudo ln -s /root/.hermes/.env /opt/shift-agent/.env" >&2
-            exit 1
-        fi
-        ENV_TARGET=$(readlink /opt/shift-agent/.env)
-        if [ "$ENV_TARGET" != "/root/.hermes/.env" ]; then
-            echo "ERROR: /opt/shift-agent/.env symlink target drifted." >&2
-            echo "  expected: /root/.hermes/.env" >&2
-            echo "  got:      $ENV_TARGET" >&2
-            echo "  Recovery: sudo ln -sf /root/.hermes/.env /opt/shift-agent/.env  &&  retry deploy" >&2
-            exit 1
-        fi
-        if [ ! -r /opt/shift-agent/.env ]; then
-            echo "ERROR: /opt/shift-agent/.env symlink target unreadable." >&2
-            echo "  /root/.hermes/.env may have been deleted or permissions changed." >&2
-            echo "  Recovery: ls -la /root/.hermes/.env  (check existence + perms);" >&2
-            echo "            verify shift-agent user can read it." >&2
-            exit 1
-        fi
-        echo "OK: env symlink intact ($ENV_TARGET)"
+        check_env_symlink_integrity "/opt/shift-agent/.env" "/root/.hermes/.env" || exit 1
 
         COMMIT_HASH=$(cat "$STAGING/.commit-hash" 2>/dev/null | head -c 8 || echo "unknown")
         NEW_TAG="deploy-$(date +%Y%m%d-%H%M%S)-${COMMIT_HASH}"
@@ -2906,6 +2938,21 @@ PY
             revert_shift_tree
             rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
             exit 1
+        fi
+        # #6: env-symlink integrity gate (the SAME check deploy) runs) — bootstrap must not
+        # restart the gateway onto a broken /opt/shift-agent/.env → /root/.hermes/.env symlink
+        # (the `sed -i` footgun). Prod-path (hardcoded like deploy)'s gate); SKIPPED in the
+        # test sandbox (design §S7 — no /opt or /root/.hermes there, and MSYS `ln -s` can't
+        # make a real symlink), same posture as install_artifacts + check-shift-agent-patch.sh.
+        # Fail-closed → coupled dual-tree rollback.
+        if ! [[ -v SHIFT_AGENT_BOOTSTRAP_TEST_SANDBOX ]]; then
+            echo "=== budget-bootstrap Phase 5: env symlink integrity gate ==="
+            if ! check_env_symlink_integrity "/opt/shift-agent/.env" "/root/.hermes/.env"; then
+                echo "FAIL: budget-bootstrap Phase 5 — env symlink integrity gate; coupled dual-tree rollback." >&2
+                revert_shift_tree
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                exit 1
+            fi
         fi
 
         # ── Phase 5 (cont.) + Phase 6: shared gates → restart → smoke ──
