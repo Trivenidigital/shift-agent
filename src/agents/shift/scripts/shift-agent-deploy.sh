@@ -1646,7 +1646,7 @@ bootstrap_assert_budget_off() {
     if printf '%s\n' "$env_out" | grep -q "GATEWAY_TURN_SEND_BUDGET_ENABLED=1"; then
         return 1
     fi
-    if [ -r "$SHIFT_ROOT/.env" ] && grep -Eq '^[[:space:]]*GATEWAY_TURN_SEND_BUDGET_ENABLED[[:space:]]*=[[:space:]]*1([[:space:]]|$)' "$SHIFT_ROOT/.env"; then
+    if [ -r "$SHIFT_ROOT/.env" ] && grep -Eq '^[[:space:]]*(export[[:space:]]+)?GATEWAY_TURN_SEND_BUDGET_ENABLED[[:space:]]*=[[:space:]]*["'"'"']?1["'"'"']?([[:space:]]|$)' "$SHIFT_ROOT/.env"; then
         return 1
     fi
     local pid
@@ -2624,12 +2624,14 @@ case "$ACTION" in
             local _rc=$?
             if [ "$_rc" -ne 0 ] && [ -f "$BOOTSTRAP_SENTINEL" ]; then
                 echo "budget-bootstrap: exiting rc=$_rc with the IN_PROGRESS sentinel still present." >&2
-                echo "  gateway restart failed; the tree is post-budget-consistent + budget OFF (never a mixed tree)." >&2
-                echo "  To FINISH: retry 'systemctl restart hermes-gateway'." >&2
-                echo "  To ABANDON: re-run 'budget-bootstrap' — Phase-0 rewinds both trees to pre-budget." >&2
+                echo "  If the failure above was the gateway RESTART: the tree is post-budget-consistent + budget OFF." >&2
+                echo "    To FINISH: retry 'systemctl restart hermes-gateway'." >&2
+                echo "    To ABANDON: re-run 'budget-bootstrap' — Phase-0 rewinds both trees to pre-budget." >&2
+                echo "  If a RESTORE/ROLLBACK error was reported above: the tree may be PARTIALLY reverted —" >&2
+                echo "    do NOT retry; SSH and inspect (a P2 alert with the specific failure was already sent)." >&2
                 /usr/local/bin/shift-agent-notify-owner --priority 2 \
                     --title "Budget-bootstrap incomplete (sentinel present)" \
-                    "Gateway restart failed; tree post-budget-consistent + budget OFF. FINISH: retry systemctl restart hermes-gateway. ABANDON: re-run budget-bootstrap (Phase-0 rewinds)." 2>/dev/null || true
+                    "budget-bootstrap exited rc=$_rc, sentinel present. If restart failed: tree is post-budget-consistent + budget OFF (FINISH: retry restart; ABANDON: re-run budget-bootstrap). If a restore/rollback error was reported: tree may be partially reverted — SSH + inspect, do not retry." 2>/dev/null || true
             fi
         }
         trap _bootstrap_exit_trap EXIT
