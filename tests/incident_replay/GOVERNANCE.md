@@ -153,13 +153,29 @@ Run:
 python -m pytest tests/test_incident_replay_suite.py -v
 ```
 
-The `28-send-spiral` case is `xfail(strict=True)` on purpose: it encodes a
-missing protection (no hard per-turn transport budget active by default on the
-live path, #643 `GATEWAY_TURN_SEND_BUDGET_ENABLED` default OFF). It **must not be
-green** until the budget is active by default. The graduation trigger is the
-budget being **DEFAULT-ON** — `turn_send_budget_enabled()` returning True in an
-unconfigured environment — **not** the mere merge of a PR. PR-3 ships the budget
-installable but still **default-OFF**, so this case stays xfailed after PR-3
-merges; only when a later change flips the default ON does the strict xfail
-become an XPASS ⇒ suite error, forcing the marker to be removed and the incident
-to graduate to a normal green assertion.
+The `28-send-spiral` case has **GRADUATED** (as of #654) from a single
+`xfail(strict=True)` to a **two-mode assertion** that proves the incident in both
+transport-budget configurations by driving the real `safe_io.turn_send_budget_gate`:
+
+* `test_28_send_spiral_baseline_unprotected_when_budget_off` — with the hard
+  per-turn budget OFF (the current production default, `GATEWAY_TURN_SEND_BUDGET_ENABLED`
+  unset), the gate performs NO enforcement (returns `None`) → a 28-send single-turn
+  spiral is NOT bounded. This asserts the known-unsafe BASELINE explicitly and must
+  never be read as protection.
+* `test_28_send_spiral_bounded_when_budget_enabled` — with the budget installed AND
+  enabled, a single inbound turn is bounded to the configured cap (exactly LIMIT
+  finalized sends admitted, the rest suppressed; drafts don't consume the finalized
+  budget; retries past exhaustion re-suppressed), and bounded to exactly the oracle's
+  `expected_logical_sends` — the PROTECTED behavior, a real green PASS.
+
+There is **no remaining xfail**: both budget configurations are green, and the
+budget-enabled full suite finishes green. The incident **oracle is unchanged** (the
+`28_send_spiral.json` fixture is byte-identical; only the test assertion graduated).
+The old strict-xfail's "detect a default flip" tripwire is preserved: if a future
+change flips `GATEWAY_TURN_SEND_BUDGET_ENABLED` default ON, the OFF-mode baseline
+test's `delenv` leaves the now-ON default active → the gate enforces → its
+`all(d is None)` assertion FAILS, forcing maintainer attention.
+
+(Note: the `28_send_spiral.json` fixture's own `description` field intentionally
+retains its original pre-graduation wording — the oracle is deliberately byte-frozen;
+this runner-policy section is the authoritative description of the current assertion.)
