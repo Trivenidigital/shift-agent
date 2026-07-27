@@ -603,7 +603,10 @@ def test_deploy_waits_for_active_flyer_generation_before_gateway_restart():
     assert "wait_for_flyer_generation_drain" in deploy
     assert "generate-flyer-concepts" in deploy
     restart_idx = deploy.index("systemctl restart hermes-gateway")
-    pre_restart = deploy[max(0, restart_idx - 600):restart_idx]
+    # Window widened 600→900: the budget-bootstrap restart_pending stamp (6-scope #1)
+    # sits between the drain and the restart. The drain-before-restart invariant is
+    # preserved; only the byte gap grew.
+    pre_restart = deploy[max(0, restart_idx - 900):restart_idx]
     assert "wait_for_flyer_generation_drain" in pre_restart
 
 

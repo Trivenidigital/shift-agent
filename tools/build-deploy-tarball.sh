@@ -82,7 +82,12 @@ tar czf "$TARBALL" \
 rm -f .commit-hash
 
 SIZE=$(du -h "$TARBALL" | cut -f1)
+# Emit the artifact sha256 so authorization can bind to the BYTES, not just the
+# self-declared .commit-hash label (RC-review R7/R8 + synthesis condition 2): the
+# operator captures this and verifies it pre-extraction as the runbook gate.
+ARTIFACT_SHA256=$(sha256sum "$TARBALL" | awk '{print $1}')
 echo "=== built $TARBALL ($SIZE) ==="
+echo "=== artifact sha256: $ARTIFACT_SHA256 ==="
 echo ""
 echo "Deploy with:"
 echo "  scp $TARBALL main-vps:/tmp/"

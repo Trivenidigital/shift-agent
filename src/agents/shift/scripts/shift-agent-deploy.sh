@@ -1599,20 +1599,62 @@ PY
 
 bootstrap_write_sentinel() {
     # $1 prev_tag  $2 snapshot_dir  $3 sha_run  $4 sha_wa  $5 sha_br
+    # TWO-STATE sentinel (6-scope #1): `state` starts "in_progress" (mutation not proven
+    # done → Phase-0 rewinds) and is later stamped "restart_pending" right before the
+    # point-of-no-return restart (mutation committed + consistent → Phase-0 finalizes).
+    # `new_tag` (6-scope #2) is stamped when Phase-4 mints the RC tarball so a rewind can
+    # evict the abandoned post-budget tarball.
     mkdir -p "$(dirname "$BOOTSTRAP_SENTINEL")"
     local tmp="${BOOTSTRAP_SENTINEL}.tmp.$$"
     python3 - "$tmp" "$1" "$2" "$3" "$4" "$5" <<'PY'
 import json, sys, time
 tmp, prev, snap, r, w, b = sys.argv[1:7]
 json.dump({
-    "state": "IN_PROGRESS",
+    "state": "in_progress",
     "prev_tag": prev,
     "snapshot_dir": snap,
+    "new_tag": "",
     "pre_budget_hermes_sha": {"run": r, "wa": w, "br": b},
     "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
 }, open(tmp, "w"), indent=2)
 PY
     mv -f "$tmp" "$BOOTSTRAP_SENTINEL"
+}
+
+bootstrap_sentinel_set() {
+    # $1 top-level key  $2 value — load the sentinel, set ONE top-level key, write back
+    # atomically (preserving every other field). Used to stamp state + new_tag.
+    local tmp="${BOOTSTRAP_SENTINEL}.tmp.$$"
+    python3 - "$BOOTSTRAP_SENTINEL" "$tmp" "$1" "$2" <<'PY'
+import json, sys
+path, tmp, key, val = sys.argv[1:5]
+d = json.load(open(path))
+d[key] = val
+json.dump(d, open(tmp, "w"), indent=2)
+PY
+    mv -f "$tmp" "$BOOTSTRAP_SENTINEL"
+}
+
+bootstrap_stamp_new_tag() {
+    # $1 = new_tag — record the RC tarball tag so a Phase-0 rewind can evict it (#2).
+    bootstrap_sentinel_set new_tag "$1"
+}
+
+bootstrap_stamp_restart_pending() {
+    # Flip the sentinel to restart_pending immediately before the point-of-no-return
+    # restart (#1). The mutation is committed + consistent by this point.
+    bootstrap_sentinel_set state restart_pending
+}
+
+bootstrap_tree_is_post_budget_consistent() {
+    # Finalize guard (#1): only FINALIZE a restart_pending sentinel if the installed tree
+    # really is post-budget-consistent — canonical Hermes carries the budget markers, the
+    # installed safe_io defines the enforcing gate, and the budget flag is OFF. Otherwise
+    # the caller falls through to the defensive coupled rewind.
+    grep -q "BEGIN shift-agent-turn-send-budget" "$CANONICAL_HERMES_RUN" 2>/dev/null || return 1
+    grep -q "def turn_send_budget_gate" "$SHIFT_ROOT/safe_io.py" 2>/dev/null || return 1
+    bootstrap_assert_budget_off || return 1
+    return 0
 }
 
 bootstrap_snapshot_hermes() {
@@ -2084,6 +2126,9 @@ PY
         fi
         systemctl restart shift-agent-tail-logger.timer 2>/dev/null || true
         systemctl restart shift-agent-health.timer 2>/dev/null || true
+        # 6-scope #1: bootstrap-mode-only, stamp restart_pending immediately before the
+        # PONR restart so a restart fault FINALIZES on re-run (deploy mode is a no-op).
+        if [ "$POST_INSTALL_MODE" = bootstrap ]; then bootstrap_stamp_restart_pending; fi
         systemctl restart hermes-gateway
         # Cockpit holds Pydantic models in memory; install_artifacts() above
         # replaced /opt/shift-agent/schemas.py + safe_io.py + shared modules,
@@ -2614,38 +2659,70 @@ case "$ACTION" in
         # Restart-fault operability trap (design-v2 Phase 7 correction; 6-scope). The
         # restart COMMAND is the point of no return: a failure there aborts under set -e
         # WITHOUT inline revert (an inline revert would itself re-issue systemctl restart
-        # on a unit that just failed). The IN_PROGRESS sentinel persists so Phase-0
-        # recovery on re-run deterministically rewinds both trees. This bootstrap-SCOPED
-        # trap (set only here; never in deploy) or the shared function) surfaces that to
-        # the operator on any non-zero exit that leaves the sentinel behind. On success
-        # (Phase 8 clears the sentinel first) and on Phase-1/rollback aborts (no sentinel)
-        # it prints nothing.
+        # on a unit that just failed). This bootstrap-SCOPED trap (set only here; never in
+        # deploy) or the shared function) surfaces a non-zero exit that leaves the sentinel
+        # behind, tailoring guidance to the sentinel STATE (6-scope #1): restart_pending →
+        # the mutation is committed + consistent, so re-running FINALIZES; in_progress →
+        # re-running REWINDS. Silent on success (Phase 8 clears first) + Phase-1 aborts.
         _bootstrap_exit_trap() {
-            local _rc=$?
+            local _rc=$? _st
             if [ "$_rc" -ne 0 ] && [ -f "$BOOTSTRAP_SENTINEL" ]; then
-                echo "budget-bootstrap: exiting rc=$_rc with the IN_PROGRESS sentinel still present." >&2
-                echo "  If the failure above was the gateway RESTART: the tree is post-budget-consistent + budget OFF." >&2
-                echo "    To FINISH: retry 'systemctl restart hermes-gateway'." >&2
-                echo "    To ABANDON: re-run 'budget-bootstrap' — Phase-0 rewinds both trees to pre-budget." >&2
-                echo "  If a RESTORE/ROLLBACK error was reported above: the tree may be PARTIALLY reverted —" >&2
-                echo "    do NOT retry; SSH and inspect (a P2 alert with the specific failure was already sent)." >&2
-                /usr/local/bin/shift-agent-notify-owner --priority 2 \
-                    --title "Budget-bootstrap incomplete (sentinel present)" \
-                    "budget-bootstrap exited rc=$_rc, sentinel present. If restart failed: tree is post-budget-consistent + budget OFF (FINISH: retry restart; ABANDON: re-run budget-bootstrap). If a restore/rollback error was reported: tree may be partially reverted — SSH + inspect, do not retry." 2>/dev/null || true
+                _st="$(bootstrap_read_sentinel_field state)"
+                if [ "$_st" = "restart_pending" ]; then
+                    echo "budget-bootstrap: exiting rc=$_rc — RESTART_PENDING sentinel present. The RC + patch are installed and CONSISTENT, budget OFF; only the gateway restart is pending." >&2
+                    echo "  To FINISH: retry 'systemctl restart hermes-gateway', OR re-run 'budget-bootstrap' (Phase-0 completes the restart — it does NOT rewind)." >&2
+                    echo "  To ABANDON across the boundary: 'un-budget-bootstrap <pre-budget-tag>'." >&2
+                    /usr/local/bin/shift-agent-notify-owner --priority 2 \
+                        --title "Budget-bootstrap restart pending" \
+                        "RC + budget patch installed (budget OFF) but the gateway restart failed. FINISH: retry systemctl restart hermes-gateway, or re-run budget-bootstrap (Phase-0 finalizes). ABANDON: un-budget-bootstrap <pre-budget-tag>." 2>/dev/null || true
+                else
+                    echo "budget-bootstrap: exiting rc=$_rc with an in_progress sentinel present." >&2
+                    echo "  If a RESTORE/ROLLBACK error was reported above, the tree may be PARTIALLY reverted —" >&2
+                    echo "    do NOT retry; SSH and inspect (a P2 alert with the specific failure was already sent)." >&2
+                    echo "  Otherwise re-run 'budget-bootstrap' — Phase-0 rewinds both trees to pre-budget." >&2
+                    /usr/local/bin/shift-agent-notify-owner --priority 2 \
+                        --title "Budget-bootstrap incomplete (sentinel present)" \
+                        "budget-bootstrap exited rc=$_rc with an in_progress sentinel. If a restore/rollback error was reported: tree may be partially reverted — SSH + inspect, do not retry. Otherwise re-run budget-bootstrap (Phase-0 rewinds)." 2>/dev/null || true
+                fi
             fi
         }
         trap _bootstrap_exit_trap EXIT
 
         # ── Phase 0: startup recovery from an interrupted prior run (S4) ──
+        # TWO-STATE (6-scope #1): distinguish "mutation not proven done → rewind" from
+        # "mutation committed + consistent, only the restart pending → finalize".
         if [ -f "$BOOTSTRAP_SENTINEL" ]; then
-            echo "=== budget-bootstrap Phase 0: interrupted prior run detected — recovering ==="
-            bootstrap_restore_hermes_snapshot
+            _state="$(bootstrap_read_sentinel_field state)"
             _prev="$(bootstrap_read_sentinel_field prev_tag)"
+            _new="$(bootstrap_read_sentinel_field new_tag)"
+            if [ "$_state" = "restart_pending" ]; then
+                echo "=== budget-bootstrap Phase 0: restart_pending — finalizing (completing the deferred restart, NOT rewinding) ==="
+                # Defensive: only finalize if the tree really is post-budget-consistent;
+                # otherwise fall through to the coupled rewind below.
+                if bootstrap_tree_is_post_budget_consistent; then
+                    if "$SYSTEMCTL" restart hermes-gateway && /usr/local/bin/shift-agent-smoke-test.sh; then
+                        bootstrap_clear_sentinel
+                        echo "budget-bootstrap finalized (restart completed on recovery)."
+                        exit 0
+                    fi
+                    echo "budget-bootstrap Phase 0: restart/smoke STILL failing; leaving the sentinel restart_pending (the mutation is committed + consistent, budget OFF — no rewind)." >&2
+                    echo "  Retry once the gateway starts, or 'un-budget-bootstrap <pre-budget-tag>' to abandon across the boundary." >&2
+                    exit 1
+                fi
+                echo "WARN: restart_pending sentinel but the tree is NOT post-budget-consistent — falling through to the coupled rewind (defensive)." >&2
+            fi
+            # state == in_progress (or missing/legacy): the mutation is NOT proven done →
+            # coupled rewind to pre-budget.
+            echo "=== budget-bootstrap Phase 0: interrupted prior run — coupled rewind to pre-budget ==="
+            bootstrap_restore_hermes_snapshot
             if [ -n "$_prev" ] && [ "$_prev" != "none" ] && [ -f "$DEPLOYS_DIR/${_prev}.tgz" ]; then
                 PREV_TAG="$_prev"
                 "$0" rollback "$PREV_TAG"
             fi
             bootstrap_verify_pre_budget_state
+            # #2: evict the abandoned post-budget RC tarball so it does not linger as the
+            # newest (default) rollback anchor. Recorded in the sentinel at Phase 4.
+            [ -n "$_new" ] && rm -f "$DEPLOYS_DIR/${_new}.tgz"
             bootstrap_clear_sentinel
             echo "recovered from interrupted bootstrap; re-run budget-bootstrap to retry." >&2
             exit 1
@@ -2687,15 +2764,22 @@ case "$ACTION" in
             echo "FATAL: budget-bootstrap requires BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT (the authorized RC commit) — refusing (new-RC deployment authorization)." >&2
             exit 1
         fi
+        # R7/R8: require an EXACT full 40-lowercase-hex authorized commit (no prefix /
+        # short form) and EXACT equality with the staged .commit-hash — the same
+        # exact-40 attestation the HERMES_PIN_OVERRIDE comment above claims.
+        if ! printf '%s' "$BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "FATAL: BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT must be exactly 40 lowercase hex chars (a full commit SHA); got '$BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT' — refusing." >&2
+            exit 1
+        fi
         ARTIFACT_COMMIT="$(cat "$STAGING/.commit-hash" 2>/dev/null | tr -d '[:space:]')"
         if [ -z "$ARTIFACT_COMMIT" ]; then
             echo "FATAL: staged artifact has no .commit-hash — refusing." >&2
             exit 1
         fi
-        case "$ARTIFACT_COMMIT" in
-            "$BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT"*) : ;;
-            *) echo "FATAL: staged .commit-hash ($ARTIFACT_COMMIT) does not match BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT ($BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT) — refusing." >&2; exit 1 ;;
-        esac
+        if [ "$ARTIFACT_COMMIT" != "$BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT" ]; then
+            echo "FATAL: staged .commit-hash ($ARTIFACT_COMMIT) does not EXACTLY match BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT ($BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT) — refusing." >&2
+            exit 1
+        fi
         # Hermes at the pinned commit (first-budget MUST be on the pin; no override here).
         H_REAL="$(readlink -f "$HERMES_HOME" 2>/dev/null || echo "$HERMES_HOME")"
         PINNED_COMMIT="$(grep '^HERMES_COMMIT=' "$STAGING/tools/hermes-patch-baseline.txt" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]' | sed -E 's/^"(.*)"$/\1/')"
@@ -2797,6 +2881,10 @@ PY
             tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src .commit-hash 2>/dev/null \
                 || tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src
         fi
+        # #2: record the RC tarball tag in the sentinel BEFORE install (which is where a
+        # SIGKILL can strike) so a Phase-0 rewind can evict this abandoned post-budget
+        # tarball instead of leaving it as the newest (default) rollback anchor.
+        bootstrap_stamp_new_tag "$NEW_TAG"
         echo "=== budget-bootstrap Phase 4: install_artifacts (RC $NEW_TAG; coupled-revert anchor $PREV_TAG) ==="
         if ! install_artifacts "$STAGING"; then
             echo "FAIL: budget-bootstrap Phase 4 — install_artifacts failed; coupled dual-tree rollback." >&2
