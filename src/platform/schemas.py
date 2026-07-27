@@ -6120,6 +6120,16 @@ class CfRouterIntercepted(_BaseEntry):
         # active-project guards NEVER yield. One marker row per yield so the
         # Phase-1 review surface can trace every hand-off to Hermes.
         "front_brain_yielded",
+        # PR-5 2026-07-26: automation-control kernel intercepts (STOP/pause/opt-out
+        # + human takeover). Each bypasses the LLM after applying a deterministic
+        # per-conversation mode change (the canonical audit is the separate
+        # catering_automation_control_changed row; this cf-router row keeps the
+        # intercept telemetry-visible for dispatcher-accuracy pairing).
+        "automation_control_customer_stop",
+        "automation_control_customer_pause",
+        "automation_control_customer_resume",
+        "automation_control_owner_takeover",
+        "automation_control_owner_release",
         "error",
     ]
     chat_id: str = Field(min_length=1, max_length=200)
@@ -6544,6 +6554,53 @@ class FrontBrainRequestQueued(_BaseEntry):
     ] = "other"
     request_preview: str = Field(default="", max_length=280)
     queue_size: int = Field(default=0, ge=0)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Catering automation-control kernel — STOP/pause/opt-out (§5.4, CAT-GO-09)
+# + human takeover (§5.5, CAT-GO-10). PR-5, DORMANT behind
+# CATERING_AUTOMATION_CONTROL_ENABLED + allowlist. Both rows are metadata-only
+# (hashed chat key, mode, actor, reason code — NEVER raw customer text or a raw
+# identifier), same privacy class as the front-brain review surface. The native
+# inbound message id rides in `logical_turn_id` (PR-4 identity: the NATIVE id,
+# not the front-brain #643 turn id).
+# ─────────────────────────────────────────────────────────────────
+
+CateringAutomationControlMode = Literal["active", "paused", "opted_out", "takeover"]
+
+
+class CateringAutomationControlChanged(_BaseEntry):
+    """A conversation's automation-control mode transitioned (PR-5, §5.4/§5.5).
+    Emitted on every set_mode — customer STOP/pause/resume, owner
+    takeover/release/resume — INCLUDING an idempotent re-assertion (from_mode ==
+    to_mode records that a re-engage/re-release was a no-op). `actor` names who
+    drove the change; `reason` is a bounded reason code (never raw text)."""
+    type: Literal["catering_automation_control_changed"]
+    chat_key_hash: str = Field(default="", max_length=64)
+    from_mode: CateringAutomationControlMode
+    to_mode: CateringAutomationControlMode
+    actor: Literal["customer", "owner", "system"]
+    reason: str = Field(default="", max_length=200)
+    logical_turn_id: str = ""
+
+
+class CateringAutomatedSendSuppressed(_BaseEntry):
+    """An automated action toward a suppressed conversation was dropped (PR-5).
+    `suppressed_send_kind` names the enforcement point: `inbound_dispatch`
+    (cf-router bypassed automated handling before routing) or `outbound_send`
+    (the bridge_post chokepoint dropped a queued follow-up / no-response sweep
+    that bypassed the inbound check). `mode` is the suppressing mode
+    (paused/opted_out/takeover), or `read_error` when the OUTBOUND backstop
+    FAILED CLOSED because the state read faulted while the feature was enabled
+    for the conversation (the sole-guard subprocess path: sweep / owner-approval
+    quote send never ran the inbound check and a fresh subprocess has a cold
+    last-known cache). The single deterministic opt-out/pause ack and
+    owner-directed sends are NEVER counted here (they are exempt)."""
+    type: Literal["catering_automated_send_suppressed"]
+    chat_key_hash: str = Field(default="", max_length=64)
+    mode: Literal["paused", "opted_out", "takeover", "read_error"]
+    suppressed_send_kind: Literal["inbound_dispatch", "outbound_send"]
+    logical_turn_id: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -7109,6 +7166,9 @@ LogEntry = Annotated[
         Annotated[FrontBrainOutboundRefused, Tag("front_brain_outbound_refused")],
         # Front-brain Phase-1 — durable unfulfillable-request queue (item 5)
         Annotated[FrontBrainRequestQueued, Tag("front_brain_request_queued")],
+        # PR-5 — catering automation-control kernel (STOP/pause/opt-out + takeover)
+        Annotated[CateringAutomationControlChanged, Tag("catering_automation_control_changed")],
+        Annotated[CateringAutomatedSendSuppressed, Tag("catering_automated_send_suppressed")],
         # Commerce primitives slice 1 — PRD v2 §8
         Annotated[CommerceCartStarted, Tag("commerce_cart_started")],
         Annotated[CommerceCartUpdated, Tag("commerce_cart_updated")],
@@ -7267,6 +7327,8 @@ __all__ = [
     "CateringAmendmentCaptured", "CateringAmendmentCaptureFailed",
     "CateringQuoteLedgerRecord", "CateringQuoteLedgerStore",
     "CateringQuoteVersionCommitted", "CateringQuoteLedgerAppendFailed",
+    "CateringAutomationControlMode",
+    "CateringAutomationControlChanged", "CateringAutomatedSendSuppressed",
     "LidLearned", "DispatcherRouted",
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
     "EodSnapshot", "EodPushoverSent", "EodSkipped",

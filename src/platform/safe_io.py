@@ -2395,17 +2395,99 @@ def _page_turn_send_budget_exhausted(
         pass
 
 
+# ─────────────────────────────────────────────────────────────────
+# Catering automation-control kernel — OUTBOUND enforcement point (PR-5, §5.4/
+# §5.5). Defense-in-depth twin of the cf-router inbound check: the last line
+# before transport drops an AUTOMATED CUSTOMER send toward a suppressed
+# conversation (opted_out / paused-unexpired / takeover) — catching queued
+# follow-ups / the no-response sweep that bypass the inbound check. DORMANT
+# behind CATERING_AUTOMATION_CONTROL_ENABLED + allowlist. Byte-identical when
+# OFF: a single env read short-circuits BEFORE any import or state read.
+# ─────────────────────────────────────────────────────────────────
+
+
+def _automation_control_suppressed_mode(jid: str) -> "Optional[str]":
+    """Return the suppressing label if this conversation must NOT receive an
+    automated send under the automation-control kernel, else None.
+
+    Byte-identical fast path when the master flag is OFF (env read only — no
+    import, no state read). The enabled-determination (flag + allowlist) FAILS
+    OPEN on an import/module fault: the module is installed by the deploy gate
+    and imported at cf-router load, so its absence is a loud plugin-load failure
+    elsewhere, not a silent send leak here.
+
+    Once the feature is CONFIRMED ENABLED for this jid, a state READ ERROR FAILS
+    CLOSED — returns ``"read_error"`` so the send is dropped (must-fix a). This
+    outbound point is often the SOLE guard: the no-response sweep and the
+    owner-approval→customer-quote send (apply-catering-owner-decision) are FRESH
+    subprocesses that never ran the inbound check and have a COLD last-known
+    cache, so a non-ok read would otherwise default to active and leak an
+    automated send to a suppressed customer. Only a CLEAN read of a
+    non-suppressing mode (or a clean active) returns None."""
+    if os.environ.get("CATERING_AUTOMATION_CONTROL_ENABLED", "") != "1":
+        return None
+    try:
+        import automation_control as _ac  # type: ignore  # flat platform module
+        if not _ac.enabled(jid):
+            return None
+    except Exception:
+        return None  # module/enabled fault → fail OPEN (loud at plugin load)
+    # Feature is active for this jid → a read fault fails CLOSED.
+    try:
+        mode, status = _ac.read_mode_and_status(jid)
+    except Exception:
+        return "read_error"
+    if status not in _ac.HEALTHY_LOAD_STATUSES:
+        return "read_error"
+    return mode if _ac.mode_suppresses(mode) else None
+
+
+def _automation_control_outbound_drop(
+    jid: str, *, ack_exempt: bool,
+) -> "Optional[Tuple[bool, str, str, str]]":
+    """Shared OUTBOUND automation-control gate for bridge_post / bridge_send_media
+    / bridge_send_cta. Returns the drop 4-tuple (emitting the suppression audit)
+    when the send must be dropped, else None. ``ack_exempt`` short-circuits for
+    the single deterministic ack (bridge_post only). Owner-directed sends pass
+    naturally — the owner's canonical key is never a suppressed customer key."""
+    if ack_exempt:
+        return None
+    label = _automation_control_suppressed_mode(jid)
+    if label is None:
+        return None
+    try:
+        import automation_control as _ac  # type: ignore
+        _ac.emit_send_suppressed(
+            jid, label, "outbound_send", logical_turn_id=_current_logical_turn_id(),
+        )
+    except Exception:
+        pass  # audit is best-effort; the drop still stands
+    return False, "", f"automation_suppressed:{label}", "suppressed"
+
+
 def bridge_post(
     jid: str,
     message: str,
     *,
     action_context: "Optional[ActionExecutionContext]" = None,
     fallback_template: "Optional[str]" = None,
+    automation_control_ack: bool = False,
 ) -> Tuple[bool, str, str, str]:
     """POST to local Hermes bridge. Returns (success, message_id, error_str, status).
 
     status ∈ {'sent', 'connect_failed', 'http_error', 'send_uncertain',
-              'unknown_error', 'refused', 'throttled'}
+              'unknown_error', 'refused', 'throttled', 'suppressed'}
+
+    'suppressed' (PR-5 §5.4/§5.5) = the automation-control kernel dropped this
+    send because the conversation is opted_out / paused(unexpired) / takeover
+    (default-OFF behind CATERING_AUTOMATION_CONTROL_ENABLED + allowlist). The
+    send did NOT go out; err_str is 'automation_suppressed:<mode>'. Distinct from
+    'refused'/'throttled' so callers can tell an automation-control drop from a
+    regulated-intent refusal or an incident-throttle drop. Caller MUST NOT
+    auto-retry. EXEMPT (never suppressed here): the single deterministic opt-out/
+    pause/resume ack (automation_control_ack=True) and owner-directed sends
+    (keyed to the owner's identity, which is never a suppressed customer key). A
+    catering_automated_send_suppressed audit row is emitted at the drop.
 
     'throttled' (2026-07-21 incident limiter) = the per-conversation send
     throttle dropped this send because the conversation exceeded its per-window
@@ -2439,6 +2521,17 @@ def bridge_post(
     blocked = bridge_send_blocked_by_test_context(BRIDGE_URL)
     if blocked:
         return False, "", blocked, "connect_failed"
+    # Automation-control OUTBOUND enforcement (PR-5, §5.4/§5.5). DORMANT behind
+    # CATERING_AUTOMATION_CONTROL_ENABLED + allowlist; byte-identical when OFF.
+    # Placed FIRST — before the front-brain screen / regulated policy / throttle
+    # — so a suppressed send drops with no other side effect (no composed-review
+    # row for a send that never goes out, no throttle slot consumed). EXEMPT: the
+    # single deterministic ack (automation_control_ack) and owner-directed sends
+    # (their key is never a suppressed customer key). Fails CLOSED on a read fault
+    # while enabled (must-fix a); fails OPEN only for the inert cases.
+    _ac_drop = _automation_control_outbound_drop(jid, ack_exempt=automation_control_ack)
+    if _ac_drop is not None:
+        return _ac_drop
     # P0-3a front-brain outbound enforcement (DORMANT behind
     # FRONT_BRAIN_OUTBOUND_ENFORCE). No-op + byte-identical when OFF. When an
     # admitted chat's composed reply fails the free-form screen, this rewrites
@@ -2592,6 +2685,12 @@ def bridge_send_media(
     blocked = bridge_send_blocked_by_test_context(url)
     if blocked:
         return False, "", blocked, "connect_failed"
+    # Automation-control OUTBOUND enforcement (PR-5) — symmetry with bridge_post so
+    # a suppression kernel covers ALL customer send methods (media has no
+    # deterministic-ack path, so no ack exemption). DORMANT/byte-identical when OFF.
+    _ac_drop = _automation_control_outbound_drop(jid, ack_exempt=False)
+    if _ac_drop is not None:
+        return _ac_drop
     # PR-ζ chokepoint discipline. Aggregates caption + file_name for lint.
     refusal = _enforce_action_context_policy(
         message_parts=[caption, file_name], jid=jid, action_context=action_context,
@@ -2675,6 +2774,12 @@ def bridge_send_cta(
     blocked = bridge_send_blocked_by_test_context(url)
     if blocked:
         return False, "", blocked, "connect_failed"
+    # Automation-control OUTBOUND enforcement (PR-5) — symmetry with bridge_post so
+    # a suppression kernel covers ALL customer send methods (CTA has no
+    # deterministic-ack path, so no ack exemption). DORMANT/byte-identical when OFF.
+    _ac_drop = _automation_control_outbound_drop(jid, ack_exempt=False)
+    if _ac_drop is not None:
+        return _ac_drop
     # PR-ζ chokepoint discipline. Aggregates body + button labels for lint.
     lint_parts = [body] + [b.get("label", "") for b in cleaned_buttons] + [footer]
     refusal = _enforce_action_context_policy(
