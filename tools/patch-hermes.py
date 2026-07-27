@@ -887,14 +887,32 @@ def _apply_wa_run(write: bool = True) -> tuple[str, str]:
         ):
             _write_text_atomic(path, new_text)
             written.append((path, original))
-    except Exception:
+    except Exception as write_exc:
         # A later write failed after an earlier one succeeded → restore the captured
-        # original bytes for every already-written target (all-or-nothing).
+        # original bytes for every already-written target (all-or-nothing). S9: a
+        # restore that ITSELF fails leaves that target in the PATCHED state while the
+        # transaction is aborting — the most dangerous half-patched outcome — so it
+        # MUST surface, never be swallowed. Attempt EVERY restore, print each failure
+        # to stderr, then (if any restore failed) raise a hard error naming the
+        # half-patched targets instead of re-raising the write fault as if rollback
+        # were clean.
+        restore_failures: list[Path] = []
         for path, original in written:
             try:
                 path.write_text(original, encoding="utf-8")
-            except Exception:
-                pass
+            except Exception as restore_exc:
+                restore_failures.append(path)
+                sys.stderr.write(
+                    f"FATAL: patch-hermes could not restore {path} to its pre-patch "
+                    f"bytes after a mid-apply write fault ({restore_exc!r}); this target "
+                    f"is left PATCHED while the transaction aborts (half-patched tree).\n"
+                )
+        if restore_failures:
+            raise PatchError(
+                "patch-hermes rollback INCOMPLETE after a mid-apply write fault — "
+                + ", ".join(str(p) for p in restore_failures)
+                + f" left in PATCHED state (original write fault: {write_exc!r})"
+            ) from write_exc
         raise
 
     print(f"  ✓ patched {WA} + {RUN} (atomic: sender-id + front-brain + turn-budget)")
