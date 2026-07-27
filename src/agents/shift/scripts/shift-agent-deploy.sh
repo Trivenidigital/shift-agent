@@ -317,7 +317,8 @@ install_artifacts() {
     # deploy), budget-bootstrap Phase 4, AND rollback) (which re-runs install_artifacts
     # from the rolled-back tarball) — so laying the label here covers every path,
     # INCLUDING the coupled dual-tree revert, through the EXISTING restore path (no
-    # separate snapshot/restore machinery needed). install(1) is atomic (temp+rename).
+    # separate snapshot/restore machinery needed). The label is written by install(1) (a
+    # single sequential write) and read back + verified by budget-bootstrap Phase 5.
     # Rollback hygiene: a rollback target whose tarball legitimately lacks .commit-hash
     # leaves "$src_root/.commit-hash" absent -> remove any stale live label so provenance
     # is never misreported after a rollback to a pre-label release (a previously-absent

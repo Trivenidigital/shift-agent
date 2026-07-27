@@ -1174,11 +1174,20 @@ def test_provenance_install_artifacts_lays_label_shared_chokepoint():
     """The label install lives in the SHARED install_artifacts() (so deploy, budget-bootstrap
     Phase 4, and rollback all route through it) with install-or-remove hygiene. Static: a
     mutation that drops the lay from the chokepoint fails here."""
+    import re
     text = DEPLOY.read_text(encoding="utf-8")
     i = text.index("install_artifacts() {")
     body = text[i:i + 4000]
-    assert 'install -m 644 "$src_root/.commit-hash" /opt/shift-agent/.commit-hash' in body
-    assert "rm -f /opt/shift-agent/.commit-hash" in body
+    # Assert the install is GUARDED by the staged-label presence check as a contiguous
+    # block (not merely that the two literals appear somewhere) — a condition inversion,
+    # an unwrapped install, or a path typo in the real chokepoint fails here. (The real
+    # lines hardcode /opt/shift-agent and cannot run in the sandbox, so this static shape
+    # check is their primary coverage; the behavioral tests exercise the faithful stub.)
+    assert re.search(
+        r'if \[ -f "\$src_root/\.commit-hash" \]; then\s*\n\s*'
+        r'install -m 644 "\$src_root/\.commit-hash" /opt/shift-agent/\.commit-hash\s*\n\s*'
+        r'else\s*\n\s*rm -f /opt/shift-agent/\.commit-hash\s*\n\s*fi',
+        body), "install_artifacts must guard the label install-or-remove with the staged-label check"
 
 
 # ── static: Phase-5 provenance verify compares installed to staged+authorized ─
