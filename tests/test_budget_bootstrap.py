@@ -384,7 +384,21 @@ install_artifacts() {
     if [ -f "$src_root/src/platform/safe_io.py" ]; then
         cp -f "$src_root/src/platform/safe_io.py" "$SHIFT_ROOT/safe_io.py"
     fi
-    echo "TEST-STUB install_artifacts: laid safe_io flat from $src_root"
+    # Model the shared-chokepoint provenance-label install-or-remove the REAL
+    # install_artifacts does (keyed off the staged / rolled-back tarball's .commit-hash),
+    # into $SHIFT_ROOT. This is what makes the .commit-hash contract exercisable in the
+    # sandbox on BOTH the forward install and the rollback re-lay.
+    if [ -f "$BOOTSTRAP_CTL/.ctl-label-wrong" ]; then
+        # fail-once: model a corrupted / mis-installed label so the REAL Phase-5 provenance
+        # verify (installed != staged) is exercised behaviorally, not just statically.
+        rm -f "$BOOTSTRAP_CTL/.ctl-label-wrong"
+        echo "WRONG-LABEL-000000000000000000000000000" > "$SHIFT_ROOT/.commit-hash"
+    elif [ -f "$src_root/.commit-hash" ]; then
+        install -m 644 "$src_root/.commit-hash" "$SHIFT_ROOT/.commit-hash"
+    else
+        rm -f "$SHIFT_ROOT/.commit-hash"
+    fi
+    echo "TEST-STUB install_artifacts: laid safe_io + .commit-hash flat from $src_root"
     return 0
 }
 post_install_gates_and_restart() {
@@ -619,6 +633,26 @@ class Sandbox:
     @property
     def snapshot_dir(self) -> Path:
         return self.state / "budget-prebudget-hermes-snapshot"
+
+    @property
+    def opt_commit_hash(self) -> Path:
+        # The top-level provenance label install_artifacts lays into $SHIFT_ROOT.
+        return self.shift / ".commit-hash"
+
+    PREV_LABEL = "prebudget0000"  # the pre-budget rollback tarball's .commit-hash
+
+    def make_prev_tarball_label_absent(self):
+        """Rebuild the pre-budget rollback tarball WITHOUT a top-level .commit-hash — models
+        rolling back to a release that legitimately predates the provenance label. After
+        this, a coupled revert / un-budget through the EXISTING restore path must REMOVE the
+        live label (rollback-hygiene)."""
+        prev_root = self.base / "prev_root_nolabel"
+        (prev_root / "src" / "platform").mkdir(parents=True, exist_ok=True)
+        (prev_root / "tools").mkdir(parents=True, exist_ok=True)
+        _wn(prev_root / "src" / "platform" / "safe_io.py", _SAFE_IO_PRE)
+        (self.deploys / f"{self.prev_tag}.tgz").unlink()
+        subprocess.run(["tar", "czf", str(self.deploys / f"{self.prev_tag}.tgz"),
+                        "-C", str(prev_root), "src", "tools"], check=True)
 
     def sentinel_json(self) -> dict:
         import json
@@ -1043,3 +1077,118 @@ def test_bootstrap_phase5_runs_env_symlink_integrity_gate_wired_to_revert():
     seg = text[i:i + 500]
     assert "check_env_symlink_integrity" in seg
     assert "revert_shift_tree" in seg
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# .commit-hash provenance label — shared install_artifacts() chokepoint
+# (install + Phase-5 verify + rollback through the EXISTING restore path)
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── clean bootstrap installs the label == the release commit ─────────────────
+@posix_only
+def test_provenance_clean_bootstrap_installs_commit_hash(sandbox):
+    """A successful bootstrap lays $SHIFT_ROOT/.commit-hash == the RC release commit.
+    Non-vacuous: the content assertion fails if the shared install_artifacts label lay OR
+    the Phase-5 verify is neutered."""
+    assert not sandbox.opt_commit_hash.exists()          # pre-budget box has no label
+    r = sandbox.run("budget-bootstrap")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert sandbox.opt_commit_hash.exists(), "bootstrap must install the .commit-hash label"
+    assert sandbox.opt_commit_hash.read_text(encoding="utf-8").strip() == sandbox.RC_COMMIT
+
+
+# ── a post-install failure rewinds the label to the prev tarball's label ─────
+@posix_only
+def test_provenance_rewind_relays_prev_label_through_existing_path(sandbox):
+    """After Phase-4 lays the RC label, a later post-install gate failure → coupled revert
+    → rollback → install_artifacts RE-LAYS the prev tarball's label (the EXISTING restore
+    path). Non-vacuous: a neutered install_artifacts label lay leaves the stale RC label."""
+    assert not sandbox.opt_commit_hash.exists()
+    sandbox.arm(".ctl-closure-fail")                     # fails in the shared post-install seq, after Phase-4
+    r = sandbox.run("budget-bootstrap")
+    assert r.returncode != 0
+    assert "closure" in (r.stdout + r.stderr)
+    sandbox.assert_clean_rollback()
+    assert sandbox.opt_commit_hash.read_text(encoding="utf-8").strip() == sandbox.PREV_LABEL, \
+        "revert must re-lay the pre-budget tarball's .commit-hash (not keep the RC label)"
+
+
+# ── rollback to a tarball that legitimately lacks the label removes it ───────
+@posix_only
+def test_provenance_rewind_removes_label_when_prev_tarball_lacks_it(sandbox):
+    """Rollback-hygiene: when the rollback artifact legitimately lacks .commit-hash, the
+    coupled revert through install_artifacts REMOVES the live label. Non-vacuous: a
+    neutered rm-branch leaves the RC label behind."""
+    sandbox.make_prev_tarball_label_absent()
+    assert not sandbox.opt_commit_hash.exists()
+    sandbox.arm(".ctl-closure-fail")
+    r = sandbox.run("budget-bootstrap")
+    assert r.returncode != 0
+    sandbox.assert_clean_rollback()
+    assert not sandbox.opt_commit_hash.exists(), \
+        "revert to a pre-label tarball must remove the live .commit-hash (rollback hygiene)"
+
+
+# ── Phase-5 verify catches a mis-installed (mismatched) label → coupled revert ─
+@posix_only
+def test_provenance_phase5_verify_catches_mismatched_label(sandbox):
+    """If install_artifacts lays a WRONG label, the Phase-5 provenance verify (installed !=
+    staged) fail-closes BEFORE the restart → coupled revert. Mutation-sensitive proof the
+    verify is load-bearing: drop the `!= ARTIFACT_COMMIT` check and this test goes green-wrong."""
+    sandbox.arm(".ctl-label-wrong")                      # Phase-4 lays a corrupted label (fail-once)
+    r = sandbox.run("budget-bootstrap")
+    assert r.returncode != 0
+    assert "provenance label" in (r.stdout + r.stderr)
+    sandbox.assert_clean_rollback()
+    # after revert, the rollback re-lay (ctl consumed) restores the prev tarball's label
+    assert sandbox.opt_commit_hash.read_text(encoding="utf-8").strip() == sandbox.PREV_LABEL
+
+
+# ── a Phase-4 install failure reverts cleanly and re-lays the prev label ─────
+@posix_only
+def test_provenance_failed_install_reverts_and_relays_prev_label(sandbox):
+    """An install_artifacts failure (Phase 4) fail-closes to the coupled revert; the label
+    ends at the pre-budget tarball's value, never a half-written RC label."""
+    sandbox.arm(".ctl-install-fail-once")
+    r = sandbox.run("budget-bootstrap")
+    assert r.returncode != 0
+    sandbox.assert_clean_rollback()
+    assert sandbox.opt_commit_hash.read_text(encoding="utf-8").strip() == sandbox.PREV_LABEL
+
+
+# ── un-budget-bootstrap re-lays the pre-budget release's label ───────────────
+@posix_only
+def test_provenance_un_budget_relays_prev_label(sandbox):
+    """After a successful bootstrap (label == RC), un-budget-bootstrap reverts through the
+    existing rollback path → install_artifacts re-lays the pre-budget tarball's label."""
+    assert sandbox.run("budget-bootstrap").returncode == 0
+    assert sandbox.opt_commit_hash.read_text(encoding="utf-8").strip() == sandbox.RC_COMMIT
+    r = sandbox.run("un-budget-bootstrap", sandbox.prev_tag)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert sandbox.opt_commit_hash.read_text(encoding="utf-8").strip() == sandbox.PREV_LABEL, \
+        "un-budget must re-lay the pre-budget release's .commit-hash, not keep the RC label"
+
+
+# ── static: install_artifacts is the shared chokepoint that lays the label ───
+def test_provenance_install_artifacts_lays_label_shared_chokepoint():
+    """The label install lives in the SHARED install_artifacts() (so deploy, budget-bootstrap
+    Phase 4, and rollback all route through it) with install-or-remove hygiene. Static: a
+    mutation that drops the lay from the chokepoint fails here."""
+    text = DEPLOY.read_text(encoding="utf-8")
+    i = text.index("install_artifacts() {")
+    body = text[i:i + 4000]
+    assert 'install -m 644 "$src_root/.commit-hash" /opt/shift-agent/.commit-hash' in body
+    assert "rm -f /opt/shift-agent/.commit-hash" in body
+
+
+# ── static: Phase-5 provenance verify compares installed to staged+authorized ─
+def test_provenance_phase5_verify_wired_to_revert():
+    """The Phase-5 provenance closure compares the installed label to BOTH the staged
+    (.commit-hash / ARTIFACT_COMMIT) and the operator-attested authorized commit, fail-
+    closing to the coupled dual-tree revert BEFORE the irreversible restart."""
+    text = DEPLOY.read_text(encoding="utf-8")
+    assert 'cat "$SHIFT_ROOT/.commit-hash"' in text
+    assert '"$_installed_commit" != "$ARTIFACT_COMMIT"' in text
+    assert '"$_installed_commit" != "$BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT"' in text
+    i = text.index("installed .commit-hash provenance label")
+    assert "revert_shift_tree" in text[i - 500:i + 500]

@@ -312,6 +312,21 @@ install_artifacts() {
     # Python modules — flat layout at /opt/shift-agent/ matches scripts' sys.path
     install -m 644 src/platform/schemas.py /opt/shift-agent/schemas.py
     install -m 644 src/platform/safe_io.py /opt/shift-agent/safe_io.py
+    # Provenance label: record the running release's commit at the live tree root.
+    # install_artifacts is the SHARED chokepoint every path routes through — forward
+    # deploy), budget-bootstrap Phase 4, AND rollback) (which re-runs install_artifacts
+    # from the rolled-back tarball) — so laying the label here covers every path,
+    # INCLUDING the coupled dual-tree revert, through the EXISTING restore path (no
+    # separate snapshot/restore machinery needed). install(1) is atomic (temp+rename).
+    # Rollback hygiene: a rollback target whose tarball legitimately lacks .commit-hash
+    # leaves "$src_root/.commit-hash" absent -> remove any stale live label so provenance
+    # is never misreported after a rollback to a pre-label release (a previously-absent
+    # label likewise stays absent).
+    if [ -f "$src_root/.commit-hash" ]; then
+        install -m 644 "$src_root/.commit-hash" /opt/shift-agent/.commit-hash
+    else
+        rm -f /opt/shift-agent/.commit-hash
+    fi
     # Canonical WhatsApp identity (LID<->phone convergence via lid-cache). Shared
     # by the cf-router plugin, schemas.py intake-session keying, and flyer
     # modules. Guarded for rollback compatibility with predating tarballs.
@@ -2954,6 +2969,22 @@ PY
                 exit 1
             fi
         fi
+        # provenance closure (before the irreversible restart): install_artifacts (Phase 4)
+        # must have laid $SHIFT_ROOT/.commit-hash EXACTLY equal to the staged release commit
+        # (== BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT, already asserted == ARTIFACT_COMMIT in
+        # Phase 1). A missing/mismatched label means the label the closure attests was NOT
+        # installed -> fail-closed -> coupled dual-tree revert (through the EXISTING restore
+        # path: revert_shift_tree -> rollback -> install_artifacts re-lays the prev label).
+        _installed_commit="$(cat "$SHIFT_ROOT/.commit-hash" 2>/dev/null | tr -d '[:space:]')"
+        if [ ! -f "$SHIFT_ROOT/.commit-hash" ] \
+           || [ "$_installed_commit" != "$ARTIFACT_COMMIT" ] \
+           || [ "$_installed_commit" != "$BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT" ]; then
+            echo "FAIL: budget-bootstrap Phase 5 — installed .commit-hash provenance label ('$_installed_commit') is missing or does not match the staged/authorized commit (staged='$ARTIFACT_COMMIT' authorized='$BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT'); coupled dual-tree rollback." >&2
+            revert_shift_tree
+            rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            exit 1
+        fi
+        echo "OK: budget-bootstrap Phase 5 — provenance label installed ($_installed_commit)."
 
         # ── Phase 5 (cont.) + Phase 6: shared gates → restart → smoke ──
         # revert_shift_tree inside this shared sequence is the coupled dual-tree
