@@ -19,6 +19,11 @@
 #   shift-agent-deploy                                  # deploy current staging-new
 #   shift-agent-deploy rollback <deploy-tag>            # restore prior tarball + reinstall
 #   shift-agent-deploy list                             # show available rollback targets
+#   shift-agent-deploy budget-bootstrap                 # first-budget coupled transaction
+#                                                       #   (patch Hermes + install RC as one
+#                                                       #    dual-tree unit; budget stays OFF)
+#   shift-agent-deploy un-budget-bootstrap <pre-tag>    # coupled revert across the budget
+#                                                       #   boundary (the only sanctioned way back)
 
 set -euo pipefail
 
@@ -36,6 +41,47 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]] && [[ -v SHIFT_AGENT_DEPLOY_TEST_SANDBOX ]]
     echo "FATAL: SHIFT_AGENT_DEPLOY_TEST_SANDBOX is forbidden during production deployment." >&2
     exit 1
 fi
+
+# ── Budget-bootstrap testability overrides + derived roots (design-v2 S7) ────
+# The first-budget bootstrap transaction (budget-bootstrap / un-budget-bootstrap)
+# and its tests parameterize the Shift root, the Hermes root, the systemctl command,
+# and the deploys dir. These overrides are honored ONLY when the explicit bootstrap
+# test marker is PRESENT. In production the marker is absent and ANY of the test-only
+# override vars being set is FATAL — the inverse of the SHIFT_AGENT_DEPLOY_TEST_SANDBOX
+# guard above (there the test var is forbidden in prod; here the test overrides
+# REQUIRE the marker). Steady-state deploy)/rollback)/list) resolve to the identical
+# canonical values, so their behavior is unchanged.
+SHIFT_ROOT=/opt/shift-agent
+SYSTEMCTL=systemctl
+HERMES_HOME="${HERMES_HOME:-/root/.hermes/hermes-agent}"
+if [[ -v SHIFT_AGENT_BOOTSTRAP_TEST_SANDBOX ]]; then
+    [ -n "${SHIFT_AGENT_BOOTSTRAP_TEST_ROOT:-}" ] && SHIFT_ROOT="$SHIFT_AGENT_BOOTSTRAP_TEST_ROOT"
+    [ -n "${SHIFT_AGENT_SYSTEMCTL:-}" ] && SYSTEMCTL="$SHIFT_AGENT_SYSTEMCTL"
+    STAGING="${SHIFT_AGENT_BOOTSTRAP_STAGING:-$SHIFT_ROOT/staging-new}"
+    DEPLOYS_DIR="${SHIFT_AGENT_BOOTSTRAP_DEPLOYS_DIR:-$SHIFT_ROOT/deploys}"
+else
+    for _ovr in SHIFT_AGENT_BOOTSTRAP_TEST_ROOT SHIFT_AGENT_SYSTEMCTL \
+                SHIFT_AGENT_BOOTSTRAP_STAGING SHIFT_AGENT_BOOTSTRAP_DEPLOYS_DIR; do
+        if [[ -v $_ovr ]]; then
+            echo "FATAL: $_ovr is a test-only override but SHIFT_AGENT_BOOTSTRAP_TEST_SANDBOX is not set — refusing (production run)." >&2
+            exit 1
+        fi
+    done
+    # HERMES_HOME is a legitimate production var (patch-hermes reads it). A
+    # NON-canonical value without the marker is refused by the bootstrap Phase-1
+    # sticky-var guard — NOT here — so deploy)/rollback)/list) stay unaffected.
+fi
+# Hermes core files (mirror check-shift-agent-patch.sh + patch-hermes.py layout).
+HERMES_RUN="$HERMES_HOME/gateway/run.py"
+HERMES_WA="$HERMES_HOME/gateway/platforms/whatsapp.py"
+HERMES_BR="$HERMES_HOME/scripts/whatsapp-bridge/bridge.js"
+# Durable in-progress sentinel + retained pre-budget Hermes snapshot (design §S4/S6).
+BOOTSTRAP_SENTINEL="$SHIFT_ROOT/state/.budget-bootstrap-inprogress.json"
+BOOTSTRAP_SNAPSHOT_DIR="$SHIFT_ROOT/state/budget-prebudget-hermes-snapshot"
+# Steady-state deploy mode; the budget-bootstrap branch flips this to "bootstrap"
+# so revert_shift_tree performs the coupled dual-tree revert instead of the plain
+# Shift-only rollback.
+POST_INSTALL_MODE=deploy
 
 mkdir -p "$DEPLOYS_DIR"
 
@@ -1488,6 +1534,623 @@ PY_VERIFY
 }
 # END approval-code-lock-init
 
+# ── First-budget bootstrap: coupled dual-tree revert primitives (design-v2) ──
+# revert_shift_tree is the ONE seam the post-install refactor pivots on. In
+# steady-state deploy (POST_INSTALL_MODE=deploy) it is byte-equivalent to the
+# pre-refactor `"$0" rollback "$PREV_TAG"`. In budget-bootstrap mode it FIRST
+# restores the Hermes core from the pre-budget snapshot (so the tree is coherent
+# and the rollback guard sees no budget markers), THEN reverts the Shift tree via
+# the pre-budget tarball, THEN verifies the coupled reversal + clears the sentinel.
+revert_shift_tree() {
+    if [ "$POST_INSTALL_MODE" = bootstrap ]; then
+        bootstrap_restore_hermes_snapshot
+    fi
+    "$0" rollback "$PREV_TAG"
+    if [ "$POST_INSTALL_MODE" = bootstrap ]; then
+        bootstrap_verify_pre_budget_state
+        bootstrap_clear_sentinel
+    fi
+}
+
+bootstrap_sha256() {
+    sha256sum "$1" | cut -d' ' -f1
+}
+
+bootstrap_clear_sentinel() {
+    rm -f "$BOOTSTRAP_SENTINEL"
+}
+
+bootstrap_read_sentinel_field() {
+    # $1 = top-level JSON field; echoes the value ("" if absent/unreadable).
+    python3 - "$BOOTSTRAP_SENTINEL" "$1" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    v = json.load(open(sys.argv[1])).get(sys.argv[2], "")
+    sys.stdout.write("" if v is None else str(v))
+except Exception:
+    pass
+PY
+}
+
+bootstrap_read_sentinel_sha() {
+    # $1 = run|wa|br; echoes the recorded pre-budget sha ("" if absent).
+    python3 - "$BOOTSTRAP_SENTINEL" "$1" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    sys.stdout.write(str(json.load(open(sys.argv[1]))["pre_budget_hermes_sha"].get(sys.argv[2], "")))
+except Exception:
+    pass
+PY
+}
+
+bootstrap_write_sentinel() {
+    # $1 prev_tag  $2 snapshot_dir  $3 sha_run  $4 sha_wa  $5 sha_br
+    mkdir -p "$(dirname "$BOOTSTRAP_SENTINEL")"
+    local tmp="${BOOTSTRAP_SENTINEL}.tmp.$$"
+    python3 - "$tmp" "$1" "$2" "$3" "$4" "$5" <<'PY'
+import json, sys, time
+tmp, prev, snap, r, w, b = sys.argv[1:7]
+json.dump({
+    "state": "IN_PROGRESS",
+    "prev_tag": prev,
+    "snapshot_dir": snap,
+    "pre_budget_hermes_sha": {"run": r, "wa": w, "br": b},
+    "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+}, open(tmp, "w"), indent=2)
+PY
+    mv -f "$tmp" "$BOOTSTRAP_SENTINEL"
+}
+
+bootstrap_snapshot_hermes() {
+    # $1 = snapshot dir. Copies the 3 Hermes core files (run/whatsapp/bridge).
+    local dir="$1"
+    rm -rf "$dir"
+    mkdir -p "$dir"
+    cp -p "$HERMES_RUN" "$dir/run.py"
+    cp -p "$HERMES_WA" "$dir/whatsapp.py"
+    cp -p "$HERMES_BR" "$dir/bridge.js"
+}
+
+_bootstrap_cp_hermes_from() {
+    # $1 = snapshot dir. Restores the 3 core files back into $HERMES_HOME.
+    local dir="$1"
+    cp -p "$dir/run.py" "$HERMES_RUN"
+    cp -p "$dir/whatsapp.py" "$HERMES_WA"
+    cp -p "$dir/bridge.js" "$HERMES_BR"
+}
+
+bootstrap_assert_budget_off() {
+    # Resolve the ACTUAL gateway unit environment (S10) — not just .env — and assert
+    # the budget flag is not enabled. Non-zero iff GATEWAY_TURN_SEND_BUDGET_ENABLED=1.
+    local env_out
+    env_out="$("$SYSTEMCTL" show -p Environment hermes-gateway 2>/dev/null || true)"
+    printf '%s\n' "$env_out" | grep -q "GATEWAY_TURN_SEND_BUDGET_ENABLED=1" && return 1
+    return 0
+}
+
+bootstrap_restore_hermes_snapshot() {
+    # Phase-0/7 restore: snapshot_dir + recorded pre-budget shas come from the
+    # sentinel. cp-back, then verify each restored file's sha256 == recorded. FATAL
+    # (P2 alert + exit 1) on a missing snapshot or a sha mismatch — a bad restore
+    # leaves a mixed tree, the exact outcome the coupled transaction forbids.
+    local snap; snap="$(bootstrap_read_sentinel_field snapshot_dir)"
+    [ -n "$snap" ] || snap="$BOOTSTRAP_SNAPSHOT_DIR"
+    if [ ! -f "$snap/run.py" ] || [ ! -f "$snap/whatsapp.py" ] || [ ! -f "$snap/bridge.js" ]; then
+        echo "FATAL: budget-bootstrap — pre-budget Hermes snapshot incomplete at '$snap'; cannot restore Hermes core." >&2
+        /usr/local/bin/shift-agent-notify-owner --title "Budget-bootstrap rollback FAILED (no snapshot)" --priority 2 \
+            "Budget-bootstrap could not restore Hermes: snapshot missing at $snap. Hermes may carry the budget patch while Shift reverted — SSH immediately." 2>/dev/null || true
+        exit 1
+    fi
+    _bootstrap_cp_hermes_from "$snap"
+    local ok=1
+    local pair key f want got
+    for pair in "run:$HERMES_RUN" "wa:$HERMES_WA" "br:$HERMES_BR"; do
+        key="${pair%%:*}"; f="${pair#*:}"
+        want="$(bootstrap_read_sentinel_sha "$key")"
+        got="$(bootstrap_sha256 "$f")"
+        if [ -n "$want" ] && [ "$want" != "$got" ]; then
+            echo "FATAL: budget-bootstrap — restored Hermes $key sha $got != recorded pre-budget $want." >&2
+            ok=0
+        fi
+    done
+    if [ "$ok" != 1 ]; then
+        /usr/local/bin/shift-agent-notify-owner --title "Budget-bootstrap rollback: Hermes sha mismatch" --priority 2 \
+            "Budget-bootstrap restored Hermes from snapshot but a sha does not match the recorded pre-budget value. Tree may be mixed — SSH immediately." 2>/dev/null || true
+        exit 1
+    fi
+    echo "  [budget-bootstrap] Hermes core restored from snapshot ($snap) — sha verified pre-budget"
+}
+
+bootstrap_restore_hermes_prebudget() {
+    # un-budget-bootstrap restore: use the RETAINED pre-budget snapshot. There is no
+    # active sentinel (the forward transaction succeeded), so verify the snapshot's
+    # SHAPE is genuinely pre-budget (no budget markers; front-brain + sender-id
+    # present) BEFORE trusting it, then cp-back.
+    local snap="$BOOTSTRAP_SNAPSHOT_DIR"
+    if [ ! -f "$snap/run.py" ] || [ ! -f "$snap/whatsapp.py" ] || [ ! -f "$snap/bridge.js" ]; then
+        echo "FATAL: un-budget-bootstrap — retained pre-budget Hermes snapshot missing at '$snap'. Cannot revert Hermes across the budget boundary." >&2
+        exit 1
+    fi
+    if grep -q "BEGIN shift-agent-turn-send-budget" "$snap/run.py" 2>/dev/null \
+       || grep -q "BEGIN shift-agent-turn-budget-sentinel" "$snap/whatsapp.py" 2>/dev/null; then
+        echo "FATAL: un-budget-bootstrap — retained snapshot at '$snap' itself carries budget markers; it is NOT a pre-budget snapshot. Refusing." >&2
+        exit 1
+    fi
+    if ! grep -q "BEGIN shift-agent-front-brain-send" "$snap/whatsapp.py" 2>/dev/null \
+       || ! grep -q "BEGIN shift-agent-sender-id" "$snap/run.py" 2>/dev/null; then
+        echo "FATAL: un-budget-bootstrap — retained snapshot at '$snap' is missing front-brain/sender-id; refusing to restore a degraded Hermes." >&2
+        exit 1
+    fi
+    _bootstrap_cp_hermes_from "$snap"
+    echo "  [un-budget-bootstrap] Hermes core restored from retained pre-budget snapshot ($snap)"
+}
+
+bootstrap_verify_pre_budget_state() {
+    # Post-rollback coupled-reversal check: budget markers ABSENT, front-brain +
+    # sender-id PRESENT (front-brain intact), RC safe_io gate ABSENT (pre-budget),
+    # budget OFF in the running unit env. Any violation => P2 alert + exit 1.
+    local bad=""
+    grep -q "BEGIN shift-agent-turn-send-budget" "$HERMES_RUN" 2>/dev/null && bad="$bad run.py-still-has-turn-send-budget"
+    grep -q "BEGIN shift-agent-turn-budget-sentinel" "$HERMES_WA" 2>/dev/null && bad="$bad whatsapp.py-still-has-turn-budget-sentinel"
+    grep -q "BEGIN shift-agent-front-brain-send" "$HERMES_WA" 2>/dev/null || bad="$bad whatsapp.py-missing-front-brain-send"
+    grep -q "BEGIN shift-agent-sender-id" "$HERMES_RUN" 2>/dev/null || bad="$bad run.py-missing-sender-id"
+    if [ -f "$SHIFT_ROOT/safe_io.py" ]; then
+        grep -q "def turn_send_budget_gate" "$SHIFT_ROOT/safe_io.py" 2>/dev/null && bad="$bad safe_io-still-has-gate"
+    fi
+    bootstrap_assert_budget_off || bad="$bad budget-flag-ON"
+    if [ -n "$bad" ]; then
+        echo "FATAL: budget-bootstrap post-rollback verification FAILED —$bad. Tree may be MIXED across the budget boundary." >&2
+        /usr/local/bin/shift-agent-notify-owner --title "Budget-bootstrap rollback verification FAILED" --priority 2 \
+            "Coupled revert left an inconsistent tree ($bad). SSH immediately." 2>/dev/null || true
+        exit 1
+    fi
+    echo "  [budget-bootstrap] pre-budget consistency verified (no budget markers, front-brain intact, budget OFF)"
+}
+
+post_install_gates_and_restart() {
+    # Shared post-install gate sequence + restart + smoke, called by BOTH the
+    # deploy) and budget-bootstrap) branches AFTER install_artifacts has run. In
+    # deploy mode (POST_INSTALL_MODE=deploy, the default) every failure path is
+    # byte-equivalent to the pre-refactor inline sequence: revert_shift_tree is
+    # exactly `"$0" rollback "$PREV_TAG"`. In bootstrap mode revert_shift_tree also
+    # restores the Hermes core from the pre-budget snapshot and verifies the
+    # coupled reversal. Reads globals NEW_TAG, PREV_TAG, STAGING, VENV_PY,
+    # DEPLOYS_DIR set by the caller.
+        # ops/approval-lock-init: initialize the canonical cross-pool code lock NOW —
+        # AFTER install_artifacts() (so /opt/shift-agent/safe_io.py exists to verify
+        # against) and BEFORE any service restart / activation below. POSITIONAL
+        # canonical literals (no env surface). Non-swallowed call: under
+        # `set -euo pipefail` any FATAL inside aborts the deploy right here, before
+        # the gateway restarts. No unlocked fallback path.
+        initialize_approval_code_lock \
+            "/opt/shift-agent/state/approval-code-pools.lock" \
+            "shift-agent" "shift-agent" "python3" "/opt/shift-agent"
+
+        # PR-R2A: precreate the SIDECAR amendment-store LOCK with the SAME reviewed
+        # routine (identical safety contract: symlink/regular/owner/group/mode reject,
+        # O_EXCL create, FileLock fd-identity verification). LOCK ONLY — the DATA file
+        # (/opt/shift-agent/state/catering-amendments.json) is intentionally NOT
+        # precreated here: it is first written by the shift-agent gateway via
+        # atomic_write_json so its inode is owned shift-agent:shift-agent from birth,
+        # keeping every subsequent atomic replacement's post-write owner check valid.
+        # Precreating the data file as root would poison that check. Same non-swallowed
+        # semantics: any FATAL aborts the deploy here, before the gateway restarts.
+        initialize_approval_code_lock \
+            "/opt/shift-agent/state/catering-amendments.json.lock" \
+            "shift-agent" "shift-agent" "python3" "/opt/shift-agent"
+
+        # CD v2 durable rollback scrub. `creative_direction` is Field(exclude=True)
+        # so NEW writes never persist it, but rows written before that fix may
+        # still carry the key on disk and an older (rolled-back) extra="forbid"
+        # loader would reject it. Strip any lingering key from the flyer project
+        # store now (after install_artifacts so flyer_store_maintenance.py is
+        # installed flat; before the gateway restart so the running gateway never
+        # reads a store carrying the key). Idempotent + safe: with exclude=True the
+        # key is never legitimately persisted, so removing it loses nothing. No-op
+        # when the store file is absent (fresh VPS / flyer never used).
+        #
+        # GUARDED on module presence (Codex BLOCKER A): on a rollback to an older
+        # tarball the guarded install above removed /opt/shift-agent/flyer_store_
+        # maintenance.py, so this `import flyer_store_maintenance` would crash. Only
+        # run the scrub when the module is actually present on the box; otherwise skip
+        # it (a rolled-back older loader does not know the key and never wrote it).
+        FLYER_STORE=/opt/shift-agent/state/flyer/projects.json
+        if [ -f /opt/shift-agent/flyer_store_maintenance.py ]; then
+            if [ -f "$FLYER_STORE" ]; then
+                if ! "$VENV_PY" -c "import sys; sys.path.insert(0, '/opt/shift-agent'); from flyer_store_maintenance import scrub_store_file; print('scrubbed creative_direction x', scrub_store_file('$FLYER_STORE'))"; then
+                    echo "FAIL: CD v2 rollback scrub of $FLYER_STORE failed — refusing to restart hermes-gateway" >&2
+                    if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                        revert_shift_tree
+                        rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                    else
+                        /usr/local/bin/shift-agent-notify-owner \
+                            --title "Deploy FAILED at CD v2 store scrub, no prior tarball" \
+                            --priority 2 \
+                            "Deploy $NEW_TAG failed scrubbing creative_direction from the flyer project store. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
+                        rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                    fi
+                    exit 1
+                fi
+            else
+                echo "OK: CD v2 rollback scrub skipped (no flyer store at $FLYER_STORE)"
+            fi
+        else
+            echo "skip scrub (module absent — rollback)"
+        fi
+
+        # Pre-restart cf-router compile gate: hooks.py is imported by the
+        # gateway at startup, so a syntax error can make systemctl restart
+        # fail before the post-restart smoke/rollback path gets control.
+        if ! "$VENV_PY" - <<'PY' > /dev/null; then
+from pathlib import Path
+for p in [
+    Path('/root/.hermes/plugins/cf-router/actions.py'),
+    Path('/root/.hermes/plugins/cf-router/hooks.py'),
+]:
+    compile(p.read_text(), str(p), 'exec')
+PY
+            echo "FAIL: pre-restart cf-router compile gate - refusing to restart hermes-gateway" >&2
+            if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                revert_shift_tree
+                # Evict the broken tarball from the rotation so next deploy
+                # doesn't surface it as a candidate rollback target.
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            else
+                /usr/local/bin/shift-agent-notify-owner \
+                    --title "Deploy FAILED at pre-restart cf-router compile gate, no prior tarball" \
+                    --priority 2 \
+                    "Deploy $NEW_TAG failed pre-restart cf-router actions/hooks compile check. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to - SSH immediately." 2>/dev/null || true
+                # Evict the broken tarball from the rotation so it isn't surfaced
+                # as a rollback candidate on the next deploy.
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            fi
+            exit 1
+        fi
+
+        # Pre-restart cf-router enabled-state gate. Unlike external Hermes
+        # foundation skills, cf-router is repo-installed by install_artifacts(),
+        # so validate it only after the staged plugin has been rsynced into
+        # /root/.hermes/plugins and before hermes-gateway can import it.
+        if [ -x /usr/local/bin/credential-minimized-readiness ]; then
+            if ! "$VENV_PY" /usr/local/bin/credential-minimized-readiness \
+                    --validate-plugin cf-router --format text > /dev/null; then
+                echo "FAIL: pre-restart cf-router readiness gate - refusing to restart hermes-gateway" >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    revert_shift_tree
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED at pre-restart cf-router readiness gate, no prior tarball" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG failed pre-restart cf-router enabled-state check. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to - SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            fi
+        fi
+
+        # Pre-restart import gate: a missing safe_io OR audit_helpers chokepoint
+        # symbol means traffic hits new code BEFORE smoke fires post-restart.
+        # Run the symbol-import checks against the just-installed binary (still
+        # old service) — failure path rolls back without touching live traffic.
+        # PR-D1 R3-H-Gate1: chained check-audit-helpers-symbols.
+        # Both gate scripts use #!/usr/bin/env python3 (system Python, no
+        # pydantic). Invoke through the Hermes venv so schemas import works.
+        #
+        # Loadability > presence (2026-07-21 incident): the install list dropping
+        # catering_recompose/catering_quote_ledger/catering_lead_sweep did not fail
+        # any presence check — the ImportError only surfaced when a live proposal
+        # inbound hit create-catering-proposal-options. Import-test the flat catering
+        # platform modules here (they are stdlib-only, so this loads them for real,
+        # not just stat()s the files) so a future missing-module regression rolls back
+        # BEFORE the gateway restarts onto the broken proposal surface. The ImportError
+        # traceback (naming the missing module) is left on stderr for the deploy log.
+        if ! "$VENV_PY" /usr/local/bin/check-safe-io-symbols > /dev/null \
+              || ! "$VENV_PY" /usr/local/bin/check-audit-helpers-symbols > /dev/null \
+              || ! "$VENV_PY" -c "import sys; sys.path.insert(0, '/opt/shift-agent'); import catering_recompose, catering_quote_ledger, catering_lead_sweep, catering_amendments" > /dev/null; then
+            echo "FAIL: pre-restart import gate — refusing to restart hermes-gateway" >&2
+            if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                revert_shift_tree
+                # Evict the broken tarball from the rotation so next deploy
+                # doesn't surface it as a candidate rollback target.
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            else
+                /usr/local/bin/shift-agent-notify-owner \
+                    --title "Deploy FAILED at pre-restart import gate, no prior tarball" \
+                    --priority 2 \
+                    "Deploy $NEW_TAG failed pre-restart symbol-import check. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
+                # Evict the broken tarball from the rotation so it isn't surfaced
+                # as a rollback candidate on the next deploy.
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            fi
+            exit 1
+        fi
+
+        # Pre-restart artifact->runtime closure gate (PR-2; F-8 / DGT-21 / SP-GO-10).
+        # The flat /opt/shift-agent layout means live code imports modules by flat
+        # name, so a renamed install target can leave the OLD flat name behind as a
+        # stale orphan the installer never refreshes (the 2026-06-05
+        # creative_firewall.py incident). This gate re-derives the whole flat-module
+        # set FROM THE ARTIFACT — no hand-maintained list that can drift — and fails
+        # closed if ANY installed flat module is not byte-identical to a file in the
+        # approved artifact (stale/orphan) or any imported flat dependency is
+        # missing/stale. Runs after install_artifacts (all flat copies laid down) and
+        # BEFORE the gateway restart, so a failure rolls back onto the old code.
+        # Rollback-safe: a pre-gate tarball lacks the helper -> WARN-skip (that
+        # tarball also predates the modules the gate would verify), mirroring the
+        # skills-manifest content gate's rollback posture.
+        CLOSURE_CHECK="$STAGING/tools/verify-artifact-runtime-closure.sh"
+        if [ -f "$CLOSURE_CHECK" ]; then
+            if ! bash "$CLOSURE_CHECK" "$STAGING" /opt/shift-agent; then
+                echo "FAIL: pre-restart artifact-runtime closure gate — refusing to restart hermes-gateway" >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    revert_shift_tree
+                    # Evict the broken tarball so the next deploy doesn't surface it
+                    # as a candidate rollback target (mirrors the import-gate eviction).
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED at artifact-runtime closure gate, no prior tarball" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG failed the artifact-runtime closure check (a flat runtime module is stale/orphaned, or an imported flat dependency is missing/stale). New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately. Re-run the check read-only: bash $CLOSURE_CHECK $STAGING /opt/shift-agent" 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            fi
+        else
+            echo "WARN: $CLOSURE_CHECK absent from staging (pre-gate rollback tarball) — skipping artifact-runtime closure gate" >&2
+        fi
+
+        # Determine ONCE whether commerce is active-for-Stripe on this VPS. Both
+        # the webhook-subscription gate (slice-3.5) and the livemode gate
+        # (slice-3.1) use this to decide whether a MISSING gate script (pre-gate
+        # or rollback tarball) is a hard-fail (commerce live on Stripe — a
+        # money-safety gate must not be silently dropped) or a safe WARN-skip
+        # (dormant/non-commerce). Probe errors (pre-commerce schema, unparseable
+        # config) are treated as not-active.
+        if "$VENV_PY" - <<'PY'
+import sys, yaml
+sys.path.insert(0, "/opt/shift-agent")
+try:
+    from schemas import CommerceConfig
+    raw = (yaml.safe_load(open("/opt/shift-agent/config.yaml")) or {}).get("commerce") or {}
+    cfg = CommerceConfig.model_validate(raw if isinstance(raw, dict) else {})
+    active = bool(cfg.enabled and cfg.provider == "stripe")
+except Exception:
+    active = False
+raise SystemExit(0 if active else 1)
+PY
+        then
+            COMMERCE_ACTIVE_STRIPE=1
+        else
+            COMMERCE_ACTIVE_STRIPE=0
+        fi
+
+        # Pre-restart commerce webhook-subscription gate (slice-3.5). Dormant-safe:
+        # exits 0 (and prints a one-line "not applicable" note) unless
+        # commerce.enabled && commerce.provider == "stripe". When commerce IS
+        # actively Stripe, it asserts the Stripe webhook subscription is
+        # registered; if missing it fails closed — without the subscription,
+        # Stripe payment_intent.succeeded events silently 404 and a paying
+        # customer is never confirmed (slice-3 §13.5 A-LOW-1).
+        #
+        # Prefer the staging source copy so the FIRST deploy that introduces the
+        # gate still runs it; fall back to the installed /usr/local/bin copy only
+        # for rollback-tarball compatibility. Run via $VENV_PY so the wrapper's
+        # `from schemas import CommerceConfig` resolves (pydantic lives there).
+        COMMERCE_WEBHOOK_GATE="$STAGING/src/platform/scripts/check-commerce-webhook-subscription"
+        [ -x "$COMMERCE_WEBHOOK_GATE" ] || COMMERCE_WEBHOOK_GATE=/usr/local/bin/check-commerce-webhook-subscription
+        if [ ! -x "$COMMERCE_WEBHOOK_GATE" ]; then
+            # Gate script absent => pre-gate (older) tarball or malformed deploy.
+            # Skipping is safe ONLY if commerce is not active-for-Stripe (probed
+            # once above). HARD-FAIL if active so a rollback cannot silently drop
+            # the money-safety gate while Stripe is live (Codex review 2026-05-29,
+            # escalated finding #3); WARN-skip when dormant (older-build compat).
+            if [ "$COMMERCE_ACTIVE_STRIPE" = 1 ]; then
+                echo "FATAL: commerce is active for Stripe but the webhook-subscription gate script is absent from staging and /usr/local/bin — refusing to deploy/restart (a rollback must not drop the money-safety gate while Stripe is live)." >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    revert_shift_tree
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED: commerce gate missing while Stripe active" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG: commerce active for Stripe but the webhook-subscription gate script is missing from the tarball. New files installed but service still on OLD code. SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            else
+                echo "WARN: commerce webhook-subscription gate script not found (pre-gate tarball); commerce is not active-for-Stripe on this VPS so skipping is safe. If you later enable Stripe, redeploy a current tarball so the gate runs." >&2
+            fi
+        else
+            if ! "$VENV_PY" "$COMMERCE_WEBHOOK_GATE" --config /opt/shift-agent/config.yaml; then
+                echo "FAIL: pre-restart commerce webhook-subscription gate — refusing to restart hermes-gateway" >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    revert_shift_tree
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED at commerce webhook gate, no prior tarball" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG failed the commerce webhook-subscription gate (commerce active for Stripe but the subscription is missing). New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            fi
+        fi
+
+        # Pre-restart commerce Stripe livemode-match gate (slice-3.1). Dormant-safe:
+        # exits 0 unless commerce.enabled && commerce.provider == "stripe". When
+        # active, asserts the Stripe API key's account livemode matches
+        # commerce.stripe_livemode_expected — catches the "live key in test config"
+        # (or vice versa) footgun before a customer pays (§13.5 B-MEDIUM-1).
+        # Fail-closed on mismatch (exit 1) or key/API error (exit 2). Reads
+        # STRIPE_API_KEY from .env itself and calls api.stripe.com via urllib (no
+        # SDK); never logs the key. Same staging-preference + absent-handling as
+        # the webhook gate above.
+        COMMERCE_LIVEMODE_GATE="$STAGING/src/platform/scripts/check-commerce-stripe-livemode"
+        [ -x "$COMMERCE_LIVEMODE_GATE" ] || COMMERCE_LIVEMODE_GATE=/usr/local/bin/check-commerce-stripe-livemode
+        if [ ! -x "$COMMERCE_LIVEMODE_GATE" ]; then
+            if [ "$COMMERCE_ACTIVE_STRIPE" = 1 ]; then
+                echo "FATAL: commerce is active for Stripe but the livemode-match gate script is absent from staging and /usr/local/bin — refusing to deploy/restart (a rollback must not drop the money-safety gate while Stripe is live)." >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    revert_shift_tree
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED: commerce livemode gate missing while Stripe active" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG: commerce active for Stripe but the livemode-match gate script is missing from the tarball. New files installed but service still on OLD code. SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            else
+                echo "WARN: commerce Stripe livemode-match gate script not found (pre-gate tarball); commerce is not active-for-Stripe on this VPS so skipping is safe. If you later enable Stripe, redeploy a current tarball so the gate runs." >&2
+            fi
+        else
+            if ! "$VENV_PY" "$COMMERCE_LIVEMODE_GATE" --config /opt/shift-agent/config.yaml; then
+                echo "FAIL: pre-restart commerce Stripe livemode-match gate — refusing to restart hermes-gateway" >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    revert_shift_tree
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED at commerce livemode gate, no prior tarball" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG failed the commerce Stripe livemode-match gate (key mode != stripe_livemode_expected, or Stripe unreachable). New files installed but service still on OLD code. No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            fi
+        fi
+
+        # Hermes runtime permission gate: run the same targeted preflight that
+        # hermes-gateway.service runs at ExecStartPre. This catches ownership
+        # issues before restart and avoids the old broad recursive chown over
+        # all of /root/.hermes, which could be blocked by stale backup files.
+        if ! /usr/local/bin/shift-agent-hermes-permissions > /dev/null; then
+            echo "FAIL: Hermes runtime permissions gate — refusing to restart hermes-gateway" >&2
+            if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                revert_shift_tree
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            else
+                /usr/local/bin/shift-agent-notify-owner \
+                    --title "Deploy FAILED at Hermes permissions gate" \
+                    --priority 2 \
+                    "Deploy $NEW_TAG failed before gateway restart because Hermes runtime permissions are invalid. SSH immediately." 2>/dev/null || true
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            fi
+            exit 1
+        fi
+
+        # Restart services (in order: tail-logger first, gateway last).
+        # Do not cut off long Flyer image generation/source-edit jobs mid-flight;
+        # a restart sends SIGTERM through the gateway process tree and can turn a
+        # real customer request into exit=-15 plus a failed WhatsApp ack.
+        if ! wait_for_flyer_generation_drain; then
+            /usr/local/bin/shift-agent-notify-owner                 --title "Deploy paused: active Flyer generation"                 --priority 2                 "Deploy $NEW_TAG refused to restart Hermes while Flyer generation was still active. Retry after the active job drains." 2>/dev/null || true
+            exit 1
+        fi
+        systemctl restart shift-agent-tail-logger.timer 2>/dev/null || true
+        systemctl restart shift-agent-health.timer 2>/dev/null || true
+        systemctl restart hermes-gateway
+        # Cockpit holds Pydantic models in memory; install_artifacts() above
+        # replaced /opt/shift-agent/schemas.py + safe_io.py + shared modules,
+        # but the cockpit's long-running uvicorn process keeps the OLD modules
+        # loaded until restart. Skipping this step caused the 2026-05-19
+        # incident where /flyer/customers returned 500 (Pydantic
+        # ValidationError on a new FlyerWorkflowStatus value) until a manual
+        # restart cleared the stale module cache.
+        #
+        # Unit-presence-gated so VPSes without the cockpit installed aren't
+        # affected. Inside the gate: restart + /health probe so a real cockpit
+        # failure fails the deploy + rolls back instead of being masked by
+        # `|| true` — the silent-failure mode this hook exists to prevent.
+        # Do not use `systemctl restart --wait` here: on main-vps it can hang
+        # even after the unit is active and no jobs remain; the HTTP health
+        # probe below is the readiness check.
+        if systemctl list-unit-files shift-agent-cockpit.service >/dev/null 2>&1; then
+            cockpit_fail_reason=""
+            if ! systemctl restart shift-agent-cockpit.service; then
+                cockpit_fail_reason="restart"
+            else
+                cockpit_healthy=0
+                for _ in 1 2 3 4 5; do
+                    if curl -sf -o /dev/null --max-time 2 http://127.0.0.1:8081/health; then
+                        cockpit_healthy=1
+                        break
+                    fi
+                    sleep 1
+                done
+                [ "$cockpit_healthy" -ne 1 ] && cockpit_fail_reason="health probe"
+                # Per-route mount probe for the manual-queue surface. The route
+                # uses a conditional import (flyer_manual_queue vs
+                # agents.flyer.manual_queue) that fails silently if either
+                # module is missing — /health alone wouldn't catch that.
+                # 401/403 here is success: it proves the route is mounted and
+                # the import resolved; connection-refused or 5xx is the fail
+                # mode we care about. Run only after /health passed so we
+                # don't mask a plain restart fail.
+                #
+                # URL note (S2 deploy regression, fixed here): the cockpit
+                # uvicorn at port 8081 serves routes at /flyer/... directly.
+                # The /api/ prefix is added externally by Caddy when proxying
+                # browser requests; it is NOT part of the uvicorn path. The
+                # initial S2 deploy script used /api/flyer/manual-queue and
+                # would return 404 on every subsequent deploy, blocking it.
+                if [ "$cockpit_healthy" -eq 1 ] && [ -z "$cockpit_fail_reason" ]; then
+                    manual_queue_code=$(curl -s -o /dev/null --max-time 2 -w '%{http_code}' http://127.0.0.1:8081/flyer/manual-queue || echo "000")
+                    case "$manual_queue_code" in
+                        200|401|403)
+                            : # route mounted (auth gate is the only thing in our way)
+                            ;;
+                        *)
+                            cockpit_fail_reason="manual-queue route probe (got $manual_queue_code)"
+                            ;;
+                    esac
+                fi
+            fi
+            if [ -n "$cockpit_fail_reason" ]; then
+                echo "FAIL: cockpit $cockpit_fail_reason failed after restart — rolling back" >&2
+                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                    revert_shift_tree
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                else
+                    /usr/local/bin/shift-agent-notify-owner \
+                        --title "Deploy FAILED at cockpit $cockpit_fail_reason, no prior tarball" \
+                        --priority 2 \
+                        "Deploy $NEW_TAG: cockpit $cockpit_fail_reason after restart. SSH immediately." 2>/dev/null || true
+                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+                fi
+                exit 1
+            fi
+        fi
+        sleep 5
+
+        # Smoke test gate
+        if ! /usr/local/bin/shift-agent-smoke-test.sh; then
+            echo "SMOKE TEST FAILED — rolling back to $PREV_TAG" >&2
+            if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+                revert_shift_tree
+                # PR-D1 R4-H2: evict the broken tarball from rotation so the
+                # next deploy doesn't surface it as a candidate rollback target.
+                # Mirror of the pre-restart-gate eviction at the failure path
+                # above; without this, ls -t shows the broken tarball first
+                # and PR-D2 rollback chains backward to a pre-shim binary.
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            else
+                /usr/local/bin/shift-agent-notify-owner \
+                    --title "Deploy FAILED, no prior tarball" \
+                    --priority 2 \
+                    "Deploy $NEW_TAG failed smoke test and no prior tarball exists to roll back to. Agent in uncertain state. SSH immediately." 2>/dev/null || true
+                # PR-D1 R4-H2: evict the broken tarball even when no prior exists.
+                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            fi
+            exit 1
+        fi
+    return 0
+}
+
 case "$ACTION" in
     deploy)
         if [ ! -d "$STAGING/src" ]; then
@@ -1747,7 +2410,7 @@ case "$ACTION" in
         if ! install_artifacts "$STAGING"; then
             echo "FAIL: install_artifacts gate failed - rolling back to $PREV_TAG" >&2
             if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
-                "$0" rollback "$PREV_TAG"
+                revert_shift_tree
                 rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
             else
                 /usr/local/bin/shift-agent-notify-owner \
@@ -1759,438 +2422,7 @@ case "$ACTION" in
             exit 1
         fi
 
-        # ops/approval-lock-init: initialize the canonical cross-pool code lock NOW —
-        # AFTER install_artifacts() (so /opt/shift-agent/safe_io.py exists to verify
-        # against) and BEFORE any service restart / activation below. POSITIONAL
-        # canonical literals (no env surface). Non-swallowed call: under
-        # `set -euo pipefail` any FATAL inside aborts the deploy right here, before
-        # the gateway restarts. No unlocked fallback path.
-        initialize_approval_code_lock \
-            "/opt/shift-agent/state/approval-code-pools.lock" \
-            "shift-agent" "shift-agent" "python3" "/opt/shift-agent"
-
-        # PR-R2A: precreate the SIDECAR amendment-store LOCK with the SAME reviewed
-        # routine (identical safety contract: symlink/regular/owner/group/mode reject,
-        # O_EXCL create, FileLock fd-identity verification). LOCK ONLY — the DATA file
-        # (/opt/shift-agent/state/catering-amendments.json) is intentionally NOT
-        # precreated here: it is first written by the shift-agent gateway via
-        # atomic_write_json so its inode is owned shift-agent:shift-agent from birth,
-        # keeping every subsequent atomic replacement's post-write owner check valid.
-        # Precreating the data file as root would poison that check. Same non-swallowed
-        # semantics: any FATAL aborts the deploy here, before the gateway restarts.
-        initialize_approval_code_lock \
-            "/opt/shift-agent/state/catering-amendments.json.lock" \
-            "shift-agent" "shift-agent" "python3" "/opt/shift-agent"
-
-        # CD v2 durable rollback scrub. `creative_direction` is Field(exclude=True)
-        # so NEW writes never persist it, but rows written before that fix may
-        # still carry the key on disk and an older (rolled-back) extra="forbid"
-        # loader would reject it. Strip any lingering key from the flyer project
-        # store now (after install_artifacts so flyer_store_maintenance.py is
-        # installed flat; before the gateway restart so the running gateway never
-        # reads a store carrying the key). Idempotent + safe: with exclude=True the
-        # key is never legitimately persisted, so removing it loses nothing. No-op
-        # when the store file is absent (fresh VPS / flyer never used).
-        #
-        # GUARDED on module presence (Codex BLOCKER A): on a rollback to an older
-        # tarball the guarded install above removed /opt/shift-agent/flyer_store_
-        # maintenance.py, so this `import flyer_store_maintenance` would crash. Only
-        # run the scrub when the module is actually present on the box; otherwise skip
-        # it (a rolled-back older loader does not know the key and never wrote it).
-        FLYER_STORE=/opt/shift-agent/state/flyer/projects.json
-        if [ -f /opt/shift-agent/flyer_store_maintenance.py ]; then
-            if [ -f "$FLYER_STORE" ]; then
-                if ! "$VENV_PY" -c "import sys; sys.path.insert(0, '/opt/shift-agent'); from flyer_store_maintenance import scrub_store_file; print('scrubbed creative_direction x', scrub_store_file('$FLYER_STORE'))"; then
-                    echo "FAIL: CD v2 rollback scrub of $FLYER_STORE failed — refusing to restart hermes-gateway" >&2
-                    if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
-                        "$0" rollback "$PREV_TAG"
-                        rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                    else
-                        /usr/local/bin/shift-agent-notify-owner \
-                            --title "Deploy FAILED at CD v2 store scrub, no prior tarball" \
-                            --priority 2 \
-                            "Deploy $NEW_TAG failed scrubbing creative_direction from the flyer project store. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
-                        rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                    fi
-                    exit 1
-                fi
-            else
-                echo "OK: CD v2 rollback scrub skipped (no flyer store at $FLYER_STORE)"
-            fi
-        else
-            echo "skip scrub (module absent — rollback)"
-        fi
-
-        # Pre-restart cf-router compile gate: hooks.py is imported by the
-        # gateway at startup, so a syntax error can make systemctl restart
-        # fail before the post-restart smoke/rollback path gets control.
-        if ! "$VENV_PY" - <<'PY' > /dev/null; then
-from pathlib import Path
-for p in [
-    Path('/root/.hermes/plugins/cf-router/actions.py'),
-    Path('/root/.hermes/plugins/cf-router/hooks.py'),
-]:
-    compile(p.read_text(), str(p), 'exec')
-PY
-            echo "FAIL: pre-restart cf-router compile gate - refusing to restart hermes-gateway" >&2
-            if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
-                "$0" rollback "$PREV_TAG"
-                # Evict the broken tarball from the rotation so next deploy
-                # doesn't surface it as a candidate rollback target.
-                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-            else
-                /usr/local/bin/shift-agent-notify-owner \
-                    --title "Deploy FAILED at pre-restart cf-router compile gate, no prior tarball" \
-                    --priority 2 \
-                    "Deploy $NEW_TAG failed pre-restart cf-router actions/hooks compile check. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to - SSH immediately." 2>/dev/null || true
-                # Evict the broken tarball from the rotation so it isn't surfaced
-                # as a rollback candidate on the next deploy.
-                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-            fi
-            exit 1
-        fi
-
-        # Pre-restart cf-router enabled-state gate. Unlike external Hermes
-        # foundation skills, cf-router is repo-installed by install_artifacts(),
-        # so validate it only after the staged plugin has been rsynced into
-        # /root/.hermes/plugins and before hermes-gateway can import it.
-        if [ -x /usr/local/bin/credential-minimized-readiness ]; then
-            if ! "$VENV_PY" /usr/local/bin/credential-minimized-readiness \
-                    --validate-plugin cf-router --format text > /dev/null; then
-                echo "FAIL: pre-restart cf-router readiness gate - refusing to restart hermes-gateway" >&2
-                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
-                    "$0" rollback "$PREV_TAG"
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                else
-                    /usr/local/bin/shift-agent-notify-owner \
-                        --title "Deploy FAILED at pre-restart cf-router readiness gate, no prior tarball" \
-                        --priority 2 \
-                        "Deploy $NEW_TAG failed pre-restart cf-router enabled-state check. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to - SSH immediately." 2>/dev/null || true
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                fi
-                exit 1
-            fi
-        fi
-
-        # Pre-restart import gate: a missing safe_io OR audit_helpers chokepoint
-        # symbol means traffic hits new code BEFORE smoke fires post-restart.
-        # Run the symbol-import checks against the just-installed binary (still
-        # old service) — failure path rolls back without touching live traffic.
-        # PR-D1 R3-H-Gate1: chained check-audit-helpers-symbols.
-        # Both gate scripts use #!/usr/bin/env python3 (system Python, no
-        # pydantic). Invoke through the Hermes venv so schemas import works.
-        #
-        # Loadability > presence (2026-07-21 incident): the install list dropping
-        # catering_recompose/catering_quote_ledger/catering_lead_sweep did not fail
-        # any presence check — the ImportError only surfaced when a live proposal
-        # inbound hit create-catering-proposal-options. Import-test the flat catering
-        # platform modules here (they are stdlib-only, so this loads them for real,
-        # not just stat()s the files) so a future missing-module regression rolls back
-        # BEFORE the gateway restarts onto the broken proposal surface. The ImportError
-        # traceback (naming the missing module) is left on stderr for the deploy log.
-        if ! "$VENV_PY" /usr/local/bin/check-safe-io-symbols > /dev/null \
-              || ! "$VENV_PY" /usr/local/bin/check-audit-helpers-symbols > /dev/null \
-              || ! "$VENV_PY" -c "import sys; sys.path.insert(0, '/opt/shift-agent'); import catering_recompose, catering_quote_ledger, catering_lead_sweep, catering_amendments" > /dev/null; then
-            echo "FAIL: pre-restart import gate — refusing to restart hermes-gateway" >&2
-            if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
-                "$0" rollback "$PREV_TAG"
-                # Evict the broken tarball from the rotation so next deploy
-                # doesn't surface it as a candidate rollback target.
-                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-            else
-                /usr/local/bin/shift-agent-notify-owner \
-                    --title "Deploy FAILED at pre-restart import gate, no prior tarball" \
-                    --priority 2 \
-                    "Deploy $NEW_TAG failed pre-restart symbol-import check. New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
-                # Evict the broken tarball from the rotation so it isn't surfaced
-                # as a rollback candidate on the next deploy.
-                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-            fi
-            exit 1
-        fi
-
-        # Pre-restart artifact->runtime closure gate (PR-2; F-8 / DGT-21 / SP-GO-10).
-        # The flat /opt/shift-agent layout means live code imports modules by flat
-        # name, so a renamed install target can leave the OLD flat name behind as a
-        # stale orphan the installer never refreshes (the 2026-06-05
-        # creative_firewall.py incident). This gate re-derives the whole flat-module
-        # set FROM THE ARTIFACT — no hand-maintained list that can drift — and fails
-        # closed if ANY installed flat module is not byte-identical to a file in the
-        # approved artifact (stale/orphan) or any imported flat dependency is
-        # missing/stale. Runs after install_artifacts (all flat copies laid down) and
-        # BEFORE the gateway restart, so a failure rolls back onto the old code.
-        # Rollback-safe: a pre-gate tarball lacks the helper -> WARN-skip (that
-        # tarball also predates the modules the gate would verify), mirroring the
-        # skills-manifest content gate's rollback posture.
-        CLOSURE_CHECK="$STAGING/tools/verify-artifact-runtime-closure.sh"
-        if [ -f "$CLOSURE_CHECK" ]; then
-            if ! bash "$CLOSURE_CHECK" "$STAGING" /opt/shift-agent; then
-                echo "FAIL: pre-restart artifact-runtime closure gate — refusing to restart hermes-gateway" >&2
-                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
-                    "$0" rollback "$PREV_TAG"
-                    # Evict the broken tarball so the next deploy doesn't surface it
-                    # as a candidate rollback target (mirrors the import-gate eviction).
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                else
-                    /usr/local/bin/shift-agent-notify-owner \
-                        --title "Deploy FAILED at artifact-runtime closure gate, no prior tarball" \
-                        --priority 2 \
-                        "Deploy $NEW_TAG failed the artifact-runtime closure check (a flat runtime module is stale/orphaned, or an imported flat dependency is missing/stale). New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately. Re-run the check read-only: bash $CLOSURE_CHECK $STAGING /opt/shift-agent" 2>/dev/null || true
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                fi
-                exit 1
-            fi
-        else
-            echo "WARN: $CLOSURE_CHECK absent from staging (pre-gate rollback tarball) — skipping artifact-runtime closure gate" >&2
-        fi
-
-        # Determine ONCE whether commerce is active-for-Stripe on this VPS. Both
-        # the webhook-subscription gate (slice-3.5) and the livemode gate
-        # (slice-3.1) use this to decide whether a MISSING gate script (pre-gate
-        # or rollback tarball) is a hard-fail (commerce live on Stripe — a
-        # money-safety gate must not be silently dropped) or a safe WARN-skip
-        # (dormant/non-commerce). Probe errors (pre-commerce schema, unparseable
-        # config) are treated as not-active.
-        if "$VENV_PY" - <<'PY'
-import sys, yaml
-sys.path.insert(0, "/opt/shift-agent")
-try:
-    from schemas import CommerceConfig
-    raw = (yaml.safe_load(open("/opt/shift-agent/config.yaml")) or {}).get("commerce") or {}
-    cfg = CommerceConfig.model_validate(raw if isinstance(raw, dict) else {})
-    active = bool(cfg.enabled and cfg.provider == "stripe")
-except Exception:
-    active = False
-raise SystemExit(0 if active else 1)
-PY
-        then
-            COMMERCE_ACTIVE_STRIPE=1
-        else
-            COMMERCE_ACTIVE_STRIPE=0
-        fi
-
-        # Pre-restart commerce webhook-subscription gate (slice-3.5). Dormant-safe:
-        # exits 0 (and prints a one-line "not applicable" note) unless
-        # commerce.enabled && commerce.provider == "stripe". When commerce IS
-        # actively Stripe, it asserts the Stripe webhook subscription is
-        # registered; if missing it fails closed — without the subscription,
-        # Stripe payment_intent.succeeded events silently 404 and a paying
-        # customer is never confirmed (slice-3 §13.5 A-LOW-1).
-        #
-        # Prefer the staging source copy so the FIRST deploy that introduces the
-        # gate still runs it; fall back to the installed /usr/local/bin copy only
-        # for rollback-tarball compatibility. Run via $VENV_PY so the wrapper's
-        # `from schemas import CommerceConfig` resolves (pydantic lives there).
-        COMMERCE_WEBHOOK_GATE="$STAGING/src/platform/scripts/check-commerce-webhook-subscription"
-        [ -x "$COMMERCE_WEBHOOK_GATE" ] || COMMERCE_WEBHOOK_GATE=/usr/local/bin/check-commerce-webhook-subscription
-        if [ ! -x "$COMMERCE_WEBHOOK_GATE" ]; then
-            # Gate script absent => pre-gate (older) tarball or malformed deploy.
-            # Skipping is safe ONLY if commerce is not active-for-Stripe (probed
-            # once above). HARD-FAIL if active so a rollback cannot silently drop
-            # the money-safety gate while Stripe is live (Codex review 2026-05-29,
-            # escalated finding #3); WARN-skip when dormant (older-build compat).
-            if [ "$COMMERCE_ACTIVE_STRIPE" = 1 ]; then
-                echo "FATAL: commerce is active for Stripe but the webhook-subscription gate script is absent from staging and /usr/local/bin — refusing to deploy/restart (a rollback must not drop the money-safety gate while Stripe is live)." >&2
-                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
-                    "$0" rollback "$PREV_TAG"
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                else
-                    /usr/local/bin/shift-agent-notify-owner \
-                        --title "Deploy FAILED: commerce gate missing while Stripe active" \
-                        --priority 2 \
-                        "Deploy $NEW_TAG: commerce active for Stripe but the webhook-subscription gate script is missing from the tarball. New files installed but service still on OLD code. SSH immediately." 2>/dev/null || true
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                fi
-                exit 1
-            else
-                echo "WARN: commerce webhook-subscription gate script not found (pre-gate tarball); commerce is not active-for-Stripe on this VPS so skipping is safe. If you later enable Stripe, redeploy a current tarball so the gate runs." >&2
-            fi
-        else
-            if ! "$VENV_PY" "$COMMERCE_WEBHOOK_GATE" --config /opt/shift-agent/config.yaml; then
-                echo "FAIL: pre-restart commerce webhook-subscription gate — refusing to restart hermes-gateway" >&2
-                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
-                    "$0" rollback "$PREV_TAG"
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                else
-                    /usr/local/bin/shift-agent-notify-owner \
-                        --title "Deploy FAILED at commerce webhook gate, no prior tarball" \
-                        --priority 2 \
-                        "Deploy $NEW_TAG failed the commerce webhook-subscription gate (commerce active for Stripe but the subscription is missing). New files installed but service still on OLD code (gateway not yet restarted). No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                fi
-                exit 1
-            fi
-        fi
-
-        # Pre-restart commerce Stripe livemode-match gate (slice-3.1). Dormant-safe:
-        # exits 0 unless commerce.enabled && commerce.provider == "stripe". When
-        # active, asserts the Stripe API key's account livemode matches
-        # commerce.stripe_livemode_expected — catches the "live key in test config"
-        # (or vice versa) footgun before a customer pays (§13.5 B-MEDIUM-1).
-        # Fail-closed on mismatch (exit 1) or key/API error (exit 2). Reads
-        # STRIPE_API_KEY from .env itself and calls api.stripe.com via urllib (no
-        # SDK); never logs the key. Same staging-preference + absent-handling as
-        # the webhook gate above.
-        COMMERCE_LIVEMODE_GATE="$STAGING/src/platform/scripts/check-commerce-stripe-livemode"
-        [ -x "$COMMERCE_LIVEMODE_GATE" ] || COMMERCE_LIVEMODE_GATE=/usr/local/bin/check-commerce-stripe-livemode
-        if [ ! -x "$COMMERCE_LIVEMODE_GATE" ]; then
-            if [ "$COMMERCE_ACTIVE_STRIPE" = 1 ]; then
-                echo "FATAL: commerce is active for Stripe but the livemode-match gate script is absent from staging and /usr/local/bin — refusing to deploy/restart (a rollback must not drop the money-safety gate while Stripe is live)." >&2
-                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
-                    "$0" rollback "$PREV_TAG"
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                else
-                    /usr/local/bin/shift-agent-notify-owner \
-                        --title "Deploy FAILED: commerce livemode gate missing while Stripe active" \
-                        --priority 2 \
-                        "Deploy $NEW_TAG: commerce active for Stripe but the livemode-match gate script is missing from the tarball. New files installed but service still on OLD code. SSH immediately." 2>/dev/null || true
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                fi
-                exit 1
-            else
-                echo "WARN: commerce Stripe livemode-match gate script not found (pre-gate tarball); commerce is not active-for-Stripe on this VPS so skipping is safe. If you later enable Stripe, redeploy a current tarball so the gate runs." >&2
-            fi
-        else
-            if ! "$VENV_PY" "$COMMERCE_LIVEMODE_GATE" --config /opt/shift-agent/config.yaml; then
-                echo "FAIL: pre-restart commerce Stripe livemode-match gate — refusing to restart hermes-gateway" >&2
-                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
-                    "$0" rollback "$PREV_TAG"
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                else
-                    /usr/local/bin/shift-agent-notify-owner \
-                        --title "Deploy FAILED at commerce livemode gate, no prior tarball" \
-                        --priority 2 \
-                        "Deploy $NEW_TAG failed the commerce Stripe livemode-match gate (key mode != stripe_livemode_expected, or Stripe unreachable). New files installed but service still on OLD code. No prior tarball to roll back to — SSH immediately." 2>/dev/null || true
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                fi
-                exit 1
-            fi
-        fi
-
-        # Hermes runtime permission gate: run the same targeted preflight that
-        # hermes-gateway.service runs at ExecStartPre. This catches ownership
-        # issues before restart and avoids the old broad recursive chown over
-        # all of /root/.hermes, which could be blocked by stale backup files.
-        if ! /usr/local/bin/shift-agent-hermes-permissions > /dev/null; then
-            echo "FAIL: Hermes runtime permissions gate — refusing to restart hermes-gateway" >&2
-            if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
-                "$0" rollback "$PREV_TAG"
-                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-            else
-                /usr/local/bin/shift-agent-notify-owner \
-                    --title "Deploy FAILED at Hermes permissions gate" \
-                    --priority 2 \
-                    "Deploy $NEW_TAG failed before gateway restart because Hermes runtime permissions are invalid. SSH immediately." 2>/dev/null || true
-                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-            fi
-            exit 1
-        fi
-
-        # Restart services (in order: tail-logger first, gateway last).
-        # Do not cut off long Flyer image generation/source-edit jobs mid-flight;
-        # a restart sends SIGTERM through the gateway process tree and can turn a
-        # real customer request into exit=-15 plus a failed WhatsApp ack.
-        if ! wait_for_flyer_generation_drain; then
-            /usr/local/bin/shift-agent-notify-owner                 --title "Deploy paused: active Flyer generation"                 --priority 2                 "Deploy $NEW_TAG refused to restart Hermes while Flyer generation was still active. Retry after the active job drains." 2>/dev/null || true
-            exit 1
-        fi
-        systemctl restart shift-agent-tail-logger.timer 2>/dev/null || true
-        systemctl restart shift-agent-health.timer 2>/dev/null || true
-        systemctl restart hermes-gateway
-        # Cockpit holds Pydantic models in memory; install_artifacts() above
-        # replaced /opt/shift-agent/schemas.py + safe_io.py + shared modules,
-        # but the cockpit's long-running uvicorn process keeps the OLD modules
-        # loaded until restart. Skipping this step caused the 2026-05-19
-        # incident where /flyer/customers returned 500 (Pydantic
-        # ValidationError on a new FlyerWorkflowStatus value) until a manual
-        # restart cleared the stale module cache.
-        #
-        # Unit-presence-gated so VPSes without the cockpit installed aren't
-        # affected. Inside the gate: restart + /health probe so a real cockpit
-        # failure fails the deploy + rolls back instead of being masked by
-        # `|| true` — the silent-failure mode this hook exists to prevent.
-        # Do not use `systemctl restart --wait` here: on main-vps it can hang
-        # even after the unit is active and no jobs remain; the HTTP health
-        # probe below is the readiness check.
-        if systemctl list-unit-files shift-agent-cockpit.service >/dev/null 2>&1; then
-            cockpit_fail_reason=""
-            if ! systemctl restart shift-agent-cockpit.service; then
-                cockpit_fail_reason="restart"
-            else
-                cockpit_healthy=0
-                for _ in 1 2 3 4 5; do
-                    if curl -sf -o /dev/null --max-time 2 http://127.0.0.1:8081/health; then
-                        cockpit_healthy=1
-                        break
-                    fi
-                    sleep 1
-                done
-                [ "$cockpit_healthy" -ne 1 ] && cockpit_fail_reason="health probe"
-                # Per-route mount probe for the manual-queue surface. The route
-                # uses a conditional import (flyer_manual_queue vs
-                # agents.flyer.manual_queue) that fails silently if either
-                # module is missing — /health alone wouldn't catch that.
-                # 401/403 here is success: it proves the route is mounted and
-                # the import resolved; connection-refused or 5xx is the fail
-                # mode we care about. Run only after /health passed so we
-                # don't mask a plain restart fail.
-                #
-                # URL note (S2 deploy regression, fixed here): the cockpit
-                # uvicorn at port 8081 serves routes at /flyer/... directly.
-                # The /api/ prefix is added externally by Caddy when proxying
-                # browser requests; it is NOT part of the uvicorn path. The
-                # initial S2 deploy script used /api/flyer/manual-queue and
-                # would return 404 on every subsequent deploy, blocking it.
-                if [ "$cockpit_healthy" -eq 1 ] && [ -z "$cockpit_fail_reason" ]; then
-                    manual_queue_code=$(curl -s -o /dev/null --max-time 2 -w '%{http_code}' http://127.0.0.1:8081/flyer/manual-queue || echo "000")
-                    case "$manual_queue_code" in
-                        200|401|403)
-                            : # route mounted (auth gate is the only thing in our way)
-                            ;;
-                        *)
-                            cockpit_fail_reason="manual-queue route probe (got $manual_queue_code)"
-                            ;;
-                    esac
-                fi
-            fi
-            if [ -n "$cockpit_fail_reason" ]; then
-                echo "FAIL: cockpit $cockpit_fail_reason failed after restart — rolling back" >&2
-                if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
-                    "$0" rollback "$PREV_TAG"
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                else
-                    /usr/local/bin/shift-agent-notify-owner \
-                        --title "Deploy FAILED at cockpit $cockpit_fail_reason, no prior tarball" \
-                        --priority 2 \
-                        "Deploy $NEW_TAG: cockpit $cockpit_fail_reason after restart. SSH immediately." 2>/dev/null || true
-                    rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-                fi
-                exit 1
-            fi
-        fi
-        sleep 5
-
-        # Smoke test gate
-        if ! /usr/local/bin/shift-agent-smoke-test.sh; then
-            echo "SMOKE TEST FAILED — rolling back to $PREV_TAG" >&2
-            if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
-                "$0" rollback "$PREV_TAG"
-                # PR-D1 R4-H2: evict the broken tarball from rotation so the
-                # next deploy doesn't surface it as a candidate rollback target.
-                # Mirror of the pre-restart-gate eviction at the failure path
-                # above; without this, ls -t shows the broken tarball first
-                # and PR-D2 rollback chains backward to a pre-shim binary.
-                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-            else
-                /usr/local/bin/shift-agent-notify-owner \
-                    --title "Deploy FAILED, no prior tarball" \
-                    --priority 2 \
-                    "Deploy $NEW_TAG failed smoke test and no prior tarball exists to roll back to. Agent in uncertain state. SSH immediately." 2>/dev/null || true
-                # PR-D1 R4-H2: evict the broken tarball even when no prior exists.
-                rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
-            fi
-            exit 1
-        fi
+        post_install_gates_and_restart
 
         rotate_deploys
 
@@ -2209,6 +2441,23 @@ PY
             echo "Available targets:" >&2
             list_deploys >&2
             exit 2
+        fi
+
+        # Budget-boundary reverse-transaction guard (design-v2 S6/1d). A plain
+        # rollback to a PRE-budget tarball while Hermes STILL carries the budget
+        # patch would leave a MIXED tree (pre-budget Shift safe_io without
+        # turn_send_budget_gate, budget-patched Hermes adapter that calls it) — the
+        # exact split the coupled transaction exists to prevent. Refuse and route to
+        # un-budget-bootstrap, the only sanctioned way back across the boundary. The
+        # bootstrap's own dual-tree revert restores Hermes FIRST, so by the time it
+        # calls `rollback` there are no markers and this guard is a no-op.
+        if grep -q "BEGIN shift-agent-turn-send-budget" "$HERMES_RUN" 2>/dev/null; then
+            if ! tar xzOf "$TARBALL" src/platform/safe_io.py 2>/dev/null | grep -q "def turn_send_budget_gate"; then
+                echo "ERROR: refusing plain rollback to $TARGET — it predates the budget boundary (its safe_io lacks turn_send_budget_gate) while Hermes still carries the budget patch. A plain rollback would leave a MIXED tree." >&2
+                echo "  Use the coupled reverse-transaction instead:" >&2
+                echo "    $0 un-budget-bootstrap $TARGET" >&2
+                exit 1
+            fi
         fi
 
         echo "Rolling back to $TARGET ($TARBALL)"
@@ -2305,13 +2554,249 @@ PY
         echo "Rollback to $TARGET complete."
         ;;
 
+    budget-bootstrap)
+        # ═══ First-budget transactional bootstrap (design-v2) ═══════════════
+        # Applies the per-inbound-turn send-budget patch to the Hermes core
+        # (whatsapp.py + run.py; bridge untouched) AND installs the RC that carries
+        # the enforcing safe_io.turn_send_budget_gate — as ONE coupled transaction
+        # with dual-tree rollback. The budget ships OFF (the flag is NEVER set); this
+        # is a code install, not an activation. deploy)/rollback)/list) are untouched.
+        POST_INSTALL_MODE=bootstrap
+
+        # ── Phase 0: startup recovery from an interrupted prior run (S4) ──
+        if [ -f "$BOOTSTRAP_SENTINEL" ]; then
+            echo "=== budget-bootstrap Phase 0: interrupted prior run detected — recovering ==="
+            bootstrap_restore_hermes_snapshot
+            _prev="$(bootstrap_read_sentinel_field prev_tag)"
+            if [ -n "$_prev" ] && [ "$_prev" != "none" ] && [ -f "$DEPLOYS_DIR/${_prev}.tgz" ]; then
+                PREV_TAG="$_prev"
+                "$0" rollback "$PREV_TAG"
+            fi
+            bootstrap_verify_pre_budget_state
+            bootstrap_clear_sentinel
+            echo "recovered from interrupted bootstrap; re-run budget-bootstrap to retry." >&2
+            exit 1
+        fi
+
+        # ── Phase 1: pre-mutation checks (NO state change; abort leaves all untouched) ──
+        if [ ! -d "$STAGING/src" ]; then
+            echo "ERROR: $STAGING/src not found. Did you scp + extract the RC tarball?" >&2
+            exit 2
+        fi
+        if [ ! -x "$STAGING/tools/check-shift-agent-patch.sh" ]; then
+            echo "ERROR: $STAGING/tools/check-shift-agent-patch.sh not found or not executable — refusing." >&2
+            exit 1
+        fi
+        if [ ! -f "$STAGING/tools/patch-hermes.py" ]; then
+            echo "ERROR: $STAGING/tools/patch-hermes.py absent from staging — refusing." >&2
+            exit 1
+        fi
+        VENV_PY="/usr/local/lib/hermes-agent/venv/bin/python"
+        if [ ! -x "$VENV_PY" ]; then
+            echo "ERROR: Hermes venv Python missing or not executable at $VENV_PY — refusing." >&2
+            exit 1
+        fi
+        # Sticky-var guard: outside a test sandbox, HERMES_HOME must be canonical.
+        if ! [[ -v SHIFT_AGENT_BOOTSTRAP_TEST_SANDBOX ]] && [ "$HERMES_HOME" != "/root/.hermes/hermes-agent" ]; then
+            echo "FATAL: HERMES_HOME=$HERMES_HOME is non-canonical without the bootstrap test marker — refusing." >&2
+            exit 1
+        fi
+        # Deployment authorization: operator must attest the authorized RC commit
+        # (re-typed, mirroring the HERMES_PIN_OVERRIDE attestation pattern) and it
+        # must match the staged artifact .commit-hash.
+        if [ -z "${BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT:-}" ]; then
+            echo "FATAL: budget-bootstrap requires BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT (the authorized RC commit) — refusing (new-RC deployment authorization)." >&2
+            exit 1
+        fi
+        ARTIFACT_COMMIT="$(cat "$STAGING/.commit-hash" 2>/dev/null | tr -d '[:space:]')"
+        if [ -z "$ARTIFACT_COMMIT" ]; then
+            echo "FATAL: staged artifact has no .commit-hash — refusing." >&2
+            exit 1
+        fi
+        case "$ARTIFACT_COMMIT" in
+            "$BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT"*) : ;;
+            *) echo "FATAL: staged .commit-hash ($ARTIFACT_COMMIT) does not match BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT ($BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT) — refusing." >&2; exit 1 ;;
+        esac
+        # Hermes at the pinned commit (first-budget MUST be on the pin; no override here).
+        H_REAL="$(readlink -f "$HERMES_HOME" 2>/dev/null || echo "$HERMES_HOME")"
+        PINNED_COMMIT="$(grep '^HERMES_COMMIT=' "$STAGING/tools/hermes-patch-baseline.txt" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]' | sed -E 's/^"(.*)"$/\1/')"
+        [ -n "$PINNED_COMMIT" ] || { echo "FATAL: baseline missing HERMES_COMMIT — refusing." >&2; exit 1; }
+        CUR_COMMIT="$(git -c "safe.directory=$H_REAL" -C "$HERMES_HOME" rev-parse HEAD 2>/dev/null || echo unknown)"
+        if [ "$CUR_COMMIT" != "$PINNED_COMMIT" ]; then
+            echo "FATAL: budget-bootstrap requires Hermes at the pinned commit $PINNED_COMMIT (current $CUR_COMMIT). Resolve pin drift before first-budget." >&2
+            exit 1
+        fi
+        PINNED_BRIDGE_SHA="$(grep '^BRIDGE_POST_PATCH_SHA256=' "$STAGING/tools/hermes-patch-baseline.txt" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]' | sed -E 's/^"(.*)"$/\1/')"
+        if [ -n "$PINNED_BRIDGE_SHA" ] && [ "$(bootstrap_sha256 "$HERMES_BR")" != "$PINNED_BRIDGE_SHA" ]; then
+            echo "FATAL: budget-bootstrap — bridge.js sha != pinned $PINNED_BRIDGE_SHA. Resolve bridge drift before first-budget." >&2
+            exit 1
+        fi
+        # First-budget: the budget markers must currently be ABSENT in Hermes, and the
+        # pre-budget baseline (sender-id + front-brain) must be PRESENT.
+        if grep -q "BEGIN shift-agent-turn-send-budget" "$HERMES_RUN" 2>/dev/null \
+           || grep -q "BEGIN shift-agent-turn-budget-sentinel" "$HERMES_WA" 2>/dev/null; then
+            echo "ERROR: Hermes already carries the budget patch — not a first-budget box. Use the ordinary deploy path." >&2
+            exit 1
+        fi
+        grep -q "BEGIN shift-agent-front-brain-send" "$HERMES_WA" 2>/dev/null \
+            || { echo "FATAL: Hermes whatsapp.py lacks the front-brain-send marker — unexpected pre-budget baseline; refusing." >&2; exit 1; }
+        grep -q "BEGIN shift-agent-sender-id" "$HERMES_RUN" 2>/dev/null \
+            || { echo "FATAL: Hermes run.py lacks the sender-id marker — unexpected pre-budget baseline; refusing." >&2; exit 1; }
+        # The staged RC safe_io MUST define the enforcing gate (F2 companion).
+        grep -q "def turn_send_budget_gate" "$STAGING/src/platform/safe_io.py" 2>/dev/null \
+            || { echo "FATAL: staged src/platform/safe_io.py lacks turn_send_budget_gate — the RC does not carry the enforcing gate; refusing." >&2; exit 1; }
+        # patch-hermes validates all-or-nothing against the live Hermes (dry parse).
+        if ! HERMES_HOME="$HERMES_HOME" "$VENV_PY" - "$STAGING/tools/patch-hermes.py" dry <<'PY'; then
+import importlib.util, sys
+path, mode = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("patch_hermes_staged", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+mod._apply_wa_run(write=(mode == "apply"))
+PY
+            echo "FATAL: budget-bootstrap — patch-hermes dry validation failed against the live Hermes (anchor drift). Refusing before any mutation." >&2
+            exit 1
+        fi
+        # Rollback anchor: the current latest tarball is the pre-budget rollback target.
+        PREV_TAG="$(ls -t "$DEPLOYS_DIR/"deploy-*.tgz 2>/dev/null | head -1 | xargs -n1 basename 2>/dev/null | sed 's/\.tgz$//' || echo none)"
+        if [ "$PREV_TAG" = "none" ] || [ ! -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
+            echo "FATAL: budget-bootstrap requires a pre-budget rollback tarball in $DEPLOYS_DIR (none found) — refusing (no coupled-revert anchor)." >&2
+            exit 1
+        fi
+        [ -w "$DEPLOYS_DIR" ] || { echo "FATAL: $DEPLOYS_DIR not writable — refusing." >&2; exit 1; }
+        # Budget must be OFF going in (env flag + resolved unit environment).
+        if [ "${GATEWAY_TURN_SEND_BUDGET_ENABLED:-0}" = "1" ]; then
+            echo "FATAL: GATEWAY_TURN_SEND_BUDGET_ENABLED=1 in the environment — the bootstrap installs the budget OFF and never enables it. Refusing." >&2
+            exit 1
+        fi
+        bootstrap_assert_budget_off || { echo "FATAL: GATEWAY_TURN_SEND_BUDGET_ENABLED=1 in the gateway unit environment — refusing." >&2; exit 1; }
+        echo "OK: budget-bootstrap Phase 1 pre-checks passed (pin $PINNED_COMMIT, budget absent, prev=$PREV_TAG, budget OFF)."
+
+        # ── Phase 2: write sentinel + snapshot the 3 Hermes core files ──
+        SHA_RUN="$(bootstrap_sha256 "$HERMES_RUN")"
+        SHA_WA="$(bootstrap_sha256 "$HERMES_WA")"
+        SHA_BR="$(bootstrap_sha256 "$HERMES_BR")"
+        bootstrap_snapshot_hermes "$BOOTSTRAP_SNAPSHOT_DIR"
+        bootstrap_write_sentinel "$PREV_TAG" "$BOOTSTRAP_SNAPSHOT_DIR" "$SHA_RUN" "$SHA_WA" "$SHA_BR"
+        echo "OK: budget-bootstrap Phase 2 — sentinel written, pre-budget Hermes snapshotted to $BOOTSTRAP_SNAPSHOT_DIR."
+
+        # ── Phase 3: apply the budget patch via _apply_wa_run() (wa+run only) ──
+        echo "=== budget-bootstrap Phase 3: applying budget patch (whatsapp.py + run.py; bridge untouched) ==="
+        if ! HERMES_HOME="$HERMES_HOME" "$VENV_PY" - "$STAGING/tools/patch-hermes.py" apply <<'PY'; then
+import importlib.util, sys
+path, mode = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("patch_hermes_staged", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+mod._apply_wa_run(write=(mode == "apply"))
+PY
+            echo "FAIL: budget-bootstrap Phase 3 — patch-hermes _apply_wa_run failed; restoring Hermes from snapshot (no Shift change)." >&2
+            bootstrap_restore_hermes_snapshot
+            bootstrap_verify_pre_budget_state
+            bootstrap_clear_sentinel
+            /usr/local/bin/shift-agent-notify-owner --title "Budget-bootstrap aborted at patch step" --priority 2 \
+                "Budget-bootstrap failed applying the budget patch; Hermes restored to pre-budget, no Shift change. Safe to retry." 2>/dev/null || true
+            exit 1
+        fi
+        # The patch installs the budget OFF and NEVER sets the flag; verify OFF via the
+        # resolved unit environment (S10). If something enabled it, restore + abort.
+        if ! bootstrap_assert_budget_off; then
+            echo "FATAL: budget-bootstrap Phase 3 — GATEWAY_TURN_SEND_BUDGET_ENABLED=1 after patch; the bootstrap never enables the budget. Restoring Hermes." >&2
+            bootstrap_restore_hermes_snapshot
+            bootstrap_verify_pre_budget_state
+            bootstrap_clear_sentinel
+            exit 1
+        fi
+
+        # ── Phase 4: install_artifacts in-process (RC safe_io + all trees) ──
+        COMMIT_HASH="$(cat "$STAGING/.commit-hash" 2>/dev/null | head -c 8 || echo unknown)"
+        NEW_TAG="deploy-$(date +%Y%m%d-%H%M%S)-${COMMIT_HASH}"
+        if [ -d "$STAGING/tools" ]; then
+            tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src tools .commit-hash 2>/dev/null \
+                || tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src tools
+        else
+            tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src .commit-hash 2>/dev/null \
+                || tar czf "$DEPLOYS_DIR/${NEW_TAG}.tgz" -C "$STAGING" src
+        fi
+        echo "=== budget-bootstrap Phase 4: install_artifacts (RC $NEW_TAG; coupled-revert anchor $PREV_TAG) ==="
+        if ! install_artifacts "$STAGING"; then
+            echo "FAIL: budget-bootstrap Phase 4 — install_artifacts failed; coupled dual-tree rollback." >&2
+            revert_shift_tree
+            rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            exit 1
+        fi
+
+        # ── Phase 5: post-install consistency gate (before the irreversible restart) ──
+        echo "=== budget-bootstrap Phase 5: post-install consistency gate ==="
+        if ! "$STAGING/tools/check-shift-agent-patch.sh"; then
+            echo "FAIL: budget-bootstrap Phase 5 — pin gate (budget markers present + F2 satisfied) failed; coupled dual-tree rollback." >&2
+            revert_shift_tree
+            rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            exit 1
+        fi
+        if ! bootstrap_assert_budget_off; then
+            echo "FAIL: budget-bootstrap Phase 5 — GATEWAY_TURN_SEND_BUDGET_ENABLED=1 in the gateway unit env; the bootstrap installs the budget OFF. Coupled dual-tree rollback." >&2
+            revert_shift_tree
+            rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"
+            exit 1
+        fi
+
+        # ── Phase 5 (cont.) + Phase 6: shared gates → restart → smoke ──
+        # revert_shift_tree inside this shared sequence is the coupled dual-tree
+        # revert because POST_INSTALL_MODE=bootstrap.
+        post_install_gates_and_restart
+
+        # ── Phase 8: success — retain the pre-budget snapshot (for un-budget-bootstrap),
+        #    clear the sentinel, record the new rollback target. ──
+        rotate_deploys
+        bootstrap_clear_sentinel
+        /usr/local/bin/shift-agent-notify-owner --title "Budget-bootstrap OK (budget installed OFF)" --priority -1 \
+            "Budget-bootstrap $NEW_TAG complete: per-turn send-budget patch installed + RC deployed, budget OFF. Pre-budget snapshot retained for un-budget-bootstrap." 2>/dev/null || true
+        echo "Budget-bootstrap $NEW_TAG complete (budget installed OFF)."
+        ;;
+
+    un-budget-bootstrap)
+        # Coupled dual-tree revert ACROSS the budget boundary (design-v2 S6/1c) — the
+        # ONLY sanctioned way back. Hermes → pre-budget (retained snapshot); Shift →
+        # rollback <pre-budget-tag>. The restart + smoke come from the rollback path.
+        TARGET="${2:?need pre-budget target tag (run: shift-agent-deploy.sh list)}"
+        TARBALL="$DEPLOYS_DIR/${TARGET}.tgz"
+        if [ ! -f "$TARBALL" ]; then
+            echo "ERROR: tarball not found: $TARBALL" >&2
+            list_deploys >&2
+            exit 2
+        fi
+        # Must currently be PAST the budget boundary.
+        if ! grep -q "BEGIN shift-agent-turn-send-budget" "$HERMES_RUN" 2>/dev/null; then
+            echo "ERROR: Hermes does not carry the budget patch — nothing to un-bootstrap. For an ordinary revert use: $0 rollback $TARGET" >&2
+            exit 1
+        fi
+        # Target must be a PRE-budget tarball (its safe_io lacks the enforcing gate).
+        if tar xzOf "$TARBALL" src/platform/safe_io.py 2>/dev/null | grep -q "def turn_send_budget_gate"; then
+            echo "ERROR: $TARGET is a POST-budget tarball (its safe_io defines turn_send_budget_gate). un-budget-bootstrap reverts to a PRE-budget tag." >&2
+            exit 1
+        fi
+        echo "=== un-budget-bootstrap: coupled dual-tree revert to $TARGET ==="
+        # 1) Restore the Hermes core to pre-budget from the retained snapshot (removes
+        #    the budget markers, so the rollback guard below is a no-op).
+        bootstrap_restore_hermes_prebudget
+        # 2) Revert the Shift tree via the pre-budget tarball (re-lays trees + restarts
+        #    the gateway + re-runs smoke inside the rollback path).
+        "$0" rollback "$TARGET"
+        # 3) Verify the coupled reversal.
+        bootstrap_verify_pre_budget_state
+        /usr/local/bin/shift-agent-notify-owner --title "un-budget-bootstrap complete" --priority 1 \
+            "Reverted across the budget boundary to $TARGET: Hermes pre-budget restored, Shift rolled back, budget OFF." 2>/dev/null || true
+        echo "un-budget-bootstrap to $TARGET complete."
+        ;;
+
     list)
         echo "Available deploys at $DEPLOYS_DIR:"
         list_deploys
         ;;
 
     *)
-        echo "usage: $0 [deploy|rollback <tag>|list]" >&2
+        echo "usage: $0 [deploy|rollback <tag>|list|budget-bootstrap|un-budget-bootstrap <pre-budget-tag>]" >&2
         exit 2
         ;;
 esac

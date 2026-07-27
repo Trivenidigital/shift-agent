@@ -67,10 +67,23 @@ def _first_line(pred) -> int:
 # STATIC (run everywhere)
 # ════════════════════════════════════════════════════════════════════════════
 def test_init_invoked_after_install_before_first_restart():
-    install = _first_line(lambda l: 'install_artifacts "$STAGING"' in l)
+    # The behavior-preserving post-install refactor moved the lock initializer + the
+    # first service restart into the shared post_install_gates_and_restart() function
+    # (textually ABOVE the deploy) branch). The invariant is unchanged at runtime and
+    # now has two static parts: (1) inside that function, the init call precedes the
+    # first restart; (2) the deploy) branch runs install_artifacts BEFORE delegating
+    # to the function, so /opt/shift-agent/safe_io.py exists when the initializer
+    # fd-verifies the production FileLock against it.
+    fn_start = _first_line(lambda l: l.strip() == "post_install_gates_and_restart() {")
+    case_start = _first_line(lambda l: l.strip() == 'case "$ACTION" in')
     init_call = _first_line(lambda l: l.strip() == "initialize_approval_code_lock \\")
     restart = _first_line(lambda l: re.match(r"^\s*systemctl (restart|start|reload)\b", l))
-    assert install < init_call < restart, f"install={install} init={init_call} restart={restart}"
+    assert fn_start < init_call < restart < case_start, (
+        f"fn_start={fn_start} init={init_call} restart={restart} case={case_start}")
+    install_pos = TEXT.index('if ! install_artifacts "$STAGING"')
+    fn_call_pos = TEXT.index("post_install_gates_and_restart", install_pos)
+    assert install_pos < fn_call_pos, (
+        "deploy) must run install_artifacts before post_install_gates_and_restart")
 
 
 def test_init_call_is_not_swallowed():

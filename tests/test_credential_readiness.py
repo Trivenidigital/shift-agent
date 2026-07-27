@@ -538,13 +538,21 @@ def test_smoke_surfaces_bundled_not_live_foundation_load_post_restart():
 def test_deploy_validates_cf_router_after_install_not_in_preinstall_foundation_gate():
     deploy = REPO_ROOT / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
     text = deploy.read_text(encoding="utf-8")
-    post_install = text[text.index('install_artifacts "$STAGING"'):]
-    assert "--validate-plugin" in post_install
-    assert "cf-router" in post_install
+    # The cf-router enabled-state validation moved into the shared
+    # post_install_gates_and_restart() function (both the deploy) and budget-bootstrap)
+    # branches call it AFTER install_artifacts, so the staged plugin is rsynced into
+    # /root/.hermes/plugins before it is validated). Retarget the "after install"
+    # anchor to that function body rather than the raw install_artifacts call site
+    # (which the refactor placed textually below the function definition).
+    fn_body = text[text.index("post_install_gates_and_restart() {") : text.index('case "$ACTION" in')]
+    assert "--validate-plugin" in fn_body
+    assert "cf-router" in fn_body
 
-    pre_install = text[: text.index('install_artifacts "$STAGING"')]
-    gate_start = pre_install.index("credential-minimized-readiness")
-    gate_block = pre_install[gate_start : gate_start + 500]
+    # The pre-install foundation gate (deploy), before install_artifacts) must NOT
+    # validate the plugin. Anchor on the gate header so the search cannot drift into
+    # the post-install function's cf-router block (which precedes it textually).
+    gate_start = text.index("=== Credential-minimized Hermes foundation gate ===")
+    gate_block = text[gate_start : gate_start + 500]
     assert "--validate-plugin" not in gate_block
 
 
@@ -560,8 +568,14 @@ def test_deploy_install_artifacts_failure_uses_rollback_path():
     deploy = REPO_ROOT / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
     text = deploy.read_text(encoding="utf-8")
     assert 'if ! install_artifacts "$STAGING"; then' in text
-    block = text[text.index('if ! install_artifacts "$STAGING"; then') : text.index("# Pre-restart cf-router compile gate")]
-    assert '"$0" rollback "$PREV_TAG"' in block
+    # The install_artifacts failure block lives in deploy) and ends where it delegates
+    # to post_install_gates_and_restart. The refactor renamed the inline rollback
+    # command to the shared revert_shift_tree seam (deploy mode == `"$0" rollback
+    # "$PREV_TAG"`); the end anchor is the function call, since the old
+    # "# Pre-restart cf-router compile gate" comment moved into the function (above).
+    start = text.index('if ! install_artifacts "$STAGING"; then')
+    block = text[start : text.index("post_install_gates_and_restart", start)]
+    assert "revert_shift_tree" in block
     assert 'rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"' in block
     assert "shift-agent-notify-owner" in block
 

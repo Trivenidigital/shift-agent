@@ -95,23 +95,40 @@ def test_closure_gate_is_rollback_safe_guarded():
 
 def test_closure_gate_hooks_the_rollback_cascade():
     # On failure the gate must roll back onto the prior tarball and evict the broken
-    # one — the same cascade the other pre-restart gates use.
+    # one — the same cascade the other pre-restart gates use. The behavior-preserving
+    # post-install refactor moved the inline `"$0" rollback "$PREV_TAG"` into the
+    # shared `revert_shift_tree` seam (deploy mode == that exact command; bootstrap
+    # mode couples the Hermes-snapshot restore in front of it), so the invariant is
+    # now that the closure-gate failure path invokes revert_shift_tree.
     idx = DEPLOY_TEXT.index("pre-restart artifact-runtime closure gate")
     block = DEPLOY_TEXT[idx:idx + 2000]
-    assert '"$0" rollback "$PREV_TAG"' in block, "gate failure must trigger rollback"
+    assert "revert_shift_tree" in block, "gate failure must trigger the rollback cascade"
     assert 'rm -f "$DEPLOYS_DIR/${NEW_TAG}.tgz"' in block, "gate failure must evict the broken tarball"
     assert "exit 1" in block, "gate failure must abort the deploy"
 
 
 def test_closure_gate_runs_after_install_and_before_gateway_restart():
     # It must run AFTER all flat copies are installed and BEFORE the gateway restarts
-    # so a failure rolls back onto the still-running old code.
-    install_call = _first(lambda l: l.strip().startswith('if ! install_artifacts "$STAGING"'))
+    # so a failure rolls back onto the still-running old code. The refactor moved the
+    # closure gate + the gateway restart into the shared post_install_gates_and_restart()
+    # function (textually ABOVE the deploy) branch), so the ordering invariant now has
+    # two parts: (1) within that function, closure gate < gateway restart; (2) the
+    # deploy) branch runs install_artifacts before delegating to the function (so all
+    # flat copies are laid down before the closure gate re-derives them at runtime).
+    fn_start = _first(lambda l: l.strip() == "post_install_gates_and_restart() {")
+    case_start = _first(lambda l: l.strip() == 'case "$ACTION" in')
     gate_call = _first(lambda l: 'bash "$CLOSURE_CHECK"' in l)
     restart = _first(lambda l: l.strip() == "systemctl restart hermes-gateway")
-    assert install_call < gate_call < restart, (
-        f"closure gate (line {gate_call}) must sit between install_artifacts "
-        f"(line {install_call}) and the gateway restart (line {restart})")
+    assert fn_start < gate_call < restart < case_start, (
+        f"closure gate (line {gate_call}) must sit between the function start "
+        f"(line {fn_start}) and the gateway restart (line {restart}), all inside "
+        f"post_install_gates_and_restart() (before the case at line {case_start})")
+    # deploy) installs artifacts before calling the shared post-install function.
+    deploy_start = DEPLOY_TEXT.index("\n    deploy)")
+    install_pos = DEPLOY_TEXT.index('if ! install_artifacts "$STAGING"', deploy_start)
+    fn_call_pos = DEPLOY_TEXT.index("post_install_gates_and_restart", install_pos)
+    assert install_pos < fn_call_pos, (
+        "deploy) must run install_artifacts before post_install_gates_and_restart")
 
 
 def test_helper_invoked_with_artifact_and_runtime_roots():
