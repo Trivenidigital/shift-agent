@@ -550,6 +550,15 @@ class Sandbox:
         return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
                               capture_output=True, text=True, check=True).stdout.strip()
 
+    def bump_hermes_commit(self) -> str:
+        """Advance the temp Hermes git HEAD (models an upstream Hermes upgrade after the
+        pre-budget snapshot was captured). Returns the new HEAD."""
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-q", "--allow-empty", "-m", "hermes upgrade"],
+                       cwd=self.hermes, env=env, check=True, capture_output=True)
+        return self._git_head(self.hermes)
+
     # ---- control markers ----------------------------------------------------
     def arm(self, name: str):
         (self.ctl / name).write_text("1", encoding="utf-8")
@@ -1000,3 +1009,37 @@ def test_a_marker_targeting_production_paths_is_fatal(tmp_path):
                        env=env, capture_output=True, text=True, timeout=60)
     assert r.returncode != 0
     assert "must target temp roots" in (r.stdout + r.stderr), r.stdout + r.stderr
+
+
+# ── #4: un-budget-bootstrap refuses to restore a snapshot onto an upgraded Hermes ──
+@posix_only
+def test_un_budget_refuses_when_hermes_upgraded_since_snapshot(sandbox):
+    """The retained pre-budget snapshot was captured against a specific Hermes commit; if
+    Hermes is upgraded before un-budget-bootstrap runs, restoring the stale run.py/whatsapp.py
+    would DOWNGRADE the gateway — so un-budget must refuse (pin-check), leaving Hermes as-is."""
+    assert sandbox.run("budget-bootstrap").returncode == 0
+    new_head = sandbox.bump_hermes_commit()   # simulate an upstream Hermes upgrade
+    r = sandbox.run("un-budget-bootstrap", sandbox.prev_tag)
+    assert r.returncode != 0
+    out = r.stdout + r.stderr
+    assert "upgraded since" in out or "DOWNGRADE" in out, out
+    # Hermes was NOT downgraded: HEAD is still the upgraded commit; budget markers remain.
+    assert sandbox._git_head(sandbox.hermes) == new_head
+    assert "BEGIN shift-agent-turn-send-budget" in sandbox.run_py.read_text(encoding="utf-8")
+
+
+# ── #6: budget-bootstrap Phase-5 wires the shared env-symlink gate to the coupled revert ──
+def test_bootstrap_phase5_runs_env_symlink_integrity_gate_wired_to_revert():
+    """The budget-bootstrap Phase-5 sequence runs the SAME env-symlink integrity check
+    deploy) runs (shared `check_env_symlink_integrity`), fail-closing to the coupled
+    dual-tree revert. Static/cross-platform: MSYS cannot create the real symlink the gate
+    needs, so the sandbox skips the gate at runtime; this asserts the wiring itself."""
+    text = DEPLOY.read_text(encoding="utf-8")
+    assert "check_env_symlink_integrity()" in text                       # shared function exists
+    # deploy) reuses it (factored, not duplicated)
+    assert 'check_env_symlink_integrity "/opt/shift-agent/.env" "/root/.hermes/.env" || exit 1' in text
+    # bootstrap Phase-5 slice: env-check wired to revert_shift_tree on failure
+    i = text.index("budget-bootstrap Phase 5: env symlink integrity gate")
+    seg = text[i:i + 500]
+    assert "check_env_symlink_integrity" in seg
+    assert "revert_shift_tree" in seg
