@@ -1,0 +1,56 @@
+# FROZEN SPEC — Governed live transport-budget evidence-enablement harness
+Status: **design GO (frozen)** across the full operator review. Repository implementation authorized. **NOT authorized: merge, RC freeze, deploy, or live execution.** Single artifact for the seven independent reviewers + implementers.
+
+Purpose: prove the ALREADY-VERIFIED finalized-send transport budget (cap=5) enforces at the REAL gateway→adapter→bridge→provider seam, on an operator-controlled destination, default-OFF, at-most-once. Proves ONLY the finalized-send cap (5); NOT the draft/edit cap (50) — that is a separate design-only probe.
+
+## Runtime facts (verified on `main-vps`)
+- Gateway service user = **`shift-agent` (UID 999)**, not root. Bridge = localhost HTTP poll (`127.0.0.1:{port}/messages`).
+- WhatsApp ingress `_build_message_event` (whatsapp.py:1455) does NOT deserialize `internal` → real inbound is always `internal=False` (base.py:992 default). `internal=True` set only by in-process forge sites.
+- `internal=True` bypasses `_is_user_authorized` (run.py:6494) → the branch MUST re-check admission explicitly.
+- Response dispatch: `_handle_message_with_agent` (run.py:7865) → per-segment `_send_with_retry` (base.py:2521) → `send()` → `_shift_turn_send_budget_screen`→`safe_io.turn_send_budget_gate` (whatsapp.py:1062) → bridge → provider.
+- Caps (code defaults, no env override): finalized-send **5** (`DEFAULT_TURN_SEND_BUDGET_LIMIT`), draft **50**. Budget flag `GATEWAY_TURN_SEND_BUDGET_ENABLED`.
+- Breach page = `notify_owner_with_fallback` → `shift-agent-notify-owner`: **Pushover primary (internal, NOT a provider send)**; WhatsApp self-chat only as fallback if Pushover fails.
+
+## Trigger (root-run CLI + peer-authenticated socket + two-phase protocol)
+- **Root CLI** `shift-agent-transport-evidence-probe` (operator runs as root). Default-OFF (feature flag).
+- **Control socket** in `/run/shift-agent/` (systemd `RuntimeDirectory=shift-agent`, `0700 shift-agent:shift-agent`); socket `shift-agent:shift-agent` `0600`. Every accept: **`SO_PEERCRED.uid == 0`** checked before parsing privileged content (rejects even UID-999 peers). Stale cleanup via `lstat`, unlink only an actual socket at the expected path/owner. Socket absent / all-ops-rejected while feature OFF. Bounded request size; strict schema + unknown-field rejection; one frame/op; r/w deadlines; unreachable from any bridge path.
+- **Root-owned single-use lease** in a `root:root 0700` dir; the **CLI** (not the gateway) validates + atomically `rename`+`fsync`(file+dir) consumes it. Fields: `{nonce, authorized_commit, authorized_harness_hash, normalized_destination, expires_at, max_runs=1, diagnostic_event_type}`. FS hardening: regular file, root UID/GID, exact mode, `O_NOFOLLOW`, link-count==1, bounded size, strict schema, expiry vs reliable clock, nonce min-entropy.
+- **Two-phase PREPARE/COMMIT** on ONE authenticated connection:
+  - PREPARE → gateway INDEPENDENTLY verifies (NO mutation): feature ON; deployed `/opt/shift-agent/.commit-hash == authorized_commit`; installed harness-manifest digest == `authorized_harness_hash`; containment active; destination authorized via live `_is_user_authorized` (whatsapp, both phone+LID alias forms); budget ON; caps exactly 5/50; gateway+bridge health + queue-0; nonce/destination/expiry/release valid; no conflicting run / no nonce in the durable committed ledger; event type valid → returns cryptographically-random **single-use prep token** bound to connection/peer + nonce + destination + commit + harness-hash, short-lived, unusable on a 2nd connection.
+  - CLI atomically consumes+fsyncs the lease → sends COMMIT (same connection) with a consumption attestation.
+  - COMMIT → gateway re-verifies token + prerequisites (containment/budget/commit/harness re-checked) → **any drift fails before the first send** → durably records `{run_id, nonce, destination, logical_turn_id, authorized_commit, harness_hash, state=committed}` (fsync) → first send.
+- **Trust invariant:** valid COMMIT requires same root-authenticated connection + single-use prep token + nonce absent from the gateway's **durable committed-nonce ledger**; gateway records committed before send, rejects the nonce forever. Gateway never reads the root lease. Root compromise out of scope; ordinary users / UID-999 / bridge / stale / replayed leases cannot commit.
+- `authorized_harness_hash` = canonical digest over a **fixed manifest of enumerated installed control/harness file paths** (sorted `path→sha256(bytes)`, not a dir walk, not self-referential); CLI + gateway compute independently, agree at PREPARE and again before COMMIT.
+
+## Diagnostic run (reuses the normal coordinator)
+- Admission re-check (whatsapp, normalized operator source, live phone/LID aliases, current containment) occurs BEFORE lease consumption / turn creation / any audit or provider op.
+- One diagnostic `logical_turn_id`. Feeds a **deterministic 28-segment response plan** (each segment below the auto-split threshold) into `_handle_message_with_agent → _send_with_retry` — the SAME dispatcher/identity/retry/failure/persistence a real reply uses. NO separate adapter/`bridge_post` loop. No model / Catering router / lead / proposal / quote / follow-up / pricing / owner-decision path runs.
+- Per-attempt ledger (durable, fsync). Each attempt record = `{outcome, provider_entry_started_at, provider_entry_attempt_id}` where `outcome ∈ not_started|dispatch_pending|sent|denied|dispatch_failed|delivery_unknown_after_send`. **A crashed process cannot write `delivery_unknown_after_send`; the state is DERIVED at restart from a durable provider-entry marker.** Live ordering:
+  1. persist `outcome=dispatch_pending` (provider_entry markers null);
+  2. **immediately before the real provider call, durably record `provider_entry_started_at` + `provider_entry_attempt_id`** (fsync);
+  3. enter provider submission;
+  4. provider rejects/fails before acceptance → `dispatch_failed`;
+  5. provider returns acceptance/message ID → `sent`;
+  6. budget denies at the gate (before provider entry) → `denied` (no provider-entry marker).
+  Restart reconciliation (no automatic retransmission in ANY case): stale `dispatch_pending` **with no** provider-entry marker → remains reserved + non-retransmittable (crashed before provider entry); stale `dispatch_pending` **with** a provider-entry marker → becomes `delivery_unknown_after_send` (crashed after provider entry, before ack). Restart/STATUS never retransmit `dispatch_pending|sent|delivery_unknown_after_send`. **No auto-continuation after crash** — operator inspects the terminal state.
+- Expected: 1–5 accepted (provider IDs); attempt 6 first denial; 6–28 denied (23) never entering `bridge_post` (provider-entry canary makes the denial proof non-vacuous); 23 `send_budget_exhausted` rows; exactly one page. Any unexpected retry / auto-split / fallback / extra provider op FAILS the run.
+- Paging accounting: Pushover success → 5 provider sends; Pushover fail → 5 + 1 separately-audited owner self-chat. Page exactly once, separate owner identity, never consumes the customer turn budget, never to a customer. Second page or unexpected provider op fails the run.
+- Failure behavior: any audit-write failure (diagnostic-attempt or normal send) → HALT (no further sends). Self-chat fallback failure → recorded, HALT. Evidence-capture failure never causes continued sending.
+- STATUS `<run_id>` = read-only, bounded output, no credential/lease-secret exposure, never triggers execution.
+
+## Evidence oracle (state isolation)
+Before/after hash-or-count: catering leads, proposals, owner decisions, follow-up, conversation/session, flyer, queue, timers, effective config, gateway+bridge NRestarts. ONLY-permitted diffs (declared): the diagnostic inbound/turn record (the normal path DOES record a diagnostic session/turn — declared, not "no session mutation"), 5 accepted-send records, 23 denial records, 1 paging record, the run ledger + lease lifecycle, local evidence artifacts. Everything else prohibited → fail.
+
+## Release binding
+Future immutable RC bundles **#659 + the harness + tests + provenance changes**. Runtime checks: `authorized_commit ↔ /opt/shift-agent/.commit-hash` (installed by #659), `authorized_harness_hash ↔ installed manifest digest`, + runtime-closure evidence from the RC review. No ceremonial artifact-hash assertion (no trusted on-box source). Harness binds to the FUTURE RC commit, never `2bee67d`.
+
+## Test set (all before merge)
+Protocol: non-root peer rejected; feature-OFF ⇒ socket unavailable/command rejected; PREPARE-but-lease-never-consumed; consumed-lease-without-COMMIT; COMMIT-without-PREPARE; expired/replayed prep token; token reused on a 2nd connection; two root clients race same nonce (≤1 run); client disconnect after COMMIT (STATUS only, no resubmit); STATUS never executes; stale socket is symlink/regular-file; gateway↔CLI hash disagreement; containment changes PREPARE→COMMIT (fail before first send); budget OFF PREPARE→COMMIT (fail before first send).
+Carrier: bridge payload with forged `internal=true` + marker + nonce + copied text → ordinary customer path, never consumes lease/enters branch.
+Crash (mutation-sensitive), FIVE separate interruption points → each proves zero duplicate provider submission: (1) before the provider-entry marker; (2) after the marker but before the provider call; (3) after provider entry but before acknowledgment; (4) after acknowledgment but before the `sent` record; (5) after `sent`. Plus gateway crash after durable COMMIT → nonce non-replayable. No auto-continuation added merely to ease testing.
+Admission: phone-lease must not authorize an unrelated LID and vice versa.
+Effect/isolation: denied attempts never reach `bridge_post`; allowed use real send-attempt+logical-turn identities; fallback self-chat can't re-enter; zero lead/proposal/pricing/follow-up/owner-decision/Catering mutation; audit failure halts.
+Plus focused protocol tests, the relevant full suite, Linux CI on the final head.
+
+## Seven independent review scopes (GO/NO-GO each; no happy-path-only)
+1 Gateway-path fidelity · 2 Control-plane & lease security · 3 Transport & audit correctness · 4 Destination & alias safety · 5 State isolation & crash recovery · 6 Adversarial trigger/replay · 7 Operations & cleanup. Crash-recovery + adversarial reviewers MUST exercise the attempt-state transitions.
