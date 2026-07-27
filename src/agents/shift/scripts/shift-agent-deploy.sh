@@ -54,14 +54,28 @@ fi
 SHIFT_ROOT=/opt/shift-agent
 SYSTEMCTL=systemctl
 HERMES_HOME="${HERMES_HOME:-/root/.hermes/hermes-agent}"
+# CANONICAL Hermes run.py — the cross-boundary mixed-tree guards (deploy) fix C +
+# rollback) fix D) grep THIS, never $HERMES_RUN, so a misconfigured HERMES_HOME can
+# NOT bypass them. Hardcoded to the real path in production; marker-gated override
+# only (temp Hermes) for the dynamic bootstrap tests.
+CANONICAL_HERMES_RUN=/root/.hermes/hermes-agent/gateway/run.py
 if [[ -v SHIFT_AGENT_BOOTSTRAP_TEST_SANDBOX ]]; then
     [ -n "${SHIFT_AGENT_BOOTSTRAP_TEST_ROOT:-}" ] && SHIFT_ROOT="$SHIFT_AGENT_BOOTSTRAP_TEST_ROOT"
     [ -n "${SHIFT_AGENT_SYSTEMCTL:-}" ] && SYSTEMCTL="$SHIFT_AGENT_SYSTEMCTL"
+    [ -n "${SHIFT_AGENT_BOOTSTRAP_CANONICAL_HERMES_RUN:-}" ] && CANONICAL_HERMES_RUN="$SHIFT_AGENT_BOOTSTRAP_CANONICAL_HERMES_RUN"
     STAGING="${SHIFT_AGENT_BOOTSTRAP_STAGING:-$SHIFT_ROOT/staging-new}"
     DEPLOYS_DIR="${SHIFT_AGENT_BOOTSTRAP_DEPLOYS_DIR:-$SHIFT_ROOT/deploys}"
+    # A (6-scope): the marker must target TEMP roots, never production. If it is set
+    # while SHIFT_ROOT or HERMES_HOME still resolve to a production path (e.g. the
+    # override vars were forgotten), FATAL — a test marker must never drive a real box.
+    if [ "$SHIFT_ROOT" = "/opt/shift-agent" ] || [ "$HERMES_HOME" = "/root/.hermes/hermes-agent" ]; then
+        echo "FATAL: SHIFT_AGENT_BOOTSTRAP_TEST_SANDBOX is set but SHIFT_ROOT/HERMES_HOME resolve to PRODUCTION paths — refusing (the test sandbox marker must target temp roots)." >&2
+        exit 1
+    fi
 else
     for _ovr in SHIFT_AGENT_BOOTSTRAP_TEST_ROOT SHIFT_AGENT_SYSTEMCTL \
-                SHIFT_AGENT_BOOTSTRAP_STAGING SHIFT_AGENT_BOOTSTRAP_DEPLOYS_DIR; do
+                SHIFT_AGENT_BOOTSTRAP_STAGING SHIFT_AGENT_BOOTSTRAP_DEPLOYS_DIR \
+                SHIFT_AGENT_BOOTSTRAP_CANONICAL_HERMES_RUN; do
         if [[ -v $_ovr ]]; then
             echo "FATAL: $_ovr is a test-only override but SHIFT_AGENT_BOOTSTRAP_TEST_SANDBOX is not set — refusing (production run)." >&2
             exit 1
@@ -1620,11 +1634,28 @@ _bootstrap_cp_hermes_from() {
 }
 
 bootstrap_assert_budget_off() {
-    # Resolve the ACTUAL gateway unit environment (S10) — not just .env — and assert
-    # the budget flag is not enabled. Non-zero iff GATEWAY_TURN_SEND_BUDGET_ENABLED=1.
+    # Assert GATEWAY_TURN_SEND_BUDGET_ENABLED is NOT armed. Non-zero (armed) if ANY of
+    # three sources says =1. design-v2 S10 CORRECTION (6-scope B1): `systemctl show -p
+    # Environment` does NOT expand `EnvironmentFile=`, so it is BLIND to how the flag is
+    # actually armed on the box (via /opt/shift-agent/.env, hermes-gateway.service:18).
+    # Read all three: (a) Environment= directives, (b) the .env EnvironmentFile, (c) the
+    # resolved running-process env (/proc/<MainPID>/environ). Test-safe: no $SHIFT_ROOT/.env
+    # and an empty/stubbed MainPID make (b)/(c) skip cleanly.
     local env_out
     env_out="$("$SYSTEMCTL" show -p Environment hermes-gateway 2>/dev/null || true)"
-    printf '%s\n' "$env_out" | grep -q "GATEWAY_TURN_SEND_BUDGET_ENABLED=1" && return 1
+    if printf '%s\n' "$env_out" | grep -q "GATEWAY_TURN_SEND_BUDGET_ENABLED=1"; then
+        return 1
+    fi
+    if [ -r "$SHIFT_ROOT/.env" ] && grep -Eq '^[[:space:]]*GATEWAY_TURN_SEND_BUDGET_ENABLED[[:space:]]*=[[:space:]]*1([[:space:]]|$)' "$SHIFT_ROOT/.env"; then
+        return 1
+    fi
+    local pid
+    pid="$("$SYSTEMCTL" show -p MainPID --value hermes-gateway 2>/dev/null || true)"
+    if [ -n "$pid" ] && [ "$pid" != 0 ] && [ -r "/proc/$pid/environ" ]; then
+        if tr '\0' '\n' < "/proc/$pid/environ" | grep -q '^GATEWAY_TURN_SEND_BUDGET_ENABLED=1'; then
+            return 1
+        fi
+    fi
     return 0
 }
 
@@ -2160,6 +2191,21 @@ case "$ACTION" in
             exit 2
         fi
 
+        # Cross-boundary mixed-tree guard (design-v2 6-scope fix C, symmetric with the
+        # rollback) guard D). A stale PRE-gate artifact deployed onto a box whose Hermes
+        # ALREADY carries the budget patch would strand new-Shift safe_io (no gate)
+        # against the budget-patched adapter that calls it — the exact split the coupled
+        # transaction exists to prevent. Grep the CANONICAL Hermes run.py (never
+        # $HERMES_RUN — a misconfigured HERMES_HOME must not bypass this). Fail-closed
+        # BEFORE any state change. Skipped on every ordinary (pre-budget-box) deploy.
+        if grep -q "BEGIN shift-agent-turn-send-budget" "$CANONICAL_HERMES_RUN" 2>/dev/null; then
+            if ! grep -q "def turn_send_budget_gate" "$STAGING/src/platform/safe_io.py" 2>/dev/null; then
+                echo "ERROR: refusing deploy — the live Hermes carries the budget patch but the staged artifact's safe_io LACKS turn_send_budget_gate (stale/pre-gate artifact). Deploying it would strand a budget-patched Hermes against a gate-less safe_io (mixed tree)." >&2
+                echo "  Ship a current (post-gate) RC, or revert the budget first: $0 un-budget-bootstrap <pre-budget-tag>" >&2
+                exit 1
+            fi
+        fi
+
         # Hermes pin gate — fail-closed before any state change. Catches silent
         # drift: Hermes commit moved, bridge.js content changed, or our patch
         # markers no longer anchored where we expect. Override mechanism for
@@ -2450,8 +2496,10 @@ case "$ACTION" in
         # exact split the coupled transaction exists to prevent. Refuse and route to
         # un-budget-bootstrap, the only sanctioned way back across the boundary. The
         # bootstrap's own dual-tree revert restores Hermes FIRST, so by the time it
-        # calls `rollback` there are no markers and this guard is a no-op.
-        if grep -q "BEGIN shift-agent-turn-send-budget" "$HERMES_RUN" 2>/dev/null; then
+        # calls `rollback` there are no markers and this guard is a no-op. Grep the
+        # CANONICAL Hermes run.py (fix D) — never $HERMES_RUN — so a misconfigured
+        # HERMES_HOME can NOT bypass the guard.
+        if grep -q "BEGIN shift-agent-turn-send-budget" "$CANONICAL_HERMES_RUN" 2>/dev/null; then
             if ! tar xzOf "$TARBALL" src/platform/safe_io.py 2>/dev/null | grep -q "def turn_send_budget_gate"; then
                 echo "ERROR: refusing plain rollback to $TARGET — it predates the budget boundary (its safe_io lacks turn_send_budget_gate) while Hermes still carries the budget patch. A plain rollback would leave a MIXED tree." >&2
                 echo "  Use the coupled reverse-transaction instead:" >&2
@@ -2563,6 +2611,29 @@ case "$ACTION" in
         # is a code install, not an activation. deploy)/rollback)/list) are untouched.
         POST_INSTALL_MODE=bootstrap
 
+        # Restart-fault operability trap (design-v2 Phase 7 correction; 6-scope). The
+        # restart COMMAND is the point of no return: a failure there aborts under set -e
+        # WITHOUT inline revert (an inline revert would itself re-issue systemctl restart
+        # on a unit that just failed). The IN_PROGRESS sentinel persists so Phase-0
+        # recovery on re-run deterministically rewinds both trees. This bootstrap-SCOPED
+        # trap (set only here; never in deploy) or the shared function) surfaces that to
+        # the operator on any non-zero exit that leaves the sentinel behind. On success
+        # (Phase 8 clears the sentinel first) and on Phase-1/rollback aborts (no sentinel)
+        # it prints nothing.
+        _bootstrap_exit_trap() {
+            local _rc=$?
+            if [ "$_rc" -ne 0 ] && [ -f "$BOOTSTRAP_SENTINEL" ]; then
+                echo "budget-bootstrap: exiting rc=$_rc with the IN_PROGRESS sentinel still present." >&2
+                echo "  gateway restart failed; the tree is post-budget-consistent + budget OFF (never a mixed tree)." >&2
+                echo "  To FINISH: retry 'systemctl restart hermes-gateway'." >&2
+                echo "  To ABANDON: re-run 'budget-bootstrap' — Phase-0 rewinds both trees to pre-budget." >&2
+                /usr/local/bin/shift-agent-notify-owner --priority 2 \
+                    --title "Budget-bootstrap incomplete (sentinel present)" \
+                    "Gateway restart failed; tree post-budget-consistent + budget OFF. FINISH: retry systemctl restart hermes-gateway. ABANDON: re-run budget-bootstrap (Phase-0 rewinds)." 2>/dev/null || true
+            fi
+        }
+        trap _bootstrap_exit_trap EXIT
+
         # ── Phase 0: startup recovery from an interrupted prior run (S4) ──
         if [ -f "$BOOTSTRAP_SENTINEL" ]; then
             echo "=== budget-bootstrap Phase 0: interrupted prior run detected — recovering ==="
@@ -2589,6 +2660,12 @@ case "$ACTION" in
         fi
         if [ ! -f "$STAGING/tools/patch-hermes.py" ]; then
             echo "ERROR: $STAGING/tools/patch-hermes.py absent from staging — refusing." >&2
+            exit 1
+        fi
+        # N2 (6-scope): the artifact-runtime closure gate the shared post-install
+        # sequence runs must be present in the RC before we mutate anything.
+        if [ ! -x "$STAGING/tools/verify-artifact-runtime-closure.sh" ]; then
+            echo "ERROR: $STAGING/tools/verify-artifact-runtime-closure.sh not found or not executable — refusing (RC missing the closure gate)." >&2
             exit 1
         fi
         VENV_PY="/usr/local/lib/hermes-agent/venv/bin/python"
@@ -2747,9 +2824,12 @@ PY
         post_install_gates_and_restart
 
         # ── Phase 8: success — retain the pre-budget snapshot (for un-budget-bootstrap),
-        #    clear the sentinel, record the new rollback target. ──
-        rotate_deploys
+        #    clear the sentinel, record the new rollback target. N1 (6-scope): clear the
+        #    sentinel BEFORE rotate_deploys so a rotate (housekeeping) failure can never
+        #    leave a stale IN_PROGRESS sentinel that Phase-0 would use to UNDO this good,
+        #    smoke-passed deploy. ──
         bootstrap_clear_sentinel
+        rotate_deploys
         /usr/local/bin/shift-agent-notify-owner --title "Budget-bootstrap OK (budget installed OFF)" --priority -1 \
             "Budget-bootstrap $NEW_TAG complete: per-turn send-budget patch installed + RC deployed, budget OFF. Pre-budget snapshot retained for un-budget-bootstrap." 2>/dev/null || true
         echo "Budget-bootstrap $NEW_TAG complete (budget installed OFF)."

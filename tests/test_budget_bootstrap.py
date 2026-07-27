@@ -254,11 +254,18 @@ def _tooling_ok() -> bool:
     if sys.platform == "win32" and os.environ.get("BOOTSTRAP_TESTS_FORCE_POSIX") != "1":
         return False
     import shutil
-    for exe in ("bash", "git", "tar", "sha256sum", "cp", "grep"):
+    # Use BOOTSTRAP_TEST_BASH for BOTH the presence probe and the exec probe (the real
+    # scenario run already does). On win32 a bare "bash" resolves to WSL via System32,
+    # which may be a broken relay stub — so a Git-Bash dev box that sets
+    # BOOTSTRAP_TEST_BASH to its bash.exe is probed through that same bash, not WSL.
+    bash_bin = os.environ.get("BOOTSTRAP_TEST_BASH", "bash")
+    for exe in ("git", "tar", "sha256sum", "cp", "grep"):
         if shutil.which(exe) is None:
             return False
+    if shutil.which(bash_bin) is None and not os.path.isfile(bash_bin):
+        return False
     try:
-        return subprocess.run(["bash", "-c", "exit 0"], capture_output=True).returncode == 0
+        return subprocess.run([bash_bin, "-c", "exit 0"], capture_output=True).returncode == 0
     except OSError:
         return False
 
@@ -276,9 +283,14 @@ posix_only = pytest.mark.skipif(
 
 # ── stub scripts (real call sites) ───────────────────────────────────────────
 _SYSTEMCTL_STUB = r'''#!/usr/bin/env bash
-# test systemctl: resolves both `$SYSTEMCTL show -p Environment` (budget-off probe) and
-# the literal `systemctl restart hermes-gateway` (fail-once on demand). list-unit-files
-# returns non-zero so the cockpit block self-skips.
+# test systemctl: resolves `$SYSTEMCTL show -p Environment` (budget-off probe),
+# `$SYSTEMCTL show -p MainPID --value` (B1 /proc probe — no running gateway in tests),
+# and the literal `systemctl restart hermes-gateway` (fail-once on demand).
+# list-unit-files returns non-zero so the cockpit block self-skips.
+if [ "$1" = "show" ] && [ "$3" = "MainPID" ]; then
+    echo ""   # no running gateway under test → the /proc/<pid>/environ check skips
+    exit 0
+fi
 if [ "$1" = "show" ]; then
     if [ -n "${BOOTSTRAP_CTL:-}" ] && [ -f "$BOOTSTRAP_CTL/.ctl-budget-on" ]; then
         echo "Environment=GATEWAY_TURN_SEND_BUDGET_ENABLED=1"
@@ -318,11 +330,20 @@ exit 0
 # Staged pin gate (Phase 5): a REAL consistency check — asserts the budget markers
 # actually landed in the patched Hermes (design §S7 stub, but a truthful one).
 _CHECK_PATCH_STUB = r'''#!/usr/bin/env bash
+# rv-marker (6-scope): assert EVERY budget marker actually landed — the run.py boundary
+# AND all three adapter markers AND the _SHIFT_DROP_SEND sentinel — so a partial-subset
+# patch (which the real check-shift-agent-patch.sh rejects) fails this Phase-5 gate too.
 H="${HERMES_HOME:-/root/.hermes/hermes-agent}"
-grep -q "BEGIN shift-agent-turn-send-budget" "$H/gateway/run.py" \
+RUN="$H/gateway/run.py"
+WA="$H/gateway/platforms/whatsapp.py"
+grep -q "BEGIN shift-agent-turn-send-budget" "$RUN" \
     || { echo "STUB pin-gate: run.py missing turn-send-budget marker" >&2; exit 1; }
-grep -q "BEGIN shift-agent-turn-budget-sentinel" "$H/gateway/platforms/whatsapp.py" \
-    || { echo "STUB pin-gate: whatsapp.py missing turn-budget-sentinel marker" >&2; exit 1; }
+for mk in turn-budget-sentinel turn-budget-send-drop turn-budget-edit-drop; do
+    grep -q "BEGIN shift-agent-$mk" "$WA" \
+        || { echo "STUB pin-gate: whatsapp.py missing $mk marker" >&2; exit 1; }
+done
+grep -q "_SHIFT_DROP_SEND = " "$WA" \
+    || { echo "STUB pin-gate: whatsapp.py missing _SHIFT_DROP_SEND sentinel" >&2; exit 1; }
 exit 0
 '''
 
@@ -487,7 +508,7 @@ class Sandbox:
         (self.staging / ".commit-hash").write_text(self.RC_COMMIT + "\n", encoding="utf-8")
         # real patch-hermes + an env-gated mid-apply fault seam (inert unless
         # BOOTSTRAP_PATCH_FAULT=1 — the documented _write_text_atomic monkeypatch seam).
-        staged_ph = PATCH_HERMES.read_text(encoding="utf-8") + _PATCH_FAULT_SEAM
+        staged_ph = PATCH_HERMES.read_text(encoding="utf-8") + _PATCH_FAULT_SEAM + _PATCH_S9_FAULT_SEAM
         (self.staging / "tools" / "patch-hermes.py").write_text(staged_ph, encoding="utf-8")
         _write_exec(self.staging / "tools" / "check-shift-agent-patch.sh", _CHECK_PATCH_STUB)
         _write_exec(self.staging / "tools" / "verify-artifact-runtime-closure.sh", _CLOSURE_STUB)
@@ -539,6 +560,9 @@ class Sandbox:
             "SHIFT_AGENT_SYSTEMCTL": _posix(self.stubdir / "systemctl"),
             "SHIFT_AGENT_BOOTSTRAP_STAGING": _posix(self.staging),
             "SHIFT_AGENT_BOOTSTRAP_DEPLOYS_DIR": _posix(self.deploys),
+            # The C/D cross-boundary guards grep the CANONICAL Hermes run.py; point it at
+            # the temp Hermes (marker-gated override) so those guards are testable.
+            "SHIFT_AGENT_BOOTSTRAP_CANONICAL_HERMES_RUN": _posix(self.hermes / "gateway" / "run.py"),
             "BUDGET_BOOTSTRAP_AUTHORIZED_COMMIT": self.RC_COMMIT,
             "TEST_VENV_PY": _posix(sys.executable),
             "TESTBIN": _posix(self.testbin),
@@ -547,6 +571,12 @@ class Sandbox:
             # so the win32 patch-venv emits utf-8 (its final ✓ line); no-op on Linux
             "PYTHONIOENCODING": "utf-8",
         }
+        # Git-Bash portability: the in-script tar operands are Windows drive paths
+        # (C:/…) which GNU tar's rsh heuristic reads as host=C. TAR_OPTIONS is honored by
+        # GNU tar as leading options, so --force-local applies without disturbing the
+        # old-style `czf` operand order. win32-only — Linux CI paths carry no drive letter.
+        if sys.platform == "win32":
+            env["TAR_OPTIONS"] = "--force-local"
         env.pop("GATEWAY_TURN_SEND_BUDGET_ENABLED", None)
         if baseline_pin is not None:  # scenario 8: sabotage the recorded pin
             (self.staging / "tools" / "hermes-patch-baseline.txt").write_text(
@@ -631,6 +661,41 @@ if os.environ.get("BOOTSTRAP_PATCH_FAULT") == "1":
 '''
 
 
+# S9 seam: drive the patcher's `PatchError: rollback INCOMPLETE` branch (the hardened
+# except that surfaces a restore that itself fails). WA is written + APPENDED to
+# `written`, the SECOND write (RUN) faults, then the all-or-nothing restore of WA is
+# blocked so `restore_failures` is non-empty and _apply_wa_run raises the INCOMPLETE
+# PatchError. The bootstrap's Phase-3 snapshot restore then reverts the half-patched
+# Hermes. Inert unless BOOTSTRAP_PATCH_S9_FAULT=1.
+_PATCH_S9_FAULT_SEAM = '''
+
+# ---- TEST-ONLY env-gated S9 restore-incomplete seam (tests/test_budget_bootstrap.py) ----
+if os.environ.get("BOOTSTRAP_PATCH_S9_FAULT") == "1":
+    import pathlib as _s9_pl
+    _s9_real_wta = _write_text_atomic
+    _s9_n = [0]
+
+    def _write_text_atomic(path, text):  # noqa: F811
+        _s9_n[0] += 1
+        if _s9_n[0] == 1:
+            _s9_real_wta(path, text)   # WA written + appended to `written`
+            return
+        # 2nd target (RUN): fault BEFORE writing so `written` == [WA] and the restore runs
+        raise OSError("BOOTSTRAP_PATCH_S9_FAULT: simulated write fault on RUN")
+
+    _s9_real_write_text = _s9_pl.Path.write_text
+
+    def _s9_write_text(self, *a, **k):
+        # once the RUN fault has fired, the all-or-nothing restore calls WA.write_text —
+        # block THAT so restore_failures is non-empty and the INCOMPLETE branch fires.
+        if _s9_n[0] >= 2:
+            raise OSError("BOOTSTRAP_PATCH_S9_FAULT: restore write blocked")
+        return _s9_real_write_text(self, *a, **k)
+
+    _s9_pl.Path.write_text = _s9_write_text
+'''
+
+
 @pytest.fixture
 def sandbox(tmp_path):
     if not _tooling_ok():
@@ -668,8 +733,10 @@ def test_dynamic_bootstrap_success_installs_budget_off(sandbox):
 def test_scenario_01_patch_fails_midway_restores_hermes(sandbox):
     r = sandbox.run("budget-bootstrap", extra_env={"BOOTSTRAP_PATCH_FAULT": "1"})
     assert r.returncode != 0
-    # patch-hermes's own all-or-nothing restore + the bootstrap Phase-3 snapshot restore
-    # leave Hermes byte-identical pre-budget; the Shift tree was never touched.
+    # The fault fires mid-FIRST-write (after WA is written, before it is appended to
+    # `written`), so patch-hermes's own all-or-nothing restore loop has nothing to undo —
+    # the bootstrap Phase-3 SNAPSHOT restore is what reverts the half-written Hermes to
+    # byte-identical pre-budget. The Shift tree was never touched.
     assert sandbox.hermes_is_pre_budget(), r.stdout + r.stderr
     assert not sandbox.sentinel.exists()
     sandbox.assert_state_untouched()
@@ -808,3 +875,97 @@ def test_un_budget_bootstrap_couples_the_reverse_transaction(sandbox):
     assert sandbox.hermes_is_pre_budget(), r.stdout + r.stderr
     assert "def turn_send_budget_gate" not in (sandbox.shift / "safe_io.py").read_text(encoding="utf-8")
     sandbox.assert_state_untouched()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 6-scope review fix batch — added coverage
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── rv-patch: S9 `PatchError: rollback INCOMPLETE` branch ────────────────────
+@posix_only
+def test_scenario_s9_patch_restore_incomplete_surfaces_then_snapshot_reverts(sandbox):
+    """The patcher's hardened restore fails (a restore write is blocked), so
+    `_apply_wa_run` raises `PatchError: rollback INCOMPLETE` and surfaces the
+    half-patched target to stderr (never swallowed). The bootstrap Phase-3 snapshot
+    restore then reverts Hermes to byte-identical pre-budget."""
+    r = sandbox.run("budget-bootstrap", extra_env={"BOOTSTRAP_PATCH_S9_FAULT": "1"})
+    assert r.returncode != 0
+    out = r.stdout + r.stderr
+    assert "rollback INCOMPLETE" in out, out          # the S9 branch fired
+    assert "left in PATCHED state" in out or "left PATCHED" in out, out
+    assert sandbox.hermes_is_pre_budget(), out         # snapshot restore reverted both files
+    assert not sandbox.sentinel.exists()
+    sandbox.assert_state_untouched()
+
+
+# ── B1: budget flag armed in .env (EnvironmentFile) → Phase-1 refusal, no mutation ──
+@posix_only
+def test_b1_budget_armed_in_env_file_refused_no_mutation(sandbox):
+    """`systemctl show -p Environment` does NOT expand EnvironmentFile=, so the flag is
+    armed in $SHIFT_ROOT/.env. bootstrap_assert_budget_off must still catch it and
+    refuse in Phase 1 BEFORE any mutation."""
+    (sandbox.shift / ".env").write_text(
+        "SOME_OTHER=x\nGATEWAY_TURN_SEND_BUDGET_ENABLED=1\n", encoding="utf-8")
+    r = sandbox.run("budget-bootstrap")
+    assert r.returncode != 0
+    assert "GATEWAY_TURN_SEND_BUDGET_ENABLED=1" in (r.stdout + r.stderr) \
+        or "budget" in (r.stdout + r.stderr).lower()
+    sandbox.assert_no_mutation()
+
+
+# ── C: deploy) onto a budget-patched box with a stale pre-gate artifact → refusal ──
+@posix_only
+def test_c_deploy_stale_pregate_artifact_onto_budget_box_refused(sandbox):
+    """A plain `deploy` of a PRE-gate artifact (staged safe_io lacks the gate) onto a
+    box whose canonical Hermes already carries the budget patch would strand new-Shift
+    (no gate) against the budget-patched adapter — a mixed tree. The deploy) guard (fix
+    C) must refuse, keyed on the CANONICAL Hermes run.py."""
+    # canonical (temp) Hermes carries the budget patch
+    sandbox.run_py.write_text(
+        sandbox.run_pre + "\n# BEGIN shift-agent-turn-send-budget\n# END shift-agent-turn-send-budget\n",
+        encoding="utf-8")
+    # staged artifact is stale/pre-gate (safe_io lacks the enforcing gate)
+    (sandbox.staging / "src" / "platform" / "safe_io.py").write_text(_SAFE_IO_PRE, encoding="utf-8")
+    r = sandbox.run("deploy")
+    assert r.returncode != 0
+    out = r.stdout + r.stderr
+    assert "mixed tree" in out and "un-budget-bootstrap" in out, out
+
+
+# ── rv-rollback #1: rollback) refusal path (pre-budget tag while Hermes is patched) ──
+@posix_only
+def test_rollback_refuses_pre_budget_tag_while_hermes_patched(sandbox):
+    """After a successful bootstrap the canonical Hermes carries budget markers; a plain
+    `rollback` to a PRE-budget tarball (whose safe_io lacks the gate) would create a
+    mixed tree, so the rollback) guard (fix D) must refuse and point at un-budget-bootstrap."""
+    assert sandbox.run("budget-bootstrap").returncode == 0
+    assert "BEGIN shift-agent-turn-send-budget" in sandbox.run_py.read_text(encoding="utf-8")
+    r = sandbox.run("rollback", sandbox.prev_tag)
+    assert r.returncode != 0
+    out = r.stdout + r.stderr
+    assert "predates the budget boundary" in out or "MIXED tree" in out, out
+    assert "un-budget-bootstrap" in out, out
+
+
+# ── A: test-sandbox marker must not target production paths ──────────────────
+@posix_only
+def test_a_marker_targeting_production_paths_is_fatal(tmp_path):
+    """The SHIFT_AGENT_BOOTSTRAP_TEST_SANDBOX marker must drive TEMP roots only. If it is
+    set while SHIFT_ROOT (or HERMES_HOME) still resolves to a production path, the script
+    FATALs before any dispatch — so an accidentally-set marker can never drive a real box."""
+    bash_bin = os.environ.get("BOOTSTRAP_TEST_BASH", "bash")
+    env = {
+        **os.environ,
+        "SHIFT_AGENT_BOOTSTRAP_TEST_SANDBOX": "1",
+        # HERMES_HOME points at a temp path so ONLY the SHIFT_ROOT==/opt/shift-agent
+        # condition triggers (SHIFT_AGENT_BOOTSTRAP_TEST_ROOT is deliberately NOT set).
+        "HERMES_HOME": _posix(tmp_path / "hermes"),
+    }
+    for k in ("SHIFT_AGENT_BOOTSTRAP_TEST_ROOT", "SHIFT_AGENT_BOOTSTRAP_STAGING",
+              "SHIFT_AGENT_BOOTSTRAP_DEPLOYS_DIR", "SHIFT_AGENT_SYSTEMCTL",
+              "SHIFT_AGENT_BOOTSTRAP_CANONICAL_HERMES_RUN"):
+        env.pop(k, None)
+    r = subprocess.run([bash_bin, _posix(DEPLOY), "list"],
+                       env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode != 0
+    assert "must target temp roots" in (r.stdout + r.stderr), r.stdout + r.stderr
