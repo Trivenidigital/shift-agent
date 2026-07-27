@@ -364,7 +364,7 @@ def test_28_send_spiral_bounded_when_budget_enabled(monkeypatch):
     # suppressed. The spiral cannot exceed the per-turn cap.
     assert decisions.count(True) == limit, "exactly LIMIT finalized sends admitted"
     assert decisions.count(False) == 28 - limit, "all sends past the cap suppressed"
-    assert limit < observed  # bounded far below the observed 28-send incident
+    assert limit < observed  # bounded far below the observed 28-send incident (production default cap = 5)
 
     # Draft/edit + retry accounting on a fresh turn: drafts do not consume the
     # finalized budget; a retry after exhaustion is re-suppressed (still bounded).
@@ -380,3 +380,12 @@ def test_28_send_spiral_bounded_when_budget_enabled(monkeypatch):
         "finalized sends capped at LIMIT; retries past exhaustion re-suppressed"
     )
     live._TURN_SEND_BUDGET.set(None)
+
+    # Tie DIRECTLY to the fixture oracle number (done LAST so it doesn't perturb
+    # the production-default-limit assertions above): at the oracle's own
+    # expected_logical_sends cap, the same 28-send turn is bounded to exactly
+    # that many admits — proving the bound tracks the oracle, not just the
+    # production default of 5.
+    oracle_decisions = _drive_28_send_turn_through_gate(monkeypatch, budget_enabled=True, limit=cap)
+    assert oracle_decisions.count(True) == cap, "bounded to exactly the oracle's expected_logical_sends"
+    assert oracle_decisions.count(False) == 28 - cap
