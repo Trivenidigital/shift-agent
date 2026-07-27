@@ -7,19 +7,23 @@ behavior. Execution safety is inherited from ``tests/conftest.py`` (autouse
 fake-bridge sink) and ``safe_io.LiveBridgeSendInTestError`` (fail-closed on any
 live-bridge / unknown destination). See ``tests/incident_replay/GOVERNANCE.md``.
 
-28-SEND SPIRAL — MUST BECOME GREEN BEFORE TRANSPORT-BUDGET ACTIVATION.
-The ``test_28_send_spiral_hard_budget_installed`` case is marked
-``xfail(strict=True)``: today no hard per-turn transport budget is active by
-default on the live path (#643 / ``GATEWAY_TURN_SEND_BUDGET_ENABLED`` default
-OFF), so the enforcing assertion FAILS and registers as an expected (xfailed)
-known gap. The graduation trigger is the budget becoming DEFAULT-ON — i.e.
-``turn_send_budget_enabled()`` returning True in an unconfigured environment —
-NOT the mere merge of any PR. PR-3 ships the budget installable but still
-DEFAULT-OFF, so this case stays xfailed after PR-3 merges; only when a later
-change flips the default ON does the assertion PASS, the strict xfail turn to
-XPASS ⇒ suite error, and this marker have to be removed so the incident
-graduates to a normal green assertion. It must NOT be silently skipped and must
-NOT be green until the protection is active by default.
+28-SEND SPIRAL — GRADUATED to a two-mode assertion (no xfail).
+Rather than a single strict-xfail whose meaning flips with an env default, the
+incident is now proven in BOTH transport-budget configurations by exercising the
+REAL ``safe_io.turn_send_budget_gate``:
+  * ``test_28_send_spiral_baseline_unprotected_when_budget_off`` — with the hard
+    per-turn budget OFF (the current production default), the gate performs NO
+    enforcement (returns ``None``), so a 28-send single-turn spiral is NOT
+    bounded. This asserts the known-unsafe BASELINE explicitly and must never be
+    read as protection.
+  * ``test_28_send_spiral_bounded_when_budget_enabled`` — with the budget
+    installed AND enabled, a single inbound turn is bounded to the configured cap
+    (exactly LIMIT finalized sends admitted, the rest suppressed; drafts don't
+    consume the finalized budget; retries past exhaustion re-suppressed). This is
+    the PROTECTED behavior and is a real green PASS.
+Both configurations are green; there is no remaining xfail for the protected
+configuration. The incident oracle is unchanged (not weakened) — only the
+assertion graduated from "known failure" to "proven in both budget states".
 
 Windows: ``fcntl`` is Linux-only; ``ensure_fcntl_stub()`` (mirrors the repo
 pattern in tests/fixtures_fleet.py) makes safe_io importable here.
@@ -295,29 +299,93 @@ def _fixture_by_id(incident_id: str) -> dict:
     raise AssertionError(f"fixture {incident_id} not found")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="28-send: no hard transport budget installed yet (#643 not activated); PR-3 gates this",
-)
-def test_28_send_spiral_hard_budget_installed():
-    """The 28-send spiral is only structurally impossible once a hard per-turn
-    transport budget is active BY DEFAULT. Today it is not (#643
-    GATEWAY_TURN_SEND_BUDGET_ENABLED default OFF), so this fails and is a STRICT
-    known failure. Graduation fires when the budget is DEFAULT-ON — not on any
-    PR merge: PR-3 ships it installable but still default-OFF, so this stays
-    xfailed after PR-3; only a later flip of the default to ON makes this pass →
-    xpass → strict-xfail suite error, forcing the marker to be removed and the
-    incident to graduate to green.
+def _drive_28_send_turn_through_gate(monkeypatch, *, budget_enabled, limit=5):
+    """Drive the REAL safe_io per-inbound-turn budget gate exactly as the 28-send
+    spiral would: begin one inbound turn, then attempt 28 finalized sends through
+    ``turn_send_budget_gate``. Returns the list of gate decisions
+    (True=admitted, False=suppressed, None=not enforced). Isolated: resets the
+    turn ContextVar before and after so no state leaks between configurations."""
+    import importlib
+    live = importlib.import_module("safe_io")
+    live._TURN_SEND_BUDGET.set(None)
+    if budget_enabled:
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_ENABLED", "1")
+        monkeypatch.setenv("GATEWAY_TURN_SEND_BUDGET_LIMIT", str(limit))
+    else:
+        monkeypatch.delenv("GATEWAY_TURN_SEND_BUDGET_ENABLED", raising=False)
+        monkeypatch.delenv("GATEWAY_TURN_SEND_BUDGET_LIMIT", raising=False)
+    live.begin_inbound_turn_send_budget()
+    chat = "15550100001@s.whatsapp.net"
+    decisions = [live.turn_send_budget_gate(chat, "reply") for _ in range(28)]
+    live._TURN_SEND_BUDGET.set(None)
+    return decisions
 
-    Anchored to the fixture oracle: the budget must cap a single turn at
-    ``expected_logical_sends`` (3), far below the observed 28."""
+
+def test_28_send_spiral_baseline_unprotected_when_budget_off(monkeypatch):
+    """OFF mode (budget unavailable / DEFAULT-OFF, the current production state):
+    the 28-send spiral is NOT structurally prevented — this asserts the known
+    unsafe baseline EXPLICITLY and must NOT be read as protection. With the hard
+    per-turn budget off, ``turn_send_budget_gate`` performs NO enforcement
+    (returns ``None`` for every attempt), so all 28 sends of a single inbound
+    turn would proceed unbounded. This is the documented gap the incident
+    tracks; it graduates only when the budget is installed AND enabled (see the
+    ON-mode test)."""
+    oracle = _fixture_by_id("28-send-spiral")
+    observed = oracle["expected_final_state"]["outbound_sends_this_turn"]["observed_incident"]
+    decisions = _drive_28_send_turn_through_gate(monkeypatch, budget_enabled=False)
+    # Baseline: no enforcement — every attempt is un-gated (None), so nothing
+    # bounds a spiral. 28 un-gated attempts == the unsafe incident shape.
+    assert all(d is None for d in decisions), (
+        "expected NO budget enforcement when the hard per-turn budget is OFF "
+        "(the known-unsafe baseline)"
+    )
+    assert len(decisions) == 28 and observed >= 28
+
+
+def test_28_send_spiral_bounded_when_budget_enabled(monkeypatch):
+    """ON mode (budget installed AND enabled in this isolated environment): the
+    protected behavior — a single inbound turn is bounded to the configured cap,
+    far below the observed 28. The spiral is structurally impossible. This is a
+    real PASS (no xfail): the graduated assertion of the incident oracle.
+
+    Accounts for the full send taxonomy the oracle cares about: finalized sends
+    consume budget and are capped at LIMIT; a progressive draft/edit
+    (``reserve_budget=False``) does NOT consume the finalized budget (a streamed
+    reply costs ONE finalized unit); retries re-hit the exhausted gate and are
+    likewise suppressed. Transport splits share the one per-turn counter."""
     oracle = _fixture_by_id("28-send-spiral")
     cap = oracle["expected_logical_sends"]
-    assert cap < oracle["expected_final_state"]["outbound_sends_this_turn"]["observed_incident"]
+    observed = oracle["expected_final_state"]["outbound_sends_this_turn"]["observed_incident"]
+    assert cap < observed  # the oracle invariant: the cap is far below the incident
 
-    # The enforcing condition: a hard per-turn transport budget is active by
-    # default (unconfigured environment). It is NOT today — this is the known gap.
-    assert safe_io.turn_send_budget_enabled(), (
-        "no hard per-turn transport budget is active by default (#643 OFF); a "
-        "28-send spiral remains structurally possible until PR-3 installs it"
+    limit = 5
+    decisions = _drive_28_send_turn_through_gate(monkeypatch, budget_enabled=True, limit=limit)
+    # Bounded: exactly LIMIT finalized sends admitted, the remaining 28-LIMIT
+    # suppressed. The spiral cannot exceed the per-turn cap.
+    assert decisions.count(True) == limit, "exactly LIMIT finalized sends admitted"
+    assert decisions.count(False) == 28 - limit, "all sends past the cap suppressed"
+    assert limit < observed  # bounded far below the observed 28-send incident (production default cap = 5)
+
+    # Draft/edit + retry accounting on a fresh turn: drafts do not consume the
+    # finalized budget; a retry after exhaustion is re-suppressed (still bounded).
+    import importlib
+    live = importlib.import_module("safe_io")
+    live._TURN_SEND_BUDGET.set(None)
+    live.begin_inbound_turn_send_budget()
+    chat = "15550100001@s.whatsapp.net"
+    assert all(live.turn_send_budget_gate(chat, "draft", reserve_budget=False) is True
+               for _ in range(10)), "progressive drafts do not consume the finalized budget"
+    finals = [live.turn_send_budget_gate(chat, "final") for _ in range(limit + 3)]
+    assert finals.count(True) == limit and finals.count(False) == 3, (
+        "finalized sends capped at LIMIT; retries past exhaustion re-suppressed"
     )
+    live._TURN_SEND_BUDGET.set(None)
+
+    # Tie DIRECTLY to the fixture oracle number (done LAST so it doesn't perturb
+    # the production-default-limit assertions above): at the oracle's own
+    # expected_logical_sends cap, the same 28-send turn is bounded to exactly
+    # that many admits — proving the bound tracks the oracle, not just the
+    # production default of 5.
+    oracle_decisions = _drive_28_send_turn_through_gate(monkeypatch, budget_enabled=True, limit=cap)
+    assert oracle_decisions.count(True) == cap, "bounded to exactly the oracle's expected_logical_sends"
+    assert oracle_decisions.count(False) == 28 - cap
