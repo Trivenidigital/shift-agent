@@ -283,6 +283,19 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/catering_amendments.py
     fi
+    # PR-5: deterministic per-conversation automation-control kernel (STOP/pause/
+    # opt-out + human takeover) — imported by the cf-router plugin (inbound
+    # enforcement point) AND by safe_io.bridge_post (outbound enforcement point,
+    # lazy import). WITHOUT this, `import automation_control` fails at plugin load
+    # -> the whole cf-router plugin fails to load. DORMANT behind
+    # CATERING_AUTOMATION_CONTROL_ENABLED; the state file lives under state/ and is
+    # NEVER reset by deploy/rollback. Guarded for rollback compatibility with
+    # tarballs that predate this module.
+    if [ -f src/platform/automation_control.py ]; then
+        install -m 644 src/platform/automation_control.py /opt/shift-agent/automation_control.py
+    else
+        rm -f /opt/shift-agent/automation_control.py
+    fi
     # PR-D catering platform modules (2026-07-21 incident: these 3 were added to the
     # tree but NEVER to this explicit per-file install list, so create-catering-
     # proposal-options ImportError'd in production the first time a proposal inbound

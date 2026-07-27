@@ -50,6 +50,11 @@ import approval_code_pools  # type: ignore  # noqa: E402
 # approval_code_pools above so an import failure surfaces LOUD at plugin-load
 # time, not silently at the first suppressed amendment.
 import catering_amendments  # type: ignore  # noqa: E402
+# PR-5: deterministic per-conversation automation-control kernel (STOP/pause/
+# opt-out + human takeover). Imported flat like the modules above so an import
+# failure surfaces LOUD at plugin-load time. DORMANT behind
+# CATERING_AUTOMATION_CONTROL_ENABLED + allowlist — byte-identical when OFF.
+import automation_control  # type: ignore  # noqa: E402
 
 # PR-ζ.1b 2026-05-26 — registry + helpers for the migrated send-path
 # callsites. Deployed-flat-module fallback mirrors safe_io.py:815-818 +
@@ -335,6 +340,19 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             f8_result = _try_f8_intercept(text, chat_id, message_id)
             if f8_result is not None:
                 return f8_result
+
+        # PR-5 automation-control kernel — INBOUND enforcement point (§5.4/§5.5).
+        # DORMANT behind CATERING_AUTOMATION_CONTROL_ENABLED + allowlist; when OFF
+        # the first line returns None with no state read (byte-identical). Runs
+        # BEFORE all routing (F9/F7/flyer) so a suppressed conversation never
+        # reaches an automated handler, while still processing the commands that
+        # are the exceptions (owner takeover/release/resume; customer STOP/pause/
+        # resume + the one deterministic ack). Placed AFTER F8 so #XXXXX approval
+        # verbs keep precedence (takeover/release verbs never match F8's verbs).
+        automation_control_result = _try_automation_control(
+            text, chat_id, message_id, native_message_id)
+        if automation_control_result is not None:
+            return automation_control_result
 
         # F9 path — employee sender + sick-call regex -> deterministic Shift.
         #
@@ -1109,6 +1127,180 @@ def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional
     # Expense / shift codes are not F8's responsibility (owner self-chat handles
     # only menu + catering here) — fall through so the LLM/dispatcher routes them.
     return None
+
+
+# ── PR-5 automation-control kernel — cf-router INBOUND enforcement (§5.4/§5.5) ─
+
+def _try_automation_control(
+    text: str, chat_id: str, message_id: str, native_message_id: str = "",
+) -> Optional[dict]:
+    """Deterministic STOP/pause/opt-out + human-takeover enforcement, BEFORE any
+    routing. Returns a ``{"action": "skip", ...}`` dict when the kernel handled
+    the inbound (a command was processed OR the conversation is suppressed), else
+    None (normal routing).
+
+    DORMANT behind CATERING_AUTOMATION_CONTROL_ENABLED + allowlist: the first
+    check returns None with no state read when OFF (byte-identical). The two
+    behaviors activate independently (CATERING_STOP_ENABLED /
+    CATERING_TAKEOVER_ENABLED). Any kernel fault falls through to normal routing
+    (fail-open at inbound — the bridge_post point still guards outbound sends;
+    get_mode itself preserves the last-known suppressed mode on a read error)."""
+    try:
+        if not automation_control.enabled(chat_id):
+            return None
+    except Exception:
+        return None
+    try:
+        nid = native_message_id or message_id or ""
+        is_owner = actions.is_owner_chat(chat_id)
+        # Owner takeover/release/resume (#XXXXX <verb>), via the F8 owner surface.
+        if is_owner and automation_control.takeover_enabled():
+            owner_cmd = automation_control.detect_owner_command(text)
+            if owner_cmd is not None:
+                verb, code = owner_cmd
+                owner_result = _automation_control_apply_owner(chat_id, verb, code, nid)
+                if owner_result is not None:
+                    return owner_result
+        # Customer STOP/pause/opt-out + resume (owner self-chat is not a customer
+        # command surface).
+        if (not is_owner) and automation_control.stop_enabled():
+            cust_cmd = automation_control.detect_customer_command(text)
+            if cust_cmd is not None:
+                applied = _automation_control_apply_customer(chat_id, cust_cmd, nid)
+                if applied is not None:
+                    return applied
+                # A resume token on an ACTIVE conversation is a NO-OP → fall
+                # through so the message routes normally (proposal-selection etc.).
+        # Suppression — a suppressed conversation's non-command inbound is dropped
+        # before routing (defense in depth with the bridge_post outbound point).
+        mode = automation_control.get_mode(chat_id)
+        if automation_control.mode_suppresses(mode):
+            automation_control.emit_send_suppressed(
+                chat_id, mode, "inbound_dispatch", logical_turn_id=nid)
+            return {"action": "skip", "reason": f"automation_suppressed:{mode}"}
+        return None
+    except Exception as exc:
+        actions.sys.stderr.write(
+            f"cf-router: automation-control kernel error (non-fatal): {exc}\n")
+        return None
+
+
+def _automation_control_resolve_customer_target(code: str) -> Optional[str]:
+    """Resolve an owner ``#XXXXX`` code to the target customer's phone by scanning
+    the catering-leads store for ANY lead carrying that owner_approval_code (not
+    just routing-actionable ones — a takeover must reach the customer in any lead
+    status). Returns the E.164 customer_phone or None (no matching lead → the
+    owner command falls through so the LLM can surface a stale-code hint)."""
+    try:
+        with actions.LEADS_PATH.open(encoding="utf-8") as f:
+            store = json.load(f)
+        for lead in store.get("leads", []):
+            if isinstance(lead, dict) and lead.get("owner_approval_code") == code:
+                phone = lead.get("customer_phone")
+                if phone:
+                    return str(phone)
+    except Exception:
+        return None
+    return None
+
+
+def _automation_control_apply_owner(
+    owner_chat_id: str, verb: str, code: str, nid: str,
+) -> Optional[dict]:
+    """Apply an owner takeover (``verb == "takeover"``) or release/resume
+    (``verb == "active"``) against the customer conversation the ``#XXXXX`` code
+    resolves to. Idempotent (re-engage/re-release rewrites the same mode + audits
+    the no-op transition). Confirms back to the owner self-chat (exempt — the
+    owner key is never a suppressed customer key)."""
+    target = _automation_control_resolve_customer_target(code)
+    if not target:
+        return None
+    if verb == "takeover":
+        to_mode, reason, audit_reason = (
+            automation_control.MODE_TAKEOVER, "owner_takeover",
+            "automation_control_owner_takeover")
+    else:
+        to_mode, reason, audit_reason = (
+            automation_control.MODE_ACTIVE, "owner_release",
+            "automation_control_owner_release")
+    from_mode, _, _ = automation_control.set_mode(
+        target, to_mode, actor="owner", reason=reason, logical_turn_id=nid)
+    automation_control.emit_control_changed(
+        target, from_mode, to_mode, "owner", reason, logical_turn_id=nid)
+    actions.audit_intercepted(
+        reason=audit_reason, chat_id=owner_chat_id, code=code, subprocess_rc=0,
+        detail=f"target_hash={automation_control.chat_key_hash(target)}; "
+               f"from={from_mode}; to={to_mode}",
+    )
+    _automation_control_send(
+        owner_chat_id, automation_control.owner_confirmation(to_mode, code), nid)
+    return {"action": "skip", "reason": f"cf-router automation-control {reason}"}
+
+
+def _automation_control_apply_customer(
+    chat_id: str, cmd: str, nid: str,
+) -> Optional[dict]:
+    """Apply a customer STOP (``opted_out``), pause (``paused``), or resume
+    (``active``). Sends AT MOST ONE deterministic ack per suppression episode via
+    the atomic compare-and-set inside set_mode (must-fix b); the ack is exempt
+    from the outbound suppression it triggers (automation_control_ack=True).
+
+    Resume is the explicit customer re-enable and takes effect ONLY when the
+    conversation is currently suppressed (BLOCKER-1a): on an ACTIVE conversation
+    a resume token is a NO-OP → returns None so the message routes normally
+    (never drops an active customer's message). A new inbound after opt_out never
+    silently re-enables — only an explicit resume, or the owner command, does."""
+    if cmd == "resume":
+        from_mode = automation_control.get_mode(chat_id)
+        if not automation_control.mode_suppresses(from_mode):
+            return None  # active convo: resume token is a NO-OP, route normally
+        automation_control.set_mode(
+            chat_id, automation_control.MODE_ACTIVE, actor="customer",
+            reason="customer_resume", logical_turn_id=nid)
+        automation_control.emit_control_changed(
+            chat_id, from_mode, automation_control.MODE_ACTIVE, "customer",
+            "customer_resume", logical_turn_id=nid)
+        actions.audit_intercepted(
+            reason="automation_control_customer_resume", chat_id=chat_id,
+            subprocess_rc=0, detail=f"from={from_mode}; to=active")
+        _automation_control_send(chat_id, automation_control.RESUME_ACK, nid)
+        return {"action": "skip", "reason": "cf-router automation-control customer resume"}
+    if cmd == "pause":
+        to_mode, reason, ack_text, audit_reason = (
+            automation_control.MODE_PAUSED, "customer_pause",
+            automation_control.PAUSE_ACK, "automation_control_customer_pause")
+    else:
+        to_mode, reason, ack_text, audit_reason = (
+            automation_control.MODE_OPTED_OUT, "customer_stop",
+            automation_control.OPT_OUT_ACK, "automation_control_customer_stop")
+    from_mode, _, ack_flipped = automation_control.set_mode(
+        chat_id, to_mode, actor="customer", reason=reason,
+        logical_turn_id=nid, ack_compare_and_set=True)
+    automation_control.emit_control_changed(
+        chat_id, from_mode, to_mode, "customer", reason, logical_turn_id=nid)
+    actions.audit_intercepted(
+        reason=audit_reason, chat_id=chat_id, subprocess_rc=0,
+        detail=f"from={from_mode}; to={to_mode}; ack_emitted={ack_flipped}")
+    if ack_flipped:
+        _automation_control_send(chat_id, ack_text, nid)
+    return {"action": "skip", "reason": f"cf-router automation-control {reason}"}
+
+
+def _automation_control_send(chat_id: str, text: str, nid: str) -> None:
+    """Send a deterministic kernel ack/confirmation via the platform send
+    chokepoint with automation_control_ack=True (exempt from the very suppression
+    it may be announcing). Non-regulated context (no completion/money claim, so
+    it clears the outbound content screens). Best-effort — a send failure never
+    regresses the state change already committed."""
+    try:
+        actions._ensure_platform_path()
+        from safe_io import bridge_post  # type: ignore
+        ctx = build_action_context(
+            action_id="catering.automation_control.ack", is_regulated_action=False)
+        bridge_post(chat_id, text, action_context=ctx, automation_control_ack=True)
+    except Exception as exc:
+        actions.sys.stderr.write(
+            f"cf-router: automation-control ack send failed (non-fatal): {exc}\n")
 
 
 def _try_flyer_sample_prompt_request_intercept(text: str, chat_id: str, event: Any, media_path: Optional[str]) -> Optional[dict]:
