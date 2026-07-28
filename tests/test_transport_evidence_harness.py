@@ -1489,6 +1489,23 @@ def test_r8_front_brain_enforce_armed_refuses_prepare(tmp_path):
     assert srv.handle_prepare(FakeConn(), prepare_dict())["status"] == "prepared"
 
 
+def test_r8_front_brain_drift_prepare_to_commit_fails_before_send(tmp_path):
+    # R8 COMMIT-time revalidation: front-brain enforcement CLEAR at PREPARE, then
+    # armed before COMMIT → the generic COMMIT prerequisite re-check (handle_commit
+    # re-runs verify_prerequisites, which includes front_brain_enforce_armed)
+    # refuses BEFORE the first send → zero diagnostic sends.
+    ss = SeamState()  # front_brain_armed = False (clear at PREPARE)
+    injected = []
+    srv = make_server(tmp_path, ss, inject=lambda ctx: injected.append(ctx))
+    conn = FakeConn()
+    p = srv.handle_prepare(conn, prepare_dict())
+    assert p["status"] == "prepared"
+    ss.front_brain_armed = True  # becomes armed between PREPARE and COMMIT
+    c = srv.handle_commit(conn, {"op": "commit", "prep_token": p["prep_token"]})
+    assert c["status"] == "refused" and c["reason"] == "drift:front_brain_enforce_armed"
+    assert injected == []  # zero diagnostic sends
+
+
 def test_r6_paging_self_chat_cannot_trip_attempt_canary(tmp_path):
     # A budget-exhaustion PAGE self-chat to the SEPARATE owner identity, POSTing
     # through the same send() while attempt 6's context is active, must NOT trip
@@ -1686,3 +1703,112 @@ def test_b1_rollback_guard_does_not_error_when_source_absent(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "ROLLBACK_OK" in r.stdout
     assert not (target / "transport_evidence.py").exists()  # stale copy removed, no error
+
+
+# ═══════════════ deploy-gate FUNCTIONAL matrix (Linux CI) ════════════════════
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs a real POSIX shell (runs on Linux CI)")
+def test_transport_evidence_deploy_gate_matrix(tmp_path):
+    """Functional accept/reject matrix for tools/check-transport-evidence-patch.sh
+    (not just `bash -n`): correct closure accepted; unpatched/missing/duplicate/
+    partial/default-OFF-violation/version-skew rejected; idempotent second apply
+    accepted."""
+    import subprocess
+
+    ph = _load_patch_hermes()
+    run_fix = (
+        "import os\n"
+        "class R:\n"
+        "    async def start(self) -> bool:\n"
+        '        """d."""\n'
+        '        logger.info("Press Ctrl+C to stop")\n'
+        "        return True\n"
+        "    async def stop(self, *, restart: bool = False) -> None:\n"
+        '        """Stop the gateway and disconnect all adapters."""\n'
+        "        return None\n"
+        "    async def _handle_message(self, event):\n"
+        '        return await self._handle_message_with_agent(event, event.source, "k", 0)\n'
+        "    async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):\n"
+        '        """Inner."""\n'
+        "        return None\n"
+    )
+    wa_fix = (
+        "import os\n"
+        "class BasePlatformAdapter:\n"
+        "    pass\n"
+        "class WhatsAppAdapter(BasePlatformAdapter):\n"
+        "    async def send(self, chat_id, content=None):\n"
+        "        try:\n"
+        "            import aiohttp\n"
+        "            chunks = [content]\n"
+        "            for chunk in chunks:\n"
+        '                payload = {"chatId": chat_id, "message": chunk}\n'
+        "                async with self._http_session.post(\n"
+        '                    f"http://127.0.0.1:{self._bridge_port}/send",\n'
+        "                    json=payload,\n"
+        "                    timeout=aiohttp.ClientTimeout(total=30)\n"
+        "                ) as resp:\n"
+        "                    if resp.status == 200:\n"
+        "                        return (await resp.json()).get(\"messageId\")\n"
+        "        except Exception:\n"
+        "            raise\n"
+        "        return None\n"
+    )
+    H = tmp_path / "hermes"
+    (H / "gateway" / "platforms").mkdir(parents=True)
+    platform = tmp_path / "opt"
+    platform.mkdir()
+    run_py = H / "gateway" / "run.py"
+    wa_py = H / "gateway" / "platforms" / "whatsapp.py"
+    run_py.write_text(ph._apply_run_transport_evidence(run_fix), encoding="utf-8")
+    wa_py.write_text(ph._apply_wa_transport_evidence(wa_fix), encoding="utf-8")
+    for m in ("transport_evidence.py", "transport_evidence_ledger.py",
+              "transport_evidence_diagnostic.py", "transport_evidence_lease.py"):
+        (platform / m).write_bytes((REPO / "src" / "platform" / m).read_bytes())
+
+    gate = str(REPO / "tools" / "check-transport-evidence-patch.sh")
+
+    def run_gate(run_path, wa_path):
+        env = {**os.environ, "RUN": str(run_path), "WA": str(wa_path), "PLATFORM": str(platform)}
+        return subprocess.run(["bash", gate], env=env, capture_output=True, text=True).returncode
+
+    # correct closure accepted
+    assert run_gate(run_py, wa_py) == 0
+    # idempotent second application accepted
+    run2 = H / "gateway" / "run2.py"
+    run2.write_text(ph._apply_run_transport_evidence(run_py.read_text(encoding="utf-8")), encoding="utf-8")
+    assert run_gate(run2, wa_py) == 0
+    # unpatched run.py rejected
+    unpatched = tmp_path / "unpatched.py"
+    unpatched.write_text("import os\nx = 1\n", encoding="utf-8")
+    assert run_gate(unpatched, wa_py) != 0
+    # missing startup marker rejected
+    miss = tmp_path / "miss_startup.py"
+    miss.write_text("\n".join(
+        ln for ln in run_py.read_text(encoding="utf-8").splitlines()
+        if "shift-agent-transport-evidence-startup" not in ln
+    ), encoding="utf-8")
+    assert run_gate(miss, wa_py) != 0
+    # duplicate diag marker rejected
+    dup = tmp_path / "dup_diag.py"
+    dup.write_text(run_py.read_text(encoding="utf-8")
+                   + "\n# BEGIN shift-agent-transport-evidence-diag\n", encoding="utf-8")
+    assert run_gate(dup, wa_py) != 0
+    # partial patch: whatsapp provider-entry marker removed → rejected
+    wmiss = tmp_path / "miss_pe.py"
+    wmiss.write_text("\n".join(
+        ln for ln in wa_py.read_text(encoding="utf-8").splitlines()
+        if "shift-agent-transport-evidence-provider-entry" not in ln
+    ), encoding="utf-8")
+    assert run_gate(run_py, wmiss) != 0
+    # default-OFF violation: module-scope call injected into the block → rejected
+    notoff = tmp_path / "notoff.py"
+    notoff.write_text(run_py.read_text(encoding="utf-8").replace(
+        "# BEGIN shift-agent-transport-evidence-probe\n",
+        "# BEGIN shift-agent-transport-evidence-probe\n_shift_te_on_startup(None)\n", 1,
+    ), encoding="utf-8")
+    assert run_gate(notoff, wa_py) != 0
+    # version-skew: a required platform module missing → rejected
+    (platform / "transport_evidence_ledger.py").unlink()
+    assert run_gate(run_py, wa_py) != 0
