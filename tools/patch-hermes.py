@@ -117,8 +117,11 @@ TURN_BUDGET_EDIT_DROP_MARK_END = "END shift-agent-turn-budget-edit-drop"
 #       `_send_with_retry` path.
 # The tested, cross-platform logic lives in the flat platform modules
 # transport_evidence*.py under /opt/shift-agent (mirrors how the front-brain screen
-# calls into safe_io). Seams tagged "RC-SEAM" bind to gateway internals verified
-# during RC review. Harness binds to the FUTURE RC commit — never 2bee67d.
+# calls into safe_io). Every live seam (labelled SEAM 1-10 in the payloads) is
+# WIRED to a real gateway surface (start/stop, _handle_message[_with_agent],
+# _send_with_retry, _is_user_authorized + alias expansion, adapters, bridge health,
+# safe_io budget/front-brain) verified read-only against the pinned Hermes source —
+# no unbound callbacks. Harness binds to the FUTURE RC commit — never 2bee67d.
 TE_MARK_BEGIN = "BEGIN shift-agent-transport-evidence-probe"
 TE_MARK_END = "END shift-agent-transport-evidence-probe"
 TE_DIAG_MARK_BEGIN = "BEGIN shift-agent-transport-evidence-diag"
@@ -746,6 +749,17 @@ def _shift_te_build_seams(_runner):
     def _clock():
         return _dt.datetime.now(_dt.timezone.utc)
 
+    def _front_brain_armed(_dest):
+        # SEAM (R1) — is FRONT_BRAIN_OUTBOUND_ENFORCE armed for the probe dest?
+        # (the live safe_io check the real send() consults). Fail CLOSED (treat as
+        # armed → PREPARE refuses) if it cannot be read, so the probe never runs
+        # into front-brain screening/substitution + front-brain's own paging.
+        import safe_io as _sio
+        try:
+            return bool(_sio.front_brain_outbound_enforce_enabled(_dest))
+        except Exception:
+            return True
+
     return _te.PrereqSeams(
         feature_enabled=_te.feature_enabled,
         read_commit_hash=_read_commit_hash,
@@ -756,6 +770,7 @@ def _shift_te_build_seams(_runner):
         budget_state=_budget_state,
         health_state=_health_state,
         clock=_clock,
+        front_brain_enforce_armed=_front_brain_armed,
     )
 
 
@@ -806,8 +821,9 @@ async def _shift_te_run_diagnostic(_runner, _source, _ctx):
     if _adapter is None:
         return None
 
-    async def _send(_chat_id, _segment):
-        return await _adapter._send_with_retry(_chat_id, _segment)
+    async def _send(_chat_id, _segment, max_retries=0):
+        # R3: max_retries=0 — no transient retry can cause a real duplicate POST.
+        return await _adapter._send_with_retry(_chat_id, _segment, max_retries=max_retries)
 
     await _ted.run_diagnostic_async(
         chat_id=_ctx.destination,
@@ -815,6 +831,7 @@ async def _shift_te_run_diagnostic(_runner, _source, _ctx):
         attempt_ledger=_ctx.attempt_ledger,
         send_with_retry=_send,
         begin_turn_budget=_sio.begin_inbound_turn_send_budget,
+        logical_turn_id=_ctx.logical_turn_id,
     )
     return None
 

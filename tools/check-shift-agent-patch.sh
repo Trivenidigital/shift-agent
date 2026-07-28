@@ -359,6 +359,15 @@ if grep -q "BEGIN shift-agent-transport-evidence-probe" "$RUN" 2>/dev/null; then
     if grep -q "_shift_te_maybe_start" "$RUN"; then
         fail "$RUN carries import-time transport-evidence arming — must be default-OFF via the async start() hook only"
     fi
+    # R2 (strengthened): the injected MODULE block must contain NO module-scope
+    # (column-0) executable statement/call — only imports, def/async def/class,
+    # decorators, comments, or blank lines. A top-level call would run at gateway
+    # import → not default-OFF. Structural, not keyword-specific.
+    TE_BLOCK=$(sed -n '/^# BEGIN shift-agent-transport-evidence-probe$/,/^# END shift-agent-transport-evidence-probe$/p' "$RUN")
+    TE_BAD=$(printf '%s\n' "$TE_BLOCK" | grep -nE '^[^[:space:]#]' | grep -vE ':(import |from |def |async def |class |@)' || true)
+    if [ -n "$TE_BAD" ]; then
+        fail "$RUN transport-evidence module block has a module-scope statement/call (not default-OFF): $TE_BAD"
+    fi
     # Version-skew closure: the wired shim lazily imports the flat harness modules;
     # assert they are installed so an armed shim can never hit an ImportError.
     for m in transport_evidence.py transport_evidence_ledger.py \

@@ -165,7 +165,9 @@ def validate_lease_dir(
             f"lease dir {lease_dir} owner {st.st_uid}:{st.st_gid} != "
             f"expected {expect_uid}:{expect_gid}"
         )
-    if stat.S_IMODE(st.st_mode) != expect_mode:
+    # POSIX permission bits are only meaningful on the Linux box (the box always
+    # enforces 0700 root:root); Windows test hosts cannot set 0700, so POSIX-gate.
+    if os.name != "nt" and stat.S_IMODE(st.st_mode) != expect_mode:
         raise LeaseValidationError(
             f"lease dir {lease_dir} mode {oct(stat.S_IMODE(st.st_mode))} != "
             f"expected {oct(expect_mode)}"

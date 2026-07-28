@@ -207,6 +207,9 @@ class DiagnosticRunner:
 class ProviderEntryContext:
     attempt: int
     on_provider_entry: Callable[[], None]  # durable marker writer (idempotent)
+    expected_chat_id: str = ""  # the diagnostic destination; guards R6 self-chat overlap
+    run_id: str = ""
+    logical_turn_id: str = ""
     entered: int = 0  # provider-boundary canary: # of POSTs reached for this attempt
 
 
@@ -218,13 +221,21 @@ _ACTIVE_ATTEMPT: "contextvars.ContextVar[Optional[ProviderEntryContext]]" = (
 def provider_entry_observer(chat_id: Any = None) -> None:
     """Called by the patched ``send()`` IMMEDIATELY before the bridge POST /send.
 
-    If a diagnostic attempt is active (set by the async driver), write the durable
-    provider-entry marker (once) and trip the provider-entry canary; else a plain
-    no-op (default-OFF passthrough). The marker is written BEFORE the POST so a
-    crash from here on reconciles to ``delivery_unknown_after_send``."""
+    If a diagnostic attempt is active (set by the async driver) AND the send is to
+    the diagnostic destination, write the durable provider-entry marker (once) and
+    trip the provider-entry canary; else a plain no-op (default-OFF passthrough).
+
+    R6 guard: the marker/canary fire ONLY when ``chat_id == pec.expected_chat_id``.
+    A budget-exhaustion PAGE self-chat to the SEPARATE owner identity — which may
+    POST through the same ``send()`` while an attempt's context is still active —
+    is to a DIFFERENT chat_id, so it can never trip the current attempt's canary
+    (which would fail-loud-misclassify a denied attempt). The marker is written
+    BEFORE the POST so a crash from here reconciles to ``delivery_unknown_after_send``."""
     pec = _ACTIVE_ATTEMPT.get()
     if pec is None:
         return
+    if pec.expected_chat_id and chat_id is not None and str(chat_id) != str(pec.expected_chat_id):
+        return  # a send to a DIFFERENT identity (e.g. the owner page self-chat)
     pec.on_provider_entry()  # durable marker (idempotent) — BEFORE the POST
     pec.entered += 1  # canary: reached the provider boundary
 
@@ -236,6 +247,7 @@ async def run_diagnostic_async(
     attempt_ledger: AttemptLedger,
     send_with_retry: Callable[..., Any],
     begin_turn_budget: Optional[Callable[[], Any]] = None,
+    logical_turn_id: str = "",
     plan: Optional[list[str]] = None,
     clock: Optional[Callable[[], str]] = None,
 ) -> RunSummary:
@@ -273,13 +285,18 @@ async def run_diagnostic_async(
                 attempt_ledger.mark_provider_entry(_i, _eid, ts=now())
                 _m["done"] = True
 
-        pec = ProviderEntryContext(attempt=i, on_provider_entry=_on_entry)
+        pec = ProviderEntryContext(
+            attempt=i, on_provider_entry=_on_entry, expected_chat_id=chat_id,
+            run_id=run_id, logical_turn_id=logical_turn_id,
+        )
         token = _ACTIVE_ATTEMPT.set(pec)
         result = None
         raised: Optional[BaseException] = None
         audit_failed = False
         try:
-            result = await send_with_retry(chat_id, segment)
+            # R3: max_retries=0 — a transient bridge flake must NOT retry and cause
+            # a real duplicate POST (which would trip entered>1 → HALT).
+            result = await send_with_retry(chat_id, segment, max_retries=0)
         except LedgerError as e:  # marker write failed inside the observer → HALT
             audit_failed = True
             raised = e

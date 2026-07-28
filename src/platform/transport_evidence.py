@@ -34,6 +34,7 @@ import secrets
 import socket
 import stat
 import struct
+import sys
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -277,6 +278,11 @@ class PrereqSeams:
     # -> (gateway_healthy, bridge_healthy, queue_depth)
     health_state: Callable[[], tuple[bool, bool, int]]
     clock: Callable[[], datetime]
+    # normalized_destination -> is FRONT_BRAIN_OUTBOUND_ENFORCE armed for it? (R1)
+    # Front-brain sits between the budget gate and the POST in send(); armed on the
+    # probe destination it would screen/substitute the diagnostic content + trigger
+    # its OWN paging, contaminating the fixed-content + exactly-one-page evidence.
+    front_brain_enforce_armed: Callable[[str], bool]
 
 
 @dataclass
@@ -334,6 +340,13 @@ def verify_prerequisites(
             return PrereqResult(False, "destination_no_alias_forms")
         if not seams.is_destination_authorized("whatsapp", list(forms)):
             return PrereqResult(False, "destination_unauthorized")
+
+        # R1 evidence integrity: FRONT_BRAIN_OUTBOUND_ENFORCE armed for the probe
+        # destination would screen/substitute the diagnostic content between the
+        # budget gate and the POST + trigger front-brain's own paging → contaminate
+        # the fixed-content + exactly-one-page evidence. Fail closed.
+        if seams.front_brain_enforce_armed(normalized_destination):
+            return PrereqResult(False, "front_brain_enforce_armed")
 
         enabled, finalized_cap, draft_cap = seams.budget_state()
         if not enabled:
@@ -854,6 +867,18 @@ def _run_accept_loop(
                     server.handle_connection(conn)
                 finally:
                     server.forget_connection(conn)
+            except Exception as _conn_err:  # noqa: BLE001
+                # R2/P1: a single malformed / oversized / stalled connection
+                # (ProtocolError, socket.timeout, decode error, ...) must NEVER
+                # tear down the whole control plane. Log + continue serving; the
+                # stop signal and clean shutdown are still honored by the loop.
+                try:
+                    sys.stderr.write(
+                        "shift-agent-transport-evidence: control connection error "
+                        "(continuing): %r\n" % (_conn_err,)
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
             finally:
                 try:
                     sock_conn.close()

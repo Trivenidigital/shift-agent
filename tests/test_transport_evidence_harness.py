@@ -74,6 +74,7 @@ class SeamState:
         self.containment = True
         self.budget = (True, 5, 50)
         self.health = (True, True, 0)
+        self.front_brain_armed = False  # FRONT_BRAIN_OUTBOUND_ENFORCE not armed (R1)
         # authorized identities (platform, form)
         self.authorized = {("whatsapp", DEST), ("whatsapp", DEST_LID)}
         self.aliases = {DEST: [DEST, DEST_LID], DEST_LID: [DEST_LID, DEST]}
@@ -92,6 +93,7 @@ class SeamState:
             budget_state=lambda: self.budget,
             health_state=lambda: self.health,
             clock=clk,
+            front_brain_enforce_armed=lambda d: self.front_brain_armed,
         )
 
 
@@ -900,6 +902,8 @@ def _owner(path):
 def test_lease_valid_accepted(tmp_path):
     lp = tmp_path / "lease.json"
     _write_lease(lp)
+    if os.name != "nt":
+        os.chmod(lp.parent, 0o700)  # F1: run_probe requires a 0o700 lease dir
     uid, gid = _owner(lp)
     lease = tle.open_and_validate_lease(lp, now=FIXED_NOW, expect_uid=uid, expect_gid=gid)
     assert lease.normalized_destination == DEST and lease.max_runs == 1
@@ -917,6 +921,8 @@ def test_lease_bad_mode_rejected(tmp_path):
 def test_lease_wrong_owner_rejected(tmp_path):
     lp = tmp_path / "lease.json"
     _write_lease(lp)
+    if os.name != "nt":
+        os.chmod(lp.parent, 0o700)  # F1: run_probe requires a 0o700 lease dir
     uid, gid = _owner(lp)
     with pytest.raises(tle.LeaseValidationError):
         tle.open_and_validate_lease(lp, now=FIXED_NOW, expect_uid=uid + 12345, expect_gid=gid)
@@ -1026,6 +1032,8 @@ def test_cli_run_probe_full_flow(tmp_path):
                       run_id_factory=lambda: "run_cli")
     lp = tmp_path / "lease.json"
     _write_lease(lp)
+    if os.name != "nt":
+        os.chmod(lp.parent, 0o700)  # F1: run_probe requires a 0o700 lease dir
     uid, gid = _owner(lp)
     conn = LoopbackClient(srv)
     code, resp = cli.run_probe(conn, str(lp), now=FIXED_NOW, expect_uid=uid,
@@ -1042,6 +1050,8 @@ def test_cli_prepare_refused_does_not_consume_lease(tmp_path):
     srv = make_server(tmp_path, ss)
     lp = tmp_path / "lease.json"
     _write_lease(lp)
+    if os.name != "nt":
+        os.chmod(lp.parent, 0o700)  # F1: run_probe requires a 0o700 lease dir
     uid, gid = _owner(lp)
     conn = LoopbackClient(srv)
     code, resp = cli.run_probe(conn, str(lp), now=FIXED_NOW, expect_uid=uid,
@@ -1057,6 +1067,8 @@ def test_cli_status_read_only(tmp_path):
                       run_id_factory=lambda: "run_cli2")
     lp = tmp_path / "lease.json"
     _write_lease(lp)
+    if os.name != "nt":
+        os.chmod(lp.parent, 0o700)  # F1: run_probe requires a 0o700 lease dir
     uid, gid = _owner(lp)
     cli.run_probe(LoopbackClient(srv), str(lp), now=FIXED_NOW, expect_uid=uid,
                   expect_gid=gid, verify_installed_digest=False)
@@ -1256,7 +1268,8 @@ def test_async_driver_5_accepted_23_denied_canary(tmp_path):
     ledger = tel.AttemptLedger(tmp_path / "a.ndjson", epoch="e")
     posts = {"n": 0}
 
-    async def fake_send(chat_id, segment):
+    async def fake_send(chat_id, segment, max_retries=0):
+        assert max_retries == 0  # R3: the diagnostic must never retry
         pec = ted._ACTIVE_ATTEMPT.get()
         if pec.attempt > 5:
             return None  # budget denied — observer NEVER called (never reached boundary)
@@ -1458,3 +1471,218 @@ def _load_patch_hermes():
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
     return mod
+
+
+# ═══════════════ CONSOLIDATED FIX PASS — reviewer findings (B1/F1/R2/3/5/6/8) ══
+
+
+def test_r8_front_brain_enforce_armed_refuses_prepare(tmp_path):
+    # R1/evidence integrity: FRONT_BRAIN_OUTBOUND_ENFORCE armed for the probe
+    # destination → PREPARE fails closed (front-brain would screen/substitute the
+    # diagnostic content + trigger its own paging → contaminate the evidence).
+    ss = SeamState()
+    ss.front_brain_armed = True
+    srv = make_server(tmp_path, ss)
+    resp = srv.handle_prepare(FakeConn(), prepare_dict())
+    assert resp["status"] == "refused" and resp["reason"] == "front_brain_enforce_armed"
+    ss.front_brain_armed = False
+    assert srv.handle_prepare(FakeConn(), prepare_dict())["status"] == "prepared"
+
+
+def test_r6_paging_self_chat_cannot_trip_attempt_canary(tmp_path):
+    # A budget-exhaustion PAGE self-chat to the SEPARATE owner identity, POSTing
+    # through the same send() while attempt 6's context is active, must NOT trip
+    # the current attempt's provider-entry canary (fail-loud misclassification).
+    marked = {"n": 0}
+
+    def on_entry():
+        marked["n"] += 1
+
+    pec = ted.ProviderEntryContext(attempt=6, on_provider_entry=on_entry, expected_chat_id=DEST)
+    token = ted._ACTIVE_ATTEMPT.set(pec)
+    try:
+        ted.provider_entry_observer("19995550000@s.whatsapp.net")  # owner self-chat
+        assert pec.entered == 0 and marked["n"] == 0  # NOT tripped, no marker
+        ted.provider_entry_observer(DEST)  # a genuine send to the diagnostic dest
+        assert pec.entered == 1 and marked["n"] == 1  # DOES trip + writes the marker
+    finally:
+        ted._ACTIVE_ATTEMPT.reset(token)
+
+
+def test_r3_diagnostic_sends_use_max_retries_zero(tmp_path):
+    import asyncio
+    ledger = tel.AttemptLedger(tmp_path / "a.ndjson", epoch="e")
+    seen = []
+
+    async def fake_send(chat_id, segment, max_retries=99):
+        seen.append(max_retries)
+        pec = ted._ACTIVE_ATTEMPT.get()
+        if pec.attempt > 5:
+            return None
+        ted.provider_entry_observer(chat_id)
+        return _AsyncSendResult("P%d" % pec.attempt)
+
+    asyncio.run(ted.run_diagnostic_async(
+        chat_id=DEST, run_id="r", attempt_ledger=ledger, send_with_retry=fake_send,
+    ))
+    assert seen and all(m == 0 for m in seen)  # every send used max_retries=0 (no dup POST)
+
+
+def test_r5_startup_refusal_writes_stderr(monkeypatch, tmp_path, capsys):
+    # transport_evidence.py now imports sys → the fail-closed startup diagnostics
+    # actually emit (before the R5 fix _te_stderr NameError'd silently).
+    monkeypatch.setenv("GATEWAY_TRANSPORT_EVIDENCE_ENABLED", "1")
+    holder = tel.SingletonLock(tmp_path / "te-owner.lock")
+    holder.acquire()
+    try:
+        te.start_gateway_harness(
+            seams=SeamState().seams(), inject_diagnostic=lambda c: None,
+            state_dir_path=str(tmp_path), serve_fn=lambda *a, **k: None, epoch="e",
+        )
+    finally:
+        holder.release()
+    err = capsys.readouterr().err
+    assert "another owner holds the ledger" in err
+
+
+def test_r2_accept_loop_survives_bad_connection(monkeypatch):
+    # A malformed / stalled connection (handle_connection raises) must NOT tear
+    # down the whole control plane — a subsequent valid connection is still served.
+    monkeypatch.setattr(te, "peer_uid_of", lambda s: 0)
+
+    class FakeSockConn:
+        def close(self):
+            pass
+
+    class FakeSrv:
+        def __init__(self, n):
+            self.n = n
+            self.i = 0
+
+        def settimeout(self, t):
+            pass
+
+        def accept(self):
+            if self.i >= self.n:
+                raise OSError("no more connections")  # ends the loop cleanly
+            self.i += 1
+            return FakeSockConn(), ("addr",)
+
+        def close(self):
+            pass
+
+    class FakeServer:
+        def __init__(self):
+            self.calls = 0
+            self.served = []
+            self.disabled = False
+
+        def handle_connection(self, conn):
+            self.calls += 1
+            if self.calls == 1:
+                raise te.ProtocolError("malformed frame on connection 1")
+            self.served.append(self.calls)
+
+        def forget_connection(self, conn):
+            pass
+
+        def disable(self):
+            self.disabled = True
+
+    server = FakeServer()
+    te._run_accept_loop(server, FakeSrv(2), stop=None, path="/nonexistent-te.sock", uid=999)
+    assert server.calls == 2  # BOTH connections processed — the bad one didn't kill the loop
+    assert server.served == [2]  # connection 2 (a valid one) served AFTER connection 1 raised
+    assert server.disabled is True  # normal teardown only at the end
+
+
+def test_f1_validate_lease_dir_bad_owner_refused(tmp_path):
+    ld = tmp_path / "leasedir"
+    ld.mkdir()
+    if os.name != "nt":
+        os.chmod(ld, 0o700)
+    duid, dgid = _owner(ld)
+    # correct owner (+ 0o700 on POSIX) → passes
+    tle.validate_lease_dir(ld, expect_uid=duid, expect_gid=dgid, expect_mode=0o700)
+    # wrong owner → refused
+    with pytest.raises(tle.LeaseValidationError):
+        tle.validate_lease_dir(ld, expect_uid=duid + 99999, expect_gid=dgid, expect_mode=0o700)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX dir permission bits (Linux box only)")
+def test_f1_validate_lease_dir_bad_mode_refused(tmp_path):
+    ld = tmp_path / "leasedir"
+    ld.mkdir()
+    os.chmod(ld, 0o755)  # not 0o700
+    duid, dgid = _owner(ld)
+    with pytest.raises(tle.LeaseValidationError):
+        tle.validate_lease_dir(ld, expect_uid=duid, expect_gid=dgid, expect_mode=0o700)
+
+
+def test_f1_cli_refuses_wrong_owner_lease_dir(tmp_path):
+    # The CLI checks the lease DIR (root:root 0700) BEFORE the lease file.
+    cli = _load_cli()
+    srv = make_server(tmp_path, SeamState())
+    ld = tmp_path / "leasedir"
+    ld.mkdir()
+    if os.name != "nt":
+        os.chmod(ld, 0o700)
+    lp = ld / "lease.json"
+    _write_lease(lp)
+    duid, dgid = _owner(ld)
+    code, resp = cli.run_probe(
+        LoopbackClient(srv), str(lp), now=FIXED_NOW,
+        expect_uid=duid + 99999, expect_gid=dgid, verify_installed_digest=False,
+    )
+    assert code != 0 and resp.get("phase") == "lease_dir"
+    assert lp.exists()  # refused before any consumption
+
+
+# ── B1: rollback-safety of the deploy install lines ──────────────────────────
+
+DEPLOY_SH = REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
+
+
+def test_b1_deploy_installs_are_rollback_guarded():
+    deploy = DEPLOY_SH.read_text(encoding="utf-8")
+    for mod in (
+        "transport_evidence.py", "transport_evidence_ledger.py",
+        "transport_evidence_diagnostic.py", "transport_evidence_lease.py",
+    ):
+        # install-or-remove: guarded install + else rm -f (era convention).
+        assert f"if [ -f src/platform/{mod} ]; then" in deploy, mod
+        assert f"install -m 644 src/platform/{mod} /opt/shift-agent/{mod}" in deploy, mod
+        assert f"rm -f /opt/shift-agent/{mod}" in deploy, mod
+        # NO unconditional install (would abort a rollback under set -euo pipefail).
+        assert f"\n    install -m 644 src/platform/{mod} " not in deploy, mod
+    # CLI rollback hygiene (installs via the additive scripts/* glob; rm on rollback).
+    assert "if [ ! -f src/platform/scripts/shift-agent-transport-evidence-probe ]; then" in deploy
+    assert "rm -f /usr/local/bin/shift-agent-transport-evidence-probe" in deploy
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs a real POSIX shell (runs on Linux CI)")
+def test_b1_rollback_guard_does_not_error_when_source_absent(tmp_path):
+    # Simulate install_artifacts under `set -euo pipefail` from a rollback src_root
+    # that LACKS the harness modules: the guarded install-or-remove must NOT abort
+    # (the pre-fix unconditional `install` would exit non-zero mid-rollback), and
+    # must REMOVE the previously installed copy.
+    import subprocess
+    src_root = tmp_path / "src_root"
+    (src_root / "src" / "platform").mkdir(parents=True)  # empty: no harness modules
+    target = tmp_path / "opt"
+    target.mkdir()
+    (target / "transport_evidence.py").write_text("stale-installed-copy")
+    script = (
+        "set -euo pipefail\n"
+        f'cd "{src_root}"\n'
+        "if [ -f src/platform/transport_evidence.py ]; then\n"
+        f'    install -m 644 src/platform/transport_evidence.py "{target}/transport_evidence.py"\n'
+        "else\n"
+        f'    rm -f "{target}/transport_evidence.py"\n'
+        "fi\n"
+        "echo ROLLBACK_OK\n"
+    )
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "ROLLBACK_OK" in r.stdout
+    assert not (target / "transport_evidence.py").exists()  # stale copy removed, no error

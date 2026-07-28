@@ -80,7 +80,16 @@ def run_probe(
     operator to inspect).
     """
     now = now or _now()
-    # 1. validate the lease WITHOUT mutating it.
+    # 1a. the lease DIR must be a real root:root 0700 directory (F1) — checked
+    #     BEFORE the lease file so a world-writable / wrong-owner dir is refused.
+    try:
+        lease_mod.validate_lease_dir(
+            Path(lease_path).parent, expect_uid=expect_uid, expect_gid=expect_gid,
+            expect_mode=0o700,
+        )
+    except lease_mod.LeaseValidationError as e:
+        return EXIT_INVALID_INPUT, {"status": "error", "phase": "lease_dir", "reason": str(e)}
+    # 1b. validate the lease file WITHOUT mutating it.
     try:
         lease = lease_mod.open_and_validate_lease(
             lease_path, now=now, expect_uid=expect_uid, expect_gid=expect_gid,
