@@ -138,3 +138,16 @@ jobs:
         run: |
           echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
           python -m pytest -vv tests/test_deploy_artifact_runtime_closure.py
+
+      # Transport-evidence harness: NAMED per-test Linux skip-closure evidence
+      # (reviewer-mandated). The POSIX/symlink/fork/shell-gated tests are SKIPPED on
+      # the Windows dev box but EXECUTE here; this -v step proves each required
+      # platform-specific test actually ran on Linux — SO_PEERCRED, lifetime flock,
+      # fork-only descriptor inheritance, SIGKILL ownership release, socket perms/
+      # resilience, fsync durability, the five crash interruption windows, prior-epoch
+      # reconciliation, and the deploy-gate functional matrix — so a silent Linux skip
+      # surfaces as a named result, never buried in the aggregate glob.
+      - name: Transport-evidence harness diagnostics (reviewer-mandated Linux skip-closure)
+        run: |
+          echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
+          python -m pytest -v tests/test_transport_evidence_harness.py
