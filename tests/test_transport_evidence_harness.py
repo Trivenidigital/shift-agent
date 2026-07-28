@@ -1,15 +1,20 @@
 """Governed live transport-budget evidence-enablement harness — test set.
 
 Covers the FROZEN-SPEC test matrix (protocol / carrier / crash / admission /
-effect+isolation) plus amendment-1 (epoch-scoped reconciliation) and amendment-2
-(kernel-grounded epoch identity + strict startup singleton-ownership ordering).
+effect+isolation) plus amendment-1 (epoch-scoped reconciliation), amendment-2
+(kernel-grounded epoch identity + strict startup singleton-ownership ordering),
+and amendment-3 (D1 async gateway-boot, D3 normalized manifest, and strict
+durable fsync-before-dispatch/readiness for authoritative ledger writes).
 
 All seams (socket, provider transport, clock, prerequisites) are in-process pure
 fakes — NO real network / gateway / bridge / provider send. Cross-platform.
 
-Authoritative contract: tasks/audits/catering-review-part1-2026-07-26/
-transport-evidence-harness-frozen-spec.md (amendment 2, sha256
-0053dd276d4cd6703541d6e64640a8e95e7b7b9b5fe8fbead882c0a824969d4a).
+Authoritative frozen specification (file: tasks/audits/catering-review-part1-
+2026-07-26/transport-evidence-harness-frozen-spec.md):
+commit 6719c4a966102f684c7057b311da928a9ed0c1bc
+blob SHA-256 cabfe3da75ebf02ffba547295fcdbb66bb78125c25a927518a97c8a6b324bd1a
+blob size 16,176 bytes
+Amendment 3
 """
 from __future__ import annotations
 
@@ -1812,3 +1817,266 @@ def test_transport_evidence_deploy_gate_matrix(tmp_path):
     # version-skew: a required platform module missing → rejected
     (platform / "transport_evidence_ledger.py").unlink()
     assert run_gate(run_py, wa_py) != 0
+
+
+# ═══ AMENDMENT 3 — strict durable fsync BEFORE dispatch / readiness ══════════
+# Instrumented os.fsync (regular-file vs directory descriptor distinguished via
+# os.fstat) + dispatch/provider and socket-readiness canaries prove the
+# authoritative durability ORDERING and fail-closed behavior on the REAL ledger /
+# runner / reconciliation / startup / CLI paths — NOT isolated replicas. Linux-only
+# (/proc/self/fd fd→path resolution + real directory-fd fsync semantics): SKIPPED on
+# the Windows dev box, EXECUTED on the Linux CI runner where each becomes a named
+# PASSED result closing the fsync category.
+
+_PROC_FD = "/proc/self/fd"
+_LINUX_DURABILITY = pytest.mark.skipif(
+    os.name == "nt" or not os.path.isdir(_PROC_FD),
+    reason="strict durable-fsync semantics + /proc/self/fd fd->path are Linux-only",
+)
+
+
+def _real(p):
+    return os.path.realpath(str(p))
+
+
+def _install_fsync_spy(monkeypatch, events, *, fail_when=None):
+    """Instrument os.fsync: append (kind, resolved_path) per call — kind is 'dir'
+    when os.fstat(fd) reports a directory descriptor else 'file' — in call order,
+    and raise OSError BEFORE the real fsync when fail_when(kind, path) is True
+    (inject a durability failure at exactly that descriptor). Delegates to the real
+    fsync otherwise. Linux-only (fd->path via /proc/self/fd)."""
+    real = os.fsync
+
+    def spy(fd):
+        try:
+            path = os.readlink(f"{_PROC_FD}/{fd}")
+        except OSError:
+            path = ""
+        try:
+            is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+        except OSError:
+            is_dir = False
+        kind = "dir" if is_dir else "file"
+        events.append((kind, path))
+        if fail_when is not None and fail_when(kind, path):
+            raise OSError("injected fsync failure")
+        return real(fd)
+
+    monkeypatch.setattr(os, "fsync", spy)
+
+
+@_LINUX_DURABILITY
+def test_ledger_fsyncs_file_and_parent_before_provider_dispatch(monkeypatch, tmp_path):
+    # REAL DiagnosticRunner + AttemptLedger. Ordering: provider-entry marker file
+    # fsync -> its parent-directory fsync -> the provider call.
+    ledger_path = tmp_path / "attempts.ndjson"
+    ledger_file, ledger_dir = _real(ledger_path), _real(tmp_path)
+    events = []
+    _install_fsync_spy(monkeypatch, events)
+
+    canary = ProviderCanary()
+
+    def dispatch(attempt, segment, on_provider_entry):
+        on_provider_entry()                     # durable provider-entry marker
+        events.append(("provider", attempt))    # provider boundary canary
+        canary.entries += 1
+        return (ted.KIND_SENT, f"PROV{attempt}")
+
+    ted.DiagnosticRunner(
+        run_id="r", plan=["seg-01"],
+        attempt_ledger=tel.AttemptLedger(ledger_path, epoch="epoch-1"),
+        dispatch_segment=dispatch,
+    ).run()
+
+    assert canary.entries == 1
+    prov = events.index(("provider", 1))
+    assert events[prov - 2] == ("file", ledger_file)   # marker file fsync ...
+    assert events[prov - 1] == ("dir", ledger_dir)     # ... then parent-dir fsync ...
+    # ... immediately before the provider call (nothing between the two and it).
+
+
+@_LINUX_DURABILITY
+def test_reconciliation_fsyncs_file_and_parent_before_socket_readiness(monkeypatch, tmp_path):
+    # REAL start_gateway_harness startup over a prior-epoch stale marker: the
+    # reconciliation transition file fsync -> parent-dir fsync -> socket readiness.
+    monkeypatch.setenv("GATEWAY_TRANSPORT_EVIDENCE_ENABLED", "1")
+    sd = tmp_path
+    runs = tel.RunLedger(sd)
+    runs.record_committed(run_id="run1", nonce="n1", destination=DEST,
+                          logical_turn_id="t1", authorized_commit=FUTURE_RC_COMMIT,
+                          harness_hash=HARNESS_HASH, epoch="epoch-old", ts="ts")
+    old = tel.AttemptLedger(sd / "attempts" / "run1.ndjson", epoch="epoch-old")
+    old.mark_dispatch_pending(1)
+    old.mark_provider_entry(1, "pe1")          # marker present -> reconcile writes a transition
+
+    trans_file = _real(sd / "attempts" / "run1.ndjson")
+    trans_dir = _real(sd / "attempts")
+    events = []
+    provider = ProviderCanary()
+
+    def serve_spy(server, **kw):
+        events.append(("serve", bool(server.reconciled)))
+
+    _install_fsync_spy(monkeypatch, events)    # instrument ONLY the startup path
+    te.start_gateway_harness(
+        seams=SeamState().seams(),
+        inject_diagnostic=lambda c: setattr(provider, "entries", provider.entries + 1),
+        state_dir_path=str(sd), serve_fn=serve_spy, epoch="epoch-new",
+    )
+
+    assert ("serve", True) in events
+    serve_idx = events.index(("serve", True))
+    file_idx = next(i for i, e in enumerate(events) if e == ("file", trans_file))
+    dir_idx = next(i for i, e in enumerate(events) if e == ("dir", trans_dir))
+    assert file_idx < dir_idx < serve_idx      # transition file -> dir -> readiness
+    assert provider.entries == 0               # reconciliation performs ZERO provider ops
+
+
+@_LINUX_DURABILITY
+def test_file_fsync_failure_fails_closed_before_provider_dispatch(monkeypatch, tmp_path):
+    # Injected file-fsync failure on the provider-entry marker -> controlled
+    # LedgerError HALT, zero provider calls, no retry, no continuation.
+    ledger_path = tmp_path / "attempts.ndjson"
+    ledger_file = _real(ledger_path)
+    events = []
+    hits = {"file": 0}
+
+    def fail_when(kind, path):
+        if kind == "file" and path == ledger_file:
+            hits["file"] += 1
+            return hits["file"] >= 2           # allow dispatch_pending; fail the marker
+        return False
+
+    _install_fsync_spy(monkeypatch, events, fail_when=fail_when)
+
+    canary = ProviderCanary()
+    dispatched = {"n": 0}
+
+    def dispatch(attempt, segment, on_provider_entry):
+        dispatched["n"] += 1
+        on_provider_entry()                    # marker file fsync FAILS here
+        events.append(("provider", attempt))
+        canary.entries += 1
+        return (ted.KIND_SENT, f"PROV{attempt}")
+
+    summary = ted.DiagnosticRunner(
+        run_id="r", plan=["seg-01", "seg-02"],
+        attempt_ledger=tel.AttemptLedger(ledger_path, epoch="epoch-1"),
+        dispatch_segment=dispatch,
+    ).run()
+
+    assert summary.halted is True
+    assert summary.halt_reason.startswith("audit_write_failed:provider_entry")
+    assert "file fsync failed" in summary.halt_reason  # normalized LedgerError (not raw OSError)
+    assert canary.entries == 0 and canary.submissions == []  # zero provider calls
+    assert ("provider", 1) not in events
+    assert dispatched["n"] == 1                # tried once; no retry
+    assert ("provider", 2) not in events       # segment 2 never attempted (no continuation)
+
+
+@_LINUX_DURABILITY
+def test_directory_fsync_failure_fails_closed_before_readiness(monkeypatch, tmp_path):
+    # Injected parent-dir fsync failure on the reconciliation transition -> controlled
+    # LedgerError, NO socket readiness, zero provider ops.
+    monkeypatch.setenv("GATEWAY_TRANSPORT_EVIDENCE_ENABLED", "1")
+    sd = tmp_path
+    runs = tel.RunLedger(sd)
+    runs.record_committed(run_id="run1", nonce="n1", destination=DEST,
+                          logical_turn_id="t1", authorized_commit=FUTURE_RC_COMMIT,
+                          harness_hash=HARNESS_HASH, epoch="epoch-old", ts="ts")
+    old = tel.AttemptLedger(sd / "attempts" / "run1.ndjson", epoch="epoch-old")
+    old.mark_dispatch_pending(1)
+    old.mark_provider_entry(1, "pe1")
+
+    trans_dir = _real(sd / "attempts")
+    trans_file = _real(sd / "attempts" / "run1.ndjson")
+    events = []
+    provider = ProviderCanary()
+    served = []
+
+    def fail_when(kind, path):
+        return kind == "dir" and path == trans_dir   # transition parent-dir fsync
+
+    _install_fsync_spy(monkeypatch, events, fail_when=fail_when)
+
+    with pytest.raises(tel.LedgerError) as ei:
+        te.start_gateway_harness(
+            seams=SeamState().seams(),
+            inject_diagnostic=lambda c: setattr(provider, "entries", provider.entries + 1),
+            state_dir_path=str(sd),
+            serve_fn=lambda server, **kw: served.append(1),
+            epoch="epoch-new",
+        )
+    assert "directory fsync failed" in str(ei.value)  # controlled + attributable
+    assert served == []                               # NO socket readiness
+    assert provider.entries == 0                       # zero provider ops
+    assert ("file", trans_file) in events              # file durable; failed at the dir gate
+
+
+class _RecordingLoopback(LoopbackClient):
+    """LoopbackClient that records the op of every frame the CLI sends, so a test
+    can prove NO COMMIT frame was ever emitted."""
+
+    def __init__(self, server, peer_uid=0):
+        super().__init__(server, peer_uid)
+        self.ops = []
+
+    def send_json(self, obj):
+        self.ops.append(obj.get("op"))
+        return super().send_json(obj)
+
+
+@_LINUX_DURABILITY
+@pytest.mark.parametrize("failpoint", ["rename", "file-fsync", "directory-fsync"])
+def test_lease_consumption_fsync_failure_blocks_commit(monkeypatch, tmp_path, failpoint):
+    # Drive the REAL CLI orchestration: validate root lease dir + lease -> PREPARE
+    # on a real in-process control server -> real consume_lease -> injected
+    # durability failure. Each failpoint must fail closed: controlled
+    # LeaseConsumeError -> no attestation -> no COMMIT frame -> nonzero CLI ->
+    # no committed-run record -> zero provider sends -> no retry.
+    cli = _load_cli()
+    injected = []                                       # provider-send canary
+    srv = make_server(tmp_path / "state", SeamState(),
+                      inject=lambda ctx: injected.append(ctx),
+                      run_id_factory=lambda: "run_lease")
+    lease_dir = tmp_path / "lease"
+    lease_dir.mkdir()
+    os.chmod(lease_dir, 0o700)                          # F1: run_probe requires a 0o700 dir
+    lp = lease_dir / "lease.json"
+    meta = _write_lease(lp)
+    uid, gid = _owner(lp)
+
+    src_dir = _real(lease_dir)
+    consumed_dir = _real(lease_dir / "consumed")
+
+    if failpoint == "rename":
+        real_rename = os.rename
+
+        def rename_spy(src, dst, *a, **k):
+            if _real(Path(src).parent) == src_dir and str(src).endswith("lease.json"):
+                raise OSError("injected rename failure")
+            return real_rename(src, dst, *a, **k)
+
+        monkeypatch.setattr(os, "rename", rename_spy)
+        expect_reason = "could not be consumed"
+    else:
+        def fail_when(kind, path):
+            if failpoint == "file-fsync":
+                return kind == "file" and path.startswith(consumed_dir)
+            return kind == "dir" and path == src_dir    # directory-fsync
+        _install_fsync_spy(monkeypatch, [], fail_when=fail_when)
+        expect_reason = "fsync failed"
+
+    conn = _RecordingLoopback(srv)
+    code, resp = cli.run_probe(conn, str(lp), now=FIXED_NOW, expect_uid=uid,
+                               expect_gid=gid, verify_installed_digest=False)
+
+    # controlled, nonzero, surfaced at the consume phase
+    assert code == cli.EXIT_INVALID_INPUT and code != cli.EXIT_OK
+    assert resp.get("phase") == "consume"
+    assert expect_reason in resp.get("reason", "")
+    # PREPARE only -> NO COMMIT frame (=> no committed-run record, zero sends), no retry
+    assert conn.ops == ["prepare"]
+    assert not srv.committed_ledger.contains(meta["nonce"])  # no committed-run record
+    assert srv.run_ledger.list_run_ids() == []               # no run recorded
+    assert injected == []                                    # ZERO provider submissions

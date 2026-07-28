@@ -274,18 +274,44 @@ def consume_lease(
             f"lease {lease_path} could not be consumed (already consumed / gone): {e}"
         ) from e
 
-    # Durability: fsync both directories touched by the rename.
-    for d in {consumed_dir, lease_path.parent}:
+    # Durability (STRICT): fsync the consumed file, THEN both directories touched
+    # by the rename. A file- OR directory-fsync failure means the single-use
+    # consumption is not proven durable, so it is normalized to a controlled
+    # ``LeaseConsumeError`` (chained) — the CLI fails closed BEFORE COMMIT rather
+    # than dispatching on an unproven consume. The rename may have already made
+    # the lease terminal; that is acceptable — the invariant is no COMMIT + no
+    # send, NOT lease recoverability. Windows cannot fsync a directory handle →
+    # best-effort there only (the durable runtime target is Linux).
+    if os.name != "nt":
         try:
-            dfd = os.open(str(d), os.O_RDONLY)
+            ffd = os.open(str(dest), os.O_RDONLY)
+        except OSError as e:
+            raise LeaseConsumeError(
+                f"lease-consume file open failed: {dest}"
+            ) from e
+        try:
+            os.fsync(ffd)
+        except OSError as e:
+            raise LeaseConsumeError(
+                f"lease-consume file fsync failed: {dest}"
+            ) from e
+        finally:
+            os.close(ffd)
+        for d in {consumed_dir, lease_path.parent}:
+            try:
+                dfd = os.open(str(d), os.O_RDONLY)
+            except OSError as e:
+                raise LeaseConsumeError(
+                    f"lease-consume directory fsync open failed: {d}"
+                ) from e
             try:
                 os.fsync(dfd)
-            except OSError:
-                pass
+            except OSError as e:
+                raise LeaseConsumeError(
+                    f"lease-consume directory fsync failed: {d}"
+                ) from e
             finally:
                 os.close(dfd)
-        except OSError:
-            pass
     return {
         "consumed_path": str(dest),
         "consumed_at": now.isoformat().replace("+00:00", "Z"),

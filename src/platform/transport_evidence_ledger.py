@@ -363,32 +363,46 @@ class SingletonLock:
 # ── low-level durable primitives (no fcntl / safe_io dependency) ─────────────
 
 
-def _fsync_dir(dir_path: Path) -> None:
+def _fsync_dir(dir_path: Path, *, required: bool = True) -> None:
     """fsync a directory so a create / rename within it is durable (Linux box).
 
-    Best-effort: Windows cannot open a directory handle for fsync, and some
-    filesystems disallow directory fsync — the preceding file fsync already ran,
-    so a failure here is not fatal."""
+    Strict by default: for an AUTHORITATIVE write a directory-fsync failure means
+    the create/rename is not proven durable, so it is normalized to a controlled
+    ``LedgerError`` (chained) — the caller HALTs before dispatch / refuses socket
+    readiness rather than proceeding on an unproven write. Windows cannot open a
+    directory handle for fsync, so it is best-effort there regardless of
+    ``required`` (the durable runtime target is Linux). Pass ``required=False``
+    ONLY for a derived, disposable cache whose loss cannot affect readiness or
+    replay (the authoritative ledger stays independently durable)."""
     if os.name == "nt":
         return
     try:
         fd = os.open(str(dir_path), os.O_RDONLY)
-    except OSError:
+    except OSError as e:
+        if required:
+            raise LedgerError(f"directory fsync open failed: {dir_path}") from e
         return
     try:
         os.fsync(fd)
-    except OSError:
-        pass
+    except OSError as e:
+        if required:
+            raise LedgerError(f"directory fsync failed: {dir_path}") from e
     finally:
         os.close(fd)
 
 
-def _append_line_fsync(path: Path, line: str) -> None:
-    """Append one newline-terminated line and fsync the file descriptor.
+def _append_line_fsync(path: Path, line: str, *, required: bool = True) -> None:
+    """Append one newline-terminated line, fsync the file descriptor, THEN fsync
+    the parent directory — the authoritative durable-append primitive.
 
     Uses a short-lived ``fcntl.flock`` on Linux so a second writer cannot
     interleave a partial line; on hosts without ``fcntl`` the single-writer
     gateway invariant makes the lock unnecessary.
+
+    Strict by default: a file- OR directory-fsync ``OSError`` is normalized to a
+    controlled ``LedgerError`` (chained) so a durability failure HALTs before
+    dispatch / readiness instead of surfacing as an uncaught crash. ``required``
+    is threaded to the directory sync so a derived cache may opt out.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     data = line if line.endswith("\n") else line + "\n"
@@ -397,27 +411,44 @@ def _append_line_fsync(path: Path, line: str) -> None:
         if _fcntl is not None:
             _fcntl.flock(fd, _fcntl.LOCK_EX)
         os.write(fd, data.encode("utf-8"))
-        os.fsync(fd)
+        try:
+            os.fsync(fd)
+        except OSError as e:
+            if required:
+                raise LedgerError(f"file fsync failed: {path}") from e
     finally:
         if _fcntl is not None:
             with contextlib.suppress(Exception):
                 _fcntl.flock(fd, _fcntl.LOCK_UN)
         os.close(fd)
-    _fsync_dir(path.parent)
+    _fsync_dir(path.parent, required=required)
 
 
-def _atomic_write_json_fsync(path: Path, obj: object, mode: int = 0o600) -> None:
-    """Write JSON to a temp file, fsync it, atomically rename, fsync the dir."""
+def _atomic_write_json_fsync(
+    path: Path, obj: object, mode: int = 0o600, *, required: bool = True
+) -> None:
+    """Write JSON to a temp file, fsync it, atomically rename, fsync the dir —
+    the authoritative durable atomic-write primitive.
+
+    Strict by default: a file- OR directory-fsync ``OSError`` is normalized to a
+    controlled ``LedgerError`` (chained). On a file-fsync failure the temp file
+    is discarded WITHOUT the atomic rename, so the target is never replaced by an
+    unproven write. Pass ``required=False`` ONLY for a derived, disposable cache.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".tmp-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(obj, fh, sort_keys=True, separators=(",", ":"))
             fh.flush()
-            os.fsync(fh.fileno())
+            try:
+                os.fsync(fh.fileno())
+            except OSError as e:
+                if required:
+                    raise LedgerError(f"file fsync failed: {path}") from e
         os.chmod(tmp, mode)
         os.replace(tmp, str(path))
-        _fsync_dir(path.parent)
+        _fsync_dir(path.parent, required=required)
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp)
@@ -554,6 +585,12 @@ class ReconcileLedger:
     def record_snapshot(
         self, run_id: str, reconciling_epoch: str, states: dict, ts: str
     ) -> None:
+        # DERIVED, DISPOSABLE cache — the authoritative reconciliation transitions
+        # are already durably appended (strict) to the attempt ledger, and every
+        # readiness/replay decision reads from there, never from this snapshot.
+        # So this write is best-effort (required=False): a snapshot-fsync failure
+        # must NOT couple to startup readiness (it would fail-close on a purely
+        # derived write). It is recomputed from the authoritative ledger on demand.
         _atomic_write_json_fsync(
             self._path(run_id),
             {
@@ -563,6 +600,7 @@ class ReconcileLedger:
                 "ts": ts,
                 "note": "DERIVED CACHE — authoritative source is the attempt ledger + transitions",
             },
+            required=False,
         )
 
     def load(self, run_id: str) -> Optional[dict]:
