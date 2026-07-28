@@ -308,6 +308,12 @@ install_artifacts() {
     if [ ! -f src/platform/scripts/check-commerce-stripe-livemode ]; then
         rm -f /usr/local/bin/check-commerce-stripe-livemode
     fi
+    # Transport-evidence probe CLI installs via the additive scripts/* glob above
+    # (no cleanup there); remove the previously installed copy on a rollback to a
+    # pre-harness tarball so no inert residue is left outside the tarball surface.
+    if [ ! -f src/platform/scripts/shift-agent-transport-evidence-probe ]; then
+        rm -f /usr/local/bin/shift-agent-transport-evidence-probe
+    fi
 
     # Python modules — flat layout at /opt/shift-agent/ matches scripts' sys.path
     install -m 644 src/platform/schemas.py /opt/shift-agent/schemas.py
@@ -439,6 +445,35 @@ install_artifacts() {
     install -m 644 src/platform/sender_context.py /opt/shift-agent/sender_context.py
     install -m 644 src/platform/exit_codes.py /opt/shift-agent/exit_codes.py
     install -m 644 src/platform/log_source.py /opt/shift-agent/log_source.py
+    # Governed live transport-budget evidence-enablement harness (repo-only,
+    # DEFAULT-OFF). The run.py gateway shim (tools/patch-hermes.py, marker
+    # shift-agent-transport-evidence-probe) lazily imports these flat modules; the
+    # CLI shift-agent-transport-evidence-probe (installed via the scripts/* glob
+    # above) imports transport_evidence + transport_evidence_lease. Inert unless
+    # GATEWAY_TRANSPORT_EVIDENCE_ENABLED=1. NOT authorized for execution.
+    # ROLLBACK-SAFE (B1): install-or-remove, like front_brain_budget.py etc. — a
+    # rollback to a pre-harness tarball (src_root lacks the file) must NOT abort
+    # install_artifacts under `set -euo pipefail` after services have stopped.
+    if [ -f src/platform/transport_evidence.py ]; then
+        install -m 644 src/platform/transport_evidence.py /opt/shift-agent/transport_evidence.py
+    else
+        rm -f /opt/shift-agent/transport_evidence.py
+    fi
+    if [ -f src/platform/transport_evidence_ledger.py ]; then
+        install -m 644 src/platform/transport_evidence_ledger.py /opt/shift-agent/transport_evidence_ledger.py
+    else
+        rm -f /opt/shift-agent/transport_evidence_ledger.py
+    fi
+    if [ -f src/platform/transport_evidence_diagnostic.py ]; then
+        install -m 644 src/platform/transport_evidence_diagnostic.py /opt/shift-agent/transport_evidence_diagnostic.py
+    else
+        rm -f /opt/shift-agent/transport_evidence_diagnostic.py
+    fi
+    if [ -f src/platform/transport_evidence_lease.py ]; then
+        install -m 644 src/platform/transport_evidence_lease.py /opt/shift-agent/transport_evidence_lease.py
+    else
+        rm -f /opt/shift-agent/transport_evidence_lease.py
+    fi
     # PR-D1: audit_helpers.py — best-effort emitters for config_load_failed
     # + catering_quote_sent_lead_missing. Pre-restart gate
     # check-audit-helpers-symbols imports this module; missing here =

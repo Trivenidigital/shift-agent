@@ -103,6 +103,36 @@ TURN_BUDGET_SEND_DROP_MARK_END = "END shift-agent-turn-budget-send-drop"
 TURN_BUDGET_EDIT_DROP_MARK_BEGIN = "BEGIN shift-agent-turn-budget-edit-drop"
 TURN_BUDGET_EDIT_DROP_MARK_END = "END shift-agent-turn-budget-edit-drop"
 
+# ─── Governed live transport-budget evidence-enablement harness (repo-only) ──────
+# A FULLY SEPARATE marker/file addition (does NOT touch the sender-id / front-brain
+# / turn-budget transforms or _apply_wa_run). Inserts a DEFAULT-OFF gateway control
+# shim into run.py:
+#   (1) a module-level block after `import os` that binds the LIVE gateway seams and
+#       arms a peer-authenticated (SO_PEERCRED uid==0) control-socket listener thread
+#       — but only when GATEWAY_TRANSPORT_EVIDENCE_ENABLED == "1"; default-OFF arms
+#       nothing (no socket, no thread, no harness import → byte-behaviour no-op);
+#   (2) a diagnostic-action branch as the first statement of
+#       `_handle_message_with_agent` that, ONLY for the dedicated internal=True
+#       diagnostic event, feeds a deterministic 28-segment plan through the EXISTING
+#       `_send_with_retry` path.
+# The tested, cross-platform logic lives in the flat platform modules
+# transport_evidence*.py under /opt/shift-agent (mirrors how the front-brain screen
+# calls into safe_io). Every live seam (labelled SEAM 1-10 in the payloads) is
+# WIRED to a real gateway surface (start/stop, _handle_message[_with_agent],
+# _send_with_retry, _is_user_authorized + alias expansion, adapters, bridge health,
+# safe_io budget/front-brain) verified read-only against the pinned Hermes source —
+# no unbound callbacks. Harness binds to the FUTURE RC commit — never 2bee67d.
+TE_MARK_BEGIN = "BEGIN shift-agent-transport-evidence-probe"
+TE_MARK_END = "END shift-agent-transport-evidence-probe"
+TE_DIAG_MARK_BEGIN = "BEGIN shift-agent-transport-evidence-diag"
+TE_DIAG_MARK_END = "END shift-agent-transport-evidence-diag"
+TE_STARTUP_MARK_BEGIN = "BEGIN shift-agent-transport-evidence-startup"
+TE_STARTUP_MARK_END = "END shift-agent-transport-evidence-startup"
+TE_SHUTDOWN_MARK_BEGIN = "BEGIN shift-agent-transport-evidence-shutdown"
+TE_SHUTDOWN_MARK_END = "END shift-agent-transport-evidence-shutdown"
+TE_PROVIDER_ENTRY_MARK_BEGIN = "BEGIN shift-agent-transport-evidence-provider-entry"
+TE_PROVIDER_ENTRY_MARK_END = "END shift-agent-transport-evidence-provider-entry"
+
 
 # ─── Patch payloads (Python files) ─────────────────────────────────────
 
@@ -591,6 +621,310 @@ BRIDGE_BUTTON_RESPONSE_EXTRACT = '''
 '''
 
 
+# ─── Patch payloads (transport-evidence gateway shim — AMENDMENT 3 wiring) ─────
+#
+# DEFAULT-OFF. NO import-time arming, NO thread/socket at module import (D1): an
+# EXPLICIT async gateway-boot hook (_shift_te_on_startup, called at the end of the
+# gateway's start()) runs the strict-order startup (singleton lock -> epoch ->
+# load+validate -> reconcile+fsync -> capture the running loop -> bind+arm the
+# control socket); _shift_te_on_shutdown (called in stop()) does the ordered
+# teardown (disable control plane -> close socket -> release lock). The heavy,
+# tested logic lives in the flat transport_evidence*.py modules under
+# /opt/shift-agent. All 10 live seams are WIRED here to the real gateway surfaces
+# (start/stop/_handle_message/_handle_message_with_agent/_send_with_retry/
+# _is_user_authorized/adapters/bridge health) verified read-only against the pinned
+# Hermes source; the provider-entry marker + canary fire inside the patched send()
+# immediately before the bridge POST /send (a separate whatsapp.py marker).
+
+# (1) Module-level control-plane block inserted AFTER the standalone `import os`
+# line (run.py:32). References to gateway names (Platform / SessionSource /
+# MessageEvent / _expand_whatsapp_auth_aliases / adapters / _is_user_authorized /
+# _handle_message / _gateway_loop) resolve LAZILY at call time (via local imports
+# or globals()), so defining this block high in the module is safe.
+RUN_PY_TRANSPORT_EVIDENCE_BLOCK = '''
+# BEGIN shift-agent-transport-evidence-probe
+import sys as _te_sys
+
+
+def _shift_te_import():
+    if "/opt/shift-agent" not in _te_sys.path:
+        _te_sys.path.insert(0, "/opt/shift-agent")
+    import transport_evidence as _te
+    import transport_evidence_ledger as _tel
+    import transport_evidence_diagnostic as _ted
+    return _te, _tel, _ted
+
+
+def _shift_te_operator_source(_dest):
+    from gateway.config import Platform as _Platform
+    from gateway.session import SessionSource as _SessionSource
+    return _SessionSource(
+        platform=_Platform.WHATSAPP, chat_id=_dest, user_id=_dest, chat_type="dm",
+    )
+
+
+def _shift_te_build_seams(_runner):
+    _te, _tel, _ted = _shift_te_import()
+    import datetime as _dt
+
+    def _read_commit_hash():
+        try:
+            with open(_te.commit_hash_path(), "r", encoding="utf-8") as _fh:
+                return _fh.read().strip()
+        except OSError:
+            return ""
+
+    def _installed_digest():
+        return _te.default_harness_manifest_digest()
+
+    def _containment_active():
+        # SEAM 2a — live containment: the operator attests the gateway is contained
+        # for the probe via GATEWAY_TRANSPORT_EVIDENCE_CONTAINMENT=1 AND no agent
+        # turn is currently running (runner._running_agents empty). Both are real
+        # runtime values; default is NOT contained.
+        if os.environ.get("GATEWAY_TRANSPORT_EVIDENCE_CONTAINMENT", "") != "1":
+            return False
+        try:
+            return not bool(getattr(_runner, "_running_agents", None))
+        except Exception:
+            return False
+
+    def _alias_forms(_dest):
+        # SEAM 2b — phone/LID alias forms via the real _expand_whatsapp_auth_aliases.
+        _exp = globals().get("_expand_whatsapp_auth_aliases")
+        try:
+            _forms = set(_exp(_dest)) if callable(_exp) else set()
+        except Exception:
+            _forms = set()
+        _forms.add(_dest)
+        return list(_forms)
+
+    def _is_authorized(_platform, _forms):
+        # SEAM 2b — destination admission via the live _is_user_authorized (which
+        # itself expands phone<->LID aliases). internal=True bypasses auth, so the
+        # branch re-checks admission explicitly here.
+        try:
+            return any(
+                bool(_runner._is_user_authorized(_shift_te_operator_source(_f)))
+                for _f in _forms
+            )
+        except Exception:
+            return False
+
+    def _budget_state():
+        import safe_io as _sio
+        _lim = _sio.turn_send_budget_limit()
+        return (
+            bool(_sio.turn_send_budget_enabled()),
+            int(_lim),
+            int(_sio.turn_send_budget_draft_limit(_lim)),
+        )
+
+    def _health_state():
+        # SEAM 3 — live gateway + bridge health + queue-0. Bridge health via a SYNC
+        # GET to the adapter's bridge /health; queue depth via the runner's
+        # active-agent set (0 == drained). All real runtime values.
+        import json as _json
+        import urllib.request as _url
+        _gw_ok = bool(getattr(_runner, "_running", True))
+        _adapter = None
+        try:
+            from gateway.config import Platform as _Platform
+            _adapter = _runner.adapters.get(_Platform.WHATSAPP)
+        except Exception:
+            _adapter = None
+        _bridge_ok = False
+        try:
+            _port = int(getattr(_adapter, "_bridge_port", 3000))
+            with _url.urlopen("http://127.0.0.1:%d/health" % _port, timeout=2) as _r:
+                _bridge_ok = _json.loads(_r.read().decode("utf-8")).get("status") == "connected"
+        except Exception:
+            _bridge_ok = False
+        try:
+            _queue = len(getattr(_runner, "_running_agents", []) or [])
+        except Exception:
+            _queue = 1
+        return (_gw_ok, _bridge_ok, _queue)
+
+    def _clock():
+        return _dt.datetime.now(_dt.timezone.utc)
+
+    def _front_brain_armed(_dest):
+        # SEAM (R1) — is FRONT_BRAIN_OUTBOUND_ENFORCE armed for the probe dest?
+        # (the live safe_io check the real send() consults). Fail CLOSED (treat as
+        # armed → PREPARE refuses) if it cannot be read, so the probe never runs
+        # into front-brain screening/substitution + front-brain's own paging.
+        import safe_io as _sio
+        try:
+            return bool(_sio.front_brain_outbound_enforce_enabled(_dest))
+        except Exception:
+            return True
+
+    return _te.PrereqSeams(
+        feature_enabled=_te.feature_enabled,
+        read_commit_hash=_read_commit_hash,
+        installed_harness_digest=_installed_digest,
+        containment_active=_containment_active,
+        is_destination_authorized=_is_authorized,
+        destination_alias_forms=_alias_forms,
+        budget_state=_budget_state,
+        health_state=_health_state,
+        clock=_clock,
+        front_brain_enforce_armed=_front_brain_armed,
+    )
+
+
+def _shift_te_make_inject(_runner):
+    # SEAM 4 — root-control COMMIT hands a committed RunContext to the gateway loop.
+    import asyncio as _asyncio
+
+    def _inject(_ctx):
+        _loop = getattr(_runner, "_gateway_loop", None)
+        if _loop is None:
+            return
+        _asyncio.run_coroutine_threadsafe(
+            _shift_te_forge_and_dispatch(_runner, _ctx), _loop,
+        )
+
+    return _inject
+
+
+async def _shift_te_forge_and_dispatch(_runner, _ctx):
+    # SEAM 4 — forge the internal=True diagnostic MessageEvent (precedent
+    # run.py:4297 handoff) carrying te_run_context and feed it to _handle_message,
+    # which routes to _handle_message_with_agent where the diagnostic branch fires.
+    from gateway.platforms.base import MessageEvent as _MessageEvent
+    _src = _shift_te_operator_source(_ctx.destination)
+    _evt = _MessageEvent(
+        text="[shift-agent-transport-evidence diagnostic turn]",
+        source=_src,
+        internal=True,
+    )
+    try:
+        _evt.te_run_context = _ctx
+    except Exception:
+        return
+    await _runner._handle_message(_evt)
+
+
+async def _shift_te_run_diagnostic(_runner, _source, _ctx):
+    # SEAMS 5/6/9 — plan injection into the existing dispatch layer; reuse the REAL
+    # adapter._send_with_retry (same dispatcher/identity/retry/persistence); freeze
+    # the REAL per-turn budget so cap=5 enforces. Runs INLINE on the turn task so
+    # the budget ContextVar propagates into send().
+    _te, _tel, _ted = _shift_te_import()
+    import safe_io as _sio
+    try:
+        _adapter = _runner.adapters.get(_source.platform)
+    except Exception:
+        _adapter = None
+    if _adapter is None:
+        return None
+
+    async def _send(_chat_id, _segment, max_retries=0):
+        # R3: max_retries=0 — no transient retry can cause a real duplicate POST.
+        return await _adapter._send_with_retry(_chat_id, _segment, max_retries=max_retries)
+
+    await _ted.run_diagnostic_async(
+        chat_id=_ctx.destination,
+        run_id=_ctx.run_id,
+        attempt_ledger=_ctx.attempt_ledger,
+        send_with_retry=_send,
+        begin_turn_budget=_sio.begin_inbound_turn_send_budget,
+        logical_turn_id=_ctx.logical_turn_id,
+    )
+    return None
+
+
+async def _shift_te_on_startup(_runner):
+    # SEAM 1 — explicit async gateway-boot hook (D1). DEFAULT-OFF: returns None
+    # immediately when the feature flag is unset. Never raises into start().
+    try:
+        _te, _tel, _ted = _shift_te_import()
+        _handle = await _te.start_gateway_harness_async(
+            seams=_shift_te_build_seams(_runner),
+            inject_diagnostic=_shift_te_make_inject(_runner),
+            gateway_loop=getattr(_runner, "_gateway_loop", None),
+        )
+        _runner._shift_te_handle = _handle
+    except Exception as _e:
+        print("shift-agent-transport-evidence startup failed: %r" % (_e,), file=_te_sys.stderr)
+
+
+async def _shift_te_on_shutdown(_runner):
+    # SEAM 1 — ordered teardown (D1): disable control plane -> close socket ->
+    # release lock. Idempotent (handle popped on first call).
+    _handle = getattr(_runner, "_shift_te_handle", None)
+    if _handle is None:
+        return
+    _runner._shift_te_handle = None
+    try:
+        _te, _tel, _ted = _shift_te_import()
+        await _te.stop_gateway_harness_async(_handle)
+    except Exception as _e:
+        print("shift-agent-transport-evidence shutdown failed: %r" % (_e,), file=_te_sys.stderr)
+# END shift-agent-transport-evidence-probe
+'''
+
+# (2) Startup hook — inserted at the END of the gateway's start() (SEAM 1),
+# immediately after `logger.info("Press Ctrl+C to stop")` and before `return True`.
+# 8-space method-body indent.
+RUN_PY_TE_STARTUP_HOOK = '''        # BEGIN shift-agent-transport-evidence-startup
+        await _shift_te_on_startup(self)
+        # END shift-agent-transport-evidence-startup
+'''
+
+# (3) Shutdown hook — inserted at the top of the gateway's stop() body (SEAM 1),
+# immediately after the `"""Stop the gateway and disconnect all adapters."""`
+# docstring. 8-space method-body indent.
+RUN_PY_TE_SHUTDOWN_HOOK = '''        # BEGIN shift-agent-transport-evidence-shutdown
+        await _shift_te_on_shutdown(self)
+        # END shift-agent-transport-evidence-shutdown
+'''
+
+# (4) Diagnostic-action branch — inserted as the FIRST statement of
+# _handle_message_with_agent(self, event, source, _quick_key, run_generation)
+# (SEAM 5). Only the dedicated internal=True diagnostic event carries
+# te_run_context; it returns BEFORE the model / router / lead / proposal /
+# owner-decision path. 8-space method-body indent.
+RUN_PY_TE_DIAG_BRANCH = '''        # BEGIN shift-agent-transport-evidence-diag
+        _te_ctx = getattr(event, "te_run_context", None)
+        if _te_ctx is not None:
+            return await _shift_te_run_diagnostic(self, source, _te_ctx)
+        # END shift-agent-transport-evidence-diag
+'''
+
+# (5) whatsapp.py provider-entry observer helper (SEAMS 7/8) — module-level,
+# inserted before `class WhatsAppAdapter(BasePlatformAdapter):`. Default no-op
+# passthrough; writes the durable provider-entry marker + trips the canary IFF a
+# diagnostic attempt is active in the ContextVar.
+WHATSAPP_TE_OBSERVER_HELPER = '''# BEGIN shift-agent-transport-evidence-probe
+def _shift_te_provider_entry_observer(chat_id):
+    """Provider boundary hook: called IMMEDIATELY before the bridge POST /send.
+    Writes the durable provider-entry marker + trips the provider-entry canary IFF
+    a transport-evidence diagnostic attempt is active; otherwise a plain no-op
+    (default-OFF passthrough). See transport_evidence_diagnostic.provider_entry_observer."""
+    try:
+        import sys as _sys
+        if "/opt/shift-agent" not in _sys.path:
+            _sys.path.insert(0, "/opt/shift-agent")
+        import transport_evidence_diagnostic as _ted
+        _ted.provider_entry_observer(chat_id)
+    except Exception:
+        pass
+# END shift-agent-transport-evidence-probe'''
+
+# (6) whatsapp.py provider-entry observer call (SEAMS 7/8) — inserted inside send()'s
+# per-chunk loop IMMEDIATELY before the bridge POST /send (the provider boundary),
+# so a budget-denied send (which returns before this) never trips the canary. A
+# denied attempt (6-28) therefore never crosses the provider boundary. 16-space
+# indent (inside `for chunk in chunks:`).
+WHATSAPP_TE_OBSERVER_INJECT = '''                # BEGIN shift-agent-transport-evidence-provider-entry
+                _shift_te_provider_entry_observer(chat_id)
+                # END shift-agent-transport-evidence-provider-entry
+'''
+
+
 def _has_marker(p: Path) -> bool:
     return p.exists() and (MARK_BEGIN in p.read_text(encoding="utf-8"))
 
@@ -958,6 +1292,200 @@ def _patch_run_py_turn_send_budget() -> None:
         print(f"  ✓ {RUN} turn-send-budget already patched")
 
 
+def _te_signature_body_start(text: str, def_pos: int) -> int:
+    """Return the index just past the newline that ends a def's (possibly
+    multi-line) signature, by matching the parameter-list parens. Robust to nested
+    parens / type hints. Raises PatchError if the signature cannot be delimited."""
+    try:
+        i = text.index("(", def_pos)
+    except ValueError:
+        raise PatchError("cannot find '(' after _handle_message_with_agent def")
+    depth = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                colon = text.find(":", i)
+                if colon == -1:
+                    raise PatchError("cannot find ':' ending _handle_message_with_agent signature")
+                nl = text.find("\n", colon)
+                if nl == -1:
+                    raise PatchError("cannot find newline after _handle_message_with_agent signature")
+                return nl + 1
+        i += 1
+    raise PatchError("unbalanced parens in _handle_message_with_agent signature")
+
+
+def _apply_run_transport_evidence(text: str) -> str:
+    """Transport-evidence gateway shim for run.py (AMENDMENT 3 wiring — SEPARATE
+    marker/file addition; does not touch the sender-id / front-brain / turn-budget
+    transforms). Four idempotent inserts, each fail-closed (PatchError) on a missing
+    anchor:
+      1. the module-level control-plane block after the standalone `import os`;
+      2. the async startup hook at the END of start()
+         (after `logger.info("Press Ctrl+C to stop")`);
+      3. the async shutdown hook at the top of stop()
+         (after its docstring);
+      4. the diagnostic-action branch as the first statement of
+         `_handle_message_with_agent`.
+    """
+    # 1. module-level block after `import os` (function replacement so any payload
+    #    backslash escapes are inserted literally, never re.sub-template-interpreted).
+    if TE_MARK_BEGIN not in text:
+        anchor_re = re.compile(r"^import os$", re.MULTILINE)
+        if not anchor_re.search(text):
+            raise PatchError(
+                f"cannot locate standalone `import os` line in {RUN} for transport-evidence block"
+            )
+        text = anchor_re.sub(
+            lambda _m: "import os" + RUN_PY_TRANSPORT_EVIDENCE_BLOCK, text, count=1
+        )
+
+    # 2. startup hook at the END of start().
+    if TE_STARTUP_MARK_BEGIN not in text:
+        anchor = 'logger.info("Press Ctrl+C to stop")'
+        idx = text.find(anchor)
+        if idx == -1:
+            raise PatchError(
+                f"cannot locate start() end anchor {anchor!r} in {RUN} — "
+                f"Hermes may have changed the gateway boot sequence."
+            )
+        nl = text.find("\n", idx)
+        if nl == -1:
+            raise PatchError(f"no newline after start() anchor in {RUN}")
+        text = text[: nl + 1] + RUN_PY_TE_STARTUP_HOOK + text[nl + 1 :]
+
+    # 3. shutdown hook after the stop() docstring.
+    if TE_SHUTDOWN_MARK_BEGIN not in text:
+        anchor = '"""Stop the gateway and disconnect all adapters."""'
+        idx = text.find(anchor)
+        if idx == -1:
+            raise PatchError(
+                f"cannot locate stop() docstring anchor in {RUN} — "
+                f"Hermes may have changed the shutdown method."
+            )
+        nl = text.find("\n", idx)
+        if nl == -1:
+            raise PatchError(f"no newline after stop() docstring in {RUN}")
+        text = text[: nl + 1] + RUN_PY_TE_SHUTDOWN_HOOK + text[nl + 1 :]
+
+    # 4. diagnostic-action branch inside _handle_message_with_agent.
+    if TE_DIAG_MARK_BEGIN not in text:
+        def_re = re.compile(r"^    async def _handle_message_with_agent\(", re.MULTILINE)
+        m = def_re.search(text)
+        if not m:
+            raise PatchError(
+                f"cannot find `async def _handle_message_with_agent(` in {RUN} — "
+                f"Hermes may have renamed the response-dispatch method."
+            )
+        insert_at = _te_signature_body_start(text, m.start())
+        line_diff = text.count("\n", m.start(), insert_at)
+        if line_diff > 20:
+            raise PatchError(
+                f"_handle_message_with_agent signature spans {line_diff} lines from its def — "
+                f"anchor mismatch (likely matched a different method)."
+            )
+        text = text[:insert_at] + RUN_PY_TE_DIAG_BRANCH + text[insert_at:]
+
+    return text
+
+
+def _apply_wa_transport_evidence(text: str) -> str:
+    """Transport-evidence provider-entry observer for whatsapp.py (SEAMS 7/8).
+    Two idempotent inserts, fail-closed on a missing anchor:
+      1. the module-level observer helper before `class WhatsAppAdapter(...)`;
+      2. the observer call inside send()'s per-chunk loop IMMEDIATELY before the
+         bridge POST /send (the provider boundary).
+    """
+    # 1. observer helper before the adapter class (shares the run.py BEGIN marker).
+    if TE_MARK_BEGIN not in text:
+        class_anchor = "class WhatsAppAdapter(BasePlatformAdapter):"
+        if class_anchor not in text:
+            raise PatchError(
+                f"cannot locate '{class_anchor}' in {WA} for transport-evidence observer"
+            )
+        text = text.replace(
+            class_anchor, WHATSAPP_TE_OBSERVER_HELPER + "\n\n\n" + class_anchor, 1
+        )
+
+    # 2. observer call immediately before the bridge POST /send boundary in send().
+    if TE_PROVIDER_ENTRY_MARK_BEGIN not in text:
+        post_re = re.compile(
+            r"(?P<indent> *)async with self\._http_session\.post\(\s*\n"
+            r"\s*f\"http://127\.0\.0\.1:\{self\._bridge_port\}/send\",",
+        )
+        m = post_re.search(text)
+        if not m:
+            raise PatchError(
+                f"cannot locate the bridge POST /send provider boundary in {WA} send() — "
+                f"Hermes may have refactored the WhatsApp send path."
+            )
+        indent = m.group("indent")
+        if len(indent) != 16:
+            raise PatchError(
+                f"unexpected indent ({len(indent)}) at the POST /send boundary in {WA} — "
+                f"the provider-entry observer would be mis-indented."
+            )
+        text = text[: m.start()] + WHATSAPP_TE_OBSERVER_INJECT + text[m.start() :]
+
+    return text
+
+
+def _patch_run_py_transport_evidence() -> None:
+    """Apply the transport-evidence gateway shim to run.py (runs AFTER the atomic
+    sender-id/front-brain/turn-budget apply). All-or-nothing for its own inserts:
+    build in memory, ast.parse-validate + marker-check, then write once. Fail-closed
+    (exit 1) on a missing anchor."""
+    text = RUN.read_text(encoding="utf-8")
+    try:
+        new = _apply_run_transport_evidence(text)
+        ast.parse(new)
+        for mk in (
+            TE_MARK_BEGIN, TE_STARTUP_MARK_BEGIN, TE_SHUTDOWN_MARK_BEGIN, TE_DIAG_MARK_BEGIN,
+        ):
+            if mk not in new:
+                raise PatchError(f"transport-evidence marker missing after apply: {mk!r}")
+    except PatchError as exc:
+        sys.stderr.write(f"FAIL: {exc}\n")
+        sys.exit(1)
+    except SyntaxError as exc:
+        sys.stderr.write(f"FAIL: patched run.py fails to parse (transport-evidence): {exc}\n")
+        sys.exit(1)
+    if new != text:
+        RUN.write_text(new, encoding="utf-8")
+        print(f"  ✓ patched {RUN} (transport-evidence: startup+shutdown+dispatch hooks)")
+    else:
+        print(f"  ✓ {RUN} transport-evidence already patched")
+
+
+def _patch_whatsapp_py_transport_evidence() -> None:
+    """Apply the transport-evidence provider-entry observer to whatsapp.py. Runs
+    AFTER the atomic apply. All-or-nothing for its own inserts. Fail-closed (exit 1)
+    on a missing anchor."""
+    text = WA.read_text(encoding="utf-8")
+    try:
+        new = _apply_wa_transport_evidence(text)
+        ast.parse(new)
+        for mk in (TE_MARK_BEGIN, TE_PROVIDER_ENTRY_MARK_BEGIN):
+            if mk not in new:
+                raise PatchError(f"transport-evidence marker missing after apply: {mk!r}")
+    except PatchError as exc:
+        sys.stderr.write(f"FAIL: {exc}\n")
+        sys.exit(1)
+    except SyntaxError as exc:
+        sys.stderr.write(f"FAIL: patched whatsapp.py fails to parse (transport-evidence): {exc}\n")
+        sys.exit(1)
+    if new != text:
+        WA.write_text(new, encoding="utf-8")
+        print(f"  ✓ patched {WA} (transport-evidence provider-entry observer)")
+    else:
+        print(f"  ✓ {WA} transport-evidence already patched")
+
+
 def _patch_bridge_js():
     if _has_marker(BR):
         print(f"  ✓ {BR} sender-id already patched")
@@ -1077,6 +1605,11 @@ def main() -> int:
     except PatchError as exc:
         sys.stderr.write(f"FAIL: {exc}\n")
         return 1
+    # Transport-evidence gateway control shim (repo-only, DEFAULT-OFF). A fully
+    # separate marker/file addition to run.py — applied after the atomic apply
+    # above (re-reads the freshly-patched run.py). Fail-closed on a missing anchor.
+    _patch_run_py_transport_evidence()
+    _patch_whatsapp_py_transport_evidence()
     # bridge.js (sender-id + CTA) is a separate JS target with its own patcher.
     _patch_bridge_js()
     print("Done.")

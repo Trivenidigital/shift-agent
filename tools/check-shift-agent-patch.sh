@@ -319,6 +319,28 @@ grep -q "buttonsResponseMessage" "$BR" || fail "$BR missing button-response inbo
 grep -q "pre_gateway_dispatch" "$RUN" || fail "$RUN missing pre_gateway_dispatch hook surface (cf-router plugin would silently fail)"
 
 # ─────────────────────────────────────────────────────────────────
+# 4b. Governed transport-budget evidence-enablement harness (AMENDMENT 3)
+# ─────────────────────────────────────────────────────────────────
+# Repo-only, DEFAULT-OFF. Fail-closed so the immutable RC can NOT be built with
+# missing / partial wiring. Verifies: every inserted marker exists EXACTLY ONCE
+# post-patch; the startup + shutdown + response-dispatch + provider-boundary hooks
+# are all present; and the default-OFF closure (no import-time arming — a socket /
+# diagnostic path exists ONLY behind the explicit start()/stop() hooks + the
+# GATEWAY_TRANSPORT_EVIDENCE_ENABLED flag). The marker block is only enforced once
+# the patch is present, so a pre-harness tree is not required to carry it.
+if grep -q "BEGIN shift-agent-transport-evidence-probe" "$RUN" 2>/dev/null; then
+    # Single source of truth: the full accept/reject matrix lives in the factored
+    # tools/check-transport-evidence-patch.sh (functionally tested by
+    # tests/test_transport_evidence_deploy_gate.py). Invoke it with the resolved
+    # paths; it fail-closes (non-zero) on any missing/duplicate marker, missing
+    # hook/anchor, a non-default-OFF module block, or a version-skew module gap.
+    RUN="$RUN" WA="$WA" PLATFORM="$PLATFORM" \
+        bash "$SCRIPT_DIR/check-transport-evidence-patch.sh" \
+        || fail "transport-evidence harness patch verification failed (see above)"
+    info "transport-evidence harness markers + hooks verified (default-OFF)."
+fi
+
+# ─────────────────────────────────────────────────────────────────
 # 5. Hermes Python module version (informational warn only)
 # ─────────────────────────────────────────────────────────────────
 
