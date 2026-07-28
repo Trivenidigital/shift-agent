@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""shift-agent-transport-evidence-probe — root-run trigger for the governed live
+transport-budget evidence-enablement harness.
+
+Default-OFF. The operator runs this AS ROOT. It:
+
+  1. validates + (on a prepared session) CONSUMES a root-owned single-use lease
+     in a ``root:root 0700`` dir (``O_NOFOLLOW`` / regular-file / uid+gid / exact
+     mode / hard-link==1 / bounded size / strict schema / expiry / nonce entropy);
+  2. connects to the peer-authenticated control socket in ``/run/shift-agent/``;
+  3. runs the two-phase protocol on ONE connection: PREPARE -> atomically
+     consume the lease -> COMMIT (with a consumption attestation);
+  4. ``status <run_id>`` is a read-only STATUS query — it NEVER triggers a run.
+
+The gateway independently verifies every prerequisite and never reads the lease;
+the CLI owns lease consumption. See tasks/audits/catering-review-part1-2026-07-26/
+transport-evidence-harness-frozen-spec.md.
+
+Repository implementation only — NOT authorized for execution.
+
+Exit codes (see exit_codes.py):
+  0  OK (committed / status returned)
+  1  refused (PREPARE/COMMIT refused by the gateway)
+  2  disabled (feature OFF) OR invalid input / lease validation failure
+  6  control socket unreachable (feature OFF or gateway down)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+# Repo-relative fallback for in-repo test runs (deployed VPS already has
+# /opt/shift-agent on sys.path above). Walk up scripts/<file> -> platform -> src -> repo.
+_THIS = Path(__file__).resolve()
+_REPO_ROOT = _THIS.parent.parent.parent.parent  # scripts/<file> -> platform -> src -> repo
+sys.path.insert(0, str(_REPO_ROOT / "src" / "platform"))
+
+import transport_evidence as te  # noqa: E402
+import transport_evidence_lease as lease_mod  # noqa: E402
+from exit_codes import (  # noqa: E402
+    EXIT_OK,
+    EXIT_GENERIC_ERROR,
+    EXIT_DISABLED,
+    EXIT_INVALID_INPUT,
+    EXIT_DEPENDENCY_DOWN,
+)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _emit(obj: dict) -> None:
+    sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+
+
+def compute_installed_harness_digest() -> str:
+    """The CLI computes the manifest digest independently (belt) so a
+    gateway<->CLI disagreement is caught before PREPARE too (D3 normalized-path
+    digest over the same trusted root the gateway uses)."""
+    return te.default_harness_manifest_digest()
+
+
+def run_probe(
+    conn,
+    lease_path: str,
+    *,
+    now: datetime | None = None,
+    expect_uid: int = 0,
+    expect_gid: int = 0,
+    verify_installed_digest: bool = True,
+) -> tuple[int, dict]:
+    """Validate the lease, PREPARE, consume the lease, COMMIT — all on ONE
+    connection. Returns (exit_code, last_response). The lease is consumed ONLY
+    after a successful PREPARE (a refused PREPARE leaves the lease intact for the
+    operator to inspect).
+    """
+    now = now or _now()
+    # 1. validate the lease WITHOUT mutating it.
+    try:
+        lease = lease_mod.open_and_validate_lease(
+            lease_path, now=now, expect_uid=expect_uid, expect_gid=expect_gid,
+        )
+    except lease_mod.LeaseValidationError as e:
+        return EXIT_INVALID_INPUT, {"status": "error", "phase": "lease", "reason": str(e)}
+
+    # 2. CLI-side digest agreement belt (the gateway re-verifies independently).
+    if verify_installed_digest:
+        try:
+            installed = compute_installed_harness_digest()
+        except OSError as e:
+            return EXIT_INVALID_INPUT, {
+                "status": "error", "phase": "harness_digest", "reason": str(e),
+            }
+        if installed != lease.authorized_harness_hash:
+            return EXIT_INVALID_INPUT, {
+                "status": "error",
+                "phase": "harness_digest",
+                "reason": "cli_installed_digest_disagrees_with_lease",
+            }
+
+    # 3. PREPARE.
+    prepare_req = {"op": "prepare", **lease.prepare_fields()}
+    conn.send_json(prepare_req)
+    prep_resp = conn.recv_json()
+    if not isinstance(prep_resp, dict) or prep_resp.get("status") != "prepared":
+        # Refused / error at PREPARE: DO NOT consume the lease.
+        return EXIT_GENERIC_ERROR, prep_resp or {"status": "error", "reason": "no_response"}
+    prep_token = prep_resp.get("prep_token")
+    if not prep_token:
+        return EXIT_GENERIC_ERROR, {"status": "error", "reason": "missing_prep_token"}
+
+    # 4. Atomically consume + fsync the lease (single-use gate) BEFORE COMMIT.
+    try:
+        attestation = lease_mod.consume_lease(lease_path, now=now)
+    except lease_mod.LeaseConsumeError as e:
+        return EXIT_INVALID_INPUT, {"status": "error", "phase": "consume", "reason": str(e)}
+
+    # 5. COMMIT on the SAME connection.
+    conn.send_json(
+        {"op": "commit", "prep_token": prep_token, "consumption_attestation": attestation}
+    )
+    commit_resp = conn.recv_json()
+    if not isinstance(commit_resp, dict):
+        return EXIT_GENERIC_ERROR, {"status": "error", "reason": "no_commit_response"}
+    if commit_resp.get("status") == "committed":
+        return EXIT_OK, commit_resp
+    return EXIT_GENERIC_ERROR, commit_resp
+
+
+def status_probe(conn, run_id: str) -> tuple[int, dict]:
+    """Read-only STATUS. Never triggers execution."""
+    conn.send_json({"op": "status", "run_id": run_id})
+    resp = conn.recv_json()
+    if not isinstance(resp, dict):
+        return EXIT_GENERIC_ERROR, {"status": "error", "reason": "no_response"}
+    return EXIT_OK, resp
+
+
+def _cmd_run(args) -> int:
+    if not te.feature_enabled():
+        _emit({"status": "disabled", "reason": "feature_off"})
+        return EXIT_DISABLED
+    try:
+        conn = te.connect_client()
+    except OSError as e:
+        _emit({"status": "error", "phase": "connect", "reason": str(e)})
+        return EXIT_DEPENDENCY_DOWN
+    try:
+        code, resp = run_probe(conn, args.lease)
+    finally:
+        conn.close()
+    _emit(resp)
+    return code
+
+
+def _cmd_status(args) -> int:
+    if not te.feature_enabled():
+        _emit({"status": "disabled", "reason": "feature_off"})
+        return EXIT_DISABLED
+    try:
+        conn = te.connect_client()
+    except OSError as e:
+        _emit({"status": "error", "phase": "connect", "reason": str(e)})
+        return EXIT_DEPENDENCY_DOWN
+    try:
+        code, resp = status_probe(conn, args.run_id)
+    finally:
+        conn.close()
+    _emit(resp)
+    return code
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="shift-agent-transport-evidence-probe",
+        description="Governed live transport-budget evidence probe (default-OFF).",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+    run = sub.add_parser("run", help="validate+consume lease, PREPARE->COMMIT")
+    run.add_argument("--lease", required=True, help="path to the root-owned single-use lease")
+    run.set_defaults(func=_cmd_run)
+    st = sub.add_parser("status", help="read-only STATUS of a run_id (never executes)")
+    st.add_argument("run_id")
+    st.set_defaults(func=_cmd_status)
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

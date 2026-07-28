@@ -319,6 +319,58 @@ grep -q "buttonsResponseMessage" "$BR" || fail "$BR missing button-response inbo
 grep -q "pre_gateway_dispatch" "$RUN" || fail "$RUN missing pre_gateway_dispatch hook surface (cf-router plugin would silently fail)"
 
 # ─────────────────────────────────────────────────────────────────
+# 4b. Governed transport-budget evidence-enablement harness (AMENDMENT 3)
+# ─────────────────────────────────────────────────────────────────
+# Repo-only, DEFAULT-OFF. Fail-closed so the immutable RC can NOT be built with
+# missing / partial wiring. Verifies: every inserted marker exists EXACTLY ONCE
+# post-patch; the startup + shutdown + response-dispatch + provider-boundary hooks
+# are all present; and the default-OFF closure (no import-time arming — a socket /
+# diagnostic path exists ONLY behind the explicit start()/stop() hooks + the
+# GATEWAY_TRANSPORT_EVIDENCE_ENABLED flag). The marker block is only enforced once
+# the patch is present, so a pre-harness tree is not required to carry it.
+if grep -q "BEGIN shift-agent-transport-evidence-probe" "$RUN" 2>/dev/null; then
+    # run.py markers — each EXACTLY once.
+    for mk in \
+        "BEGIN shift-agent-transport-evidence-probe" "END shift-agent-transport-evidence-probe" \
+        "BEGIN shift-agent-transport-evidence-startup" "END shift-agent-transport-evidence-startup" \
+        "BEGIN shift-agent-transport-evidence-shutdown" "END shift-agent-transport-evidence-shutdown" \
+        "BEGIN shift-agent-transport-evidence-diag" "END shift-agent-transport-evidence-diag"; do
+        c=$(grep -cF "$mk" "$RUN" || true)
+        [ "$c" = "1" ] || fail "$RUN transport-evidence marker '$mk' count=$c (expected exactly 1)"
+    done
+    # whatsapp.py markers — each EXACTLY once.
+    for mk in \
+        "BEGIN shift-agent-transport-evidence-probe" "END shift-agent-transport-evidence-probe" \
+        "BEGIN shift-agent-transport-evidence-provider-entry" "END shift-agent-transport-evidence-provider-entry"; do
+        c=$(grep -cF "$mk" "$WA" || true)
+        [ "$c" = "1" ] || fail "$WA transport-evidence marker '$mk' count=$c (expected exactly 1)"
+    done
+    # Hook + anchor presence (SEAMS 1/5/6/7): startup, shutdown, diagnostic
+    # dispatch into _handle_message_with_agent, and the provider-boundary observer
+    # immediately before the bridge POST /send.
+    grep -q "async def _handle_message_with_agent(" "$RUN" || fail "$RUN missing _handle_message_with_agent anchor (diagnostic dispatch hook)"
+    grep -q "_shift_te_on_startup(self)" "$RUN" || fail "$RUN missing transport-evidence startup hook call"
+    grep -q "_shift_te_on_shutdown(self)" "$RUN" || fail "$RUN missing transport-evidence shutdown hook call"
+    grep -q "_shift_te_run_diagnostic(self, source" "$RUN" || fail "$RUN missing transport-evidence diagnostic dispatch call"
+    grep -q "_shift_te_provider_entry_observer(chat_id)" "$WA" || fail "$WA missing transport-evidence provider-entry observer call"
+    grep -q "{self._bridge_port}/send" "$WA" || fail "$WA missing bridge POST /send provider boundary"
+    # DEFAULT-OFF closure: NO import-time arming may exist (arming is only via the
+    # explicit async start() hook, gated by GATEWAY_TRANSPORT_EVIDENCE_ENABLED).
+    if grep -q "_shift_te_maybe_start" "$RUN"; then
+        fail "$RUN carries import-time transport-evidence arming — must be default-OFF via the async start() hook only"
+    fi
+    # Version-skew closure: the wired shim lazily imports the flat harness modules;
+    # assert they are installed so an armed shim can never hit an ImportError.
+    for m in transport_evidence.py transport_evidence_ledger.py \
+             transport_evidence_diagnostic.py transport_evidence_lease.py; do
+        [ -f "$PLATFORM/$m" ] || fail "$PLATFORM/$m missing while the transport-evidence patch is installed (armed shim would ImportError)"
+    done
+    grep -q "def run_diagnostic_async" "$PLATFORM/transport_evidence_diagnostic.py" 2>/dev/null \
+        || fail "$PLATFORM/transport_evidence_diagnostic.py missing run_diagnostic_async (diagnostic path absent)"
+    info "transport-evidence harness markers + hooks verified (default-OFF)."
+fi
+
+# ─────────────────────────────────────────────────────────────────
 # 5. Hermes Python module version (informational warn only)
 # ─────────────────────────────────────────────────────────────────
 

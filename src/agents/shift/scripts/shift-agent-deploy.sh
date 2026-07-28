@@ -439,6 +439,16 @@ install_artifacts() {
     install -m 644 src/platform/sender_context.py /opt/shift-agent/sender_context.py
     install -m 644 src/platform/exit_codes.py /opt/shift-agent/exit_codes.py
     install -m 644 src/platform/log_source.py /opt/shift-agent/log_source.py
+    # Governed live transport-budget evidence-enablement harness (repo-only,
+    # DEFAULT-OFF). The run.py gateway shim (tools/patch-hermes.py, marker
+    # shift-agent-transport-evidence-probe) lazily imports these flat modules; the
+    # CLI shift-agent-transport-evidence-probe (installed via the scripts/* glob
+    # above) imports transport_evidence + transport_evidence_lease. Inert unless
+    # GATEWAY_TRANSPORT_EVIDENCE_ENABLED=1. NOT authorized for execution.
+    install -m 644 src/platform/transport_evidence.py /opt/shift-agent/transport_evidence.py
+    install -m 644 src/platform/transport_evidence_ledger.py /opt/shift-agent/transport_evidence_ledger.py
+    install -m 644 src/platform/transport_evidence_diagnostic.py /opt/shift-agent/transport_evidence_diagnostic.py
+    install -m 644 src/platform/transport_evidence_lease.py /opt/shift-agent/transport_evidence_lease.py
     # PR-D1: audit_helpers.py — best-effort emitters for config_load_failed
     # + catering_quote_sent_lead_missing. Pre-restart gate
     # check-audit-helpers-symbols imports this module; missing here =
