@@ -267,15 +267,22 @@ def _recompute_with_pricebook(
     path's "item not in current menu", and the reason the kernel's
     never-guess rule matters here: a guessed number would be persisted.
     """
-    qc = _pricing.compute_quote(
-        guest_count if guest_count and guest_count >= 1 else 1,
-        package_id,
-        [(it.name, it.qty) for it in items],
-        None,  # discounts are an owner action (M3), never customer-selected
-        pricebook,
-        menu,
-        min_per_guest_usd=min_per_guest_usd,
-    )
+    try:
+        qc = _pricing.compute_quote(
+            guest_count if guest_count and guest_count >= 1 else 1,
+            package_id,
+            [(it.name, it.qty) for it in items],
+            None,  # discounts are an owner action (M3), never customer-selected
+            pricebook,
+            menu,
+            min_per_guest_usd=min_per_guest_usd,
+        )
+    except _pricing.PricingError as e:
+        # Caller-side input error the kernel refuses to guess around — an unknown
+        # or inactive --package-id is the reachable case. Surface it as a clean
+        # exit rather than a traceback: the SKILL reads stderr and branches on it.
+        sys.stderr.write(f"pricing refused this finalize: {e}\n")
+        sys.exit(EXIT_INVALID_INPUT)
     unpriced = [ln.name for ln in qc.lines if ln.unit_cents is None]
     if unpriced:
         sys.stderr.write(
@@ -819,6 +826,15 @@ def main() -> int:
              "and --quote-total-usd if set; picks a representative basket from "
              "catering-menu.json instead.",
     )
+    parser.add_argument(
+        "--package-id", default="",
+        help="M3: price this finalize against a named per-person package from the "
+             "pricebook, so the total scales with the headcount instead of being a "
+             "flat basket sum. The kernel validates it — an unknown or inactive id "
+             "is refused (exit 2), never silently ignored. Only meaningful with a "
+             "pricebook; --auto-default already picks the cheapest eligible package "
+             "on its own, so the two are mutually exclusive.",
+    )
     args = parser.parse_args()
 
     # PR-4: one logical_turn_id for the turn + one send_attempt_id for the OWNER
@@ -839,6 +855,24 @@ def main() -> int:
     pricebook = _load_pricebook()
     guest_count = _lookup_lead_headcount(args.code) if pricebook is not None else None
     package_id: Optional[str] = None
+
+    # M3 --package-id. Refused up front rather than silently dropped: a caller who
+    # names a package and gets flat basket arithmetic instead would be quoting a
+    # number that does not scale with the headcount — the BL-CATER-03 class this
+    # flag exists to close. The kernel itself validates the id (unknown/inactive
+    # raise PricingError, surfaced by _recompute_with_pricebook).
+    explicit_package_id = (args.package_id or "").strip()
+    if explicit_package_id:
+        if args.auto_default:
+            sys.stderr.write(
+                "--package-id cannot be combined with --auto-default "
+                "(--auto-default already picks the cheapest eligible package)\n")
+            return EXIT_INVALID_INPUT
+        if pricebook is None:
+            sys.stderr.write(
+                f"--package-id {explicit_package_id!r} requires a pricebook; none at "
+                f"{PRICEBOOK_PATH}. Import one with import-catering-pricebook.\n")
+            return EXIT_INVALID_INPUT
 
     # Step 1: input validation (auto-default vs. manual-selection branches)
     if args.auto_default:
@@ -868,6 +902,7 @@ def main() -> int:
             )
             sys.exit(EXIT_INVALID_INPUT)
         items, llm_total = _validate_inputs(args)
+        package_id = explicit_package_id or None
 
     # Step 3: cross-check + recompute (no lock).
     # `guard_total` is what the truth-guard compares the LLM's number against;
