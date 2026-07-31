@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "effective_date": "2026-01-01",
+  "updated_at": "2026-01-01T00:00:00Z",
+  "updated_by": "manual",
+  "currency": "USD",
+  "placeholder": true,
+  "notes": "PLACEHOLDER SEED — every number below is an EXAMPLE, not this business's pricing. placeholder=true makes that machine-detectable: the pricing kernel marks every quote computed from this file price_status=pending_owner_review and flags placeholder_pricebook, so proposal delivery hard-refuses. The owner must replace these values and re-import with placeholder=false before any customer sees a price. All money is INTEGER CENTS (1800 = $18.00). Discount value is basis points for kind=percent (500 = 5%) and cents for kind=fixed_cents. tax_rate_bps is basis points (825 = 8.25%).",
+  "tax_rate_bps": 0,
+  "per_person_packages": [
+    {
+      "id": "example-veg-buffet",
+      "name": "EXAMPLE — Standard Veg Buffet",
+      "price_per_person_cents": 1800,
+      "min_guests": 20,
+      "description": "EXAMPLE PLACEHOLDER — replace with a real package. Two mains, one rice, bread, one dessert.",
+      "dietary_profile": ["veg"],
+      "included_sections": ["main", "side", "dessert"],
+      "active": true
+    },
+    {
+      "id": "example-mixed-buffet",
+      "name": "EXAMPLE — Mixed Veg & Non-Veg Buffet",
+      "price_per_person_cents": 2400,
+      "min_guests": 25,
+      "description": "EXAMPLE PLACEHOLDER — replace with a real package.",
+      "dietary_profile": [],
+      "included_sections": ["appetizer", "main", "side", "dessert"],
+      "active": true
+    }
+  ],
+  "fixed_fees": [
+    {
+      "id": "example-delivery",
+      "name": "EXAMPLE — Delivery",
+      "kind": "delivery",
+      "amount_cents": 2500,
+      "per_unit": "flat",
+      "active": true
+    },
+    {
+      "id": "example-server",
+      "name": "EXAMPLE — On-site server (per staff member)",
+      "kind": "staffing",
+      "amount_cents": 12000,
+      "per_unit": "per_staff",
+      "active": false
+    }
+  ],
+  "approved_discounts": [
+    {
+      "id": "example-repeat-customer",
+      "name": "EXAMPLE — Repeat customer",
+      "kind": "percent",
+      "value": 500,
+      "max_amount_cents": 10000,
+      "requires_owner_code": true,
+      "active": false
+    }
+  ],
+  "item_price_overrides": {}
+}
