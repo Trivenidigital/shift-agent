@@ -193,7 +193,7 @@ def _run_main(mod, argv, stdin_text=None):
 
 
 def run_create_lead(*, customer_phone, customer_name, raw_inquiry, message_id, fields_json,
-                     suppress_customer_ack=False):
+                     suppress_customer_ack=False, qualification_gate=False):
     mod = _load_patched("e2e_ccl", "create-catering-lead", {
         "CONFIG_PATH": CONFIG_PATH, "LEADS_PATH": LEADS_PATH,
         "LEADS_LOCK": Path(str(LEADS_PATH) + ".lock"), "LOG_PATH": DECISIONS_LOG,
@@ -205,6 +205,8 @@ def run_create_lead(*, customer_phone, customer_name, raw_inquiry, message_id, f
             "--message-id", message_id, "--fields-json", fields_json]
     if suppress_customer_ack:
         argv.append("--suppress-customer-ack")
+    if qualification_gate:
+        argv.append("--qualification-gate")
     return _run_main(mod, argv)
 
 
@@ -327,7 +329,8 @@ def wire(hooks, actions):
 
     # Subprocess-boundary → real scripts in-process against the sandbox.
     def _trigger_create_lead(customer_phone, customer_name, raw_inquiry, message_id,
-                             extracted_fields=None, suppress_customer_ack=False):
+                             extracted_fields=None, suppress_customer_ack=False,
+                             qualification_gate=False):
         fields = {"headcount": None, "event_date": None, "event_time": None,
                   "menu_preferences": [], "off_menu_items": [], "dietary_restrictions": [],
                   "delivery_or_pickup": "unknown", "budget_hint_usd": None,
@@ -337,7 +340,8 @@ def wire(hooks, actions):
         rc, out, err = run_create_lead(customer_phone=customer_phone, customer_name=customer_name,
                                        raw_inquiry=raw_inquiry, message_id=message_id,
                                        fields_json=json.dumps(fields),
-                                       suppress_customer_ack=suppress_customer_ack)
+                                       suppress_customer_ack=suppress_customer_ack,
+                                       qualification_gate=qualification_gate)
         if rc == 0:
             return True, out.strip().splitlines()[-1] if out.strip() else ""
         return False, f"exit={rc} stderr={err[:500]}"

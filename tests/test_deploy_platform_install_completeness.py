@@ -210,6 +210,23 @@ def test_pre_restart_import_gate_loadability_smokes_catering_modules():
     ), "pre-restart import gate must import-test catering_recompose/quote_ledger/lead_sweep/amendments"
 
 
+# M1: the scan roots above are src/agents/*/scripts/ + src/platform/*.py — the
+# cf-router PLUGIN dir is not scanned, so a module imported ONLY by hooks.py would
+# slip the superset assertion while breaking plugin load in production (a strictly
+# worse blast radius than the 2026-07-21 script ImportError). These two are imported
+# at hooks.py top level, so they are pinned explicitly on both surfaces.
+M1_PLUGIN_IMPORTED_MODULES = ("catering_extraction", "catering_qualification")
+
+
+def test_m1_plugin_imported_modules_are_installed_and_import_gated():
+    installed, _unclassified = installed_platform_modules(TEXT)
+    for m in M1_PLUGIN_IMPORTED_MODULES:
+        assert m in installed, f"{m} is imported by cf-router hooks.py and must be installed"
+        assert re.search(rf"import\s+[^\n]*\b{m}\b", TEXT), (
+            f"pre-restart import gate must import-test {m}"
+        )
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Negative self-tests — prove the guard is not vacuously green
 # ════════════════════════════════════════════════════════════════════════════

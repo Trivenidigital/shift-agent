@@ -1,0 +1,675 @@
+#!/usr/bin/env python3
+"""amend-catering-lead — M1 lead updater. Closes the R2A write-only gap.
+
+Two input sources, ONE merge core (lock -> parse with the shared deterministic
+extractor -> merge -> validate -> persist -> audit -> notify):
+
+  --mode amendment  (default)
+      Reads the captured-but-unapplied amendment records for a lead from the R2A
+      sidecar (src/platform/catering_amendments.py), parses each record's raw_text
+      with the SAME grammar the lead was created with, and OVERWRITES the fields
+      the customer changed. Until this script existed the sidecar was write-only:
+      the correction was durably captured and the owner still approved the
+      pre-amendment numbers (the data-integrity gap documented at hooks.py Branch
+      B). Marks each record applied, appends an "amendment_applied" quote-ledger
+      version when the lead already has a committed quote, and re-sends the owner
+      card so what the owner approves matches what the customer last said.
+
+  --mode answer --answer-text "..."
+      One inbound answer in the deterministic slot-filling loop against a
+      QUALIFYING lead. FILLS NULLS ONLY (an answer to "what date?" cannot silently
+      rewrite a headcount the customer already gave — a contradiction is the
+      fresh-vs-stale discriminator's business upstream, not this script's).
+      Recomputes qualification and then either asks the next batch, or transitions
+      to AWAITING_OWNER_APPROVAL and fires the owner card (on completion, or at
+      catering_qualification.MAX_QUALIFICATION_ROUNDS with the residual gaps
+      flagged on the card).
+
+Idempotent by construction. In amendment mode a record already stamped applied is
+skipped, so a re-run is a no-op that exits 0 with applied=[]. In answer mode the
+merge only fills nulls, so replaying the same answer changes nothing.
+
+Outputs JSON to stdout, e.g.
+  {"lead_id": "L0007", "applied": ["A0003"], "fields_changed": ["headcount"],
+   "quote_version": 4, "status": "AWAITING_OWNER_APPROVAL", "card_sent": true}
+
+Exit codes:
+  0  — applied (or nothing to apply / idempotent replay)
+  2  — invalid input
+  4  — lead not found, or not in a status this mode can act on
+  5  — schema violation / leads store unreadable
+  6  — bridge unreachable (lead state IS persisted; only the notification failed)
+  8  — amendment sidecar could not be marked applied. The lead update IS persisted;
+       the records stay unapplied, so a re-run re-applies them — safe, because an
+       overwrite merge of the same amendment text is idempotent.
+  9  — illegal state transition
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, ndjson_append, atomic_write_json, customer_now,
+    load_model, load_yaml_model,
+    assert_load_status_clean, LoadStatusError,
+)
+from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402  # PR-ε: chokepoint consolidation
+import catering_amendments  # noqa: E402
+import catering_extraction  # noqa: E402  # the SAME grammar the lead was created with
+import catering_qualification  # noqa: E402  # the ONE minimum-qualification gate
+from schemas import (  # noqa: E402
+    PRE_QUOTE_DRAFT_SENTINEL,
+    Config, CateringLead, CateringLeadStore,
+    CateringAmendmentApplied, CateringLeadQualificationUpdated,
+    CateringLeadStatusChange,
+    CateringCustomerAckSent, CateringCustomerAckFailed,
+    CateringOwnerApprovalCardSent, CateringOwnerApprovalCardFailed,
+    CateringOwnerApprovalRequested,
+    is_catering_transition_allowed,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND, EXIT_SCHEMA_VIOLATION,
+    EXIT_DEPENDENCY_DOWN, EXIT_LOCK_TIMEOUT, EXIT_ILLEGAL_TRANSITION,
+)
+from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
+
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
+LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+AMENDMENTS_PATH = Path(os.environ.get(
+    "SHIFT_AGENT_CATERING_AMENDMENTS_PATH",
+    "/opt/shift-agent/state/catering-amendments.json"))
+LEDGER_PATH = Path(os.environ.get(
+    "SHIFT_AGENT_CATERING_QUOTE_LEDGER_PATH",
+    "/opt/shift-agent/state/catering-quote-ledger.json"))
+
+# Fields an amendment may OVERWRITE. Deliberately narrower than the extractor's
+# full output: an amendment restates the event, so the event facts move, but the
+# free-text `notes` accumulate rather than replace (losing an earlier note the
+# owner already read would be a silent regression) and the raw_inquiry never moves.
+AMENDABLE_FIELDS = (
+    "headcount", "event_date", "event_time", "event_type", "venue",
+    "service_style", "delivery_or_pickup", "dietary_restrictions",
+    "veg_guest_count", "nonveg_guest_count", "budget_hint_usd",
+)
+# Statuses whose lead an amendment may still change. A terminal or already-sent
+# lead is NOT amended in place — that would rewrite a quote the customer has
+# already been given, with no record on the customer's side that it moved.
+AMENDABLE_STATUSES = frozenset({
+    "QUALIFYING", "AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED", "OWNER_EDITED",
+})
+
+
+def _log_best_effort(adapter: TypeAdapter, entry, *, context: str) -> None:
+    """Best-effort audit write — never raises, so the caller's stdout/exit-code
+    contract survives an unwritable audit log (mirrors create-catering-lead)."""
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(Path(str(LOG_PATH) + ".lock")):
+            ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+    except Exception as e:  # noqa: BLE001 — invariant: audit must not block flow
+        sys.stderr.write(
+            f"WARN: audit log failed (non-fatal, context={context}): "
+            f"{type(e).__name__}: {e}\n"
+        )
+
+
+def _merge_fields(lead: CateringLead, parsed: dict, *, overwrite: bool) -> list[str]:
+    """Apply a parsed field dict onto a lead's extracted block. Returns the names
+    that actually CHANGED (so the audit row and the owner card report the real
+    delta, not what we attempted).
+
+    `overwrite=False` (answer mode) fills only fields that are currently null/empty.
+    `overwrite=True` (amendment mode) replaces the AMENDABLE_FIELDS the amendment
+    mentions — an amendment that says nothing about the venue leaves the venue.
+    """
+    changed: list[str] = []
+    for name, value in (parsed or {}).items():
+        if name == "notes":
+            continue                      # notes accumulate separately, never replace
+        if overwrite and name not in AMENDABLE_FIELDS:
+            continue
+        if not hasattr(lead.extracted, name):
+            continue
+        current = getattr(lead.extracted, name)
+        is_empty = current is None or current == [] or current == ""
+        if not overwrite and not is_empty:
+            continue
+        if current == value:
+            continue
+        setattr(lead.extracted, name, value)
+        changed.append(name)
+    return changed
+
+
+def _append_note(lead: CateringLead, note: str) -> bool:
+    """Accumulate an extractor note without dropping what is already there.
+    Returns True when the lead's notes actually changed."""
+    note = (note or "").strip()
+    if not note:
+        return False
+    existing = (lead.extracted.notes or "").strip()
+    if note in existing:
+        return False
+    lead.extracted.notes = f"{existing}; {note}" if existing else note
+    return True
+
+
+def _render_owner_card(lead: CateringLead, *, headline: str, change_note: str,
+                       quote_version: Optional[int]) -> str:
+    """Owner-facing card for an amended / newly-qualified lead.
+
+    Mirrors create-catering-lead's card shape (summary lines + the three reply
+    commands) without importing it — the sibling scripts each own their renderer
+    (finalize-catering-menu and apply-catering-owner-decision do the same), because
+    a hyphenated extension-less script is not importable.
+
+    BL-CATER-08: no per-item prices here. This card carries the EVENT facts the
+    owner approves against, never a composed price.
+    """
+    f = lead.extracted
+    lines = []
+    if f.headcount is not None:
+        lines.append(f"  - Headcount: {f.headcount}")
+    if f.event_date:
+        lines.append(f"  - Event: {f.event_date}" + (f" {f.event_time}" if f.event_time else ""))
+    if f.event_type:
+        lines.append(f"  - Type: {f.event_type}")
+    if f.venue:
+        lines.append(f"  - Venue: {f.venue}")
+    if f.service_style:
+        lines.append(f"  - Service: {f.service_style}")
+    if f.veg_guest_count is not None or f.nonveg_guest_count is not None:
+        veg = f.veg_guest_count if f.veg_guest_count is not None else "?"
+        nonveg = f.nonveg_guest_count if f.nonveg_guest_count is not None else "?"
+        lines.append(f"  - Veg/Non-veg: {veg} / {nonveg}")
+    if f.dietary_restrictions:
+        lines.append(f"  - Dietary: {', '.join(f.dietary_restrictions)}")
+    if f.delivery_or_pickup and f.delivery_or_pickup != "unknown":
+        lines.append(f"  - Delivery: {f.delivery_or_pickup}")
+    if f.budget_hint_usd is not None:
+        lines.append(f"  - Budget hint: ${f.budget_hint_usd}")
+    if f.notes:
+        lines.append(f"  - Notes: {f.notes[:300]}")
+
+    gaps = catering_qualification.missing_fields(lead)
+    if gaps:
+        # Top-of-card so it lands above the WhatsApp preview fold — the owner must
+        # see that they are approving against an INCOMPLETE picture before the
+        # details lull them into a routine approve.
+        lines.insert(0, "  [!] Still missing: "
+                        + catering_qualification.gap_summary(gaps))
+    summary = "\n".join(lines) if lines else "  (no structured fields extracted)"
+
+    parts = [
+        "⚕ *Catering Agent*\n────────────",
+        f"*{headline} — {lead.lead_id}*",
+        "",
+        f"From: {lead.customer_phone}",
+    ]
+    if change_note:
+        parts += ["", change_note]
+    if quote_version:
+        parts += ["", f"Quote version: v{quote_version}"]
+    parts += ["", f"Details:\n{summary}"]
+    if lead.owner_approval_code:
+        parts += [
+            "",
+            f"*To approve, reply with:* `{lead.owner_approval_code} approve`",
+            f"*To reject:* `{lead.owner_approval_code} reject`",
+            f"*To edit:* `{lead.owner_approval_code} edit <your changes>`",
+        ]
+    return "\n".join(parts)
+
+
+def _append_amendment_ledger_version(lead: CateringLead, *, now: datetime,
+                                     source_message_id: Optional[str]) -> Optional[int]:
+    """Commit an "amendment_applied" quote version, but ONLY when the lead already
+    has a committed version — the ledger records how an EXISTING quote moved, and
+    minting v1 from an amendment would fabricate a quote nobody drafted.
+
+    BEST-EFFORT: a ledger failure never rolls back the already-committed lead write
+    (the ledger's documented caller contract); it logs loudly and returns None.
+    """
+    try:
+        import catering_quote_ledger as _ql
+        if _ql.latest_committed(lead.lead_id, data_path=LEDGER_PATH) is None:
+            return None
+        res = _ql.append_version(
+            lead_id=lead.lead_id, quote_text=lead.quote_text or "",
+            quote_total_usd=lead.quote_total_usd or 0,
+            selected_items=[{"name": it.name, "qty": it.qty, "price_usd": it.price_usd}
+                            for it in (lead.selected_items or [])],
+            source="amendment_applied", source_message_id=source_message_id,
+            approval_code=lead.owner_approval_code, created_at=now,
+            data_path=LEDGER_PATH,
+        )
+        if not res.ok:
+            sys.stderr.write(
+                f"WARN: quote-ledger append failed (non-fatal) for {lead.lead_id} "
+                f"source=amendment_applied: {res.reason}\n"
+            )
+            return None
+        return res.version
+    except Exception as e:  # noqa: BLE001 — ledger is a best-effort sidecar
+        sys.stderr.write(
+            f"WARN: quote-ledger append raised (non-fatal) for {lead.lead_id}: "
+            f"{type(e).__name__}: {e}\n"
+        )
+        return None
+
+
+SELF_CHAT_JID_EMPTY = "self_chat_jid_empty"
+
+
+def _card_failure_is_fatal(card_error: str) -> bool:
+    """An unconfigured owner chat is a CONFIG state, not a dependency outage —
+    create-catering-lead returns success in that case (the lead is in state and the
+    owner can review it in the cockpit), so this script agrees rather than reporting
+    a bridge failure that did not happen."""
+    return card_error != SELF_CHAT_JID_EMPTY
+
+
+def _send_owner_card(cfg: Config, lead: CateringLead, card_text: str, *,
+                     now: datetime, logical_turn_id: str) -> tuple[bool, str]:
+    """Send + audit the owner card. Returns (ok, message_id_or_error). Mirrors
+    create-catering-lead: the send happens OUTSIDE every lock, the lead is already
+    persisted, and a bridge failure is reported (exit 6) rather than swallowed."""
+    if not cfg.owner.self_chat_jid:
+        sys.stderr.write("owner.self_chat_jid empty; lead updated but card not sent\n")
+        return False, SELF_CHAT_JID_EMPTY
+    send_attempt_id = uuid.uuid4().hex
+    ok, mid_or_err = _bridge_post(cfg.owner.self_chat_jid, card_text)
+    entry = (
+        CateringOwnerApprovalCardSent(
+            ts=now, type="catering_owner_approval_card_sent",
+            lead_id=lead.lead_id, owner_card_outbound_id=mid_or_err,
+            logical_turn_id=logical_turn_id, send_attempt_id=send_attempt_id,
+            transport_destination=cfg.owner.self_chat_jid, outcome="sent",
+        ) if ok else
+        CateringOwnerApprovalCardFailed(
+            ts=now, type="catering_owner_approval_card_failed",
+            lead_id=lead.lead_id, reason="bridge_unreachable",
+            bridge_error=str(mid_or_err)[:2000],
+            logical_turn_id=logical_turn_id, send_attempt_id=send_attempt_id,
+            transport_destination=cfg.owner.self_chat_jid, outcome="bridge_unreachable",
+        )
+    )
+    if not ok:
+        sys.stderr.write(f"bridge_post failed: {mid_or_err}\n")
+    _log_best_effort(TypeAdapter(type(entry)), entry, context="owner_card")
+    return ok, mid_or_err
+
+
+def _send_customer_text(lead: CateringLead, text: str, *, now: datetime,
+                        logical_turn_id: str) -> bool:
+    """Send + audit one deterministic customer message (question batch / closing
+    acknowledgement). Hard-coded templates only — no LLM, no prices, no menu."""
+    if not text:
+        return True
+    cp = str(lead.customer_phone).lstrip("+").strip()
+    customer_jid = cp if "@" in cp else f"{cp}@s.whatsapp.net"
+    send_attempt_id = uuid.uuid4().hex
+    ok, mid_or_err = _bridge_post(customer_jid, text)
+    entry = (
+        CateringCustomerAckSent(
+            ts=now, type="catering_customer_ack_sent", customer_jid=customer_jid,
+            outbound_message_id=mid_or_err, lead_id=lead.lead_id,
+            logical_turn_id=logical_turn_id, send_attempt_id=send_attempt_id,
+            outcome="sent",
+        ) if ok else
+        CateringCustomerAckFailed(
+            ts=now, type="catering_customer_ack_failed", customer_jid=customer_jid,
+            reason="bridge_unreachable", detail=str(mid_or_err)[:2000],
+            logical_turn_id=logical_turn_id, send_attempt_id=send_attempt_id,
+            outcome="bridge_unreachable",
+        )
+    )
+    if not ok:
+        sys.stderr.write(f"customer bridge_post failed: {mid_or_err}\n")
+    _log_best_effort(TypeAdapter(type(entry)), entry, context="customer_reply")
+    return ok
+
+
+def _load_store_or_exit() -> tuple[Optional[CateringLeadStore], int]:
+    store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+    try:
+        assert_load_status_clean(LEADS_PATH, status, context="amend-catering-lead load")
+    except LoadStatusError as e:
+        sys.stderr.write(f"{e}\n")
+        return None, EXIT_SCHEMA_VIOLATION
+    return store, EXIT_OK
+
+
+def _persist(store: CateringLeadStore) -> int:
+    try:
+        CateringLeadStore.model_validate(store.model_dump())
+    except ValidationError as e:
+        sys.stderr.write(f"store validation failed: {e}\n")
+        return EXIT_SCHEMA_VIOLATION
+    atomic_write_json(LEADS_PATH, store)
+    return EXIT_OK
+
+
+# ── Mode: amendment ──────────────────────────────────────────────────────────
+def _run_amendment_mode(args, cfg: Config, now: datetime) -> int:
+    pending = catering_amendments.unapplied_for_lead(
+        args.lead_id, data_path=AMENDMENTS_PATH,
+    )
+    if not pending:
+        print(json.dumps({"lead_id": args.lead_id, "applied": [], "fields_changed": [],
+                          "reason": "no_unapplied_amendments"}))
+        return EXIT_OK
+
+    applied_ids: list[str] = []
+    changed_by_amendment: dict[str, list[str]] = {}
+    all_changed: list[str] = []
+    notes_changed = False
+    lead_snapshot: Optional[CateringLead] = None
+
+    with FileLock(LEADS_LOCK):
+        store, rc = _load_store_or_exit()
+        if store is None:
+            return rc
+        lead = next((l for l in store.leads if l.lead_id == args.lead_id), None)
+        if lead is None:
+            sys.stderr.write(f"lead {args.lead_id} not found\n")
+            return EXIT_NOT_FOUND
+        if lead.status not in AMENDABLE_STATUSES:
+            sys.stderr.write(
+                f"lead {args.lead_id} status={lead.status} is not amendable "
+                f"(amendable: {sorted(AMENDABLE_STATUSES)})\n"
+            )
+            return EXIT_NOT_FOUND
+
+        for record in pending:
+            parsed = catering_extraction.extract_catering_fields(record.get("raw_text") or "")
+            if not parsed:
+                # Nothing parseable — still MARK IT APPLIED. An unparseable amendment
+                # left unapplied would be re-read on every future run forever; the
+                # raw text stays in the sidecar for the owner either way.
+                applied_ids.append(record.get("amendment_id"))
+                changed_by_amendment[record.get("amendment_id")] = []
+                continue
+            changed = _merge_fields(lead, parsed, overwrite=True)
+            if parsed.get("notes") and _append_note(lead, parsed["notes"]):
+                notes_changed = True
+            applied_ids.append(record.get("amendment_id"))
+            changed_by_amendment[record.get("amendment_id")] = changed
+            all_changed.extend(c for c in changed if c not in all_changed)
+
+        # Notes are tracked separately from `all_changed`: an amendment that only
+        # adds a note ("requested 2 sample menu combinations") still has to be
+        # PERSISTED — otherwise it is marked applied with its content dropped — but
+        # it does not warrant a fresh owner card or a new quote version.
+        if all_changed or notes_changed:
+            lead.updated_at = now
+            rc = _persist(store)
+            if rc != EXIT_OK:
+                return rc
+        lead_snapshot = lead.model_copy(deep=True)
+
+    # Sidecar mark runs OUTSIDE the leads lock — the amendment lock is a LEAF and is
+    # never held with the leads lock (the R2A locking contract).
+    mark = catering_amendments.mark_applied(
+        args.lead_id, applied_ids, applied_at=now,
+        data_path=AMENDMENTS_PATH,
+        expected_owner=args.expected_owner or None,
+        expected_group=args.expected_group or None,
+    )
+    if not mark.ok:
+        # The lead IS updated but the records are not stamped, so a re-run would
+        # re-apply them. Overwrite-merge with the same text is idempotent, so the
+        # re-run is safe; surface the failure loudly rather than claiming success.
+        sys.stderr.write(f"amendment mark_applied failed: {mark.reason}\n")
+        print(json.dumps({"lead_id": args.lead_id, "applied": [],
+                          "fields_changed": all_changed,
+                          "reason": f"mark_failed:{mark.reason}"}))
+        return EXIT_LOCK_TIMEOUT
+
+    quote_version = None
+    if all_changed:
+        quote_version = _append_amendment_ledger_version(
+            lead_snapshot, now=now, source_message_id=args.message_id or None,
+        )
+    for amendment_id in applied_ids:
+        _log_best_effort(
+            TypeAdapter(CateringAmendmentApplied),
+            CateringAmendmentApplied(
+                type="catering_amendment_applied", ts=now,
+                lead_id=args.lead_id, amendment_id=amendment_id,
+                fields_changed=changed_by_amendment.get(amendment_id, []),
+                quote_version=quote_version or 0,
+            ),
+            context="amendment_applied",
+        )
+
+    card_sent = False
+    card_error = ""
+    if all_changed:
+        change_note = ("The customer amended this enquiry — "
+                       f"updated: {', '.join(all_changed)}.")
+        card_text = _render_owner_card(
+            lead_snapshot, headline="Amended Catering Inquiry",
+            change_note=change_note, quote_version=quote_version,
+        )
+        card_sent, card_error = _send_owner_card(
+            cfg, lead_snapshot, card_text, now=now,
+            logical_turn_id=args.message_id or args.lead_id,
+        )
+    print(json.dumps({
+        "lead_id": args.lead_id, "applied": applied_ids,
+        "fields_changed": all_changed, "quote_version": quote_version,
+        "status": lead_snapshot.status, "card_sent": card_sent,
+    }))
+    if all_changed and not card_sent and _card_failure_is_fatal(card_error):
+        sys.stderr.write(f"owner card not sent: {card_error}\n")
+        return EXIT_DEPENDENCY_DOWN
+    return EXIT_OK
+
+
+# ── Mode: answer (deterministic slot-filling loop) ───────────────────────────
+def _run_answer_mode(args, cfg: Config, now: datetime) -> int:
+    answer = args.answer_text or ""
+    if not answer.strip():
+        sys.stderr.write("--answer-text required in answer mode\n")
+        return EXIT_INVALID_INPUT
+
+    with FileLock(LEADS_LOCK):
+        store, rc = _load_store_or_exit()
+        if store is None:
+            return rc
+        lead = next((l for l in store.leads if l.lead_id == args.lead_id), None)
+        if lead is None:
+            sys.stderr.write(f"lead {args.lead_id} not found\n")
+            return EXIT_NOT_FOUND
+        if lead.status != "QUALIFYING":
+            sys.stderr.write(
+                f"lead {args.lead_id} status={lead.status}; answer mode only acts on "
+                f"QUALIFYING leads\n"
+            )
+            return EXIT_NOT_FOUND
+
+        parsed = catering_extraction.extract_catering_fields(answer) or {}
+        # A short bare reply is only interpretable as a venue when venue is the ONE
+        # thing outstanding — with two open questions there is no deterministic way
+        # to know which one "Grand Ballroom" answers.
+        free_text_field = catering_qualification.sole_free_text_question(lead.pending_questions)
+        if free_text_field == "venue" and not parsed.get("venue") and not lead.extracted.venue:
+            venue = catering_qualification.clean_free_text_answer(answer)
+            if venue:
+                parsed["venue"] = venue
+
+        filled = _merge_fields(lead, parsed, overwrite=False)
+        if parsed.get("notes"):
+            _append_note(lead, parsed["notes"])
+
+        qual = catering_qualification.qualification_state(lead)
+        at_round_cap = lead.qualification_rounds >= catering_qualification.MAX_QUALIFICATION_ROUNDS
+        next_batch = [] if qual["complete"] else catering_qualification.next_question_batch(lead)
+        # Hand to the owner when qualification is met, when the round cap is hit, or
+        # when there is nothing left we are willing to ask (every remaining gap has
+        # already been asked once — asking again is what makes a bot feel broken).
+        hand_off = qual["complete"] or at_round_cap or not next_batch
+        outcome = ("complete" if qual["complete"]
+                   else "round_cap_reached" if hand_off else "asked")
+
+        if hand_off:
+            if not is_catering_transition_allowed(lead.status, "AWAITING_OWNER_APPROVAL"):
+                sys.stderr.write(
+                    f"illegal transition {lead.status} -> AWAITING_OWNER_APPROVAL\n")
+                return EXIT_ILLEGAL_TRANSITION
+            from_status = lead.status
+            lead.status = "AWAITING_OWNER_APPROVAL"
+            lead.pending_questions = []
+            if not lead.quote_text.strip():
+                # The S1 invariant requires non-empty quote_text at and after
+                # AWAITING_OWNER_APPROVAL. Status is set by ASSIGNMENT here, so no
+                # validator runs and an empty value would reach disk — the read-time
+                # shim would then backfill it as LEGACY_QUOTE_TEXT_SENTINEL and log a
+                # "legacy pre-v0.3 lead" warning about a lead created today. Set the
+                # documented pre-draft sentinel that create-catering-lead's own mint
+                # path lands on, so the value is honest and the read is silent.
+                lead.quote_text = PRE_QUOTE_DRAFT_SENTINEL
+        else:
+            lead.pending_questions = next_batch
+            lead.questions_asked = list(lead.questions_asked) + [
+                f for f in next_batch if f not in lead.questions_asked
+            ]
+            lead.qualification_rounds += 1
+            from_status = None
+        lead.updated_at = now
+
+        rc = _persist(store)
+        if rc != EXIT_OK:
+            return rc
+        lead_snapshot = lead.model_copy(deep=True)
+
+    _log_best_effort(
+        TypeAdapter(CateringLeadQualificationUpdated),
+        CateringLeadQualificationUpdated(
+            type="catering_lead_qualification_updated", ts=now,
+            lead_id=args.lead_id, fields_filled=filled,
+            still_missing=qual["missing"], questions_asked=next_batch if not hand_off else [],
+            round_number=lead_snapshot.qualification_rounds,
+            complete=qual["complete"], outcome=outcome,
+        ),
+        context="qualification_updated",
+    )
+    if from_status is not None:
+        _log_best_effort(
+            TypeAdapter(CateringLeadStatusChange),
+            CateringLeadStatusChange(
+                type="catering_lead_status_change", ts=now, lead_id=args.lead_id,
+                from_status=from_status, to_status="AWAITING_OWNER_APPROVAL",
+                actor="system",
+                reason="qualification_complete" if qual["complete"] else "qualification_round_cap",
+            ),
+            context="status_change",
+        )
+
+    logical_turn_id = args.message_id or args.lead_id
+    card_sent = False
+    card_error = ""
+    if hand_off:
+        customer_text = (catering_qualification.render_complete_message(args.lead_id)
+                         if qual["complete"]
+                         else catering_qualification.render_handoff_message(args.lead_id))
+        headline = ("Catering Inquiry — qualified" if qual["complete"]
+                    else "Catering Inquiry — needs your input")
+        change_note = ("Minimum details collected; ready for your quote."
+                       if qual["complete"] else
+                       "Intake stopped after "
+                       f"{catering_qualification.MAX_QUALIFICATION_ROUNDS} rounds — "
+                       "the customer has not supplied the fields flagged above.")
+        if lead_snapshot.owner_approval_code:
+            # Schema requires a non-empty code; a lead minted without one (never
+            # produced by create-catering-lead, but possible via hand-edited state)
+            # still gets its card — it just cannot claim an approval was requested.
+            _log_best_effort(
+                TypeAdapter(CateringOwnerApprovalRequested),
+                CateringOwnerApprovalRequested(
+                    type="catering_owner_approval_requested", ts=now,
+                    lead_id=args.lead_id, approval_code=lead_snapshot.owner_approval_code,
+                ),
+                context="approval_requested",
+            )
+        card_sent, card_error = _send_owner_card(
+            cfg, lead_snapshot,
+            _render_owner_card(lead_snapshot, headline=headline,
+                               change_note=change_note, quote_version=None),
+            now=now, logical_turn_id=logical_turn_id,
+        )
+    else:
+        customer_text = catering_qualification.render_question_message(
+            args.lead_id, next_batch, first_contact=False,
+        )
+    customer_ok = _send_customer_text(
+        lead_snapshot, customer_text, now=now, logical_turn_id=logical_turn_id,
+    )
+
+    print(json.dumps({
+        "lead_id": args.lead_id, "fields_filled": filled,
+        "qualification_complete": qual["complete"],
+        "qualification_missing": qual["missing"],
+        "pending_questions": lead_snapshot.pending_questions,
+        "status": lead_snapshot.status, "outcome": outcome,
+        "card_sent": card_sent, "customer_replied": customer_ok,
+    }))
+    if not customer_ok or (hand_off and not card_sent and _card_failure_is_fatal(card_error)):
+        sys.stderr.write(f"notification incomplete: card_error={card_error}\n")
+        return EXIT_DEPENDENCY_DOWN
+    return EXIT_OK
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Apply captured amendments / qualification answers to a catering lead")
+    ap.add_argument("--lead-id", required=True, help="catering lead id, e.g. L0007")
+    ap.add_argument("--mode", choices=("amendment", "answer"), default="amendment",
+                    help="amendment: apply unapplied R2A sidecar records (default). "
+                         "answer: apply ONE slot-filling answer to a QUALIFYING lead.")
+    ap.add_argument("--answer-text", default="",
+                    help="answer mode: the customer's inbound text")
+    ap.add_argument("--message-id", default="",
+                    help="native inbound message id — the turn's logical_turn_id")
+    ap.add_argument("--expected-owner", default="",
+                    help="amendment mode: sidecar POSIX owner override (tests/CI)")
+    ap.add_argument("--expected-group", default="",
+                    help="amendment mode: sidecar POSIX group override (tests/CI)")
+    args = ap.parse_args()
+
+    if not (args.lead_id or "").strip():
+        sys.stderr.write("--lead-id required\n")
+        return EXIT_INVALID_INPUT
+
+    try:
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        log_config_load_failed_best_effort(CONFIG_PATH, e)
+        sys.stderr.write(f"config load failed: {type(e).__name__}: {e}\n")
+        return EXIT_SCHEMA_VIOLATION
+
+    try:
+        now = customer_now(cfg.customer.timezone)
+    except Exception:  # noqa: BLE001 — an unresolvable tz must not strand the update
+        now = datetime.now(timezone.utc)
+
+    if args.mode == "answer":
+        return _run_answer_mode(args, cfg, now)
+    return _run_amendment_mode(args, cfg, now)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

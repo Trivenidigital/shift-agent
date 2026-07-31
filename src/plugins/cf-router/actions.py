@@ -50,6 +50,7 @@ APPLY_MENU_UPDATE_BIN = Path("/usr/local/bin/apply-menu-update")
 NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
 CREATE_LEAD_BIN = Path("/usr/local/bin/create-catering-lead")  # F7 path
 CREATE_CATERING_PROPOSALS_BIN = Path("/usr/local/bin/create-catering-proposal-options")
+AMEND_CATERING_LEAD_BIN = Path("/usr/local/bin/amend-catering-lead")  # M1 apply path
 SELECT_CATERING_PROPOSAL_BIN = Path("/usr/local/bin/select-catering-proposal")
 CREATE_FLYER_PROJECT_BIN = Path("/usr/local/bin/create-flyer-project")
 BARE_FLYER_SEND_BIN = Path("/usr/local/bin/bare-flyer-render-and-send")  # Approach B async render+send
@@ -309,6 +310,15 @@ ACTIONABLE_LEAD_STATUSES = frozenset({
     "OWNER_EDITED", "OWNER_APPROVED",
 })
 
+# M1: statuses a lead can be in and still be the sender's OPEN lead. QUALIFYING is
+# added here but deliberately NOT to ACTIONABLE_LEAD_STATUSES: the sender lookup
+# must find a mid-intake lead (otherwise the customer's answer would be read as a
+# brand-new inquiry and mint a second lead), while the `#XXXXX` code lookup must
+# NOT — the owner has not been shown a card for a QUALIFYING lead, so there is no
+# code in their hands, and treating one as actionable would only widen the surface
+# a screenshot-forwarded code can reach.
+OPEN_LEAD_STATUSES = ACTIONABLE_LEAD_STATUSES | frozenset({"QUALIFYING"})
+
 
 def find_catering_lead_by_code(code: str) -> Optional[dict]:
     """Look up a non-terminal catering lead by owner_approval_code.
@@ -397,13 +407,32 @@ def find_active_catering_lead_by_sender(
          (legacy LID-as-fake-phone persistence — the actual deployed shape
          in L0004..L0010 as of 2026-05-12)
 
-    Non-terminal set: ACTIONABLE_LEAD_STATUSES (shared with
-    find_catering_lead_by_code; includes OWNER_APPROVED to cover the brief
-    transient state between owner-approve and quote-sent). Returns the
+    Non-terminal set: OPEN_LEAD_STATUSES (ACTIONABLE_LEAD_STATUSES — which includes
+    OWNER_APPROVED to cover the brief transient state between owner-approve and
+    quote-sent — plus M1's QUALIFYING, so a customer answering an intake question is
+    matched to their open lead instead of minting a second one). Returns the
     most-recent matching lead (sorted by created_at desc), or None.
     """
     leads = find_all_eligible_catering_leads_by_sender(phone, chat_id)
     return leads[0] if leads else None
+
+
+def any_qualifying_lead_exists() -> bool:
+    """True when ANY lead in the store is mid-intake (QUALIFYING).
+
+    M1 cheap pre-check for the F7 admission widening. Resolving sender identity runs
+    `identify-sender` as a SUBPROCESS; doing that on every non-catering inbound just
+    to discover there is no intake loop open would add a process spawn to the hot
+    path for messages that previously did nothing here. One tolerant file read
+    answers it instead, and the identity resolution only happens when at least one
+    lead is actually waiting on an answer. Never raises, never writes."""
+    try:
+        with LEADS_PATH.open() as f:
+            store = json.load(f)
+        return any(lead.get("status") == "QUALIFYING"
+                   for lead in store.get("leads", []))
+    except Exception:
+        return False
 
 
 def find_all_eligible_catering_leads_by_sender(
@@ -452,7 +481,7 @@ def find_all_eligible_catering_leads_by_sender(
         except Exception:
             sender_key = ""
         for lead in store.get("leads", []):
-            if lead.get("status") not in ACTIONABLE_LEAD_STATUSES:
+            if lead.get("status") not in OPEN_LEAD_STATUSES:
                 continue
             cp = lead.get("customer_phone")
             cl = lead.get("customer_lid")
@@ -626,6 +655,36 @@ def invoke_create_catering_proposals(lead_id: str, chat_id: str, message_id: str
                 "--auto-generate-from-menu",
             ],
             capture_output=True, text=True,
+            env=os.environ.copy(), timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        return 124
+    except Exception:
+        return 1
+
+
+def invoke_amend_catering_lead(lead_id: str, *, mode: str = "amendment",
+                               answer_text: str = "", message_id: str = "") -> int:
+    """Invoke amend-catering-lead; returns its exit code.
+
+    M1. `mode="amendment"` materialises the captured-but-unapplied R2A sidecar
+    records onto the lead (the application half of a capture that was write-only);
+    `mode="answer"` applies ONE slot-filling answer to a QUALIFYING lead. The script
+    owns every send it causes (owner card / customer reply) and every audit row, so
+    this wrapper stays a thin, fail-safe subprocess invoke like its siblings.
+    """
+    argv = [
+        str(PYTHON_BIN), str(AMEND_CATERING_LEAD_BIN),
+        "--lead-id", lead_id, "--mode", mode,
+    ]
+    if answer_text:
+        argv += ["--answer-text", answer_text[:4000]]
+    if message_id:
+        argv += ["--message-id", message_id]
+    try:
+        result = subprocess.run(
+            argv, capture_output=True, text=True,
             env=os.environ.copy(), timeout=SUBPROCESS_TIMEOUT_SEC,
         )
         return result.returncode
@@ -7167,8 +7226,15 @@ def trigger_create_catering_lead(
     customer_phone: str, customer_name: str, raw_inquiry: str, message_id: str,
     extracted_fields: Optional[dict] = None,
     suppress_customer_ack: bool = False,
+    qualification_gate: bool = False,
 ) -> tuple[bool, str]:
     """Invoke create-catering-lead.
+
+    `qualification_gate` (M1 2026-07-31): when True, pass `--qualification-gate` so
+    a lead below minimum qualification parks in QUALIFYING and the customer is asked
+    for the missing fields, instead of an owner approval card firing for an event
+    whose date, size, venue and style are all unknown. Default False preserves every
+    caller that passes already-complete fields (the LLM SKILL path, the rescue path).
 
     `suppress_customer_ack` (turn-arbitration 2026-07-26): when True, pass
     `--suppress-customer-ack` so create-catering-lead sends the owner approval card
@@ -7219,6 +7285,8 @@ def trigger_create_catering_lead(
     ]
     if suppress_customer_ack:
         argv.append("--suppress-customer-ack")
+    if qualification_gate:
+        argv.append("--qualification-gate")
     try:
         result = subprocess.run(
             argv,
