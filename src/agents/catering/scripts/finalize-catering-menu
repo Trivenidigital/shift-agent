@@ -297,7 +297,7 @@ def _recompute_with_pricebook(
         # Headcount unknown: per-guest scaling is not verifiable, so the number
         # is not owner-approvable as-is. Never silently present it as firm.
         qc = qc.model_copy(update={
-            "flags": qc.flags + ["unknown_guest_count"],
+            "flags": qc.flags + [_pricing.FLAG_UNKNOWN_GUEST_COUNT],
             "price_status": "pending_owner_review",
         })
     guard_basis = _pricing.cents_to_whole_dollars(

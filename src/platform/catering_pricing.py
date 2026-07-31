@@ -78,6 +78,24 @@ FLAG_UNAVAILABLE_ITEM = "unavailable_item"     # unavailable_item:<item name>
 FLAG_MISSING_FEE_INPUT = "missing_fee_input"   # missing_fee_input:<fee id>
 FLAG_BELOW_PACKAGE_MIN = "below_package_min_guests"   # ...:<package id>
 FLAG_DISCOUNT_NEEDS_CODE = "discount_requires_owner_code"  # ...:<discount id>
+# Raised by finalize, not by the kernel: the headcount was unknown, so the quote
+# was priced for one guest and cannot be checked against the event. Named here
+# because a recompute has to know it is a block it can never clear on its own.
+FLAG_UNKNOWN_GUEST_COUNT = "unknown_guest_count"
+
+# Flags the kernel derives afresh on every call. A COMMITTED one must not be
+# carried into a recompute: the owner supplying a staff count is precisely how a
+# `missing_fee_input` block is meant to clear, and carrying the stale flag would
+# keep the quote blocked forever. Anything NOT here (a finalize-local flag, say)
+# is carried, because nothing else will re-derive it.
+_KERNEL_DERIVED_FLAGS = (
+    FLAG_PLACEHOLDER_PRICEBOOK,
+    FLAG_BELOW_MIN_PER_GUEST,
+    FLAG_MISSING_PRICE,
+    FLAG_MISSING_FEE_INPUT,
+    FLAG_BELOW_PACKAGE_MIN,
+    FLAG_DISCOUNT_NEEDS_CODE,
+)
 
 # CateringSelectedItem.qty is bounded at 500 by the state schema; a
 # headcount-scaled default basket clamps to it rather than emitting an
@@ -605,13 +623,34 @@ def recompute_from_inputs(
         miles=(inputs.miles if miles is None else miles),
         min_per_guest_usd=min_per_guest_usd,
     )
-    # Union of flags, kernel first: a reason the commitment recorded (an unknown
-    # headcount, say) is still a reason now, and losing it would leave the owner
-    # reading "pending owner review" with nothing saying why.
-    flags = list(qc.flags) + [f for f in inputs.flags if f not in qc.flags]
+    # Carry only what the kernel did NOT just re-derive. A committed
+    # `missing_fee_input` that the caller has since resolved with a staff count
+    # must not survive as a stale reason on a quote that is now fully priced.
+    carried = [f for f in inputs.flags
+               if f not in qc.flags
+               and not any(f == k or f.startswith(k + ":") for k in _KERNEL_DERIVED_FLAGS)]
+
+    # Firmness ceiling. Pinned prices make every line an "override", which the
+    # kernel would happily call "exact" even when the committed numbers were
+    # menu-derived estimates — so the recompute is capped at how firm the
+    # commitment was. A committed "pending_owner_review" caps at "estimated"
+    # rather than at itself: pending is a RESOLUTION verdict, not a statement
+    # about where the prices came from, and resolution is re-derived above (the
+    # pinned book carries a placeholder pricebook; fee multipliers are inputs).
+    # Supplying a missing multiplier is exactly how an owner is meant to make a
+    # pending quote deliverable, and capping at "pending" would forbid it.
+    ceiling = ("estimated" if inputs.price_status == "pending_owner_review"
+               else inputs.price_status)
+    price_status = weaker_price_status(qc.price_status, ceiling)
+    # The one block a recompute can never clear on its own: it prices from frozen
+    # inputs, so it cannot rediscover that the headcount behind them was never
+    # known. Without this, resolving an unrelated fee would quietly make an
+    # unheadcounted quote deliverable.
+    if FLAG_UNKNOWN_GUEST_COUNT in inputs.flags:
+        price_status = "pending_owner_review"
     return qc.model_copy(update={
-        "price_status": weaker_price_status(qc.price_status, inputs.price_status),
-        "flags": flags,
+        "price_status": price_status,
+        "flags": list(qc.flags) + carried,
     })
 
 
