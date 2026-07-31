@@ -247,7 +247,11 @@ def _process_due(store, leads, cfg, now, path, *, autosend: bool,
 
         # The allowlist gates the conversation, not the follow-up: a lead outside
         # the rollout is left SCHEDULED (not suppressed) so graduating the
-        # allowlist later picks it up rather than finding a graveyard.
+        # allowlist later picks it up rather than finding a graveyard. An ORPHANED
+        # follow-up has no conversation to gate, so it falls through to the
+        # suppression check below and is retired as lead_missing — that path sends
+        # nothing, so letting it run outside the allowlist costs nothing and keeps
+        # the store from accumulating records nobody will ever resolve.
         if lead is not None and not _allowlist_admits(jid):
             continue
 
