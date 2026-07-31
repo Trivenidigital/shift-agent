@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+"""record-catering-acceptance — customer accept/decline of a sent catering quote (M3).
+
+Before M3 there was NO acceptance path. Once a lead reached ``SENT_TO_CUSTOMER`` the
+only legal moves were ``CLOSED`` and ``STALE``, and the ONLY writer of ``CLOSED`` was
+the operator script ``catering-lead-reconcile``. A customer replying "we accept" got
+the generic follow-up reply and the booking existed nowhere — not on the lead, not in
+the audit chain, not on the owner's phone.
+
+This script is the deterministic writer for that turn. It re-runs the SAME grammar the
+router used (``catering_extraction.detect_quote_acceptance``) so the router's job is
+only admission, never authority, and then:
+
+  accepted   -> lead SENT_TO_CUSTOMER -> BOOKED, acceptance fields stamped, owner told
+  declined   -> lead SENT_TO_CUSTOMER -> CLOSED with the reason on the audit row
+  ambiguous  -> NO state change; ONE clarification question, recorded on the lead so it
+                can never repeat (a customer who keeps saying "ok" is asked once)
+
+NO LLM anywhere: this books an event, so it is exactly the deterministic /
+money-adjacent territory the project rules reserve for regex.
+
+Idempotent by construction: the customer's message id is stored on the lead, and a
+lead that already carries a ``customer_acceptance`` is never re-transitioned — so a
+redelivered inbound cannot double-book or re-notify the owner.
+
+M4 hold interaction: a held lead still RECORDS the customer's decision (losing what
+the customer said is worse than any send) and still notifies the OWNER (owner-directed
+sends are never blocked by a hold), but the automated CUSTOMER confirmation is
+withheld and audited as `catering_lead_hold_blocked_send`. An ambiguous message on a
+held lead does nothing at all — the clarification IS a customer send, and asking later
+is correct.
+
+Usage:
+  record-catering-acceptance \\
+    --lead-id L0007 --customer-jid "1555...@s.whatsapp.net" \\
+    --customer-message-id "wamid.X" --message-text "we accept" \\
+    --sender-role customer
+
+Outputs JSON: {"lead_id": ..., "outcome": ..., "new_status": ..., "replayed": bool}.
+
+Exit codes:
+  0  — handled (recorded, or clarification sent, or idempotent replay)
+  2  — no acceptance signal in --message-text (caller should route normally)
+  4  — lead not found, or not in an acceptance-eligible status
+  5  — leads store unreadable / schema violation
+  6  — bridge unreachable (state IS written; delivery uncertain)
+  9  — illegal transition (refused, lead untouched)
+  12 — privilege denied (an owner message must never book on a customer's behalf)
+  14 — lead is ON HOLD and the only action would have been a customer send
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, atomic_write_json, ndjson_append, customer_now, load_model, flock,
+    load_yaml_model,
+)
+from safe_io import bridge_post  # noqa: E402
+from schemas import (  # noqa: E402
+    ActionExecutionContext, Config, CateringLeadStore, CateringLeadStatusChange,
+    CateringLeadAcceptanceRecorded, CateringLeadHoldBlockedSend,
+    is_catering_transition_allowed,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND, EXIT_SCHEMA_VIOLATION,
+    EXIT_DEPENDENCY_DOWN, EXIT_ILLEGAL_TRANSITION, EXIT_PRIVILEGE_DENIED,
+    EXIT_LEAD_ON_HOLD,
+)
+from catering_extraction import detect_quote_acceptance  # noqa: E402
+from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
+
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH",
+                                 "/opt/shift-agent/state/catering-leads.json"))
+LEADS_LOCK = Path(os.environ.get("SHIFT_AGENT_LEADS_LOCK", str(LEADS_PATH) + ".lock"))
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
+
+BRIDGE_PREFIX = "⚕ *Catering Agent*\n────────────\n"
+
+# The statuses from which a customer's accept/decline is meaningful. Deliberately
+# just SENT_TO_CUSTOMER: before it the customer has no quote to accept, and after
+# it (BOOKED / CLOSED / STALE) the decision is already recorded — a second "we
+# accept" is a replay, and a change of mind after booking is an owner decision
+# (`mark-catering-lead-outcome`), not something automation flips silently.
+ACCEPTANCE_ELIGIBLE_STATUSES = ("SENT_TO_CUSTOMER",)
+
+# Customer-facing copy. HARD-CODED, no LLM, no prices, no deposit/payment words —
+# a booking acknowledgment must not imply a payment obligation nobody quoted.
+_ACCEPT_REPLY = (
+    "Thank you — we've recorded that you'd like to go ahead with inquiry {lead_id}. "
+    "The owner will confirm the final details with you shortly."
+)
+_DECLINE_REPLY = (
+    "Thanks for letting us know — we've closed inquiry {lead_id}. "
+    "You're very welcome to get in touch again any time."
+)
+_CLARIFY_REPLY = (
+    "Just to confirm — would you like to go ahead and book the catering for inquiry "
+    "{lead_id}? Reply \"we accept\" to confirm, or let us know what you'd like to change."
+)
+
+
+# PR-ζ chokepoint discipline. This script POSTs through the CANONICAL
+# `bridge_post` with a real ActionExecutionContext rather than the
+# `bridge_post_2tuple` adapter, deliberately: every existing catering caller of
+# that adapter sits on SAFE_IO_NULL_CONTEXT_ALLOWLIST as documented migration
+# debt, and a script written after PR-ζ should not add to it.
+#
+# The customer confirmation IS a completion claim ("we've recorded that...") — but
+# a VERIFIED one: the lead write has already committed by the time it is sent, so
+# verified_action_result=True is a statement of fact, not a lint bypass. The
+# clarification question claims nothing and is not a regulated action. The owner
+# card is owner-directed notification, the same class as system health alerts.
+_CTX_ACCEPT = ActionExecutionContext(
+    action_id="catering.acceptance.customer_confirmation",
+    is_regulated_action=True, verified_action_result=True,
+    mutation_class="local_reversible",
+)
+_CTX_CLARIFY = ActionExecutionContext(
+    action_id="catering.acceptance.clarification",
+    is_regulated_action=False, verified_action_result=False,
+)
+_CTX_OWNER = ActionExecutionContext(
+    action_id="catering.acceptance.owner_card",
+    is_regulated_action=False, verified_action_result=False,
+)
+
+
+def _post(jid: str, message: str, context: ActionExecutionContext) -> tuple[bool, str]:
+    """(ok, message_id_or_error) — the 2-tuple shape the sibling catering scripts
+    unpack, over the canonical 4-tuple chokepoint."""
+    ok, mid, err, status = bridge_post(jid, message, action_context=context)
+    return (True, mid) if ok else (False, err or status)
+
+
+def _append_audit_under_leadslock(adapter: TypeAdapter, entry) -> None:
+    """Caller MUST hold LEADS_LOCK. Acquires the inner LOG_PATH flock — the same
+    outer-LEADS_LOCK -> inner-LOG_PATH order every catering writer uses."""
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with flock(LOG_PATH):
+        ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+
+
+def _notify_owner(cfg, lead, outcome: str, version_hint: str) -> None:
+    """Owner card for the booking decision. Owner-directed, so a per-lead hold and
+    the automation-control kernel never suppress it. Best-effort on both channels:
+    the state write already succeeded and must never be rolled back by a send."""
+    if outcome == "accepted":
+        headline = f"Customer ACCEPTED quote {version_hint} for {lead.lead_id}"
+        body = (
+            f"{headline}\n"
+            f"Customer: {lead.customer_name or '(unknown)'} ({lead.customer_phone})\n"
+            f"Event: {(lead.extracted.event_date if lead.extracted else None) or '[TBD]'}"
+            f" — {(lead.extracted.headcount if lead.extracted else None) or '[TBD]'} guests\n"
+            f"The lead is now BOOKED. Confirm the final details with them."
+        )
+    else:
+        headline = f"Customer DECLINED quote {version_hint} for {lead.lead_id}"
+        body = (
+            f"{headline}\n"
+            f"Customer: {lead.customer_name or '(unknown)'} ({lead.customer_phone})\n"
+            f"The lead is now CLOSED."
+        )
+    if cfg is not None and getattr(cfg.owner, "self_chat_jid", ""):
+        try:
+            _post(cfg.owner.self_chat_jid, BRIDGE_PREFIX + body, _CTX_OWNER)
+        except Exception as e:  # noqa: BLE001 — owner card is best-effort
+            sys.stderr.write(f"WARN: owner card POST failed (non-fatal): "
+                             f"{type(e).__name__}: {e}\n")
+    # Plain text (§12b): underscore-bearing ids must not be mangled by a Markdown
+    # parser into an alert the operator does not recognise.
+    sys.stderr.write(f"catering_acceptance_alert_dispatched lead={lead.lead_id} "
+                     f"outcome={outcome}\n")
+    try:
+        subprocess.run(
+            [str(NOTIFY_OWNER_BIN), "--priority", "1",
+             "--title", "Catering quote decision", "--", body],
+            check=False, capture_output=True, text=True, timeout=10,
+        )
+    except Exception as e:  # noqa: BLE001 — alerting is best-effort
+        sys.stderr.write(f"catering_acceptance_alert_delivery_failed lead={lead.lead_id} "
+                         f"error={type(e).__name__}: {e}\n")
+
+
+def _latest_quote_version(lead_id: str) -> str:
+    """'vN' from the immutable quote ledger, or '(unversioned)'. Read-only + best
+    effort — the owner card is decoration, never a gate on the booking."""
+    try:
+        import catering_quote_ledger as _ql
+        rec = _ql.latest_committed(lead_id)
+        return f"v{rec['version']}" if rec else "(unversioned)"
+    except Exception:  # noqa: BLE001
+        return "(unversioned)"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--lead-id", required=True)
+    ap.add_argument("--customer-jid", required=True)
+    ap.add_argument("--customer-message-id", required=True)
+    ap.add_argument("--message-text", required=True)
+    ap.add_argument(
+        "--sender-role", default="customer",
+        choices=["owner", "employee", "customer", "unknown"],
+        help="resolved sender role from identify-sender. An OWNER message can never "
+             "book on the customer's behalf — that is the owner-decision path "
+             "(mark-catering-lead-outcome), which carries its own audit identity.",
+    )
+    args = ap.parse_args()
+
+    if args.sender_role == "owner":
+        sys.stderr.write(
+            "privilege denied: a customer acceptance cannot be recorded from an "
+            "owner message; use mark-catering-lead-outcome\n"
+        )
+        return EXIT_PRIVILEGE_DENIED
+
+    # The router already ran this grammar to decide admission; re-running it here
+    # makes THIS script the authority on what the customer said.
+    detected = detect_quote_acceptance(args.message_text)
+    if detected is None:
+        sys.stderr.write("no acceptance signal in --message-text; nothing recorded\n")
+        return EXIT_INVALID_INPUT
+    outcome = detected["outcome"]
+    matched_phrase = detected["matched_phrase"]
+
+    cfg = None
+    try:
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+        now = customer_now(cfg.customer.timezone)
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        log_config_load_failed_best_effort(CONFIG_PATH, e, log_path=LOG_PATH)
+        sys.stderr.write(f"WARN: config load failed; using UTC: {e}\n")
+        now = datetime.now(timezone.utc)
+
+    new_status = ""
+    replayed = False
+    send_customer_reply = True
+    lead_snapshot = None
+
+    with FileLock(LEADS_LOCK):
+        try:
+            store, status = load_model(LEADS_PATH, CateringLeadStore,
+                                       default=CateringLeadStore())
+            if status not in ("ok", "missing", "empty"):
+                sys.stderr.write(f"leads store status={status!r}; refusing to mutate\n")
+                return EXIT_SCHEMA_VIOLATION
+        except Exception as e:  # noqa: BLE001 — clean exit, never a traceback
+            sys.stderr.write(f"failed to load leads store: {e}\n")
+            return EXIT_SCHEMA_VIOLATION
+
+        idx = next((i for i, l in enumerate(store.leads) if l.lead_id == args.lead_id), None)
+        if idx is None:
+            sys.stderr.write(f"lead {args.lead_id} not found\n")
+            return EXIT_NOT_FOUND
+        lead = store.leads[idx]
+
+        # Idempotency FIRST, before the status gate: a redelivered inbound arrives
+        # when the lead has ALREADY left SENT_TO_CUSTOMER (we moved it), so a
+        # status-first order would report not-found for our own successful write.
+        if (lead.acceptance_message_id
+                and lead.acceptance_message_id == args.customer_message_id):
+            print(json.dumps({"lead_id": lead.lead_id, "outcome": lead.customer_acceptance,
+                              "new_status": lead.status, "replayed": True}))
+            return EXIT_OK
+        if (outcome == "ambiguous"
+                and lead.acceptance_clarification_sent_message_id):
+            # Asked once already. Silence here is deliberate: a second "shall we
+            # book?" reads as the agent nagging a customer about money.
+            print(json.dumps({"lead_id": lead.lead_id, "outcome": "ambiguous",
+                              "new_status": lead.status, "replayed": True}))
+            return EXIT_OK
+        if lead.customer_acceptance is not None:
+            sys.stderr.write(
+                f"lead {lead.lead_id} already recorded "
+                f"customer_acceptance={lead.customer_acceptance!r}; refusing to overwrite\n"
+            )
+            print(json.dumps({"lead_id": lead.lead_id, "outcome": lead.customer_acceptance,
+                              "new_status": lead.status, "replayed": True}))
+            return EXIT_OK
+
+        if lead.status not in ACCEPTANCE_ELIGIBLE_STATUSES:
+            sys.stderr.write(
+                f"lead {lead.lead_id} is in status {lead.status!r}; acceptance is only "
+                f"meaningful from {ACCEPTANCE_ELIGIBLE_STATUSES}\n"
+            )
+            return EXIT_NOT_FOUND
+
+        if lead.on_hold:
+            # A hold withholds CUSTOMER sends, not the record of what the customer
+            # said. Ambiguous is the exception: its whole action IS a send.
+            send_customer_reply = False
+            try:
+                _append_audit_under_leadslock(
+                    TypeAdapter(CateringLeadHoldBlockedSend),
+                    CateringLeadHoldBlockedSend(
+                        type="catering_lead_hold_blocked_send", ts=now,
+                        lead_id=lead.lead_id, blocked_send_kind="customer_ack",
+                        hold_reason=(lead.hold_reason or "")[:200],
+                    ),
+                )
+            except Exception as e:  # noqa: BLE001 — audit is best-effort
+                sys.stderr.write(f"audit emit (hold-guard) failed (non-fatal): {e}\n")
+            if outcome == "ambiguous":
+                sys.stderr.write(
+                    f"M4/G4: lead {lead.lead_id} is ON HOLD; the acceptance "
+                    f"clarification was withheld and NOT recorded as asked\n"
+                )
+                return EXIT_LEAD_ON_HOLD
+
+        if outcome == "ambiguous":
+            store.leads[idx] = lead.model_copy(update={
+                "acceptance_clarification_sent_message_id": args.customer_message_id,
+            })
+            atomic_write_json(LEADS_PATH, store)
+            _append_audit_under_leadslock(
+                TypeAdapter(CateringLeadAcceptanceRecorded),
+                CateringLeadAcceptanceRecorded(
+                    type="catering_lead_acceptance_recorded", ts=now,
+                    lead_id=lead.lead_id, outcome="clarification_sent",
+                    from_status=lead.status, to_status=lead.status,
+                    customer_message_id=args.customer_message_id,
+                    matched_phrase=matched_phrase,
+                    detail="ambiguous reply; one clarification asked, no state change",
+                ),
+            )
+            new_status = lead.status
+            lead_snapshot = store.leads[idx]
+        else:
+            target = "BOOKED" if outcome == "accepted" else "CLOSED"
+            if not is_catering_transition_allowed(lead.status, target):
+                sys.stderr.write(
+                    f"illegal transition {lead.status}->{target} for {lead.lead_id}; "
+                    f"refusing (lead untouched)\n"
+                )
+                return EXIT_ILLEGAL_TRANSITION
+            store.leads[idx] = lead.model_copy(update={
+                "status": target,
+                "updated_at": now,
+                "customer_acceptance": outcome,
+                "acceptance_at": now,
+                "acceptance_message_id": args.customer_message_id,
+            })
+            atomic_write_json(LEADS_PATH, store)
+            _append_audit_under_leadslock(
+                TypeAdapter(CateringLeadStatusChange),
+                CateringLeadStatusChange(
+                    type="catering_lead_status_change", ts=now,
+                    lead_id=lead.lead_id, from_status=lead.status, to_status=target,
+                    actor="customer",
+                    reason=f"customer_{outcome}: {matched_phrase}"[:2000],
+                ),
+            )
+            _append_audit_under_leadslock(
+                TypeAdapter(CateringLeadAcceptanceRecorded),
+                CateringLeadAcceptanceRecorded(
+                    type="catering_lead_acceptance_recorded", ts=now,
+                    lead_id=lead.lead_id, outcome=outcome,
+                    from_status=lead.status, to_status=target,
+                    customer_message_id=args.customer_message_id,
+                    matched_phrase=matched_phrase,
+                    detail=args.message_text[:500],
+                ),
+            )
+            new_status = target
+            lead_snapshot = store.leads[idx]
+
+    # Sends happen OUTSIDE the lock (no network under a lock).
+    if outcome in ("accepted", "declined"):
+        _notify_owner(cfg, lead_snapshot, outcome, _latest_quote_version(args.lead_id))
+
+    ok, mid_or_err = True, ""
+    if send_customer_reply:
+        template = {
+            "accepted": _ACCEPT_REPLY,
+            "declined": _DECLINE_REPLY,
+            "ambiguous": _CLARIFY_REPLY,
+        }[outcome]
+        context = _CTX_CLARIFY if outcome == "ambiguous" else _CTX_ACCEPT
+        ok, mid_or_err = _post(
+            args.customer_jid, BRIDGE_PREFIX + template.format(lead_id=args.lead_id),
+            context)
+        if not ok:
+            sys.stderr.write(f"customer reply POST failed: {mid_or_err}\n")
+
+    print(json.dumps({
+        "lead_id": args.lead_id, "outcome": outcome, "new_status": new_status,
+        "replayed": replayed, "customer_reply_sent": bool(send_customer_reply and ok),
+        "outbound_message_id": mid_or_err if ok else "",
+    }))
+    # The state is committed either way; a failed send is reported, never rolled back.
+    return EXIT_OK if ok else EXIT_DEPENDENCY_DOWN
+
+
+if __name__ == "__main__":
+    sys.exit(main())

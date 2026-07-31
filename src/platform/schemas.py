@@ -510,6 +510,7 @@ CateringLeadStatus = Literal[
     "OWNER_EDITED",             # owner sent edits; re-draft pending
     "OWNER_REJECTED",           # owner declined (terminal)
     "SENT_TO_CUSTOMER",         # quote sent to inquirer
+    "BOOKED",                   # M3: customer EXPLICITLY accepted the sent quote
     "CLOSED",                   # terminal — booked or customer-declined
     "STALE",                    # terminal — silent for too long
 ]
@@ -570,7 +571,14 @@ CATERING_TRANSITIONS: dict[CateringLeadStatus, set[CateringLeadStatus]] = {
     # without manual state surgery. The CateringQuoteAttempted idempotency
     # anchor prevents duplicate sends on legit retries.
     "OWNER_APPROVED": {"SENT_TO_CUSTOMER", "AWAITING_OWNER_APPROVAL"},
-    "SENT_TO_CUSTOMER": {"CLOSED", "STALE"},
+    # M3 2026-07-31: BOOKED is the customer's EXPLICIT acceptance of the sent quote
+    # (record-catering-acceptance / mark-catering-lead-outcome --outcome won). It is
+    # deliberately NOT terminal — a booked event still has to be closed out (CLOSED)
+    # and a booked lead the customer then goes silent on can still be swept (STALE).
+    # A DECLINE goes straight to CLOSED with the reason on the audit row, which is
+    # why SENT_TO_CUSTOMER keeps its existing CLOSED edge.
+    "SENT_TO_CUSTOMER": {"BOOKED", "CLOSED", "STALE"},
+    "BOOKED": {"CLOSED", "STALE"},
     "OWNER_REJECTED": set(),                                              # terminal
     "CLOSED": set(),                                                      # terminal
     "STALE": set(),                                                       # terminal
@@ -613,6 +621,12 @@ class CateringConfig(BaseModel):
     # legitimate budget catering (e.g. a $6/guest order). Operator-tunable per customer.
     min_per_guest_usd: float = Field(default=3.0, ge=0.0)
     stale_after_hours: int = Field(default=14 * 24, ge=1)  # 14 days default
+    # M3: how long a SENT proposal set (and the quote text that quotes it) stays
+    # valid. Drives BOTH the customer-facing "This quote is valid until <date>"
+    # line and CateringProposalSet.expires_at, so the sweep can never expire a set
+    # earlier than the date the customer was told. ADDITIVE — a config written
+    # before M3 decodes with the 14-day default.
+    proposal_validity_days: int = Field(default=14, ge=1, le=365)
     # Per-customer pricing knobs land in v0.2 (would otherwise bloat config).
 
 
@@ -2341,6 +2355,25 @@ class CateringLead(BaseModel):
     hold_reason: Optional[str] = Field(default=None, max_length=200)
     hold_set_at: Optional[datetime] = None
 
+    # M3 customer acceptance. Additive + default-None so every legacy lead decodes
+    # unchanged. Written ONLY by `record-catering-acceptance` under FileLock(LEADS_LOCK)
+    # on an UNAMBIGUOUS accept/decline token — an ambiguous "ok"/"sounds good" never
+    # lands here; it gets one clarification instead (see below).
+    customer_acceptance: Optional[Literal["accepted", "declined"]] = None
+    acceptance_at: Optional[datetime] = None
+    acceptance_message_id: Optional[str] = Field(
+        default=None, min_length=1, max_length=200,
+        description="Idempotency anchor — bridge messageId of the customer's "
+                    "accept/decline message. Same id seen twice => no-op replay.",
+    )
+    # The bridge messageId of the ONE ambiguous-reply clarification we sent
+    # ("would you like to go ahead and book...?"). Set once and never cleared, so
+    # a customer who keeps saying "ok" is asked exactly once — a second
+    # clarification would read as the agent nagging about money.
+    acceptance_clarification_sent_message_id: Optional[str] = Field(
+        default=None, min_length=1, max_length=200,
+    )
+
     # v0.3: post-AWAITING statuses require non-empty quote_text. Legacy data
     # (pre-v0.3 leads with empty quote_text) is backfilled with sentinel by
     # mode="before" shim, then strict validator runs. Migration tool fixes
@@ -2358,6 +2391,7 @@ class CateringLead(BaseModel):
         post_awaiting = {
             "AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED",  # PR-CF1
             "OWNER_APPROVED", "OWNER_EDITED", "SENT_TO_CUSTOMER",
+            "BOOKED",  # M3 — reachable only from SENT_TO_CUSTOMER, which already required it
         }
         if status in post_awaiting and not (data.get("quote_text", "") or "").strip():
             sys.stderr.write(
@@ -2372,6 +2406,7 @@ class CateringLead(BaseModel):
         post_awaiting = {
             "AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED",  # PR-CF1
             "OWNER_APPROVED", "OWNER_EDITED", "SENT_TO_CUSTOMER",
+            "BOOKED",  # M3 — reachable only from SENT_TO_CUSTOMER, which already required it
         }
         if self.status in post_awaiting and not self.quote_text.strip():
             raise ValueError(
@@ -2502,7 +2537,51 @@ class CateringQuoteLedgerStore(BaseModel):
 CateringProposalStatus = Literal[
     "DRAFT", "SENT", "SEND_FAILED", "SUPERSEDED",
     "SELECTING", "SELECTED", "SELECTED_OWNER_CARD_FAILED", "SELECT_FAILED",
+    "EXPIRED",  # M3 — validity window elapsed with no selection
 ]
+
+# M3: proposal-set state machine. Mirrors CATERING_TRANSITIONS' shape (typed against
+# the status Literal so a typo on either side is a mypy error) and, like it, is the
+# SINGLE source of truth consulted by the scripts at every status write — the schema
+# layer does NOT enforce it, so historic sets replay unchanged.
+#
+# Encoded from the two deployed writers, NOT invented:
+#   create-catering-proposal-options
+#     _create_draft            mints DRAFT (initial state, not a transition)
+#     _mark_send_failed        DRAFT -> SEND_FAILED
+#     _mark_sent_and_supersede DRAFT -> SENT, or DRAFT -> SUPERSEDED when a
+#                              later-sequence set already went out (has_later_sent);
+#                              and, for every OTHER lower-sequence row, SENT -> SUPERSEDED
+#   select-catering-proposal
+#     _claim_selection         SENT -> SELECTING (optimistic claim)
+#     _finish_selection        SELECTING -> SELECTED | SELECTED_OWNER_CARD_FAILED
+#                                        | SELECT_FAILED (bad finalize rc / superseded mid-flight)
+#     _fail_claim_after_finalize_exception  SELECTING -> SELECT_FAILED
+#   catering-proposal-expiry-sweep (new)
+#                              SENT -> EXPIRED
+#
+# Every terminal state has an empty set: a SEND_FAILED set is never resurrected (the
+# next attempt mints a new set), and SELECTED / SELECT_FAILED / SUPERSEDED / EXPIRED
+# are end states of their respective paths.
+CATERING_PROPOSAL_SET_TRANSITIONS: dict[CateringProposalStatus, set[CateringProposalStatus]] = {
+    "DRAFT": {"SENT", "SEND_FAILED", "SUPERSEDED"},
+    "SENT": {"SELECTING", "SUPERSEDED", "EXPIRED"},
+    "SEND_FAILED": set(),                                                 # terminal
+    "SUPERSEDED": set(),                                                  # terminal
+    "SELECTING": {"SELECTED", "SELECTED_OWNER_CARD_FAILED", "SELECT_FAILED"},
+    "SELECTED": set(),                                                    # terminal
+    "SELECTED_OWNER_CARD_FAILED": set(),                                  # terminal
+    "SELECT_FAILED": set(),                                               # terminal
+    "EXPIRED": set(),                                                     # terminal
+}
+
+
+def is_proposal_set_transition_allowed(from_s: str, to_s: str) -> bool:
+    """M3: True only for allowed proposal-set transitions. False for unknown
+    statuses. Accepts plain str (not Literal) for runtime ergonomics — callers pass
+    strings read off disk JSON. Mirrors is_catering_transition_allowed exactly."""
+    return to_s in CATERING_PROPOSAL_SET_TRANSITIONS.get(from_s, set())  # type: ignore[arg-type]
+
 
 CateringProposalTier = Literal["classic", "balanced", "premium"]
 
@@ -2524,6 +2603,12 @@ class CateringProposalSet(BaseModel):
     status: CateringProposalStatus
     created_at: datetime
     sent_at: Optional[datetime] = None
+    # M3 validity window. Stamped at SENT time from CateringConfig.proposal_validity_days
+    # — the SAME field the customer-facing "valid until" line renders from, so a set can
+    # never expire before the date the customer was given. ADDITIVE + Optional: every set
+    # sent before M3 carries None and is simply never expired by the sweep (an operator
+    # re-sends instead of the sweep silently retiring a set nobody was told expires).
+    expires_at: Optional[datetime] = None
     outbound_message_id: str = ""
     source_message_id: str = Field(min_length=1, max_length=200)
     request_text: str = Field(default="", max_length=1000)
@@ -6393,6 +6478,15 @@ class CfRouterIntercepted(_BaseEntry):
         #     must be able to see it.
         "f7_primary_amendment_applied",
         "f7_qualification_answer",
+        # M3 2026-07-31: a customer's EXPLICIT accept/decline of a quote already sent
+        # to them was recorded deterministically (record-catering-acceptance). Its own
+        # reason, and telemetry-visible, for the same rule as every arm here: it
+        # bypasses the LLM, so dispatcher-accuracy pairing must be able to see it —
+        # and this arm books events, which is the last place invisible routing is
+        # acceptable. subprocess_rc carries the writer's exit code, which is the ONLY
+        # signal distinguishing "booked" from "recorded but the reply never sent"
+        # from "held".
+        "f7_quote_acceptance",
         # PR-R2B-1 2026-07-20: flyer/catering amendment-conflict gate (dormant until
         # armed). captured = discriminator→catering_amendment, R2A capture ok; flyer_edit
         # = discriminator→flyer_edit, fell through to the unchanged flyer arm; clarify =
@@ -7029,6 +7123,63 @@ class CateringLeadHoldBlockedSend(_BaseEntry):
     lead_id: str = Field(min_length=1)
     blocked_send_kind: Literal["customer_ack", "owner_approved_quote"]
     hold_reason: str = Field(default="", max_length=200)
+
+
+class CateringProposalExpired(_BaseEntry):
+    """M3: a SENT proposal set passed its validity window with no selection and was
+    transitioned to EXPIRED by `catering-proposal-expiry-sweep`. One row per set per
+    expiry — EXPIRED is terminal, so a re-run never re-emits."""
+    type: Literal["catering_proposal_expired"]
+    lead_id: str = Field(min_length=1)
+    proposal_set_id: str = Field(min_length=1)
+    from_status: CateringProposalStatus
+    sent_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    validity_days: int = Field(ge=1)
+
+
+class CateringProposalTransitionRefused(_BaseEntry):
+    """M3: a proposal-set status write was REFUSED because
+    CATERING_PROPOSAL_SET_TRANSITIONS does not allow it. Emitted instead of
+    silently writing the illegal status — a refusal that leaves no trace is the
+    exact silent-failure class the transition table exists to close."""
+    type: Literal["catering_proposal_transition_refused"]
+    lead_id: str = Field(default="", max_length=64)
+    proposal_set_id: str = Field(min_length=1)
+    from_status: str = Field(min_length=1, max_length=64)
+    to_status: str = Field(min_length=1, max_length=64)
+    write_site: str = Field(min_length=1, max_length=80)
+
+
+class CateringLeadAcceptanceRecorded(_BaseEntry):
+    """M3: the customer EXPLICITLY accepted or declined the quote they were sent.
+
+    Written only for an unambiguous token — an ambiguous "ok"/"sounds good" produces
+    `outcome="clarification_sent"` instead, which records that we asked once and
+    mutates no acceptance field. `matched_phrase` is the deterministic token the
+    detector fired on, so an operator can see WHY a booking was recorded without
+    re-running the grammar."""
+    type: Literal["catering_lead_acceptance_recorded"]
+    lead_id: str = Field(min_length=1)
+    outcome: Literal["accepted", "declined", "clarification_sent"]
+    from_status: CateringLeadStatus
+    to_status: CateringLeadStatus
+    customer_message_id: str = Field(default="", max_length=200)
+    matched_phrase: str = Field(default="", max_length=120)
+    detail: str = Field(default="", max_length=500)
+
+
+class CateringLeadOutcomeMarked(_BaseEntry):
+    """M3: the OWNER recorded the commercial outcome of a lead via
+    `mark-catering-lead-outcome`. Distinct from CateringLeadAcceptanceRecorded
+    (which the CUSTOMER's own words drive) and from
+    CateringLeadManuallyReconciled (a state-vs-outbound divergence repair)."""
+    type: Literal["catering_lead_outcome_marked"]
+    lead_id: str = Field(min_length=1)
+    outcome: Literal["won", "lost"]
+    from_status: CateringLeadStatus
+    to_status: CateringLeadStatus
+    reason: str = Field(default="", max_length=500)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -7689,6 +7840,11 @@ LogEntry = Annotated[
         Annotated[CateringFollowupSent, Tag("catering_followup_sent")],
         Annotated[CateringFollowupCancelled, Tag("catering_followup_cancelled")],
         Annotated[CateringFollowupExpired, Tag("catering_followup_expired")],
+        # M3 2026-07-31 — proposal validity/expiry, customer acceptance, owner outcome
+        Annotated[CateringProposalExpired, Tag("catering_proposal_expired")],
+        Annotated[CateringProposalTransitionRefused, Tag("catering_proposal_transition_refused")],
+        Annotated[CateringLeadAcceptanceRecorded, Tag("catering_lead_acceptance_recorded")],
+        Annotated[CateringLeadOutcomeMarked, Tag("catering_lead_outcome_marked")],
         # Commerce primitives slice 1 — PRD v2 §8
         Annotated[CommerceCartStarted, Tag("commerce_cart_started")],
         Annotated[CommerceCartUpdated, Tag("commerce_cart_updated")],
@@ -7802,6 +7958,7 @@ __all__ = [
     "FlyerBrandKit", "FlyerProject", "FlyerProjectStore",
     # v0.3 status-machine + helpers
     "CATERING_TRANSITIONS", "is_catering_transition_allowed",
+    "CATERING_PROPOSAL_SET_TRANSITIONS", "is_proposal_set_transition_allowed",
     "assert_rejection_reason_complete",
     # v0.3 code-pattern constants
     "_CODE_BODY_PATTERN", "_CODE_FULL_PATTERN",
@@ -7857,6 +8014,8 @@ __all__ = [
     "CateringAutomationControlMode",
     "CateringAutomationControlChanged", "CateringAutomatedSendSuppressed",
     "CateringLeadHoldChanged", "CateringLeadHoldBlockedSend",
+    "CateringProposalExpired", "CateringProposalTransitionRefused",
+    "CateringLeadAcceptanceRecorded", "CateringLeadOutcomeMarked",
     "LidLearned", "DispatcherRouted",
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
     "EodSnapshot", "EodPushoverSent", "EodSkipped",

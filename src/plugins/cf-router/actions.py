@@ -53,6 +53,7 @@ CREATE_CATERING_PROPOSALS_BIN = Path("/usr/local/bin/create-catering-proposal-op
 AMEND_CATERING_LEAD_BIN = Path("/usr/local/bin/amend-catering-lead")  # M1 apply path
 APPROVE_CATERING_FOLLOWUP_BIN = Path("/usr/local/bin/approve-catering-followup")  # M5
 SELECT_CATERING_PROPOSAL_BIN = Path("/usr/local/bin/select-catering-proposal")
+RECORD_CATERING_ACCEPTANCE_BIN = Path("/usr/local/bin/record-catering-acceptance")  # M3
 CREATE_FLYER_PROJECT_BIN = Path("/usr/local/bin/create-flyer-project")
 BARE_FLYER_SEND_BIN = Path("/usr/local/bin/bare-flyer-render-and-send")  # Approach B async render+send
 HANDLE_SHIFT_SICK_CALL_BIN = Path("/usr/local/bin/handle-shift-sick-call")
@@ -320,6 +321,13 @@ ACTIONABLE_LEAD_STATUSES = frozenset({
 # a screenshot-forwarded code can reach.
 OPEN_LEAD_STATUSES = ACTIONABLE_LEAD_STATUSES | frozenset({"QUALIFYING"})
 
+# M3: the statuses in which a customer's accept/decline of the quote is meaningful.
+# Deliberately its OWN set rather than an addition to ACTIONABLE/OPEN: widening
+# those would change F7 follow-up routing, the `#XXXXX` code lookup surface and the
+# R2B-1 conflict gate all at once, for a status that only ONE new arm cares about.
+# `record-catering-acceptance` re-checks this server-side; this copy is admission.
+POST_QUOTE_LEAD_STATUSES = frozenset({"SENT_TO_CUSTOMER"})
+
 
 def find_catering_lead_by_code(code: str) -> Optional[dict]:
     """Look up a non-terminal catering lead by owner_approval_code.
@@ -516,6 +524,97 @@ def find_all_eligible_catering_leads_by_sender(
         return []
 
 
+def any_post_quote_lead_exists() -> bool:
+    """M3: True when ANY lead is awaiting a customer decision (SENT_TO_CUSTOMER).
+
+    Cheap pre-check for the acceptance arm, mirroring `any_qualifying_lead_exists`:
+    resolving sender identity spawns `identify-sender`, and a bare "ok" is one of
+    the most common inbounds there is. One tolerant file read answers "is anyone
+    waiting on a decision at all?" so the subprocess only runs when the answer is
+    yes. Never raises, never writes."""
+    try:
+        with LEADS_PATH.open() as f:
+            store = json.load(f)
+        return any(lead.get("status") in POST_QUOTE_LEAD_STATUSES
+                   for lead in store.get("leads", []))
+    except Exception:
+        return False
+
+
+def find_post_quote_catering_lead_by_sender(
+    phone: Optional[str], chat_id: Optional[str],
+) -> Optional[dict]:
+    """M3: the sender's most-recent lead that is awaiting their decision, or None.
+
+    Uses the SAME 4-priority sender association as
+    find_all_eligible_catering_leads_by_sender (phone / LID / LID-as-fake-phone /
+    canonical-identity fallback) but over POST_QUOTE_LEAD_STATUSES, which
+    OPEN_LEAD_STATUSES deliberately excludes — which is exactly why a customer
+    replying "we accept" reached no arm at all before M3. Never raises, never
+    writes."""
+    if not phone and not chat_id:
+        return None
+
+    lid_digits: Optional[str] = None
+    if chat_id and chat_id.endswith("@lid"):
+        digits_part = chat_id[: -len("@lid")]
+        if digits_part.isdigit():
+            lid_digits = digits_part
+
+    try:
+        with LEADS_PATH.open() as f:
+            store = json.load(f)
+        try:
+            sender_key = flyer_canonical_identity_key(chat_id or "", phone)
+        except Exception:
+            sender_key = ""
+        direct_matches: list[dict] = []
+        canonical_matches: list[dict] = []
+        for lead in store.get("leads", []):
+            if lead.get("status") not in POST_QUOTE_LEAD_STATUSES:
+                continue
+            cp = lead.get("customer_phone")
+            cl = lead.get("customer_lid")
+            if phone and cp == phone:
+                direct_matches.append(lead)
+                continue
+            if chat_id and cl == chat_id:
+                direct_matches.append(lead)
+                continue
+            if lid_digits and cp == f"+{lid_digits}":
+                direct_matches.append(lead)
+                continue
+            if sender_key:
+                try:
+                    lead_key = flyer_canonical_identity_key(cl or "", cp)
+                except Exception:
+                    lead_key = ""
+                if lead_key and lead_key == sender_key:
+                    canonical_matches.append(lead)
+        matches = direct_matches if direct_matches else canonical_matches
+        matches.sort(key=lambda l: l.get("created_at", ""), reverse=True)
+        return matches[0] if matches else None
+    except Exception:
+        return None
+
+
+def detect_quote_acceptance(text: str) -> Optional[dict]:
+    """M3: thin delegation to the shared deterministic grammar.
+
+    The SAME function `record-catering-acceptance` runs, so the router and the
+    writer can never disagree about what the customer said — the router only
+    decides admission, the script remains the authority. Fail-safe: if the
+    platform module cannot be imported, no acceptance is claimed and the inbound
+    takes its existing route."""
+    try:
+        _ensure_platform_path()
+        from catering_extraction import detect_quote_acceptance as _detect  # type: ignore
+
+        return _detect(text)
+    except Exception:
+        return None
+
+
 def find_menu_pending_by_code(code: str) -> Optional[dict]:
     """Look up the pending menu update if its confirmation_code matches.
 
@@ -650,6 +749,33 @@ def invoke_select_catering_proposal(lead_id: str, chat_id: str, message_id: str,
                 # logical_turn_id — every send this turn causes carries it.
                 "--logical-turn-id", message_id,
                 "--selection-text", text,
+            ],
+            capture_output=True, text=True,
+            env=os.environ.copy(), timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        return 124
+    except Exception:
+        return 1
+
+
+def invoke_record_catering_acceptance(lead_id: str, chat_id: str, message_id: str,
+                                      text: str, sender_role: str = "customer") -> int:
+    """M3: invoke record-catering-acceptance; returns its exit code.
+
+    `--sender-role` is forwarded so the script can refuse an owner message booking
+    on a customer's behalf even if this router's role check ever regresses."""
+    try:
+        result = subprocess.run(
+            [
+                str(PYTHON_BIN),
+                str(RECORD_CATERING_ACCEPTANCE_BIN),
+                "--lead-id", lead_id,
+                "--customer-jid", chat_id,
+                "--customer-message-id", message_id,
+                "--message-text", text,
+                "--sender-role", sender_role or "customer",
             ],
             capture_output=True, text=True,
             env=os.environ.copy(), timeout=SUBPROCESS_TIMEOUT_SEC,

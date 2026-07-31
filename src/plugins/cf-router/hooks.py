@@ -787,6 +787,19 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                         return flyer_result
                     return None
 
+            # M3 acceptance arm, BEFORE the catering-signal admission below: a
+            # customer answering "we accept" to a quote we already sent carries no
+            # catering signal, so the admission check would drop it — and its lead
+            # is in SENT_TO_CUSTOMER, which F7's active-lead lookup excludes. It
+            # runs after the flyer-intent branch above so explicit flyer intent
+            # still wins.
+            acceptance_result = _try_catering_acceptance_intercept(
+                text, chat_id, event,
+                flyer_generation_enabled=flyer_generation_enabled,
+            )
+            if acceptance_result is not None:
+                return acceptance_result
+
             is_catering, signals = actions.classify_catering(text)
             proposal_workflow = (
                 actions.is_proposal_selection(text)
@@ -5763,6 +5776,86 @@ def _generate_proposals_deterministically(
     if rc in {0, 2, 4, 6, 11}:
         return {"action": "skip",
                 "reason": f"cf-router F7 primary: proposals generated deterministically for {lead_id}"}
+    return None
+
+
+# F7 ACCEPTANCE ARM (M3). A customer whose quote has been SENT replies "we accept"
+# — and before M3 nothing anywhere handled it. SENT_TO_CUSTOMER is deliberately NOT
+# in ACTIONABLE_LEAD_STATUSES, so `find_active_catering_lead_by_sender` returns
+# None, F7 Branch B never runs, and the message either created a SPURIOUS SECOND
+# LEAD (if it happened to classify as catering) or went to the LLM. Neither books
+# anything, so the booking existed nowhere.
+#
+# This arm needs its OWN admission because the F7 gate above admits on catering
+# signals and "we accept" carries none — the same reason M1 had to add the
+# QUALIFYING lead lookup for slot-filling answers.
+#
+# Cost discipline on the hot path, cheapest first: a pure-regex detector that
+# returns None for virtually every inbound, THEN one tolerant file read, and only
+# then the `identify-sender` subprocess. A bare "ok" is common, so the file-read
+# gate matters.
+F7_ACCEPTANCE_ARM_ENABLED = True
+
+
+def _try_catering_acceptance_intercept(
+    text: str, chat_id: str, event: Any, *, flyer_generation_enabled: bool = False,
+) -> Optional[dict]:
+    """Record a customer's explicit accept/decline of a quote already sent to them.
+
+    Returns a skip dict when the acceptance writer handled the turn, else None so
+    the inbound takes its existing route completely unchanged.
+
+    Precedence deliberately CEDED, in order:
+      * amendment-phrased text ("actually we accept but move the date") keeps the
+        R2A durable-capture path — the change matters more than the yes, and the
+        capture path is where changes are preserved;
+      * an owner inbound never books on a customer's behalf (that is
+        `mark-catering-lead-outcome`, an owner-identified audit path);
+      * a sender with a live flyer project is left to the existing flyer/catering
+        routing rather than claimed here — mirrors the same guard the F7 catering
+        block applies, so this arm cannot re-open the conflict class R2B-1 closed.
+    """
+    if not F7_ACCEPTANCE_ARM_ENABLED:
+        return None
+    detected = actions.detect_quote_acceptance(text)
+    if detected is None:
+        return None
+    if actions.is_amendment_phrased(text):
+        return None
+    if not actions.any_post_quote_lead_exists():
+        return None
+
+    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    if role == "owner":
+        return None
+    if flyer_generation_enabled and actions.has_non_delivered_flyer_project_by_sender(
+        phone, chat_id
+    ):
+        return None
+
+    lead = actions.find_post_quote_catering_lead_by_sender(phone, chat_id)
+    if not lead:
+        return None
+    lead_id = lead.get("lead_id", "?")
+    message_id = _extract_native_message_id(event) or _extract_message_id(event, chat_id, text)
+
+    rc = actions.invoke_record_catering_acceptance(
+        lead_id, chat_id, message_id, text, sender_role=role or "customer",
+    )
+    actions.audit_intercepted(
+        reason="f7_quote_acceptance", chat_id=chat_id,
+        code=lead.get("owner_approval_code") or "", subprocess_rc=rc,
+        detail=(f"post-quote {lead_id}; detector={detected['outcome']}; "
+                f"recorded deterministically by cf-router; LLM bypassed"),
+    )
+    # 0 = recorded / clarified / replay, 6 = recorded but the reply POST failed,
+    # 14 = held (nothing sent, deliberately). All three mutated or deliberately
+    # declined to act on state the script owns, so re-running the inbound through
+    # the LLM would double-handle it. Anything else (no signal server-side,
+    # not-found, schema, illegal transition) falls through untouched.
+    if rc in {0, 6, 14}:
+        return {"action": "skip",
+                "reason": f"cf-router F7: quote acceptance recorded for {lead_id}"}
     return None
 
 

@@ -72,3 +72,13 @@ EXIT_PROPOSAL_ACTIVE = 13
 # Distinct from EXIT_ILLEGAL_TRANSITION (=9) because the lead's status is
 # perfectly legal; only the send is withheld.
 EXIT_LEAD_ON_HOLD = 14
+
+# 15 — M3: apply-catering-owner-decision --discount-id named a discount the
+# CURRENT pricebook does not approve (unknown id) or no longer publishes
+# (active=false). Refused BEFORE any state change, so the lead is untouched.
+# Distinct from EXIT_INVALID_INPUT (=2) because the operator's next step is
+# specific and different: re-import the pricebook, or use one of the ids it
+# actually approves — not "fix your flags". Distinct from EXIT_NOT_FOUND (=4),
+# which in this script already means "no lead carries that approval code", so
+# reusing it would make the two failures indistinguishable in the exit status.
+EXIT_UNKNOWN_DISCOUNT = 15

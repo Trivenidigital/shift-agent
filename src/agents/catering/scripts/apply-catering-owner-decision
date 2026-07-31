@@ -69,12 +69,17 @@ from exit_codes import (  # noqa: E402
     EXIT_TRUTH_GUARD_FAILED,  # PR-B v3 review fix: distinct from bridge-unreachable
     EXIT_PRIVILEGE_DENIED,
     EXIT_LEAD_ON_HOLD,  # M4/G4: lead-scoped hold withheld the customer send
+    EXIT_UNKNOWN_DISCOUNT,  # M3: --discount-id the current pricebook does not approve
 )
+from catering_paths import CATERING_PRICEBOOK_PATH  # noqa: E402
 from audit_helpers import (  # noqa: E402
     log_config_load_failed_best_effort,
     log_quote_sent_lead_missing_best_effort,
 )
 from schemas import CateringQuoteSentLeadMissing  # noqa: E402  # PR-D2 commit 2
+from catering_proposal_sweep import (  # noqa: E402  # M3 validity window
+    quote_validity_line as _quote_validity_line,
+)
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
 # PR-D2 commit 1: SHIFT_AGENT_CONFIG_PATH env var override (test-only;
@@ -88,6 +93,13 @@ LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/de
 LEDGER_PATH = Path(os.environ.get(
     "SHIFT_AGENT_CATERING_QUOTE_LEDGER_PATH",
     "/opt/shift-agent/state/catering-quote-ledger.json"))
+# M3 --discount-id: the COMMERCIAL pricebook only. PR-B v3 removed this script's
+# catalog reads because an owner-edited quote has no catalog provenance; that rule
+# is about the MENU (see tests/test_pr_b_v3_static.py::test_menu_path_constant_
+# deleted, which this file still satisfies — no menu path, no Menu import). A
+# discount, by contrast, is a published commercial term the owner must be held to,
+# so it MUST be validated against the pricebook rather than taken on trust.
+PRICEBOOK_PATH = CATERING_PRICEBOOK_PATH
 
 # PR-B v3 — drafted-quote stdin caps and Unicode strip categories.
 # 8KB stdin read cap is generous (LLM drafts run ~300-500 chars in practice);
@@ -126,7 +138,7 @@ def _normalize_quote_text(s: str) -> str:
     return out[:_QUOTE_OUTPUT_CAP_CHARS]
 
 
-def _render_quote_from_lead_state(lead) -> str:
+def _render_quote_from_lead_state(lead, validity_days: int) -> str:
     """PR-CF1c 2026-05-12: render a default quote text from lead state alone.
 
     Mirrors finalize-catering-menu's --auto-default shape — server-authoritative,
@@ -145,11 +157,16 @@ def _render_quote_from_lead_state(lead) -> str:
     total = lead.quote_total_usd or 0
     event_date = (lead.extracted.event_date if lead.extracted else None) or "(TBD)"
     headcount = (lead.extracted.headcount if lead.extracted else None) or 0
+    # M3: a priced customer quote states how long it stands. Same helper (and same
+    # CateringConfig.proposal_validity_days) the proposal set's expires_at and the
+    # F14 customer template use, so every surface names one deadline.
+    validity = _quote_validity_line(datetime.now(timezone.utc), validity_days)
     return (
         f"Quote for {lead.lead_id} ({customer_name} / {customer_phone}):\n"
         f"{items_block}\n\n"
         f"Total: ${total}\n"
-        f"Event: {event_date} | Headcount: {headcount}"
+        f"Event: {event_date} | Headcount: {headcount}\n"
+        f"{validity}"
     )
 
 
@@ -214,7 +231,64 @@ def _emit_quote_skill_failed_best_effort(lead_id: str, code: str,
         )
 
 
-def _append_quote_ledger_best_effort(lead, *, source: str, now) -> None:
+def _recompute_with_discount(lead, discount_id: str):
+    """M3: validate `discount_id` against the CURRENT pricebook and recompute the
+    lead's total with it applied. Returns (quote_computation, error_message).
+
+    The kernel is the validator: an unknown or inactive id raises PricingError, which
+    is the refusal — a silently-ignored discount overcharges the customer and a
+    silently-applied unknown one undercharges. `requires_owner_code` discounts are
+    ALLOWED here and not treated as a blocker: that flag exists to stop automation
+    applying them, and this IS the owner acting.
+
+    Line prices come from the lead's ALREADY-COMMITTED selected_items, fed to the
+    kernel as overrides. That is deliberate — this script reads no menu (PR-B v3),
+    and re-deriving prices from a catalog would silently reprice items the owner
+    already approved. Because those numbers were only ever menu-derived estimates,
+    the resulting status is floored at "estimated": the kernel would call an
+    all-override quote "exact", which would overstate how firm these numbers are.
+    A kernel verdict of pending_owner_review still wins (a placeholder pricebook
+    must keep blocking).
+    """
+    try:
+        import catering_pricing as _pricing
+    except Exception as e:  # noqa: BLE001
+        return None, f"pricing kernel unavailable: {type(e).__name__}: {e}"
+    try:
+        pricebook = _pricing.load_pricebook(PRICEBOOK_PATH)
+    except Exception as e:  # noqa: BLE001 — a present-but-invalid pricebook
+        return None, f"pricebook unreadable: {e}"
+    if pricebook is None:
+        return None, (
+            f"no pricebook at {PRICEBOOK_PATH}; a discount can only be applied "
+            f"against published commercial terms. Import one with "
+            f"import-catering-pricebook."
+        )
+
+    items = list(lead.selected_items or [])
+    if not items:
+        return None, ("the lead has no selected items to discount (the customer has "
+                      "not finalized a menu)")
+
+    overrides = dict(pricebook.item_price_overrides)
+    for it in items:
+        overrides.setdefault(it.name, _pricing.usd_to_cents(it.price_usd))
+    priced_book = pricebook.model_copy(update={"item_price_overrides": overrides})
+
+    guest_count = (lead.extracted.headcount if lead.extracted else None) or 1
+    try:
+        qc = _pricing.compute_quote(
+            guest_count, None, [(it.name, it.qty) for it in items],
+            discount_id, priced_book, None,
+        )
+    except _pricing.PricingError as e:
+        return None, str(e)
+    if qc.price_status == "exact":
+        qc = qc.model_copy(update={"price_status": "estimated"})
+    return qc, None
+
+
+def _append_quote_ledger_best_effort(lead, *, source: str, now, quote_computation=None) -> None:
     """PR-B: append the lead's committed quote state to the quote ledger AFTER the
     lead-store commit succeeded and LEADS_LOCK is released (leaf lock held alone).
     BEST-EFFORT — a ledger failure NEVER rolls back the lead write; it logs loudly.
@@ -230,17 +304,43 @@ def _append_quote_ledger_best_effort(lead, *, source: str, now) -> None:
     test_menu_path_constant_deleted) precisely because an owner-edited quote is
     NOT derived from the menu or pricebook. Stamping a catalog version on it
     would assert a provenance the number does not have. The finalize path
-    stamps both on the version the owner is approving."""
+    stamps both on the version the owner is approving.
+
+    M3 EXCEPTION, and only this one: when `quote_computation` is passed, the owner
+    supplied `--discount-id` and the total was recomputed by the kernel against a
+    SPECIFIC pricebook version. That version IS this record's provenance, so it is
+    stamped along with the kernel's price_status. `menu_version` still stays None —
+    this script still reads no menu, so there is still no catalog provenance to
+    claim. Without `quote_computation` the behavior above is byte-identical."""
     try:
         import catering_quote_ledger as _ql  # lazy; module is deployed flat
         selected = [{"name": it.name, "qty": it.qty, "price_usd": it.price_usd}
                     for it in (lead.selected_items or [])]
+        quote_text = lead.quote_text or ""
+        price_status = "estimated"
+        pricebook_version = None
+        if quote_computation is not None:
+            import catering_pricing as _pricing
+            price_status = quote_computation.price_status
+            pricebook_version = quote_computation.pricebook_version
+            # The discount is ATTRIBUTED on the record, not just folded into the
+            # total: "why is this cheaper than v(N-1)?" must be answerable from the
+            # ledger alone, without re-deriving it from the pricebook.
+            quote_text = (
+                f"{quote_text}\n\n"
+                f"Discount applied by owner: "
+                f"{quote_computation.discount_name or quote_computation.discount_id} "
+                f"({quote_computation.discount_id}) "
+                f"-{_pricing.format_cents(quote_computation.discount_cents)}\n"
+                f"Recomputed total: {_pricing.format_cents(quote_computation.total_cents)}"
+            ).strip()
         res = _ql.append_version(
-            lead_id=lead.lead_id, quote_text=lead.quote_text or "",
+            lead_id=lead.lead_id, quote_text=quote_text,
             quote_total_usd=lead.quote_total_usd or 0, selected_items=selected,
             source=source, approval_code=lead.owner_approval_code, created_at=now,
             data_path=LEDGER_PATH,
-            price_status="estimated",
+            price_status=price_status,
+            pricebook_version=pricebook_version,
         )
         if not res.ok:
             sys.stderr.write(
@@ -409,6 +509,16 @@ def main() -> int:
              "should see before approving.",
     )
     ap.add_argument(
+        "--discount-id", default="",
+        help="M3: apply a pricebook-approved discount and recompute the total. "
+             "Validated through the pricing kernel against the CURRENT pricebook — "
+             "an unknown or inactive id is refused (exit 15) BEFORE any state "
+             "change. `requires_owner_code` discounts ARE allowed here: that flag "
+             "exists to stop automation applying them, and this is the owner path. "
+             "On approve it requires --quote-from-lead-state, so the recomputed "
+             "total is what the customer actually reads.",
+    )
+    ap.add_argument(
         "--sender-role", required=True,
         choices=["owner", "employee", "customer", "unknown"],
         help="resolved sender role from identify-sender; must be 'owner' to mutate state. "
@@ -429,6 +539,23 @@ def main() -> int:
     if args.decision == "edit" and not args.edit_text.strip():
         sys.stderr.write("--edit-text required when decision=edit\n")
         return EXIT_INVALID_INPUT
+
+    discount_id = args.discount_id.strip()
+    if discount_id:
+        if args.decision == "reject":
+            sys.stderr.write(
+                "--discount-id is meaningless with decision=reject (nothing is sent)\n")
+            return EXIT_INVALID_INPUT
+        if args.decision == "approve" and not args.quote_from_lead_state:
+            # An LLM-drafted body was composed without knowing about the discount,
+            # so the text and the recomputed total would disagree — and the text is
+            # what the customer believes. Refuse rather than send a mismatch.
+            sys.stderr.write(
+                "--discount-id on approve requires --quote-from-lead-state so the "
+                "recomputed total is the number the customer actually reads "
+                "(a stdin-drafted quote was written without the discount)\n"
+            )
+            return EXIT_INVALID_INPUT
 
     code = args.code.strip()
     if not code.startswith("#") or len(code) != 6:
@@ -455,6 +582,7 @@ def main() -> int:
     target_jid: Optional[str] = None
     new_status_for_output: str = ""
     lead_id_for_output: str = ""
+    quote_computation = None   # M3: set only when --discount-id was supplied
 
     with FileLock(LEADS_LOCK):
         store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
@@ -666,13 +794,32 @@ def main() -> int:
         new_status = decision_map[args.decision]
         new_status_for_output = new_status
 
+        # M3 --discount-id: validate + recompute BEFORE the state write, so an
+        # unknown or inactive discount leaves the lead exactly where it was rather
+        # than parked in OWNER_APPROVED with a total nobody agreed to. Mirrors the
+        # M4 hold guard's refuse-before-mutation shape for the same reason.
+        if discount_id:
+            quote_computation, discount_error = _recompute_with_discount(lead, discount_id)
+            if quote_computation is None:
+                sys.stderr.write(
+                    f"--discount-id {discount_id!r} refused for {lead.lead_id}: "
+                    f"{discount_error}\n"
+                )
+                return EXIT_UNKNOWN_DISCOUNT
+            import catering_pricing as _pricing_mod
+            discounted_total = _pricing_mod.cents_to_whole_dollars(
+                quote_computation.total_cents)
+
         # Update lead in-place
         for i, l in enumerate(store.leads):
             if l.lead_id == lead.lead_id:
-                store.leads[i] = l.model_copy(update={
-                    "status": new_status,
-                    "updated_at": now,
-                })
+                update = {"status": new_status, "updated_at": now}
+                if discount_id:
+                    # The recomputed total becomes the lead's total, so the
+                    # server-rendered customer quote below (and the deposit hook,
+                    # and the owner's next card) all read ONE number.
+                    update["quote_total_usd"] = discounted_total
+                store.leads[i] = l.model_copy(update=update)
                 lead = store.leads[i]
                 break
 
@@ -705,7 +852,8 @@ def main() -> int:
                         "lead with non-empty selected_items\n"
                     )
                     return EXIT_INVALID_INPUT
-                raw_quote = _render_quote_from_lead_state(lead)
+                raw_quote = _render_quote_from_lead_state(
+                    lead, cfg.catering.proposal_validity_days)
             else:
                 if not args.quote_text_stdin:
                     _emit_quote_skill_failed_best_effort(
@@ -751,6 +899,25 @@ def main() -> int:
                 # handles; truth-guard fail needs a re-DRAFT (only the SKILL
                 # can do that). Collision would silently misroute retry logic.
                 return EXIT_TRUTH_GUARD_FAILED
+
+            # M3: persist the EXACT normalized text the customer is about to
+            # receive. Until now NO write site ever put it on the lead — all three
+            # model_copy calls in this script updated only status/updated_at — so
+            # the text the customer actually got existed nowhere durable and every
+            # later "what did we quote them?" had to be reconstructed from the
+            # transcript. The lead docstring has claimed this contract ("quote_text
+            # ... populated ONLY by apply-catering-owner-decision on owner approve")
+            # since PR-CF1; this is the code that makes it true.
+            #
+            # PR-B v3 constraints preserved: the stored string is the post-normalize,
+            # post-truth-guard body WITHOUT the bridge template_bypass prefix (that
+            # header is transport plumbing, not quote content), and NO catalog/
+            # pricebook version is stamped anywhere by this script.
+            for i, l in enumerate(store.leads):
+                if l.lead_id == lead.lead_id:
+                    store.leads[i] = l.model_copy(update={"quote_text": quote_text})
+                    lead = store.leads[i]
+                    break
 
         atomic_write_json(LEADS_PATH, store)
 
@@ -805,8 +972,12 @@ def main() -> int:
     # held ALONE (leaf lock). Best-effort: never rolls back the OWNER_EDITED write.
     # (approve does NOT append here: the finalize path already ledgered the version
     # the owner is approving; reject leaves the quote unchanged.)
-    if args.decision == "edit":
-        _append_quote_ledger_best_effort(lead, source="owner_edit", now=now)
+    # M3: a discount is an owner edit to the money whichever decision carried it, so
+    # approve-with-discount commits a version too — otherwise the discounted number
+    # the customer just received would exist on the lead but in no committed version.
+    if args.decision == "edit" or (discount_id and args.decision == "approve"):
+        _append_quote_ledger_best_effort(lead, source="owner_edit", now=now,
+                                         quote_computation=quote_computation)
 
     # Outside lock: handle outbound for approve
     if args.decision != "approve":
@@ -983,10 +1154,15 @@ def main() -> int:
             ),
         )
 
-        # Step 3: state mutation THIRD.
+        # Step 3: state mutation THIRD. M3 re-stamps quote_text here as well as at
+        # the pre-bridge write: this store was RE-LOADED from disk after the POST,
+        # so a concurrent writer could have replaced the row we stamped. This copy
+        # is the authoritative "text the customer demonstrably received" — the
+        # bridge returned mid_or_err for exactly this body.
         store.leads[matched_idx] = store.leads[matched_idx].model_copy(update={
             "status": "SENT_TO_CUSTOMER",
             "updated_at": now2,
+            "quote_text": quote_text,
         })
         atomic_write_json(LEADS_PATH, store)
 
