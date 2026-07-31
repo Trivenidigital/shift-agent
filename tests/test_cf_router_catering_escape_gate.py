@@ -108,16 +108,19 @@ _DEFAULT_PROJECT = object()  # sentinel: "use a live project" vs. explicit None 
 
 
 def _wire(monkeypatch, hooks_mod, actions_mod, *, role="customer",
-          project=_DEFAULT_PROJECT, f7_declines=False, classify=None):
+          project=_DEFAULT_PROJECT, f7_declines=False, classify=None, open_lead=None):
     """Monkeypatch every dependency the gate touches. Returns a _Spies recorder.
     classify=None keeps the REAL classify_catering (wrapped for call counting).
-    project=None means NO active flyer project (scoping no-op)."""
+    project=None means NO active flyer project (scoping no-op).
+    open_lead=None means the sender has NO open catering lead (F7's canonical
+    lookup is stubbed so the Windows suite never reads the deployed leads file)."""
     s = _Spies()
     if project is _DEFAULT_PROJECT:
         project = _project()
 
     monkeypatch.setattr(actions_mod, "lid_to_phone_via_identify_sender", lambda cid: (PHONE, role))
     monkeypatch.setattr(actions_mod, "find_active_flyer_project_by_sender", lambda p, c: project)
+    monkeypatch.setattr(actions_mod, "find_active_catering_lead_by_sender", lambda p, c: open_lead)
     monkeypatch.setattr(actions_mod, "audit_intercepted", lambda **kw: s.audits.append(kw))
     monkeypatch.setattr(actions_mod, "send_flyer_text",
                         lambda cid, txt, **kw: s.sent.append((cid, txt)) or (True, "mid1", ""))
@@ -531,6 +534,117 @@ def test_no_active_project_compound_reaches_delivery_state_guard(monkeypatch):
     assert [a.get("reason") for a in audits] == ["flyer_delivery_state_guard"]
     assert "flyer_catering_intent_clarification" not in [a.get("reason") for a in audits]
     assert classify_calls["n"] == 1
+
+
+# ── P1-1 open-lead routing precedence (the live 2026-07-24 recurrence) ───────
+# A customer mid-catering-conversation (OPEN lead L0019) sent menu/proposal
+# follow-ups that scored classify_catering=weak; each was swallowed by the flyer
+# active-project intercept (`flyer_reference_exact_edit_queued`, stale project
+# F0225). The gate must route these to catering BEFORE the flyer intercept.
+OPEN_LEAD_FOLLOWUPS = [
+    "Can you present me two best menus to choose from.",
+    "Yes propose two menus",
+    "For my birthday party I want to select items from your menu",
+]
+
+
+@pytest.mark.parametrize("followup", OPEN_LEAD_FOLLOWUPS)
+def test_open_lead_menu_followup_escapes_to_catering_over_stale_flyer(monkeypatch, followup):
+    """Open catering lead + a menu/proposal follow-up escapes to catering even
+    with a STALE flyer project (manual_edit_required + queued edit) present — the
+    exact live scenario. classify_catering scores weak (False) on these, so this
+    is the path the pre-fix gate fell through on."""
+    hooks_mod, actions_mod = _load_plugin()
+    # Precondition: production classification of these follow-ups is weak.
+    assert actions_mod.classify_catering(followup)[0] is False
+    s = _wire(monkeypatch, hooks_mod, actions_mod,
+              project=_project("manual_edit_required", "F0225"),
+              open_lead=_lead("L0019"))
+    out = hooks_mod._try_flyer_catering_escape_gate(followup, CHAT, _event())
+    assert out["action"] == "skip" and "F7" in out["reason"]
+    assert len(s.f7_calls) == 1 and s.f7_calls[0]["allow_new_lead"] is True
+    assert _reasons(s) == ["flyer_active_project_open_lead_catering_escape"]
+    assert "flyer_reference_exact_edit_queued" not in _reasons(s)
+    # No flyer capture / no dual outcome.
+    assert s.update_calls == [] and s.flyer_arm_calls == []
+
+
+def test_explicit_flyer_edit_with_open_lead_stays_flyer(monkeypatch):
+    """An explicit flyer edit ("change the price on my flyer to $8") WHILE a
+    catering lead is open must NOT be over-escaped — it falls through to the flyer
+    path (the deterministic flyer-signal exclusion holds)."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod,
+              project=_project("manual_edit_required", "F0225"),
+              open_lead=_lead("L0019"))
+    out = hooks_mod._try_flyer_catering_escape_gate(
+        "change the price on my flyer to $8", CHAT, _event())
+    assert out is hooks_mod._GATE_FALLTHROUGH
+    assert s.f7_calls == [] and s.sent == [] and s.audits == []
+
+
+def test_complaint_while_flyer_project_active_escalates_not_swallowed(monkeypatch):
+    """"Are u crazy" while a flyer project is active routes to an escalation ack,
+    NOT a flyer queued-edit. No classifier call, no lead, no revision."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod,
+              project=_project("manual_edit_required", "F0225"),
+              open_lead=_lead("L0019"))
+    out = hooks_mod._try_flyer_catering_escape_gate("Are u crazy", CHAT, _event())
+    assert out == {"action": "skip", "reason": "cf-router customer complaint escalation sent"}
+    assert _reasons(s) == ["customer_complaint_escalation"]
+    assert len(s.sent) == 1, "exactly one escalation ack"
+    assert s.f7_calls == [] and s.flyer_arm_calls == [] and s.update_calls == []
+    assert s.classify_calls == 0, "a complaint must not invoke classify_catering"
+    assert "flyer_reference_exact_edit_queued" not in _reasons(s)
+
+
+def test_complaint_with_open_lead_no_flyer_project_still_escalates(monkeypatch):
+    """The complaint guard fires on catering-lead-OR-flyer-project: an open lead
+    with no active flyer project still escalates (never reaches the fallthrough)."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, project=None, open_lead=_lead("L0019"))
+    out = hooks_mod._try_flyer_catering_escape_gate("this is broken", CHAT, _event())
+    assert out == {"action": "skip", "reason": "cf-router customer complaint escalation sent"}
+    assert _reasons(s) == ["customer_complaint_escalation"]
+    assert s.classify_calls == 0
+
+
+def test_no_open_lead_proposal_phrasing_unchanged(monkeypatch):
+    """Regression: a proposal-phrased follow-up with NO open catering lead keeps
+    the prior behavior — classify=weak ⇒ fall through to the flyer arms unchanged.
+    classify_catering is invoked exactly once (the not-catering scope check)."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod,
+              project=_project("manual_edit_required", "F0225"), open_lead=None)
+    out = hooks_mod._try_flyer_catering_escape_gate(
+        "Can you present me two best menus to choose from.", CHAT, _event())
+    assert out is hooks_mod._GATE_FALLTHROUGH
+    assert s.f7_calls == [] and s.sent == [] and s.audits == []
+    assert s.classify_calls == 1
+
+
+def test_open_lead_escape_invokes_classify_at_most_once(monkeypatch):
+    """On the open-lead escape path the gate calls classify_catering exactly once
+    (F7 is stubbed here; the single-flight memo covers the dispatch-level call)."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod,
+              project=_project("manual_edit_required", "F0225"),
+              open_lead=_lead("L0019"))
+    hooks_mod._try_flyer_catering_escape_gate("Yes propose two menus", CHAT, _event())
+    assert s.classify_calls == 1
+    assert _reasons(s) == ["flyer_active_project_open_lead_catering_escape"]
+
+
+def test_new_open_lead_reason_literals_are_enum_members():
+    from typing import get_args
+    import schemas
+    allowed = set(get_args(schemas.CfRouterIntercepted.model_fields["reason"].annotation))
+    for reason in (
+        "flyer_active_project_open_lead_catering_escape",
+        "customer_complaint_escalation",
+    ):
+        assert reason in allowed, f"{reason} missing from CfRouterIntercepted.reason"
 
 
 # ── Static placement proof (runs on every platform) ─────────────────────────
