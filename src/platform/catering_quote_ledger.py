@@ -341,6 +341,9 @@ def append_version(
     source_message_id: Optional[str] = None,
     approval_code: Optional[str] = None,
     created_at: Optional[datetime] = None,
+    menu_version: Optional[int] = None,
+    pricebook_version: Optional[int] = None,
+    price_status: Optional[str] = None,
     data_path=None,
     lock_path=None,
     expected_owner: Optional[str] = None,
@@ -351,6 +354,10 @@ def append_version(
 ) -> LedgerResult:
     """Append ONE committed quote version to the ledger. Returns LedgerResult with
     the assigned `version` (monotonic per lead) + `ledger_entry_id` on success. On
+    M2: `menu_version` / `pricebook_version` / `price_status` stamp WHICH catalog
+    and pricebook produced this number and how firm it is. All three are optional
+    — records committed before the pricing kernel landed carry None.
+
     ANY failure the store is PRESERVED, a metadata-only append_failed row is
     emitted, and ok=False — the CALLER's lead write is never rolled back (this is a
     best-effort sidecar; the caller logs loudly and proceeds).
@@ -410,6 +417,8 @@ def append_version(
                     quote_total_usd=quote_total_usd, selected_items=norm_items,
                     source=source, source_message_id=source_message_id,
                     approval_code=approval_code, created_at=created_at,
+                    menu_version=menu_version, pricebook_version=pricebook_version,
+                    price_status=price_status,
                 )
             except Exception:
                 _emit_failed(lead_id, source, "record_validation_failed", emit_audit)

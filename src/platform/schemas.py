@@ -2721,13 +2721,18 @@ class CateringPricebook(BaseModel):
         a typo. This says what actually breaks: every downstream cent is dollar
         math, so an INR pricebook is a wrong-money bug, not a formatting one.
         """
-        if isinstance(v, str) and v.strip().upper() != "USD":
-            raise ValueError(
-                f"currency={v!r} is not supported: catering pricing is USD-only "
-                "end-to-end (deposit cents, quote totals and every '$' template "
-                "are dollar math). A non-USD pricebook would render foreign "
-                "amounts through dollar arithmetic. Refusing to load."
-            )
+        if isinstance(v, str):
+            normalized = v.strip().upper()
+            if normalized != "USD":
+                raise ValueError(
+                    f"currency={v!r} is not supported: catering pricing is USD-only "
+                    "end-to-end (deposit cents, quote totals and every '$' template "
+                    "are dollar math). A non-USD pricebook would render foreign "
+                    "amounts through dollar arithmetic. Refusing to load."
+                )
+            # Case/whitespace normalization only — a hand-edited "usd" is the
+            # same currency, not a different one.
+            return normalized
         return v
 
     @model_validator(mode="after")

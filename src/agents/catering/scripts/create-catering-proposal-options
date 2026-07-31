@@ -38,12 +38,13 @@ from schemas import (  # noqa: E402
     MenuItem,
 )
 from catering_recompose import recompose_plan  # noqa: E402  # PR-D mix-and-match assist
+from catering_paths import CATERING_MENU_PATH  # noqa: E402
 
 PROPOSALS_PATH = Path("/opt/shift-agent/state/catering-proposals.json")
 PROPOSALS_LOCK = Path("/opt/shift-agent/state/catering-proposals.json.lock")
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
-MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
+MENU_PATH = CATERING_MENU_PATH
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 LOG_LOCK = Path("/opt/shift-agent/logs/decisions.log.lock")
 NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")

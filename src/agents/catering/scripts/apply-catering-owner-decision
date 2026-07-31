@@ -215,7 +215,18 @@ def _append_quote_ledger_best_effort(lead, *, source: str, now) -> None:
     lead-store commit succeeded and LEADS_LOCK is released (leaf lock held alone).
     BEST-EFFORT — a ledger failure NEVER rolls back the lead write; it logs loudly.
     Used on the owner-EDIT path so each owner revision is a durable committed
-    version. `lead` is the updated CateringLead model."""
+    version. `lead` is the updated CateringLead model.
+
+    M2 price_status: "estimated", never "exact" — an owner EDIT is free text the
+    owner authored, not a number the deterministic kernel derived from the
+    pricebook.
+
+    M2 menu_version / pricebook_version stay None here, deliberately. PR-B v3
+    removed this script's catalog reads (see tests/test_pr_b_v3_static.py::
+    test_menu_path_constant_deleted) precisely because an owner-edited quote is
+    NOT derived from the menu or pricebook. Stamping a catalog version on it
+    would assert a provenance the number does not have. The finalize path
+    stamps both on the version the owner is approving."""
     try:
         import catering_quote_ledger as _ql  # lazy; module is deployed flat
         selected = [{"name": it.name, "qty": it.qty, "price_usd": it.price_usd}
@@ -225,6 +236,7 @@ def _append_quote_ledger_best_effort(lead, *, source: str, now) -> None:
             quote_total_usd=lead.quote_total_usd or 0, selected_items=selected,
             source=source, approval_code=lead.owner_approval_code, created_at=now,
             data_path=LEDGER_PATH,
+            price_status="estimated",
         )
         if not res.ok:
             sys.stderr.write(

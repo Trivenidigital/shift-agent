@@ -10,7 +10,8 @@ Dietary: {dietary}
 Selected menu ({item_count} items):
 {items_section}
 
-Internal estimate from current menu item prices: ${quote_total_usd}
+{price_breakdown}Internal estimate from current menu item prices: ${quote_total_usd}
+{price_status_line}
 Review/edit before approving the final customer quote.
 {price_drift_note}
 

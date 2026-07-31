@@ -58,11 +58,12 @@ from schemas import (  # noqa: E402
     CateringProposalStore,
     Menu,
 )
+from catering_paths import CATERING_MENU_PATH  # noqa: E402
 
 DEFAULT_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 DEFAULT_LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 DEFAULT_PROPOSALS_PATH = Path("/opt/shift-agent/state/catering-proposals.json")
-DEFAULT_MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
+DEFAULT_MENU_PATH = CATERING_MENU_PATH
 DEFAULT_LESSONS_PATH = Path("/opt/shift-agent/lessons/catering.md")
 DEFAULT_ROSTER_PATH = Path("/opt/shift-agent/roster.json")
 DEFAULT_LEARNING_SUMMARY_PATH = Path("/opt/shift-agent/state/catering-learning-summary.json")

@@ -38,12 +38,13 @@ Deployed FLAT to /opt/shift-agent/ (same contract as catering_quote_ledger).
 """
 from __future__ import annotations
 
+import json
 import math
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from schemas import (
     CateringDiscount,
@@ -524,25 +525,45 @@ def default_basket(
     return None, out
 
 
-# ── Store loaders (I/O — deliberately OUTSIDE the pure kernel) ───────────────
+# ── Store loader (I/O — deliberately OUTSIDE the pure kernel) ───────────────
 def load_pricebook(path: Any) -> Optional[CateringPricebook]:
-    """Load the pricebook store, or None when absent.
+    """Load the pricebook, or None when the file is absent or empty.
 
     Accepts BOTH on-disk shapes: the `CateringPricebookStore` envelope written
     by import-catering-pricebook, and a bare `CateringPricebook` document (what
-    an operator hand-writes / the seed template looks like). Raises on a present
-    but invalid file — a corrupt pricebook must never degrade to "no pricebook",
-    which would silently revert callers to pre-M2 flat pricing.
+    an operator hand-writes, and what the seed template is).
+
+    Raises `PricingError` on a present-but-invalid file. Degrading to "no
+    pricebook" would silently revert callers to pre-M2 flat pricing — dropping
+    the owner's fees, tax and packages out of a real quote without anyone
+    noticing.
+
+    Deliberately does NOT use safe_io.safe_load_json / load_model: those
+    rename-quarantine a corrupt file to `.corrupt-<epoch>`. That is right for
+    regenerable agent state and wrong for a hand-maintained commercial source of
+    truth — the operator must find their pricebook where they left it. Mirrors
+    catering_quote_ledger._load_store's preservation contract.
     """
     p = Path(path)
-    if not p.exists():
+    try:
+        if not p.exists():
+            return None
+        raw = p.read_text(encoding="utf-8")
+    except OSError as e:
+        raise PricingError(f"pricebook at {p} is unreadable: {e}") from e
+    if not raw.strip():
         return None
-    from safe_io import load_model  # lazy: keeps the kernel importable off-box
-
-    store, status = load_model(p, CateringPricebookStore, default=None)
-    if store is not None and status == "ok":
-        return store.pricebook
-    book, status = load_model(p, CateringPricebook, default=None)
-    if book is None or status != "ok":
-        raise PricingError(f"pricebook at {p} is present but unloadable (status={status})")
-    return book
+    try:
+        doc = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        raise PricingError(f"pricebook at {p} is not valid JSON: {e}") from e
+    if not isinstance(doc, dict):
+        raise PricingError(
+            f"pricebook at {p} must be a JSON object; got {type(doc).__name__}"
+        )
+    try:
+        if "pricebook" in doc:
+            return CateringPricebookStore.model_validate(doc).pricebook
+        return CateringPricebook.model_validate(doc)
+    except ValidationError as e:
+        raise PricingError(f"pricebook at {p} failed validation:\n{e}") from e

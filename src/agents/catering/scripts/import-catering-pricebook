@@ -44,7 +44,7 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
 
 from safe_io import (  # noqa: E402
-    FileLock, atomic_write_json, ndjson_append, flock, load_model,
+    FileLock, atomic_write_json, ndjson_append, flock,
 )
 from schemas import (  # noqa: E402
     CateringPricebook, CateringPricebookStore, CateringPricebookUpdated,
@@ -53,6 +53,7 @@ from catering_paths import (  # noqa: E402
     CATERING_PRICEBOOK_PATH, CATERING_PRICEBOOK_LOCK,
     CATERING_PRICEBOOK_ARCHIVE_DIR,
 )
+import catering_pricing as _pricing  # noqa: E402
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_SCHEMA_VIOLATION, EXIT_PRIVILEGE_DENIED,
 )
@@ -103,22 +104,20 @@ def _parse_pricebook(raw: str) -> CateringPricebook:
 
 
 def _load_prior() -> CateringPricebook | None:
-    """Current pricebook, or None on first run. Exits 5 if present-but-corrupt —
-    silently treating a corrupt pricebook as absent would reset the version
-    counter and let an archive be skipped."""
-    if not PRICEBOOK_PATH.exists():
-        return None
-    store, status = load_model(PRICEBOOK_PATH, CateringPricebookStore, default=None)
-    if store is not None and status == "ok":
-        return store.pricebook
-    book, status = load_model(PRICEBOOK_PATH, CateringPricebook, default=None)
-    if book is None or status != "ok":
+    """Current pricebook, or None on first run. Exits 5 if present-but-corrupt.
+
+    Treating a corrupt pricebook as absent would reset the version counter AND
+    skip the archive, so the damaged file would be overwritten with no copy
+    kept. The loader leaves it exactly where it is for the operator to inspect.
+    """
+    try:
+        return _pricing.load_pricebook(PRICEBOOK_PATH)
+    except _pricing.PricingError as e:
         sys.stderr.write(
-            f"existing pricebook at {PRICEBOOK_PATH} is unreadable (status={status}); "
-            "refusing to overwrite it. Move it aside manually after inspection.\n"
+            f"existing pricebook is unreadable, refusing to overwrite it: {e}\n"
+            "Inspect and move it aside manually, then re-run.\n"
         )
         sys.exit(EXIT_SCHEMA_VIOLATION)
-    return book
 
 
 def main() -> int:
