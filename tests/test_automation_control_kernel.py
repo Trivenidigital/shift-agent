@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -329,3 +330,120 @@ class TestCommandDetection:
     def test_owner_approve_is_not_an_automation_command(self):
         # #XXXXX approve is F8 territory, not automation-control.
         assert ac.detect_owner_command("approve #A3F9K") is None
+
+
+# ── M4/G3: owner pause verb + bounded takeover window ────────────────────────
+
+class TestOwnerPauseCommand:
+    @pytest.mark.parametrize("text", [
+        "pause #A3F9K", "#A3F9K pause", "hold #A3F9K", "#A3F9K hold",
+        "please pause #A3F9K for now",
+    ])
+    def test_owner_pause_and_hold_detected(self, text):
+        assert ac.detect_owner_command(text) == ("paused", "#A3F9K")
+
+    def test_owner_pause_requires_a_code(self):
+        """Same rule as takeover: the code is what identifies WHICH customer."""
+        assert ac.detect_owner_command("pause everything") is None
+        assert ac.detect_owner_command("hold off") is None
+
+    def test_release_wins_over_pause_when_both_appear(self):
+        """The un-suppress verb must never be shadowed — the same precedence the
+        customer detector applies to `resume`."""
+        assert ac.detect_owner_command("resume #A3F9K, no need to pause") == ("active", "#A3F9K")
+
+    def test_takeover_still_wins_over_pause(self):
+        assert ac.detect_owner_command("takeover #A3F9K and pause it") == ("takeover", "#A3F9K")
+
+    def test_owner_pause_suppresses_and_expires(self):
+        ac.set_mode(CUSTOMER, ac.MODE_PAUSED, actor="owner", reason="owner_pause",
+                    pause_seconds=3600)
+        assert ac.get_mode(CUSTOMER) == "paused"
+        assert ac.is_suppressed(CUSTOMER) is True
+
+        doc = json.loads(_state_file().read_text(encoding="utf-8"))
+        key = next(iter(doc["conversations"]))
+        doc["conversations"][key]["pause_expires_ts"] = "2000-01-01T00:00:00+00:00"
+        _state_file().write_text(json.dumps(doc), encoding="utf-8")
+        ac._LAST_KNOWN_MODE.clear()
+
+        assert ac.get_mode(CUSTOMER) == "active"
+
+    def test_owner_pause_uses_the_seven_day_default(self):
+        before = datetime.now(tz=timezone.utc)
+        ac.set_mode(CUSTOMER, ac.MODE_PAUSED, actor="owner", reason="owner_pause")
+        rec = ac.get_record(CUSTOMER)
+        expires = datetime.fromisoformat(rec["pause_expires_ts"])
+        delta = (expires - before).total_seconds()
+        assert abs(delta - ac.DEFAULT_PAUSE_SECONDS) < 60
+
+
+class TestTakeoverExpiry:
+    def test_takeover_records_an_expiry(self):
+        before = datetime.now(tz=timezone.utc)
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="owner_takeover")
+        rec = ac.get_record(CUSTOMER)
+        expires = datetime.fromisoformat(rec["takeover_expires_ts"])
+        delta = (expires - before).total_seconds()
+        assert abs(delta - ac.TAKEOVER_DEFAULT_SECONDS) < 60
+        assert ac.get_mode(CUSTOMER) == "takeover"
+
+    def test_expired_takeover_reads_active(self):
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t",
+                    takeover_seconds=3600)
+        assert ac.get_mode(CUSTOMER) == "takeover"
+
+        doc = json.loads(_state_file().read_text(encoding="utf-8"))
+        key = next(iter(doc["conversations"]))
+        doc["conversations"][key]["takeover_expires_ts"] = "2000-01-01T00:00:00+00:00"
+        _state_file().write_text(json.dumps(doc), encoding="utf-8")
+        ac._LAST_KNOWN_MODE.clear()
+
+        assert ac.get_mode(CUSTOMER) == "active"
+        assert ac.is_suppressed(CUSTOMER) is False
+
+    def test_reissuing_takeover_extends_the_window(self):
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t",
+                    takeover_seconds=60)
+        first = ac.get_record(CUSTOMER)["takeover_expires_ts"]
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t")
+        second = ac.get_record(CUSTOMER)["takeover_expires_ts"]
+        assert datetime.fromisoformat(second) > datetime.fromisoformat(first)
+
+    def test_legacy_takeover_without_expiry_never_expires(self):
+        """Records written before M4 carry no takeover_expires_ts. Silently
+        un-muting a conversation a human is handling is the failure this kernel
+        exists to prevent, so a missing expiry keeps the old never-expires
+        behavior until the owner re-issues the takeover."""
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t")
+        doc = json.loads(_state_file().read_text(encoding="utf-8"))
+        key = next(iter(doc["conversations"]))
+        del doc["conversations"][key]["takeover_expires_ts"]
+        _state_file().write_text(json.dumps(doc), encoding="utf-8")
+        ac._LAST_KNOWN_MODE.clear()
+
+        assert ac.get_mode(CUSTOMER) == "takeover"
+
+    def test_malformed_expiry_is_not_expired(self):
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t")
+        doc = json.loads(_state_file().read_text(encoding="utf-8"))
+        key = next(iter(doc["conversations"]))
+        doc["conversations"][key]["takeover_expires_ts"] = "not-a-timestamp"
+        _state_file().write_text(json.dumps(doc), encoding="utf-8")
+        ac._LAST_KNOWN_MODE.clear()
+
+        assert ac.get_mode(CUSTOMER) == "takeover"
+
+
+class TestOwnerConfirmationText:
+    def test_each_suppressing_verb_states_its_window(self):
+        pause = ac.owner_confirmation(ac.MODE_PAUSED, "#A3F9K")
+        takeover = ac.owner_confirmation(ac.MODE_TAKEOVER, "#A3F9K")
+        active = ac.owner_confirmation(ac.MODE_ACTIVE, "#A3F9K")
+        assert "7 days" in pause and "#A3F9K" in pause and "resume" in pause
+        assert "3 days" in takeover and "#A3F9K" in takeover
+        assert "resumed" in active and "#A3F9K" in active
+
+    def test_confirmations_are_deterministic(self):
+        assert ac.owner_confirmation(ac.MODE_PAUSED, "#A3F9K") == \
+            ac.owner_confirmation(ac.MODE_PAUSED, "#A3F9K")
