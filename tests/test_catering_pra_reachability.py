@@ -99,6 +99,7 @@ class _Spies:
         self.captures = []
         self.proposals = []  # (lead_id, chat_id, message_id, text) per deterministic invoke
         self.selects = []    # (lead_id, chat_id, message_id, text) per selection invoke
+        self.applies = []    # (lead_id, kwargs) per M1 amendment/answer application invoke
 
 
 def _wire(monkeypatch, hooks_mod, actions_mod, *, active_lead, role="customer",
@@ -138,11 +139,25 @@ def _wire(monkeypatch, hooks_mod, actions_mod, *, active_lead, role="customer",
     monkeypatch.setattr(hooks_mod.catering_amendments, "capture_branch_b_amendment",
                         lambda **kw: s.captures.append(kw) or CaptureResult(
                             ok=capture_ok, amendment_id="A0001", idempotent=False))
+    # M1 2026-07-31: a NEW capture is now APPLIED to the lead inline (the R2A sidecar
+    # stopped being write-only). Spied so these routing pins never shell out.
+    monkeypatch.setattr(actions_mod, "invoke_amend_catering_lead",
+                        lambda lead_id, **kw: s.applies.append((lead_id, kw)) or 0)
     return s
 
 
 def _reasons(s):
     return [a["reason"] for a in s.audits]
+
+
+# M1 2026-07-31: a NEW R2A capture emits the application row BEFORE the canonical
+# suppression row — capture is no longer the end of the arm, it is the durable step
+# before the amendment is materialised onto the lead. A REPLAYED capture has nothing
+# to apply and still emits the suppression row alone.
+R2A_CAPTURED_REASONS = [
+    "f7_primary_amendment_applied",
+    "f7_primary_followup_suppressed",
+]
 
 
 # ── Incident replay: new lead over stale + DETERMINISTIC generation ─────────
@@ -217,7 +232,7 @@ def test_r2a_canary_amendment_keeps_capture_path(monkeypatch):
     assert "follow-up" in out["reason"]
     assert len(s.captures) == 1, "amendment-phrased text is durably captured (R2A)"
     assert s.creates == [], "an amendment must NEVER open a second lead"
-    assert _reasons(s) == ["f7_primary_followup_suppressed"]
+    assert _reasons(s) == R2A_CAPTURED_REASONS
     assert len(s.canonical) == 1
 
 
@@ -300,7 +315,7 @@ def test_amendment_phrased_proposal_request_stays_r2a(monkeypatch):
     assert out is not None and out["action"] == "skip" and "follow-up" in out["reason"]
     assert len(s.captures) == 1
     assert s.creates == []
-    assert _reasons(s) == ["f7_primary_followup_suppressed"]
+    assert _reasons(s) == R2A_CAPTURED_REASONS
 
 
 # ── Flag-off rollback → discriminator/escape dormant, R2A capture unchanged ─
@@ -312,7 +327,7 @@ def test_flag_off_falls_back_to_r2a_capture(monkeypatch):
     # PR-A block skipped → pre-PR-A behavior: durable capture + canonical reply.
     assert out is not None and out["action"] == "skip" and "follow-up" in out["reason"]
     assert len(s.captures) == 1 and s.creates == []
-    assert _reasons(s) == ["f7_primary_followup_suppressed"]
+    assert _reasons(s) == R2A_CAPTURED_REASONS
 
 
 # ── Turn-arbitration: outbound-count proxy ──────────────────────────────────
@@ -369,7 +384,7 @@ def test_amendment_named_tier_stays_capture_not_selection(monkeypatch):
     assert out is not None and "follow-up" in out["reason"]
     assert s.selects == [], "amendment-phrased tier change must NOT be read as a selection"
     assert len(s.captures) == 1, "it keeps the R2A durable-capture path"
-    assert _reasons(s) == ["f7_primary_followup_suppressed"]
+    assert _reasons(s) == R2A_CAPTURED_REASONS
 
 
 # ── Full 3-message live-transcript reproduction (2026-07-26 smoke) ───────────

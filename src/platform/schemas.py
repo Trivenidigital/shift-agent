@@ -6064,6 +6064,18 @@ class CfRouterIntercepted(_BaseEntry):
         # visible (dispatcher-accuracy pairing), so the failure arm gets its own
         # reason rather than being swallowed as an invalid enum value.
         "f7_primary_amendment_capture_failed",
+        # M1 2026-07-31: the two arms that make an R2A capture actionable.
+        #   f7_primary_amendment_applied — a NEW capture was materialised onto the
+        #     lead inline (amend-catering-lead --mode amendment), so the owner card
+        #     carries the amended values instead of the pre-amendment ones. Carries
+        #     the application's exit code as subprocess_rc, which is the ONLY signal
+        #     that a capture succeeded but its application did not.
+        #   f7_qualification_answer — an inbound was applied to a QUALIFYING lead as
+        #     a slot-filling answer. Telemetry-visible for the same reason as every
+        #     other arm here: it bypasses the LLM, so dispatcher-accuracy pairing
+        #     must be able to see it.
+        "f7_primary_amendment_applied",
+        "f7_qualification_answer",
         # PR-R2B-1 2026-07-20: flyer/catering amendment-conflict gate (dormant until
         # armed). captured = discriminator→catering_amendment, R2A capture ok; flyer_edit
         # = discriminator→flyer_edit, fell through to the unchanged flyer arm; clarify =
