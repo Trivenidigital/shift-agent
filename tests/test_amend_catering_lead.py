@@ -254,6 +254,21 @@ def test_applied_records_are_stamped_without_mutating_the_captured_text(sb):
     assert ca.unapplied_for_lead("L0001", data_path=sb.amendments) == []
 
 
+def test_note_only_amendment_is_persisted_without_a_fresh_owner_card(sb):
+    """An amendment that only adds a note must still be SAVED — marking it applied
+    while dropping its content is silent data loss — but it does not warrant a new
+    owner card or a new quote version."""
+    sb.write_lead()
+    sb.capture("could you send two sample menus", message_id="wamid.A1")
+
+    rc, payload, _err = _amend(sb)
+
+    assert rc == 0
+    assert payload["fields_changed"] == []
+    assert "requested 2 sample menu combinations" in sb.read_lead()["extracted"]["notes"]
+    assert sb.sends == [], "a note-only amendment does not re-card the owner"
+
+
 def test_no_amendments_is_a_clean_exit(sb):
     sb.write_lead()
     rc, payload, _err = _amend(sb)

@@ -154,15 +154,17 @@ def _merge_fields(lead: CateringLead, parsed: dict, *, overwrite: bool) -> list[
     return changed
 
 
-def _append_note(lead: CateringLead, note: str) -> None:
-    """Accumulate an extractor note without dropping what is already there."""
+def _append_note(lead: CateringLead, note: str) -> bool:
+    """Accumulate an extractor note without dropping what is already there.
+    Returns True when the lead's notes actually changed."""
     note = (note or "").strip()
     if not note:
-        return
+        return False
     existing = (lead.extracted.notes or "").strip()
     if note in existing:
-        return
+        return False
     lead.extracted.notes = f"{existing}; {note}" if existing else note
+    return True
 
 
 def _render_owner_card(lead: CateringLead, *, headline: str, change_note: str,
@@ -374,6 +376,7 @@ def _run_amendment_mode(args, cfg: Config, now: datetime) -> int:
     applied_ids: list[str] = []
     changed_by_amendment: dict[str, list[str]] = {}
     all_changed: list[str] = []
+    notes_changed = False
     lead_snapshot: Optional[CateringLead] = None
 
     with FileLock(LEADS_LOCK):
@@ -401,13 +404,17 @@ def _run_amendment_mode(args, cfg: Config, now: datetime) -> int:
                 changed_by_amendment[record.get("amendment_id")] = []
                 continue
             changed = _merge_fields(lead, parsed, overwrite=True)
-            if parsed.get("notes"):
-                _append_note(lead, parsed["notes"])
+            if parsed.get("notes") and _append_note(lead, parsed["notes"]):
+                notes_changed = True
             applied_ids.append(record.get("amendment_id"))
             changed_by_amendment[record.get("amendment_id")] = changed
             all_changed.extend(c for c in changed if c not in all_changed)
 
-        if all_changed:
+        # Notes are tracked separately from `all_changed`: an amendment that only
+        # adds a note ("requested 2 sample menu combinations") still has to be
+        # PERSISTED — otherwise it is marked applied with its content dropped — but
+        # it does not warrant a fresh owner card or a new quote version.
+        if all_changed or notes_changed:
             lead.updated_at = now
             rc = _persist(store)
             if rc != EXIT_OK:
