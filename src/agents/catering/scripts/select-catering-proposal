@@ -8,7 +8,7 @@ import re
 import subprocess
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,9 +29,11 @@ from schemas import (  # noqa: E402
     CateringProposalSelectionFailed,
     CateringProposalSet,
     CateringProposalStore,
+    CateringProposalTransitionRefused,
     CateringSelectedItem,
     Menu,
     MenuItem,
+    is_proposal_set_transition_allowed,
 )
 from catering_paths import CATERING_MENU_PATH  # noqa: E402
 
@@ -77,6 +79,7 @@ class SelectionFinalizeResult:
     option_id: str
     finalize_exit_code: int
     options: list[CateringProposalOption]
+    refusals: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,7 @@ class SelectionClaim:
     selected_items: list[dict]
     quote_total_usd: int
     options: list[CateringProposalOption]
+    refusals: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,7 @@ class SelectionClaimFailure:
     detail: str
     options: list[CateringProposalOption]
     exit_code: int
+    refusals: list[dict] = field(default_factory=list)
 
 
 def _now() -> datetime:
@@ -189,6 +194,36 @@ def _audit_ack(lead_id: str, customer_jid: str, ok: bool, message_id_or_error: s
             ))
     except Exception as e:  # noqa: BLE001 - audit is best-effort
         sys.stderr.write(f"WARN: selection-ack audit emit failed (non-fatal): {type(e).__name__}: {e}\n")
+
+
+# M3 — proposal-set state machine enforcement. Mirrors create-catering-proposal-
+# options: an illegal status write is REFUSED (row untouched) and recorded, never
+# silently applied. Refusals are collected under PROPOSALS_LOCK and emitted by
+# _emit_transition_refusals after it releases, keeping this script's existing
+# lock discipline (PROPOSALS_LOCK and LOG_LOCK are never held together).
+def _transition_ok(row, to_status: str, write_site: str, sink: list[dict]) -> bool:
+    if is_proposal_set_transition_allowed(row.status, to_status):
+        return True
+    sink.append({
+        "lead_id": row.lead_id, "proposal_set_id": row.proposal_set_id,
+        "from_status": row.status, "to_status": to_status, "write_site": write_site,
+    })
+    return False
+
+
+def _emit_transition_refusals(refusals: list[dict]) -> None:
+    for r in refusals or []:
+        sys.stderr.write(
+            f"proposal_transition_refused set={r['proposal_set_id']} "
+            f"{r['from_status']}->{r['to_status']} site={r['write_site']}\n"
+        )
+        try:
+            _append_audit(CateringProposalTransitionRefused(
+                type="catering_proposal_transition_refused", ts=_now(), **r))
+        except Exception as e:  # noqa: BLE001 — audit is best-effort
+            sys.stderr.write(
+                f"WARN: transition-refusal audit emit failed (non-fatal): "
+                f"{type(e).__name__}: {e}\n")
 
 
 def _resolve_selection(text: str, options: list[CateringProposalOption]) -> tuple[str | None, str]:
@@ -409,6 +444,17 @@ def _claim_selection(
                 exit_code=EXIT_INVALID_INPUT,
             )
 
+        refusals: list[dict] = []
+        if not _transition_ok(target, "SELECTING", "claim_selection", refusals):
+            return SelectionClaimFailure(
+                proposal_set_id=proposal_set_id,
+                reason="no_sent_proposal",
+                detail=(f"proposal set {proposal_set_id} cannot move "
+                        f"{target.status}->SELECTING"),
+                options=target.options,
+                exit_code=EXIT_NOT_FOUND,
+                refusals=refusals,
+            )
         target.status = "SELECTING"
         target.selected_option_id = option_id
         target.failure_reason = f"selecting:{customer_message_id}"[:200]
@@ -459,12 +505,14 @@ def _finish_selection(
             and _proposal_sequence(row) > target_sequence
             and row.status in SUPERSEDING_PROPOSAL_STATUSES
         ]
+        refusals: list[dict] = []
         if superseding:
             latest = max(superseding, key=_proposal_sequence)
-            target.status = "SELECT_FAILED"
-            target.selected_option_id = None
-            target.failure_reason = f"superseded by {latest.proposal_set_id}"[:200]
-            atomic_write_json(PROPOSALS_PATH, store)
+            if _transition_ok(target, "SELECT_FAILED", "finish_selection_superseded", refusals):
+                target.status = "SELECT_FAILED"
+                target.selected_option_id = None
+                target.failure_reason = f"superseded by {latest.proposal_set_id}"[:200]
+                atomic_write_json(PROPOSALS_PATH, store)
             return SelectionClaimFailure(
                 proposal_set_id=proposal_set_id,
                 reason="no_sent_proposal",
@@ -474,20 +522,28 @@ def _finish_selection(
                 ),
                 options=target.options,
                 exit_code=EXIT_NOT_FOUND,
+                refusals=refusals,
             )
         if finalize_rc in {EXIT_OK, EXIT_DEPENDENCY_DOWN}:
-            target.status = "SELECTED" if finalize_rc == EXIT_OK else "SELECTED_OWNER_CARD_FAILED"
-            target.selected_option_id = option_id
+            to_status = "SELECTED" if finalize_rc == EXIT_OK else "SELECTED_OWNER_CARD_FAILED"
         else:
-            target.status = "SELECT_FAILED"
-            target.selected_option_id = None
-        target.failure_reason = "" if finalize_rc in {EXIT_OK, EXIT_DEPENDENCY_DOWN} else f"finalize_exit_{finalize_rc}"
-        atomic_write_json(PROPOSALS_PATH, store)
+            to_status = "SELECT_FAILED"
+        if _transition_ok(target, to_status, "finish_selection", refusals):
+            target.status = to_status
+            target.selected_option_id = (
+                option_id if finalize_rc in {EXIT_OK, EXIT_DEPENDENCY_DOWN} else None
+            )
+            target.failure_reason = (
+                "" if finalize_rc in {EXIT_OK, EXIT_DEPENDENCY_DOWN}
+                else f"finalize_exit_{finalize_rc}"
+            )
+            atomic_write_json(PROPOSALS_PATH, store)
         return SelectionFinalizeResult(
             proposal_set_id=proposal_set_id,
             option_id=option_id,
             finalize_exit_code=finalize_rc,
             options=target.options,
+            refusals=refusals,
         )
 
 
@@ -495,20 +551,22 @@ def _fail_claim_after_finalize_exception(
     proposal_set_id: str,
     option_id: str,
     detail: str,
-) -> list[CateringProposalOption]:
+) -> tuple[list[CateringProposalOption], list[dict]]:
+    refusals: list[dict] = []
     with FileLock(PROPOSALS_LOCK):
         store, load_status = load_model(PROPOSALS_PATH, CateringProposalStore, default=CateringProposalStore())
         assert_load_status_clean(PROPOSALS_PATH, load_status, context="proposal-selection exception cleanup")
         target = next((row for row in store.sets if row.proposal_set_id == proposal_set_id), None)
         if target is None:
-            return []
+            return [], refusals
         options = target.options
-        if target.status == "SELECTING" and target.selected_option_id == option_id:
+        if (target.status == "SELECTING" and target.selected_option_id == option_id
+                and _transition_ok(target, "SELECT_FAILED", "claim_cleanup", refusals)):
             target.status = "SELECT_FAILED"
             target.selected_option_id = None
             target.failure_reason = detail[:200]
             atomic_write_json(PROPOSALS_PATH, store)
-        return options
+        return options, refusals
 
 
 def _finalize(code: str, customer_message_id: str, selected_items: list[dict], total: int,
@@ -625,6 +683,7 @@ def main() -> int:
         return EXIT_NOT_FOUND
 
     if isinstance(claim, SelectionClaimFailure):
+        _emit_transition_refusals(claim.refusals)
         _bridge_post(args.customer_jid, _failed_text(claim.options) if claim.options else _no_active_proposal_text())
         _audit_failed(args.lead_id, claim.reason, claim.detail, claim.proposal_set_id)
         return claim.exit_code
@@ -634,12 +693,15 @@ def main() -> int:
                                 _RUN_IDENTITY["logical_turn_id"])
     except Exception as e:
         detail = f"{type(e).__name__}: {e}"
-        options = _fail_claim_after_finalize_exception(claim.proposal_set_id, claim.option_id, detail)
+        options, refusals = _fail_claim_after_finalize_exception(
+            claim.proposal_set_id, claim.option_id, detail)
+        _emit_transition_refusals(refusals)
         _bridge_post(args.customer_jid, _failed_text(options or claim.options))
         _audit_failed(args.lead_id, "finalize_exit_other", detail, claim.proposal_set_id)
         return EXIT_DEPENDENCY_DOWN
 
     result = _finish_selection(args.lead_id, claim.proposal_set_id, claim.option_id, finalize_rc)
+    _emit_transition_refusals(result.refusals)
     if isinstance(result, SelectionClaimFailure):
         _bridge_post(args.customer_jid, _failed_text(result.options) if result.options else _no_active_proposal_text())
         _audit_failed(args.lead_id, result.reason, result.detail, result.proposal_set_id)

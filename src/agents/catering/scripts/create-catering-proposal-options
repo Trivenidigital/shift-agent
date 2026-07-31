@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -31,15 +32,22 @@ from schemas import (  # noqa: E402
     CateringProposalOption,
     CateringProposalSet,
     CateringProposalStore,
+    CateringProposalTransitionRefused,
     CateringProposalsGenerated,
     CateringRecomposedMenuSent,
     CateringRecomposeClarifySent,
     Menu,
     MenuItem,
+    is_proposal_set_transition_allowed,
 )
 from catering_recompose import recompose_plan  # noqa: E402  # PR-D mix-and-match assist
 from catering_paths import CATERING_MENU_PATH  # noqa: E402
+from catering_proposal_sweep import (  # noqa: E402  # M3 validity window
+    DEFAULT_PROPOSAL_VALIDITY_DAYS,
+    expires_at_from as _expires_at,
+)
 
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
 PROPOSALS_PATH = Path("/opt/shift-agent/state/catering-proposals.json")
 PROPOSALS_LOCK = Path("/opt/shift-agent/state/catering-proposals.json.lock")
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
@@ -90,6 +98,22 @@ class SectionBalanceError(ValueError):
 
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
+
+
+def _proposal_validity_days() -> int:
+    """M3 validity window, from config. Best-effort: an unreadable config falls back
+    to the documented default rather than blocking a send that already happened."""
+    try:
+        from safe_io import load_yaml_model  # lazy — only the send path needs config
+        from schemas import Config
+
+        return int(load_yaml_model(CONFIG_PATH, Config).catering.proposal_validity_days)
+    except Exception as e:  # noqa: BLE001 — validity must never block delivery
+        sys.stderr.write(
+            f"WARN: proposal_validity_days config load failed; using "
+            f"{DEFAULT_PROPOSAL_VALIDITY_DAYS}d default: {type(e).__name__}: {e}\n"
+        )
+        return DEFAULT_PROPOSAL_VALIDITY_DAYS
 
 
 def _allowed_option_count(request_text: str) -> int:
@@ -437,15 +461,50 @@ def _create_draft(
         return proposal_set_id
 
 
-def _mark_send_failed(proposal_set_id: str, reason: str) -> None:
+# M3 — proposal-set state machine enforcement. Every status write in this script
+# goes through _transition_ok first; an illegal move is REFUSED (the row is left
+# completely untouched) and recorded, never silently written. Refusals are
+# collected inside the PROPOSALS_LOCK and emitted by _emit_transition_refusals
+# AFTER it is released, so the deployed single-lock discipline of this script is
+# unchanged (no new PROPOSALS_LOCK -> LOG_LOCK nesting).
+def _transition_ok(row, to_status: str, write_site: str, sink: list[dict]) -> bool:
+    if is_proposal_set_transition_allowed(row.status, to_status):
+        return True
+    sink.append({
+        "lead_id": row.lead_id, "proposal_set_id": row.proposal_set_id,
+        "from_status": row.status, "to_status": to_status, "write_site": write_site,
+    })
+    return False
+
+
+def _emit_transition_refusals(refusals: list[dict]) -> None:
+    for r in refusals:
+        sys.stderr.write(
+            f"proposal_transition_refused set={r['proposal_set_id']} "
+            f"{r['from_status']}->{r['to_status']} site={r['write_site']}\n"
+        )
+        try:
+            _append_audit(CateringProposalTransitionRefused(
+                type="catering_proposal_transition_refused", ts=_now(), **r))
+        except Exception as e:  # noqa: BLE001 — audit is best-effort
+            sys.stderr.write(
+                f"WARN: transition-refusal audit emit failed (non-fatal): "
+                f"{type(e).__name__}: {e}\n")
+
+
+def _mark_send_failed(proposal_set_id: str, reason: str) -> list[dict]:
+    refusals: list[dict] = []
     with FileLock(PROPOSALS_LOCK):
         store, status = load_model(PROPOSALS_PATH, CateringProposalStore, default=CateringProposalStore())
         assert_load_status_clean(PROPOSALS_PATH, status, context="proposal-options fail load")
         target = next(row for row in store.sets if row.proposal_set_id == proposal_set_id)
+        if not _transition_ok(target, "SEND_FAILED", "mark_send_failed", refusals):
+            return refusals
         target.status = "SEND_FAILED"
         target.failure_reason = reason[:200]
         target.outbound_message_id = ""
         atomic_write_json(PROPOSALS_PATH, store)
+    return refusals
 
 
 def _proposal_sequence(proposal_set_id: str) -> int:
@@ -453,8 +512,12 @@ def _proposal_sequence(proposal_set_id: str) -> int:
     return int(match.group(1)) if match else -1
 
 
-def _mark_sent_and_supersede(lead_id: str, proposal_set_id: str, outbound_message_id: str) -> None:
+def _mark_sent_and_supersede(
+    lead_id: str, proposal_set_id: str, outbound_message_id: str,
+) -> list[dict]:
     sent_at = _now()
+    validity_days = _proposal_validity_days()
+    refusals: list[dict] = []
     with FileLock(PROPOSALS_LOCK):
         store, status = load_model(PROPOSALS_PATH, CateringProposalStore, default=CateringProposalStore())
         assert_load_status_clean(PROPOSALS_PATH, status, context="proposal-options sent load")
@@ -473,12 +536,27 @@ def _mark_sent_and_supersede(lead_id: str, proposal_set_id: str, outbound_messag
                 and row.proposal_set_id != proposal_set_id
                 and _proposal_sequence(row.proposal_set_id) < target_sequence
             ):
-                row.status = "SUPERSEDED"
-        target.status = "SUPERSEDED" if has_later_sent else "SENT"
+                if _transition_ok(row, "SUPERSEDED", "supersede_older_sent", refusals):
+                    row.status = "SUPERSEDED"
+        to_status = "SUPERSEDED" if has_later_sent else "SENT"
+        if not _transition_ok(target, to_status, "mark_sent", refusals):
+            # Refuse the whole write rather than record half of it: a row carrying
+            # sent_at + outbound_message_id but a status that never advanced is
+            # exactly the state-vs-outbound divergence this guard exists to surface.
+            # The customer DID receive the set (the bridge POST already returned) —
+            # the refusal row is what makes the mismatch visible to an operator.
+            return refusals
+        target.status = to_status
         target.sent_at = sent_at
+        # M3: a SENT set carries the same validity window the customer was told.
+        # A SUPERSEDED one does not — it is already dead, and stamping an expiry on
+        # it would invite the sweep to "expire" something no longer selectable.
+        if to_status == "SENT":
+            target.expires_at = _expires_at(sent_at, validity_days)
         target.outbound_message_id = outbound_message_id
         target.failure_reason = ""
         atomic_write_json(PROPOSALS_PATH, store)
+    return refusals
 
 
 def _load_latest_sent_set(lead_id: str) -> dict | None:
@@ -691,12 +769,14 @@ def main() -> int:
 
     ok, message_id_or_error = _bridge_post(args.customer_jid, body)
     if not ok:
-        _mark_send_failed(proposal_set_id, message_id_or_error)
+        _emit_transition_refusals(_mark_send_failed(proposal_set_id, message_id_or_error))
         _fail_generation(args.lead_id, "bridge_unreachable", message_id_or_error, proposal_set_id)
         print(json.dumps({"proposal_set_id": proposal_set_id, "sent": False}))
         return EXIT_DEPENDENCY_DOWN
 
-    _mark_sent_and_supersede(args.lead_id, proposal_set_id, message_id_or_error)
+    _emit_transition_refusals(
+        _mark_sent_and_supersede(args.lead_id, proposal_set_id, message_id_or_error)
+    )
     _append_audit(
         CateringProposalsGenerated(
             type="catering_proposals_generated",
