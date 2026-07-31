@@ -58,6 +58,22 @@ class _BridgeStub(BaseHTTPRequestHandler):
         return
 
 
+@pytest.fixture(autouse=True)
+def _rebind_safe_io_to_live_module():
+    """Order-determinism: an earlier suite's loader may have popped "safe_io"
+    from sys.modules and re-imported a FRESH object (Linux-only loaders do).
+    This file's top-level ``import safe_io`` would then hold a STALE object —
+    patching BRIDGE_URL on it silently misses the object the script under test
+    imports. Re-resolve the live module before every test (mirrors
+    test_front_brain_outbound_enforcement.py)."""
+    global safe_io
+    import sys as _sys
+    live = _sys.modules.get("safe_io")
+    if live is not None:
+        safe_io = live
+    yield
+
+
 @pytest.fixture
 def bridge_server(monkeypatch):
     """Local stub on an ephemeral port (never :3000, so the live-bridge tripwire

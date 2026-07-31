@@ -46,8 +46,19 @@ def _ctx():
 
 @pytest.fixture
 def safe_io_module():
-    importlib.reload(safe_io)
-    return safe_io
+    # Order-determinism: an earlier suite's loader may have popped "safe_io"
+    # from sys.modules and re-imported it as a FRESH object (the cf-router
+    # flyer-routing / front-brain cohort loaders do this on Linux, where this
+    # file actually runs). reload() requires the module object to be the one
+    # registered in sys.modules, so re-resolve the LIVE object first — the
+    # same defence test_front_brain_outbound_enforcement.py uses.
+    global safe_io
+    live = sys.modules.get("safe_io")
+    if live is None:
+        live = importlib.import_module("safe_io")
+    safe_io = live
+    importlib.reload(live)
+    return live
 
 
 @pytest.fixture
