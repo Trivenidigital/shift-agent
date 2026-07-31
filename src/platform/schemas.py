@@ -2304,6 +2304,23 @@ class CateringLead(BaseModel):
         description="Server-recomputed sum(qty*price). Source of truth; "
                     "LLM-passed total is cross-check only.",
     )
+    # The cents-exact commitment behind quote_total_usd. ADDITIVE + Optional so
+    # every lead finalized before it existed decodes unchanged — and those leads
+    # are exactly the ones the owner-discount path refuses to recompute, because
+    # rebuilding a package quote from whole-dollar selected_items quotes the
+    # add-ons alone. See CateringPricingInputs.
+    pricing_inputs: Optional["CateringPricingInputs"] = Field(
+        default=None,
+        description="Cents-exact kernel inputs frozen at finalize; the only "
+                    "sound basis for a later recompute.",
+    )
+    # The date the quote the customer HOLDS stops standing, stamped at
+    # approve-send time from CateringConfig.proposal_validity_days — the same
+    # config the customer-facing "valid until" line renders from, so the lead can
+    # never expire a quote earlier than the date the customer was given. ADDITIVE
+    # + Optional: a lead sent before this existed carries None and is never
+    # treated as expired (nobody told that customer a deadline we can enforce).
+    quote_valid_until: Optional[datetime] = None
     customer_finalized_at: Optional[datetime] = Field(
         default=None,
         description="Timestamp of first finalize. Re-finalize via different "
@@ -2986,6 +3003,82 @@ class CateringPricebookStore(BaseModel):
     model_config = ConfigDict(extra="forbid")
     schema_version: int = Field(default=1, ge=1)
     pricebook: CateringPricebook
+
+
+# ── Pricing provenance: the cents-exact commitment behind a quoted number ─────
+class CateringQuoteLineInput(BaseModel):
+    """One à-la-carte line EXACTLY as the kernel priced it at finalize time.
+
+    `unit_cents` is the whole point. CateringSelectedItem.price_usd is whole
+    dollars, so a $4.50 item round-trips to $5 — and a later recompute that
+    re-derives cents from that dollar overcharges by $0.50 on every unit."""
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    qty: int = Field(ge=1, le=500)
+    unit_cents: int = Field(ge=0)
+
+
+class CateringQuoteFeeInput(BaseModel):
+    """One fee EXACTLY as it was applied at finalize time.
+
+    `units=None` records a fee whose multiplier (staff count / miles) was never
+    supplied — the unresolved state that forces price_status="pending_owner_review".
+    Persisting it is what lets a recompute reproduce that verdict instead of
+    silently pricing the fee at zero."""
+    model_config = ConfigDict(extra="forbid")
+    fee_id: str = Field(pattern=_PRICEBOOK_ID_PATTERN)
+    name: str = Field(min_length=1, max_length=200)
+    kind: str = Field(default="other", max_length=40)
+    per_unit: str = Field(default="flat", max_length=40)
+    unit_cents: int = Field(ge=0)
+    units: Optional[int] = Field(default=None, ge=0)
+
+
+class CateringPricingInputs(BaseModel):
+    """PRICING PROVENANCE — the cents-exact kernel inputs behind a lead's
+    committed `quote_total_usd`, frozen at finalize time.
+
+    Why this exists: before it, the only durable record of a priced quote was
+    `selected_items` (whole dollars) plus `quote_total_usd` (whole dollars). Any
+    later recompute — the owner-discount path — had to REBUILD the quote from
+    those two, which lost two different things at once:
+
+      * the PACKAGE. A package-priced finalize leaves `selected_items` holding
+        only the à-la-carte add-ons, so rebuilding from them quoted the add-ons
+        alone (measured: $3,978 -> $117 on a 200-guest package lead).
+      * the CENTS. Re-deriving cents from whole dollars is off by up to $0.49
+        per unit and biased UP — a measured $75 overcharge on 150 units of a
+        $2.50 item, exactly enough to cancel a $75 discount.
+
+    So the commitment is STORED, never reconstructed. `total_cents` is the
+    kernel's exact total and `subtotal_cents` the pre-discount, pre-tax base a
+    recompute must reproduce. A lead carrying NO CateringPricingInputs predates
+    this record; the discount path refuses it rather than recomputing it wrong.
+
+    Written only by `finalize-catering-menu`, and only on the pricebook path —
+    the legacy no-pricebook path has no kernel computation to freeze, and a
+    discount cannot be applied without a pricebook anyway.
+    """
+    model_config = ConfigDict(extra="forbid")
+    guest_count: int = Field(ge=1)
+    package_id: Optional[str] = Field(default=None, pattern=_PRICEBOOK_ID_PATTERN)
+    package_name: Optional[str] = Field(default=None, max_length=200)
+    package_price_per_person_cents: Optional[int] = Field(default=None, ge=0)
+    package_min_guests: int = Field(default=1, ge=1, le=10000)
+    line_items: list[CateringQuoteLineInput] = Field(default_factory=list, max_length=50)
+    fees: list[CateringQuoteFeeInput] = Field(default_factory=list, max_length=50)
+    # Multipliers the kernel was given for per_staff / per_mile fees. None means
+    # "never supplied", which is precisely what produced any missing_fee_input flag.
+    staff_count: Optional[int] = Field(default=None, ge=0)
+    miles: Optional[int] = Field(default=None, ge=0)
+    tax_rate_bps: int = Field(default=0, ge=0, le=10000)
+    currency: Literal["USD"] = "USD"
+    pricebook_version: Optional[int] = Field(default=None, ge=1)
+    menu_version: Optional[int] = Field(default=None, ge=1)
+    subtotal_cents: int = Field(default=0, ge=0)
+    total_cents: int = Field(default=0, ge=0)
+    price_status: CateringPriceStatus = "pending_owner_review"
+    flags: list[str] = Field(default_factory=list, max_length=80)
 
 
 # Agent #3 Multi-Location Coordinator config
@@ -5924,6 +6017,10 @@ class CateringProposalSelectionFailed(_BaseEntry):
         "no_sent_proposal", "ambiguous_selection", "invalid_selection",
         "lead_not_found", "finalize_exit_2", "finalize_exit_4",
         "finalize_exit_11", "finalize_exit_other",
+        # M3 validity window: the set's own expires_at had passed when the
+        # customer picked. Distinct from no_sent_proposal — the set WAS sent and
+        # the customer answered it; the deadline they were told simply elapsed.
+        "proposal_expired",
     ]
     detail: str = Field(default="", max_length=2000)
 
@@ -6161,6 +6258,12 @@ class CateringQuoteSkillFailed(_BaseEntry):
         "llm_malformed_response",   # gateway returned non-text/empty/error
         "finalized_total_missing_from_quote",      # PR-CF1: soft-warn (apply-script Change 5A)
         "owner_approve_without_customer_finalize", # PR-CF1: hard-fail (apply-script Change 5B)
+        # The NUMBER, not the text, is the problem: the kernel rated this quote
+        # "pending_owner_review" (placeholder pricebook, an unresolvable item
+        # price, or a per-unit fee whose multiplier was never supplied), so it is
+        # not a final quote and the customer send is refused. `detail` carries the
+        # kernel flags naming which of those it was.
+        "price_pending_owner_review",
     ]
     detail: str = Field(default="", max_length=2000)
 
@@ -7161,7 +7264,18 @@ class CateringLeadAcceptanceRecorded(_BaseEntry):
     re-running the grammar."""
     type: Literal["catering_lead_acceptance_recorded"]
     lead_id: str = Field(min_length=1)
-    outcome: Literal["accepted", "declined", "clarification_sent"]
+    outcome: Literal[
+        "accepted", "declined", "clarification_sent",
+        # The customer said yes, but the quote they were holding had already
+        # passed the validity date they were given. NOT a booking: prices and
+        # availability were only ever promised through that date, so the owner
+        # confirms current terms instead of the agent booking stale ones.
+        "acceptance_of_expired",
+        # The one clarification we are allowed to ask never reached the customer
+        # (bridge down). The ask-once anchor is rolled back so the next message
+        # asks again — this row is what makes that rollback visible.
+        "clarification_send_failed",
+    ]
     from_status: CateringLeadStatus
     to_status: CateringLeadStatus
     customer_message_id: str = Field(default="", max_length=200)

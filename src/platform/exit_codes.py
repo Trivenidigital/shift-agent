@@ -82,3 +82,30 @@ EXIT_LEAD_ON_HOLD = 14
 # which in this script already means "no lead carries that approval code", so
 # reusing it would make the two failures indistinguishable in the exit status.
 EXIT_UNKNOWN_DISCOUNT = 15
+
+# 16 — apply-catering-owner-decision --discount-id was asked to recompute a lead
+# that carries no CateringPricingInputs (it was finalized before pricing
+# provenance existed, or on the legacy no-pricebook path). Rebuilding the quote
+# from whole-dollar `selected_items` would quote a package lead's add-ons alone
+# and re-derive cents that were never there, so the recompute is REFUSED before
+# any state change. Distinct from EXIT_UNKNOWN_DISCOUNT (=15): the discount id is
+# fine, the LEAD is the problem, and the fix is to re-finalize it — not to pick a
+# different discount.
+EXIT_PRICING_PROVENANCE_MISSING = 16
+
+# 17 — the price the customer would have received is not deliverable: its
+# price_status is "pending_owner_review" (placeholder pricebook, an unresolvable
+# item price, or a per-unit fee whose multiplier was never supplied). The kernel
+# has said the number is not a final quote, so the send is refused rather than
+# labelled and sent anyway. Distinct from EXIT_TRUTH_GUARD_FAILED (=11), which is
+# about the DRAFTED TEXT; this is about the NUMBER.
+EXIT_PRICE_PENDING_OWNER_REVIEW = 17
+
+# 18 — finalize-catering-menu was asked to price a per-person package for more
+# guests than CateringSelectedItem.qty can hold (MAX_LINE_QTY = 500). The
+# materialised package line would silently clamp to 500 while the kernel priced
+# the full headcount, so the itemization and the total would disagree. Refused up
+# front. Distinct from EXIT_TRUTH_GUARD_FAILED (=11), which the clamp used to
+# masquerade as once the divergence grew past tolerance — that read as LLM
+# hallucination and sent the operator hunting in the wrong place.
+EXIT_GUEST_COUNT_UNSUPPORTED = 18
