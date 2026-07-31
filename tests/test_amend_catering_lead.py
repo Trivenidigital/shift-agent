@@ -462,6 +462,30 @@ def test_completion_transitions_to_owner_approval_and_fires_the_card(sb):
     assert status_rows[-1]["reason"] == "qualification_complete"
 
 
+def test_completion_lands_the_documented_pre_draft_sentinel_not_the_legacy_one(sb):
+    """The S1 invariant requires non-empty quote_text at AWAITING_OWNER_APPROVAL, and
+    status is set by assignment (no validator runs). Without an explicit value the
+    read-time shim would backfill LEGACY_QUOTE_TEXT_SENTINEL and warn about a
+    "legacy pre-v0.3 lead" that was created today."""
+    from schemas import LEGACY_QUOTE_TEXT_SENTINEL, PRE_QUOTE_DRAFT_SENTINEL
+
+    _qualifying_lead(sb, pending_questions=["venue"], questions_asked=list(cq.REQUIRED_FIELDS),
+                     extracted={
+                         "headcount": 120, "event_date": "2026-09-15",
+                         "event_type": "wedding", "service_style": "buffet",
+                         "dietary_restrictions": ["veg"],
+                     })
+
+    rc, _payload, err = _answer(sb, "Grand Ballroom")
+
+    assert rc == 0
+    lead = sb.read_lead()
+    assert lead["status"] == "AWAITING_OWNER_APPROVAL"
+    assert lead["quote_text"] == PRE_QUOTE_DRAFT_SENTINEL
+    assert lead["quote_text"] != LEGACY_QUOTE_TEXT_SENTINEL
+    assert "legacy quote_text=empty" not in err
+
+
 def test_round_cap_hands_to_the_owner_with_the_gaps_flagged(sb):
     _qualifying_lead(sb, qualification_rounds=cq.MAX_QUALIFICATION_ROUNDS,
                      pending_questions=["venue"], questions_asked=["venue"])

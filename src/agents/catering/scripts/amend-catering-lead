@@ -68,6 +68,7 @@ import catering_amendments  # noqa: E402
 import catering_extraction  # noqa: E402  # the SAME grammar the lead was created with
 import catering_qualification  # noqa: E402  # the ONE minimum-qualification gate
 from schemas import (  # noqa: E402
+    PRE_QUOTE_DRAFT_SENTINEL,
     Config, CateringLead, CateringLeadStore,
     CateringAmendmentApplied, CateringLeadQualificationUpdated,
     CateringLeadStatusChange,
@@ -526,6 +527,15 @@ def _run_answer_mode(args, cfg: Config, now: datetime) -> int:
             from_status = lead.status
             lead.status = "AWAITING_OWNER_APPROVAL"
             lead.pending_questions = []
+            if not lead.quote_text.strip():
+                # The S1 invariant requires non-empty quote_text at and after
+                # AWAITING_OWNER_APPROVAL. Status is set by ASSIGNMENT here, so no
+                # validator runs and an empty value would reach disk — the read-time
+                # shim would then backfill it as LEGACY_QUOTE_TEXT_SENTINEL and log a
+                # "legacy pre-v0.3 lead" warning about a lead created today. Set the
+                # documented pre-draft sentinel that create-catering-lead's own mint
+                # path lands on, so the value is honest and the read is silent.
+                lead.quote_text = PRE_QUOTE_DRAFT_SENTINEL
         else:
             lead.pending_questions = next_batch
             lead.questions_asked = list(lead.questions_asked) + [
