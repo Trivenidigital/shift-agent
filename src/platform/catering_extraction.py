@@ -470,8 +470,132 @@ def extract_catering_fields(text: str, signals: Optional[list] = None) -> Option
     return fields or None
 
 
+# ── Quote acceptance / decline (M3) ──────────────────────────────────────────
+# After a quote is sent there was NO acceptance path at all: the only legal moves
+# out of SENT_TO_CUSTOMER were CLOSED and STALE, and only an operator script ever
+# wrote CLOSED. A customer saying "we accept" reached the generic follow-up reply
+# and the booking existed nowhere.
+#
+# Regex is the RIGHT tool here and an LLM is the wrong one: this is a
+# deterministic, audited, money-adjacent state change (it books an event), which
+# is exactly the structured-token territory the project rules carve out. The cost
+# of a false positive — booking an event the customer never agreed to — is far
+# higher than the cost of falling through to the existing follow-up path, so the
+# grammar is deliberately narrow and every uncertain shape returns None.
+#
+# Evaluation order is load-bearing:
+#   questions are excluded first  — "should we accept?" / "do you accept venmo?"
+#     must never book anything, so only ASSERTION sentences are matched
+#   decline before accept          — "not going ahead" contains "going ahead"
+#   negated-accept before accept   — "we don't accept credit cards" is a payment
+#     remark, not a decline; it returns None (no automated state change at all)
+#   ambiguous last, whole-message  — a message that is ONLY "ok"/"sounds good"
+#     gets one clarification; the same words with real content after them
+#     ("sounds good, add 20 plates") are an amendment and fall through untouched.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+_DECLINE_PATTERNS = [
+    re.compile(r"\b(?:we|i)\s+(?:have\s+)?declin(?:e|ed)\b", re.IGNORECASE),
+    re.compile(r"^declined?\b", re.IGNORECASE),
+    re.compile(r"\bnot\s+(?:going|moving)\s+(?:ahead|forward)\b", re.IGNORECASE),
+    re.compile(r"\b(?:went|going)\s+with\s+(?:someone|somebody|another|a\s+different|"
+               r"other)\b", re.IGNORECASE),
+    re.compile(r"\b(?:decided|chose|choosing|picked)\s+(?:to\s+go\s+with\s+|on\s+)?"
+               r"(?:someone|somebody|another|a\s+different)\b", re.IGNORECASE),
+    re.compile(r"\bcancel\s+(?:the|our|this|my)?\s*"
+               r"(?:quote|order|booking|event|catering|inquiry)\b", re.IGNORECASE),
+    re.compile(r"\bno\s+longer\s+need(?:ed|ing)?\b", re.IGNORECASE),
+    re.compile(r"\bnot\s+interested\b", re.IGNORECASE),
+    re.compile(r"\bwe(?:'?ll| will)\s+pass\b", re.IGNORECASE),
+]
+
+# A negated commitment verb. NOT read as a decline — "we don't accept credit
+# cards" is the common real sentence — but it must never be read as acceptance
+# either, so it hard-stops the whole detector.
+_NEGATED_ACCEPT_RE = re.compile(
+    r"\b(?:do(?:n'?t|\s+not)|does(?:n'?t|\s+not)|did(?:n'?t|\s+not)|"
+    r"won'?t|will\s+not|can'?t|cannot|could\s+not|couldn'?t|never|not)\s+"
+    r"(?:\w+\s+){0,2}?(?:accept(?:ing)?|proceed(?:ing)?|book(?:ing)?|confirm(?:ing)?)\b",
+    re.IGNORECASE,
+)
+
+_ACCEPT_PATTERNS = [
+    # The customer, as the subject, accepting. "do YOU accept venmo" cannot match.
+    re.compile(r"\b(?:we|i)(?:'?ve|\s+have)?\s+accept(?:ed)?\b", re.IGNORECASE),
+    re.compile(r"\b(?:quote|proposal|estimate|price)\s+(?:is\s+)?accepted\b", re.IGNORECASE),
+    re.compile(r"^accepted\b", re.IGNORECASE),
+    re.compile(r"\bconfirmed[\s,.!]+(?:go\s+ahead|please\s+proceed|proceed|"
+               r"(?:let'?s|lets)\s+(?:go|book|proceed))\b", re.IGNORECASE),
+    re.compile(r"\b(?:yes|yeah|yep)[\s,.!]+(?:let'?s|lets|we(?:'?d| would)\s+like\s+to|"
+               r"please)\s+(?:book|proceed|go\s+ahead|confirm)\b", re.IGNORECASE),
+    re.compile(r"\bwe(?:'?d| would)\s+like\s+to\s+(?:proceed|book|go\s+ahead|confirm)\b",
+               re.IGNORECASE),
+    re.compile(r"\bwe\s+(?:want|wish)\s+to\s+(?:proceed|book|go\s+ahead|confirm)\b",
+               re.IGNORECASE),
+    re.compile(r"\b(?:let'?s|lets)\s+(?:book|proceed|go\s+ahead)\b", re.IGNORECASE),
+    re.compile(r"\bplease\s+(?:book|proceed|go\s+ahead)\b", re.IGNORECASE),
+]
+
+# Whole-message filler. Alone these mean nothing ("ok" to WHAT?) — they get ONE
+# clarification, never a booking.
+_AMBIGUOUS_TOKEN = (
+    r"(?:ok(?:ay)?|kk?|sure|great|good|nice|perfect|cool|alright|all\s+right|fine|"
+    r"sounds\s+(?:good|great)|looks\s+good|thanks(?:\s+a\s+lot)?|thank\s+you|thx|ty|"
+    r"yes|yeah|yep|yup|noted|got\s+it|received|\U0001F44D|\U0001F44C|\U0001F64F|\U0001F60A)"
+)
+_AMBIGUOUS_ONLY_RE = re.compile(
+    rf"^(?:{_AMBIGUOUS_TOKEN})(?:[\s,.!—\-]+(?:{_AMBIGUOUS_TOKEN}))*[\s,.!?]*$",
+    re.IGNORECASE,
+)
+
+
+def _assertion_text(normalized: str) -> str:
+    """The message minus its questions.
+
+    A question is never a commitment: "should we accept?" and "can you cancel the
+    quote?" must not book or close anything. Splitting per SENTENCE rather than
+    discarding the whole message keeps a real acceptance that happens to be
+    followed by a question ("We accept. When is the deposit due?") detectable.
+    """
+    parts = _SENTENCE_SPLIT_RE.split(normalized)
+    return " ".join(p for p in parts if not p.rstrip().endswith("?"))
+
+
+def detect_quote_acceptance(text: str) -> Optional[dict]:
+    """Deterministically classify a post-quote customer message.
+
+    Returns ``{"outcome": ..., "matched_phrase": ...}`` where outcome is one of
+    ``"accepted"`` / ``"declined"`` / ``"ambiguous"``, or ``None`` when the message
+    carries no acceptance signal at all (the overwhelmingly common case — it then
+    takes the unchanged follow-up path).
+
+    ``"ambiguous"`` means "this MIGHT be a yes and we refuse to guess": the caller
+    sends exactly one clarification and records that it did, never a booking.
+    """
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return None
+
+    statements = _assertion_text(normalized)
+    if statements:
+        for pattern in _DECLINE_PATTERNS:
+            m = pattern.search(statements)
+            if m:
+                return {"outcome": "declined", "matched_phrase": m.group(0)[:120]}
+        if not _NEGATED_ACCEPT_RE.search(statements):
+            for pattern in _ACCEPT_PATTERNS:
+                m = pattern.search(statements)
+                if m:
+                    return {"outcome": "accepted", "matched_phrase": m.group(0)[:120]}
+
+    if _AMBIGUOUS_ONLY_RE.match(normalized):
+        return {"outcome": "ambiguous", "matched_phrase": normalized[:120]}
+    return None
+
+
 __all__ = [
     "extract_catering_fields",
+    "detect_quote_acceptance",
     "parse_month_day_event_date", "parse_numeric_event_date", "parse_event_date",
     "parse_headcount", "parse_headcount_from_signals",
     "parse_event_type", "parse_service_style", "parse_delivery_or_pickup",

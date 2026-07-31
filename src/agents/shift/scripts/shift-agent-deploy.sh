@@ -409,6 +409,16 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/catering_lead_sweep.py
     fi
+    # catering_proposal_sweep — M3 proposal validity window: the expiry predicate
+    # AND the customer-facing "valid until" line. Imported by
+    # catering-proposal-expiry-sweep, create-catering-proposal-options,
+    # create-catering-lead and apply-catering-owner-decision — i.e. by the SEND
+    # paths, not just the sweep, so a missing file breaks quote delivery.
+    if [ -f src/platform/catering_proposal_sweep.py ]; then
+        install -m 644 src/platform/catering_proposal_sweep.py /opt/shift-agent/catering_proposal_sweep.py
+    else
+        rm -f /opt/shift-agent/catering_proposal_sweep.py
+    fi
     # catering_paths — canonical catering state paths (menu + pricebook); imported
     # by every catering script that touches those files.
     if [ -f src/platform/catering_paths.py ]; then

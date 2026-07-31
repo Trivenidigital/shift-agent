@@ -6386,6 +6386,15 @@ class CfRouterIntercepted(_BaseEntry):
         #     must be able to see it.
         "f7_primary_amendment_applied",
         "f7_qualification_answer",
+        # M3 2026-07-31: a customer's EXPLICIT accept/decline of a quote already sent
+        # to them was recorded deterministically (record-catering-acceptance). Its own
+        # reason, and telemetry-visible, for the same rule as every arm here: it
+        # bypasses the LLM, so dispatcher-accuracy pairing must be able to see it —
+        # and this arm books events, which is the last place invisible routing is
+        # acceptable. subprocess_rc carries the writer's exit code, which is the ONLY
+        # signal distinguishing "booked" from "recorded but the reply never sent"
+        # from "held".
+        "f7_quote_acceptance",
         # PR-R2B-1 2026-07-20: flyer/catering amendment-conflict gate (dormant until
         # armed). captured = discriminator→catering_amendment, R2A capture ok; flyer_edit
         # = discriminator→flyer_edit, fell through to the unchanged flyer arm; clarify =
