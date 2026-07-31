@@ -41,7 +41,7 @@ read-only on-box; **re-verify at execution time** — Hermes core is out-of-tree
 
 | Layer | Function | Fed by | Alias handling | Default | Stage A |
 |---|---|---|---|---|---|
-| **PRIMARY — gateway admission** (the effective containment boundary) | `_is_user_authorized(source)` — Hermes `run.py:6334` | `GATEWAY_ALLOW_ALL_USERS` (global allow-all, `run.py:6486`) + `WHATSAPP_ALLOWED_USERS` (per-platform allowlist, `run.py:6387,6599`) + DM-pairing list; **default: deny** | **YES** — phone↔LID resolved at admission via `_expand_whatsapp_auth_aliases` / `_normalize_whatsapp_identifier` (imported `run.py:~843-844`, used inside `_is_user_authorized`) | deny (once `GATEWAY_ALLOW_ALL_USERS` is false and the id is not allowlisted) | **THIS is what §4 mutates and what rejects the §6 denial probe.** |
+| **PRIMARY — gateway admission** (the effective containment boundary) | `_is_user_authorized(source)` — Hermes `run.py:6334` | `GATEWAY_ALLOW_ALL_USERS` (global allow-all, `run.py:6486`) + `WHATSAPP_ALLOWED_USERS` (per-platform allowlist, `run.py:6387,6599`) + DM-pairing list; **default: deny** | **YES** — phone↔LID resolved at admission via `_expand_whatsapp_auth_aliases` / `_normalize_whatsapp_identifier` (imported `run.py:1066-1067`, used at `run.py:6553-6558` inside `_is_user_authorized`) | deny (once `GATEWAY_ALLOW_ALL_USERS` is false and the id is not allowlisted) | **THIS is what §4 mutates and what rejects the §6 denial probe.** |
 | **SECONDARY — adapter DM policy** | `_is_dm_allowed(sender_id)` — Hermes `whatsapp.py:530-536`, called at `whatsapp.py:654` | `WHATSAPP_DM_POLICY` (or `config.extra.dm_policy`, `whatsapp.py:448`), default **`"open"`** + `allow_from`/`allowFrom` (NOT `WHATSAPP_ALLOWED_USERS`; only consulted when `dm_policy=="allowlist"`, `whatsapp.py:534-535`) | none in this method (raw `sender_id in self._allow_from`) | **`"open"` ⇒ admits ALL DMs** | **OPEN and UNCHANGED** — Stage A does not set `WHATSAPP_DM_POLICY`/`allow_from`, so this layer rejects nothing. |
 
 Consequences the runbook now enforces:
@@ -68,7 +68,7 @@ progressive-edit probe, or begin Stage B. It changes **only** the two authorized
   **out-of-tree Hermes core — verified read-only on-box, re-verify at execution time**): per-platform allowlist
   `WHATSAPP_ALLOWED_USERS` (`run.py:6387,6599`), DM-pairing list, global allow-all `GATEWAY_ALLOW_ALL_USERS`
   (`run.py:6486`), else **default deny**. For WhatsApp it **resolves phone↔LID aliases at admission** via
-  `_expand_whatsapp_auth_aliases`/`_normalize_whatsapp_identifier` (imported `run.py:~843-844`, applied inside
+  `_expand_whatsapp_auth_aliases`/`_normalize_whatsapp_identifier` (imported `run.py:1066-1067`, applied at `run.py:6553-6558` inside
   `_is_user_authorized`) — so an inbound `17329837841@s.whatsapp.net` (or the matching LID under WhatsApp
   privacy delivery) IS resolved to the allowlisted `+17329837841` form by the gate itself; alias handling is
   NOT purely an upstream `bridge.js` concern. The adapter's SECONDARY `_is_dm_allowed`/`allow_from`
