@@ -88,6 +88,10 @@ def wired(tmp_path, monkeypatch):
         "owner:\n  self_chat_jid: 15550100002@s.whatsapp.net\n", encoding="utf-8")
     actions.PLATFORM_DIR = PLATFORM_DIR
 
+    # The arm ships DISARMED (it books an event off a customer message), so every
+    # cell that expects it to fire has to arm it the way an operator would.
+    monkeypatch.setenv(hooks.CATERING_ACCEPTANCE_ARM_ENV, "1")
+
     s = Spy()
     monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender",
                         lambda cid: ("+19045550199", "customer"))
@@ -204,12 +208,25 @@ def test_a_sender_with_a_live_flyer_project_is_left_to_existing_routing(wired, m
     assert wired.spy.records == []
 
 
-def test_flag_off_restores_the_pre_m3_routing_exactly(wired, monkeypatch):
+def test_unarmed_is_the_default_and_restores_the_pre_m3_routing_exactly(wired, monkeypatch):
+    """The arm BOOKS an event off a customer message. With no operator action —
+    i.e. the env var absent, which is how a fresh box starts — the inbound must
+    take its pre-M3 route with nothing written and nothing audited."""
     _seed(wired, SENT_LEAD)
-    monkeypatch.setattr(wired.hooks, "F7_ACCEPTANCE_ARM_ENABLED", False)
+    monkeypatch.delenv(wired.hooks.CATERING_ACCEPTANCE_ARM_ENV, raising=False)
     assert _inbound(wired, "we accept") is None
     assert wired.spy.records == []
     assert wired.spy.audits == []
+
+
+@pytest.mark.parametrize("value", ["0", "", "true", "yes"])
+def test_only_an_explicit_1_arms_the_acceptance_path(wired, monkeypatch, value):
+    """Anything other than the documented "1" leaves the arm disarmed — a typo in
+    the operator's env must fail toward NOT booking."""
+    _seed(wired, SENT_LEAD)
+    monkeypatch.setenv(wired.hooks.CATERING_ACCEPTANCE_ARM_ENV, value)
+    assert _inbound(wired, "we accept") is None
+    assert wired.spy.records == []
 
 
 # ── exit-code handling ──────────────────────────────────────────────────────
@@ -266,3 +283,34 @@ def test_dispatch_runs_the_acceptance_arm_before_the_catering_admission():
     arm = text.index("acceptance_result = _try_catering_acceptance_intercept(")
     admission = text.index("is_catering, signals = actions.classify_catering(text)")
     assert arm < admission
+
+
+# ── disclosure: no source-only default-ON routing arm ───────────────────────
+def test_neither_f7_flag_is_a_bare_source_constant():
+    """Both arms are operator-controlled via the environment. A `FLAG = True` at
+    module scope has no off-switch short of editing deployed source, which is not
+    a lever an operator has — and it hides that the arm is on at all."""
+    text = (PLUGIN_DIR / "hooks.py").read_text(encoding="utf-8")
+    assert "F7_ACCEPTANCE_ARM_ENABLED = True" not in text
+    assert "F7_QUALIFICATION_GATE_ENABLED = True" not in text
+    assert 'os.environ.get(CATERING_ACCEPTANCE_ARM_ENV, "0")' in text
+    assert 'os.environ.get(CATERING_QUALIFICATION_GATE_ENV, "1")' in text
+
+
+def test_the_arm_reads_the_env_at_call_time_not_at_import(wired, monkeypatch):
+    monkeypatch.delenv(wired.hooks.CATERING_ACCEPTANCE_ARM_ENV, raising=False)
+    assert wired.hooks.f7_acceptance_arm_enabled() is False
+    monkeypatch.setenv(wired.hooks.CATERING_ACCEPTANCE_ARM_ENV, "1")
+    assert wired.hooks.f7_acceptance_arm_enabled() is True
+
+
+def test_an_unarmed_read_costs_nothing_beyond_the_flag(wired, monkeypatch):
+    """Disarmed, the arm must short-circuit BEFORE the regex, the store read and
+    the identify-sender subprocess — it is on the hot path for every inbound."""
+    _seed(wired, SENT_LEAD)
+    monkeypatch.delenv(wired.hooks.CATERING_ACCEPTANCE_ARM_ENV, raising=False)
+    calls = []
+    monkeypatch.setattr(wired.actions, "detect_quote_acceptance",
+                        lambda t: calls.append(t))
+    assert _inbound(wired, "we accept") is None
+    assert calls == []

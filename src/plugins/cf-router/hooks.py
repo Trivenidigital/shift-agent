@@ -110,16 +110,37 @@ F7_PRIMARY_FOLLOWUP_REPLY = True
 F7_PROPOSAL_BRANCH_ENABLED = True
 
 # M1 2026-07-31: minimum-qualification gate + deterministic slot-filling loop.
-# With it True, a new inquiry below catering_qualification.REQUIRED_FIELDS parks in
+# Enabled, a new inquiry below catering_qualification.REQUIRED_FIELDS parks in
 # QUALIFYING and the customer is asked for the gaps, instead of an owner approval
 # card firing for an event whose date, size, venue and style are unknown; a reply to
-# those questions is applied to the SAME lead. With it False, every catering path
-# behaves exactly as it did before M1 (create-catering-lead's gate is opt-in, so
-# flag-off simply never passes --qualification-gate and never routes an answer).
-# Rollback is the same one-liner as F7_ENABLED:
-#   sudo sed -i 's/^F7_QUALIFICATION_GATE_ENABLED = True/F7_QUALIFICATION_GATE_ENABLED = False/' \
-#     /root/.hermes/plugins/cf-router/hooks.py && sudo systemctl restart hermes-gateway
-F7_QUALIFICATION_GATE_ENABLED = True
+# those questions is applied to the SAME lead. Disabled, every catering path behaves
+# exactly as it did before M1 (create-catering-lead's gate is opt-in, so flag-off
+# simply never passes --qualification-gate and never routes an answer).
+#
+# DEFAULT ON — this behavior is disclosed and accepted. The env var exists as a
+# rollback lever that needs no source edit and no redeploy:
+#   sudo systemctl set-environment CATERING_QUALIFICATION_GATE=0 \
+#     && sudo systemctl restart hermes-gateway
+CATERING_QUALIFICATION_GATE_ENV = "CATERING_QUALIFICATION_GATE"
+
+# F7 ACCEPTANCE ARM (M3) — see _try_catering_acceptance_intercept for what it does.
+# DEFAULT OFF: it BOOKS an event off a customer message, and no operator has armed
+# it. It stays dormant (byte-identical routing) until one explicitly does:
+#   sudo systemctl set-environment CATERING_ACCEPTANCE_ARM=1 \
+#     && sudo systemctl restart hermes-gateway
+CATERING_ACCEPTANCE_ARM_ENV = "CATERING_ACCEPTANCE_ARM"
+
+
+# Read at CALL time, mirroring the automation_control kernel's flag helpers
+# (stop_enabled / takeover_enabled): a module-load snapshot cannot be flipped
+# without re-importing the plugin, and it makes the flag untestable from the
+# environment the operator actually sets.
+def f7_qualification_gate_enabled() -> bool:
+    return os.environ.get(CATERING_QUALIFICATION_GATE_ENV, "1") == "1"
+
+
+def f7_acceptance_arm_enabled() -> bool:
+    return os.environ.get(CATERING_ACCEPTANCE_ARM_ENV, "0") == "1"
 
 # 30s rescue window — matches the deployed F7 daemon's WATCHDOG_TIMEOUT_SECS.
 # PRESERVED (not removed) for backwards-compat with TestF7DispatcherWatchdog,
@@ -809,7 +830,7 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             # the lead lookup is the last admission check — evaluated ONLY when the
             # cheap signal checks have all failed.
             if not (is_catering or _has_f7_followup_signal(signals) or proposal_workflow):
-                admit = (F7_QUALIFICATION_GATE_ENABLED
+                admit = (f7_qualification_gate_enabled()
                          and _sender_has_qualifying_lead(chat_id))
             else:
                 admit = True
@@ -5614,7 +5635,7 @@ def _create_catering_lead_from_inbound(
         message_id=message_id,
         extracted_fields=extracted,
         suppress_customer_ack=will_generate_proposals,
-        qualification_gate=F7_QUALIFICATION_GATE_ENABLED and not will_generate_proposals,
+        qualification_gate=f7_qualification_gate_enabled() and not will_generate_proposals,
     )
     actions.audit_intercepted(
         reason="f7_primary_new_inquiry", chat_id=chat_id,
@@ -5729,7 +5750,7 @@ def _open_fresh_lead_over_stale(*, text: str, chat_id: str, message_id: str,
         # Same one-bounded-response rule as Branch A: when a proposal set is about
         # to be generated for this new lead it IS the turn's response, so the
         # qualification questions must not also fire.
-        qualification_gate=F7_QUALIFICATION_GATE_ENABLED and not suppress_customer_ack,
+        qualification_gate=f7_qualification_gate_enabled() and not suppress_customer_ack,
     )
     new_lead_id = _lead_id_from_create_detail(detail) if ok else ""
     if not ok or not new_lead_id:
@@ -5794,7 +5815,8 @@ def _generate_proposals_deterministically(
 # returns None for virtually every inbound, THEN one tolerant file read, and only
 # then the `identify-sender` subprocess. A bare "ok" is common, so the file-read
 # gate matters.
-F7_ACCEPTANCE_ARM_ENABLED = True
+#
+# Armed by CATERING_ACCEPTANCE_ARM=1 — DEFAULT OFF (see f7_acceptance_arm_enabled).
 
 
 def _try_catering_acceptance_intercept(
@@ -5815,7 +5837,7 @@ def _try_catering_acceptance_intercept(
         routing rather than claimed here — mirrors the same guard the F7 catering
         block applies, so this arm cannot re-open the conflict class R2B-1 closed.
     """
-    if not F7_ACCEPTANCE_ARM_ENABLED:
+    if not f7_acceptance_arm_enabled():
         return None
     detected = actions.detect_quote_acceptance(text)
     if detected is None:
@@ -6022,7 +6044,7 @@ def _try_f7_primary_intercept(
                                    f"opened over stale {lead_id}")}
             # Creation could not complete — fall through to the durable capture below
             # so the inbound is never lost.
-        elif (F7_QUALIFICATION_GATE_ENABLED
+        elif (f7_qualification_gate_enabled()
                 and active_lead.get("status") == "QUALIFYING"):
             # M1 slot-filling answer. Placed AFTER the contradiction check so the
             # ruled fresh-vs-stale discriminator still owns a message that
@@ -6117,7 +6139,7 @@ def _try_f7_primary_intercept(
         # non-zero rc is audited and the canonical reply still goes out — the
         # amendment stays unapplied in the sidecar and the next application run
         # picks it up, rather than the customer being told nothing was recorded.
-        if F7_QUALIFICATION_GATE_ENABLED and not capture.idempotent:
+        if f7_qualification_gate_enabled() and not capture.idempotent:
             apply_rc = actions.invoke_amend_catering_lead(
                 lead_id, mode="amendment",
                 message_id=_extract_native_message_id(event),
