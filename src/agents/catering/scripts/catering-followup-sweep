@@ -171,6 +171,9 @@ def _render(followup, lead, template_dir: Path) -> str:
         "event_date": event_date or "the date we have on file",
         "headcount": headcount if headcount is not None else "no guest count on file yet",
         "missing_fields": missing_label or "a few remaining details",
+        # Owner-authored context, empty for every type but owner_reminder. Passed
+        # to every template so one field dict serves all six.
+        "note_line": cf.note_line(followup.note),
     }
     return template.format(**fields).strip()
 

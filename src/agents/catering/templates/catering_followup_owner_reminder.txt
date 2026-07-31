@@ -1,5 +1,5 @@
 Hi {customer_name}, checking in on your catering enquiry for {event_date}.
-
+{note_line}
 Let us know how you'd like to proceed and we'll help from there.
 
 (Ref: {lead_id})

@@ -94,6 +94,46 @@ def with_bridge_prefix(body: str) -> str:
     return f"{BRIDGE_TEMPLATE_PREFIX}{body}"
 
 
+# ── Owner note (owner_reminder context) ──────────────────────────────────────
+NOTE_MAX_CHARS = 300
+# Control + format + surrogate + private + unassigned. Same set
+# apply-catering-owner-decision strips from a drafted quote: defends the WhatsApp
+# rendering against RTL-overrides and zero-width characters.
+_STRIP_UNICODE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn"})
+_MARKDOWN_DELIMS = "*_~`"
+
+
+def normalize_note(text: str) -> str:
+    """Bound and clean an owner-authored note for a customer-facing message.
+
+    NFC normalise, drop control/format characters (newlines become spaces — a
+    note is one line inside a fixed template), strip markdown delimiters so the
+    note cannot restyle the surrounding message, collapse whitespace, cap length.
+
+    Deliberately NOT content-screened: this is the business owner's own sentence
+    to their own customer, not model output, and they read it again on the
+    approval card before anything sends. The cleaning here is about rendering
+    safety, not about judging what the owner may say.
+    """
+    import unicodedata
+    normalized = unicodedata.normalize("NFC", text or "")
+    kept = [
+        " " if ch in "\r\n\t" else ch
+        for ch in normalized
+        if ch in "\r\n\t" or unicodedata.category(ch) not in _STRIP_UNICODE_CATEGORIES
+    ]
+    out = "".join(kept)
+    for delim in _MARKDOWN_DELIMS:
+        out = out.replace(delim, "")
+    return " ".join(out.split())[:NOTE_MAX_CHARS]
+
+
+def note_line(note: Optional[str]) -> str:
+    """The note as a template-ready block: its own paragraph, or nothing."""
+    cleaned = normalize_note(note or "")
+    return f"\n{cleaned}\n" if cleaned else ""
+
+
 # ── Template keys (one per type; the sweep reads the matching .txt) ───────────
 TEMPLATE_KEYS: dict[str, str] = {
     "incomplete_qualification": "catering_followup_incomplete_qualification",
@@ -265,6 +305,7 @@ def schedule_followup(
     due_at: Optional[datetime] = None,
     event_date: Optional[str] = None,
     created_by: str = "system",
+    note: Optional[str] = None,
     path: Optional[Path] = None,
 ) -> ScheduleResult:
     """Write ONE follow-up to the store under its FileLock.
@@ -272,6 +313,9 @@ def schedule_followup(
     Refuses duplicates by (lead_id, type, due-day) — including previously
     suppressed and cancelled ones — unless `created_by="owner"`, which is a human
     deliberately asking for the nudge the system decided against.
+
+    `note` is owner-authored context rendered into an owner_reminder; it is
+    normalised here so the stored value is already the value that will render.
     """
     if followup_type not in TEMPLATE_KEYS:
         return ScheduleResult(False, reason="unknown_type")
@@ -297,6 +341,7 @@ def schedule_followup(
             created_by=created_by,
             status="scheduled",
             message_template_key=TEMPLATE_KEYS[followup_type],
+            note=normalize_note(note) or None,
         )
         store.followups.append(followup)
         store.next_sequence = int(followup.followup_id[2:]) + 1
@@ -600,6 +645,7 @@ __all__ = [
     "POST_EVENT_FEEDBACK_DAYS_AFTER",
     "EVENT_ANCHORED_TYPES", "TEMPLATE_KEYS",
     "BRIDGE_TEMPLATE_PREFIX", "with_bridge_prefix",
+    "NOTE_MAX_CHARS", "normalize_note", "note_line",
     "CARD_TTL_HOURS", "MAX_CARD_ATTEMPTS",
     "FOLLOWUP_ALLOWED_LEAD_STATUSES", "FOLLOWUP_EXTRA_ALLOWED_STATUSES",
     "LIVE_FOLLOWUP_STATUSES",

@@ -485,5 +485,57 @@ class TestTemplates:
         text = (TEMPLATE_DIR / f"{key}.txt").read_text(encoding="utf-8")
         rendered = text.format(customer_name="Asha", lead_id="L0001",
                                event_date="2026-09-01", headcount=40,
-                               missing_fields="venue, service style")
+                               missing_fields="venue, service style",
+                               note_line=cf.note_line("a note"))
         assert "{" not in rendered
+
+
+class TestOwnerNote:
+    def test_a_plain_note_survives_intact(self):
+        assert cf.normalize_note("Ask about the Sept 14 date.") == (
+            "Ask about the Sept 14 date.")
+
+    def test_newlines_and_runs_of_space_collapse(self):
+        """A note is one line inside a fixed template."""
+        assert cf.normalize_note("first\nsecond\t\tthird   fourth") == (
+            "first second third fourth")
+
+    def test_markdown_delimiters_are_stripped(self):
+        """The note must not restyle the message around it."""
+        assert cf.normalize_note("*bold* _it_ ~s~ `c`") == "bold it s c"
+
+    def test_control_and_format_characters_are_dropped(self):
+        assert cf.normalize_note("hi‮gnimoc​ there") == "hignimoc there"
+
+    def test_length_is_capped(self):
+        assert len(cf.normalize_note("x" * 500)) == cf.NOTE_MAX_CHARS
+
+    def test_empty_and_none_render_no_paragraph(self):
+        assert cf.note_line(None) == ""
+        assert cf.note_line("") == ""
+        assert cf.note_line("   ") == ""
+
+    def test_a_present_note_renders_as_its_own_paragraph(self):
+        assert cf.note_line("check the date") == "\ncheck the date\n"
+
+    def test_the_note_is_normalised_on_the_way_into_the_store(self, store_path):
+        res = cf.schedule_followup("L0001", "owner_reminder", now=NOW,
+                                   due_at=NOW + timedelta(days=1),
+                                   created_by="owner", note="  *ask*\nagain  ")
+        assert res.followup.note == "ask again"
+
+    def test_no_note_stores_none_not_empty_string(self, store_path):
+        res = cf.schedule_followup("L0001", "owner_reminder", now=NOW,
+                                   due_at=NOW + timedelta(days=1),
+                                   created_by="owner", note="")
+        assert res.followup.note is None
+
+    def test_a_followup_written_before_the_note_field_still_decodes(self, store_path):
+        """Additive + default None: a rollback must not strand the store."""
+        legacy = _followup().model_dump(mode="json")
+        legacy.pop("note")
+        store_path.write_text(json.dumps({
+            "schema_version": 1, "next_sequence": 2, "followups": [legacy],
+        }), encoding="utf-8")
+        loaded, status = cf.load_store(store_path)
+        assert status == "ok" and loaded.followups[0].note is None

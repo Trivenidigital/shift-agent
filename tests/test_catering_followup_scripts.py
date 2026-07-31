@@ -33,6 +33,7 @@ for _p in (REPO / "src" / "platform",):
 SWEEP = SCRIPTS / "catering-followup-sweep"
 APPROVE = SCRIPTS / "approve-catering-followup"
 STATUS = SCRIPTS / "catering-followup-status"
+CREATE = SCRIPTS / "create-catering-followup"
 AMEND = SCRIPTS / "amend-catering-lead"
 
 OWNER_JID = "19045550100@s.whatsapp.net"
@@ -551,6 +552,161 @@ class TestApprove:
         assert rc == 6 and len(sends) == 1
         assert _store(env)[0]["status"] == "awaiting_owner_approval"
         assert "catering_followup_sent" not in _types(env)
+
+
+# ── create (owner_reminder) ──────────────────────────────────────────────────
+def _run_create(env, monkeypatch, *argv):
+    mod = load_script(f"create_fu_{len(argv)}_{id(argv)}", CREATE)
+    old = sys.argv
+    sys.argv = ["create-catering-followup", *argv]
+    try:
+        return mod.main()
+    finally:
+        sys.argv = old
+
+
+class TestCreate:
+    def test_relative_due_at_schedules_an_owner_reminder(self, env, monkeypatch):
+        assert _run_create(env, monkeypatch, "--lead-id", "L0001", "--due-at", "+2d") == 0
+        created = [f for f in _store(env) if f["followup_type"] == "owner_reminder"]
+        assert len(created) == 1
+        assert created[0]["created_by"] == "owner"
+        assert created[0]["status"] == "scheduled"
+        assert created[0]["note"] is None
+        row = [r for r in _rows(env) if r["type"] == "catering_followup_scheduled"][-1]
+        assert row["created_by"] == "owner" and row["trigger"] == "owner_cli"
+
+    def test_iso_due_at_is_accepted(self, env, monkeypatch):
+        assert _run_create(env, monkeypatch, "--lead-id", "L0001",
+                           "--due-at", "2099-08-14T10:00:00+00:00") == 0
+        created = [f for f in _store(env) if f["followup_type"] == "owner_reminder"][0]
+        assert created["due_at"].startswith("2099-08-14T10:00")
+
+    def test_the_note_is_stored_normalised(self, env, monkeypatch):
+        assert _run_create(env, monkeypatch, "--lead-id", "L0001", "--due-at", "+3h",
+                           "--note", "  *Ask* about\nthe 14th  ") == 0
+        created = [f for f in _store(env) if f["followup_type"] == "owner_reminder"][0]
+        assert created["note"] == "Ask about the 14th"
+
+    def test_the_note_reaches_the_rendered_message(self, env, monkeypatch):
+        """End of the chain: --note -> store -> sweep render -> owner card."""
+        _run_create(env, monkeypatch, "--lead-id", "L0001", "--due-at", "+1h",
+                    "--note", "Ask about the 14th")
+        # Make it due, and clear the fixture's own follow-up so only ours cards.
+        created = [f for f in _store(env) if f["followup_type"] == "owner_reminder"][0]
+        created["due_at"] = "2026-07-30T14:00:00+00:00"
+        _write_followups(env, created)
+        rc, sends = _run(env, monkeypatch, SWEEP, "sweep_note")
+        assert rc == 0 and len(sends) == 1
+        assert "Ask about the 14th" in sends[0][1]
+        assert "Ask about the 14th" in _store(env)[0]["rendered_message"]
+
+    def test_a_reminder_without_a_note_renders_cleanly(self, env, monkeypatch):
+        _run_create(env, monkeypatch, "--lead-id", "L0001", "--due-at", "+1h")
+        created = [f for f in _store(env) if f["followup_type"] == "owner_reminder"][0]
+        created["due_at"] = "2026-07-30T14:00:00+00:00"
+        _write_followups(env, created)
+        rc, _ = _run(env, monkeypatch, SWEEP, "sweep_nonote")
+        assert rc == 0
+        rendered = _store(env)[0]["rendered_message"]
+        assert "{" not in rendered and "\n\n\n" not in rendered
+
+    def test_unknown_lead_is_refused(self, env, monkeypatch):
+        assert _run_create(env, monkeypatch, "--lead-id", "L9999", "--due-at", "+2d") == 4
+        assert not [f for f in _store(env) if f["followup_type"] == "owner_reminder"]
+
+    @pytest.mark.parametrize("status", ["CLOSED", "OWNER_REJECTED", "STALE",
+                                        "NOT_CATERING"])
+    def test_a_lead_in_a_terminal_status_is_refused(self, env, monkeypatch, status):
+        _write_leads(env, _lead(status=status))
+        assert _run_create(env, monkeypatch, "--lead-id", "L0001", "--due-at", "+2d") == 4
+        assert not [f for f in _store(env) if f["followup_type"] == "owner_reminder"]
+
+    @pytest.mark.parametrize("raw", ["", "tomorrow", "+0d", "+2w", "2d", "+d",
+                                     "not-a-date", "+-3h"])
+    def test_malformed_due_at_is_refused(self, env, monkeypatch, raw):
+        assert _run_create(env, monkeypatch, "--lead-id", "L0001", "--due-at", raw) == 2
+        assert not [f for f in _store(env) if f["followup_type"] == "owner_reminder"]
+
+    def test_a_due_time_in_the_past_is_refused(self, env, monkeypatch):
+        """It would fire on the very next sweep — almost certainly a typo."""
+        assert _run_create(env, monkeypatch, "--lead-id", "L0001",
+                           "--due-at", "2020-01-01T00:00:00+00:00") == 2
+        assert not [f for f in _store(env) if f["followup_type"] == "owner_reminder"]
+
+    def test_the_owner_may_schedule_the_same_day_twice(self, env, monkeypatch):
+        """created_by='owner' bypasses the dedup: a human asking again is not the
+        system re-litigating a decision it already made."""
+        assert _run_create(env, monkeypatch, "--lead-id", "L0001", "--due-at", "+2d") == 0
+        assert _run_create(env, monkeypatch, "--lead-id", "L0001", "--due-at", "+2d") == 0
+        created = [f for f in _store(env) if f["followup_type"] == "owner_reminder"]
+        assert len(created) == 2
+        assert len({f["followup_id"] for f in created}) == 2
+
+    def test_an_unreadable_leads_store_refuses_rather_than_scheduling_blind(
+            self, env, monkeypatch):
+        env["leads"].write_text("{not json", encoding="utf-8")
+        assert _run_create(env, monkeypatch, "--lead-id", "L0001", "--due-at", "+2d") == 5
+        assert not [f for f in _store(env) if f["followup_type"] == "owner_reminder"]
+
+    def test_owner_created_reminders_are_not_capped_at_sweep_time(self, env, monkeypatch):
+        """The lifetime budget stops the SYSTEM pestering; it does not overrule
+        the owner."""
+        for _ in range(5):
+            assert _run_create(env, monkeypatch, "--lead-id", "L0001",
+                               "--due-at", "+2d") == 0
+        due = []
+        for f in _store(env):
+            if f["followup_type"] == "owner_reminder":
+                f["due_at"] = "2026-07-30T14:00:00+00:00"
+                due.append(f)
+        _write_followups(env, *due)
+        rc, sends = _run(env, monkeypatch, SWEEP, "sweep_ownercap")
+        assert rc == 0
+        assert len(sends) == 5
+        assert all(f["status"] == "awaiting_owner_approval" for f in _store(env))
+
+    def test_an_owner_reminder_is_still_subject_to_the_customer_protections(
+            self, env, monkeypatch):
+        """Owner-created bypasses dedup and the cap — never the kill switch, a
+        hold, or an opt-out."""
+        _run_create(env, monkeypatch, "--lead-id", "L0001", "--due-at", "+1h")
+        created = [f for f in _store(env) if f["followup_type"] == "owner_reminder"][0]
+        created["due_at"] = "2026-07-30T14:00:00+00:00"
+        _write_followups(env, created)
+        _write_leads(env, _lead(on_hold=True, hold_reason="customer asked us to wait"))
+        rc, sends = _run(env, monkeypatch, SWEEP, "sweep_ownerhold")
+        assert rc == 0 and sends == []
+        assert _store(env)[0]["suppressed_reason"] == "lead_on_hold"
+
+
+class TestDueAtParsing:
+    """Pure parser cells — the argument an owner is most likely to fat-finger."""
+
+    @pytest.fixture
+    def parse(self):
+        return load_script("create_fu_parse", CREATE).parse_due_at
+
+    def test_hours_and_days(self, parse):
+        now = datetime(2026, 7, 31, 14, 0, tzinfo=timezone.utc)
+        assert parse("+6h", now=now) == now + timedelta(hours=6)
+        assert parse("+3d", now=now) == now + timedelta(days=3)
+        assert parse("+2D", now=now) == now + timedelta(days=2)
+
+    def test_naive_iso_is_read_as_utc(self, parse):
+        now = datetime(2026, 7, 31, 14, 0, tzinfo=timezone.utc)
+        assert parse("2026-08-14T10:00", now=now) == datetime(
+            2026, 8, 14, 10, 0, tzinfo=timezone.utc)
+
+    def test_an_offset_bearing_iso_keeps_its_offset(self, parse):
+        now = datetime(2026, 7, 31, 14, 0, tzinfo=timezone.utc)
+        parsed = parse("2026-08-14T10:00:00-04:00", now=now)
+        assert parsed.utcoffset() == timedelta(hours=-4)
+
+    @pytest.mark.parametrize("raw", ["", "   ", "+0h", "+0d", "2 days", "+2w",
+                                     "next friday", "++3h"])
+    def test_rejects_what_it_cannot_read(self, parse, raw):
+        assert parse(raw, now=datetime(2026, 7, 31, tzinfo=timezone.utc)) is None
 
 
 # ── status ───────────────────────────────────────────────────────────────────

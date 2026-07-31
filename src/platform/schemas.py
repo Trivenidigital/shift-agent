@@ -2645,6 +2645,12 @@ class CateringFollowup(BaseModel):
     sent_message_id: Optional[str] = Field(default=None, max_length=200)
     attempt_count: int = Field(default=0, ge=0, le=10)
     last_attempt_at: Optional[datetime] = None
+    # Owner-authored context for an owner_reminder ("are you still thinking about
+    # the 14th?"). The owner's OWN words to their OWN customer — not model output —
+    # so it is bounded and stripped rather than screened, and the owner reads it
+    # again on the approval card before it can send. Additive + default None, so
+    # every follow-up written before this field decodes unchanged.
+    note: Optional[str] = Field(default=None, max_length=300)
 
 
 class CateringFollowupStore(BaseModel):
