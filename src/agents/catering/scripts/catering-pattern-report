@@ -79,6 +79,9 @@ ACTIVE_LEAD_STATUSES = {
     "OWNER_APPROVED",
     "OWNER_EDITED",
     "SENT_TO_CUSTOMER",
+    # M3: BOOKED is non-terminal (it still has to be closed out), so it belongs in
+    # the same "not dead yet" set every other live status is in.
+    "BOOKED",
 }
 
 
