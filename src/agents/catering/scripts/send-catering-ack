@@ -33,11 +33,13 @@ Exit codes:
   0  — success (message accepted by bridge with messageId)
   2  — invalid input (missing/malformed flags)
   6  — bridge unreachable / empty response
+  14 — lead is ON HOLD (M4/G4); the ack was withheld, do NOT retry
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -46,12 +48,20 @@ from pathlib import Path
 sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
 
-from safe_io import ndjson_append  # noqa: E402
+from safe_io import load_model, ndjson_append  # noqa: E402
 from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402  # PR-ε: chokepoint consolidation
-from schemas import CateringCustomerAckSent, CateringCustomerAckFailed  # noqa: E402
-from exit_codes import EXIT_OK, EXIT_INVALID_INPUT, EXIT_DEPENDENCY_DOWN  # noqa: E402
+from schemas import (  # noqa: E402
+    CateringCustomerAckSent, CateringCustomerAckFailed,
+    CateringLeadHoldBlockedSend, CateringLeadStore,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_DEPENDENCY_DOWN, EXIT_LEAD_ON_HOLD,
+)
 
-LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+# Env overrides mirror the sibling catering scripts (apply-catering-owner-decision,
+# catering-quote-status) so tests and subprocess callers can isolate both paths.
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
 
 # F5b: server-side bridge `template_bypass` prefix. Mirrors apply-script F1
 # (PR #43). See bridge.js:133 for the exact regex:
@@ -101,6 +111,44 @@ def _emit_ack_sent(jid: str, mid: str, lead_id: str, *,
             logical_turn_id=logical_turn_id,
             send_attempt_id=send_attempt_id,
             outcome="sent",
+        )
+        ndjson_append(LOG_PATH, entry.model_dump_json())
+    except Exception as e:
+        sys.stderr.write(f"audit emit failed (non-fatal): {e}\n")
+
+
+def _lead_hold(lead_id: str) -> "tuple[bool, str]":
+    """Return ``(on_hold, hold_reason)`` for ``lead_id`` (M4/G4).
+
+    FAILS OPEN — an unknown lead id, an unreadable store, or any error reads as
+    NOT held. A hold withholds a courtesy acknowledgment; losing one to a
+    transient read fault leaves the customer in silence right after they wrote
+    in, which is the worse outcome. The owner-approved QUOTE send in
+    apply-catering-owner-decision reads the hold off the lead it already holds
+    under LEADS_LOCK, so that money-adjacent path has no such window."""
+    if not lead_id:
+        return False, ""
+    try:
+        store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+        if status not in ("ok", "missing", "empty"):
+            return False, ""
+        lead = next((l for l in store.leads if l.lead_id == lead_id), None)
+        if lead is None:
+            return False, ""
+        return bool(lead.on_hold), (lead.hold_reason or "")
+    except Exception as e:  # noqa: BLE001 — never block the ack on a store fault
+        sys.stderr.write(f"hold check failed (fail-open, non-fatal): {e}\n")
+        return False, ""
+
+
+def _emit_hold_blocked(lead_id: str, hold_reason: str) -> None:
+    try:
+        entry = CateringLeadHoldBlockedSend(
+            ts=_now_iso(),
+            type="catering_lead_hold_blocked_send",
+            lead_id=lead_id,
+            blocked_send_kind="customer_ack",
+            hold_reason=hold_reason[:200],
         )
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
@@ -157,6 +205,19 @@ def main() -> int:
                          f"message-text {len(body)} chars exceeds {MAX_ACK_BODY_CHARS}", **_ids)
         sys.stderr.write(f"--message-text {len(body)} chars > {MAX_ACK_BODY_CHARS}\n")
         return EXIT_INVALID_INPUT
+
+    # M4/G4 per-lead hold — checked at the SEND CALL (the F7 extraction region is
+    # owned by another workstream this wave). Only lead-scoped: an ack invoked
+    # without --lead-id has no lead to hold and is never blocked here.
+    on_hold, hold_reason = _lead_hold(args.lead_id.strip())
+    if on_hold:
+        _emit_hold_blocked(args.lead_id.strip(), hold_reason)
+        sys.stderr.write(
+            f"lead {args.lead_id.strip()} is ON HOLD; withholding customer ack "
+            f"(reason: {hold_reason or 'unspecified'}). "
+            f"Clear with: set-catering-lead-hold --lead-id {args.lead_id.strip()} --off\n"
+        )
+        return EXIT_LEAD_ON_HOLD
 
     full_message = f"{BRIDGE_PREFIX}{body}"
     ok, mid_or_err = _bridge_post(jid, full_message)

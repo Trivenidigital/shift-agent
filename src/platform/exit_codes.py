@@ -63,3 +63,12 @@ EXIT_PRIVILEGE_DENIED = 12
 # the customer to pick an option instead of retrying the finalize. Operator
 # escape hatch: pass --force-default to build the default basket anyway.
 EXIT_PROPOSAL_ACTIVE = 13
+
+# 14 — M4/G4: the lead is ON HOLD, so a lead-scoped automated CUSTOMER send was
+# refused (send-catering-ack, apply-catering-owner-decision approve). Distinct
+# from EXIT_DEPENDENCY_DOWN (=6, "bridge unreachable") so the PR-D2 retry
+# state-machine does NOT re-attempt the bridge POST — a hold is an operator
+# decision, cleared only by `set-catering-lead-hold --off`, never by a retry.
+# Distinct from EXIT_ILLEGAL_TRANSITION (=9) because the lead's status is
+# perfectly legal; only the send is withheld.
+EXIT_LEAD_ON_HOLD = 14

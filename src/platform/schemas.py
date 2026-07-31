@@ -2284,6 +2284,21 @@ class CateringLead(BaseModel):
     ] = "none"
     deposit_minted_at: Optional[datetime] = None
 
+    # M4/G4 per-lead HOLD. Additive + default-off, so every legacy lead decodes
+    # unchanged and a rollback drops the fields cleanly. Orthogonal to
+    # lead.status AND to the per-conversation automation-control kernel: a hold
+    # scopes to ONE lead, the kernel scopes to the whole conversation (a customer
+    # with two leads can have one held and the other running). Set/cleared only
+    # by `set-catering-lead-hold` under FileLock(LEADS_LOCK).
+    #
+    # Enforcement contract: a held lead is excluded from LEAD-SCOPED automated
+    # CUSTOMER sends (the F7 primary ack in send-catering-ack, the owner-approved
+    # quote in apply-catering-owner-decision). Owner-directed sends — approval
+    # cards, reprompts, confirmations — are NEVER blocked by a hold.
+    on_hold: bool = False
+    hold_reason: Optional[str] = Field(default=None, max_length=200)
+    hold_set_at: Optional[datetime] = None
+
     # v0.3: post-AWAITING statuses require non-empty quote_text. Legacy data
     # (pre-v0.3 leads with empty quote_text) is backfilled with sentinel by
     # mode="before" shim, then strict validator runs. Migration tool fixes
@@ -3734,8 +3749,22 @@ class OutboundCapExceeded(_BaseEntry):
 
 
 class OutboundRefusedDisabled(_BaseEntry):
+    """An outbound send was refused because the operator kill switch
+    (``shift-agent-disable`` → ``state/disabled.flag``) is engaged.
+
+    M4/G6 WIDENING (additive): the flag is now honored at the safe_io send
+    chokepoint (bridge_post / bridge_send_media / bridge_send_cta) and the
+    front-brain gateway seam, none of which have a proposal in scope. So
+    ``proposal_id`` became OPTIONAL (empty string) and the pattern admits ""
+    alongside the legacy ``P####`` form — every row that validated before still
+    validates. ``send_kind`` names the refusing site ("" for the legacy
+    proposal-scoped emitters in send-coverage-message)."""
     type: Literal["outbound_refused_disabled"]
-    proposal_id: ProposalId
+    proposal_id: str = Field(default="", pattern=r"^(P\d{4,})?$")
+    chat_key_hash: str = Field(default="", max_length=64)
+    send_kind: Literal[
+        "", "bridge_post", "bridge_send_media", "bridge_send_cta", "gateway_send",
+    ] = ""
 
 
 class AgentStateChange(_BaseEntry):
@@ -6603,6 +6632,33 @@ class CateringAutomatedSendSuppressed(_BaseEntry):
     logical_turn_id: str = ""
 
 
+class CateringLeadHoldChanged(_BaseEntry):
+    """M4/G4: a lead's per-lead HOLD was set or cleared (set-catering-lead-hold).
+
+    Orthogonal to the per-CONVERSATION automation-control kernel: a hold scopes
+    to ONE lead (a customer with two leads can have one held and one running),
+    the kernel scopes to the whole conversation. Idempotent re-assertion is
+    audited too (from_hold == to_hold records the no-op), mirroring
+    catering_automation_control_changed."""
+    type: Literal["catering_lead_hold_changed"]
+    lead_id: str = Field(min_length=1)
+    from_hold: bool
+    to_hold: bool
+    actor: Literal["owner", "operator", "system"]
+    reason: str = Field(default="", max_length=200)
+
+
+class CateringLeadHoldBlockedSend(_BaseEntry):
+    """M4/G4: a lead-scoped automated CUSTOMER send was refused because the lead
+    is on hold. Owner-directed sends (approval cards, confirmations) are NEVER
+    counted here — a hold pauses the customer-facing automation, not the owner's
+    visibility. `blocked_send_kind` names the refusing site."""
+    type: Literal["catering_lead_hold_blocked_send"]
+    lead_id: str = Field(min_length=1)
+    blocked_send_kind: Literal["customer_ack", "owner_approved_quote"]
+    hold_reason: str = Field(default="", max_length=200)
+
+
 # ─────────────────────────────────────────────────────────────────
 # Commerce primitive LogEntry variants — slice 1 (PRD v2 §8)
 # Slice 1 emits: cart_started/updated/cleared/expired/checked_out,
@@ -7169,6 +7225,9 @@ LogEntry = Annotated[
         # PR-5 — catering automation-control kernel (STOP/pause/opt-out + takeover)
         Annotated[CateringAutomationControlChanged, Tag("catering_automation_control_changed")],
         Annotated[CateringAutomatedSendSuppressed, Tag("catering_automated_send_suppressed")],
+        # M4/G4 — per-lead hold (lead-scoped twin of the conversation kernel)
+        Annotated[CateringLeadHoldChanged, Tag("catering_lead_hold_changed")],
+        Annotated[CateringLeadHoldBlockedSend, Tag("catering_lead_hold_blocked_send")],
         # Commerce primitives slice 1 — PRD v2 §8
         Annotated[CommerceCartStarted, Tag("commerce_cart_started")],
         Annotated[CommerceCartUpdated, Tag("commerce_cart_updated")],
@@ -7329,6 +7388,7 @@ __all__ = [
     "CateringQuoteVersionCommitted", "CateringQuoteLedgerAppendFailed",
     "CateringAutomationControlMode",
     "CateringAutomationControlChanged", "CateringAutomatedSendSuppressed",
+    "CateringLeadHoldChanged", "CateringLeadHoldBlockedSend",
     "LidLearned", "DispatcherRouted",
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
     "EodSnapshot", "EodPushoverSent", "EodSkipped",
