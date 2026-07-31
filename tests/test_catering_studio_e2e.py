@@ -271,6 +271,13 @@ def _env_map(sb: _Sandbox) -> dict[str, str]:
         "CATERING_FOLLOWUP_ALLOWLIST": "*",
         # M3 proposal sweep
         "CATERING_PROPOSAL_SWEEP_ENABLED": "1",
+        # The two F7 source flags a parallel fix wave converts to env-driven
+        # (CATERING_ACCEPTANCE_ARM defaults OFF, CATERING_QUALIFICATION_GATE ON).
+        # Set explicitly so this transcript states what it needs rather than
+        # inheriting a default: harmless no-ops against the current base, and
+        # correct the moment the flags start reading the environment.
+        "CATERING_ACCEPTANCE_ARM": "1",
+        "CATERING_QUALIFICATION_GATE": "1",
         # The transport is stubbed at urlopen, so the send path must be allowed to
         # reach it — otherwise bridge_post short-circuits before the kill-switch
         # and automation-control gates this file exists to prove.
@@ -494,14 +501,31 @@ def _shim_select(sb: _Sandbox, finalize_calls: list):
     return _s
 
 
+def _shim_record_acceptance(sb: _Sandbox):
+    def _r(lead_id, chat_id, message_id, text, sender_role="customer"):
+        return _run_script(sb, "record-catering-acceptance", [
+            "--lead-id", lead_id, "--customer-jid", chat_id,
+            "--customer-message-id", message_id, "--message-text", text,
+            "--sender-role", sender_role or "customer",
+        ])[0]
+    return _r
+
+
 @pytest.fixture(scope="module")
 def cf(sb: _Sandbox):
     """The real cf-router, wired so its subprocess boundary runs the REAL scripts
     in-process against the sandbox. Module-scoped: one router for the transcript."""
     actions, hooks = _load_plugin()
+    # Armed explicitly rather than inherited: a parallel fix wave converts the
+    # qualification-gate and acceptance-arm flags to env-driven (acceptance arm
+    # default OFF). Setting BOTH the env vars (see _env_map) and the module
+    # attributes means this transcript states its own preconditions whichever way
+    # the flag ends up being read, instead of silently losing an arm to a
+    # default flip.
     hooks.F7_PROPOSAL_BRANCH_ENABLED = True
     hooks.F7_PRIMARY_FOLLOWUP_REPLY = True
     hooks.F7_QUALIFICATION_GATE_ENABLED = True
+    hooks.F7_ACCEPTANCE_ARM_ENABLED = True
 
     actions.CONFIG_PATH = sb.config
     actions.LEADS_PATH = sb.leads
@@ -522,6 +546,7 @@ def cf(sb: _Sandbox):
     actions.invoke_amend_catering_lead = _shim_amend(sb)
     actions.invoke_create_catering_proposals = _shim_create_proposals(sb)
     actions.invoke_select_catering_proposal = _shim_select(sb, finalize_calls)
+    actions.invoke_record_catering_acceptance = _shim_record_acceptance(sb)
     return SimpleNamespace(hooks=hooks, actions=actions, finalize_calls=finalize_calls)
 
 
@@ -1287,15 +1312,20 @@ def test_13_owner_release_restores_normal_handling(cf, sb: _Sandbox):
 # ═════════════════════════════════════════════════════════════════════════════
 # 14. Acceptance → BOOKED; an ambiguous reply on a DIFFERENT lead clarifies once.
 # ═════════════════════════════════════════════════════════════════════════════
-def _record_acceptance(sb: _Sandbox, lead_id: str, jid: str, mid: str, text: str):
-    return _run_script(sb, "record-catering-acceptance", [
-        "--lead-id", lead_id, "--customer-jid", jid,
-        "--customer-message-id", mid, "--message-text", text,
-        "--sender-role", "customer",
-    ])
+def _acceptance_inbound(cf, text: str, mid: str, chat_id: str):
+    """A customer inbound through the REAL cf-router acceptance arm.
+
+    The arm sits in the dispatch chain ahead of the catering-signal admission, so
+    this is the production route for "we accept" — driving the writer script
+    directly would skip the detector, the amendment-phrasing cede, the owner-role
+    refusal and the post-quote lead lookup, which is most of what makes the arm
+    safe."""
+    return cf.hooks._try_catering_acceptance_intercept(
+        text, chat_id, _event(mid, chat_id), flyer_generation_enabled=False,
+    )
 
 
-def test_14_customer_acceptance_books_the_lead(sb: _Sandbox):
+def test_14_customer_acceptance_books_the_lead(cf, sb: _Sandbox):
     # The lead is OWNER_EDITED after test_09; the customer's acceptance applies to
     # the quote they were sent, so put the lead back in the state that models
     # "quote is with the customer" before recording their answer.
@@ -1306,11 +1336,15 @@ def test_14_customer_acceptance_books_the_lead(sb: _Sandbox):
     sb.leads.write_text(json.dumps(doc), encoding="utf-8")
 
     n0 = len(sb.sent)
-    rc, out, err = _record_acceptance(sb, sb.lead_id, CUSTOMER_JID, "wamid.M7.15",
-                                      "yes, we accept - let's book it")
-    assert rc == 0, f"record-catering-acceptance exit={rc}; stderr={err[:800]}"
-    body = _stdout_json(out)
-    assert body["outcome"] == "accepted" and body["new_status"] == "BOOKED", f"stdout={body}"
+    result = _acceptance_inbound(cf, "yes, we accept - let's book it", "wamid.M7.15",
+                                 CUSTOMER_LID)
+    assert result is not None and result["action"] == "skip", (
+        f"the acceptance arm must own an explicit accept; got {result!r}")
+    assert sb.lead_id in result["reason"], (
+        f"the arm must resolve the sender to THEIR post-quote lead: {result['reason']}")
+    assert any(r.get("reason") == "f7_quote_acceptance"
+               for r in _rows(sb, "cf_router_intercepted")), (
+        "the acceptance routing decision must be auditable")
 
     lead = _lead(sb, sb.lead_id)
     assert lead["status"] == "BOOKED", f"status={lead['status']}"
@@ -1324,11 +1358,21 @@ def test_14_customer_acceptance_books_the_lead(sb: _Sandbox):
     assert len(_to_owner(sb, n0)) == 1, "the owner is told the booking landed"
     assert len(_to_customer(sb, n0)) == 1, "the customer gets one confirmation"
 
+    # The booked lead has left SENT_TO_CUSTOMER, so the arm no longer claims this
+    # sender — a second "we accept" falls through to normal routing instead of
+    # re-booking.
+    n_replay = len(sb.sent)
+    assert _acceptance_inbound(cf, "yes we accept", "wamid.M7.15b", CUSTOMER_LID) is None, (
+        "a BOOKED lead is no longer awaiting a decision; the arm must cede the turn")
+    assert sb.sent[n_replay:] == [], f"nothing re-sent, got {sb.sent[n_replay:]}"
+
     # A DIFFERENT lead, an ambiguous reply: one clarification, no state change.
     n1 = len(sb.sent)
     before = _lead(sb, OTHER_LEAD_ID)
-    rc, out2, err2 = _record_acceptance(sb, OTHER_LEAD_ID, OTHER_JID, "wamid.M7.16", "ok great")
-    assert rc == 0, f"ambiguous acceptance exit={rc}; stderr={err2[:600]}"
+    amb = _acceptance_inbound(cf, "ok great", "wamid.M7.16", OTHER_JID)
+    assert amb is not None and amb["action"] == "skip", (
+        f"an ambiguous post-quote reply is still owned by the arm; got {amb!r}")
+    assert OTHER_LEAD_ID in amb["reason"], amb["reason"]
     after = _lead(sb, OTHER_LEAD_ID)
     assert after["status"] == before["status"] == "SENT_TO_CUSTOMER", (
         "an ambiguous reply must NOT decide the booking")
@@ -1342,10 +1386,17 @@ def test_14_customer_acceptance_books_the_lead(sb: _Sandbox):
 
     # ...and only ONCE: a second ambiguous reply is silent.
     n2 = len(sb.sent)
-    rc, out3, _ = _record_acceptance(sb, OTHER_LEAD_ID, OTHER_JID, "wamid.M7.17", "ok great")
-    assert rc == 0 and _stdout_json(out3).get("replayed") is True, f"stdout={out3[:300]}"
+    amb2 = _acceptance_inbound(cf, "ok great", "wamid.M7.17", OTHER_JID)
+    assert amb2 is not None and amb2["action"] == "skip", (
+        f"the arm still owns the turn, it just says nothing; got {amb2!r}")
     assert sb.sent[n2:] == [], (
         f"clarification is asked once, never again, got {sb.sent[n2:]}")
+
+    # An amendment-phrased "accept" is deliberately CEDED to the durable-capture
+    # path — the change matters more than the yes.
+    assert _acceptance_inbound(
+        cf, "actually we accept but make it 200 guests", "wamid.M7.17b", OTHER_JID
+    ) is None, "amendment-phrased text must keep the R2A capture path, not book"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
