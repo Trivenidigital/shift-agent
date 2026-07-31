@@ -74,6 +74,8 @@ from exit_codes import (  # noqa: E402
     EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN,
 )
 from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
+from catering_paths import CATERING_MENU_PATH  # noqa: E402
+from catering_pricing import price_status_line as _price_status_line  # noqa: E402
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
 # PR-D2 commit 1: SHIFT_AGENT_CONFIG_PATH env var override (test-only).
@@ -82,7 +84,7 @@ LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 TEMPLATE_DIR = Path("/opt/shift-agent/templates")
-MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
+MENU_PATH = CATERING_MENU_PATH
 PROPOSAL_MENU_ITEMS_CAP = 12  # cap to keep WhatsApp message readable
 
 # Off-menu render budget. Budget arithmetic:
@@ -222,6 +224,10 @@ def _render_proposal(lead_id: str, customer_name: str, fields: CateringLeadExtra
         "event_date": fields.event_date or "[TBD]",
         "event_time": fields.event_time or "[TBD]",
         "menu_section": menu_section,
+        # M2 ruling #5: the price-status label rides on every customer-facing
+        # quote surface. This one is PRE-approval (BL-CATER-08 keeps prices off
+        # it entirely), so the honest status is always pending owner review.
+        "price_status_line": _price_status_line("pending_owner_review"),
     }
     if template_path.exists():
         try:
@@ -233,7 +239,8 @@ def _render_proposal(lead_id: str, customer_name: str, fields: CateringLeadExtra
     return (
         f"⚕ *Catering Agent*\n────────────\n"
         f"Hi {fmt_fields['customer_name']}, thanks for your catering inquiry. "
-        f"We'll be in touch shortly with details.{menu_section}\n(Ref: {lead_id})"
+        f"We'll be in touch shortly with details.{menu_section}\n"
+        f"{fmt_fields['price_status_line']}\n(Ref: {lead_id})"
     )
 
 

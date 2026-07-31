@@ -79,6 +79,8 @@ from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
     EXIT_DEPENDENCY_DOWN, EXIT_TRUTH_GUARD_FAILED, EXIT_PROPOSAL_ACTIVE,
 )
+from catering_paths import CATERING_MENU_PATH, CATERING_PRICEBOOK_PATH  # noqa: E402
+import catering_pricing as _pricing  # noqa: E402  # M2 deterministic quote kernel
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
 # Paths (test-overridable via env or monkeypatch)
@@ -87,7 +89,11 @@ LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 LOG_LOCK = Path("/opt/shift-agent/logs/decisions.log.lock")
-MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
+MENU_PATH = CATERING_MENU_PATH
+# M2: commercial pricebook. ABSENT is a supported steady state — every catering
+# customer ran without one before M2, and those leads must keep pricing exactly
+# as they did (flat menu-price sum, price_status="estimated").
+PRICEBOOK_PATH = CATERING_PRICEBOOK_PATH
 TEMPLATE_DIR = Path("/opt/shift-agent/templates")
 # census C4: proposal store — consulted by the --auto-default guard so the crude
 # default basket cannot silently override an option-picker flow (SENT proposal).
@@ -162,8 +168,8 @@ def _load_config() -> Config:
     return load_yaml_model(CONFIG_PATH, Config)
 
 
-def _load_menu_index() -> dict[str, int]:
-    """Returns name -> price_usd (whole dollars) for available items only.
+def _load_menu() -> tuple[Menu, dict[str, int]]:
+    """Returns (menu, name -> price_usd whole dollars for available items).
 
     Exits 2 if menu missing or unloadable (finalize cannot proceed without it).
     """
@@ -179,17 +185,37 @@ def _load_menu_index() -> dict[str, int]:
         sys.stderr.write(f"menu load_status={status}; cannot finalize\n")
         sys.exit(EXIT_INVALID_INPUT)
     # Convert price_usd (float) -> int (whole dollars). Round to nearest.
-    return {
+    index = {
         it.name: int(round(it.price_usd))
         for it in menu.items
         if it.available and it.price_usd is not None
     }
+    return menu, index
+
+
+def _load_pricebook():
+    """M2 commercial pricebook, or None when this customer has none.
+
+    Exits 2 when the file EXISTS but will not load: silently falling back to
+    pre-M2 flat pricing would quietly drop the owner's fees, tax and packages
+    from a real quote — a wrong-money outcome, not a degraded one.
+    """
+    try:
+        return _pricing.load_pricebook(PRICEBOOK_PATH)
+    except Exception as e:  # noqa: BLE001 — includes PricingError + load errors
+        sys.stderr.write(
+            f"pricebook at {PRICEBOOK_PATH} is present but unloadable "
+            f"({type(e).__name__}: {e}); refusing to finalize at pre-pricebook "
+            "prices. Re-import it with import-catering-pricebook.\n"
+        )
+        sys.exit(EXIT_INVALID_INPUT)
 
 
 def _cross_check_and_recompute(
     items: list[CateringSelectedItem], menu_index: dict[str, int],
 ) -> tuple[int, bool]:
-    """Validates items against menu; replaces stale prices with current.
+    """LEGACY (no-pricebook) path: validates items against menu; replaces stale
+    prices with current.
 
     Returns (server_recompute_usd, price_drift_detected).
     Exits 2 if any item not in menu or recompute is 0.
@@ -219,6 +245,61 @@ def _cross_check_and_recompute(
     return server_total, drift
 
 
+def _recompute_with_pricebook(
+    items: list[CateringSelectedItem], *, pricebook, menu: Menu,
+    guest_count: Optional[int], package_id: Optional[str],
+    min_per_guest_usd: Optional[float],
+) -> tuple[int, int, "_pricing.QuoteComputation"]:
+    """M2 path: route the basket through the deterministic kernel.
+
+    Returns (server_total_usd, guard_basis_usd, computation).
+
+    `server_total_usd` is the FULL quote (package + items + fees - discount +
+    tax) — the number persisted and shown to the owner.
+
+    `guard_basis_usd` is only the line-item + per-person subtotal. The
+    truth-guard compares the LLM's passed total against THIS, not the full
+    total: the LLM computed a basket sum and never saw the owner's fees or tax
+    rate, so comparing against the full total would trip exit 11 on every
+    legitimate finalize while telling us nothing about LLM price hallucination.
+
+    Exits 2 on an unresolvable price — same refusal contract as the legacy
+    path's "item not in current menu", and the reason the kernel's
+    never-guess rule matters here: a guessed number would be persisted.
+    """
+    qc = _pricing.compute_quote(
+        guest_count if guest_count and guest_count >= 1 else 1,
+        package_id,
+        [(it.name, it.qty) for it in items],
+        None,  # discounts are an owner action (M3), never customer-selected
+        pricebook,
+        menu,
+        min_per_guest_usd=min_per_guest_usd,
+    )
+    unpriced = [ln.name for ln in qc.lines if ln.unit_cents is None]
+    if unpriced:
+        sys.stderr.write(
+            f"no resolvable price for {unpriced!r} in menu v{menu.version} or "
+            f"pricebook v{pricebook.version}; refusing finalize\n"
+        )
+        sys.exit(EXIT_INVALID_INPUT)
+    if guest_count is None or guest_count < 1:
+        # Headcount unknown: per-guest scaling is not verifiable, so the number
+        # is not owner-approvable as-is. Never silently present it as firm.
+        qc = qc.model_copy(update={
+            "flags": qc.flags + ["unknown_guest_count"],
+            "price_status": "pending_owner_review",
+        })
+    guard_basis = _pricing.cents_to_whole_dollars(
+        qc.items_subtotal_cents + qc.per_person_subtotal_cents
+    )
+    server_total = _pricing.cents_to_whole_dollars(qc.total_cents)
+    if guard_basis <= 0:
+        sys.stderr.write(f"recomputed subtotal is {guard_basis}; refusing finalize\n")
+        sys.exit(EXIT_INVALID_INPUT)
+    return server_total, guard_basis, qc
+
+
 def _within_quote_tolerance(server: int, llm: int) -> bool:
     """Returns True iff |server - llm| <= min(5%, $25)."""
     if server == 0:
@@ -229,6 +310,35 @@ def _within_quote_tolerance(server: int, llm: int) -> bool:
     return abs_diff <= cap
 
 
+def _price_breakdown_block(qc) -> str:
+    """Fee / discount / tax lines the flat item list does not explain.
+
+    Empty on the legacy (no-pricebook) path, where the item sum IS the total.
+    """
+    if qc is None:
+        return ""
+    parts: list[str] = []
+    if qc.package_name is not None:
+        parts.append(
+            f"Package: {qc.package_name} — "
+            f"{_pricing.format_cents(qc.price_per_person_cents)}/guest × "
+            f"{qc.guest_count} = {_pricing.format_cents(qc.per_person_subtotal_cents)}"
+        )
+    for fee in qc.fees:
+        if fee.extended_cents is None:
+            parts.append(f"Fee — {fee.name}: pending ({fee.per_unit} count not supplied)")
+        else:
+            parts.append(f"Fee — {fee.name}: {_pricing.format_cents(fee.extended_cents)}")
+    if qc.discount_cents:
+        label = qc.discount_name or qc.discount_id or "Discount"
+        parts.append(f"Discount ({label}): -{_pricing.format_cents(qc.discount_cents)}")
+    if qc.tax_cents:
+        parts.append(
+            f"Tax ({qc.tax_rate_bps / 100:g}%): {_pricing.format_cents(qc.tax_cents)}"
+        )
+    return ("\n".join(parts) + "\n") if parts else ""
+
+
 def _render_owner_card(
     lead: CateringLead,
     items_with_prices: list[tuple[str, int, int]],  # (name, qty, price_usd)
@@ -237,6 +347,8 @@ def _render_owner_card(
     min_per_guest_usd: float | None = None,
     quote_version: int | None = None,
     quote_diff_line: str = "",
+    price_status: str = "estimated",
+    qc=None,
 ) -> str:
     """Render owner card. Caller passes (name, qty, price) tuples — on FIRST
     finalize the prices are current-menu values; on REPLAY the caller passes
@@ -299,6 +411,9 @@ def _render_owner_card(
         "price_drift_note": drift_note,
         "price_warning": price_warning,
         "quote_version_line": quote_version_line,
+        # M2 ruling #5: every price-bearing reply carries a price-status label.
+        "price_breakdown": _price_breakdown_block(qc),
+        "price_status_line": _pricing.price_status_line(price_status),
     }
     if template_path.exists():
         try:
@@ -325,7 +440,9 @@ def _render_owner_card(
         f"Dietary: {fmt_fields['dietary']}\n\n"
         f"Selected menu ({fmt_fields['item_count']} items):\n"
         f"{items_section}\n\n"
+        f"{fmt_fields['price_breakdown']}"
         f"Internal estimate from current menu item prices: ${server_total}\n"
+        f"{fmt_fields['price_status_line']}\n"
         f"Review/edit before approving the final customer quote.\n"
         f"{drift_note}\n\n"
         f"To approve and send the priced quote to the customer:\n"
@@ -335,6 +452,30 @@ def _render_owner_card(
         f"To decline:\n"
         f"  Reply: {fmt_fields['approval_code']} reject <reason>\n"
     )
+
+
+def _resolve_items_with_prices(
+    items: list[CateringSelectedItem], menu_index: dict[str, int], qc,
+) -> list[tuple[str, int, int]]:
+    """(name, qty, price_usd) rows to persist + render.
+
+    Legacy path: current menu prices (unchanged). Pricebook path: the kernel's
+    resolved unit price, which honours item_price_overrides. A materialised
+    package row is not a kernel line — it keeps the per-person price the basket
+    builder already assigned it.
+    """
+    if qc is None:
+        return [(it.name, it.qty, menu_index[it.name]) for it in items]
+    unit_by_name = {
+        ln.name: ln.unit_cents for ln in qc.lines if ln.unit_cents is not None
+    }
+    out: list[tuple[str, int, int]] = []
+    for it in items:
+        cents = unit_by_name.get(it.name)
+        price = (_pricing.cents_to_whole_dollars(cents) if cents is not None
+                 else it.price_usd)
+        out.append((it.name, it.qty, price))
+    return out
 
 
 def _selected_items_snapshot(lead: CateringLead) -> list[dict]:
@@ -357,11 +498,16 @@ def _diff_line_for(lead_id: str, version: int | None) -> str:
 
 def _append_quote_ledger_best_effort(
     lead: CateringLead, *, source: str, source_message_id: str | None, now: datetime,
+    menu_version: int | None = None, pricebook_version: int | None = None,
+    price_status: str | None = None,
 ) -> tuple[int | None, str]:
     """PR-B: append the lead's committed quote to the ledger AFTER the lead-store
     commit succeeded and LEADS_LOCK is released (leaf lock held alone). BEST-EFFORT
     — a ledger failure NEVER rolls back the finalized lead; it logs loudly and the
-    card degrades to no-version. Returns (version|None, diff_line)."""
+    card degrades to no-version. Returns (version|None, diff_line).
+
+    M2: stamps the catalog + pricebook versions and the price status that
+    produced this number, so a committed version is self-describing."""
     try:
         import catering_quote_ledger as _ql
         res = _ql.append_version(
@@ -371,6 +517,8 @@ def _append_quote_ledger_best_effort(
             source=source, source_message_id=source_message_id,
             approval_code=lead.owner_approval_code, created_at=now,
             data_path=LEDGER_PATH,
+            menu_version=menu_version, pricebook_version=pricebook_version,
+            price_status=price_status,
         )
         if not res.ok:
             sys.stderr.write(
@@ -545,20 +693,15 @@ def _lead_has_active_sent_proposal(code: str) -> bool:
 def _build_default_basket(
     menu_index: dict[str, int],
 ) -> tuple[list[CateringSelectedItem], int]:
-    """PR-CF1b 2026-05-12: default basket for `--auto-default` mode.
+    """PR-CF1b 2026-05-12: LEGACY default basket for `--auto-default` mode.
 
-    Intentionally minimal heuristic for the v0.1 customer-finalize loop:
-    pick the first 5 available menu items with non-zero price, qty=1 each,
-    total = sum of unit prices. No headcount scaling — owner refines via
-    cockpit or approval-card edits. This unblocks E2E customer-finalize →
-    owner-approve testing without requiring the upstream SKILL to extract
-    explicit item selections from free-text conversation (which the May 3
-    "interactive Kimi" run achieved only by hallucinating fake proposals
-    and violating every HARD RULE in parse_catering_inquiry).
-
-    Future iterations can replace this with category-aware,
-    headcount-scaled, or dietary-tag-filtered baskets — see
-    tasks/hermes-v0-13-0-plugin-api-recon-2026-05-11.md §Tomorrow.
+    Used ONLY when this customer has no pricebook (pre-M2 behavior, preserved
+    byte-identically). Picks the first 5 available menu items with non-zero
+    price, qty=1 each, total = sum of unit prices — NO headcount scaling, which
+    is the BL-CATER-03 unscaled-basket bug (a 200-guest event priced at ~$50).
+    The per-guest floor in deposit.py and the owner-card warning exist to catch
+    it. `_build_default_basket_priced` is the M2 fix and takes over the moment a
+    pricebook exists.
     """
     items: list[CateringSelectedItem] = []
     total = 0
@@ -573,6 +716,81 @@ def _build_default_basket(
         sys.stderr.write("auto-default: no usable items in menu (all unavailable or zero-priced)\n")
         sys.exit(EXIT_INVALID_INPUT)
     return items, total
+
+
+def _build_default_basket_priced(
+    menu: Menu, menu_index: dict[str, int], pricebook, guest_count: Optional[int],
+) -> tuple[list[CateringSelectedItem], int, Optional[str]]:
+    """M2 `--auto-default` basket, scaled to the headcount (BL-CATER-03 fix).
+
+    Returns (selected_items, line_subtotal_usd, package_id).
+
+    With an eligible active package the basket IS that package, materialised as
+    ONE selected item at (per-person price × guest_count) so it flows through
+    the existing selected_items / owner-card / ledger pipeline unchanged. The
+    kernel prices it from `package_id`, so the row is never double-counted.
+
+    Without an eligible package it falls back to menu items whose quantities are
+    scaled by `ceil(guest_count / serves)` — the fix for qty=1-regardless-of-
+    headcount. Headcount unknown => no scaling is possible, so we defer to the
+    legacy basket and the caller downgrades price_status.
+    """
+    if guest_count is None or guest_count < 1:
+        items, total = _build_default_basket(menu_index)
+        return items, total, None
+
+    package_id, line_items = _pricing.default_basket(guest_count, pricebook, menu)
+    if package_id is not None:
+        pkg = next(p for p in pricebook.per_person_packages if p.id == package_id)
+        qty = min(guest_count, _pricing.MAX_LINE_QTY)
+        per_person_usd = _pricing.cents_to_whole_dollars(pkg.price_per_person_cents)
+        return (
+            [CateringSelectedItem(name=pkg.name, qty=qty, price_usd=per_person_usd)],
+            per_person_usd * qty,
+            package_id,
+        )
+
+    items: list[CateringSelectedItem] = []
+    total = 0
+    for name, qty in line_items:
+        unit = pricebook.item_price_overrides.get(name)
+        price_usd = (_pricing.cents_to_whole_dollars(unit) if unit is not None
+                     else menu_index.get(name, 0))
+        items.append(CateringSelectedItem(name=name, qty=qty, price_usd=price_usd))
+        total += price_usd * qty
+    if not items:
+        sys.stderr.write(
+            "auto-default: no usable items in menu (all unavailable or zero-priced) "
+            "and no eligible package in the pricebook\n"
+        )
+        sys.exit(EXIT_INVALID_INPUT)
+    return items, total, None
+
+
+def _lookup_lead_headcount(code: str) -> Optional[int]:
+    """Extracted headcount for the lead behind `code`, or None.
+
+    Read BEFORE the main LEADS_LOCK block because the pricing kernel needs the
+    guest count to scale a per-person package, and recompute happens outside the
+    lock (mirrors _lead_has_active_sent_proposal's pre-read). Best-effort: any
+    failure returns None and the caller degrades to pending_owner_review rather
+    than inventing a headcount.
+    """
+    try:
+        with FileLock(LEADS_LOCK):
+            store, status = load_model(
+                LEADS_PATH, CateringLeadStore, default=CateringLeadStore()
+            )
+            assert_load_status_clean(LEADS_PATH, status, context="pricing headcount lookup")
+        lead = next((l for l in store.leads if l.owner_approval_code == code), None)
+        if lead is None or lead.extracted is None:
+            return None
+        return lead.extracted.headcount
+    except Exception as e:  # noqa: BLE001 — never block finalize on this read
+        sys.stderr.write(
+            f"headcount lookup skipped (non-fatal): {type(e).__name__}: {e}\n"
+        )
+        return None
 
 
 def main() -> int:
@@ -615,7 +833,12 @@ def main() -> int:
     # Step 2 (menu load) MOVED UP — auto-default branch needs the menu BEFORE
     # building items. For the existing manual-selection path it makes no
     # difference (read-mostly, no lock).
-    menu_index = _load_menu_index()
+    menu, menu_index = _load_menu()
+    # M2: the pricebook decides which pricing regime this finalize runs in.
+    # None => pre-M2 flat menu-price arithmetic, unchanged.
+    pricebook = _load_pricebook()
+    guest_count = _lookup_lead_headcount(args.code) if pricebook is not None else None
+    package_id: Optional[str] = None
 
     # Step 1: input validation (auto-default vs. manual-selection branches)
     if args.auto_default:
@@ -631,7 +854,12 @@ def main() -> int:
                 "Pass --force-default to build the default basket anyway.\n"
             )
             return EXIT_PROPOSAL_ACTIVE
-        items, llm_total = _build_default_basket(menu_index)
+        if pricebook is not None:
+            items, llm_total, package_id = _build_default_basket_priced(
+                menu, menu_index, pricebook, guest_count,
+            )
+        else:
+            items, llm_total = _build_default_basket(menu_index)
     else:
         if not args.selected_items_json or args.quote_total_usd is None:
             sys.stderr.write(
@@ -641,24 +869,42 @@ def main() -> int:
             sys.exit(EXIT_INVALID_INPUT)
         items, llm_total = _validate_inputs(args)
 
-    # Step 3: cross-check + recompute (no lock)
-    server_total, price_drift = _cross_check_and_recompute(items, menu_index)
+    # Step 3: cross-check + recompute (no lock).
+    # `guard_total` is what the truth-guard compares the LLM's number against;
+    # `server_total` is what gets persisted. They are the same value on the
+    # legacy path and diverge under a pricebook (fees/tax are server-only).
+    qc = None
+    if pricebook is not None:
+        # A package basket is priced FROM package_id — its materialised
+        # selected_items row must not also be charged as an à-la-carte line.
+        priced_items = [] if package_id is not None else items
+        server_total, guard_total, qc = _recompute_with_pricebook(
+            priced_items, pricebook=pricebook, menu=menu,
+            guest_count=guest_count, package_id=package_id,
+            min_per_guest_usd=cfg.catering.min_per_guest_usd,
+        )
+        price_drift = guard_total != llm_total
+        price_status = qc.price_status
+    else:
+        server_total, price_drift = _cross_check_and_recompute(items, menu_index)
+        guard_total = server_total
+        # No commercial pricebook: the number is a menu-derived estimate, and
+        # says so. (Arithmetic is byte-identical to pre-M2.)
+        price_status = "estimated"
 
-    fresh_items_with_prices: list[tuple[str, int, int]] = [
-        (it.name, it.qty, menu_index[it.name]) for it in items
-    ]
+    fresh_items_with_prices = _resolve_items_with_prices(items, menu_index, qc)
 
     # Step 3b: tolerance check (server-authoritative)
-    if not _within_quote_tolerance(server_total, llm_total):
+    if not _within_quote_tolerance(guard_total, llm_total):
         _emit_quote_mismatch_audit(
             now=now, args=args, items=items,
-            server_total=server_total, llm_total=llm_total,
+            server_total=guard_total, llm_total=llm_total,
             price_drift=price_drift,
             logical_turn_id=logical_turn_id, send_attempt_id=send_attempt_id,
         )
         sys.stderr.write(
-            f"quote total mismatch: server={server_total} llm={llm_total} "
-            f"diff={abs(server_total-llm_total)} tolerance=min(5%,$25)\n"
+            f"quote total mismatch: server={guard_total} llm={llm_total} "
+            f"diff={abs(guard_total-llm_total)} tolerance=min(5%,$25)\n"
         )
         return EXIT_TRUTH_GUARD_FAILED
 
@@ -786,6 +1032,9 @@ def main() -> int:
                 _append_quote_ledger_best_effort(
                     target, source="customer_finalize",
                     source_message_id=args.customer_message_id, now=now,
+                    menu_version=menu.version,
+                    pricebook_version=(pricebook.version if pricebook else None),
+                    price_status=price_status,
                 )
             )
 
@@ -833,6 +1082,11 @@ def main() -> int:
             min_per_guest_usd=cfg.catering.min_per_guest_usd,
             quote_version=quote_version_for_card,
             quote_diff_line=quote_diff_line_for_card,
+            price_status=price_status,
+            # On replay the breakdown would describe a fresh computation, not
+            # the persisted one the owner already saw — omit it and keep the
+            # card consistent with the persisted total.
+            qc=(None if replay else qc),
         )
         ok, mid_or_err = _bridge_post(cfg.owner.self_chat_jid, card_text)
         if ok:
@@ -907,6 +1161,12 @@ def main() -> int:
         "replay": replay,
         "suppressed": suppressed,
         "price_drift_detected": price_drift,
+        # M2 provenance for the calling SKILL: pending_owner_review means the
+        # number is NOT deliverable to the customer as a firm price.
+        "price_status": price_status,
+        "menu_version": menu.version,
+        "pricebook_version": (pricebook.version if pricebook else None),
+        "pricing_flags": (qc.flags if qc is not None else []),
     }))
 
     return EXIT_DEPENDENCY_DOWN if bridge_failed else EXIT_OK

@@ -1,0 +1,100 @@
+{
+  "version": 4,
+  "effective_date": "2026-07-01",
+  "updated_at": "2026-07-01T09:00:00Z",
+  "updated_by": "manual",
+  "currency": "USD",
+  "placeholder": false,
+  "notes": "Test fixture — real-shaped pricing, integer cents.",
+  "tax_rate_bps": 825,
+  "per_person_packages": [
+    {
+      "id": "veg-standard",
+      "name": "Standard Veg Buffet",
+      "price_per_person_cents": 1800,
+      "min_guests": 20,
+      "description": "Two mains, rice, bread, dessert.",
+      "dietary_profile": ["veg"],
+      "included_sections": ["main", "side", "dessert"],
+      "active": true
+    },
+    {
+      "id": "veg-premium",
+      "name": "Premium Veg Buffet",
+      "price_per_person_cents": 2900,
+      "min_guests": 40,
+      "description": "Four mains, two rices, breads, two desserts.",
+      "dietary_profile": ["veg"],
+      "included_sections": ["appetizer", "main", "side", "dessert"],
+      "active": true
+    },
+    {
+      "id": "veg-retired",
+      "name": "Retired Veg Buffet",
+      "price_per_person_cents": 900,
+      "min_guests": 1,
+      "description": "No longer offered.",
+      "dietary_profile": ["veg"],
+      "included_sections": ["main"],
+      "active": false
+    }
+  ],
+  "fixed_fees": [
+    {
+      "id": "delivery",
+      "name": "Delivery",
+      "kind": "delivery",
+      "amount_cents": 2500,
+      "per_unit": "flat",
+      "active": true
+    },
+    {
+      "id": "setup",
+      "name": "On-site setup",
+      "kind": "setup",
+      "amount_cents": 5000,
+      "per_unit": null,
+      "active": true
+    },
+    {
+      "id": "server",
+      "name": "On-site server",
+      "kind": "staffing",
+      "amount_cents": 12000,
+      "per_unit": "per_staff",
+      "active": false
+    }
+  ],
+  "approved_discounts": [
+    {
+      "id": "repeat-customer",
+      "name": "Repeat customer",
+      "kind": "percent",
+      "value": 1000,
+      "max_amount_cents": 5000,
+      "requires_owner_code": false,
+      "active": true
+    },
+    {
+      "id": "festival-flat",
+      "name": "Festival flat discount",
+      "kind": "fixed_cents",
+      "value": 7500,
+      "max_amount_cents": null,
+      "requires_owner_code": true,
+      "active": true
+    },
+    {
+      "id": "expired-promo",
+      "name": "Expired promo",
+      "kind": "percent",
+      "value": 2000,
+      "max_amount_cents": null,
+      "requires_owner_code": false,
+      "active": false
+    }
+  ],
+  "item_price_overrides": {
+    "Gulab Jamun": 450
+  }
+}

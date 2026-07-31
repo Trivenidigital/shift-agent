@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""import-catering-pricebook — M2 commercial pricebook import.
+
+Validates a JSON pricebook file, archives the prior version, bumps the
+version, and replaces /opt/shift-agent/state/catering-pricebook.json. Mirrors
+apply-menu-update's shape: owner-only, FileLock + archive-before-replace +
+atomic write + one audit row.
+
+The pricebook is the COMMERCIAL source of truth (per-person packages, fees,
+tax, approved discounts, per-item cent overrides). The Menu remains the
+culinary catalog. Money in the file is INTEGER CENTS.
+
+Accepts either on-disk shape: a bare CateringPricebook document (what an
+operator hand-edits, and what the seed template looks like) or the
+CateringPricebookStore envelope this script writes.
+
+VERSION is assigned by this script — max(prior version, file version) + 1 —
+so an operator re-importing an edited copy of the live file can never
+silently overwrite a newer version with a stale number.
+
+Refuses (exit 2) on any validation error, printing the Pydantic error verbatim
+so the operator sees which field is wrong. A refusal never touches state.
+
+Usage:
+  import-catering-pricebook --file ./pricebook.json --sender-role owner
+  import-catering-pricebook --file ./pricebook.json --sender-role owner \
+      --updated-by cockpit --dry-run
+
+Exit codes:
+  0  — imported (or --dry-run validated)
+  2  — invalid input (bad path / bad JSON / schema violation)
+  5  — existing state unreadable
+  12 — privilege denied (--sender-role is not owner)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, atomic_write_json, ndjson_append, flock,
+)
+from schemas import (  # noqa: E402
+    CateringPricebook, CateringPricebookStore, CateringPricebookUpdated,
+)
+from catering_paths import (  # noqa: E402
+    CATERING_PRICEBOOK_PATH, CATERING_PRICEBOOK_LOCK,
+    CATERING_PRICEBOOK_ARCHIVE_DIR,
+)
+import catering_pricing as _pricing  # noqa: E402
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_SCHEMA_VIOLATION, EXIT_PRIVILEGE_DENIED,
+)
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
+
+PRICEBOOK_PATH = CATERING_PRICEBOOK_PATH
+PRICEBOOK_LOCK = CATERING_PRICEBOOK_LOCK
+ARCHIVE_DIR = CATERING_PRICEBOOK_ARCHIVE_DIR
+LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+
+# Bound the input so a stray multi-MB file can't be slurped into memory.
+MAX_INPUT_BYTES = 1_000_000
+
+
+def _log(entry) -> None:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with flock(LOG_PATH):
+        ndjson_append(LOG_PATH, TypeAdapter(type(entry)).dump_json(entry).decode("utf-8"))
+
+
+def _parse_pricebook(raw: str) -> CateringPricebook:
+    """Validate `raw` as either envelope or bare pricebook. Exits 2 on failure.
+
+    The bare-document error is the one surfaced when both shapes fail: an
+    operator hand-writes the bare form, so its message is the actionable one.
+    """
+    try:
+        doc = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        sys.stderr.write(f"pricebook file is not valid JSON: {e}\n")
+        sys.exit(EXIT_INVALID_INPUT)
+    if not isinstance(doc, dict):
+        sys.stderr.write(
+            f"pricebook file must contain a JSON object; got {type(doc).__name__}\n"
+        )
+        sys.exit(EXIT_INVALID_INPUT)
+    if "pricebook" in doc:
+        try:
+            return CateringPricebookStore.model_validate(doc).pricebook
+        except ValidationError as e:
+            sys.stderr.write(f"pricebook store validation failed:\n{e}\n")
+            sys.exit(EXIT_INVALID_INPUT)
+    try:
+        return CateringPricebook.model_validate(doc)
+    except ValidationError as e:
+        sys.stderr.write(f"pricebook validation failed:\n{e}\n")
+        sys.exit(EXIT_INVALID_INPUT)
+
+
+def _load_prior() -> CateringPricebook | None:
+    """Current pricebook, or None on first run. Exits 5 if present-but-corrupt.
+
+    Treating a corrupt pricebook as absent would reset the version counter AND
+    skip the archive, so the damaged file would be overwritten with no copy
+    kept. The loader leaves it exactly where it is for the operator to inspect.
+    """
+    try:
+        return _pricing.load_pricebook(PRICEBOOK_PATH)
+    except _pricing.PricingError as e:
+        sys.stderr.write(
+            f"existing pricebook is unreadable, refusing to overwrite it: {e}\n"
+            "Inspect and move it aside manually, then re-run.\n"
+        )
+        sys.exit(EXIT_SCHEMA_VIOLATION)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--file", required=True, help="path to the pricebook JSON to import")
+    ap.add_argument(
+        "--sender-role", required=True,
+        choices=["owner", "employee", "customer", "unknown"],
+        help="resolved sender role from identify-sender; must be 'owner' to mutate "
+             "state. Mirrors apply-menu-update's defense-in-depth role gate (D-013).",
+    )
+    ap.add_argument("--updated-by", default="manual",
+                    choices=["manual", "import", "cockpit"])
+    ap.add_argument("--dry-run", action="store_true",
+                    help="validate and report; write nothing, audit nothing")
+    args = ap.parse_args()
+
+    # Privilege check FIRST — before any state read — so an unauthorized caller
+    # cannot probe for the pricebook's existence.
+    if args.sender_role != "owner":
+        sys.stderr.write(
+            "privilege denied: pricebook import is owner-only, got "
+            f"sender_role={args.sender_role!r}\n"
+        )
+        return EXIT_PRIVILEGE_DENIED
+
+    src = Path(args.file)
+    if not src.is_file():
+        sys.stderr.write(f"pricebook file not found: {src}\n")
+        return EXIT_INVALID_INPUT
+    try:
+        if src.stat().st_size > MAX_INPUT_BYTES:
+            sys.stderr.write(
+                f"pricebook file is {src.stat().st_size} bytes; max {MAX_INPUT_BYTES}\n"
+            )
+            return EXIT_INVALID_INPUT
+        raw = src.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        sys.stderr.write(f"pricebook file unreadable: {e}\n")
+        return EXIT_INVALID_INPUT
+
+    incoming = _parse_pricebook(raw)
+
+    with FileLock(PRICEBOOK_LOCK):
+        prior = _load_prior()
+        prev_version = prior.version if prior is not None else 0
+        # max(prior, incoming) + 1: an operator importing an edited copy of an
+        # older export cannot roll the version backwards.
+        new_version = max(prev_version, incoming.version) + 1
+        new_book = incoming.model_copy(update={
+            "version": new_version,
+            "updated_by": args.updated_by,
+        })
+
+        summary = {
+            "version": new_version,
+            "prev_version": prev_version,
+            "updated_by": args.updated_by,
+            "currency": new_book.currency,
+            "placeholder": new_book.is_placeholder(),
+            "package_count": len(new_book.per_person_packages),
+            "fee_count": len(new_book.fixed_fees),
+            "discount_count": len(new_book.approved_discounts),
+            "item_override_count": len(new_book.item_price_overrides),
+            "tax_rate_bps": new_book.tax_rate_bps,
+        }
+
+        if args.dry_run:
+            print(json.dumps({"status": "validated", "dry_run": True, **summary}))
+            return EXIT_OK
+
+        if prior is not None:
+            ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+            archive_path = ARCHIVE_DIR / (
+                f"pricebook-v{prev_version}-"
+                f"{int(new_book.updated_at.timestamp())}.json"
+            )
+            try:
+                shutil.copy2(PRICEBOOK_PATH, archive_path)
+            except OSError as e:
+                sys.stderr.write(f"WARN: archive failed: {e}\n")
+
+        atomic_write_json(
+            PRICEBOOK_PATH,
+            CateringPricebookStore(schema_version=1, pricebook=new_book),
+        )
+
+    try:
+        _log(CateringPricebookUpdated(
+            type="catering_pricebook_updated", ts=new_book.updated_at,
+            version=new_version, prev_version=prev_version,
+            updated_by=args.updated_by, currency=new_book.currency,
+            placeholder=new_book.is_placeholder(),
+            package_count=summary["package_count"],
+            fee_count=summary["fee_count"],
+            discount_count=summary["discount_count"],
+            item_override_count=summary["item_override_count"],
+        ))
+    except Exception as e:  # noqa: BLE001 — audit is best-effort; the write landed
+        sys.stderr.write(f"audit emit failed (non-fatal): {e}\n")
+
+    if new_book.is_placeholder():
+        sys.stderr.write(
+            "WARN: this pricebook is flagged placeholder=true — prices are seed "
+            "values. Quotes computed from it are marked pending_owner_review and "
+            "must NOT be delivered to a customer until the owner replaces them.\n"
+        )
+
+    print(json.dumps({"status": "imported", **summary}))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

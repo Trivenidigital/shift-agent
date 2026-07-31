@@ -7,6 +7,7 @@ We can confirm — based on what you shared:
 - Date: {event_date}
 - Time: {event_time}
 {menu_section}
+{price_status_line}
 We'll be in touch shortly with final pricing. Reply here with any questions or changes.
 
 (Ref: {lead_id})
