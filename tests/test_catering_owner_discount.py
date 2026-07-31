@@ -118,7 +118,31 @@ def env_dir(tmp_path):
     return tmp_path
 
 
-def _seed_lead(env_dir, *, status="CUSTOMER_FINALIZED", items=None, total=400):
+def _pricing_inputs(items, total, *, price_status="estimated", package=None,
+                    fees=None, tax_rate_bps=0, flags=None):
+    """The cents-exact commitment finalize freezes onto the lead. The discount
+    path rebuilds from THIS, so a seed without it is a lead that predates
+    provenance — which the refusal cells below exercise deliberately."""
+    lines = [{"name": it["name"], "qty": it["qty"],
+              "unit_cents": it["price_usd"] * 100} for it in items]
+    doc = {
+        "guest_count": 50,
+        "line_items": lines,
+        "fees": fees or [],
+        "tax_rate_bps": tax_rate_bps,
+        "pricebook_version": 4,
+        "subtotal_cents": sum(l["unit_cents"] * l["qty"] for l in lines),
+        "total_cents": total * 100,
+        "price_status": price_status,
+        "flags": flags or [],
+    }
+    if package:
+        doc.update(package)
+    return doc
+
+
+def _seed_lead(env_dir, *, status="CUSTOMER_FINALIZED", items=None, total=400,
+               pricing_inputs=_pricing_inputs, **inputs_over):
     if items is None:
         items = [{"name": "Veg Biryani", "qty": 4, "price_usd": 100}]
     lead = {
@@ -134,6 +158,8 @@ def _seed_lead(env_dir, *, status="CUSTOMER_FINALIZED", items=None, total=400):
         "customer_finalized_at": "2026-07-25T11:00:00-04:00",
         "owner_approval_code": "#ABCDE",
     }
+    if pricing_inputs is not None and items:
+        lead["pricing_inputs"] = pricing_inputs(items, total, **inputs_over)
     (env_dir / "state" / "catering-leads.json").write_text(
         json.dumps({"leads": [lead]}), encoding="utf-8")
 

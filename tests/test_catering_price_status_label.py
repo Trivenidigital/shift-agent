@@ -41,6 +41,10 @@ REQUIRED_TEMPLATES = (
 REQUIRED_INLINE_FALLBACKS = (
     "finalize-catering-menu",
     "create-catering-lead",
+    # The customer-facing quote send. It renders its body inline (PR-B v3 removed
+    # its template path), so it was emitting "Total: $X" with no firmness label at
+    # all — on both the server-rendered and the owner-drafted branch.
+    "apply-catering-owner-decision",
 )
 
 
