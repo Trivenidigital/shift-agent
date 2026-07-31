@@ -16,6 +16,13 @@ only admission, never authority, and then:
   ambiguous  -> NO state change; ONE clarification question, recorded on the lead so it
                 can never repeat (a customer who keeps saying "ok" is asked once)
 
+An acceptance arriving AFTER `lead.quote_valid_until` does NOT book. The quote said
+"valid until <date>"; prices and availability were promised through that date and no
+further, so booking on it would commit the owner to terms they withdrew. The customer
+is told politely, the owner is paged to confirm current terms, and the audit records
+`acceptance_of_expired`. A lead with no `quote_valid_until` is never expired — nobody
+told that customer a deadline.
+
 NO LLM anywhere: this books an event, so it is exactly the deterministic /
 money-adjacent territory the project rules reserve for regex.
 
@@ -110,6 +117,42 @@ _CLARIFY_REPLY = (
     "Just to confirm — would you like to go ahead and book the catering for inquiry "
     "{lead_id}? Reply \"we accept\" to confirm, or let us know what you'd like to change."
 )
+# No price and no apology-for-a-refusal: the quote simply stood for the period it
+# said it stood for, and the owner picks it up from here.
+_EXPIRED_REPLY = (
+    "Thank you — that quote for inquiry {lead_id} has now passed its validity date, "
+    "so we can't confirm it as it stands. The owner will check current availability "
+    "and pricing and come back to you shortly."
+)
+
+
+def _quote_has_expired(quote_valid_until, now) -> bool:
+    """True when the quote's stated validity DATE is already in the past.
+
+    Boundary (deliberate, and the generous direction): the customer was told a
+    calendar date — "This quote is valid until 2026-08-15" — so the quote stands
+    through the END of that day. Comparing instants would retire it up to 23h59
+    early against the only promise the customer actually received. Both sides are
+    reduced to UTC calendar dates so the boundary does not move with the clock's
+    timezone. Accepting ON the named date is therefore still valid; the day after
+    is not.
+
+    `None` means no deadline was ever stamped (a lead sent before the stamp
+    existed) — never expired, because nobody told that customer anything to
+    enforce. A tz-naive stored value (hand-edited state) is treated the same way
+    rather than crashing a booking turn on a subtraction.
+    """
+    if quote_valid_until is None:
+        return False
+    try:
+        return (now.astimezone(timezone.utc).date()
+                > quote_valid_until.astimezone(timezone.utc).date())
+    except (ValueError, TypeError, AttributeError) as e:
+        sys.stderr.write(
+            f"WARN: quote_valid_until={quote_valid_until!r} is not comparable "
+            f"({e}); treating the quote as still valid\n"
+        )
+        return False
 
 
 # PR-ζ chokepoint discipline. This script POSTs through the CANONICAL
@@ -157,7 +200,20 @@ def _notify_owner(cfg, lead, outcome: str, version_hint: str) -> None:
     """Owner card for the booking decision. Owner-directed, so a per-lead hold and
     the automation-control kernel never suppress it. Best-effort on both channels:
     the state write already succeeded and must never be rolled back by a send."""
-    if outcome == "accepted":
+    if outcome == "acceptance_of_expired":
+        headline = (f"Customer accepted EXPIRED quote {version_hint} for "
+                    f"{lead.lead_id} — NOT booked")
+        body = (
+            f"{headline}\n"
+            f"Customer: {lead.customer_name or '(unknown)'} ({lead.customer_phone})\n"
+            f"Event: {(lead.extracted.event_date if lead.extracted else None) or '[TBD]'}"
+            f" — {(lead.extracted.headcount if lead.extracted else None) or '[TBD]'} guests\n"
+            f"The quote was valid until "
+            f"{lead.quote_valid_until.date().isoformat() if lead.quote_valid_until else '[unknown]'}"
+            f", so nothing was booked on your behalf. They have been told you will "
+            f"confirm current availability and pricing. Re-quote to proceed."
+        )
+    elif outcome == "accepted":
         headline = f"Customer ACCEPTED quote {version_hint} for {lead.lead_id}"
         body = (
             f"{headline}\n"
@@ -192,6 +248,86 @@ def _notify_owner(cfg, lead, outcome: str, version_hint: str) -> None:
     except Exception as e:  # noqa: BLE001 — alerting is best-effort
         sys.stderr.write(f"catering_acceptance_alert_delivery_failed lead={lead.lead_id} "
                          f"error={type(e).__name__}: {e}\n")
+
+
+def _rollback_unsent_clarification(lead_id: str, customer_message_id: str,
+                                   cfg, lead, now, error: str) -> None:
+    """The ask-once anchor is written under the lock BEFORE the send; if the send
+    then fails, clear it.
+
+    Otherwise the three states compound into silence: the customer was never
+    asked, the anchor says we already asked so no later message will ask again,
+    and the lead sits in SENT_TO_CUSTOMER with an ambiguous reply nobody
+    resolved. Clearing the anchor restores the one question we are allowed to
+    ask; the audit row and the owner page make the loss visible rather than
+    leaving it to be inferred from an absence (§12b).
+
+    Only clears an anchor that is still OURS — a concurrent turn that has since
+    asked successfully must not have its anchor dropped.
+    """
+    cleared = False
+    try:
+        with FileLock(LEADS_LOCK):
+            store, status = load_model(LEADS_PATH, CateringLeadStore,
+                                       default=CateringLeadStore())
+            if status in ("ok", "missing", "empty"):
+                idx = next((i for i, l in enumerate(store.leads)
+                            if l.lead_id == lead_id), None)
+                if (idx is not None
+                        and store.leads[idx].acceptance_clarification_sent_message_id
+                        == customer_message_id):
+                    store.leads[idx] = store.leads[idx].model_copy(update={
+                        "acceptance_clarification_sent_message_id": None,
+                    })
+                    atomic_write_json(LEADS_PATH, store)
+                    cleared = True
+                _append_audit_under_leadslock(
+                    TypeAdapter(CateringLeadAcceptanceRecorded),
+                    CateringLeadAcceptanceRecorded(
+                        type="catering_lead_acceptance_recorded", ts=now,
+                        lead_id=lead_id, outcome="clarification_send_failed",
+                        from_status=store.leads[idx].status if idx is not None
+                        else "SENT_TO_CUSTOMER",
+                        to_status=store.leads[idx].status if idx is not None
+                        else "SENT_TO_CUSTOMER",
+                        customer_message_id=customer_message_id,
+                        detail=(f"bridge failure: {error}; ask-once anchor "
+                                f"{'cleared' if cleared else 'left as found'}")[:500],
+                    ),
+                )
+    except Exception as e:  # noqa: BLE001 — never raise on an already-failed turn
+        sys.stderr.write(
+            f"WARN: could not roll back the unsent clarification anchor for "
+            f"{lead_id}: {type(e).__name__}: {e}\n"
+        )
+    # §12b: an automated reversal of state the system itself just wrote, on a
+    # path where the customer is waiting on a question about a booking. Plain
+    # text — underscore-bearing ids must not be mangled by a Markdown parser.
+    body = (
+        f"Catering {lead_id}: the customer replied ambiguously to their quote and "
+        f"the booking-confirmation question could NOT be delivered ({error}). "
+        f"Nothing was booked. The ask-once guard was "
+        f"{'cleared, so the next message from them will ask again' if cleared else 'left in place — check the lead'}. "
+        f"Reach out directly if they do not write back."
+    )
+    sys.stderr.write(f"catering_clarification_lost_alert_dispatched lead={lead_id} "
+                     f"cleared={cleared}\n")
+    if cfg is not None and getattr(cfg.owner, "self_chat_jid", ""):
+        try:
+            _post(cfg.owner.self_chat_jid, BRIDGE_PREFIX + body, _CTX_OWNER)
+        except Exception as e:  # noqa: BLE001 — the bridge is already suspect here
+            sys.stderr.write(f"WARN: owner card POST failed (non-fatal): "
+                             f"{type(e).__name__}: {e}\n")
+    try:
+        subprocess.run(
+            [str(NOTIFY_OWNER_BIN), "--priority", "1",
+             "--title", "Catering: booking question not delivered", "--", body],
+            check=False, capture_output=True, text=True, timeout=10,
+        )
+        sys.stderr.write(f"catering_clarification_lost_alert_delivered lead={lead_id}\n")
+    except Exception as e:  # noqa: BLE001 — alerting is best-effort
+        sys.stderr.write(f"catering_clarification_lost_alert_delivery_failed "
+                         f"lead={lead_id} error={type(e).__name__}: {e}\n")
 
 
 def _latest_quote_version(lead_id: str) -> str:
@@ -249,6 +385,7 @@ def main() -> int:
     replayed = False
     send_customer_reply = True
     lead_snapshot = None
+    quote_expired = False
 
     with FileLock(LEADS_LOCK):
         try:
@@ -338,6 +475,32 @@ def main() -> int:
             )
             new_status = lead.status
             lead_snapshot = store.leads[idx]
+        elif outcome == "accepted" and _quote_has_expired(lead.quote_valid_until, now):
+            # The customer said yes to terms that had already lapsed. Booking here
+            # would hold the owner to prices and availability their own quote
+            # withdrew on a date the customer was shown. So: no transition, no
+            # acceptance fields — only the idempotency anchor, so a redelivered
+            # inbound does not page the owner twice for one message.
+            quote_expired = True
+            store.leads[idx] = lead.model_copy(update={
+                "acceptance_message_id": args.customer_message_id,
+            })
+            atomic_write_json(LEADS_PATH, store)
+            _append_audit_under_leadslock(
+                TypeAdapter(CateringLeadAcceptanceRecorded),
+                CateringLeadAcceptanceRecorded(
+                    type="catering_lead_acceptance_recorded", ts=now,
+                    lead_id=lead.lead_id, outcome="acceptance_of_expired",
+                    from_status=lead.status, to_status=lead.status,
+                    customer_message_id=args.customer_message_id,
+                    matched_phrase=matched_phrase,
+                    detail=(f"quote_valid_until="
+                            f"{lead.quote_valid_until.isoformat() if lead.quote_valid_until else ''}"
+                            f"; not booked")[:500],
+                ),
+            )
+            new_status = lead.status
+            lead_snapshot = store.leads[idx]
         else:
             target = "BOOKED" if outcome == "accepted" else "CLOSED"
             if not is_catering_transition_allowed(lead.status, target):
@@ -378,12 +541,15 @@ def main() -> int:
             lead_snapshot = store.leads[idx]
 
     # Sends happen OUTSIDE the lock (no network under a lock).
-    if outcome in ("accepted", "declined"):
+    if quote_expired:
+        _notify_owner(cfg, lead_snapshot, "acceptance_of_expired",
+                      _latest_quote_version(args.lead_id))
+    elif outcome in ("accepted", "declined"):
         _notify_owner(cfg, lead_snapshot, outcome, _latest_quote_version(args.lead_id))
 
     ok, mid_or_err = True, ""
     if send_customer_reply:
-        template = {
+        template = _EXPIRED_REPLY if quote_expired else {
             "accepted": _ACCEPT_REPLY,
             "declined": _DECLINE_REPLY,
             "ambiguous": _CLARIFY_REPLY,
@@ -394,9 +560,15 @@ def main() -> int:
             context)
         if not ok:
             sys.stderr.write(f"customer reply POST failed: {mid_or_err}\n")
+            if outcome == "ambiguous":
+                _rollback_unsent_clarification(args.lead_id, args.customer_message_id,
+                                               cfg, lead_snapshot, now, mid_or_err)
 
     print(json.dumps({
-        "lead_id": args.lead_id, "outcome": outcome, "new_status": new_status,
+        "lead_id": args.lead_id,
+        "outcome": "acceptance_of_expired" if quote_expired else outcome,
+        "new_status": new_status,
+        "quote_expired": quote_expired,
         "replayed": replayed, "customer_reply_sent": bool(send_customer_reply and ok),
         "outbound_message_id": mid_or_err if ok else "",
     }))

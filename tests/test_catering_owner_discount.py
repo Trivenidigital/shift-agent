@@ -118,7 +118,31 @@ def env_dir(tmp_path):
     return tmp_path
 
 
-def _seed_lead(env_dir, *, status="CUSTOMER_FINALIZED", items=None, total=400):
+def _pricing_inputs(items, total, *, price_status="estimated", package=None,
+                    fees=None, tax_rate_bps=0, flags=None):
+    """The cents-exact commitment finalize freezes onto the lead. The discount
+    path rebuilds from THIS, so a seed without it is a lead that predates
+    provenance — which the refusal cells below exercise deliberately."""
+    lines = [{"name": it["name"], "qty": it["qty"],
+              "unit_cents": it["price_usd"] * 100} for it in items]
+    doc = {
+        "guest_count": 50,
+        "line_items": lines,
+        "fees": fees or [],
+        "tax_rate_bps": tax_rate_bps,
+        "pricebook_version": 4,
+        "subtotal_cents": sum(l["unit_cents"] * l["qty"] for l in lines),
+        "total_cents": total * 100,
+        "price_status": price_status,
+        "flags": flags or [],
+    }
+    if package:
+        doc.update(package)
+    return doc
+
+
+def _seed_lead(env_dir, *, status="CUSTOMER_FINALIZED", items=None, total=400,
+               pricing_inputs=_pricing_inputs, **inputs_over):
     if items is None:
         items = [{"name": "Veg Biryani", "qty": 4, "price_usd": 100}]
     lead = {
@@ -134,6 +158,8 @@ def _seed_lead(env_dir, *, status="CUSTOMER_FINALIZED", items=None, total=400):
         "customer_finalized_at": "2026-07-25T11:00:00-04:00",
         "owner_approval_code": "#ABCDE",
     }
+    if pricing_inputs is not None and items:
+        lead["pricing_inputs"] = pricing_inputs(items, total, **inputs_over)
     (env_dir / "state" / "catering-leads.json").write_text(
         json.dumps({"leads": [lead]}), encoding="utf-8")
 
@@ -269,6 +295,47 @@ def test_the_discounted_version_carries_the_pricebook_it_was_validated_against(
         "committed line prices were menu-derived estimates; an all-override "
         "recompute must not be upgraded to 'exact'"
     )
+
+
+def test_the_owner_edit_instruction_lands_on_the_committed_version(
+    bridge_server, env_dir,
+):
+    """The revision is the whole point of an owner_edit version. Snapshotting
+    lead.quote_text alone recorded none of it: only APPROVE writes quote_text and
+    an approved lead is no longer editable, so the version could only ever carry
+    the pre-quote placeholder. The instruction lived solely in the
+    catering_owner_decision audit row."""
+    _seed_lead(env_dir)
+    edit = "drop the paneer, add 20 more samosas, cap the total at $380"
+    assert _run(env_dir, "--decision", "edit", "--edit-text", edit) == 0
+    rec = _ledger(env_dir)[-1]
+    assert rec["source"] == "owner_edit"
+    assert edit in rec["quote_text"]
+    assert "Quote for L0001" in rec["quote_text"], (
+        "appended, not substituted — the version still records what was on the "
+        "table when the owner asked for the change"
+    )
+
+
+def test_an_edit_carrying_a_discount_records_both(bridge_server, env_dir):
+    """One invocation can do both; neither attribution may swallow the other."""
+    _seed_lead(env_dir)
+    assert _run(env_dir, "--decision", "edit", "--edit-text", "swap the dessert",
+                "--discount-id", "flat25") == 0
+    rec = _ledger(env_dir)[-1]
+    assert "Owner edit: swap the dessert" in rec["quote_text"]
+    assert "flat25" in rec["quote_text"]
+    assert rec["quote_total_usd"] == 375
+
+
+def test_an_approve_with_a_discount_records_no_owner_edit_line(
+    bridge_server, env_dir,
+):
+    """That path reaches the same append with no instruction to attribute."""
+    _seed_lead(env_dir)
+    assert _run(env_dir, "--decision", "approve", "--quote-from-lead-state",
+                "--discount-id", "flat25") == 0
+    assert "Owner edit:" not in _ledger(env_dir)[-1]["quote_text"]
 
 
 def test_an_owner_edit_without_a_discount_is_unchanged(bridge_server, env_dir):

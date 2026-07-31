@@ -47,6 +47,8 @@ Exit codes:
   13 --auto-default refused: lead has an active SENT proposal (census C4).
      Route the customer through select-catering-proposal, or pass
      --force-default to build the default basket anyway.
+  18 per-person package priced for more guests than a selected-items row can
+     hold (MAX_LINE_QTY=500). Refused before any state change.
 """
 from __future__ import annotations
 
@@ -78,6 +80,7 @@ from schemas import (  # noqa: E402
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
     EXIT_DEPENDENCY_DOWN, EXIT_TRUTH_GUARD_FAILED, EXIT_PROPOSAL_ACTIVE,
+    EXIT_GUEST_COUNT_UNSUPPORTED,
 )
 from catering_paths import CATERING_MENU_PATH, CATERING_PRICEBOOK_PATH  # noqa: E402
 import catering_pricing as _pricing  # noqa: E402  # M2 deterministic quote kernel
@@ -294,7 +297,7 @@ def _recompute_with_pricebook(
         # Headcount unknown: per-guest scaling is not verifiable, so the number
         # is not owner-approvable as-is. Never silently present it as firm.
         qc = qc.model_copy(update={
-            "flags": qc.flags + ["unknown_guest_count"],
+            "flags": qc.flags + [_pricing.FLAG_UNKNOWN_GUEST_COUNT],
             "price_status": "pending_owner_review",
         })
     guard_basis = _pricing.cents_to_whole_dollars(
@@ -741,6 +744,12 @@ def _build_default_basket_priced(
     scaled by `ceil(guest_count / serves)` — the fix for qty=1-regardless-of-
     headcount. Headcount unknown => no scaling is possible, so we defer to the
     legacy basket and the caller downgrades price_status.
+
+    The returned subtotal is accumulated in CENTS and converted once at the end.
+    Summing the whole-dollar row prices instead drifts by up to $0.49 per unit
+    against the kernel's number, which the truth guard then reports as an LLM
+    quote mismatch: a $25.50/guest package for 150 guests came out $75 high and
+    exited 11 with nothing wrong on the LLM's side.
     """
     if guest_count is None or guest_count < 1:
         items, total = _build_default_basket(menu_index)
@@ -749,22 +758,26 @@ def _build_default_basket_priced(
     package_id, line_items = _pricing.default_basket(guest_count, pricebook, menu)
     if package_id is not None:
         pkg = next(p for p in pricebook.per_person_packages if p.id == package_id)
+        # Bounded by the caller (main() refuses guest_count > MAX_LINE_QTY with a
+        # package), so this qty is the true headcount, never a silent clamp.
         qty = min(guest_count, _pricing.MAX_LINE_QTY)
         per_person_usd = _pricing.cents_to_whole_dollars(pkg.price_per_person_cents)
         return (
             [CateringSelectedItem(name=pkg.name, qty=qty, price_usd=per_person_usd)],
-            per_person_usd * qty,
+            _pricing.cents_to_whole_dollars(pkg.price_per_person_cents * qty),
             package_id,
         )
 
     items: list[CateringSelectedItem] = []
-    total = 0
+    total_cents = 0
     for name, qty in line_items:
         unit = pricebook.item_price_overrides.get(name)
-        price_usd = (_pricing.cents_to_whole_dollars(unit) if unit is not None
-                     else menu_index.get(name, 0))
-        items.append(CateringSelectedItem(name=name, qty=qty, price_usd=price_usd))
-        total += price_usd * qty
+        unit_cents = (int(unit) if unit is not None
+                      else _pricing.usd_to_cents(menu_index.get(name, 0)))
+        items.append(CateringSelectedItem(
+            name=name, qty=qty, price_usd=_pricing.cents_to_whole_dollars(unit_cents)))
+        total_cents += unit_cents * qty
+    total = _pricing.cents_to_whole_dollars(total_cents)
     if not items:
         sys.stderr.write(
             "auto-default: no usable items in menu (all unavailable or zero-priced) "
@@ -855,6 +868,11 @@ def main() -> int:
     pricebook = _load_pricebook()
     guest_count = _lookup_lead_headcount(args.code) if pricebook is not None else None
     package_id: Optional[str] = None
+    # True only when the basket builder materialised the package AS a
+    # selected_items row (the --auto-default shape). Those rows must not also be
+    # charged as à-la-carte lines; genuine add-ons alongside an explicit
+    # --package-id must.
+    package_row_materialised = False
 
     # M3 --package-id. Refused up front rather than silently dropped: a caller who
     # names a package and gets flat basket arithmetic instead would be quoting a
@@ -892,6 +910,7 @@ def main() -> int:
             items, llm_total, package_id = _build_default_basket_priced(
                 menu, menu_index, pricebook, guest_count,
             )
+            package_row_materialised = package_id is not None
         else:
             items, llm_total = _build_default_basket(menu_index)
     else:
@@ -904,15 +923,34 @@ def main() -> int:
         items, llm_total = _validate_inputs(args)
         package_id = explicit_package_id or None
 
+    # Step 2b: per-line quantity bound. A per-person package is itemised as ONE
+    # row of qty=guest_count, and CateringSelectedItem.qty stops at MAX_LINE_QTY.
+    # Above it the row used to clamp while the kernel priced the true headcount:
+    # the two disagreed silently until the gap grew past the truth-guard
+    # tolerance, at which point it exited 11 — read as an LLM hallucination when
+    # nothing was wrong with the LLM. Refuse here instead, before any state
+    # change, and say what the operator can actually do about it.
+    if package_id is not None and (guest_count or 0) > _pricing.MAX_LINE_QTY:
+        sys.stderr.write(
+            f"guest count {guest_count} exceeds the per-line quantity bound "
+            f"{_pricing.MAX_LINE_QTY} for package pricing — split the order into "
+            f"multiple leads or contact support. (The package would be itemised "
+            f"as one row of {guest_count}, which the lead schema cannot hold.)\n"
+        )
+        return EXIT_GUEST_COUNT_UNSUPPORTED
+
     # Step 3: cross-check + recompute (no lock).
     # `guard_total` is what the truth-guard compares the LLM's number against;
     # `server_total` is what gets persisted. They are the same value on the
     # legacy path and diverge under a pricebook (fees/tax are server-only).
     qc = None
     if pricebook is not None:
-        # A package basket is priced FROM package_id — its materialised
-        # selected_items row must not also be charged as an à-la-carte line.
-        priced_items = [] if package_id is not None else items
+        # The --auto-default package basket is priced FROM package_id, so its
+        # materialised selected_items row must not ALSO be charged as an
+        # à-la-carte line. Items passed alongside an explicit --package-id are
+        # genuine add-ons and must be: excluding them dropped them out of
+        # server_total entirely while the owner card still listed them.
+        priced_items = [] if package_row_materialised else items
         server_total, guard_total, qc = _recompute_with_pricebook(
             priced_items, pricebook=pricebook, menu=menu,
             guest_count=guest_count, package_id=package_id,
@@ -928,6 +966,22 @@ def main() -> int:
         price_status = "estimated"
 
     fresh_items_with_prices = _resolve_items_with_prices(items, menu_index, qc)
+
+    # Freeze the cents-exact commitment behind the number we are about to persist.
+    # `selected_items` alone cannot carry it: it is whole dollars, and on a package
+    # finalize it holds only the add-ons. Anything that later re-prices this quote
+    # (today: the owner-discount path) rebuilds from THIS, never from those rows.
+    # Legacy no-pricebook finalizes have no kernel computation to freeze and stay
+    # None — a discount needs a pricebook anyway.
+    pricing_inputs = None
+    if qc is not None:
+        try:
+            pricing_inputs = _pricing.pricing_inputs_from_quote(qc, pricebook)
+        except _pricing.PricingError as e:
+            # Unreachable via the refusals above (an unpriced line already exits 2).
+            # Refuse rather than persist a total with no recoverable basis.
+            sys.stderr.write(f"cannot record pricing provenance: {e}\n")
+            return EXIT_INVALID_INPUT
 
     # Step 3b: tolerance check (server-authoritative)
     if not _within_quote_tolerance(guard_total, llm_total):
@@ -1020,6 +1074,7 @@ def main() -> int:
                 for name, qty, price in fresh_items_with_prices
             ]
             target.quote_total_usd = server_total
+            target.pricing_inputs = pricing_inputs
             target.customer_finalized_at = now
             target.last_finalize_message_id = args.customer_message_id
             target.updated_at = now
@@ -1191,6 +1246,10 @@ def main() -> int:
         "lead_id": target.lead_id,
         "status": target.status,
         "quote_total_usd": server_total,
+        # The exact number. `quote_total_usd` is it rounded to whole dollars for
+        # the whole-dollar pipeline; this is what was actually computed.
+        "quote_total_cents": (pricing_inputs.total_cents
+                              if pricing_inputs is not None else None),
         "owner_card_sent": owner_card_outbound_id != "",
         "owner_card_outbound_id": owner_card_outbound_id or None,
         "replay": replay,

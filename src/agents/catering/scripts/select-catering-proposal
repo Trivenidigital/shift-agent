@@ -36,6 +36,11 @@ from schemas import (  # noqa: E402
     is_proposal_set_transition_allowed,
 )
 from catering_paths import CATERING_MENU_PATH  # noqa: E402
+# M3 validity window. Reusing the SWEEP's own predicate (rather than re-deriving
+# `expires_at <= now` here) keeps ONE definition of "expired": a set this script
+# would still accept but the sweep would retire is exactly the inconsistency the
+# shared helper exists to prevent.
+from catering_proposal_sweep import find_expired_sent_proposal_sets  # noqa: E402
 
 PROPOSALS_PATH = Path("/opt/shift-agent/state/catering-proposals.json")
 PROPOSALS_LOCK = Path("/opt/shift-agent/state/catering-proposals.json.lock")
@@ -357,6 +362,59 @@ def _no_active_proposal_text() -> str:
     )
 
 
+def _expired_proposal_text() -> str:
+    """No option numbers are echoed back: they are precisely what is no longer
+    selectable, and re-listing them invites the customer to pick again."""
+    return (
+        BRIDGE_PREFIX
+        + "Thank you — those menu options have now expired, so I can't lock one in. "
+        "The owner will refresh them and come back to you shortly."
+    )
+
+
+def _expire_proposal_set(proposal_set_id: str) -> list[dict]:
+    """Retire an elapsed set through the LEGAL SENT->EXPIRED edge, so the customer's
+    reply cannot advance it any further. Returns transition refusals for the
+    caller to emit after PROPOSALS_LOCK releases (this script never holds
+    PROPOSALS_LOCK and LOG_LOCK together)."""
+    refusals: list[dict] = []
+    with FileLock(PROPOSALS_LOCK):
+        store, load_status = load_model(PROPOSALS_PATH, CateringProposalStore,
+                                        default=CateringProposalStore())
+        assert_load_status_clean(PROPOSALS_PATH, load_status,
+                                 context="proposal-selection expiry")
+        target = next((row for row in store.sets
+                       if row.proposal_set_id == proposal_set_id), None)
+        if target is None or target.status != "SENT":
+            return refusals
+        if _transition_ok(target, "EXPIRED", "select_expired", refusals):
+            target.status = "EXPIRED"
+            target.failure_reason = "validity window elapsed before selection"[:200]
+            atomic_write_json(PROPOSALS_PATH, store)
+    return refusals
+
+
+def _notify_owner_proposal_expired(lead_id: str, proposal_set_id: str,
+                                   selection_text: str) -> None:
+    """The customer answered — just too late. That is a live lead the owner would
+    otherwise never hear about, since nothing advanced and no card was sent."""
+    message = (
+        f"lead_id={lead_id} proposal_set_id={proposal_set_id}: the customer chose an "
+        f"option AFTER the quote's validity date, so nothing was locked in. They have "
+        f"been told you will refresh the options. Their reply: "
+        f"{(selection_text or '')[:200]!r}"
+    )
+    try:
+        subprocess.run(
+            [str(NOTIFY_OWNER_BIN), "--priority", "1",
+             "--title", "Catering proposal expired before selection", message],
+            check=False, capture_output=True, text=True, timeout=10,
+        )
+    except Exception as e:  # noqa: BLE001 - alerting is best-effort
+        sys.stderr.write(f"WARN: shift-agent-notify-owner failed (non-fatal): "
+                         f"{type(e).__name__}: {e}\n")
+
+
 SUPERSEDING_PROPOSAL_STATUSES = {
     "DRAFT",
     "SENT",
@@ -649,6 +707,25 @@ def main() -> int:
     if proposal is None:
         _audit_failed(args.lead_id, "no_sent_proposal", "latest proposal is not SENT")
         _bridge_post(args.customer_jid, _no_active_proposal_text())
+        return EXIT_NOT_FOUND
+
+    # The "valid until <date>" line the customer was sent is a commitment, and until
+    # now it bound nothing: a set could be selected, finalized and put in front of
+    # the owner months after it lapsed. Checked BEFORE resolving the selection —
+    # whatever the customer typed, the options are gone, and a clarification
+    # re-listing dead options would be worse than saying so.
+    if find_expired_sent_proposal_sets([proposal], _now()):
+        refusals = _expire_proposal_set(proposal.proposal_set_id)
+        _emit_transition_refusals(refusals)
+        _bridge_post(args.customer_jid, _expired_proposal_text())
+        _audit_failed(
+            args.lead_id, "proposal_expired",
+            f"expires_at={proposal.expires_at.isoformat() if proposal.expires_at else ''} "
+            f"elapsed; selection text: {args.selection_text}",
+            proposal.proposal_set_id,
+        )
+        _notify_owner_proposal_expired(args.lead_id, proposal.proposal_set_id,
+                                       args.selection_text)
         return EXIT_NOT_FOUND
 
     option_id, reason = _resolve_selection(args.selection_text, proposal.options)

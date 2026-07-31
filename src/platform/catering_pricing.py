@@ -53,6 +53,9 @@ from schemas import (
     CateringPriceStatus,
     CateringPricebook,
     CateringPricebookStore,
+    CateringPricingInputs,
+    CateringQuoteFeeInput,
+    CateringQuoteLineInput,
     Menu,
 )
 
@@ -75,6 +78,24 @@ FLAG_UNAVAILABLE_ITEM = "unavailable_item"     # unavailable_item:<item name>
 FLAG_MISSING_FEE_INPUT = "missing_fee_input"   # missing_fee_input:<fee id>
 FLAG_BELOW_PACKAGE_MIN = "below_package_min_guests"   # ...:<package id>
 FLAG_DISCOUNT_NEEDS_CODE = "discount_requires_owner_code"  # ...:<discount id>
+# Raised by finalize, not by the kernel: the headcount was unknown, so the quote
+# was priced for one guest and cannot be checked against the event. Named here
+# because a recompute has to know it is a block it can never clear on its own.
+FLAG_UNKNOWN_GUEST_COUNT = "unknown_guest_count"
+
+# Flags the kernel derives afresh on every call. A COMMITTED one must not be
+# carried into a recompute: the owner supplying a staff count is precisely how a
+# `missing_fee_input` block is meant to clear, and carrying the stale flag would
+# keep the quote blocked forever. Anything NOT here (a finalize-local flag, say)
+# is carried, because nothing else will re-derive it.
+_KERNEL_DERIVED_FLAGS = (
+    FLAG_PLACEHOLDER_PRICEBOOK,
+    FLAG_BELOW_MIN_PER_GUEST,
+    FLAG_MISSING_PRICE,
+    FLAG_MISSING_FEE_INPUT,
+    FLAG_BELOW_PACKAGE_MIN,
+    FLAG_DISCOUNT_NEEDS_CODE,
+)
 
 # CateringSelectedItem.qty is bounded at 500 by the state schema; a
 # headcount-scaled default basket clamps to it rather than emitting an
@@ -223,9 +244,16 @@ def _resolve_package(
     )
 
 
-def _resolve_discount(
+def resolve_discount(
     pricebook: CateringPricebook, discount_id: Optional[str],
 ) -> Optional[CateringDiscount]:
+    """PUBLIC — the single validator for a discount id against a pricebook.
+
+    Exposed (not `_`-private like its sibling resolvers) because callers need to
+    answer "is this id one the owner may apply?" BEFORE deciding anything else
+    about the lead: an id the owner just mistyped is the most actionable thing to
+    tell them, and it is true regardless of what state the lead is in.
+    """
     if discount_id is None:
         return None
     for disc in pricebook.approved_discounts:
@@ -377,7 +405,7 @@ def compute_quote(
     subtotal = per_person_subtotal + items_subtotal + fees_subtotal
 
     # 4. Discount — validated against the pricebook, capped, never negative.
-    disc = _resolve_discount(pricebook, discount_id)
+    disc = resolve_discount(pricebook, discount_id)
     discount_cents = 0
     if disc is not None:
         if disc.kind == "percent":
@@ -439,6 +467,191 @@ def compute_quote(
         price_status=price_status,
         flags=flags,
     )
+
+
+# ── Provenance: freeze a computation, then re-price from the frozen inputs ───
+# How firm each status is. A recompute is never allowed to come back FIRMER than
+# the commitment it was built on: rebuilding from committed cents makes every
+# line an "override", which the kernel would happily call "exact" even though the
+# committed numbers were menu-derived estimates.
+_PRICE_STATUS_FIRMNESS: dict[str, int] = {
+    "pending_owner_review": 0,
+    "estimated": 1,
+    "exact": 2,
+}
+
+
+def weaker_price_status(a: str, b: str) -> CateringPriceStatus:
+    """The LESS firm of two price statuses. Unknown values sort as least firm."""
+    if _PRICE_STATUS_FIRMNESS.get(a, 0) <= _PRICE_STATUS_FIRMNESS.get(b, 0):
+        return a  # type: ignore[return-value]
+    return b  # type: ignore[return-value]
+
+
+def pricing_inputs_from_quote(
+    qc: QuoteComputation,
+    pricebook: CateringPricebook,
+    *,
+    staff_count: Optional[int] = None,
+    miles: Optional[int] = None,
+) -> CateringPricingInputs:
+    """Freeze a computed quote into the cents-exact provenance a lead persists.
+
+    Every à-la-carte line must be priced: an unpriced line cannot be represented
+    as a committed cent amount, and a caller that persists one is committing a
+    number it never computed. Callers refuse those upstream (finalize exits 2),
+    so reaching here with one is a bug, not a data condition — hence PricingError.
+    """
+    unpriced = [ln.name for ln in qc.lines
+                if ln.source != "package" and ln.unit_cents is None]
+    if unpriced:
+        raise PricingError(
+            f"cannot freeze pricing provenance: {unpriced!r} have no resolved "
+            "unit price; a committed quote must be cents-exact on every line"
+        )
+    pkg_min_guests = 1
+    if qc.package_id is not None:
+        pkg = next((p for p in pricebook.per_person_packages if p.id == qc.package_id), None)
+        if pkg is not None:
+            pkg_min_guests = pkg.min_guests
+    return CateringPricingInputs(
+        guest_count=qc.guest_count,
+        package_id=qc.package_id,
+        package_name=qc.package_name,
+        package_price_per_person_cents=qc.price_per_person_cents,
+        package_min_guests=pkg_min_guests,
+        line_items=[
+            CateringQuoteLineInput(name=ln.name, qty=ln.qty, unit_cents=int(ln.unit_cents))
+            for ln in qc.lines
+            if ln.source != "package" and ln.unit_cents is not None
+        ],
+        fees=[
+            CateringQuoteFeeInput(
+                fee_id=fee.fee_id, name=fee.name, kind=fee.kind,
+                per_unit=fee.per_unit or "flat",
+                unit_cents=fee.unit_cents, units=fee.units,
+            )
+            for fee in qc.fees
+        ],
+        staff_count=staff_count,
+        miles=miles,
+        tax_rate_bps=qc.tax_rate_bps,
+        currency=qc.currency,
+        pricebook_version=qc.pricebook_version,
+        menu_version=qc.menu_version,
+        subtotal_cents=qc.subtotal_cents,
+        total_cents=qc.total_cents,
+        price_status=qc.price_status,
+        flags=list(qc.flags),
+    )
+
+
+def pinned_pricebook(
+    inputs: CateringPricingInputs, current: CateringPricebook,
+) -> CateringPricebook:
+    """A pricebook that reproduces the COMMITTED quote exactly.
+
+    Every price is pinned to what was committed — the package's per-person rate,
+    each line's unit cents, each fee's unit amount, the tax rate. The ONLY thing
+    taken from `current` is `approved_discounts`: the discount is the term the
+    owner is applying NOW, so it must be validated against the pricebook that is
+    published now, while everything it applies TO stays as quoted.
+
+    The package is pinned `active=True` on purpose: retiring a package after a
+    customer was quoted it does not un-quote them.
+    """
+    packages: list[CateringPackage] = []
+    if inputs.package_id is not None:
+        packages.append(CateringPackage(
+            id=inputs.package_id,
+            name=inputs.package_name or inputs.package_id,
+            price_per_person_cents=int(inputs.package_price_per_person_cents or 0),
+            min_guests=inputs.package_min_guests,
+            active=True,
+        ))
+    return CateringPricebook(
+        version=inputs.pricebook_version or current.version,
+        effective_date=current.effective_date,
+        updated_at=current.updated_at,
+        currency=inputs.currency,
+        # Carried, not cleared: a quote computed against seed data stays flagged
+        # and stays undeliverable however many times it is recomputed.
+        placeholder=FLAG_PLACEHOLDER_PRICEBOOK in inputs.flags,
+        per_person_packages=packages,
+        fixed_fees=[
+            CateringFee(id=f.fee_id, name=f.name, kind=f.kind,
+                        amount_cents=f.unit_cents, per_unit=f.per_unit, active=True)
+            for f in inputs.fees
+        ],
+        tax_rate_bps=inputs.tax_rate_bps,
+        approved_discounts=list(current.approved_discounts),
+        item_price_overrides={li.name: li.unit_cents for li in inputs.line_items},
+    )
+
+
+def recompute_from_inputs(
+    inputs: CateringPricingInputs,
+    *,
+    pricebook: CateringPricebook,
+    discount_id: Optional[str] = None,
+    staff_count: Optional[int] = None,
+    miles: Optional[int] = None,
+    min_per_guest_usd: Optional[float] = None,
+) -> QuoteComputation:
+    """Re-price a COMMITTED quote — optionally with a discount — from its frozen
+    inputs, through the same kernel that produced it.
+
+    The guarantee this exists for: with `discount_id=None` and the committed
+    multipliers, `total_cents` comes back byte-equal to `inputs.total_cents`. The
+    discount therefore lands on the true base rather than on whatever could be
+    reconstructed from whole-dollar line rows.
+
+    `staff_count` / `miles` default to the committed values; passing them lets an
+    owner resolve a fee multiplier that was missing at finalize (which legitimately
+    changes the total — the fee stops being unpriced).
+    """
+    book = pinned_pricebook(inputs, pricebook)
+    qc = compute_quote(
+        inputs.guest_count,
+        inputs.package_id,
+        [(li.name, li.qty) for li in inputs.line_items],
+        discount_id,
+        book,
+        None,  # no menu: every price is pinned, nothing may fall back to a catalog
+        fee_ids=[f.fee_id for f in inputs.fees],
+        staff_count=(inputs.staff_count if staff_count is None else staff_count),
+        miles=(inputs.miles if miles is None else miles),
+        min_per_guest_usd=min_per_guest_usd,
+    )
+    # Carry only what the kernel did NOT just re-derive. A committed
+    # `missing_fee_input` that the caller has since resolved with a staff count
+    # must not survive as a stale reason on a quote that is now fully priced.
+    carried = [f for f in inputs.flags
+               if f not in qc.flags
+               and not any(f == k or f.startswith(k + ":") for k in _KERNEL_DERIVED_FLAGS)]
+
+    # Firmness ceiling. Pinned prices make every line an "override", which the
+    # kernel would happily call "exact" even when the committed numbers were
+    # menu-derived estimates — so the recompute is capped at how firm the
+    # commitment was. A committed "pending_owner_review" caps at "estimated"
+    # rather than at itself: pending is a RESOLUTION verdict, not a statement
+    # about where the prices came from, and resolution is re-derived above (the
+    # pinned book carries a placeholder pricebook; fee multipliers are inputs).
+    # Supplying a missing multiplier is exactly how an owner is meant to make a
+    # pending quote deliverable, and capping at "pending" would forbid it.
+    ceiling = ("estimated" if inputs.price_status == "pending_owner_review"
+               else inputs.price_status)
+    price_status = weaker_price_status(qc.price_status, ceiling)
+    # The one block a recompute can never clear on its own: it prices from frozen
+    # inputs, so it cannot rediscover that the headcount behind them was never
+    # known. Without this, resolving an unrelated fee would quietly make an
+    # unheadcounted quote deliverable.
+    if FLAG_UNKNOWN_GUEST_COUNT in inputs.flags:
+        price_status = "pending_owner_review"
+    return qc.model_copy(update={
+        "price_status": price_status,
+        "flags": list(qc.flags) + carried,
+    })
 
 
 # ── Customer / owner facing render ───────────────────────────────────────────
