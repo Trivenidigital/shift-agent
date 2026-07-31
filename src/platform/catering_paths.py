@@ -32,6 +32,14 @@ CATERING_PRICEBOOK_PATH = STATE_DIR / "catering-pricebook.json"
 CATERING_PRICEBOOK_LOCK = Path(str(CATERING_PRICEBOOK_PATH) + ".lock")
 CATERING_PRICEBOOK_ARCHIVE_DIR = STATE_DIR / "catering-pricebook-archive"
 
+# ── Scheduled follow-ups (M5) ────────────────────────────────────────────────
+# The DEFAULT location. Unlike the two above, this one has an env override
+# (SHIFT_AGENT_FOLLOWUPS_PATH) resolved at call time by catering_followups —
+# three separate scripts read this store, so the override has to reach a
+# subprocess, which a monkeypatched module attribute cannot do.
+CATERING_FOLLOWUPS_PATH = STATE_DIR / "catering-followups.json"
+CATERING_FOLLOWUPS_LOCK = Path(str(CATERING_FOLLOWUPS_PATH) + ".lock")
+
 __all__ = [
     "STATE_DIR",
     "CATERING_MENU_PATH",
@@ -40,4 +48,6 @@ __all__ = [
     "CATERING_PRICEBOOK_PATH",
     "CATERING_PRICEBOOK_LOCK",
     "CATERING_PRICEBOOK_ARCHIVE_DIR",
+    "CATERING_FOLLOWUPS_PATH",
+    "CATERING_FOLLOWUPS_LOCK",
 ]
