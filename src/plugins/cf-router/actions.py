@@ -823,18 +823,27 @@ def invoke_amend_catering_lead(lead_id: str, *, mode: str = "amendment",
     `mode="answer"` applies ONE slot-filling answer to a QUALIFYING lead. The script
     owns every send it causes (owner card / customer reply) and every audit row, so
     this wrapper stays a thin, fail-safe subprocess invoke like its siblings.
+
+    The answer text goes over STDIN, never argv: it is raw customer text, and a
+    reply that starts with a dash ("-veg", "--help", "-80") is read by the script's
+    argparse as a flag — SystemExit 2 — which looked to the caller like "answer mode
+    could not handle it" and dropped the inbound into the R2A capture path, where it
+    was applied in OVERWRITE mode instead of fill-nulls. Same reason
+    apply-catering-owner-decision takes its drafted quote on --quote-text-stdin.
     """
     argv = [
         str(PYTHON_BIN), str(AMEND_CATERING_LEAD_BIN),
         "--lead-id", lead_id, "--mode", mode,
     ]
+    stdin_text: Optional[str] = None
     if answer_text:
-        argv += ["--answer-text", answer_text[:4000]]
+        stdin_text = answer_text[:4000]
+        argv.append("--answer-text-stdin")
     if message_id:
         argv += ["--message-id", message_id]
     try:
         result = subprocess.run(
-            argv, capture_output=True, text=True,
+            argv, input=stdin_text, capture_output=True, text=True,
             env=os.environ.copy(), timeout=SUBPROCESS_TIMEOUT_SEC,
         )
         return result.returncode
