@@ -79,6 +79,21 @@ CARD_TTL_HOURS = 4
 # lapse has answered; a third would be the agent arguing with them.
 MAX_CARD_ATTEMPTS = 2
 
+# ── Bridge template-bypass prefix ────────────────────────────────────────────
+# bridge.js drops outbound text that looks like LLM monologue unless it matches
+# /^⚕ \*[A-Za-z][A-Za-z ]*\*\n[─\-]+\n/ (see the F1 note in
+# apply-catering-owner-decision). The prefix is a TRANSPORT header, not content,
+# so it lives here and is prepended at SEND time rather than being baked into the
+# template files — that way the owner approval card shows the message body the
+# customer will read, without a duplicate header stacked inside it.
+BRIDGE_TEMPLATE_PREFIX = "⚕ *Catering Agent*\n────────────\n"
+
+
+def with_bridge_prefix(body: str) -> str:
+    """The customer-bound form of a rendered follow-up body."""
+    return f"{BRIDGE_TEMPLATE_PREFIX}{body}"
+
+
 # ── Template keys (one per type; the sweep reads the matching .txt) ───────────
 TEMPLATE_KEYS: dict[str, str] = {
     "incomplete_qualification": "catering_followup_incomplete_qualification",
@@ -483,6 +498,7 @@ __all__ = [
     "EVENT_APPROACHING_DAYS_BEFORE", "FINAL_HEADCOUNT_DAYS_BEFORE",
     "POST_EVENT_FEEDBACK_DAYS_AFTER",
     "EVENT_ANCHORED_TYPES", "TEMPLATE_KEYS",
+    "BRIDGE_TEMPLATE_PREFIX", "with_bridge_prefix",
     "CARD_TTL_HOURS", "MAX_CARD_ATTEMPTS",
     "FOLLOWUP_ALLOWED_LEAD_STATUSES", "FOLLOWUP_EXTRA_ALLOWED_STATUSES",
     "LIVE_FOLLOWUP_STATUSES",

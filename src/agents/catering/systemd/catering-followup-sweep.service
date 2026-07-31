@@ -1,0 +1,25 @@
+[Unit]
+# M5 controlled follow-up engine. Turns due follow-ups into OWNER APPROVAL CARDS;
+# the customer hears nothing until the owner replies with the card's #XXXXX code
+# (approve-catering-followup). Direct customer auto-send is a separate flag
+# (CATERING_FOLLOWUP_AUTOSEND) that ships OFF.
+Description=Catering follow-up sweep (M5) - card due follow-ups to the owner
+After=network-online.target
+Wants=network-online.target
+ConditionFileIsExecutable=/usr/local/bin/catering-followup-sweep
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+Environment=HOME=/opt/shift-agent
+ExecStart=/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/catering-followup-sweep
+StandardOutput=append:/opt/shift-agent/logs/catering-followup-sweep.log
+StandardError=append:/opt/shift-agent/logs/catering-followup-sweep.log
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shift-agent
+ProtectHome=read-only
+PrivateTmp=true

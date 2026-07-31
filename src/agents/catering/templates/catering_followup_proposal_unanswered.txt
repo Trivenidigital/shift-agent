@@ -1,0 +1,5 @@
+Hi {customer_name}, following up on the catering quote we shared for {event_date}.
+
+Any questions, or anything you'd like adjusted? Just reply here and we'll take another look.
+
+(Ref: {lead_id})
