@@ -221,6 +221,47 @@ def test_answer_to_an_intake_question_is_applied_to_the_same_lead(wired, monkeyp
     assert "f7_qualification_answer" in reasons
 
 
+def test_the_answer_arm_owns_the_turn_and_the_canonical_reply_is_suppressed(
+        wired, monkeypatch):
+    """One response per inbound (turn arbitration). A real answer to an open
+    question is answered BY the question loop — amend-catering-lead sends the next
+    batch (or the closing line) itself, so the canonical "your inquiry is with the
+    owner" reply must NOT also fire. The two live in mutually exclusive arms and
+    this is the cell that keeps them that way; without it the arbitration is only
+    provable on Linux via test_cf_router_plugin, which skips off-Linux."""
+    _set_active_lead(wired, monkeypatch, QUALIFYING_LEAD)
+    _capture_result(wired, monkeypatch)
+
+    result = _inbound(wired, "It's a wedding on June 15")
+
+    assert result["action"] == "skip"
+    assert [a["mode"] for a in wired.spy.amends] == ["answer"]
+    assert wired.spy.canonical == [], (
+        "the question loop owns the customer response on the answer arm; a canonical "
+        "follow-up reply here is a second response to one inbound"
+    )
+
+
+def test_a_weak_followup_gets_the_canonical_reply_and_re_asks_nothing(
+        wired, monkeypatch):
+    """The other side of the same arbitration: a non-answer follow-up against a
+    lead that is NOT qualifying takes the R2A capture path, gets exactly ONE
+    canonical reply, and never re-enters the question loop (re-asking questions the
+    customer already answered reads as the agent nagging)."""
+    _set_active_lead(wired, monkeypatch,
+                     dict(QUALIFYING_LEAD, status="AWAITING_OWNER_APPROVAL"))
+    _capture_result(wired, monkeypatch)
+
+    result = _inbound(wired, "Will wait for two menu proposals. Thank you!")
+
+    assert result["action"] == "skip"
+    assert len(wired.spy.canonical) == 1, "exactly one canonical reply per inbound"
+    assert [a["mode"] for a in wired.spy.amends] == ["amendment"], (
+        "the amendment application is a state write, not a question re-ask; answer "
+        "mode must not run for a lead that is not QUALIFYING"
+    )
+
+
 def _seed_leads_store(wired, *leads):
     """Write the real leads store so the admission pre-check reads live state."""
     wired.actions.LEADS_PATH.write_text(
