@@ -72,6 +72,9 @@ export interface LeadListResponse {
 
 export interface QuoteVersionRow {
   version: number;
+  /** null for the first committed version — there is nothing to diff against,
+   *  so items_added holds the whole basket rather than a change. */
+  from_version: number | null;
   ledger_entry_id: string | null;
   quote_total_usd: number | null;
   source: string | null;

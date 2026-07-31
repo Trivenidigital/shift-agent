@@ -175,17 +175,26 @@ export function LeadDetailDrawer({ leadId, onClose }: { leadId: string; onClose:
                         {v.pricebook_version != null && <span>pricebook v{v.pricebook_version}</span>}
                         {v.menu_version != null && <span>menu v{v.menu_version}</span>}
                       </div>
-                      {v.diff_summary && (
-                        <div className="mt-1 text-zinc-600">
-                          Changed: {v.diff_summary}
-                          {v.quote_text_changed && " · quote text edited"}
-                        </div>
-                      )}
-                      {(v.items_added.length > 0 || v.items_removed.length > 0) && (
-                        <div className="mt-0.5 text-zinc-500">
-                          {v.items_added.length > 0 && <span className="text-emerald-700">+ {v.items_added.join(", ")} </span>}
-                          {v.items_removed.length > 0 && <span className="text-rose-700">− {v.items_removed.join(", ")}</span>}
-                        </div>
+                      {/* A first version has no predecessor, so items_added is
+                          the whole basket — showing it as a diff would read as
+                          a change the owner never made. */}
+                      {v.from_version === null ? (
+                        <div className="mt-1 text-zinc-400">First committed version.</div>
+                      ) : (
+                        <>
+                          {v.diff_summary && (
+                            <div className="mt-1 text-zinc-600">
+                              Changed vs v{v.from_version}: {v.diff_summary}
+                              {v.quote_text_changed && " · quote text edited"}
+                            </div>
+                          )}
+                          {(v.items_added.length > 0 || v.items_removed.length > 0) && (
+                            <div className="mt-0.5 text-zinc-500">
+                              {v.items_added.length > 0 && <span className="text-emerald-700">+ {v.items_added.join(", ")} </span>}
+                              {v.items_removed.length > 0 && <span className="text-rose-700">− {v.items_removed.join(", ")}</span>}
+                            </div>
+                          )}
+                        </>
                       )}
                     </li>
                   ))}

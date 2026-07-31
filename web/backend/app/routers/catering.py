@@ -323,6 +323,10 @@ class LeadListResponse(BaseModel):
 class QuoteVersionRow(BaseModel):
     model_config = ConfigDict(extra="forbid")
     version: int
+    # None for the first committed version. `items_added` then lists the whole
+    # basket (diff_versions has nothing to subtract), which reads as a change
+    # when it is not — callers must gate the added/removed display on this.
+    from_version: Optional[int] = None
     ledger_entry_id: Optional[str] = None
     quote_total_usd: Optional[int] = None
     source: Optional[str] = None
@@ -720,18 +724,21 @@ def _quote_versions(lead_id: str) -> tuple[list[QuoteVersionRow], Optional[str]]
     rows: list[QuoteVersionRow] = []
     previous: Optional[dict[str, Any]] = None
     for record in mine:
+        from_version: Optional[int] = None
         try:
             diff = catering_quote_ledger.diff_versions(previous, record)
             summary, added, removed = (
                 diff.summary_line(), list(diff.items_added), list(diff.items_removed),
             )
             text_changed, delta = diff.quote_text_changed, diff.total_delta_usd
+            from_version = diff.from_version
         except (TypeError, ValueError, KeyError):
             # A hand-edited or future-shaped record must not blank the history.
             summary, added, removed, text_changed, delta = "", [], [], False, 0
         items = record.get("selected_items")
         rows.append(QuoteVersionRow(
             version=_safe_int(record.get("version")),
+            from_version=from_version,
             ledger_entry_id=_opt_str(record.get("ledger_entry_id")),
             quote_total_usd=_opt_int(record.get("quote_total_usd")),
             source=_opt_str(record.get("source")),

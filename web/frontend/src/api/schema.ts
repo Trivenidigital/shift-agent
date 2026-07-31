@@ -2709,6 +2709,8 @@ export interface components {
              * @default
              */
             diff_summary: string;
+            /** From Version */
+            from_version?: number | null;
             /**
              * Item Count
              * @default 0

@@ -397,10 +397,15 @@ def test_lead_detail_assembles_ledger_amendments_and_timeline(tmp_path, monkeypa
 
     versions = body["quote_versions"]
     assert [v["version"] for v in versions] == [2, 1], "newest version first"
+    assert versions[0]["from_version"] == 1
     assert versions[0]["items_added"] == ["Goat Curry"]
     assert versions[0]["total_delta_usd"] == 240
     assert "total +$240" in versions[0]["diff_summary"]
-    assert versions[1]["diff_summary"] == "", "first version has nothing to diff against"
+    # The first version has no predecessor. diff_versions still reports the
+    # whole basket as "added" — from_version=None is what tells a caller that
+    # is a listing, not a change.
+    assert versions[1]["from_version"] is None
+    assert versions[1]["diff_summary"] == ""
 
     assert [a["amendment_id"] for a in body["amendments"]] == ["A0002", "A0001"]
     assert body["amendments"][0]["applied"] is True

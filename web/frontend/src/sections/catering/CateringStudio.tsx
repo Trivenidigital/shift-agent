@@ -175,6 +175,8 @@ function OverviewTab({
               }
               unknown={readiness.automation_kernel_armed_source === null}
             />
+            {/* Follow-ups being off is a configuration choice, not a fault —
+                it gets a neutral mark, unlike a missing pricebook. */}
             <ReadinessLine
               ok={readiness.followups_enabled === true}
               label="Follow-ups"
@@ -183,9 +185,10 @@ function OverviewTab({
                   ? "unknown (agent config not readable)"
                   : readiness.followups_enabled
                     ? "enabled"
-                    : "disabled"
+                    : "disabled in the agent config"
               }
               unknown={readiness.followups_enabled === null}
+              neutral={readiness.followups_enabled === false}
             />
             <ReadinessLine
               ok={counts.on_hold === 0}
@@ -205,23 +208,26 @@ function ReadinessLine({
   ok,
   warn,
   unknown,
+  neutral,
   label,
   detail,
 }: {
   ok: boolean;
   warn?: boolean;
   unknown?: boolean;
+  neutral?: boolean;
   label: string;
   detail: string;
 }) {
-  const mark = unknown ? "?" : ok ? "✓" : warn ? "⚠" : "✕";
-  const tone = unknown
-    ? "text-zinc-400"
-    : ok
-      ? "text-emerald-600"
-      : warn
-        ? "text-amber-600"
-        : "text-rose-600";
+  const mark = unknown ? "?" : ok ? "✓" : neutral ? "·" : warn ? "⚠" : "✕";
+  const tone =
+    unknown || neutral
+      ? "text-zinc-400"
+      : ok
+        ? "text-emerald-600"
+        : warn
+          ? "text-amber-600"
+          : "text-rose-600";
   return (
     <li className="flex items-baseline gap-2">
       <span className={cn("w-4 font-semibold", tone)}>{mark}</span>

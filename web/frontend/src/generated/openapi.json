@@ -2746,6 +2746,17 @@
             "title": "Diff Summary",
             "type": "string"
           },
+          "from_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Version"
+          },
           "item_count": {
             "default": 0,
             "title": "Item Count",
