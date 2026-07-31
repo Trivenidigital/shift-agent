@@ -38,6 +38,26 @@ AMEND = SCRIPTS / "amend-catering-lead"
 OWNER_JID = "19045550100@s.whatsapp.net"
 CUSTOMER_JID = "15550100777@s.whatsapp.net"
 
+# PRE-EXISTING DEFECT, surfaced by the M5 guard below and deliberately NOT fixed
+# here — neither script is M5's, and one of them is on a money path.
+#
+# Both alias the send chokepoint (`from safe_io import bridge_post_2tuple as
+# _bridge_post`) without an entry in SAFE_IO_NULL_CONTEXT_ALLOWLIST, so at
+# runtime every send they make is refused with `missing_action_context`:
+#   amend-catering-lead    — M1's slot-filling loop: every customer question
+#                            batch and every owner hand-off card.
+#   catering-mint-deposit  — the slice-2 deposit-link customer send.
+# The PR-ζ AST static gate cannot see either callsite (it matches call NAMES,
+# and both call through an alias), which is why they have gone unnoticed.
+#
+# Recorded as a pinned set rather than dropped from the guard so the finding
+# stays visible: a NEW name appearing here fails the test, and closing either
+# gap also fails it (prompting the set to shrink).
+KNOWN_UNALLOWLISTED_CATERING_SENDERS = {
+    "amend-catering-lead",
+    "catering-mint-deposit",
+}
+
 
 def _lead(**over) -> dict:
     lead = {
@@ -351,6 +371,91 @@ class TestSweepResilience:
         quarantined = list(env["state"].glob("catering-followups.json.corrupt-*"))
         assert len(quarantined) == 1
         assert quarantined[0].read_text(encoding="utf-8") == "{not json"
+
+
+class TestSendChokepointAdmitsTheFollowupScripts:
+    """The bug the stubbed-bridge tests above CANNOT catch.
+
+    Every other test in this file monkeypatches `_bridge_post`, so it proves the
+    script's own logic and nothing about the chokepoint the send actually goes
+    through. Both follow-up scripts call `bridge_post_2tuple` via a module-level
+    alias, which the PR-ζ AST static gate cannot see (its own docstring admits
+    the indirect-call blind spot) — so the RUNTIME caller-basename match against
+    SAFE_IO_NULL_CONTEXT_ALLOWLIST is the only thing admitting them. Without the
+    allowlist entries every card and every approved send is refused with
+    `missing_action_context` and the engine ships dead.
+    """
+
+    @pytest.mark.parametrize("basename", ["catering-followup-sweep",
+                                          "approve-catering-followup"])
+    def test_the_caller_basename_is_admitted_by_the_policy(self, basename, monkeypatch):
+        import safe_io
+        monkeypatch.setattr(safe_io, "_resolve_caller_script_name", lambda: basename)
+        assert safe_io._enforce_action_context_policy(
+            message_parts=["hello"], jid=CUSTOMER_JID, action_context=None,
+        ) is None, f"{basename} would be refused with missing_action_context"
+
+    def test_an_unlisted_caller_is_still_refused(self, monkeypatch):
+        """Evidence the assertion above is not vacuous."""
+        import safe_io
+        monkeypatch.setattr(safe_io, "_resolve_caller_script_name",
+                            lambda: "not-a-real-script")
+        refusal = safe_io._enforce_action_context_policy(
+            message_parts=["hello"], jid=CUSTOMER_JID, action_context=None,
+        )
+        assert refusal is not None and refusal[2] == "missing_action_context"
+
+    def test_why_no_end_to_end_variant_of_this_test_exists(self):
+        """Pins the reason the assertions above are indirect.
+
+        bridge_post checks BRIDGE_URL before it checks the action-context policy.
+        Under pytest the autouse fixture points BRIDGE_URL at a closed sink, so
+        every in-test send short-circuits to 'connect_failed' and NEVER reaches
+        the policy. An end-to-end 'run the sweep and inspect the status' test
+        would therefore pass whether or not the caller is allowlisted — false
+        confidence. If this ordering ever changes, the guard above is the one to
+        extend, not to replace with an e2e.
+        """
+        import inspect
+        import safe_io
+        src = inspect.getsource(safe_io.bridge_post)
+        url_check = src.index("validate_bridge_url")
+        policy_check = src.index("_enforce_action_context_policy")
+        assert url_check < policy_check, (
+            "bridge_post now checks the action-context policy before the bridge "
+            "URL — an end-to-end allowlist test has become possible; add one."
+        )
+
+    def test_every_catering_script_that_aliases_the_chokepoint_is_allowlisted(self):
+        """The generalised guard: the PR-ζ AST gate matches call NAMES, so a
+        script that does `from safe_io import bridge_post_2tuple as _bridge_post`
+        is invisible to it and is admitted at runtime by basename alone. Any
+        catering script importing a bridge_post* helper under an alias must
+        therefore carry an allowlist entry, or it ships refusing every send.
+        """
+        import re
+        import safe_io
+        alias_import = re.compile(
+            r"^from safe_io import (?:bridge_post|bridge_post_2tuple|"
+            r"bridge_send_media|bridge_send_cta) as (\w+)", re.MULTILINE)
+        missing = []
+        for script in sorted(SCRIPTS.iterdir()):
+            if not script.is_file():
+                continue
+            text = script.read_text(encoding="utf-8", errors="ignore")
+            if not alias_import.search(text):
+                continue
+            if script.name not in safe_io.SAFE_IO_NULL_CONTEXT_ALLOWLIST:
+                missing.append(script.name)
+        assert set(missing) == KNOWN_UNALLOWLISTED_CATERING_SENDERS, (
+            f"the set of catering scripts that alias the send chokepoint without "
+            f"an allowlist entry changed.\n"
+            f"  now missing : {sorted(missing)}\n"
+            f"  known gap   : {sorted(KNOWN_UNALLOWLISTED_CATERING_SENDERS)}\n"
+            f"A NEW name here ships refusing every send it makes — add it to "
+            f"SAFE_IO_NULL_CONTEXT_ALLOWLIST. A name that DISAPPEARED means the "
+            f"pre-existing gap was closed; shrink the known-gap set."
+        )
 
 
 # ── approve / cancel ─────────────────────────────────────────────────────────
