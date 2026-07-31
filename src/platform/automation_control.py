@@ -334,6 +334,103 @@ def _alert_state_corrupt(status: str) -> None:
         pass
 
 
+# §12b takeover auto-expiry. The takeover window closing is an AUTOMATED reversal
+# of OPERATOR-applied state: the owner said "I am handling this customer by hand",
+# and 72h later a read flips the conversation back to active and the assistant
+# starts replying again — with nothing anywhere telling the owner it happened. The
+# alert fires on the FIRST read that OBSERVES the transition; the marker below is
+# persisted on the record so no later read re-alerts, and re-issuing takeover
+# writes a fresh record (new expiry, no marker) so the NEXT expiry alerts again.
+TAKEOVER_EXPIRY_ALERTED_FIELD = "takeover_expiry_alerted_for"
+_TAKEOVER_EXPIRY_DEDUP_MIN = 60
+
+
+def _claim_takeover_expiry_alert(key: str, expires_ts: str) -> bool:
+    """Compare-and-set the alerted marker under the state lock. True EXACTLY ONCE
+    per (record, expiry_ts) — the read-and-flip happens inside the lock, so two
+    concurrent readers observing the same expiry cannot both page the owner.
+
+    False (no alert) on any read/write problem, on a record that moved underneath
+    us, or on an expiry already alerted for: an alerting hiccup must never fault
+    the read path this sits on."""
+    path = _state_path()
+    try:
+        with FileLock(Path(str(path) + ".lock")):
+            doc, status = safe_load_json(path, default={})
+            if status not in HEALTHY_LOAD_STATUSES or not isinstance(doc, dict):
+                return False
+            convs = doc.get("conversations")
+            if not isinstance(convs, dict):
+                return False
+            rec = convs.get(key)
+            if not isinstance(rec, dict):
+                return False
+            if str(rec.get("takeover_expires_ts") or "") != expires_ts:
+                return False          # re-issued / released between read and claim
+            if rec.get(TAKEOVER_EXPIRY_ALERTED_FIELD) == expires_ts:
+                return False          # this expiry has already paged the owner
+            rec[TAKEOVER_EXPIRY_ALERTED_FIELD] = expires_ts
+            convs[key] = rec
+            doc["conversations"] = convs
+            doc.setdefault("schema_version", 1)
+            atomic_write_json(path, doc)
+            return True
+    except Exception as e:  # noqa: BLE001 — never raise into the read path
+        try:
+            sys.stderr.write(
+                f"catering_takeover_expiry_claim_failed ({type(e).__name__}: {str(e)[:160]})\n")
+        except Exception:
+            pass
+        return False
+
+
+def _observe_takeover_expiry(jid: str, key: str, record: dict) -> None:
+    """§12b: page the owner + audit that an operator takeover auto-expired.
+
+    Best-effort and idempotent — the persisted claim above gates everything below,
+    so a second read of the same expired record does nothing at all. PLAIN TEXT
+    body (no Markdown) per the §12b lesson: mode names like ``opted_out`` carry
+    underscores that a Markdown parser silently eats."""
+    expires_ts = str(record.get("takeover_expires_ts") or "")
+    if not expires_ts or not _claim_takeover_expiry_alert(key, expires_ts):
+        return
+    emit_control_changed(
+        jid, MODE_TAKEOVER, MODE_ACTIVE, actor="system",
+        reason="takeover_auto_expiry",
+    )
+    key_hash = chat_key_hash(jid)
+    title = "catering human takeover expired"
+    body = (
+        f"The human-takeover window you set on conversation {key_hash} has "
+        f"expired ({expires_ts}) and automated replies to that customer have "
+        f"resumed. If you are still handling them by hand, send 'takeover' with "
+        f"their code again to extend it."
+    )
+    try:
+        sys.stderr.write(
+            f"catering_takeover_expiry_alert_dispatched chat={key_hash}\n")
+    except Exception:
+        pass
+    delivered = False
+    try:
+        delivered = notify_owner_with_fallback(
+            title, body, priority=1, source="automation_control_takeover_expiry",
+            dedup_window_min=_TAKEOVER_EXPIRY_DEDUP_MIN,
+        )
+    except Exception as e:  # noqa: BLE001 — alerting must never crash the read path
+        try:
+            sys.stderr.write(
+                f"catering_takeover_expiry alert raised "
+                f"({type(e).__name__}: {str(e)[:160]})\n")
+        except Exception:
+            pass
+    try:
+        sys.stderr.write(
+            f"catering_takeover_expiry_alert_delivered delivered={delivered}\n")
+    except Exception:
+        pass
+
+
 def read_mode_and_status(jid: str) -> Tuple[str, str]:
     """Return ``(effective_mode, load_status)`` where load_status is
     safe_load_json's ('ok'/'missing'/'empty' are CLEAN; anything else is a read
@@ -352,7 +449,16 @@ def read_mode_and_status(jid: str) -> Tuple[str, str]:
         except Exception:
             pass
         return _LAST_KNOWN_MODE.get(key, MODE_ACTIVE), status
-    mode = _effective_mode(convs.get(key))
+    record = convs.get(key)
+    mode = _effective_mode(record)
+    # §12b, only on the (rare) read that actually WATCHES a takeover lapse — the
+    # ordinary read path pays one dict lookup and one comparison for this.
+    if (isinstance(record, dict) and record.get("mode") == MODE_TAKEOVER
+            and mode == MODE_ACTIVE):
+        try:
+            _observe_takeover_expiry(jid, key, record)
+        except Exception:  # noqa: BLE001 — alerting never faults a mode read
+            pass
     _LAST_KNOWN_MODE[key] = mode
     return mode, status
 
