@@ -55,6 +55,22 @@ jobs:
           PUSHOVER_USER_KEY: "stub-user-key"
         run: .venv/bin/pytest -v --tb=short
 
+      # Catering Studio E2E read model (M7 companion): the Studio's view of a
+      # FINISHED lifecycle — dashboard counts, the booked lead's list row, and the
+      # detail view's quote versions / control chip / timeline. Collected by the
+      # aggregate Pytest step above too; this named step exists so the read-model
+      # cells report PASSED by name alongside the root suite's transcript, and so a
+      # failure here is attributable to the read model rather than to the lifecycle.
+      - name: Catering Studio E2E read model (M7) — finished-lifecycle projection
+        env:
+          COCKPIT_TEST_MODE: "1"
+          COCKPIT_JWT_SECRET: "0000000000000000000000000000000000000000000000000000000000000000"
+          PUSHOVER_APP_TOKEN: "stub-app-token"
+          PUSHOVER_USER_KEY: "stub-user-key"
+        run: |
+          echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
+          .venv/bin/pytest -vv tests/test_catering_studio_e2e_readmodel.py
+
       - name: Dump OpenAPI spec (sanity check the dump-script runs)
         env:
           COCKPIT_TEST_MODE: "1"

@@ -705,6 +705,18 @@ def test_03_duplicate_inbound_is_idempotent(cf, sb: _Sandbox):
 MSG_ANSWER = "September 12 at the Grand Ballroom in Edison, buffet style, serving at 6pm"
 
 
+def _next_september_12() -> str:
+    """The date a bare "September 12" means: the next one that has not passed.
+
+    Stating the contract instead of hard-coding a year keeps this transcript from
+    rotting on 2026-09-13 — and keeps the lead's event date in the FUTURE, which
+    the event-anchored follow-ups depend on to stay not-yet-due in test_10."""
+    from datetime import date
+    today = datetime.now(timezone.utc).date()
+    year = today.year if date(today.year, 9, 12) >= today else today.year + 1
+    return f"{year}-09-12"
+
+
 def test_04_answer_advances_the_same_lead_to_owner_approval(cf, sb: _Sandbox):
     n0 = len(sb.sent)
     result = _inbound(cf, sb, MSG_ANSWER, "wamid.M7.02")
@@ -714,7 +726,7 @@ def test_04_answer_advances_the_same_lead_to_owner_approval(cf, sb: _Sandbox):
     assert len(_leads(sb)) == 3, (
         f"an answer must never mint a second lead: {[le['lead_id'] for le in _leads(sb)]}")
     lead = _lead(sb, sb.lead_id)
-    assert lead["extracted"]["event_date"] == "2026-09-12", (
+    assert lead["extracted"]["event_date"] == _next_september_12(), (
         f"the date answer must land on the SAME lead: {lead['extracted']}")
     assert lead["extracted"]["service_style"] == "buffet", (
         f"the service-style answer must land on the SAME lead: {lead['extracted']}")
@@ -1085,15 +1097,26 @@ def test_09_owner_approval_sends_the_governed_quote_once(sb: _Sandbox):
 # ═════════════════════════════════════════════════════════════════════════════
 # 10. Follow-up: quote-sent scheduled it; sweep cards the owner; owner approves.
 # ═════════════════════════════════════════════════════════════════════════════
-def _make_due(sb: _Sandbox, followup_id: str) -> None:
-    """Advance the clock the way the M5 suites do — by moving `due_at` into the
-    past. The sweep reads real wall-clock `customer_now`, so there is no clock to
-    inject; writing the data relative to now is the deterministic equivalent."""
+def _only_due(sb: _Sandbox, followup_id: str) -> None:
+    """Make exactly ONE follow-up due, and nothing else.
+
+    The sweep reads wall-clock `customer_now` — there is no clock to inject — so
+    the M5 suites control time by writing `due_at` relative to now. This does the
+    same, and additionally parks every OTHER scheduled record in the future. That
+    second half matters: the quote-sent trigger also schedules event-anchored
+    chases (event_approaching is event_date minus 7 days), so on any run inside a
+    week of the transcript's event the sweep would card two follow-ups and the
+    "exactly one chase" assertions would depend on the calendar. Pinning one
+    record at a time makes each sweep assertion date-independent.
+    """
     doc = json.loads(sb.followups.read_text(encoding="utf-8"))
     past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    far = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
     for f in doc["followups"]:
         if f["followup_id"] == followup_id:
             f["due_at"] = past
+        elif f["status"] == "scheduled":
+            f["due_at"] = far
     sb.followups.write_text(json.dumps(doc), encoding="utf-8")
 
 
@@ -1109,7 +1132,7 @@ def test_10_followup_is_scheduled_carded_and_approved(sb: _Sandbox):
                for r in _rows(sb, "catering_followup_scheduled")), (
         "the schedule must name the trigger that caused it")
 
-    _make_due(sb, unanswered[0]["followup_id"])
+    _only_due(sb, unanswered[0]["followup_id"])
     n0 = len(sb.sent)
     rc, out, err = _run_script(sb, "catering-followup-sweep", [])
     assert rc == 0, f"sweep exit={rc}; stderr={err[:600]}"
@@ -1182,7 +1205,7 @@ def test_11_customer_stop_acks_once_then_suppresses_everything(cf, sb: _Sandbox)
     ])
     assert rc == 0, f"create-catering-followup exit={rc}; stderr={err[:600]}"
     fid = _stdout_json(out2)["followup_id"]
-    _make_due(sb, fid)
+    _only_due(sb, fid)
 
     n2 = len(sb.sent)
     rc, out3, err = _run_script(sb, "catering-followup-sweep", [])
@@ -1399,7 +1422,7 @@ def test_16_per_lead_hold_refuses_approval_and_suppresses_followup(sb: _Sandbox)
     ])
     assert rc == 0, f"create-catering-followup exit={rc}; stderr={err[:600]}"
     fid = _stdout_json(out2)["followup_id"]
-    _make_due(sb, fid)
+    _only_due(sb, fid)
     n1 = len(sb.sent)
     rc, _out, err = _run_script(sb, "catering-followup-sweep", [])
     assert rc == 0, f"sweep exit={rc}; stderr={err[:600]}"
@@ -1517,3 +1540,14 @@ def test_17_audit_timeline_tells_the_whole_story_without_duplicates(sb: _Sandbox
     assert len(ledger) >= 2, f"the lead's quote history: {[r['version'] for r in ledger]}"
     assert [r["version"] for r in ledger] == sorted(r["version"] for r in ledger), (
         "ledger versions are monotonic")
+
+    # FINDING (pinned as-is, reported — NOT fixed here): the LEAD's own
+    # `quote_version` field is never written by any catering script, so it stays 0
+    # while the ledger holds the real history. The Studio read model surfaces that
+    # lead field verbatim (see
+    # web/backend/tests/test_catering_studio_e2e_readmodel.py), which is how a
+    # 2-version lead ends up displayed as "0 versions". Asserting it here keeps the
+    # two suites agreeing on the end state without a cross-suite import.
+    assert final.get("quote_version", 0) == 0, (
+        "FINDING CHANGED: lead.quote_version is now maintained — update this cell, "
+        "the read-model companion, and the report")
