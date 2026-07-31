@@ -87,6 +87,10 @@ from exit_codes import (  # noqa: E402
 from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
 from catering_paths import CATERING_MENU_PATH  # noqa: E402
 from catering_pricing import price_status_line as _price_status_line  # noqa: E402
+from catering_proposal_sweep import (  # noqa: E402  # M3 validity window
+    DEFAULT_PROPOSAL_VALIDITY_DAYS,
+    quote_validity_line as _quote_validity_line,
+)
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
 # PR-D2 commit 1: SHIFT_AGENT_CONFIG_PATH env var override (test-only).
@@ -220,7 +224,8 @@ def _format_menu_section(items: list[MenuItem], total: int, dietary_restrictions
     return "\n".join(lines) + "\n"
 
 
-def _render_proposal(lead_id: str, customer_name: str, fields: CateringLeadExtractedFields) -> str:
+def _render_proposal(lead_id: str, customer_name: str, fields: CateringLeadExtractedFields,
+                     validity_days: int = DEFAULT_PROPOSAL_VALIDITY_DAYS) -> str:
     """Render the customer-facing proposal. Uses catering_quote_to_customer.txt
     template (which includes the bridge `template_bypass` prefix) populated
     with extracted fields + sample-menu section filtered by dietary."""
@@ -239,6 +244,12 @@ def _render_proposal(lead_id: str, customer_name: str, fields: CateringLeadExtra
         # quote surface. This one is PRE-approval (BL-CATER-08 keeps prices off
         # it entirely), so the honest status is always pending owner review.
         "price_status_line": _price_status_line("pending_owner_review"),
+        # M3: a customer is never quoted anything without being told how long it
+        # stands. Same config field the proposal set's expires_at is stamped from,
+        # so the date the customer reads and the date the sweep enforces agree.
+        "quote_validity_line": _quote_validity_line(
+            datetime.now(tz=timezone.utc), validity_days
+        ),
     }
     if template_path.exists():
         try:
@@ -251,7 +262,8 @@ def _render_proposal(lead_id: str, customer_name: str, fields: CateringLeadExtra
         f"⚕ *Catering Agent*\n────────────\n"
         f"Hi {fmt_fields['customer_name']}, thanks for your catering inquiry. "
         f"We'll be in touch shortly with details.{menu_section}\n"
-        f"{fmt_fields['price_status_line']}\n(Ref: {lead_id})"
+        f"{fmt_fields['price_status_line']}\n"
+        f"{fmt_fields['quote_validity_line']}\n(Ref: {lead_id})"
     )
 
 
@@ -823,7 +835,8 @@ def main() -> int:
     # quote (handle_catering_owner_approval flow), not the initial proposal.
     #
     customer_jid = _customer_jid(args.customer_phone)  # see helper for the F14-LID contract
-    proposal_text = _render_proposal(lead_id, args.customer_name, extracted)
+    proposal_text = _render_proposal(lead_id, args.customer_name, extracted,
+                                     cfg.catering.proposal_validity_days)
     # PR-4 (charter §4.3/§4.2): the customer ack shares the turn's logical_turn_id
     # (set above with the owner card) but gets its OWN send_attempt_id — distinct
     # customer- vs owner-side outbound identity for the same inbound.

@@ -75,6 +75,9 @@ from audit_helpers import (  # noqa: E402
     log_quote_sent_lead_missing_best_effort,
 )
 from schemas import CateringQuoteSentLeadMissing  # noqa: E402  # PR-D2 commit 2
+from catering_proposal_sweep import (  # noqa: E402  # M3 validity window
+    quote_validity_line as _quote_validity_line,
+)
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
 # PR-D2 commit 1: SHIFT_AGENT_CONFIG_PATH env var override (test-only;
@@ -126,7 +129,7 @@ def _normalize_quote_text(s: str) -> str:
     return out[:_QUOTE_OUTPUT_CAP_CHARS]
 
 
-def _render_quote_from_lead_state(lead) -> str:
+def _render_quote_from_lead_state(lead, validity_days: int) -> str:
     """PR-CF1c 2026-05-12: render a default quote text from lead state alone.
 
     Mirrors finalize-catering-menu's --auto-default shape — server-authoritative,
@@ -145,11 +148,16 @@ def _render_quote_from_lead_state(lead) -> str:
     total = lead.quote_total_usd or 0
     event_date = (lead.extracted.event_date if lead.extracted else None) or "(TBD)"
     headcount = (lead.extracted.headcount if lead.extracted else None) or 0
+    # M3: a priced customer quote states how long it stands. Same helper (and same
+    # CateringConfig.proposal_validity_days) the proposal set's expires_at and the
+    # F14 customer template use, so every surface names one deadline.
+    validity = _quote_validity_line(datetime.now(timezone.utc), validity_days)
     return (
         f"Quote for {lead.lead_id} ({customer_name} / {customer_phone}):\n"
         f"{items_block}\n\n"
         f"Total: ${total}\n"
-        f"Event: {event_date} | Headcount: {headcount}"
+        f"Event: {event_date} | Headcount: {headcount}\n"
+        f"{validity}"
     )
 
 
@@ -705,7 +713,8 @@ def main() -> int:
                         "lead with non-empty selected_items\n"
                     )
                     return EXIT_INVALID_INPUT
-                raw_quote = _render_quote_from_lead_state(lead)
+                raw_quote = _render_quote_from_lead_state(
+                    lead, cfg.catering.proposal_validity_days)
             else:
                 if not args.quote_text_stdin:
                     _emit_quote_skill_failed_best_effort(
@@ -751,6 +760,25 @@ def main() -> int:
                 # handles; truth-guard fail needs a re-DRAFT (only the SKILL
                 # can do that). Collision would silently misroute retry logic.
                 return EXIT_TRUTH_GUARD_FAILED
+
+            # M3: persist the EXACT normalized text the customer is about to
+            # receive. Until now NO write site ever put it on the lead — all three
+            # model_copy calls in this script updated only status/updated_at — so
+            # the text the customer actually got existed nowhere durable and every
+            # later "what did we quote them?" had to be reconstructed from the
+            # transcript. The lead docstring has claimed this contract ("quote_text
+            # ... populated ONLY by apply-catering-owner-decision on owner approve")
+            # since PR-CF1; this is the code that makes it true.
+            #
+            # PR-B v3 constraints preserved: the stored string is the post-normalize,
+            # post-truth-guard body WITHOUT the bridge template_bypass prefix (that
+            # header is transport plumbing, not quote content), and NO catalog/
+            # pricebook version is stamped anywhere by this script.
+            for i, l in enumerate(store.leads):
+                if l.lead_id == lead.lead_id:
+                    store.leads[i] = l.model_copy(update={"quote_text": quote_text})
+                    lead = store.leads[i]
+                    break
 
         atomic_write_json(LEADS_PATH, store)
 
@@ -983,10 +1011,15 @@ def main() -> int:
             ),
         )
 
-        # Step 3: state mutation THIRD.
+        # Step 3: state mutation THIRD. M3 re-stamps quote_text here as well as at
+        # the pre-bridge write: this store was RE-LOADED from disk after the POST,
+        # so a concurrent writer could have replaced the row we stamped. This copy
+        # is the authoritative "text the customer demonstrably received" — the
+        # bridge returned mid_or_err for exactly this body.
         store.leads[matched_idx] = store.leads[matched_idx].model_copy(update={
             "status": "SENT_TO_CUSTOMER",
             "updated_at": now2,
+            "quote_text": quote_text,
         })
         atomic_write_json(LEADS_PATH, store)
 
