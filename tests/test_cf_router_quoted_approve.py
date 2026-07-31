@@ -46,13 +46,16 @@ spec.loader.exec_module(cf_actions)
 def _load_plugin_modules():
     """Synthetic-package loader so hooks.py's `from . import actions`
     resolves (mirrors tests/test_cf_router_plugin.py — the plugin dir name
-    `cf-router` contains a hyphen so it can't be imported by name)."""
+    `cf-router` contains a hyphen so it can't be imported by name).
+
+    Only the synthetic package is evicted — `schemas` / `safe_io` stay in
+    sys.modules for the reason spelled out in test_cf_router_plugin's loader:
+    popping them rebinds those names underneath every co-resident suite that
+    holds a module-level `import safe_io`."""
     pkg_name = "cf_router_pkg_quoted_approve"
     for mod_name in list(sys.modules):
         if mod_name == pkg_name or mod_name.startswith(pkg_name + "."):
             del sys.modules[mod_name]
-    for mod_name in ("schemas", "safe_io"):
-        sys.modules.pop(mod_name, None)
 
     pkg_spec = importlib.machinery.ModuleSpec(pkg_name, loader=None, is_package=True)
     pkg_spec.submodule_search_locations = [str(PLUGIN_DIR)]

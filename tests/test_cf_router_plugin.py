@@ -64,8 +64,17 @@ def _load_plugin_modules():
     synthetic parent package, so the relative import `from . import actions`
     in hooks.py resolves correctly. The plugin dir name `cf-router` contains
     a hyphen so it can't be imported by name — hence the synthetic package.
+
+    Only the synthetic package is evicted. `schemas` / `safe_io` are deliberately
+    LEFT in sys.modules: popping them rebinds those names underneath every
+    already-imported co-resident test module in the same process, so a suite that
+    holds a module-level `import safe_io` (test_kill_switch_chokepoint,
+    test_record_catering_acceptance) then monkeypatches or reloads an object that
+    the code under test no longer uses. PLATFORM_DIR is already on sys.path, so a
+    first import here resolves to the in-repo copy either way.
     """
-    sys.path.insert(0, str(PLATFORM_DIR))
+    if str(PLATFORM_DIR) not in sys.path:
+        sys.path.insert(0, str(PLATFORM_DIR))
 
     pkg_name = "cf_router_pkg_under_test"
     if pkg_name in sys.modules:
@@ -73,9 +82,6 @@ def _load_plugin_modules():
         for mod_name in list(sys.modules):
             if mod_name == pkg_name or mod_name.startswith(pkg_name + "."):
                 del sys.modules[mod_name]
-
-    for mod_name in ("schemas", "safe_io"):
-        sys.modules.pop(mod_name, None)
 
     # Synthetic parent package — points at the plugin directory
     pkg_spec = importlib.machinery.ModuleSpec(pkg_name, loader=None, is_package=True)
@@ -180,8 +186,6 @@ def mods(state_env):
     while platform_text in sys.path:
         sys.path.remove(platform_text)
     sys.path.insert(0, platform_text)
-    for mod_name in ("schemas", "safe_io"):
-        sys.modules.pop(mod_name, None)
     return hooks_mod, actions_mod
 
 
