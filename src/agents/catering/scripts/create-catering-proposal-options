@@ -41,7 +41,7 @@ from schemas import (  # noqa: E402
     is_proposal_set_transition_allowed,
 )
 from catering_recompose import recompose_plan  # noqa: E402  # PR-D mix-and-match assist
-from catering_paths import CATERING_MENU_PATH  # noqa: E402
+from catering_paths import CATERING_MENU_PATH, CATERING_PRICEBOOK_PATH  # noqa: E402
 from catering_proposal_sweep import (  # noqa: E402  # M3 validity window
     DEFAULT_PROPOSAL_VALIDITY_DAYS,
     expires_at_from as _expires_at,
@@ -53,6 +53,10 @@ PROPOSALS_LOCK = Path("/opt/shift-agent/state/catering-proposals.json.lock")
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
 MENU_PATH = CATERING_MENU_PATH
+PRICEBOOK_PATH = CATERING_PRICEBOOK_PATH
+LEDGER_PATH = Path(os.environ.get(
+    "SHIFT_AGENT_CATERING_QUOTE_LEDGER_PATH",
+    "/opt/shift-agent/state/catering-quote-ledger.json"))
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 LOG_LOCK = Path("/opt/shift-agent/logs/decisions.log.lock")
 NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
@@ -559,6 +563,133 @@ def _mark_sent_and_supersede(
     return refusals
 
 
+# ── M3: owner-side "initial_draft" quote-ledger provenance ───────────────────
+# `initial_draft` has been a declared CateringQuoteLedgerRecord.source since PR-B
+# and was never written by anything, so the very first priced artefact for a lead
+# was whatever the customer finalized — with no record of what the options were
+# worth when they were offered. This commits that baseline.
+#
+# STRICTLY OWNER-SIDE. The customer-facing proposal stays price-free: the
+# creative_catering_proposals contract forbids prices before owner approval, and
+# _assert_no_forbidden_customer_text enforces it on the body. Nothing here touches
+# the body — the numbers only ever reach the ledger.
+#
+# Runs only when the customer HAS a pricebook and the lead HAS a headcount; without
+# either, a number would be a guess, and the never-guess rule beats provenance.
+def _ledger_already_has_draft(lead_id: str, proposal_set_id: str) -> bool:
+    """Idempotency: one initial_draft per proposal SET.
+
+    Dedup is on the proposal_set_id parked in `source_message_id` — the ledger's own
+    duplicate refusal is on (lead_id, version), which cannot see a re-run because a
+    re-run would simply take the next version number. `source_message_id` is the
+    right home: for this source the causing artefact IS the proposal set."""
+    try:
+        import catering_quote_ledger as _ql
+        return any(
+            r.get("source") == "initial_draft"
+            and r.get("source_message_id") == proposal_set_id
+            for r in _ql.history(lead_id, data_path=LEDGER_PATH)
+        )
+    except Exception:  # noqa: BLE001 — a read failure must not block the append
+        return False
+
+
+def _indicative_quotes(lead, options: list[CateringProposalOption]) -> tuple[list, object]:
+    """(per-option (option, QuoteComputation) pairs, menu) — or ([], None).
+
+    Every option is priced through the SAME M2 kernel the owner card and finalize
+    use, so the owner-side baseline and the eventual quote come from one arithmetic.
+    """
+    try:
+        import catering_pricing as _pricing
+        from schemas import Menu as _Menu
+
+        guest_count = getattr(getattr(lead, "extracted", None), "headcount", None)
+        if not isinstance(guest_count, int) or guest_count < 1:
+            return [], None
+        pricebook = _pricing.load_pricebook(PRICEBOOK_PATH)
+        if pricebook is None:
+            return [], None
+        menu, status = load_model(MENU_PATH, _Menu)
+        assert_load_status_clean(MENU_PATH, status, context="initial-draft menu load")
+        priced = []
+        for option in options:
+            qc = _pricing.compute_quote(
+                guest_count, None, [(name, 1) for name in option.item_names],
+                None, pricebook, menu,
+            )
+            priced.append((option, qc))
+        return priced, menu
+    except Exception as e:  # noqa: BLE001 — provenance is never worth a failed send
+        sys.stderr.write(
+            f"WARN: indicative pricing skipped (non-fatal): {type(e).__name__}: {e}\n")
+        return [], None
+
+
+def _append_initial_draft_ledger_best_effort(lead, proposal_set_id: str,
+                                             options: list[CateringProposalOption]) -> None:
+    """Commit ONE owner-side ledger version for the set. Called AFTER the proposal
+    store write and its lock have been released, so the ledger's lock is held alone
+    (leaf-lock contract).
+
+    Best-effort BY STRUCTURE, not by the good manners of its helpers: the whole body
+    is inside one handler, so a raise anywhere — the dedup read, the pricing, the
+    append — is swallowed. The customer already has the options by the time this
+    runs, and a provenance failure must never surface as a send failure."""
+    try:
+        if _ledger_already_has_draft(lead.lead_id, proposal_set_id):
+            return
+        priced, menu = _indicative_quotes(lead, options)
+        if not priced:
+            return
+
+        import catering_pricing as _pricing
+        import catering_quote_ledger as _ql
+
+        # Option 1 is the recorded baseline (it is the first, lowest-tier option
+        # `_auto_generate_options` emits). Every option's indicative total is kept
+        # in quote_text so the per-option arithmetic is not thrown away — that text
+        # is owner-side provenance and is NEVER sent to anyone.
+        baseline_option, baseline_qc = priced[0]
+        lines = [
+            f"Indicative owner-side draft for {proposal_set_id} "
+            f"({len(priced)} option(s), {baseline_qc.guest_count} guests). NOT SENT.",
+        ]
+        for option, qc in priced:
+            lines.append(
+                f"Option {option.option_id} ({option.tier}): "
+                f"{_pricing.format_cents(qc.total_cents)} — "
+                f"{_pricing.price_status_line(qc.price_status)}"
+            )
+        selected_items = [
+            {"name": ln.name, "qty": ln.qty,
+             "price_usd": _pricing.cents_to_whole_dollars(ln.unit_cents or 0)}
+            for ln in baseline_qc.lines
+        ]
+        res = _ql.append_version(
+            lead_id=lead.lead_id,
+            quote_text="\n".join(lines),
+            quote_total_usd=_pricing.cents_to_whole_dollars(baseline_qc.total_cents),
+            selected_items=selected_items,
+            source="initial_draft",
+            source_message_id=proposal_set_id,
+            approval_code=lead.owner_approval_code,
+            created_at=_now(),
+            menu_version=(menu.version if menu is not None else None),
+            pricebook_version=baseline_qc.pricebook_version,
+            price_status=baseline_qc.price_status,
+            data_path=LEDGER_PATH,
+        )
+        if not res.ok:
+            sys.stderr.write(
+                f"WARN: initial_draft ledger append failed (non-fatal) for "
+                f"{lead.lead_id} set={proposal_set_id}: {res.reason}\n")
+    except Exception as e:  # noqa: BLE001 — ledger is a best-effort sidecar
+        sys.stderr.write(
+            f"WARN: initial_draft ledger append raised (non-fatal) for "
+            f"{getattr(lead, 'lead_id', '?')}: {type(e).__name__}: {e}\n")
+
+
 def _load_latest_sent_set(lead_id: str) -> dict | None:
     """Most-recent SENT proposal set for the lead (raw dict), or None."""
     try:
@@ -777,6 +908,8 @@ def main() -> int:
     _emit_transition_refusals(
         _mark_sent_and_supersede(args.lead_id, proposal_set_id, message_id_or_error)
     )
+    # M3 owner-side provenance, AFTER the proposals lock released (leaf-lock contract).
+    _append_initial_draft_ledger_best_effort(lead, proposal_set_id, options)
     _append_audit(
         CateringProposalsGenerated(
             type="catering_proposals_generated",
