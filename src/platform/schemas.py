@@ -502,6 +502,7 @@ class DailyBriefConfig(BaseModel):
 CateringLeadStatus = Literal[
     "NEW",                      # raw inquiry just arrived
     "EXTRACTING",               # extractor running (LLM)
+    "QUALIFYING",               # M1: below minimum qualification; slot-filling loop open
     "NOT_CATERING",             # classifier said no (terminal)
     "AWAITING_OWNER_APPROVAL",  # quote drafted; owner needs to approve
     "CUSTOMER_FINALIZED",       # PR-CF1: customer locked in selected_items
@@ -530,8 +531,17 @@ def is_catering_terminal(status: str) -> bool:
 # Review L9: typed against the CateringLeadStatus Literal so mypy catches
 # typos (a misspelled status as key OR value would be a type error).
 CATERING_TRANSITIONS: dict[CateringLeadStatus, set[CateringLeadStatus]] = {
-    "NEW": {"EXTRACTING", "NOT_CATERING"},
-    "EXTRACTING": {"AWAITING_OWNER_APPROVAL", "NOT_CATERING"},
+    "NEW": {"EXTRACTING", "QUALIFYING", "NOT_CATERING"},
+    "EXTRACTING": {"AWAITING_OWNER_APPROVAL", "QUALIFYING", "NOT_CATERING"},
+    # M1 2026-07-31: a lead below minimum qualification parks here while the
+    # deterministic slot-filling loop asks for the missing fields. The self-edge
+    # covers each additional answer round (mirrors CUSTOMER_FINALIZED's re-finalize
+    # self-edge) — every round still emits its own audit row. It leaves for
+    # AWAITING_OWNER_APPROVAL either on completion or when the round cap is hit
+    # (owner review with the residual gaps flagged). STALE is reserved for a future
+    # TTL sweep extension; catering-lead-ttl-sweep currently only sweeps
+    # AWAITING_OWNER_APPROVAL, so nothing reaches it today.
+    "QUALIFYING": {"QUALIFYING", "AWAITING_OWNER_APPROVAL", "STALE"},
     "NOT_CATERING": set(),                                                # terminal
     "AWAITING_OWNER_APPROVAL": {
         "OWNER_APPROVED", "OWNER_EDITED", "OWNER_REJECTED", "STALE",
@@ -2176,6 +2186,17 @@ class CateringLeadExtractedFields(BaseModel):
     delivery_or_pickup: Optional[Literal["delivery", "pickup", "unknown"]] = None
     budget_hint_usd: Optional[int] = Field(default=None, ge=0)
     notes: str = ""
+    # M1 qualification block (2026-07-31). All Optional — the owner fills any gap
+    # the deterministic extractor cannot reach, and legacy leads decode unchanged.
+    # `venue` is DELIBERATELY never pattern-guessed off the initial inquiry (no
+    # deployed venue regex exists and a fragile one does more harm than good — same
+    # rationale as the fresh-vs-stale discriminator's venue omission); it is filled
+    # ONLY from a direct answer to the venue question in the slot-filling loop.
+    event_type: Optional[Literal["wedding", "birthday", "corporate", "religious", "other"]] = None
+    venue: Optional[str] = Field(default=None, max_length=200)
+    service_style: Optional[Literal["buffet", "plated", "boxed", "family_style", "other"]] = None
+    veg_guest_count: Optional[int] = Field(default=None, ge=0, le=10000)
+    nonveg_guest_count: Optional[int] = Field(default=None, ge=0, le=10000)
     # Items the customer asked about that aren't on the current menu —
     # LLM-extracted from message text. Empty list = no off-menu requests
     # detected.
@@ -2235,6 +2256,27 @@ class CateringLead(BaseModel):
     quote_version: int = Field(default=0, ge=0)
     owner_approval_code: Optional[ProposalCode] = None  # reuses Shift's pattern
     customer_replied: bool = False
+
+    # M1 slot-filling loop (2026-07-31). All default-empty so legacy leads decode
+    # unchanged. `pending_questions` / `questions_asked` hold QUALIFICATION FIELD
+    # NAMES (catering_qualification.REQUIRED_FIELDS members), NOT rendered question
+    # text — the text is re-rendered deterministically from the field name at send
+    # time, so a template edit never strands a lead mid-loop, and the router can ask
+    # "is the single open question the free-text venue one?" without parsing prose.
+    pending_questions: list[str] = Field(
+        default_factory=list, max_length=8,
+        description="Qualification field names asked in the last round, still unanswered",
+    )
+    questions_asked: list[str] = Field(
+        default_factory=list, max_length=16,
+        description="Every qualification field name asked so far — never re-asked",
+    )
+    qualification_rounds: int = Field(
+        default=0, ge=0, le=10,
+        description="Question rounds sent. Capped by catering_qualification."
+                    "MAX_QUALIFICATION_ROUNDS, after which the lead goes to owner "
+                    "review with the residual gaps flagged.",
+    )
 
     # PR-CF1: customer-finalized menu fields. All default-empty so legacy
     # leads (pre-finalize) decode unchanged. Set only by finalize-catering-menu
@@ -3897,6 +3939,36 @@ class CateringAmendmentCaptureFailed(_BaseEntry):
     type: Literal["catering_amendment_capture_failed"]
     lead_id: str
     reason: str
+
+
+class CateringAmendmentApplied(_BaseEntry):
+    """M1: a captured amendment record was MATERIALISED onto its lead — the R2A
+    sidecar stopped being write-only. PRIVACY: ids + the field NAMES that changed
+    only — never the raw amendment text and never the values (a headcount or venue
+    is customer content, same class as raw_inquiry). `quote_version` is the ledger
+    version the application committed, or 0 when the lead had no committed quote
+    yet (nothing to re-version)."""
+    type: Literal["catering_amendment_applied"]
+    lead_id: str
+    amendment_id: str
+    fields_changed: list[str] = Field(default_factory=list, max_length=20)
+    quote_version: int = Field(default=0, ge=0)
+
+
+class CateringLeadQualificationUpdated(_BaseEntry):
+    """M1: one deterministic slot-filling round resolved against a QUALIFYING lead.
+    PRIVACY: field NAMES + counts only — never the answer text or its values.
+    Emitted on EVERY update (including the round that completes qualification and
+    the one that gives up at the round cap), so the whole intake conversation is
+    reconstructable from the audit chain without storing customer prose."""
+    type: Literal["catering_lead_qualification_updated"]
+    lead_id: str
+    fields_filled: list[str] = Field(default_factory=list, max_length=20)
+    still_missing: list[str] = Field(default_factory=list, max_length=20)
+    questions_asked: list[str] = Field(default_factory=list, max_length=20)
+    round_number: int = Field(ge=0)
+    complete: bool
+    outcome: Literal["asked", "complete", "round_cap_reached"]
 
 
 class CateringQuoteVersionCommitted(_BaseEntry):
@@ -6950,6 +7022,9 @@ LogEntry = Annotated[
         Annotated[ApprovalCodeCollisionDetected, Tag("approval_code_collision_detected")],
         Annotated[CateringAmendmentCaptured, Tag("catering_amendment_captured")],
         Annotated[CateringAmendmentCaptureFailed, Tag("catering_amendment_capture_failed")],
+        # M1: amendment application + deterministic qualification slot-filling
+        Annotated[CateringAmendmentApplied, Tag("catering_amendment_applied")],
+        Annotated[CateringLeadQualificationUpdated, Tag("catering_lead_qualification_updated")],
         # PR-B: retained immutable quote-version ledger
         Annotated[CateringQuoteVersionCommitted, Tag("catering_quote_version_committed")],
         Annotated[CateringQuoteLedgerAppendFailed, Tag("catering_quote_ledger_append_failed")],
@@ -7325,6 +7400,7 @@ __all__ = [
     "ApprovalCodeCollisionDetected", "HealthCheckFailure",
     "CateringAmendmentRecord", "CateringAmendmentStore",
     "CateringAmendmentCaptured", "CateringAmendmentCaptureFailed",
+    "CateringAmendmentApplied", "CateringLeadQualificationUpdated",
     "CateringQuoteLedgerRecord", "CateringQuoteLedgerStore",
     "CateringQuoteVersionCommitted", "CateringQuoteLedgerAppendFailed",
     "CateringAutomationControlMode",
