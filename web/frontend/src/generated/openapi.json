@@ -3616,6 +3616,7 @@
     },
     "/catering/leads/{lead_id}/amend-apply": {
       "post": {
+        "description": "Materialise captured amendments / apply one qualification answer.\n\nSteps up to a fresh OTP like the sibling write endpoints. It mutates the lead's\nextracted facts, can transition it to AWAITING_OWNER_APPROVAL and fires both the\nowner card and a customer-facing message \u2014 strictly more impactful than\n``/hold``, which already required the step-up.",
         "operationId": "post_amend_apply_catering_leads__lead_id__amend_apply_post",
         "parameters": [
           {

@@ -1500,16 +1500,27 @@ async def post_amend_apply(
     lead_id: str,
     body: AmendApplyBody,
     request: Request,
-    _=Depends(require_auth),
+    _=Depends(require_fresh_otp),
 ) -> ActionResult:
+    """Materialise captured amendments / apply one qualification answer.
+
+    Steps up to a fresh OTP like the sibling write endpoints. It mutates the lead's
+    extracted facts, can transition it to AWAITING_OWNER_APPROVAL and fires both the
+    owner card and a customer-facing message — strictly more impactful than
+    ``/hold``, which already required the step-up."""
     lead_id = _validated_lead_id(lead_id)
     _find_lead(lead_id)
     if body.mode == "answer" and not body.answer_text.strip():
         raise HTTPException(status_code=422, detail="answer_text required in answer mode")
     args = ["--lead-id", lead_id, "--mode", body.mode]
+    stdin_data: Optional[str] = None
     if body.mode == "answer":
-        args += ["--answer-text", body.answer_text.strip()]
-    result = _run_or_503(_AMEND_BIN, args, timeout=60)
+        # Over stdin, not argv: an answer that starts with a dash is otherwise
+        # parsed by the script's argparse as a flag (same reason the decision
+        # endpoint pipes its quote text).
+        args.append("--answer-text-stdin")
+        stdin_data = body.answer_text.strip()
+    result = _run_or_503(_AMEND_BIN, args, timeout=60, stdin_data=stdin_data)
     return _script_result(
         result, action="amend_apply", request=request,
         details={"lead_id": lead_id, "mode": body.mode},

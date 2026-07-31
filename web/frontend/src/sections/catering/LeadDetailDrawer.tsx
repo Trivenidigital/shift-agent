@@ -401,7 +401,8 @@ export function LeadDetailDrawer({ leadId, onClose }: { leadId: string; onClose:
                 )}
 
                 <div className="text-xs text-zinc-400">
-                  Approve, reject, revision and hold need a login code issued in the last 5 minutes.
+                  Approve, reject, revision, hold and applying amendments need a login code
+                  issued in the last 5 minutes.
                 </div>
               </div>
             </Section>

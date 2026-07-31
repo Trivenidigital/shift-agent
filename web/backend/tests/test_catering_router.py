@@ -229,6 +229,10 @@ def test_every_endpoint_requires_auth(tmp_path, method, path):
     [
         ("/catering/leads/L0001/decision", {"decision": "approve"}),
         ("/catering/leads/L0001/hold", {"on": True}),
+        # amend-apply mutates the lead's extracted facts, can transition it to
+        # AWAITING_OWNER_APPROVAL and fires both the owner card and a
+        # customer-facing message — strictly more impactful than /hold.
+        ("/catering/leads/L0001/amend-apply", {"mode": "amendment"}),
         ("/catering/pricebook/import", {"document": {}}),
     ],
 )
@@ -241,11 +245,13 @@ def test_sensitive_endpoints_reject_stale_otp(tmp_path, monkeypatch, path, body)
     assert calls == [], "a stale-OTP request must never reach the agent script"
 
 
-def test_amend_apply_needs_auth_but_not_fresh_otp(tmp_path, monkeypatch):
+def test_amend_apply_accepts_a_fresh_otp(tmp_path, monkeypatch):
+    """The step-up is a gate, not a wall — a freshly-verified owner still gets
+    through, so the parametrized stale-OTP cell above is not passing vacuously."""
     pytest.importorskip("jose")
     _seed(tmp_path)
     calls = _capture_run_cli(monkeypatch)
-    client = _authed_client(monkeypatch, fresh=False)
+    client = _authed_client(monkeypatch, fresh=True)
     response = client.post("/catering/leads/L0001/amend-apply", json={"mode": "amendment"})
     assert response.status_code == 200
     assert len(calls) == 1
@@ -748,9 +754,27 @@ def test_amend_apply_argv(tmp_path, monkeypatch):
 
     assert calls[0]["binary"] == "/usr/local/bin/amend-catering-lead"
     assert calls[0]["args"] == ["--lead-id", "L0001", "--mode", "amendment"]
+    # The answer travels over STDIN, never argv: an answer that starts with a dash
+    # is otherwise parsed by the script's argparse as a flag.
+    assert calls[0]["stdin_data"] is None
     assert calls[1]["args"] == [
-        "--lead-id", "L0001", "--mode", "answer", "--answer-text", "Grand Ballroom",
+        "--lead-id", "L0001", "--mode", "answer", "--answer-text-stdin",
     ]
+    assert calls[1]["stdin_data"] == "Grand Ballroom"
+
+
+def test_amend_apply_passes_a_dash_leading_answer_over_stdin(tmp_path, monkeypatch):
+    pytest.importorskip("jose")
+    _seed(tmp_path)
+    calls = _capture_run_cli(monkeypatch)
+    client = _authed_client(monkeypatch)
+
+    response = client.post("/catering/leads/L0001/amend-apply",
+                           json={"mode": "answer", "answer_text": "-veg only please"})
+
+    assert response.status_code == 200
+    assert "-veg only please" not in calls[0]["args"]
+    assert calls[0]["stdin_data"] == "-veg only please"
 
 
 def test_pricebook_import_validates_before_shelling_out(tmp_path, monkeypatch):
