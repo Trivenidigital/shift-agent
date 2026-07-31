@@ -46,7 +46,7 @@ from pathlib import Path
 
 import pytest
 
-from fixtures_fleet import ensure_fcntl_stub, load_script, read_log_rows
+from fixtures_fleet import ensure_fcntl_stub, load_script, posix_fs_identity, read_log_rows
 
 ensure_fcntl_stub()  # before any safe_io / schemas import
 
@@ -243,6 +243,13 @@ def _env(sb: _Sandbox, monkeypatch):
         "SHIFT_AGENT_TEMPLATE_DIR": str(sb.templates),
     }.items():
         monkeypatch.setenv(key, value)
+    # POSIX: the ledger enforces an owner:group contract defaulting to the
+    # deployed `shift-agent` identity; the sandbox is owned by the pytest user,
+    # so pass the runner's identity through (inert off-POSIX). Same pattern as
+    # every other suite that drives the ledger writers on Linux CI.
+    owner, group = posix_fs_identity()
+    monkeypatch.setenv("SHIFT_AGENT_CATERING_QUOTE_LEDGER_OWNER", owner)
+    monkeypatch.setenv("SHIFT_AGENT_CATERING_QUOTE_LEDGER_GROUP", group)
 
 
 _SANDBOX_ATTRS = ("CONFIG_PATH", "LEADS_PATH", "LEADS_LOCK", "LOG_PATH", "LOG_LOCK",
