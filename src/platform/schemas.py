@@ -7284,6 +7284,36 @@ class CateringProposalExpired(_BaseEntry):
     validity_days: int = Field(ge=1)
 
 
+class CateringStateDowngraded(_BaseEntry):
+    """P0-2: ONE catering state store was reverse-migrated so the PREVIOUS release
+    can read it. One row per store per `catering-state-downgrade` run.
+
+    The Catering Studio MVP added fields and statuses to models the previous release
+    validates with `extra="forbid"` + a status `Literal`. ONE lead written by the new
+    release therefore makes catering-leads.json unreadable by the old code after a
+    tarball rollback — `load_model` raises, and cf-router's tolerant raw-JSON lookups
+    degrade to "no lead" without saying so. `catering-state-downgrade` strips those
+    fields and remaps those statuses; this row is the audit trail.
+
+    Emitted BEFORE the store mutation, so the trail survives even if the operator
+    rolls back immediately afterwards and the old binary never gets a chance to write
+    a row of this (to it, unknown) type. The old release's NDJSON reader tolerates it:
+    `_pick_log_entry_tag` routes any tag outside `_KNOWN_LOG_ENTRY_TYPES` to
+    `_UnknownLogEntry`, which is `extra="allow"` and preserves the payload verbatim.
+
+    NOTHING is destroyed: every stripped field and original status is written to the
+    `sidecar` file first, so a re-upgrade or an audit can recover every fact.
+    """
+    type: Literal["catering_state_downgraded"]
+    target_release: str = Field(min_length=1, max_length=64)  # commit the state is made readable by
+    store: str = Field(min_length=1, max_length=80)      # basename, e.g. "catering-leads.json"
+    sidecar: str = Field(min_length=1, max_length=200)   # basename of the lossless sidecar
+    records_total: int = Field(ge=0)
+    records_stripped: int = Field(ge=0)                  # carried >=1 forbidden field
+    records_remapped: int = Field(ge=0)                  # carried a status the old release lacks
+    fields_stripped: int = Field(ge=0)                   # total field occurrences removed
+
+
 class CateringProposalTransitionRefused(_BaseEntry):
     """M3: a proposal-set status write was REFUSED because
     CATERING_PROPOSAL_SET_TRANSITIONS does not allow it. Emitted instead of
@@ -8036,6 +8066,8 @@ LogEntry = Annotated[
         Annotated[CateringProposalExpired, Tag("catering_proposal_expired")],
         Annotated[CateringProposalTransitionRefused, Tag("catering_proposal_transition_refused")],
         Annotated[CateringLeadAcceptanceRecorded, Tag("catering_lead_acceptance_recorded")],
+        # P0-2: reverse migration that makes catering state readable by the PREVIOUS release
+        Annotated[CateringStateDowngraded, Tag("catering_state_downgraded")],
         Annotated[CateringLeadOutcomeMarked, Tag("catering_lead_outcome_marked")],
         # Commerce primitives slice 1 — PRD v2 §8
         Annotated[CommerceCartStarted, Tag("commerce_cart_started")],
@@ -8209,6 +8241,7 @@ __all__ = [
     "CateringLeadHoldChanged", "CateringLeadHoldBlockedSend",
     "CateringProposalExpired", "CateringProposalTransitionRefused",
     "CateringLeadAcceptanceRecorded", "CateringLeadOutcomeMarked",
+    "CateringStateDowngraded",
     "LidLearned", "DispatcherRouted",
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
     "EodSnapshot", "EodPushoverSent", "EodSkipped",

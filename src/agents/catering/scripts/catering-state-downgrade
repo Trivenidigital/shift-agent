@@ -1,0 +1,341 @@
+#!/usr/bin/env python3
+"""catering-state-downgrade — reverse-migrate catering state so the PREVIOUS release can read it.
+
+WHY THIS EXISTS (P0-2, rollback-compatibility activation blocker)
+----------------------------------------------------------------
+The Catering Studio MVP added 12 fields and 2 statuses (``QUALIFYING``, ``BOOKED``)
+to ``CateringLead``, and ``expires_at`` to ``CateringProposalSet``. In the PREVIOUS
+release (``dc7a81a2``) both models carry ``extra="forbid"`` and a status ``Literal``
+that names neither new status. So ONE lead written by the new release makes
+``/opt/shift-agent/state/catering-leads.json`` unreadable by the old code after a
+tarball rollback: ``safe_io.load_model`` raises inside the old scripts, and
+cf-router's tolerant raw-JSON lookups degrade to "no lead" WITHOUT SAYING SO —
+a live customer's lead simply stops being found.
+
+This script is the reverse migration: it strips the fields the old models forbid
+and remaps the statuses they lack, so the old release loads the store cleanly.
+
+NOTHING IS DESTROYED. Every stripped field and every original status is written to
+a per-store sidecar (``<store>.downgrade-sidecar-<epoch>.json``) BEFORE the store is
+touched, so a later re-upgrade or an audit can recover every fact.
+
+STORE AUDIT (evidence: ``git show dc7a81a2:src/platform/schemas.py``)
+--------------------------------------------------------------------
+  catering-leads.json      HAZARD — CateringLead is extra="forbid"; 12 new fields
+                           + QUALIFYING/BOOKED absent from the old status Literal.
+  catering-proposals.json  HAZARD — CateringProposalSet is extra="forbid"; M3 added
+                           expires_at. (The STORE is extra="ignore", but the old
+                           model validates every SET inside it.)
+  catering-quote-ledger.json   SAFE — the old CateringQuoteLedgerStore is
+                           extra="allow" with ``records: list[dict]``; the strict
+                           CateringQuoteLedgerRecord is applied ONLY at append, never
+                           on read, so the M2 price_status / pricebook_version /
+                           menu_version stamps round-trip untouched.
+  catering-amendments.json SAFE — same preservation-safe tolerant-dict shape.
+  catering-followups.json  INERT — the dc7a81a2 tree contains no reference to the
+                           filename at all; the old release never opens it.
+  catering-pricebook.json  INERT — likewise absent from the old tree.
+
+Only the two HAZARD stores are rewritten. The four others are deliberately left
+alone: rewriting a store the old release reads tolerantly (or never reads) would be
+churn on live money-adjacent data for no rollback benefit.
+
+ORDERING GUARANTEE
+------------------
+Per store, under that store's FileLock: sidecar (fsync'd via atomic_write_json) →
+audit row → store. A crash between any two steps leaves either the ORIGINAL store
+intact (with an orphaned sidecar, which is harmless — a re-run recomputes from the
+untouched store and writes a fresh one) or a fully downgraded store with its
+sidecar already durable. There is no window in which a stripped store exists
+without its sidecar.
+
+The audit row goes first because the operator rolls back immediately afterwards:
+once the old binary is live it can no longer WRITE a row of this (to it, unknown)
+type. It can still READ one — the old ``_pick_log_entry_tag`` routes any tag outside
+``_KNOWN_LOG_ENTRY_TYPES`` to ``_UnknownLogEntry`` (``type: str`` + ``extra="allow"``),
+so the row is preserved verbatim rather than failing the old reader's parse.
+
+Locks are taken SEQUENTIALLY, one store at a time — never nested. The deployed
+writers (finalize-catering-menu, select-catering-proposal) take LEADS and PROPOSALS
+in opposite orders, so a nested acquisition here would be a deadlock against live
+traffic. The runbook stops the gateway first regardless.
+
+IDEMPOTENT: a store with nothing left to strip or remap is reported and skipped —
+no sidecar, no audit row, no write.
+
+NOT AUTOMATIC: ``shift-agent-deploy.sh``'s failure revert does NOT call this. That
+revert fires mid-deploy, before the new release has served any traffic, so no lead
+can carry new-format state yet. A rollback AFTER the new release has run is the case
+this script exists for, and it is a deliberate manual operator step. See
+``docs/runbooks/catering-rollback.md``.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, atomic_write_json, ndjson_append, safe_load_json, flock,
+)
+from schemas import CateringStateDowngraded  # noqa: E402
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_STATE_CORRUPT,
+)
+from pydantic import TypeAdapter  # noqa: E402
+
+# The release this script makes state readable by. Recorded on every audit row so a
+# future rollback to a DIFFERENT baseline can never be mistaken for this one.
+TARGET_RELEASE = "dc7a81a2"
+
+LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_CATERING_LEADS_PATH",
+                                 "/opt/shift-agent/state/catering-leads.json"))
+PROPOSALS_PATH = Path(os.environ.get("SHIFT_AGENT_CATERING_PROPOSALS_PATH",
+                                     "/opt/shift-agent/state/catering-proposals.json"))
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH",
+                               "/opt/shift-agent/logs/decisions.log"))
+
+# Fields on CateringLead that dc7a81a2's extra="forbid" model REJECTS. Verified
+# field-by-field against `git show dc7a81a2:src/platform/schemas.py`; pinned by
+# tests/test_catering_rollback_compat.py, which recomputes the new-minus-old set
+# from the materialised old module and fails if this constant drifts.
+LEAD_FIELDS_UNKNOWN_TO_OLD = (
+    # M1 deterministic qualification slot-filling loop
+    "pending_questions", "questions_asked", "qualification_rounds",
+    # M2 cents-exact pricing provenance
+    "pricing_inputs",
+    # M3 quote validity window + explicit customer acceptance
+    "quote_valid_until",
+    "customer_acceptance", "acceptance_at", "acceptance_message_id",
+    "acceptance_clarification_sent_message_id",
+    # M4/G4 per-lead hold
+    "on_hold", "hold_reason", "hold_set_at",
+)
+
+# M3 stamped a validity window on the proposal SET. Old CateringProposalSet is
+# extra="forbid", so it has to come off.
+PROPOSAL_FIELDS_UNKNOWN_TO_OLD = ("expires_at",)
+
+# Statuses the old CateringLeadStatus Literal does not name, mapped to the
+# least-wrong status it does.
+#
+#   QUALIFYING -> NEW
+#     A QUALIFYING lead is pre-quote and pre-approval: the slot-filling loop is open
+#     and no quote_text has been composed. NEW is the old release's only pre-quote,
+#     non-terminal, workable status, and the old forward path out of it
+#     (NEW -> EXTRACTING -> AWAITING_OWNER_APPROVAL) is exactly the route a
+#     re-qualified lead needs. Nothing in the old tree auto-acts on a NEW lead — the
+#     TTL sweep only retires AWAITING_OWNER_APPROVAL — so the mapping is inert
+#     rather than surprising.
+#     REJECTED alternatives: EXTRACTING claims an LLM extraction is in flight that is
+#     not, stranding the lead in a transient state. AWAITING_OWNER_APPROVAL is worse
+#     still — it is in the old model's post-AWAITING set, so the old validator's
+#     mode="before" shim would backfill LEGACY_QUOTE_TEXT_SENTINEL and put a lead
+#     with NO REAL QUOTE into the owner's approval queue, one approval away from
+#     sending a sentinel to a customer.
+#
+#   BOOKED -> CLOSED
+#     CLOSED is the old terminal for "booked or customer-declined" and carries no
+#     quote_text constraint, so the acceptance is not misrepresented as still-open
+#     work. The acceptance FACTS (customer_acceptance, acceptance_at,
+#     acceptance_message_id) live in the sidecar, recoverable in full.
+LEAD_STATUS_DOWNGRADE = {
+    "QUALIFYING": "NEW",
+    "BOOKED": "CLOSED",
+}
+
+SIDECAR_SCHEMA_VERSION = 1
+
+
+class _StoreCorrupt(RuntimeError):
+    """Raised when a store cannot be parsed; the operator resolves it manually."""
+
+
+def _log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def plan_downgrade(records, *, id_key, forbidden_fields, status_map):
+    """Pure planner: return (downgraded_records, sidecar_records, counts).
+
+    `records` are raw parsed-JSON dicts, NEVER models — the whole point is to emit
+    exactly the keys the old release accepts, and validating through the NEW models
+    first would drop unknown keys we have no business touching. Records are copied,
+    never mutated in place, so a caller that aborts leaves its input intact.
+    """
+    downgraded, sidecar = [], []
+    stripped_records = remapped_records = fields_stripped = 0
+
+    for record in records:
+        if not isinstance(record, dict):
+            # Tolerant: a non-dict entry is nothing this script can reason about.
+            # Pass it through untouched rather than crashing the migration.
+            downgraded.append(record)
+            continue
+
+        new_record = dict(record)
+        stripped = {k: new_record.pop(k) for k in forbidden_fields if k in new_record}
+
+        original_status = None
+        status = new_record.get("status")
+        if isinstance(status, str) and status in status_map:
+            original_status = status
+            new_record["status"] = status_map[status]
+
+        if stripped or original_status is not None:
+            sidecar.append({
+                "id": record.get(id_key),
+                "stripped_fields": stripped,
+                "original_status": original_status,
+            })
+            if stripped:
+                stripped_records += 1
+                fields_stripped += len(stripped)
+            if original_status is not None:
+                remapped_records += 1
+
+        downgraded.append(new_record)
+
+    counts = {
+        "records_total": len(records),
+        "records_stripped": stripped_records,
+        "records_remapped": remapped_records,
+        "fields_stripped": fields_stripped,
+    }
+    return downgraded, sidecar, counts
+
+
+def _sidecar_path(store_path: Path, epoch: int) -> Path:
+    """`catering-leads.json` -> `catering-leads.downgrade-sidecar-<epoch>.json`."""
+    return store_path.with_name(
+        f"{store_path.stem}.downgrade-sidecar-{epoch}.json"
+    )
+
+
+def _append_audit_under_storelock(entry: CateringStateDowngraded) -> None:
+    """Caller MUST hold the store's lock. Acquires the inner LOG_PATH flock."""
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with flock(LOG_PATH):
+        ndjson_append(
+            LOG_PATH,
+            TypeAdapter(CateringStateDowngraded).dump_json(entry).decode("utf-8"),
+        )
+
+
+def downgrade_store(store_path, *, records_key, id_key, forbidden_fields,
+                    status_map, epoch, dry_run):
+    """Downgrade ONE store under its own lock. Returns the counts dict, or None if
+    the store was absent, empty, or already downgraded (all no-ops)."""
+    lock_path = Path(str(store_path) + ".lock")
+    name = store_path.name
+
+    with FileLock(lock_path):
+        raw, status = safe_load_json(store_path, default=None)
+        if status in ("missing", "empty") or raw is None:
+            print(f"skip {name}: {status} - nothing to downgrade")
+            return None
+        if status != "ok":
+            # Corrupt state is the operator's call, not this script's: rewriting a
+            # store we could not parse would turn a recoverable file into a lost one.
+            # NOTE safe_load_json has already renamed a corrupt file aside to
+            # <name>.corrupt-<epoch> — say so, or the operator hunts for a missing store.
+            _log(f"ERROR: {name} status={status!r}; refusing to rewrite unparseable state "
+                 f"(a corrupt file has been renamed aside to {name}.corrupt-<epoch>)")
+            raise _StoreCorrupt(name)
+        if not isinstance(raw, dict) or not isinstance(raw.get(records_key), list):
+            _log(f"ERROR: {name} has no `{records_key}` list; refusing to rewrite")
+            raise _StoreCorrupt(name)
+
+        downgraded, sidecar, counts = plan_downgrade(
+            raw[records_key], id_key=id_key,
+            forbidden_fields=forbidden_fields, status_map=status_map,
+        )
+
+        if not sidecar:
+            print(f"ok {name}: already downgraded "
+                  f"({counts['records_total']} record(s), nothing to strip or remap)")
+            return None
+
+        summary = (f"{name}: {counts['records_stripped']} record(s) stripped "
+                   f"({counts['fields_stripped']} field(s)), "
+                   f"{counts['records_remapped']} status(es) remapped, "
+                   f"of {counts['records_total']} total")
+        if dry_run:
+            print(f"would_downgrade {summary}")
+            for row in sidecar:
+                print(f"  would_change {row['id']} "
+                      f"stripped={sorted(row['stripped_fields'])} "
+                      f"status={row['original_status']}")
+            return counts
+
+        # 1. Sidecar FIRST — atomic_write_json fsyncs the file and (on POSIX) the
+        #    parent directory, so once this returns the lossless record is durable.
+        sidecar_path = _sidecar_path(store_path, epoch)
+        atomic_write_json(sidecar_path, {
+            "schema_version": SIDECAR_SCHEMA_VERSION,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "target_release": TARGET_RELEASE,
+            "source_store": store_path.name,
+            "records": sidecar,
+        })
+
+        # 2. Audit row — before the mutation, while this release can still write it.
+        _append_audit_under_storelock(CateringStateDowngraded(
+            type="catering_state_downgraded",
+            ts=datetime.now(timezone.utc),
+            target_release=TARGET_RELEASE,
+            store=store_path.name,
+            sidecar=sidecar_path.name,
+            **counts,
+        ))
+
+        # 3. Store LAST.
+        raw[records_key] = downgraded
+        atomic_write_json(store_path, raw)
+
+    print(f"downgraded {summary} -> sidecar {sidecar_path.name}")
+    return counts
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Report what WOULD change. Writes nothing at all — no store, "
+                         "no sidecar, no audit row.")
+    args = ap.parse_args()
+
+    epoch = int(time.time())
+    stores = (
+        dict(store_path=LEADS_PATH, records_key="leads", id_key="lead_id",
+             forbidden_fields=LEAD_FIELDS_UNKNOWN_TO_OLD,
+             status_map=LEAD_STATUS_DOWNGRADE),
+        dict(store_path=PROPOSALS_PATH, records_key="sets", id_key="proposal_set_id",
+             forbidden_fields=PROPOSAL_FIELDS_UNKNOWN_TO_OLD,
+             status_map={}),
+    )
+
+    changed = 0
+    for spec in stores:
+        try:
+            if downgrade_store(epoch=epoch, dry_run=args.dry_run, **spec):
+                changed += 1
+        except _StoreCorrupt:
+            return EXIT_STATE_CORRUPT
+        except OSError as e:
+            _log(f"ERROR: {spec['store_path'].name}: {e}")
+            return EXIT_INVALID_INPUT
+
+    if not changed:
+        print(f"nothing to do - catering state is already readable by {TARGET_RELEASE}")
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
