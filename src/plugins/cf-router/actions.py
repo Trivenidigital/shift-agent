@@ -417,6 +417,24 @@ def find_active_catering_lead_by_sender(
     return leads[0] if leads else None
 
 
+def any_qualifying_lead_exists() -> bool:
+    """True when ANY lead in the store is mid-intake (QUALIFYING).
+
+    M1 cheap pre-check for the F7 admission widening. Resolving sender identity runs
+    `identify-sender` as a SUBPROCESS; doing that on every non-catering inbound just
+    to discover there is no intake loop open would add a process spawn to the hot
+    path for messages that previously did nothing here. One tolerant file read
+    answers it instead, and the identity resolution only happens when at least one
+    lead is actually waiting on an answer. Never raises, never writes."""
+    try:
+        with LEADS_PATH.open() as f:
+            store = json.load(f)
+        return any(lead.get("status") == "QUALIFYING"
+                   for lead in store.get("leads", []))
+    except Exception:
+        return False
+
+
 def find_all_eligible_catering_leads_by_sender(
     phone: Optional[str], chat_id: Optional[str],
 ) -> list[dict]:

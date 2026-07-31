@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -200,11 +201,19 @@ def test_answer_to_an_intake_question_is_applied_to_the_same_lead(wired, monkeyp
     assert "f7_qualification_answer" in reasons
 
 
+def _seed_leads_store(wired, *leads):
+    """Write the real leads store so the admission pre-check reads live state."""
+    wired.actions.LEADS_PATH.write_text(
+        json.dumps({"schema_version": 1, "leads": list(leads)}), encoding="utf-8",
+    )
+
+
 def test_bare_venue_answer_with_no_catering_signal_still_reaches_the_lead(wired, monkeypatch):
     """"Grand Ballroom" classifies as nothing. Without the QUALIFYING admission
     widening it would go to the LLM and the loop would break at question one."""
     lead = dict(QUALIFYING_LEAD, pending_questions=["venue"], questions_asked=["venue"])
     _set_active_lead(wired, monkeypatch, lead)
+    _seed_leads_store(wired, lead)
     assert wired.actions.classify_catering("Grand Ballroom")[0] is False
 
     assert wired.hooks._sender_has_qualifying_lead("19045550199@s.whatsapp.net") is True
@@ -221,16 +230,34 @@ def test_bare_venue_answer_with_no_catering_signal_still_reaches_the_lead(wired,
 
 
 def test_admission_check_ignores_non_qualifying_leads_and_the_owner(wired, monkeypatch):
-    _set_active_lead(wired, monkeypatch, dict(QUALIFYING_LEAD, status="AWAITING_OWNER_APPROVAL"))
+    other = dict(QUALIFYING_LEAD, status="AWAITING_OWNER_APPROVAL")
+    _set_active_lead(wired, monkeypatch, other)
+    _seed_leads_store(wired, other)
     assert wired.hooks._sender_has_qualifying_lead("19045550199@s.whatsapp.net") is False
 
     _set_active_lead(wired, monkeypatch, QUALIFYING_LEAD)
+    _seed_leads_store(wired, QUALIFYING_LEAD)
     monkeypatch.setattr(wired.actions, "lid_to_phone_via_identify_sender",
                         lambda cid: ("+19045550100", "owner"))
     assert wired.hooks._sender_has_qualifying_lead("19045550100@s.whatsapp.net") is False
 
 
+def test_admission_pre_check_avoids_identity_resolution_when_no_loop_is_open(wired, monkeypatch):
+    """Identity resolution spawns `identify-sender`. With no QUALIFYING lead in the
+    store the admission check must short-circuit on the file read alone, or every
+    non-catering inbound pays for a process spawn."""
+    _seed_leads_store(wired, dict(QUALIFYING_LEAD, status="SENT_TO_CUSTOMER"))
+    resolved = []
+    monkeypatch.setattr(wired.actions, "lid_to_phone_via_identify_sender",
+                        lambda cid: (resolved.append(cid), ("+19045550199", "customer"))[1])
+
+    assert wired.hooks._sender_has_qualifying_lead("19045550199@s.whatsapp.net") is False
+    assert resolved == [], "no identity resolution when no intake loop is open"
+
+
 def test_admission_check_never_raises(wired, monkeypatch):
+    _seed_leads_store(wired, QUALIFYING_LEAD)
+
     def _boom(_cid):
         raise RuntimeError("state file exploded")
     monkeypatch.setattr(wired.actions, "lid_to_phone_via_identify_sender", _boom)

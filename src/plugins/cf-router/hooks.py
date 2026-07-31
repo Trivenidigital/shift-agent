@@ -5488,10 +5488,16 @@ def _sender_has_qualifying_lead(chat_id: str) -> bool:
     ANSWER carries none — "Grand Ballroom" or "about 80" classifies as nothing, so
     without this the reply to our own question would go to the LLM and the intake
     loop would silently break at question one. Only consulted when the cheap signal
-    checks have already failed, so the common path costs nothing extra. Never raises
-    (a lookup failure falls back to the pre-M1 admission set).
+    checks have already failed. Never raises (a lookup failure falls back to the
+    pre-M1 admission set).
+
+    Ordered cheap-first: identity resolution spawns `identify-sender`, so a store
+    with no QUALIFYING lead at all short-circuits on one file read rather than adding
+    a subprocess to every non-catering inbound.
     """
     try:
+        if not actions.any_qualifying_lead_exists():
+            return False
         phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
         if role == "owner":
             return False
