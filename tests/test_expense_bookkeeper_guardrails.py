@@ -563,6 +563,9 @@ def test_v02_8_dispatcher_step3_jq_filters_are_syntax_valid():
         "expense-bookkeeper/leads.json": {
             "leads": [{"owner_approval_code": "#A3F2X", "status": "AWAITING_OWNER_APPROVAL"}],
         },
+        "catering-followups.json": {
+            "followups": [{"approval_code": "#A3F2X", "status": "awaiting_owner_approval"}],
+        },
         "/state/pending.json": {"proposals": [{"code": "#A3F2X"}]},
     }
 
