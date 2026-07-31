@@ -426,6 +426,9 @@ def capture_branch_b_amendment(
 # rewriting it would change what a rollback-era reader sees for no gain. raw_text
 # is never touched — the append-only guarantee holds.
 APPLIED_MARK_FIELD = "applied_at"
+# Additive companion to APPLIED_MARK_FIELD: a bounded reason code present ONLY on
+# a record stamped APPLIED-WITH-ERROR (see mark_applied's `error_marker`).
+APPLIED_ERROR_FIELD = "apply_error"
 
 
 def _amendment_sort_key(record: dict) -> tuple:
@@ -468,9 +471,17 @@ def mark_applied(
     expected_group: Optional[str] = None,
     lock_attempts: int = 20,
     lock_sleep_sec: float = 0.5,
+    error_marker: Optional[str] = None,
 ) -> MarkAppliedResult:
     """Stamp `applied_at` on the named records for a lead. Idempotent: a record
     already carrying the mark is left untouched and not re-reported.
+
+    `error_marker` stamps an ADDITIVE `apply_error` reason code alongside the
+    applied mark — APPLIED-WITH-ERROR, for a record the caller could not
+    materialise (its parsed values are unholdable by the lead schema). Such a
+    record MUST still be stamped: an unapplied record is re-read on every later
+    run and re-fails, which blocks every subsequent amendment for that lead. The
+    raw_text is untouched either way, so the owner can still read what was said.
 
     Same failure discipline as capture — ANY failure PRESERVES the store and returns
     ok=False, so the caller can decide whether to re-run (a re-run re-applies the
@@ -505,6 +516,8 @@ def mark_applied(
                         or record.get(APPLIED_MARK_FIELD)):
                     continue
                 record[APPLIED_MARK_FIELD] = stamp
+                if error_marker:
+                    record[APPLIED_ERROR_FIELD] = str(error_marker)[:200]
                 marked.append(record["amendment_id"])
             if not marked:
                 return MarkAppliedResult(ok=True, marked=())
