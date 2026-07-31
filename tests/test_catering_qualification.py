@@ -250,3 +250,90 @@ def test_legacy_lead_without_m1_fields_still_decodes():
     assert legacy.qualification_rounds == 0
     assert legacy.extracted.venue is None
     assert legacy.extracted.event_type is None
+
+
+def _followups_module():
+    """catering_followups pulls in safe_io (fcntl), so the Windows dev box needs the
+    shared stub installed before it imports. Kept local to the parity cells so the
+    rest of this suite stays the pure stdlib + pydantic module its header promises."""
+    from fixtures_fleet import ensure_fcntl_stub  # noqa: PLC0415
+
+    ensure_fcntl_stub()
+    import catering_followups  # noqa: PLC0415
+
+    return catering_followups
+
+
+# ── Free-text answers are rendered on the OWNER approval card ────────────────
+# A customer's venue reply lands verbatim beside the `#XXXXX approve` command
+# lines. Unfiltered, a U+202E right-to-left override rearranges what the owner
+# reads and backticks/asterisks restyle the surrounding text, so an injected
+# string can be made to look like the card's own approval line.
+class TestFreeTextSanitizer:
+    # The reviewer's exact payload.
+    HOSTILE = "Hall*  \u202e APPROVED \u202c `#ZZZZZ approve` _x_"
+
+    def test_the_hostile_venue_payload_loses_every_render_control(self):
+        cleaned = cq.clean_free_text_answer(self.HOSTILE)
+
+        assert "\u202e" not in cleaned and "\u202c" not in cleaned
+        for delim in "*_~`":
+            assert delim not in cleaned
+        assert cleaned == "Hall APPROVED #ZZZZZ approve x"
+
+    def test_it_can_no_longer_occupy_its_own_line_on_the_card(self):
+        """The card is line-oriented — "  - Venue: <value>" — so a value that can
+        carry a newline can plant what looks like a separate command line."""
+        cleaned = cq.clean_free_text_answer("Hall\n#ZZZZZ approve\nGrand")
+        assert "\n" not in cleaned and "\r" not in cleaned
+
+    @pytest.mark.parametrize("hostile", [
+        "Hall\u200b\u200bRoom",              # zero-width space (Cf)
+        "Hall\x00Room",                      # NUL (Cc)
+        "Hall\ufeffRoom",                    # BOM (Cf)
+        "Hall\U000e0001Room",                # language tag (Cf)
+    ])
+    def test_control_and_format_characters_are_dropped(self, hostile):
+        cleaned = cq.clean_free_text_answer(hostile)
+        assert cleaned == "HallRoom"
+
+    def test_a_reply_that_is_only_control_characters_is_not_a_venue(self):
+        """Post-strip it is empty, so it must read as "no answer" — not as a venue
+        that silently marks the question answered forever."""
+        assert cq.clean_free_text_answer("\u202e\u202c\x00`*_") is None
+
+    def test_an_over_long_reply_is_still_rejected_rather_than_truncated(self):
+        """Sanitizing must not quietly cut a 500-character rant down to a
+        plausible-looking venue."""
+        assert cq.clean_free_text_answer("y" * (cq.VENUE_MAX_LEN + 1)) is None
+
+    def test_an_ordinary_venue_is_untouched(self):
+        assert cq.clean_free_text_answer("Grand Ballroom") == "Grand Ballroom"
+        assert cq.clean_free_text_answer("St. Mary's Hall, 2nd floor") == \
+            "St. Mary's Hall, 2nd floor"
+
+    @pytest.mark.parametrize("raw", [
+        HOSTILE,
+        "Hall\n\nRoom",
+        "  spaced   out  ",
+        "\u202eweird\u202c",
+        "plain text",
+        "",
+        "a" * 400,
+        "emoji \U0001F389 kept",
+    ])
+    def test_policy_parity_with_the_followup_note_sanitizer(self, raw):
+        """catering_qualification.sanitize_free_text is a deliberate COPY of
+        catering_followups.normalize_note's character policy (it cannot import it:
+        this module is pure stdlib and loads inside the cf-router plugin). Copies
+        drift — this cell is what stops them. If you change one policy, change both.
+        """
+        cf = _followups_module()
+
+        assert cq.sanitize_free_text(raw, max_chars=cf.NOTE_MAX_CHARS) == cf.normalize_note(raw)
+
+    def test_the_two_policies_declare_the_same_character_sets(self):
+        cf = _followups_module()
+
+        assert cq._STRIP_UNICODE_CATEGORIES == cf._STRIP_UNICODE_CATEGORIES
+        assert cq._MARKDOWN_DELIMS == cf._MARKDOWN_DELIMS

@@ -21,6 +21,7 @@ Deployed FLAT to /opt/shift-agent/ so scripts + the cf-router plugin can import 
 """
 from __future__ import annotations
 
+import unicodedata
 from typing import Any, Optional
 
 # Minimum qualification. Names are the QUALIFICATION vocabulary (what the customer
@@ -71,6 +72,43 @@ GAP_LABELS: dict[str, str] = {
 }
 
 VENUE_MAX_LEN = 200
+
+# ── Free-text rendering safety ───────────────────────────────────────────────
+# A free-text answer (today: `venue`) is CUSTOMER-authored and is rendered
+# verbatim on the OWNER approval card, next to the `#XXXXX approve` command
+# lines. Unfiltered it can plant a convincing fake line there: a U+202E
+# right-to-left override rearranges what the owner reads, and backticks/asterisks
+# restyle the surrounding message so injected text looks like the card's own.
+#
+# POLICY PARITY (deliberate duplication): this is the SAME character policy as
+# catering_followups.normalize_note — strip Cc/Cf/Cs/Co/Cn, drop the markdown
+# delimiters, collapse whitespace, cap length. It is copied rather than imported
+# because catering_qualification is a PURE stdlib module the cf-router plugin and
+# the scripts both import, and catering_followups pulls in the followup store.
+# tests/test_catering_qualification.py pins the two policies against each other so
+# they cannot drift; change one and the parity test fails.
+_STRIP_UNICODE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn"})
+_MARKDOWN_DELIMS = "*_~`"
+
+
+def sanitize_free_text(text: str, *, max_chars: Optional[int] = None) -> str:
+    """Customer free text made safe to render inside a fixed owner/customer
+    template. See the policy-parity note above.
+
+    `max_chars=None` (the default) does NOT truncate: clean_free_text_answer needs
+    the true post-strip length so an over-long reply is REJECTED as a venue rather
+    than silently cut down to a plausible-looking one."""
+    normalized = unicodedata.normalize("NFC", text or "")
+    kept = [
+        " " if ch in "\r\n\t" else ch
+        for ch in normalized
+        if ch in "\r\n\t" or unicodedata.category(ch) not in _STRIP_UNICODE_CATEGORIES
+    ]
+    out = "".join(kept)
+    for delim in _MARKDOWN_DELIMS:
+        out = out.replace(delim, "")
+    collapsed = " ".join(out.split())
+    return collapsed if max_chars is None else collapsed[:max_chars]
 
 # Explicit NON-answers. A customer who replies "not sure yet" to "where is it being
 # held?" has told us they do not know — writing that string into `venue` would put
@@ -179,8 +217,13 @@ def clean_free_text_answer(text: str) -> Optional[str]:
     """A short bare reply normalised into a venue value, or None if it does not look
     like one. Rejects empty / over-long / pure-number replies and the explicit
     NON_ANSWER_PHRASES, so "150", "ok" or "not sure yet" never lands in the venue
-    field — and, just as importantly, never marks the venue answered."""
-    candidate = " ".join((text or "").split())
+    field — and, just as importantly, never marks the venue answered.
+
+    The value is sanitize_free_text'd FIRST: it is rendered verbatim on the owner
+    approval card beside the approval-code commands, so control/format characters
+    and markdown delimiters are stripped before any length or vocabulary check (a
+    reply that is only such characters must read as empty, not as a venue)."""
+    candidate = sanitize_free_text(text)
     if not (2 <= len(candidate) <= VENUE_MAX_LEN):
         return None
     if candidate.replace(",", "").replace(".", "").isdigit():
@@ -235,7 +278,7 @@ __all__ = [
     "REQUIRED_FIELDS", "QUESTION_TEMPLATES", "GAP_LABELS", "FREE_TEXT_FIELDS",
     "NON_ANSWER_PHRASES",
     "MIN_QUESTIONS_PER_ROUND", "MAX_QUESTIONS_PER_ROUND", "MAX_QUALIFICATION_ROUNDS",
-    "VENUE_MAX_LEN",
+    "VENUE_MAX_LEN", "sanitize_free_text",
     "qualification_state", "missing_fields", "next_question_batch",
     "sole_free_text_question", "clean_free_text_answer", "gap_summary",
     "render_question_message", "render_complete_message", "render_handoff_message",
