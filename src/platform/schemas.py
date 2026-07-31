@@ -539,9 +539,10 @@ CATERING_TRANSITIONS: dict[CateringLeadStatus, set[CateringLeadStatus]] = {
     # covers each additional answer round (mirrors CUSTOMER_FINALIZED's re-finalize
     # self-edge) — every round still emits its own audit row. It leaves for
     # AWAITING_OWNER_APPROVAL either on completion or when the round cap is hit
-    # (owner review with the residual gaps flagged). STALE is reserved for a future
-    # TTL sweep extension; catering-lead-ttl-sweep currently only sweeps
-    # AWAITING_OWNER_APPROVAL, so nothing reaches it today.
+    # (owner review with the residual gaps flagged). STALE is reached by
+    # catering-lead-ttl-sweep for a lead whose customer went quiet mid-loop
+    # (catering.qualifying_stale_after_hours), so an unanswered intake question can
+    # no longer keep a lead open forever with the owner never told.
     "QUALIFYING": {"QUALIFYING", "AWAITING_OWNER_APPROVAL", "STALE"},
     "NOT_CATERING": set(),                                                # terminal
     "AWAITING_OWNER_APPROVAL": {
@@ -621,6 +622,13 @@ class CateringConfig(BaseModel):
     # legitimate budget catering (e.g. a $6/guest order). Operator-tunable per customer.
     min_per_guest_usd: float = Field(default=3.0, ge=0.0)
     stale_after_hours: int = Field(default=14 * 24, ge=1)  # 14 days default
+    # How long a QUALIFYING lead may sit with no activity before catering-lead-ttl-sweep
+    # expires it. MUCH shorter than the AWAITING_OWNER_APPROVAL TTL: an unanswered
+    # intake question is a customer who went quiet mid-conversation, not an inquiry
+    # waiting on the owner, and until this existed such a lead lived forever with the
+    # owner never told (a WhatsApp-only owner never sees the Studio counter). ADDITIVE
+    # — a config written before this decodes with the 72h default.
+    qualifying_stale_after_hours: int = Field(default=72, ge=1)
     # M3: how long a SENT proposal set (and the quote text that quotes it) stays
     # valid. Drives BOTH the customer-facing "This quote is valid until <date>"
     # line and CateringProposalSet.expires_at, so the sweep can never expire a set
@@ -4334,12 +4342,21 @@ class CateringAmendmentApplied(_BaseEntry):
     only — never the raw amendment text and never the values (a headcount or venue
     is customer content, same class as raw_inquiry). `quote_version` is the ledger
     version the application committed, or 0 when the lead had no committed quote
-    yet (nothing to re-version)."""
+    yet (nothing to re-version).
+
+    `apply_error` is set when the record was marked APPLIED-WITH-ERROR: its parsed
+    values could not be held by CateringLeadExtractedFields, so nothing was written
+    for it. It is still stamped applied, because a record left unapplied is re-read
+    on every later run and re-fails, which blocks every LATER amendment for the same
+    lead. Empty on the normal path. Field NAMES / a bounded reason code only —
+    never the rejected value."""
     type: Literal["catering_amendment_applied"]
     lead_id: str
     amendment_id: str
     fields_changed: list[str] = Field(default_factory=list, max_length=20)
     quote_version: int = Field(default=0, ge=0)
+    apply_error: str = Field(default="", max_length=200)
+    rejected_fields: list[str] = Field(default_factory=list, max_length=20)
 
 
 class CateringLeadQualificationUpdated(_BaseEntry):
@@ -4356,6 +4373,11 @@ class CateringLeadQualificationUpdated(_BaseEntry):
     round_number: int = Field(ge=0)
     complete: bool
     outcome: Literal["asked", "complete", "round_cap_reached"]
+    # Field NAMES the answer parsed to a value CateringLeadExtractedFields cannot
+    # hold (e.g. a veg count above its le=10000 bound). Those values are dropped
+    # rather than written — persisting one fails the whole lead write and would
+    # strand the lead mid-loop. Names only, never the value.
+    rejected_fields: list[str] = Field(default_factory=list, max_length=20)
 
 
 class CateringQuoteVersionCommitted(_BaseEntry):
@@ -7121,7 +7143,14 @@ class CateringLeadHoldBlockedSend(_BaseEntry):
     visibility. `blocked_send_kind` names the refusing site."""
     type: Literal["catering_lead_hold_blocked_send"]
     lead_id: str = Field(min_length=1)
-    blocked_send_kind: Literal["customer_ack", "owner_approved_quote"]
+    blocked_send_kind: Literal[
+        "customer_ack", "owner_approved_quote",
+        # amend-catering-lead's slot-filling loop: the next question batch, or the
+        # closing "passed to the owner" message. Held leads still MERGE the answer
+        # (capturing what the customer said is never the harm); only the reply is
+        # withheld, so the bot cannot keep interviewing a customer the owner paused.
+        "qualification_question",
+    ]
     hold_reason: str = Field(default="", max_length=200)
 
 
