@@ -1207,11 +1207,13 @@ def _automation_control_resolve_customer_target(code: str) -> Optional[str]:
 def _automation_control_apply_owner(
     owner_chat_id: str, verb: str, code: str, nid: str,
 ) -> Optional[dict]:
-    """Apply an owner takeover (``verb == "takeover"``) or release/resume
-    (``verb == "active"``) against the customer conversation the ``#XXXXX`` code
-    resolves to. Idempotent (re-engage/re-release rewrites the same mode + audits
-    the no-op transition). Confirms back to the owner self-chat (exempt — the
-    owner key is never a suppressed customer key)."""
+    """Apply an owner takeover (``verb == "takeover"``), pause/hold
+    (``verb == "paused"`` — M4/G3), or release/resume (``verb == "active"``)
+    against the customer conversation the ``#XXXXX`` code resolves to. Idempotent
+    (re-asserting rewrites the same mode + audits the no-op transition, and for
+    takeover/pause that rewrite also extends the auto-expiry window). Confirms
+    back to the owner self-chat (exempt — the owner key is never a suppressed
+    customer key)."""
     target = _automation_control_resolve_customer_target(code)
     if not target:
         return None
@@ -1219,6 +1221,10 @@ def _automation_control_apply_owner(
         to_mode, reason, audit_reason = (
             automation_control.MODE_TAKEOVER, "owner_takeover",
             "automation_control_owner_takeover")
+    elif verb == automation_control.MODE_PAUSED:
+        to_mode, reason, audit_reason = (
+            automation_control.MODE_PAUSED, "owner_pause",
+            "automation_control_owner_pause")
     else:
         to_mode, reason, audit_reason = (
             automation_control.MODE_ACTIVE, "owner_release",
