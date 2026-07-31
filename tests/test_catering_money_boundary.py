@@ -536,8 +536,8 @@ def test_the_label_reflects_the_discounted_recompute(bridge, env):
 # ── MEDIUM 5 — a package cannot be quoted above the per-line quantity bound ──
 @pytest.mark.parametrize("headcount,expected_rc", [
     (500, 0),      # exactly the bound: itemisable, priced, fine
-    (501, 18),     # one over: the row used to clamp and diverge silently
-    (2000, 18),    # far over: used to surface as exit 11 "quote mismatch"
+    (501, 19),     # one over: the row used to clamp and diverge silently
+    (2000, 19),    # far over: used to surface as exit 11 "quote mismatch"
 ])
 def test_auto_default_refuses_a_package_above_the_line_quantity_bound(
     bridge, env, headcount, expected_rc,
