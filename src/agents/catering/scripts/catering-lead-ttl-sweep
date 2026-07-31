@@ -7,11 +7,17 @@ open on 2026-07-21). This sweep transitions leads with no activity for
 ``CATERING_LEAD_TTL_DAYS`` to the legal terminal ``STALE`` status and alerts the owner at the
 write site (§12b) — the catering analog of ``shift-agent-proposal-sweep`` (BL-SHIFT-04).
 
+It sweeps ``QUALIFYING`` on its own, much shorter window too
+(``catering.qualifying_stale_after_hours``, 72h default). That status waits on the CUSTOMER,
+not the owner: we asked an intake question and they never came back. Such a lead was
+previously immortal AND invisible — a WhatsApp-only owner never sees the Studio's QUALIFYING
+counter, so nobody was ever told the enquiry existed.
+
 Both the transition (via the same lock + ``is_catering_transition_allowed`` + atomic-write +
 ``CateringLeadStatusChange`` chokepoint every catering script uses) and the owner alert only
-ever fire on a lead that is STILL ``AWAITING_OWNER_APPROVAL``: once a lead becomes ``STALE`` it
-is no longer selected, and any owner/customer activity within the TTL window keeps it alive, so
-the sweep is idempotent and never touches an actively-worked lead.
+ever fire on a lead STILL in one of those two statuses: once a lead becomes ``STALE`` it is no
+longer selected, and any owner/customer activity within the window keeps it alive, so the
+sweep is idempotent and never touches an actively-worked lead.
 
 GATED: no-op unless ``CATERING_LEAD_TTL_SWEEP_ENABLED`` is ``1``/``true`` (ships OFF; the
 operator arms it per-customer after review, consistent with house rollout rules). No systemd
@@ -39,7 +45,10 @@ from safe_io import (  # noqa: E402
 from schemas import (  # noqa: E402
     Config, CateringLeadStore, CateringLeadStatusChange, is_catering_transition_allowed,
 )
-from catering_lead_sweep import find_expired_awaiting_leads, CATERING_LEAD_TTL_DAYS  # noqa: E402
+from catering_lead_sweep import (  # noqa: E402
+    find_expired_awaiting_leads, find_expired_qualifying_leads,
+    CATERING_LEAD_TTL_DAYS, CATERING_QUALIFYING_STALE_HOURS,
+)
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
 CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
@@ -76,13 +85,21 @@ def _append_audit_under_leadslock(entry) -> None:
         ndjson_append(LOG_PATH, TypeAdapter(CateringLeadStatusChange).dump_json(entry).decode("utf-8"))
 
 
-def _alert_owner(lead_id: str, ttl_days: int) -> None:
+def _alert_owner(lead_id: str, window: str, *, qualifying: bool = False) -> None:
     """§12b owner notification at the expiry write site. Plain text (Pushover), so
     underscore-bearing content can never be mangled by a Markdown parser. Best-effort;
-    dispatched/delivered structured logs make every fire traceable in journalctl."""
+    dispatched/delivered structured logs make every fire traceable in journalctl.
+
+    The QUALIFYING wording differs because the situation does: nothing was ever waiting
+    on the owner there — the customer stopped answering our intake questions, and the
+    owner is being told for the FIRST time that the enquiry existed at all."""
     import subprocess
     msg = (
-        f"Catering inquiry {lead_id} expired after {ttl_days} days with no owner action "
+        f"Catering enquiry {lead_id} went quiet {window} ago part-way through intake "
+        f"(the customer never answered our questions) and is now closed as stale. "
+        f"If it is still live, reach out to them directly."
+        if qualifying else
+        f"Catering inquiry {lead_id} expired after {window} with no owner action "
         f"and is now closed as stale. If it is still live, start a fresh quote for it."
     )
     _log(f"catering_lead_ttl_alert_dispatched lead={lead_id}")
@@ -110,15 +127,19 @@ def main() -> int:
 
     ttl_days = _ttl_days()
 
-    # Config load is best-effort (tz only); UTC fallback keeps the sweep running.
+    # Config load is best-effort (tz + the QUALIFYING window); UTC + the module default
+    # keep the sweep running when it fails.
+    qualifying_hours = CATERING_QUALIFYING_STALE_HOURS
     try:
         cfg = load_yaml_model(CONFIG_PATH, Config)
         now = customer_now(cfg.customer.timezone)
+        qualifying_hours = cfg.catering.qualifying_stale_after_hours
     except (FileNotFoundError, RuntimeError, ValidationError) as e:
         _log(f"catering_lead_ttl_sweep: config load failed; using UTC: {e}")
         now = datetime.now(timezone.utc)
 
-    transitioned: list[str] = []
+    # lead_id -> (reason suffix, owner-facing window, is_qualifying)
+    transitioned: list[tuple[str, str, bool]] = []
     try:
         with FileLock(LEADS_LOCK):
             store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
@@ -126,16 +147,29 @@ def main() -> int:
                 _log(f"catering_lead_ttl_sweep: leads.json status={status!r}; skipping this cycle")
                 return 0
 
-            expired_ids = set(find_expired_awaiting_leads(store.leads, now, ttl_days))
+            # Two windows, one pass. A lead is in exactly one status, so the two id sets
+            # are disjoint by construction.
+            expiring: dict[str, tuple[str, str, bool]] = {
+                lead_id: (f"ttl_expired_awaiting_owner_approval ttl_days={ttl_days}",
+                          f"{ttl_days} days", False)
+                for lead_id in find_expired_awaiting_leads(store.leads, now, ttl_days)
+            }
+            expiring.update({
+                lead_id: (f"ttl_expired_qualifying stale_hours={qualifying_hours}",
+                          f"{qualifying_hours}h", True)
+                for lead_id in find_expired_qualifying_leads(store.leads, now, qualifying_hours)
+            })
             if args.dry_run:
-                for lead_id in sorted(expired_ids):
-                    print(f"would_expire {lead_id} (ttl_days={ttl_days})")
+                for lead_id, (reason, _window, _q) in sorted(expiring.items()):
+                    print(f"would_expire {lead_id} ({reason})")
                 return 0
 
             mutated = False
             for i, lead in enumerate(store.leads):
-                if lead.lead_id not in expired_ids:
+                selected = expiring.get(lead.lead_id)
+                if selected is None:
                     continue
+                reason, window, is_qualifying = selected
                 # Re-check legality under lock (the transition table is the source of truth).
                 if not is_catering_transition_allowed(lead.status, TERMINAL_STATUS):
                     _log(f"catering_lead_ttl_sweep: {lead.lead_id} illegal transition "
@@ -147,9 +181,9 @@ def main() -> int:
                 _append_audit_under_leadslock(CateringLeadStatusChange(
                     type="catering_lead_status_change", ts=now,
                     lead_id=lead.lead_id, from_status=from_status, to_status=TERMINAL_STATUS,
-                    actor="system", reason=f"ttl_expired_awaiting_owner_approval ttl_days={ttl_days}",
+                    actor="system", reason=reason,
                 ))
-                transitioned.append(lead.lead_id)
+                transitioned.append((lead.lead_id, window, is_qualifying))
 
             if mutated:
                 atomic_write_json(LEADS_PATH, store)
@@ -159,9 +193,9 @@ def main() -> int:
 
     # Alerts happen OUTSIDE the lock (no network under the lock). One alert per transition;
     # a terminal status fires at most once per lead, so no alert-spam across cycles.
-    for lead_id in transitioned:
+    for lead_id, window, is_qualifying in transitioned:
         try:
-            _alert_owner(lead_id, ttl_days)
+            _alert_owner(lead_id, window, qualifying=is_qualifying)
         except Exception as e:  # noqa: BLE001
             _log(f"catering_lead_ttl_sweep: alert error for {lead_id}: {e}")
 

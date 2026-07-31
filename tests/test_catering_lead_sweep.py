@@ -20,7 +20,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from catering_lead_sweep import find_expired_awaiting_leads, CATERING_LEAD_TTL_DAYS
+from catering_lead_sweep import (
+    find_expired_awaiting_leads, find_expired_qualifying_leads,
+    CATERING_LEAD_TTL_DAYS, CATERING_QUALIFYING_STALE_HOURS,
+)
 
 NOW = datetime(2026, 7, 21, 12, 0, 0, tzinfo=timezone.utc)
 _REPO = Path(__file__).resolve().parent.parent
@@ -79,6 +82,62 @@ def test_default_ttl_is_21_days():
     assert CATERING_LEAD_TTL_DAYS == 21
 
 
+# ── find_expired_qualifying_leads ───────────────────────────────────────────
+# A QUALIFYING lead waits on the CUSTOMER, not the owner: we asked an intake
+# question and they never came back. Before this sweep such a lead was immortal
+# AND invisible — a WhatsApp-only owner never sees the Studio's QUALIFYING
+# counter, so nobody was ever told the enquiry existed.
+def _qualifying(hours_ago=None, lead_id="L1"):
+    updated_at = NOW - timedelta(hours=hours_ago) if hours_ago is not None else None
+    return SimpleNamespace(lead_id=lead_id, status="QUALIFYING", updated_at=updated_at)
+
+
+def test_stale_qualifying_included():
+    assert find_expired_qualifying_leads([_qualifying(100)], NOW, 72) == ["L1"]
+
+
+def test_fresh_qualifying_excluded():
+    assert find_expired_qualifying_leads([_qualifying(4)], NOW, 72) == []
+
+
+def test_qualifying_boundary_exactly_at_window_included():
+    assert find_expired_qualifying_leads([_qualifying(72)], NOW, 72) == ["L1"]
+
+
+def test_qualifying_without_updated_at_excluded():
+    assert find_expired_qualifying_leads([_qualifying(None)], NOW, 72) == []
+
+
+def test_qualifying_sweep_ignores_every_other_status():
+    leads = [
+        _lead("AWAITING_OWNER_APPROVAL", 999, "L1"),
+        _lead("SENT_TO_CUSTOMER", 999, "L2"),
+        _lead("STALE", 999, "L3"),
+    ]
+    assert find_expired_qualifying_leads(leads, NOW, 72) == []
+
+
+def test_awaiting_sweep_ignores_qualifying():
+    """The two windows are disjoint by status, so a QUALIFYING lead can never be
+    expired on the (much longer) owner-side TTL by accident."""
+    assert find_expired_awaiting_leads([_qualifying(24 * 999)], NOW, 21) == []
+
+
+def test_qualifying_expired_returns_sorted_ids():
+    leads = [_qualifying(100, "L3"), _qualifying(200, "L1"), _qualifying(1, "L2")]
+    assert find_expired_qualifying_leads(leads, NOW, 72) == ["L1", "L3"]
+
+
+def test_default_qualifying_window_is_72_hours():
+    assert CATERING_QUALIFYING_STALE_HOURS == 72
+
+
+def test_the_qualifying_window_is_much_shorter_than_the_owner_side_ttl():
+    """Different waits, different windows: three weeks is right for an owner who
+    has not got to a lead, and absurd for a customer who stopped replying."""
+    assert CATERING_QUALIFYING_STALE_HOURS < CATERING_LEAD_TTL_DAYS * 24
+
+
 # ── static-invariant scans of the sweep script (cross-platform) ─────────────
 def test_sweep_script_compiles():
     py_compile.compile(str(_SWEEP), doraise=True)
@@ -98,6 +157,7 @@ def test_sweep_uses_legal_terminal_transition_via_chokepoint():
     assert "is_catering_transition_allowed" in t
     assert "CateringLeadStatusChange" in t
     assert "find_expired_awaiting_leads" in t
+    assert "find_expired_qualifying_leads" in t
     assert "atomic_write_json" in t
 
 
@@ -158,13 +218,17 @@ def _run_sweep(tmp_path, *, enabled, extra_env=None):
 
 def _seed(tmp_path):
     leads_path = tmp_path / "catering-leads.json"
-    recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    now = datetime.now(timezone.utc)
+    recent = (now - timedelta(days=1)).isoformat()
     leads_path.write_text(json.dumps({
         "schema_version": 1,
         "leads": [
             _lead_row("L0001", "AWAITING_OWNER_APPROVAL", "2020-01-01T00:00:00+00:00"),  # stale
             _lead_row("L0002", "AWAITING_OWNER_APPROVAL", recent),                       # fresh
             _lead_row("L0003", "SENT_TO_CUSTOMER", "2020-01-01T00:00:00+00:00"),         # wrong status
+            # QUALIFYING: one abandoned mid-intake, one that answered an hour ago.
+            _lead_row("L0004", "QUALIFYING", (now - timedelta(hours=200)).isoformat()),
+            _lead_row("L0005", "QUALIFYING", (now - timedelta(hours=1)).isoformat()),
         ],
     }), encoding="utf-8")
     return leads_path
@@ -221,3 +285,170 @@ def test_cli_within_ttl_lead_untouched(tmp_path):
     r = _run_sweep(tmp_path, enabled=True, extra_env={"CATERING_LEAD_TTL_DAYS": "100000"})
     assert r.returncode == 0
     assert _statuses(leads_path)["L0001"] == "AWAITING_OWNER_APPROVAL"
+
+
+# ── in-process drive of the sweep's main() (runs everywhere) ────────────────
+# The subprocess cells above are Linux-gated because a fresh interpreter cannot
+# import safe_io on Windows. Loading main() in-process behind the fcntl stub —
+# the pattern tests/test_amend_catering_lead.py uses — pins the QUALIFYING arm on
+# the dev box too, which matters because that arm is the new behavior here.
+def _drive_sweep(tmp_path, monkeypatch, *, config_text=None):
+    from fixtures_fleet import ensure_fcntl_stub, load_script
+
+    ensure_fcntl_stub()
+    leads_path = _seed(tmp_path)
+    log_path = tmp_path / "decisions.log"
+    config_path = tmp_path / "config.yaml"
+    if config_text is not None:
+        config_path.write_text(config_text, encoding="utf-8")
+
+    monkeypatch.setenv("CATERING_LEAD_TTL_SWEEP_ENABLED", "1")
+    monkeypatch.setenv("SHIFT_AGENT_CATERING_LEADS_PATH", str(leads_path))
+    monkeypatch.setenv("SHIFT_AGENT_DECISIONS_LOG_PATH", str(log_path))
+    monkeypatch.setenv("SHIFT_AGENT_CONFIG_PATH", str(config_path))
+    mod = load_script("catering_lead_ttl_sweep_under_test", _SWEEP)
+    mod.LEADS_PATH = leads_path
+    mod.LEADS_LOCK = Path(str(leads_path) + ".lock")
+    mod.LOG_PATH = log_path
+    mod.CONFIG_PATH = config_path
+
+    alerts: list[tuple] = []
+    monkeypatch.setattr(mod, "_alert_owner",
+                        lambda lead_id, window, **kw: alerts.append((lead_id, window, kw)))
+    old_argv = sys.argv
+    sys.argv = ["catering-lead-ttl-sweep"]
+    try:
+        rc = mod.main()
+    finally:
+        sys.argv = old_argv
+    return rc, leads_path, log_path, alerts
+
+
+def test_qualifying_lead_expires_with_an_owner_alert(tmp_path, monkeypatch):
+    """The lead nobody could see: QUALIFYING, customer gone, owner never told."""
+    rc, leads_path, log_path, alerts = _drive_sweep(tmp_path, monkeypatch)
+
+    assert rc == 0
+    statuses = _statuses(leads_path)
+    assert statuses["L0004"] == "STALE", "a QUALIFYING lead past its window expires"
+    assert statuses["L0005"] == "QUALIFYING", "one that answered an hour ago is untouched"
+    assert statuses["L0001"] == "STALE", "the owner-side TTL still behaves as before"
+    assert statuses["L0002"] == "AWAITING_OWNER_APPROVAL"
+    assert statuses["L0003"] == "SENT_TO_CUSTOMER"
+
+    alerted = {lead_id: kw for lead_id, _window, kw in alerts}
+    assert set(alerted) == {"L0001", "L0004"}, "§12b: one owner alert per expiry"
+    assert alerted["L0004"]["qualifying"] is True
+    assert alerted["L0001"].get("qualifying", False) is False
+
+    rows = [json.loads(l) for l in log_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    changes = {x["lead_id"]: x for x in rows
+               if x.get("type") == "catering_lead_status_change"}
+    assert changes["L0004"]["from_status"] == "QUALIFYING"
+    assert changes["L0004"]["to_status"] == "STALE"
+    assert changes["L0004"]["actor"] == "system"
+    assert "ttl_expired_qualifying" in changes["L0004"]["reason"]
+    assert "ttl_expired_awaiting_owner_approval" in changes["L0001"]["reason"]
+
+
+def test_qualifying_window_is_read_from_config(tmp_path, monkeypatch):
+    """`catering.qualifying_stale_after_hours` is the per-customer knob; a wide
+    value keeps a 200h-old intake alive while the owner-side TTL is unaffected."""
+    import yaml
+
+    config_text = yaml.safe_dump({
+        "schema_version": 1,
+        "customer": {"name": "T", "location_id": "loc", "timezone": "UTC"},
+        "owner": {"name": "O", "phone": "+19045550100"},
+        "limits": {}, "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "x@y"},
+        "catering": {"enabled": True, "qualifying_stale_after_hours": 10000},
+    })
+    rc, leads_path, _log, alerts = _drive_sweep(tmp_path, monkeypatch, config_text=config_text)
+
+    assert rc == 0
+    assert _statuses(leads_path)["L0004"] == "QUALIFYING"
+    assert [lead_id for lead_id, _w, _k in alerts] == ["L0001"]
+
+
+def test_qualifying_sweep_is_dormant_unless_armed(tmp_path, monkeypatch):
+    monkeypatch.delenv("CATERING_LEAD_TTL_SWEEP_ENABLED", raising=False)
+    from fixtures_fleet import ensure_fcntl_stub, load_script
+
+    ensure_fcntl_stub()
+    leads_path = _seed(tmp_path)
+    mod = load_script("catering_lead_ttl_sweep_disarmed", _SWEEP)
+    mod.LEADS_PATH = leads_path
+    old_argv = sys.argv
+    sys.argv = ["catering-lead-ttl-sweep"]
+    try:
+        assert mod.main() == 0
+    finally:
+        sys.argv = old_argv
+    assert _statuses(leads_path)["L0004"] == "QUALIFYING", "same flag gates both arms"
+
+
+@_LINUX_ONLY
+def test_cli_expires_the_abandoned_qualifying_lead_and_alerts(tmp_path):
+    """The lead nobody could see: QUALIFYING, customer gone, owner never told."""
+    leads_path = _seed(tmp_path)
+    r = _run_sweep(tmp_path, enabled=True)
+    assert r.returncode == 0, r.stderr
+
+    statuses = _statuses(leads_path)
+    assert statuses["L0004"] == "STALE", "a QUALIFYING lead past its window expires"
+    assert statuses["L0005"] == "QUALIFYING", "one that answered an hour ago is untouched"
+
+    rows = [json.loads(l) for l in (tmp_path / "decisions.log").read_text(encoding="utf-8").splitlines() if l.strip()]
+    changes = [x for x in rows if x.get("type") == "catering_lead_status_change"
+               and x.get("lead_id") == "L0004"]
+    assert len(changes) == 1
+    assert changes[0]["from_status"] == "QUALIFYING"
+    assert changes[0]["to_status"] == "STALE"
+    assert changes[0]["actor"] == "system"
+    assert "ttl_expired_qualifying" in changes[0]["reason"]
+    # §12b: the owner is told at the write site, and the reason distinguishes the
+    # two windows so the alert text can too.
+    assert "catering_lead_ttl_alert_dispatched lead=L0004" in r.stderr
+
+
+@_LINUX_ONLY
+def test_cli_qualifying_expiry_is_idempotent(tmp_path):
+    _seed(tmp_path)
+    _run_sweep(tmp_path, enabled=True)
+    _run_sweep(tmp_path, enabled=True)
+    rows = [json.loads(l) for l in (tmp_path / "decisions.log").read_text(encoding="utf-8").splitlines() if l.strip()]
+    changes = [x for x in rows if x.get("type") == "catering_lead_status_change"
+               and x.get("lead_id") == "L0004"]
+    assert len(changes) == 1, "STALE is terminal — no re-expiry, no repeat alert"
+
+
+@_LINUX_ONLY
+def test_cli_qualifying_sweep_obeys_the_same_arming_flag(tmp_path):
+    leads_path = _seed(tmp_path)
+    r = _run_sweep(tmp_path, enabled=False)
+    assert r.returncode == 0
+    assert _statuses(leads_path)["L0004"] == "QUALIFYING", "dormant unless armed"
+
+
+@_LINUX_ONLY
+def test_cli_qualifying_window_comes_from_config(tmp_path):
+    """`catering.qualifying_stale_after_hours` is the per-customer knob; a wide
+    value keeps a 200h-old intake alive."""
+    import yaml
+
+    leads_path = _seed(tmp_path)
+    config = tmp_path / "config.yaml"
+    config.write_text(yaml.safe_dump({
+        "schema_version": 1,
+        "customer": {"name": "T", "location_id": "loc", "timezone": "UTC"},
+        "owner": {"name": "O", "phone": "+19045550100"},
+        "limits": {}, "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "x@y"},
+        "catering": {"enabled": True, "qualifying_stale_after_hours": 10000},
+    }), encoding="utf-8")
+
+    r = _run_sweep(tmp_path, enabled=True,
+                   extra_env={"SHIFT_AGENT_CONFIG_PATH": str(config)})
+    assert r.returncode == 0, r.stderr
+    assert _statuses(leads_path)["L0004"] == "QUALIFYING"
