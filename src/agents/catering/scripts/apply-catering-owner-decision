@@ -31,6 +31,8 @@ Exit codes:
   5  — schema violation
   6  — bridge unreachable (state still updated; quote delivery uncertain)
   9  — illegal transition (lead in terminal/wrong status)
+  14 — lead is ON HOLD (M4/G4); approve refused BEFORE any state change, so the
+       lead is untouched. Do NOT retry — clear with set-catering-lead-hold --off
 """
 from __future__ import annotations
 
@@ -59,12 +61,14 @@ from schemas import (  # noqa: E402
     CateringLeadStatusChange, CateringOwnerDecision, CateringQuoteSent,
     CateringQuoteAttempted,  # PR-D2 commit 3: anchor row schema (PR-D1)
     CateringQuoteSkillFailed,  # PR-B v3: SKILL handoff failure audit
+    CateringLeadHoldBlockedSend,  # M4/G4: per-lead hold refusal audit
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
     EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN, EXIT_ILLEGAL_TRANSITION,
     EXIT_TRUTH_GUARD_FAILED,  # PR-B v3 review fix: distinct from bridge-unreachable
     EXIT_PRIVILEGE_DENIED,
+    EXIT_LEAD_ON_HOLD,  # M4/G4: lead-scoped hold withheld the customer send
 )
 from audit_helpers import (  # noqa: E402
     log_config_load_failed_best_effort,
@@ -512,6 +516,36 @@ def main() -> int:
 
         lead = matches[0]
         lead_id_for_output = lead.lead_id
+
+        # M4/G4: per-lead HOLD guard. Refuse BEFORE any state mutation, so the
+        # lead stays exactly where it was instead of landing in OWNER_APPROVED
+        # with an undelivered quote — that half-state is indistinguishable from a
+        # bridge failure, and PR-D2's retry state-machine would re-attempt the
+        # send forever against a hold only an operator can lift. Approve is the
+        # only decision gated: reject/edit send nothing to the customer, and the
+        # owner-directed reprompts below are never blocked by a hold.
+        if args.decision == "approve" and lead.on_hold:
+            sys.stderr.write(
+                f"M4/G4: lead {lead.lead_id} {code} is ON HOLD "
+                f"(reason: {lead.hold_reason or 'unspecified'}); refusing approve "
+                f"— the quote would go to a customer whose lead was deliberately "
+                f"paused. Clear with: set-catering-lead-hold --lead-id "
+                f"{lead.lead_id} --off\n"
+            )
+            try:
+                ndjson_append(
+                    LOG_PATH,
+                    CateringLeadHoldBlockedSend(
+                        type="catering_lead_hold_blocked_send",
+                        ts=customer_now(cfg.customer.timezone),
+                        lead_id=lead.lead_id,
+                        blocked_send_kind="owner_approved_quote",
+                        hold_reason=(lead.hold_reason or "")[:200],
+                    ).model_dump_json(),
+                )
+            except Exception as e:
+                sys.stderr.write(f"audit emit (hold-guard) failed (non-fatal): {e}\n")
+            return EXIT_LEAD_ON_HOLD
 
         # PR-CF1: owner-approve guard for non-finalized leads.
         # If customer hasn't run the finalize flow (customer_finalized_at is

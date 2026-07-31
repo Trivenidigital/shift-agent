@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""set-catering-lead-hold — put ONE catering lead's automation on hold, or lift it.
+
+M4/G4. The automation-control kernel (src/platform/automation_control.py) works
+per CONVERSATION: STOP, pause and takeover mute everything we would say to that
+customer. A hold is the lead-scoped twin — a customer with two leads can have
+one held while the other keeps running, and the owner keeps receiving cards for
+the held one.
+
+What a hold does (enforced at the send call sites, not here):
+  - blocks the F7 primary customer ack   (send-catering-ack --lead-id)
+  - blocks the owner-approved quote send (apply-catering-owner-decision approve)
+  - does NOT block owner-directed sends  (approval cards, reprompts, confirms)
+
+A held lead's status is untouched — a hold withholds sends, it is not a state
+transition. Lifting the hold makes the lead sendable again exactly where it was.
+
+Usage:
+  set-catering-lead-hold --lead-id L00042 --on --reason "customer asked us to wait"
+  set-catering-lead-hold --lead-id L00042 --off
+
+Idempotent: re-running with the same --on/--off leaves the same final state and
+still writes the audit row (from_hold == to_hold records the no-op), mirroring
+catering_automation_control_changed. Re-asserting --on refreshes hold_set_at and
+the reason.
+
+Outputs JSON: {"lead_id": ..., "from_hold": bool, "to_hold": bool, "reason": ...}
+
+Exit codes:
+  0 — applied
+  2 — invalid input
+  4 — lead not found
+  5 — leads store unreadable / schema violation
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, atomic_write_json, ndjson_append, customer_now,
+    load_model, flock, load_yaml_model,
+)
+from schemas import (  # noqa: E402
+    Config, CateringLeadStore, CateringLeadHoldChanged,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND, EXIT_SCHEMA_VIOLATION,
+)
+from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
+
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
+LEADS_LOCK = Path(os.environ.get("SHIFT_AGENT_LEADS_LOCK", str(LEADS_PATH) + ".lock"))
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+
+_REASON_MAX = 200
+
+
+def _append_audit_under_leadslock(adapter: TypeAdapter, entry) -> None:
+    """Caller MUST hold LEADS_LOCK. Acquires inner LOG_PATH flock."""
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with flock(LOG_PATH):
+        ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--lead-id", required=True, help="Lead ID, e.g. L00042")
+    group = ap.add_mutually_exclusive_group(required=True)
+    group.add_argument("--on", action="store_true", help="Put the lead on hold")
+    group.add_argument("--off", action="store_true", help="Lift the hold")
+    ap.add_argument("--reason", default="", help=f"Why (<= {_REASON_MAX} chars)")
+    ap.add_argument("--actor", default="operator", choices=("owner", "operator", "system"),
+                    help="Who is applying this (audit only)")
+    args = ap.parse_args()
+
+    lead_id = (args.lead_id or "").strip()
+    if not lead_id:
+        sys.stderr.write("--lead-id required\n")
+        return EXIT_INVALID_INPUT
+    to_hold = bool(args.on)
+    reason = (args.reason or "").strip()[:_REASON_MAX]
+
+    # Config is only needed for the customer timezone on the audit ts; a broken
+    # config must not block an operator lifting a hold.
+    try:
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+        now = customer_now(cfg.customer.timezone)
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        log_config_load_failed_best_effort(CONFIG_PATH, e)
+        sys.stderr.write(f"WARN: config load failed; using UTC: {e}\n")
+        now = datetime.now(timezone.utc)
+
+    with FileLock(LEADS_LOCK):
+        try:
+            store, status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+            if status not in ("ok", "missing", "empty"):
+                sys.stderr.write(f"leads store status={status!r}; refusing to mutate\n")
+                return EXIT_SCHEMA_VIOLATION
+        except Exception as e:  # noqa: BLE001 — surface as a clean exit, never a traceback
+            sys.stderr.write(f"failed to load leads store: {e}\n")
+            return EXIT_SCHEMA_VIOLATION
+
+        matched_idx = next(
+            (i for i, l in enumerate(store.leads) if l.lead_id == lead_id), None,
+        )
+        if matched_idx is None:
+            sys.stderr.write(f"lead {lead_id} not found\n")
+            return EXIT_NOT_FOUND
+
+        lead = store.leads[matched_idx]
+        from_hold = bool(lead.on_hold)
+
+        # Write unconditionally, including the no-op re-assert: hold_set_at and
+        # the reason are refreshed so "when did this hold start / why" always
+        # reflects the most recent operator statement. updated_at is deliberately
+        # NOT touched — a hold is not a lead lifecycle event, and the TTL sweep
+        # reads updated_at.
+        store.leads[matched_idx] = lead.model_copy(update={
+            "on_hold": to_hold,
+            "hold_reason": (reason or None) if to_hold else None,
+            "hold_set_at": now if to_hold else None,
+        })
+        atomic_write_json(LEADS_PATH, store)
+
+        _append_audit_under_leadslock(
+            TypeAdapter(CateringLeadHoldChanged),
+            CateringLeadHoldChanged(
+                type="catering_lead_hold_changed", ts=now,
+                lead_id=lead_id, from_hold=from_hold, to_hold=to_hold,
+                actor=args.actor, reason=reason,
+            ),
+        )
+
+    print(json.dumps({
+        "lead_id": lead_id,
+        "from_hold": from_hold,
+        "to_hold": to_hold,
+        "reason": reason,
+    }))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
