@@ -16,6 +16,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -38,6 +39,19 @@ AMEND = SCRIPTS / "amend-catering-lead"
 
 OWNER_JID = "19045550100@s.whatsapp.net"
 CUSTOMER_JID = "15550100777@s.whatsapp.net"
+
+# Every scripted run below is pinned to this instant. The engine reads the
+# CUSTOMER's local clock, and quiet hours are a gate this suite has to exercise
+# deliberately rather than inherit from whenever CI happens to run — before the
+# clock was pinned, the whole approve suite would have failed between 21:00 and
+# 09:00 New York (the fixture config's timezone) because every send deferred.
+# 14:00 is comfortably outside the 21:00->09:00 default window.
+DAYTIME = datetime(2026, 7, 31, 14, 0, tzinfo=ZoneInfo("America/New_York"))
+
+
+def _at(hour: int, minute: int = 0) -> datetime:
+    """The pinned day at a customer-local hour."""
+    return DAYTIME.replace(hour=hour, minute=minute)
 
 # Catering scripts that alias the send chokepoint WITHOUT an allowlist entry, and
 # are therefore refused at runtime with missing_action_context.
@@ -165,8 +179,14 @@ def _types(env) -> list[str]:
     return [r["type"] for r in _rows(env)]
 
 
-def _run(env, monkeypatch, script: Path, name: str, *argv, bridge_ok=True):
-    """Load a script fresh, stub its bridge, run main(); returns (rc, sends)."""
+def _run(env, monkeypatch, script: Path, name: str, *argv, bridge_ok=True,
+         now: datetime = DAYTIME, post=None, notify=None):
+    """Load a script fresh, pin its clock, stub its bridge, run main().
+
+    Returns (rc, sends). `post` replaces the bridge stub outright (the
+    concurrency tests re-enter the script from inside the send); `notify`
+    replaces the owner-alert helper.
+    """
     mod = load_script(name, script)
     sends: list = []
 
@@ -174,7 +194,10 @@ def _run(env, monkeypatch, script: Path, name: str, *argv, bridge_ok=True):
         sends.append((jid, message))
         return (True, "wamid.OK") if bridge_ok else (False, "connect_failed")
 
-    monkeypatch.setattr(mod, "_bridge_post", _fake_post)
+    monkeypatch.setattr(mod, "_bridge_post", post or _fake_post)
+    monkeypatch.setattr(mod, "customer_now", lambda tz: now)
+    if notify is not None:
+        monkeypatch.setattr(mod.safe_io, "notify_owner_with_fallback", notify)
     old = sys.argv
     sys.argv = [script.name, *argv]
     try:
@@ -269,7 +292,7 @@ class TestSweepCards:
 
 class TestSweepCardExpiry:
     def _carded(self, hours_ago: int, attempt: int) -> dict:
-        stamped = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+        stamped = DAYTIME - timedelta(hours=hours_ago)
         return _followup(status="awaiting_owner_approval", approval_code="#AAAAA",
                          rendered_message="hi", attempt_count=attempt,
                          last_attempt_at=stamped.isoformat())
@@ -346,6 +369,68 @@ class TestSweepSuppression:
         assert _store(env)[0]["status"] == "suppressed"
 
 
+class TestSweepQuietHours:
+    """Quiet hours used to be TERMINAL. With whole-day +24h/+48h offsets that made
+    21:00-09:00 a deterministic 12-hours-a-day kill zone: anything whose due
+    moment landed there died, and the config comment promised the opposite."""
+
+    def test_an_owner_card_is_sent_inside_quiet_hours(self, env, monkeypatch):
+        """The card goes to the OWNER, who reads on their own schedule."""
+        rc, sends = _run(env, monkeypatch, SWEEP, "sweep_quiet_card", now=_at(22, 30))
+        assert rc == 0 and len(sends) == 1 and sends[0][0] == OWNER_JID
+        record = _store(env)[0]
+        assert record["status"] == "awaiting_owner_approval"
+        assert record["suppressed_reason"] is None
+        assert "catering_followup_suppressed" not in _types(env)
+
+    @pytest.mark.parametrize("hour,minute,quiet", [
+        (20, 59, False),  # last minute before the window
+        (21, 0, True),    # the window opens ON quiet_hours_start
+        (8, 59, True),    # last minute inside the window
+        (9, 0, False),    # the window closes ON quiet_hours_end
+    ])
+    def test_autosend_defers_inside_the_window_and_sends_outside_it(
+            self, env, monkeypatch, hour, minute, quiet):
+        monkeypatch.setenv("CATERING_FOLLOWUP_AUTOSEND", "1")
+        rc, sends = _run(env, monkeypatch, SWEEP, f"sweep_quiet_{hour}_{minute}",
+                         now=_at(hour, minute))
+        assert rc == 0
+        record = _store(env)[0]
+        if not quiet:
+            assert len(sends) == 1 and sends[0][0] == CUSTOMER_JID
+            assert record["status"] == "approved_sent"
+            return
+        assert sends == []
+        assert record["status"] == "scheduled", "deferred, never terminal"
+        assert record["suppressed_reason"] is None
+        assert "catering_followup_suppressed" not in _types(env)
+        row = [r for r in _rows(env) if r["type"] == "catering_followup_deferred"][-1]
+        assert row["reason"] == "quiet_hours"
+        assert record["due_at"] == row["to_due_at"]
+        assert datetime.fromisoformat(record["due_at"]).hour == 9, (
+            "the record moves ONTO the boundary where the window reopens"
+        )
+
+    def test_a_deferred_followup_cards_when_the_window_reopens(self, env, monkeypatch):
+        """The whole point: deferred at 23:00, alive at 09:00 the next morning."""
+        monkeypatch.setenv("CATERING_FOLLOWUP_AUTOSEND", "1")
+        _run(env, monkeypatch, SWEEP, "sweep_defer_a", now=_at(23, 0))
+        assert _store(env)[0]["status"] == "scheduled"
+        rc, sends = _run(env, monkeypatch, SWEEP, "sweep_defer_b",
+                         now=_at(9, 30) + timedelta(days=1))
+        assert rc == 0 and len(sends) == 1 and sends[0][0] == CUSTOMER_JID
+        assert _store(env)[0]["status"] == "approved_sent"
+
+    def test_deferral_does_not_multiply_the_record(self, env, monkeypatch):
+        """Same record, moved. A defer implemented as suppress-then-reschedule
+        would either duplicate the nudge or be swallowed by the dedup."""
+        monkeypatch.setenv("CATERING_FOLLOWUP_AUTOSEND", "1")
+        _run(env, monkeypatch, SWEEP, "sweep_defer_1", now=_at(22, 0))
+        _run(env, monkeypatch, SWEEP, "sweep_defer_2", now=_at(23, 0))
+        assert len(_store(env)) == 1
+        assert _store(env)[0]["followup_id"] == "FU0001"
+
+
 class TestSweepAutosend:
     def test_autosend_off_by_default_even_when_armed(self, env, monkeypatch):
         _, sends = _run(env, monkeypatch, SWEEP, "sweep_noauto")
@@ -359,8 +444,141 @@ class TestSweepAutosend:
         jid, message = sends[0]
         assert jid == CUSTOMER_JID
         assert message.startswith("⚕ *Catering Agent*"), "customer sends carry the prefix"
-        assert _store(env)[0]["status"] == "approved_sent"
+        record = _store(env)[0]
+        assert record["status"] == "approved_sent"
+        assert record["sent_message_id"] == "wamid.OK"
+        assert record["claimed_at"] is None
         assert [r["type"] for r in _rows(env)] == ["catering_followup_sent"]
+
+    def test_the_claim_is_on_disk_before_the_bridge_is_called(self, env, monkeypatch):
+        """`approved_sent` may only ever mean "the customer HAS this". Writing it
+        first made the store lie for the whole duration of the send — and stay
+        lying if the send failed."""
+        monkeypatch.setenv("CATERING_FOLLOWUP_AUTOSEND", "1")
+        seen: dict = {}
+
+        def _post(jid, message):
+            seen["record"] = _store(env)[0]
+            return True, "wamid.OK"
+
+        _run(env, monkeypatch, SWEEP, "sweep_auto_claim", post=_post)
+        assert seen["record"]["status"] == "sending"
+        assert seen["record"]["claimed_at"]
+
+    def test_a_failed_autosend_is_retryable_not_terminal(self, env, monkeypatch):
+        monkeypatch.setenv("CATERING_FOLLOWUP_AUTOSEND", "1")
+        rc, sends = _run(env, monkeypatch, SWEEP, "sweep_auto_fail", bridge_ok=False)
+        assert rc == 0 and len(sends) == 1
+        record = _store(env)[0]
+        assert record["status"] == "scheduled"
+        assert record["claimed_at"] is None
+        assert record["approval_code"] is None, "the next cycle re-renders and re-mints"
+        assert record["attempt_count"] == 1
+        row = [r for r in _rows(env) if r["type"] == "catering_followup_send_failed"][-1]
+        assert row["released_to"] == "scheduled" and row["error"] == "connect_failed"
+        assert "catering_followup_sent" not in _types(env)
+
+    def test_the_retry_is_bounded_and_the_owner_hears_about_the_end_of_it(
+            self, env, monkeypatch):
+        monkeypatch.setenv("CATERING_FOLLOWUP_AUTOSEND", "1")
+        paged: list = []
+
+        def _notify(title, message, **kw):
+            paged.append(message)
+            return True
+
+        _run(env, monkeypatch, SWEEP, "sweep_auto_f1", bridge_ok=False, notify=_notify)
+        rc, _ = _run(env, monkeypatch, SWEEP, "sweep_auto_f2", bridge_ok=False,
+                     notify=_notify)
+        assert rc == 0
+        record = _store(env)[0]
+        assert record["status"] == "expired" and record["attempt_count"] == 2
+        assert len(paged) == 1 and "L0001" in paged[0]
+
+
+class TestSweepReclaimsStaleClaims:
+    """A process killed between the claim and the confirm must not strand the
+    follow-up in a status nothing else reads."""
+
+    def _claimed(self, *, claimed_minutes_ago: int, carded_hours_ago: int = 1) -> dict:
+        return _followup(
+            status="sending", approval_code="#AAAAA", rendered_message="hi",
+            attempt_count=1,
+            last_attempt_at=(DAYTIME - timedelta(hours=carded_hours_ago)).isoformat(),
+            claimed_at=(DAYTIME - timedelta(minutes=claimed_minutes_ago)).isoformat(),
+        )
+
+    def test_a_stale_claim_returns_to_the_card_it_was_claimed_from(self, env, monkeypatch):
+        _write_followups(env, self._claimed(claimed_minutes_ago=30))
+        rc, sends = _run(env, monkeypatch, SWEEP, "sweep_reclaim")
+        assert rc == 0 and sends == []
+        record = _store(env)[0]
+        assert record["status"] == "awaiting_owner_approval"
+        assert record["claimed_at"] is None
+        assert record["approval_code"] == "#AAAAA", "the owner's card is untouched"
+
+    def test_a_live_claim_is_left_alone(self, env, monkeypatch):
+        """This process cannot tell "crashed" from "slower than me"."""
+        _write_followups(env, self._claimed(claimed_minutes_ago=5))
+        rc, sends = _run(env, monkeypatch, SWEEP, "sweep_reclaim_fresh")
+        assert rc == 0 and sends == []
+        assert _store(env)[0]["status"] == "sending"
+
+    def test_a_reclaimed_card_that_also_lapsed_is_re_carded_the_same_cycle(
+            self, env, monkeypatch):
+        _write_followups(env, self._claimed(claimed_minutes_ago=30,
+                                            carded_hours_ago=5))
+        rc, sends = _run(env, monkeypatch, SWEEP, "sweep_reclaim_lapsed")
+        assert rc == 0 and len(sends) == 1 and sends[0][0] == OWNER_JID
+        record = _store(env)[0]
+        assert record["status"] == "awaiting_owner_approval"
+        assert record["attempt_count"] == 2
+        assert record["approval_code"] != "#AAAAA", "a re-card mints a fresh code"
+
+
+class TestExpiryNotifiesTheOwner:
+    """Every other automated retirement in catering announces itself; this one
+    was silent, so a lead the owner meant to chase could go quiet with the only
+    record of it in an audit file nobody reads."""
+
+    def _lapsed(self, attempt: int) -> dict:
+        return _followup(status="awaiting_owner_approval", approval_code="#AAAAA",
+                         rendered_message="hi", attempt_count=attempt,
+                         last_attempt_at=(DAYTIME - timedelta(hours=5)).isoformat())
+
+    def test_the_final_lapse_pages_the_owner(self, env, monkeypatch):
+        paged: list = []
+
+        def _notify(title, message, **kw):
+            paged.append((title, message))
+            return True
+
+        _write_followups(env, self._lapsed(attempt=2))
+        rc, _ = _run(env, monkeypatch, SWEEP, "sweep_expire_page", notify=_notify)
+        assert rc == 0 and _store(env)[0]["status"] == "expired"
+        assert len(paged) == 1
+        title, message = paged[0]
+        assert "L0001" in message and "expired" in message.lower()
+        assert "proposal_unanswered" in message, (
+            "plain text: an underscore-bearing type must survive to the owner intact"
+        )
+
+    def test_a_re_card_does_not_page(self, env, monkeypatch):
+        """Only the RETIREMENT is news; a re-card is the loop working."""
+        paged: list = []
+        _write_followups(env, self._lapsed(attempt=1))
+        rc, _ = _run(env, monkeypatch, SWEEP, "sweep_recard_nopage",
+                     notify=lambda *a, **k: paged.append(a) or True)
+        assert rc == 0 and paged == []
+
+    def test_a_paging_failure_never_fails_the_cycle(self, env, monkeypatch):
+        def _boom(*a, **k):
+            raise RuntimeError("pushover on fire")
+
+        _write_followups(env, self._lapsed(attempt=2))
+        rc, _ = _run(env, monkeypatch, SWEEP, "sweep_page_boom", notify=_boom)
+        assert rc == 0, "a timer-driven sweep never fails its unit"
+        assert _store(env)[0]["status"] == "expired"
 
 
 class TestSweepResilience:
@@ -577,8 +795,221 @@ class TestApprove:
                          "--decision", "approve", "--sender-role", "owner",
                          bridge_ok=False)
         assert rc == 6 and len(sends) == 1
-        assert _store(env)[0]["status"] == "awaiting_owner_approval"
+        record = _store(env)[0]
+        assert record["status"] == "awaiting_owner_approval"
+        assert record["claimed_at"] is None, "the claim is released, not stranded"
+        assert record["approval_code"] == code, "the owner can simply approve again"
+        row = [r for r in _rows(env) if r["type"] == "catering_followup_send_failed"][-1]
+        assert row["released_to"] == "awaiting_owner_approval"
+        assert row["error"] == "connect_failed"
         assert "catering_followup_sent" not in _types(env)
+
+    def test_a_failed_claim_does_not_restart_the_owners_approval_window(
+            self, env, monkeypatch):
+        """last_attempt_at anchors the 4h card TTL. If the claim stamped it, a
+        flapping bridge would extend the window every time it failed."""
+        code = _card(env, monkeypatch)
+        before = _store(env)[0]["last_attempt_at"]
+        _run(env, monkeypatch, APPROVE, "appr_ttl", "--code", code, "--decision",
+             "approve", "--sender-role", "owner", bridge_ok=False)
+        assert _store(env)[0]["last_attempt_at"] == before
+
+
+class TestApproveIsSingleSend:
+    """The interleave the lock never covered: check under the lock, RELEASE it,
+    send, re-lock to record. Two owner taps both passed the check."""
+
+    def test_two_approvals_of_one_code_send_exactly_once(self, env, monkeypatch):
+        code = _card(env, monkeypatch)
+        sends: list = []
+        loser: dict = {}
+
+        def _reentrant_post(jid, message):
+            # The second tap lands while the first invocation is at the bridge.
+            if not loser:
+                loser["rc"], _ = _run(
+                    env, monkeypatch, APPROVE, "appr_race_b", "--code", code,
+                    "--decision", "approve", "--sender-role", "owner",
+                    post=_reentrant_post)
+            sends.append((jid, message))
+            return True, "wamid.OK"
+
+        rc, _ = _run(env, monkeypatch, APPROVE, "appr_race_a", "--code", code,
+                     "--decision", "approve", "--sender-role", "owner",
+                     post=_reentrant_post)
+        assert rc == 0
+        assert loser["rc"] == 0, "the loser reports success — the send IS happening"
+        assert len(sends) == 1, "the customer must receive exactly one copy"
+        assert len([r for r in _rows(env) if r["type"] == "catering_followup_sent"]) == 1
+        record = _store(env)[0]
+        assert record["status"] == "approved_sent"
+        assert record["sent_message_id"] == "wamid.OK"
+        assert record["claimed_at"] is None
+
+    def test_an_already_claimed_code_is_a_no_op(self, env, monkeypatch, capsys):
+        _write_followups(env, _followup(
+            status="sending", approval_code="#AAAAA", rendered_message="hi",
+            attempt_count=1, last_attempt_at=DAYTIME.isoformat(),
+            claimed_at=(DAYTIME - timedelta(minutes=1)).isoformat()))
+        rc, sends = _run(env, monkeypatch, APPROVE, "appr_claimed", "--code",
+                         "#AAAAA", "--decision", "approve", "--sender-role", "owner")
+        assert rc == 0 and sends == []
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["in_flight"] is True and payload["idempotent_replay"] is True
+        assert _store(env)[0]["status"] == "sending"
+
+    def test_a_claim_cannot_be_cancelled_out_from_under_the_sender(
+            self, env, monkeypatch):
+        _write_followups(env, _followup(
+            status="sending", approval_code="#AAAAA", rendered_message="hi",
+            attempt_count=1, last_attempt_at=DAYTIME.isoformat(),
+            claimed_at=(DAYTIME - timedelta(minutes=1)).isoformat()))
+        rc, sends = _run(env, monkeypatch, APPROVE, "appr_claimed_cancel", "--code",
+                         "#AAAAA", "--decision", "cancel", "--sender-role", "owner")
+        assert rc == 0 and sends == []
+        assert _store(env)[0]["status"] == "sending"
+        assert "catering_followup_cancelled" not in _types(env)
+
+
+class TestApproveNamesTheRuleThatFired:
+    """EXIT_LEAD_ON_HOLD (14) means "clear the hold". Returning it for a kill
+    switch or an opt-out sent the owner to `set-catering-lead-hold --off` for a
+    hold nobody ever set, and the skill explained the wrong reason."""
+
+    def _payload(self, capsys) -> dict:
+        return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    def test_a_hold_keeps_the_hold_code(self, env, monkeypatch, capsys):
+        code = _card(env, monkeypatch)
+        _write_leads(env, _lead(on_hold=True, hold_reason="paused"))
+        rc, _ = _run(env, monkeypatch, APPROVE, "appr_code_hold", "--code", code,
+                     "--decision", "approve", "--sender-role", "owner")
+        assert rc == 14
+        assert self._payload(capsys)["suppressed_reason"] == "lead_on_hold"
+
+    def test_the_kill_switch_is_not_a_hold(self, env, monkeypatch, capsys):
+        code = _card(env, monkeypatch)
+        (env["state"] / "disabled.flag").write_text("", encoding="utf-8")
+        rc, sends = _run(env, monkeypatch, APPROVE, "appr_code_kill", "--code", code,
+                         "--decision", "approve", "--sender-role", "owner")
+        assert rc == 16 and sends == []
+        assert self._payload(capsys)["suppressed_reason"] == "kill_switch"
+
+    def test_a_closed_lead_is_not_a_hold(self, env, monkeypatch, capsys):
+        code = _card(env, monkeypatch)
+        _write_leads(env, _lead(status="CLOSED"))
+        rc, sends = _run(env, monkeypatch, APPROVE, "appr_code_closed", "--code", code,
+                         "--decision", "approve", "--sender-role", "owner")
+        assert rc == 16 and sends == []
+        assert self._payload(capsys)["suppressed_reason"] == "lead_status_not_allowed"
+
+    def test_a_vanished_lead_is_not_a_hold(self, env, monkeypatch, capsys):
+        code = _card(env, monkeypatch)
+        _write_leads(env)
+        rc, sends = _run(env, monkeypatch, APPROVE, "appr_code_gone", "--code", code,
+                         "--decision", "approve", "--sender-role", "owner")
+        assert rc == 16 and sends == []
+        assert self._payload(capsys)["suppressed_reason"] == "lead_missing"
+
+
+class TestApproveQuietHours:
+    """The owner approving at 23:00 is not a reason to message a customer at
+    23:00 — and not a reason to destroy the follow-up either."""
+
+    def test_an_approval_inside_quiet_hours_defers_the_send(self, env, monkeypatch,
+                                                            capsys):
+        code = _card(env, monkeypatch)
+        rc, sends = _run(env, monkeypatch, APPROVE, "appr_quiet", "--code", code,
+                         "--decision", "approve", "--sender-role", "owner",
+                         now=_at(23, 0))
+        assert rc == 0 and sends == []
+        record = _store(env)[0]
+        assert record["status"] == "scheduled", "deferred, never terminal"
+        assert record["suppressed_reason"] is None
+        assert record["approval_code"] is None, (
+            "the owner should see the card at the hour it will actually send"
+        )
+        row = [r for r in _rows(env) if r["type"] == "catering_followup_deferred"][-1]
+        assert row["reason"] == "quiet_hours"
+        assert record["due_at"] == row["to_due_at"]
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["deferred_reason"] == "quiet_hours"
+        assert payload["deferred_until"] == record["due_at"]
+
+    def test_the_deferred_followup_is_carded_again_when_the_window_reopens(
+            self, env, monkeypatch):
+        code = _card(env, monkeypatch)
+        _run(env, monkeypatch, APPROVE, "appr_quiet_defer", "--code", code,
+             "--decision", "approve", "--sender-role", "owner", now=_at(23, 0))
+        rc, sends = _run(env, monkeypatch, SWEEP, "sweep_after_defer",
+                         now=_at(9, 15) + timedelta(days=1))
+        assert rc == 0 and len(sends) == 1 and sends[0][0] == OWNER_JID
+        assert _store(env)[0]["status"] == "awaiting_owner_approval"
+
+    @pytest.mark.parametrize("hour,minute,quiet", [
+        (20, 59, False), (21, 0, True), (8, 59, True), (9, 0, False)])
+    def test_the_window_boundaries(self, env, monkeypatch, hour, minute, quiet):
+        code = _card(env, monkeypatch)
+        rc, sends = _run(env, monkeypatch, APPROVE, f"appr_q_{hour}_{minute}",
+                         "--code", code, "--decision", "approve",
+                         "--sender-role", "owner", now=_at(hour, minute))
+        assert rc == 0
+        if quiet:
+            assert sends == [] and _store(env)[0]["status"] == "scheduled"
+        else:
+            assert len(sends) == 1 and _store(env)[0]["status"] == "approved_sent"
+
+
+class TestApproveRechecksTheAllowlist:
+    """The sweep gates on CATERING_FOLLOWUP_ALLOWLIST; approve did not. A card in
+    flight when the operator narrowed the rollout still sent."""
+
+    def test_a_card_does_not_outlive_a_narrowing_of_the_rollout(
+            self, env, monkeypatch, capsys):
+        code = _card(env, monkeypatch)          # minted under "*"
+        monkeypatch.setenv("CATERING_FOLLOWUP_ALLOWLIST", "")
+        rc, sends = _run(env, monkeypatch, APPROVE, "appr_allow_empty", "--code",
+                         code, "--decision", "approve", "--sender-role", "owner")
+        assert rc == 16 and sends == []
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["suppressed_reason"] == "not_in_allowlist"
+        row = [r for r in _rows(env) if r["type"] == "catering_followup_suppressed"][-1]
+        assert row["reason"] == "not_in_allowlist"
+
+    def test_the_refusal_is_a_gate_not_a_retirement(self, env, monkeypatch):
+        """Same posture the sweep already takes: widening the allowlist again
+        must find the card, not a graveyard."""
+        code = _card(env, monkeypatch)
+        monkeypatch.setenv("CATERING_FOLLOWUP_ALLOWLIST", "")
+        _run(env, monkeypatch, APPROVE, "appr_allow_gate", "--code", code,
+             "--decision", "approve", "--sender-role", "owner")
+        assert _store(env)[0]["status"] == "awaiting_owner_approval"
+        monkeypatch.setenv("CATERING_FOLLOWUP_ALLOWLIST", "*")
+        rc, sends = _run(env, monkeypatch, APPROVE, "appr_allow_rewide", "--code",
+                         code, "--decision", "approve", "--sender-role", "owner")
+        assert rc == 0 and len(sends) == 1
+        assert _store(env)[0]["status"] == "approved_sent"
+
+    def test_a_still_listed_number_is_admitted(self, env, monkeypatch):
+        code = _card(env, monkeypatch)
+        monkeypatch.setenv("CATERING_FOLLOWUP_ALLOWLIST", "+15550100777")
+        rc, sends = _run(env, monkeypatch, APPROVE, "appr_allow_named", "--code",
+                         code, "--decision", "approve", "--sender-role", "owner")
+        assert rc == 0 and len(sends) == 1 and sends[0][0] == CUSTOMER_JID
+
+    def test_an_orphaned_followup_reports_the_missing_lead_not_the_allowlist(
+            self, env, monkeypatch, capsys):
+        """An orphan has no conversation to gate; `lead_missing` is the truthful
+        reason and the one that retires it."""
+        code = _card(env, monkeypatch)
+        _write_leads(env)
+        monkeypatch.setenv("CATERING_FOLLOWUP_ALLOWLIST", "")
+        rc, sends = _run(env, monkeypatch, APPROVE, "appr_allow_orphan", "--code",
+                         code, "--decision", "approve", "--sender-role", "owner")
+        assert rc == 16 and sends == []
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert payload["suppressed_reason"] == "lead_missing"
+        assert _store(env)[0]["status"] == "suppressed"
 
 
 # ── create (owner_reminder) ──────────────────────────────────────────────────
@@ -767,6 +1198,18 @@ class TestStatus:
         report = json.loads(capsys.readouterr().out)
         assert report["store_readable"] is False
         assert report["total"] == 0
+
+    def test_an_in_flight_claim_is_reported_as_open(self, env, monkeypatch, capsys):
+        """A claimed send is neither finished nor idle; an operator looking for it
+        must not find it in neither bucket."""
+        _write_followups(env, _followup(status="sending", approval_code="#AAAAA",
+                                        claimed_at=DAYTIME.isoformat()))
+        mod = load_script("status_sending", STATUS)
+        sys.argv = ["catering-followup-status", "--json"]
+        assert mod.main() == 0
+        report = json.loads(capsys.readouterr().out)
+        assert [r["followup_id"] for r in report["open"]] == ["FU0001"]
+        assert report["open"][0]["claimed_at"]
 
     def test_lead_filter(self, env, monkeypatch, capsys):
         _write_followups(env, _followup(), _followup(followup_id="FU0002",

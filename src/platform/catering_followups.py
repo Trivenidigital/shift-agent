@@ -27,6 +27,28 @@ happens to pass would turn "the customer opted out" into "the customer opted out
 until 9am tomorrow", and the audit row would record the attempt that eventually
 succeeded rather than the decision that should have stopped it.
 
+QUIET HOURS ARE THE ONE EXCEPTION, AND THEY DEFER RATHER THAN SUPPRESS. Every
+other rule is a decision about whether this follow-up should happen at all; quiet
+hours are a fact about the clock. Treating them as terminal killed anything due
+between 21:00 and 09:00 — and with whole-day +24h/+48h offsets that is a
+deterministic 12-hours-a-day dead zone, not an edge case. So:
+
+  * OWNER approval cards are EXEMPT (`owner_directed=True`). The owner reads on
+    their own schedule; a withheld card is a lost lead, not a courtesy.
+  * A CUSTOMER-directed send inside the window advances `due_at` to the first
+    instant the window is over, stays `scheduled`, and writes a
+    `catering_followup_deferred` row. Same record, so the dedup key still names
+    exactly one nudge and nothing is re-litigated.
+
+CLAIM BEFORE SEND. A customer send is claimed (`sending`, with `claimed_at`)
+under the store lock BEFORE the network call and confirmed (`approved_sent`) only
+after the bridge accepts it — the same discipline as
+CateringQuoteAttempted -> CateringQuoteSent. Two owners tapping the same #XXXXX
+at once therefore produce ONE message: the second invocation sees the claim and
+exits idempotently. A failed send releases the claim to a retryable state; a
+claim older than CLAIM_STALE_MINUTES is a crashed sender and the sweep reclaims
+it, so a process that dies mid-send cannot strand a follow-up.
+
 Deployed FLAT to /opt/shift-agent/ so scripts + the cf-router plugin can import it.
 """
 from __future__ import annotations
@@ -78,6 +100,12 @@ CARD_TTL_HOURS = 4
 # Card attempts before the follow-up is abandoned. An owner who let two cards
 # lapse has answered; a third would be the agent arguing with them.
 MAX_CARD_ATTEMPTS = 2
+# A `sending` claim older than this is a CRASHED sender, not a slow one: the
+# bridge call it guards times out at safe_io.BRIDGE_TIMEOUT_SEC (10s by default),
+# so 15 minutes is ~90x the longest a live claim can legitimately be held. The
+# sweep releases claims past it; without that, a process killed between the claim
+# and the confirm would strand the follow-up in a status nothing ever reads.
+CLAIM_STALE_MINUTES = 15
 
 # ── Bridge template-bypass prefix ────────────────────────────────────────────
 # bridge.js drops outbound text that looks like LLM monologue unless it matches
@@ -165,17 +193,29 @@ FOLLOWUP_EXTRA_ALLOWED_STATUSES: dict[str, frozenset[str]] = {
     "post_event_feedback": frozenset({"CLOSED"}),
 }
 
-# Follow-up statuses that consumed a real attention budget (someone was carded or
-# messaged). A suppressed / cancelled / expired record never reached anyone, so it
-# does not count against the per-lead cap.
+# Follow-up statuses that consumed a real attention budget. TWO budgets, ONE cap:
+# `approved_sent` spent the CUSTOMER's, while `awaiting_owner_approval`, `sending`
+# and `expired` spent the OWNER's — a card was put in front of them, and an
+# `expired` record burned MAX_CARD_ATTEMPTS of those cards before being retired
+# unanswered. Leaving `expired` out let a lead that had already consumed two
+# owner cards start again from zero.
+#
+# `scheduled` and `suppressed` reached nobody. `cancelled` is left out
+# deliberately: the owner saw that card and ANSWERED it, and a cap that counted
+# their own "no" would ration the answering rather than the asking.
 _BUDGET_CONSUMING_STATUSES: frozenset[str] = frozenset({
-    "awaiting_owner_approval", "approved_sent",
+    "awaiting_owner_approval", "sending", "approved_sent", "expired",
 })
 
 # Follow-up statuses still in play — their approval codes must not be re-minted.
 LIVE_FOLLOWUP_STATUSES: frozenset[str] = frozenset({
-    "scheduled", "awaiting_owner_approval",
+    "scheduled", "awaiting_owner_approval", "sending",
 })
+
+# The sweep's rollout gate, read here so the approve path can re-check the SAME
+# list at approval time (a card minted under a wide allowlist must not outlive a
+# narrowing of it).
+ALLOWLIST_ENV = "CATERING_FOLLOWUP_ALLOWLIST"
 
 _ENV_PATH = "SHIFT_AGENT_FOLLOWUPS_PATH"
 
@@ -461,6 +501,36 @@ def _attr(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default)
 
 
+def allowlist_admits(jid: str) -> bool:
+    """ppv1/#612 wildcard semantics on the canonical identity key: ``*`` admits
+    everything, an empty list admits NOTHING (fail-closed), any error is a
+    refusal. Identical to automation_control.enabled's allowlist half, keyed the
+    same way so a number armed there means the same conversation here.
+
+    Lives in the kernel rather than in the sweep because BOTH ends of the
+    owner-supervised loop have to agree: the sweep decides which conversations may
+    be carded, and the approve path re-checks the same list before the send, so a
+    card already in flight when the operator narrows the rollout does not walk
+    through the gate that narrowing was meant to close.
+    """
+    try:
+        import automation_control  # lazy: scripts import this module without the kernel
+
+        raw = [p.strip() for p in os.environ.get(ALLOWLIST_ENV, "").split(",") if p.strip()]
+        if "*" in raw:
+            return True
+        if not raw:
+            return False
+        want = automation_control.canonical_key(jid)
+        if not want:
+            return False
+        allow = {automation_control.canonical_key(e) for e in raw}
+        allow.discard("")
+        return want in allow
+    except Exception:  # noqa: BLE001 — a broken gate refuses, never admits
+        return False
+
+
 def in_quiet_hours(hour: int, start: int, end: int) -> bool:
     """Is `hour` inside the customer-facing quiet window?
 
@@ -477,6 +547,37 @@ def in_quiet_hours(hour: int, start: int, end: int) -> bool:
     if start > end:
         return hour >= start or hour < end
     return start <= hour < end
+
+
+def quiet_hours_bounds(cfg: Any) -> Tuple[int, int]:
+    """(start, end) from a CateringFollowupConfig, with the deployed defaults.
+    ONE reader, so the gate and the deferral it produces can never disagree about
+    where the window is."""
+    return (int(_attr(cfg, "quiet_hours_start", 21) or 0),
+            int(_attr(cfg, "quiet_hours_end", 9) or 0))
+
+
+def next_quiet_hours_end(now: datetime, start: int, end: int) -> datetime:
+    """The first instant at or after `now` when the customer-facing window reopens.
+
+    `now` itself when the window is not open (including the start == end
+    disabled case), so a caller that defers unconditionally cannot push a
+    follow-up into the future for no reason. On the wrapping 21->9 default,
+    22:30 defers to 09:00 TOMORROW and 03:00 defers to 09:00 today — the
+    boundary belongs to the send side (`end` is not quiet), which is the same
+    convention in_quiet_hours uses.
+    """
+    if not in_quiet_hours(now.hour, start, end):
+        return now
+    boundary = now.replace(hour=end % 24, minute=0, second=0, microsecond=0)
+    return boundary if boundary > now else boundary + timedelta(days=1)
+
+
+def deferred_due_at(now: datetime, cfg: Any = None) -> datetime:
+    """Where a quiet-houred CUSTOMER send moves to. The whole deferral in one
+    call, so the sweep and the approve path place it identically."""
+    start, end = quiet_hours_bounds(cfg)
+    return next_quiet_hours_end(now, start, end)
 
 
 def _prior_budget_consumers(
@@ -511,6 +612,7 @@ def suppression_check(
     cfg: Any = None,
     lead_followups: Sequence[CateringFollowup] = (),
     kill_switch_engaged: bool = False,
+    owner_directed: bool = False,
 ) -> Tuple[bool, str]:
     """(suppressed, reason). `reason` is "" when the follow-up may proceed.
 
@@ -528,6 +630,11 @@ def suppression_check(
       frequency_cap        the lifetime budget for system follow-ups is spent
       min_interval         too soon after the previous one
       quiet_hours          outside the customer-facing window
+
+    `quiet_hours` is the ONE reason the caller must not treat as terminal: it is a
+    DEFERRAL (see `deferred_due_at`). `owner_directed=True` — the sweep's default
+    owner-card path — skips the check entirely, because the owner reads on their
+    own schedule and their card was never a customer-facing send.
 
     `automation_mode` is the conversation's effective automation-control mode, or
     None when the kernel is not armed for that chat. `cfg` is a
@@ -572,10 +679,10 @@ def suppression_check(
             if now - most_recent < timedelta(hours=min_hours):
                 return True, "min_interval"
 
-    start = int(_attr(cfg, "quiet_hours_start", 21) or 0)
-    end = int(_attr(cfg, "quiet_hours_end", 9) or 0)
-    if in_quiet_hours(now.hour, start, end):
-        return True, "quiet_hours"
+    if not owner_directed:
+        start, end = quiet_hours_bounds(cfg)
+        if in_quiet_hours(now.hour, start, end):
+            return True, "quiet_hours"
 
     return False, ""
 
@@ -603,17 +710,34 @@ def card_expired(followup: CateringFollowup, now: datetime,
     return now - stamped >= timedelta(hours=ttl_hours)
 
 
+def claim_stale(followup: CateringFollowup, now: datetime,
+                *, stale_minutes: int = CLAIM_STALE_MINUTES) -> bool:
+    """Has a `sending` claim outlived any live send it could be guarding?
+
+    A claim with no `claimed_at` is treated as stale: it cannot be aged, and
+    leaving it would be the permanent limbo the claim exists to avoid.
+    """
+    if followup.status != "sending":
+        return False
+    if followup.claimed_at is None:
+        return True
+    return now - followup.claimed_at >= timedelta(minutes=stale_minutes)
+
+
 def for_lead(store: CateringFollowupStore, lead_id: str) -> list[CateringFollowup]:
     return [f for f in store.followups if f.lead_id == lead_id]
 
 
 def by_code(store: CateringFollowupStore, code: str) -> Optional[CateringFollowup]:
-    """The follow-up awaiting approval under this code. Only
-    `awaiting_owner_approval` and `approved_sent` records are matched: the first
-    is the live card, the second is what makes an owner's repeated reply an
-    idempotent replay rather than a not-found error."""
+    """The follow-up awaiting approval under this code. Three statuses match:
+    `awaiting_owner_approval` is the live card, `approved_sent` is what makes an
+    owner's repeated reply an idempotent replay rather than a not-found error,
+    and `sending` is a claim another invocation is already acting on — a
+    concurrent approval MUST see it, because "not found" would read as an error
+    the owner should retry."""
     for f in store.followups:
-        if f.approval_code == code and f.status in ("awaiting_owner_approval", "approved_sent"):
+        if f.approval_code == code and f.status in (
+                "awaiting_owner_approval", "sending", "approved_sent"):
             return f
     return None
 
@@ -646,12 +770,14 @@ __all__ = [
     "EVENT_ANCHORED_TYPES", "TEMPLATE_KEYS",
     "BRIDGE_TEMPLATE_PREFIX", "with_bridge_prefix",
     "NOTE_MAX_CHARS", "normalize_note", "note_line",
-    "CARD_TTL_HOURS", "MAX_CARD_ATTEMPTS",
+    "CARD_TTL_HOURS", "MAX_CARD_ATTEMPTS", "CLAIM_STALE_MINUTES",
     "FOLLOWUP_ALLOWED_LEAD_STATUSES", "FOLLOWUP_EXTRA_ALLOWED_STATUSES",
-    "LIVE_FOLLOWUP_STATUSES",
+    "LIVE_FOLLOWUP_STATUSES", "ALLOWLIST_ENV", "allowlist_admits",
     "followups_path", "followups_lock", "load_store", "save_store",
     "next_followup_id", "dedup_key", "find_duplicate", "compute_due",
     "ScheduleResult", "schedule_followup", "schedule_best_effort",
-    "in_quiet_hours", "allowed_statuses_for", "suppression_check",
-    "due_followups", "card_expired", "for_lead", "by_code", "live_codes",
+    "in_quiet_hours", "quiet_hours_bounds", "next_quiet_hours_end",
+    "deferred_due_at", "allowed_statuses_for", "suppression_check",
+    "due_followups", "card_expired", "claim_stale", "for_lead", "by_code",
+    "live_codes",
 ]

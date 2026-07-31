@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """catering-followup-sweep — the M5 follow-up engine (owner-supervised by default).
 
-Walks the follow-up store once per run and does exactly three things:
+Walks the follow-up store once per run and does exactly four things:
 
-  1. RE-CARDS or EXPIRES owner approval cards whose 4h window lapsed.
+  1. RECLAIMS crashed `sending` claims, then RE-CARDS or EXPIRES owner approval
+     cards whose 4h window lapsed. An expiry NOTIFIES the owner — an automated
+     retirement the owner never hears about is a lead that vanished.
   2. SUPPRESSES due follow-ups that a rule says must not happen, terminally.
-  3. CARDS the survivors: renders the deterministic template, mints a #XXXXX
+  3. DEFERS a due CUSTOMER send that landed inside quiet hours, advancing its
+     `due_at` to the moment the window reopens. Owner CARDS are exempt from quiet
+     hours entirely, so the default path never defers.
+  4. CARDS the survivors: renders the deterministic template, mints a #XXXXX
      approval code, moves the record to `awaiting_owner_approval` and sends the
      OWNER a card. The customer hears nothing until the owner replies with the
      code (`approve-catering-followup`).
@@ -13,7 +18,10 @@ Walks the follow-up store once per run and does exactly three things:
 Direct customer auto-send exists behind ``CATERING_FOLLOWUP_AUTOSEND`` and ships
 OFF. It is deliberately a SEPARATE flag from the sweep's own arming flag: an
 operator turning the engine on to watch it card things must not discover they
-also turned on unattended sending.
+also turned on unattended sending. When it IS on, the send is CLAIMED (`sending`)
+under the store lock and only confirmed `approved_sent` once the bridge accepts
+it — a status that says the customer has the message must never be written by a
+send that has not happened yet.
 
 THREE INDEPENDENT GATES, all default-off (house style — arming one arms nothing
 else):
@@ -56,8 +64,9 @@ from safe_io import (  # noqa: E402
 )
 from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402
 from schemas import (  # noqa: E402
-    CateringFollowupCardSent, CateringFollowupExpired, CateringFollowupSent,
-    CateringFollowupSuppressed, CateringLeadStore, Config,
+    CateringFollowupCardSent, CateringFollowupDeferred, CateringFollowupExpired,
+    CateringFollowupSendFailed, CateringFollowupSent, CateringFollowupSuppressed,
+    CateringLeadStore, Config,
 )
 from exit_codes import EXIT_OK  # noqa: E402
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
@@ -67,7 +76,6 @@ LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH", "/opt/shift-agent/sta
 LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
 
 ENABLED_ENV = "CATERING_FOLLOWUP_ENABLED"
-ALLOWLIST_ENV = "CATERING_FOLLOWUP_ALLOWLIST"
 AUTOSEND_ENV = "CATERING_FOLLOWUP_AUTOSEND"
 TEMPLATE_DIR_ENV = "SHIFT_AGENT_TEMPLATE_DIR"
 
@@ -100,27 +108,6 @@ def _template_dir() -> Path:
     if deployed.is_dir():
         return deployed
     return Path(__file__).resolve().parent.parent / "templates"
-
-
-def _allowlist_admits(jid: str) -> bool:
-    """ppv1/#612 wildcard semantics on the canonical identity key: ``*`` admits
-    everything, an empty list admits NOTHING (fail-closed), any error is a
-    refusal. Identical to automation_control.enabled's allowlist half, keyed the
-    same way so a number armed there means the same conversation here."""
-    try:
-        raw = [p.strip() for p in os.environ.get(ALLOWLIST_ENV, "").split(",") if p.strip()]
-        if "*" in raw:
-            return True
-        if not raw:
-            return False
-        want = automation_control.canonical_key(jid)
-        if not want:
-            return False
-        allow = {automation_control.canonical_key(e) for e in raw}
-        allow.discard("")
-        return want in allow
-    except Exception:
-        return False
 
 
 def _customer_jid(lead) -> str:
@@ -202,16 +189,54 @@ def _mint_code(path: Path) -> str:
     return approval_code_pools.generate_unique_code(exclude=cf.live_codes(path))
 
 
-def _expire_or_recard(store, now, path):
-    """Sweep lapsed owner cards. Returns (recarded, expired, audit_rows).
+def _notify_expired(row) -> None:
+    """Tell the owner a follow-up retired itself. Plain text, never Markdown: the
+    follow-up type carries underscores (`proposal_unanswered`), and a MarkdownV1
+    parse would silently eat them and hand the owner a mangled alert.
 
-    Caller MUST hold the store lock. A card that outlived its window returns the
-    follow-up to `scheduled` so the next cycle re-cards it; at MAX_CARD_ATTEMPTS
-    it becomes `expired` instead. An owner who let two cards lapse has answered.
+    Every other automated retirement in catering announces itself (§12b); this one
+    did not, so a lead the owner meant to chase could go quiet with the only
+    record of it sitting in an audit file nobody reads. Best-effort by
+    construction — `notify_owner_with_fallback` dead-letters its own failures, and
+    a paging problem must not stop the sweep finishing its cycle.
     """
-    recarded = expired = 0
+    try:
+        safe_io.notify_owner_with_fallback(
+            "Catering follow-up expired",
+            f"The follow-up for {row.lead_id} ({row.followup_type}) expired "
+            f"unapproved after {row.attempts} owner cards and will not be sent. "
+            f"If you still want to reach them, schedule a fresh reminder.",
+            priority=0, source="catering-followup-sweep",
+        )
+    except Exception as e:  # noqa: BLE001
+        _log(f"catering_followup_sweep: expiry notification failed for "
+             f"{row.followup_id} (non-fatal): {e}")
+
+
+def _expire_or_recard(store, now, path):
+    """Sweep stale claims and lapsed owner cards. Returns (recarded, expired,
+    reclaimed, audit_rows).
+
+    Caller MUST hold the store lock. A `sending` claim older than
+    CLAIM_STALE_MINUTES belonged to a process that died between claiming and
+    confirming; it returns to `awaiting_owner_approval` so the owner's card — and
+    the 4h window still running on it — resume where they were. A card that
+    outlived that window returns the follow-up to `scheduled` so the next cycle
+    re-cards it; at MAX_CARD_ATTEMPTS it becomes `expired` instead. An owner who
+    let two cards lapse has answered.
+    """
+    recarded = expired = reclaimed = 0
     pending_rows = []
     for i, f in enumerate(store.followups):
+        if cf.claim_stale(f, now):
+            # Released to the card it was claimed from, NOT to `scheduled`: the
+            # owner already approved this text, and the card's own TTL (measured
+            # from last_attempt_at, which the claim deliberately left alone) is
+            # what bounds it from here.
+            f = f.model_copy(update={"status": "awaiting_owner_approval",
+                                     "claimed_at": None})
+            store.followups[i] = f
+            reclaimed += 1
         if not cf.card_expired(f, now):
             continue
         if f.attempt_count >= cf.MAX_CARD_ATTEMPTS:
@@ -229,7 +254,7 @@ def _expire_or_recard(store, now, path):
                 "status": "scheduled", "approval_code": None, "rendered_message": None,
             })
             recarded += 1
-    return recarded, expired, pending_rows
+    return recarded, expired, reclaimed, pending_rows
 
 
 def _process_due(store, leads, cfg, now, path, *, autosend: bool,
@@ -255,7 +280,7 @@ def _process_due(store, leads, cfg, now, path, *, autosend: bool,
         # suppression check below and is retired as lead_missing — that path sends
         # nothing, so letting it run outside the allowlist costs nothing and keeps
         # the store from accumulating records nobody will ever resolve.
-        if lead is not None and not _allowlist_admits(jid):
+        if lead is not None and not cf.allowlist_admits(jid):
             continue
 
         mode = None
@@ -271,7 +296,24 @@ def _process_due(store, leads, cfg, now, path, *, autosend: bool,
             cfg=cfg.catering_followup,
             lead_followups=cf.for_lead(store, followup.lead_id),
             kill_switch_engaged=kill_switch,
+            # The default outcome of this loop is an OWNER card, and the owner
+            # reads on their own schedule. Only the autosend path is a
+            # customer-facing send, so only it consults the quiet window.
+            owner_directed=not autosend,
         )
+        if suppressed and reason == "quiet_hours":
+            # DEFER, never retire: the clock is not a decision about this
+            # customer. Same record, so the (lead, type, due-day) dedup still
+            # names exactly one nudge and no second copy can appear.
+            new_due = cf.deferred_due_at(now, cfg.catering_followup)
+            if _set(store, followup.followup_id, {"due_at": new_due}) is not None:
+                _emit(CateringFollowupDeferred(
+                    type="catering_followup_deferred", ts=now,
+                    followup_id=followup.followup_id, lead_id=followup.lead_id,
+                    followup_type=followup.followup_type, reason="quiet_hours",
+                    from_due_at=followup.due_at, to_due_at=new_due,
+                ))
+            continue
         if suppressed:
             _set(store, followup.followup_id, {
                 "status": "suppressed", "suppressed_reason": reason,
@@ -300,12 +342,16 @@ def _process_due(store, leads, cfg, now, path, *, autosend: bool,
             _log(f"catering_followup_sweep: code mint failed for {followup.followup_id}: {e}")
             continue
 
+        # CLAIM, don't confirm. The autosend record moves to `sending`, not to
+        # `approved_sent`: that status is the store's claim that the customer HAS
+        # the message, and only the bridge accepting it may write that.
         updated = _set(store, followup.followup_id, {
-            "status": "approved_sent" if autosend else "awaiting_owner_approval",
+            "status": "sending" if autosend else "awaiting_owner_approval",
             "approval_code": code,
             "rendered_message": message[:2000],
             "attempt_count": followup.attempt_count + 1,
             "last_attempt_at": now,
+            "claimed_at": now if autosend else None,
         })
         if updated is None:
             continue
@@ -328,6 +374,61 @@ def _set(store, followup_id: str, update: dict):
             store.followups[i] = f.model_copy(update=update)
             return store.followups[i]
     return None
+
+
+def _commit(path: Path, followup_id: str, update: dict) -> bool:
+    """Apply ONE update to the on-disk store under its lock. Used after a send,
+    when the sweep's own lock has long been released. Best-effort: the audit row
+    is written first everywhere this is called, so a failure here loses
+    bookkeeping, never the record of what reached the customer."""
+    try:
+        with FileLock(cf.followups_lock(path)):
+            store, status = cf.load_store(path)
+            if status not in ("ok", "missing", "empty"):
+                _log(f"catering_followup_sweep: followups status={status!r} after a send; "
+                     f"{followup_id} state not persisted")
+                return False
+            if _set(store, followup_id, update) is None:
+                return False
+            cf.save_store(store, path)
+            return True
+    except Exception as e:  # noqa: BLE001 — the cycle must still finish
+        _log(f"catering_followup_sweep: state write failed for {followup_id}: {e}")
+        return False
+
+
+def _release_claim(path: Path, followup, now, *, error: str):
+    """Hand a FAILED autosend claim back, and say so. Returns the expiry row when
+    the release retired the follow-up, else None.
+
+    `scheduled` is the retryable release — the next cycle re-renders and re-mints
+    rather than reusing a code the customer never saw. The release is bounded by
+    the same MAX_CARD_ATTEMPTS the card path uses: a bridge that has swallowed
+    two attempts is an outage the owner should hear about, not a loop the sweep
+    should run forever.
+    """
+    retire = followup.attempt_count >= cf.MAX_CARD_ATTEMPTS
+    released_to = "expired" if retire else "scheduled"
+    _emit(CateringFollowupSendFailed(
+        type="catering_followup_send_failed", ts=now,
+        followup_id=followup.followup_id, lead_id=followup.lead_id,
+        followup_type=followup.followup_type, approval_code=followup.approval_code,
+        attempt=followup.attempt_count, released_to=released_to,
+        error=str(error)[:200],
+    ))
+    update = {"status": released_to, "claimed_at": None}
+    if not retire:
+        update.update({"approval_code": None, "rendered_message": None})
+    _commit(path, followup.followup_id, update)
+    if not retire:
+        return None
+    row = CateringFollowupExpired(
+        type="catering_followup_expired", ts=now,
+        followup_id=followup.followup_id, lead_id=followup.lead_id,
+        followup_type=followup.followup_type, attempts=followup.attempt_count,
+    )
+    _emit(row)
+    return row
 
 
 def main() -> int:
@@ -356,7 +457,7 @@ def main() -> int:
 
     pending_sends: list[dict] = []
     expiry_rows: list = []
-    recarded = expired = 0
+    recarded = expired = reclaimed = 0
     try:
         leads_store, leads_status = load_model(LEADS_PATH, CateringLeadStore,
                                                default=CateringLeadStore())
@@ -375,7 +476,7 @@ def main() -> int:
                 _log(f"catering_followup_sweep: followups status={status!r}; skipping cycle")
                 return EXIT_OK
 
-            recarded, expired, expiry_rows = _expire_or_recard(store, now, path)
+            recarded, expired, reclaimed, expiry_rows = _expire_or_recard(store, now, path)
             pending_sends = _process_due(
                 store, leads_store.leads, cfg, now, path,
                 autosend=autosend, template_dir=template_dir, owner_jid=owner_jid,
@@ -385,6 +486,7 @@ def main() -> int:
                     print(f"would_card {s['followup'].followup_id} lead={s['followup'].lead_id} "
                           f"type={s['followup'].followup_type} kind={s['kind']}")
                 print(json.dumps({"would_recard": recarded, "would_expire": expired,
+                                  "would_reclaim": reclaimed,
                                   "would_card": len(pending_sends)}))
                 return EXIT_OK
             cf.save_store(store, path)
@@ -392,36 +494,39 @@ def main() -> int:
         _log(f"catering_followup_sweep: unexpected error, skipping cycle: {e}")
         return EXIT_OK
 
+    # Notify OUTSIDE the lock (no network under a lock). `expired` is terminal
+    # with no self-edge, so one transition is one alert and later cycles cannot
+    # re-page the owner about the same retirement.
     for row in expiry_rows:
         _emit(row)
+        _notify_expired(row)
 
-    # Sends happen OUTSIDE the lock. A send failure leaves the record in
+    # Sends happen OUTSIDE the lock. A failed CARD leaves the record in
     # awaiting_owner_approval with last_attempt_at stamped, so the 4h card TTL
     # re-cards it on a later cycle — that is the retry, and it is bounded by
-    # MAX_CARD_ATTEMPTS rather than looping.
+    # MAX_CARD_ATTEMPTS rather than looping. A failed autosend releases its claim
+    # (`_release_claim`), because a claim nobody ever resolves is worse than
+    # either outcome.
     carded = sent = 0
     for s in pending_sends:
         f = s["followup"]
+        autosent = s["kind"] == "customer_autosend"
         if not s["jid"]:
             _log(f"catering_followup_sweep: no destination for {f.followup_id}; skipping send")
+            if autosent:
+                row = _release_claim(path, f, now, error="no_customer_destination")
+                if row is not None:
+                    _notify_expired(row)
             continue
         try:
             ok, mid_or_err = _bridge_post(s["jid"], s["message"])
         except Exception as e:  # noqa: BLE001
             _log(f"catering_followup_sweep: send raised for {f.followup_id}: {e}")
-            continue
-        if not ok:
-            _log(f"catering_followup_sweep: send failed for {f.followup_id}: {mid_or_err}")
-            continue
-        if s["kind"] == "customer_autosend":
-            sent += 1
-            _emit(CateringFollowupSent(
-                type="catering_followup_sent", ts=now,
-                followup_id=f.followup_id, lead_id=f.lead_id,
-                followup_type=f.followup_type, approval_code=s["code"],
-                outbound_message_id=mid_or_err,
-            ))
-        else:
+            ok, mid_or_err = False, f"{type(e).__name__}: {e}"
+        if not autosent:
+            if not ok:
+                _log(f"catering_followup_sweep: send failed for {f.followup_id}: {mid_or_err}")
+                continue
             carded += 1
             _emit(CateringFollowupCardSent(
                 type="catering_followup_card_sent", ts=now,
@@ -429,9 +534,31 @@ def main() -> int:
                 followup_type=f.followup_type, approval_code=s["code"],
                 attempt=f.attempt_count, owner_card_outbound_id=mid_or_err,
             ))
+            continue
 
-    print(json.dumps({"carded": carded, "auto_sent": sent,
-                      "recarded": recarded, "expired": expired}))
+        if not ok:
+            _log(f"catering_followup_sweep: autosend failed for {f.followup_id}: {mid_or_err}")
+            row = _release_claim(path, f, now, error=str(mid_or_err))
+            if row is not None:
+                _notify_expired(row)
+            continue
+        # CONFIRM: the bridge accepted it, so `approved_sent` is now true. Audit
+        # first — a crash between the two leaves the send-proven row on disk
+        # rather than a record claiming nothing happened.
+        sent += 1
+        _emit(CateringFollowupSent(
+            type="catering_followup_sent", ts=now,
+            followup_id=f.followup_id, lead_id=f.lead_id,
+            followup_type=f.followup_type, approval_code=s["code"],
+            outbound_message_id=mid_or_err,
+        ))
+        _commit(path, f.followup_id, {
+            "status": "approved_sent", "sent_message_id": mid_or_err,
+            "claimed_at": None,
+        })
+
+    print(json.dumps({"carded": carded, "auto_sent": sent, "recarded": recarded,
+                      "expired": expired, "reclaimed": reclaimed}))
     return EXIT_OK
 
 

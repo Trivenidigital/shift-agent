@@ -82,3 +82,14 @@ EXIT_LEAD_ON_HOLD = 14
 # which in this script already means "no lead carries that approval code", so
 # reusing it would make the two failures indistinguishable in the exit status.
 EXIT_UNKNOWN_DISCOUNT = 15
+
+# 16 — M5: approve-catering-followup refused because a suppression rule fired
+# between the card and the owner's approval. NOT the per-lead hold, which keeps
+# EXIT_LEAD_ON_HOLD (=14) to itself: 14 means "clear the hold", and returning it
+# for a kill switch, an opt-out or a frequency cap sends the owner to
+# `set-catering-lead-hold --off` for a hold nobody ever set. The rule that
+# actually fired is on stdout as {"suppressed_reason": "..."}, so the explanation
+# the owner reads can name it without the caller guessing from the exit status.
+# Quiet hours are NOT here: they defer the send and exit 0 (see
+# catering_followups.deferred_due_at).
+EXIT_FOLLOWUP_SUPPRESSED = 16

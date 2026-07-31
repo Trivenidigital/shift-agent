@@ -307,9 +307,19 @@ class TestSuppressionMatrix:
     def test_one_below_the_cap_proceeds(self):
         assert _check(lead_followups=_prior(2)) == (False, "")
 
-    @pytest.mark.parametrize("status", ["suppressed", "cancelled", "expired", "scheduled"])
+    @pytest.mark.parametrize("status", ["suppressed", "cancelled", "scheduled"])
     def test_records_that_reached_nobody_do_not_consume_the_budget(self, status):
         assert _check(lead_followups=_prior(5, status=status)) == (False, "")
+
+    def test_an_expired_record_still_consumed_owner_cards(self):
+        """It reached the OWNER twice before being retired. Excluding it let a
+        lead that had already burned MAX_CARD_ATTEMPTS start again from zero."""
+        assert _check(lead_followups=_prior(3, status="expired")) == (
+            True, "frequency_cap")
+
+    def test_a_claimed_send_consumes_the_budget_while_it_is_in_flight(self):
+        assert _check(lead_followups=_prior(3, status="sending")) == (
+            True, "frequency_cap")
 
     def test_owner_created_followups_are_never_capped(self):
         owner = _followup(created_by="owner")
@@ -339,6 +349,22 @@ class TestSuppressionMatrix:
         assert suppressed is expected
         assert reason == ("quiet_hours" if expected else "")
 
+    @pytest.mark.parametrize("hour,minute", [(20, 59), (21, 0), (8, 59), (9, 0)])
+    def test_an_owner_directed_followup_ignores_quiet_hours_entirely(self, hour, minute):
+        """The card goes to the OWNER, who reads on their own schedule. Gating it
+        on the CUSTOMER's clock killed everything due in a 12-hour window every
+        night — and the whole-day +24h/+48h offsets made that deterministic, not
+        an edge case."""
+        assert _check(now=NOW.replace(hour=hour, minute=minute),
+                      owner_directed=True) == (False, "")
+
+    def test_owner_direction_exempts_only_the_clock(self):
+        """Exempt from quiet hours is not exempt from anything else."""
+        assert _check(lead=_lead(on_hold=True), now=NOW.replace(hour=22),
+                      owner_directed=True) == (True, "lead_on_hold")
+        assert _check(mode="opted_out", now=NOW.replace(hour=22),
+                      owner_directed=True) == (True, "automation_suppressed")
+
     def test_automation_suppression_outranks_quiet_hours(self):
         """An opted-out customer during quiet hours records the opt-out — the fact
         that matters — not the incidental clock."""
@@ -358,6 +384,79 @@ class TestQuietHoursWindow:
     def test_equal_bounds_disable_the_check(self):
         """A misconfiguration must not mute the agent forever."""
         assert all(not cf.in_quiet_hours(h, 0, 0) for h in range(24))
+
+
+class TestQuietHoursDeferral:
+    """Where a quiet-houred CUSTOMER send moves to. The boundary convention is
+    in_quiet_hours': `end` belongs to the sending side, so the deferral lands ON
+    it and the very next evaluation proceeds."""
+
+    @pytest.mark.parametrize("hour,minute,expected", [
+        # Not quiet — `now` is returned unchanged, so a caller that defers
+        # unconditionally cannot push a follow-up into the future for nothing.
+        (20, 59, datetime(2026, 7, 31, 20, 59, tzinfo=timezone.utc)),
+        # Quiet, before midnight: the window closes TOMORROW at 09:00.
+        (21, 0, datetime(2026, 8, 1, 9, 0, tzinfo=timezone.utc)),
+        (23, 30, datetime(2026, 8, 1, 9, 0, tzinfo=timezone.utc)),
+        # Quiet, after midnight: the window closes TODAY at 09:00.
+        (0, 5, datetime(2026, 7, 31, 9, 0, tzinfo=timezone.utc)),
+        (8, 59, datetime(2026, 7, 31, 9, 0, tzinfo=timezone.utc)),
+        (9, 0, datetime(2026, 7, 31, 9, 0, tzinfo=timezone.utc)),
+    ])
+    def test_wrapping_window_boundaries(self, hour, minute, expected):
+        now = NOW.replace(hour=hour, minute=minute)
+        assert cf.next_quiet_hours_end(now, 21, 9) == expected
+
+    def test_non_wrapping_window(self):
+        now = NOW.replace(hour=10, minute=30)
+        assert cf.next_quiet_hours_end(now, 9, 17) == NOW.replace(
+            hour=17, minute=0)
+
+    def test_a_disabled_window_never_moves_anything(self):
+        now = NOW.replace(hour=3)
+        assert cf.next_quiet_hours_end(now, 0, 0) == now
+
+    def test_the_deferred_instant_is_itself_sendable(self):
+        """No defer loop: the boundary the deferral lands on is outside the
+        window by construction."""
+        for hour in range(24):
+            now = NOW.replace(hour=hour, minute=13)
+            moved = cf.next_quiet_hours_end(now, 21, 9)
+            assert not cf.in_quiet_hours(moved.hour, 21, 9)
+
+    def test_deferred_due_at_reads_the_config(self):
+        cfg = CateringFollowupConfig(quiet_hours_start=9, quiet_hours_end=17)
+        assert cf.deferred_due_at(NOW.replace(hour=10), cfg) == NOW.replace(hour=17)
+
+    def test_deferred_due_at_falls_back_to_the_deployed_defaults(self):
+        assert cf.deferred_due_at(NOW.replace(hour=22), None) == datetime(
+            2026, 8, 1, 9, 0, tzinfo=timezone.utc)
+
+    def test_quiet_hours_bounds_reads_a_dict_too(self):
+        assert cf.quiet_hours_bounds({"quiet_hours_start": 20,
+                                      "quiet_hours_end": 8}) == (20, 8)
+
+
+class TestAllowlist:
+    """The rollout gate, in the kernel so BOTH ends of the loop read one list."""
+
+    def test_wildcard_admits_everything(self, monkeypatch):
+        monkeypatch.setenv(cf.ALLOWLIST_ENV, "*")
+        assert cf.allowlist_admits("15550100777@s.whatsapp.net")
+
+    def test_empty_admits_nothing(self, monkeypatch):
+        """Fail-closed: an unset rollout is a disabled rollout."""
+        monkeypatch.setenv(cf.ALLOWLIST_ENV, "")
+        assert not cf.allowlist_admits("15550100777@s.whatsapp.net")
+
+    def test_a_scoped_list_admits_only_its_own_numbers(self, monkeypatch):
+        monkeypatch.setenv(cf.ALLOWLIST_ENV, "+15550100777")
+        assert cf.allowlist_admits("15550100777@s.whatsapp.net")
+        assert not cf.allowlist_admits("19998887777@s.whatsapp.net")
+
+    def test_an_empty_jid_is_refused(self, monkeypatch):
+        monkeypatch.setenv(cf.ALLOWLIST_ENV, "+15550100777")
+        assert not cf.allowlist_admits("")
 
 
 # ── selection helpers ────────────────────────────────────────────────────────
@@ -382,16 +481,22 @@ class TestSelection:
         assert not cf.card_expired(unstamped, NOW)
         assert not cf.card_expired(_followup(), NOW)  # still scheduled
 
-    def test_by_code_matches_only_carded_or_sent(self):
+    def test_by_code_matches_only_carded_claimed_or_sent(self):
         store = CateringFollowupStore(followups=[
             _followup(followup_id="FU0001", approval_code="#AAAAA", status="cancelled"),
             _followup(followup_id="FU0002", approval_code="#BBBBB",
                       status="awaiting_owner_approval"),
             _followup(followup_id="FU0003", approval_code="#CCCCC", status="approved_sent"),
+            _followup(followup_id="FU0004", approval_code="#DDDDD", status="sending",
+                      claimed_at=NOW),
         ])
         assert cf.by_code(store, "#AAAAA") is None
         assert cf.by_code(store, "#BBBBB").followup_id == "FU0002"
         assert cf.by_code(store, "#CCCCC").followup_id == "FU0003"
+        assert cf.by_code(store, "#DDDDD").followup_id == "FU0004", (
+            "a concurrent approval must SEE the claim; 'not found' reads as an "
+            "error the owner should retry"
+        )
 
     def test_live_codes_excludes_terminal_records(self, store_path):
         store = CateringFollowupStore(followups=[
@@ -400,9 +505,30 @@ class TestSelection:
                       status="awaiting_owner_approval"),
             _followup(followup_id="FU0003", approval_code="#CCCCC", status="approved_sent"),
             _followup(followup_id="FU0004", approval_code="#DDDDD", status="suppressed"),
+            _followup(followup_id="FU0005", approval_code="#EEEEE", status="sending",
+                      claimed_at=NOW),
         ])
         cf.save_store(store, store_path)
-        assert cf.live_codes(store_path) == {"#AAAAA", "#BBBBB"}
+        assert cf.live_codes(store_path) == {"#AAAAA", "#BBBBB", "#EEEEE"}
+
+    def test_a_claim_goes_stale_on_a_send_scale_not_a_card_scale(self):
+        """A claim guards a bridge call that times out in seconds. Ageing it on
+        the 4h CARD window would leave a crashed sender's record unreadable for
+        most of a working day."""
+        fresh = _followup(status="sending", claimed_at=NOW - timedelta(minutes=14))
+        assert not cf.claim_stale(fresh, NOW)
+        stale = _followup(status="sending", claimed_at=NOW - timedelta(minutes=15))
+        assert cf.claim_stale(stale, NOW)
+
+    def test_an_unaged_claim_is_stale_by_definition(self):
+        """No claimed_at means it can never age out — the permanent limbo the
+        claim exists to prevent."""
+        assert cf.claim_stale(_followup(status="sending"), NOW)
+
+    def test_only_a_claim_can_be_stale(self):
+        for status in ("scheduled", "awaiting_owner_approval", "approved_sent"):
+            assert not cf.claim_stale(
+                _followup(status=status, claimed_at=NOW - timedelta(days=9)), NOW)
 
     def test_live_codes_never_raises_into_a_mint_path(self, store_path):
         store_path.write_text("{not json", encoding="utf-8")

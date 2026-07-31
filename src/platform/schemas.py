@@ -2695,6 +2695,7 @@ CateringFollowupType = Literal[
 CateringFollowupStatus = Literal[
     "scheduled",                 # waiting for due_at
     "awaiting_owner_approval",   # card sent to the owner; #XXXXX pending
+    "sending",                   # CLAIMED for a customer send (see below)
     "approved_sent",             # owner approved; message delivered (terminal)
     "suppressed",                # a suppression rule fired (terminal)
     "cancelled",                 # owner/operator cancelled (terminal)
@@ -2714,6 +2715,13 @@ class CateringFollowup(BaseModel):
     customer sends: a card whose 4h approval window lapses returns the record to
     `scheduled` with attempt_count + 1, and the sweep gives up at
     ``catering_followups.MAX_CARD_ATTEMPTS``.
+
+    `sending` + `claimed_at` are the CLAIM half of claim-before-send: a customer
+    send is claimed under the store lock BEFORE the network call and confirmed
+    (`approved_sent`) only after it succeeds, so two concurrent approvals of the
+    same code cannot both reach the bridge. A claim older than
+    ``catering_followups.CLAIM_STALE_MINUTES`` is a crashed sender, not a slow
+    one, and the sweep reclaims it.
     """
     model_config = ConfigDict(extra="forbid")
     followup_id: str = Field(pattern=r"^FU[0-9]{4,}$")
@@ -2730,6 +2738,12 @@ class CateringFollowup(BaseModel):
     sent_message_id: Optional[str] = Field(default=None, max_length=200)
     attempt_count: int = Field(default=0, ge=0, le=10)
     last_attempt_at: Optional[datetime] = None
+    # When the `sending` claim was taken. Deliberately NOT last_attempt_at: that
+    # field anchors the 4h card TTL, and a claim that fails must leave the owner's
+    # approval window running from the CARD rather than restarting it. Additive +
+    # default None, so every follow-up written before the claim landed decodes
+    # unchanged.
+    claimed_at: Optional[datetime] = None
     # Owner-authored context for an owner_reminder ("are you still thinking about
     # the 14th?"). The owner's OWN words to their OWN customer — not model output —
     # so it is bounded and stripped rather than screened, and the owner reads it
@@ -7211,7 +7225,13 @@ class CateringFollowupSuppressed(_BaseFollowupEntry):
     """A due follow-up was NOT carded, and the record is now terminal. It is
     never silently rescheduled: a suppressed follow-up stays suppressed so the
     reason stays attached to a specific decision instead of being retried until
-    it happens to pass."""
+    it happens to pass.
+
+    ONE reason is not terminal: `not_in_allowlist` is a rollout gate, not a
+    decision about the follow-up, so the record is left where it was (the sweep
+    leaves such leads `scheduled`, the approve path leaves the card open) and
+    widening the allowlist picks it up again. Every other reason retires it.
+    """
     type: Literal["catering_followup_suppressed"]
     reason: Literal[
         "kill_switch",             # state/disabled.flag engaged
@@ -7222,9 +7242,36 @@ class CateringFollowupSuppressed(_BaseFollowupEntry):
         "customer_declined",       # the lead records a customer decline
         "frequency_cap",           # lifetime cap for system-created follow-ups
         "min_interval",            # too soon after the previous follow-up
-        "quiet_hours",             # outside the customer-facing sending window
+        # Historical only: quiet hours DEFER a customer send now (see
+        # CateringFollowupDeferred) and never reach the owner card at all. Kept in
+        # the union so rows written before that fix still decode.
+        "quiet_hours",
+        "not_in_allowlist",        # conversation outside CATERING_FOLLOWUP_ALLOWLIST
     ]
     detail: str = Field(default="", max_length=200)
+
+
+class CateringFollowupDeferred(_BaseFollowupEntry):
+    """A due CUSTOMER-directed follow-up was moved, not killed. Quiet hours are a
+    fact about the clock, not a decision about the customer, so the record keeps
+    its `scheduled` status and its `due_at` advances to the first instant the
+    window is over. Owner approval CARDS never reach this row: the owner reads on
+    their own schedule and is exempt from quiet hours entirely."""
+    type: Literal["catering_followup_deferred"]
+    reason: Literal["quiet_hours"]
+    from_due_at: datetime
+    to_due_at: datetime
+
+
+class CateringFollowupSendFailed(_BaseFollowupEntry):
+    """A CLAIMED customer send did not reach the bridge. The claim is released
+    back to a retryable state rather than confirmed, so `approved_sent` never
+    means anything but "the customer has this message"."""
+    type: Literal["catering_followup_send_failed"]
+    approval_code: Optional[ProposalCode] = None
+    attempt: int = Field(default=0, ge=0, le=10)
+    released_to: CateringFollowupStatus
+    error: str = Field(default="", max_length=200)
 
 
 class CateringFollowupCardSent(_BaseFollowupEntry):
@@ -7836,6 +7883,8 @@ LogEntry = Annotated[
         # M5 — controlled follow-up engine
         Annotated[CateringFollowupScheduled, Tag("catering_followup_scheduled")],
         Annotated[CateringFollowupSuppressed, Tag("catering_followup_suppressed")],
+        Annotated[CateringFollowupDeferred, Tag("catering_followup_deferred")],
+        Annotated[CateringFollowupSendFailed, Tag("catering_followup_send_failed")],
         Annotated[CateringFollowupCardSent, Tag("catering_followup_card_sent")],
         Annotated[CateringFollowupSent, Tag("catering_followup_sent")],
         Annotated[CateringFollowupCancelled, Tag("catering_followup_cancelled")],
@@ -7929,6 +7978,7 @@ __all__ = [
     "CateringFollowupType", "CateringFollowupStatus",
     "CateringFollowup", "CateringFollowupStore",
     "CateringFollowupScheduled", "CateringFollowupSuppressed",
+    "CateringFollowupDeferred", "CateringFollowupSendFailed",
     "CateringFollowupCardSent", "CateringFollowupSent",
     "CateringFollowupCancelled", "CateringFollowupExpired",
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
