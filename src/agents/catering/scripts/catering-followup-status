@@ -39,7 +39,10 @@ ENABLED_ENV = "CATERING_FOLLOWUP_ENABLED"
 ALLOWLIST_ENV = "CATERING_FOLLOWUP_ALLOWLIST"
 AUTOSEND_ENV = "CATERING_FOLLOWUP_AUTOSEND"
 
-_OPEN_STATUSES = ("scheduled", "awaiting_owner_approval")
+# Everything not yet resolved. `sending` is a claimed customer send in flight —
+# it belongs here rather than in the terminal bucket, or an operator looking for
+# a follow-up mid-send would find it in neither.
+_OPEN_STATUSES = ("scheduled", "awaiting_owner_approval", "sending")
 
 
 def _allowlist_summary(raw: str) -> dict:
@@ -68,6 +71,7 @@ def _row(f: dict) -> dict:
         "suppressed_reason": f.get("suppressed_reason"),
         "attempt_count": f.get("attempt_count", 0),
         "last_attempt_at": f.get("last_attempt_at"),
+        "claimed_at": f.get("claimed_at"),
     }
 
 
