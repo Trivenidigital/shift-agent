@@ -353,7 +353,8 @@ def _recompute_with_discount(lead, discount_id: str, *,
     return qc, None, False
 
 
-def _append_quote_ledger_best_effort(lead, *, source: str, now, quote_computation=None) -> None:
+def _append_quote_ledger_best_effort(lead, *, source: str, now, quote_computation=None,
+                                     edit_text: str = "") -> None:
     """PR-B: append the lead's committed quote state to the quote ledger AFTER the
     lead-store commit succeeded and LEADS_LOCK is released (leaf lock held alone).
     BEST-EFFORT — a ledger failure NEVER rolls back the lead write; it logs loudly.
@@ -376,7 +377,18 @@ def _append_quote_ledger_best_effort(lead, *, source: str, now, quote_computatio
     SPECIFIC pricebook version. That version IS this record's provenance, so it is
     stamped along with the kernel's price_status. `menu_version` still stays None —
     this script still reads no menu, so there is still no catalog provenance to
-    claim. Without `quote_computation` the behavior above is byte-identical."""
+    claim. Without `quote_computation` the behavior above is byte-identical.
+
+    `edit_text` is the owner's revision instruction, and it is ATTRIBUTED onto the
+    record rather than left out. Snapshotting `lead.quote_text` alone recorded
+    nothing about the edit: only the APPROVE path ever writes quote_text, and an
+    approved lead is no longer editable, so an owner_edit version could only ever
+    carry the pre-quote placeholder — a committed "revision" whose revision was
+    invisible. The instruction survived solely in the catering_owner_decision
+    audit row, which means reconstructing what the owner asked for required
+    joining the ledger against decisions.log by timestamp. It is appended, not
+    substituted, so the version still records what was on the table when the
+    owner asked for the change."""
     try:
         import catering_quote_ledger as _ql  # lazy; module is deployed flat
         selected = [{"name": it.name, "qty": it.qty, "price_usd": it.price_usd}
@@ -384,6 +396,11 @@ def _append_quote_ledger_best_effort(lead, *, source: str, now, quote_computatio
         quote_text = lead.quote_text or ""
         price_status = "estimated"
         pricebook_version = None
+        if edit_text.strip():
+            # Same 1000-char bound the CateringOwnerDecision audit row applies, so
+            # the two records of one instruction cannot disagree by truncation.
+            quote_text = (f"{quote_text}\n\n"
+                          f"Owner edit: {edit_text.strip()[:1000]}").strip()
         if quote_computation is not None:
             import catering_pricing as _pricing
             price_status = quote_computation.price_status
@@ -1122,8 +1139,13 @@ def main() -> int:
     # approve-with-discount commits a version too — otherwise the discounted number
     # the customer just received would exist on the lead but in no committed version.
     if args.decision == "edit" or (discount_id and args.decision == "approve"):
-        _append_quote_ledger_best_effort(lead, source="owner_edit", now=now,
-                                         quote_computation=quote_computation)
+        _append_quote_ledger_best_effort(
+            lead, source="owner_edit", now=now,
+            quote_computation=quote_computation,
+            # Only an actual edit carries an instruction; approve-with-discount
+            # reaches this same append with none.
+            edit_text=(args.edit_text if args.decision == "edit" else ""),
+        )
 
     # Outside lock: handle outbound for approve
     if args.decision != "approve":

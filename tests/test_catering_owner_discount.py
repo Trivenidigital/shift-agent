@@ -297,6 +297,47 @@ def test_the_discounted_version_carries_the_pricebook_it_was_validated_against(
     )
 
 
+def test_the_owner_edit_instruction_lands_on_the_committed_version(
+    bridge_server, env_dir,
+):
+    """The revision is the whole point of an owner_edit version. Snapshotting
+    lead.quote_text alone recorded none of it: only APPROVE writes quote_text and
+    an approved lead is no longer editable, so the version could only ever carry
+    the pre-quote placeholder. The instruction lived solely in the
+    catering_owner_decision audit row."""
+    _seed_lead(env_dir)
+    edit = "drop the paneer, add 20 more samosas, cap the total at $380"
+    assert _run(env_dir, "--decision", "edit", "--edit-text", edit) == 0
+    rec = _ledger(env_dir)[-1]
+    assert rec["source"] == "owner_edit"
+    assert edit in rec["quote_text"]
+    assert "Quote for L0001" in rec["quote_text"], (
+        "appended, not substituted — the version still records what was on the "
+        "table when the owner asked for the change"
+    )
+
+
+def test_an_edit_carrying_a_discount_records_both(bridge_server, env_dir):
+    """One invocation can do both; neither attribution may swallow the other."""
+    _seed_lead(env_dir)
+    assert _run(env_dir, "--decision", "edit", "--edit-text", "swap the dessert",
+                "--discount-id", "flat25") == 0
+    rec = _ledger(env_dir)[-1]
+    assert "Owner edit: swap the dessert" in rec["quote_text"]
+    assert "flat25" in rec["quote_text"]
+    assert rec["quote_total_usd"] == 375
+
+
+def test_an_approve_with_a_discount_records_no_owner_edit_line(
+    bridge_server, env_dir,
+):
+    """That path reaches the same append with no instruction to attribute."""
+    _seed_lead(env_dir)
+    assert _run(env_dir, "--decision", "approve", "--quote-from-lead-state",
+                "--discount-id", "flat25") == 0
+    assert "Owner edit:" not in _ledger(env_dir)[-1]["quote_text"]
+
+
 def test_an_owner_edit_without_a_discount_is_unchanged(bridge_server, env_dir):
     """The PR-B v3 no-catalog-provenance rule still holds where it applies."""
     _seed_lead(env_dir)
