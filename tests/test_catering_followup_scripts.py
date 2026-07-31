@@ -39,25 +39,37 @@ AMEND = SCRIPTS / "amend-catering-lead"
 OWNER_JID = "19045550100@s.whatsapp.net"
 CUSTOMER_JID = "15550100777@s.whatsapp.net"
 
-# PRE-EXISTING DEFECT, surfaced by the M5 guard below and deliberately NOT fixed
-# here — neither script is M5's, and one of them is on a money path.
+# Catering scripts that alias the send chokepoint WITHOUT an allowlist entry, and
+# are therefore refused at runtime with missing_action_context.
 #
-# Both alias the send chokepoint (`from safe_io import bridge_post_2tuple as
-# _bridge_post`) without an entry in SAFE_IO_NULL_CONTEXT_ALLOWLIST, so at
-# runtime every send they make is refused with `missing_action_context`:
-#   amend-catering-lead    — M1's slot-filling loop: every customer question
-#                            batch and every owner hand-off card.
-#   catering-mint-deposit  — the slice-2 deposit-link customer send.
-# The PR-ζ AST static gate cannot see either callsite (it matches call NAMES,
-# and both call through an alias), which is why they have gone unnoticed.
+# EMPTY, and it must stay that way. It briefly held amend-catering-lead (M1's
+# slot-filling loop) and catering-mint-deposit (the slice-2 deposit send), both
+# surfaced by the scan below and both since allowlisted. The set is kept as a
+# pinned expectation rather than deleted so the guard reports a CHANGE in either
+# direction: a new name means a script ships refusing every send it makes, and a
+# name disappearing means a gap was closed and this set should shrink.
+KNOWN_UNALLOWLISTED_CATERING_SENDERS: set[str] = set()
+
+# EVERY catering script that reaches the send chokepoint through an alias. Each
+# needs a SAFE_IO_NULL_CONTEXT_ALLOWLIST entry, and each gets a direct policy
+# assertion below — the AST static gate cannot see any of these callsites, so
+# this list plus the scan that keeps it honest is the whole guard.
 #
-# Recorded as a pinned set rather than dropped from the guard so the finding
-# stays visible: a NEW name appearing here fails the test, and closing either
-# gap also fails it (prompting the set to shrink).
-KNOWN_UNALLOWLISTED_CATERING_SENDERS = {
+# The last four are the ones this work touched (the two M5 scripts, plus the two
+# pre-existing gaps it surfaced); the first six were already allowlisted and are
+# asserted here so a future allowlist edit cannot quietly drop one.
+ALIASED_CATERING_SENDERS = [
+    "send-catering-ack",
+    "apply-catering-owner-decision",
+    "create-catering-lead",
+    "create-catering-proposal-options",
+    "finalize-catering-menu",
+    "select-catering-proposal",
+    "catering-followup-sweep",
+    "approve-catering-followup",
     "amend-catering-lead",
     "catering-mint-deposit",
-}
+]
 
 
 def _lead(**over) -> dict:
@@ -387,8 +399,7 @@ class TestSendChokepointAdmitsTheFollowupScripts:
     `missing_action_context` and the engine ships dead.
     """
 
-    @pytest.mark.parametrize("basename", ["catering-followup-sweep",
-                                          "approve-catering-followup"])
+    @pytest.mark.parametrize("basename", ALIASED_CATERING_SENDERS)
     def test_the_caller_basename_is_admitted_by_the_policy(self, basename, monkeypatch):
         import safe_io
         monkeypatch.setattr(safe_io, "_resolve_caller_script_name", lambda: basename)
@@ -439,23 +450,39 @@ class TestSendChokepointAdmitsTheFollowupScripts:
         alias_import = re.compile(
             r"^from safe_io import (?:bridge_post|bridge_post_2tuple|"
             r"bridge_send_media|bridge_send_cta) as (\w+)", re.MULTILINE)
-        missing = []
-        for script in sorted(SCRIPTS.iterdir()):
-            if not script.is_file():
-                continue
-            text = script.read_text(encoding="utf-8", errors="ignore")
-            if not alias_import.search(text):
-                continue
-            if script.name not in safe_io.SAFE_IO_NULL_CONTEXT_ALLOWLIST:
-                missing.append(script.name)
-        assert set(missing) == KNOWN_UNALLOWLISTED_CATERING_SENDERS, (
+        aliasing = {
+            script.name for script in SCRIPTS.iterdir()
+            if script.is_file()
+            and alias_import.search(script.read_text(encoding="utf-8", errors="ignore"))
+        }
+        missing = aliasing - set(safe_io.SAFE_IO_NULL_CONTEXT_ALLOWLIST)
+        assert missing == KNOWN_UNALLOWLISTED_CATERING_SENDERS, (
             f"the set of catering scripts that alias the send chokepoint without "
             f"an allowlist entry changed.\n"
             f"  now missing : {sorted(missing)}\n"
-            f"  known gap   : {sorted(KNOWN_UNALLOWLISTED_CATERING_SENDERS)}\n"
+            f"  expected    : {sorted(KNOWN_UNALLOWLISTED_CATERING_SENDERS)}\n"
             f"A NEW name here ships refusing every send it makes — add it to "
-            f"SAFE_IO_NULL_CONTEXT_ALLOWLIST. A name that DISAPPEARED means the "
-            f"pre-existing gap was closed; shrink the known-gap set."
+            f"SAFE_IO_NULL_CONTEXT_ALLOWLIST. A name that DISAPPEARED means a gap "
+            f"was closed; shrink KNOWN_UNALLOWLISTED_CATERING_SENDERS to match."
+        )
+
+    def test_the_per_script_assertions_cover_every_aliasing_script(self):
+        """Keeps ALIASED_CATERING_SENDERS honest. Without this, a new aliasing
+        script could be allowlisted (satisfying the scan above) while never
+        getting its own policy assertion — the list would silently rot."""
+        import re
+        alias_import = re.compile(
+            r"^from safe_io import (?:bridge_post|bridge_post_2tuple|"
+            r"bridge_send_media|bridge_send_cta) as (\w+)", re.MULTILINE)
+        aliasing = {
+            script.name for script in SCRIPTS.iterdir()
+            if script.is_file()
+            and alias_import.search(script.read_text(encoding="utf-8", errors="ignore"))
+        }
+        assert aliasing == set(ALIASED_CATERING_SENDERS), (
+            f"ALIASED_CATERING_SENDERS is stale.\n"
+            f"  scripts aliasing the chokepoint : {sorted(aliasing)}\n"
+            f"  listed for policy assertion     : {sorted(ALIASED_CATERING_SENDERS)}"
         )
 
 

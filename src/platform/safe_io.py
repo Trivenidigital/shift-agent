@@ -864,6 +864,18 @@ SAFE_IO_NULL_CONTEXT_ALLOWLIST: frozenset[str] = frozenset({
     # a real ActionExecutionContext remains the PR-ζ.1 follow-up.
     "catering-followup-sweep",
     "approve-catering-followup",
+    # M1 slot-filling loop. Sends the customer question batch and the owner
+    # hand-off card via the same aliased chokepoint; shipped without an entry, so
+    # BOTH sends were refused with missing_action_context at runtime. Found by
+    # the M5 alias scan in tests/test_catering_followup_scripts.py, not by the
+    # AST gate (an alias is its documented blind spot).
+    "amend-catering-lead",
+    # Slice-2 deposit caller. ONE customer send, at the end of main() after every
+    # refuse-to-mint guard has already passed. This entry governs chokepoint
+    # ADMISSION only — it does not touch the double-charge guard, the
+    # per-guest floor, the provider-configured check, or any other precondition
+    # for minting a deposit.
+    "catering-mint-deposit",
     "create-catering-proposal-options",
     "finalize-catering-menu",
     "select-catering-proposal",
