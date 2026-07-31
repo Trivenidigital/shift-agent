@@ -109,6 +109,18 @@ F7_PRIMARY_FOLLOWUP_REPLY = True
 # suppression behavior until the proposal workflow is explicitly enabled.
 F7_PROPOSAL_BRANCH_ENABLED = True
 
+# M1 2026-07-31: minimum-qualification gate + deterministic slot-filling loop.
+# With it True, a new inquiry below catering_qualification.REQUIRED_FIELDS parks in
+# QUALIFYING and the customer is asked for the gaps, instead of an owner approval
+# card firing for an event whose date, size, venue and style are unknown; a reply to
+# those questions is applied to the SAME lead. With it False, every catering path
+# behaves exactly as it did before M1 (create-catering-lead's gate is opt-in, so
+# flag-off simply never passes --qualification-gate and never routes an answer).
+# Rollback is the same one-liner as F7_ENABLED:
+#   sudo sed -i 's/^F7_QUALIFICATION_GATE_ENABLED = True/F7_QUALIFICATION_GATE_ENABLED = False/' \
+#     /root/.hermes/plugins/cf-router/hooks.py && sudo systemctl restart hermes-gateway
+F7_QUALIFICATION_GATE_ENABLED = True
+
 # 30s rescue window — matches the deployed F7 daemon's WATCHDOG_TIMEOUT_SECS.
 # PRESERVED (not removed) for backwards-compat with TestF7DispatcherWatchdog,
 # but no longer wired into pre_gateway_dispatch. f7_rescue_check() +
@@ -780,7 +792,15 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 actions.is_proposal_selection(text)
                 or actions.is_proposal_request(text)
             )
-            if is_catering or _has_f7_followup_signal(signals) or proposal_workflow:
+            # M1: a reply to our own intake question carries no catering signal, so
+            # the lead lookup is the last admission check — evaluated ONLY when the
+            # cheap signal checks have all failed.
+            if not (is_catering or _has_f7_followup_signal(signals) or proposal_workflow):
+                admit = (F7_QUALIFICATION_GATE_ENABLED
+                         and _sender_has_qualifying_lead(chat_id))
+            else:
+                admit = True
+            if admit:
                 if flyer_generation_enabled:
                     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
                     if role != "owner" and actions.has_non_delivered_flyer_project_by_sender(phone, chat_id):
@@ -5461,6 +5481,26 @@ def _maybe_generate_catering_proposals_for_new_lead(
     )
 
 
+def _sender_has_qualifying_lead(chat_id: str) -> bool:
+    """True when this sender has an OPEN lead parked mid-intake (QUALIFYING).
+
+    M1 admission widening. The F7 gate admits on catering signals, but a slot-filling
+    ANSWER carries none — "Grand Ballroom" or "about 80" classifies as nothing, so
+    without this the reply to our own question would go to the LLM and the intake
+    loop would silently break at question one. Only consulted when the cheap signal
+    checks have already failed, so the common path costs nothing extra. Never raises
+    (a lookup failure falls back to the pre-M1 admission set).
+    """
+    try:
+        phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+        if role == "owner":
+            return False
+        lead = actions.find_active_catering_lead_by_sender(phone, chat_id)
+        return bool(lead) and lead.get("status") == "QUALIFYING"
+    except Exception:  # noqa: BLE001 — admission widening must never break routing
+        return False
+
+
 def _has_f7_followup_signal(signals: list[str]) -> bool:
     """Return True when weak catering signals are enough for Branch B only.
 
@@ -5510,6 +5550,10 @@ def _create_catering_lead_from_inbound(
     # A new inquiry WITHOUT a proposal ask keeps the F14 menu as its one response.
     will_generate_proposals = actions.is_proposal_request(text)
 
+    # M1 qualification gate. Gated ONLY when we are not about to generate proposals:
+    # turn arbitration allows the customer exactly ONE bounded response per inbound,
+    # and a proposal ask already claims it. A gated create sends the question batch
+    # instead of the F14 sample menu — still one send.
     ok, detail = actions.trigger_create_catering_lead(
         customer_phone=customer_phone_arg,
         customer_name="",
@@ -5517,6 +5561,7 @@ def _create_catering_lead_from_inbound(
         message_id=message_id,
         extracted_fields=extracted,
         suppress_customer_ack=will_generate_proposals,
+        qualification_gate=F7_QUALIFICATION_GATE_ENABLED and not will_generate_proposals,
     )
     actions.audit_intercepted(
         reason="f7_primary_new_inquiry", chat_id=chat_id,
@@ -5628,6 +5673,10 @@ def _open_fresh_lead_over_stale(*, text: str, chat_id: str, message_id: str,
         message_id=message_id,
         extracted_fields=extracted,
         suppress_customer_ack=suppress_customer_ack,
+        # Same one-bounded-response rule as Branch A: when a proposal set is about
+        # to be generated for this new lead it IS the turn's response, so the
+        # qualification questions must not also fire.
+        qualification_gate=F7_QUALIFICATION_GATE_ENABLED and not suppress_customer_ack,
     )
     new_lead_id = _lead_id_from_create_detail(detail) if ok else ""
     if not ok or not new_lead_id:
@@ -5840,6 +5889,32 @@ def _try_f7_primary_intercept(
                                    f"opened over stale {lead_id}")}
             # Creation could not complete — fall through to the durable capture below
             # so the inbound is never lost.
+        elif (F7_QUALIFICATION_GATE_ENABLED
+                and active_lead.get("status") == "QUALIFYING"):
+            # M1 slot-filling answer. Placed AFTER the contradiction check so the
+            # ruled fresh-vs-stale discriminator still owns a message that
+            # contradicts a field the lead already has (that is a different event,
+            # not an answer) — this arm only ever fills nulls. Placed BEFORE the
+            # proposal / ambiguous arms and NOT gated on `is_inquiry`, because a
+            # bare answer ("Grand Ballroom") carries no catering signal at all.
+            rc = actions.invoke_amend_catering_lead(
+                lead_id, mode="answer", answer_text=text,
+                message_id=_extract_native_message_id(event),
+            )
+            actions.audit_intercepted(
+                reason="f7_qualification_answer", chat_id=chat_id,
+                code=approval_code, subprocess_rc=rc,
+                detail=(f"active {lead_id} status=QUALIFYING; slot-filling answer "
+                        f"applied by cf-router; LLM bypassed"),
+            )
+            if rc in {0, 6}:
+                # 0 = applied and answered; 6 = applied but a notification send
+                # failed. Both mutated state, so re-running the inbound through the
+                # LLM would double-handle it. Anything else (not-found, schema,
+                # illegal transition) falls through to the durable R2A capture, so
+                # the answer is never lost.
+                return {"action": "skip",
+                        "reason": f"cf-router F7 primary: qualification answer applied to {lead_id}"}
         elif proposal_escape:
             if actions.is_mix_and_match_request(text):
                 # Mix-and-match recompose stays with Hermes: the catering_dispatcher
@@ -5900,6 +5975,26 @@ def _try_f7_primary_intercept(
         provider_timestamp=_event_provider_timestamp(event),
     )
     if capture.ok:
+        # M1 — APPLY what R2A captured. Until this call the sidecar was write-only:
+        # the correction was durably stored and the owner still approved the
+        # pre-amendment numbers (the data-integrity gap documented above). Runs only
+        # on a NEW capture (a replay has nothing new to apply) and only after the
+        # capture returned ok, so the sidecar lock is already released. Guarded and
+        # fail-safe exactly like the other subprocess invokes on this path: any
+        # non-zero rc is audited and the canonical reply still goes out — the
+        # amendment stays unapplied in the sidecar and the next application run
+        # picks it up, rather than the customer being told nothing was recorded.
+        if F7_QUALIFICATION_GATE_ENABLED and not capture.idempotent:
+            apply_rc = actions.invoke_amend_catering_lead(
+                lead_id, mode="amendment",
+                message_id=_extract_native_message_id(event),
+            )
+            actions.audit_intercepted(
+                reason="f7_primary_amendment_applied", chat_id=chat_id,
+                code=approval_code, subprocess_rc=apply_rc,
+                detail=(f"active {lead_id}; amendment {capture.amendment_id} "
+                        f"application rc={apply_rc}"),
+            )
         # captured OR replay — identical canonical reply, gated by the existing
         # UX flag so silent-suppression mode is preserved exactly as before R2A.
         if F7_PRIMARY_FOLLOWUP_REPLY:

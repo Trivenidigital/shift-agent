@@ -72,6 +72,7 @@ MIN_TOKEN_LEN = 3  # ignore "a", "an", "Sr", etc. when matching
 ACTIVE_LEAD_STATUSES = {
     "NEW",
     "EXTRACTING",
+    "QUALIFYING",
     "AWAITING_OWNER_APPROVAL",
     "CUSTOMER_FINALIZED",
     "OWNER_APPROVED",

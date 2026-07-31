@@ -129,7 +129,8 @@ def _capture(sends: list, via: str, *, ok: bool = True):
 
 def _shim_trigger_create_lead(sb: _Sandbox, sends: list):
     def _t(customer_phone, customer_name, raw_inquiry, message_id,
-           extracted_fields=None, suppress_customer_ack=False):
+           extracted_fields=None, suppress_customer_ack=False,
+           qualification_gate=False):
         fields = {"headcount": None, "event_date": None, "event_time": None, "menu_preferences": [],
                   "off_menu_items": [], "dietary_restrictions": [], "delivery_or_pickup": "unknown",
                   "budget_hint_usd": None, "notes": "(e2e)"}
@@ -148,6 +149,8 @@ def _shim_trigger_create_lead(sb: _Sandbox, sends: list):
                 "--message-id", message_id, "--fields-json", json.dumps(fields)]
         if suppress_customer_ack:
             argv.append("--suppress-customer-ack")
+        if qualification_gate:
+            argv.append("--qualification-gate")
         rc, out, err = _run_main(mod, argv)
         if rc == 0:
             return True, (out.strip().splitlines()[-1] if out.strip() else "")
