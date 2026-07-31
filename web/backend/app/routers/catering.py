@@ -137,11 +137,19 @@ def _now() -> datetime:
 
 
 # ── Tolerant readers (never raise, never write) ──────────────────────────────
+def _exists(path: Path) -> bool:
+    """Path.exists() that treats EACCES (Python 3.11 propagates it) as absent."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def _read_json(path: Path) -> tuple[Any, Optional[str]]:
     """Return (document, unavailable_reason). A missing file is (None, None) —
     a legitimate empty state, not a fault. Anything unreadable or malformed is
     (None, reason) so the UI can say which."""
-    if not path.exists():
+    if not _exists(path):
         return None, None
     try:
         raw = path.read_text(encoding="utf-8")
@@ -228,9 +236,12 @@ def _read_env_layered(name: str) -> tuple[str, Optional[str]]:
         ("agent_env", Path(os.environ.get("SHIFT_AGENT_ENV_PATH", "/opt/shift-agent/.env"))),
     )
     for source, env_path in candidates:
-        if not env_path.exists():
-            continue
+        # Path.exists() propagates EACCES on Python 3.11 (only ENOENT-family is
+        # swallowed) — an unreadable /root on the CI runner or a locked-down box
+        # must read as "unknown", never crash the dashboard.
         try:
+            if not env_path.exists():
+                continue
             for line in env_path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
@@ -825,7 +836,7 @@ def _control_for(lead: dict[str, Any]) -> ControlChip:
 
 
 def _ndjson_rows(path: Path, *, max_lines: int = _AUDIT_SCAN_LINES) -> list[dict[str, Any]]:
-    if not path.exists():
+    if not _exists(path):
         return []
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -890,7 +901,7 @@ def _read_followups() -> tuple[list[FollowupRow], Optional[str], Optional[str]]:
     """Return (rows, unavailable_reason, degraded). M5 owns this file and may
     not have shipped it yet — an absent file is an empty state, not an error."""
     path = _followups_path()
-    if not path.exists():
+    if not _exists(path):
         return [], "followup store not present (feature not yet enabled)", None
     doc, reason = _read_json(path)
     if reason:
@@ -1013,7 +1024,7 @@ async def get_dashboard(_=Depends(require_auth)) -> CateringDashboard:
         menu_present=menu is not None,
         menu_version=menu.version if menu is not None else None,
         menu_item_count=len(menu.items) if menu is not None else 0,
-        kill_switch_engaged=settings.disabled_flag.exists(),
+        kill_switch_engaged=_exists(settings.disabled_flag),
         automation_kernel_armed=kernel_value.lower() in ("1", "true", "yes"),
         automation_kernel_armed_source=kernel_source,
         followups_enabled=_followups_enabled(),
@@ -1328,7 +1339,7 @@ async def get_controls(_=Depends(require_auth)) -> ControlsResponse:
     settings = get_settings()
     degraded: list[str] = []
 
-    kill_switch_engaged = settings.disabled_flag.exists()
+    kill_switch_engaged = _exists(settings.disabled_flag)
     kill_switch_set_at = ""
     if kill_switch_engaged:
         try:
