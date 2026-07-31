@@ -2419,6 +2419,13 @@ class CateringQuoteLedgerRecord(BaseModel):
     source_message_id: Optional[str] = Field(default=None, max_length=200)
     approval_code: Optional[str] = Field(default=None, pattern=r"^#[A-HJKMNPQR-Z2-9]{5}$")
     created_at: datetime
+    # M2 provenance stamps — ADDITIVE + Optional so every record committed before
+    # the pricing kernel landed still validates (they simply carry None). These
+    # answer "which catalog / which pricebook produced this committed number?"
+    # without re-deriving it from the transcript.
+    menu_version: Optional[int] = Field(default=None, ge=1)
+    pricebook_version: Optional[int] = Field(default=None, ge=1)
+    price_status: Optional[CateringPriceStatus] = None
 
 
 class CateringQuoteLedgerStore(BaseModel):
@@ -2589,6 +2596,175 @@ class MenuPendingUpdate(BaseModel):
     confirmation_code: str = Field(pattern=_CODE_FULL_PATTERN,
                                    description="reuses Shift's #X9X9X code alphabet")
     parser_notes: str = Field(default="", max_length=2000)
+
+
+# ── Catering commercial pricebook (M2) ───────────────────────────────────────
+# The Menu is the CULINARY catalog (what we cook, optional retail float prices).
+# The Pricebook is the COMMERCIAL source of truth (what we charge): per-person
+# packages, fixed fees, tax, approved discounts, and per-item price overrides.
+# ALL money here is INTEGER CENTS — never float — mirroring deposit.py's
+# round-half-up cents discipline. Stored at
+# /opt/shift-agent/state/catering-pricebook.json (see catering_paths.py).
+
+CateringFeeKind = Literal["delivery", "staffing", "setup", "other"]
+CateringFeeUnit = Literal["flat", "per_staff", "per_mile"]
+CateringDiscountKind = Literal["percent", "fixed_cents"]
+CateringPricebookUpdatedBy = Literal["manual", "import", "cockpit"]
+# Price provenance carried on every computed quote + committed ledger version:
+#   exact               — every line priced from the pricebook (package / override)
+#   estimated           — at least one line fell back to a Menu retail price
+#   pending_owner_review— a price could not be resolved, or the pricebook is a
+#                         placeholder seed; NOT deliverable to a customer as-is
+CateringPriceStatus = Literal["exact", "estimated", "pending_owner_review"]
+
+_PRICEBOOK_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+
+
+class CateringPackage(BaseModel):
+    """One per-person catering package (buffet tier, thali, etc.).
+
+    `price_per_person_cents` is multiplied by the event guest count by the
+    deterministic kernel (catering_pricing.compute_quote) — this is the field
+    that fixes the BL-CATER-03 unscaled-basket bug.
+    """
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=_PRICEBOOK_ID_PATTERN)
+    name: str = Field(min_length=1, max_length=200)
+    price_per_person_cents: int = Field(ge=0, le=1_000_000)
+    min_guests: int = Field(default=1, ge=1, le=10000)
+    description: str = Field(default="", max_length=1000)
+    dietary_profile: list[DietaryTag] = Field(default_factory=list)
+    included_sections: list[str] = Field(default_factory=list, max_length=50)
+    active: bool = True
+
+
+class CateringFee(BaseModel):
+    """One fixed fee line (delivery, staffing, setup).
+
+    `per_unit` says how `amount_cents` scales: "flat" (or unset) applies once;
+    "per_staff" / "per_mile" require the caller to supply the multiplier. The
+    kernel NEVER guesses a multiplier — an unsupplied one yields an unpriced
+    line + `pending_owner_review`, never a silent zero.
+    """
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=_PRICEBOOK_ID_PATTERN)
+    name: str = Field(min_length=1, max_length=200)
+    kind: CateringFeeKind = "other"
+    amount_cents: int = Field(ge=0, le=100_000_000)
+    per_unit: Optional[CateringFeeUnit] = None
+    active: bool = True
+
+
+class CateringDiscount(BaseModel):
+    """One owner-approved discount.
+
+    `value` semantics are keyed off `kind` — BOTH integer, never float:
+      kind="percent"     -> value is BASIS POINTS (500 = 5%), mirroring
+                            `tax_rate_bps` so all rate math stays integer.
+      kind="fixed_cents" -> value is integer cents.
+    `max_amount_cents` caps a percent discount in absolute terms.
+    """
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=_PRICEBOOK_ID_PATTERN)
+    name: str = Field(min_length=1, max_length=200)
+    kind: CateringDiscountKind
+    value: int = Field(ge=0)
+    max_amount_cents: Optional[int] = Field(default=None, ge=0)
+    requires_owner_code: bool = True
+    active: bool = True
+
+    @model_validator(mode="after")
+    def _validate_value_range(self) -> "CateringDiscount":
+        if self.kind == "percent" and self.value > 10000:
+            raise ValueError(
+                f"discount {self.id!r}: percent value is BASIS POINTS "
+                f"(10000 = 100%); got {self.value}"
+            )
+        return self
+
+
+class CateringPricebook(BaseModel):
+    """Versioned commercial source of truth for catering pricing.
+
+    Replaced wholesale on each import (mirrors the Menu single-source-of-truth
+    pattern); the prior version is archived to catering-pricebook-archive/.
+    """
+    model_config = ConfigDict(extra="forbid")
+    version: int = Field(default=1, ge=1)
+    effective_date: date
+    updated_at: datetime
+    updated_by: CateringPricebookUpdatedBy = "manual"
+    # SINGLE-CURRENCY BY CONSTRUCTION (binding ruling): every downstream number
+    # — deposit cents, quote_total_usd, the `$` in every template — is dollar
+    # math. A non-USD pricebook MUST fail loudly at load rather than silently
+    # render rupees through dollar arithmetic. See _reject_non_usd below.
+    currency: Literal["USD"] = "USD"
+    # Mechanically-detectable "this is seed data, not real prices". The kernel
+    # turns this into price_status="pending_owner_review" + a
+    # "placeholder_pricebook" flag so proposal delivery can hard-refuse on it.
+    placeholder: bool = False
+    per_person_packages: list[CateringPackage] = Field(default_factory=list, max_length=100)
+    fixed_fees: list[CateringFee] = Field(default_factory=list, max_length=50)
+    tax_rate_bps: int = Field(default=0, ge=0, le=10000)
+    approved_discounts: list[CateringDiscount] = Field(default_factory=list, max_length=50)
+    # Menu item name -> integer cents. Overrides the Menu's float `price_usd`
+    # for that item; the commercial number always wins over the culinary one.
+    item_price_overrides: dict[str, int] = Field(default_factory=dict)
+    notes: str = Field(default="", max_length=2000)
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def _reject_non_usd(cls, v: Any) -> Any:
+        """FAIL LOUD on any non-USD currency (binding PR-C ruling #3).
+
+        Literal["USD"] alone would emit "Input should be 'USD'", which reads as
+        a typo. This says what actually breaks: every downstream cent is dollar
+        math, so an INR pricebook is a wrong-money bug, not a formatting one.
+        """
+        if isinstance(v, str) and v.strip().upper() != "USD":
+            raise ValueError(
+                f"currency={v!r} is not supported: catering pricing is USD-only "
+                "end-to-end (deposit cents, quote totals and every '$' template "
+                "are dollar math). A non-USD pricebook would render foreign "
+                "amounts through dollar arithmetic. Refusing to load."
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _validate_unique_ids_and_overrides(self) -> "CateringPricebook":
+        for label, ids in (
+            ("per_person_packages", [p.id for p in self.per_person_packages]),
+            ("fixed_fees", [f.id for f in self.fixed_fees]),
+            ("approved_discounts", [d.id for d in self.approved_discounts]),
+        ):
+            dupes = sorted({i for i in ids if ids.count(i) > 1})
+            if dupes:
+                raise ValueError(f"{label}: duplicate id(s) {dupes}")
+        for name, cents in self.item_price_overrides.items():
+            if not isinstance(cents, int) or isinstance(cents, bool) or cents < 0:
+                raise ValueError(
+                    f"item_price_overrides[{name!r}] must be a non-negative "
+                    f"integer number of CENTS; got {cents!r}"
+                )
+        return self
+
+    def is_placeholder(self) -> bool:
+        """True when this pricebook is seed/template data requiring owner review.
+
+        Callers that deliver pricing to a customer MUST refuse on True (the
+        kernel already downgrades price_status to 'pending_owner_review')."""
+        return self.placeholder
+
+
+class CateringPricebookStore(BaseModel):
+    """On-disk envelope for /opt/shift-agent/state/catering-pricebook.json.
+
+    Mirrors the Menu store pattern (single document replaced on each update,
+    prior version archived) with a schema_version envelope so a future
+    multi-pricebook layout can migrate without rewriting every reader."""
+    model_config = ConfigDict(extra="forbid")
+    schema_version: int = Field(default=1, ge=1)
+    pricebook: CateringPricebook
 
 
 # Agent #3 Multi-Location Coordinator config
@@ -4080,6 +4256,21 @@ class MenuUpdateRejected(_BaseEntry):
     type: Literal["menu_update_rejected"]
     update_id: str = Field(min_length=1)
     reason: Literal["owner_no", "owner_edit_aborted", "ttl_expired"]
+
+
+class CateringPricebookUpdated(_BaseEntry):
+    """M2: catering-pricebook.json was replaced by import-catering-pricebook.
+    PRIVACY: version + counts + provenance only — never per-package prices."""
+    type: Literal["catering_pricebook_updated"]
+    version: int = Field(ge=1)
+    prev_version: int = Field(ge=0, description="0 if no prior pricebook existed")
+    updated_by: CateringPricebookUpdatedBy
+    currency: str = Field(default="USD", max_length=8)
+    placeholder: bool = False
+    package_count: int = Field(ge=0)
+    fee_count: int = Field(ge=0)
+    discount_count: int = Field(ge=0)
+    item_override_count: int = Field(ge=0)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -7054,6 +7245,8 @@ LogEntry = Annotated[
         Annotated[MenuUpdateProposed, Tag("menu_update_proposed")],
         Annotated[MenuUpdateApplied, Tag("menu_update_applied")],
         Annotated[MenuUpdateRejected, Tag("menu_update_rejected")],
+        # M2: commercial pricebook import
+        Annotated[CateringPricebookUpdated, Tag("catering_pricebook_updated")],
         # Agent #21 Expense Bookkeeper (15 entry types)
         Annotated[ExpenseReceiptReceived, Tag("expense_receipt_received")],
         Annotated[ExpenseDuplicateDetected, Tag("expense_duplicate_detected")],
