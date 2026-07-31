@@ -127,6 +127,14 @@ def sb(tmp_path, monkeypatch):
     box = Sandbox(tmp_path)
     monkeypatch.setenv("SHIFT_AGENT_CATERING_AMENDMENTS_PATH", str(box.amendments))
     monkeypatch.setenv("SHIFT_AGENT_CATERING_QUOTE_LEDGER_PATH", str(box.ledger))
+    # The ledger's POSIX fs-owner contract defaults to shift-agent:shift-agent (the
+    # deployed state-dir owner). The script reaches append_version without an
+    # explicit expected_owner, so the tmp sandbox — owned by whoever runs the tests —
+    # needs the same override test_catering_finalize_menu uses, or the append is
+    # refused `parent_bad_owner` and swallowed as a non-fatal WARN. Inert on Windows,
+    # where _validate_fs skips ownership entirely.
+    monkeypatch.setenv("SHIFT_AGENT_CATERING_QUOTE_LEDGER_OWNER", OWNER)
+    monkeypatch.setenv("SHIFT_AGENT_CATERING_QUOTE_LEDGER_GROUP", GROUP)
     monkeypatch.setenv("SHIFT_AGENT_CONFIG_PATH", str(box.config))
     return box
 

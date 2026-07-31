@@ -22,9 +22,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from fixtures_fleet import ensure_fcntl_stub, load_script
+from fixtures_fleet import ensure_fcntl_stub, load_script, posix_fs_identity
 
 ensure_fcntl_stub()
+
+LEDGER_OWNER, LEDGER_GROUP = posix_fs_identity()
 
 REPO = Path(__file__).resolve().parent.parent
 for _p in (REPO / "src" / "platform",):
@@ -99,7 +101,13 @@ def _pricebook(**over):
 
 
 @pytest.fixture
-def env_dir(tmp_path):
+def env_dir(tmp_path, monkeypatch):
+    # The owner-decision path commits a quote-ledger version, and the ledger's
+    # POSIX fs-owner contract defaults to the deployed shift-agent:shift-agent.
+    # Align it to whoever runs the tests or every append is refused
+    # `parent_bad_owner` and swallowed as a non-fatal WARN.
+    monkeypatch.setenv("SHIFT_AGENT_CATERING_QUOTE_LEDGER_OWNER", LEDGER_OWNER)
+    monkeypatch.setenv("SHIFT_AGENT_CATERING_QUOTE_LEDGER_GROUP", LEDGER_GROUP)
     (tmp_path / "state").mkdir()
     (tmp_path / "logs").mkdir()
     cfg = {
