@@ -239,7 +239,7 @@ def downgrade_store(store_path, *, records_key, id_key, forbidden_fields,
     with FileLock(lock_path):
         raw, status = safe_load_json(store_path, default=None)
         if status in ("missing", "empty") or raw is None:
-            print(f"skip {name}: {status} — nothing to downgrade")
+            print(f"skip {name}: {status} - nothing to downgrade")
             return None
         if status != "ok":
             # Corrupt state is the operator's call, not this script's: rewriting a
@@ -333,7 +333,7 @@ def main() -> int:
             return EXIT_INVALID_INPUT
 
     if not changed:
-        print(f"nothing to do — catering state is already readable by {TARGET_RELEASE}")
+        print(f"nothing to do - catering state is already readable by {TARGET_RELEASE}")
     return EXIT_OK
 
 
