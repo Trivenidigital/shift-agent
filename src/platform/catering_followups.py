@@ -304,6 +304,107 @@ def schedule_followup(
     return ScheduleResult(True, followup=followup)
 
 
+_DEFAULT_DECISIONS_LOG = "/opt/shift-agent/logs/decisions.log"
+
+
+def _decisions_log_path() -> Path:
+    """The audit chokepoint, resolved at call time. Both env names are honoured
+    because the catering scripts use SHIFT_AGENT_LOG_PATH while the platform
+    modules and the pytest isolation fixture use SHIFT_AGENT_DECISIONS_LOG_PATH —
+    a trigger firing inside a script must land in the same file the script's own
+    rows do."""
+    return Path(
+        os.environ.get("SHIFT_AGENT_LOG_PATH")
+        or os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH")
+        or _DEFAULT_DECISIONS_LOG
+    )
+
+
+def schedule_best_effort(
+    lead_id: str,
+    followup_type: str,
+    *,
+    now: datetime,
+    enabled: bool,
+    due_at: Optional[datetime] = None,
+    event_date: Optional[str] = None,
+    created_by: str = "system",
+    trigger: str = "",
+    path: Optional[Path] = None,
+) -> Optional[CateringFollowup]:
+    """Schedule ONE follow-up from inside a send path, and NEVER raise.
+
+    This is what the trigger sites call. A follow-up is a courtesy; the send path
+    hosting the trigger is the product. Anything that goes wrong here — a
+    duplicate, an unreadable store, a schema regression — is logged and swallowed,
+    because a quote that reaches the customer and then fails because its optional
+    reminder could not be written is a strictly worse outcome than a missing
+    reminder.
+
+    `enabled` is the caller's config gate (cfg.catering_followup.enabled) passed
+    explicitly rather than read here, so the call site reads as gated code.
+    Returns the created follow-up, or None for every no-op and failure alike.
+    """
+    if not enabled:
+        return None
+    try:
+        result = schedule_followup(
+            lead_id, followup_type, now=now, due_at=due_at, event_date=event_date,
+            created_by=created_by, path=path,
+        )
+        if not result.ok or result.followup is None:
+            return None
+        _emit_scheduled(result.followup, trigger=trigger, now=now)
+        return result.followup
+    except Exception as e:  # noqa: BLE001 — a follow-up must never break its host
+        _emit_schedule_failure(lead_id, followup_type, e)
+        return None
+
+
+def _emit_scheduled(followup: CateringFollowup, *, trigger: str, now: datetime) -> None:
+    from safe_io import flock, ndjson_append  # lazy: keeps import cost off cold paths
+    from schemas import CateringFollowupScheduled
+
+    entry = CateringFollowupScheduled(
+        type="catering_followup_scheduled", ts=now,
+        followup_id=followup.followup_id, lead_id=followup.lead_id,
+        followup_type=followup.followup_type, due_at=followup.due_at,
+        created_by=followup.created_by, trigger=trigger[:100],
+    )
+    path = _decisions_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with flock(path):
+        ndjson_append(path, entry.model_dump_json())
+
+
+def _emit_schedule_failure(lead_id: str, followup_type: str, exc: BaseException) -> None:
+    """A scheduling failure is a HEALTH event, not a follow-up event — there is no
+    follow-up to attach a follow-up row to. Best-effort on top of best-effort: if
+    even this fails, stderr is the last stop."""
+    detail = (
+        f"catering follow-up scheduling failed for lead={lead_id} "
+        f"type={followup_type}: {type(exc).__name__}: {exc}"
+    )
+    try:
+        from safe_io import flock, ndjson_append
+        from schemas import HealthCheckFailure
+
+        entry = HealthCheckFailure(
+            type="health_check_failure", ts=datetime.now(timezone.utc),
+            check="catering_followup_schedule", detail=detail[:500],
+        )
+        path = _decisions_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with flock(path):
+            ndjson_append(path, entry.model_dump_json())
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        sys.stderr.write(detail + "\n")
+    except Exception:
+        pass
+
+
 # ── Suppression ──────────────────────────────────────────────────────────────
 def _attr(obj: Any, name: str, default: Any = None) -> Any:
     """Attribute from a model OR key from a dict — leads reach this module both
@@ -504,7 +605,7 @@ __all__ = [
     "LIVE_FOLLOWUP_STATUSES",
     "followups_path", "followups_lock", "load_store", "save_store",
     "next_followup_id", "dedup_key", "find_duplicate", "compute_due",
-    "ScheduleResult", "schedule_followup",
+    "ScheduleResult", "schedule_followup", "schedule_best_effort",
     "in_quiet_hours", "allowed_statuses_for", "suppression_check",
     "due_followups", "card_expired", "for_lead", "by_code", "live_codes",
 ]
