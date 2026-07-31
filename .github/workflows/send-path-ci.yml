@@ -151,3 +151,16 @@ jobs:
         run: |
           echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
           python -m pytest -v tests/test_transport_evidence_harness.py
+
+      # Catering Studio E2E (M7): the full-lifecycle deterministic proof. The file
+      # is ALSO collected by the aggregate glob above; this named -vv step exists so
+      # each of the 17 ordered lifecycle cells reports its own PASSED line, and so a
+      # Linux-only skip or failure surfaces BY NAME instead of being buried in the
+      # glob's dot output. The reviewer reads the whole transcript here — qualified
+      # lead, applied amendment, deterministic total, governed quote, follow-up,
+      # STOP/takeover/release, acceptance, kill switch, per-lead hold, and the audit
+      # timeline finale. This suite skips NOTHING on Linux.
+      - name: Catering Studio E2E (M7) — full-lifecycle deterministic proof
+        run: |
+          echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
+          python -m pytest -vv tests/test_catering_studio_e2e.py
