@@ -298,14 +298,11 @@ def test_dashboard_reflects_the_finished_lifecycle(tmp_path, monkeypatch):
     assert counts["followups_due"] == 0, (
         f"the transcript's follow-ups are approved_sent / suppressed, not due: {counts}")
 
-    # FINDING (pinned as-is, reported — NOT fixed here): the M3 terminal state
-    # BOOKED reaches no dashboard counter. `booked_this_month` keys off CLOSED,
-    # and BOOKED is not in _LOST_STATUSES either, so a won booking is visible only
-    # inside total_leads. Proposed minimal fix: count BOOKED (alongside or instead
-    # of CLOSED) in booked_this_month.
-    assert counts["booked_this_month"] == 0, (
-        "FINDING CHANGED: the dashboard now counts BOOKED — update this cell and "
-        "the report to assert the fixed behaviour")
+    # FINDING RESOLVED (fix-intake F10): the dashboard counts BOOKED alongside
+    # CLOSED in booked_this_month, so the won state is visible. (Known residual,
+    # backlogged: CLOSED still conflates declines with legacy wins.)
+    assert counts["booked_this_month"] == 1, (
+        f"REGRESSION: BOOKED no longer counted in booked_this_month: {counts}")
     assert counts["lost_this_month"] == 0, "a booking is certainly not a loss"
 
     readiness = body["readiness"]
@@ -337,24 +334,18 @@ def test_lead_list_shows_the_booked_lead_with_its_latest_quote(tmp_path, monkeyp
     assert booked["latest_quote_total_usd"] == _BOOKED_TOTAL_USD, (
         f"the list must join the LATEST ledger total, got {booked['latest_quote_total_usd']}")
 
-    # FINDING (pinned as-is, reported — NOT fixed here): `quote_version` is read
-    # off the LEAD record, and no catering script ever writes that field — the
-    # ledger is the source of truth. So the Studio reports "0 versions" for a lead
-    # whose ledger holds two, while `latest_quote_total_usd` (which DOES join the
-    # ledger) is correct. Proposed minimal fix: derive quote_version from the same
-    # ledger join that already produces latest_quote_total_usd.
-    assert booked["quote_version"] == 0, (
-        "FINDING CHANGED: quote_version is now derived from the ledger — update "
-        "this cell and the report to assert the fixed behaviour")
+    # FINDING RESOLVED (fix-intake F9): quote_version is derived from the same
+    # ledger join that produces latest_quote_total_usd — the dead lead field
+    # (permanently 0) is no longer echoed.
+    assert booked["quote_version"] == 2, (
+        f"REGRESSION: quote_version must come from the ledger join (2 committed "
+        f"versions seeded), got {booked['quote_version']}")
     assert body["status_counts"]["BOOKED"] == 1, body["status_counts"]
 
-    # FINDING (pinned as-is, reported — NOT fixed here): BOOKED has no
-    # `next_action` mapping, so the Studio tells the owner "No action" on the one
-    # lead that actually converted. Proposed minimal fix: add a BOOKED entry
-    # ("Booked — confirm the final details").
-    assert booked["next_action"] == "No action", (
-        "FINDING CHANGED: BOOKED now has a next_action — update this cell and the "
-        "report to assert the fixed behaviour")
+    # FINDING RESOLVED (fix-intake F10): BOOKED carries a real next action.
+    assert booked["next_action"] == "Booked — confirm the final details", (
+        f"REGRESSION: BOOKED lost its next_action mapping, got "
+        f"{booked['next_action']!r}")
 
     assert _BOOKED_PHONE not in json.dumps(body), "a raw phone must never reach a list view"
 
@@ -368,9 +359,9 @@ def test_lead_detail_shows_quote_versions_control_and_timeline(tmp_path, monkeyp
     assert body["status"] == "BOOKED"
     assert body["quote_total_usd"] == _BOOKED_TOTAL_USD
     assert body["quote_text"].strip(), "a booked lead carries the quote it was booked on"
-    assert body["quote_version"] == 0, (
-        "same lead-field FINDING as the list view; the real history is in "
-        "quote_versions below")
+    assert body["quote_version"] == 2, (
+        "detail headline must equal max(quote_versions[].version) from the "
+        "ledger join (fix-intake F9)")
     assert [(i["name"], i["qty"]) for i in body["selected_items"]] == [
         (i["name"], i["qty"]) for i in _selected_items()]
 

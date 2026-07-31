@@ -610,8 +610,18 @@ def _to_owner(sb: _Sandbox, since: int) -> list[dict]:
 def test_01_seed_menu_and_pricebook(sb: _Sandbox):
     sb.menu.write_text(MENU_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
 
+    # Commit the two add-on items commercially via item_price_overrides (same
+    # cents as the menu). Menu-sourced lines honestly price "estimated"; the
+    # step-7 "exact" assertion requires every line to come from the pricebook.
+    book_doc = json.loads(PRICEBOOK_FIXTURE.read_text(encoding="utf-8"))
+    inner = book_doc.get("pricebook", book_doc)
+    inner.setdefault("item_price_overrides", {}).update(
+        {"Idly (3 PCS)": 599, "Masala Dosa": 1099})
+    seeded = sb.pricebook.parent / "pricebook-seed.json"
+    seeded.write_text(json.dumps(book_doc), encoding="utf-8")
+
     rc, out, err = _run_script(sb, "import-catering-pricebook", [
-        "--file", str(PRICEBOOK_FIXTURE), "--updated-by", "import",
+        "--file", str(seeded), "--updated-by", "import",
         "--sender-role", "owner",
     ])
     assert rc == 0, f"import-catering-pricebook exit={rc}; stderr={err[:600]}"
@@ -895,10 +905,22 @@ def _expected_total_cents(sb: _Sandbox) -> tuple[int, int]:
     book = book.get("pricebook", book)
     pkg = next(p for p in book["per_person_packages"] if p["id"] == PACKAGE_ID)
 
-    # A package basket prices FROM the package; its materialised item rows are
-    # NOT also charged as a la carte lines.
+    # Post-money-boundary-fix semantics: the package prices per-person, and
+    # explicit --selected-items-json rows passed ALONGSIDE a package are
+    # priced as ADD-ONS at their true menu cents (the pre-fix behavior that
+    # dropped them from server_total was the BL-CATER-03-adjacent bug the
+    # fix wave closed). Unit prices come from the MENU fixture, not the
+    # caller's claimed whole-dollar price_usd — the kernel is
+    # server-authoritative.
     per_person = pkg["price_per_person_cents"] * FINAL_HEADCOUNT
-    items = 0
+    overrides = book.get("item_price_overrides") or {}
+    menu_doc = json.loads(MENU_FIXTURE.read_text(encoding="utf-8"))
+    menu_items = menu_doc["items"] if isinstance(menu_doc, dict) else menu_doc
+    menu_cents = {i["name"]: int((Decimal(str(i["price_usd"])) * 100)
+                                 .quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+                  for i in menu_items if i.get("price_usd") is not None}
+    items = sum(i["qty"] * int(overrides.get(i["name"], menu_cents[i["name"]]))
+                for i in SELECTED_ITEMS)
     # fee_ids=None applies every ACTIVE fee; a missing per_unit means "flat", and
     # units for a flat fee is 1. The one per_staff fee in the fixture is inactive.
     fees = sum(f["amount_cents"] for f in book["fixed_fees"]
@@ -1012,18 +1034,15 @@ def test_08_owner_revision_appends_an_immutable_ledger_version(sb: _Sandbox):
     assert newest["version"] == highest_before + 1, "versions are monotonic per lead"
     assert newest["source"] == "owner_edit", f"source={newest['source']}"
 
-    # FINDING (pinned as-is, reported to the orchestrator — NOT fixed here):
-    # the owner_edit ledger version snapshots `lead.quote_text`, and the edit path
-    # never writes `--edit-text` onto the lead (only the APPROVE path writes
-    # quote_text). Since an already-approved lead is not editable, an owner_edit
-    # version can therefore never carry the revision the owner typed — it carries
-    # whatever quote_text the lead had, here still the pre-quote sentinel. The
-    # revision survives ONLY in the catering_owner_decision audit row. Asserting
-    # the real behaviour keeps this test honest; a future fix should thread
-    # edit_text into the ledger append and will flip these two assertions.
-    assert REVISION_TEXT not in newest["quote_text"], (
-        "FINDING CHANGED: the owner_edit ledger version now carries the edit text — "
-        "update this cell (and the report) to assert the fixed behaviour")
+    # FINDING RESOLVED (fix-money F8): the owner_edit ledger version now
+    # appends the owner's instruction ("Owner edit: <text>") to the snapshot,
+    # so the revision survives in the immutable money artifact — not only in
+    # the catering_owner_decision audit row. The pre-edit text is retained
+    # above the appended line (the version still records what was on the
+    # table when the owner revised it).
+    assert REVISION_TEXT in newest["quote_text"], (
+        "REGRESSION: the owner_edit ledger version no longer carries the "
+        "owner's edit text (fix-money F8 behaviour)")
     decision_rows = [r for r in _rows(sb, "catering_owner_decision")
                      if r["lead_id"] == sb.lead_id and r["decision"] == "edit"]
     assert len(decision_rows) == 1 and decision_rows[0]["edit_text"] == REVISION_TEXT, (
