@@ -176,11 +176,31 @@ def test_gate_is_suppressed_when_a_proposal_set_will_be_generated(wired):
 
 
 def test_flag_off_never_passes_the_gate(wired, monkeypatch):
-    monkeypatch.setattr(wired.hooks, "F7_QUALIFICATION_GATE_ENABLED", False)
+    monkeypatch.setenv(wired.hooks.CATERING_QUALIFICATION_GATE_ENV, "0")
 
     _inbound(wired, "Do you do catering for 80 people next month?")
 
     assert wired.spy.creates[0]["qualification_gate"] is False
+
+
+def test_the_gate_is_on_with_no_env_set_at_all(wired, monkeypatch):
+    """DEFAULT ON — this behavior is disclosed and accepted, so an unset variable
+    must not silently disarm it. The env var is a rollback lever, not the switch
+    that turns the feature on."""
+    monkeypatch.delenv(wired.hooks.CATERING_QUALIFICATION_GATE_ENV, raising=False)
+
+    _inbound(wired, "Do you do catering for 80 people next month?")
+
+    assert wired.spy.creates[0]["qualification_gate"] is True
+
+
+def test_the_gate_reads_the_env_at_call_time_not_at_import(wired, monkeypatch):
+    """The flag has to be flippable on a loaded plugin — a module-load snapshot
+    would make the documented rollback lever a lie."""
+    monkeypatch.setenv(wired.hooks.CATERING_QUALIFICATION_GATE_ENV, "0")
+    assert wired.hooks.f7_qualification_gate_enabled() is False
+    monkeypatch.setenv(wired.hooks.CATERING_QUALIFICATION_GATE_ENV, "1")
+    assert wired.hooks.f7_qualification_gate_enabled() is True
 
 
 # ── Branch B: the slot-filling answer arm ────────────────────────────────────
@@ -336,7 +356,7 @@ def test_failed_capture_is_never_applied(wired, monkeypatch):
 
 
 def test_flag_off_restores_pre_m1_branch_b_routing(wired, monkeypatch):
-    monkeypatch.setattr(wired.hooks, "F7_QUALIFICATION_GATE_ENABLED", False)
+    monkeypatch.setenv(wired.hooks.CATERING_QUALIFICATION_GATE_ENV, "0")
     _set_active_lead(wired, monkeypatch, QUALIFYING_LEAD)
     _capture_result(wired, monkeypatch)
 

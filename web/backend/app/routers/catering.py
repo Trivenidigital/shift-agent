@@ -708,6 +708,9 @@ def _next_action(lead: dict[str, Any], qualification: QualificationSummary) -> s
         "OWNER_APPROVED": "Approved — quote delivery in flight",
         "OWNER_EDITED": "Edits captured — re-draft pending",
         "SENT_TO_CUSTOMER": "Sent — awaiting customer reply",
+        # M3's won state. Without an entry here a lead the customer just ACCEPTED
+        # read "No action" — the one row in the list that most needs one.
+        "BOOKED": "Booked — confirm the final details",
         "OWNER_REJECTED": "Rejected (closed)",
         "NOT_CATERING": "Not a catering inquiry (closed)",
         "CLOSED": "Closed",
@@ -968,8 +971,17 @@ async def get_dashboard(_=Depends(require_auth)) -> CateringDashboard:
             1 for lead in leads
             if lead.get("status") in ("SENT_TO_CUSTOMER", "OWNER_APPROVED")
         ),
+        # BOOKED is M3's won state (record-catering-acceptance on an accept,
+        # mark-catering-lead-outcome --outcome won). Counting CLOSED alone made
+        # every conversion invisible until it was also closed out.
+        # KNOWN RESIDUAL: CLOSED is overloaded — a DECLINE also lands there
+        # (SENT_TO_CUSTOMER -> CLOSED), so it still inflates this count. The lead
+        # carries `customer_acceptance` ("accepted"/"declined"), which would
+        # separate them; changing what CLOSED means here moves a number the
+        # operator already reads, so it is left for a ruled follow-up.
         booked_this_month=sum(
-            1 for lead in leads if lead.get("status") == "CLOSED" and _in_month(lead)
+            1 for lead in leads
+            if lead.get("status") in ("BOOKED", "CLOSED") and _in_month(lead)
         ),
         lost_this_month=sum(
             1 for lead in leads if lead.get("status") in _LOST_STATUSES and _in_month(lead)
@@ -1022,6 +1034,11 @@ async def list_leads(
         key = str(lead.get("status") or "UNKNOWN")
         status_counts[key] = status_counts.get(key, 0) + 1
 
+    # The quote ledger is the ONLY place a version number exists. CateringLead
+    # carries a `quote_version` field that nothing has ever written, so reading it
+    # showed "0 versions" for a lead with a full committed history — while
+    # latest_quote_total_usd, joined from this same ledger, was right beside it and
+    # correct. Both columns now come from the one join.
     ledger_records, _ledger_reason = _read_records(_quote_ledger_path())
     latest_total: dict[str, tuple[int, Optional[int]]] = {}
     for record in ledger_records:
@@ -1048,7 +1065,7 @@ async def list_leads(
             on_hold=lead.get("on_hold") is True,
             hold_reason=_opt_str(lead.get("hold_reason")),
             approval_code=_opt_str(lead.get("owner_approval_code")),
-            quote_version=_safe_int(lead.get("quote_version")),
+            quote_version=latest_total.get(lead_id, (0, None))[0],
             latest_quote_total_usd=latest_total.get(lead_id, (0, None))[1],
             qualification=qualification,
             next_action=_next_action(lead, qualification),
@@ -1100,7 +1117,11 @@ async def get_lead(lead_id: str, _=Depends(require_auth)) -> LeadDetail:
         qualification=_qualification(lead),
         pending_questions=[q for q in (pending or []) if isinstance(q, str)],
         quote_text=str(lead.get("quote_text") or ""),
-        quote_version=_safe_int(lead.get("quote_version")),
+        # From the ledger, not the lead: `CateringLead.quote_version` is never
+        # written by anything, so it is permanently 0. `versions` is already this
+        # lead's committed history; max() rather than an end index so the answer
+        # does not depend on _quote_versions' newest-first render order.
+        quote_version=max((v.version for v in versions), default=0),
         quote_total_usd=_opt_int(lead.get("quote_total_usd")),
         approval_code=_opt_str(lead.get("owner_approval_code")),
         on_hold=lead.get("on_hold") is True,
@@ -1500,16 +1521,27 @@ async def post_amend_apply(
     lead_id: str,
     body: AmendApplyBody,
     request: Request,
-    _=Depends(require_auth),
+    _=Depends(require_fresh_otp),
 ) -> ActionResult:
+    """Materialise captured amendments / apply one qualification answer.
+
+    Steps up to a fresh OTP like the sibling write endpoints. It mutates the lead's
+    extracted facts, can transition it to AWAITING_OWNER_APPROVAL and fires both the
+    owner card and a customer-facing message — strictly more impactful than
+    ``/hold``, which already required the step-up."""
     lead_id = _validated_lead_id(lead_id)
     _find_lead(lead_id)
     if body.mode == "answer" and not body.answer_text.strip():
         raise HTTPException(status_code=422, detail="answer_text required in answer mode")
     args = ["--lead-id", lead_id, "--mode", body.mode]
+    stdin_data: Optional[str] = None
     if body.mode == "answer":
-        args += ["--answer-text", body.answer_text.strip()]
-    result = _run_or_503(_AMEND_BIN, args, timeout=60)
+        # Over stdin, not argv: an answer that starts with a dash is otherwise
+        # parsed by the script's argparse as a flag (same reason the decision
+        # endpoint pipes its quote text).
+        args.append("--answer-text-stdin")
+        stdin_data = body.answer_text.strip()
+    result = _run_or_503(_AMEND_BIN, args, timeout=60, stdin_data=stdin_data)
     return _script_result(
         result, action="amend_apply", request=request,
         details={"lead_id": lead_id, "mode": body.mode},

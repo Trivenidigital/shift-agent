@@ -319,3 +319,55 @@ def test_extracted_dict_validates_against_the_lead_schema():
     model = CateringLeadExtractedFields.model_validate(fields)
     for key, value in fields.items():
         assert getattr(model, key) == value, f"{key} was dropped by extra='ignore'"
+
+
+# ── Veg / non-veg counts must stay inside the band the schema can hold ───────
+# "we will have 99999 vegetarians" used to emit veg_guest_count=99999, which
+# CateringLeadExtractedFields bounds at 10000. That value did not just get lost:
+# it failed the whole lead write, and in the amendment path a record that cannot
+# be persisted is never marked applied, so it was re-read and re-failed forever,
+# taking every LATER amendment for that lead down with it.
+def test_an_out_of_band_veg_count_is_not_extracted():
+    fields = ce.extract_catering_fields("we will have 99999 vegetarians")
+    assert "veg_guest_count" not in fields
+
+
+def test_an_out_of_band_non_veg_count_is_not_extracted():
+    fields = ce.extract_catering_fields("we will have 40000 non-vegetarians")
+    assert "nonveg_guest_count" not in fields
+
+
+def test_an_out_of_band_count_is_still_reported_to_the_owner_as_a_note():
+    """Same discipline as an approximate event time: the number is refused as a
+    FIELD and disclosed as prose, so the owner sees what the customer said."""
+    fields = ce.extract_catering_fields("we will have 99999 vegetarians")
+    assert "99999" in fields["notes"]
+    assert fields["dietary_restrictions"] == ["veg"], "the stated preference survives"
+
+
+def test_the_band_boundaries_are_accepted():
+    assert ce.extract_catering_fields("10000 vegetarians")["veg_guest_count"] == 10000
+    assert ce.extract_catering_fields("0 vegetarians")["veg_guest_count"] == 0
+
+
+def test_the_band_matches_the_schema_field_exactly():
+    """Drift guard: widen the schema bound without widening this one (or the other
+    way round) and the extractor starts emitting values the lead cannot hold."""
+    from schemas import CateringLeadExtractedFields  # noqa: PLC0415 — path set above
+
+    for name in ("veg_guest_count", "nonveg_guest_count"):
+        bounds = {type(m).__name__: getattr(m, "ge", getattr(m, "le", None))
+                  for m in CateringLeadExtractedFields.model_fields[name].metadata}
+        assert bounds.get("Ge") == ce.GUEST_SPLIT_MIN
+        assert bounds.get("Le") == ce.GUEST_SPLIT_MAX
+
+
+def test_every_extractable_count_round_trips_through_the_schema():
+    """The invariant that actually matters: whatever the extractor emits, the lead
+    model must accept — no extraction may ever fail a lead write."""
+    from schemas import CateringLeadExtractedFields  # noqa: PLC0415 — path set above
+
+    for text in ("99999 vegetarians", "0 vegetarians", "10000 non-vegetarians",
+                 "90 veg 30 non-veg", "12345 veg and 99999 non-veg"):
+        fields = ce.extract_catering_fields(text) or {}
+        CateringLeadExtractedFields.model_validate(fields)

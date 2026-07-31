@@ -191,6 +191,26 @@ VEG_MAJORITY_RE = re.compile(
     r"\b(?:mostly|mainly|primarily|majority|largely)\s+(?:are\s+)?veg(?:etarian)?\b",
     re.IGNORECASE,
 )
+# Acceptance band for the veg / non-veg split, mirroring parse_headcount's
+# HEADCOUNT_MIN/MAX: the band is the one CateringLeadExtractedFields.veg_guest_count
+# and .nonveg_guest_count declare (ge=0, le=10000). Emitting a count outside it
+# does not just lose that field — the whole lead write fails validation, and in
+# the amendment path a record that cannot be persisted is never marked applied, so
+# it is re-read and re-fails forever, blocking every LATER amendment for that lead.
+# Out of band therefore behaves exactly like an unparseable count: NO extraction,
+# a note so the owner sees what the customer actually said.
+GUEST_SPLIT_MIN = 0
+GUEST_SPLIT_MAX = 10000
+
+
+def parse_guest_split_count(raw: str) -> Optional[int]:
+    """A stated veg / non-veg count the schema can hold, or None when it is outside
+    GUEST_SPLIT_MIN..GUEST_SPLIT_MAX (or not an int at all)."""
+    try:
+        count = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return count if GUEST_SPLIT_MIN <= count <= GUEST_SPLIT_MAX else None
 
 REQUESTED_MENU_COUNT_RE = re.compile(
     r"\b(\d+|one|two|three)\s+(?:sample\s+)?(?:combinations?\s+)?menus?\b",
@@ -414,17 +434,27 @@ def extract_catering_fields(text: str, signals: Optional[list] = None) -> Option
     non_veg_match = NON_VEG_COUNT_RE.search(text)
     veg_match = VEG_COUNT_RE.search(text)
     if non_veg_match:
+        # The WORD matched, so the dietary tag is earned even when the number is
+        # unusable — only the count is dropped.
         dietary.append("non-veg")
-        count = int(non_veg_match.group(1))
-        fields["nonveg_guest_count"] = count
-        notes.append(f"{count} non-veg")
+        count = parse_guest_split_count(non_veg_match.group(1))
+        if count is None:
+            notes.append(f'customer stated "{non_veg_match.group(1)} non-veg" '
+                         f"— outside the recordable range, not stored as a count")
+        else:
+            fields["nonveg_guest_count"] = count
+            notes.append(f"{count} non-veg")
     elif NON_VEG_WORD_RE.search(text):
         dietary.append("non-veg")
     if veg_match:
         dietary.append("veg")
-        count = int(veg_match.group(1))
-        fields["veg_guest_count"] = count
-        notes.append(f"{count} veg")
+        count = parse_guest_split_count(veg_match.group(1))
+        if count is None:
+            notes.append(f'customer stated "{veg_match.group(1)} veg" '
+                         f"— outside the recordable range, not stored as a count")
+        else:
+            fields["veg_guest_count"] = count
+            notes.append(f"{count} veg")
     elif VEG_WORD_RE.search(text):
         dietary.append("veg")
     if dietary:
@@ -597,8 +627,9 @@ __all__ = [
     "extract_catering_fields",
     "detect_quote_acceptance",
     "parse_month_day_event_date", "parse_numeric_event_date", "parse_event_date",
-    "parse_headcount", "parse_headcount_from_signals",
+    "parse_headcount", "parse_headcount_from_signals", "parse_guest_split_count",
     "parse_event_type", "parse_service_style", "parse_delivery_or_pickup",
     "parse_event_time", "parse_budget",
     "HEADCOUNT_PATTERNS", "MONTH_NUMBERS", "MONTH_DAY_RE",
+    "GUEST_SPLIT_MIN", "GUEST_SPLIT_MAX",
 ]

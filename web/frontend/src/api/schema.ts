@@ -290,7 +290,15 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Post Amend Apply */
+        /**
+         * Post Amend Apply
+         * @description Materialise captured amendments / apply one qualification answer.
+         *
+         *     Steps up to a fresh OTP like the sibling write endpoints. It mutates the lead's
+         *     extracted facts, can transition it to AWAITING_OWNER_APPROVAL and fires both the
+         *     owner card and a customer-facing message — strictly more impactful than
+         *     ``/hold``, which already required the step-up.
+         */
         post: operations["post_amend_apply_catering_leads__lead_id__amend_apply_post"];
         delete?: never;
         options?: never;

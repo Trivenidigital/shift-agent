@@ -42,6 +42,7 @@ for _p in (SRC, SRC / "platform"):
         sys.path.insert(0, str(_p))
 
 import catering_amendments as ca  # noqa: E402
+import catering_extraction as cx  # noqa: E402
 import catering_qualification as cq  # noqa: E402
 import catering_quote_ledger as ql  # noqa: E402
 
@@ -130,7 +131,7 @@ def sb(tmp_path, monkeypatch):
     return box
 
 
-def _run(sb: Sandbox, argv, *, bridge_ok=True):
+def _run(sb: Sandbox, argv, *, bridge_ok=True, stdin_text=None):
     mod = load_script("amend_lead_under_test", SCRIPTS / "amend-catering-lead")
     mod.CONFIG_PATH = sb.config
     mod.LEADS_PATH = sb.leads
@@ -144,8 +145,10 @@ def _run(sb: Sandbox, argv, *, bridge_ok=True):
         return (True, "wamid.OUT") if bridge_ok else (False, "connection refused")
     mod._bridge_post = _bridge
 
-    old_argv = sys.argv
+    old_argv, old_stdin = sys.argv, sys.stdin
     sys.argv = argv
+    if stdin_text is not None:
+        sys.stdin = io.StringIO(stdin_text)
     out, err = io.StringIO(), io.StringIO()
     try:
         with redirect_stdout(out), redirect_stderr(err):
@@ -153,7 +156,7 @@ def _run(sb: Sandbox, argv, *, bridge_ok=True):
     except SystemExit as e:
         rc = e.code if isinstance(e.code, int) else 1
     finally:
-        sys.argv = old_argv
+        sys.argv, sys.stdin = old_argv, old_stdin
     stdout = out.getvalue().strip()
     payload = json.loads(stdout.splitlines()[-1]) if stdout else {}
     return rc, payload, err.getvalue()
@@ -172,6 +175,14 @@ def _answer(sb, text, *, lead_id="L0001", message_id="wamid.ANS", bridge_ok=True
     return _run(sb, ["amend-catering-lead", "--lead-id", lead_id, "--mode", "answer",
                      "--answer-text", text, "--message-id", message_id],
                 bridge_ok=bridge_ok)
+
+
+def _answer_via_stdin(sb, text, *, lead_id="L0001", message_id="wamid.ANS"):
+    """The path the router and the cockpit actually use — the text never touches
+    argv, so a reply that starts with a dash cannot be read as a flag."""
+    return _run(sb, ["amend-catering-lead", "--lead-id", lead_id, "--mode", "answer",
+                     "--answer-text-stdin", "--message-id", message_id],
+                stdin_text=text)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -570,3 +581,287 @@ def test_replaying_the_same_answer_leaves_the_filled_field_alone(sb):
     assert second_rc == 0
     assert second["fields_filled"] == []
     assert sb.read_lead()["extracted"]["venue"] == "Grand Ballroom"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# A value the schema cannot hold must never freeze the lead
+#
+# The bug: "we will have 99999 vegetarians" parsed to veg_guest_count=99999,
+# which CateringLeadExtractedFields bounds at 10000. setattr accepted it (the
+# model does not set validate_assignment), _persist's model_validate then failed,
+# and the script exited BEFORE mark_applied — so the record stayed unapplied, was
+# re-read on every later run, and re-failed. Every LATER amendment and answer for
+# that lead was silently dropped behind it, permanently.
+#
+# Three layers, each pinned below: the extractor never emits an out-of-band count;
+# the merge refuses a value the field cannot hold; the record is marked
+# APPLIED-WITH-ERROR so it can never block what comes after it.
+# ════════════════════════════════════════════════════════════════════════════
+def test_poison_amendment_does_not_block_the_amendments_behind_it(sb):
+    """The reviewer's exact RUN1 / RUN2 / RUN3 sequence. RUN3 is the one that
+    matters: a perfectly good "make it 280" landing behind the poison."""
+    sb.write_lead()
+    assert sb.capture("we will have 99999 vegetarians", message_id="wamid.P1").ok
+
+    rc1, payload1, _e1 = _amend(sb, message_id="wamid.P1")
+    assert rc1 == 0, "the poison record no longer fails the run"
+    assert payload1["applied"], "and it is drained rather than left to re-fail"
+
+    rc2, payload2, _e2 = _amend(sb, message_id="wamid.P1")
+    assert rc2 == 0
+    assert payload2["reason"] == "no_unapplied_amendments", "not re-processed forever"
+
+    assert sb.capture("actually make it 280 people not 235", message_id="wamid.P2").ok
+    rc3, payload3, _e3 = _amend(sb, message_id="wamid.P2")
+
+    assert rc3 == 0
+    assert payload3["fields_changed"] == ["headcount"]
+    assert sb.read_lead()["extracted"]["headcount"] == 280
+
+
+def test_an_out_of_band_count_is_recorded_as_a_note_not_dropped_silently(sb):
+    """The owner still needs to see what the customer said — just not in the
+    numeric field, where it would be a fabricated headcount split."""
+    sb.write_lead()
+    sb.capture("we will have 99999 vegetarians", message_id="wamid.P1")
+
+    _amend(sb)
+
+    extracted = sb.read_lead()["extracted"]
+    assert extracted["veg_guest_count"] is None
+    assert "99999" in extracted["notes"]
+    assert extracted["dietary_restrictions"] == ["veg"], "the stated preference survives"
+
+
+def _poison_extractor(monkeypatch, fields):
+    """Force the merge layer to face a value the extractor's own band would never
+    emit — defense in depth: the clamp and the merge gate are separate layers and
+    each has to hold on its own."""
+    monkeypatch.setattr(cx, "extract_catering_fields", lambda text, signals=None: dict(fields))
+
+
+def test_a_record_whose_values_the_schema_refuses_is_applied_with_error(sb, monkeypatch):
+    sb.write_lead()
+    cap = sb.capture("make it 280 people", message_id="wamid.P1")
+    _poison_extractor(monkeypatch, {"headcount": 280, "veg_guest_count": 99999})
+
+    rc, payload, err = _amend(sb)
+
+    assert rc == 0
+    assert payload["applied"] == [cap.amendment_id]
+    assert payload["applied_with_error"] == [cap.amendment_id]
+    assert "veg_guest_count" in err
+    # The value the schema CAN hold still lands — one bad field is not a reason to
+    # throw away the correction the customer actually sent.
+    assert sb.read_lead()["extracted"]["headcount"] == 280
+    assert sb.read_lead()["extracted"]["veg_guest_count"] is None
+
+
+def test_the_applied_with_error_marker_is_stamped_on_the_sidecar_record(sb, monkeypatch):
+    sb.write_lead()
+    sb.capture("make it 280 people", message_id="wamid.P1")
+    _poison_extractor(monkeypatch, {"headcount": 280, "veg_guest_count": 99999})
+
+    _amend(sb)
+
+    record = json.loads(sb.amendments.read_text(encoding="utf-8"))["records"][0]
+    assert record["applied_at"], "stamped applied — it can never block later records"
+    assert record[ca.APPLIED_ERROR_FIELD] == "schema_rejected_values"
+    assert record["raw_text"] == "make it 280 people", "the capture stays immutable"
+    assert ca.unapplied_for_lead("L0001", data_path=sb.amendments) == []
+
+
+def test_the_audit_row_names_the_rejected_field_without_its_value(sb, monkeypatch):
+    sb.write_lead()
+    sb.capture("make it 280 people", message_id="wamid.P1")
+    _poison_extractor(monkeypatch, {"headcount": 280, "veg_guest_count": 99999})
+
+    _amend(sb)
+
+    rows = sb.audit_rows("catering_amendment_applied")
+    assert len(rows) == 1
+    assert rows[0]["apply_error"] == "schema_rejected_values"
+    assert rows[0]["rejected_fields"] == ["veg_guest_count"]
+    assert "99999" not in json.dumps(rows[0]), "PRIVACY: names, never values"
+
+
+def test_a_later_amendment_still_applies_after_an_applied_with_error_record(sb, monkeypatch):
+    """The whole point of the error marker: the record is drained, so what comes
+    after it is unaffected."""
+    sb.write_lead()
+    sb.capture("make it 280 people", message_id="wamid.P1")
+    _poison_extractor(monkeypatch, {"headcount": 280, "veg_guest_count": 99999})
+    _amend(sb)
+
+    monkeypatch.undo()
+    sb.capture("move the date to October 12", message_id="wamid.P2")
+    rc, payload, _err = _amend(sb)
+
+    assert rc == 0
+    assert payload["fields_changed"] == ["event_date"]
+    assert sb.read_lead()["extracted"]["event_date"] == "2026-10-12"
+
+
+def test_answer_mode_survives_a_value_the_schema_refuses(sb, monkeypatch):
+    """The loop must keep running: the bad value is dropped, the good ones land,
+    and the round still advances so the lead is never stranded mid-intake."""
+    _qualifying_lead(sb, extracted={"headcount": 120},
+                     pending_questions=["event_type", "veg_nonveg"],
+                     questions_asked=["event_type", "veg_nonveg"])
+    _poison_extractor(monkeypatch, {"event_type": "wedding", "veg_guest_count": 99999})
+
+    rc, payload, err = _answer(sb, "a wedding, 99999 vegetarians")
+
+    assert rc == 0
+    assert payload["fields_filled"] == ["event_type"]
+    assert payload["rejected_fields"] == ["veg_guest_count"]
+    assert "veg_guest_count" in err
+    lead = sb.read_lead()
+    assert lead["extracted"]["event_type"] == "wedding"
+    assert lead["extracted"]["veg_guest_count"] is None
+    assert lead["qualification_rounds"] == 2, "the round still advanced"
+    assert lead["pending_questions"], "and the next batch was asked"
+
+    rows = sb.audit_rows("catering_lead_qualification_updated")
+    assert rows[-1]["rejected_fields"] == ["veg_guest_count"]
+
+
+def test_the_next_answer_lands_after_a_rejected_one(sb, monkeypatch):
+    _qualifying_lead(sb, extracted={"headcount": 120},
+                     pending_questions=["event_type", "veg_nonveg"],
+                     questions_asked=["event_type", "veg_nonveg"])
+    _poison_extractor(monkeypatch, {"veg_guest_count": 99999})
+    first_rc, _first, _e = _answer(sb, "99999 vegetarians")
+    assert first_rc == 0
+
+    monkeypatch.undo()
+    rc, payload, _err = _answer(sb, "It's a wedding")
+
+    assert rc == 0
+    assert "event_type" in payload["fields_filled"]
+    assert sb.read_lead()["extracted"]["event_type"] == "wedding"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# M4/G4 per-lead hold — the qualification loop must obey it
+#
+# The hold was enforced at send-catering-ack, the owner-approved quote send, the
+# acceptance writer and the follow-up engine, but NOT here: an owner held a lead,
+# the customer replied, and the bot carried on interviewing them.
+# ════════════════════════════════════════════════════════════════════════════
+def test_a_held_lead_merges_the_answer_but_sends_the_customer_nothing(sb):
+    _qualifying_lead(sb, on_hold=True, hold_reason="customer asked us to wait",
+                     extracted={"headcount": 235, "event_date": "2026-09-15"},
+                     pending_questions=["venue", "service_style"],
+                     questions_asked=["venue", "service_style"])
+
+    rc, payload, _err = _answer(sb, "Grand Ballroom, buffet please")
+
+    assert rc == 0, "a withheld send is a correct outcome, not a failed notification"
+    assert payload["customer_send_withheld"] is True
+    # Capturing what the customer said is never the harm — only the reply is.
+    assert sb.read_lead()["extracted"]["service_style"] == "buffet"
+    assert [s for s in sb.sends if s["jid"].startswith("19045550199")] == []
+
+
+def test_a_held_lead_audits_every_withheld_customer_send(sb):
+    _qualifying_lead(sb, on_hold=True, hold_reason="customer asked us to wait")
+
+    _answer(sb, "It's a wedding on June 15")
+
+    rows = sb.audit_rows("catering_lead_hold_blocked_send")
+    assert len(rows) == 1
+    assert rows[0]["lead_id"] == "L0001"
+    assert rows[0]["blocked_send_kind"] == "qualification_question"
+    assert rows[0]["hold_reason"] == "customer asked us to wait"
+
+
+def test_a_hold_never_withholds_the_owner_card(sb):
+    """A hold pauses the CUSTOMER-facing automation, not the owner's visibility —
+    the owner is exactly who needs to see where the held lead got to."""
+    _qualifying_lead(sb, on_hold=True, hold_reason="waiting on the customer",
+                     pending_questions=["venue"], questions_asked=list(cq.REQUIRED_FIELDS),
+                     extracted={
+                         "headcount": 120, "event_date": "2026-09-15",
+                         "event_type": "wedding", "service_style": "buffet",
+                         "dietary_restrictions": ["veg"],
+                     })
+
+    rc, payload, _err = _answer(sb, "Grand Ballroom")
+
+    assert rc == 0
+    assert payload["card_sent"] is True
+    assert [s["jid"] for s in sb.sends] == ["19045550100@s.whatsapp.net"]
+
+
+def test_an_unheld_lead_still_replies(sb):
+    """Guard against the hold check reading as always-on."""
+    _qualifying_lead(sb)
+
+    rc, payload, _err = _answer(sb, "It's a wedding on June 15")
+
+    assert rc == 0
+    assert payload["customer_send_withheld"] is False
+    assert sb.audit_rows("catering_lead_hold_blocked_send") == []
+    assert [s for s in sb.sends if s["jid"].startswith("19045550199")]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# --answer-text-stdin: customer text is not argv
+#
+# A reply that merely STARTS with a dash ("-veg", "--help", "-80") was parsed by
+# argparse as a flag → SystemExit 2 → the router read that as "answer mode could
+# not handle it" and fell through to R2A capture, which applies in OVERWRITE mode
+# instead of fill-nulls. The text now travels over stdin.
+# ════════════════════════════════════════════════════════════════════════════
+@pytest.mark.parametrize("text", ["-veg", "--help", "-80", "--answer-text", "-"])
+def test_a_dash_leading_answer_reaches_answer_mode_over_stdin(sb, text):
+    _qualifying_lead(sb, pending_questions=["venue"], questions_asked=["venue"])
+
+    rc, payload, err = _answer_via_stdin(sb, text)
+
+    assert rc == 0, f"{text!r} must not be read as a flag: {err}"
+    assert payload["lead_id"] == "L0001"
+    assert payload["status"] in ("QUALIFYING", "AWAITING_OWNER_APPROVAL")
+
+
+def test_a_dash_leading_answer_fills_nulls_and_never_overwrites(sb):
+    """The harm the argparse exit caused was not the exit itself: the router read
+    it as "answer mode could not handle this" and fell through to the R2A capture
+    path, which applies in OVERWRITE mode. Reaching answer mode is what keeps a
+    field the customer already gave from being rewritten by a stray reply."""
+    _qualifying_lead(sb, pending_questions=["venue"], questions_asked=["venue"],
+                     extracted={"headcount": 120, "event_type": "wedding"})
+
+    rc, payload, _err = _answer_via_stdin(sb, "-80 people maybe")
+
+    assert rc == 0
+    extracted = sb.read_lead()["extracted"]
+    assert extracted["headcount"] == 120, "fill-nulls-only, not overwrite"
+    assert extracted["event_type"] == "wedding"
+    assert "headcount" not in payload["fields_filled"]
+
+
+def test_ordinary_text_over_stdin_behaves_exactly_as_over_argv(sb):
+    _qualifying_lead(sb, pending_questions=["venue"], questions_asked=["venue"])
+
+    rc, payload, _err = _answer_via_stdin(sb, "Grand Ballroom")
+
+    assert rc == 0
+    assert payload["fields_filled"] == ["venue"]
+    assert sb.read_lead()["extracted"]["venue"] == "Grand Ballroom"
+
+
+def test_empty_stdin_is_invalid_input_not_a_crash(sb):
+    _qualifying_lead(sb)
+    rc, _payload, err = _answer_via_stdin(sb, "   \n")
+    assert rc == 2
+    assert "--answer-text required" in err
+
+
+def test_argv_answer_text_still_works_for_compatibility(sb):
+    """The flag is kept so an operator running the script by hand is not broken."""
+    _qualifying_lead(sb, pending_questions=["venue"], questions_asked=["venue"])
+    rc, payload, _err = _answer(sb, "Grand Ballroom")
+    assert rc == 0
+    assert payload["fields_filled"] == ["venue"]
