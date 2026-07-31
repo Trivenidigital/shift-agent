@@ -30,6 +30,15 @@ event are a no-op (returns the existing lead's id+code).
 
 Outputs JSON to stdout: {"lead_id": "L0007", "approval_code": "#A3F2X"}.
 
+M1 qualification gate (--qualification-gate, opt-in): when the extracted fields
+fall below catering_qualification.REQUIRED_FIELDS, the lead is parked in
+QUALIFYING with the first batch of missing-field questions instead of firing an
+owner approval card for an event whose date, size, venue and style are unknown.
+The customer gets the questions as their ONE bounded response for the turn; the
+owner card fires later, from amend-catering-lead, once the loop closes. WITHOUT
+the flag every path behaves exactly as before (the LLM SKILL path passes fully
+extracted fields and is unaffected).
+
 Exit codes:
   0  — created (or already-exists, idempotent replay)
   2  — invalid input
@@ -61,9 +70,11 @@ from safe_io import (  # noqa: E402
 )
 from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402  # PR-ε: chokepoint consolidation
 import approval_code_pools  # noqa: E402  # PR-R1: single-source cross-pool code contract
+import catering_qualification  # noqa: E402  # M1: the ONE minimum-qualification gate
 from schemas import (  # noqa: E402
     Config, CateringLead, CateringLeadStore, CateringLeadExtractedFields,
     CateringLeadCreated, CateringLeadStatusChange, CateringLeadRejected,
+    CateringLeadQualificationUpdated,
     CateringOwnerApprovalRequested,
     Menu, MenuItem,
     CateringCustomerAckSent, CateringCustomerAckFailed,
@@ -413,6 +424,25 @@ def _validate_event_date(
     return None, None
 
 
+def _customer_jid(raw_customer_phone: str) -> str:
+    """Bridge JID for a customer, from the RAW upstream --customer-phone value.
+
+    F14-LID 2026-05-11: upstream SKILLs pass either a +E.164 phone OR a bare LID
+    ("<digits>@lid") when the v=1 sender block had phone=null. Persistence-side
+    Pydantic normalization strips @lid, but this builder runs on the RAW args value
+    pre-normalization. Without the @lid detection below, LID input produces a
+    malformed "<digits>@lid@s.whatsapp.net" JID and the customer never receives the
+    message. Bug reproduced 2026-05-11 on L0004; fix documented in
+    tasks/hermes-v0-13-0-plugin-api-recon-2026-05-11.md.
+    """
+    cp = str(raw_customer_phone).lstrip('+').strip()
+    if cp.endswith('@lid'):
+        return cp                       # LID-only: bridge accepts "<digits>@lid" directly
+    if '@' in cp:
+        return cp                       # defensive: already a complete JID, pass through
+    return f"{cp}@s.whatsapp.net"       # standard phone path
+
+
 def _log(adapter: TypeAdapter, entry) -> None:
     """Append a Pydantic-validated entry to decisions.log under flock."""
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -460,6 +490,13 @@ def main() -> int:
                           "new lead, so the customer receives ONE bounded response (the "
                           "generated options) instead of an F14 sample menu AND a "
                           "tiered set as two independent sends. Default: send the F14 ack."))
+    ap.add_argument("--qualification-gate", action="store_true",
+                    help=("M1: park the lead in QUALIFYING and ask for the missing "
+                          "catering_qualification.REQUIRED_FIELDS instead of firing an "
+                          "owner approval card, when the extracted fields fall below "
+                          "minimum qualification. cf-router F7 primary-mode sets this; "
+                          "the LLM SKILL path (which passes fully extracted fields) does "
+                          "not, so its behavior is unchanged. Default: off."))
     args = ap.parse_args()
 
     # Stdin sentinel — bulletproof path for JSON containing shell metachars
@@ -567,9 +604,25 @@ def main() -> int:
         now = customer_now(cfg.customer.timezone)
         lead_id = _next_lead_id(store)
         approval_code = _generate_unique_code()
+
+        # M1 qualification gate. `qualification_state` is the ONE decision point —
+        # the same call amend-catering-lead makes when an answer arrives, so the
+        # create and update paths can never disagree about what "complete" means.
+        # The approval code is still minted (it belongs to the lead for its whole
+        # life, and approval_code_pools excludes only TERMINAL statuses, so a
+        # QUALIFYING lead's code stays reserved against collision); it is simply
+        # not shown to the owner until the lead is worth approving.
+        qual = catering_qualification.qualification_state(extracted)
+        gated = bool(args.qualification_gate) and not qual["complete"]
+        pending_questions = (
+            catering_qualification.next_question_batch(
+                {"extracted": extracted, "questions_asked": []},
+            ) if gated else []
+        )
+
         lead = CateringLead(
             lead_id=lead_id,
-            status="AWAITING_OWNER_APPROVAL",
+            status="QUALIFYING" if gated else "AWAITING_OWNER_APPROVAL",
             customer_phone=args.customer_phone,
             customer_name=args.customer_name,
             raw_inquiry=args.raw_inquiry,
@@ -578,6 +631,9 @@ def main() -> int:
             updated_at=now,
             extracted=extracted,
             owner_approval_code=approval_code,
+            pending_questions=pending_questions,
+            questions_asked=list(pending_questions),
+            qualification_rounds=1 if gated else 0,
         )
         store.leads.append(lead)
 
@@ -608,19 +664,84 @@ def main() -> int:
             TypeAdapter(CateringLeadStatusChange),
             CateringLeadStatusChange(
                 type="catering_lead_status_change", ts=now,
-                lead_id=lead_id, from_status="NEW", to_status="AWAITING_OWNER_APPROVAL",
-                actor="system", reason="extractor_completed",
+                lead_id=lead_id, from_status="NEW",
+                to_status="QUALIFYING" if gated else "AWAITING_OWNER_APPROVAL",
+                actor="system",
+                reason="qualification_incomplete" if gated else "extractor_completed",
             ),
             context="status_change",
         )
-        _audit_best_effort(
-            TypeAdapter(CateringOwnerApprovalRequested),
-            CateringOwnerApprovalRequested(
-                type="catering_owner_approval_requested", ts=now,
-                lead_id=lead_id, approval_code=approval_code,
-            ),
-            context="approval_requested",
+        if gated:
+            # M1: no owner-approval request is emitted for a QUALIFYING lead — the
+            # owner is not being asked for anything yet. The qualification row is the
+            # audit anchor for this round instead.
+            _audit_best_effort(
+                TypeAdapter(CateringLeadQualificationUpdated),
+                CateringLeadQualificationUpdated(
+                    type="catering_lead_qualification_updated", ts=now,
+                    lead_id=lead_id,
+                    fields_filled=[f for f in catering_qualification.REQUIRED_FIELDS
+                                   if f not in qual["missing"]],
+                    still_missing=qual["missing"],
+                    questions_asked=pending_questions,
+                    round_number=1, complete=False, outcome="asked",
+                ),
+                context="qualification_updated",
+            )
+        else:
+            _audit_best_effort(
+                TypeAdapter(CateringOwnerApprovalRequested),
+                CateringOwnerApprovalRequested(
+                    type="catering_owner_approval_requested", ts=now,
+                    lead_id=lead_id, approval_code=approval_code,
+                ),
+                context="approval_requested",
+            )
+
+    # M1 gated path: the customer's ONE bounded response for this turn is the
+    # question batch — no owner card (nothing to approve yet) and no F14 sample
+    # menu (a menu for an event with no date/size/venue anchors the customer on a
+    # spread the owner never priced). The owner card fires from amend-catering-lead
+    # once the loop closes, or at the round cap with the gaps flagged.
+    if gated:
+        question_text = catering_qualification.render_question_message(
+            lead_id, pending_questions, first_contact=True,
         )
+        customer_jid = _customer_jid(args.customer_phone)
+        send_attempt_id = uuid.uuid4().hex
+        q_ok, q_mid_or_err = _bridge_post(customer_jid, question_text)
+        try:
+            if q_ok:
+                entry = CateringCustomerAckSent(
+                    ts=now, type="catering_customer_ack_sent",
+                    customer_jid=customer_jid, outbound_message_id=q_mid_or_err,
+                    lead_id=lead_id, logical_turn_id=args.message_id,
+                    send_attempt_id=send_attempt_id, outcome="sent",
+                )
+            else:
+                sys.stderr.write(f"qualification questions bridge_post failed: {q_mid_or_err}\n")
+                entry = CateringCustomerAckFailed(
+                    ts=now, type="catering_customer_ack_failed",
+                    customer_jid=customer_jid, reason="bridge_unreachable",
+                    detail=str(q_mid_or_err)[:2000], logical_turn_id=args.message_id,
+                    send_attempt_id=send_attempt_id, outcome="bridge_unreachable",
+                )
+            with FileLock(LEADS_LOCK):
+                ndjson_append(LOG_PATH, entry.model_dump_json())
+        except Exception as e:  # noqa: BLE001 — audit is best-effort
+            sys.stderr.write(f"audit emit (qualification ack) failed (non-fatal): {e}\n")
+        print(json.dumps({
+            "lead_id": lead_id, "approval_code": approval_code,
+            "status": "QUALIFYING", "card_sent": False,
+            "qualification_complete": False,
+            "qualification_missing": qual["missing"],
+            "pending_questions": pending_questions,
+            "questions_sent": q_ok,
+        }))
+        # Lead is persisted either way; a failed question send is the same class as
+        # a failed owner card (state consistent, dependency down) and gets the same
+        # exit code so the caller can surface it.
+        return EXIT_OK if q_ok else EXIT_DEPENDENCY_DOWN
 
     # Send approval card to owner — outside the FileLock; bridge slowness shouldn't block.
     if not cfg.owner.self_chat_jid:
@@ -694,20 +815,7 @@ def main() -> int:
     # before any owner approval. Owner involvement is reserved for the FINAL priced
     # quote (handle_catering_owner_approval flow), not the initial proposal.
     #
-    # F14-LID 2026-05-11: args.customer_phone may be raw input from upstream SKILLs —
-    # either a +E.164 phone OR a bare LID ("<digits>@lid") when the v=1 sender block
-    # had phone=null. Persistence-side Pydantic normalization strips @lid, but this
-    # F14 JID builder runs on the RAW args value pre-normalization. Without the
-    # detection below, LID input produces a malformed "<digits>@lid@s.whatsapp.net"
-    # JID and the customer never receives the proposal. Bug reproduced 2026-05-11
-    # on L0004; fix documented in tasks/hermes-v0-13-0-plugin-api-recon-2026-05-11.md.
-    _cp = str(args.customer_phone).lstrip('+').strip()
-    if _cp.endswith('@lid'):
-        customer_jid = _cp                          # LID-only: bridge accepts "<digits>@lid" directly
-    elif '@' in _cp:
-        customer_jid = _cp                          # defensive: already a complete JID, pass through
-    else:
-        customer_jid = f"{_cp}@s.whatsapp.net"      # standard phone path
+    customer_jid = _customer_jid(args.customer_phone)  # see helper for the F14-LID contract
     proposal_text = _render_proposal(lead_id, args.customer_name, extracted)
     # PR-4 (charter §4.3/§4.2): the customer ack shares the turn's logical_turn_id
     # (set above with the owner card) but gets its OWN send_attempt_id — distinct

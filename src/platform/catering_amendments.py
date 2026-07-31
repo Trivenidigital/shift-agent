@@ -75,6 +75,13 @@ class CaptureResult:
     idempotent: bool = False
 
 
+@dataclass(frozen=True)
+class MarkAppliedResult:
+    ok: bool
+    marked: Tuple[str, ...] = ()
+    reason: Optional[str] = None
+
+
 # ── Hashes / identity / fingerprint ──────────────────────────────────────────
 def _sha256_text(s: str) -> str:
     return hashlib.sha256((s or "").encode("utf-8")).hexdigest()
@@ -406,3 +413,112 @@ def capture_branch_b_amendment(
             f"catering_amendments: capture exception: {type(e).__name__}: {str(e)[:200]}\n")
         _emit_failed(lead_id, "capture_exception", emit_audit)
         return CaptureResult(ok=False, reason="capture_exception")
+
+
+# ── Application read/mark surface (M1) ───────────────────────────────────────
+# R2A captured amendments durably but NOTHING read them back — the owner still
+# approved the pre-amendment numbers (the known gap at hooks.py Branch B). These
+# two functions are the read + acknowledge half that `amend-catering-lead` uses.
+#
+# "Applied" is recorded as an ADDITIVE `applied_at` field on the record. The
+# record's own `status` is left at whatever R2A wrote: status is part of the R2A
+# on-disk contract and the three dedup tiers match records in ANY status, so
+# rewriting it would change what a rollback-era reader sees for no gain. raw_text
+# is never touched — the append-only guarantee holds.
+APPLIED_MARK_FIELD = "applied_at"
+
+
+def _amendment_sort_key(record: dict) -> tuple:
+    """Capture order: amendment_id is a zero-padded monotonic sequence ("A0007"),
+    so its numeric suffix orders records exactly as they were captured. Falls back
+    to captured_at then the raw id for a hand-edited store."""
+    aid = record.get("amendment_id")
+    if isinstance(aid, str) and aid.startswith("A") and aid[1:].isdigit():
+        return (0, int(aid[1:]), "")
+    return (1, 0, str(record.get("captured_at") or "") + str(aid or ""))
+
+
+def unapplied_for_lead(lead_id: str, *, data_path=None) -> list:
+    """Captured-but-not-yet-applied records for a lead, in CAPTURE ORDER.
+
+    Lockless tolerant read (mirrors catering_quote_ledger's read paths): the caller
+    re-reads under the lock before marking, so a concurrent capture between read and
+    mark simply lands in the next application run rather than being lost.
+    """
+    if not lead_id:
+        return []
+    store, reason = _load_store(Path(data_path) if data_path else _data_path())
+    if reason or not isinstance(store, dict):
+        return []
+    out = [r for r in store.get("records", [])
+           if isinstance(r, dict) and r.get("lead_id") == lead_id
+           and not r.get(APPLIED_MARK_FIELD)]
+    out.sort(key=_amendment_sort_key)
+    return out
+
+
+def mark_applied(
+    lead_id: str,
+    amendment_ids,
+    *,
+    applied_at: Optional[datetime] = None,
+    data_path=None,
+    lock_path=None,
+    expected_owner: Optional[str] = None,
+    expected_group: Optional[str] = None,
+    lock_attempts: int = 20,
+    lock_sleep_sec: float = 0.5,
+) -> MarkAppliedResult:
+    """Stamp `applied_at` on the named records for a lead. Idempotent: a record
+    already carrying the mark is left untouched and not re-reported.
+
+    Same failure discipline as capture — ANY failure PRESERVES the store and returns
+    ok=False, so the caller can decide whether to re-run (a re-run re-applies the
+    same amendment, which is why the caller applies fill/overwrite merges that are
+    themselves idempotent on identical text)."""
+    from safe_io import LockUnavailable, try_acquire_filelock_with_retry  # lazy
+
+    applied_at = applied_at or datetime.now(timezone.utc)
+    data_path = Path(data_path) if data_path else _data_path()
+    lock_path = Path(lock_path) if lock_path else _lock_path(data_path)
+    expected_owner = expected_owner or DEFAULT_OWNER
+    expected_group = expected_group or DEFAULT_GROUP
+    wanted = {a for a in (amendment_ids or []) if isinstance(a, str) and a}
+    if not lead_id or not wanted:
+        return MarkAppliedResult(ok=True, marked=())
+
+    stamp = applied_at.isoformat().replace("+00:00", "Z")
+    try:
+        with try_acquire_filelock_with_retry(lock_path, attempts=lock_attempts,
+                                             sleep_sec=lock_sleep_sec):
+            fs_reason = _validate_fs(data_path, expected_owner, expected_group)
+            if fs_reason:
+                return MarkAppliedResult(ok=False, reason="fs_" + fs_reason)
+            store, load_reason = _load_store(data_path)
+            if load_reason:
+                return MarkAppliedResult(ok=False, reason=load_reason)
+
+            marked: list[str] = []
+            for record in store.get("records", []):
+                if (not isinstance(record, dict) or record.get("lead_id") != lead_id
+                        or record.get("amendment_id") not in wanted
+                        or record.get(APPLIED_MARK_FIELD)):
+                    continue
+                record[APPLIED_MARK_FIELD] = stamp
+                marked.append(record["amendment_id"])
+            if not marked:
+                return MarkAppliedResult(ok=True, marked=())
+            try:
+                _atomic_write(data_path, store)
+            except Exception:
+                return MarkAppliedResult(ok=False, reason="write_failed")
+            post_reason = _validate_fs(data_path, expected_owner, expected_group)
+            if post_reason:
+                return MarkAppliedResult(ok=False, reason="postwrite_" + post_reason)
+            return MarkAppliedResult(ok=True, marked=tuple(marked))
+    except LockUnavailable:
+        return MarkAppliedResult(ok=False, reason="lock_unavailable")
+    except Exception as e:  # noqa: BLE001 — mark must never raise into the caller
+        sys.stderr.write(
+            f"catering_amendments: mark_applied exception: {type(e).__name__}: {str(e)[:200]}\n")
+        return MarkAppliedResult(ok=False, reason="mark_exception")
