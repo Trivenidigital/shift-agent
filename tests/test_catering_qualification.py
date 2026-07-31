@@ -157,6 +157,16 @@ def test_clean_free_text_answer_rejects_non_venue_shapes(answer):
     assert cq.clean_free_text_answer(answer) is None
 
 
+@pytest.mark.parametrize("answer", [
+    "not sure yet", "Not sure yet.", "don't know", "TBD", "no idea", "ok", "n/a",
+])
+def test_clean_free_text_answer_rejects_explicit_non_answers(answer):
+    """A customer saying "not sure yet" has told us they do NOT know. Storing that
+    string would put a sentence where the owner reads the venue AND mark the field
+    answered so nobody ever asks again."""
+    assert cq.clean_free_text_answer(answer) is None
+
+
 # ── rendered copy ────────────────────────────────────────────────────────────
 def test_question_message_carries_the_ref_and_every_asked_question():
     msg = cq.render_question_message("L0007", ["event_date", "venue"], first_contact=True)

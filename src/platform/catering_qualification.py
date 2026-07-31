@@ -72,6 +72,20 @@ GAP_LABELS: dict[str, str] = {
 
 VENUE_MAX_LEN = 200
 
+# Explicit NON-answers. A customer who replies "not sure yet" to "where is it being
+# held?" has told us they do not know — writing that string into `venue` would put
+# a sentence on the owner card in the place the owner reads as the venue, and would
+# mark the field satisfied so nobody ever asks again. Narrow and literal on purpose:
+# this is a reject list for one structured slot, not a whitelist standing in for
+# intent classification. Anything not listed is accepted as a venue.
+NON_ANSWER_PHRASES: frozenset[str] = frozenset({
+    "not sure", "not sure yet", "unsure", "no idea", "dont know", "don't know",
+    "do not know", "i dont know", "i don't know", "idk", "tbd", "to be decided",
+    "to be confirmed", "not yet", "not decided", "undecided", "unknown", "maybe",
+    "n/a", "na", "none", "nothing", "no", "nope", "yes", "yeah", "ok", "okay",
+    "sure", "thanks", "thank you", "hi", "hello",
+})
+
 
 def _attr(obj: Any, name: str) -> Any:
     """Read an attribute from a model OR a key from a dict (None if absent)."""
@@ -163,12 +177,15 @@ def sole_free_text_question(pending: Any) -> Optional[str]:
 
 def clean_free_text_answer(text: str) -> Optional[str]:
     """A short bare reply normalised into a venue value, or None if it does not look
-    like one. Rejects empty / multi-line-essay / pure-number replies so a stray
-    "ok" or "150" never lands in the venue field."""
+    like one. Rejects empty / over-long / pure-number replies and the explicit
+    NON_ANSWER_PHRASES, so "150", "ok" or "not sure yet" never lands in the venue
+    field — and, just as importantly, never marks the venue answered."""
     candidate = " ".join((text or "").split())
     if not (2 <= len(candidate) <= VENUE_MAX_LEN):
         return None
     if candidate.replace(",", "").replace(".", "").isdigit():
+        return None
+    if candidate.lower().strip(" .!?").rstrip(",") in NON_ANSWER_PHRASES:
         return None
     return candidate
 
@@ -216,6 +233,7 @@ def render_handoff_message(lead_id: str) -> str:
 
 __all__ = [
     "REQUIRED_FIELDS", "QUESTION_TEMPLATES", "GAP_LABELS", "FREE_TEXT_FIELDS",
+    "NON_ANSWER_PHRASES",
     "MIN_QUESTIONS_PER_ROUND", "MAX_QUESTIONS_PER_ROUND", "MAX_QUALIFICATION_ROUNDS",
     "VENUE_MAX_LEN",
     "qualification_state", "missing_fields", "next_question_batch",
