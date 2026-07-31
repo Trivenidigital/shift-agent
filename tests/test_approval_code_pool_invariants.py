@@ -154,7 +154,7 @@ def test_canonical_pool_order_single_source():
     """The canonical lookup order is exported from ONE constant."""
     pools = _load_pools_module()
     assert pools.CODE_POOL_CANONICAL_ORDER == (
-        "menu-pending", "catering-leads", "expense", "shift",
+        "menu-pending", "catering-leads", "expense", "shift", "catering-followups",
     )
 
 
@@ -165,6 +165,7 @@ _FILE_TO_POOL = {
     "catering-menu-pending.json": "menu-pending",
     "catering-leads.json": "catering-leads",
     "expense-bookkeeper/leads.json": "expense",
+    "catering-followups.json": "catering-followups",
     "pending.json": "shift",
 }
 
@@ -172,7 +173,7 @@ _SKILL_MD = SRC / "agents" / "shift" / "skills" / "dispatch_shift_agent" / "SKIL
 
 
 def _parse_skill_pool_order(text: str) -> list[str]:
-    """Parse the SKILL's four jq lookup lines (top-to-bottom) into an ordered
+    """Parse the SKILL's jq lookup lines (top-to-bottom) into an ordered
     pool list, first occurrence of each pool preserved in document order."""
     order: list[str] = []
     for line in text.splitlines():
@@ -189,7 +190,7 @@ def _parse_skill_pool_order(text: str) -> list[str]:
 
 
 def test_skill_md_pool_order_and_membership_match_registry():
-    """The dispatcher SKILL's documented pool-lookup block (its four jq lines,
+    """The dispatcher SKILL's documented pool-lookup block (its jq lines,
     read top-to-bottom) must resolve pools in the SAME order AND with the SAME
     membership as the registry's CODE_POOL_CANONICAL_ORDER. This is how the prose
     'consumes' the single executable source — if either drifts, this fails."""

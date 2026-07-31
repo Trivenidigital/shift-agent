@@ -2591,6 +2591,80 @@ class CateringLearningSummary(BaseModel):
     )
 
 
+# ── M5: controlled follow-up engine (Agent #10 state) ────────────────────────
+# A follow-up is a SCHEDULED, DETERMINISTIC, OWNER-SUPERVISED nudge attached to
+# an existing lead. There is no cold-outreach shape here by construction: every
+# record carries a `lead_id`, and the sweep refuses to render one whose lead it
+# cannot find. The default path is not a send at all — a due follow-up becomes an
+# owner APPROVAL CARD and only reaches the customer once the owner replies with
+# its #XXXXX code (see src/platform/catering_followups.py for the kernel).
+CateringFollowupType = Literal[
+    "incomplete_qualification",  # M1 slot-filling loop ran out of rounds unanswered
+    "proposal_unanswered",       # quote went to the customer; no reply
+    "owner_reminder",            # operator/owner-created via the CLI
+    "event_approaching",         # event_date - 7d
+    "final_headcount_due",       # event_date - 3d
+    "post_event_feedback",       # event_date + 1d
+]
+
+CateringFollowupStatus = Literal[
+    "scheduled",                 # waiting for due_at
+    "awaiting_owner_approval",   # card sent to the owner; #XXXXX pending
+    "approved_sent",             # owner approved; message delivered (terminal)
+    "suppressed",                # a suppression rule fired (terminal)
+    "cancelled",                 # owner/operator cancelled (terminal)
+    "expired",                   # re-carded to the cap without an owner decision (terminal)
+]
+
+
+class CateringFollowup(BaseModel):
+    """ONE scheduled follow-up for ONE lead.
+
+    `rendered_message` is populated at CARD time (not at schedule time) so an
+    edited template always reaches the customer in its current form, and the text
+    the owner approved is the exact text that is sent — the card and the send read
+    the same stored string, never two independent renders.
+
+    `attempt_count` counts owner-approval CARDS sent for this follow-up, not
+    customer sends: a card whose 4h approval window lapses returns the record to
+    `scheduled` with attempt_count + 1, and the sweep gives up at
+    ``catering_followups.MAX_CARD_ATTEMPTS``.
+    """
+    model_config = ConfigDict(extra="forbid")
+    followup_id: str = Field(pattern=r"^FU[0-9]{4,}$")
+    lead_id: str = Field(min_length=1)
+    followup_type: CateringFollowupType
+    due_at: datetime
+    created_at: datetime
+    created_by: Literal["system", "owner"]
+    status: CateringFollowupStatus = "scheduled"
+    approval_code: Optional[ProposalCode] = None
+    message_template_key: str = Field(min_length=1, max_length=100)
+    rendered_message: Optional[str] = Field(default=None, max_length=2000)
+    suppressed_reason: Optional[str] = Field(default=None, max_length=100)
+    sent_message_id: Optional[str] = Field(default=None, max_length=200)
+    attempt_count: int = Field(default=0, ge=0, le=10)
+    last_attempt_at: Optional[datetime] = None
+    # Owner-authored context for an owner_reminder ("are you still thinking about
+    # the 14th?"). The owner's OWN words to their OWN customer — not model output —
+    # so it is bounded and stripped rather than screened, and the owner reads it
+    # again on the approval card before it can send. Additive + default None, so
+    # every follow-up written before this field decodes unchanged.
+    note: Optional[str] = Field(default=None, max_length=300)
+
+
+class CateringFollowupStore(BaseModel):
+    """Scheduled follow-ups (lives at /opt/shift-agent/state/catering-followups.json).
+
+    ``extra="ignore"`` for rollback safety, mirroring CateringLeadStore: a store
+    written by a newer binary decodes cleanly on an older one.
+    """
+    model_config = ConfigDict(extra="ignore")
+    schema_version: int = Field(default=1, ge=1)
+    next_sequence: int = Field(default=1, ge=1)
+    followups: list[CateringFollowup] = Field(default_factory=list)
+
+
 # Catering menu (Agent #2 v0.2 — photo-upload menu management)
 DietaryTag = Literal[
     "veg", "non-veg", "vegan", "jain", "halal", "kosher",
@@ -3152,11 +3226,29 @@ class VipConfig(BaseModel):
 
 # Agent #10 — Catering Follow-up (Low-Medium; depends on Agent #2)
 class CateringFollowupConfig(BaseModel):
+    """M5 controlled follow-up engine. `enabled` gates SCHEDULING (the trigger
+    insertions in create/amend/apply); the sweep that turns a due follow-up into
+    an owner approval card is gated independently by CATERING_FOLLOWUP_ENABLED +
+    CATERING_FOLLOWUP_ALLOWLIST. Three gates, all default-off, so arming one
+    never arms the others."""
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
     thank_you_delay_hours: int = Field(default=24, ge=1)
     feedback_request_delay_hours: int = Field(default=48, ge=1)
     anniversary_nudge_days_before: int = Field(default=14, ge=1)
+    # M5 quiet hours for CUSTOMER-facing follow-ups, in the customer's local hour
+    # (0-23). The default window 21:00 -> 09:00 wraps midnight; a non-wrapping
+    # window (start < end) is supported too, and start == end disables the check.
+    # Owner-directed cards are NEVER quiet-houred — the owner reads on their own
+    # schedule and a withheld card is a lost lead, not a courtesy.
+    quiet_hours_start: int = Field(default=21, ge=0, le=23)
+    quiet_hours_end: int = Field(default=9, ge=0, le=23)
+    # M5 frequency caps for SYSTEM-created follow-ups (owner-created ones are an
+    # explicit human decision and are never capped). Lifetime cap counts
+    # follow-ups that actually reached someone — carded or sent; a suppressed or
+    # cancelled record never pestered anyone and does not consume the budget.
+    max_followups_per_lead: int = Field(default=3, ge=1, le=20)
+    min_hours_between: int = Field(default=24, ge=1, le=720)
 
 
 # Agent #12 — Hiring & Onboarding (Medium)
@@ -6940,6 +7032,83 @@ class CateringLeadHoldBlockedSend(_BaseEntry):
 
 
 # ─────────────────────────────────────────────────────────────────
+# M5 — controlled follow-up engine. Six rows cover the whole lifecycle:
+# scheduled -> (suppressed | card_sent -> (sent | cancelled | expired)).
+# EVERY terminal outcome has a row, so "nothing happened to this follow-up"
+# is never a silent state the operator has to infer from absence.
+# ─────────────────────────────────────────────────────────────────
+
+class _BaseFollowupEntry(_BaseEntry):
+    """Shared identity fields for the follow-up rows. Metadata only — the
+    rendered customer text never enters the audit log (it can carry the
+    customer's own words back to them via the lead context)."""
+    followup_id: str = Field(min_length=1, max_length=40)
+    lead_id: str = Field(min_length=1)
+    followup_type: CateringFollowupType
+
+
+class CateringFollowupScheduled(_BaseFollowupEntry):
+    """A follow-up was written to the store. Scheduling is NOT a send — this row
+    records an intention whose earliest possible effect is `due_at`."""
+    type: Literal["catering_followup_scheduled"]
+    due_at: datetime
+    created_by: Literal["system", "owner"]
+    trigger: str = Field(default="", max_length=100)
+
+
+class CateringFollowupSuppressed(_BaseFollowupEntry):
+    """A due follow-up was NOT carded, and the record is now terminal. It is
+    never silently rescheduled: a suppressed follow-up stays suppressed so the
+    reason stays attached to a specific decision instead of being retried until
+    it happens to pass."""
+    type: Literal["catering_followup_suppressed"]
+    reason: Literal[
+        "kill_switch",             # state/disabled.flag engaged
+        "automation_suppressed",   # conversation paused / opted_out / takeover
+        "lead_missing",            # no lead carries this lead_id any more
+        "lead_on_hold",            # M4/G4 per-lead hold
+        "lead_status_not_allowed", # terminal / unknown status (defensive default)
+        "customer_declined",       # the lead records a customer decline
+        "frequency_cap",           # lifetime cap for system-created follow-ups
+        "min_interval",            # too soon after the previous follow-up
+        "quiet_hours",             # outside the customer-facing sending window
+    ]
+    detail: str = Field(default="", max_length=200)
+
+
+class CateringFollowupCardSent(_BaseFollowupEntry):
+    """The owner approval card for a due follow-up was delivered. `attempt` is
+    the card attempt number (a lapsed 4h window re-cards at attempt+1)."""
+    type: Literal["catering_followup_card_sent"]
+    approval_code: ProposalCode
+    attempt: int = Field(ge=1, le=10)
+    owner_card_outbound_id: str = Field(default="", max_length=200)
+
+
+class CateringFollowupSent(_BaseFollowupEntry):
+    """The owner approved and the follow-up reached the customer."""
+    type: Literal["catering_followup_sent"]
+    approval_code: ProposalCode
+    outbound_message_id: str = Field(default="", max_length=200)
+
+
+class CateringFollowupCancelled(_BaseFollowupEntry):
+    """The owner (or an operator) cancelled a carded follow-up before it sent."""
+    type: Literal["catering_followup_cancelled"]
+    approval_code: Optional[ProposalCode] = None
+    actor: Literal["owner", "operator", "system"]
+    reason: str = Field(default="", max_length=200)
+
+
+class CateringFollowupExpired(_BaseFollowupEntry):
+    """The owner never answered the card within the approval window, for the
+    maximum number of attempts. Terminal — the follow-up is dropped rather than
+    carded forever, because an owner who ignored it twice has answered."""
+    type: Literal["catering_followup_expired"]
+    attempts: int = Field(ge=1, le=10)
+
+
+# ─────────────────────────────────────────────────────────────────
 # Commerce primitive LogEntry variants — slice 1 (PRD v2 §8)
 # Slice 1 emits: cart_started/updated/cleared/expired/checked_out,
 # order_created/status_change/cancelled/create_refused_category,
@@ -7513,6 +7682,13 @@ LogEntry = Annotated[
         # M4/G4 — per-lead hold (lead-scoped twin of the conversation kernel)
         Annotated[CateringLeadHoldChanged, Tag("catering_lead_hold_changed")],
         Annotated[CateringLeadHoldBlockedSend, Tag("catering_lead_hold_blocked_send")],
+        # M5 — controlled follow-up engine
+        Annotated[CateringFollowupScheduled, Tag("catering_followup_scheduled")],
+        Annotated[CateringFollowupSuppressed, Tag("catering_followup_suppressed")],
+        Annotated[CateringFollowupCardSent, Tag("catering_followup_card_sent")],
+        Annotated[CateringFollowupSent, Tag("catering_followup_sent")],
+        Annotated[CateringFollowupCancelled, Tag("catering_followup_cancelled")],
+        Annotated[CateringFollowupExpired, Tag("catering_followup_expired")],
         # Commerce primitives slice 1 — PRD v2 §8
         Annotated[CommerceCartStarted, Tag("commerce_cart_started")],
         Annotated[CommerceCartUpdated, Tag("commerce_cart_updated")],
@@ -7593,6 +7769,12 @@ __all__ = [
     "CateringProposalOption", "CateringProposalSet", "CateringProposalStore",
     "CateringLearningSource", "CateringLearningProposalHealth",
     "CateringLearningSummary",
+    # M5 controlled follow-up engine
+    "CateringFollowupType", "CateringFollowupStatus",
+    "CateringFollowup", "CateringFollowupStore",
+    "CateringFollowupScheduled", "CateringFollowupSuppressed",
+    "CateringFollowupCardSent", "CateringFollowupSent",
+    "CateringFollowupCancelled", "CateringFollowupExpired",
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
     "FlyerConfig", "FlyerRecoveryConfig", "FlyerWorkflowStatus", "FlyerOnboardingStatus", "FlyerLanguage", "FlyerCreationMode",
     "FlyerIntakeStatus", "FlyerIntakeSource", "FlyerOutputFormat", "FlyerImageQuality",

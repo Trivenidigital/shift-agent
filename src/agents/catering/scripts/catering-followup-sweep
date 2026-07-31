@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""catering-followup-sweep — the M5 follow-up engine (owner-supervised by default).
+
+Walks the follow-up store once per run and does exactly three things:
+
+  1. RE-CARDS or EXPIRES owner approval cards whose 4h window lapsed.
+  2. SUPPRESSES due follow-ups that a rule says must not happen, terminally.
+  3. CARDS the survivors: renders the deterministic template, mints a #XXXXX
+     approval code, moves the record to `awaiting_owner_approval` and sends the
+     OWNER a card. The customer hears nothing until the owner replies with the
+     code (`approve-catering-followup`).
+
+Direct customer auto-send exists behind ``CATERING_FOLLOWUP_AUTOSEND`` and ships
+OFF. It is deliberately a SEPARATE flag from the sweep's own arming flag: an
+operator turning the engine on to watch it card things must not discover they
+also turned on unattended sending.
+
+THREE INDEPENDENT GATES, all default-off (house style — arming one arms nothing
+else):
+
+  config.catering_followup.enabled     gates SCHEDULING (the trigger sites)
+  CATERING_FOLLOWUP_ENABLED=1          gates THIS sweep
+  CATERING_FOLLOWUP_ALLOWLIST          which conversations it may card;
+                                       empty DISABLES (fail-closed), ``*``
+                                       graduates every conversation
+
+GRADUATION TRIGGER for the allowlist (standing project rule — every scoped
+rollout names the condition that retires its scope): after 10 clean
+owner-approved follow-up sends with ZERO mis-targets (no card naming the wrong
+lead, no send to a customer whose conversation was suppressed), replace the
+per-number list with ``*``. Until then the empty default keeps the sweep inert.
+
+**Exit 0 always** — a timer-driven sweep must not fail its unit. Every error path
+is caught and logged to journald, and a failure on one follow-up never skips the
+rest of the cycle.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+import approval_code_pools  # noqa: E402
+import automation_control  # noqa: E402
+import catering_followups as cf  # noqa: E402
+import safe_io  # noqa: E402
+from safe_io import (  # noqa: E402
+    FileLock, customer_now, flock, load_model, load_yaml_model, ndjson_append,
+)
+from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402
+from schemas import (  # noqa: E402
+    CateringFollowupCardSent, CateringFollowupExpired, CateringFollowupSent,
+    CateringFollowupSuppressed, CateringLeadStore, Config,
+)
+from exit_codes import EXIT_OK  # noqa: E402
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
+
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+
+ENABLED_ENV = "CATERING_FOLLOWUP_ENABLED"
+ALLOWLIST_ENV = "CATERING_FOLLOWUP_ALLOWLIST"
+AUTOSEND_ENV = "CATERING_FOLLOWUP_AUTOSEND"
+TEMPLATE_DIR_ENV = "SHIFT_AGENT_TEMPLATE_DIR"
+
+_REASON_LABELS = {
+    "incomplete_qualification": "enquiry still missing details",
+    "proposal_unanswered": "quote sent, no reply yet",
+    "owner_reminder": "you asked to check back",
+    "event_approaching": "event about a week away",
+    "final_headcount_due": "final guest count due",
+    "post_event_feedback": "post-event feedback",
+}
+
+
+def _log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def _truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _template_dir() -> Path:
+    """Deployed templates dir, an operator/test override, or the in-repo copy for
+    an in-place run. Resolved at call time so a subprocess test can point at the
+    repo without a deploy."""
+    override = os.environ.get(TEMPLATE_DIR_ENV)
+    if override:
+        return Path(override)
+    deployed = Path("/opt/shift-agent/templates")
+    if deployed.is_dir():
+        return deployed
+    return Path(__file__).resolve().parent.parent / "templates"
+
+
+def _allowlist_admits(jid: str) -> bool:
+    """ppv1/#612 wildcard semantics on the canonical identity key: ``*`` admits
+    everything, an empty list admits NOTHING (fail-closed), any error is a
+    refusal. Identical to automation_control.enabled's allowlist half, keyed the
+    same way so a number armed there means the same conversation here."""
+    try:
+        raw = [p.strip() for p in os.environ.get(ALLOWLIST_ENV, "").split(",") if p.strip()]
+        if "*" in raw:
+            return True
+        if not raw:
+            return False
+        want = automation_control.canonical_key(jid)
+        if not want:
+            return False
+        allow = {automation_control.canonical_key(e) for e in raw}
+        allow.discard("")
+        return want in allow
+    except Exception:
+        return False
+
+
+def _customer_jid(lead) -> str:
+    phone = str(getattr(lead, "customer_phone", "") or "").lstrip("+").strip()
+    if not phone:
+        return ""
+    return phone if "@" in phone else f"{phone}@s.whatsapp.net"
+
+
+def _emit(entry) -> None:
+    """Append ONE audit row. Best-effort: a broken audit pipeline must not stop
+    the sweep from finishing its cycle."""
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with flock(LOG_PATH):
+            ndjson_append(LOG_PATH, TypeAdapter(type(entry)).dump_json(entry).decode("utf-8"))
+    except Exception as e:  # noqa: BLE001
+        _log(f"catering_followup_sweep: audit emit failed (non-fatal): {e}")
+
+
+def _render(followup, lead, template_dir: Path) -> str:
+    """Deterministic customer text for ONE follow-up — the BODY, without the
+    bridge transport prefix (that is added at send time so the owner card can
+    embed the body without stacking a second header inside itself).
+
+    Templates carry no prices by construction (asserted by test): a nudge that
+    names a number is a quote, and quotes go through the owner-approval path that
+    already exists.
+
+    Every placeholder gets a value, so a lead missing a field renders a slightly
+    vaguer sentence instead of raising and stranding the follow-up.
+    """
+    path = template_dir / f"{followup.message_template_key}.txt"
+    template = path.read_text(encoding="utf-8")
+    extracted = getattr(lead, "extracted", None)
+    missing = []
+    try:
+        import catering_qualification
+        missing = catering_qualification.missing_fields(lead)
+        missing_label = catering_qualification.gap_summary(missing)
+    except Exception:  # noqa: BLE001 — a vaguer sentence beats a stranded follow-up
+        missing_label = ""
+    headcount = getattr(extracted, "headcount", None)
+    event_date = getattr(extracted, "event_date", None)
+    fields = {
+        "customer_name": getattr(lead, "customer_name", None) or "there",
+        "lead_id": followup.lead_id,
+        "event_date": event_date or "the date we have on file",
+        "headcount": headcount if headcount is not None else "no guest count on file yet",
+        "missing_fields": missing_label or "a few remaining details",
+        # Owner-authored context, empty for every type but owner_reminder. Passed
+        # to every template so one field dict serves all six.
+        "note_line": cf.note_line(followup.note),
+    }
+    return template.format(**fields).strip()
+
+
+def _render_owner_card(followup, lead, message: str, template_dir: Path, *,
+                       code: str) -> str:
+    path = template_dir / "catering_followup_owner_card.txt"
+    fields = {
+        "lead_id": followup.lead_id,
+        "customer_name": getattr(lead, "customer_name", None) or "(unknown)",
+        "customer_phone": getattr(lead, "customer_phone", None) or "(unknown)",
+        "reason_label": _REASON_LABELS.get(followup.followup_type, followup.followup_type),
+        "due_at": followup.due_at.strftime("%Y-%m-%d %H:%M"),
+        "rendered_message": message,
+        "approval_code": code,
+        "ttl_hours": cf.CARD_TTL_HOURS,
+    }
+    return path.read_text(encoding="utf-8").format(**fields).strip()
+
+
+def _mint_code(path: Path) -> str:
+    """A #XXXXX code unique across the four approval-code pools AND the live
+    follow-up codes. Held under the cross-pool generation lock, with the store
+    write that claims it happening inside the same lock (the LOCK CONTRACT in
+    approval_code_pools: scan and commit are one atomic step)."""
+    return approval_code_pools.generate_unique_code(exclude=cf.live_codes(path))
+
+
+def _expire_or_recard(store, now, path):
+    """Sweep lapsed owner cards. Returns (recarded, expired, audit_rows).
+
+    Caller MUST hold the store lock. A card that outlived its window returns the
+    follow-up to `scheduled` so the next cycle re-cards it; at MAX_CARD_ATTEMPTS
+    it becomes `expired` instead. An owner who let two cards lapse has answered.
+    """
+    recarded = expired = 0
+    pending_rows = []
+    for i, f in enumerate(store.followups):
+        if not cf.card_expired(f, now):
+            continue
+        if f.attempt_count >= cf.MAX_CARD_ATTEMPTS:
+            store.followups[i] = f.model_copy(update={"status": "expired"})
+            pending_rows.append(CateringFollowupExpired(
+                type="catering_followup_expired", ts=now,
+                followup_id=f.followup_id, lead_id=f.lead_id,
+                followup_type=f.followup_type, attempts=f.attempt_count,
+            ))
+            expired += 1
+        else:
+            # Back to scheduled, due NOW: the follow-up was already due when it
+            # was carded, so re-carding must not push it into the future.
+            store.followups[i] = f.model_copy(update={
+                "status": "scheduled", "approval_code": None, "rendered_message": None,
+            })
+            recarded += 1
+    return recarded, expired, pending_rows
+
+
+def _process_due(store, leads, cfg, now, path, *, autosend: bool,
+                 template_dir: Path, owner_jid: str) -> list[dict]:
+    """Evaluate every due follow-up under the store lock and return the SENDS the
+    caller must perform after releasing it (no network under a lock).
+
+    Each returned dict is {"followup", "jid", "message", "code", "kind"} where
+    kind is "owner_card" or "customer_autosend".
+    """
+    kill_switch = safe_io._agent_disabled()
+    leads_by_id = {l.lead_id: l for l in leads}
+    pending_sends: list[dict] = []
+
+    for followup in cf.due_followups(store, now):
+        lead = leads_by_id.get(followup.lead_id)
+        jid = _customer_jid(lead) if lead is not None else ""
+
+        # The allowlist gates the conversation, not the follow-up: a lead outside
+        # the rollout is left SCHEDULED (not suppressed) so graduating the
+        # allowlist later picks it up rather than finding a graveyard. An ORPHANED
+        # follow-up has no conversation to gate, so it falls through to the
+        # suppression check below and is retired as lead_missing — that path sends
+        # nothing, so letting it run outside the allowlist costs nothing and keeps
+        # the store from accumulating records nobody will ever resolve.
+        if lead is not None and not _allowlist_admits(jid):
+            continue
+
+        mode = None
+        try:
+            if jid and automation_control.enabled(jid):
+                mode = automation_control.get_mode(jid)
+        except Exception as e:  # noqa: BLE001 — kernel fault must not crash the cycle
+            _log(f"catering_followup_sweep: automation-control read failed for "
+                 f"{followup.followup_id} ({e}); treating as unarmed")
+
+        suppressed, reason = cf.suppression_check(
+            lead, followup, mode, now,
+            cfg=cfg.catering_followup,
+            lead_followups=cf.for_lead(store, followup.lead_id),
+            kill_switch_engaged=kill_switch,
+        )
+        if suppressed:
+            _set(store, followup.followup_id, {
+                "status": "suppressed", "suppressed_reason": reason,
+                "last_attempt_at": now,
+            })
+            _emit(CateringFollowupSuppressed(
+                type="catering_followup_suppressed", ts=now,
+                followup_id=followup.followup_id, lead_id=followup.lead_id,
+                followup_type=followup.followup_type, reason=reason,
+                detail=f"status={getattr(lead, 'status', 'missing')}",
+            ))
+            continue
+
+        try:
+            message = _render(followup, lead, template_dir)
+        except Exception as e:  # noqa: BLE001 — a bad template must not wedge the sweep
+            _log(f"catering_followup_sweep: render failed for {followup.followup_id}: {e}")
+            continue
+        if not message:
+            _log(f"catering_followup_sweep: empty render for {followup.followup_id}; skipping")
+            continue
+
+        try:
+            code = _mint_code(path)
+        except Exception as e:  # noqa: BLE001
+            _log(f"catering_followup_sweep: code mint failed for {followup.followup_id}: {e}")
+            continue
+
+        updated = _set(store, followup.followup_id, {
+            "status": "approved_sent" if autosend else "awaiting_owner_approval",
+            "approval_code": code,
+            "rendered_message": message[:2000],
+            "attempt_count": followup.attempt_count + 1,
+            "last_attempt_at": now,
+        })
+        if updated is None:
+            continue
+        pending_sends.append({
+            "followup": updated,
+            "jid": jid if autosend else owner_jid,
+            "message": cf.with_bridge_prefix(message) if autosend else _render_owner_card(
+                updated, lead, message, template_dir, code=code),
+            "code": code,
+            "kind": "customer_autosend" if autosend else "owner_card",
+        })
+    return pending_sends
+
+
+def _set(store, followup_id: str, update: dict):
+    """Replace ONE follow-up in the store; returns the updated model (None when
+    the id vanished, which a concurrent writer could cause)."""
+    for i, f in enumerate(store.followups):
+        if f.followup_id == followup_id:
+            store.followups[i] = f.model_copy(update=update)
+            return store.followups[i]
+    return None
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Report what WOULD be carded/suppressed; mutate nothing, send nothing")
+    args = ap.parse_args()
+
+    if not _truthy(ENABLED_ENV) and not args.dry_run:
+        return EXIT_OK  # dormant — operator has not armed the sweep
+
+    try:
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+        now = customer_now(cfg.customer.timezone)
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        _log(f"catering_followup_sweep: config load failed; skipping cycle: {e}")
+        return EXIT_OK
+
+    path = cf.followups_path()
+    autosend = _truthy(AUTOSEND_ENV)
+    template_dir = _template_dir()
+    owner_jid = cfg.owner.self_chat_jid or ""
+    if not owner_jid and not autosend:
+        _log("catering_followup_sweep: owner.self_chat_jid empty; nothing to card")
+        return EXIT_OK
+
+    pending_sends: list[dict] = []
+    expiry_rows: list = []
+    recarded = expired = 0
+    try:
+        leads_store, leads_status = load_model(LEADS_PATH, CateringLeadStore,
+                                               default=CateringLeadStore())
+        if leads_status not in ("ok", "missing", "empty"):
+            _log(f"catering_followup_sweep: leads.json status={leads_status!r}; skipping cycle")
+            return EXIT_OK
+
+        # Lock order (approval_code_pools LOCK CONTRACT): the cross-pool code lock
+        # is the OUTER lock, always acquired before a per-pool store lock, and the
+        # store write that claims a minted code happens before it is released — so
+        # scan, mint and commit are one atomic step across every generator.
+        with approval_code_pools.code_generation_lock(state_dir=path.parent), \
+                FileLock(cf.followups_lock(path)):
+            store, status = cf.load_store(path)
+            if status not in ("ok", "missing", "empty"):
+                _log(f"catering_followup_sweep: followups status={status!r}; skipping cycle")
+                return EXIT_OK
+
+            recarded, expired, expiry_rows = _expire_or_recard(store, now, path)
+            pending_sends = _process_due(
+                store, leads_store.leads, cfg, now, path,
+                autosend=autosend, template_dir=template_dir, owner_jid=owner_jid,
+            )
+            if args.dry_run:
+                for s in pending_sends:
+                    print(f"would_card {s['followup'].followup_id} lead={s['followup'].lead_id} "
+                          f"type={s['followup'].followup_type} kind={s['kind']}")
+                print(json.dumps({"would_recard": recarded, "would_expire": expired,
+                                  "would_card": len(pending_sends)}))
+                return EXIT_OK
+            cf.save_store(store, path)
+    except Exception as e:  # noqa: BLE001 — a timer-driven sweep never fails its unit
+        _log(f"catering_followup_sweep: unexpected error, skipping cycle: {e}")
+        return EXIT_OK
+
+    for row in expiry_rows:
+        _emit(row)
+
+    # Sends happen OUTSIDE the lock. A send failure leaves the record in
+    # awaiting_owner_approval with last_attempt_at stamped, so the 4h card TTL
+    # re-cards it on a later cycle — that is the retry, and it is bounded by
+    # MAX_CARD_ATTEMPTS rather than looping.
+    carded = sent = 0
+    for s in pending_sends:
+        f = s["followup"]
+        if not s["jid"]:
+            _log(f"catering_followup_sweep: no destination for {f.followup_id}; skipping send")
+            continue
+        try:
+            ok, mid_or_err = _bridge_post(s["jid"], s["message"])
+        except Exception as e:  # noqa: BLE001
+            _log(f"catering_followup_sweep: send raised for {f.followup_id}: {e}")
+            continue
+        if not ok:
+            _log(f"catering_followup_sweep: send failed for {f.followup_id}: {mid_or_err}")
+            continue
+        if s["kind"] == "customer_autosend":
+            sent += 1
+            _emit(CateringFollowupSent(
+                type="catering_followup_sent", ts=now,
+                followup_id=f.followup_id, lead_id=f.lead_id,
+                followup_type=f.followup_type, approval_code=s["code"],
+                outbound_message_id=mid_or_err,
+            ))
+        else:
+            carded += 1
+            _emit(CateringFollowupCardSent(
+                type="catering_followup_card_sent", ts=now,
+                followup_id=f.followup_id, lead_id=f.lead_id,
+                followup_type=f.followup_type, approval_code=s["code"],
+                attempt=f.attempt_count, owner_card_outbound_id=mid_or_err,
+            ))
+
+    print(json.dumps({"carded": carded, "auto_sent": sent,
+                      "recarded": recarded, "expired": expired}))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

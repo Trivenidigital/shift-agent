@@ -1016,9 +1016,51 @@ def main() -> int:
         lead_id=lead_id_for_output,
     )
 
+    # ── M5 followup trigger ──────────────────────────────────────────────────
+    # The quote is with the customer. Schedule the follow-ups whose clock starts
+    # here. Bounded to this block so it merges cleanly alongside concurrent work
+    # on the rest of this script.
+    _schedule_followups_after_quote_sent(
+        cfg=cfg, lead=store.leads[matched_idx], now=now2,
+    )
+    # ── end M5 followup trigger ──────────────────────────────────────────────
+
     print(json.dumps({"lead_id": lead_id_for_output, "new_status": "SENT_TO_CUSTOMER",
                       "outbound_sent": True, "outbound_message_id": mid_or_err}))
     return EXIT_OK
+
+
+# ── M5 followup trigger ──────────────────────────────────────────────────────
+def _schedule_followups_after_quote_sent(*, cfg, lead, now) -> None:
+    """Schedule the follow-ups anchored on "the quote reached the customer".
+
+    One unconditional (`proposal_unanswered`, +48h) plus three that need the event
+    date (`event_approaching`, `final_headcount_due`, `post_event_feedback`).
+    Nothing is scheduled without a date — a nudge placed against a guessed date is
+    worse than no nudge.
+
+    NEVER raises: schedule_best_effort swallows every failure into an audit row,
+    and the import is guarded too, so a rollback that drops the platform module
+    leaves this a no-op instead of a traceback on a path that has already sent a
+    customer a quote.
+    """
+    try:
+        import catering_followups
+    except ImportError as e:
+        sys.stderr.write(f"WARN: catering_followups unavailable; no follow-ups scheduled: {e}\n")
+        return
+    enabled = cfg.catering_followup.enabled
+    event_date = getattr(getattr(lead, "extracted", None), "event_date", None)
+    catering_followups.schedule_best_effort(
+        lead.lead_id, "proposal_unanswered", now=now, enabled=enabled,
+        trigger="quote_sent",
+    )
+    for followup_type in ("event_approaching", "final_headcount_due", "post_event_feedback"):
+        catering_followups.schedule_best_effort(
+            lead.lead_id, followup_type, now=now, enabled=enabled,
+            event_date=event_date, trigger="quote_sent",
+        )
+# ── end M5 followup trigger ──────────────────────────────────────────────────
 
 
 def _maybe_invoke_deposit_hook(cfg, lead, lead_id: str) -> None:

@@ -66,6 +66,7 @@ from safe_io import (  # noqa: E402
 from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402  # PR-ε: chokepoint consolidation
 import catering_amendments  # noqa: E402
 import catering_extraction  # noqa: E402  # the SAME grammar the lead was created with
+import catering_followups  # noqa: E402  # M5 followup trigger
 import catering_qualification  # noqa: E402  # the ONE minimum-qualification gate
 from schemas import (  # noqa: E402
     PRE_QUOTE_DRAFT_SENTINEL,
@@ -612,6 +613,17 @@ def _run_answer_mode(args, cfg: Config, now: datetime) -> int:
                                change_note=change_note, quote_version=None),
             now=now, logical_turn_id=logical_turn_id,
         )
+        # M5 followup trigger — the loop ran out of rounds with gaps still open.
+        # Schedule ONE nudge 24h out so the customer gets a chance to close the
+        # gaps themselves before the owner has to chase by hand. Best-effort by
+        # contract: schedule_best_effort never raises, so a follow-up problem can
+        # never turn a completed qualification handoff into a failure.
+        if not qual["complete"]:
+            catering_followups.schedule_best_effort(
+                args.lead_id, "incomplete_qualification", now=now,
+                enabled=cfg.catering_followup.enabled,
+                trigger="qualification_round_cap",
+            )
     else:
         customer_text = catering_qualification.render_question_message(
             args.lead_id, next_batch, first_contact=False,

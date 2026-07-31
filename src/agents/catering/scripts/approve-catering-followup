@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""approve-catering-followup — turn an owner-carded follow-up into a send, or drop it.
+
+The second half of the M5 owner-supervised loop. catering-followup-sweep cards a
+due follow-up with a #XXXXX code; this script is what the owner's reply resolves
+to. Owner-only: a follow-up is an outbound customer message, and the whole point
+of the card is that a human authorised THIS text to THIS customer.
+
+Usage:
+  approve-catering-followup --code "#A3F2X" --decision approve --sender-role owner
+  approve-catering-followup --code "#A3F2X" --decision cancel  --sender-role owner
+
+The message sent is the EXACT `rendered_message` stored on the record at card
+time — the text the owner read on the card — under the bridge transport prefix
+every catering customer send carries. It is never re-rendered here, so an edited
+template or a changed lead field cannot make the customer receive something other
+than what was approved.
+
+IDEMPOTENT REPLAY: re-running approve with a code already `approved_sent` is a
+no-op that reports the original outbound id (mirrors apply-catering-owner-
+decision's CateringQuoteSent anchor). An owner who taps their own message twice
+must not send the customer two copies.
+
+Outputs JSON: {"followup_id": ..., "lead_id": ..., "status": ...,
+               "outbound_message_id": ..., "idempotent_replay": bool}
+
+Exit codes:
+  0  — applied
+  2  — invalid input
+  4  — code not found among carded follow-ups
+  5  — store unreadable / schema violation
+  6  — bridge unreachable (record left carded; the sweep re-cards it)
+  12 — privilege denied (sender is not the owner)
+  14 — a suppression rule fired between the card and the approval
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+import automation_control  # noqa: E402
+import catering_followups as cf  # noqa: E402
+import safe_io  # noqa: E402
+from safe_io import (  # noqa: E402
+    FileLock, customer_now, flock, load_model, load_yaml_model, ndjson_append,
+)
+from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402
+from schemas import (  # noqa: E402
+    CateringFollowupCancelled, CateringFollowupSent, CateringFollowupSuppressed,
+    CateringLeadStore, Config,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND, EXIT_SCHEMA_VIOLATION,
+    EXIT_DEPENDENCY_DOWN, EXIT_PRIVILEGE_DENIED, EXIT_LEAD_ON_HOLD,
+)
+from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
+
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+
+
+def _emit(entry) -> None:
+    """Best-effort audit append — a broken audit pipeline must not turn a
+    successful owner decision into a failure the owner has to repeat."""
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with flock(LOG_PATH):
+            ndjson_append(LOG_PATH, TypeAdapter(type(entry)).dump_json(entry).decode("utf-8"))
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"approve-catering-followup: audit emit failed (non-fatal): {e}\n")
+
+
+def _customer_jid(lead) -> str:
+    phone = str(getattr(lead, "customer_phone", "") or "").lstrip("+").strip()
+    if not phone:
+        return ""
+    return phone if "@" in phone else f"{phone}@s.whatsapp.net"
+
+
+def _set(store, followup_id: str, update: dict):
+    for i, f in enumerate(store.followups):
+        if f.followup_id == followup_id:
+            store.followups[i] = f.model_copy(update=update)
+            return store.followups[i]
+    return None
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--code", required=True, help="approval code from the card, e.g. #A3F2X")
+    ap.add_argument("--decision", required=True, choices=["approve", "cancel"])
+    ap.add_argument("--reason", default="", help="optional cancellation reason")
+    ap.add_argument("--sender-role", required=True,
+                    choices=["owner", "employee", "customer", "unknown"],
+                    help="resolved sender role from identify-sender; must be 'owner'. "
+                         "Defense-in-depth against a screenshot-forwarded #XXXXX code "
+                         "the dispatcher's role gate failed to catch upstream.")
+    args = ap.parse_args()
+
+    if args.sender_role != "owner":
+        sys.stderr.write(
+            f"privilege denied: follow-up approval is owner-only, "
+            f"got sender_role={args.sender_role!r}\n"
+        )
+        return EXIT_PRIVILEGE_DENIED
+
+    code = args.code.strip()
+    if not code.startswith("#") or len(code) != 6:
+        sys.stderr.write(f"invalid code format (expected #XXXXX): {code!r}\n")
+        return EXIT_INVALID_INPUT
+
+    try:
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+        now = customer_now(cfg.customer.timezone)
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        log_config_load_failed_best_effort(CONFIG_PATH, e, log_path=LOG_PATH)
+        sys.stderr.write(f"config load failed: {type(e).__name__}: {e}\n")
+        return EXIT_SCHEMA_VIOLATION
+
+    path = cf.followups_path()
+    target_jid = ""
+    message = ""
+    followup = None
+
+    with FileLock(cf.followups_lock(path)):
+        store, status = cf.load_store(path)
+        if status not in ("ok", "missing", "empty"):
+            sys.stderr.write(f"followups store status={status!r}; refusing to act\n")
+            return EXIT_SCHEMA_VIOLATION
+
+        followup = cf.by_code(store, code)
+        if followup is None:
+            sys.stderr.write(f"no carded follow-up with code {code}\n")
+            return EXIT_NOT_FOUND
+
+        # Idempotent replay: the customer demonstrably already has this message.
+        if followup.status == "approved_sent":
+            print(json.dumps({
+                "followup_id": followup.followup_id, "lead_id": followup.lead_id,
+                "status": "approved_sent",
+                "outbound_message_id": followup.sent_message_id or "",
+                "idempotent_replay": True,
+            }))
+            return EXIT_OK
+
+        if args.decision == "cancel":
+            _set(store, followup.followup_id, {
+                "status": "cancelled", "last_attempt_at": now,
+            })
+            cf.save_store(store, path)
+            _emit(CateringFollowupCancelled(
+                type="catering_followup_cancelled", ts=now,
+                followup_id=followup.followup_id, lead_id=followup.lead_id,
+                followup_type=followup.followup_type, approval_code=code,
+                actor="owner", reason=args.reason[:200],
+            ))
+            print(json.dumps({
+                "followup_id": followup.followup_id, "lead_id": followup.lead_id,
+                "status": "cancelled", "outbound_message_id": "",
+                "idempotent_replay": False,
+            }))
+            return EXIT_OK
+
+        message = followup.rendered_message or ""
+        if not message:
+            sys.stderr.write(
+                f"follow-up {followup.followup_id} carries no rendered_message; "
+                f"refusing to invent one\n"
+            )
+            return EXIT_SCHEMA_VIOLATION
+
+        # Re-run suppression at approval time. The card may be hours old; a
+        # customer who opted out or a lead put on hold in between must not receive
+        # the message just because the owner tapped approve. Time-based rules
+        # (quiet hours, min interval) are re-evaluated too — the owner approving at
+        # 23:00 is not a reason to message a customer at 23:00.
+        leads_store, leads_status = load_model(LEADS_PATH, CateringLeadStore,
+                                               default=CateringLeadStore())
+        lead = None
+        if leads_status in ("ok", "missing", "empty"):
+            lead = next((l for l in leads_store.leads if l.lead_id == followup.lead_id), None)
+        target_jid = _customer_jid(lead) if lead is not None else ""
+        mode = None
+        try:
+            if target_jid and automation_control.enabled(target_jid):
+                mode = automation_control.get_mode(target_jid)
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"automation-control read failed ({e}); treating as unarmed\n")
+        suppressed, reason = cf.suppression_check(
+            lead, followup, mode, now,
+            cfg=cfg.catering_followup,
+            lead_followups=cf.for_lead(store, followup.lead_id),
+            kill_switch_engaged=safe_io._agent_disabled(),
+        )
+        if suppressed:
+            _set(store, followup.followup_id, {
+                "status": "suppressed", "suppressed_reason": reason,
+                "last_attempt_at": now,
+            })
+            cf.save_store(store, path)
+            _emit(CateringFollowupSuppressed(
+                type="catering_followup_suppressed", ts=now,
+                followup_id=followup.followup_id, lead_id=followup.lead_id,
+                followup_type=followup.followup_type, reason=reason,
+                detail="re-checked at owner approval",
+            ))
+            sys.stderr.write(
+                f"follow-up {followup.followup_id} suppressed at approval time "
+                f"({reason}); nothing sent\n"
+            )
+            return EXIT_LEAD_ON_HOLD
+
+    if not target_jid:
+        sys.stderr.write(f"no customer destination for follow-up {followup.followup_id}\n")
+        return EXIT_SCHEMA_VIOLATION
+
+    # Send OUTSIDE the lock (no network under a lock). bridge_post is the governed
+    # chokepoint: the kill switch, the automation-control outbound backstop and the
+    # conversation throttle all apply there, so this call cannot walk past them.
+    ok, mid_or_err = _bridge_post(target_jid, cf.with_bridge_prefix(message))
+    if not ok:
+        sys.stderr.write(f"bridge_post to customer failed: {mid_or_err}\n")
+        print(json.dumps({
+            "followup_id": followup.followup_id, "lead_id": followup.lead_id,
+            "status": followup.status, "outbound_message_id": "",
+            "idempotent_replay": False, "error": mid_or_err,
+        }))
+        return EXIT_DEPENDENCY_DOWN
+
+    # Audit BEFORE the state write, so a crash between the two leaves the
+    # send-proven row on disk rather than a record claiming nothing happened.
+    _emit(CateringFollowupSent(
+        type="catering_followup_sent", ts=now,
+        followup_id=followup.followup_id, lead_id=followup.lead_id,
+        followup_type=followup.followup_type, approval_code=code,
+        outbound_message_id=mid_or_err,
+    ))
+    with FileLock(cf.followups_lock(path)):
+        store, status = cf.load_store(path)
+        if status in ("ok", "missing", "empty"):
+            _set(store, followup.followup_id, {
+                "status": "approved_sent", "sent_message_id": mid_or_err,
+                "last_attempt_at": now,
+            })
+            cf.save_store(store, path)
+        else:
+            sys.stderr.write(
+                f"followups store status={status!r} after a SUCCESSFUL send; "
+                f"{followup.followup_id} state not persisted (audit row written)\n"
+            )
+
+    print(json.dumps({
+        "followup_id": followup.followup_id, "lead_id": followup.lead_id,
+        "status": "approved_sent", "outbound_message_id": mid_or_err,
+        "idempotent_replay": False,
+    }))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

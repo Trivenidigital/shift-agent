@@ -51,6 +51,7 @@ NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
 CREATE_LEAD_BIN = Path("/usr/local/bin/create-catering-lead")  # F7 path
 CREATE_CATERING_PROPOSALS_BIN = Path("/usr/local/bin/create-catering-proposal-options")
 AMEND_CATERING_LEAD_BIN = Path("/usr/local/bin/amend-catering-lead")  # M1 apply path
+APPROVE_CATERING_FOLLOWUP_BIN = Path("/usr/local/bin/approve-catering-followup")  # M5
 SELECT_CATERING_PROPOSAL_BIN = Path("/usr/local/bin/select-catering-proposal")
 CREATE_FLYER_PROJECT_BIN = Path("/usr/local/bin/create-flyer-project")
 BARE_FLYER_SEND_BIN = Path("/usr/local/bin/bare-flyer-render-and-send")  # Approach B async render+send
@@ -585,6 +586,29 @@ def invoke_apply_owner_decision(code: str, decision: str,
             cmd.extend(["--reason", "owner_reject_via_cf_router"])
         result = subprocess.run(
             cmd, input=stdin_text, capture_output=True, text=True,
+            env=env, timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        return 124
+    except Exception:
+        return 1
+
+
+def invoke_approve_catering_followup(code: str, decision: str) -> int:
+    """Invoke approve-catering-followup (M5); returns exit code.
+
+    `decision` is "approve" or "cancel". --sender-role owner is passed explicitly
+    because the script's privilege check requires it and cf-router only reaches
+    this from the owner self-chat surface — the same reasoning (and the same
+    PR-CF1c bug class) as invoke_apply_owner_decision above.
+    """
+    try:
+        env = {**os.environ, "PYTHONPATH": str(PLATFORM_DIR)}
+        cmd = [str(PYTHON_BIN), str(APPROVE_CATERING_FOLLOWUP_BIN),
+               "--code", code, "--decision", decision, "--sender-role", "owner"]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
             env=env, timeout=SUBPROCESS_TIMEOUT_SEC,
         )
         return result.returncode

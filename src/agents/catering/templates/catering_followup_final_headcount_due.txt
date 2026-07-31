@@ -1,0 +1,5 @@
+Hi {customer_name}, we're getting ready for {event_date} and would like to settle the numbers.
+
+Could you let us know your final guest count? We currently have {headcount}.
+
+(Ref: {lead_id})

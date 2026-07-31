@@ -1,0 +1,7 @@
+Hi {customer_name}, just checking back on your catering enquiry.
+
+We still need a couple of details before we can put a plan together: {missing_fields}.
+
+Reply here whenever you have them and we'll pick it up from there.
+
+(Ref: {lead_id})

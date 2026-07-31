@@ -1,0 +1,19 @@
+⚕ *Catering Agent*
+────────────
+*Follow-up ready — {lead_id}*
+
+To: {customer_name} ({customer_phone})
+Reason: {reason_label}
+Due: {due_at}
+
+Message we'd send:
+{rendered_message}
+
+----
+*To send it, reply:*
+`{approval_code} approve`
+
+*To drop it, reply:*
+`{approval_code} cancel`
+
+This card expires in {ttl_hours}h.
