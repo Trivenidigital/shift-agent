@@ -126,8 +126,12 @@ def format_cents(cents: Optional[int]) -> str:
 
 # ── Computation result models ────────────────────────────────────────────────
 class QuoteLine(BaseModel):
-    """One à-la-carte line. `unit_cents`/`extended_cents` are None ONLY when the
-    price could not be resolved — the line still appears, flagged."""
+    """One priced line. `lines` is the COMPLETE itemization: a per-person package
+    appears as the first line (source='package', qty=guest_count, unit=the
+    per-person price), followed by à-la-carte lines.
+
+    `unit_cents`/`extended_cents` are None ONLY when the price could not be
+    resolved — the line still appears, flagged, never dropped or zeroed."""
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=200)
     qty: int = Field(ge=1)
@@ -308,16 +312,23 @@ def compute_quote(
     overrides = pricebook.item_price_overrides
     index = _menu_index(menu)
 
-    # 1. Per-person package
+    # 1. Per-person package — the first line of the itemization, and the whole
+    #    point of M2: this is what makes a quote scale with the guest count.
     pkg = _resolve_package(pricebook, package_id)
     per_person_subtotal = 0
+    lines: list[QuoteLine] = []
     if pkg is not None:
         per_person_subtotal = pkg.price_per_person_cents * guest_count
+        lines.append(QuoteLine(
+            name=pkg.name, qty=guest_count,
+            unit_cents=pkg.price_per_person_cents,
+            extended_cents=per_person_subtotal, source="package",
+        ))
         if guest_count < pkg.min_guests:
             flags.append(f"{FLAG_BELOW_PACKAGE_MIN}:{pkg.id}")
 
-    # 2. À-la-carte lines
-    lines: list[QuoteLine] = []
+    # 2. À-la-carte lines. `items_subtotal` counts ONLY these — the package's
+    #    contribution lives in `per_person_subtotal`, so the two never overlap.
     items_subtotal = 0
     for name, qty in items:
         unit_cents: Optional[int] = None
@@ -448,9 +459,11 @@ def render_quote_lines(qc: QuoteComputation) -> str:
             f"Package: {qc.package_name} — {format_cents(qc.price_per_person_cents)}"
             f"/guest × {qc.guest_count} = {format_cents(qc.per_person_subtotal_cents)}"
         )
-    if qc.lines:
+    # The package already has its own headline above; don't repeat it here.
+    a_la_carte = [ln for ln in qc.lines if ln.source != "package"]
+    if a_la_carte:
         out.append("Items:")
-        for ln in qc.lines:
+        for ln in a_la_carte:
             if ln.unit_cents is None:
                 out.append(f"  - {ln.name} × {ln.qty} — price to be confirmed by owner")
             else:

@@ -141,6 +141,41 @@ def test_package_plus_extras_sums_both_streams():
     assert qc.total_cents == 92_400
 
 
+def test_the_package_appears_as_the_first_line_of_the_itemization():
+    qc = compute_quote(50, "veg-standard", [("Gulab Jamun", 6)], None,
+                       _pricebook(), _menu())
+    head = qc.lines[0]
+    assert (head.name, head.qty, head.unit_cents, head.extended_cents, head.source) == (
+        "Standard Veg Buffet", 50, 1800, 90_000, "package")
+    assert [ln.source for ln in qc.lines] == ["package", "menu"]
+
+
+def test_the_package_line_is_not_double_counted():
+    """`items_subtotal_cents` is a-la-carte only; the package lives in
+    `per_person_subtotal_cents`. Summing the lines must equal their sum, and the
+    subtotal must not count the package twice."""
+    qc = compute_quote(50, "veg-standard", [("Gulab Jamun", 6)], None,
+                       _pricebook(), _menu())
+    assert qc.items_subtotal_cents == 2400          # the dessert only
+    assert qc.per_person_subtotal_cents == 90_000   # the package only
+    assert sum(ln.extended_cents for ln in qc.lines) == 92_400
+    assert qc.subtotal_cents == 92_400
+
+
+def test_a_pure_a_la_carte_quote_has_no_package_line():
+    qc = compute_quote(10, None, [("Samosa", 2)], None, _pricebook(), _menu())
+    assert all(ln.source != "package" for ln in qc.lines)
+    assert qc.per_person_subtotal_cents == 0
+
+
+def test_render_does_not_repeat_the_package_in_the_items_block():
+    qc = compute_quote(50, "veg-standard", [("Gulab Jamun", 6)], None,
+                       _pricebook(), _menu())
+    text = render_quote_lines(qc)
+    assert text.count("Standard Veg Buffet") == 1
+    assert "Package: Standard Veg Buffet" in text
+
+
 def test_item_price_override_beats_the_menu_price():
     pb = _pricebook(item_price_overrides={"Gulab Jamun": 450})
     qc = compute_quote(10, None, [("Gulab Jamun", 2)], None, pb, _menu())
