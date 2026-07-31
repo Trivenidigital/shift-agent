@@ -12,6 +12,17 @@ transport-evidence closure; it designs the *next* evidence step for the distinct
 proposes no new Hermes-owned behaviour. Any probe would mirror the existing `/send` transport-evidence
 harness pattern, not introduce a parallel transport.
 
+> **Reviewer amendment 1 (2026-07-31) — owner-page/provider-op accounting corrected.** The earlier
+> statement that the budget-exhaustion page "is not a WhatsApp send" was only true on the primary
+> owner-notification branch. `notify_owner_with_fallback` has TWO branches and this document now preserves
+> both (§1d, §6): primary channel (Pushover/Telegram) succeeds → **one internal owner notification, zero
+> owner WhatsApp provider operations**; primary channel FAILS → **one reviewed owner self-chat fallback =
+> one additional WhatsApp provider operation** on a **separate owner-send/audit identity**, **never** counted
+> as an edit or a customer send. Consequently Strategy C may claim **zero customer/provider *edit* visibility**
+> only when owner paging is deterministically stubbed to an internal loopback OR the fallback branch is
+> separately contained + accounted; it may **not** categorically claim "zero provider operations" while the
+> real self-chat fallback remains possible.
+
 ## Hermes-first analysis
 
 | Domain | Hermes skill found? | Decision |
@@ -111,6 +122,17 @@ denied pre-provider, assuming the 5-finalized cap is not reached first.
 
 - Denials are audited to the decisions log via `_emit_turn_send_budget_suppressed` (metadata-only:
   turn-id / count / limit / reason — never message content) and paged once per turn.
+- **Owner-page accounting is two-branch (load-bearing for the provider-op count).** The once-per-turn page
+  goes through `_page_turn_send_budget_exhausted` → `notify_owner_with_fallback` (`safe_io.py:2353-2395`):
+  - **Primary channel succeeds** (Pushover via `shift-agent-notify-owner`, or Telegram) → **one internal
+    owner notification, ZERO owner WhatsApp provider operations.**
+  - **Primary channel FAILS** → **one reviewed owner self-chat fallback = one additional WhatsApp provider
+    operation**, on a **separate owner-send/audit identity** (the owner self-chat, not the customer edit
+    chat), and it is **never** counted as an edit or a customer send.
+  A probe must therefore either (a) deterministically stub owner paging to an internal loopback (so the page
+  cannot reach any provider), or (b) separately contain + account the fallback branch (assert its one owner
+  self-chat op lands on the owner identity, is separately audited, and never touches the customer edit chat
+  or the `loopback_edit_posts` count). It may not assume the fallback never fires.
 - The `/edit` seam is **NOT** wired to the transport-evidence ledger (see §2). Its evidence surface today
   is the budget gate's audit rows + the pre-provider `return None`, not a `transport_evidence_ledger` record.
 
@@ -221,8 +243,15 @@ establish **"cap 50 live-proven."**
   check).
 - **Does not prove:** real provider in-place edit; real ack; real notification churn (the loopback does not
   model WhatsApp edit semantics).
-- **Provider-visible ops:** **NONE** (fully in-process / loopback).
-- **Notification risk:** **NONE.**
+- **Provider-visible ops:** **NONE on the customer/edit path** (all `/edit` traffic is loopback). The one
+  budget-exhaustion owner page is the only thing that could reach a real provider, and only on its FAILURE
+  branch (one owner self-chat op). Strategy C therefore **stubs owner paging to an internal loopback**
+  (asserting `page_count==1` against the spy, `owner_page_provider_ops==0`) so it can honestly claim **zero
+  provider operations of any kind**; if paging is left un-stubbed, C must instead account the fallback branch
+  per §6 (`owner_page_provider_ops` ≤ 1 owner op, separately audited, never on the customer edit chat) and
+  claim only "zero customer/provider *edit* operations."
+- **Notification risk:** **NONE** on the customer path (owner paging stubbed to loopback; if un-stubbed, at
+  most one owner self-chat on primary-channel failure — never a customer notification).
 - **Duplicate/retry risk:** **NONE.**
 - **State mutation:** in-process tmp only.
 - **Cleanup:** full (tmp dirs; `_TURN_SEND_BUDGET` ContextVar reset — the existing
@@ -238,10 +267,12 @@ establish **"cap 50 live-proven."**
 **Primary: Strategy C (deterministic `/edit` emulator), executed as a repository-only, default-OFF,
 never-in-production test that mirrors the existing `/send` harness.** It closes everything that source +
 arithmetic leave open about the *gate* — the 50-draft ceiling, pre-provider denial, at-most-once, audit
-row, single page — with **zero** provider visibility, zero notification risk, and the strongest
+row, single page — with **zero customer/edit provider visibility** (owner paging stubbed to loopback →
+`owner_page_provider_ops==0`), zero customer notification risk, and the strongest
 exact-release fidelity (it runs the real patched `edit_message` logic + real `safe_io`). This is the
 faithful analogue of how `cap=5` was proven for `/send`, and it needs **no** Stage-A admission, no real
-destination, and no live traffic.
+destination, and no live customer traffic. (Its one owner-page path is stubbed to an internal loopback so
+`owner_page_provider_ops==0` — see §6; run un-stubbed only with the fallback branch separately accounted.)
 
 **Only if the operator separately authorizes real-edit fidelity: add Strategy B's minimal positive
 control (2-3 real edits) under an admitted Stage-A identity** to establish that a real `/edit` edits one
@@ -275,19 +306,25 @@ class tag.
 | `loopback_acks` | 50 × HTTP 200 from the loopback — *emulated, not a live provider ack* | loopback responses |
 | `message_ids` | **exactly one distinct id** across all edits (*live-source-asserted*: the one-id echo is a Hermes `edit_message` property, §1a, not repo-verifiable; a C run controls the id it feeds) | `SendResult.message_id` echo |
 | `audit_rows` | one decisions-log row of type **`send_budget_exhausted`** per denial, `reason=draft_exhausted` | decisions-log delta (`_emit_turn_send_budget_suppressed` → `_try_emit_audit_row("send_budget_exhausted", …)`, `safe_io.py:2334-2343`) |
-| `page_count` | **exactly 1** (once per turn, `budget.paged`), via the §12b **owner-alert** path (`notify_owner_with_fallback` — Pushover/Telegram), NOT a WhatsApp transport POST | `_page_turn_send_budget_exhausted` spy |
+| `page_count` | **exactly 1** (once per turn, `budget.paged`), via the §12b **owner-alert** path (`notify_owner_with_fallback` — Pushover/Telegram primary; owner self-chat only if the primary FAILS) | `_page_turn_send_budget_exhausted` spy |
+| `owner_page_provider_ops` | **0** when owner paging is stubbed to an internal loopback OR the primary owner channel succeeds; **1** owner self-chat WhatsApp op **iff** the primary FAILS — on the **owner** identity, separately audited, **never** on the customer edit chat and **never** counted in `loopback_edit_posts` | owner-alert spy branch + owner-send audit row |
 | `before_state` | `count=0, draft_count=0` at turn freeze | `_TurnSendBudget` |
 | `after_state` | `draft_count=50` (+ finalized `count` only if a finalize edit ran) | `_TurnSendBudget` |
 | `cleanup` | tmp dirs removed; `_TURN_SEND_BUDGET` reset to `None`; no residual audit outside the tmp log | fixture teardown |
-| **abort conditions** | any `/edit` POST for a denied attempt · > 1 distinct `message_id` · `page_count != 1` · a denied draft reaching the loopback · (pre-provider tests) any provider-visible send · denial reason `exhausted` when `draft_exhausted` was expected | assertion failure ⇒ abort |
+| **abort conditions** | any `/edit` POST for a denied attempt · > 1 distinct `message_id` · `page_count != 1` · a denied draft reaching the loopback · (pre-provider tests) any provider-visible **edit/customer** send · denial reason `exhausted` when `draft_exhausted` was expected · an owner self-chat fallback that lands on the customer edit chat or inflates `loopback_edit_posts` · owner paging reaching a real provider when the probe required it stubbed to loopback | assertion failure ⇒ abort |
 
-**Page-vs-customer separation (mirror the existing R6 guard).** The one budget-exhaustion page does NOT
-touch the WhatsApp transport at all — `_page_turn_send_budget_exhausted` routes through the §12b
-`notify_owner_with_fallback` owner-alert path (Pushover/Telegram, `safe_io.py:2353-2395`), to the **owner**,
-not the customer edit chat. (Even the `/send` harness — where a page *could* ride the same `send()` — excludes
-it from the provider canary by `expected_chat_id` matching, `transport_evidence_diagnostic.py:228-238`.) So a
-`/edit` probe's `loopback_edit_posts` count is doubly insulated from the page: different mechanism **and**
-different destination — the owner page can never inflate the `exactly 50` count.
+**Page-vs-customer separation (mirror the existing R6 guard).** The one budget-exhaustion page routes
+through the §12b `notify_owner_with_fallback` owner-alert path (`safe_io.py:2353-2395`) to the **owner**, not
+the customer edit chat. On its **primary** branch (Pushover/Telegram) it makes **no WhatsApp provider call**;
+only if the primary FAILS does it fall back to **one** owner self-chat WhatsApp op — on the owner identity,
+separately audited, never on the customer edit chat and never counted as an edit. So the page is insulated
+from the `loopback_edit_posts`/`exactly 50` count by both a different mechanism (primary channel) **and** a
+different destination (owner, not customer) — mirroring the `/send` harness's `expected_chat_id` guard
+(`transport_evidence_diagnostic.py:228-238`), which excludes an owner page from the provider canary precisely
+because it targets a different identity. The page can never inflate the `exactly 50` **edit** count; the
+separate `owner_page_provider_ops` field (above) accounts for the fallback branch's single owner op so the
+probe never has to pretend the fallback is impossible. To claim **zero provider operations of any kind**, the
+probe must stub owner paging to an internal loopback (recommended for Strategy C).
 
 ---
 
