@@ -35,7 +35,10 @@ dev = [
   "pytest>=8.3",
   "pytest-asyncio>=0.24",
   "anyio>=4.4",
-  "ruff>=0.7",
+  # <0.16: an unpinned latest-ruff started flagging pre-existing app code
+  # (E402/I001/RUF100 sweep, 2026-07-31) — raise the bound only together with
+  # the repo-wide cleanup that makes the new rules pass.
+  "ruff>=0.7,<0.16",
   "mypy>=1.13",
 ]
 
