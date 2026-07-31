@@ -286,9 +286,12 @@ class TestSuppressionMatrix:
         assert _check(lead=closed, followup=feedback) == (False, "")
 
     def test_customer_declined_read_defensively(self):
-        """The field is M3's; the gate is correct the moment it lands and inert
-        (not broken) before it does — a CateringLead today has no such field."""
-        assert not hasattr(_lead(), "customer_acceptance")
+        """Written pre-M3 as a defensive getattr; M3 landed customer_acceptance
+        on CateringLead, so the gate is now live on the real model too."""
+        assert hasattr(_lead(), "customer_acceptance")
+        declined = _lead(status="SENT_TO_CUSTOMER", quote_text="q")
+        declined = declined.model_copy(update={"customer_acceptance": "declined"})
+        assert _check(lead=declined) == (True, "customer_declined")
         assert cf.suppression_check(
             {"status": "SENT_TO_CUSTOMER", "customer_acceptance": "declined"},
             _followup(), None, NOW, cfg=CFG,
