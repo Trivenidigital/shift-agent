@@ -16,7 +16,9 @@ Two independently-activatable behaviors under one master flag:
                                                 wildcard semantics on the
                                                 canonical identity key)
     CATERING_STOP_ENABLED     = "1"   customer STOP/pause/opt-out + resume
-    CATERING_TAKEOVER_ENABLED = "1"   owner #XXXXX takeover / release / resume
+    CATERING_TAKEOVER_ENABLED = "1"   owner #XXXXX takeover / pause / release
+                                                / resume (one flag; the owner
+                                                command surface is indivisible)
 
 State file `state/catering-automation-control.json` (atomic + FileLock), keyed
 by ``flyer_identity.canonical_identity_key`` so a customer reaching us under a
@@ -27,6 +29,7 @@ LID and a phone-JID converges on ONE record. Per-conversation record::
       logical_turn_id,          # the NATIVE inbound message id (PR-4 identity —
                                 #   NOT the front-brain #643 turn id)
       pause_expires_ts,         # paused only; auto-expires to active at read time
+      takeover_expires_ts,      # takeover only; same read-time expiry (M4/G3)
       ack_sent }                # the one-deterministic-ack guard (§5.4)
 
 Absent record = ``active``. State persists across restart/deploy and is NOT
@@ -78,6 +81,17 @@ HEALTHY_LOAD_STATUSES = frozenset({"ok", "missing", "empty"})
 _DEFAULT_STATE_PATH = "/opt/shift-agent/state/catering-automation-control.json"
 # Default pause window (§5.4 "temporary"; auto-expires back to active). 7 days.
 DEFAULT_PAUSE_SECONDS = 7 * 24 * 3600
+# Default human-takeover window (M4/G3). 72h: long enough to cover a weekend the
+# owner takes a lead over by hand, short enough that a takeover forgotten on a
+# Friday does not mute the customer indefinitely. Re-issuing `#XXXXX takeover`
+# rewrites the record and extends the window from that moment.
+#
+# Records written BEFORE M4 carry no takeover_expires_ts, and a missing expiry
+# reads as NOT expired — so an existing takeover keeps its old never-expires
+# behavior until the owner re-issues it. Deliberate: silently un-muting a
+# conversation a human is handling is the failure this whole kernel exists to
+# prevent.
+TAKEOVER_DEFAULT_SECONDS = 72 * 3600
 
 # ── deterministic customer-facing acks (§5.4). No completion/money claim so they
 #    pass the outbound content screens; the resume instruction is inline so a
@@ -161,7 +175,10 @@ def stop_enabled() -> bool:
 
 
 def takeover_enabled() -> bool:
-    """Owner takeover/release/resume handling active (independent of STOP)."""
+    """Owner takeover/pause/release/resume handling active (independent of STOP).
+    ONE flag for the whole owner command surface: arming pause without release —
+    or release without pause — would leave the owner able to mute a customer with
+    no way to un-mute them, or vice versa."""
     return os.environ.get("CATERING_TAKEOVER_ENABLED", "") == "1"
 
 
@@ -179,15 +196,15 @@ def _state_path() -> Path:
 _LAST_KNOWN_MODE: dict[str, str] = {}
 
 
-def _is_expired(pause_expires_ts: object) -> bool:
-    """True when a paused record's expiry is in the past. A malformed / missing
-    expiry is treated as NOT expired (keep the customer's chosen pause) — failing
-    toward the suppression the customer asked for, never resuming on a parse
-    hiccup."""
-    if not pause_expires_ts:
+def _is_expired(expires_ts: object) -> bool:
+    """True when a suppression record's expiry is in the past. A malformed /
+    missing expiry is treated as NOT expired (keep the chosen suppression) —
+    failing toward the suppression the customer or owner asked for, never
+    resuming on a parse hiccup. Shared by the pause and takeover windows."""
+    if not expires_ts:
         return False
     try:
-        exp = datetime.fromisoformat(str(pause_expires_ts))
+        exp = datetime.fromisoformat(str(expires_ts))
         if exp.tzinfo is None:
             exp = exp.replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
@@ -196,14 +213,17 @@ def _is_expired(pause_expires_ts: object) -> bool:
 
 
 def _effective_mode(record: object) -> str:
-    """Mode with pause auto-expiry applied (§5.4). Absent / malformed / unknown
-    → active."""
+    """Mode with pause (§5.4) and takeover (M4/G3) auto-expiry applied. Absent /
+    malformed / unknown → active. Read-time expiry, so no sweeper is needed and a
+    process that never restarts still sees the window close."""
     if not isinstance(record, dict):
         return MODE_ACTIVE
     mode = record.get("mode", MODE_ACTIVE)
     if mode not in ALL_MODES:
         return MODE_ACTIVE
     if mode == MODE_PAUSED and _is_expired(record.get("pause_expires_ts")):
+        return MODE_ACTIVE
+    if mode == MODE_TAKEOVER and _is_expired(record.get("takeover_expires_ts")):
         return MODE_ACTIVE
     return mode
 
@@ -314,6 +334,103 @@ def _alert_state_corrupt(status: str) -> None:
         pass
 
 
+# §12b takeover auto-expiry. The takeover window closing is an AUTOMATED reversal
+# of OPERATOR-applied state: the owner said "I am handling this customer by hand",
+# and 72h later a read flips the conversation back to active and the assistant
+# starts replying again — with nothing anywhere telling the owner it happened. The
+# alert fires on the FIRST read that OBSERVES the transition; the marker below is
+# persisted on the record so no later read re-alerts, and re-issuing takeover
+# writes a fresh record (new expiry, no marker) so the NEXT expiry alerts again.
+TAKEOVER_EXPIRY_ALERTED_FIELD = "takeover_expiry_alerted_for"
+_TAKEOVER_EXPIRY_DEDUP_MIN = 60
+
+
+def _claim_takeover_expiry_alert(key: str, expires_ts: str) -> bool:
+    """Compare-and-set the alerted marker under the state lock. True EXACTLY ONCE
+    per (record, expiry_ts) — the read-and-flip happens inside the lock, so two
+    concurrent readers observing the same expiry cannot both page the owner.
+
+    False (no alert) on any read/write problem, on a record that moved underneath
+    us, or on an expiry already alerted for: an alerting hiccup must never fault
+    the read path this sits on."""
+    path = _state_path()
+    try:
+        with FileLock(Path(str(path) + ".lock")):
+            doc, status = safe_load_json(path, default={})
+            if status not in HEALTHY_LOAD_STATUSES or not isinstance(doc, dict):
+                return False
+            convs = doc.get("conversations")
+            if not isinstance(convs, dict):
+                return False
+            rec = convs.get(key)
+            if not isinstance(rec, dict):
+                return False
+            if str(rec.get("takeover_expires_ts") or "") != expires_ts:
+                return False          # re-issued / released between read and claim
+            if rec.get(TAKEOVER_EXPIRY_ALERTED_FIELD) == expires_ts:
+                return False          # this expiry has already paged the owner
+            rec[TAKEOVER_EXPIRY_ALERTED_FIELD] = expires_ts
+            convs[key] = rec
+            doc["conversations"] = convs
+            doc.setdefault("schema_version", 1)
+            atomic_write_json(path, doc)
+            return True
+    except Exception as e:  # noqa: BLE001 — never raise into the read path
+        try:
+            sys.stderr.write(
+                f"catering_takeover_expiry_claim_failed ({type(e).__name__}: {str(e)[:160]})\n")
+        except Exception:
+            pass
+        return False
+
+
+def _observe_takeover_expiry(jid: str, key: str, record: dict) -> None:
+    """§12b: page the owner + audit that an operator takeover auto-expired.
+
+    Best-effort and idempotent — the persisted claim above gates everything below,
+    so a second read of the same expired record does nothing at all. PLAIN TEXT
+    body (no Markdown) per the §12b lesson: mode names like ``opted_out`` carry
+    underscores that a Markdown parser silently eats."""
+    expires_ts = str(record.get("takeover_expires_ts") or "")
+    if not expires_ts or not _claim_takeover_expiry_alert(key, expires_ts):
+        return
+    emit_control_changed(
+        jid, MODE_TAKEOVER, MODE_ACTIVE, actor="system",
+        reason="takeover_auto_expiry",
+    )
+    key_hash = chat_key_hash(jid)
+    title = "catering human takeover expired"
+    body = (
+        f"The human-takeover window you set on conversation {key_hash} has "
+        f"expired ({expires_ts}) and automated replies to that customer have "
+        f"resumed. If you are still handling them by hand, send 'takeover' with "
+        f"their code again to extend it."
+    )
+    try:
+        sys.stderr.write(
+            f"catering_takeover_expiry_alert_dispatched chat={key_hash}\n")
+    except Exception:
+        pass
+    delivered = False
+    try:
+        delivered = notify_owner_with_fallback(
+            title, body, priority=1, source="automation_control_takeover_expiry",
+            dedup_window_min=_TAKEOVER_EXPIRY_DEDUP_MIN,
+        )
+    except Exception as e:  # noqa: BLE001 — alerting must never crash the read path
+        try:
+            sys.stderr.write(
+                f"catering_takeover_expiry alert raised "
+                f"({type(e).__name__}: {str(e)[:160]})\n")
+        except Exception:
+            pass
+    try:
+        sys.stderr.write(
+            f"catering_takeover_expiry_alert_delivered delivered={delivered}\n")
+    except Exception:
+        pass
+
+
 def read_mode_and_status(jid: str) -> Tuple[str, str]:
     """Return ``(effective_mode, load_status)`` where load_status is
     safe_load_json's ('ok'/'missing'/'empty' are CLEAN; anything else is a read
@@ -332,7 +449,16 @@ def read_mode_and_status(jid: str) -> Tuple[str, str]:
         except Exception:
             pass
         return _LAST_KNOWN_MODE.get(key, MODE_ACTIVE), status
-    mode = _effective_mode(convs.get(key))
+    record = convs.get(key)
+    mode = _effective_mode(record)
+    # §12b, only on the (rare) read that actually WATCHES a takeover lapse — the
+    # ordinary read path pays one dict lookup and one comparison for this.
+    if (isinstance(record, dict) and record.get("mode") == MODE_TAKEOVER
+            and mode == MODE_ACTIVE):
+        try:
+            _observe_takeover_expiry(jid, key, record)
+        except Exception:  # noqa: BLE001 — alerting never faults a mode read
+            pass
     _LAST_KNOWN_MODE[key] = mode
     return mode, status
 
@@ -363,6 +489,7 @@ def set_mode(
     reason: str,
     logical_turn_id: str = "",
     pause_seconds: Optional[int] = None,
+    takeover_seconds: Optional[int] = None,
     ack_sent: Optional[bool] = None,
     ack_compare_and_set: bool = False,
 ) -> Tuple[str, str, bool]:
@@ -380,7 +507,11 @@ def set_mode(
 
     ``ack_sent`` (used only when NOT ack_compare_and_set): when provided it is
     written verbatim; when None it is preserved for opted_out/paused and reset to
-    False for active/takeover (a fresh suppression episode earns a fresh ack)."""
+    False for active/takeover (a fresh suppression episode earns a fresh ack).
+
+    ``pause_seconds`` / ``takeover_seconds`` override the respective default
+    windows (DEFAULT_PAUSE_SECONDS / TAKEOVER_DEFAULT_SECONDS); each is written
+    only on a transition INTO that mode, and both expire at read time."""
     if to_mode not in ALL_MODES:
         raise ValueError(f"unknown automation-control mode: {to_mode!r}")
     key = canonical_key(jid)
@@ -407,6 +538,15 @@ def set_mode(
         if to_mode == MODE_PAUSED:
             secs = DEFAULT_PAUSE_SECONDS if pause_seconds is None else max(1, int(pause_seconds))
             record["pause_expires_ts"] = (now + timedelta(seconds=secs)).isoformat()
+        if to_mode == MODE_TAKEOVER:
+            # M4/G3: bound the takeover window. Re-issuing takeover rewrites the
+            # record, which extends the window from now — that IS the owner's
+            # "keep it" gesture, no separate extend verb needed.
+            tsecs = (
+                TAKEOVER_DEFAULT_SECONDS if takeover_seconds is None
+                else max(1, int(takeover_seconds))
+            )
+            record["takeover_expires_ts"] = (now + timedelta(seconds=tsecs)).isoformat()
         if ack_compare_and_set:
             # Atomic guard: send the ack only when it flips False→True here.
             record["ack_sent"] = True
@@ -476,11 +616,25 @@ def detect_customer_command(text: str) -> Optional[str]:
     return None
 
 
+# Owner PAUSE verbs (M4/G3). Distinct from takeover: a pause just mutes
+# automation for a while (auto-expiring after DEFAULT_PAUSE_SECONDS, exactly like
+# the customer-initiated pause), whereas a takeover asserts a human is now
+# handling that customer. `hold` is included because it is the word owners
+# actually use, and it mirrors the customer-side _PAUSE_TOKEN_RE.
+_OWNER_PAUSE_RE = re.compile(r"\b(pause|hold)\b")
+
+
 def detect_owner_command(text: str) -> Optional[Tuple[str, str]]:
     """Classify an owner self-chat message as an automation-control command:
-    ``("takeover", code)`` or ``("active", code)`` (release/resume), or None.
-    A ``#XXXXX`` code is REQUIRED — it identifies the target lead / customer
-    conversation (§5.5 "#XXXXX takeover <lead>")."""
+    ``("takeover", code)``, ``("paused", code)`` (pause/hold — M4/G3), or
+    ``("active", code)`` (release/resume), or None. A ``#XXXXX`` code is REQUIRED
+    — it identifies the target lead / customer conversation (§5.5 "#XXXXX
+    takeover <lead>").
+
+    Precedence is takeover → release/resume → pause. Release is checked ahead of
+    pause for the same reason the customer detector checks resume first: the
+    un-suppress verb must never be shadowed, so a message carrying both reads as
+    the owner un-muting."""
     if not text:
         return None
     code_match = _CODE_RE.search(text)
@@ -492,14 +646,33 @@ def detect_owner_command(text: str) -> Optional[Tuple[str, str]]:
         return "takeover", code
     if re.search(r"\b(release|hand\s*back|hand\s*off|re-?enable|resume|reactivate)\b", low):
         return "active", code
+    if _OWNER_PAUSE_RE.search(low):
+        return MODE_PAUSED, code
     return None
+
+
+def _window_days(seconds: int) -> str:
+    """Render a window as a whole number of days for owner-facing text, floored
+    at 1 so a sub-day window never reads as "0 days"."""
+    return f"{max(1, round(seconds / 86400))} day{'s' if round(seconds / 86400) != 1 else ''}"
 
 
 def owner_confirmation(to_mode: str, code: str) -> str:
     """Deterministic one-line confirmation sent back to the owner self-chat so a
-    #XXXXX command is never a silent black hole."""
+    #XXXXX command is never a silent black hole. Each suppressing verb states its
+    auto-expiry window, so the owner is never surprised when it lapses."""
     if to_mode == MODE_TAKEOVER:
-        return f"Takeover ON for {code} — automated replies to that customer are paused until you release it."
+        return (
+            f"Takeover ON for {code} — automated replies to that customer are "
+            f"paused until you release it, or for {_window_days(TAKEOVER_DEFAULT_SECONDS)} "
+            f"if you don't. Send 'takeover {code}' again to extend."
+        )
+    if to_mode == MODE_PAUSED:
+        return (
+            f"Automation paused for {code} — no automated replies to that "
+            f"customer for {_window_days(DEFAULT_PAUSE_SECONDS)}. "
+            f"Send 'resume {code}' to turn them back on sooner."
+        )
     return f"Automation resumed for {code} — the assistant will handle that customer again."
 
 

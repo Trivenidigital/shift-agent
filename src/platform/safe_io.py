@@ -855,6 +855,27 @@ SAFE_IO_NULL_CONTEXT_ALLOWLIST: frozenset[str] = frozenset({
     "send-catering-ack",
     "apply-catering-owner-decision",
     "create-catering-lead",
+    # M5 follow-up engine. Same adapter-caller shape as the four catering
+    # entries around it (bridge_post_2tuple via a module-level alias), so the
+    # AST static gate cannot see the callsite and the RUNTIME caller-basename
+    # match is the only thing admitting them. Without these two entries every
+    # follow-up card and every approved follow-up send is refused with
+    # missing_action_context — the engine ships dead. Migrating all of these to
+    # a real ActionExecutionContext remains the PR-ζ.1 follow-up.
+    "catering-followup-sweep",
+    "approve-catering-followup",
+    # M1 slot-filling loop. Sends the customer question batch and the owner
+    # hand-off card via the same aliased chokepoint; shipped without an entry, so
+    # BOTH sends were refused with missing_action_context at runtime. Found by
+    # the M5 alias scan in tests/test_catering_followup_scripts.py, not by the
+    # AST gate (an alias is its documented blind spot).
+    "amend-catering-lead",
+    # Slice-2 deposit caller. ONE customer send, at the end of main() after every
+    # refuse-to-mint guard has already passed. This entry governs chokepoint
+    # ADMISSION only — it does not touch the double-charge guard, the
+    # per-guest floor, the provider-configured check, or any other precondition
+    # for minting a deposit.
+    "catering-mint-deposit",
     "create-catering-proposal-options",
     "finalize-catering-menu",
     "select-catering-proposal",
@@ -1334,6 +1355,51 @@ def _front_brain_outbound_enforce(
     return safe_fallback
 
 
+def _gateway_seam_refusal_text(
+    screen_jid: str, fallback_template: "Optional[str]", reason: str,
+) -> str:
+    """The gateway seam's REFUSAL shape, factored out so the M4 controls refuse
+    the same way the seam already refuses (throttle breach / budget exhaustion /
+    screen error): substitute the safe template and let the adapter relay THAT.
+
+    KNOWN LIMIT, stated plainly: ``front_brain_screen_gateway_send`` is
+    contractually ``-> str`` and the injected adapter wrapper relays whatever it
+    returns, so this is a SUBSTITUTION, not a drop — a suppressed conversation
+    still receives one bounded template per gateway send. The seam's only TRUE
+    suppression is the ``turn_send_budget_gate`` sentinel honored by
+    ``_shift_turn_send_budget_screen`` in the Hermes core patch; routing the
+    automation-control verdict through that sentinel is the follow-up that takes
+    this to zero sends.
+
+    The ``front_brain_reply_composed`` review row is emitted ONLY when the
+    front-brain tier admits this chat — that row is the TIER's human-review
+    surface, and writing it while the tier is off would break its byte-identical
+    dormancy. The refusal's own audit row is emitted by the caller either way."""
+    safe = (
+        fallback_template
+        if (fallback_template and str(fallback_template).strip())
+        else FRONT_BRAIN_SAFE_GENERIC_ACK
+    )
+    if front_brain_outbound_enforce_enabled(screen_jid):
+        _try_emit_audit_row(
+            "front_brain_reply_composed",
+            {
+                "chat_key_hash": _front_brain_chat_key_hash(screen_jid),
+                "reply_text": str(safe or "")[:2000],
+                "verdict": "passed",
+                "lint_classes_checked": [],
+                "template_fallback": True,
+                "logical_turn_id": _current_logical_turn_id(),
+                "send_attempt_id": uuid.uuid4().hex,
+            },
+        )
+    try:
+        sys.stderr.write(f"FRONT_BRAIN gateway send -> template fallback ({reason})\n")
+    except Exception:
+        pass
+    return safe
+
+
 def front_brain_screen_gateway_send(
     jid: str,
     message: str,
@@ -1350,8 +1416,13 @@ def front_brain_screen_gateway_send(
     composed reply and sends the STRING it returns.
 
     Flag/allowlist OFF (default) → returns ``message`` unchanged with ZERO side
-    effects (byte-identical send path). When the chat is admitted
-    (FRONT_BRAIN_OUTBOUND_ENFORCE + allowlist):
+    effects (byte-identical send path), EXCEPT for the two M4 controls that own
+    their own arming and therefore sit above that gate: the operator kill switch
+    (inert unless ``state/disabled.flag`` exists) and the catering
+    automation-control kernel (inert unless CATERING_AUTOMATION_CONTROL_ENABLED
+    + allowlist admit the chat). Both refuse by substituting the safe template —
+    see :func:`_gateway_seam_refusal_text` for why this seam cannot drop.
+    When the chat is admitted (FRONT_BRAIN_OUTBOUND_ENFORCE + allowlist):
 
       1. **Per-chat/day budget** (only when ``reserve_budget`` — default True).
          Bounds outbound SENDS per chat per day — NOT LLM compute (the model has
@@ -1383,6 +1454,44 @@ def front_brain_screen_gateway_send(
         screen_jid = canonical_identity_key(jid) or _front_brain_normalize_chat_key(jid)
     except Exception:
         screen_jid = _front_brain_normalize_chat_key(jid)
+
+    # 0a. Operator KILL SWITCH (M4/G6) and 0b. automation-control suppression
+    #     (M4/G2). BOTH sit ABOVE the front-brain tier gate on purpose: they are
+    #     gated by their OWN arming (the disabled.flag operator action / the
+    #     CATERING_AUTOMATION_CONTROL_* flags), not by FRONT_BRAIN_OUTBOUND_ENFORCE.
+    #     Putting them below the gate would make this seam's coverage silently
+    #     depend on an unrelated tier being armed — a phantom lever. Both fast-path
+    #     out with a single stat / a single env read when unarmed, so the
+    #     tier-off path stays inert.
+    if _agent_disabled():
+        _try_emit_audit_row(
+            "outbound_refused_disabled",
+            {"chat_key_hash": _front_brain_chat_key_hash(screen_jid),
+             "send_kind": "gateway_send"},
+        )
+        _alert_agent_disabled_send("gateway_send")
+        return _gateway_seam_refusal_text(
+            screen_jid, fallback_template, "agent_disabled")
+    # G2: the gateway adapter's free-form egress is NOT bridge_post (see the
+    # docstring above), so until M4 the ONLY automation-control protection an
+    # LLM-answered conversation had was the cf-router INBOUND check — which fails
+    # OPEN by design. An opted-out / paused / taken-over customer whose inbound
+    # check faulted got a full LLM reply. Same semantics as the bridge_post call
+    # site: owner-directed sends pass naturally (the owner's canonical key is
+    # never a suppressed customer key) and a read fault fails CLOSED once the
+    # kernel is enabled for the chat.
+    _ac_label = _automation_control_suppressed_mode(screen_jid)
+    if _ac_label is not None:
+        try:
+            import automation_control as _ac  # type: ignore
+            _ac.emit_send_suppressed(
+                screen_jid, _ac_label, "outbound_send",
+                logical_turn_id=_current_logical_turn_id(),
+            )
+        except Exception:
+            pass  # audit is best-effort; the refusal still stands
+        return _gateway_seam_refusal_text(
+            screen_jid, fallback_template, f"automation_suppressed:{_ac_label}")
 
     if not front_brain_outbound_enforce_enabled(screen_jid):
         return message
@@ -2396,6 +2505,141 @@ def _page_turn_send_budget_exhausted(
 
 
 # ─────────────────────────────────────────────────────────────────
+# OPERATOR KILL SWITCH at the send chokepoint (M4/G6)
+#
+# `shift-agent-disable` stops the gateway + timers and touches
+# state/disabled.flag. Until M4 that flag was honored by exactly THREE legacy
+# scripts (send-coverage-message, send-daily-brief, eod-reconcile) — the string
+# "disabled.flag" appeared nowhere in safe_io.py, hooks.py or actions.py. So any
+# send that did NOT originate from those three (every catering/flyer subprocess,
+# every cf-router reply, every Hermes gateway reply) went out with the kill
+# switch engaged, provided something restarted the gateway. This block closes
+# that: the flag is now checked at the shared bridge_* chokepoint AND at the
+# front-brain gateway seam.
+#
+# DORMANCY. This is the ONE M4 control that is not behind a new feature flag,
+# because it has no new arming surface of its own: it is inert unless the
+# operator has ALREADY run `shift-agent-disable` (an explicit, audited, owner-
+# paged action). With no flag file present the added cost is one os.path.exists
+# per send and behavior is unchanged.
+#
+# FAIL POSTURE — OPEN, deliberately, and the OPPOSITE of the automation-control
+# outbound gate below. A stat error means "we could not read the operator's
+# kill switch", and the kill switch is an explicit operator ACTION: its absence
+# (or unreadability) must never silence a healthy agent. The automation-control
+# gate fails CLOSED once enabled because there the suppressed state was chosen
+# by the CUSTOMER and losing it leaks a send to someone who opted out. Different
+# owner of the state → different safe direction. Path.exists() already swallows
+# OSError into False; the try/except is belt-and-suspenders.
+#
+# NOT CACHED. A kill switch must take effect on the next send, not after a cache
+# TTL, and one stat per send is cheaper than the JSON state read the sibling gate
+# already does.
+# ─────────────────────────────────────────────────────────────────
+
+_DISABLED_FLAG_DEFAULT = "/opt/shift-agent/state/disabled.flag"
+# §12b throttle for the kill-switch page: in-process once/hour, plus the notify
+# chokepoint's cross-process same-message dedup for fresh subprocesses. Mirrors
+# automation_control._alert_state_corrupt.
+_DISABLED_ALERT_THROTTLE_SEC = 3600
+_DISABLED_ALERT_DEDUP_MIN = 60
+_last_disabled_alert_monotonic: float = 0.0
+
+
+def _disabled_flag_path() -> Path:
+    """Kill-switch flag path, resolved at CALL time from SHIFT_AGENT_DISABLED_FLAG
+    — the SAME env override send-daily-brief and eod-reconcile already use — so a
+    conftest fixture and a subprocess caller agree. Defaults to the path
+    `shift-agent-disable` touches."""
+    return Path(os.environ.get("SHIFT_AGENT_DISABLED_FLAG", _DISABLED_FLAG_DEFAULT))
+
+
+def _agent_disabled() -> bool:
+    """True when the operator kill switch is engaged. FAILS OPEN (see the section
+    note): any stat problem is reported as NOT disabled."""
+    try:
+        return _disabled_flag_path().exists()
+    except Exception:
+        return False
+
+
+def _alert_agent_disabled_send(send_kind: str) -> None:
+    """§12b page: traffic is still arriving at the send chokepoint while the
+    operator kill switch is engaged. That is a real operator-visible condition —
+    either something restarted the gateway/timers after `shift-agent-disable`, or
+    a subprocess is running that the disable never stopped — and the customer is
+    getting silence either way.
+
+    Best-effort — NEVER raises into the send path. Throttled once/hour in-process
+    plus the notify chokepoint's cross-process same-message dedup. PLAIN-TEXT
+    body with a STABLE title+message (the varying send_kind rides the audit row +
+    stderr, never the deduped message) per the §12b lesson."""
+    global _last_disabled_alert_monotonic
+    now = time.monotonic()
+    if (
+        _last_disabled_alert_monotonic
+        and (now - _last_disabled_alert_monotonic) < _DISABLED_ALERT_THROTTLE_SEC
+    ):
+        return
+    _last_disabled_alert_monotonic = now
+    title = "shift-agent DISABLED but sends are still being attempted"
+    body = (
+        "The kill-switch flag state/disabled.flag is present, so the send "
+        "chokepoint is refusing outbound messages — customers and staff are "
+        "getting silence. Either something restarted the agent after "
+        "shift-agent-disable, or a timer/subprocess the disable did not stop is "
+        "still running. Run shift-agent-enable to restore, or stop the caller."
+    )
+    try:
+        sys.stderr.write(
+            f"agent_disabled_send_refused_alert_dispatched send_kind={send_kind}\n"
+        )
+    except Exception:
+        pass
+    delivered = False
+    try:
+        delivered = notify_owner_with_fallback(
+            title, body, priority=1, source="agent_disabled_send_refused",
+            dedup_window_min=_DISABLED_ALERT_DEDUP_MIN,
+        )
+    except Exception as e:  # noqa: BLE001 — alerting must never crash the send path
+        try:
+            sys.stderr.write(
+                f"agent_disabled_send_refused alert raised "
+                f"({type(e).__name__}: {str(e)[:160]})\n"
+            )
+        except Exception:
+            pass
+    try:
+        sys.stderr.write(
+            f"agent_disabled_send_refused_alert_delivered delivered={delivered}\n"
+        )
+    except Exception:
+        pass
+
+
+def _agent_disabled_drop(
+    jid: str, *, send_kind: str,
+) -> "Optional[Tuple[bool, str, str, str]]":
+    """Shared kill-switch gate for bridge_post / bridge_send_media /
+    bridge_send_cta. Returns the drop 4-tuple (emitting the
+    ``outbound_refused_disabled`` audit row + the throttled §12b page) when the
+    switch is engaged, else None.
+
+    NO exemptions — not the deterministic automation-control ack, not
+    owner-directed sends. A kill switch that some sends walk past is not a kill
+    switch; the operator gets the page instead of a message they cannot see."""
+    if not _agent_disabled():
+        return None
+    _try_emit_audit_row(
+        "outbound_refused_disabled",
+        {"chat_key_hash": _front_brain_chat_key_hash(jid), "send_kind": send_kind},
+    )
+    _alert_agent_disabled_send(send_kind)
+    return False, "", "agent_disabled", "disabled"
+
+
+# ─────────────────────────────────────────────────────────────────
 # Catering automation-control kernel — OUTBOUND enforcement point (PR-5, §5.4/
 # §5.5). Defense-in-depth twin of the cf-router inbound check: the last line
 # before transport drops an AUTOMATED CUSTOMER send toward a suppressed
@@ -2476,7 +2720,16 @@ def bridge_post(
     """POST to local Hermes bridge. Returns (success, message_id, error_str, status).
 
     status ∈ {'sent', 'connect_failed', 'http_error', 'send_uncertain',
-              'unknown_error', 'refused', 'throttled', 'suppressed'}
+              'unknown_error', 'refused', 'throttled', 'suppressed', 'disabled'}
+
+    'disabled' (M4/G6) = the operator KILL SWITCH is engaged
+    (state/disabled.flag, set by shift-agent-disable) so the chokepoint refused
+    the send before transport; err_str is 'agent_disabled'. Distinct from every
+    other drop status because it is neither a policy decision about THIS message
+    nor a transient fault — the whole agent is off. NO exemptions apply (not the
+    automation-control ack, not owner-directed sends). Caller MUST NOT
+    auto-retry; only `shift-agent-enable` clears it. An outbound_refused_disabled
+    audit row + a throttled §12b operator page are emitted at the drop.
 
     'suppressed' (PR-5 §5.4/§5.5) = the automation-control kernel dropped this
     send because the conversation is opted_out / paused(unexpired) / takeover
@@ -2521,6 +2774,13 @@ def bridge_post(
     blocked = bridge_send_blocked_by_test_context(BRIDGE_URL)
     if blocked:
         return False, "", blocked, "connect_failed"
+    # Operator KILL SWITCH (M4/G6). Checked FIRST — it is the most total gate,
+    # and no exemption survives it (not even the automation-control ack below).
+    # Inert unless the operator ran shift-agent-disable; fails OPEN on a stat
+    # fault (see the kill-switch section note).
+    _disabled_drop = _agent_disabled_drop(jid, send_kind="bridge_post")
+    if _disabled_drop is not None:
+        return _disabled_drop
     # Automation-control OUTBOUND enforcement (PR-5, §5.4/§5.5). DORMANT behind
     # CATERING_AUTOMATION_CONTROL_ENABLED + allowlist; byte-identical when OFF.
     # Placed FIRST — before the front-brain screen / regulated policy / throttle
@@ -2685,6 +2945,10 @@ def bridge_send_media(
     blocked = bridge_send_blocked_by_test_context(url)
     if blocked:
         return False, "", blocked, "connect_failed"
+    # Operator KILL SWITCH (M4/G6) — symmetry with bridge_post.
+    _disabled_drop = _agent_disabled_drop(jid, send_kind="bridge_send_media")
+    if _disabled_drop is not None:
+        return _disabled_drop
     # Automation-control OUTBOUND enforcement (PR-5) — symmetry with bridge_post so
     # a suppression kernel covers ALL customer send methods (media has no
     # deterministic-ack path, so no ack exemption). DORMANT/byte-identical when OFF.
@@ -2774,6 +3038,10 @@ def bridge_send_cta(
     blocked = bridge_send_blocked_by_test_context(url)
     if blocked:
         return False, "", blocked, "connect_failed"
+    # Operator KILL SWITCH (M4/G6) — symmetry with bridge_post.
+    _disabled_drop = _agent_disabled_drop(jid, send_kind="bridge_send_cta")
+    if _disabled_drop is not None:
+        return _disabled_drop
     # Automation-control OUTBOUND enforcement (PR-5) — symmetry with bridge_post so
     # a suppression kernel covers ALL customer send methods (CTA has no
     # deterministic-ack path, so no ack exemption). DORMANT/byte-identical when OFF.

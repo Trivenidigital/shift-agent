@@ -1,0 +1,5 @@
+Hi {customer_name}, your catering event on {event_date} is coming up in about a week.
+
+If anything has moved — the timing, the guest list, or what you'd like on the menu — now is a good moment to tell us.
+
+(Ref: {lead_id})

@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""catering-followup-status — read-only view of the follow-up queue.
+
+Answers "what is scheduled, what is waiting on the owner, and what did the engine
+decide not to do" in one place. This is the data source the Studio UI reads; the
+JSON shape is the contract and the human lines are for operators at a terminal.
+
+STRICTLY READ-ONLY. No lock is taken, no file is created, no state is written and
+no audit row is emitted — running this must never perturb what it reports. An
+unreadable store is REPORTED as unreadable rather than raising, so a broken store
+never hides the arming flags next to it.
+
+Usage:
+  catering-followup-status                 # human summary + JSON
+  catering-followup-status --json          # JSON only (machine callers)
+  catering-followup-status --lead-id L0007 # one lead's follow-ups
+
+Exit codes:
+  0 — rendered (ALWAYS, even when the store is unreadable — the report says so)
+  2 — invalid input
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+import catering_followups as cf  # noqa: E402
+from safe_io import safe_load_json  # noqa: E402
+from exit_codes import EXIT_OK  # noqa: E402
+
+ENABLED_ENV = "CATERING_FOLLOWUP_ENABLED"
+ALLOWLIST_ENV = "CATERING_FOLLOWUP_ALLOWLIST"
+AUTOSEND_ENV = "CATERING_FOLLOWUP_AUTOSEND"
+
+# Everything not yet resolved. `sending` is a claimed customer send in flight —
+# it belongs here rather than in the terminal bucket, or an operator looking for
+# a follow-up mid-send would find it in neither.
+_OPEN_STATUSES = ("scheduled", "awaiting_owner_approval", "sending")
+
+
+def _allowlist_summary(raw: str) -> dict:
+    """Describe the allowlist without printing raw phone numbers: the semantics
+    are what matters (empty DISABLES fail-closed, ``*`` graduates every chat),
+    plus how many explicit entries there are."""
+    entries = [p.strip() for p in (raw or "").split(",") if p.strip()]
+    if "*" in entries:
+        return {"mode": "wildcard", "entry_count": len(entries)}
+    if not entries:
+        return {"mode": "empty_disabled", "entry_count": 0}
+    return {"mode": "scoped", "entry_count": len(entries)}
+
+
+def _row(f: dict) -> dict:
+    """One follow-up as the UI wants it. Reads RAW dicts, not validated models: a
+    single malformed record must not blank the whole report."""
+    return {
+        "followup_id": f.get("followup_id", ""),
+        "lead_id": f.get("lead_id", ""),
+        "followup_type": f.get("followup_type", ""),
+        "status": f.get("status", ""),
+        "due_at": f.get("due_at", ""),
+        "created_by": f.get("created_by", ""),
+        "approval_code": f.get("approval_code"),
+        "suppressed_reason": f.get("suppressed_reason"),
+        "attempt_count": f.get("attempt_count", 0),
+        "last_attempt_at": f.get("last_attempt_at"),
+        "claimed_at": f.get("claimed_at"),
+    }
+
+
+def _due_now(row: dict, now: datetime) -> bool:
+    if row["status"] != "scheduled":
+        return False
+    try:
+        due = datetime.fromisoformat(str(row["due_at"]))
+    except (TypeError, ValueError):
+        return False
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    return due <= now
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--json", action="store_true", help="JSON only")
+    ap.add_argument("--lead-id", default="", help="restrict to one lead")
+    args = ap.parse_args()
+
+    now = datetime.now(timezone.utc)
+    path = cf.followups_path()
+    doc, status = safe_load_json(path, default={})
+
+    rows: list[dict] = []
+    if isinstance(doc, dict):
+        for f in doc.get("followups", []) or []:
+            if isinstance(f, dict):
+                rows.append(_row(f))
+    if args.lead_id:
+        rows = [r for r in rows if r["lead_id"] == args.lead_id]
+
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+
+    report = {
+        "generated_at": now.isoformat(),
+        "store_path": str(path),
+        "store_status": status,
+        "store_readable": status in ("ok", "missing", "empty"),
+        "flags": {
+            ENABLED_ENV: os.environ.get(ENABLED_ENV, "") or None,
+            AUTOSEND_ENV: os.environ.get(AUTOSEND_ENV, "") or None,
+            "allowlist": _allowlist_summary(os.environ.get(ALLOWLIST_ENV, "")),
+        },
+        "counts": counts,
+        "total": len(rows),
+        "due_now": [r for r in rows if _due_now(r, now)],
+        "open": [r for r in rows if r["status"] in _OPEN_STATUSES],
+        "followups": rows,
+    }
+
+    if not args.json:
+        print(f"Follow-up queue  ({path})")
+        print(f"  store: {status}")
+        allow = report["flags"]["allowlist"]
+        print(f"  sweep armed: {bool(os.environ.get(ENABLED_ENV))}  "
+              f"auto-send: {bool(os.environ.get(AUTOSEND_ENV))}  "
+              f"allowlist: {allow['mode']} ({allow['entry_count']})")
+        if not rows:
+            print("  (no follow-ups)")
+        for r in sorted(rows, key=lambda r: str(r["due_at"])):
+            extra = f" code={r['approval_code']}" if r["approval_code"] else ""
+            if r["suppressed_reason"]:
+                extra += f" reason={r['suppressed_reason']}"
+            print(f"  {r['followup_id']}  {r['lead_id']:<8} {r['followup_type']:<24} "
+                  f"{r['status']:<24} due {r['due_at']}{extra}")
+        print()
+
+    print(json.dumps(report, indent=2 if not args.json else None))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

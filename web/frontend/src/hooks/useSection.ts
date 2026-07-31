@@ -8,6 +8,7 @@ export type Section =
   | "decisions"
   | "config"
   | "flyer"
+  | "catering"
   | "commerce"
   | "whatsapp"
   | "safety"
@@ -26,6 +27,7 @@ const VALID = [
   "decisions",
   "config",
   "flyer",
+  "catering",
   "commerce",
   "whatsapp",
   "safety",

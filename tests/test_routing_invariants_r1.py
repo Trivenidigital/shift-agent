@@ -45,11 +45,16 @@ import safe_io  # noqa: E402
 
 
 # ── state-dir + pool-file helpers (all tmp) ──────────────────────────────────
-def _write_pools(state_dir: Path, *, menu=None, catering=None, expense=None, shift=None):
-    """Write pool state files under `state_dir`. catering/expense are lists of
-    lead dicts; shift is a dict {proposal_id: proposal_dict}; menu is a dict."""
+def _write_pools(state_dir: Path, *, menu=None, catering=None, expense=None, shift=None,
+                 followups=None):
+    """Write pool state files under `state_dir`. catering/expense/followups are
+    lists of record dicts; shift is a dict {proposal_id: proposal_dict}; menu is
+    a dict."""
     state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
+    if followups is not None:
+        (state_dir / "catering-followups.json").write_text(
+            json.dumps({"followups": followups}), encoding="utf-8")
     if menu is not None:
         (state_dir / "catering-menu-pending.json").write_text(json.dumps(menu), encoding="utf-8")
     if catering is not None:
@@ -74,6 +79,11 @@ def _expense_lead(code, status="AWAITING_OWNER_APPROVAL"):
 
 def _shift_prop(code, status="sent"):
     return {"P1": {"proposal_id": "P1", "code": code, "status": status}}
+
+
+def _followup(code, status="awaiting_owner_approval"):
+    return {"followup_id": "FU0001", "lead_id": "L0001",
+            "approval_code": code, "status": status}
 
 
 @pytest.fixture
@@ -212,7 +222,7 @@ def test_collision_cannot_fall_through_to_first_canonical(state_dir):
 
 def test_canonical_order_exported_from_one_source():
     assert pools.CODE_POOL_CANONICAL_ORDER == (
-        "menu-pending", "catering-leads", "expense", "shift")
+        "menu-pending", "catering-leads", "expense", "shift", "catering-followups")
 
 
 def test_all_live_codes_union_excludes_terminal(state_dir):
@@ -534,6 +544,106 @@ def test_f8_real_registry_menu_before_catering_no_collision(state_dir, monkeypat
     out = hooks_mod._try_f8_intercept("#ABCDE approve", "owner@c.us")
     assert calls == [("#ABCDE", "approve")]
     assert out["action"] == "skip"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# M5 — the catering-followups pool (appended LAST in the canonical order)
+# ════════════════════════════════════════════════════════════════════════════
+def test_followup_pool_resolves_a_carded_code(state_dir):
+    _write_pools(state_dir, followups=[_followup("#FUPQR")])
+    assert _reg_is_pool(pools.resolve_code("#FUPQR"), pools.POOL_CATERING_FOLLOWUPS)
+
+
+def test_followup_pool_ignores_terminal_records(state_dir):
+    for status in ("scheduled", "suppressed", "cancelled", "expired"):
+        _write_pools(state_dir, followups=[_followup("#FUPQR", status=status)])
+        assert pools.resolve_code("#FUPQR") is None, status
+
+
+def test_followup_pool_resolves_a_sent_code_for_idempotent_replay(state_dir):
+    """An owner tapping their own approval twice must reach the follow-up handler,
+    which answers it as a replay — not fall through as an unknown code."""
+    _write_pools(state_dir, followups=[_followup("#FUPQR", status="approved_sent")])
+    assert _reg_is_pool(pools.resolve_code("#FUPQR"), pools.POOL_CATERING_FOLLOWUPS)
+
+
+def test_followup_codes_join_the_cross_pool_exclusion_set(state_dir):
+    """The reason the pool is registered at all: without it a later catering lead
+    could mint a code a live follow-up card is already using."""
+    _write_pools(
+        state_dir,
+        followups=[_followup("#FUPQR", status="scheduled"),
+                   _followup("#FUPST", status="awaiting_owner_approval"),
+                   _followup("#FUPXY", status="approved_sent"),
+                   _followup("#FUPYZ", status="suppressed")],
+    )
+    live = pools.all_live_codes()
+    assert {"#FUPQR", "#FUPST"} <= live
+    assert "#FUPXY" not in live and "#FUPYZ" not in live
+
+
+def test_followup_colliding_with_a_lead_code_fails_closed(state_dir):
+    _write_pools(state_dir, catering=[_catering_lead("#DUPQR")],
+                 followups=[_followup("#DUPQR")])
+    res = pools.resolve_code("#DUPQR")
+    assert isinstance(res, pools.CollisionResult)
+    assert res.pools == ("catering-leads", "catering-followups")
+
+
+def test_appending_the_pool_did_not_move_any_existing_code(state_dir):
+    """Every pool that resolved before M5 resolves the same way after it."""
+    _write_pools(state_dir, menu={"confirmation_code": "#MEN02"},
+                 catering=[_catering_lead("#CAT02")],
+                 expense=[_expense_lead("#EXP02")], shift=_shift_prop("#SHF02"),
+                 followups=[_followup("#FUPVW")])
+    assert _reg_is_pool(pools.resolve_code("#MEN02"), pools.POOL_MENU_PENDING)
+    assert _reg_is_pool(pools.resolve_code("#CAT02"), pools.POOL_CATERING_LEADS)
+    assert _reg_is_pool(pools.resolve_code("#EXP02"), pools.POOL_EXPENSE)
+    assert _reg_is_pool(pools.resolve_code("#SHF02"), pools.POOL_SHIFT)
+
+
+def test_f8_approves_a_followup_code(state_dir, monkeypatch):
+    hooks_mod, actions_mod = _load_plugin(state_dir)
+    _write_pools(state_dir, followups=[_followup("#FUPQR")])
+    calls = []
+    monkeypatch.setattr(actions_mod, "invoke_approve_catering_followup",
+                        lambda code, decision: calls.append((code, decision)) or 0)
+    out = hooks_mod._try_f8_intercept("#FUPQR approve", "owner@c.us")
+    assert calls == [("#FUPQR", "approve")]
+    assert out["action"] == "skip" and out["reason"].startswith("cf-router")
+
+
+def test_f8_cancels_a_followup_on_a_reject_verb(state_dir, monkeypatch):
+    hooks_mod, actions_mod = _load_plugin(state_dir)
+    _write_pools(state_dir, followups=[_followup("#FUPQR")])
+    calls = []
+    monkeypatch.setattr(actions_mod, "invoke_approve_catering_followup",
+                        lambda code, decision: calls.append((code, decision)) or 0)
+    out = hooks_mod._try_f8_intercept("#FUPQR cancel", "owner@c.us")
+    assert calls == [("#FUPQR", "cancel")]
+    assert out["action"] == "skip"
+
+
+def test_f8_falls_through_on_an_edit_verb(state_dir, monkeypatch):
+    """The text was fixed when the card was rendered, so there is nothing to
+    edit — let the LLM say so rather than silently approving."""
+    hooks_mod, actions_mod = _load_plugin(state_dir)
+    _write_pools(state_dir, followups=[_followup("#FUPQR")])
+    calls = []
+    monkeypatch.setattr(actions_mod, "invoke_approve_catering_followup",
+                        lambda code, decision: calls.append((code, decision)) or 0)
+    assert hooks_mod._try_f8_intercept("#FUPQR change the wording", "owner@c.us") is None
+    assert calls == []
+
+
+def test_f8_falls_through_when_no_verb_is_present(state_dir, monkeypatch):
+    hooks_mod, actions_mod = _load_plugin(state_dir)
+    _write_pools(state_dir, followups=[_followup("#FUPQR")])
+    calls = []
+    monkeypatch.setattr(actions_mod, "invoke_approve_catering_followup",
+                        lambda code, decision: calls.append((code, decision)) or 0)
+    assert hooks_mod._try_f8_intercept("what is #FUPQR", "owner@c.us") is None
+    assert calls == []
 
 
 # ════════════════════════════════════════════════════════════════════════════

@@ -45,15 +45,18 @@ from exit_codes import (  # noqa: E402
     EXIT_PRIVILEGE_DENIED,
 )
 from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
+from catering_paths import (  # noqa: E402
+    CATERING_MENU_ARCHIVE_DIR, CATERING_MENU_LOCK, CATERING_MENU_PATH,
+)
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
 # PR-D2 commit 1: SHIFT_AGENT_CONFIG_PATH env var override (test-only).
 CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
-MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
-MENU_LOCK = Path("/opt/shift-agent/state/catering-menu.json.lock")
+MENU_PATH = CATERING_MENU_PATH
+MENU_LOCK = CATERING_MENU_LOCK
 PENDING_PATH = Path("/opt/shift-agent/state/catering-menu-pending.json")
 PENDING_LOCK = Path("/opt/shift-agent/state/catering-menu-pending.json.lock")
-ARCHIVE_DIR = Path("/opt/shift-agent/state/catering-menu-archive")
+ARCHIVE_DIR = CATERING_MENU_ARCHIVE_DIR
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 
 

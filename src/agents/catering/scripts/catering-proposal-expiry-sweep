@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""catering-proposal-expiry-sweep — retire SENT catering proposal sets past validity (M3).
+
+A ``SENT`` proposal set had no expiry of any kind: no ``expires_at``, no TTL, no
+sweep. The options stayed selectable forever, so a customer could reply "option 2"
+months later and ``select-catering-proposal`` would happily claim it — against menu
+items and prices the owner has since changed. That is the money-side twin of the
+L0017 never-closing-lead incident. Now every set carries the SAME validity window
+the customer was told in the quote text, and this sweep retires it when the window
+closes.
+
+Both the transition (via ``is_proposal_set_transition_allowed`` + the same
+FileLock + atomic-write discipline the two proposal writers use) and the owner
+alert (§12b) only ever fire on a set that is STILL ``SENT``: ``EXPIRED`` is
+terminal with no self-edge, so the sweep is idempotent and never touches a set the
+customer already selected or that was superseded.
+
+A ``SENT`` set with ``expires_at=None`` — every set sent before M3 — is SKIPPED.
+Nobody told those customers a deadline, so retiring their options on a deadline
+they never heard would be exactly the silent behavior change this sweep exists to
+prevent; an operator re-sends instead.
+
+GATED: no-op unless ``CATERING_PROPOSAL_SWEEP_ENABLED`` is ``1``/``true`` (ships
+OFF; the operator arms it per-customer after review, consistent with house rollout
+rules). No systemd timer is wired in this PR — the CLI + flag + tests are the unit;
+timer wiring is a separate ruled deploy step.
+
+**Exit 0 always** — a watchdog must not fail its timer; every error path is caught
++ logged to journald, and a failure on one set never skips the rest of the cycle.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, atomic_write_json, ndjson_append, customer_now, load_model, flock,
+    load_yaml_model,
+)
+from schemas import (  # noqa: E402
+    Config, CateringProposalStore, CateringProposalExpired,
+    is_proposal_set_transition_allowed,
+)
+from catering_proposal_sweep import (  # noqa: E402
+    DEFAULT_PROPOSAL_VALIDITY_DAYS, find_expired_sent_proposal_sets,
+)
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
+
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+PROPOSALS_PATH = Path(os.environ.get("SHIFT_AGENT_CATERING_PROPOSALS_PATH",
+                                     "/opt/shift-agent/state/catering-proposals.json"))
+PROPOSALS_LOCK = Path(str(PROPOSALS_PATH) + ".lock")
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH",
+                               "/opt/shift-agent/logs/decisions.log"))
+NOTIFY_OWNER = "/usr/local/bin/shift-agent-notify-owner"
+
+ENABLED_ENV = "CATERING_PROPOSAL_SWEEP_ENABLED"
+TERMINAL_STATUS = "EXPIRED"
+
+
+def _log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def _enabled() -> bool:
+    return os.environ.get(ENABLED_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _append_audit_under_proposalslock(entry) -> None:
+    """Caller MUST hold PROPOSALS_LOCK. Acquires the inner LOG_PATH flock."""
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with flock(LOG_PATH):
+        ndjson_append(LOG_PATH, TypeAdapter(CateringProposalExpired).dump_json(entry).decode("utf-8"))
+
+
+def _alert_owner(lead_id: str, proposal_set_id: str, validity_days: int) -> None:
+    """§12b owner notification at the expiry write site. Plain text (Pushover), so
+    underscore-bearing content can never be mangled by a Markdown parser. Best-effort;
+    dispatched/delivered structured logs make every fire traceable in journalctl."""
+    import subprocess
+    msg = (
+        f"Catering menu options for {lead_id} ({proposal_set_id}) reached the end of "
+        f"their {validity_days}-day validity with no choice from the customer and are "
+        f"no longer selectable. If they are still interested, send fresh options."
+    )
+    _log(f"catering_proposal_expiry_alert_dispatched set={proposal_set_id}")
+    try:
+        rc = subprocess.run(
+            [NOTIFY_OWNER, "--priority", "1", "--title", "Catering menu options expired", "--", msg],
+        ).returncode
+    except Exception as e:  # noqa: BLE001 — alert failure must never crash the sweep
+        _log(f"catering_proposal_expiry_alert_delivery_failed set={proposal_set_id} error={e}")
+        return
+    if rc == 0:
+        _log(f"catering_proposal_expiry_alert_delivered set={proposal_set_id}")
+    else:
+        _log(f"catering_proposal_expiry_alert_delivery_failed set={proposal_set_id} rc={rc}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Report the sets that WOULD expire without mutating or alerting")
+    args = ap.parse_args()
+
+    if not _enabled() and not args.dry_run:
+        return 0  # dormant — operator has not armed the sweep
+
+    # Config load is best-effort (tz + the validity days quoted in the alert); the
+    # authoritative deadline is the per-set expires_at stamped at send time, so a
+    # broken config can never move a customer's deadline.
+    validity_days = DEFAULT_PROPOSAL_VALIDITY_DAYS
+    try:
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+        now = customer_now(cfg.customer.timezone)
+        validity_days = cfg.catering.proposal_validity_days
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        _log(f"catering_proposal_expiry_sweep: config load failed; using UTC: {e}")
+        now = datetime.now(timezone.utc)
+
+    expired_pairs: list[tuple[str, str]] = []
+    try:
+        with FileLock(PROPOSALS_LOCK):
+            store, status = load_model(PROPOSALS_PATH, CateringProposalStore,
+                                       default=CateringProposalStore())
+            if status not in ("ok", "missing", "empty"):
+                _log(f"catering_proposal_expiry_sweep: catering-proposals.json "
+                     f"status={status!r}; skipping this cycle")
+                return 0
+
+            expired_ids = set(find_expired_sent_proposal_sets(store.sets, now))
+            if args.dry_run:
+                for set_id in sorted(expired_ids):
+                    print(f"would_expire {set_id}")
+                return 0
+
+            mutated = False
+            for row in store.sets:
+                if row.proposal_set_id not in expired_ids:
+                    continue
+                # Re-check legality under lock (the transition table is the source of truth).
+                if not is_proposal_set_transition_allowed(row.status, TERMINAL_STATUS):
+                    _log(f"catering_proposal_expiry_sweep: {row.proposal_set_id} illegal "
+                         f"transition {row.status}->{TERMINAL_STATUS}; skipping")
+                    continue
+                from_status = row.status
+                sent_at, expires_at = row.sent_at, row.expires_at
+                row.status = TERMINAL_STATUS
+                mutated = True
+                _append_audit_under_proposalslock(CateringProposalExpired(
+                    type="catering_proposal_expired", ts=now,
+                    lead_id=row.lead_id, proposal_set_id=row.proposal_set_id,
+                    from_status=from_status, sent_at=sent_at, expires_at=expires_at,
+                    validity_days=validity_days,
+                ))
+                expired_pairs.append((row.lead_id, row.proposal_set_id))
+
+            if mutated:
+                atomic_write_json(PROPOSALS_PATH, store)
+    except Exception as e:  # noqa: BLE001 — a watchdog must never fail its timer
+        _log(f"catering_proposal_expiry_sweep: unexpected error, skipping this cycle: {e}")
+        return 0
+
+    # Alerts happen OUTSIDE the lock (no network under the lock). One alert per
+    # transition; EXPIRED is terminal with no self-edge, so no alert-spam across cycles.
+    for lead_id, set_id in expired_pairs:
+        try:
+            _alert_owner(lead_id, set_id, validity_days)
+        except Exception as e:  # noqa: BLE001
+            _log(f"catering_proposal_expiry_sweep: alert error for {set_id}: {e}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,27 @@
+[Unit]
+Description=Catering follow-up sweep timer (M5, hourly)
+Requires=catering-followup-sweep.service
+
+# STAGED, NOT ENABLED: shift-agent-deploy.sh installs this unit file via the
+# catering systemd wildcard but does NOT enable it (there is no
+# `systemctl enable ... catering-followup-sweep.timer` anywhere in the deploy
+# script — same posture as openrouter-balance-check.timer). Arming is a
+# deliberate one-time operator step per VPS:
+#   systemctl daemon-reload && systemctl enable --now catering-followup-sweep.timer
+#
+# Enabling the timer alone changes NOTHING: the sweep is inert until
+# CATERING_FOLLOWUP_ENABLED=1 AND CATERING_FOLLOWUP_ALLOWLIST is non-empty in
+# /opt/shift-agent/.env. Three independent gates, all default-off.
+
+[Timer]
+# Hourly on the half hour. Follow-ups are day-granular by design (the dedup key
+# is a due DATE), so hourly is fine-grained enough to card promptly and coarse
+# enough that a stuck cycle cannot spam. The offset keeps it clear of the
+# on-the-hour timers.
+OnCalendar=*-*-* *:30:00
+Persistent=true
+AccuracySec=5min
+Unit=catering-followup-sweep.service
+
+[Install]
+WantedBy=timers.target

@@ -236,6 +236,56 @@ class TestOwnerTakeover:
         assert _call(plugin, "#ZZZZZ takeover", OWNER) is None
 
 
+# ── M4/G3: owner pause/hold routes through the same owner surface ────────────
+
+class TestOwnerPause:
+    @pytest.fixture(autouse=True)
+    def _takeover_on(self, monkeypatch):
+        monkeypatch.setenv("CATERING_TAKEOVER_ENABLED", "1")
+        monkeypatch.setenv("CATERING_STOP_ENABLED", "1")
+
+    def test_owner_pause_sets_customer_paused(self, plugin):
+        res = _call(plugin, f"pause {CODE}", OWNER)
+        assert res["action"] == "skip" and "owner_pause" in res["reason"]
+        assert ac.get_mode(LEAD_PHONE) == "paused"
+        assert len(plugin.spy.sends) == 1        # owner confirmation only
+        assert plugin.spy.sends[0][0] == OWNER
+        chg = _changed(plugin.spy)[-1]
+        assert chg["to_mode"] == "paused" and chg["actor"] == "owner"
+
+    def test_owner_hold_is_the_same_verb(self, plugin):
+        assert _call(plugin, f"hold {CODE}", OWNER)["action"] == "skip"
+        assert ac.get_mode(LEAD_PHONE) == "paused"
+
+    def test_pause_suppresses_customer_inbound(self, plugin):
+        _call(plugin, f"pause {CODE}", OWNER)
+        res = _call(plugin, "any update?", CUSTOMER)
+        assert res == {"action": "skip", "reason": "automation_suppressed:paused"}
+
+    def test_owner_resume_lifts_an_owner_pause(self, plugin):
+        _call(plugin, f"pause {CODE}", OWNER)
+        res = _call(plugin, f"resume {CODE}", OWNER)
+        assert res["action"] == "skip" and "owner_release" in res["reason"]
+        assert ac.get_mode(LEAD_PHONE) == "active"
+        chg = _changed(plugin.spy)[-1]
+        assert chg["from_mode"] == "paused" and chg["to_mode"] == "active"
+
+    def test_pause_is_idempotent(self, plugin):
+        _call(plugin, f"pause {CODE}", OWNER)
+        _call(plugin, f"pause {CODE}", OWNER)
+        assert ac.get_mode(LEAD_PHONE) == "paused"
+
+    def test_unknown_code_falls_through(self, plugin):
+        assert _call(plugin, "pause #ZZZZZ", OWNER) is None
+
+    def test_pause_ignored_when_takeover_flag_off(self, plugin, monkeypatch):
+        """The owner command surface is indivisible: one flag arms pause,
+        takeover and release together."""
+        monkeypatch.delenv("CATERING_TAKEOVER_ENABLED", raising=False)
+        _call(plugin, f"pause {CODE}", OWNER)
+        assert ac.get_mode(LEAD_PHONE) == "active"
+
+
 # ── independence: STOP-only vs takeover-only ─────────────────────────────────
 
 class TestIndependentActivation:

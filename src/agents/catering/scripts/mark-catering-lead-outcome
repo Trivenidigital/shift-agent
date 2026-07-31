@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""mark-catering-lead-outcome — the OWNER records how a catering lead ended (M3).
+
+Two distinct outcomes exist and neither had a writer before M3:
+
+  won   — the event is happening. The lead lands in BOOKED (the same state the
+          customer's own "we accept" produces), so "how many events are booked?"
+          has ONE answer regardless of who said so.
+  lost  — it is not happening. The lead lands in CLOSED with the reason on the
+          audit row, which is what makes lost-reason reporting possible at all.
+
+Deliberately NOT overlapping the two neighbouring scripts:
+  * `set-catering-lead-hold` pauses a lead's automation WITHOUT changing its status
+    (a hold is not an outcome), so hold on/off is not duplicated here.
+  * `catering-lead-reconcile` repairs state-vs-outbound DIVERGENCE (the lead's
+    status disagrees with what the customer demonstrably received). That is a
+    repair, not a commercial fact, and it carries its own audit variant.
+
+Owner-only, same assumption as `catering-lead-reconcile`: this is an operator CLI,
+not a message surface, so there is no `#XXXXX` code path and nothing here is
+reachable from an inbound.
+
+Every transition goes through CATERING_TRANSITIONS — an outcome that the state
+machine forbids is REFUSED, never forced. So "won" is only recordable from
+SENT_TO_CUSTOMER (a quote the customer actually has), and a lead already BOOKED
+can be marked lost (BOOKED -> CLOSED) but never re-won.
+
+Usage:
+  mark-catering-lead-outcome --lead-id L0007 --outcome won
+  mark-catering-lead-outcome --lead-id L0007 --outcome lost \\
+      --reason "went with a cheaper caterer"
+
+Outputs JSON: {"lead_id": ..., "outcome": ..., "from_status": ..., "to_status": ...}
+
+Exit codes:
+  0 — recorded
+  2 — invalid input (empty reason on `lost`, same-state no-op)
+  4 — lead not found
+  5 — leads store unreadable / schema violation
+  9 — the outcome is not a legal transition from the lead's current status
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import (  # noqa: E402
+    FileLock, atomic_write_json, ndjson_append, customer_now, load_model, flock,
+    load_yaml_model,
+)
+from schemas import (  # noqa: E402
+    Config, CateringLeadStore, CateringLeadStatusChange, CateringLeadOutcomeMarked,
+    is_catering_transition_allowed,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND, EXIT_SCHEMA_VIOLATION,
+    EXIT_ILLEGAL_TRANSITION,
+)
+from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
+
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH",
+                                 "/opt/shift-agent/state/catering-leads.json"))
+LEADS_LOCK = Path(os.environ.get("SHIFT_AGENT_LEADS_LOCK", str(LEADS_PATH) + ".lock"))
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+
+_REASON_MAX = 500
+
+# Derived from the status machine, not invented alongside it: `won` means the same
+# BOOKED state the customer's acceptance produces; `lost` means CLOSED. The
+# transition table decides whether either is reachable from where the lead is.
+OUTCOME_TO_STATUS = {"won": "BOOKED", "lost": "CLOSED"}
+
+
+def _append_audit_under_leadslock(adapter: TypeAdapter, entry) -> None:
+    """Caller MUST hold LEADS_LOCK. Acquires the inner LOG_PATH flock."""
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with flock(LOG_PATH):
+        ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--lead-id", required=True, help="Lead ID, e.g. L0007")
+    ap.add_argument("--outcome", required=True, choices=sorted(OUTCOME_TO_STATUS))
+    ap.add_argument("--reason", default="", help=f"Why (<= {_REASON_MAX} chars). "
+                                                 "Required for --outcome lost.")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Validate inputs + state without mutating")
+    args = ap.parse_args()
+
+    lead_id = (args.lead_id or "").strip()
+    if not lead_id:
+        sys.stderr.write("--lead-id required\n")
+        return EXIT_INVALID_INPUT
+    reason = (args.reason or "").strip()[:_REASON_MAX]
+    if args.outcome == "lost" and not reason:
+        # A lost lead with no reason is a row nobody can learn from — the whole
+        # point of recording the outcome.
+        sys.stderr.write("--reason is required for --outcome lost\n")
+        return EXIT_INVALID_INPUT
+
+    target = OUTCOME_TO_STATUS[args.outcome]
+
+    try:
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+        now = customer_now(cfg.customer.timezone)
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        log_config_load_failed_best_effort(CONFIG_PATH, e, log_path=LOG_PATH)
+        sys.stderr.write(f"WARN: config load failed; using UTC: {e}\n")
+        now = datetime.now(timezone.utc)
+
+    with FileLock(LEADS_LOCK):
+        try:
+            store, status = load_model(LEADS_PATH, CateringLeadStore,
+                                       default=CateringLeadStore())
+            if status not in ("ok", "missing", "empty"):
+                sys.stderr.write(f"leads store status={status!r}; refusing to mutate\n")
+                return EXIT_SCHEMA_VIOLATION
+        except Exception as e:  # noqa: BLE001 — clean exit, never a traceback
+            sys.stderr.write(f"failed to load leads store: {e}\n")
+            return EXIT_SCHEMA_VIOLATION
+
+        idx = next((i for i, l in enumerate(store.leads) if l.lead_id == lead_id), None)
+        if idx is None:
+            sys.stderr.write(f"lead {lead_id} not found\n")
+            return EXIT_NOT_FOUND
+
+        lead = store.leads[idx]
+        from_status = lead.status
+
+        if from_status == target:
+            sys.stderr.write(f"lead {lead_id} is already {target}\n")
+            return EXIT_INVALID_INPUT
+        if not is_catering_transition_allowed(from_status, target):
+            sys.stderr.write(
+                f"refusing {args.outcome}: {from_status}->{target} is not a legal "
+                f"transition for {lead_id}\n"
+            )
+            return EXIT_ILLEGAL_TRANSITION
+
+        if args.dry_run:
+            print(json.dumps({"lead_id": lead_id, "outcome": args.outcome,
+                              "from_status": from_status, "to_status": target,
+                              "dry_run": True}))
+            return EXIT_OK
+
+        store.leads[idx] = lead.model_copy(update={"status": target, "updated_at": now})
+        atomic_write_json(LEADS_PATH, store)
+
+        _append_audit_under_leadslock(
+            TypeAdapter(CateringLeadStatusChange),
+            CateringLeadStatusChange(
+                type="catering_lead_status_change", ts=now,
+                lead_id=lead_id, from_status=from_status, to_status=target,
+                actor="owner", reason=f"outcome_{args.outcome}: {reason}"[:2000],
+            ),
+        )
+        _append_audit_under_leadslock(
+            TypeAdapter(CateringLeadOutcomeMarked),
+            CateringLeadOutcomeMarked(
+                type="catering_lead_outcome_marked", ts=now,
+                lead_id=lead_id, outcome=args.outcome,
+                from_status=from_status, to_status=target, reason=reason,
+            ),
+        )
+
+    print(json.dumps({"lead_id": lead_id, "outcome": args.outcome,
+                      "from_status": from_status, "to_status": target}))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

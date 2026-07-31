@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import json
+import os
 import sys
 import types
 from datetime import datetime, timezone
@@ -41,6 +42,24 @@ def ensure_fcntl_stub() -> None:
     stub.flock = lambda *a, **k: None
     stub.lockf = lambda *a, **k: None
     sys.modules["fcntl"] = stub
+
+
+def posix_fs_identity() -> tuple[str, str]:
+    """(owner, group) the running process creates tmp files as.
+
+    The catering quote-ledger / amendment sidecar enforce an owner:group contract
+    on POSIX, defaulting to the deployed state-dir owner `shift-agent`. A test
+    sandbox is owned by whoever runs pytest, so suites driving those writers pass
+    these through SHIFT_AGENT_CATERING_QUOTE_LEDGER_OWNER/_GROUP (or an explicit
+    expected_owner=) — otherwise the append is refused `parent_bad_owner` and
+    swallowed as a non-fatal WARN. Off-POSIX the deployed defaults are returned;
+    they are inert there because the ownership checks do not run.
+    """
+    if os.name == "posix":
+        import grp
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name, grp.getgrgid(os.getgid()).gr_name
+    return ("shift-agent", "shift-agent")
 
 
 def load_script(module_name: str, path: Path):

@@ -58,15 +58,22 @@ POOL_MENU_PENDING = "menu-pending"
 POOL_CATERING_LEADS = "catering-leads"
 POOL_EXPENSE = "expense"
 POOL_SHIFT = "shift"
+POOL_CATERING_FOLLOWUPS = "catering-followups"
 
 #: Canonical pool lookup order — the dispatcher SKILL's documented contract
 #: (dispatch_shift_agent/SKILL.md:189-192). The ONE source of order; F8 and the
 #: SKILL both conform to this.
+#:
+#: M5 appended catering-followups LAST, deliberately: every code that resolved
+#: before M5 resolves to the same pool after it, so the follow-up store joins the
+#: cross-pool uniqueness set (a later lead can no longer mint a code a live
+#: follow-up card is using) without perturbing any existing precedence.
 CODE_POOL_CANONICAL_ORDER: Tuple[str, ...] = (
     POOL_MENU_PENDING,
     POOL_CATERING_LEADS,
     POOL_EXPENSE,
     POOL_SHIFT,
+    POOL_CATERING_FOLLOWUPS,
 )
 
 # ── Eligibility filters ───────────────────────────────────────────────────────
@@ -97,6 +104,12 @@ _CATERING_ACTIONABLE = frozenset({
 })
 _CATERING_LIVE_EXCLUDE = frozenset({"CLOSED", "OWNER_REJECTED", "STALE", "NOT_CATERING"})
 _EXPENSE_TERMINAL = frozenset({"PUSHED", "REVERSED", "REJECTED", "EXPIRED"})
+# M5 follow-ups. RESOLVE admits `approved_sent` alongside the live card so an
+# owner's repeated `#XXXXX approve` still routes to the follow-up handler, which
+# answers it as an idempotent replay instead of the code reading as unknown.
+# ENUMERATE is narrower: a sent follow-up's code is free to be re-minted.
+_FOLLOWUP_ACTIONABLE = frozenset({"awaiting_owner_approval", "approved_sent"})
+_FOLLOWUP_LIVE = frozenset({"scheduled", "awaiting_owner_approval"})
 
 # ── Generation alphabet (matches every generator's _CODE_ALPHA + schema) ──────
 _CODE_ALPHA = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
@@ -130,6 +143,11 @@ def _expense_leads_path() -> Path:
 def _shift_pending_path() -> Path:
     return Path(os.environ.get("SHIFT_AGENT_PENDING_PATH")
                 or (_state_dir() / "pending.json"))
+
+
+def _catering_followups_path() -> Path:
+    return Path(os.environ.get("SHIFT_AGENT_FOLLOWUPS_PATH")
+                or (_state_dir() / "catering-followups.json"))
 
 
 def _decisions_log_path() -> Path:
@@ -218,6 +236,30 @@ def _shift_rows(doc: Any) -> Iterator[Tuple[str, dict]]:
             yield prop["code"], prop
 
 
+def _followup_resolve_rows(doc: Any) -> Iterator[Tuple[str, dict]]:
+    """M5 follow-ups an owner `#XXXXX` reply can act on."""
+    if not isinstance(doc, dict):
+        return
+    for f in doc.get("followups", []):
+        if not isinstance(f, dict):
+            continue
+        code = f.get("approval_code")
+        if code and f.get("status") in _FOLLOWUP_ACTIONABLE:
+            yield code, f
+
+
+def _followup_live_rows(doc: Any) -> Iterator[Tuple[str, dict]]:
+    """M5 follow-up codes still in play — the exclusion set for every generator."""
+    if not isinstance(doc, dict):
+        return
+    for f in doc.get("followups", []):
+        if not isinstance(f, dict):
+            continue
+        code = f.get("approval_code")
+        if code and f.get("status") in _FOLLOWUP_LIVE:
+            yield code, f
+
+
 @dataclass(frozen=True)
 class _Pool:
     name: str
@@ -249,6 +291,8 @@ _POOLS: Tuple[_Pool, ...] = (
     _Pool(POOL_CATERING_LEADS, _catering_leads_path, _catering_resolve_rows, _catering_live_rows),
     _Pool(POOL_EXPENSE, _expense_leads_path, _expense_rows, _expense_rows),
     _Pool(POOL_SHIFT, _shift_pending_path, _shift_rows, _shift_rows),
+    _Pool(POOL_CATERING_FOLLOWUPS, _catering_followups_path,
+          _followup_resolve_rows, _followup_live_rows),
 )
 
 # `paths` overrides (used by resolve_code / all_live_codes) are a partial
@@ -270,6 +314,7 @@ def pool_paths_under(state_dir) -> dict:
         POOL_CATERING_LEADS: state_dir / "catering-leads.json",
         POOL_EXPENSE: state_dir / "expense-bookkeeper" / "leads.json",
         POOL_SHIFT: state_dir / "pending.json",
+        POOL_CATERING_FOLLOWUPS: state_dir / "catering-followups.json",
     }
 
 

@@ -64,8 +64,17 @@ def _load_plugin_modules():
     synthetic parent package, so the relative import `from . import actions`
     in hooks.py resolves correctly. The plugin dir name `cf-router` contains
     a hyphen so it can't be imported by name — hence the synthetic package.
+
+    Only the synthetic package is evicted. `schemas` / `safe_io` are deliberately
+    LEFT in sys.modules: popping them rebinds those names underneath every
+    already-imported co-resident test module in the same process, so a suite that
+    holds a module-level `import safe_io` (test_kill_switch_chokepoint,
+    test_record_catering_acceptance) then monkeypatches or reloads an object that
+    the code under test no longer uses. PLATFORM_DIR is already on sys.path, so a
+    first import here resolves to the in-repo copy either way.
     """
-    sys.path.insert(0, str(PLATFORM_DIR))
+    if str(PLATFORM_DIR) not in sys.path:
+        sys.path.insert(0, str(PLATFORM_DIR))
 
     pkg_name = "cf_router_pkg_under_test"
     if pkg_name in sys.modules:
@@ -73,9 +82,6 @@ def _load_plugin_modules():
         for mod_name in list(sys.modules):
             if mod_name == pkg_name or mod_name.startswith(pkg_name + "."):
                 del sys.modules[mod_name]
-
-    for mod_name in ("schemas", "safe_io"):
-        sys.modules.pop(mod_name, None)
 
     # Synthetic parent package — points at the plugin directory
     pkg_spec = importlib.machinery.ModuleSpec(pkg_name, loader=None, is_package=True)
@@ -180,8 +186,6 @@ def mods(state_env):
     while platform_text in sys.path:
         sys.path.remove(platform_text)
     sys.path.insert(0, platform_text)
-    for mod_name in ("schemas", "safe_io"):
-        sys.modules.pop(mod_name, None)
     return hooks_mod, actions_mod
 
 
@@ -1948,13 +1952,17 @@ class TestF7PrimaryMode:
         assert "follow-up to active L0011 suppressed" in result["reason"]
         # No new lead created
         mock_trigger.assert_not_called()
-        # Canonical follow-up reply sent
+        # Canonical follow-up reply sent — EXACTLY once. This is the one-response-
+        # per-inbound guard; M1's application step below sends no customer message.
         mock_reply.assert_called_once_with("15550100001@s.whatsapp.net", "L0011", "")
-        # Suppressed audit row
+        # Suppressed audit row. M1 added a second row on this turn: a NEW capture is
+        # now applied inline (amend-catering-lead --mode amendment), and that
+        # application is audited with its rc before the suppression row.
         rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
-        assert len(audits) == 1
-        assert audits[0]["reason"] == "f7_primary_followup_suppressed"
+        assert [a["reason"] for a in audits] == [
+            "f7_primary_amendment_applied", "f7_primary_followup_suppressed",
+        ]
         # PR-R2A: outcome=captured — the follow-up text is durably persisted to the
         # sidecar BEFORE the canonical reply (closes the Branch-B data-loss gap).
         store = json.loads(
@@ -3757,11 +3765,15 @@ class TestF7PrimaryMode:
         assert result["action"] == "skip"
         assert "follow-up to active L0014 suppressed" in result["reason"]
         mock_trigger.assert_not_called()
+        # Exactly one customer response for the inbound — the canonical reply. The
+        # weak follow-up carries no parseable field, so M1's inline application is a
+        # no-op that sends nothing; it still audits its rc alongside the suppression.
         mock_reply.assert_called_once_with("100000000000001@lid", "L0014", "")
         rows = [json.loads(l) for l in state_env["log_path"].read_text(encoding="utf-8").splitlines() if l.strip()]
         audits = [r for r in rows if r.get("type") == "cf_router_intercepted"]
-        assert len(audits) == 1
-        assert audits[0]["reason"] == "f7_primary_followup_suppressed"
+        assert [a["reason"] for a in audits] == [
+            "f7_primary_amendment_applied", "f7_primary_followup_suppressed",
+        ]
 
     def test_weak_menu_text_without_active_lead_does_not_create_new_lead(self, mods, state_env):
         """Weak follow-up signals only apply when an active lead already exists."""
@@ -3853,16 +3865,26 @@ class TestF7PrimaryMode:
         mock_trigger.assert_called_once()
         call_kwargs = mock_trigger.call_args.kwargs
         # Headcount and obvious vegetarian preference should be parsed + forwarded.
+        # M1 widened the extractor beyond headcount/dietary — "food delivered" now
+        # also yields delivery_or_pickup, which is a qualification slot the lead
+        # would otherwise have to ask for.
         assert call_kwargs.get("extracted_fields") == {
             "headcount": 80,
             "dietary_restrictions": ["veg"],
+            "delivery_or_pickup": "delivery",
         }, f"expected extracted_fields with headcount/dietary, got {call_kwargs.get('extracted_fields')!r}"
 
-    def test_branch_a_no_headcount_signal_passes_none(self, mods, state_env):
+    def test_branch_a_no_headcount_signal_forwards_no_headcount(self, mods, state_env):
         """When classify_catering finds NO headcount signal (e.g. text says
-        'catering for our anniversary' with no digit), extracted_fields is
-        None — preserves the prior all-null behavior. Defensive against
-        regression of the no-signal path."""
+        'catering for our anniversary' with no digit), no headcount reaches the
+        lead — it stays null for the qualification loop to ask about. Defensive
+        against regression of the no-signal path.
+
+        Pre-M1 this pinned `extracted_fields is None`, because headcount and
+        dietary were the only fields the router forwarded. M1 widened the
+        extractor (event_type, delivery_or_pickup, ...), so a headcount-free text
+        legitimately forwards other slots; the invariant under test is the
+        ABSENCE of a fabricated headcount, not an empty payload."""
         hooks_mod, actions_mod = mods
         _seed_config(state_env)
         _seed_leads_multi(state_env, [])
@@ -3886,8 +3908,8 @@ class TestF7PrimaryMode:
             # not a failure of the headcount logic itself.
             return
         mock_trigger.assert_called_once()
-        # No headcount signal → no extracted_fields override (None)
-        assert mock_trigger.call_args.kwargs.get("extracted_fields") is None
+        # No headcount signal → headcount must not be invented from anywhere else.
+        assert "headcount" not in (mock_trigger.call_args.kwargs.get("extracted_fields") or {})
 
     def test_parse_headcount_from_signals_helper(self, mods):
         """Direct unit test of the _parse_headcount_from_signals helper:

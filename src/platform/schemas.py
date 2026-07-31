@@ -502,6 +502,7 @@ class DailyBriefConfig(BaseModel):
 CateringLeadStatus = Literal[
     "NEW",                      # raw inquiry just arrived
     "EXTRACTING",               # extractor running (LLM)
+    "QUALIFYING",               # M1: below minimum qualification; slot-filling loop open
     "NOT_CATERING",             # classifier said no (terminal)
     "AWAITING_OWNER_APPROVAL",  # quote drafted; owner needs to approve
     "CUSTOMER_FINALIZED",       # PR-CF1: customer locked in selected_items
@@ -509,6 +510,7 @@ CateringLeadStatus = Literal[
     "OWNER_EDITED",             # owner sent edits; re-draft pending
     "OWNER_REJECTED",           # owner declined (terminal)
     "SENT_TO_CUSTOMER",         # quote sent to inquirer
+    "BOOKED",                   # M3: customer EXPLICITLY accepted the sent quote
     "CLOSED",                   # terminal — booked or customer-declined
     "STALE",                    # terminal — silent for too long
 ]
@@ -530,8 +532,18 @@ def is_catering_terminal(status: str) -> bool:
 # Review L9: typed against the CateringLeadStatus Literal so mypy catches
 # typos (a misspelled status as key OR value would be a type error).
 CATERING_TRANSITIONS: dict[CateringLeadStatus, set[CateringLeadStatus]] = {
-    "NEW": {"EXTRACTING", "NOT_CATERING"},
-    "EXTRACTING": {"AWAITING_OWNER_APPROVAL", "NOT_CATERING"},
+    "NEW": {"EXTRACTING", "QUALIFYING", "NOT_CATERING"},
+    "EXTRACTING": {"AWAITING_OWNER_APPROVAL", "QUALIFYING", "NOT_CATERING"},
+    # M1 2026-07-31: a lead below minimum qualification parks here while the
+    # deterministic slot-filling loop asks for the missing fields. The self-edge
+    # covers each additional answer round (mirrors CUSTOMER_FINALIZED's re-finalize
+    # self-edge) — every round still emits its own audit row. It leaves for
+    # AWAITING_OWNER_APPROVAL either on completion or when the round cap is hit
+    # (owner review with the residual gaps flagged). STALE is reached by
+    # catering-lead-ttl-sweep for a lead whose customer went quiet mid-loop
+    # (catering.qualifying_stale_after_hours), so an unanswered intake question can
+    # no longer keep a lead open forever with the owner never told.
+    "QUALIFYING": {"QUALIFYING", "AWAITING_OWNER_APPROVAL", "STALE"},
     "NOT_CATERING": set(),                                                # terminal
     "AWAITING_OWNER_APPROVAL": {
         "OWNER_APPROVED", "OWNER_EDITED", "OWNER_REJECTED", "STALE",
@@ -560,7 +572,14 @@ CATERING_TRANSITIONS: dict[CateringLeadStatus, set[CateringLeadStatus]] = {
     # without manual state surgery. The CateringQuoteAttempted idempotency
     # anchor prevents duplicate sends on legit retries.
     "OWNER_APPROVED": {"SENT_TO_CUSTOMER", "AWAITING_OWNER_APPROVAL"},
-    "SENT_TO_CUSTOMER": {"CLOSED", "STALE"},
+    # M3 2026-07-31: BOOKED is the customer's EXPLICIT acceptance of the sent quote
+    # (record-catering-acceptance / mark-catering-lead-outcome --outcome won). It is
+    # deliberately NOT terminal — a booked event still has to be closed out (CLOSED)
+    # and a booked lead the customer then goes silent on can still be swept (STALE).
+    # A DECLINE goes straight to CLOSED with the reason on the audit row, which is
+    # why SENT_TO_CUSTOMER keeps its existing CLOSED edge.
+    "SENT_TO_CUSTOMER": {"BOOKED", "CLOSED", "STALE"},
+    "BOOKED": {"CLOSED", "STALE"},
     "OWNER_REJECTED": set(),                                              # terminal
     "CLOSED": set(),                                                      # terminal
     "STALE": set(),                                                       # terminal
@@ -603,6 +622,19 @@ class CateringConfig(BaseModel):
     # legitimate budget catering (e.g. a $6/guest order). Operator-tunable per customer.
     min_per_guest_usd: float = Field(default=3.0, ge=0.0)
     stale_after_hours: int = Field(default=14 * 24, ge=1)  # 14 days default
+    # How long a QUALIFYING lead may sit with no activity before catering-lead-ttl-sweep
+    # expires it. MUCH shorter than the AWAITING_OWNER_APPROVAL TTL: an unanswered
+    # intake question is a customer who went quiet mid-conversation, not an inquiry
+    # waiting on the owner, and until this existed such a lead lived forever with the
+    # owner never told (a WhatsApp-only owner never sees the Studio counter). ADDITIVE
+    # — a config written before this decodes with the 72h default.
+    qualifying_stale_after_hours: int = Field(default=72, ge=1)
+    # M3: how long a SENT proposal set (and the quote text that quotes it) stays
+    # valid. Drives BOTH the customer-facing "This quote is valid until <date>"
+    # line and CateringProposalSet.expires_at, so the sweep can never expire a set
+    # earlier than the date the customer was told. ADDITIVE — a config written
+    # before M3 decodes with the 14-day default.
+    proposal_validity_days: int = Field(default=14, ge=1, le=365)
     # Per-customer pricing knobs land in v0.2 (would otherwise bloat config).
 
 
@@ -2176,6 +2208,17 @@ class CateringLeadExtractedFields(BaseModel):
     delivery_or_pickup: Optional[Literal["delivery", "pickup", "unknown"]] = None
     budget_hint_usd: Optional[int] = Field(default=None, ge=0)
     notes: str = ""
+    # M1 qualification block (2026-07-31). All Optional — the owner fills any gap
+    # the deterministic extractor cannot reach, and legacy leads decode unchanged.
+    # `venue` is DELIBERATELY never pattern-guessed off the initial inquiry (no
+    # deployed venue regex exists and a fragile one does more harm than good — same
+    # rationale as the fresh-vs-stale discriminator's venue omission); it is filled
+    # ONLY from a direct answer to the venue question in the slot-filling loop.
+    event_type: Optional[Literal["wedding", "birthday", "corporate", "religious", "other"]] = None
+    venue: Optional[str] = Field(default=None, max_length=200)
+    service_style: Optional[Literal["buffet", "plated", "boxed", "family_style", "other"]] = None
+    veg_guest_count: Optional[int] = Field(default=None, ge=0, le=10000)
+    nonveg_guest_count: Optional[int] = Field(default=None, ge=0, le=10000)
     # Items the customer asked about that aren't on the current menu —
     # LLM-extracted from message text. Empty list = no off-menu requests
     # detected.
@@ -2236,6 +2279,27 @@ class CateringLead(BaseModel):
     owner_approval_code: Optional[ProposalCode] = None  # reuses Shift's pattern
     customer_replied: bool = False
 
+    # M1 slot-filling loop (2026-07-31). All default-empty so legacy leads decode
+    # unchanged. `pending_questions` / `questions_asked` hold QUALIFICATION FIELD
+    # NAMES (catering_qualification.REQUIRED_FIELDS members), NOT rendered question
+    # text — the text is re-rendered deterministically from the field name at send
+    # time, so a template edit never strands a lead mid-loop, and the router can ask
+    # "is the single open question the free-text venue one?" without parsing prose.
+    pending_questions: list[str] = Field(
+        default_factory=list, max_length=8,
+        description="Qualification field names asked in the last round, still unanswered",
+    )
+    questions_asked: list[str] = Field(
+        default_factory=list, max_length=16,
+        description="Every qualification field name asked so far — never re-asked",
+    )
+    qualification_rounds: int = Field(
+        default=0, ge=0, le=10,
+        description="Question rounds sent. Capped by catering_qualification."
+                    "MAX_QUALIFICATION_ROUNDS, after which the lead goes to owner "
+                    "review with the residual gaps flagged.",
+    )
+
     # PR-CF1: customer-finalized menu fields. All default-empty so legacy
     # leads (pre-finalize) decode unchanged. Set only by finalize-catering-menu
     # under FileLock(LEADS_LOCK).
@@ -2248,6 +2312,23 @@ class CateringLead(BaseModel):
         description="Server-recomputed sum(qty*price). Source of truth; "
                     "LLM-passed total is cross-check only.",
     )
+    # The cents-exact commitment behind quote_total_usd. ADDITIVE + Optional so
+    # every lead finalized before it existed decodes unchanged — and those leads
+    # are exactly the ones the owner-discount path refuses to recompute, because
+    # rebuilding a package quote from whole-dollar selected_items quotes the
+    # add-ons alone. See CateringPricingInputs.
+    pricing_inputs: Optional["CateringPricingInputs"] = Field(
+        default=None,
+        description="Cents-exact kernel inputs frozen at finalize; the only "
+                    "sound basis for a later recompute.",
+    )
+    # The date the quote the customer HOLDS stops standing, stamped at
+    # approve-send time from CateringConfig.proposal_validity_days — the same
+    # config the customer-facing "valid until" line renders from, so the lead can
+    # never expire a quote earlier than the date the customer was given. ADDITIVE
+    # + Optional: a lead sent before this existed carries None and is never
+    # treated as expired (nobody told that customer a deadline we can enforce).
+    quote_valid_until: Optional[datetime] = None
     customer_finalized_at: Optional[datetime] = Field(
         default=None,
         description="Timestamp of first finalize. Re-finalize via different "
@@ -2284,6 +2365,40 @@ class CateringLead(BaseModel):
     ] = "none"
     deposit_minted_at: Optional[datetime] = None
 
+    # M4/G4 per-lead HOLD. Additive + default-off, so every legacy lead decodes
+    # unchanged and a rollback drops the fields cleanly. Orthogonal to
+    # lead.status AND to the per-conversation automation-control kernel: a hold
+    # scopes to ONE lead, the kernel scopes to the whole conversation (a customer
+    # with two leads can have one held and the other running). Set/cleared only
+    # by `set-catering-lead-hold` under FileLock(LEADS_LOCK).
+    #
+    # Enforcement contract: a held lead is excluded from LEAD-SCOPED automated
+    # CUSTOMER sends (the F7 primary ack in send-catering-ack, the owner-approved
+    # quote in apply-catering-owner-decision). Owner-directed sends — approval
+    # cards, reprompts, confirmations — are NEVER blocked by a hold.
+    on_hold: bool = False
+    hold_reason: Optional[str] = Field(default=None, max_length=200)
+    hold_set_at: Optional[datetime] = None
+
+    # M3 customer acceptance. Additive + default-None so every legacy lead decodes
+    # unchanged. Written ONLY by `record-catering-acceptance` under FileLock(LEADS_LOCK)
+    # on an UNAMBIGUOUS accept/decline token — an ambiguous "ok"/"sounds good" never
+    # lands here; it gets one clarification instead (see below).
+    customer_acceptance: Optional[Literal["accepted", "declined"]] = None
+    acceptance_at: Optional[datetime] = None
+    acceptance_message_id: Optional[str] = Field(
+        default=None, min_length=1, max_length=200,
+        description="Idempotency anchor — bridge messageId of the customer's "
+                    "accept/decline message. Same id seen twice => no-op replay.",
+    )
+    # The bridge messageId of the ONE ambiguous-reply clarification we sent
+    # ("would you like to go ahead and book...?"). Set once and never cleared, so
+    # a customer who keeps saying "ok" is asked exactly once — a second
+    # clarification would read as the agent nagging about money.
+    acceptance_clarification_sent_message_id: Optional[str] = Field(
+        default=None, min_length=1, max_length=200,
+    )
+
     # v0.3: post-AWAITING statuses require non-empty quote_text. Legacy data
     # (pre-v0.3 leads with empty quote_text) is backfilled with sentinel by
     # mode="before" shim, then strict validator runs. Migration tool fixes
@@ -2301,6 +2416,7 @@ class CateringLead(BaseModel):
         post_awaiting = {
             "AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED",  # PR-CF1
             "OWNER_APPROVED", "OWNER_EDITED", "SENT_TO_CUSTOMER",
+            "BOOKED",  # M3 — reachable only from SENT_TO_CUSTOMER, which already required it
         }
         if status in post_awaiting and not (data.get("quote_text", "") or "").strip():
             sys.stderr.write(
@@ -2315,6 +2431,7 @@ class CateringLead(BaseModel):
         post_awaiting = {
             "AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED",  # PR-CF1
             "OWNER_APPROVED", "OWNER_EDITED", "SENT_TO_CUSTOMER",
+            "BOOKED",  # M3 — reachable only from SENT_TO_CUSTOMER, which already required it
         }
         if self.status in post_awaiting and not self.quote_text.strip():
             raise ValueError(
@@ -2419,6 +2536,13 @@ class CateringQuoteLedgerRecord(BaseModel):
     source_message_id: Optional[str] = Field(default=None, max_length=200)
     approval_code: Optional[str] = Field(default=None, pattern=r"^#[A-HJKMNPQR-Z2-9]{5}$")
     created_at: datetime
+    # M2 provenance stamps — ADDITIVE + Optional so every record committed before
+    # the pricing kernel landed still validates (they simply carry None). These
+    # answer "which catalog / which pricebook produced this committed number?"
+    # without re-deriving it from the transcript.
+    menu_version: Optional[int] = Field(default=None, ge=1)
+    pricebook_version: Optional[int] = Field(default=None, ge=1)
+    price_status: Optional[CateringPriceStatus] = None
 
 
 class CateringQuoteLedgerStore(BaseModel):
@@ -2438,7 +2562,51 @@ class CateringQuoteLedgerStore(BaseModel):
 CateringProposalStatus = Literal[
     "DRAFT", "SENT", "SEND_FAILED", "SUPERSEDED",
     "SELECTING", "SELECTED", "SELECTED_OWNER_CARD_FAILED", "SELECT_FAILED",
+    "EXPIRED",  # M3 — validity window elapsed with no selection
 ]
+
+# M3: proposal-set state machine. Mirrors CATERING_TRANSITIONS' shape (typed against
+# the status Literal so a typo on either side is a mypy error) and, like it, is the
+# SINGLE source of truth consulted by the scripts at every status write — the schema
+# layer does NOT enforce it, so historic sets replay unchanged.
+#
+# Encoded from the two deployed writers, NOT invented:
+#   create-catering-proposal-options
+#     _create_draft            mints DRAFT (initial state, not a transition)
+#     _mark_send_failed        DRAFT -> SEND_FAILED
+#     _mark_sent_and_supersede DRAFT -> SENT, or DRAFT -> SUPERSEDED when a
+#                              later-sequence set already went out (has_later_sent);
+#                              and, for every OTHER lower-sequence row, SENT -> SUPERSEDED
+#   select-catering-proposal
+#     _claim_selection         SENT -> SELECTING (optimistic claim)
+#     _finish_selection        SELECTING -> SELECTED | SELECTED_OWNER_CARD_FAILED
+#                                        | SELECT_FAILED (bad finalize rc / superseded mid-flight)
+#     _fail_claim_after_finalize_exception  SELECTING -> SELECT_FAILED
+#   catering-proposal-expiry-sweep (new)
+#                              SENT -> EXPIRED
+#
+# Every terminal state has an empty set: a SEND_FAILED set is never resurrected (the
+# next attempt mints a new set), and SELECTED / SELECT_FAILED / SUPERSEDED / EXPIRED
+# are end states of their respective paths.
+CATERING_PROPOSAL_SET_TRANSITIONS: dict[CateringProposalStatus, set[CateringProposalStatus]] = {
+    "DRAFT": {"SENT", "SEND_FAILED", "SUPERSEDED"},
+    "SENT": {"SELECTING", "SUPERSEDED", "EXPIRED"},
+    "SEND_FAILED": set(),                                                 # terminal
+    "SUPERSEDED": set(),                                                  # terminal
+    "SELECTING": {"SELECTED", "SELECTED_OWNER_CARD_FAILED", "SELECT_FAILED"},
+    "SELECTED": set(),                                                    # terminal
+    "SELECTED_OWNER_CARD_FAILED": set(),                                  # terminal
+    "SELECT_FAILED": set(),                                               # terminal
+    "EXPIRED": set(),                                                     # terminal
+}
+
+
+def is_proposal_set_transition_allowed(from_s: str, to_s: str) -> bool:
+    """M3: True only for allowed proposal-set transitions. False for unknown
+    statuses. Accepts plain str (not Literal) for runtime ergonomics — callers pass
+    strings read off disk JSON. Mirrors is_catering_transition_allowed exactly."""
+    return to_s in CATERING_PROPOSAL_SET_TRANSITIONS.get(from_s, set())  # type: ignore[arg-type]
+
 
 CateringProposalTier = Literal["classic", "balanced", "premium"]
 
@@ -2460,6 +2628,12 @@ class CateringProposalSet(BaseModel):
     status: CateringProposalStatus
     created_at: datetime
     sent_at: Optional[datetime] = None
+    # M3 validity window. Stamped at SENT time from CateringConfig.proposal_validity_days
+    # — the SAME field the customer-facing "valid until" line renders from, so a set can
+    # never expire before the date the customer was given. ADDITIVE + Optional: every set
+    # sent before M3 carries None and is simply never expired by the sweep (an operator
+    # re-sends instead of the sweep silently retiring a set nobody was told expires).
+    expires_at: Optional[datetime] = None
     outbound_message_id: str = ""
     source_message_id: str = Field(min_length=1, max_length=200)
     request_text: str = Field(default="", max_length=1000)
@@ -2527,6 +2701,94 @@ class CateringLearningSummary(BaseModel):
     )
 
 
+# ── M5: controlled follow-up engine (Agent #10 state) ────────────────────────
+# A follow-up is a SCHEDULED, DETERMINISTIC, OWNER-SUPERVISED nudge attached to
+# an existing lead. There is no cold-outreach shape here by construction: every
+# record carries a `lead_id`, and the sweep refuses to render one whose lead it
+# cannot find. The default path is not a send at all — a due follow-up becomes an
+# owner APPROVAL CARD and only reaches the customer once the owner replies with
+# its #XXXXX code (see src/platform/catering_followups.py for the kernel).
+CateringFollowupType = Literal[
+    "incomplete_qualification",  # M1 slot-filling loop ran out of rounds unanswered
+    "proposal_unanswered",       # quote went to the customer; no reply
+    "owner_reminder",            # operator/owner-created via the CLI
+    "event_approaching",         # event_date - 7d
+    "final_headcount_due",       # event_date - 3d
+    "post_event_feedback",       # event_date + 1d
+]
+
+CateringFollowupStatus = Literal[
+    "scheduled",                 # waiting for due_at
+    "awaiting_owner_approval",   # card sent to the owner; #XXXXX pending
+    "sending",                   # CLAIMED for a customer send (see below)
+    "approved_sent",             # owner approved; message delivered (terminal)
+    "suppressed",                # a suppression rule fired (terminal)
+    "cancelled",                 # owner/operator cancelled (terminal)
+    "expired",                   # re-carded to the cap without an owner decision (terminal)
+]
+
+
+class CateringFollowup(BaseModel):
+    """ONE scheduled follow-up for ONE lead.
+
+    `rendered_message` is populated at CARD time (not at schedule time) so an
+    edited template always reaches the customer in its current form, and the text
+    the owner approved is the exact text that is sent — the card and the send read
+    the same stored string, never two independent renders.
+
+    `attempt_count` counts owner-approval CARDS sent for this follow-up, not
+    customer sends: a card whose 4h approval window lapses returns the record to
+    `scheduled` with attempt_count + 1, and the sweep gives up at
+    ``catering_followups.MAX_CARD_ATTEMPTS``.
+
+    `sending` + `claimed_at` are the CLAIM half of claim-before-send: a customer
+    send is claimed under the store lock BEFORE the network call and confirmed
+    (`approved_sent`) only after it succeeds, so two concurrent approvals of the
+    same code cannot both reach the bridge. A claim older than
+    ``catering_followups.CLAIM_STALE_MINUTES`` is a crashed sender, not a slow
+    one, and the sweep reclaims it.
+    """
+    model_config = ConfigDict(extra="forbid")
+    followup_id: str = Field(pattern=r"^FU[0-9]{4,}$")
+    lead_id: str = Field(min_length=1)
+    followup_type: CateringFollowupType
+    due_at: datetime
+    created_at: datetime
+    created_by: Literal["system", "owner"]
+    status: CateringFollowupStatus = "scheduled"
+    approval_code: Optional[ProposalCode] = None
+    message_template_key: str = Field(min_length=1, max_length=100)
+    rendered_message: Optional[str] = Field(default=None, max_length=2000)
+    suppressed_reason: Optional[str] = Field(default=None, max_length=100)
+    sent_message_id: Optional[str] = Field(default=None, max_length=200)
+    attempt_count: int = Field(default=0, ge=0, le=10)
+    last_attempt_at: Optional[datetime] = None
+    # When the `sending` claim was taken. Deliberately NOT last_attempt_at: that
+    # field anchors the 4h card TTL, and a claim that fails must leave the owner's
+    # approval window running from the CARD rather than restarting it. Additive +
+    # default None, so every follow-up written before the claim landed decodes
+    # unchanged.
+    claimed_at: Optional[datetime] = None
+    # Owner-authored context for an owner_reminder ("are you still thinking about
+    # the 14th?"). The owner's OWN words to their OWN customer — not model output —
+    # so it is bounded and stripped rather than screened, and the owner reads it
+    # again on the approval card before it can send. Additive + default None, so
+    # every follow-up written before this field decodes unchanged.
+    note: Optional[str] = Field(default=None, max_length=300)
+
+
+class CateringFollowupStore(BaseModel):
+    """Scheduled follow-ups (lives at /opt/shift-agent/state/catering-followups.json).
+
+    ``extra="ignore"`` for rollback safety, mirroring CateringLeadStore: a store
+    written by a newer binary decodes cleanly on an older one.
+    """
+    model_config = ConfigDict(extra="ignore")
+    schema_version: int = Field(default=1, ge=1)
+    next_sequence: int = Field(default=1, ge=1)
+    followups: list[CateringFollowup] = Field(default_factory=list)
+
+
 # Catering menu (Agent #2 v0.2 — photo-upload menu management)
 DietaryTag = Literal[
     "veg", "non-veg", "vegan", "jain", "halal", "kosher",
@@ -2589,6 +2851,256 @@ class MenuPendingUpdate(BaseModel):
     confirmation_code: str = Field(pattern=_CODE_FULL_PATTERN,
                                    description="reuses Shift's #X9X9X code alphabet")
     parser_notes: str = Field(default="", max_length=2000)
+
+
+# ── Catering commercial pricebook (M2) ───────────────────────────────────────
+# The Menu is the CULINARY catalog (what we cook, optional retail float prices).
+# The Pricebook is the COMMERCIAL source of truth (what we charge): per-person
+# packages, fixed fees, tax, approved discounts, and per-item price overrides.
+# ALL money here is INTEGER CENTS — never float — mirroring deposit.py's
+# round-half-up cents discipline. Stored at
+# /opt/shift-agent/state/catering-pricebook.json (see catering_paths.py).
+
+CateringFeeKind = Literal["delivery", "staffing", "setup", "other"]
+CateringFeeUnit = Literal["flat", "per_staff", "per_mile"]
+CateringDiscountKind = Literal["percent", "fixed_cents"]
+CateringPricebookUpdatedBy = Literal["manual", "import", "cockpit"]
+# Price provenance carried on every computed quote + committed ledger version:
+#   exact               — every line priced from the pricebook (package / override)
+#   estimated           — at least one line fell back to a Menu retail price
+#   pending_owner_review— a price could not be resolved, or the pricebook is a
+#                         placeholder seed; NOT deliverable to a customer as-is
+CateringPriceStatus = Literal["exact", "estimated", "pending_owner_review"]
+
+_PRICEBOOK_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+
+
+class CateringPackage(BaseModel):
+    """One per-person catering package (buffet tier, thali, etc.).
+
+    `price_per_person_cents` is multiplied by the event guest count by the
+    deterministic kernel (catering_pricing.compute_quote) — this is the field
+    that fixes the BL-CATER-03 unscaled-basket bug.
+    """
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=_PRICEBOOK_ID_PATTERN)
+    name: str = Field(min_length=1, max_length=200)
+    price_per_person_cents: int = Field(ge=0, le=1_000_000)
+    min_guests: int = Field(default=1, ge=1, le=10000)
+    description: str = Field(default="", max_length=1000)
+    dietary_profile: list[DietaryTag] = Field(default_factory=list)
+    included_sections: list[str] = Field(default_factory=list, max_length=50)
+    active: bool = True
+
+
+class CateringFee(BaseModel):
+    """One fixed fee line (delivery, staffing, setup).
+
+    `per_unit` says how `amount_cents` scales: "flat" (or unset) applies once;
+    "per_staff" / "per_mile" require the caller to supply the multiplier. The
+    kernel NEVER guesses a multiplier — an unsupplied one yields an unpriced
+    line + `pending_owner_review`, never a silent zero.
+    """
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=_PRICEBOOK_ID_PATTERN)
+    name: str = Field(min_length=1, max_length=200)
+    kind: CateringFeeKind = "other"
+    amount_cents: int = Field(ge=0, le=100_000_000)
+    per_unit: Optional[CateringFeeUnit] = None
+    active: bool = True
+
+
+class CateringDiscount(BaseModel):
+    """One owner-approved discount.
+
+    `value` semantics are keyed off `kind` — BOTH integer, never float:
+      kind="percent"     -> value is BASIS POINTS (500 = 5%), mirroring
+                            `tax_rate_bps` so all rate math stays integer.
+      kind="fixed_cents" -> value is integer cents.
+    `max_amount_cents` caps a percent discount in absolute terms.
+    """
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=_PRICEBOOK_ID_PATTERN)
+    name: str = Field(min_length=1, max_length=200)
+    kind: CateringDiscountKind
+    value: int = Field(ge=0)
+    max_amount_cents: Optional[int] = Field(default=None, ge=0)
+    requires_owner_code: bool = True
+    active: bool = True
+
+    @model_validator(mode="after")
+    def _validate_value_range(self) -> "CateringDiscount":
+        if self.kind == "percent" and self.value > 10000:
+            raise ValueError(
+                f"discount {self.id!r}: percent value is BASIS POINTS "
+                f"(10000 = 100%); got {self.value}"
+            )
+        return self
+
+
+class CateringPricebook(BaseModel):
+    """Versioned commercial source of truth for catering pricing.
+
+    Replaced wholesale on each import (mirrors the Menu single-source-of-truth
+    pattern); the prior version is archived to catering-pricebook-archive/.
+    """
+    model_config = ConfigDict(extra="forbid")
+    version: int = Field(default=1, ge=1)
+    effective_date: date
+    updated_at: datetime
+    updated_by: CateringPricebookUpdatedBy = "manual"
+    # SINGLE-CURRENCY BY CONSTRUCTION (binding ruling): every downstream number
+    # — deposit cents, quote_total_usd, the `$` in every template — is dollar
+    # math. A non-USD pricebook MUST fail loudly at load rather than silently
+    # render rupees through dollar arithmetic. See _reject_non_usd below.
+    currency: Literal["USD"] = "USD"
+    # Mechanically-detectable "this is seed data, not real prices". The kernel
+    # turns this into price_status="pending_owner_review" + a
+    # "placeholder_pricebook" flag so proposal delivery can hard-refuse on it.
+    placeholder: bool = False
+    per_person_packages: list[CateringPackage] = Field(default_factory=list, max_length=100)
+    fixed_fees: list[CateringFee] = Field(default_factory=list, max_length=50)
+    tax_rate_bps: int = Field(default=0, ge=0, le=10000)
+    approved_discounts: list[CateringDiscount] = Field(default_factory=list, max_length=50)
+    # Menu item name -> integer cents. Overrides the Menu's float `price_usd`
+    # for that item; the commercial number always wins over the culinary one.
+    item_price_overrides: dict[str, int] = Field(default_factory=dict)
+    notes: str = Field(default="", max_length=2000)
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def _reject_non_usd(cls, v: Any) -> Any:
+        """FAIL LOUD on any non-USD currency (binding PR-C ruling #3).
+
+        Literal["USD"] alone would emit "Input should be 'USD'", which reads as
+        a typo. This says what actually breaks: every downstream cent is dollar
+        math, so an INR pricebook is a wrong-money bug, not a formatting one.
+        """
+        if isinstance(v, str):
+            normalized = v.strip().upper()
+            if normalized != "USD":
+                raise ValueError(
+                    f"currency={v!r} is not supported: catering pricing is USD-only "
+                    "end-to-end (deposit cents, quote totals and every '$' template "
+                    "are dollar math). A non-USD pricebook would render foreign "
+                    "amounts through dollar arithmetic. Refusing to load."
+                )
+            # Case/whitespace normalization only — a hand-edited "usd" is the
+            # same currency, not a different one.
+            return normalized
+        return v
+
+    @model_validator(mode="after")
+    def _validate_unique_ids_and_overrides(self) -> "CateringPricebook":
+        for label, ids in (
+            ("per_person_packages", [p.id for p in self.per_person_packages]),
+            ("fixed_fees", [f.id for f in self.fixed_fees]),
+            ("approved_discounts", [d.id for d in self.approved_discounts]),
+        ):
+            dupes = sorted({i for i in ids if ids.count(i) > 1})
+            if dupes:
+                raise ValueError(f"{label}: duplicate id(s) {dupes}")
+        for name, cents in self.item_price_overrides.items():
+            if not isinstance(cents, int) or isinstance(cents, bool) or cents < 0:
+                raise ValueError(
+                    f"item_price_overrides[{name!r}] must be a non-negative "
+                    f"integer number of CENTS; got {cents!r}"
+                )
+        return self
+
+    def is_placeholder(self) -> bool:
+        """True when this pricebook is seed/template data requiring owner review.
+
+        Callers that deliver pricing to a customer MUST refuse on True (the
+        kernel already downgrades price_status to 'pending_owner_review')."""
+        return self.placeholder
+
+
+class CateringPricebookStore(BaseModel):
+    """On-disk envelope for /opt/shift-agent/state/catering-pricebook.json.
+
+    Mirrors the Menu store pattern (single document replaced on each update,
+    prior version archived) with a schema_version envelope so a future
+    multi-pricebook layout can migrate without rewriting every reader."""
+    model_config = ConfigDict(extra="forbid")
+    schema_version: int = Field(default=1, ge=1)
+    pricebook: CateringPricebook
+
+
+# ── Pricing provenance: the cents-exact commitment behind a quoted number ─────
+class CateringQuoteLineInput(BaseModel):
+    """One à-la-carte line EXACTLY as the kernel priced it at finalize time.
+
+    `unit_cents` is the whole point. CateringSelectedItem.price_usd is whole
+    dollars, so a $4.50 item round-trips to $5 — and a later recompute that
+    re-derives cents from that dollar overcharges by $0.50 on every unit."""
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    qty: int = Field(ge=1, le=500)
+    unit_cents: int = Field(ge=0)
+
+
+class CateringQuoteFeeInput(BaseModel):
+    """One fee EXACTLY as it was applied at finalize time.
+
+    `units=None` records a fee whose multiplier (staff count / miles) was never
+    supplied — the unresolved state that forces price_status="pending_owner_review".
+    Persisting it is what lets a recompute reproduce that verdict instead of
+    silently pricing the fee at zero."""
+    model_config = ConfigDict(extra="forbid")
+    fee_id: str = Field(pattern=_PRICEBOOK_ID_PATTERN)
+    name: str = Field(min_length=1, max_length=200)
+    kind: str = Field(default="other", max_length=40)
+    per_unit: str = Field(default="flat", max_length=40)
+    unit_cents: int = Field(ge=0)
+    units: Optional[int] = Field(default=None, ge=0)
+
+
+class CateringPricingInputs(BaseModel):
+    """PRICING PROVENANCE — the cents-exact kernel inputs behind a lead's
+    committed `quote_total_usd`, frozen at finalize time.
+
+    Why this exists: before it, the only durable record of a priced quote was
+    `selected_items` (whole dollars) plus `quote_total_usd` (whole dollars). Any
+    later recompute — the owner-discount path — had to REBUILD the quote from
+    those two, which lost two different things at once:
+
+      * the PACKAGE. A package-priced finalize leaves `selected_items` holding
+        only the à-la-carte add-ons, so rebuilding from them quoted the add-ons
+        alone (measured: $3,978 -> $117 on a 200-guest package lead).
+      * the CENTS. Re-deriving cents from whole dollars is off by up to $0.49
+        per unit and biased UP — a measured $75 overcharge on 150 units of a
+        $2.50 item, exactly enough to cancel a $75 discount.
+
+    So the commitment is STORED, never reconstructed. `total_cents` is the
+    kernel's exact total and `subtotal_cents` the pre-discount, pre-tax base a
+    recompute must reproduce. A lead carrying NO CateringPricingInputs predates
+    this record; the discount path refuses it rather than recomputing it wrong.
+
+    Written only by `finalize-catering-menu`, and only on the pricebook path —
+    the legacy no-pricebook path has no kernel computation to freeze, and a
+    discount cannot be applied without a pricebook anyway.
+    """
+    model_config = ConfigDict(extra="forbid")
+    guest_count: int = Field(ge=1)
+    package_id: Optional[str] = Field(default=None, pattern=_PRICEBOOK_ID_PATTERN)
+    package_name: Optional[str] = Field(default=None, max_length=200)
+    package_price_per_person_cents: Optional[int] = Field(default=None, ge=0)
+    package_min_guests: int = Field(default=1, ge=1, le=10000)
+    line_items: list[CateringQuoteLineInput] = Field(default_factory=list, max_length=50)
+    fees: list[CateringQuoteFeeInput] = Field(default_factory=list, max_length=50)
+    # Multipliers the kernel was given for per_staff / per_mile fees. None means
+    # "never supplied", which is precisely what produced any missing_fee_input flag.
+    staff_count: Optional[int] = Field(default=None, ge=0)
+    miles: Optional[int] = Field(default=None, ge=0)
+    tax_rate_bps: int = Field(default=0, ge=0, le=10000)
+    currency: Literal["USD"] = "USD"
+    pricebook_version: Optional[int] = Field(default=None, ge=1)
+    menu_version: Optional[int] = Field(default=None, ge=1)
+    subtotal_cents: int = Field(default=0, ge=0)
+    total_cents: int = Field(default=0, ge=0)
+    price_status: CateringPriceStatus = "pending_owner_review"
+    flags: list[str] = Field(default_factory=list, max_length=80)
 
 
 # Agent #3 Multi-Location Coordinator config
@@ -2914,11 +3426,29 @@ class VipConfig(BaseModel):
 
 # Agent #10 — Catering Follow-up (Low-Medium; depends on Agent #2)
 class CateringFollowupConfig(BaseModel):
+    """M5 controlled follow-up engine. `enabled` gates SCHEDULING (the trigger
+    insertions in create/amend/apply); the sweep that turns a due follow-up into
+    an owner approval card is gated independently by CATERING_FOLLOWUP_ENABLED +
+    CATERING_FOLLOWUP_ALLOWLIST. Three gates, all default-off, so arming one
+    never arms the others."""
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
     thank_you_delay_hours: int = Field(default=24, ge=1)
     feedback_request_delay_hours: int = Field(default=48, ge=1)
     anniversary_nudge_days_before: int = Field(default=14, ge=1)
+    # M5 quiet hours for CUSTOMER-facing follow-ups, in the customer's local hour
+    # (0-23). The default window 21:00 -> 09:00 wraps midnight; a non-wrapping
+    # window (start < end) is supported too, and start == end disables the check.
+    # Owner-directed cards are NEVER quiet-houred — the owner reads on their own
+    # schedule and a withheld card is a lost lead, not a courtesy.
+    quiet_hours_start: int = Field(default=21, ge=0, le=23)
+    quiet_hours_end: int = Field(default=9, ge=0, le=23)
+    # M5 frequency caps for SYSTEM-created follow-ups (owner-created ones are an
+    # explicit human decision and are never capped). Lifetime cap counts
+    # follow-ups that actually reached someone — carded or sent; a suppressed or
+    # cancelled record never pestered anyone and does not consume the budget.
+    max_followups_per_lead: int = Field(default=3, ge=1, le=20)
+    min_hours_between: int = Field(default=24, ge=1, le=720)
 
 
 # Agent #12 — Hiring & Onboarding (Medium)
@@ -3734,8 +4264,22 @@ class OutboundCapExceeded(_BaseEntry):
 
 
 class OutboundRefusedDisabled(_BaseEntry):
+    """An outbound send was refused because the operator kill switch
+    (``shift-agent-disable`` → ``state/disabled.flag``) is engaged.
+
+    M4/G6 WIDENING (additive): the flag is now honored at the safe_io send
+    chokepoint (bridge_post / bridge_send_media / bridge_send_cta) and the
+    front-brain gateway seam, none of which have a proposal in scope. So
+    ``proposal_id`` became OPTIONAL (empty string) and the pattern admits ""
+    alongside the legacy ``P####`` form — every row that validated before still
+    validates. ``send_kind`` names the refusing site ("" for the legacy
+    proposal-scoped emitters in send-coverage-message)."""
     type: Literal["outbound_refused_disabled"]
-    proposal_id: ProposalId
+    proposal_id: str = Field(default="", pattern=r"^(P\d{4,})?$")
+    chat_key_hash: str = Field(default="", max_length=64)
+    send_kind: Literal[
+        "", "bridge_post", "bridge_send_media", "bridge_send_cta", "gateway_send",
+    ] = ""
 
 
 class AgentStateChange(_BaseEntry):
@@ -3897,6 +4441,50 @@ class CateringAmendmentCaptureFailed(_BaseEntry):
     type: Literal["catering_amendment_capture_failed"]
     lead_id: str
     reason: str
+
+
+class CateringAmendmentApplied(_BaseEntry):
+    """M1: a captured amendment record was MATERIALISED onto its lead — the R2A
+    sidecar stopped being write-only. PRIVACY: ids + the field NAMES that changed
+    only — never the raw amendment text and never the values (a headcount or venue
+    is customer content, same class as raw_inquiry). `quote_version` is the ledger
+    version the application committed, or 0 when the lead had no committed quote
+    yet (nothing to re-version).
+
+    `apply_error` is set when the record was marked APPLIED-WITH-ERROR: its parsed
+    values could not be held by CateringLeadExtractedFields, so nothing was written
+    for it. It is still stamped applied, because a record left unapplied is re-read
+    on every later run and re-fails, which blocks every LATER amendment for the same
+    lead. Empty on the normal path. Field NAMES / a bounded reason code only —
+    never the rejected value."""
+    type: Literal["catering_amendment_applied"]
+    lead_id: str
+    amendment_id: str
+    fields_changed: list[str] = Field(default_factory=list, max_length=20)
+    quote_version: int = Field(default=0, ge=0)
+    apply_error: str = Field(default="", max_length=200)
+    rejected_fields: list[str] = Field(default_factory=list, max_length=20)
+
+
+class CateringLeadQualificationUpdated(_BaseEntry):
+    """M1: one deterministic slot-filling round resolved against a QUALIFYING lead.
+    PRIVACY: field NAMES + counts only — never the answer text or its values.
+    Emitted on EVERY update (including the round that completes qualification and
+    the one that gives up at the round cap), so the whole intake conversation is
+    reconstructable from the audit chain without storing customer prose."""
+    type: Literal["catering_lead_qualification_updated"]
+    lead_id: str
+    fields_filled: list[str] = Field(default_factory=list, max_length=20)
+    still_missing: list[str] = Field(default_factory=list, max_length=20)
+    questions_asked: list[str] = Field(default_factory=list, max_length=20)
+    round_number: int = Field(ge=0)
+    complete: bool
+    outcome: Literal["asked", "complete", "round_cap_reached"]
+    # Field NAMES the answer parsed to a value CateringLeadExtractedFields cannot
+    # hold (e.g. a veg count above its le=10000 bound). Those values are dropped
+    # rather than written — persisting one fails the whole lead write and would
+    # strand the lead mid-loop. Names only, never the value.
+    rejected_fields: list[str] = Field(default_factory=list, max_length=20)
 
 
 class CateringQuoteVersionCommitted(_BaseEntry):
@@ -4080,6 +4668,21 @@ class MenuUpdateRejected(_BaseEntry):
     type: Literal["menu_update_rejected"]
     update_id: str = Field(min_length=1)
     reason: Literal["owner_no", "owner_edit_aborted", "ttl_expired"]
+
+
+class CateringPricebookUpdated(_BaseEntry):
+    """M2: catering-pricebook.json was replaced by import-catering-pricebook.
+    PRIVACY: version + counts + provenance only — never per-package prices."""
+    type: Literal["catering_pricebook_updated"]
+    version: int = Field(ge=1)
+    prev_version: int = Field(ge=0, description="0 if no prior pricebook existed")
+    updated_by: CateringPricebookUpdatedBy
+    currency: str = Field(default="USD", max_length=8)
+    placeholder: bool = False
+    package_count: int = Field(ge=0)
+    fee_count: int = Field(ge=0)
+    discount_count: int = Field(ge=0)
+    item_override_count: int = Field(ge=0)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -5450,6 +6053,10 @@ class CateringProposalSelectionFailed(_BaseEntry):
         "no_sent_proposal", "ambiguous_selection", "invalid_selection",
         "lead_not_found", "finalize_exit_2", "finalize_exit_4",
         "finalize_exit_11", "finalize_exit_other",
+        # M3 validity window: the set's own expires_at had passed when the
+        # customer picked. Distinct from no_sent_proposal — the set WAS sent and
+        # the customer answered it; the deadline they were told simply elapsed.
+        "proposal_expired",
     ]
     detail: str = Field(default="", max_length=2000)
 
@@ -5687,6 +6294,12 @@ class CateringQuoteSkillFailed(_BaseEntry):
         "llm_malformed_response",   # gateway returned non-text/empty/error
         "finalized_total_missing_from_quote",      # PR-CF1: soft-warn (apply-script Change 5A)
         "owner_approve_without_customer_finalize", # PR-CF1: hard-fail (apply-script Change 5B)
+        # The NUMBER, not the text, is the problem: the kernel rated this quote
+        # "pending_owner_review" (placeholder pricebook, an unresolvable item
+        # price, or a per-unit fee whose multiplier was never supplied), so it is
+        # not a final quote and the customer send is refused. `detail` carries the
+        # kernel flags naming which of those it was.
+        "price_pending_owner_review",
     ]
     detail: str = Field(default="", max_length=2000)
 
@@ -5992,6 +6605,27 @@ class CfRouterIntercepted(_BaseEntry):
         # visible (dispatcher-accuracy pairing), so the failure arm gets its own
         # reason rather than being swallowed as an invalid enum value.
         "f7_primary_amendment_capture_failed",
+        # M1 2026-07-31: the two arms that make an R2A capture actionable.
+        #   f7_primary_amendment_applied — a NEW capture was materialised onto the
+        #     lead inline (amend-catering-lead --mode amendment), so the owner card
+        #     carries the amended values instead of the pre-amendment ones. Carries
+        #     the application's exit code as subprocess_rc, which is the ONLY signal
+        #     that a capture succeeded but its application did not.
+        #   f7_qualification_answer — an inbound was applied to a QUALIFYING lead as
+        #     a slot-filling answer. Telemetry-visible for the same reason as every
+        #     other arm here: it bypasses the LLM, so dispatcher-accuracy pairing
+        #     must be able to see it.
+        "f7_primary_amendment_applied",
+        "f7_qualification_answer",
+        # M3 2026-07-31: a customer's EXPLICIT accept/decline of a quote already sent
+        # to them was recorded deterministically (record-catering-acceptance). Its own
+        # reason, and telemetry-visible, for the same rule as every arm here: it
+        # bypasses the LLM, so dispatcher-accuracy pairing must be able to see it —
+        # and this arm books events, which is the last place invisible routing is
+        # acceptable. subprocess_rc carries the writer's exit code, which is the ONLY
+        # signal distinguishing "booked" from "recorded but the reply never sent"
+        # from "held".
+        "f7_quote_acceptance",
         # PR-R2B-1 2026-07-20: flyer/catering amendment-conflict gate (dormant until
         # armed). captured = discriminator→catering_amendment, R2A capture ok; flyer_edit
         # = discriminator→flyer_edit, fell through to the unchanged flyer arm; clarify =
@@ -6603,6 +7237,218 @@ class CateringAutomatedSendSuppressed(_BaseEntry):
     logical_turn_id: str = ""
 
 
+class CateringLeadHoldChanged(_BaseEntry):
+    """M4/G4: a lead's per-lead HOLD was set or cleared (set-catering-lead-hold).
+
+    Orthogonal to the per-CONVERSATION automation-control kernel: a hold scopes
+    to ONE lead (a customer with two leads can have one held and one running),
+    the kernel scopes to the whole conversation. Idempotent re-assertion is
+    audited too (from_hold == to_hold records the no-op), mirroring
+    catering_automation_control_changed."""
+    type: Literal["catering_lead_hold_changed"]
+    lead_id: str = Field(min_length=1)
+    from_hold: bool
+    to_hold: bool
+    actor: Literal["owner", "operator", "system"]
+    reason: str = Field(default="", max_length=200)
+
+
+class CateringLeadHoldBlockedSend(_BaseEntry):
+    """M4/G4: a lead-scoped automated CUSTOMER send was refused because the lead
+    is on hold. Owner-directed sends (approval cards, confirmations) are NEVER
+    counted here — a hold pauses the customer-facing automation, not the owner's
+    visibility. `blocked_send_kind` names the refusing site."""
+    type: Literal["catering_lead_hold_blocked_send"]
+    lead_id: str = Field(min_length=1)
+    blocked_send_kind: Literal[
+        "customer_ack", "owner_approved_quote",
+        # amend-catering-lead's slot-filling loop: the next question batch, or the
+        # closing "passed to the owner" message. Held leads still MERGE the answer
+        # (capturing what the customer said is never the harm); only the reply is
+        # withheld, so the bot cannot keep interviewing a customer the owner paused.
+        "qualification_question",
+    ]
+    hold_reason: str = Field(default="", max_length=200)
+
+
+class CateringProposalExpired(_BaseEntry):
+    """M3: a SENT proposal set passed its validity window with no selection and was
+    transitioned to EXPIRED by `catering-proposal-expiry-sweep`. One row per set per
+    expiry — EXPIRED is terminal, so a re-run never re-emits."""
+    type: Literal["catering_proposal_expired"]
+    lead_id: str = Field(min_length=1)
+    proposal_set_id: str = Field(min_length=1)
+    from_status: CateringProposalStatus
+    sent_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    validity_days: int = Field(ge=1)
+
+
+class CateringProposalTransitionRefused(_BaseEntry):
+    """M3: a proposal-set status write was REFUSED because
+    CATERING_PROPOSAL_SET_TRANSITIONS does not allow it. Emitted instead of
+    silently writing the illegal status — a refusal that leaves no trace is the
+    exact silent-failure class the transition table exists to close."""
+    type: Literal["catering_proposal_transition_refused"]
+    lead_id: str = Field(default="", max_length=64)
+    proposal_set_id: str = Field(min_length=1)
+    from_status: str = Field(min_length=1, max_length=64)
+    to_status: str = Field(min_length=1, max_length=64)
+    write_site: str = Field(min_length=1, max_length=80)
+
+
+class CateringLeadAcceptanceRecorded(_BaseEntry):
+    """M3: the customer EXPLICITLY accepted or declined the quote they were sent.
+
+    Written only for an unambiguous token — an ambiguous "ok"/"sounds good" produces
+    `outcome="clarification_sent"` instead, which records that we asked once and
+    mutates no acceptance field. `matched_phrase` is the deterministic token the
+    detector fired on, so an operator can see WHY a booking was recorded without
+    re-running the grammar."""
+    type: Literal["catering_lead_acceptance_recorded"]
+    lead_id: str = Field(min_length=1)
+    outcome: Literal[
+        "accepted", "declined", "clarification_sent",
+        # The customer said yes, but the quote they were holding had already
+        # passed the validity date they were given. NOT a booking: prices and
+        # availability were only ever promised through that date, so the owner
+        # confirms current terms instead of the agent booking stale ones.
+        "acceptance_of_expired",
+        # The one clarification we are allowed to ask never reached the customer
+        # (bridge down). The ask-once anchor is rolled back so the next message
+        # asks again — this row is what makes that rollback visible.
+        "clarification_send_failed",
+    ]
+    from_status: CateringLeadStatus
+    to_status: CateringLeadStatus
+    customer_message_id: str = Field(default="", max_length=200)
+    matched_phrase: str = Field(default="", max_length=120)
+    detail: str = Field(default="", max_length=500)
+
+
+class CateringLeadOutcomeMarked(_BaseEntry):
+    """M3: the OWNER recorded the commercial outcome of a lead via
+    `mark-catering-lead-outcome`. Distinct from CateringLeadAcceptanceRecorded
+    (which the CUSTOMER's own words drive) and from
+    CateringLeadManuallyReconciled (a state-vs-outbound divergence repair)."""
+    type: Literal["catering_lead_outcome_marked"]
+    lead_id: str = Field(min_length=1)
+    outcome: Literal["won", "lost"]
+    from_status: CateringLeadStatus
+    to_status: CateringLeadStatus
+    reason: str = Field(default="", max_length=500)
+
+
+# ─────────────────────────────────────────────────────────────────
+# M5 — controlled follow-up engine. Six rows cover the whole lifecycle:
+# scheduled -> (suppressed | card_sent -> (sent | cancelled | expired)).
+# EVERY terminal outcome has a row, so "nothing happened to this follow-up"
+# is never a silent state the operator has to infer from absence.
+# ─────────────────────────────────────────────────────────────────
+
+class _BaseFollowupEntry(_BaseEntry):
+    """Shared identity fields for the follow-up rows. Metadata only — the
+    rendered customer text never enters the audit log (it can carry the
+    customer's own words back to them via the lead context)."""
+    followup_id: str = Field(min_length=1, max_length=40)
+    lead_id: str = Field(min_length=1)
+    followup_type: CateringFollowupType
+
+
+class CateringFollowupScheduled(_BaseFollowupEntry):
+    """A follow-up was written to the store. Scheduling is NOT a send — this row
+    records an intention whose earliest possible effect is `due_at`."""
+    type: Literal["catering_followup_scheduled"]
+    due_at: datetime
+    created_by: Literal["system", "owner"]
+    trigger: str = Field(default="", max_length=100)
+
+
+class CateringFollowupSuppressed(_BaseFollowupEntry):
+    """A due follow-up was NOT carded, and the record is now terminal. It is
+    never silently rescheduled: a suppressed follow-up stays suppressed so the
+    reason stays attached to a specific decision instead of being retried until
+    it happens to pass.
+
+    ONE reason is not terminal: `not_in_allowlist` is a rollout gate, not a
+    decision about the follow-up, so the record is left where it was (the sweep
+    leaves such leads `scheduled`, the approve path leaves the card open) and
+    widening the allowlist picks it up again. Every other reason retires it.
+    """
+    type: Literal["catering_followup_suppressed"]
+    reason: Literal[
+        "kill_switch",             # state/disabled.flag engaged
+        "automation_suppressed",   # conversation paused / opted_out / takeover
+        "lead_missing",            # no lead carries this lead_id any more
+        "lead_on_hold",            # M4/G4 per-lead hold
+        "lead_status_not_allowed", # terminal / unknown status (defensive default)
+        "customer_declined",       # the lead records a customer decline
+        "frequency_cap",           # lifetime cap for system-created follow-ups
+        "min_interval",            # too soon after the previous follow-up
+        # Historical only: quiet hours DEFER a customer send now (see
+        # CateringFollowupDeferred) and never reach the owner card at all. Kept in
+        # the union so rows written before that fix still decode.
+        "quiet_hours",
+        "not_in_allowlist",        # conversation outside CATERING_FOLLOWUP_ALLOWLIST
+    ]
+    detail: str = Field(default="", max_length=200)
+
+
+class CateringFollowupDeferred(_BaseFollowupEntry):
+    """A due CUSTOMER-directed follow-up was moved, not killed. Quiet hours are a
+    fact about the clock, not a decision about the customer, so the record keeps
+    its `scheduled` status and its `due_at` advances to the first instant the
+    window is over. Owner approval CARDS never reach this row: the owner reads on
+    their own schedule and is exempt from quiet hours entirely."""
+    type: Literal["catering_followup_deferred"]
+    reason: Literal["quiet_hours"]
+    from_due_at: datetime
+    to_due_at: datetime
+
+
+class CateringFollowupSendFailed(_BaseFollowupEntry):
+    """A CLAIMED customer send did not reach the bridge. The claim is released
+    back to a retryable state rather than confirmed, so `approved_sent` never
+    means anything but "the customer has this message"."""
+    type: Literal["catering_followup_send_failed"]
+    approval_code: Optional[ProposalCode] = None
+    attempt: int = Field(default=0, ge=0, le=10)
+    released_to: CateringFollowupStatus
+    error: str = Field(default="", max_length=200)
+
+
+class CateringFollowupCardSent(_BaseFollowupEntry):
+    """The owner approval card for a due follow-up was delivered. `attempt` is
+    the card attempt number (a lapsed 4h window re-cards at attempt+1)."""
+    type: Literal["catering_followup_card_sent"]
+    approval_code: ProposalCode
+    attempt: int = Field(ge=1, le=10)
+    owner_card_outbound_id: str = Field(default="", max_length=200)
+
+
+class CateringFollowupSent(_BaseFollowupEntry):
+    """The owner approved and the follow-up reached the customer."""
+    type: Literal["catering_followup_sent"]
+    approval_code: ProposalCode
+    outbound_message_id: str = Field(default="", max_length=200)
+
+
+class CateringFollowupCancelled(_BaseFollowupEntry):
+    """The owner (or an operator) cancelled a carded follow-up before it sent."""
+    type: Literal["catering_followup_cancelled"]
+    approval_code: Optional[ProposalCode] = None
+    actor: Literal["owner", "operator", "system"]
+    reason: str = Field(default="", max_length=200)
+
+
+class CateringFollowupExpired(_BaseFollowupEntry):
+    """The owner never answered the card within the approval window, for the
+    maximum number of attempts. Terminal — the follow-up is dropped rather than
+    carded forever, because an owner who ignored it twice has answered."""
+    type: Literal["catering_followup_expired"]
+    attempts: int = Field(ge=1, le=10)
+
+
 # ─────────────────────────────────────────────────────────────────
 # Commerce primitive LogEntry variants — slice 1 (PRD v2 §8)
 # Slice 1 emits: cart_started/updated/cleared/expired/checked_out,
@@ -6950,6 +7796,9 @@ LogEntry = Annotated[
         Annotated[ApprovalCodeCollisionDetected, Tag("approval_code_collision_detected")],
         Annotated[CateringAmendmentCaptured, Tag("catering_amendment_captured")],
         Annotated[CateringAmendmentCaptureFailed, Tag("catering_amendment_capture_failed")],
+        # M1: amendment application + deterministic qualification slot-filling
+        Annotated[CateringAmendmentApplied, Tag("catering_amendment_applied")],
+        Annotated[CateringLeadQualificationUpdated, Tag("catering_lead_qualification_updated")],
         # PR-B: retained immutable quote-version ledger
         Annotated[CateringQuoteVersionCommitted, Tag("catering_quote_version_committed")],
         Annotated[CateringQuoteLedgerAppendFailed, Tag("catering_quote_ledger_append_failed")],
@@ -7054,6 +7903,8 @@ LogEntry = Annotated[
         Annotated[MenuUpdateProposed, Tag("menu_update_proposed")],
         Annotated[MenuUpdateApplied, Tag("menu_update_applied")],
         Annotated[MenuUpdateRejected, Tag("menu_update_rejected")],
+        # M2: commercial pricebook import
+        Annotated[CateringPricebookUpdated, Tag("catering_pricebook_updated")],
         # Agent #21 Expense Bookkeeper (15 entry types)
         Annotated[ExpenseReceiptReceived, Tag("expense_receipt_received")],
         Annotated[ExpenseDuplicateDetected, Tag("expense_duplicate_detected")],
@@ -7169,6 +8020,23 @@ LogEntry = Annotated[
         # PR-5 — catering automation-control kernel (STOP/pause/opt-out + takeover)
         Annotated[CateringAutomationControlChanged, Tag("catering_automation_control_changed")],
         Annotated[CateringAutomatedSendSuppressed, Tag("catering_automated_send_suppressed")],
+        # M4/G4 — per-lead hold (lead-scoped twin of the conversation kernel)
+        Annotated[CateringLeadHoldChanged, Tag("catering_lead_hold_changed")],
+        Annotated[CateringLeadHoldBlockedSend, Tag("catering_lead_hold_blocked_send")],
+        # M5 — controlled follow-up engine
+        Annotated[CateringFollowupScheduled, Tag("catering_followup_scheduled")],
+        Annotated[CateringFollowupSuppressed, Tag("catering_followup_suppressed")],
+        Annotated[CateringFollowupDeferred, Tag("catering_followup_deferred")],
+        Annotated[CateringFollowupSendFailed, Tag("catering_followup_send_failed")],
+        Annotated[CateringFollowupCardSent, Tag("catering_followup_card_sent")],
+        Annotated[CateringFollowupSent, Tag("catering_followup_sent")],
+        Annotated[CateringFollowupCancelled, Tag("catering_followup_cancelled")],
+        Annotated[CateringFollowupExpired, Tag("catering_followup_expired")],
+        # M3 2026-07-31 — proposal validity/expiry, customer acceptance, owner outcome
+        Annotated[CateringProposalExpired, Tag("catering_proposal_expired")],
+        Annotated[CateringProposalTransitionRefused, Tag("catering_proposal_transition_refused")],
+        Annotated[CateringLeadAcceptanceRecorded, Tag("catering_lead_acceptance_recorded")],
+        Annotated[CateringLeadOutcomeMarked, Tag("catering_lead_outcome_marked")],
         # Commerce primitives slice 1 — PRD v2 §8
         Annotated[CommerceCartStarted, Tag("commerce_cart_started")],
         Annotated[CommerceCartUpdated, Tag("commerce_cart_updated")],
@@ -7249,6 +8117,13 @@ __all__ = [
     "CateringProposalOption", "CateringProposalSet", "CateringProposalStore",
     "CateringLearningSource", "CateringLearningProposalHealth",
     "CateringLearningSummary",
+    # M5 controlled follow-up engine
+    "CateringFollowupType", "CateringFollowupStatus",
+    "CateringFollowup", "CateringFollowupStore",
+    "CateringFollowupScheduled", "CateringFollowupSuppressed",
+    "CateringFollowupDeferred", "CateringFollowupSendFailed",
+    "CateringFollowupCardSent", "CateringFollowupSent",
+    "CateringFollowupCancelled", "CateringFollowupExpired",
     "is_catering_terminal", "CATERING_TERMINAL_STATUSES",
     "FlyerConfig", "FlyerRecoveryConfig", "FlyerWorkflowStatus", "FlyerOnboardingStatus", "FlyerLanguage", "FlyerCreationMode",
     "FlyerIntakeStatus", "FlyerIntakeSource", "FlyerOutputFormat", "FlyerImageQuality",
@@ -7276,6 +8151,7 @@ __all__ = [
     "FlyerBrandKit", "FlyerProject", "FlyerProjectStore",
     # v0.3 status-machine + helpers
     "CATERING_TRANSITIONS", "is_catering_transition_allowed",
+    "CATERING_PROPOSAL_SET_TRANSITIONS", "is_proposal_set_transition_allowed",
     "assert_rejection_reason_complete",
     # v0.3 code-pattern constants
     "_CODE_BODY_PATTERN", "_CODE_FULL_PATTERN",
@@ -7325,10 +8201,14 @@ __all__ = [
     "ApprovalCodeCollisionDetected", "HealthCheckFailure",
     "CateringAmendmentRecord", "CateringAmendmentStore",
     "CateringAmendmentCaptured", "CateringAmendmentCaptureFailed",
+    "CateringAmendmentApplied", "CateringLeadQualificationUpdated",
     "CateringQuoteLedgerRecord", "CateringQuoteLedgerStore",
     "CateringQuoteVersionCommitted", "CateringQuoteLedgerAppendFailed",
     "CateringAutomationControlMode",
     "CateringAutomationControlChanged", "CateringAutomatedSendSuppressed",
+    "CateringLeadHoldChanged", "CateringLeadHoldBlockedSend",
+    "CateringProposalExpired", "CateringProposalTransitionRefused",
+    "CateringLeadAcceptanceRecorded", "CateringLeadOutcomeMarked",
     "LidLearned", "DispatcherRouted",
     "BriefAttempted", "BriefSent", "BriefSendFailed", "BriefSkipped",
     "EodSnapshot", "EodPushoverSent", "EodSkipped",

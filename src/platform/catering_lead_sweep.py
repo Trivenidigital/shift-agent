@@ -23,6 +23,16 @@ from datetime import datetime, timedelta
 # before a lead is considered abandoned. Overridable by the CLI via env for tuning.
 CATERING_LEAD_TTL_DAYS = 21
 
+# Default TTL for QUALIFYING leads, in HOURS — a much shorter window, because the two
+# statuses mean different things. AWAITING_OWNER_APPROVAL is waiting on the OWNER, who
+# may legitimately take a week. QUALIFYING is waiting on the CUSTOMER, mid-conversation:
+# we asked a question and they never came back. Left alone such a lead lives forever,
+# invisible to a WhatsApp-only owner (who never sees the Studio's QUALIFYING counter) and
+# still holding the sender's "active lead" slot, so every later message from them routes
+# as an answer to a conversation that ended. Overridden per-customer by
+# ``catering.qualifying_stale_after_hours``.
+CATERING_QUALIFYING_STALE_HOURS = 72
+
 
 def find_expired_awaiting_leads(leads, now: datetime, ttl_days: int) -> list[str]:
     """Return the sorted ids of leads in status ``AWAITING_OWNER_APPROVAL`` whose
@@ -35,10 +45,29 @@ def find_expired_awaiting_leads(leads, now: datetime, ttl_days: int) -> list[str
     missing ``updated_at`` is skipped defensively rather than crashed on. ``now`` and each
     ``updated_at`` must share tz-awareness (both originate from ``safe_io.customer_now``).
     """
-    cutoff = now - timedelta(days=ttl_days)
+    return _expired_in_status(leads, "AWAITING_OWNER_APPROVAL",
+                              now - timedelta(days=ttl_days))
+
+
+def find_expired_qualifying_leads(leads, now: datetime, stale_hours: int) -> list[str]:
+    """Return the sorted ids of leads in status ``QUALIFYING`` whose ``updated_at`` is at
+    least ``stale_hours`` before ``now``.
+
+    Same contract and same idempotence as ``find_expired_awaiting_leads`` — a lead that
+    answers a question leaves QUALIFYING or bumps ``updated_at``, and once swept to
+    ``STALE`` it is never selected again. Separate function rather than a status
+    parameter because the two windows are set by different config keys and mean
+    different things (see CATERING_QUALIFYING_STALE_HOURS).
+    """
+    return _expired_in_status(leads, "QUALIFYING", now - timedelta(hours=stale_hours))
+
+
+def _expired_in_status(leads, status: str, cutoff: datetime) -> list[str]:
+    """Sorted ids of leads in ``status`` last touched at or before ``cutoff``. A lead
+    missing ``updated_at`` is skipped defensively rather than crashed on."""
     expired: list[str] = []
     for lead in leads:
-        if getattr(lead, "status", None) != "AWAITING_OWNER_APPROVAL":
+        if getattr(lead, "status", None) != status:
             continue
         updated_at = getattr(lead, "updated_at", None)
         if updated_at is not None and updated_at <= cutoff:

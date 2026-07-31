@@ -1,6 +1,187 @@
 {
   "components": {
     "schemas": {
+      "ActionResult": {
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "returncode": {
+            "title": "Returncode",
+            "type": "integer"
+          },
+          "stderr": {
+            "default": "",
+            "title": "Stderr",
+            "type": "string"
+          },
+          "stdout": {
+            "default": "",
+            "title": "Stdout",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "returncode"
+        ],
+        "title": "ActionResult",
+        "type": "object"
+      },
+      "AllowlistSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "effect": {
+            "title": "Effect",
+            "type": "string"
+          },
+          "entry_count": {
+            "title": "Entry Count",
+            "type": "integer"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          }
+        },
+        "required": [
+          "mode",
+          "entry_count",
+          "effect"
+        ],
+        "title": "AllowlistSummary",
+        "type": "object"
+      },
+      "AmendApplyBody": {
+        "additionalProperties": false,
+        "properties": {
+          "answer_text": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Answer Text",
+            "type": "string"
+          },
+          "mode": {
+            "default": "amendment",
+            "enum": [
+              "amendment",
+              "answer"
+            ],
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "title": "AmendApplyBody",
+        "type": "object"
+      },
+      "AmendmentRow": {
+        "additionalProperties": false,
+        "properties": {
+          "amendment_id": {
+            "title": "Amendment Id",
+            "type": "string"
+          },
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "applied_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Applied At"
+          },
+          "captured_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Captured At"
+          },
+          "disposition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disposition"
+          },
+          "raw_text_prefix": {
+            "default": "",
+            "title": "Raw Text Prefix",
+            "type": "string"
+          },
+          "raw_text_truncated": {
+            "default": false,
+            "title": "Raw Text Truncated",
+            "type": "boolean"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "source_transport": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Transport"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "required": [
+          "amendment_id"
+        ],
+        "title": "AmendmentRow",
+        "type": "object"
+      },
       "AuthStatus": {
         "description": "Public \u2014 drives login screen tab visibility. No sensitive data.",
         "properties": {
@@ -147,6 +328,35 @@
         "title": "CancelBody",
         "type": "object"
       },
+      "CateringDashboard": {
+        "additionalProperties": false,
+        "properties": {
+          "counts": {
+            "$ref": "#/components/schemas/DashboardCounts"
+          },
+          "degraded": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Degraded",
+            "type": "array"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "readiness": {
+            "$ref": "#/components/schemas/ReadinessFlags"
+          }
+        },
+        "required": [
+          "generated_at",
+          "counts",
+          "readiness"
+        ],
+        "title": "CateringDashboard",
+        "type": "object"
+      },
       "ComponentStatus": {
         "properties": {
           "detail": {
@@ -184,6 +394,276 @@
           "fields"
         ],
         "title": "ConfigPatch",
+        "type": "object"
+      },
+      "ControlChip": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "default": "",
+            "title": "Actor",
+            "type": "string"
+          },
+          "available": {
+            "default": false,
+            "title": "Available",
+            "type": "boolean"
+          },
+          "effective_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Mode"
+          },
+          "expired": {
+            "default": false,
+            "title": "Expired",
+            "type": "boolean"
+          },
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          },
+          "pause_expires_ts": {
+            "default": "",
+            "title": "Pause Expires Ts",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "since_ts": {
+            "default": "",
+            "title": "Since Ts",
+            "type": "string"
+          },
+          "stored_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stored Mode"
+          },
+          "takeover_expires_ts": {
+            "default": "",
+            "title": "Takeover Expires Ts",
+            "type": "string"
+          }
+        },
+        "title": "ControlChip",
+        "type": "object"
+      },
+      "ControlsResponse": {
+        "additionalProperties": false,
+        "description": "Mirrors catering-control-status's JSON contract. Env-derived flags carry\na `source`; a flag the cockpit genuinely cannot read reports known=false\nrather than a fabricated \"off\".",
+        "properties": {
+          "budget_flags": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/FlagValue"
+            },
+            "title": "Budget Flags",
+            "type": "object"
+          },
+          "containment_flags": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/FlagValue"
+            },
+            "title": "Containment Flags",
+            "type": "object"
+          },
+          "conversations": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationControlRow"
+            },
+            "title": "Conversations",
+            "type": "array"
+          },
+          "conversations_available": {
+            "default": false,
+            "title": "Conversations Available",
+            "type": "boolean"
+          },
+          "degraded": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Degraded",
+            "type": "array"
+          },
+          "followups_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Followups Enabled"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "held_leads": {
+            "items": {
+              "$ref": "#/components/schemas/HeldLeadRow"
+            },
+            "title": "Held Leads",
+            "type": "array"
+          },
+          "kernel_allowlists": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/AllowlistSummary"
+            },
+            "title": "Kernel Allowlists",
+            "type": "object"
+          },
+          "kernel_flags": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/FlagValue"
+            },
+            "title": "Kernel Flags",
+            "type": "object"
+          },
+          "kill_switch_engaged": {
+            "default": false,
+            "title": "Kill Switch Engaged",
+            "type": "boolean"
+          },
+          "kill_switch_set_at": {
+            "default": "",
+            "title": "Kill Switch Set At",
+            "type": "string"
+          },
+          "suppressed_count": {
+            "default": 0,
+            "title": "Suppressed Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "generated_at"
+        ],
+        "title": "ControlsResponse",
+        "type": "object"
+      },
+      "ConversationControlRow": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "default": "",
+            "title": "Actor",
+            "type": "string"
+          },
+          "chat_key_hash": {
+            "title": "Chat Key Hash",
+            "type": "string"
+          },
+          "effective_mode": {
+            "title": "Effective Mode",
+            "type": "string"
+          },
+          "expired": {
+            "title": "Expired",
+            "type": "boolean"
+          },
+          "pause_expires_ts": {
+            "default": "",
+            "title": "Pause Expires Ts",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "since_ts": {
+            "default": "",
+            "title": "Since Ts",
+            "type": "string"
+          },
+          "stored_mode": {
+            "title": "Stored Mode",
+            "type": "string"
+          },
+          "takeover_expires_ts": {
+            "default": "",
+            "title": "Takeover Expires Ts",
+            "type": "string"
+          }
+        },
+        "required": [
+          "chat_key_hash",
+          "stored_mode",
+          "effective_mode",
+          "expired"
+        ],
+        "title": "ConversationControlRow",
+        "type": "object"
+      },
+      "DashboardCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "awaiting_owner_approval": {
+            "default": 0,
+            "title": "Awaiting Owner Approval",
+            "type": "integer"
+          },
+          "booked_this_month": {
+            "default": 0,
+            "title": "Booked This Month",
+            "type": "integer"
+          },
+          "followups_due": {
+            "default": 0,
+            "title": "Followups Due",
+            "type": "integer"
+          },
+          "lost_this_month": {
+            "default": 0,
+            "title": "Lost This Month",
+            "type": "integer"
+          },
+          "new_leads": {
+            "default": 0,
+            "title": "New Leads",
+            "type": "integer"
+          },
+          "on_hold": {
+            "default": 0,
+            "title": "On Hold",
+            "type": "integer"
+          },
+          "proposals_sent": {
+            "default": 0,
+            "title": "Proposals Sent",
+            "type": "integer"
+          },
+          "qualifying": {
+            "default": 0,
+            "title": "Qualifying",
+            "type": "integer"
+          },
+          "total_leads": {
+            "default": 0,
+            "title": "Total Leads",
+            "type": "integer"
+          }
+        },
+        "title": "DashboardCounts",
         "type": "object"
       },
       "DashboardResponse": {
@@ -244,6 +724,49 @@
           "last_decisions"
         ],
         "title": "DashboardResponse",
+        "type": "object"
+      },
+      "DecisionBody": {
+        "additionalProperties": false,
+        "description": "`quote_text` is the owner-authored customer quote. On approve it is\npiped to the script's stdin; when omitted the script renders from lead\nstate (--quote-from-lead-state), which needs a finalized lead.",
+        "properties": {
+          "decision": {
+            "enum": [
+              "approve",
+              "reject",
+              "edit"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "edit_text": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Edit Text",
+            "type": "string"
+          },
+          "quote_text": {
+            "default": "",
+            "maxLength": 4000,
+            "title": "Quote Text",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "maxLength": 300,
+            "title": "Reason",
+            "type": "string"
+          },
+          "skip_finalize": {
+            "default": false,
+            "title": "Skip Finalize",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "DecisionBody",
         "type": "object"
       },
       "DecisionEntry": {
@@ -314,6 +837,56 @@
           "signed_by_name"
         ],
         "title": "DisclosureSign",
+        "type": "object"
+      },
+      "DiscountRow": {
+        "additionalProperties": false,
+        "properties": {
+          "active": {
+            "default": true,
+            "title": "Active",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "max_amount_cents": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Amount Cents"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "requires_owner_code": {
+            "default": true,
+            "title": "Requires Owner Code",
+            "type": "boolean"
+          },
+          "value": {
+            "title": "Value",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "value"
+        ],
+        "title": "DiscountRow",
         "type": "object"
       },
       "EmployeeIn": {
@@ -515,6 +1088,79 @@
         "title": "ExtendTrialBody",
         "type": "object"
       },
+      "FeeRow": {
+        "additionalProperties": false,
+        "properties": {
+          "active": {
+            "default": true,
+            "title": "Active",
+            "type": "boolean"
+          },
+          "amount_cents": {
+            "default": 0,
+            "title": "Amount Cents",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "default": "other",
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "per_unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Per Unit"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "FeeRow",
+        "type": "object"
+      },
+      "FlagValue": {
+        "additionalProperties": false,
+        "properties": {
+          "known": {
+            "default": false,
+            "title": "Known",
+            "type": "boolean"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "value": {
+            "default": "",
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "title": "FlagValue",
+        "type": "object"
+      },
       "FlagWarnTierBody": {
         "description": "Operator's optional context note. Empty is acceptable \u2014 the flag\nitself is the signal; ts + flagged_by_operator_id always traceable.",
         "properties": {
@@ -528,6 +1174,96 @@
         "title": "FlagWarnTierBody",
         "type": "object"
       },
+      "FollowupRow": {
+        "additionalProperties": false,
+        "description": "Tolerant projection of an M5 followup record. M5 is landing in parallel,\nso the shape is read defensively and the untouched record is echoed in\n`raw` rather than being forced through a schema this build invented.",
+        "properties": {
+          "approval_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Code"
+          },
+          "due_at": {
+            "default": "",
+            "title": "Due At",
+            "type": "string"
+          },
+          "followup_type": {
+            "default": "",
+            "title": "Followup Type",
+            "type": "string"
+          },
+          "lead_id": {
+            "default": "",
+            "title": "Lead Id",
+            "type": "string"
+          },
+          "raw": {
+            "additionalProperties": true,
+            "title": "Raw",
+            "type": "object"
+          },
+          "status": {
+            "default": "",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "FollowupRow",
+        "type": "object"
+      },
+      "FollowupsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "available": {
+            "default": false,
+            "title": "Available",
+            "type": "boolean"
+          },
+          "degraded": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Degraded"
+          },
+          "due_count": {
+            "default": 0,
+            "title": "Due Count",
+            "type": "integer"
+          },
+          "followups": {
+            "items": {
+              "$ref": "#/components/schemas/FollowupRow"
+            },
+            "title": "Followups",
+            "type": "array"
+          },
+          "unavailable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unavailable Reason"
+          }
+        },
+        "title": "FollowupsResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -539,6 +1275,448 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HeldLeadRow": {
+        "additionalProperties": false,
+        "properties": {
+          "hold_reason": {
+            "default": "",
+            "title": "Hold Reason",
+            "type": "string"
+          },
+          "hold_set_at": {
+            "default": "",
+            "title": "Hold Set At",
+            "type": "string"
+          },
+          "lead_id": {
+            "title": "Lead Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "lead_id",
+          "status"
+        ],
+        "title": "HeldLeadRow",
+        "type": "object"
+      },
+      "HoldBody": {
+        "additionalProperties": false,
+        "properties": {
+          "on": {
+            "title": "On",
+            "type": "boolean"
+          },
+          "reason": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "on"
+        ],
+        "title": "HoldBody",
+        "type": "object"
+      },
+      "LeadDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "amendments": {
+            "items": {
+              "$ref": "#/components/schemas/AmendmentRow"
+            },
+            "title": "Amendments",
+            "type": "array"
+          },
+          "amendments_available": {
+            "default": true,
+            "title": "Amendments Available",
+            "type": "boolean"
+          },
+          "approval_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Code"
+          },
+          "control": {
+            "$ref": "#/components/schemas/ControlChip"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "customer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Customer Name"
+          },
+          "customer_phone_masked": {
+            "title": "Customer Phone Masked",
+            "type": "string"
+          },
+          "degraded": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Degraded",
+            "type": "array"
+          },
+          "deposit_amount_cents": {
+            "default": 0,
+            "title": "Deposit Amount Cents",
+            "type": "integer"
+          },
+          "deposit_status": {
+            "default": "none",
+            "title": "Deposit Status",
+            "type": "string"
+          },
+          "extracted": {
+            "additionalProperties": true,
+            "title": "Extracted",
+            "type": "object"
+          },
+          "followups": {
+            "items": {
+              "$ref": "#/components/schemas/FollowupRow"
+            },
+            "title": "Followups",
+            "type": "array"
+          },
+          "followups_available": {
+            "default": false,
+            "title": "Followups Available",
+            "type": "boolean"
+          },
+          "hold_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hold Reason"
+          },
+          "hold_set_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hold Set At"
+          },
+          "lead_id": {
+            "title": "Lead Id",
+            "type": "string"
+          },
+          "on_hold": {
+            "default": false,
+            "title": "On Hold",
+            "type": "boolean"
+          },
+          "original_message_id": {
+            "default": "",
+            "title": "Original Message Id",
+            "type": "string"
+          },
+          "pending_questions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Pending Questions",
+            "type": "array"
+          },
+          "qualification": {
+            "$ref": "#/components/schemas/QualificationSummary"
+          },
+          "quote_ledger_available": {
+            "default": true,
+            "title": "Quote Ledger Available",
+            "type": "boolean"
+          },
+          "quote_text": {
+            "default": "",
+            "title": "Quote Text",
+            "type": "string"
+          },
+          "quote_total_usd": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quote Total Usd"
+          },
+          "quote_version": {
+            "default": 0,
+            "title": "Quote Version",
+            "type": "integer"
+          },
+          "quote_versions": {
+            "items": {
+              "$ref": "#/components/schemas/QuoteVersionRow"
+            },
+            "title": "Quote Versions",
+            "type": "array"
+          },
+          "raw_inquiry": {
+            "default": "",
+            "title": "Raw Inquiry",
+            "type": "string"
+          },
+          "selected_items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Selected Items",
+            "type": "array"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "timeline": {
+            "items": {
+              "$ref": "#/components/schemas/TimelineRow"
+            },
+            "title": "Timeline",
+            "type": "array"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "lead_id",
+          "status",
+          "customer_phone_masked",
+          "qualification",
+          "control"
+        ],
+        "title": "LeadDetail",
+        "type": "object"
+      },
+      "LeadListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "available": {
+            "default": true,
+            "title": "Available",
+            "type": "boolean"
+          },
+          "degraded": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Degraded"
+          },
+          "leads": {
+            "items": {
+              "$ref": "#/components/schemas/LeadRow"
+            },
+            "title": "Leads",
+            "type": "array"
+          },
+          "status_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Status Counts",
+            "type": "object"
+          }
+        },
+        "title": "LeadListResponse",
+        "type": "object"
+      },
+      "LeadRow": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Code"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "customer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Customer Name"
+          },
+          "customer_phone_masked": {
+            "title": "Customer Phone Masked",
+            "type": "string"
+          },
+          "event_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Date"
+          },
+          "event_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Type"
+          },
+          "headcount": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headcount"
+          },
+          "hold_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hold Reason"
+          },
+          "latest_quote_total_usd": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Quote Total Usd"
+          },
+          "lead_id": {
+            "title": "Lead Id",
+            "type": "string"
+          },
+          "next_action": {
+            "title": "Next Action",
+            "type": "string"
+          },
+          "on_hold": {
+            "default": false,
+            "title": "On Hold",
+            "type": "boolean"
+          },
+          "qualification": {
+            "$ref": "#/components/schemas/QualificationSummary"
+          },
+          "quote_version": {
+            "default": 0,
+            "title": "Quote Version",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "lead_id",
+          "status",
+          "customer_phone_masked",
+          "qualification",
+          "next_action"
+        ],
+        "title": "LeadRow",
         "type": "object"
       },
       "ManualQueueAssignBody": {
@@ -690,6 +1868,126 @@
         "title": "MeResponse",
         "type": "object"
       },
+      "MenuItemRow": {
+        "additionalProperties": false,
+        "properties": {
+          "available": {
+            "default": true,
+            "title": "Available",
+            "type": "boolean"
+          },
+          "category": {
+            "default": "main",
+            "title": "Category",
+            "type": "string"
+          },
+          "dietary_tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Dietary Tags",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "notes": {
+            "default": "",
+            "title": "Notes",
+            "type": "string"
+          },
+          "price_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Usd"
+          },
+          "serves": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Serves"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "MenuItemRow",
+        "type": "object"
+      },
+      "MenuResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "available": {
+            "default": false,
+            "title": "Available",
+            "type": "boolean"
+          },
+          "degraded": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Degraded"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MenuItemRow"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "notes": {
+            "default": "",
+            "title": "Notes",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "updated_by": {
+            "default": "",
+            "title": "Updated By",
+            "type": "string"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "title": "MenuResponse",
+        "type": "object"
+      },
       "OrderTransitionBody": {
         "additionalProperties": false,
         "description": "Cockpit staff-action request. `expected_from_status` is the status the\noperator saw when they clicked (optimistic-concurrency token); `cause` is\nrequired for a cancel (the operator's reason) and optional otherwise.",
@@ -776,6 +2074,52 @@
         "title": "OtpVerifyBody",
         "type": "object"
       },
+      "PackageRow": {
+        "additionalProperties": false,
+        "properties": {
+          "active": {
+            "default": true,
+            "title": "Active",
+            "type": "boolean"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "dietary_profile": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Dietary Profile",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "min_guests": {
+            "default": 1,
+            "title": "Min Guests",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "price_per_person_cents": {
+            "title": "Price Per Person Cents",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "price_per_person_cents"
+        ],
+        "title": "PackageRow",
+        "type": "object"
+      },
       "PairSessionResponse": {
         "properties": {
           "expires_at": {
@@ -792,6 +2136,133 @@
           "expires_at"
         ],
         "title": "PairSessionResponse",
+        "type": "object"
+      },
+      "PricebookImportBody": {
+        "additionalProperties": false,
+        "properties": {
+          "document": {
+            "additionalProperties": true,
+            "title": "Document",
+            "type": "object"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "document"
+        ],
+        "title": "PricebookImportBody",
+        "type": "object"
+      },
+      "PricebookResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "approved_discounts": {
+            "items": {
+              "$ref": "#/components/schemas/DiscountRow"
+            },
+            "title": "Approved Discounts",
+            "type": "array"
+          },
+          "available": {
+            "default": false,
+            "title": "Available",
+            "type": "boolean"
+          },
+          "currency": {
+            "default": "USD",
+            "title": "Currency",
+            "type": "string"
+          },
+          "degraded": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Degraded"
+          },
+          "effective_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Date"
+          },
+          "fixed_fees": {
+            "items": {
+              "$ref": "#/components/schemas/FeeRow"
+            },
+            "title": "Fixed Fees",
+            "type": "array"
+          },
+          "item_price_override_count": {
+            "default": 0,
+            "title": "Item Price Override Count",
+            "type": "integer"
+          },
+          "notes": {
+            "default": "",
+            "title": "Notes",
+            "type": "string"
+          },
+          "per_person_packages": {
+            "items": {
+              "$ref": "#/components/schemas/PackageRow"
+            },
+            "title": "Per Person Packages",
+            "type": "array"
+          },
+          "placeholder": {
+            "default": false,
+            "title": "Placeholder",
+            "type": "boolean"
+          },
+          "tax_rate_bps": {
+            "default": 0,
+            "title": "Tax Rate Bps",
+            "type": "integer"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "updated_by": {
+            "default": "",
+            "title": "Updated By",
+            "type": "string"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "title": "PricebookResponse",
         "type": "object"
       },
       "ProposalView": {
@@ -900,6 +2371,579 @@
         "title": "PublicHealth",
         "type": "object"
       },
+      "QualificationSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "answered_count": {
+            "default": 0,
+            "title": "Answered Count",
+            "type": "integer"
+          },
+          "asked": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Asked",
+            "type": "array"
+          },
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "missing": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing",
+            "type": "array"
+          },
+          "missing_labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Labels",
+            "type": "array"
+          },
+          "required_count": {
+            "default": 0,
+            "title": "Required Count",
+            "type": "integer"
+          },
+          "rounds": {
+            "default": 0,
+            "title": "Rounds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "complete"
+        ],
+        "title": "QualificationSummary",
+        "type": "object"
+      },
+      "QuotePreviewFee": {
+        "additionalProperties": false,
+        "properties": {
+          "extended_cents": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extended Cents"
+          },
+          "fee_id": {
+            "title": "Fee Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "per_unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Per Unit"
+          },
+          "unit_cents": {
+            "default": 0,
+            "title": "Unit Cents",
+            "type": "integer"
+          },
+          "units": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Units"
+          }
+        },
+        "required": [
+          "fee_id",
+          "name",
+          "kind"
+        ],
+        "title": "QuotePreviewFee",
+        "type": "object"
+      },
+      "QuotePreviewLine": {
+        "additionalProperties": false,
+        "properties": {
+          "extended_cents": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extended Cents"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "qty": {
+            "title": "Qty",
+            "type": "integer"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "unit_cents": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Cents"
+          }
+        },
+        "required": [
+          "name",
+          "qty"
+        ],
+        "title": "QuotePreviewLine",
+        "type": "object"
+      },
+      "QuotePreviewResponse": {
+        "additionalProperties": false,
+        "description": "Read-only calculator output. Runs the same deterministic kernel the\nagent uses (catering_pricing.compute_quote) so the number the owner sees\nhere is the number a quote would carry \u2014 nothing is written or sent.",
+        "properties": {
+          "available": {
+            "default": false,
+            "title": "Available",
+            "type": "boolean"
+          },
+          "currency": {
+            "default": "USD",
+            "title": "Currency",
+            "type": "string"
+          },
+          "deliverable": {
+            "default": false,
+            "title": "Deliverable",
+            "type": "boolean"
+          },
+          "discount_cents": {
+            "default": 0,
+            "title": "Discount Cents",
+            "type": "integer"
+          },
+          "discount_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discount Id"
+          },
+          "discount_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discount Name"
+          },
+          "fees": {
+            "items": {
+              "$ref": "#/components/schemas/QuotePreviewFee"
+            },
+            "title": "Fees",
+            "type": "array"
+          },
+          "fees_subtotal_cents": {
+            "default": 0,
+            "title": "Fees Subtotal Cents",
+            "type": "integer"
+          },
+          "flags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Flags",
+            "type": "array"
+          },
+          "guest_count": {
+            "default": 0,
+            "title": "Guest Count",
+            "type": "integer"
+          },
+          "items_subtotal_cents": {
+            "default": 0,
+            "title": "Items Subtotal Cents",
+            "type": "integer"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/QuotePreviewLine"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
+          "menu_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Menu Version"
+          },
+          "package_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Package Id"
+          },
+          "package_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Package Name"
+          },
+          "per_person_subtotal_cents": {
+            "default": 0,
+            "title": "Per Person Subtotal Cents",
+            "type": "integer"
+          },
+          "price_per_person_cents": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Per Person Cents"
+          },
+          "price_status": {
+            "default": "pending_owner_review",
+            "title": "Price Status",
+            "type": "string"
+          },
+          "pricebook_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pricebook Version"
+          },
+          "subtotal_cents": {
+            "default": 0,
+            "title": "Subtotal Cents",
+            "type": "integer"
+          },
+          "tax_cents": {
+            "default": 0,
+            "title": "Tax Cents",
+            "type": "integer"
+          },
+          "tax_rate_bps": {
+            "default": 0,
+            "title": "Tax Rate Bps",
+            "type": "integer"
+          },
+          "taxable_cents": {
+            "default": 0,
+            "title": "Taxable Cents",
+            "type": "integer"
+          },
+          "total_cents": {
+            "default": 0,
+            "title": "Total Cents",
+            "type": "integer"
+          },
+          "total_per_guest_cents": {
+            "default": 0,
+            "title": "Total Per Guest Cents",
+            "type": "integer"
+          },
+          "unavailable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unavailable Reason"
+          }
+        },
+        "title": "QuotePreviewResponse",
+        "type": "object"
+      },
+      "QuoteVersionRow": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "diff_summary": {
+            "default": "",
+            "title": "Diff Summary",
+            "type": "string"
+          },
+          "from_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Version"
+          },
+          "item_count": {
+            "default": 0,
+            "title": "Item Count",
+            "type": "integer"
+          },
+          "items_added": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Items Added",
+            "type": "array"
+          },
+          "items_removed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Items Removed",
+            "type": "array"
+          },
+          "ledger_entry_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ledger Entry Id"
+          },
+          "menu_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Menu Version"
+          },
+          "price_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Status"
+          },
+          "pricebook_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pricebook Version"
+          },
+          "quote_text_changed": {
+            "default": false,
+            "title": "Quote Text Changed",
+            "type": "boolean"
+          },
+          "quote_total_usd": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quote Total Usd"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "total_delta_usd": {
+            "default": 0,
+            "title": "Total Delta Usd",
+            "type": "integer"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "title": "QuoteVersionRow",
+        "type": "object"
+      },
+      "ReadinessFlags": {
+        "additionalProperties": false,
+        "properties": {
+          "automation_kernel_armed": {
+            "default": false,
+            "title": "Automation Kernel Armed",
+            "type": "boolean"
+          },
+          "automation_kernel_armed_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Automation Kernel Armed Source"
+          },
+          "followups_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Followups Enabled"
+          },
+          "kill_switch_engaged": {
+            "default": false,
+            "title": "Kill Switch Engaged",
+            "type": "boolean"
+          },
+          "menu_item_count": {
+            "default": 0,
+            "title": "Menu Item Count",
+            "type": "integer"
+          },
+          "menu_present": {
+            "default": false,
+            "title": "Menu Present",
+            "type": "boolean"
+          },
+          "menu_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Menu Version"
+          },
+          "pricebook_placeholder": {
+            "default": false,
+            "title": "Pricebook Placeholder",
+            "type": "boolean"
+          },
+          "pricebook_present": {
+            "default": false,
+            "title": "Pricebook Present",
+            "type": "boolean"
+          },
+          "pricebook_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pricebook Version"
+          }
+        },
+        "title": "ReadinessFlags",
+        "type": "object"
+      },
       "ReasonBody": {
         "properties": {
           "reason": {
@@ -967,6 +3011,35 @@
           "role"
         ],
         "title": "ScheduleEntryIn",
+        "type": "object"
+      },
+      "TimelineRow": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "event": {
+            "title": "Event",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ts",
+          "event",
+          "detail",
+          "source"
+        ],
+        "title": "TimelineRow",
         "type": "object"
       },
       "TotpVerifyBody": {
@@ -1383,6 +3456,506 @@
         "summary": "Verify Totp Route",
         "tags": [
           "auth"
+        ]
+      }
+    },
+    "/catering/controls": {
+      "get": {
+        "operationId": "get_controls_catering_controls_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Controls",
+        "tags": [
+          "catering"
+        ]
+      }
+    },
+    "/catering/dashboard": {
+      "get": {
+        "operationId": "get_dashboard_catering_dashboard_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CateringDashboard"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Dashboard",
+        "tags": [
+          "catering"
+        ]
+      }
+    },
+    "/catering/followups": {
+      "get": {
+        "operationId": "get_followups_catering_followups_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FollowupsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Followups",
+        "tags": [
+          "catering"
+        ]
+      }
+    },
+    "/catering/leads": {
+      "get": {
+        "operationId": "list_leads_catering_leads_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 40,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeadListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Leads",
+        "tags": [
+          "catering"
+        ]
+      }
+    },
+    "/catering/leads/{lead_id}": {
+      "get": {
+        "operationId": "get_lead_catering_leads__lead_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "lead_id",
+            "required": true,
+            "schema": {
+              "title": "Lead Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeadDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Lead",
+        "tags": [
+          "catering"
+        ]
+      }
+    },
+    "/catering/leads/{lead_id}/amend-apply": {
+      "post": {
+        "description": "Materialise captured amendments / apply one qualification answer.\n\nSteps up to a fresh OTP like the sibling write endpoints. It mutates the lead's\nextracted facts, can transition it to AWAITING_OWNER_APPROVAL and fires both the\nowner card and a customer-facing message \u2014 strictly more impactful than\n``/hold``, which already required the step-up.",
+        "operationId": "post_amend_apply_catering_leads__lead_id__amend_apply_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "lead_id",
+            "required": true,
+            "schema": {
+              "title": "Lead Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AmendApplyBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Amend Apply",
+        "tags": [
+          "catering"
+        ]
+      }
+    },
+    "/catering/leads/{lead_id}/decision": {
+      "post": {
+        "description": "Approve / reject / request-revision on a lead's owner-approval code.\n\nThe cockpit resolves the code from the lead rather than accepting one from\nthe client: a code typed into a browser is exactly the screenshot-forwarded\ncode the script's role gate exists to refuse.",
+        "operationId": "post_decision_catering_leads__lead_id__decision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "lead_id",
+            "required": true,
+            "schema": {
+              "title": "Lead Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Decision",
+        "tags": [
+          "catering"
+        ]
+      }
+    },
+    "/catering/leads/{lead_id}/hold": {
+      "post": {
+        "operationId": "post_hold_catering_leads__lead_id__hold_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "lead_id",
+            "required": true,
+            "schema": {
+              "title": "Lead Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HoldBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Hold",
+        "tags": [
+          "catering"
+        ]
+      }
+    },
+    "/catering/menu": {
+      "get": {
+        "operationId": "get_menu_catering_menu_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MenuResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Menu",
+        "tags": [
+          "catering"
+        ]
+      }
+    },
+    "/catering/pricebook": {
+      "get": {
+        "operationId": "get_pricebook_catering_pricebook_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PricebookResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Pricebook",
+        "tags": [
+          "catering"
+        ]
+      }
+    },
+    "/catering/pricebook/import": {
+      "post": {
+        "description": "Import a pricebook document. Validated here first so an obviously-bad\npaste fails with a field-level message instead of a subprocess exit code,\nthen handed to import-catering-pricebook which owns the archive + audit.",
+        "operationId": "post_pricebook_import_catering_pricebook_import_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PricebookImportBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Pricebook Import",
+        "tags": [
+          "catering"
+        ]
+      }
+    },
+    "/catering/quote-preview": {
+      "get": {
+        "description": "Price one hypothetical event with the deterministic kernel. READ-ONLY:\nnothing is written, no version is committed, no message is sent.",
+        "operationId": "get_quote_preview_catering_quote_preview_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "lead_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Lead Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "guest_count",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 10000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Guest Count"
+            }
+          },
+          {
+            "in": "query",
+            "name": "package_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 40,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Package Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "discount_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 40,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Discount Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotePreviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Quote Preview",
+        "tags": [
+          "catering"
         ]
       }
     },

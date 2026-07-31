@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""catering-control-status — read-only snapshot of every automation control.
+
+M4/deliverable 5. Answers "what is currently allowed to talk to customers, and
+what is muted" in one place, because the controls live in four different stores:
+
+  - the operator kill switch          state/disabled.flag
+  - the automation-control kernel     state/catering-automation-control.json
+                                      + CATERING_AUTOMATION_CONTROL_* env flags
+  - per-lead holds                    state/catering-leads.json
+  - the transport / budget / screen   env flags only
+    containment flags
+
+STRICTLY READ-ONLY. No locks are taken, no file is created, no state is written
+and no audit row is emitted — running this must never perturb what it reports.
+Every read is best-effort: a store that is missing or unreadable is reported as
+such rather than raising, so a broken store never hides the other three.
+
+This is the data source the Studio UI will call; the JSON shape is the contract
+and the human lines are for operators at a terminal.
+
+Usage:
+  catering-control-status              # human summary + JSON
+  catering-control-status --json       # JSON only (machine callers)
+
+Exit codes:
+  0 — rendered (ALWAYS, even when stores are unreadable — the report says so)
+  2 — invalid input
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+from safe_io import safe_load_json  # noqa: E402
+from exit_codes import EXIT_OK  # noqa: E402
+
+LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
+DISABLED_FLAG = Path(os.environ.get("SHIFT_AGENT_DISABLED_FLAG", "/opt/shift-agent/state/disabled.flag"))
+
+# Flags reported verbatim (never resolved against a chat) so the operator sees
+# the ARMING, not one chat's verdict. Value is reported as set/unset + the raw
+# string for allowlists, because "which numbers" is the question that actually
+# gets asked.
+_BOOL_FLAGS = (
+    "CATERING_AUTOMATION_CONTROL_ENABLED",
+    "CATERING_STOP_ENABLED",
+    "CATERING_TAKEOVER_ENABLED",
+)
+_CONTAINMENT_FLAGS = (
+    "FRONT_BRAIN_OUTBOUND_ENFORCE",
+    "GATEWAY_TRANSPORT_EVIDENCE_ENABLED",
+    "GATEWAY_TURN_SEND_BUDGET_ENABLED",
+    "BRIDGE_CONVERSATION_THROTTLE_ENABLED",
+    "GATEWAY_SEND_THROTTLE_ENABLED",
+)
+_ALLOWLIST_FLAGS = (
+    "CATERING_AUTOMATION_CONTROL_ALLOWLIST",
+    "FRONT_BRAIN_OUTBOUND_ENFORCE_ALLOWLIST",
+)
+_BUDGET_FLAGS = (
+    "GATEWAY_TURN_SEND_BUDGET_LIMIT",
+    "GATEWAY_TURN_SEND_BUDGET_DRAFT_LIMIT",
+    "FRONT_BRAIN_CHAT_DAILY_CAP",
+)
+
+
+def _allowlist_summary(raw: str) -> dict:
+    """Describe an allowlist without printing raw phone numbers: the ppv1/#612
+    semantics are what matters (empty DISABLES fail-closed, ``*`` graduates
+    every chat), plus how many explicit entries there are."""
+    entries = [p.strip() for p in (raw or "").split(",") if p.strip()]
+    if "*" in entries:
+        return {"mode": "wildcard", "entry_count": len(entries),
+                "effect": "every chat admitted"}
+    if not entries:
+        return {"mode": "empty", "entry_count": 0,
+                "effect": "DISABLED (fail-closed - empty never means global-on)"}
+    return {"mode": "scoped", "entry_count": len(entries),
+            "effect": f"{len(entries)} explicit chat(s) admitted"}
+
+
+def _kernel_state() -> dict:
+    """Per-conversation modes from the automation-control store, with expiry
+    applied the same way the kernel applies it at read time."""
+    try:
+        import automation_control as ac  # type: ignore
+        path = ac._state_path()
+    except Exception as e:  # noqa: BLE001
+        return {"readable": False, "error": f"{type(e).__name__}: {str(e)[:160]}",
+                "path": "", "conversations": []}
+    doc, status = safe_load_json(path, default={})
+    if status not in ("ok", "missing", "empty"):
+        return {"readable": False, "error": f"load status {status}",
+                "path": str(path), "conversations": []}
+    convs = doc.get("conversations") if isinstance(doc, dict) else {}
+    if not isinstance(convs, dict):
+        convs = {}
+    out = []
+    for key, rec in sorted(convs.items()):
+        if not isinstance(rec, dict):
+            continue
+        stored = rec.get("mode", "active")
+        effective = ac._effective_mode(rec)
+        out.append({
+            # The store is already keyed by the canonical identity; hash it for
+            # the report so this surface never prints a raw customer identifier.
+            "chat_key_hash": ac.chat_key_hash(key),
+            "stored_mode": stored,
+            "effective_mode": effective,
+            "expired": stored != effective,
+            "since_ts": rec.get("since_ts", ""),
+            "actor": rec.get("actor", ""),
+            "reason": rec.get("reason", ""),
+            "pause_expires_ts": rec.get("pause_expires_ts", ""),
+            "takeover_expires_ts": rec.get("takeover_expires_ts", ""),
+        })
+    return {"readable": True, "error": "", "path": str(path), "conversations": out,
+            "suppressed_count": sum(1 for c in out
+                                    if c["effective_mode"] != "active")}
+
+
+def _held_leads() -> dict:
+    """Leads currently on hold. Read through safe_load_json rather than the
+    CateringLeadStore model: a single malformed lead must not blank the whole
+    report, and this surface only needs four fields."""
+    doc, status = safe_load_json(LEADS_PATH, default={})
+    if status not in ("ok", "missing", "empty"):
+        return {"readable": False, "error": f"load status {status}",
+                "path": str(LEADS_PATH), "leads": []}
+    leads = doc.get("leads") if isinstance(doc, dict) else []
+    if not isinstance(leads, list):
+        leads = []
+    held = [
+        {
+            "lead_id": str(l.get("lead_id", "")),
+            "status": str(l.get("status", "")),
+            "hold_reason": str(l.get("hold_reason") or ""),
+            "hold_set_at": str(l.get("hold_set_at") or ""),
+        }
+        for l in leads
+        if isinstance(l, dict) and l.get("on_hold") is True
+    ]
+    return {"readable": True, "error": "", "path": str(LEADS_PATH),
+            "leads": held, "held_count": len(held), "total_leads": len(leads)}
+
+
+def _kill_switch() -> dict:
+    try:
+        engaged = DISABLED_FLAG.exists()
+        mtime = (
+            datetime.fromtimestamp(DISABLED_FLAG.stat().st_mtime, tz=timezone.utc).isoformat()
+            if engaged else ""
+        )
+        return {"readable": True, "error": "", "path": str(DISABLED_FLAG),
+                "engaged": engaged, "set_at": mtime}
+    except Exception as e:  # noqa: BLE001
+        # Mirrors safe_io._agent_disabled's fail-OPEN: unreadable reads as not
+        # engaged, and the report says the read failed so the operator can tell
+        # the two apart.
+        return {"readable": False, "error": f"{type(e).__name__}: {str(e)[:160]}",
+                "path": str(DISABLED_FLAG), "engaged": False, "set_at": ""}
+
+
+def _flags() -> dict:
+    return {
+        "kernel": {f: os.environ.get(f, "") for f in _BOOL_FLAGS},
+        "kernel_allowlists": {
+            f: _allowlist_summary(os.environ.get(f, "")) for f in _ALLOWLIST_FLAGS
+        },
+        "containment": {f: os.environ.get(f, "") for f in _CONTAINMENT_FLAGS},
+        "budgets": {f: os.environ.get(f, "") for f in _BUDGET_FLAGS},
+    }
+
+
+def build_report() -> dict:
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "kill_switch": _kill_switch(),
+        "flags": _flags(),
+        "automation_control": _kernel_state(),
+        "lead_holds": _held_leads(),
+    }
+
+
+def _human(report: dict) -> str:
+    lines = []
+    ks = report["kill_switch"]
+    lines.append(
+        f"kill switch: {'ENGAGED — all sends refused' if ks['engaged'] else 'clear'}"
+        + (f" (set {ks['set_at']})" if ks["engaged"] and ks["set_at"] else "")
+        + ("" if ks["readable"] else f" [UNREADABLE: {ks['error']}]")
+    )
+
+    flags = report["flags"]
+    kernel_on = flags["kernel"].get("CATERING_AUTOMATION_CONTROL_ENABLED") == "1"
+    allow = flags["kernel_allowlists"]["CATERING_AUTOMATION_CONTROL_ALLOWLIST"]
+    armed = kernel_on and allow["mode"] != "empty"
+    subs = [n.replace("CATERING_", "").replace("_ENABLED", "").casefold()
+            for n in ("CATERING_STOP_ENABLED", "CATERING_TAKEOVER_ENABLED")
+            if flags["kernel"].get(n) == "1"]
+    lines.append(
+        f"automation-control kernel: {'ARMED' if armed else 'OFF'} "
+        f"(allowlist {allow['mode']}: {allow['effect']}"
+        + (f"; sub-flags on: {', '.join(subs)}" if subs else "; no sub-flags on")
+        + ")"
+    )
+
+    ac = report["automation_control"]
+    if not ac["readable"]:
+        lines.append(f"conversations: UNREADABLE ({ac['error']})")
+    else:
+        lines.append(
+            f"conversations: {ac['suppressed_count']} suppressed of "
+            f"{len(ac['conversations'])} with a record"
+        )
+        for c in ac["conversations"]:
+            if c["effective_mode"] == "active":
+                continue
+            exp = c["pause_expires_ts"] or c["takeover_expires_ts"] or "no expiry"
+            lines.append(
+                f"  - {c['chat_key_hash'][:12]}... {c['effective_mode']} "
+                f"by {c['actor'] or 'unknown'} since {c['since_ts'] or 'unknown'} "
+                f"(expires: {exp})"
+            )
+
+    holds = report["lead_holds"]
+    if not holds["readable"]:
+        lines.append(f"lead holds: UNREADABLE ({holds['error']})")
+    else:
+        lines.append(f"lead holds: {holds['held_count']} of {holds['total_leads']} leads")
+        for l in holds["leads"]:
+            lines.append(
+                f"  - {l['lead_id']} ({l['status']}) held since "
+                f"{l['hold_set_at'] or 'unknown'}: {l['hold_reason'] or 'no reason given'}"
+            )
+
+    cont = ", ".join(f"{k}={v or 'unset'}" for k, v in report["flags"]["containment"].items())
+    lines.append(f"containment flags: {cont}")
+    budg = ", ".join(f"{k}={v or 'default'}" for k, v in report["flags"]["budgets"].items())
+    lines.append(f"budget flags: {budg}")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--json", action="store_true",
+                    help="Emit only the JSON report (for machine callers)")
+    args = ap.parse_args()
+
+    report = build_report()
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return EXIT_OK
+    print(_human(report))
+    print()
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

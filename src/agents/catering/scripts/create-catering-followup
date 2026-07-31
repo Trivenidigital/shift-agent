@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""create-catering-followup — the owner schedules a follow-up by hand (M5).
+
+The five other follow-up types are scheduled automatically by the triggers in
+create/amend/apply. `owner_reminder` is the one an owner asks for: "check back
+with them on Friday". This is its only creator.
+
+Owner-created follow-ups differ from system ones in three ways, all deliberate:
+  * They BYPASS the (lead, type, due-day) dedup. A human asking again is not the
+    system re-litigating a decision it already made.
+  * They are NEVER capped by max_followups_per_lead — the lifetime budget exists
+    to stop the system pestering, not to overrule the owner.
+  * They can carry a --note, the owner's own sentence, rendered into the message.
+
+They are NOT exempt from anything that protects the customer: the kill switch,
+STOP/opt-out, a per-lead hold, quiet hours and the terminal-status allowlist all
+still apply at sweep time, and the owner still approves the rendered text on a
+card before it sends. Scheduling is not sending.
+
+Usage:
+  create-catering-followup --lead-id L0007 --due-at +2d
+  create-catering-followup --lead-id L0007 --due-at 2026-08-14T10:00:00+00:00 \\
+      --note "Ask whether they settled on the Sept 14 date."
+
+--due-at accepts an ISO-8601 instant (naive is read as UTC) or a relative offset
+`+Nh` / `+Nd`. Relative is what an owner actually types; ISO is for the cockpit.
+
+Outputs JSON: {"followup_id": ..., "lead_id": ..., "due_at": ..., "note": ...}
+
+Exit codes:
+  0 — scheduled
+  2 — invalid input (missing/malformed --due-at, a due time in the past)
+  4 — lead not found, or in a status a follow-up may not act on
+  5 — leads/follow-up store unreadable, or the write failed schema validation
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, "/opt/shift-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
+
+import catering_followups as cf  # noqa: E402
+from safe_io import customer_now, flock, load_model, load_yaml_model, ndjson_append  # noqa: E402
+from schemas import (  # noqa: E402
+    CateringFollowupScheduled, CateringLeadStore, Config,
+)
+from exit_codes import (  # noqa: E402
+    EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND, EXIT_SCHEMA_VIOLATION,
+)
+from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
+
+CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+
+FOLLOWUP_TYPE = "owner_reminder"
+_RELATIVE_RE = re.compile(r"^\+(\d+)([hd])$", re.IGNORECASE)
+
+
+def parse_due_at(raw: str, *, now: datetime) -> Optional[datetime]:
+    """`+Nh` / `+Nd` relative to `now`, or an ISO-8601 instant. None if neither.
+
+    A naive ISO value is read as UTC rather than rejected: an owner typing
+    `2026-08-14T10:00` means a wall-clock time, and refusing it over a missing
+    offset would be pedantry at the CLI.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    relative = _RELATIVE_RE.match(text)
+    if relative:
+        amount = int(relative.group(1))
+        if amount <= 0:
+            return None
+        unit = relative.group(2).lower()
+        return now + (timedelta(hours=amount) if unit == "h" else timedelta(days=amount))
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--lead-id", required=True, help="catering lead id, e.g. L0007")
+    ap.add_argument("--due-at", required=True,
+                    help="when to follow up: +Nh / +Nd, or an ISO-8601 instant")
+    ap.add_argument("--note", default="",
+                    help=f"owner context rendered into the message "
+                         f"(<= {cf.NOTE_MAX_CHARS} chars)")
+    args = ap.parse_args()
+
+    lead_id = (args.lead_id or "").strip()
+    if not lead_id:
+        sys.stderr.write("--lead-id required\n")
+        return EXIT_INVALID_INPUT
+
+    # Config is only needed for the customer timezone; a broken config must not
+    # stop an owner scheduling a reminder.
+    try:
+        cfg = load_yaml_model(CONFIG_PATH, Config)
+        now = customer_now(cfg.customer.timezone)
+    except (FileNotFoundError, RuntimeError, ValidationError) as e:
+        log_config_load_failed_best_effort(CONFIG_PATH, e, log_path=LOG_PATH)
+        sys.stderr.write(f"WARN: config load failed; using UTC: {e}\n")
+        now = datetime.now(timezone.utc)
+
+    due_at = parse_due_at(args.due_at, now=now)
+    if due_at is None:
+        sys.stderr.write(
+            f"--due-at {args.due_at!r} is neither a +Nh/+Nd offset nor an ISO-8601 "
+            f"instant\n"
+        )
+        return EXIT_INVALID_INPUT
+    if due_at <= now:
+        sys.stderr.write(
+            f"--due-at {due_at.isoformat()} is not in the future; a follow-up due "
+            f"in the past would fire on the next sweep\n"
+        )
+        return EXIT_INVALID_INPUT
+
+    # The lead must exist and be in a status a follow-up may act on. Checked HERE
+    # as well as at sweep time so the owner finds out now, not in four hours when
+    # a card silently fails to appear.
+    leads, leads_status = load_model(LEADS_PATH, CateringLeadStore,
+                                     default=CateringLeadStore())
+    if leads_status not in ("ok", "missing", "empty"):
+        sys.stderr.write(f"leads store status={leads_status!r}; refusing to schedule\n")
+        return EXIT_SCHEMA_VIOLATION
+    lead = next((l for l in leads.leads if l.lead_id == lead_id), None)
+    if lead is None:
+        sys.stderr.write(f"lead {lead_id} not found\n")
+        return EXIT_NOT_FOUND
+    allowed = cf.allowed_statuses_for(FOLLOWUP_TYPE)
+    if lead.status not in allowed:
+        sys.stderr.write(
+            f"lead {lead_id} status={lead.status} is not a status a follow-up may "
+            f"act on (allowed: {', '.join(sorted(allowed))})\n"
+        )
+        return EXIT_NOT_FOUND
+
+    try:
+        result = cf.schedule_followup(
+            lead_id, FOLLOWUP_TYPE, now=now, due_at=due_at,
+            created_by="owner", note=args.note,
+        )
+    except ValidationError as e:
+        sys.stderr.write(f"follow-up failed schema validation: {e}\n")
+        return EXIT_SCHEMA_VIOLATION
+    if not result.ok or result.followup is None:
+        sys.stderr.write(f"could not schedule follow-up: {result.reason}\n")
+        return EXIT_SCHEMA_VIOLATION
+
+    followup = result.followup
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with flock(LOG_PATH):
+            ndjson_append(LOG_PATH, TypeAdapter(CateringFollowupScheduled).dump_json(
+                CateringFollowupScheduled(
+                    type="catering_followup_scheduled", ts=now,
+                    followup_id=followup.followup_id, lead_id=followup.lead_id,
+                    followup_type=followup.followup_type, due_at=followup.due_at,
+                    created_by="owner", trigger="owner_cli",
+                )).decode("utf-8"))
+    except Exception as e:  # noqa: BLE001 — the follow-up IS scheduled; say so loudly
+        sys.stderr.write(f"WARN: audit emit failed (non-fatal): {e}\n")
+
+    print(json.dumps({
+        "followup_id": followup.followup_id,
+        "lead_id": followup.lead_id,
+        "followup_type": followup.followup_type,
+        "due_at": followup.due_at.isoformat(),
+        "note": followup.note,
+    }))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

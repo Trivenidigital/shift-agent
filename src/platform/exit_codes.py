@@ -63,3 +63,60 @@ EXIT_PRIVILEGE_DENIED = 12
 # the customer to pick an option instead of retrying the finalize. Operator
 # escape hatch: pass --force-default to build the default basket anyway.
 EXIT_PROPOSAL_ACTIVE = 13
+
+# 14 — M4/G4: the lead is ON HOLD, so a lead-scoped automated CUSTOMER send was
+# refused (send-catering-ack, apply-catering-owner-decision approve). Distinct
+# from EXIT_DEPENDENCY_DOWN (=6, "bridge unreachable") so the PR-D2 retry
+# state-machine does NOT re-attempt the bridge POST — a hold is an operator
+# decision, cleared only by `set-catering-lead-hold --off`, never by a retry.
+# Distinct from EXIT_ILLEGAL_TRANSITION (=9) because the lead's status is
+# perfectly legal; only the send is withheld.
+EXIT_LEAD_ON_HOLD = 14
+
+# 15 — M3: apply-catering-owner-decision --discount-id named a discount the
+# CURRENT pricebook does not approve (unknown id) or no longer publishes
+# (active=false). Refused BEFORE any state change, so the lead is untouched.
+# Distinct from EXIT_INVALID_INPUT (=2) because the operator's next step is
+# specific and different: re-import the pricebook, or use one of the ids it
+# actually approves — not "fix your flags". Distinct from EXIT_NOT_FOUND (=4),
+# which in this script already means "no lead carries that approval code", so
+# reusing it would make the two failures indistinguishable in the exit status.
+EXIT_UNKNOWN_DISCOUNT = 15
+
+# 16 — M5: approve-catering-followup refused because a suppression rule fired
+# between the card and the owner's approval. NOT the per-lead hold, which keeps
+# EXIT_LEAD_ON_HOLD (=14) to itself: 14 means "clear the hold", and returning it
+# for a kill switch, an opt-out or a frequency cap sends the owner to
+# `set-catering-lead-hold --off` for a hold nobody ever set. The rule that
+# actually fired is on stdout as {"suppressed_reason": "..."}, so the explanation
+# the owner reads can name it without the caller guessing from the exit status.
+# Quiet hours are NOT here: they defer the send and exit 0 (see
+# catering_followups.deferred_due_at).
+EXIT_FOLLOWUP_SUPPRESSED = 16
+
+# 17 — apply-catering-owner-decision --discount-id was asked to recompute a lead
+# that carries no CateringPricingInputs (it was finalized before pricing
+# provenance existed, or on the legacy no-pricebook path). Rebuilding the quote
+# from whole-dollar `selected_items` would quote a package lead's add-ons alone
+# and re-derive cents that were never there, so the recompute is REFUSED before
+# any state change. Distinct from EXIT_UNKNOWN_DISCOUNT (=15): the discount id is
+# fine, the LEAD is the problem, and the fix is to re-finalize it — not to pick a
+# different discount.
+EXIT_PRICING_PROVENANCE_MISSING = 17
+
+# 18 — the price the customer would have received is not deliverable: its
+# price_status is "pending_owner_review" (placeholder pricebook, an unresolvable
+# item price, or a per-unit fee whose multiplier was never supplied). The kernel
+# has said the number is not a final quote, so the send is refused rather than
+# labelled and sent anyway. Distinct from EXIT_TRUTH_GUARD_FAILED (=11), which is
+# about the DRAFTED TEXT; this is about the NUMBER.
+EXIT_PRICE_PENDING_OWNER_REVIEW = 18
+
+# 19 — finalize-catering-menu was asked to price a per-person package for more
+# guests than CateringSelectedItem.qty can hold (MAX_LINE_QTY = 500). The
+# materialised package line would silently clamp to 500 while the kernel priced
+# the full headcount, so the itemization and the total would disagree. Refused up
+# front. Distinct from EXIT_TRUTH_GUARD_FAILED (=11), which the clamp used to
+# masquerade as once the divergence grew past tolerance — that read as LLM
+# hallucination and sent the operator hunting in the wrong place.
+EXIT_GUEST_COUNT_UNSUPPORTED = 19

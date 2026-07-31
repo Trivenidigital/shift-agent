@@ -64,7 +64,14 @@ NO_HANDLER_FOUND = "<no-handler-found>"
 #   2. Update fixtures + mock to reflect any new priority rules
 #   3. Update SKILL_MD_KNOWN_SHA256 below to the new hash
 #   4. Document the change in the commit message
-SKILL_MD_KNOWN_SHA256 = "4f5ee8ac079fb0924137270dce54e094f56ff1677c6b49b699b7903da186be3a"
+# 2026-07-31 (M5): re-validated after SKILL.md gained a FIFTH code-pool jq lookup
+# line for state/catering-followups.json. The line is APPENDED after the shift
+# pending.json lookup, so priorities 1-5 in mock_llm_priority_order below are
+# byte-for-byte the routing they were, and every fixture's expected_handler still
+# holds (no fixture carries a follow-up store or a follow-up approval code). The
+# mock deliberately gains no follow-up branch: adding one would encode a route no
+# fixture exercises.
+SKILL_MD_KNOWN_SHA256 = "18e8cf34f6b2f2253d854986a5594f6130e05a6d288957bd56df8f302786fe82"
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

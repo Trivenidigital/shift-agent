@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -329,3 +330,227 @@ class TestCommandDetection:
     def test_owner_approve_is_not_an_automation_command(self):
         # #XXXXX approve is F8 territory, not automation-control.
         assert ac.detect_owner_command("approve #A3F9K") is None
+
+
+# ── M4/G3: owner pause verb + bounded takeover window ────────────────────────
+
+class TestOwnerPauseCommand:
+    @pytest.mark.parametrize("text", [
+        "pause #A3F9K", "#A3F9K pause", "hold #A3F9K", "#A3F9K hold",
+        "please pause #A3F9K for now",
+    ])
+    def test_owner_pause_and_hold_detected(self, text):
+        assert ac.detect_owner_command(text) == ("paused", "#A3F9K")
+
+    def test_owner_pause_requires_a_code(self):
+        """Same rule as takeover: the code is what identifies WHICH customer."""
+        assert ac.detect_owner_command("pause everything") is None
+        assert ac.detect_owner_command("hold off") is None
+
+    def test_release_wins_over_pause_when_both_appear(self):
+        """The un-suppress verb must never be shadowed — the same precedence the
+        customer detector applies to `resume`."""
+        assert ac.detect_owner_command("resume #A3F9K, no need to pause") == ("active", "#A3F9K")
+
+    def test_takeover_still_wins_over_pause(self):
+        assert ac.detect_owner_command("takeover #A3F9K and pause it") == ("takeover", "#A3F9K")
+
+    def test_owner_pause_suppresses_and_expires(self):
+        ac.set_mode(CUSTOMER, ac.MODE_PAUSED, actor="owner", reason="owner_pause",
+                    pause_seconds=3600)
+        assert ac.get_mode(CUSTOMER) == "paused"
+        assert ac.is_suppressed(CUSTOMER) is True
+
+        doc = json.loads(_state_file().read_text(encoding="utf-8"))
+        key = next(iter(doc["conversations"]))
+        doc["conversations"][key]["pause_expires_ts"] = "2000-01-01T00:00:00+00:00"
+        _state_file().write_text(json.dumps(doc), encoding="utf-8")
+        ac._LAST_KNOWN_MODE.clear()
+
+        assert ac.get_mode(CUSTOMER) == "active"
+
+    def test_owner_pause_uses_the_seven_day_default(self):
+        before = datetime.now(tz=timezone.utc)
+        ac.set_mode(CUSTOMER, ac.MODE_PAUSED, actor="owner", reason="owner_pause")
+        rec = ac.get_record(CUSTOMER)
+        expires = datetime.fromisoformat(rec["pause_expires_ts"])
+        delta = (expires - before).total_seconds()
+        assert abs(delta - ac.DEFAULT_PAUSE_SECONDS) < 60
+
+
+class TestTakeoverExpiry:
+    def test_takeover_records_an_expiry(self):
+        before = datetime.now(tz=timezone.utc)
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="owner_takeover")
+        rec = ac.get_record(CUSTOMER)
+        expires = datetime.fromisoformat(rec["takeover_expires_ts"])
+        delta = (expires - before).total_seconds()
+        assert abs(delta - ac.TAKEOVER_DEFAULT_SECONDS) < 60
+        assert ac.get_mode(CUSTOMER) == "takeover"
+
+    def test_expired_takeover_reads_active(self):
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t",
+                    takeover_seconds=3600)
+        assert ac.get_mode(CUSTOMER) == "takeover"
+
+        doc = json.loads(_state_file().read_text(encoding="utf-8"))
+        key = next(iter(doc["conversations"]))
+        doc["conversations"][key]["takeover_expires_ts"] = "2000-01-01T00:00:00+00:00"
+        _state_file().write_text(json.dumps(doc), encoding="utf-8")
+        ac._LAST_KNOWN_MODE.clear()
+
+        assert ac.get_mode(CUSTOMER) == "active"
+        assert ac.is_suppressed(CUSTOMER) is False
+
+    def test_reissuing_takeover_extends_the_window(self):
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t",
+                    takeover_seconds=60)
+        first = ac.get_record(CUSTOMER)["takeover_expires_ts"]
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t")
+        second = ac.get_record(CUSTOMER)["takeover_expires_ts"]
+        assert datetime.fromisoformat(second) > datetime.fromisoformat(first)
+
+    def test_legacy_takeover_without_expiry_never_expires(self):
+        """Records written before M4 carry no takeover_expires_ts. Silently
+        un-muting a conversation a human is handling is the failure this kernel
+        exists to prevent, so a missing expiry keeps the old never-expires
+        behavior until the owner re-issues the takeover."""
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t")
+        doc = json.loads(_state_file().read_text(encoding="utf-8"))
+        key = next(iter(doc["conversations"]))
+        del doc["conversations"][key]["takeover_expires_ts"]
+        _state_file().write_text(json.dumps(doc), encoding="utf-8")
+        ac._LAST_KNOWN_MODE.clear()
+
+        assert ac.get_mode(CUSTOMER) == "takeover"
+
+    def test_malformed_expiry_is_not_expired(self):
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t")
+        doc = json.loads(_state_file().read_text(encoding="utf-8"))
+        key = next(iter(doc["conversations"]))
+        doc["conversations"][key]["takeover_expires_ts"] = "not-a-timestamp"
+        _state_file().write_text(json.dumps(doc), encoding="utf-8")
+        ac._LAST_KNOWN_MODE.clear()
+
+        assert ac.get_mode(CUSTOMER) == "takeover"
+
+
+class TestTakeoverExpiryAlert:
+    """§12b: the takeover window closing REVERSES operator-applied state. The owner
+    said "I am handling this customer by hand"; 72h later a read silently flips the
+    conversation back to active and the assistant resumes replying. That reversal
+    must page the owner and land an audit row — exactly once."""
+
+    @staticmethod
+    def _expire(ts="2000-01-01T00:00:00+00:00"):
+        doc = json.loads(_state_file().read_text(encoding="utf-8"))
+        key = next(iter(doc["conversations"]))
+        doc["conversations"][key]["takeover_expires_ts"] = ts
+        _state_file().write_text(json.dumps(doc), encoding="utf-8")
+        ac._LAST_KNOWN_MODE.clear()
+
+    @staticmethod
+    def _wire(monkeypatch):
+        pages, rows = [], []
+        monkeypatch.setattr(ac, "notify_owner_with_fallback",
+                            lambda *a, **k: pages.append((a, k)) or True)
+        monkeypatch.setattr(ac, "_emit", lambda t, f: rows.append((t, f)))
+        return pages, rows
+
+    def test_observed_expiry_pages_the_owner_and_audits_once(self, monkeypatch):
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t",
+                    takeover_seconds=3600)
+        pages, rows = self._wire(monkeypatch)
+        self._expire()
+
+        assert ac.get_mode(CUSTOMER) == "active"
+
+        assert len(pages) == 1, "the reversal must not be silent"
+        title, body = pages[0][0][0], pages[0][0][1]
+        assert "takeover" in title.lower()
+        assert "resumed" in body.lower()
+        assert "*" not in body and "_" not in body, "§12b bodies are plain text"
+        assert len(rows) == 1
+        entry_type, fields = rows[0]
+        assert entry_type == "catering_automation_control_changed"
+        assert (fields["from_mode"], fields["to_mode"]) == ("takeover", "active")
+        assert fields["actor"] == "system"
+        assert fields["reason"] == "takeover_auto_expiry"
+
+    def test_a_second_read_of_the_same_expiry_is_silent(self, monkeypatch):
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t",
+                    takeover_seconds=3600)
+        pages, rows = self._wire(monkeypatch)
+        self._expire()
+
+        for _ in range(4):
+            ac._LAST_KNOWN_MODE.clear()
+            assert ac.get_mode(CUSTOMER) == "active"
+
+        assert len(pages) == 1, "the alerted marker is persisted, not in-process"
+        assert len(rows) == 1
+
+    def test_the_marker_is_persisted_on_the_record(self, monkeypatch):
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t",
+                    takeover_seconds=3600)
+        self._wire(monkeypatch)
+        self._expire()
+        ac.get_mode(CUSTOMER)
+
+        rec = ac.get_record(CUSTOMER)
+        assert rec[ac.TAKEOVER_EXPIRY_ALERTED_FIELD] == rec["takeover_expires_ts"]
+
+    def test_a_re_issued_takeover_can_alert_again_when_it_lapses(self, monkeypatch):
+        """The marker is keyed to the EXPIRY, not the conversation — the owner must
+        be told every time a window they set lapses, not only the first."""
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t",
+                    takeover_seconds=3600)
+        pages, rows = self._wire(monkeypatch)
+        self._expire("2000-01-01T00:00:00+00:00")
+        ac.get_mode(CUSTOMER)
+        assert len(pages) == 1
+
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t",
+                    takeover_seconds=3600)
+        self._expire("2001-01-01T00:00:00+00:00")
+        ac.get_mode(CUSTOMER)
+
+        assert len(pages) == 2
+        assert len(rows) == 2
+
+    def test_an_unexpired_takeover_never_alerts(self, monkeypatch):
+        pages, rows = self._wire(monkeypatch)
+        ac.set_mode(CUSTOMER, ac.MODE_TAKEOVER, actor="owner", reason="t")
+        ac._LAST_KNOWN_MODE.clear()
+
+        assert ac.get_mode(CUSTOMER) == "takeover"
+        assert pages == [] and rows == []
+
+    def test_an_expired_pause_is_not_a_takeover_reversal(self, monkeypatch):
+        """A pause lapsing is the customer's own temporary mute running out — it is
+        not an automated reversal of operator-applied state, and must stay quiet."""
+        pages, rows = self._wire(monkeypatch)
+        ac.set_mode(CUSTOMER, ac.MODE_PAUSED, actor="customer", reason="customer_pause",
+                    pause_seconds=3600)
+        doc = json.loads(_state_file().read_text(encoding="utf-8"))
+        key = next(iter(doc["conversations"]))
+        doc["conversations"][key]["pause_expires_ts"] = "2000-01-01T00:00:00+00:00"
+        _state_file().write_text(json.dumps(doc), encoding="utf-8")
+        ac._LAST_KNOWN_MODE.clear()
+
+        assert ac.get_mode(CUSTOMER) == "active"
+        assert pages == [] and rows == []
+
+
+class TestOwnerConfirmationText:
+    def test_each_suppressing_verb_states_its_window(self):
+        pause = ac.owner_confirmation(ac.MODE_PAUSED, "#A3F9K")
+        takeover = ac.owner_confirmation(ac.MODE_TAKEOVER, "#A3F9K")
+        active = ac.owner_confirmation(ac.MODE_ACTIVE, "#A3F9K")
+        assert "7 days" in pause and "#A3F9K" in pause and "resume" in pause
+        assert "3 days" in takeover and "#A3F9K" in takeover
+        assert "resumed" in active and "#A3F9K" in active
+
+    def test_confirmations_are_deterministic(self):
+        assert ac.owner_confirmation(ac.MODE_PAUSED, "#A3F9K") == \
+            ac.owner_confirmation(ac.MODE_PAUSED, "#A3F9K")

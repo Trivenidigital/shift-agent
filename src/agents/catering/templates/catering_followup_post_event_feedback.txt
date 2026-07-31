@@ -1,0 +1,7 @@
+Hi {customer_name}, we hope {event_date} went well.
+
+If you have a moment, we'd love to hear how the food and the service were — anything you'd want different next time is genuinely useful to us.
+
+Thank you for having us.
+
+(Ref: {lead_id})

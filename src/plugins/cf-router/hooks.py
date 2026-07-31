@@ -50,6 +50,12 @@ import approval_code_pools  # type: ignore  # noqa: E402
 # approval_code_pools above so an import failure surfaces LOUD at plugin-load
 # time, not silently at the first suppressed amendment.
 import catering_amendments  # type: ignore  # noqa: E402
+# M1: deterministic catering field extraction + minimum-qualification state.
+# Imported flat like the modules above so an import failure surfaces LOUD at
+# plugin-load time rather than at the first catering inbound. Both are pure
+# stdlib (regex + dict shaping) — no IO, no LLM, no network.
+import catering_extraction  # type: ignore  # noqa: E402
+import catering_qualification  # type: ignore  # noqa: E402
 # PR-5: deterministic per-conversation automation-control kernel (STOP/pause/
 # opt-out + human takeover). Imported flat like the modules above so an import
 # failure surfaces LOUD at plugin-load time. DORMANT behind
@@ -102,6 +108,39 @@ F7_PRIMARY_FOLLOWUP_REPLY = True
 # Task 6 proposal branch flag. Default off preserves Branch B's pinned
 # suppression behavior until the proposal workflow is explicitly enabled.
 F7_PROPOSAL_BRANCH_ENABLED = True
+
+# M1 2026-07-31: minimum-qualification gate + deterministic slot-filling loop.
+# Enabled, a new inquiry below catering_qualification.REQUIRED_FIELDS parks in
+# QUALIFYING and the customer is asked for the gaps, instead of an owner approval
+# card firing for an event whose date, size, venue and style are unknown; a reply to
+# those questions is applied to the SAME lead. Disabled, every catering path behaves
+# exactly as it did before M1 (create-catering-lead's gate is opt-in, so flag-off
+# simply never passes --qualification-gate and never routes an answer).
+#
+# DEFAULT ON — this behavior is disclosed and accepted. The env var exists as a
+# rollback lever that needs no source edit and no redeploy:
+#   sudo systemctl set-environment CATERING_QUALIFICATION_GATE=0 \
+#     && sudo systemctl restart hermes-gateway
+CATERING_QUALIFICATION_GATE_ENV = "CATERING_QUALIFICATION_GATE"
+
+# F7 ACCEPTANCE ARM (M3) — see _try_catering_acceptance_intercept for what it does.
+# DEFAULT OFF: it BOOKS an event off a customer message, and no operator has armed
+# it. It stays dormant (byte-identical routing) until one explicitly does:
+#   sudo systemctl set-environment CATERING_ACCEPTANCE_ARM=1 \
+#     && sudo systemctl restart hermes-gateway
+CATERING_ACCEPTANCE_ARM_ENV = "CATERING_ACCEPTANCE_ARM"
+
+
+# Read at CALL time, mirroring the automation_control kernel's flag helpers
+# (stop_enabled / takeover_enabled): a module-load snapshot cannot be flipped
+# without re-importing the plugin, and it makes the flag untestable from the
+# environment the operator actually sets.
+def f7_qualification_gate_enabled() -> bool:
+    return os.environ.get(CATERING_QUALIFICATION_GATE_ENV, "1") == "1"
+
+
+def f7_acceptance_arm_enabled() -> bool:
+    return os.environ.get(CATERING_ACCEPTANCE_ARM_ENV, "0") == "1"
 
 # 30s rescue window — matches the deployed F7 daemon's WATCHDOG_TIMEOUT_SECS.
 # PRESERVED (not removed) for backwards-compat with TestF7DispatcherWatchdog,
@@ -769,12 +808,33 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                         return flyer_result
                     return None
 
+            # M3 acceptance arm, BEFORE the catering-signal admission below: a
+            # customer answering "we accept" to a quote we already sent carries no
+            # catering signal, so the admission check would drop it — and its lead
+            # is in SENT_TO_CUSTOMER, which F7's active-lead lookup excludes. It
+            # runs after the flyer-intent branch above so explicit flyer intent
+            # still wins.
+            acceptance_result = _try_catering_acceptance_intercept(
+                text, chat_id, event,
+                flyer_generation_enabled=flyer_generation_enabled,
+            )
+            if acceptance_result is not None:
+                return acceptance_result
+
             is_catering, signals = actions.classify_catering(text)
             proposal_workflow = (
                 actions.is_proposal_selection(text)
                 or actions.is_proposal_request(text)
             )
-            if is_catering or _has_f7_followup_signal(signals) or proposal_workflow:
+            # M1: a reply to our own intake question carries no catering signal, so
+            # the lead lookup is the last admission check — evaluated ONLY when the
+            # cheap signal checks have all failed.
+            if not (is_catering or _has_f7_followup_signal(signals) or proposal_workflow):
+                admit = (f7_qualification_gate_enabled()
+                         and _sender_has_qualifying_lead(chat_id))
+            else:
+                admit = True
+            if admit:
                 if flyer_generation_enabled:
                     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
                     if role != "owner" and actions.has_non_delivered_flyer_project_by_sender(phone, chat_id):
@@ -1124,6 +1184,34 @@ def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional
         # Code matched but no clear verb — let LLM ask for clarification
         return None
 
+    if pool_name == approval_code_pools.POOL_CATERING_FOLLOWUPS:
+        # M5: the owner is answering a follow-up approval card. Without this
+        # branch the code resolves to a pool F8 does not handle and falls through
+        # to the LLM, which would have to guess what "#XXXXX approve" meant for a
+        # message the deterministic engine already composed and stored.
+        followup_status = row.get("status")
+        if has_edit:
+            # There is nothing to edit — the text was fixed when the card was
+            # rendered. Let the LLM explain that rather than silently approving.
+            return None
+        if has_approve:
+            rc = actions.invoke_approve_catering_followup(code, "approve")
+            return _build_skip_or_passthrough(
+                rc=rc, chat_id=chat_id, code=code,
+                reason="f8_followup_approve",
+                detail=f"followup status was {followup_status}",
+                action_label=f"approve-catering-followup approve for {code}",
+            )
+        if has_reject:
+            rc = actions.invoke_approve_catering_followup(code, "cancel")
+            return _build_skip_or_passthrough(
+                rc=rc, chat_id=chat_id, code=code,
+                reason="f8_followup_cancel",
+                detail=f"followup status was {followup_status}",
+                action_label=f"approve-catering-followup cancel for {code}",
+            )
+        return None
+
     # Expense / shift codes are not F8's responsibility (owner self-chat handles
     # only menu + catering here) — fall through so the LLM/dispatcher routes them.
     return None
@@ -1207,11 +1295,13 @@ def _automation_control_resolve_customer_target(code: str) -> Optional[str]:
 def _automation_control_apply_owner(
     owner_chat_id: str, verb: str, code: str, nid: str,
 ) -> Optional[dict]:
-    """Apply an owner takeover (``verb == "takeover"``) or release/resume
-    (``verb == "active"``) against the customer conversation the ``#XXXXX`` code
-    resolves to. Idempotent (re-engage/re-release rewrites the same mode + audits
-    the no-op transition). Confirms back to the owner self-chat (exempt — the
-    owner key is never a suppressed customer key)."""
+    """Apply an owner takeover (``verb == "takeover"``), pause/hold
+    (``verb == "paused"`` — M4/G3), or release/resume (``verb == "active"``)
+    against the customer conversation the ``#XXXXX`` code resolves to. Idempotent
+    (re-asserting rewrites the same mode + audits the no-op transition, and for
+    takeover/pause that rewrite also extends the auto-expiry window). Confirms
+    back to the owner self-chat (exempt — the owner key is never a suppressed
+    customer key)."""
     target = _automation_control_resolve_customer_target(code)
     if not target:
         return None
@@ -1219,6 +1309,10 @@ def _automation_control_apply_owner(
         to_mode, reason, audit_reason = (
             automation_control.MODE_TAKEOVER, "owner_takeover",
             "automation_control_owner_takeover")
+    elif verb == automation_control.MODE_PAUSED:
+        to_mode, reason, audit_reason = (
+            automation_control.MODE_PAUSED, "owner_pause",
+            "automation_control_owner_pause")
     else:
         to_mode, reason, audit_reason = (
             automation_control.MODE_ACTIVE, "owner_release",
@@ -5401,116 +5495,25 @@ def _parse_headcount_from_signals(signals: list[str]) -> Optional[int]:
     return None
 
 
-_MONTH_NUMBERS = {
-    "jan": 1,
-    "january": 1,
-    "feb": 2,
-    "february": 2,
-    "mar": 3,
-    "march": 3,
-    "apr": 4,
-    "april": 4,
-    "may": 5,
-    "jun": 6,
-    "june": 6,
-    "jul": 7,
-    "july": 7,
-    "aug": 8,
-    "august": 8,
-    "sep": 9,
-    "sept": 9,
-    "september": 9,
-    "oct": 10,
-    "october": 10,
-    "nov": 11,
-    "november": 11,
-    "dec": 12,
-    "december": 12,
-}
-_MONTH_DAY_RE = re.compile(
-    r"\b("
-    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
-    r"jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
-    r")\s+(\d{1,2})(?:st|nd|rd|th)?(?:,\s*(\d{4}))?\b",
-    re.IGNORECASE,
-)
-_NON_VEG_COUNT_RE = re.compile(
-    r"\b(\d{1,5})\s+(?:people\s+)?(?:non[\s-]?vegetarians?|non[\s-]?veg(?:etarians?)?)\b",
-    re.IGNORECASE,
-)
-_VEG_COUNT_RE = re.compile(
-    r"\b(\d{1,5})\s+(?:people\s+)?(?:vegetarians?|veg(?:etarians?)?)\b",
-    re.IGNORECASE,
-)
-_REQUESTED_MENU_COUNT_RE = re.compile(
-    r"\b(\d+|one|two|three)\s+(?:sample\s+)?(?:combinations?\s+)?menus?\b",
-    re.IGNORECASE,
-)
-_COUNT_WORDS = {"one": 1, "two": 2, "three": 3}
-
-
 def _parse_month_day_event_date(text: str) -> Optional[str]:
-    match = _MONTH_DAY_RE.search(text or "")
-    if not match:
-        return None
-    month_label = match.group(1).lower()
-    month = _MONTH_NUMBERS.get(month_label)
-    day = int(match.group(2))
-    if month is None:
-        return None
-    today = datetime.now(timezone.utc).date()
-    year = int(match.group(3)) if match.group(3) else today.year
-    try:
-        candidate = datetime(year, month, day, tzinfo=timezone.utc).date()
-    except ValueError:
-        return None
-    if not match.group(3) and candidate < today:
-        try:
-            candidate = datetime(year + 1, month, day, tzinfo=timezone.utc).date()
-        except ValueError:
-            return None
-    return candidate.isoformat()
+    """Month-NAME event date -> ISO. Delegates to the shared platform grammar.
+
+    DELIBERATELY the NARROW parser: this is what `_inbound_event_identity` feeds
+    the fresh-vs-stale discriminator, whose rules are ruled binding. The widened
+    grammar (numeric "6/15" dates) lives in catering_extraction.parse_event_date
+    and is reached only through the extractor, so which follow-ups count as
+    contradicting a different event is byte-identical to the deployed behavior.
+    """
+    return catering_extraction.parse_month_day_event_date(text)
 
 
 def _extract_catering_fields_from_text(text: str, signals: list[str]) -> Optional[dict]:
-    fields: dict[str, Any] = {}
-    notes: list[str] = []
-
-    headcount = _parse_headcount_from_signals(signals or [])
-    if headcount is not None:
-        fields["headcount"] = headcount
-
-    event_date = _parse_month_day_event_date(text)
-    if event_date:
-        fields["event_date"] = event_date
-
-    dietary: list[str] = []
-    non_veg_match = _NON_VEG_COUNT_RE.search(text or "")
-    veg_match = _VEG_COUNT_RE.search(text or "")
-    if non_veg_match:
-        dietary.append("non-veg")
-        notes.append(f"{int(non_veg_match.group(1))} non-veg")
-    elif re.search(r"\bnon[\s-]?veg(?:etarian)?s?\b", text or "", re.IGNORECASE):
-        dietary.append("non-veg")
-    if veg_match:
-        dietary.append("veg")
-        notes.append(f"{int(veg_match.group(1))} veg")
-    elif re.search(r"\b(?:vegetarian|veg)\b", text or "", re.IGNORECASE):
-        dietary.append("veg")
-    if dietary:
-        # Preserve stable order while avoiding duplicates.
-        fields["dietary_restrictions"] = [value for value in ("veg", "non-veg") if value in set(dietary)]
-
-    count_match = _REQUESTED_MENU_COUNT_RE.search(text or "")
-    if count_match:
-        raw_count = count_match.group(1).lower()
-        count = _COUNT_WORDS.get(raw_count, int(raw_count) if raw_count.isdigit() else 0)
-        if count:
-            notes.append(f"requested {count} sample menu combinations")
-
-    if notes:
-        fields["notes"] = "; ".join(notes)
-    return fields or None
+    """Deterministic extracted-fields dict for an inbound. Delegates to the shared
+    platform module so `amend-catering-lead` (a script, which cannot import this
+    hyphenated plugin package) parses amendments with the EXACT same grammar the
+    lead was created with — two copies would drift, and the amendment path exists
+    to keep the lead in agreement with what the customer said."""
+    return catering_extraction.extract_catering_fields(text, signals or [])
 
 
 def _lead_id_from_create_detail(detail: str) -> str:
@@ -5544,6 +5547,32 @@ def _maybe_generate_catering_proposals_for_new_lead(
         subprocess_rc=rc,
         detail=f"new {lead_id}; proposal request handled by cf-router",
     )
+
+
+def _sender_has_qualifying_lead(chat_id: str) -> bool:
+    """True when this sender has an OPEN lead parked mid-intake (QUALIFYING).
+
+    M1 admission widening. The F7 gate admits on catering signals, but a slot-filling
+    ANSWER carries none — "Grand Ballroom" or "about 80" classifies as nothing, so
+    without this the reply to our own question would go to the LLM and the intake
+    loop would silently break at question one. Only consulted when the cheap signal
+    checks have already failed. Never raises (a lookup failure falls back to the
+    pre-M1 admission set).
+
+    Ordered cheap-first: identity resolution spawns `identify-sender`, so a store
+    with no QUALIFYING lead at all short-circuits on one file read rather than adding
+    a subprocess to every non-catering inbound.
+    """
+    try:
+        if not actions.any_qualifying_lead_exists():
+            return False
+        phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+        if role == "owner":
+            return False
+        lead = actions.find_active_catering_lead_by_sender(phone, chat_id)
+        return bool(lead) and lead.get("status") == "QUALIFYING"
+    except Exception:  # noqa: BLE001 — admission widening must never break routing
+        return False
 
 
 def _has_f7_followup_signal(signals: list[str]) -> bool:
@@ -5595,6 +5624,10 @@ def _create_catering_lead_from_inbound(
     # A new inquiry WITHOUT a proposal ask keeps the F14 menu as its one response.
     will_generate_proposals = actions.is_proposal_request(text)
 
+    # M1 qualification gate. Gated ONLY when we are not about to generate proposals:
+    # turn arbitration allows the customer exactly ONE bounded response per inbound,
+    # and a proposal ask already claims it. A gated create sends the question batch
+    # instead of the F14 sample menu — still one send.
     ok, detail = actions.trigger_create_catering_lead(
         customer_phone=customer_phone_arg,
         customer_name="",
@@ -5602,6 +5635,7 @@ def _create_catering_lead_from_inbound(
         message_id=message_id,
         extracted_fields=extracted,
         suppress_customer_ack=will_generate_proposals,
+        qualification_gate=f7_qualification_gate_enabled() and not will_generate_proposals,
     )
     actions.audit_intercepted(
         reason="f7_primary_new_inquiry", chat_id=chat_id,
@@ -5713,6 +5747,10 @@ def _open_fresh_lead_over_stale(*, text: str, chat_id: str, message_id: str,
         message_id=message_id,
         extracted_fields=extracted,
         suppress_customer_ack=suppress_customer_ack,
+        # Same one-bounded-response rule as Branch A: when a proposal set is about
+        # to be generated for this new lead it IS the turn's response, so the
+        # qualification questions must not also fire.
+        qualification_gate=f7_qualification_gate_enabled() and not suppress_customer_ack,
     )
     new_lead_id = _lead_id_from_create_detail(detail) if ok else ""
     if not ok or not new_lead_id:
@@ -5759,6 +5797,87 @@ def _generate_proposals_deterministically(
     if rc in {0, 2, 4, 6, 11}:
         return {"action": "skip",
                 "reason": f"cf-router F7 primary: proposals generated deterministically for {lead_id}"}
+    return None
+
+
+# F7 ACCEPTANCE ARM (M3). A customer whose quote has been SENT replies "we accept"
+# — and before M3 nothing anywhere handled it. SENT_TO_CUSTOMER is deliberately NOT
+# in ACTIONABLE_LEAD_STATUSES, so `find_active_catering_lead_by_sender` returns
+# None, F7 Branch B never runs, and the message either created a SPURIOUS SECOND
+# LEAD (if it happened to classify as catering) or went to the LLM. Neither books
+# anything, so the booking existed nowhere.
+#
+# This arm needs its OWN admission because the F7 gate above admits on catering
+# signals and "we accept" carries none — the same reason M1 had to add the
+# QUALIFYING lead lookup for slot-filling answers.
+#
+# Cost discipline on the hot path, cheapest first: a pure-regex detector that
+# returns None for virtually every inbound, THEN one tolerant file read, and only
+# then the `identify-sender` subprocess. A bare "ok" is common, so the file-read
+# gate matters.
+#
+# Armed by CATERING_ACCEPTANCE_ARM=1 — DEFAULT OFF (see f7_acceptance_arm_enabled).
+
+
+def _try_catering_acceptance_intercept(
+    text: str, chat_id: str, event: Any, *, flyer_generation_enabled: bool = False,
+) -> Optional[dict]:
+    """Record a customer's explicit accept/decline of a quote already sent to them.
+
+    Returns a skip dict when the acceptance writer handled the turn, else None so
+    the inbound takes its existing route completely unchanged.
+
+    Precedence deliberately CEDED, in order:
+      * amendment-phrased text ("actually we accept but move the date") keeps the
+        R2A durable-capture path — the change matters more than the yes, and the
+        capture path is where changes are preserved;
+      * an owner inbound never books on a customer's behalf (that is
+        `mark-catering-lead-outcome`, an owner-identified audit path);
+      * a sender with a live flyer project is left to the existing flyer/catering
+        routing rather than claimed here — mirrors the same guard the F7 catering
+        block applies, so this arm cannot re-open the conflict class R2B-1 closed.
+    """
+    if not f7_acceptance_arm_enabled():
+        return None
+    detected = actions.detect_quote_acceptance(text)
+    if detected is None:
+        return None
+    if actions.is_amendment_phrased(text):
+        return None
+    if not actions.any_post_quote_lead_exists():
+        return None
+
+    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    if role == "owner":
+        return None
+    if flyer_generation_enabled and actions.has_non_delivered_flyer_project_by_sender(
+        phone, chat_id
+    ):
+        return None
+
+    lead = actions.find_post_quote_catering_lead_by_sender(phone, chat_id)
+    if not lead:
+        return None
+    lead_id = lead.get("lead_id", "?")
+    message_id = _extract_native_message_id(event) or _extract_message_id(event, chat_id, text)
+
+    rc = actions.invoke_record_catering_acceptance(
+        lead_id, chat_id, message_id, text, sender_role=role or "customer",
+    )
+    actions.audit_intercepted(
+        reason="f7_quote_acceptance", chat_id=chat_id,
+        code=lead.get("owner_approval_code") or "", subprocess_rc=rc,
+        detail=(f"post-quote {lead_id}; detector={detected['outcome']}; "
+                f"recorded deterministically by cf-router; LLM bypassed"),
+    )
+    # 0 = recorded / clarified / replay, 6 = recorded but the reply POST failed,
+    # 14 = held (nothing sent, deliberately). All three mutated or deliberately
+    # declined to act on state the script owns, so re-running the inbound through
+    # the LLM would double-handle it. Anything else (no signal server-side,
+    # not-found, schema, illegal transition) falls through untouched.
+    if rc in {0, 6, 14}:
+        return {"action": "skip",
+                "reason": f"cf-router F7: quote acceptance recorded for {lead_id}"}
     return None
 
 
@@ -5925,6 +6044,32 @@ def _try_f7_primary_intercept(
                                    f"opened over stale {lead_id}")}
             # Creation could not complete — fall through to the durable capture below
             # so the inbound is never lost.
+        elif (f7_qualification_gate_enabled()
+                and active_lead.get("status") == "QUALIFYING"):
+            # M1 slot-filling answer. Placed AFTER the contradiction check so the
+            # ruled fresh-vs-stale discriminator still owns a message that
+            # contradicts a field the lead already has (that is a different event,
+            # not an answer) — this arm only ever fills nulls. Placed BEFORE the
+            # proposal / ambiguous arms and NOT gated on `is_inquiry`, because a
+            # bare answer ("Grand Ballroom") carries no catering signal at all.
+            rc = actions.invoke_amend_catering_lead(
+                lead_id, mode="answer", answer_text=text,
+                message_id=_extract_native_message_id(event),
+            )
+            actions.audit_intercepted(
+                reason="f7_qualification_answer", chat_id=chat_id,
+                code=approval_code, subprocess_rc=rc,
+                detail=(f"active {lead_id} status=QUALIFYING; slot-filling answer "
+                        f"applied by cf-router; LLM bypassed"),
+            )
+            if rc in {0, 6}:
+                # 0 = applied and answered; 6 = applied but a notification send
+                # failed. Both mutated state, so re-running the inbound through the
+                # LLM would double-handle it. Anything else (not-found, schema,
+                # illegal transition) falls through to the durable R2A capture, so
+                # the answer is never lost.
+                return {"action": "skip",
+                        "reason": f"cf-router F7 primary: qualification answer applied to {lead_id}"}
         elif proposal_escape:
             if actions.is_mix_and_match_request(text):
                 # Mix-and-match recompose stays with Hermes: the catering_dispatcher
@@ -5985,6 +6130,26 @@ def _try_f7_primary_intercept(
         provider_timestamp=_event_provider_timestamp(event),
     )
     if capture.ok:
+        # M1 — APPLY what R2A captured. Until this call the sidecar was write-only:
+        # the correction was durably stored and the owner still approved the
+        # pre-amendment numbers (the data-integrity gap documented above). Runs only
+        # on a NEW capture (a replay has nothing new to apply) and only after the
+        # capture returned ok, so the sidecar lock is already released. Guarded and
+        # fail-safe exactly like the other subprocess invokes on this path: any
+        # non-zero rc is audited and the canonical reply still goes out — the
+        # amendment stays unapplied in the sidecar and the next application run
+        # picks it up, rather than the customer being told nothing was recorded.
+        if f7_qualification_gate_enabled() and not capture.idempotent:
+            apply_rc = actions.invoke_amend_catering_lead(
+                lead_id, mode="amendment",
+                message_id=_extract_native_message_id(event),
+            )
+            actions.audit_intercepted(
+                reason="f7_primary_amendment_applied", chat_id=chat_id,
+                code=approval_code, subprocess_rc=apply_rc,
+                detail=(f"active {lead_id}; amendment {capture.amendment_id} "
+                        f"application rc={apply_rc}"),
+            )
         # captured OR replay — identical canonical reply, gated by the existing
         # UX flag so silent-suppression mode is preserved exactly as before R2A.
         if F7_PRIMARY_FOLLOWUP_REPLY:

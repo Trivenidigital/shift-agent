@@ -50,7 +50,10 @@ APPLY_MENU_UPDATE_BIN = Path("/usr/local/bin/apply-menu-update")
 NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
 CREATE_LEAD_BIN = Path("/usr/local/bin/create-catering-lead")  # F7 path
 CREATE_CATERING_PROPOSALS_BIN = Path("/usr/local/bin/create-catering-proposal-options")
+AMEND_CATERING_LEAD_BIN = Path("/usr/local/bin/amend-catering-lead")  # M1 apply path
+APPROVE_CATERING_FOLLOWUP_BIN = Path("/usr/local/bin/approve-catering-followup")  # M5
 SELECT_CATERING_PROPOSAL_BIN = Path("/usr/local/bin/select-catering-proposal")
+RECORD_CATERING_ACCEPTANCE_BIN = Path("/usr/local/bin/record-catering-acceptance")  # M3
 CREATE_FLYER_PROJECT_BIN = Path("/usr/local/bin/create-flyer-project")
 BARE_FLYER_SEND_BIN = Path("/usr/local/bin/bare-flyer-render-and-send")  # Approach B async render+send
 HANDLE_SHIFT_SICK_CALL_BIN = Path("/usr/local/bin/handle-shift-sick-call")
@@ -309,6 +312,22 @@ ACTIONABLE_LEAD_STATUSES = frozenset({
     "OWNER_EDITED", "OWNER_APPROVED",
 })
 
+# M1: statuses a lead can be in and still be the sender's OPEN lead. QUALIFYING is
+# added here but deliberately NOT to ACTIONABLE_LEAD_STATUSES: the sender lookup
+# must find a mid-intake lead (otherwise the customer's answer would be read as a
+# brand-new inquiry and mint a second lead), while the `#XXXXX` code lookup must
+# NOT — the owner has not been shown a card for a QUALIFYING lead, so there is no
+# code in their hands, and treating one as actionable would only widen the surface
+# a screenshot-forwarded code can reach.
+OPEN_LEAD_STATUSES = ACTIONABLE_LEAD_STATUSES | frozenset({"QUALIFYING"})
+
+# M3: the statuses in which a customer's accept/decline of the quote is meaningful.
+# Deliberately its OWN set rather than an addition to ACTIONABLE/OPEN: widening
+# those would change F7 follow-up routing, the `#XXXXX` code lookup surface and the
+# R2B-1 conflict gate all at once, for a status that only ONE new arm cares about.
+# `record-catering-acceptance` re-checks this server-side; this copy is admission.
+POST_QUOTE_LEAD_STATUSES = frozenset({"SENT_TO_CUSTOMER"})
+
 
 def find_catering_lead_by_code(code: str) -> Optional[dict]:
     """Look up a non-terminal catering lead by owner_approval_code.
@@ -397,13 +416,32 @@ def find_active_catering_lead_by_sender(
          (legacy LID-as-fake-phone persistence — the actual deployed shape
          in L0004..L0010 as of 2026-05-12)
 
-    Non-terminal set: ACTIONABLE_LEAD_STATUSES (shared with
-    find_catering_lead_by_code; includes OWNER_APPROVED to cover the brief
-    transient state between owner-approve and quote-sent). Returns the
+    Non-terminal set: OPEN_LEAD_STATUSES (ACTIONABLE_LEAD_STATUSES — which includes
+    OWNER_APPROVED to cover the brief transient state between owner-approve and
+    quote-sent — plus M1's QUALIFYING, so a customer answering an intake question is
+    matched to their open lead instead of minting a second one). Returns the
     most-recent matching lead (sorted by created_at desc), or None.
     """
     leads = find_all_eligible_catering_leads_by_sender(phone, chat_id)
     return leads[0] if leads else None
+
+
+def any_qualifying_lead_exists() -> bool:
+    """True when ANY lead in the store is mid-intake (QUALIFYING).
+
+    M1 cheap pre-check for the F7 admission widening. Resolving sender identity runs
+    `identify-sender` as a SUBPROCESS; doing that on every non-catering inbound just
+    to discover there is no intake loop open would add a process spawn to the hot
+    path for messages that previously did nothing here. One tolerant file read
+    answers it instead, and the identity resolution only happens when at least one
+    lead is actually waiting on an answer. Never raises, never writes."""
+    try:
+        with LEADS_PATH.open() as f:
+            store = json.load(f)
+        return any(lead.get("status") == "QUALIFYING"
+                   for lead in store.get("leads", []))
+    except Exception:
+        return False
 
 
 def find_all_eligible_catering_leads_by_sender(
@@ -452,7 +490,7 @@ def find_all_eligible_catering_leads_by_sender(
         except Exception:
             sender_key = ""
         for lead in store.get("leads", []):
-            if lead.get("status") not in ACTIONABLE_LEAD_STATUSES:
+            if lead.get("status") not in OPEN_LEAD_STATUSES:
                 continue
             cp = lead.get("customer_phone")
             cl = lead.get("customer_lid")
@@ -484,6 +522,97 @@ def find_all_eligible_catering_leads_by_sender(
         return matches
     except Exception:
         return []
+
+
+def any_post_quote_lead_exists() -> bool:
+    """M3: True when ANY lead is awaiting a customer decision (SENT_TO_CUSTOMER).
+
+    Cheap pre-check for the acceptance arm, mirroring `any_qualifying_lead_exists`:
+    resolving sender identity spawns `identify-sender`, and a bare "ok" is one of
+    the most common inbounds there is. One tolerant file read answers "is anyone
+    waiting on a decision at all?" so the subprocess only runs when the answer is
+    yes. Never raises, never writes."""
+    try:
+        with LEADS_PATH.open() as f:
+            store = json.load(f)
+        return any(lead.get("status") in POST_QUOTE_LEAD_STATUSES
+                   for lead in store.get("leads", []))
+    except Exception:
+        return False
+
+
+def find_post_quote_catering_lead_by_sender(
+    phone: Optional[str], chat_id: Optional[str],
+) -> Optional[dict]:
+    """M3: the sender's most-recent lead that is awaiting their decision, or None.
+
+    Uses the SAME 4-priority sender association as
+    find_all_eligible_catering_leads_by_sender (phone / LID / LID-as-fake-phone /
+    canonical-identity fallback) but over POST_QUOTE_LEAD_STATUSES, which
+    OPEN_LEAD_STATUSES deliberately excludes — which is exactly why a customer
+    replying "we accept" reached no arm at all before M3. Never raises, never
+    writes."""
+    if not phone and not chat_id:
+        return None
+
+    lid_digits: Optional[str] = None
+    if chat_id and chat_id.endswith("@lid"):
+        digits_part = chat_id[: -len("@lid")]
+        if digits_part.isdigit():
+            lid_digits = digits_part
+
+    try:
+        with LEADS_PATH.open() as f:
+            store = json.load(f)
+        try:
+            sender_key = flyer_canonical_identity_key(chat_id or "", phone)
+        except Exception:
+            sender_key = ""
+        direct_matches: list[dict] = []
+        canonical_matches: list[dict] = []
+        for lead in store.get("leads", []):
+            if lead.get("status") not in POST_QUOTE_LEAD_STATUSES:
+                continue
+            cp = lead.get("customer_phone")
+            cl = lead.get("customer_lid")
+            if phone and cp == phone:
+                direct_matches.append(lead)
+                continue
+            if chat_id and cl == chat_id:
+                direct_matches.append(lead)
+                continue
+            if lid_digits and cp == f"+{lid_digits}":
+                direct_matches.append(lead)
+                continue
+            if sender_key:
+                try:
+                    lead_key = flyer_canonical_identity_key(cl or "", cp)
+                except Exception:
+                    lead_key = ""
+                if lead_key and lead_key == sender_key:
+                    canonical_matches.append(lead)
+        matches = direct_matches if direct_matches else canonical_matches
+        matches.sort(key=lambda l: l.get("created_at", ""), reverse=True)
+        return matches[0] if matches else None
+    except Exception:
+        return None
+
+
+def detect_quote_acceptance(text: str) -> Optional[dict]:
+    """M3: thin delegation to the shared deterministic grammar.
+
+    The SAME function `record-catering-acceptance` runs, so the router and the
+    writer can never disagree about what the customer said — the router only
+    decides admission, the script remains the authority. Fail-safe: if the
+    platform module cannot be imported, no acceptance is claimed and the inbound
+    takes its existing route."""
+    try:
+        _ensure_platform_path()
+        from catering_extraction import detect_quote_acceptance as _detect  # type: ignore
+
+        return _detect(text)
+    except Exception:
+        return None
 
 
 def find_menu_pending_by_code(code: str) -> Optional[dict]:
@@ -565,6 +694,29 @@ def invoke_apply_owner_decision(code: str, decision: str,
         return 1
 
 
+def invoke_approve_catering_followup(code: str, decision: str) -> int:
+    """Invoke approve-catering-followup (M5); returns exit code.
+
+    `decision` is "approve" or "cancel". --sender-role owner is passed explicitly
+    because the script's privilege check requires it and cf-router only reaches
+    this from the owner self-chat surface — the same reasoning (and the same
+    PR-CF1c bug class) as invoke_apply_owner_decision above.
+    """
+    try:
+        env = {**os.environ, "PYTHONPATH": str(PLATFORM_DIR)}
+        cmd = [str(PYTHON_BIN), str(APPROVE_CATERING_FOLLOWUP_BIN),
+               "--code", code, "--decision", decision, "--sender-role", "owner"]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            env=env, timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        return 124
+    except Exception:
+        return 1
+
+
 def invoke_apply_menu_update(code: str, decision: str) -> int:
     """Invoke apply-menu-update; returns exit code."""
     try:
@@ -608,6 +760,33 @@ def invoke_select_catering_proposal(lead_id: str, chat_id: str, message_id: str,
         return 1
 
 
+def invoke_record_catering_acceptance(lead_id: str, chat_id: str, message_id: str,
+                                      text: str, sender_role: str = "customer") -> int:
+    """M3: invoke record-catering-acceptance; returns its exit code.
+
+    `--sender-role` is forwarded so the script can refuse an owner message booking
+    on a customer's behalf even if this router's role check ever regresses."""
+    try:
+        result = subprocess.run(
+            [
+                str(PYTHON_BIN),
+                str(RECORD_CATERING_ACCEPTANCE_BIN),
+                "--lead-id", lead_id,
+                "--customer-jid", chat_id,
+                "--customer-message-id", message_id,
+                "--message-text", text,
+                "--sender-role", sender_role or "customer",
+            ],
+            capture_output=True, text=True,
+            env=os.environ.copy(), timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        return 124
+    except Exception:
+        return 1
+
+
 def invoke_create_catering_proposals(lead_id: str, chat_id: str, message_id: str,
                                      text: str) -> int:
     """Invoke create-catering-proposal-options in deterministic menu mode."""
@@ -626,6 +805,45 @@ def invoke_create_catering_proposals(lead_id: str, chat_id: str, message_id: str
                 "--auto-generate-from-menu",
             ],
             capture_output=True, text=True,
+            env=os.environ.copy(), timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        return 124
+    except Exception:
+        return 1
+
+
+def invoke_amend_catering_lead(lead_id: str, *, mode: str = "amendment",
+                               answer_text: str = "", message_id: str = "") -> int:
+    """Invoke amend-catering-lead; returns its exit code.
+
+    M1. `mode="amendment"` materialises the captured-but-unapplied R2A sidecar
+    records onto the lead (the application half of a capture that was write-only);
+    `mode="answer"` applies ONE slot-filling answer to a QUALIFYING lead. The script
+    owns every send it causes (owner card / customer reply) and every audit row, so
+    this wrapper stays a thin, fail-safe subprocess invoke like its siblings.
+
+    The answer text goes over STDIN, never argv: it is raw customer text, and a
+    reply that starts with a dash ("-veg", "--help", "-80") is read by the script's
+    argparse as a flag — SystemExit 2 — which looked to the caller like "answer mode
+    could not handle it" and dropped the inbound into the R2A capture path, where it
+    was applied in OVERWRITE mode instead of fill-nulls. Same reason
+    apply-catering-owner-decision takes its drafted quote on --quote-text-stdin.
+    """
+    argv = [
+        str(PYTHON_BIN), str(AMEND_CATERING_LEAD_BIN),
+        "--lead-id", lead_id, "--mode", mode,
+    ]
+    stdin_text: Optional[str] = None
+    if answer_text:
+        stdin_text = answer_text[:4000]
+        argv.append("--answer-text-stdin")
+    if message_id:
+        argv += ["--message-id", message_id]
+    try:
+        result = subprocess.run(
+            argv, input=stdin_text, capture_output=True, text=True,
             env=os.environ.copy(), timeout=SUBPROCESS_TIMEOUT_SEC,
         )
         return result.returncode
@@ -7167,8 +7385,15 @@ def trigger_create_catering_lead(
     customer_phone: str, customer_name: str, raw_inquiry: str, message_id: str,
     extracted_fields: Optional[dict] = None,
     suppress_customer_ack: bool = False,
+    qualification_gate: bool = False,
 ) -> tuple[bool, str]:
     """Invoke create-catering-lead.
+
+    `qualification_gate` (M1 2026-07-31): when True, pass `--qualification-gate` so
+    a lead below minimum qualification parks in QUALIFYING and the customer is asked
+    for the missing fields, instead of an owner approval card firing for an event
+    whose date, size, venue and style are all unknown. Default False preserves every
+    caller that passes already-complete fields (the LLM SKILL path, the rescue path).
 
     `suppress_customer_ack` (turn-arbitration 2026-07-26): when True, pass
     `--suppress-customer-ack` so create-catering-lead sends the owner approval card
@@ -7219,6 +7444,8 @@ def trigger_create_catering_lead(
     ]
     if suppress_customer_ack:
         argv.append("--suppress-customer-ack")
+    if qualification_gate:
+        argv.append("--qualification-gate")
     try:
         result = subprocess.run(
             argv,
