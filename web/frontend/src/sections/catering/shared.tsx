@@ -53,6 +53,7 @@ export function leadStatusTone(status: string): Tone {
       return "blue";
     case "OWNER_APPROVED":
     case "SENT_TO_CUSTOMER":
+    case "BOOKED":
     case "CLOSED":
       return "green";
     case "OWNER_REJECTED":

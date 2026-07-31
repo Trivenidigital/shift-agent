@@ -857,3 +857,153 @@ def test_owner_actions_are_audited(tmp_path, monkeypatch):
     assert len(hold_rows) == 1
     assert hold_rows[0]["details"]["lead_id"] == "L0001"
     assert hold_rows[0]["details"]["returncode"] == 0
+
+
+# ── F9: quote_version comes from the ledger, not the dead lead field ─────────
+# CateringLead.quote_version exists in the schema but nothing has ever written
+# it, so the Studio showed "0 versions" for a lead with a full committed
+# history — while latest_quote_total_usd, joined from the ledger and rendered in
+# the very next column, was correct. The fixture leaves the lead field set to 1
+# precisely so a regression cannot pass by echoing it back.
+def _ledger_doc(*versions: tuple[str, int, int]) -> dict:
+    return {
+        "schema_version": 1,
+        "next_seq": len(versions) + 1,
+        "records": [
+            {"ledger_entry_id": f"Q{i:04d}", "lead_id": lead_id, "version": version,
+             "quote_text": f"v{version}", "quote_total_usd": total,
+             "selected_items": [{"name": "Paneer Tikka", "qty": 10, "price_usd": 12}],
+             "source": "owner_edit", "created_at": _NOW,
+             "menu_version": 3, "pricebook_version": 2, "price_status": "priced"}
+            for i, (lead_id, version, total) in enumerate(versions, start=1)
+        ],
+    }
+
+
+def test_lead_row_quote_version_counts_committed_ledger_versions(tmp_path, monkeypatch):
+    pytest.importorskip("jose")
+    settings = _seed(tmp_path, leads=_leads_store(_lead("L0001")))
+    _write_json(settings.state_dir / "catering-quote-ledger.json",
+                _ledger_doc(("L0001", 1, 1000), ("L0001", 2, 1240)))
+
+    client = _authed_client(monkeypatch)
+    row = client.get("/catering/leads").json()["leads"][0]
+
+    assert row["quote_version"] == 2, "two committed versions, not the lead's stale 1"
+    # The column beside it was always right — both now come from the one join.
+    assert row["latest_quote_total_usd"] == 1240
+
+
+def test_lead_row_quote_version_is_zero_with_no_ledger_history(tmp_path, monkeypatch):
+    """The honest answer for a lead that has never had a quote committed — and
+    the case the dead lead field got accidentally right, which is why the bug
+    survived."""
+    pytest.importorskip("jose")
+    _seed(tmp_path, leads=_leads_store(_lead("L0001")))
+
+    client = _authed_client(monkeypatch)
+    row = client.get("/catering/leads").json()["leads"][0]
+
+    assert row["quote_version"] == 0
+    assert row["latest_quote_total_usd"] is None
+
+
+def test_lead_row_quote_version_is_per_lead(tmp_path, monkeypatch):
+    pytest.importorskip("jose")
+    settings = _seed(tmp_path, leads=_leads_store(
+        _lead("L0001"), _lead("L0002"),
+    ))
+    _write_json(settings.state_dir / "catering-quote-ledger.json",
+                _ledger_doc(("L0001", 1, 1000), ("L0001", 2, 1240), ("L0002", 1, 500)))
+
+    client = _authed_client(monkeypatch)
+    rows = {r["lead_id"]: r for r in client.get("/catering/leads").json()["leads"]}
+
+    assert rows["L0001"]["quote_version"] == 2
+    assert rows["L0002"]["quote_version"] == 1
+
+
+def test_lead_detail_quote_version_matches_its_version_history(tmp_path, monkeypatch):
+    pytest.importorskip("jose")
+    settings = _seed(tmp_path, leads=_leads_store(_lead("L0001")))
+    _write_json(settings.state_dir / "catering-quote-ledger.json",
+                _ledger_doc(("L0001", 1, 1000), ("L0001", 2, 1240)))
+
+    client = _authed_client(monkeypatch)
+    body = client.get("/catering/leads/L0001").json()
+
+    assert body["quote_version"] == 2
+    assert body["quote_version"] == max(v["version"] for v in body["quote_versions"]), \
+        "the headline number must agree with the list rendered under it"
+
+
+def test_lead_detail_quote_version_is_zero_when_the_ledger_is_unreadable(tmp_path, monkeypatch):
+    """Degraded, not wrong: an unreadable ledger reports 0 versions AND says so,
+    rather than quietly echoing a lead field nobody writes."""
+    pytest.importorskip("jose")
+    settings = _seed(tmp_path, leads=_leads_store(_lead("L0001")))
+    (settings.state_dir / "catering-quote-ledger.json").write_text("nope", encoding="utf-8")
+
+    client = _authed_client(monkeypatch)
+    body = client.get("/catering/leads/L0001").json()
+
+    assert body["quote_version"] == 0
+    assert body["quote_ledger_available"] is False
+    assert any("quote ledger" in d for d in body["degraded"])
+
+
+# ── F10: BOOKED is M3's won state and must be visible ────────────────────────
+def test_booked_leads_count_toward_booked_this_month(tmp_path, monkeypatch):
+    pytest.importorskip("jose")
+    from app.routers import catering
+
+    # Pin the clock: the month bucket is computed from wall-clock time, so a
+    # fixture dated _NOW would otherwise stop matching next month.
+    monkeypatch.setattr(catering, "_now",
+                        lambda: datetime.fromisoformat(_NOW))
+    _seed(tmp_path, leads=_leads_store(
+        _lead("L0001", status="BOOKED"),
+        _lead("L0002", status="CLOSED"),
+        _lead("L0003", status="SENT_TO_CUSTOMER"),
+    ))
+
+    client = _authed_client(monkeypatch)
+    counts = client.get("/catering/dashboard").json()["counts"]
+
+    assert counts["booked_this_month"] == 2, "a conversion counts before it is closed out"
+    assert counts["proposals_sent"] == 1
+    assert counts["lost_this_month"] == 0, "BOOKED is not a loss"
+
+
+def test_a_booked_lead_has_a_next_action(tmp_path, monkeypatch):
+    """A lead the customer just ACCEPTED read "No action" — the one row in the
+    list that most needs one."""
+    pytest.importorskip("jose")
+    _seed(tmp_path, leads=_leads_store(_lead("L0001", status="BOOKED")))
+
+    client = _authed_client(monkeypatch)
+    row = client.get("/catering/leads").json()["leads"][0]
+
+    assert row["next_action"] != "No action"
+    assert "Booked" in row["next_action"]
+
+
+def test_every_lead_status_has_a_next_action(tmp_path, monkeypatch):
+    """Drift guard: the next-action map is keyed by status string, so a status
+    added to CateringLeadStatus without a mapping silently degrades to "No
+    action" — exactly how BOOKED went missing."""
+    pytest.importorskip("jose")
+    from typing import get_args  # noqa: PLC0415
+
+    from schemas import CateringLeadStatus  # noqa: PLC0415 — conftest puts src/platform on the path
+
+    statuses = get_args(CateringLeadStatus)
+    _seed(tmp_path, leads=_leads_store(
+        *[_lead(f"L{i:04d}", status=s) for i, s in enumerate(statuses, start=1)]
+    ))
+
+    client = _authed_client(monkeypatch)
+    rows = client.get("/catering/leads").json()["leads"]
+
+    unmapped = sorted(r["status"] for r in rows if r["next_action"] == "No action")
+    assert unmapped == [], f"statuses with no owner-facing next action: {unmapped}"
