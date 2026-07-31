@@ -50,6 +50,12 @@ import approval_code_pools  # type: ignore  # noqa: E402
 # approval_code_pools above so an import failure surfaces LOUD at plugin-load
 # time, not silently at the first suppressed amendment.
 import catering_amendments  # type: ignore  # noqa: E402
+# M1: deterministic catering field extraction + minimum-qualification state.
+# Imported flat like the modules above so an import failure surfaces LOUD at
+# plugin-load time rather than at the first catering inbound. Both are pure
+# stdlib (regex + dict shaping) — no IO, no LLM, no network.
+import catering_extraction  # type: ignore  # noqa: E402
+import catering_qualification  # type: ignore  # noqa: E402
 # PR-5: deterministic per-conversation automation-control kernel (STOP/pause/
 # opt-out + human takeover). Imported flat like the modules above so an import
 # failure surfaces LOUD at plugin-load time. DORMANT behind
@@ -5401,116 +5407,25 @@ def _parse_headcount_from_signals(signals: list[str]) -> Optional[int]:
     return None
 
 
-_MONTH_NUMBERS = {
-    "jan": 1,
-    "january": 1,
-    "feb": 2,
-    "february": 2,
-    "mar": 3,
-    "march": 3,
-    "apr": 4,
-    "april": 4,
-    "may": 5,
-    "jun": 6,
-    "june": 6,
-    "jul": 7,
-    "july": 7,
-    "aug": 8,
-    "august": 8,
-    "sep": 9,
-    "sept": 9,
-    "september": 9,
-    "oct": 10,
-    "october": 10,
-    "nov": 11,
-    "november": 11,
-    "dec": 12,
-    "december": 12,
-}
-_MONTH_DAY_RE = re.compile(
-    r"\b("
-    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
-    r"jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
-    r")\s+(\d{1,2})(?:st|nd|rd|th)?(?:,\s*(\d{4}))?\b",
-    re.IGNORECASE,
-)
-_NON_VEG_COUNT_RE = re.compile(
-    r"\b(\d{1,5})\s+(?:people\s+)?(?:non[\s-]?vegetarians?|non[\s-]?veg(?:etarians?)?)\b",
-    re.IGNORECASE,
-)
-_VEG_COUNT_RE = re.compile(
-    r"\b(\d{1,5})\s+(?:people\s+)?(?:vegetarians?|veg(?:etarians?)?)\b",
-    re.IGNORECASE,
-)
-_REQUESTED_MENU_COUNT_RE = re.compile(
-    r"\b(\d+|one|two|three)\s+(?:sample\s+)?(?:combinations?\s+)?menus?\b",
-    re.IGNORECASE,
-)
-_COUNT_WORDS = {"one": 1, "two": 2, "three": 3}
-
-
 def _parse_month_day_event_date(text: str) -> Optional[str]:
-    match = _MONTH_DAY_RE.search(text or "")
-    if not match:
-        return None
-    month_label = match.group(1).lower()
-    month = _MONTH_NUMBERS.get(month_label)
-    day = int(match.group(2))
-    if month is None:
-        return None
-    today = datetime.now(timezone.utc).date()
-    year = int(match.group(3)) if match.group(3) else today.year
-    try:
-        candidate = datetime(year, month, day, tzinfo=timezone.utc).date()
-    except ValueError:
-        return None
-    if not match.group(3) and candidate < today:
-        try:
-            candidate = datetime(year + 1, month, day, tzinfo=timezone.utc).date()
-        except ValueError:
-            return None
-    return candidate.isoformat()
+    """Month-NAME event date -> ISO. Delegates to the shared platform grammar.
+
+    DELIBERATELY the NARROW parser: this is what `_inbound_event_identity` feeds
+    the fresh-vs-stale discriminator, whose rules are ruled binding. The widened
+    grammar (numeric "6/15" dates) lives in catering_extraction.parse_event_date
+    and is reached only through the extractor, so which follow-ups count as
+    contradicting a different event is byte-identical to the deployed behavior.
+    """
+    return catering_extraction.parse_month_day_event_date(text)
 
 
 def _extract_catering_fields_from_text(text: str, signals: list[str]) -> Optional[dict]:
-    fields: dict[str, Any] = {}
-    notes: list[str] = []
-
-    headcount = _parse_headcount_from_signals(signals or [])
-    if headcount is not None:
-        fields["headcount"] = headcount
-
-    event_date = _parse_month_day_event_date(text)
-    if event_date:
-        fields["event_date"] = event_date
-
-    dietary: list[str] = []
-    non_veg_match = _NON_VEG_COUNT_RE.search(text or "")
-    veg_match = _VEG_COUNT_RE.search(text or "")
-    if non_veg_match:
-        dietary.append("non-veg")
-        notes.append(f"{int(non_veg_match.group(1))} non-veg")
-    elif re.search(r"\bnon[\s-]?veg(?:etarian)?s?\b", text or "", re.IGNORECASE):
-        dietary.append("non-veg")
-    if veg_match:
-        dietary.append("veg")
-        notes.append(f"{int(veg_match.group(1))} veg")
-    elif re.search(r"\b(?:vegetarian|veg)\b", text or "", re.IGNORECASE):
-        dietary.append("veg")
-    if dietary:
-        # Preserve stable order while avoiding duplicates.
-        fields["dietary_restrictions"] = [value for value in ("veg", "non-veg") if value in set(dietary)]
-
-    count_match = _REQUESTED_MENU_COUNT_RE.search(text or "")
-    if count_match:
-        raw_count = count_match.group(1).lower()
-        count = _COUNT_WORDS.get(raw_count, int(raw_count) if raw_count.isdigit() else 0)
-        if count:
-            notes.append(f"requested {count} sample menu combinations")
-
-    if notes:
-        fields["notes"] = "; ".join(notes)
-    return fields or None
+    """Deterministic extracted-fields dict for an inbound. Delegates to the shared
+    platform module so `amend-catering-lead` (a script, which cannot import this
+    hyphenated plugin package) parses amendments with the EXACT same grammar the
+    lead was created with — two copies would drift, and the amendment path exists
+    to keep the lead in agreement with what the customer said."""
+    return catering_extraction.extract_catering_fields(text, signals or [])
 
 
 def _lead_id_from_create_detail(detail: str) -> str:

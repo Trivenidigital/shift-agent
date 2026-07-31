@@ -409,6 +409,27 @@ install_artifacts() {
     else
         rm -f /opt/shift-agent/catering_lead_sweep.py
     fi
+    # M1 catering intake modules. BOTH are imported at cf-router plugin-load time
+    # (hooks.py top-level, flat) AND by create-catering-lead / amend-catering-lead,
+    # so a missing file breaks the whole plugin, not just one script — the same
+    # blast radius as catering_amendments. The completeness drift-guard test only
+    # scans scripts + platform (not the plugin dir), so these two are ALSO named in
+    # the pre-restart import gate below. Guarded for rollback compatibility with
+    # tarballs that predate them.
+    # catering_extraction — deterministic field-extraction grammar shared by the
+    # cf-router extractor and the amendment/answer application paths.
+    if [ -f src/platform/catering_extraction.py ]; then
+        install -m 644 src/platform/catering_extraction.py /opt/shift-agent/catering_extraction.py
+    else
+        rm -f /opt/shift-agent/catering_extraction.py
+    fi
+    # catering_qualification — minimum-qualification gate + slot-filling question
+    # templates; single source of truth for QUALIFYING vs AWAITING_OWNER_APPROVAL.
+    if [ -f src/platform/catering_qualification.py ]; then
+        install -m 644 src/platform/catering_qualification.py /opt/shift-agent/catering_qualification.py
+    else
+        rm -f /opt/shift-agent/catering_qualification.py
+    fi
     # Front-brain Phase-1: per-chat/day budget + latency fallback, imported by the
     # gateway-send screen (safe_io.front_brain_screen_gateway_send). WITHOUT this,
     # `from front_brain_budget import ...` fails at runtime -> the screen fails
@@ -2045,7 +2066,7 @@ PY
         # traceback (naming the missing module) is left on stderr for the deploy log.
         if ! "$VENV_PY" /usr/local/bin/check-safe-io-symbols > /dev/null \
               || ! "$VENV_PY" /usr/local/bin/check-audit-helpers-symbols > /dev/null \
-              || ! "$VENV_PY" -c "import sys; sys.path.insert(0, '/opt/shift-agent'); import catering_recompose, catering_quote_ledger, catering_lead_sweep, catering_amendments" > /dev/null; then
+              || ! "$VENV_PY" -c "import sys; sys.path.insert(0, '/opt/shift-agent'); import catering_recompose, catering_quote_ledger, catering_lead_sweep, catering_amendments, catering_extraction, catering_qualification" > /dev/null; then
             echo "FAIL: pre-restart import gate — refusing to restart hermes-gateway" >&2
             if [ "$PREV_TAG" != "none" ] && [ -f "$DEPLOYS_DIR/${PREV_TAG}.tgz" ]; then
                 revert_shift_tree
