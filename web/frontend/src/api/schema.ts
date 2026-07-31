@@ -196,6 +196,226 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/catering/controls": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Controls */
+        get: operations["get_controls_catering_controls_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catering/dashboard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Dashboard */
+        get: operations["get_dashboard_catering_dashboard_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catering/followups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Followups */
+        get: operations["get_followups_catering_followups_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catering/leads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Leads */
+        get: operations["list_leads_catering_leads_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catering/leads/{lead_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Lead */
+        get: operations["get_lead_catering_leads__lead_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catering/leads/{lead_id}/amend-apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Post Amend Apply */
+        post: operations["post_amend_apply_catering_leads__lead_id__amend_apply_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catering/leads/{lead_id}/decision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Decision
+         * @description Approve / reject / request-revision on a lead's owner-approval code.
+         *
+         *     The cockpit resolves the code from the lead rather than accepting one from
+         *     the client: a code typed into a browser is exactly the screenshot-forwarded
+         *     code the script's role gate exists to refuse.
+         */
+        post: operations["post_decision_catering_leads__lead_id__decision_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catering/leads/{lead_id}/hold": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Post Hold */
+        post: operations["post_hold_catering_leads__lead_id__hold_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catering/menu": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Menu */
+        get: operations["get_menu_catering_menu_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catering/pricebook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Pricebook */
+        get: operations["get_pricebook_catering_pricebook_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catering/pricebook/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Pricebook Import
+         * @description Import a pricebook document. Validated here first so an obviously-bad
+         *     paste fails with a field-level message instead of a subprocess exit code,
+         *     then handed to import-catering-pricebook which owns the archive + audit.
+         */
+        post: operations["post_pricebook_import_catering_pricebook_import_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catering/quote-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Quote Preview
+         * @description Price one hypothetical event with the deterministic kernel. READ-ONLY:
+         *     nothing is written, no version is committed, no message is sent.
+         */
+        get: operations["get_quote_preview_catering_quote_preview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/commerce/orders": {
         parameters: {
             query?: never;
@@ -1235,6 +1455,80 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** ActionResult */
+        ActionResult: {
+            /** Ok */
+            ok: boolean;
+            /** Returncode */
+            returncode: number;
+            /**
+             * Stderr
+             * @default
+             */
+            stderr: string;
+            /**
+             * Stdout
+             * @default
+             */
+            stdout: string;
+        };
+        /** AllowlistSummary */
+        AllowlistSummary: {
+            /** Effect */
+            effect: string;
+            /** Entry Count */
+            entry_count: number;
+            /** Mode */
+            mode: string;
+            /** Source */
+            source?: string | null;
+        };
+        /** AmendApplyBody */
+        AmendApplyBody: {
+            /**
+             * Answer Text
+             * @default
+             */
+            answer_text: string;
+            /**
+             * Mode
+             * @default amendment
+             * @enum {string}
+             */
+            mode: "amendment" | "answer";
+        };
+        /** AmendmentRow */
+        AmendmentRow: {
+            /** Amendment Id */
+            amendment_id: string;
+            /**
+             * Applied
+             * @default false
+             */
+            applied: boolean;
+            /** Applied At */
+            applied_at?: string | null;
+            /** Captured At */
+            captured_at?: string | null;
+            /** Disposition */
+            disposition?: string | null;
+            /**
+             * Raw Text Prefix
+             * @default
+             */
+            raw_text_prefix: string;
+            /**
+             * Raw Text Truncated
+             * @default false
+             */
+            raw_text_truncated: boolean;
+            /** Source */
+            source?: string | null;
+            /** Source Transport */
+            source_transport?: string | null;
+            /** Status */
+            status?: string | null;
+        };
         /**
          * AuthStatus
          * @description Public — drives login screen tab visibility. No sensitive data.
@@ -1301,6 +1595,15 @@ export interface components {
             /** Reason */
             reason: string;
         };
+        /** CateringDashboard */
+        CateringDashboard: {
+            counts: components["schemas"]["DashboardCounts"];
+            /** Degraded */
+            degraded?: string[];
+            /** Generated At */
+            generated_at: string;
+            readiness: components["schemas"]["ReadinessFlags"];
+        };
         /** ComponentStatus */
         ComponentStatus: {
             /**
@@ -1326,6 +1629,191 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /** ControlChip */
+        ControlChip: {
+            /**
+             * Actor
+             * @default
+             */
+            actor: string;
+            /**
+             * Available
+             * @default false
+             */
+            available: boolean;
+            /** Effective Mode */
+            effective_mode?: string | null;
+            /**
+             * Expired
+             * @default false
+             */
+            expired: boolean;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+            /**
+             * Pause Expires Ts
+             * @default
+             */
+            pause_expires_ts: string;
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
+            /**
+             * Since Ts
+             * @default
+             */
+            since_ts: string;
+            /** Stored Mode */
+            stored_mode?: string | null;
+            /**
+             * Takeover Expires Ts
+             * @default
+             */
+            takeover_expires_ts: string;
+        };
+        /**
+         * ControlsResponse
+         * @description Mirrors catering-control-status's JSON contract. Env-derived flags carry
+         *     a `source`; a flag the cockpit genuinely cannot read reports known=false
+         *     rather than a fabricated "off".
+         */
+        ControlsResponse: {
+            /** Budget Flags */
+            budget_flags?: {
+                [key: string]: components["schemas"]["FlagValue"];
+            };
+            /** Containment Flags */
+            containment_flags?: {
+                [key: string]: components["schemas"]["FlagValue"];
+            };
+            /** Conversations */
+            conversations?: components["schemas"]["ConversationControlRow"][];
+            /**
+             * Conversations Available
+             * @default false
+             */
+            conversations_available: boolean;
+            /** Degraded */
+            degraded?: string[];
+            /** Followups Enabled */
+            followups_enabled?: boolean | null;
+            /** Generated At */
+            generated_at: string;
+            /** Held Leads */
+            held_leads?: components["schemas"]["HeldLeadRow"][];
+            /** Kernel Allowlists */
+            kernel_allowlists?: {
+                [key: string]: components["schemas"]["AllowlistSummary"];
+            };
+            /** Kernel Flags */
+            kernel_flags?: {
+                [key: string]: components["schemas"]["FlagValue"];
+            };
+            /**
+             * Kill Switch Engaged
+             * @default false
+             */
+            kill_switch_engaged: boolean;
+            /**
+             * Kill Switch Set At
+             * @default
+             */
+            kill_switch_set_at: string;
+            /**
+             * Suppressed Count
+             * @default 0
+             */
+            suppressed_count: number;
+        };
+        /** ConversationControlRow */
+        ConversationControlRow: {
+            /**
+             * Actor
+             * @default
+             */
+            actor: string;
+            /** Chat Key Hash */
+            chat_key_hash: string;
+            /** Effective Mode */
+            effective_mode: string;
+            /** Expired */
+            expired: boolean;
+            /**
+             * Pause Expires Ts
+             * @default
+             */
+            pause_expires_ts: string;
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
+            /**
+             * Since Ts
+             * @default
+             */
+            since_ts: string;
+            /** Stored Mode */
+            stored_mode: string;
+            /**
+             * Takeover Expires Ts
+             * @default
+             */
+            takeover_expires_ts: string;
+        };
+        /** DashboardCounts */
+        DashboardCounts: {
+            /**
+             * Awaiting Owner Approval
+             * @default 0
+             */
+            awaiting_owner_approval: number;
+            /**
+             * Booked This Month
+             * @default 0
+             */
+            booked_this_month: number;
+            /**
+             * Followups Due
+             * @default 0
+             */
+            followups_due: number;
+            /**
+             * Lost This Month
+             * @default 0
+             */
+            lost_this_month: number;
+            /**
+             * New Leads
+             * @default 0
+             */
+            new_leads: number;
+            /**
+             * On Hold
+             * @default 0
+             */
+            on_hold: number;
+            /**
+             * Proposals Sent
+             * @default 0
+             */
+            proposals_sent: number;
+            /**
+             * Qualifying
+             * @default 0
+             */
+            qualifying: number;
+            /**
+             * Total Leads
+             * @default 0
+             */
+            total_leads: number;
+        };
         /** DashboardResponse */
         DashboardResponse: {
             /** Components */
@@ -1344,6 +1832,39 @@ export interface components {
             send_counter: {
                 [key: string]: unknown;
             } | null;
+        };
+        /**
+         * DecisionBody
+         * @description `quote_text` is the owner-authored customer quote. On approve it is
+         *     piped to the script's stdin; when omitted the script renders from lead
+         *     state (--quote-from-lead-state), which needs a finalized lead.
+         */
+        DecisionBody: {
+            /**
+             * Decision
+             * @enum {string}
+             */
+            decision: "approve" | "reject" | "edit";
+            /**
+             * Edit Text
+             * @default
+             */
+            edit_text: string;
+            /**
+             * Quote Text
+             * @default
+             */
+            quote_text: string;
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
+            /**
+             * Skip Finalize
+             * @default false
+             */
+            skip_finalize: boolean;
         };
         /** DecisionEntry */
         DecisionEntry: {
@@ -1369,6 +1890,29 @@ export interface components {
             signed_at?: string | null;
             /** Signed By Name */
             signed_by_name: string;
+        };
+        /** DiscountRow */
+        DiscountRow: {
+            /**
+             * Active
+             * @default true
+             */
+            active: boolean;
+            /** Id */
+            id: string;
+            /** Kind */
+            kind: string;
+            /** Max Amount Cents */
+            max_amount_cents?: number | null;
+            /** Name */
+            name: string;
+            /**
+             * Requires Owner Code
+             * @default true
+             */
+            requires_owner_code: boolean;
+            /** Value */
+            value: number;
         };
         /** EmployeeIn */
         EmployeeIn: {
@@ -1417,6 +1961,45 @@ export interface components {
             /** Reason */
             reason: string;
         };
+        /** FeeRow */
+        FeeRow: {
+            /**
+             * Active
+             * @default true
+             */
+            active: boolean;
+            /**
+             * Amount Cents
+             * @default 0
+             */
+            amount_cents: number;
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @default other
+             */
+            kind: string;
+            /** Name */
+            name: string;
+            /** Per Unit */
+            per_unit?: string | null;
+        };
+        /** FlagValue */
+        FlagValue: {
+            /**
+             * Known
+             * @default false
+             */
+            known: boolean;
+            /** Source */
+            source?: string | null;
+            /**
+             * Value
+             * @default
+             */
+            value: string;
+        };
         /**
          * FlagWarnTierBody
          * @description Operator's optional context note. Empty is acceptable — the flag
@@ -1429,10 +2012,241 @@ export interface components {
              */
             note: string;
         };
+        /**
+         * FollowupRow
+         * @description Tolerant projection of an M5 followup record. M5 is landing in parallel,
+         *     so the shape is read defensively and the untouched record is echoed in
+         *     `raw` rather than being forced through a schema this build invented.
+         */
+        FollowupRow: {
+            /** Approval Code */
+            approval_code?: string | null;
+            /**
+             * Due At
+             * @default
+             */
+            due_at: string;
+            /**
+             * Followup Type
+             * @default
+             */
+            followup_type: string;
+            /**
+             * Lead Id
+             * @default
+             */
+            lead_id: string;
+            /** Raw */
+            raw?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Status
+             * @default
+             */
+            status: string;
+        };
+        /** FollowupsResponse */
+        FollowupsResponse: {
+            /**
+             * Available
+             * @default false
+             */
+            available: boolean;
+            /** Degraded */
+            degraded?: string | null;
+            /**
+             * Due Count
+             * @default 0
+             */
+            due_count: number;
+            /** Followups */
+            followups?: components["schemas"]["FollowupRow"][];
+            /** Unavailable Reason */
+            unavailable_reason?: string | null;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** HeldLeadRow */
+        HeldLeadRow: {
+            /**
+             * Hold Reason
+             * @default
+             */
+            hold_reason: string;
+            /**
+             * Hold Set At
+             * @default
+             */
+            hold_set_at: string;
+            /** Lead Id */
+            lead_id: string;
+            /** Status */
+            status: string;
+        };
+        /** HoldBody */
+        HoldBody: {
+            /** On */
+            on: boolean;
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
+        };
+        /** LeadDetail */
+        LeadDetail: {
+            /** Amendments */
+            amendments?: components["schemas"]["AmendmentRow"][];
+            /**
+             * Amendments Available
+             * @default true
+             */
+            amendments_available: boolean;
+            /** Approval Code */
+            approval_code?: string | null;
+            control: components["schemas"]["ControlChip"];
+            /** Created At */
+            created_at?: string | null;
+            /** Customer Name */
+            customer_name?: string | null;
+            /** Customer Phone Masked */
+            customer_phone_masked: string;
+            /** Degraded */
+            degraded?: string[];
+            /**
+             * Deposit Amount Cents
+             * @default 0
+             */
+            deposit_amount_cents: number;
+            /**
+             * Deposit Status
+             * @default none
+             */
+            deposit_status: string;
+            /** Extracted */
+            extracted?: {
+                [key: string]: unknown;
+            };
+            /** Followups */
+            followups?: components["schemas"]["FollowupRow"][];
+            /**
+             * Followups Available
+             * @default false
+             */
+            followups_available: boolean;
+            /** Hold Reason */
+            hold_reason?: string | null;
+            /** Hold Set At */
+            hold_set_at?: string | null;
+            /** Lead Id */
+            lead_id: string;
+            /**
+             * On Hold
+             * @default false
+             */
+            on_hold: boolean;
+            /**
+             * Original Message Id
+             * @default
+             */
+            original_message_id: string;
+            /** Pending Questions */
+            pending_questions?: string[];
+            qualification: components["schemas"]["QualificationSummary"];
+            /**
+             * Quote Ledger Available
+             * @default true
+             */
+            quote_ledger_available: boolean;
+            /**
+             * Quote Text
+             * @default
+             */
+            quote_text: string;
+            /** Quote Total Usd */
+            quote_total_usd?: number | null;
+            /**
+             * Quote Version
+             * @default 0
+             */
+            quote_version: number;
+            /** Quote Versions */
+            quote_versions?: components["schemas"]["QuoteVersionRow"][];
+            /**
+             * Raw Inquiry
+             * @default
+             */
+            raw_inquiry: string;
+            /** Selected Items */
+            selected_items?: {
+                [key: string]: unknown;
+            }[];
+            /** Status */
+            status: string;
+            /** Timeline */
+            timeline?: components["schemas"]["TimelineRow"][];
+            /** Updated At */
+            updated_at?: string | null;
+        };
+        /** LeadListResponse */
+        LeadListResponse: {
+            /**
+             * Available
+             * @default true
+             */
+            available: boolean;
+            /** Degraded */
+            degraded?: string | null;
+            /** Leads */
+            leads?: components["schemas"]["LeadRow"][];
+            /** Status Counts */
+            status_counts?: {
+                [key: string]: number;
+            };
+        };
+        /** LeadRow */
+        LeadRow: {
+            /** Approval Code */
+            approval_code?: string | null;
+            /** Created At */
+            created_at?: string | null;
+            /** Customer Name */
+            customer_name?: string | null;
+            /** Customer Phone Masked */
+            customer_phone_masked: string;
+            /** Event Date */
+            event_date?: string | null;
+            /** Event Type */
+            event_type?: string | null;
+            /** Headcount */
+            headcount?: number | null;
+            /** Hold Reason */
+            hold_reason?: string | null;
+            /** Latest Quote Total Usd */
+            latest_quote_total_usd?: number | null;
+            /** Lead Id */
+            lead_id: string;
+            /** Next Action */
+            next_action: string;
+            /**
+             * On Hold
+             * @default false
+             */
+            on_hold: boolean;
+            qualification: components["schemas"]["QualificationSummary"];
+            /**
+             * Quote Version
+             * @default 0
+             */
+            quote_version: number;
+            /** Status */
+            status: string;
+            /** Updated At */
+            updated_at?: string | null;
         };
         /** ManualQueueAssignBody */
         ManualQueueAssignBody: {
@@ -1501,6 +2315,58 @@ export interface components {
             /** Owner Phone */
             owner_phone: string;
         };
+        /** MenuItemRow */
+        MenuItemRow: {
+            /**
+             * Available
+             * @default true
+             */
+            available: boolean;
+            /**
+             * Category
+             * @default main
+             */
+            category: string;
+            /** Dietary Tags */
+            dietary_tags?: string[];
+            /** Name */
+            name: string;
+            /**
+             * Notes
+             * @default
+             */
+            notes: string;
+            /** Price Usd */
+            price_usd?: number | null;
+            /** Serves */
+            serves?: number | null;
+        };
+        /** MenuResponse */
+        MenuResponse: {
+            /**
+             * Available
+             * @default false
+             */
+            available: boolean;
+            /** Degraded */
+            degraded?: string | null;
+            /** Items */
+            items?: components["schemas"]["MenuItemRow"][];
+            /**
+             * Notes
+             * @default
+             */
+            notes: string;
+            /** Updated At */
+            updated_at?: string | null;
+            /**
+             * Updated By
+             * @default
+             */
+            updated_by: string;
+            /** Version */
+            version?: number | null;
+        };
         /**
          * OrderTransitionBody
          * @description Cockpit staff-action request. `expected_from_status` is the status the
@@ -1538,12 +2404,102 @@ export interface components {
             /** Token */
             token: string;
         };
+        /** PackageRow */
+        PackageRow: {
+            /**
+             * Active
+             * @default true
+             */
+            active: boolean;
+            /**
+             * Description
+             * @default
+             */
+            description: string;
+            /** Dietary Profile */
+            dietary_profile?: string[];
+            /** Id */
+            id: string;
+            /**
+             * Min Guests
+             * @default 1
+             */
+            min_guests: number;
+            /** Name */
+            name: string;
+            /** Price Per Person Cents */
+            price_per_person_cents: number;
+        };
         /** PairSessionResponse */
         PairSessionResponse: {
             /** Expires At */
             expires_at: string;
             /** Session Id */
             session_id: string;
+        };
+        /** PricebookImportBody */
+        PricebookImportBody: {
+            /** Document */
+            document: {
+                [key: string]: unknown;
+            };
+            /**
+             * Dry Run
+             * @default false
+             */
+            dry_run: boolean;
+        };
+        /** PricebookResponse */
+        PricebookResponse: {
+            /** Approved Discounts */
+            approved_discounts?: components["schemas"]["DiscountRow"][];
+            /**
+             * Available
+             * @default false
+             */
+            available: boolean;
+            /**
+             * Currency
+             * @default USD
+             */
+            currency: string;
+            /** Degraded */
+            degraded?: string | null;
+            /** Effective Date */
+            effective_date?: string | null;
+            /** Fixed Fees */
+            fixed_fees?: components["schemas"]["FeeRow"][];
+            /**
+             * Item Price Override Count
+             * @default 0
+             */
+            item_price_override_count: number;
+            /**
+             * Notes
+             * @default
+             */
+            notes: string;
+            /** Per Person Packages */
+            per_person_packages?: components["schemas"]["PackageRow"][];
+            /**
+             * Placeholder
+             * @default false
+             */
+            placeholder: boolean;
+            /**
+             * Tax Rate Bps
+             * @default 0
+             */
+            tax_rate_bps: number;
+            /** Updated At */
+            updated_at?: string | null;
+            /**
+             * Updated By
+             * @default
+             */
+            updated_by: string;
+            /** Version */
+            version?: number | null;
         };
         /** ProposalView */
         ProposalView: {
@@ -1580,6 +2536,256 @@ export interface components {
             /** Ok */
             ok: boolean;
         };
+        /** QualificationSummary */
+        QualificationSummary: {
+            /**
+             * Answered Count
+             * @default 0
+             */
+            answered_count: number;
+            /** Asked */
+            asked?: string[];
+            /** Complete */
+            complete: boolean;
+            /** Missing */
+            missing?: string[];
+            /** Missing Labels */
+            missing_labels?: string[];
+            /**
+             * Required Count
+             * @default 0
+             */
+            required_count: number;
+            /**
+             * Rounds
+             * @default 0
+             */
+            rounds: number;
+        };
+        /** QuotePreviewFee */
+        QuotePreviewFee: {
+            /** Extended Cents */
+            extended_cents?: number | null;
+            /** Fee Id */
+            fee_id: string;
+            /** Kind */
+            kind: string;
+            /** Name */
+            name: string;
+            /** Per Unit */
+            per_unit?: string | null;
+            /**
+             * Unit Cents
+             * @default 0
+             */
+            unit_cents: number;
+            /** Units */
+            units?: number | null;
+        };
+        /** QuotePreviewLine */
+        QuotePreviewLine: {
+            /** Extended Cents */
+            extended_cents?: number | null;
+            /** Name */
+            name: string;
+            /** Qty */
+            qty: number;
+            /** Source */
+            source?: string | null;
+            /** Unit Cents */
+            unit_cents?: number | null;
+        };
+        /**
+         * QuotePreviewResponse
+         * @description Read-only calculator output. Runs the same deterministic kernel the
+         *     agent uses (catering_pricing.compute_quote) so the number the owner sees
+         *     here is the number a quote would carry — nothing is written or sent.
+         */
+        QuotePreviewResponse: {
+            /**
+             * Available
+             * @default false
+             */
+            available: boolean;
+            /**
+             * Currency
+             * @default USD
+             */
+            currency: string;
+            /**
+             * Deliverable
+             * @default false
+             */
+            deliverable: boolean;
+            /**
+             * Discount Cents
+             * @default 0
+             */
+            discount_cents: number;
+            /** Discount Id */
+            discount_id?: string | null;
+            /** Discount Name */
+            discount_name?: string | null;
+            /** Fees */
+            fees?: components["schemas"]["QuotePreviewFee"][];
+            /**
+             * Fees Subtotal Cents
+             * @default 0
+             */
+            fees_subtotal_cents: number;
+            /** Flags */
+            flags?: string[];
+            /**
+             * Guest Count
+             * @default 0
+             */
+            guest_count: number;
+            /**
+             * Items Subtotal Cents
+             * @default 0
+             */
+            items_subtotal_cents: number;
+            /** Lines */
+            lines?: components["schemas"]["QuotePreviewLine"][];
+            /** Menu Version */
+            menu_version?: number | null;
+            /** Package Id */
+            package_id?: string | null;
+            /** Package Name */
+            package_name?: string | null;
+            /**
+             * Per Person Subtotal Cents
+             * @default 0
+             */
+            per_person_subtotal_cents: number;
+            /** Price Per Person Cents */
+            price_per_person_cents?: number | null;
+            /**
+             * Price Status
+             * @default pending_owner_review
+             */
+            price_status: string;
+            /** Pricebook Version */
+            pricebook_version?: number | null;
+            /**
+             * Subtotal Cents
+             * @default 0
+             */
+            subtotal_cents: number;
+            /**
+             * Tax Cents
+             * @default 0
+             */
+            tax_cents: number;
+            /**
+             * Tax Rate Bps
+             * @default 0
+             */
+            tax_rate_bps: number;
+            /**
+             * Taxable Cents
+             * @default 0
+             */
+            taxable_cents: number;
+            /**
+             * Total Cents
+             * @default 0
+             */
+            total_cents: number;
+            /**
+             * Total Per Guest Cents
+             * @default 0
+             */
+            total_per_guest_cents: number;
+            /** Unavailable Reason */
+            unavailable_reason?: string | null;
+        };
+        /** QuoteVersionRow */
+        QuoteVersionRow: {
+            /** Created At */
+            created_at?: string | null;
+            /**
+             * Diff Summary
+             * @default
+             */
+            diff_summary: string;
+            /** From Version */
+            from_version?: number | null;
+            /**
+             * Item Count
+             * @default 0
+             */
+            item_count: number;
+            /** Items Added */
+            items_added?: string[];
+            /** Items Removed */
+            items_removed?: string[];
+            /** Ledger Entry Id */
+            ledger_entry_id?: string | null;
+            /** Menu Version */
+            menu_version?: number | null;
+            /** Price Status */
+            price_status?: string | null;
+            /** Pricebook Version */
+            pricebook_version?: number | null;
+            /**
+             * Quote Text Changed
+             * @default false
+             */
+            quote_text_changed: boolean;
+            /** Quote Total Usd */
+            quote_total_usd?: number | null;
+            /** Source */
+            source?: string | null;
+            /**
+             * Total Delta Usd
+             * @default 0
+             */
+            total_delta_usd: number;
+            /** Version */
+            version: number;
+        };
+        /** ReadinessFlags */
+        ReadinessFlags: {
+            /**
+             * Automation Kernel Armed
+             * @default false
+             */
+            automation_kernel_armed: boolean;
+            /** Automation Kernel Armed Source */
+            automation_kernel_armed_source?: string | null;
+            /** Followups Enabled */
+            followups_enabled?: boolean | null;
+            /**
+             * Kill Switch Engaged
+             * @default false
+             */
+            kill_switch_engaged: boolean;
+            /**
+             * Menu Item Count
+             * @default 0
+             */
+            menu_item_count: number;
+            /**
+             * Menu Present
+             * @default false
+             */
+            menu_present: boolean;
+            /** Menu Version */
+            menu_version?: number | null;
+            /**
+             * Pricebook Placeholder
+             * @default false
+             */
+            pricebook_placeholder: boolean;
+            /**
+             * Pricebook Present
+             * @default false
+             */
+            pricebook_present: boolean;
+            /** Pricebook Version */
+            pricebook_version?: number | null;
+        };
         /** ReasonBody */
         ReasonBody: {
             /** Reason */
@@ -1603,6 +2809,17 @@ export interface components {
             role: string;
             /** Shift */
             shift: string;
+        };
+        /** TimelineRow */
+        TimelineRow: {
+            /** Detail */
+            detail: string;
+            /** Event */
+            event: string;
+            /** Source */
+            source: string;
+            /** Ts */
+            ts: string;
         };
         /** TotpVerifyBody */
         TotpVerifyBody: {
@@ -1883,6 +3100,340 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_controls_catering_controls_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControlsResponse"];
+                };
+            };
+        };
+    };
+    get_dashboard_catering_dashboard_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CateringDashboard"];
+                };
+            };
+        };
+    };
+    get_followups_catering_followups_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FollowupsResponse"];
+                };
+            };
+        };
+    };
+    list_leads_catering_leads_get: {
+        parameters: {
+            query?: {
+                status?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LeadListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_lead_catering_leads__lead_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                lead_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LeadDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_amend_apply_catering_leads__lead_id__amend_apply_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                lead_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AmendApplyBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_decision_catering_leads__lead_id__decision_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                lead_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecisionBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_hold_catering_leads__lead_id__hold_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                lead_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HoldBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_menu_catering_menu_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MenuResponse"];
+                };
+            };
+        };
+    };
+    get_pricebook_catering_pricebook_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PricebookResponse"];
+                };
+            };
+        };
+    };
+    post_pricebook_import_catering_pricebook_import_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PricebookImportBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_quote_preview_catering_quote_preview_get: {
+        parameters: {
+            query?: {
+                lead_id?: string | null;
+                guest_count?: number | null;
+                package_id?: string | null;
+                discount_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuotePreviewResponse"];
                 };
             };
             /** @description Validation Error */

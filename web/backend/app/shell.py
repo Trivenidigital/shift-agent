@@ -44,6 +44,13 @@ ALLOWED_BINS: frozenset[str] = frozenset(
         "/usr/local/bin/shift-agent-smoke-test.sh",
         "/usr/local/bin/shift-agent-notify-owner",
         "/usr/local/bin/send-flyer-campaign",
+        # Catering Studio (M6) owner actions. Each of these owns its own
+        # locking, audit row and idempotency — the cockpit never writes
+        # catering state directly.
+        "/usr/local/bin/apply-catering-owner-decision",
+        "/usr/local/bin/set-catering-lead-hold",
+        "/usr/local/bin/amend-catering-lead",
+        "/usr/local/bin/import-catering-pricebook",
     }
 )
 
@@ -62,6 +69,7 @@ def run_cli(
     *,
     timeout: float = 30.0,
     user_args: list[str] | None = None,
+    stdin_data: str | None = None,
 ) -> CliResult:
     """Run a vetted CLI binary.
 
@@ -74,6 +82,11 @@ def run_cli(
     user_args:
         User-supplied positional args. Will be appended after ``--``.
         Each must be a non-empty string with no NUL bytes.
+    stdin_data:
+        Free-form text piped to the child's stdin. This is the ONLY safe
+        channel for operator-authored prose (quote text): argv would make it
+        a shell-escape surface, which is exactly why
+        ``apply-catering-owner-decision`` grew ``--quote-text-stdin``.
 
     Raises
     ------
@@ -94,6 +107,11 @@ def run_cli(
             raise ValueError("user_args invalid: non-str entry")
         if any("\x00" in a for a in user_args):
             raise ValueError("user_args invalid: NUL byte in entry")
+    if stdin_data is not None:
+        if not isinstance(stdin_data, str):
+            raise TypeError("stdin_data must be a string")
+        if "\x00" in stdin_data:
+            raise ValueError("stdin_data invalid: NUL byte")
 
     # Disk-touch happens last (after cheap validation passes).
     if not Path(binary).is_file():
@@ -113,6 +131,7 @@ def run_cli(
             text=True,
             timeout=timeout,
             check=False,
+            input=stdin_data,
         )
     except subprocess.TimeoutExpired as e:
         return CliResult(
