@@ -94,6 +94,13 @@ one-way-door pattern (deposit_* did the same), widened here.
 12. G8 send-coverage-message local bridge_post bypass; G9 outbound idempotency
     convention-only; G12 harness draft-cap-50 derived-not-constant.
 
+13. FLYER (main-inherited, needs a flyer session): cockpit
+    test_flyer_admin manual-queue-complete cells broken by #621's src-side
+    manual_queue.py changes (passed 2026-07-07, cockpit-ci never ran since);
+    temporarily deselected in cockpit-ci.yml with a pointer here — fix the
+    operator-text-manifest path routing in the flyer test/writer and remove
+    the deselects.
+
 ## Phase 2 backlog (directive §12)
 
 Deposits/payments (deposit machinery exists, dormant), contract acceptance,
