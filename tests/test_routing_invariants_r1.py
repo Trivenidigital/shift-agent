@@ -212,7 +212,7 @@ def test_collision_cannot_fall_through_to_first_canonical(state_dir):
 
 def test_canonical_order_exported_from_one_source():
     assert pools.CODE_POOL_CANONICAL_ORDER == (
-        "menu-pending", "catering-leads", "expense", "shift")
+        "menu-pending", "catering-leads", "expense", "shift", "catering-followups")
 
 
 def test_all_live_codes_union_excludes_terminal(state_dir):

@@ -1150,6 +1150,34 @@ def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional
         # Code matched but no clear verb — let LLM ask for clarification
         return None
 
+    if pool_name == approval_code_pools.POOL_CATERING_FOLLOWUPS:
+        # M5: the owner is answering a follow-up approval card. Without this
+        # branch the code resolves to a pool F8 does not handle and falls through
+        # to the LLM, which would have to guess what "#XXXXX approve" meant for a
+        # message the deterministic engine already composed and stored.
+        followup_status = row.get("status")
+        if has_edit:
+            # There is nothing to edit — the text was fixed when the card was
+            # rendered. Let the LLM explain that rather than silently approving.
+            return None
+        if has_approve:
+            rc = actions.invoke_approve_catering_followup(code, "approve")
+            return _build_skip_or_passthrough(
+                rc=rc, chat_id=chat_id, code=code,
+                reason="f8_followup_approve",
+                detail=f"followup status was {followup_status}",
+                action_label=f"approve-catering-followup approve for {code}",
+            )
+        if has_reject:
+            rc = actions.invoke_approve_catering_followup(code, "cancel")
+            return _build_skip_or_passthrough(
+                rc=rc, chat_id=chat_id, code=code,
+                reason="f8_followup_cancel",
+                detail=f"followup status was {followup_status}",
+                action_label=f"approve-catering-followup cancel for {code}",
+            )
+        return None
+
     # Expense / shift codes are not F8's responsibility (owner self-chat handles
     # only menu + catering here) — fall through so the LLM/dispatcher routes them.
     return None
