@@ -18,6 +18,11 @@ VERSION is assigned by this script — max(prior version, file version) + 1 —
 so an operator re-importing an edited copy of the live file can never
 silently overwrite a newer version with a stale number.
 
+A document carrying `source_menu_update_id` came from an owner approving a menu
+photo (apply-menu-update runs this script for them). If that same proposal
+already produced the LIVE pricebook, the import is a NO-OP success rather than a
+second version: replaying an approval must not bump anything.
+
 Refuses (exit 2) on any validation error, printing the Pydantic error verbatim
 so the operator sees which field is wrong. A refusal never touches state.
 
@@ -36,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -59,10 +65,18 @@ from exit_codes import (  # noqa: E402
 )
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
-PRICEBOOK_PATH = CATERING_PRICEBOOK_PATH
-PRICEBOOK_LOCK = CATERING_PRICEBOOK_LOCK
-ARCHIVE_DIR = CATERING_PRICEBOOK_ARCHIVE_DIR
-LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+# Env overrides (same idiom as parse-menu-photo's CONFIG_PATH). apply-menu-update
+# invokes this script as a SUBPROCESS, so a test sandbox cannot reach it by
+# monkeypatching a module attribute — the override has to travel in the
+# environment. Unset in production, where the constants are the deployed paths.
+PRICEBOOK_PATH = Path(
+    os.environ.get("SHIFT_AGENT_PRICEBOOK_PATH") or CATERING_PRICEBOOK_PATH)
+PRICEBOOK_LOCK = Path(str(PRICEBOOK_PATH) + ".lock")
+ARCHIVE_DIR = (CATERING_PRICEBOOK_ARCHIVE_DIR
+               if PRICEBOOK_PATH == CATERING_PRICEBOOK_PATH
+               else PRICEBOOK_PATH.parent / CATERING_PRICEBOOK_ARCHIVE_DIR.name)
+LOG_PATH = Path(
+    os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH") or "/opt/shift-agent/logs/decisions.log")
 
 # Bound the input so a stray multi-MB file can't be slurped into memory.
 MAX_INPUT_BYTES = 1_000_000
@@ -103,6 +117,17 @@ def _parse_pricebook(raw: str) -> CateringPricebook:
         sys.exit(EXIT_INVALID_INPUT)
 
 
+# Assigned by THIS script on every import, so they can never match an incoming
+# document and must be excluded from a content comparison.
+_ASSIGNED_FIELDS = {"version", "updated_at", "updated_by"}
+
+
+def _same_content(prior: CateringPricebook, incoming: CateringPricebook) -> bool:
+    """True when two pricebooks say the same thing about money and terms."""
+    return (prior.model_dump(exclude=_ASSIGNED_FIELDS)
+            == incoming.model_dump(exclude=_ASSIGNED_FIELDS))
+
+
 def _load_prior() -> CateringPricebook | None:
     """Current pricebook, or None on first run. Exits 5 if present-but-corrupt.
 
@@ -130,7 +155,7 @@ def main() -> int:
              "state. Mirrors apply-menu-update's defense-in-depth role gate (D-013).",
     )
     ap.add_argument("--updated-by", default="manual",
-                    choices=["manual", "import", "cockpit"])
+                    choices=["manual", "import", "cockpit", "menu_approval"])
     ap.add_argument("--dry-run", action="store_true",
                     help="validate and report; write nothing, audit nothing")
     args = ap.parse_args()
@@ -163,6 +188,32 @@ def main() -> int:
 
     with FileLock(PRICEBOOK_LOCK):
         prior = _load_prior()
+
+        # Replay anchor. A menu-derived document names the menu-update proposal
+        # it came from; if that proposal already produced the LIVE pricebook AND
+        # the content is identical, this is a re-run of the same approval, not a
+        # new one. Re-importing would bump the version and archive a copy for a
+        # change nobody made, so it is a no-op success — the caller's retry is
+        # meant to be safe.
+        #
+        # The CONTENT check is not belt-and-braces: proposal ids come from a
+        # counter that a state reset or restore can rewind, so an id alone can
+        # match while the prices differ. Suppressing that would leave the live
+        # pricebook silently wrong — the exact failure this anchor exists to
+        # prevent, inverted. An id match with different content is a REAL import.
+        if (
+            incoming.source_menu_update_id is not None
+            and prior is not None
+            and prior.source_menu_update_id == incoming.source_menu_update_id
+            and _same_content(prior, incoming)
+        ):
+            print(json.dumps({
+                "status": "already_active",
+                "version": prior.version,
+                "source_menu_update_id": prior.source_menu_update_id,
+            }))
+            return EXIT_OK
+
         prev_version = prior.version if prior is not None else 0
         # max(prior, incoming) + 1: an operator importing an edited copy of an
         # older export cannot roll the version backwards.

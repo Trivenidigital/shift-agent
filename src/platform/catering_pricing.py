@@ -42,7 +42,7 @@ import json
 import math
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, NamedTuple, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -749,6 +749,261 @@ def default_basket(
         qty = min(math.ceil(guest_count / serves), MAX_LINE_QTY)
         out.append((item.name, max(qty, 1)))
     return None, out
+
+
+# ── Menu -> pricebook adapter (pure; the owner-menu bridge) ─────────────────
+# The owner already gets a real, versioned, audited MENU by photographing it
+# (parse-menu-photo -> apply-menu-update). What they could not do was get those
+# prices into the COMMERCIAL pricebook without hand-editing JSON. This adapter is
+# that bridge: approved menu items + the ACTIVE pricebook -> the exact document
+# `import-catering-pricebook` already accepts.
+#
+# It lives here, not in a new module, because it is the same discipline the
+# kernel below it enforces — integer cents, Decimal + ROUND_HALF_UP, never guess
+# a price — and because a new platform module would cost a deploy install line
+# and a pre-restart import-gate entry for ~80 lines of pure function.
+#
+# NOTHING here decides policy about WHEN to activate. It is called at preview
+# time (to render what approval would do) and at approval time (to produce the
+# document), and both callers must get byte-identical answers from it.
+
+#: Why a menu item was refused as a committed commercial price. These are the
+#: ONLY exclusion reasons — an item excluded here is not unpriceable, it simply
+#: keeps quoting through the Menu at price_status "estimated" instead of being
+#: promoted to "exact". The owner resolves them by re-sending a corrected photo.
+EXCLUDE_EMPTY_NAME = "empty_name"
+EXCLUDE_MISSING_PRICE = "missing_price"
+EXCLUDE_NON_POSITIVE_PRICE = "non_positive_price"
+EXCLUDE_SUB_CENT_PRECISION = "sub_cent_precision"
+EXCLUDE_DUPLICATE_CONFLICT = "duplicate_conflict"
+# NOT a price-quality rule — a kernel-ordering one. `compute_quote` checks
+# `item_price_overrides` BEFORE it looks at the menu, and only the MENU branch
+# raises `unavailable_item`. So an override on a sold-out dish makes the kernel
+# skip the availability check entirely and return a firm, deliverable "exact"
+# price for something nobody can cook. Leaving these items OUT keeps them on the
+# menu path, where being unavailable still blocks the quote.
+EXCLUDE_UNAVAILABLE = "unavailable"
+
+EXCLUSION_LABELS: dict[str, str] = {
+    EXCLUDE_EMPTY_NAME: "no item name",
+    EXCLUDE_MISSING_PRICE: "no price printed",
+    EXCLUDE_NON_POSITIVE_PRICE: "priced at zero or less",
+    EXCLUDE_SUB_CENT_PRECISION: "price has fractions of a cent",
+    EXCLUDE_DUPLICATE_CONFLICT: "listed twice at different prices",
+    EXCLUDE_UNAVAILABLE: "marked unavailable on the menu",
+}
+
+
+class ExcludedMenuItem(NamedTuple):
+    name: str
+    reason: str
+    price_usd: Optional[float]
+
+
+class OverrideChange(NamedTuple):
+    name: str
+    change: str                      # "added" | "changed" | "removed"
+    old_cents: Optional[int]
+    new_cents: Optional[int]
+
+
+class MenuPricebookSync(NamedTuple):
+    """What approving a menu would do to the pricebook.
+
+    `pricebook` is the importer's input document; `next_version` is the version
+    the importer WILL assign to it (its own max(prior, incoming) + 1 rule,
+    reproduced here so the owner card cannot promise a different number than the
+    one that lands)."""
+    pricebook: CateringPricebook
+    excluded: list[ExcludedMenuItem]
+    changes: list[OverrideChange]
+    next_version: int
+
+
+def has_sub_cent_precision(price_usd: float) -> bool:
+    """True when a dollar amount carries fractions of a cent (5.999).
+
+    Rounding it would commit the owner to a price they never wrote down, so the
+    item is excluded instead of quantized."""
+    cents = Decimal(str(price_usd)) * 100
+    return cents != cents.to_integral_value()
+
+
+def derive_item_overrides(
+    items: Iterable[Any],
+) -> tuple[dict[str, int], list[ExcludedMenuItem]]:
+    """Menu items -> (item_price_overrides in integer CENTS, excluded items).
+
+    Duplicate names are resolved FIRST: rows sharing a name that disagree on
+    price are ALL excluded, because nothing in the menu says which is current and
+    picking one would be a silent wrong price. Rows sharing a name AND a price
+    are the same price stated twice — one override, no conflict.
+    """
+    overrides: dict[str, int] = {}
+    excluded: list[ExcludedMenuItem] = []
+
+    groups: dict[str, list[Any]] = {}
+    for item in items:
+        name = (item.name or "").strip()
+        if not name:
+            excluded.append(ExcludedMenuItem(item.name, EXCLUDE_EMPTY_NAME, item.price_usd))
+            continue
+        groups.setdefault(name, []).append(item)
+
+    for name, group in groups.items():
+        prices = {it.price_usd for it in group}
+        if len(prices) > 1:
+            for it in group:
+                excluded.append(
+                    ExcludedMenuItem(name, EXCLUDE_DUPLICATE_CONFLICT, it.price_usd))
+            continue
+        price = group[0].price_usd
+        # Availability is checked AFTER the duplicate rule (so a conflict is still
+        # reported as a conflict) and BEFORE the price rules (a sold-out item is
+        # excluded whatever its price says). Any unavailable row in the group
+        # excludes the name: promoting a price that might be sold out is the
+        # failure this rule exists to stop.
+        if not all(getattr(it, "available", True) for it in group):
+            reason = EXCLUDE_UNAVAILABLE
+        elif price is None:
+            reason = EXCLUDE_MISSING_PRICE
+        elif price <= 0:
+            reason = EXCLUDE_NON_POSITIVE_PRICE
+        elif has_sub_cent_precision(price):
+            reason = EXCLUDE_SUB_CENT_PRECISION
+        else:
+            overrides[name] = usd_to_cents(price)
+            continue
+        excluded.append(ExcludedMenuItem(name, reason, price))
+    return overrides, excluded
+
+
+def diff_item_overrides(
+    active: dict[str, int], proposed: dict[str, int],
+) -> list[OverrideChange]:
+    """added / changed / removed, name-sorted so two identical syncs render
+    identically. `removed` matters: the derived set REPLACES the active one, so
+    an item that left the menu must not lose its price unannounced."""
+    changes: list[OverrideChange] = []
+    for name in sorted(set(active) | set(proposed)):
+        old, new = active.get(name), proposed.get(name)
+        if old is None:
+            changes.append(OverrideChange(name, "added", None, new))
+        elif new is None:
+            changes.append(OverrideChange(name, "removed", old, None))
+        elif old != new:
+            changes.append(OverrideChange(name, "changed", old, new))
+    return changes
+
+
+def sync_pricebook_from_menu_items(
+    items: Iterable[Any],
+    active: Optional[CateringPricebook],
+    *,
+    effective_date: Any,
+    updated_at: Any,
+    source_menu_update_id: str,
+) -> MenuPricebookSync:
+    """PURE. Approved menu items + the ACTIVE pricebook -> the importer's input.
+
+    The active pricebook's COMMERCIAL fields are carried forward VERBATIM
+    (packages, fees, tax, discounts, effective date, notes, placeholder flag):
+    this bridge supplies item prices, never the business model.
+
+    With NO active pricebook the commercial fields are empty AND the book is
+    flagged `placeholder=True`. That flag is what stops a menu photo from
+    silently promoting quoting from "estimated" to a firm "exact" that charges
+    0% tax and no delivery fee: the kernel keeps such quotes at
+    pending_owner_review until the owner configures real commercial terms.
+    Item prices land immediately; the permission to quote them as final does not.
+
+    `version` is left at the model default; the importer's own
+    max(prior, incoming) + 1 rule assigns the real one, so a document built
+    before another import landed still bumps forward rather than backward.
+    """
+    overrides, excluded = derive_item_overrides(items)
+    prior_overrides = dict(active.item_price_overrides) if active is not None else {}
+    book = CateringPricebook(
+        effective_date=(active.effective_date if active is not None else effective_date),
+        updated_at=updated_at,
+        updated_by="menu_approval",
+        currency=(active.currency if active is not None else "USD"),
+        placeholder=(active.placeholder if active is not None else True),
+        per_person_packages=(list(active.per_person_packages) if active is not None else []),
+        fixed_fees=(list(active.fixed_fees) if active is not None else []),
+        tax_rate_bps=(active.tax_rate_bps if active is not None else 0),
+        approved_discounts=(list(active.approved_discounts) if active is not None else []),
+        item_price_overrides=overrides,
+        notes=(active.notes if active is not None else ""),
+        source_menu_update_id=source_menu_update_id,
+    )
+    prior_version = active.version if active is not None else 0
+    return MenuPricebookSync(
+        pricebook=book,
+        excluded=excluded,
+        changes=diff_item_overrides(prior_overrides, overrides),
+        next_version=max(prior_version, book.version) + 1,
+    )
+
+
+def render_pricebook_activation_section(
+    sync: MenuPricebookSync, active: Optional[CateringPricebook],
+) -> str:
+    """The pricebook half of the owner's menu-approval card.
+
+    Approving a menu photo now also publishes prices customers are quoted, so the
+    card has to say so BEFORE the owner types yes — with the actual old->new
+    numbers, what will be left out, and which version lands."""
+    out: list[str] = ["*Pricebook* — approving this also activates it"]
+
+    if not sync.changes:
+        out.append("  No price changes — the pricebook already matches this menu.")
+    else:
+        for change in sync.changes:
+            if change.change == "added":
+                out.append(f"  + {change.name} — {format_cents(change.new_cents)}")
+            elif change.change == "removed":
+                out.append(
+                    f"  - {change.name} — {format_cents(change.old_cents)} "
+                    "(no longer on the menu)"
+                )
+            else:
+                out.append(
+                    f"  ~ {change.name} — {format_cents(change.old_cents)} "
+                    f"→ {format_cents(change.new_cents)}"
+                )
+
+    if sync.excluded:
+        out.append(f"  Not priced ({len(sync.excluded)}) — these stay quotable only "
+                   "as estimates:")
+        for item in sync.excluded:
+            label = EXCLUSION_LABELS.get(item.reason, item.reason)
+            shown = item.name.strip() or "(unnamed item)"
+            out.append(f"    · {shown} — {label}")
+
+    if active is None:
+        out.append(
+            "  No pricebook exists yet, so this one starts with NO packages, NO "
+            "fees and 0% tax. These prices go on file, but quotes stay marked "
+            "'pending owner review' and are NOT sent as final until you set up "
+            "your packages, fees and tax in the Studio."
+        )
+    out.append(f"  Approving also activates pricebook version {sync.next_version}.")
+    return "\n".join(out)
+
+
+def pricebook_fingerprint(active: Optional[CateringPricebook]) -> str:
+    """Identity of the pricebook a menu card was rendered against.
+
+    Stamped onto the pending menu proposal so activation can prove the owner
+    approved a card describing the CURRENT pricebook. Between the card and the
+    `yes` an operator can import a new pricebook; carrying on would activate a
+    diff the owner never saw. `"none"` is a real value, distinct from an absent
+    stamp (a proposal made before this field existed, which cannot be checked).
+    """
+    if active is None:
+        return "none"
+    return f"v{active.version}@{active.updated_at.isoformat()}"
 
 
 # ── Store loader (I/O — deliberately OUTSIDE the pure kernel) ───────────────
