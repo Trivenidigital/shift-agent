@@ -734,16 +734,28 @@ class GovernanceChecker:
         return affected
 
     @staticmethod
-    def _field_value(body: str, label: str) -> Optional[str]:
+    def _deemphasize(text: str) -> str:
+        """Drop markdown bold/italic markers so `- **Label:** v` reads like `- Label: v`.
+
+        Authors bold their Reuse Map labels; the gate must not depend on that
+        choice. Only the emphasis markers are removed — the values are intact
+        for the emptiness and project-name checks that follow.
+        """
+        return re.sub(r"\*\*|__", "", text)
+
+    @classmethod
+    def _field_value(cls, body: str, label: str) -> Optional[str]:
         m = re.search(
-            rf"^\s*[-*]?\s*{re.escape(label)}\s*:\s*(.*)$", body, re.MULTILINE | re.IGNORECASE
+            rf"^\s*[-*]?\s*{re.escape(label)}\s*:\s*(.*)$",
+            cls._deemphasize(body),
+            re.MULTILINE | re.IGNORECASE,
         )
         if m is None:
             return None
         return m.group(1).strip()
 
     def check_pr_body(self, body: str, changed: list[str], today: _dt.date) -> None:
-        if REUSE_MAP_HEADING not in body:
+        if REUSE_MAP_HEADING not in self._deemphasize(body):
             self.add(
                 "GOV-PR-NOMAP",
                 f"PR body has no `{REUSE_MAP_HEADING}` section — a verbal reuse claim "
@@ -771,7 +783,12 @@ class GovernanceChecker:
                 continue
             impact_rx = [pattern_to_regex(p) for p in proj.impact_analysis_paths]
             touched_runtime = any(
-                any(rx.match(path) for rx in impact_rx) for path in changed
+                any(rx.match(path) for rx in impact_rx)
+                # A nested AGENTS.md sits inside a runtime directory but is an
+                # instruction pointer, never shared runtime. Adding one must not
+                # demand a fleet-wide impact analysis.
+                and Path(path).name != "AGENTS.md"
+                for path in changed
             )
             if not touched_runtime:
                 continue

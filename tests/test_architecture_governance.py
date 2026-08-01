@@ -472,6 +472,41 @@ def test_incomplete_reuse_map_fails():
     assert "GOV-PR-FIELD" in out and "Vertical E2E proof" in out
 
 
+def test_bold_markdown_labels_are_accepted():
+    """Authors bold their Reuse Map labels; the gate must not depend on that."""
+    body = reuse_map()
+    bolded = "\n".join(
+        line.replace("- ", "- **", 1).replace(":", ":**", 1) if line.startswith("- ") else line
+        for line in body.splitlines()
+    )
+    assert "- **Requested outcome:**" in bolded
+    code, out = run_checker(REPO_ROOT, changed=["src/agents/catering/deposit.py"], body=bolded)
+    assert code == 0, out
+
+
+def test_nested_agents_pointer_does_not_trigger_shared_impact_analysis():
+    """An AGENTS.md inside a shared runtime dir is a pointer, not shared runtime."""
+    body = reuse_map(**{
+        "Affected projects": "commerce-platform",
+        "Applicable directives": "docs/governance/projects/commerce-platform.md",
+        "Shared-platform impact": "none",
+    })
+    code, out = run_checker(REPO_ROOT, changed=["src/platform/commerce/AGENTS.md"], body=body)
+    assert code == 0, out
+
+
+def test_real_shared_runtime_change_still_triggers_impact_analysis():
+    """Guard the guard: an actual commerce module must still demand the analysis."""
+    body = reuse_map(**{
+        "Affected projects": "commerce-platform",
+        "Applicable directives": "docs/governance/projects/commerce-platform.md",
+        "Shared-platform impact": "none",
+    })
+    code, out = run_checker(REPO_ROOT, changed=["src/platform/commerce/cart.py"], body=body)
+    assert code == 1
+    assert "GOV-PR-SHARED" in out
+
+
 # ── 11 & 12. subsystem heuristic ───────────────────────────────────────────
 
 
