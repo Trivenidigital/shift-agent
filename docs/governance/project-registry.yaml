@@ -16,6 +16,17 @@
 #   a common path are an undeclared overlap and fail the checker unless listed
 #   under `overlaps:` below.
 #
+# CONTAINER RULES vs PRODUCT RULES.
+#   `tests/**` and `tools/**` (shift-platform) and `web/backend/**` +
+#   `web/frontend/**` (cockpit) are CONTAINER rules: they exist so no path is
+#   ever unclassified, NOT as a claim that shift-platform or the cockpit owns
+#   everything inside them. Product-specific patterns are strictly more
+#   specific and therefore always win. A product-owned test, fixture, tool or
+#   cockpit panel MUST carry its own pattern under the owning project — being
+#   swallowed by a container rule is a registry defect, not an acceptable
+#   default. tests/test_architecture_governance.py enforces this: any file
+#   whose path names a product but resolves to a container rule fails.
+#
 # UNKNOWN PATHS fail closed: a changed file matching no pattern is a
 # classification error, not a silent pass. Add it to the owning project.
 
@@ -145,6 +156,14 @@ projects:
         - tests/test_select_catering_proposal.py
         - tests/test_record_catering_acceptance.py
         - tests/test_lookup_prior_leads.py
+        - tests/test_create_catering*.py
+        - tests/test_send_catering_ack.py
+        - tests/test_cf_router_catering*.py
+        - tests/test_pr_d1_catering*.py
+        - tests/e2e/catering_*
+        - tests/e2e/test_catering*
+        - tests/e2e/fixtures/catering-*
+        - tests/fixtures/catering_*
       ops:
         - src/agents/catering/scripts/**
         - src/agents/catering/systemd/**
@@ -152,6 +171,7 @@ projects:
       ui:
         - web/frontend/src/sections/catering/**
         - web/backend/app/routers/catering.py
+        - web/backend/tests/test_catering_*.py
       docs:
         - docs/catering-edge-cases.md
         - docs/runbooks/catering-dark-deploy.md
@@ -181,6 +201,9 @@ projects:
         - tests/test_flyer*.py
         - tests/flyer_oracle/**
         - tests/_flyer_replay_helpers.py
+        - tests/test_cf_router_flyer*.py
+        - tests/fixtures/flyer_*/**
+        - tests/incident_replay/fixtures/stale_flyer_*
       ops:
         - src/agents/flyer/scripts/**
         - src/agents/flyer/systemd/**
@@ -189,8 +212,10 @@ projects:
         - tools/stage-flyer-env-split.sh
       ui:
         - web/frontend/src/sections/flyer/**
+        - web/frontend/src/sections/FlyerAdmin.tsx
         - web/frontend/src/sections/FlyerProjectEvidenceDrawer.tsx
         - web/backend/app/routers/flyer.py
+        - web/backend/tests/test_flyer_*.py
       docs:
         - docs/flyer-studio-current-state.md
         - docs/product/live-scope.md
@@ -306,6 +331,7 @@ projects:
         - src/agents/daily_brief/**
       tests:
         - tests/test_daily*.py
+        - tests/test_send_daily_brief*.py
       ops:
         - src/agents/daily_brief/scripts/**
         - src/agents/daily_brief/systemd/**
@@ -352,6 +378,7 @@ projects:
         - src/agents/compliance/**
       tests:
         - tests/test_compliance*.py
+        - tests/test_agent_13_compliance*.py
       ops:
         - src/agents/compliance/scripts/**
         - src/agents/compliance/systemd/**
@@ -376,6 +403,7 @@ projects:
         - src/agents/multi_location/**
       tests:
         - tests/test_multi_location*.py
+        - tests/test_agent_3_multi_location*.py
       ops:
         - src/agents/multi_location/scripts/**
       ui: []

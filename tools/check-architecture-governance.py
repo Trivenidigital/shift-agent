@@ -149,6 +149,55 @@ EMPTY_VALUES = {"", "none", "n/a", "na", "-", "tbd", "todo"}
 CURSOR_RULE_ALIASES = {"shared-platform-directive": "shift-platform"}
 CURSOR_UNIVERSAL_RULE = "engineering-directive"
 
+# Container rules exist so that no path is ever unclassified. They are NOT a
+# claim of ownership over everything beneath them: a product-specific pattern
+# is strictly more specific and always wins.
+CONTAINER_PATTERNS = {
+    "tests/**",
+    "tools/**",
+    "conftest.py",
+    "src/platform/*.py",
+    "web/backend/**",
+    "web/frontend/**",
+    "docs/**",
+    "tasks/**",
+}
+
+# Code containers only. A product-owned test, fixture, tool, module or cockpit
+# panel resolving to one of these is a registry defect (GOV-REG-ABSORBED) —
+# comprehensive classification is not the same as correct classification.
+#
+# `docs/**` and `tasks/**` are deliberately NOT guarded: planning and review
+# history is cross-product by nature and carries no runtime behavior, so a plan
+# named for a product still belongs to repo-meta (see
+# docs/governance/projects/repo-meta.md). Product-owned RUNBOOKS and scope docs
+# are assigned explicitly to their products in the registry and therefore never
+# reach the container rule.
+ABSORPTION_GUARDED_CONTAINERS = {
+    "tests/**",
+    "tools/**",
+    "conftest.py",
+    "src/platform/*.py",
+    "web/backend/**",
+    "web/frontend/**",
+}
+
+# Path substrings that unambiguously name a product, used ONLY to detect
+# container absorption. This is a supporting signal that raises a registry
+# finding — it never decides ownership, which the registry alone does.
+PRODUCT_NAME_SIGNALS = {
+    "catering": "catering-studio",
+    "flyer": "flyer-studio",
+    "commerce": "commerce-platform",
+    "expense": "expense-bookkeeper",
+    "qbo": "expense-bookkeeper",
+    "compliance": "compliance",
+    "daily_brief": "daily-brief",
+    "daily-brief": "daily-brief",
+    "multi_location": "multi-location",
+    "eod": "eod-reconcile",
+}
+
 BLOCKER = "BLOCKER"
 HIGH = "HIGH"
 
@@ -445,6 +494,71 @@ class GovernanceChecker:
             if any(pattern_to_regex(p).match(path) for p in patterns):
                 return True
         return False
+
+    def resolve(self, path: str) -> dict:
+        """Full ownership resolution for one path — the audit record."""
+        assert self.matcher is not None
+        owner, owners, pattern = self.matcher.classify(path)
+        proj = self.by_id.get(owner) if owner else None
+        directives: list[str] = []
+        if proj:
+            directives.append(proj.directive)
+            if proj.shared_platform and proj.directive != SHARED_DIRECTIVE:
+                directives.append(SHARED_DIRECTIVE)
+        overlap = None
+        if len(owners) > 1:
+            for entry in self.overlaps:
+                if set(owners) <= set(entry.get("projects") or []) and any(
+                    pattern_to_regex(p).match(path) for p in entry.get("paths") or []
+                ):
+                    overlap = entry.get("id")
+                    break
+        # De-duplicate while preserving order: repo-governance's own directive
+        # IS the universal directive.
+        seen: set[str] = set()
+        applicable = [
+            d for d in [UNIVERSAL_DIRECTIVE] + directives
+            if d and not (d in seen or seen.add(d))
+        ]
+        return {
+            "path": path,
+            "project": owner,
+            "tied_projects": owners,
+            "winning_rule": pattern,
+            "rule_kind": "container" if pattern in CONTAINER_PATTERNS else "product-specific",
+            "specificity": specificity(pattern) if pattern else None,
+            "directives": applicable,
+            "declared_overlap": overlap,
+        }
+
+    def check_container_absorption(self) -> None:
+        """A product-named file must not be owned via a broad container rule.
+
+        Comprehensive classification is not the same as correct classification:
+        `tests/**` can classify every test while silently assigning Catering
+        and Flyer suites to the shared platform. This makes that failure loud.
+        """
+        assert self.matcher is not None
+        for path in self.tracked_files():
+            if self.matcher.is_excluded(path):
+                continue
+            owner, _, pattern = self.matcher.classify(path)
+            if owner is None or pattern not in ABSORPTION_GUARDED_CONTAINERS:
+                continue
+            lowered = path.lower()
+            for signal, expected in PRODUCT_NAME_SIGNALS.items():
+                if signal not in lowered or expected == owner:
+                    continue
+                if expected not in self.by_id:
+                    continue
+                self.add(
+                    "GOV-REG-ABSORBED",
+                    f"`{path}` resolves to `{owner}` only via the container rule "
+                    f"`{pattern}`, but its path names `{expected}`. Container rules must "
+                    "not absorb product-owned files — add a specific pattern under "
+                    f"`{expected}`, or rename the file if it is genuinely shared",
+                )
+                break
 
     def check_overlaps(self) -> None:
         """A tracked file whose top-specificity match is tied across projects is
@@ -875,6 +989,7 @@ class GovernanceChecker:
         if not self.load_registry():
             return
         self.check_overlaps()
+        self.check_container_absorption()
         self.check_instruction_files()
         self.check_cursor_rules()
         self.load_exceptions()
@@ -937,6 +1052,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--pr-body", default=None, help="file containing the PR body")
     ap.add_argument("--today", default=None, help="override today's date (YYYY-MM-DD, tests)")
     ap.add_argument("--format", choices=("text", "json"), default="text")
+    ap.add_argument(
+        "--resolve",
+        nargs="+",
+        metavar="PATH",
+        help="print the ownership-resolution record for each PATH and exit",
+    )
     args = ap.parse_args(argv)
 
     root = Path(args.repo_root).resolve() if args.repo_root else Path(__file__).resolve().parent.parent
@@ -967,6 +1088,32 @@ def main(argv: Optional[list[str]] = None) -> int:
         body = bp.read_text(encoding="utf-8")
 
     checker = GovernanceChecker(root)
+
+    if args.resolve:
+        checker.check_structure()
+        if not checker.load_registry():
+            for f in checker.findings:
+                print(f.render())
+            return 1
+        records = [checker.resolve(p) for p in args.resolve]
+        if args.format == "json":
+            print(json.dumps(records, indent=2))
+        else:
+            width = max(len(r["path"]) for r in records)
+            print(f"{'PATH'.ljust(width)}  {'PROJECT':<20} {'RULE KIND':<17} WINNING RULE")
+            print("-" * (width + 60))
+            for r in records:
+                proj = r["project"] or "UNCLASSIFIED"
+                print(
+                    f"{r['path'].ljust(width)}  {proj:<20} "
+                    f"{r['rule_kind']:<17} {r['winning_rule']}"
+                )
+                print(f"{' ' * width}    directives: {', '.join(r['directives'])}")
+                if r["declared_overlap"]:
+                    print(f"{' ' * width}    declared overlap: {r['declared_overlap']} "
+                          f"({', '.join(r['tied_projects'])})")
+        return 0
+
     checker.run(changed, added, body, today)
 
     if args.format == "json":

@@ -810,3 +810,299 @@ def test_pointer_files_do_not_fork_policy():
         text = (REPO_ROOT / rel).read_text(encoding="utf-8")
         assert len(text.splitlines()) < 60, f"{rel} looks like a forked policy copy"
         assert "docs/governance/engineering-directive.md" in text
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Reviewer blocker 1 — legacy policy from the pre-governance instruction
+# files must survive. Each contract below existed in the pre-PR AGENTS.md /
+# CLAUDE.md; a later edit must not silently delete it.
+# ══════════════════════════════════════════════════════════════════════════
+
+GOVERNANCE_CORPUS_FILES = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/governance/engineering-directive.md",
+    "docs/governance/shared-platform-directive.md",
+]
+
+
+def _governance_corpus() -> str:
+    parts = [(REPO_ROOT / f).read_text(encoding="utf-8") for f in GOVERNANCE_CORPUS_FILES]
+    parts += [p.read_text(encoding="utf-8")
+              for p in sorted((REPO_ROOT / "docs" / "governance" / "projects").glob("*.md"))]
+    return "\n".join(parts)
+
+
+# (legacy rule, canonical destination, marker strings that must all survive)
+PRESERVED_LEGACY_CONTRACTS = [
+    ("hermes-capability-inventory", "shared-platform-directive.md §1a",
+     ["Source ingestion across formats", "Vision extraction", "Skill chaining",
+      "LLM gateway", "Per-VPS state"]),
+    ("canonical-menu-image-reference", "shared-platform-directive.md §1a",
+     ["Owner sends a menu\nimage"]),
+    ("bundled-ecosystem-skills", "shared-platform-directive.md §1a",
+     ["productivity/google-workspace", "productivity/maps", "productivity/airtable",
+      "productivity/ocr-and-documents", "productivity/notion"]),
+    ("native-mcp-escape-hatch", "shared-platform-directive.md §1a",
+     ["mcp/native-mcp", "8,600"]),
+    ("genuinely-net-new-categories", "engineering-directive.md §2a",
+     ["External write APIs", "Money-moving UX discipline",
+      "Per-customer business logic", "Specialised classifiers"]),
+    ("trap-skills-do-not-investigate", "engineering-directive.md §2a",
+     ["bookkeeper", "sentiment-priority-scorer", "cognify-skills", "farmos-equipment"]),
+    ("read-deployed-code-table", "engineering-directive.md §6",
+     ["src/platform/schemas.py", "src/platform/safe_io.py",
+      "dispatch_shift_agent", "shift-agent-deploy.sh"]),
+    ("deployed-pattern-checklist", "engineering-directive.md §7",
+     ["atomic_write_json", "generate_unique_code", 'extra="forbid"',
+      "fromMe", "single-tenant"]),
+    ("drift-check-tag", "projects/repo-meta.md",
+     ["Hermes-native", "extends-Hermes", "drifts-from-Hermes"]),
+    ("author-side-hook-and-command", "projects/repo-meta.md",
+     ["hermes-first-check.py", "/hermes-check"]),
+    ("reviewer-standing-rule", "engineering-directive.md §11",
+     ["NO-GO", "could an existing capability", "is the scope itself needed"]),
+    ("review-economics", "engineering-directive.md §8",
+     ["BLOCKER", "two reviewer/fix cycles", "new evidence"]),
+    ("pilot-readiness-gate", "AGENTS.md workflow reminders",
+     ["pilot-readiness-check --text", "blocking for onboarding"]),
+    ("self-learning-boundary", "AGENTS.md workflow reminders",
+     ["Self-learning boundary", "state/memory only"]),
+    ("catering-menu-authority", "AGENTS.md + projects/catering-studio.md",
+     ["only the owner may apply the extracted menu", "confirmation code"]),
+    ("tarball-deploy-discipline", "AGENTS.md workflow reminders",
+     ["no git checkout on the VPS"]),
+    ("plan-first", "AGENTS.md workflow reminders",
+     ["tasks/<feature>-plan.md"]),
+    ("project-context", "AGENTS.md project context",
+     ["Triveni Supermarket", "Hetzner", "docs/portfolio.md"]),
+]
+
+
+@pytest.mark.parametrize(
+    "rule,destination,markers",
+    PRESERVED_LEGACY_CONTRACTS,
+    ids=[c[0] for c in PRESERVED_LEGACY_CONTRACTS],
+)
+def test_legacy_policy_contract_preserved(rule, destination, markers):
+    corpus = _governance_corpus()
+    missing = [m for m in markers if m not in corpus]
+    assert not missing, (
+        f"legacy rule `{rule}` (canonical destination: {destination}) lost these "
+        f"markers from the pre-governance instruction files: {missing}"
+    )
+
+
+def test_every_pre_pr_section_heading_is_accounted_for():
+    """Each substantive heading in the pre-PR AGENTS.md is preserved or listed
+    as intentionally superseded. Nothing may be dropped silently."""
+    pre = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "show", "main:AGENTS.md"],
+        capture_output=True, text=True,
+    ).stdout
+    if not pre:
+        pytest.skip("pre-PR AGENTS.md not reachable (shallow clone)")
+    headings = [h.strip("# ").strip() for h in pre.splitlines() if h.startswith(("## ", "### "))]
+    # Point-in-time status sections are intentionally superseded — they record a
+    # moment, not a rule, and were already stale at consolidation time.
+    intentionally_superseded = {"Active scope this session"}
+    unaccounted = [
+        h for h in headings
+        if h not in intentionally_superseded and h not in ACCOUNTED_PRE_PR_HEADINGS
+    ]
+    assert not unaccounted, (
+        "pre-PR AGENTS.md headings not accounted for in the preservation map: "
+        f"{unaccounted}"
+    )
+
+
+ACCOUNTED_PRE_PR_HEADINGS = {
+    "⚠️ CRITICAL RULE — Check Hermes capabilities BEFORE writing code",
+    "How to apply (mandatory checklist before any code/spec)",
+    "What Hermes natively handles (verified in production for Catering Agent as of 2026-04-29)",
+    "Install-now ecosystem skills (verified 2026-05-03; cover 6 of 17 prioritized agents)",
+    "What is genuine net-new engineering (NOT Hermes substrate)",
+    "Why this rule exists",
+    "How this rule is enforced (mechanical, not discipline-based)",
+    "⚠️ DRIFT RULES — Read deployed code BEFORE proposing",
+    "The rule (Part 3 working agreement)",
+    "Drift-check tag (mandatory at top of every plan/spec/design doc)",
+    "Deployed pattern checklist (Part 1 — verify, do NOT silently import alternatives)",
+    "Operational drift checklist (Part 2)",
+    "How to apply (mandatory checklist before any plan/spec/code)",
+    "Why this rule exists (separate from Hermes-first)",
+    "Project context",
+    "Key paths",
+    "Workflow reminders",
+}
+
+
+def test_claude_md_still_points_and_does_not_refork():
+    """Preservation must not be achieved by pasting policy back into CLAUDE.md."""
+    text = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    assert len(text.splitlines()) < 60
+    for forked in ("What Hermes natively handles", "Deployed pattern checklist",
+                   "productivity/google-workspace", "atomic_write_json"):
+        assert forked not in text, f"CLAUDE.md re-forked policy text: {forked!r}"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Reviewer blocker 2 — the registry must be precise, not merely comprehensive.
+# ══════════════════════════════════════════════════════════════════════════
+
+# (path, expected project, expected rule kind)
+OWNERSHIP_TABLE = [
+    ("src/agents/catering/deposit.py", "catering-studio", "product-specific"),
+    ("tests/test_catering_pricing_kernel.py", "catering-studio", "product-specific"),
+    ("tests/e2e/test_catering_conversation_e2e.py", "catering-studio", "product-specific"),
+    ("tests/fixtures/catering_pricebook_valid.json", "catering-studio", "product-specific"),
+    ("src/agents/catering/scripts/import-catering-pricebook", "catering-studio", "product-specific"),
+    ("src/platform/catering_pricing.py", "catering-studio", "product-specific"),
+    ("src/agents/flyer/visual_qa.py", "flyer-studio", "product-specific"),
+    ("tests/test_flyer_visual_qa.py", "flyer-studio", "product-specific"),
+    ("tests/fixtures/flyer_rollout_readiness/green.json", "flyer-studio", "product-specific"),
+    ("tools/flyer-self-evaluation.py", "flyer-studio", "product-specific"),
+    ("src/platform/flyer_identity.py", "flyer-studio", "product-specific"),
+    ("src/platform/commerce/cart.py", "commerce-platform", "product-specific"),
+    ("web/backend/app/routers/catering.py", "catering-studio", "product-specific"),
+    ("web/frontend/src/sections/catering/CateringStudio.tsx", "catering-studio", "product-specific"),
+    ("web/frontend/src/sections/FlyerAdmin.tsx", "flyer-studio", "product-specific"),
+    ("web/frontend/src/sections/flyer/ManualQueueActions.tsx", "flyer-studio", "product-specific"),
+    ("src/platform/safe_io.py", "shift-platform", "container"),
+    ("src/agents/shift/skills/dispatch_shift_agent/SKILL.md", "shift-platform", "product-specific"),
+    ("tests/test_schemas.py", "shift-platform", "container"),
+    ("tools/patch-hermes.py", "shift-platform", "container"),
+    ("src/agents/vip/skills/vip_dispatcher/SKILL.md", "phase0-agents", "product-specific"),
+    ("docs/governance/engineering-directive.md", "repo-governance", "product-specific"),
+    ("web/backend/app/routers/auth.py", "cockpit", "container"),
+    ("src/platform/qbo_client.py", "expense-bookkeeper", "product-specific"),
+]
+
+
+@pytest.mark.parametrize("path,project,kind", OWNERSHIP_TABLE,
+                         ids=[p for p, _, _ in OWNERSHIP_TABLE])
+def test_ownership_resolution_table(path, project, kind):
+    checker = gov.GovernanceChecker(REPO_ROOT)
+    assert checker.load_registry(), checker.findings
+    r = checker.resolve(path)
+    assert r["project"] == project, f"{path} -> {r['project']} (rule {r['winning_rule']})"
+    assert r["rule_kind"] == kind, f"{path} matched via {r['winning_rule']} ({r['rule_kind']})"
+    assert gov.UNIVERSAL_DIRECTIVE in r["directives"]
+    proj = checker.by_id[project]
+    assert proj.directive in r["directives"]
+    if proj.shared_platform:
+        assert gov.SHARED_DIRECTIVE in r["directives"]
+
+
+def test_no_product_file_is_absorbed_by_a_container_rule():
+    """The core blocker-2 guarantee, enforced across the whole repository."""
+    code, out = run_checker(REPO_ROOT, registry_only=True)
+    assert "GOV-REG-ABSORBED" not in out, out
+    assert code == 0, out
+
+
+def test_catering_test_is_not_classified_only_as_shared_platform():
+    for path in ("tests/test_catering_pricing_kernel.py",
+                 "tests/e2e/test_catering_conversation_e2e.py",
+                 "tests/test_send_catering_ack.py"):
+        assert classify(path) == "catering-studio", path
+
+
+def test_flyer_tool_is_not_classified_only_as_shared_platform():
+    for path in ("tools/flyer-self-evaluation.py",
+                 "tools/flyer-acceptance-baseline.py",
+                 "tools/backfill-flyer-pdf-qa.py"):
+        assert classify(path) == "flyer-studio", path
+
+
+def test_absorption_guard_fires_when_a_product_pattern_is_removed(sandbox, monkeypatch):
+    """Deleting a product's test pattern must be caught, not silently absorbed.
+
+    Runs entirely against the sandbox registry; the real repository's file list
+    is injected rather than the sandbox registry being copied into the repo — a
+    governance test must never write into the tree it audits.
+    """
+    real = gov.GovernanceChecker(REPO_ROOT)
+    assert real.load_registry()
+    repo_files = real.tracked_files()
+
+    data = _registry(sandbox)
+    for proj in data["projects"]:
+        if proj["id"] == "flyer-studio":
+            proj["paths"]["tests"] = [p for p in proj["paths"]["tests"]
+                                      if p != "tests/test_flyer*.py"]
+    _write_registry(sandbox, data)
+
+    checker = gov.GovernanceChecker(sandbox)
+    monkeypatch.setattr(checker, "tracked_files", lambda: repo_files)
+    assert checker.load_registry(), checker.findings
+    checker.check_container_absorption()
+    findings = [f for f in checker.findings if f.code == "GOV-REG-ABSORBED"]
+    assert findings, "removing tests/test_flyer*.py must be caught by the guard"
+    assert any("flyer-studio" in f.message for f in findings)
+    assert any("tests/test_flyer" in f.message for f in findings)
+
+
+def test_cross_project_path_maps_to_all_declared_owners(sandbox: Path):
+    """A genuinely shared path may map to multiple owners when declared."""
+    data = _registry(sandbox)
+    for proj in data["projects"]:
+        if proj["id"] == "flyer-studio":
+            proj["paths"]["tests"].append("tests/test_catering*.py")
+    data["overlaps"].append({
+        "id": "OV-TEST-XPROJ",
+        "projects": ["catering-studio", "flyer-studio"],
+        "paths": ["tests/test_catering*.py"],
+        "resolution": "longest-literal-prefix-wins",
+        "reason": "genuinely cross-project suite",
+    })
+    _write_registry(sandbox, data)
+    checker = gov.GovernanceChecker(sandbox)
+    assert checker.load_registry(), checker.findings
+    affected = checker.classify_changes(["tests/test_catering_pricing_kernel.py"])
+    assert set(affected) == {"catering-studio", "flyer-studio"}, affected
+    assert not [f for f in checker.findings if f.code == "GOV-OVERLAP"]
+
+
+def test_longest_prefix_cannot_conceal_an_undeclared_overlap(sandbox: Path):
+    """Equal-specificity collision must fail even though classification 'works'."""
+    data = _registry(sandbox)
+    for proj in data["projects"]:
+        if proj["id"] == "flyer-studio":
+            proj["paths"]["tests"].append("tests/test_catering*.py")
+    _write_registry(sandbox, data)
+    checker = gov.GovernanceChecker(sandbox)
+    assert checker.load_registry()
+    checker.classify_changes(["tests/test_catering_pricing_kernel.py"])
+    codes = [f.code for f in checker.findings]
+    assert "GOV-OVERLAP" in codes, codes
+
+
+def test_broad_fallback_cannot_validate_a_wrongly_owned_path(sandbox: Path):
+    """Widening a container rule must not launder a misowned product file."""
+    data = _registry(sandbox)
+    for proj in data["projects"]:
+        if proj["id"] == "shift-platform":
+            proj["paths"]["ops"].append("src/agents/flyer/**")
+    _write_registry(sandbox, data)
+    checker = gov.GovernanceChecker(sandbox)
+    assert checker.load_registry()
+    checker.classify_changes(["src/agents/flyer/visual_qa.py"])
+    codes = [f.code for f in checker.findings]
+    assert "GOV-OVERLAP" in codes, codes
+
+
+def test_resolve_cli_emits_the_ownership_record():
+    proc = subprocess.run(
+        [sys.executable, str(CHECKER), "--repo-root", str(REPO_ROOT), "--format", "json",
+         "--resolve", "tests/test_flyer_visual_qa.py", "src/platform/safe_io.py"],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    import json as _json
+    records = _json.loads(proc.stdout)
+    assert records[0]["project"] == "flyer-studio"
+    assert records[0]["rule_kind"] == "product-specific"
+    assert records[1]["project"] == "shift-platform"
+    assert records[1]["rule_kind"] == "container"
+    assert gov.SHARED_DIRECTIVE in records[1]["directives"]

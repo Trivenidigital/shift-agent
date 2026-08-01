@@ -1,6 +1,6 @@
 # Shared-Platform Directive
 
-    Version: 1.0.0
+    Version: 1.1.0
     Status:  Mandatory
     Scope:   Level 2 — shared Hermes / Shift / gateway / transport / routing /
              state / deployment infrastructure used by more than one product
@@ -64,6 +64,52 @@ Deployed anchors for the deterministic half (read before proposing):
 | Schemas / `LogEntry` union | `src/platform/schemas.py` |
 | Deploy + pin gate | `src/agents/shift/scripts/shift-agent-deploy.sh`, `tools/check-shift-agent-patch.sh` |
 
+## 1a. Verified Hermes capability inventory — check this before tagging work "new"
+
+Production-verified for the Catering Agent as of 2026-04-29. If a step in your
+task appears here, it is **reuse**, not net-new engineering. Re-verify against
+the deployed code before relying on any line; do not extend this list from
+memory.
+
+- **Source ingestion across formats:** image (JPEG/PNG), PDF, Excel/CSV, Word,
+  plain text.
+- **Source origins:** WhatsApp inbound media, mounted filesystems, Google Drive
+  (point-to-folder), URLs.
+- **Vision extraction:** complex layouts, multi-column, low-quality scans,
+  multi-language.
+- **Structured output:** JSON-schema-conformant extraction.
+- **Skill chaining:** extract → classify → respond, with audit at each step.
+- **Approval workflows:** `#XXXXX` 5-char codes, 4h proposal TTL, dead-man
+  escalation.
+- **Identity + role gating:** `sender_role` check (owner / staff / customer).
+- **Audit chain:** `decisions.log` discriminated-union entries.
+- **Multi-channel response:** WhatsApp text/image/document, Telegram, email.
+- **Skill dispatch:** routing by `sender_role` + `media_type` + content.
+- **Per-VPS state:** JSON / SQLite + encrypted backups.
+- **LLM gateway:** text + vision, swappable provider.
+
+**Canonical reference — the test that proves the loop.** Owner sends a menu
+image to their WhatsApp → Hermes extracts → structured menu created →
+customer-facing reply with menu items. End to end, all inside Hermes. This is
+the template for *media-in → structured-out → response-out*; it works for
+receipts, invoices and supplier price sheets with only the schema swapping.
+
+### Bundled ecosystem skills — install before scaffolding equivalents
+
+Per `tasks/skills-roadmap.md` (4-source ecosystem audit, verified 2026-05-03).
+Check this list before tagging any step net-new:
+
+1. **`productivity/google-workspace`** — Calendar/Sheets/Drive/Gmail/Docs OAuth.
+2. **`productivity/maps`** — OSRM routing + Nominatim geocoding (free, 1 req/s).
+3. **`productivity/airtable`** — CRUD for SKU lists, cost data, P&L history.
+4. **`productivity/ocr-and-documents`** — pymupdf + marker-pdf (90+ languages,
+   table support). Complements Hermes vision for non-image PDFs.
+5. **`productivity/notion`** — Notion CRUD as an Airtable alternative.
+
+**Escape hatch — `mcp/native-mcp`** bridges Hermes to ~8,600+ MCP servers.
+Investigate a maintained MCP server *before* estimating custom integration
+code for QBO, Stripe, DocuSign and similar externals.
+
 ## 2. Shared changes must not silently change behavior for every agent
 
 A shared-infrastructure change is, by default, a change to every product on the
@@ -125,4 +171,5 @@ an approved exception describing the compensating control.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.1.0 | 2026-08-01 | Add §1a: the production-verified Hermes capability inventory, the canonical menu-image reference test, the bundled ecosystem-skill list and the `mcp/native-mcp` escape hatch, carried from the pre-governance `AGENTS.md`. |
 | 1.0.0 | 2026-08-01 | Initial shared-platform directive. |

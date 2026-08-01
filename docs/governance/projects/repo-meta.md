@@ -1,6 +1,6 @@
 # Repository Docs and Planning — Project Directive
 
-    Version: 1.0.0
+    Version: 1.1.0
     Status:  Mandatory
     Level:   3 (project)
     Project id: repo-meta
@@ -53,11 +53,15 @@ This is a self-disclosure mechanism: it surfaces deviation at proposal time so
 reviewers can engage with it explicitly. It does not replace the
 read-the-deployed-code rule (universal directive §6).
 
-> **Operational note.** A `PreToolUse` hook may be configured in the author's
-> local Claude Code settings (`hermes-first-check.py`) that blocks writes to
-> `tasks/` plan/design/spec docs lacking both a `**Drift-check tag:**` line and
-> a reuse-checklist heading. It is an author-side convenience, not a repository
-> gate — the requirement above stands whether or not the hook is installed.
+> **Operational note — author-side tooling.** Two conveniences may exist in the
+> author's local Claude Code settings. Neither is a repository gate, and the
+> requirements above stand whether or not they are installed:
+>
+> - a `PreToolUse` hook (`hermes-first-check.py`) that blocks writes to `tasks/`
+>   plan/design/spec docs lacking both a `**Drift-check tag:**` line and a
+>   reuse-checklist heading;
+> - a `/hermes-check <task>` slash command that walks the per-step reuse
+>   checklist from the universal directive §1.
 
 ## Decision boundary
 
@@ -74,4 +78,5 @@ it does, the change is misclassified and belongs to the owning product.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.1.0 | 2026-08-01 | Record the `/hermes-check` slash command alongside the drift-check-tag hook as author-side tooling. |
 | 1.0.0 | 2026-08-01 | Initial repo-meta directive. |

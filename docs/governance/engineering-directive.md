@@ -1,6 +1,6 @@
 # Universal Engineering Directive
 
-    Version: 1.0.0
+    Version: 1.1.0
     Status:  Mandatory
     Scope:   Every file, product and agent in this repository (Level 1)
     Applies to: all agents, developers, reviewers, subagents and implementation
@@ -52,6 +52,39 @@ the entire repository:
 
 Extending an existing one is the default. Creating a parallel one requires an
 approved exception whose `subsystem_type` names it.
+
+## 2a. What is genuinely net-new (the bounded exception to §2)
+
+Reuse-first is not "never write code". These categories are real engineering
+and should be estimated as such. Verified 2026-05-03 against a 4-source
+ecosystem audit (`tasks/skills-roadmap.md`):
+
+- **External write APIs** — QuickBooks OAuth + write scope, Stripe charges,
+  e-sign services, calendar invites. The platform consumes externals; writing
+  to them is per-product work. No Hermes/OpenClaw/community skill exists for
+  QBO write, standalone Stripe/Square/PayPal/Venmo, DocuSign/HelloSign/
+  PandaDoc, state tax filings, delivery platforms, or restaurant-equipment
+  vendor APIs. **Always check `mcp/native-mcp` for a community MCP server
+  before estimating custom code.**
+- **Money-moving UX discipline** — code+amount approval format, perceptual-hash
+  dedup, per-amount cockpit-vs-WhatsApp thresholds, reversibility windows.
+- **Per-customer business logic** — chart-of-accounts mapping, supplier roster
+  matching, festival-calendar regional variants.
+- **Specialised classifiers** beyond what a prompt-engineered LLM call can do.
+- **Cross-agent coordination logic** — state-machine handoffs between agents.
+  Rare; a skill chain usually suffices.
+
+### Trap skills — do not spend investigation cycles here
+
+Audited and rejected; re-proposing one needs new evidence, not a fresh opinion:
+
+- **`bookkeeper` meta-skill** — writes to Xero, not QBO; paid Maton+DeepRead
+  dependencies; VirusTotal "Suspicious"-flagged.
+- **`sentiment-priority-scorer`** — real-estate-specific, misleading for the
+  review/feedback agents.
+- **`cognify-skills`** — referenced as 19 business-ops skills; the repository
+  returns 404.
+- **`farmos-equipment`** — farm equipment, not restaurant equipment.
 
 ## 3. Do not hand-build what a capability can obtain
 
@@ -240,4 +273,5 @@ Bump `Version` on any normative change and record the reason below.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.1.0 | 2026-08-01 | Add §2a (genuinely net-new categories + audited trap skills), carried from the pre-governance `AGENTS.md` so the reuse rule keeps its bounded exception. |
 | 1.0.0 | 2026-08-01 | Initial universal directive. Consolidates the Hermes-first rule and drift rules previously forked between `AGENTS.md` and `CLAUDE.md` into one canonical source. |
