@@ -57,6 +57,8 @@ from exit_codes import (  # noqa: E402
     EXIT_SCHEMA_VIOLATION, EXIT_DEPENDENCY_DOWN,
 )
 from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
+from catering_paths import CATERING_PRICEBOOK_PATH  # noqa: E402
+import catering_pricing as _pricing  # noqa: E402
 import approval_code_pools  # noqa: E402  # PR-R1: single-source cross-pool code contract
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
@@ -65,6 +67,14 @@ CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/c
 PENDING_PATH = Path("/opt/shift-agent/state/catering-menu-pending.json")
 PENDING_LOCK = Path("/opt/shift-agent/state/catering-menu-pending.json.lock")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+# Module-level like its siblings so a test sandbox can repoint it. It was inlined
+# in _next_update_id, which made the one hardcoded prod path in this script
+# unreachable from a harness driving the real staging flow.
+UPDATE_COUNTER_PATH = Path("/opt/shift-agent/state/catering-menu-update-counter.txt")
+# READ-ONLY: used to render what approving this preview would do to prices.
+# parse-menu-photo never writes the pricebook.
+PRICEBOOK_PATH = Path(
+    os.environ.get("SHIFT_AGENT_PRICEBOOK_PATH") or CATERING_PRICEBOOK_PATH)
 
 # Vision model — gpt-4o-mini via OpenRouter (proven on Triveni VPS, low cost ~$0.01/update).
 # Override with VISION_MODEL env var; alternates that work on OpenRouter:
@@ -134,7 +144,7 @@ def _next_update_id() -> str:
     Stored as a counter inside the pending file's predecessor (we keep a tiny
     counter file for safety since pending file is ephemeral).
     """
-    counter = Path("/opt/shift-agent/state/catering-menu-update-counter.txt")
+    counter = UPDATE_COUNTER_PATH
     counter.parent.mkdir(parents=True, exist_ok=True)
     n = 0
     if counter.exists():
@@ -222,7 +232,38 @@ def _call_vision(api_key: str, image_b64: str, mime: str) -> dict:
         raise RuntimeError(f"vision returned non-JSON: {e}\nbody: {content[:1000]}")
 
 
-def _format_preview(items: list[MenuItem], parser_notes: str) -> str:
+def _pricebook_section(items: list[MenuItem], update_id: str) -> str:
+    """The pricebook half of the owner card.
+
+    Approving this preview activates the pricebook derived from it, so the card
+    has to show the price changes and the version BEFORE the owner types yes —
+    the `#XXXXX yes` is the single approval for both effects.
+
+    Best-effort by construction: a pricebook this script cannot read must not
+    cost the owner their menu preview, but the card still says so plainly,
+    because in that state approving publishes the menu and leaves prices alone.
+    """
+    try:
+        active = _pricing.load_pricebook(PRICEBOOK_PATH)
+    except _pricing.PricingError as e:
+        return ("*Pricebook* — could not be read, so approving publishes the MENU "
+                f"only and leaves prices unchanged.\n  ({str(e)[:200]})")
+    try:
+        sync = _pricing.sync_pricebook_from_menu_items(
+            items, active,
+            # Only the derived overrides and the version are rendered; the date
+            # and id below never reach the card.
+            effective_date=datetime.now().date(), updated_at=datetime.now(),
+            source_menu_update_id=update_id,
+        )
+    except Exception as e:  # noqa: BLE001 — the preview must survive anything here
+        return ("*Pricebook* — price changes could not be computed; approving "
+                f"publishes the MENU only.\n  ({type(e).__name__}: {str(e)[:200]})")
+    return _pricing.render_pricebook_activation_section(sync, active)
+
+
+def _format_preview(items: list[MenuItem], parser_notes: str,
+                    pricebook_section: str = "") -> str:
     """Build the owner-facing preview message. Intentionally compact — owner
     will see this in WhatsApp self-chat with limited screen space."""
     if not items:
@@ -248,6 +289,9 @@ def _format_preview(items: list[MenuItem], parser_notes: str) -> str:
             lines.append(f"  - {it.name}{price}{tags}")
         if len(by_cat[cat]) > 8:
             lines.append(f"  ... and {len(by_cat[cat]) - 8} more {cat}s")
+        lines.append("")
+    if pricebook_section:
+        lines.append(pricebook_section)
         lines.append("")
     if parser_notes:
         lines.append(f"_Parser notes:_ {parser_notes}")
@@ -358,7 +402,7 @@ def main() -> int:
         item_count=len(items), source_image_id=args.source_image_id,
     ))
 
-    preview = _format_preview(items, parser_notes)
+    preview = _format_preview(items, parser_notes, _pricebook_section(items, update_id))
     print(json.dumps({
         "update_id": update_id,
         "confirmation_code": confirmation_code,

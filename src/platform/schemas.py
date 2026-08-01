@@ -2864,7 +2864,11 @@ class MenuPendingUpdate(BaseModel):
 CateringFeeKind = Literal["delivery", "staffing", "setup", "other"]
 CateringFeeUnit = Literal["flat", "per_staff", "per_mile"]
 CateringDiscountKind = Literal["percent", "fixed_cents"]
-CateringPricebookUpdatedBy = Literal["manual", "import", "cockpit"]
+# "menu_approval" is the owner approving a menu photo: the same `#XXXXX yes` that
+# publishes the menu also activates the pricebook derived from it. Named
+# distinctly so an operator reading catering_pricebook_updated can tell a
+# menu-driven bump from a hand import without opening the file.
+CateringPricebookUpdatedBy = Literal["manual", "import", "cockpit", "menu_approval"]
 # Price provenance carried on every computed quote + committed ledger version:
 #   exact               — every line priced from the pricebook (package / override)
 #   estimated           — at least one line fell back to a Menu retail price
@@ -2966,6 +2970,13 @@ class CateringPricebook(BaseModel):
     # for that item; the commercial number always wins over the culinary one.
     item_price_overrides: dict[str, int] = Field(default_factory=dict)
     notes: str = Field(default="", max_length=2000)
+    # The menu-update proposal (MenuPendingUpdate.update_id) whose approval
+    # produced this version, when it came from one. This is the REPLAY ANCHOR:
+    # import-catering-pricebook refuses to re-import a document whose
+    # source_menu_update_id already matches the live one, so re-running an
+    # approval cannot bump the version twice for a change nobody made. A hand
+    # import leaves it None, which is also how the anchor gets cleared.
+    source_menu_update_id: Optional[str] = Field(default=None, max_length=64)
 
     @field_validator("currency", mode="before")
     @classmethod
@@ -4683,6 +4694,21 @@ class CateringPricebookUpdated(_BaseEntry):
     fee_count: int = Field(ge=0)
     discount_count: int = Field(ge=0)
     item_override_count: int = Field(ge=0)
+
+
+class CateringMenuPricebookSyncFailed(_BaseEntry):
+    """The menu was approved and persisted, but activating the pricebook derived
+    from it FAILED. The menu stays approved and the pricebook stays byte-unchanged
+    at its prior version — this row plus an owner alert is how that partial
+    outcome stops being silent.
+
+    PRIVACY: reason + exit status only. The importer's stderr can quote a price,
+    so it goes to the owner's alert (owner-only channel) and never here."""
+    type: Literal["catering_menu_pricebook_sync_failed"]
+    update_id: str = Field(min_length=1)
+    menu_version: int = Field(ge=1)
+    reason: str = Field(max_length=100)
+    returncode: int
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -7952,6 +7978,8 @@ LogEntry = Annotated[
         Annotated[MenuUpdateRejected, Tag("menu_update_rejected")],
         # M2: commercial pricebook import
         Annotated[CateringPricebookUpdated, Tag("catering_pricebook_updated")],
+        Annotated[CateringMenuPricebookSyncFailed,
+                  Tag("catering_menu_pricebook_sync_failed")],
         # Agent #21 Expense Bookkeeper (15 entry types)
         Annotated[ExpenseReceiptReceived, Tag("expense_receipt_received")],
         Annotated[ExpenseDuplicateDetected, Tag("expense_duplicate_detected")],

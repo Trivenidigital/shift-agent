@@ -6,12 +6,26 @@ replies to the menu preview with the confirmation_code + verb (YES / NO /
 EDIT). Looks up the pending update, applies the decision deterministically,
 archives the prior menu (if any), and writes the audit entry.
 
+ONE approval, TWO effects. On YES the menu is persisted as before, and then the
+pricebook derived from it is activated through the EXISTING
+import-catering-pricebook path (same validation, version bump, archive and audit
+row). There is no second approval and no second store: the owner card built by
+parse-menu-photo already states which prices change and which version lands, so
+the `#XXXXX yes` they type is informed consent for both.
+
+FAILURE ISOLATION: the menu is persisted FIRST and is never rolled back. If the
+pricebook activation fails, the menu stays approved, the pricebook stays
+byte-unchanged at its prior version, and the partial outcome is audited
+(catering_menu_pricebook_sync_failed) AND pushed to the owner. Prices the owner
+has not seen must never go live; prices they approved must never be lost.
+
 Usage:
   apply-menu-update --code "#A3F2X" --decision yes
   apply-menu-update --code "#A3F2X" --decision no --reason "wrong photo"
 
 Exit codes:
-  0 — applied
+  0 — applied (the menu landed; a pricebook-activation failure is reported on
+      stderr + audited + pushed, and does NOT fail the approval)
   2 — invalid input
   4 — code not found among pending updates
   5 — schema violation
@@ -23,7 +37,9 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -33,11 +49,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "p
 from safe_io import (  # noqa: E402
     FileLock, atomic_write_json, ndjson_append, customer_now,
     safe_load_json, load_model, flock,
-    load_yaml_model,
+    load_yaml_model, notify_owner_with_fallback,
 )
 from schemas import (  # noqa: E402
     Config, Menu, MenuPendingUpdate,
-    MenuUpdateApplied, MenuUpdateRejected,
+    CateringMenuPricebookSyncFailed, MenuUpdateApplied, MenuUpdateRejected,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND,
@@ -47,7 +63,9 @@ from exit_codes import (  # noqa: E402
 from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
 from catering_paths import (  # noqa: E402
     CATERING_MENU_ARCHIVE_DIR, CATERING_MENU_LOCK, CATERING_MENU_PATH,
+    CATERING_PRICEBOOK_PATH,
 )
+import catering_pricing as _pricing  # noqa: E402
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
 # PR-D2 commit 1: SHIFT_AGENT_CONFIG_PATH env var override (test-only).
@@ -58,12 +76,101 @@ PENDING_PATH = Path("/opt/shift-agent/state/catering-menu-pending.json")
 PENDING_LOCK = Path("/opt/shift-agent/state/catering-menu-pending.json.lock")
 ARCHIVE_DIR = CATERING_MENU_ARCHIVE_DIR
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+# Read-only here: the pricebook is written ONLY by import-catering-pricebook.
+# This path is used to render what the sync will do, never to write.
+PRICEBOOK_PATH = Path(
+    os.environ.get("SHIFT_AGENT_PRICEBOOK_PATH") or CATERING_PRICEBOOK_PATH)
+# Sibling-script invocation, same shape as select-catering-proposal -> finalize.
+IMPORT_PRICEBOOK_BIN = Path("/usr/local/bin/import-catering-pricebook")
+PYTHON_BIN = Path("/usr/local/lib/hermes-agent/venv/bin/python")
 
 
 def _log(adapter: TypeAdapter, entry) -> None:
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with flock(LOG_PATH):
         ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
+
+
+def _activate_pricebook(menu: Menu, update_id: str, now: datetime) -> tuple[bool, str]:
+    """Activate the pricebook derived from the menu just persisted.
+
+    Returns (ok, detail). NEVER raises and NEVER writes the pricebook itself:
+    it builds the document with the pure adapter and hands it to the EXISTING
+    import-catering-pricebook, which owns the validation, the version bump, the
+    archive and the audit row. The importer refuses a replay of this same
+    `update_id`, so a re-run cannot double-bump.
+
+    A failure here is contained on purpose — the caller keeps the approved menu.
+    """
+    try:
+        active = _pricing.load_pricebook(PRICEBOOK_PATH)
+    except _pricing.PricingError as e:
+        return False, f"active pricebook unreadable: {e}"
+
+    try:
+        sync = _pricing.sync_pricebook_from_menu_items(
+            menu.items, active,
+            effective_date=now.date(), updated_at=now,
+            source_menu_update_id=update_id,
+        )
+    except (ValidationError, ValueError) as e:
+        return False, f"pricebook document could not be built: {e}"
+
+    handle = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", prefix="menu-pricebook-", delete=False, encoding="utf-8",
+    )
+    try:
+        handle.write(sync.pricebook.model_dump_json())
+        handle.close()
+        proc = subprocess.run(
+            [str(PYTHON_BIN), str(IMPORT_PRICEBOOK_BIN),
+             "--file", handle.name, "--sender-role", "owner",
+             "--updated-by", "menu_approval"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"import-catering-pricebook could not be run: {type(e).__name__}: {e}"
+    finally:
+        Path(handle.name).unlink(missing_ok=True)
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[:300]
+        return False, f"import_exit_{proc.returncode}: {detail}"
+    return True, (proc.stdout or "").strip()[:300]
+
+
+def _report_pricebook_sync_failure(
+    update_id: str, menu_version: int, detail: str, now: datetime,
+) -> None:
+    """Audit + page the owner. The menu IS live and the pricebook is NOT, and an
+    owner who is not told that will quote from prices they think they changed."""
+    sys.stderr.write(f"WARN: pricebook activation failed (menu is applied): {detail}\n")
+    reason, _, _rest = detail.partition(":")
+    try:
+        _log(TypeAdapter(CateringMenuPricebookSyncFailed), CateringMenuPricebookSyncFailed(
+            type="catering_menu_pricebook_sync_failed", ts=now,
+            update_id=update_id, menu_version=menu_version,
+            reason=reason.strip()[:100] or "unknown",
+            # -1 when the subprocess never produced a status of its own.
+            returncode=int(reason.rsplit("_", 1)[-1])
+            if reason.startswith("import_exit_") else -1,
+        ))
+    except Exception as e:  # noqa: BLE001 — audit is best-effort; the menu landed
+        sys.stderr.write(f"sync-failure audit emit failed (non-fatal): {e}\n")
+
+    try:
+        # parse_mode-free plain text via the notify chokepoint: underscore-bearing
+        # reasons render as garbage under Markdown (§12b).
+        notify_owner_with_fallback(
+            "Catering menu applied, pricebook NOT updated",
+            f"Menu v{menu_version} is live, but the pricebook could not be "
+            f"activated and stays at its previous version. Quotes still use the "
+            f"old prices. Reason: {detail}",
+            priority=1,
+            source="apply-menu-update",
+        )
+    except Exception as e:  # noqa: BLE001 — alerting is best-effort
+        sys.stderr.write(f"owner notify failed (non-fatal): {type(e).__name__}: {e}\n")
 
 
 def main() -> int:
@@ -176,6 +283,16 @@ def main() -> int:
                 prev_version=prev_version,
             ))
 
+        # Menu persistence has SUCCEEDED and is final from here on. Activate the
+        # pricebook derived from it — outside MENU_LOCK (it takes the pricebook's
+        # own lock) and inside PENDING_LOCK, so the pending file is still claimed
+        # and a concurrent approval of the same code cannot interleave.
+        pricebook_ok, pricebook_detail = _activate_pricebook(
+            new_menu, pending.update_id, now)
+        if not pricebook_ok:
+            _report_pricebook_sync_failure(
+                pending.update_id, new_menu.version, pricebook_detail, now)
+
         # Clear pending
         try:
             PENDING_PATH.unlink()
@@ -185,6 +302,8 @@ def main() -> int:
     print(json.dumps({
         "update_id": pending.update_id,
         "status": "applied",
+        "pricebook_activated": pricebook_ok,
+        "pricebook_detail": pricebook_detail,
         "new_version": new_menu.version,
         "item_count": len(new_menu.items),
         "prev_version": prev_version,
