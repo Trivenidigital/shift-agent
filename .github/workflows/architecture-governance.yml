@@ -1,0 +1,93 @@
+name: architecture-governance
+
+# Governance-only gate. It reads docs/governance/ and the PR diff, and reports
+# findings. It never deploys, never touches a VPS, never reads agent state and
+# is never a runtime dependency — see docs/governance/engineering-directive.md
+# §11 and the guard in tests/test_architecture_governance.py.
+#
+# Cost model:
+#   - registry/structure integrity runs on EVERY pull request (cheap, and it is
+#     the one check that must never be skipped — a broken registry breaks
+#     classification for everyone);
+#   - path-scoped checks (Capability Reuse Map, affected projects, exception
+#     scope, new-subsystem heuristic) run against the actual changed files, so
+#     an unrelated PR never pays for another product's rules.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/governance/**"
+      - "tools/check-architecture-governance.py"
+      - "tests/test_architecture_governance.py"
+      - ".github/workflows/architecture-governance.yml"
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - ".cursor/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: architecture-governance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  governance:
+    name: registry integrity + path-scoped drift check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet pyyaml pytest
+
+      # Universal: always runs, for every PR, regardless of changed paths.
+      - name: Registry + structure integrity
+        run: python3 tools/check-architecture-governance.py --registry-only
+
+      - name: Governance checker self-tests
+        run: python3 -m pytest tests/test_architecture_governance.py -q
+
+      # Path-scoped: only the affected projects' rules are evaluated.
+      - name: Capture PR body
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+
+      - name: Path-scoped architecture drift check
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python3 tools/check-architecture-governance.py \
+            --base "$BASE_SHA" \
+            --pr-body "$RUNNER_TEMP/pr-body.md"
+
+      - name: Report affected projects
+        if: always() && github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python3 tools/check-architecture-governance.py \
+            --base "$BASE_SHA" --format json > "$RUNNER_TEMP/governance.json" || true
+          {
+            echo "### Architecture governance"
+            echo ""
+            echo '```json'
+            cat "$RUNNER_TEMP/governance.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

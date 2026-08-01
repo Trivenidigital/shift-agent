@@ -1,0 +1,22 @@
+---
+description: Shared Hermes/Shift platform rules — affected-agent analysis required
+globs:
+  - src/platform/*.py
+  - src/platform/scripts/**
+  - src/platform/systemd/**
+  - src/plugins/**
+  - src/agents/shift/skills/dispatch_shift_agent/**
+  - src/agents/shift/scripts/**
+  - src/agents/shift/systemd/**
+alwaysApply: false
+---
+
+Read and enforce `docs/governance/shared-platform-directive.md` in addition to
+the universal directive.
+
+A change here reaches every agent on the VPS. It must carry affected-agent
+analysis, compatibility proof, default behavior, activation posture, rollback,
+per-agent impact and tests for every materially affected product.
+
+Do not add a parallel router, audit path, approval-code generator or send gate.
+Do not absorb product-specific business policy into a shared component.

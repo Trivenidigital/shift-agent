@@ -1,0 +1,19 @@
+---
+description: Operator cockpit architecture rules
+globs:
+  - web/backend/**
+  - web/frontend/**
+  - web/portal/**
+  - web/deploy/**
+alwaysApply: false
+---
+
+Read and enforce `docs/governance/projects/cockpit.md`.
+
+The cockpit is a view-and-act surface over deterministic state. Auth,
+authorization, every state mutation, approval actions and kill switches stay
+deterministic. A cockpit action that mutates agent state must go through the
+same script or module the agent uses — never a second write path.
+
+Product panels inside the cockpit carry their own product's directive; check
+`docs/governance/project-registry.yaml`.

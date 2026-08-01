@@ -1,0 +1,538 @@
+# Authoritative path-to-project classification for this monorepo.
+#
+# Read by tools/check-architecture-governance.py and by every dev session
+# (root AGENTS.md step 1). Nothing here is a runtime dependency.
+#
+# CLASSIFICATION RULE — longest-literal-prefix wins.
+#   A path pattern's "specificity" is the length of its literal prefix (the
+#   characters before the first wildcard). For a changed file, the matching
+#   pattern with the greatest specificity decides the owning project.
+#   Example: `src/platform/catering_pricing.py` matches both
+#   `src/platform/**` (shift-platform, specificity 14) and
+#   `src/platform/catering_*` (catering-studio, specificity 22) — Catering
+#   Studio owns it. Ownership follows the owner, not the directory.
+#
+#   Two patterns from different projects with EQUAL specificity that can match
+#   a common path are an undeclared overlap and fail the checker unless listed
+#   under `overlaps:` below.
+#
+# UNKNOWN PATHS fail closed: a changed file matching no pattern is a
+# classification error, not a silent pass. Add it to the owning project.
+
+version: 1.0.0
+updated: 2026-08-01
+
+classification:
+  rule: longest-literal-prefix-wins
+  unclassified_policy: fail-closed
+  # Path patterns must be repository-relative, POSIX-separated, contain no
+  # absolute prefix, no `..`, no leading `./`, and no bare `**` catch-all.
+
+# Discovery note: this repository contains 18 agents under src/agents/, one
+# shared platform layer, one commerce layer, one operator cockpit, and the
+# governance layer itself. Gecko Alpha is NOT present in this repository — it
+# is referenced only as an out-of-scope external project in
+# tasks/production-readiness-sprint-plan.md, so no directive is created for it.
+
+projects:
+
+  # ── Level 2: shared platform ───────────────────────────────────────────────
+  - id: shift-platform
+    name: Shift / Hermes Shared Platform
+    directive: docs/governance/shared-platform-directive.md
+    shared_platform: true
+    impact_analysis_required: true
+    lifecycle: production
+    runtime: per-customer VPS (hermes-gateway + shift-agent timers)
+    summary: >-
+      Identity, routing, audit, locking, approval-code namespace, transport
+      safety, automation control, schemas, deploy and the pre-gateway
+      cf-router. Consumed by every agent in the repository.
+    paths:
+      source:
+        - src/platform/*.py
+        - src/platform/scripts/**
+        - src/plugins/**
+        - src/agents/shift/skills/dispatch_shift_agent/**
+      tests:
+        - tests/**
+        - conftest.py
+      ops:
+        - src/platform/systemd/**
+        - src/agents/shift/scripts/**
+        - src/agents/shift/systemd/**
+        - src/agents/shift/logrotate/**
+        - tools/**
+      ui: []
+      docs:
+        - docs/hermes-alignment.md
+        - docs/deploy.md
+        - docs/fleet-provisioning.md
+        - docs/multi-tenant-architecture.md
+        - docs/operator-runbook.md
+        - docs/runbooks/release.md
+        - docs/runbooks/rollback.md
+        - docs/runbooks/gateway-toolset-scoping.md
+        - docs/runbooks/operator-ops-brief.md
+    # Runtime paths whose modification triggers mandatory affected-agent
+    # analysis. Test/doc changes to this project do not.
+    impact_analysis_paths:
+      - src/platform/*.py
+      - src/platform/scripts/**
+      - src/plugins/**
+      - src/agents/shift/skills/dispatch_shift_agent/**
+      - src/platform/systemd/**
+      - src/agents/shift/scripts/**
+    shared_dependencies: []
+    nested_agents_file: null
+
+  - id: commerce-platform
+    name: Commerce (deposits, payment links, order state)
+    directive: docs/governance/projects/commerce-platform.md
+    shared_platform: true
+    impact_analysis_required: true
+    lifecycle: production
+    runtime: per-customer VPS (invoked from agent scripts + cockpit)
+    summary: >-
+      Cart, order-state machine, Stripe payment links, live-mode and webhook
+      gates, commerce audit. Primary consumer today is Catering Studio
+      deposits; the cockpit exposes order views.
+    paths:
+      source:
+        - src/platform/commerce/**
+        - src/platform/commerce_*.py
+      tests:
+        - tests/test_commerce*.py
+        - web/backend/tests/test_commerce*.py
+      ops:
+        - src/platform/scripts/commerce-list-active-stripe-links
+        - src/platform/scripts/commerce-payment-confirm
+        - src/platform/scripts/check-commerce-stripe-livemode
+        - src/platform/scripts/check-commerce-webhook-subscription
+      ui:
+        - web/backend/app/routers/commerce.py
+        - web/frontend/src/sections/CommerceOrders.tsx
+      docs:
+        - docs/runbooks/commerce-deposit-onboarding.md
+        - docs/runbooks/commerce-stripe-onboarding.md
+    impact_analysis_paths:
+      - src/platform/commerce/**
+      - src/platform/commerce_*.py
+    shared_dependencies:
+      - shift-platform
+    nested_agents_file: src/platform/commerce/AGENTS.md
+
+  # ── Level 3: products ──────────────────────────────────────────────────────
+  - id: catering-studio
+    name: Catering Studio
+    directive: docs/governance/projects/catering-studio.md
+    shared_platform: false
+    impact_analysis_required: false
+    lifecycle: production
+    runtime: per-customer VPS (catering skills + sweep timers)
+    summary: >-
+      WhatsApp catering lead capture, qualification, menu/pricebook, quoting,
+      proposals, owner approval, deposits and post-event follow-up.
+    paths:
+      source:
+        - src/agents/catering/**
+        - src/agents/catering_followup/**
+        - src/platform/catering_*.py
+      tests:
+        - tests/test_catering*.py
+        - tests/test_amend_catering_lead.py
+        - tests/test_mark_catering_lead_outcome.py
+        - tests/test_select_catering_proposal.py
+        - tests/test_record_catering_acceptance.py
+        - tests/test_lookup_prior_leads.py
+      ops:
+        - src/agents/catering/scripts/**
+        - src/agents/catering/systemd/**
+        - tools/run-catering-prose-parity.py
+      ui:
+        - web/frontend/src/sections/catering/**
+        - web/backend/app/routers/catering.py
+      docs:
+        - docs/catering-edge-cases.md
+        - docs/runbooks/catering-dark-deploy.md
+        - docs/runbooks/catering-rollback.md
+        - docs/reviews/catering-agent-review-charter-v1.2.md
+    shared_dependencies:
+      - shift-platform
+      - commerce-platform
+    nested_agents_file: src/agents/catering/AGENTS.md
+
+  - id: flyer-studio
+    name: Flyer Studio
+    directive: docs/governance/projects/flyer-studio.md
+    shared_platform: false
+    impact_analysis_required: false
+    lifecycle: production
+    runtime: per-customer VPS (flyer skills + recovery/SLA watchdogs)
+    summary: >-
+      WhatsApp-first flyer and campaign creative generation with locked-fact
+      enforcement, visual QA, fabrication firewall, deterministic overlay
+      fallback, bounded retry/recovery and owner approval.
+    paths:
+      source:
+        - src/agents/flyer/**
+        - src/platform/flyer_*.py
+      tests:
+        - tests/test_flyer*.py
+        - tests/flyer_oracle/**
+        - tests/_flyer_replay_helpers.py
+      ops:
+        - src/agents/flyer/scripts/**
+        - src/agents/flyer/systemd/**
+        - tools/flyer-*.py
+        - tools/backfill-flyer-pdf-qa.py
+        - tools/stage-flyer-env-split.sh
+      ui:
+        - web/frontend/src/sections/flyer/**
+        - web/frontend/src/sections/FlyerProjectEvidenceDrawer.tsx
+        - web/backend/app/routers/flyer.py
+      docs:
+        - docs/flyer-studio-current-state.md
+        - docs/product/live-scope.md
+        - docs/marketing/**
+        - docs/qa/**
+        - docs/runbooks/flyer-model-policy.md
+        - docs/runbooks/premium-poster-v1-operations.md
+    shared_dependencies:
+      - shift-platform
+    nested_agents_file: src/agents/flyer/AGENTS.md
+
+  - id: shift-agent
+    name: Shift Agent (scheduling)
+    directive: docs/governance/projects/shift-agent.md
+    shared_platform: false
+    impact_analysis_required: false
+    lifecycle: production
+    runtime: per-customer VPS (shift skills + proposal sweep)
+    summary: >-
+      Sick-call intake, roster lookup, coverage proposals to candidates, owner
+      commands and candidate responses. Shares a directory tree with the
+      shared platform; only the non-dispatcher skills and templates are
+      product surface.
+    paths:
+      source:
+        - src/agents/shift/skills/handle_candidate_response/**
+        - src/agents/shift/skills/handle_owner_command/**
+        - src/agents/shift/skills/handle_sick_call/**
+        - src/agents/shift/skills/roster_lookup/**
+      tests:
+        - tests/test_shift*.py
+        - tests/test_handle_shift_sick_call_script.py
+        - tests/test_roster_lookup_skill_md.py
+      ops:
+        - src/agents/shift/AGENTS.md
+        - src/agents/shift/templates/**
+        - src/agents/shift/config.yaml.template
+        - src/agents/shift/runbook.md
+      ui: []
+      docs:
+        - docs/runbooks/production-pilot-shift-catering-daily-brief.md
+    shared_dependencies:
+      - shift-platform
+    nested_agents_file: src/agents/shift/AGENTS.md
+
+  - id: cockpit
+    name: Operator Cockpit (web backend, frontend, portal)
+    directive: docs/governance/projects/cockpit.md
+    shared_platform: false
+    impact_analysis_required: false
+    lifecycle: production
+    runtime: per-customer VPS (shift-agent-cockpit.service behind Caddy)
+    summary: >-
+      FastAPI backend, React frontend and static portal giving the operator
+      read/act surfaces over roster, schedule, pending approvals, audit,
+      safety controls and per-product panels.
+    paths:
+      source:
+        - web/AGENTS.md
+        - web/backend/**
+        - web/frontend/**
+      tests:
+        - web/backend/tests/**
+      ops:
+        - web/deploy/**
+        - tools/deploy-portal.sh
+      ui:
+        - web/portal/**
+      docs:
+        - web/README.md
+    shared_dependencies:
+      - shift-platform
+    nested_agents_file: web/AGENTS.md
+
+  - id: expense-bookkeeper
+    name: Expense Bookkeeper
+    directive: docs/governance/projects/expense-bookkeeper.md
+    shared_platform: false
+    impact_analysis_required: false
+    lifecycle: pilot
+    runtime: per-customer VPS (gated by cfg.expense_bookkeeper.enabled)
+    summary: >-
+      Receipt photo capture, extraction, owner approval and QuickBooks Online
+      write-back, with receipt retention pruning.
+    paths:
+      source:
+        - src/agents/expense_bookkeeper/**
+        - src/platform/qbo_client.py
+      tests:
+        - tests/test_expense*.py
+        - tests/test_prune_and_expire_expenses_lifecycle.py
+      ops:
+        - src/agents/expense_bookkeeper/scripts/**
+        - src/agents/expense_bookkeeper/systemd/**
+      ui: []
+      docs: []
+    shared_dependencies:
+      - shift-platform
+    nested_agents_file: src/agents/expense_bookkeeper/AGENTS.md
+
+  - id: daily-brief
+    name: Daily Brief
+    directive: docs/governance/projects/daily-brief.md
+    shared_platform: false
+    impact_analysis_required: false
+    lifecycle: production
+    runtime: per-customer VPS (send-daily-brief.timer)
+    summary: >-
+      Scheduled owner-facing daily summary, plus customer birthday capture
+      feeding the brief.
+    paths:
+      source:
+        - src/agents/daily_brief/**
+      tests:
+        - tests/test_daily*.py
+      ops:
+        - src/agents/daily_brief/scripts/**
+        - src/agents/daily_brief/systemd/**
+      ui: []
+      docs: []
+    shared_dependencies:
+      - shift-platform
+    nested_agents_file: null
+
+  - id: eod-reconcile
+    name: End-of-Day Reconcile
+    directive: docs/governance/projects/eod-reconcile.md
+    shared_platform: false
+    impact_analysis_required: false
+    lifecycle: production
+    runtime: per-customer VPS (eod-reconcile.timer)
+    summary: End-of-day cash/close reconciliation sweep.
+    paths:
+      source:
+        - src/agents/eod_reconcile/**
+      tests:
+        - tests/test_eod*.py
+      ops:
+        - src/agents/eod_reconcile/scripts/**
+        - src/agents/eod_reconcile/systemd/**
+      ui: []
+      docs: []
+    shared_dependencies:
+      - shift-platform
+    nested_agents_file: null
+
+  - id: compliance
+    name: Compliance Calendar
+    directive: docs/governance/projects/compliance.md
+    shared_platform: false
+    impact_analysis_required: false
+    lifecycle: pilot
+    runtime: per-customer VPS (check-compliance-deadlines.timer)
+    summary: >-
+      Tracks licence/permit/filing deadlines and answers owner queries about
+      what is due.
+    paths:
+      source:
+        - src/agents/compliance/**
+      tests:
+        - tests/test_compliance*.py
+      ops:
+        - src/agents/compliance/scripts/**
+        - src/agents/compliance/systemd/**
+      ui: []
+      docs: []
+    shared_dependencies:
+      - shift-platform
+    nested_agents_file: null
+
+  - id: multi-location
+    name: Multi-Location Store Locator
+    directive: docs/governance/projects/multi-location.md
+    shared_platform: false
+    impact_analysis_required: false
+    lifecycle: production
+    runtime: per-customer VPS (gated by cfg.multi_location.locations)
+    summary: >-
+      Answers "where are you / which store is closest" for customers and
+      cross-location queries for the owner.
+    paths:
+      source:
+        - src/agents/multi_location/**
+      tests:
+        - tests/test_multi_location*.py
+      ops:
+        - src/agents/multi_location/scripts/**
+      ui: []
+      docs: []
+    shared_dependencies:
+      - shift-platform
+    nested_agents_file: null
+
+  - id: phase0-agents
+    name: Phase-0 Agent Family (disabled scaffolds)
+    directive: docs/governance/projects/phase0-agents.md
+    shared_platform: false
+    impact_analysis_required: false
+    lifecycle: scaffold
+    runtime: per-customer VPS, self-declining (cfg.<agent>.enabled = False)
+    summary: >-
+      Nine dispatcher-only scaffolds that share one identical shape: declare
+      intent, self-decline while disabled, and log `agent_declined`. Governed
+      by one family directive rather than nine near-identical files.
+    members:
+      - cash_ar
+      - employee_docs
+      - equipment_maintenance
+      - hiring
+      - inventory
+      - pnl_anomaly
+      - sales_tax
+      - supplier
+      - vip
+    paths:
+      source:
+        - src/agents/cash_ar/**
+        - src/agents/employee_docs/**
+        - src/agents/equipment_maintenance/**
+        - src/agents/hiring/**
+        - src/agents/inventory/**
+        - src/agents/pnl_anomaly/**
+        - src/agents/sales_tax/**
+        - src/agents/supplier/**
+        - src/agents/vip/**
+      tests: []
+      ops: []
+      ui: []
+      docs:
+        - docs/portfolio.md
+    shared_dependencies:
+      - shift-platform
+    nested_agents_file: null
+
+  # ── Level 1 support: governance and planning ───────────────────────────────
+  - id: repo-governance
+    name: Repository Governance
+    directive: docs/governance/engineering-directive.md
+    shared_platform: false
+    impact_analysis_required: false
+    lifecycle: internal
+    runtime: none (CI only; never imported by runtime code)
+    summary: >-
+      The directives, registry, exception log, agent instruction files, the
+      governance checker and its CI workflow.
+    paths:
+      source:
+        - docs/governance/**
+        - tools/check-architecture-governance.py
+        - AGENTS.md
+        - CLAUDE.md
+        - .github/copilot-instructions.md
+        - .github/pull_request_template.md
+        - .cursor/**
+      tests:
+        - tests/test_architecture_governance.py
+      ops:
+        - .github/workflows/architecture-governance.yml
+      ui: []
+      docs: []
+    shared_dependencies: []
+    nested_agents_file: null
+
+  - id: repo-meta
+    name: Repository Docs and Planning
+    directive: docs/governance/projects/repo-meta.md
+    shared_platform: false
+    impact_analysis_required: false
+    lifecycle: internal
+    runtime: none
+    summary: >-
+      Cross-product planning docs, reviews, backlog and root README/PLAN
+      material that is not owned by a single product.
+    paths:
+      source: []
+      tests: []
+      ops:
+        - .github/workflows/**
+        - .gitignore
+        - .gitattributes
+        - requirements-hermes-venv.txt
+      ui: []
+      docs:
+        - docs/**
+        - tasks/**
+        - review-notes/**
+        - .codex_*.md
+        - README.md
+        - PLAN.md
+        - DESIGN.md
+        - backlog.md
+        - GO-LIVE-HANDOFF.md
+    shared_dependencies: []
+    nested_agents_file: null
+
+# Declared overlaps — directories that host more than one project's files.
+#
+# Ownership inside an overlap is still resolved by longest-literal-prefix; the
+# declaration records that the broader project's patterns deliberately span
+# another project's files, so the checker does not read it as accidental. An
+# entry authorizes nothing about architecture — it is a scope statement only.
+overlaps:
+  - id: OV-001
+    projects:
+      - cockpit
+      - catering-studio
+      - flyer-studio
+      - commerce-platform
+    paths:
+      - web/backend/**
+      - web/frontend/**
+    resolution: longest-literal-prefix-wins
+    reason: >-
+      The cockpit is a container surface. Its broad web/backend and web/frontend
+      patterns necessarily span the product panels mounted inside it — the
+      catering, flyer and commerce routers and sections. Those specific paths
+      are owned by their products and carry their products' directives; the
+      cockpit directive governs the surrounding shell, auth and state access.
+
+  - id: OV-002
+    projects:
+      - shift-platform
+      - catering-studio
+      - flyer-studio
+      - commerce-platform
+      - expense-bookkeeper
+    paths:
+      - src/platform/*.py
+      - src/platform/scripts/**
+    resolution: longest-literal-prefix-wins
+    reason: >-
+      Several product-specific modules physically live under src/platform/ —
+      catering_*.py, flyer_*.py, commerce_*.py, qbo_client.py and the
+      commerce-* scripts. The registry classifies them by owner rather than by
+      directory, so governance treats them as product code. This is the
+      standing deviation recorded in shared-platform-directive.md §3;
+      relocating them is a future cleanup, not a governance prerequisite.
+
+# Paths intentionally excluded from classification (binary/vendored artifacts
+# that carry no architecture decisions). Kept explicit and narrow.
+excluded:
+  - web/frontend/package-lock.json
+  - web/frontend/src/generated/**
+  - "*.png"
+  - "**/*.png"

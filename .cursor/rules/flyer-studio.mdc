@@ -1,0 +1,25 @@
+---
+description: Flyer Studio architecture rules
+globs:
+  - src/agents/flyer/**
+  - src/platform/flyer_*.py
+  - web/frontend/src/sections/flyer/**
+  - web/backend/app/routers/flyer.py
+alwaysApply: false
+---
+
+Read and enforce `docs/governance/projects/flyer-studio.md`.
+
+Models own visual generation, layout exploration, copy interpretation, creative
+alternatives, image understanding and style recommendations. Deterministic
+Flyer systems own exact dimensions, original-QR preservation, fabrication
+detection, price/promotion validation, brand constraints, file-format checks,
+OCR/visual QA, retry and fallback policy, approval state, export requirements
+and audit.
+
+Presumed NO-GO: a second generation pipeline, a parallel approval store, a QR
+regeneration path where preservation is required, an alternate fabrication
+detector, a separate retry/orchestration framework, or bypassing the OCR and
+approval gates.
+
+These rules apply to Flyer paths only. Never apply them to Catering Studio.
