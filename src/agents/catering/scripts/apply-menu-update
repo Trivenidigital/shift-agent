@@ -115,16 +115,30 @@ def _activate_pricebook(
     # If someone imported a new one in between, that diff is stale and the owner
     # never saw what would actually change — so the menu stands and the prices do
     # not move. They re-send the photo to get an honest card.
+    #
+    # An ABSENT stamp means the proposal predates the pricebook-activation scope
+    # entirely (a pending update created by the previous release): its card
+    # never showed a pricebook section or an "approving also activates" line,
+    # so the owner never consented to a price change. Deployment-preflight
+    # requirement: such proposals stay MENU-ONLY — fail closed, never activate.
     stamped = pending.pricebook_fingerprint
-    if stamped is not None:
-        current = _pricing.pricebook_fingerprint(active)
-        if stamped != current:
-            return (
-                False,
-                f"pricebook_changed_since_proposal: the card was built against "
-                f"{stamped}, the live pricebook is {current}",
-                None, None,
-            )
+    if stamped is None:
+        return (
+            False,
+            "proposal_predates_pricebook_scope: this menu proposal was created "
+            "before pricebook activation existed, so its approval card never "
+            "showed a price diff. The menu is applied; prices are NOT. Re-send "
+            "the menu photo to get a card that can activate prices.",
+            None, None,
+        )
+    current = _pricing.pricebook_fingerprint(active)
+    if stamped != current:
+        return (
+            False,
+            f"pricebook_changed_since_proposal: the card was built against "
+            f"{stamped}, the live pricebook is {current}",
+            None, None,
+        )
 
     try:
         sync = _pricing.sync_pricebook_from_menu_items(
