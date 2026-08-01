@@ -282,3 +282,85 @@ def test_cession_reason_literal_is_an_enum_member():
     import schemas
     allowed = set(get_args(schemas.CfRouterIntercepted.model_fields["reason"].annotation))
     assert "menu_caption_ceded_to_dispatcher" in allowed
+
+
+# ── Caption boundary (the conservative half of the fix) ──────────────────────
+@pytest.mark.parametrize("caption", [
+    INCIDENT_CAPTION, "update menu please", "please update menu",
+    "menu", "Menu.", "MENU", "new menu", "menu update",
+])
+def test_caption_triggers_match(caption):
+    _, actions_mod = _load_plugin()
+    assert actions_mod.is_menu_update_caption(caption) is True
+
+
+@pytest.mark.parametrize("caption", [
+    FLYER_BRIEF,
+    "weekend flyer with our menu items",
+    "put the menu on a poster",
+    "our menu is attached, make a banner",
+    "add the dosa menu prices",
+    "",
+])
+def test_caption_non_triggers_do_not_match(caption):
+    """The standing rule against keyword whitelists for LLM-classifiable intent:
+    the bare substring "menu" is what let the flyer arm swallow the live photo,
+    so it must not be what un-swallows it either. Only the SKILL's documented
+    trigger phrases match inside a sentence; a lone "menu" matches only as the
+    whole caption."""
+    _, actions_mod = _load_plugin()
+    assert actions_mod.is_menu_update_caption(caption) is False
+
+
+def test_explicit_flyer_edit_naming_a_flyer_still_wins(monkeypatch):
+    """"update menu prices on this flyer" carries the trigger AND an explicit
+    flyer signal. The same deterministic exclusion the P1-1 escape gate uses
+    keeps it on the flyer path — the cession never over-claims a flyer edit."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, role="owner")
+
+    result = _dispatch(hooks_mod, "update menu prices on this flyer")
+
+    assert result == {"action": "skip",
+                      "reason": "cf-router flyer primary: project F0226 created"}
+    assert "menu_caption_ceded_to_dispatcher" not in s.reasons
+
+
+# ── Static placement proof (runs on every platform) ─────────────────────────
+def test_cession_sits_between_the_r2b1_gate_and_every_flyer_claim():
+    """The cession is only a fix if nothing claims the inbound before it. Pins:
+    R2B-1 amendment precedence is preserved AHEAD of it, and it runs BEFORE both
+    the P1-1 escape gate (which itself precedes the flyer active-project arm) and
+    the `should_start_new_flyer_over_active` admission that created F0226."""
+    import ast
+    src = (PLUGIN_DIR / "hooks.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    dispatch = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "_pre_gateway_dispatch_impl")
+    r2b1 = cession = escape = None
+    start_new_lines = []
+    for node in ast.walk(dispatch):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            if node.func.id == "_try_amendment_conflict_intercept" and r2b1 is None:
+                r2b1 = node.lineno
+            if node.func.id == "_menu_caption_cedes_to_dispatcher" and cession is None:
+                cession = node.lineno
+            if node.func.id == "_try_flyer_catering_escape_gate" and escape is None:
+                escape = node.lineno
+        elif isinstance(node.func, ast.Attribute) and \
+                node.func.attr == "should_start_new_flyer_over_active":
+            start_new_lines.append(node.lineno)
+
+    assert cession is not None, "menu-caption cession not wired into dispatch"
+    assert r2b1 is not None and escape is not None and start_new_lines
+    assert r2b1 < cession, (
+        "the R2B-1 amendment gate MUST keep precedence ahead of the cession")
+    assert cession < escape, (
+        f"the cession (line {cession}) MUST precede the P1-1 escape gate "
+        f"(line {escape}), which in turn precedes the flyer active-project arm")
+    assert all(cession < sl for sl in start_new_lines), (
+        f"the cession (line {cession}) MUST precede the "
+        f"should_start_new_flyer_over_active admission (lines {sorted(start_new_lines)}) "
+        f"— the arm that created F0226 live")

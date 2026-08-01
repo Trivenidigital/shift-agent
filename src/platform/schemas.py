@@ -6788,6 +6788,20 @@ class CfRouterIntercepted(_BaseEntry):
         #     flyer queued-edit. Creates neither a lead nor a revision.
         "flyer_active_project_open_lead_catering_escape",
         "customer_complaint_escalation",
+        # Menu-caption routing precedence (2026-08-01): the owner sent a menu
+        # photo captioned "Update menu" to start the menu→pricebook pipeline and
+        # the flyer primary arm claimed it (project F0226 created, photo ingested
+        # as a `menu_reference` asset, concept generation failed) because
+        # `should_start_new_flyer_over_active` admits ANY media message whose
+        # caption contains "menu". The dispatcher never ran, so the
+        # `update_catering_menu` SKILL never fired.
+        #   menu_caption_ceded_to_dispatcher — an owner / verified-employee media
+        #     message whose caption carries a documented SKILL trigger ("update
+        #     menu", "menu update", "new menu", or a bare "menu") was released by
+        #     cf-router BEFORE any flyer claim, so the Hermes dispatcher routes it
+        #     to `update_catering_menu`. Creates neither a flyer project nor a
+        #     catering lead — records the cession only.
+        "menu_caption_ceded_to_dispatcher",
         "flyer_brief_approved",
         "flyer_brief_project_create_failed",
         "flyer_starter_preference_off",

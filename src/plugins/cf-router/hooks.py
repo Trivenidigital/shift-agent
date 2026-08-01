@@ -590,6 +590,24 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                     text, chat_id, event, media_path)
                 if amendment_conflict_result is not None:
                     return amendment_conflict_result
+                # Menu-caption cession (2026-08-01 live F0226 defect): an owner /
+                # verified-employee media message captioned with a documented
+                # `update_catering_menu` trigger belongs to the menu→pricebook
+                # SKILL, not to Flyer Studio. Released here so it precedes EVERY
+                # flyer claim below — the active-project arm (which would ingest
+                # the photo as a flyer reference asset) and the
+                # `should_start_new_flyer_over_active` primary arm (which created
+                # F0226 live, because _MEDIA_TEMPLATE_EDIT admits the bare
+                # substring "menu" on any media message). Returning None is the
+                # established "let the dispatcher route it" fall-through: no flyer
+                # project, no asset ingestion, no catering lead. Placed AFTER the
+                # R2B-1 gate so amendment-conflict precedence is unchanged, and it
+                # reuses the `guest_role` identity already resolved above rather
+                # than spawning identify-sender again.
+                if _menu_caption_cedes_to_dispatcher(
+                    text, chat_id, media_path=media_path, role=guest_role,
+                ):
+                    return None
                 # P1-1: fresh-intent catering escape gate. A fresh catering
                 # inquiry from a customer with a LIVE flyer project must reach
                 # catering (F7), not be captured as a flyer edit/revision (the
@@ -4511,6 +4529,47 @@ def _flyer_send_now_early_path_allowed(text: str, classify_memo: Callable[[str],
     except Exception:  # noqa: BLE001 — classifier error ⇒ treat as compound ⇒ clarify downstream
         return False
     return not is_catering
+
+
+def _menu_caption_cedes_to_dispatcher(
+    text: str, chat_id: str, *, media_path: Optional[str], role: str,
+) -> bool:
+    """Menu-caption routing precedence (2026-08-01 live F0226 defect).
+
+    True when cf-router must release an inbound to the Hermes dispatcher so the
+    `update_catering_menu` SKILL can claim it, instead of letting a flyer arm
+    take it first. All three conditions are required:
+
+      * the message carries media — the SKILL extracts from an image or a PDF,
+        and `_extract_media_path` surfaces both as `media_path`
+      * the visible caption carries a documented SKILL trigger
+        (`actions.is_menu_update_caption`)
+      * the sender resolves to owner or verified employee — the SKILL's hard
+        rule; `identify-sender` returning owner/employee IS that verification,
+        so the caller passes the role it already resolved (no extra spawn)
+
+    An explicit flyer create/edit signal vetoes the cession, the same
+    deterministic exclusion the P1-1 escape gate uses, so "update menu prices on
+    this flyer" stays on the flyer path. Records the cession, then the caller
+    returns None — creating neither a flyer project nor a catering lead.
+    Defensive: any error means NO cession (the flyer path stays byte-identical).
+    """
+    if not media_path or role not in ("owner", "employee"):
+        return False
+    try:
+        if not actions.is_menu_update_caption(text):
+            return False
+        if _flyer_edit_signal_present(text, has_media=True):
+            return False
+        actions.audit_intercepted(
+            reason="menu_caption_ceded_to_dispatcher",
+            chat_id=chat_id,
+            detail=(f"sender_role={role}; has_media=true; "
+                    f"skill=update_catering_menu"),
+        )
+        return True
+    except Exception:  # noqa: BLE001 — a cession decision must never claim the inbound
+        return False
 
 
 def _flyer_edit_signal_present(text: str, *, has_media: bool) -> bool:
