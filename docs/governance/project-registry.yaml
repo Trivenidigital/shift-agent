@@ -160,6 +160,7 @@ projects:
         - tests/test_send_catering_ack.py
         - tests/test_cf_router_catering*.py
         - tests/test_pr_d1_catering*.py
+        - tests/test_pricebook_menu_approval*.py
         - tests/e2e/catering_*
         - tests/e2e/test_catering*
         - tests/e2e/fixtures/catering-*

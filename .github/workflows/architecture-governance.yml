@@ -68,22 +68,40 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
 
-      - name: Path-scoped architecture drift check
+      # actions/checkout builds a MERGE COMMIT for pull_request events, so HEAD
+      # is "this PR merged into current main". Diffing against
+      # pull_request.base.sha would therefore also pick up everything that
+      # landed on main after this PR branched, and attribute other people's
+      # files to this PR. The base side of that merge (HEAD^1) is current main,
+      # so HEAD^1...HEAD is exactly this PR's own changes. Fall back to
+      # base.sha when HEAD is not a merge commit.
+      - name: Resolve diff base
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          if git rev-parse -q --verify HEAD^2 >/dev/null 2>&1; then
+            resolved=$(git rev-parse HEAD^1)
+            echo "HEAD is a merge commit; using its base parent $resolved"
+          else
+            resolved="$BASE_SHA"
+            echo "HEAD is not a merge commit; using pull_request.base.sha $resolved"
+          fi
+          echo "DIFF_BASE=$resolved" >> "$GITHUB_ENV"
+
+      - name: Path-scoped architecture drift check
+        if: github.event_name == 'pull_request'
+        run: |
           python3 tools/check-architecture-governance.py \
-            --base "$BASE_SHA" \
+            --base "$DIFF_BASE" \
             --pr-body "$RUNNER_TEMP/pr-body.md"
 
       - name: Report affected projects
         if: always() && github.event_name == 'pull_request'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           python3 tools/check-architecture-governance.py \
-            --base "$BASE_SHA" --format json > "$RUNNER_TEMP/governance.json" || true
+            --base "${DIFF_BASE:-${{ github.event.pull_request.base.sha }}}" \
+            --format json > "$RUNNER_TEMP/governance.json" || true
           {
             echo "### Architecture governance"
             echo ""
