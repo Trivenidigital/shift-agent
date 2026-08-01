@@ -26,6 +26,7 @@ WHAT IS AND IS NOT EXERCISED
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -33,6 +34,7 @@ import sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -106,6 +108,8 @@ class _Box:
         self.dedupe = self.state / "cf-router-inbound-dedupe.json"
         self.log = self.logs / "decisions.log"
         self.image = root / "menu-photo.jpg"
+        # Every outbound that survives every gate. Must stay EMPTY.
+        self.sent: list[str] = []
 
 
 @pytest.fixture
@@ -136,7 +140,20 @@ def box(tmp_path, monkeypatch) -> _Box:
     monkeypatch.setenv("SHIFT_AGENT_DECISIONS_LOG_PATH", str(b.log))
     monkeypatch.setenv("SHIFT_AGENT_LOG_PATH", str(b.log))
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-a-placeholder")
-    return b
+
+    # Transport sink: nothing in this transcript may reach a real endpoint. Any
+    # outbound at all is a hard failure, so "zero customer sends" is enforced by
+    # the harness rather than asserted by inspection.
+    def _no_transport(req, timeout=None):  # noqa: ARG001
+        b.sent.append(getattr(req, "full_url", str(req)))
+        raise AssertionError("this transcript must not send anything")
+
+    with patch("urllib.request.urlopen", _no_transport):
+        yield b
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 _run_seq = [0]
@@ -205,7 +222,16 @@ def _proposed_rows(box: _Box) -> list[dict]:
 def test_ceded_route_stages_a_pending_proposal_with_an_approval_code(monkeypatch, box):
     """cf-router releases the inbound, then the script the SKILL is mandated to
     call stages a real pending update carrying a real `#XXXXX` code from the
-    deployed alphabet — the code the owner replies with to approve."""
+    deployed alphabet — the code the owner replies with to approve.
+
+    This is guarantee (c): the ceded message lands in the EXISTING ingestion, not
+    a parallel one. Evidenced three ways — the script executed is the deployed
+    file on disk, the preview card is the one that script renders, and the code is
+    visible to the EXISTING cross-pool approval registry (`all_live_codes`), which
+    is what makes it collide-safe against catering / expense / shift codes and
+    resolvable by the deployed dispatcher."""
+    import approval_code_pools
+
     result, s = _cede(monkeypatch, box)
     assert result is None and s.primary_calls == []
     assert s.reasons == ["menu_caption_ceded_to_dispatcher"]
@@ -215,6 +241,7 @@ def test_ceded_route_stages_a_pending_proposal_with_an_approval_code(monkeypatch
 
     assert CODE_RE.match(out["confirmation_code"]), out["confirmation_code"]
     assert out["item_count"] == 3
+    assert out["preview_text"].strip(), "the existing extraction-preview card"
     pending = json.loads(box.pending.read_text(encoding="utf-8"))
     assert pending["confirmation_code"] == out["confirmation_code"]
     assert pending["source_image_id"] == MESSAGE_ID
@@ -223,6 +250,17 @@ def test_ceded_route_stages_a_pending_proposal_with_an_approval_code(monkeypatch
     rows = _proposed_rows(box)
     assert len(rows) == 1
     assert rows[0]["confirmation_code"] == out["confirmation_code"]
+    # The EXISTING approval mechanism now owns this code — no parallel registry.
+    assert out["confirmation_code"] in approval_code_pools.all_live_codes()
+    assert box.sent == [], "no outbound from routing or extraction"
+
+
+def test_the_ceded_route_runs_the_deployed_ingestion_script(box):
+    """Non-vacuity for guarantee (c): the harness executes the file that ships to
+    the box, so "the existing flow" cannot quietly become a test-local copy."""
+    script = SCRIPTS / "parse-menu-photo"
+    assert script.is_file()
+    assert script.read_text(encoding="utf-8").lstrip().startswith("#!")
 
 
 # ── Proofs 8 + 9: no approved state moves until the owner approves ──────────
@@ -231,19 +269,23 @@ def test_routing_leaves_the_approved_menu_and_active_pricebook_byte_unchanged(
     """The cession only YIELDS to the dispatcher. It must not activate a
     pricebook or mutate the approved menu — and neither must the extraction step
     that follows it. Byte-level, against real pre-existing approved state."""
-    menu_before = box.menu.read_bytes()
-    pricebook_before = box.pricebook.read_bytes()
+    menu_before = _sha256(box.menu)
+    pricebook_before = _sha256(box.pricebook)
 
     result, s = _cede(monkeypatch, box)
 
     assert result is None and s.reasons == ["menu_caption_ceded_to_dispatcher"]
-    assert box.menu.read_bytes() == menu_before, "the cession mutated the approved menu"
-    assert box.pricebook.read_bytes() == pricebook_before, "the cession touched the pricebook"
+    assert _sha256(box.menu) == menu_before, "the cession mutated the approved menu"
+    assert _sha256(box.pricebook) == pricebook_before, "the cession touched the pricebook"
 
-    _parse_menu_photo(box)
+    out = _parse_menu_photo(box)
 
-    assert box.menu.read_bytes() == menu_before, "extraction mutated the approved menu"
-    assert box.pricebook.read_bytes() == pricebook_before, "extraction activated a pricebook"
+    # The preview EXISTS — staging is expected and fine — and both COMMERCIAL
+    # stores are still byte-identical. Mutation only past the #code approval.
+    assert box.pending.exists() and CODE_RE.match(out["confirmation_code"])
+    assert _sha256(box.menu) == menu_before, "extraction mutated the approved menu"
+    assert _sha256(box.pricebook) == pricebook_before, "extraction activated a pricebook"
+    assert box.sent == []
 
 
 def test_the_previously_approved_menu_stays_active_through_preview(monkeypatch, box):
@@ -259,6 +301,7 @@ def test_the_previously_approved_menu_stays_active_through_preview(monkeypatch, 
     assert [i["name"] for i in live["items"]] == ["Veg Biryani"]
     assert box.pending.exists(), "the new extraction is staged as PENDING, not live"
     assert json.loads(box.pending.read_text(encoding="utf-8"))["update_id"] != live["version"]
+    assert box.sent == []
 
 
 # ── Proof 7: a replayed delivery does not mint a second pending update ──────
@@ -284,7 +327,8 @@ def test_duplicate_delivery_yields_exactly_one_pending_update_and_one_code(
     # One hand-off ⇒ one staged proposal ⇒ one code, unchanged by the replay.
     pending = json.loads(box.pending.read_text(encoding="utf-8"))
     assert pending["confirmation_code"] == out["confirmation_code"]
-    assert len(_proposed_rows(box)) == 1
+    assert len(_proposed_rows(box)) == 1, "ONE logical processing outcome"
+    assert box.sent == [], "and no duplicate outbound — no outbound at all"
 
 
 def test_the_pending_store_is_single_slot_by_construction(monkeypatch, box):

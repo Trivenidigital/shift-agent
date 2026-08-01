@@ -95,6 +95,11 @@ class _Spies:
         self.audits: list[dict] = []
         self.primary_calls: list[dict] = []
         self.f7_calls: list[dict] = []
+        # Outbound sink. A cession is a pure YIELD: cf-router hands the inbound
+        # to the dispatcher and says NOTHING itself, so this must stay empty on
+        # every ceded cell — the owner must not get a cf-router message on top of
+        # whatever the SKILL sends.
+        self.sent: list[tuple] = []
 
     @property
     def reasons(self) -> list[str]:
@@ -163,6 +168,8 @@ def _wire(monkeypatch, hooks_mod, actions_mod, *, role="employee"):
     monkeypatch.setattr(actions_mod, "recent_bare_flyer_for_chat", lambda _cid: False)
     monkeypatch.setattr(actions_mod, "audit_intercepted",
                         lambda **kw: s.audits.append(kw))
+    monkeypatch.setattr(actions_mod, "send_flyer_text",
+                        lambda cid, txt, **kw: s.sent.append((cid, txt)) or (True, "mid1", ""))
     monkeypatch.setattr(hooks_mod, "_sender_has_qualifying_lead", lambda _cid: False)
 
     def _primary(text, chat_id, event, **kw):
@@ -208,6 +215,7 @@ def test_menu_photo_caption_cedes_to_dispatcher_instead_of_creating_a_flyer(
     assert s.f7_calls == [], "the menu pipeline is a SKILL, not an F7 catering lead"
     assert s.reasons == ["menu_caption_ceded_to_dispatcher"]
     assert f"sender_role={role}" in s.audits[0]["detail"]
+    assert s.sent == [], "a cession is a pure yield — cf-router says nothing itself"
 
 
 @pytest.mark.parametrize("caption", SKILL_CAPTIONS)
@@ -220,6 +228,7 @@ def test_every_documented_skill_caption_cedes(monkeypatch, caption):
     assert _dispatch(hooks_mod, caption) is None
     assert s.primary_calls == []
     assert s.reasons == ["menu_caption_ceded_to_dispatcher"]
+    assert s.sent == []
 
 
 def test_pdf_menu_document_cedes_too(monkeypatch):
@@ -231,6 +240,7 @@ def test_pdf_menu_document_cedes_too(monkeypatch):
     assert _dispatch(hooks_mod, INCIDENT_CAPTION, media_path=DOC_MEDIA) is None
     assert s.primary_calls == []
     assert s.reasons == ["menu_caption_ceded_to_dispatcher"]
+    assert s.sent == []
 
 
 # ── Guardrails: what must NOT change ─────────────────────────────────────────
@@ -281,6 +291,7 @@ def test_only_owner_and_employee_are_authorized(monkeypatch, role):
     assert _dispatch(hooks_mod, "menu") is None
     assert s.primary_calls == []
     assert s.reasons == ["menu_caption_ceded_to_dispatcher"]
+    assert s.sent == []
 
 
 def test_media_less_menu_text_is_unchanged(monkeypatch):
@@ -340,6 +351,7 @@ def test_capitalization_and_whitespace_variants_cede_end_to_end(monkeypatch, cap
     assert _dispatch(hooks_mod, caption) is None
     assert s.primary_calls == []
     assert s.reasons == ["menu_caption_ceded_to_dispatcher"]
+    assert s.sent == []
 
 
 # ── "menu flyer" is a FLYER job, not a menu update ───────────────────────────
