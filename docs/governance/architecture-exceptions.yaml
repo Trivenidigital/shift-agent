@@ -1,0 +1,65 @@
+# Approved architecture exceptions (Level 4).
+#
+# ONLY an entry with `status: approved` authorizes architecture that the
+# applicable directive otherwise presumes NO-GO. `proposed`, `rejected` and
+# `expired` entries authorize nothing.
+#
+# Exceptions are narrowly scoped:
+#   - `affected_project` must be a project id from project-registry.yaml.
+#   - `affected_paths` must be repository-relative patterns that fall inside
+#     that project's registered paths. A Catering exception cannot authorize a
+#     Flyer Studio change.
+#   - A shared-platform exception must name EVERY affected agent in `scope`.
+#
+# The checker validates: required fields present, status in the allowed set,
+# affected_project known, affected_paths inside the project, and — when a PR
+# cites an exception id — that the cited exception is approved, unexpired and
+# actually covers the changed files.
+
+version: 1.0.0
+updated: 2026-08-01
+
+statuses:
+  - proposed
+  - approved
+  - rejected
+  - expired
+
+exceptions:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # SCHEMA FIXTURE — not a real authorization.
+  # Deliberately `status: proposed` so it cannot authorize anything. Copy this
+  # block to file a real exception, then have it reviewed and approved.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: HERMES-EX-000
+    status: proposed
+    fixture: true
+    affected_project: catering-studio
+    affected_paths:
+      - src/platform/catering_pricing.py
+    subsystem_type: example-only
+    scope: >-
+      Schema fixture illustrating the required shape of an exception record.
+      Authorizes nothing. Referencing this id from a PR must fail the checker
+      because its status is `proposed`.
+    reason: >-
+      Documents the field contract so a real exception can be filed without
+      guessing. Kept in-tree instead of in prose so the checker's schema
+      validation is exercised by a real record.
+    existing_capability_found_insufficient: >-
+      N/A — fixture. A real entry states which specific Hermes capability and
+      which specific deterministic kernel were inspected and why each was
+      insufficient, naming files.
+    evidence: >-
+      N/A — fixture. A real entry links the investigation: commit or PR, the
+      failing test, the reproduction, or the measurement that shows reuse
+      cannot meet the requirement.
+    safety_justification: >-
+      N/A — fixture. A real entry states what the new subsystem is allowed to
+      own, what it is forbidden to own, and which deterministic gate still
+      holds the money / authorization / irreversible-state boundary.
+    approver: none (fixture — never approve this record)
+    approval_date: null
+    expiration_or_review_condition: >-
+      Permanent fixture. Review only if the exception schema itself changes.

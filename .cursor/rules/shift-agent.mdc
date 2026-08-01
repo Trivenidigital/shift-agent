@@ -1,0 +1,20 @@
+---
+description: Shift Agent (scheduling) architecture rules
+globs:
+  - src/agents/shift/skills/handle_candidate_response/**
+  - src/agents/shift/skills/handle_owner_command/**
+  - src/agents/shift/skills/handle_sick_call/**
+  - src/agents/shift/skills/roster_lookup/**
+  - src/agents/shift/templates/**
+alwaysApply: false
+---
+
+Read and enforce `docs/governance/projects/shift-agent.md`.
+
+Hermes owns absence-intent detection and message wording. Deterministic code
+owns employee identity, eligibility, proposal state, approval codes and send
+eligibility. Routing belongs to the shared `dispatch_shift_agent` matrix, not
+to a handler skill.
+
+`src/agents/shift/scripts/`, `src/agents/shift/systemd/` and the dispatcher
+skill are SHARED PLATFORM, not this product.

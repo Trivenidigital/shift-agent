@@ -1,0 +1,26 @@
+---
+description: Catering Studio architecture rules
+globs:
+  - src/agents/catering/**
+  - src/agents/catering_followup/**
+  - src/platform/catering_*.py
+  - web/frontend/src/sections/catering/**
+  - web/backend/app/routers/catering.py
+alwaysApply: false
+---
+
+Read and enforce `docs/governance/projects/catering-studio.md`.
+
+Hermes owns interpretation, extraction, clarification, qualification and all
+customer/owner-facing language. Deterministic Catering kernels own identity,
+authorization, canonical item IDs, integer-cents money, pricebook import,
+pricing, lead and proposal state, quote versions, approval enforcement,
+idempotency, persistence, send eligibility, follow-up policy, audit and
+rollback.
+
+Presumed NO-GO: a second menu-ingestion pipeline, pricebook importer, proposal
+lifecycle, approval workflow, owner-notification mechanism, parallel lead or
+proposal store, custom clarification trees, or hand-authored JSON where Hermes
+can extract the data.
+
+These rules apply to Catering paths only. Never apply them to Flyer Studio.
