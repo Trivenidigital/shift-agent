@@ -45,7 +45,8 @@ The script will:
 - On `yes` + sender_role=owner: archive the existing menu (if any) to
   `/opt/shift-agent/state/catering-menu-archive/menu-vN-<ts>.json`,
   write the new menu to `/opt/shift-agent/state/catering-menu.json` with
-  incremented version, log `MenuUpdateApplied`, clear the pending file.
+  incremented version, log `MenuUpdateApplied`, THEN activate the pricebook
+  derived from that menu via `import-catering-pricebook`, clear the pending file.
 - On `no` + sender_role=owner: log `MenuUpdateRejected(reason="owner_no")`,
   clear the pending file. Existing menu is unchanged.
 - On any sender_role != "owner": exit 12 (privilege denied), no state change.
@@ -60,8 +61,16 @@ The script will:
 
 ## Step 3 — Confirm to owner
 
-After exit 0:
-- yes: *"Menu updated to v{new_version} ({item_count} items). Previous v{prev_version} archived. New catering quotes will use this menu."*
+After exit 0, read `pricebook_activated` from the script's JSON:
+- yes + `pricebook_activated: true`: *"Menu updated to v{new_version}
+  ({item_count} items). Previous v{prev_version} archived. Pricebook updated too
+  — new quotes use these prices."*
+- yes + `pricebook_activated: false`: the menu IS live but prices are NOT. Say
+  so plainly and do not round it off: *"Menu updated to v{new_version}
+  ({item_count} items). But the pricebook could NOT be updated, so quotes still
+  use the old prices: {pricebook_detail}. I've alerted you separately."* The
+  owner has already been paged; your job is to make sure the reply they are
+  reading right now does not imply prices changed when they did not.
 - no: *"Discarded. Existing menu unchanged. Send a new photo when you're ready."*
 
 After exit 4:
@@ -77,6 +86,15 @@ After exit 5 / 6 / other failure:
 
 - NEVER apply a menu without explicit `yes` from the owner.
 - NEVER infer "yes" from "thanks" or other ambiguous text.
+- `yes` also activates the pricebook derived from the menu. The preview the
+  owner approved listed exactly which prices change and which pricebook version
+  lands, so their `yes` covers both. NEVER treat a reply as `yes` for a preview
+  the owner has not seen.
+- If the owner replies with a CORRECTION instead of a verb (a different price,
+  "the paneer one is $12", "that's per tray"), do NOT apply and do NOT edit
+  anything. Reply: *"Got it. Reply `{code} no` and send a photo with that
+  corrected — I'll re-read it and show you a fresh preview."* The re-upload loop
+  is v0.2's only correction mechanism.
 - NEVER edit items inline in v0.2 — if owner wants to fix specific items,
   ask them to re-send the photo (v0.2.1 will add EDIT flow).
 - After applying, report the new version + item count so the owner has a

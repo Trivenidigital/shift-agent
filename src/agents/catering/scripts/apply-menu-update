@@ -209,7 +209,20 @@ def main() -> int:
 
     # Load pending update
     with FileLock(PENDING_LOCK):
-        pending, status = load_model(PENDING_PATH, MenuPendingUpdate, default=None)
+        # load_model(default=None) RAISES on an absent or corrupt store rather
+        # than returning a status, so the guard below could never fire on the
+        # commonest case of all: the owner replying twice. An approval is
+        # consumed by clearing this file, which makes "already applied" and "no
+        # pending update" the same state — and it must answer with the documented
+        # exit 4 the SKILL branches on, not an escaping traceback.
+        try:
+            pending, status = load_model(PENDING_PATH, MenuPendingUpdate, default=None)
+        except FileNotFoundError:
+            sys.stderr.write("no pending menu update found (missing)\n")
+            return EXIT_NOT_FOUND
+        except RuntimeError as e:
+            sys.stderr.write(f"pending menu update is unreadable: {e}\n")
+            return EXIT_SCHEMA_VIOLATION
         if pending is None or status != "ok":
             sys.stderr.write(f"no pending menu update found ({status})\n")
             return EXIT_NOT_FOUND
