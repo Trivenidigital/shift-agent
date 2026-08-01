@@ -5,7 +5,17 @@ lifecycle, controls, follow-ups, cockpit) on the existing Hermes substrate; Herm
 keeps conversation/classification. No new state-machine paradigm, no parallel
 approval system.
 
-**Date:** 2026-07-31 · **Branch:** `feat/catering-studio-mvp` · **PR:** #661
+**Date:** 2026-07-31 (superseded state below) · **PR:** #661
+
+> **2026-08-01 UPDATE — production is now `d01c88a`** (deploy-20260801-201411-d01c88a6),
+> which adds PR #664 (menu→pricebook adapter), #665 (legacy-pending fail-closed)
+> and #667 (menu-caption routing precedence). The owner-menu ingestion workflow
+> is BLOCKED at the agent turn — see
+> `tasks/catering-menu-ingestion-resume-2026-08-01.md`, which is the
+> authoritative resume document. Backlog items 14-20 below were added by that
+> attempt.
+
+**Original branch:** `feat/catering-studio-mvp`
 **Base:** origin/main `dc7a81a2` (== deployed prod) + docs branch tip `50f9b83`
 (incorporates reviewer-amendment `7345847`, exact SHA preserved).
 
@@ -100,6 +110,46 @@ one-way-door pattern (deposit_* did the same), widened here.
     temporarily deselected in cockpit-ci.yml with a pointer here — fix the
     operator-text-manifest path routing in the flyer test/writer and remove
     the deselects.
+
+### Added 2026-08-01 (menu-ingestion activation attempt)
+
+14. **BLOCKER (open) — the agent turn never invokes `update_catering_menu`.**
+    A correctly-ceded owner menu photo yields a conversational reply and
+    `parse-menu-photo` never runs; `menu_update_proposed` count in the whole
+    production audit log is 0. Front-brain CONVERSE was tested and DISPROVEN as
+    the cause. Full state, evidence and the next probe:
+    `tasks/catering-menu-ingestion-resume-2026-08-01.md`.
+15. **HIGH — ungrounded operational-success claim.** The model told the owner
+    *"successfully recorded"* with no receipt, no state change, no audit row;
+    it passed the outbound screen twice (`verdict: passed`, no fallback). Fix as
+    an invariant — a claimed operational success must be backed by a verified
+    action result or durable receipt — NOT by blacklisting the phrase. Blocks
+    restoring the owner chat to converse mode and blocks pilot activation.
+16. **HIGH — zero per-turn agent observability.** The gateway journal carries
+    only systemd session lines: no skill-selection or tool-call logging exists,
+    so item 14 cannot be diagnosed from evidence. Add before (or alongside) the
+    next attempt.
+17. **MEDIUM — non-reproducible deploy artifact builder.**
+    `tools/build-deploy-tarball.sh` embeds tar mtimes + per-run gzip state, so
+    two builds of one commit differ (cost one deployment halt). Fix in its own
+    narrow PR: `--sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner`,
+    `gzip -n`. Until then: NEVER delete a deploy worktree before the artifact is
+    installed; retain the exact built `.tgz`.
+18. **MEDIUM — front-brain precedence for owner media SKILL triggers.** Was
+    scoped as the durable fix while converse was the suspect; converse is now
+    exonerated, so re-scope only if item 14's probe implicates the conversational
+    tier. Do not build it speculatively.
+19. **MEDIUM (pre-existing, surfaced live) — F7 proposal-request path fires on
+    owner text.** An owner text message matched lead L0020 and deterministically
+    generated + SENT 2 proposal options (`catering-proposals.json` mutated,
+    recipient was the owner's own number). Behaviour predates this work; review
+    whether an owner-authored message should be able to trigger a customer-shaped
+    proposal send at all.
+20. **LOW — owner-alert channel unproven.** Pushover credentials are valid but
+    the account has NO ACTIVE DEVICE (trial lapsed unlicensed), so the API
+    accepts and silently drops; the WhatsApp fallback therefore never fires and
+    §12b pages are lost. Owner-waived 2026-08-01. One curl re-test closes it
+    after a licence purchase.
 
 ## Phase 2 backlog (directive §12)
 
