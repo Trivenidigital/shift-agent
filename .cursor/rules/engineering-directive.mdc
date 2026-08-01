@@ -1,0 +1,25 @@
+---
+description: Mandatory universal engineering and drift-control policy for this monorepo
+alwaysApply: true
+---
+
+Read and enforce, before planning, generating or reviewing any code:
+
+- `AGENTS.md`
+- `docs/governance/engineering-directive.md`
+- `docs/governance/project-registry.yaml`
+
+Reuse order: existing platform/model capability → existing deterministic
+kernel → thin adapter → new subsystem only under an approved exception in
+`docs/governance/architecture-exceptions.yaml`.
+
+Classify affected paths through the registry (longest-literal-prefix-wins) and
+load only the applicable project directives from `docs/governance/projects/`.
+
+Probabilistic output must never own money, authorization, tenant identity,
+irreversible state transitions, approval enforcement, send eligibility,
+signing, persistence, audit or rollback.
+
+Every substantive change carries a Capability Reuse Map (universal directive
+§9). More custom code is not progress; the smallest working vertical
+integration is.

@@ -1,0 +1,19 @@
+---
+description: Commerce (money) architecture rules — strictest deterministic boundary
+globs:
+  - src/platform/commerce/**
+  - src/platform/commerce_*.py
+  - web/backend/app/routers/commerce.py
+  - web/frontend/src/sections/CommerceOrders.tsx
+alwaysApply: false
+---
+
+Read and enforce `docs/governance/projects/commerce-platform.md` and the
+shared-platform directive.
+
+Amounts, currency, order-state transitions, payment-link creation and expiry,
+live-vs-test mode, webhook authenticity, idempotency, refund eligibility,
+persistence and audit are deterministic without exception. Model output may
+only phrase descriptions of these — never produce or gate them.
+
+Changes here are shared: list every affected agent.

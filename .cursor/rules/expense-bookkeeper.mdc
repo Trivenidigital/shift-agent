@@ -1,0 +1,16 @@
+---
+description: Expense Bookkeeper architecture rules
+globs:
+  - src/agents/expense_bookkeeper/**
+  - src/platform/qbo_client.py
+alwaysApply: false
+---
+
+Read and enforce `docs/governance/projects/expense-bookkeeper.md`.
+
+Hermes owns receipt vision extraction, classification and card wording. The
+OWNER-CONFIRMED total is the source of truth for the QuickBooks push; the
+extracted total is advisory only. Never auto-post an extracted amount.
+
+Presumed NO-GO: a second receipt/OCR pipeline, a local approval mechanism, a
+parallel expense store, or a second QBO write path.
