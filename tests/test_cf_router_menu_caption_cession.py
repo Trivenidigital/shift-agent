@@ -250,18 +250,37 @@ def test_flyer_brief_mentioning_menu_still_goes_to_flyer(monkeypatch):
     assert "menu_caption_ceded_to_dispatcher" not in s.reasons
 
 
-def test_customer_menu_photo_is_unchanged(monkeypatch):
-    """`update_catering_menu` is owner / verified-employee only (SKILL hard
-    rule). A customer sending the same photo + caption keeps the prior routing."""
+@pytest.mark.parametrize("caption", [INCIDENT_CAPTION, "menu", "new menu"])
+@pytest.mark.parametrize("role", ["customer", "guest", "unknown", ""])
+def test_unauthorized_identities_cannot_enter_the_menu_update_path(
+        monkeypatch, role, caption):
+    """`update_catering_menu` is owner / verified-employee ONLY (SKILL hard
+    rule) — the menu is the business's price source of truth, so an ordinary
+    customer photographing a menu must not be able to stage an update to it. The
+    role allowlist is positive, so an unrecognized or empty role is refused too,
+    and every such sender keeps the exact prior routing."""
     hooks_mod, actions_mod = _load_plugin()
-    s = _wire(monkeypatch, hooks_mod, actions_mod, role="customer")
+    s = _wire(monkeypatch, hooks_mod, actions_mod, role=role)
 
-    result = _dispatch(hooks_mod, INCIDENT_CAPTION)
+    result = _dispatch(hooks_mod, caption)
 
     assert result == {"action": "skip",
                       "reason": "cf-router flyer primary: project F0226 created"}
     assert len(s.primary_calls) == 1
     assert "menu_caption_ceded_to_dispatcher" not in s.reasons
+
+
+@pytest.mark.parametrize("role", ["owner", "employee"])
+def test_only_owner_and_employee_are_authorized(monkeypatch, role):
+    """The positive half of the same rule, so the allowlist cannot be narrowed to
+    owner-only without a failing cell: the live sender resolved as `employee` via
+    roster mapping, and the SKILL admits owner OR verified employee."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, role=role)
+
+    assert _dispatch(hooks_mod, "menu") is None
+    assert s.primary_calls == []
+    assert s.reasons == ["menu_caption_ceded_to_dispatcher"]
 
 
 def test_media_less_menu_text_is_unchanged(monkeypatch):
@@ -292,6 +311,69 @@ def test_cession_reason_literal_is_an_enum_member():
 def test_caption_triggers_match(caption):
     _, actions_mod = _load_plugin()
     assert actions_mod.is_menu_update_caption(caption) is True
+
+
+# A WhatsApp caption is typed on a phone: mixed case and stray whitespace are the
+# NORMAL shape, not the edge case. Every one of these must reach the SKILL.
+@pytest.mark.parametrize("caption", [
+    "  Update Menu ", "UPDATE MENU", "Update  Menu", "uPdAtE mEnU",
+    "MENU", " menu ", "  Menu  ", "\tmenu\n",
+    "new  menu", "New Menu", "NEW MENU", "Menu  Update", "MENU UPDATE",
+])
+def test_caption_triggers_survive_capitalization_and_whitespace(caption):
+    """The caption predicate normalizes whitespace and folds case, so an owner
+    who types "  Update Menu " gets the menu pipeline, not a flyer."""
+    _, actions_mod = _load_plugin()
+    assert actions_mod.is_menu_update_caption(caption) is True
+
+
+@pytest.mark.parametrize("caption", [
+    "  Update Menu ", "MENU", "new  menu", "New Menu",
+])
+def test_capitalization_and_whitespace_variants_cede_end_to_end(monkeypatch, caption):
+    """The predicate is not the product — pin the same variants through the real
+    dispatch so a normalization change cannot pass the unit cell while the live
+    route still hands the photo to Flyer Studio."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, role="owner")
+
+    assert _dispatch(hooks_mod, caption) is None
+    assert s.primary_calls == []
+    assert s.reasons == ["menu_caption_ceded_to_dispatcher"]
+
+
+# ── "menu flyer" is a FLYER job, not a menu update ───────────────────────────
+@pytest.mark.parametrize("caption", [
+    "create a menu flyer",
+    "design a menu flyer",
+    "make a menu flyer",
+    "Create a menu flyer for the weekend",
+    "design a new menu flyer",
+    "create a new menu flyer for Saturday",
+])
+def test_menu_flyer_requests_stay_in_flyer_studio(monkeypatch, caption):
+    """"Create/design/make a menu flyer" is Flyer Studio work that happens to
+    contain the word menu. Two of these ("a NEW MENU flyer") even carry the
+    literal trigger phrase — the explicit-flyer veto is what keeps them on the
+    flyer path, which is why they are pinned through the real dispatch."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, role="owner")
+
+    result = _dispatch(hooks_mod, caption)
+
+    assert result == {"action": "skip",
+                      "reason": "cf-router flyer primary: project F0226 created"}
+    assert len(s.primary_calls) == 1
+    assert "menu_caption_ceded_to_dispatcher" not in s.reasons
+
+
+def test_the_flyer_veto_is_what_saves_new_menu_flyer():
+    """Non-vacuity guard for the cell above: "design a new menu flyer" DOES match
+    the caption trigger, so if the explicit-flyer veto were ever dropped this
+    would silently start ceding real flyer work to the menu pipeline."""
+    _, actions_mod = _load_plugin()
+    assert actions_mod.is_menu_update_caption("design a new menu flyer") is True
+    assert actions_mod.classify_flyer_intent("design a new menu flyer")[0] is True
 
 
 @pytest.mark.parametrize("caption", [
