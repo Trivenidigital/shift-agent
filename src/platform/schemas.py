@@ -2851,6 +2851,13 @@ class MenuPendingUpdate(BaseModel):
     confirmation_code: str = Field(pattern=_CODE_FULL_PATTERN,
                                    description="reuses Shift's #X9X9X code alphabet")
     parser_notes: str = Field(default="", max_length=2000)
+    # Identity of the pricebook the owner's card was rendered against
+    # (catering_pricing.pricebook_fingerprint: "v5@<iso>" or "none"). Approving
+    # this proposal also activates a pricebook, and the card stated exactly which
+    # prices would change; if the live pricebook moved in between, that diff is
+    # stale and activation refuses rather than applying something unseen.
+    # None means the proposal predates this field and cannot be checked.
+    pricebook_fingerprint: Optional[str] = Field(default=None, max_length=120)
 
 
 # ── Catering commercial pricebook (M2) ───────────────────────────────────────
@@ -4694,6 +4701,27 @@ class CateringPricebookUpdated(_BaseEntry):
     fee_count: int = Field(ge=0)
     discount_count: int = Field(ge=0)
     item_override_count: int = Field(ge=0)
+
+
+class CateringMenuPricebookSynced(_BaseEntry):
+    """A menu approval activated the pricebook derived from it.
+
+    Carries the diff the activation actually applied. Without it the change set
+    is computed twice (card + activation) and discarded both times, leaving the
+    audit trail unable to answer "what did approving that photo change?" —
+    `removed_names` most of all, because a removed override is an item quietly
+    losing its committed price.
+
+    PRIVACY: counts and names, never amounts."""
+    type: Literal["catering_menu_pricebook_synced"]
+    update_id: str = Field(min_length=1)
+    menu_version: int = Field(ge=1)
+    pricebook_version: Optional[int] = Field(default=None, ge=1)
+    added_count: int = Field(ge=0)
+    changed_count: int = Field(ge=0)
+    removed_count: int = Field(ge=0)
+    excluded_count: int = Field(ge=0)
+    removed_names: list[str] = Field(default_factory=list, max_length=50)
 
 
 class CateringMenuPricebookSyncFailed(_BaseEntry):
@@ -7978,6 +8006,7 @@ LogEntry = Annotated[
         Annotated[MenuUpdateRejected, Tag("menu_update_rejected")],
         # M2: commercial pricebook import
         Annotated[CateringPricebookUpdated, Tag("catering_pricebook_updated")],
+        Annotated[CateringMenuPricebookSynced, Tag("catering_menu_pricebook_synced")],
         Annotated[CateringMenuPricebookSyncFailed,
                   Tag("catering_menu_pricebook_sync_failed")],
         # Agent #21 Expense Bookkeeper (15 entry types)

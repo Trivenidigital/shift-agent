@@ -29,7 +29,7 @@ for _p in (str(PLATFORM), str(REPO / "src")):
         sys.path.insert(0, _p)
 
 import catering_pricing as cp  # noqa: E402
-from schemas import CateringPricebook, MenuItem  # noqa: E402
+from schemas import CateringPricebook, Menu, MenuItem  # noqa: E402
 
 _TS = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
 _DATE = date(2026, 8, 1)
@@ -167,13 +167,56 @@ def test_one_bad_row_never_costs_the_owner_the_good_ones():
     assert [e.name for e in excluded] == ["Mystery"]
 
 
-def test_unavailable_items_are_still_priced():
-    """`available` is a culinary fact (we are out of it today); the COMMERCIAL
-    price stays on file, and the kernel already flags an unavailable line."""
+def test_unavailable_items_are_excluded_so_they_cannot_quote_as_firm():
+    """An override on a sold-out dish is a wrong price in effect.
+
+    compute_quote checks `item_price_overrides` BEFORE it looks at the menu, and
+    only the MENU branch raises `unavailable_item` — so an override makes the
+    kernel skip the availability check and return a firm, deliverable "exact"
+    price for something nobody can cook. Leaving these out keeps them on the menu
+    path, where being unavailable still blocks the quote."""
     overrides, excluded = cp.derive_item_overrides(
         [MenuItem(name="Goat Curry", price_usd=18.0, available=False)])
-    assert overrides == {"Goat Curry": 1800}
-    assert excluded == []
+    assert overrides == {}
+    assert [(e.name, e.reason) for e in excluded] == [
+        ("Goat Curry", cp.EXCLUDE_UNAVAILABLE)]
+
+
+def test_one_unavailable_row_excludes_the_whole_name():
+    """Promoting a price that MIGHT be sold out is the failure this rule stops,
+    so any unavailable row in a same-name group excludes the name."""
+    overrides, excluded = cp.derive_item_overrides([
+        MenuItem(name="Chai", price_usd=2.50, available=True),
+        MenuItem(name="Chai", price_usd=2.50, available=False),
+    ])
+    assert overrides == {}
+    assert [e.reason for e in excluded] == [cp.EXCLUDE_UNAVAILABLE]
+
+
+def test_availability_is_checked_after_the_duplicate_rule():
+    """A price conflict is still reported as a conflict — availability must not
+    quietly resolve one by knocking out the row that disagrees."""
+    _overrides, excluded = cp.derive_item_overrides([
+        MenuItem(name="Chai", price_usd=2.50, available=True),
+        MenuItem(name="Chai", price_usd=3.00, available=False),
+    ])
+    assert [e.reason for e in excluded] == [cp.EXCLUDE_DUPLICATE_CONFLICT] * 2
+
+
+def test_a_sold_out_item_cannot_be_quoted_as_exact_through_the_kernel():
+    """The end-to-end property the exclusion exists for, asserted against the
+    REAL kernel rather than the adapter's own output."""
+    items = [MenuItem(name="Goat Curry", price_usd=18.0, available=False)]
+    menu = Menu(version=1, updated_at=_TS, items=items)
+    sync = _sync(items, _active_book())
+
+    quote = cp.compute_quote(10, None, [("Goat Curry", 2)], None, sync.pricebook, menu)
+
+    assert quote.price_status != "exact"
+    assert quote.price_status == "pending_owner_review"
+    assert quote.is_deliverable() is False
+    assert "unavailable_item:Goat Curry" in quote.flags
+    assert quote.lines[0].unit_cents is None, "a sold-out line is unpriced, not firm"
 
 
 # ── Carry-forward-verbatim property ──────────────────────────────────────────
@@ -211,6 +254,35 @@ def test_with_no_active_pricebook_the_document_is_prices_and_nothing_else():
     assert book.approved_discounts == [] and book.tax_rate_bps == 0
     assert book.effective_date == _DATE
     assert book.item_price_overrides == {"Idly": 600}
+
+
+def test_a_first_pricebook_with_no_commercial_terms_is_flagged_placeholder():
+    """Item prices alone are not a quote. Without the flag, one menu photo
+    silently promotes quoting from "estimated" to a firm "exact" that charges
+    0% tax and no delivery fee."""
+    assert _sync([MenuItem(name="Idly", price_usd=6.00)], None).pricebook.placeholder is True
+
+
+def test_a_first_activation_quote_stays_pending_owner_review():
+    """The end-to-end property the flag exists for, through the REAL kernel."""
+    items = [MenuItem(name="Idly", price_usd=6.00)]
+    menu = Menu(version=1, updated_at=_TS, items=items)
+    sync = _sync(items, None)
+
+    quote = cp.compute_quote(10, None, [("Idly", 2)], None, sync.pricebook, menu)
+
+    assert quote.price_status == "pending_owner_review"
+    assert quote.is_deliverable() is False
+    assert cp.FLAG_PLACEHOLDER_PRICEBOOK in quote.flags
+    # The price itself DID land — only the permission to quote it as final did not.
+    assert quote.lines[0].unit_cents == 600
+
+
+def test_a_real_pricebook_is_not_turned_into_a_placeholder():
+    """The flag is carried, not invented: a configured pricebook keeps quoting
+    firm through a menu approval."""
+    assert _sync([MenuItem(name="Idly", price_usd=6.00)],
+                 _active_book()).pricebook.placeholder is False
 
 
 # ── Diff + announced version ─────────────────────────────────────────────────
@@ -290,4 +362,25 @@ def test_the_card_says_what_happens_when_there_is_no_pricebook_yet():
     sync = _sync([MenuItem(name="Idly", price_usd=6.00)], None)
     text = cp.render_pricebook_activation_section(sync, None)
     assert "NO packages, NO fees and 0% tax" in text
+    # The owner must be told the prices land but quotes do NOT go out as final.
+    assert "pending owner review" in text
+    assert "NOT sent as final" in text
     assert "activates pricebook version 2" in text
+
+
+# ── Proposal-window fingerprint ──────────────────────────────────────────────
+def test_the_fingerprint_distinguishes_no_pricebook_from_an_unchecked_proposal():
+    """`"none"` is a real, comparable value. An ABSENT stamp (None) means the
+    proposal predates the field and cannot be checked — the two must not be
+    confusable, or a first-ever approval would look unverifiable."""
+    assert cp.pricebook_fingerprint(None) == "none"
+    assert cp.pricebook_fingerprint(_active_book()) != "none"
+
+
+def test_the_fingerprint_changes_when_the_pricebook_does():
+    base = _active_book(version=4)
+    assert cp.pricebook_fingerprint(base) == cp.pricebook_fingerprint(_active_book(version=4))
+    assert cp.pricebook_fingerprint(base) != cp.pricebook_fingerprint(_active_book(version=5))
+    bumped = _active_book(version=4, updated_at=datetime(2026, 8, 2, tzinfo=timezone.utc))
+    assert cp.pricebook_fingerprint(base) != cp.pricebook_fingerprint(bumped), (
+        "a re-import at the same version still moves updated_at")

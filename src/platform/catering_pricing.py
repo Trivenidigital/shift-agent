@@ -776,6 +776,13 @@ EXCLUDE_MISSING_PRICE = "missing_price"
 EXCLUDE_NON_POSITIVE_PRICE = "non_positive_price"
 EXCLUDE_SUB_CENT_PRECISION = "sub_cent_precision"
 EXCLUDE_DUPLICATE_CONFLICT = "duplicate_conflict"
+# NOT a price-quality rule — a kernel-ordering one. `compute_quote` checks
+# `item_price_overrides` BEFORE it looks at the menu, and only the MENU branch
+# raises `unavailable_item`. So an override on a sold-out dish makes the kernel
+# skip the availability check entirely and return a firm, deliverable "exact"
+# price for something nobody can cook. Leaving these items OUT keeps them on the
+# menu path, where being unavailable still blocks the quote.
+EXCLUDE_UNAVAILABLE = "unavailable"
 
 EXCLUSION_LABELS: dict[str, str] = {
     EXCLUDE_EMPTY_NAME: "no item name",
@@ -783,6 +790,7 @@ EXCLUSION_LABELS: dict[str, str] = {
     EXCLUDE_NON_POSITIVE_PRICE: "priced at zero or less",
     EXCLUDE_SUB_CENT_PRECISION: "price has fractions of a cent",
     EXCLUDE_DUPLICATE_CONFLICT: "listed twice at different prices",
+    EXCLUDE_UNAVAILABLE: "marked unavailable on the menu",
 }
 
 
@@ -850,7 +858,14 @@ def derive_item_overrides(
                     ExcludedMenuItem(name, EXCLUDE_DUPLICATE_CONFLICT, it.price_usd))
             continue
         price = group[0].price_usd
-        if price is None:
+        # Availability is checked AFTER the duplicate rule (so a conflict is still
+        # reported as a conflict) and BEFORE the price rules (a sold-out item is
+        # excluded whatever its price says). Any unavailable row in the group
+        # excludes the name: promoting a price that might be sold out is the
+        # failure this rule exists to stop.
+        if not all(getattr(it, "available", True) for it in group):
+            reason = EXCLUDE_UNAVAILABLE
+        elif price is None:
             reason = EXCLUDE_MISSING_PRICE
         elif price <= 0:
             reason = EXCLUDE_NON_POSITIVE_PRICE
@@ -893,9 +908,14 @@ def sync_pricebook_from_menu_items(
 
     The active pricebook's COMMERCIAL fields are carried forward VERBATIM
     (packages, fees, tax, discounts, effective date, notes, placeholder flag):
-    this bridge supplies item prices, never the business model. With no active
-    pricebook those fields are empty — the resulting book charges 0 tax and no
-    fees until the owner configures them, which the owner card states outright.
+    this bridge supplies item prices, never the business model.
+
+    With NO active pricebook the commercial fields are empty AND the book is
+    flagged `placeholder=True`. That flag is what stops a menu photo from
+    silently promoting quoting from "estimated" to a firm "exact" that charges
+    0% tax and no delivery fee: the kernel keeps such quotes at
+    pending_owner_review until the owner configures real commercial terms.
+    Item prices land immediately; the permission to quote them as final does not.
 
     `version` is left at the model default; the importer's own
     max(prior, incoming) + 1 rule assigns the real one, so a document built
@@ -908,7 +928,7 @@ def sync_pricebook_from_menu_items(
         updated_at=updated_at,
         updated_by="menu_approval",
         currency=(active.currency if active is not None else "USD"),
-        placeholder=(active.placeholder if active is not None else False),
+        placeholder=(active.placeholder if active is not None else True),
         per_person_packages=(list(active.per_person_packages) if active is not None else []),
         fixed_fees=(list(active.fixed_fees) if active is not None else []),
         tax_rate_bps=(active.tax_rate_bps if active is not None else 0),
@@ -964,10 +984,26 @@ def render_pricebook_activation_section(
     if active is None:
         out.append(
             "  No pricebook exists yet, so this one starts with NO packages, NO "
-            "fees and 0% tax until you set them up in the Studio."
+            "fees and 0% tax. These prices go on file, but quotes stay marked "
+            "'pending owner review' and are NOT sent as final until you set up "
+            "your packages, fees and tax in the Studio."
         )
     out.append(f"  Approving also activates pricebook version {sync.next_version}.")
     return "\n".join(out)
+
+
+def pricebook_fingerprint(active: Optional[CateringPricebook]) -> str:
+    """Identity of the pricebook a menu card was rendered against.
+
+    Stamped onto the pending menu proposal so activation can prove the owner
+    approved a card describing the CURRENT pricebook. Between the card and the
+    `yes` an operator can import a new pricebook; carrying on would activate a
+    diff the owner never saw. `"none"` is a real value, distinct from an absent
+    stamp (a proposal made before this field existed, which cannot be checked).
+    """
+    if active is None:
+        return "none"
+    return f"v{active.version}@{active.updated_at.isoformat()}"
 
 
 # ── Store loader (I/O — deliberately OUTSIDE the pure kernel) ───────────────

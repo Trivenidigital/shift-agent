@@ -232,7 +232,17 @@ def _call_vision(api_key: str, image_b64: str, mime: str) -> dict:
         raise RuntimeError(f"vision returned non-JSON: {e}\nbody: {content[:1000]}")
 
 
-def _pricebook_section(items: list[MenuItem], update_id: str) -> str:
+def _load_active_pricebook():
+    """(active pricebook or None, unreadable-reason or None). Read ONCE per run so
+    the card and the fingerprint stamped beside it describe the same document."""
+    try:
+        return _pricing.load_pricebook(PRICEBOOK_PATH), None
+    except _pricing.PricingError as e:
+        return None, str(e)[:200]
+
+
+def _pricebook_section(items: list[MenuItem], update_id: str,
+                       active, load_error: Optional[str]) -> str:
     """The pricebook half of the owner card.
 
     Approving this preview activates the pricebook derived from it, so the card
@@ -243,11 +253,9 @@ def _pricebook_section(items: list[MenuItem], update_id: str) -> str:
     cost the owner their menu preview, but the card still says so plainly,
     because in that state approving publishes the menu and leaves prices alone.
     """
-    try:
-        active = _pricing.load_pricebook(PRICEBOOK_PATH)
-    except _pricing.PricingError as e:
+    if load_error is not None:
         return ("*Pricebook* — could not be read, so approving publishes the MENU "
-                f"only and leaves prices unchanged.\n  ({str(e)[:200]})")
+                f"only and leaves prices unchanged.\n  ({load_error})")
     try:
         sync = _pricing.sync_pricebook_from_menu_items(
             items, active,
@@ -382,6 +390,14 @@ def main() -> int:
     update_id = _next_update_id()
     now = customer_now(cfg.customer.timezone)
 
+    # ONE read, used for both the card the owner sees and the fingerprint stamped
+    # beside it, so activation can prove they approved a diff against THIS
+    # pricebook. An unreadable pricebook stamps nothing: there is no identity to
+    # pin, and the card already tells the owner prices will not move.
+    active_pricebook, pricebook_load_error = _load_active_pricebook()
+    fingerprint = (None if pricebook_load_error is not None
+                   else _pricing.pricebook_fingerprint(active_pricebook))
+
     with approval_code_pools.code_generation_lock(state_dir=PENDING_PATH.parent):
         confirmation_code = _generate_unique_code()
         pending = MenuPendingUpdate(
@@ -391,6 +407,7 @@ def main() -> int:
             extracted_items=items,
             confirmation_code=confirmation_code,
             parser_notes=parser_notes,
+            pricebook_fingerprint=fingerprint,
         )
         PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(PENDING_LOCK):
@@ -402,7 +419,10 @@ def main() -> int:
         item_count=len(items), source_image_id=args.source_image_id,
     ))
 
-    preview = _format_preview(items, parser_notes, _pricebook_section(items, update_id))
+    preview = _format_preview(
+        items, parser_notes,
+        _pricebook_section(items, update_id, active_pricebook, pricebook_load_error),
+    )
     print(json.dumps({
         "update_id": update_id,
         "confirmation_code": confirmation_code,

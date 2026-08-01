@@ -121,6 +121,11 @@ EXTRACTION_TAKE_2 = {
          "dietary_tags": ["veg"], "available": True, "notes": "", "serves": 1},
         {"name": "Paneer Tikka", "price_usd": 12.00, "category": "appetizer",
          "dietary_tags": ["veg"], "available": True, "notes": "", "serves": 2},
+        # Cleanly priced but SOLD OUT. An override here would make the kernel
+        # skip its availability check and quote it as firm and deliverable.
+        {"name": "Seasonal Prawn Fry", "price_usd": 22.00, "category": "main",
+         "dietary_tags": ["non-veg"], "available": False, "notes": "out of season",
+         "serves": 2},
     ],
     "parser_notes": "corrected reprint",
 }
@@ -394,6 +399,8 @@ def test_04_the_corrected_photo_resolves_the_ambiguity(sb: _Sandbox):
     # The two the owner confirmed stay unpriced are STILL excluded.
     assert "Market Fish Fry — no price printed" in sb.card_take_2
     assert "Welcome Drink — priced at zero or less" in sb.card_take_2
+    # A sold-out dish is priced on the menu but must not be promoted.
+    assert "Seasonal Prawn Fry — marked unavailable on the menu" in sb.card_take_2
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -430,6 +437,7 @@ def test_05_approval_publishes_the_menu_and_activates_the_pricebook(sb: _Sandbox
     # Excluded items never become prices.
     assert "Market Fish Fry" not in book.item_price_overrides
     assert "Welcome Drink" not in book.item_price_overrides
+    assert "Seasonal Prawn Fry" not in book.item_price_overrides
 
     # Commercial fields carried forward VERBATIM from v5.
     seed = json.loads(PRICEBOOK_FIXTURE.read_text(encoding="utf-8"))
@@ -453,6 +461,21 @@ def test_05_approval_publishes_the_menu_and_activates_the_pricebook(sb: _Sandbox
     assert (updated["version"], updated["prev_version"]) == (6, 5)
     assert updated["updated_by"] == "menu_approval"
     assert _rows(sb, "catering_menu_pricebook_sync_failed") == []
+
+    # The diff the activation applied is RECORDED, not computed and discarded.
+    synced = _rows(sb, "catering_menu_pricebook_synced")[-1]
+    assert synced["update_id"] == sb.update_id_take_2
+    assert (synced["menu_version"], synced["pricebook_version"]) == (1, 6)
+    # Idly / Masala Dosa / Goat Curry / Chai / Paneer Tikka added, Gulab Jamun
+    # changed 450 -> 500, Seasonal Special removed.
+    assert (synced["added_count"], synced["changed_count"], synced["removed_count"]) \
+        == (5, 1, 1)
+    assert synced["removed_names"] == [STALE_OVERRIDE_NAME], (
+        "a removed override is an item losing its committed price — name it")
+    assert synced["excluded_count"] == 3     # fish / welcome drink / prawn fry
+    # PRIVACY: names, never amounts.
+    assert "$" not in json.dumps(synced)
+    assert "900" not in json.dumps(synced)
 
 
 def test_06_the_adapter_output_is_exactly_what_landed(sb: _Sandbox):
@@ -560,6 +583,97 @@ def test_09_replaying_the_approval_creates_no_duplicate_version(sb: _Sandbox):
     assert len(_rows(sb, "catering_pricebook_updated")) == before_updates
 
 
+def test_09b_a_pricebook_change_after_the_card_refuses_the_sync(sb: _Sandbox):
+    """The card the owner approved described a diff against a SPECIFIC pricebook.
+    If an operator imports a new one in between, that diff is stale — activating
+    it would apply price changes the owner never saw. The menu still stands."""
+    result = _extract(sb, EXTRACTION_TAKE_2, "wamid.MENU.DRIFT")
+    stamped_version = _active(sb).version
+
+    # An operator imports a different pricebook while the card sits unanswered.
+    document = json.loads(PRICEBOOK_FIXTURE.read_text(encoding="utf-8"))
+    document["tax_rate_bps"] = 900
+    document["item_price_overrides"] = {}
+    drifted = sb.root / "pricebook-drift.json"
+    drifted.write_text(json.dumps(document), encoding="utf-8")
+    rc, out, err = _run_script(sb, "import-catering-pricebook", [
+        "--file", str(drifted), "--sender-role", "owner",
+    ])
+    assert rc == 0, (out, err)
+    assert _active(sb).version != stamped_version
+    pricebook_after_drift = sb.pricebook.read_bytes()
+    menu_version_before = json.loads(sb.menu.read_text(encoding="utf-8"))["version"]
+
+    rc, out, err = _run_script(sb, "apply-menu-update", [
+        "--code", result["confirmation_code"], "--decision", "yes",
+        "--sender-role", "owner",
+    ])
+    assert rc == 0, (out, err)
+    payload = _stdout_json(out)
+    assert payload["status"] == "applied"
+    assert payload["pricebook_activated"] is False
+    assert "pricebook_changed_since_proposal" in payload["pricebook_detail"]
+
+    # Menu advanced; prices did NOT move.
+    assert json.loads(sb.menu.read_text(encoding="utf-8"))["version"] == \
+        menu_version_before + 1
+    assert sb.pricebook.read_bytes() == pricebook_after_drift
+
+    failed = _rows(sb, "catering_menu_pricebook_sync_failed")[-1]
+    assert failed["reason"] == "pricebook_changed_since_proposal"
+    assert failed["update_id"] == result["update_id"]
+
+
+def test_09c_a_recycled_proposal_id_with_different_content_still_imports(sb: _Sandbox):
+    """The replay anchor must not turn a REAL price change into a silent no-op.
+
+    Proposal ids come from a counter a state reset can rewind, so an id can match
+    while the prices differ. Suppressing that would leave the live pricebook
+    silently wrong — this diff's anchor requires the CONTENT to match too."""
+    live = _active(sb)
+    recycled_id = live.source_menu_update_id or "MU0001"
+    if live.source_menu_update_id is None:
+        # The drift import above cleared the anchor; re-stamp it so the id
+        # genuinely collides, which is the condition under test.
+        stamped = live.model_copy(update={"source_menu_update_id": recycled_id})
+        seed = sb.root / "recycle-seed.json"
+        seed.write_text(stamped.model_dump_json(), encoding="utf-8")
+        rc, out, err = _run_script(sb, "import-catering-pricebook", [
+            "--file", str(seed), "--sender-role", "owner", "--updated-by", "menu_approval",
+        ])
+        assert rc == 0, (out, err)
+        live = _active(sb)
+
+    assert live.source_menu_update_id == recycled_id
+    version_before = live.version
+
+    # Same id, DIFFERENT content (one price moved).
+    changed = live.model_copy(update={
+        "item_price_overrides": {**live.item_price_overrides, "Idly (3 PCS)": 777},
+    })
+    src = sb.root / "recycled-id-different-content.json"
+    src.write_text(changed.model_dump_json(), encoding="utf-8")
+
+    rc, out, err = _run_script(sb, "import-catering-pricebook", [
+        "--file", str(src), "--sender-role", "owner", "--updated-by", "menu_approval",
+    ])
+    assert rc == 0, (out, err)
+    assert _stdout_json(out)["status"] == "imported", "a real change must not be swallowed"
+    assert _active(sb).version == version_before + 1
+    assert _active(sb).item_price_overrides["Idly (3 PCS)"] == 777
+
+    # And the true replay — same id AND same content — is still a no-op.
+    replay = sb.root / "true-replay.json"
+    replay.write_text(_active(sb).model_dump_json(), encoding="utf-8")
+    bytes_before = sb.pricebook.read_bytes()
+    rc, out, err = _run_script(sb, "import-catering-pricebook", [
+        "--file", str(replay), "--sender-role", "owner", "--updated-by", "menu_approval",
+    ])
+    assert rc == 0, (out, err)
+    assert _stdout_json(out)["status"] == "already_active"
+    assert sb.pricebook.read_bytes() == bytes_before
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 10-12. Failure isolation, role gate, and the send assertion
 # ════════════════════════════════════════════════════════════════════════════
@@ -570,7 +684,8 @@ def test_10_a_pricebook_failure_never_rolls_back_the_approved_menu(sb: _Sandbox)
     result = _extract(sb, EXTRACTION_TAKE_2, "wamid.MENU.TAKE3")
     code = result["confirmation_code"]
     pricebook_before = sb.pricebook.read_bytes()
-    menu_version_before = _active(sb).version
+    pricebook_version_before = _active(sb).version
+    menu_version_before = json.loads(sb.menu.read_text(encoding="utf-8"))["version"]
 
     rc, out, err = _run_script(
         sb, "apply-menu-update",
@@ -583,15 +698,16 @@ def test_10_a_pricebook_failure_never_rolls_back_the_approved_menu(sb: _Sandbox)
     payload = _stdout_json(out)
     assert payload["status"] == "applied"
     assert payload["pricebook_activated"] is False
-    assert payload["new_version"] == 2, "the menu still advanced"
+    assert payload["new_version"] == menu_version_before + 1, "the menu still advanced"
 
-    assert json.loads(sb.menu.read_text(encoding="utf-8"))["version"] == 2
+    assert json.loads(sb.menu.read_text(encoding="utf-8"))["version"] == \
+        menu_version_before + 1
     assert sb.pricebook.read_bytes() == pricebook_before, "prices are byte-unchanged"
-    assert _active(sb).version == menu_version_before
+    assert _active(sb).version == pricebook_version_before
 
     failed = _rows(sb, "catering_menu_pricebook_sync_failed")[-1]
     assert failed["update_id"] == result["update_id"]
-    assert failed["menu_version"] == 2
+    assert failed["menu_version"] == menu_version_before + 1
     # PRIVACY: the importer's stderr can quote a price, so it stays out of audit.
     assert "$" not in json.dumps(failed)
     assert "pricebook activation failed" in err

@@ -117,6 +117,17 @@ def _parse_pricebook(raw: str) -> CateringPricebook:
         sys.exit(EXIT_INVALID_INPUT)
 
 
+# Assigned by THIS script on every import, so they can never match an incoming
+# document and must be excluded from a content comparison.
+_ASSIGNED_FIELDS = {"version", "updated_at", "updated_by"}
+
+
+def _same_content(prior: CateringPricebook, incoming: CateringPricebook) -> bool:
+    """True when two pricebooks say the same thing about money and terms."""
+    return (prior.model_dump(exclude=_ASSIGNED_FIELDS)
+            == incoming.model_dump(exclude=_ASSIGNED_FIELDS))
+
+
 def _load_prior() -> CateringPricebook | None:
     """Current pricebook, or None on first run. Exits 5 if present-but-corrupt.
 
@@ -179,14 +190,22 @@ def main() -> int:
         prior = _load_prior()
 
         # Replay anchor. A menu-derived document names the menu-update proposal
-        # it came from; if that proposal already produced the LIVE pricebook,
-        # this is a re-run of the same approval, not a new one. Re-importing
-        # would bump the version and archive a copy for a change nobody made, so
-        # it is a no-op success — the caller's retry is meant to be safe.
+        # it came from; if that proposal already produced the LIVE pricebook AND
+        # the content is identical, this is a re-run of the same approval, not a
+        # new one. Re-importing would bump the version and archive a copy for a
+        # change nobody made, so it is a no-op success — the caller's retry is
+        # meant to be safe.
+        #
+        # The CONTENT check is not belt-and-braces: proposal ids come from a
+        # counter that a state reset or restore can rewind, so an id alone can
+        # match while the prices differ. Suppressing that would leave the live
+        # pricebook silently wrong — the exact failure this anchor exists to
+        # prevent, inverted. An id match with different content is a REAL import.
         if (
             incoming.source_menu_update_id is not None
             and prior is not None
             and prior.source_menu_update_id == incoming.source_menu_update_id
+            and _same_content(prior, incoming)
         ):
             print(json.dumps({
                 "status": "already_active",
