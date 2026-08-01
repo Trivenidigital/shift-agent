@@ -3131,6 +3131,38 @@ def should_start_new_flyer_over_active(text: str, *, has_media: bool = False) ->
     return False
 
 
+# Menu-caption routing precedence (2026-08-01). `update_catering_menu`'s SKILL
+# frontmatter documents its trigger as a media message whose caption contains
+# "update menu", "new menu", or is just "menu". These are STRUCTURED TOKENS —
+# the documented activation phrases for a deterministic pipeline — not an intent
+# keyword list, which is why matching them literally is appropriate here and a
+# broader "does this sound like a menu request" list would not be.
+#
+# Anchored on purpose: `_MEDIA_TEMPLATE_EDIT` above admits the bare substring
+# "menu" for any media message, which is precisely how the flyer arm swallowed
+# the live menu photo. A longer flyer brief that merely mentions the word ("a
+# weekend flyer with our menu items") must NOT match, so only the two-word
+# trigger phrases match inside a sentence; the single word "menu" matches only
+# when it is the WHOLE caption.
+_MENU_UPDATE_CAPTION_RE = re.compile(
+    r"\b(?:update\s+menu|menu\s+update|new\s+menu)\b",
+    re.IGNORECASE,
+)
+
+
+def is_menu_update_caption(text: str) -> bool:
+    """Return True when a media caption carries a documented `update_catering_menu`
+    trigger: "update menu" / "menu update" / "new menu" anywhere in the caption, or
+    a bare "menu" as the entire caption. Deterministic; NO LLM. Caller supplies the
+    media + sender-role conditions — this answers the caption question only."""
+    body = " ".join(flyer_visible_message_text(text).split())
+    if not body:
+        return False
+    if _MENU_UPDATE_CAPTION_RE.search(body):
+        return True
+    return body.strip(" .!?,:;\"'").lower() == "menu"
+
+
 def is_exact_reference_edit_request(text: str, *, has_media: bool = False) -> bool:
     """Return True for source-preserving edits to an attached flyer/artwork.
 
