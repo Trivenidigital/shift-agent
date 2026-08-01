@@ -111,6 +111,18 @@ EXCEPTION_STATUSES = ("proposed", "approved", "rejected", "expired")
 
 REUSE_MAP_HEADING = "## Capability Reuse Map"
 
+# THE authoritative, machine-enforced Capability Reuse Map schema.
+#
+# Every published template — engineering-directive.md §9, the AGENTS.md session
+# bootstrap skeleton, and .github/pull_request_template.md — must reproduce
+# these labels EXACTLY. Those documents necessarily repeat the labels; this
+# tuple is what decides. tests/test_architecture_governance.py asserts each
+# published template contains every field verbatim and carries no divergent
+# replacement label, which is what keeps them from forking again.
+#
+# Matching is exact by design: no aliases, no singular/plural variants, no
+# parenthetical variants, no fuzzy matching. A gate that accepts near-misses
+# stops being a gate.
 REUSE_MAP_FIELDS = (
     "Requested outcome",
     "Affected projects",
@@ -119,10 +131,12 @@ REUSE_MAP_FIELDS = (
     "Existing deterministic kernels reused",
     "Existing stores/workflows reused",
     "Thin adapters",
+    "Custom runtime code genuinely unavoidable",
     "New subsystem",
     "Evidence existing capabilities were insufficient",
     "Architecture exception",
     "Shared-platform impact",
+    "Other agents affected",
     "Vertical E2E proof",
 )
 

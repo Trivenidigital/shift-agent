@@ -50,12 +50,18 @@ Architecture exception: <none | HERMES-EX-###>
 
 Capability Reuse Map — <project id>
 - Requested outcome:
-- Existing platform/model capability reused:
-- Existing deterministic kernel reused:
-- Existing store/workflow reused:
-- Thin adapter introduced:
+- Affected projects:
+- Applicable directives:
+- Existing platform/model capabilities reused:
+- Existing deterministic kernels reused:
+- Existing stores/workflows reused:
+- Thin adapters:
 - Custom runtime code genuinely unavoidable:
+- New subsystem:
 - Evidence existing capabilities were insufficient:
+- Architecture exception:
+- Shared-platform impact:
+- Other agents affected:
 - Vertical E2E proof:
 ```
 
