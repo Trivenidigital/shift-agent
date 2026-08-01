@@ -1,6 +1,6 @@
 # Universal Engineering Directive
 
-    Version: 1.1.0
+    Version: 1.2.0
     Status:  Mandatory
     Scope:   Every file, product and agent in this repository (Level 1)
     Applies to: all agents, developers, reviewers, subagents and implementation
@@ -188,16 +188,16 @@ with these fields:
 ## Capability Reuse Map
 
 - Requested outcome:
-- Affected project(s):
-- Applicable directive(s):
-- Existing platform/model capability reused:
-- Existing deterministic kernel reused:
-- Existing store/workflow reused:
-- Thin adapter introduced:
+- Affected projects:
+- Applicable directives:
+- Existing platform/model capabilities reused:
+- Existing deterministic kernels reused:
+- Existing stores/workflows reused:
+- Thin adapters:
 - Custom runtime code genuinely unavoidable:
-- New subsystem introduced:
+- New subsystem:
 - Evidence existing capabilities were insufficient:
-- Architecture exception ID or none:
+- Architecture exception:
 - Shared-platform impact:
 - Other agents affected:
 - Vertical E2E proof:
@@ -273,5 +273,6 @@ Bump `Version` on any normative change and record the reason below.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.2.0 | 2026-08-01 | Align the published §9 Reuse Map with the schema CI actually enforces (`REUSE_MAP_FIELDS`). The §9 labels used singular/parenthetical forms the checker did not recognise, so a PR body copied from this directive failed 8 of 12 field checks. `Custom runtime code genuinely unavoidable` and `Other agents affected` are now enforced. |
 | 1.1.0 | 2026-08-01 | Add §2a (genuinely net-new categories + audited trap skills), carried from the pre-governance `AGENTS.md` so the reuse rule keeps its bounded exception. |
 | 1.0.0 | 2026-08-01 | Initial universal directive. Consolidates the Hermes-first rule and drift rules previously forked between `AGENTS.md` and `CLAUDE.md` into one canonical source. |

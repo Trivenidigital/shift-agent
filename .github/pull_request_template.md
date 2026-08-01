@@ -18,10 +18,12 @@
 - Existing deterministic kernels reused:
 - Existing stores/workflows reused:
 - Thin adapters:
+- Custom runtime code genuinely unavoidable:
 - New subsystem:
 - Evidence existing capabilities were insufficient:
 - Architecture exception:
 - Shared-platform impact:
+- Other agents affected:
 - Vertical E2E proof:
 
 ## Architecture drift check

@@ -91,12 +91,18 @@ def reuse_map(**overrides) -> str:
         "Existing deterministic kernels reused": "catering_pricing.py, import-catering-pricebook",
         "Existing stores/workflows reused": "catering-leads.json, existing approval workflow",
         "Thin adapters": "menu-to-pricebook adapter",
+        "Custom runtime code genuinely unavoidable": "none",
         "New subsystem": "none",
         "Evidence existing capabilities were insufficient": "n/a - no new subsystem",
         "Architecture exception": "none",
         "Shared-platform impact": "none",
+        "Other agents affected": "none",
         "Vertical E2E proof": "inbound WhatsApp menu photo through to priced pricebook",
     }
+    assert set(values) == set(gov.REUSE_MAP_FIELDS), (
+        "test fixture drifted from the enforced schema: "
+        f"{set(values) ^ set(gov.REUSE_MAP_FIELDS)}"
+    )
     values.update(overrides)
     lines = ["## Summary", "", "test body", "", "## Capability Reuse Map", ""]
     lines += [f"- {k}: {v}" for k, v in values.items()]
@@ -1106,3 +1112,156 @@ def test_resolve_cli_emits_the_ownership_record():
     assert records[1]["project"] == "shift-platform"
     assert records[1]["rule_kind"] == "container"
     assert gov.SHARED_DIRECTIVE in records[1]["directives"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Capability Reuse Map schema — single-source enforcement.
+#
+# REUSE_MAP_FIELDS in tools/check-architecture-governance.py is the
+# authoritative machine-enforced schema. The three published templates
+# necessarily REPEAT those labels; these tests prove each repetition is exact
+# and carries no divergent replacement, which is what stops them forking.
+# The extractors below are deliberately narrow and literal — no general
+# Markdown framework, no schema generator.
+# ══════════════════════════════════════════════════════════════════════════
+
+DIRECTIVE_REL = "docs/governance/engineering-directive.md"
+PR_TEMPLATE_REL = ".github/pull_request_template.md"
+
+# Labels that previously diverged. If any reappears in a published template,
+# that template has forked from the enforced schema again.
+RETIRED_LABELS = (
+    "Affected project(s)",
+    "Applicable directive(s)",
+    "Existing platform/model capability reused",
+    "Existing deterministic kernel reused",
+    "Existing store/workflow reused",
+    "Thin adapter introduced",
+    "New subsystem introduced",
+    "Architecture exception ID or none",
+)
+
+
+def _bullet_labels(text: str) -> list[str]:
+    """Labels from `- Label:` bullet lines. Literal and deterministic."""
+    out = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- ") and ":" in stripped:
+            out.append(stripped[2:].split(":", 1)[0].strip())
+    return out
+
+
+def _directive_reuse_map_block() -> str:
+    """The fenced block under §9 of the universal directive."""
+    text = (REPO_ROOT / DIRECTIVE_REL).read_text(encoding="utf-8")
+    start = text.index("## 9. Required output")
+    fence = text.index("```", start) + 3
+    end = text.index("```", fence)
+    return text[fence:end]
+
+
+def _agents_bootstrap_block() -> str:
+    """The Capability Reuse Map skeleton inside the AGENTS.md bootstrap fence."""
+    text = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    start = text.index("Capability Reuse Map — <project id>")
+    end = text.index("```", start)
+    return text[start:end]
+
+
+def _pr_template_block() -> str:
+    text = (REPO_ROOT / PR_TEMPLATE_REL).read_text(encoding="utf-8")
+    start = text.index(gov.REUSE_MAP_HEADING)
+    end = text.index("## Architecture drift check", start)
+    return text[start:end]
+
+
+PUBLISHED_TEMPLATES = {
+    "engineering-directive §9": _directive_reuse_map_block,
+    "AGENTS.md bootstrap skeleton": _agents_bootstrap_block,
+    "pull_request_template.md": _pr_template_block,
+}
+
+
+@pytest.mark.parametrize("name", list(PUBLISHED_TEMPLATES))
+def test_published_template_contains_every_enforced_field(name):
+    labels = _bullet_labels(PUBLISHED_TEMPLATES[name]())
+    missing = [f for f in gov.REUSE_MAP_FIELDS if f not in labels]
+    assert not missing, f"{name} is missing enforced field(s): {missing}"
+
+
+@pytest.mark.parametrize("name", list(PUBLISHED_TEMPLATES))
+def test_published_template_has_no_divergent_label(name):
+    labels = _bullet_labels(PUBLISHED_TEMPLATES[name]())
+    retired = [lbl for lbl in labels if lbl in RETIRED_LABELS]
+    assert not retired, f"{name} reintroduced retired label(s): {retired}"
+    extra = [lbl for lbl in labels if lbl not in gov.REUSE_MAP_FIELDS]
+    assert not extra, f"{name} publishes label(s) the checker does not enforce: {extra}"
+
+
+def _body_from_labels(labels: list[str]) -> str:
+    lines = ["## Summary", "", "schema conformance check", "", gov.REUSE_MAP_HEADING, ""]
+    lines += [f"- {lbl}: catering-studio" if lbl == "Affected projects" else f"- {lbl}: none"
+              for lbl in labels]
+    return "\n".join(lines) + "\n"
+
+
+@pytest.mark.parametrize("name", list(PUBLISHED_TEMPLATES))
+def test_pr_body_copied_from_published_template_passes(name):
+    """The headline guarantee: following any published template passes CI."""
+    labels = _bullet_labels(PUBLISHED_TEMPLATES[name]())
+    code, out = run_checker(
+        REPO_ROOT,
+        changed=["src/agents/catering/deposit.py"],
+        body=_body_from_labels(labels),
+    )
+    assert code == 0, f"a body copied verbatim from {name} was rejected:\n{out}"
+
+
+@pytest.mark.parametrize(
+    "omitted",
+    ["Custom runtime code genuinely unavoidable", "Other agents affected"],
+)
+def test_omitting_a_newly_enforced_field_fails(omitted):
+    labels = [f for f in gov.REUSE_MAP_FIELDS if f != omitted]
+    code, out = run_checker(
+        REPO_ROOT,
+        changed=["src/agents/catering/deposit.py"],
+        body=_body_from_labels(labels),
+    )
+    assert code == 1, out
+    assert "GOV-PR-FIELD" in out
+    assert f"`{omitted}:`" in out, out
+
+
+def test_enforced_schema_is_the_expected_fourteen_fields():
+    """Pins the agreed schema so a silent addition or removal is visible."""
+    assert gov.REUSE_MAP_FIELDS == (
+        "Requested outcome",
+        "Affected projects",
+        "Applicable directives",
+        "Existing platform/model capabilities reused",
+        "Existing deterministic kernels reused",
+        "Existing stores/workflows reused",
+        "Thin adapters",
+        "Custom runtime code genuinely unavoidable",
+        "New subsystem",
+        "Evidence existing capabilities were insufficient",
+        "Architecture exception",
+        "Shared-platform impact",
+        "Other agents affected",
+        "Vertical E2E proof",
+    )
+
+
+def test_field_matching_stays_exact_not_fuzzy():
+    """Variant spellings must NOT be accepted — no aliases, no fuzzy matching."""
+    labels = ["Affected project(s)" if f == "Affected projects" else f
+              for f in gov.REUSE_MAP_FIELDS]
+    code, out = run_checker(
+        REPO_ROOT,
+        changed=["src/agents/catering/deposit.py"],
+        body=_body_from_labels(labels),
+    )
+    assert code == 1, "a parenthetical variant label must not satisfy the gate"
+    assert "`Affected projects:`" in out
