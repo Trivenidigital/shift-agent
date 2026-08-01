@@ -624,6 +624,44 @@ def test_09b_a_pricebook_change_after_the_card_refuses_the_sync(sb: _Sandbox):
     assert failed["update_id"] == result["update_id"]
 
 
+def test_09b2_a_legacy_pending_proposal_is_menu_only_and_fails_closed(sb: _Sandbox):
+    """Deployment preflight (reviewer-required): a pending proposal created by
+    the PREVIOUS release carries no `pricebook_fingerprint`, and its card never
+    showed a pricebook section or an "approving also activates" line — the owner
+    never consented to a price change. Approving it must apply the MENU ONLY:
+    the pricebook stays byte-identical and the non-activation is audited."""
+    result = _extract(sb, EXTRACTION_TAKE_2, "wamid.MENU.LEGACY")
+
+    # Rewrite the pending store the way b8652ab wrote it: the field absent.
+    pending_doc = json.loads(sb.menu_pending.read_text(encoding="utf-8"))
+    assert "pricebook_fingerprint" in pending_doc, "fixture drift: stamp missing"
+    del pending_doc["pricebook_fingerprint"]
+    sb.menu_pending.write_text(json.dumps(pending_doc), encoding="utf-8")
+
+    pricebook_before = sb.pricebook.read_bytes()
+    menu_version_before = json.loads(sb.menu.read_text(encoding="utf-8"))["version"]
+
+    rc, out, err = _run_script(sb, "apply-menu-update", [
+        "--code", result["confirmation_code"], "--decision", "yes",
+        "--sender-role", "owner",
+    ])
+    assert rc == 0, (out, err)
+    payload = _stdout_json(out)
+    assert payload["status"] == "applied"
+    assert payload["pricebook_activated"] is False, (
+        "a legacy proposal must NEVER activate a pricebook")
+    assert "proposal_predates_pricebook_scope" in payload["pricebook_detail"]
+
+    # Menu advanced (ordinary menu-only proposal); prices did NOT move.
+    assert json.loads(sb.menu.read_text(encoding="utf-8"))["version"] == \
+        menu_version_before + 1
+    assert sb.pricebook.read_bytes() == pricebook_before
+
+    failed = _rows(sb, "catering_menu_pricebook_sync_failed")[-1]
+    assert failed["reason"] == "proposal_predates_pricebook_scope"
+    assert failed["update_id"] == result["update_id"]
+
+
 def test_09c_a_recycled_proposal_id_with_different_content_still_imports(sb: _Sandbox):
     """The replay anchor must not turn a REAL price change into a silent no-op.
 
