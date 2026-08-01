@@ -723,13 +723,36 @@ def test_every_registered_directive_exists_and_is_versioned():
 
 
 def test_case17_no_runtime_code_references_governance():
-    """Governance files must not be imported or read by runtime code."""
+    """Governance files must not be imported or read by runtime code.
+
+    Scoped to executable/runtime file types on purpose: the nested AGENTS.md
+    pointers live under src/ and web/ and are SUPPOSED to reference the
+    directives — they are instructions to contributors, not runtime inputs.
+    Their content is asserted separately by test_all_declared_nested_pointers_resolve.
+    """
+    runtime_globs = [
+        "src/**/*.py", "src/**/*.sh", "src/**/SKILL.md",
+        "src/**/*.service", "src/**/*.timer", "src/**/*.yaml", "src/**/*.yml",
+        "web/backend/app/**", "web/frontend/src/**",
+    ]
     hits = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "grep", "-rln", "docs/governance",
-         "--", "src/", "web/backend/app/", "web/frontend/src/"],
+        ["git", "-C", str(REPO_ROOT), "grep", "-rln", "docs/governance", "--", *runtime_globs],
         capture_output=True, text=True,
     ).stdout.split()
     assert hits == [], f"runtime code references governance files: {hits}"
+
+
+def test_case17_nested_pointers_are_the_only_governance_refs_under_src():
+    """Anything under src/ or web/ that mentions governance must be an AGENTS.md."""
+    hits = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "grep", "-rln", "docs/governance", "--", "src/", "web/"],
+        capture_output=True, text=True,
+    ).stdout.split()
+    assert hits, "expected the nested AGENTS.md pointers to be found"
+    for path in hits:
+        assert Path(path).name == "AGENTS.md", (
+            f"`{path}` references governance but is not an instruction pointer"
+        )
 
 
 def test_case17_checker_imports_nothing_from_runtime():
