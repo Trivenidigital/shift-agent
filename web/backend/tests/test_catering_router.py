@@ -260,6 +260,13 @@ def test_amend_apply_accepts_a_fresh_otp(tmp_path, monkeypatch):
 # ── Reads against fixture state ─────────────────────────────────────────────
 def test_dashboard_counts_and_readiness(tmp_path, monkeypatch):
     pytest.importorskip("jose")
+    from app.routers import catering
+
+    # Pin the clock, same as test_booked_leads_count_toward_booked_this_month
+    # below: booked_this_month / lost_this_month bucket on wall-clock time, so
+    # fixtures dated _NOW stop matching the moment the calendar rolls past that
+    # month. Unpinned, this cell went red on 2026-08-01 for everyone.
+    monkeypatch.setattr(catering, "_now", lambda: datetime.fromisoformat(_NOW))
     settings = _seed(tmp_path, leads=_leads_store(
         _lead("L0001", status="AWAITING_OWNER_APPROVAL"),
         _lead("L0002", status="QUALIFYING"),

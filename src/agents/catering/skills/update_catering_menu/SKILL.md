@@ -83,10 +83,48 @@ The script will:
 - 5: vision response failed schema validation. Tell owner the menu didn't parse cleanly; ask if they want to try a different image.
 - 6: OpenRouter unreachable / API key missing. Tell owner the menu service is down; suggest retry in a few minutes.
 
+## Step 2b — Ask about genuinely ambiguous prices BEFORE the owner approves
+
+Approving this preview does two things: it publishes the menu AND it activates
+the pricebook derived from it, so a price the owner does not correct now becomes
+a price a customer is quoted. `preview_text` already lists what will be left out
+and why. Your job here is the small number of cases where the owner's answer
+would change what goes live.
+
+Ask ONLY when the extraction is genuinely ambiguous — never to double-check a
+price that read cleanly. Ask everything in ONE message, then wait:
+
+- A price whose UNIT is unclear from the menu:
+  *"Is $14.99 per tray, per person, or per order?"*
+- The same dish listed at two different prices:
+  *"Two Paneer Tikka prices appear — $12.00 and $14.00. Which one should be
+  active?"*
+- Items with no visible price:
+  *"These three items have no visible price — should they stay unavailable for
+  quoting for now?"*
+
+`MenuItem` has NO pricing-unit field. Do NOT invent one, do NOT encode the answer
+into `notes`, and do NOT edit the extraction yourself — see the fail-closed rule
+above. The owner's answer is resolved the way v0.2 resolves every correction:
+
+1. Owner replies with the correction (or answers your question).
+2. You reply `{confirmation_code} no` guidance: *"Got it — reply
+   `{code} no` and send me a photo with that corrected, and I'll re-read it."*
+3. The corrected photo comes back through Step 1, producing a NEW preview with a
+   NEW code, which the owner approves.
+
+That re-upload loop IS the correction mechanism in v0.2. There is no inline edit
+verb, and you must not simulate one.
+
 ## Step 3 — Send preview to owner
 
 Reply to the owner's self-chat with the script's `preview_text`, prefixed
 with the standard agent header. Include the confirmation code clearly.
+
+`preview_text` ends with a *Pricebook* section listing the price changes
+approving would make, the items that will NOT be priced, and the pricebook
+version that will land. Pass it through VERBATIM like the rest — it is the only
+place the owner is told that `yes` also changes what customers are charged.
 
 Format the reply EXACTLY like this (so the owner sees a structured preview):
 
@@ -112,5 +150,6 @@ Format the reply EXACTLY like this (so the owner sees a structured preview):
 ## What this skill does NOT do
 
 - Apply the menu to disk (apply-menu-update does that, called by apply_catering_menu_decision)
+- Activate the pricebook (apply-menu-update does that too, on the owner's `yes`)
 - Render quotes for customers (apply-catering-owner-decision handles that)
 - Edit individual items inline (v0.2 deferred — owner re-uploads if a few items are wrong)
