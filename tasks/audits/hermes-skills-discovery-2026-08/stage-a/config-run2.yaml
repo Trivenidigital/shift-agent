@@ -1,0 +1,18 @@
+# Stage A ISOLATED pilot home - RUN 2 (tool surface LOCKED).
+skills:
+  disabled:
+    - godmode
+agent:
+  max_turns: 4
+  reasoning_effort: low
+  disabled_toolsets:
+    - browser
+    - web_search
+    - file
+    - terminal
+    - code_execution
+    - delegation
+    - computer_use
+    - mcp
+    - memory
+    - clarify

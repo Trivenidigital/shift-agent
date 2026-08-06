@@ -1,0 +1,47 @@
+agent,repository,skill,source,status,applicability,expected_benefit,privilege_level,risk,recommendation,rollout_wave
+shift-agent,sme-agents,subagent-driven-development,local-installed,enabled,CURRENT_BUT_UNDERUSED,"Delegate bounded implementation/investigation to subagents instead of single-context work; already installed, unused in agent chains",read-only orchestration,LOW,"Wire into Shift dev/ops workflow; no install needed",1
+shift-agent,sme-agents,writing-plans,local-installed,enabled,CURRENT_BUT_UNDERUSED,"Structured plan authoring matching the repo's plan-first convention",read-only,LOW,"Wire into plan workflow; no install needed",1
+shift-agent,sme-agents,debugging-hermes-tui-commands,local-installed,enabled,CURRENT_BUT_UNDERUSED,"Hermes/gateway diagnostics — directly relevant to routing + plugin investigation",read-only,LOW,Adopt for gateway triage,1
+shift-agent,sme-agents,architecture-diagram,builtin,enabled,CURRENT_BUT_UNDERUSED,"Render dispatcher/routing topology for review and onboarding",read-only,LOW,Adopt for architecture docs,1
+shift-agent,sme-agents,claude-code,builtin,enabled,CURRENT_BUT_UNDERUSED,"Coding-agent workflow for repo work",read-write repo,MED,"Adopt with worktree isolation",2
+shift-agent,sme-agents,codex,builtin,enabled,CURRENT_BUT_UNDERUSED,"Coding-agent workflow; overlaps claude-code/opencode",read-write repo,MED,"Pick ONE coding agent to avoid routing ambiguity",2
+shift-agent,sme-agents,opencode,builtin,enabled,DUPLICATE,"Third overlapping coding agent",read-write repo,MED,"Disable or narrow — routing overlap with claude-code/codex",0
+shift-agent,sme-agents,kanban-orchestrator,local-installed,enabled,DUPLICATE,"Overlaps kanban-worker + kanban-codex-lane",read-write,MED,"Consolidate the three kanban skills to one",0
+shift-agent,sme-agents,native-mcp,local-installed,enabled,CURRENT_BUT_UNDERUSED,"Bridge to MCP servers — the CLAUDE.md-designated path for QBO/Stripe before custom LOC",varies by server,MED,"Evaluate per-server; do not enable broadly",3
+shift-agent,sme-agents,org/runtime-effective-diagnosis,PROPOSED,n/a,CUSTOM_SKILL_NEEDED,"Encode the process-vs-file discipline that corrected 3 wrong conclusions in this engagement",read-only,LOW,"Author via /learn from this session's transcript",3
+shift-agent,sme-agents,org/shift-routing-audit,PROPOSED,n/a,CUSTOM_SKILL_NEEDED,"Sender x state x intent routing grid audit; existing practice, not encoded",read-only,LOW,Author,3
+shift-agent,sme-agents,whatsapp-messaging,clawhub-community,not-installed,INCOMPATIBLE,"Would move outbound-send policy to an LLM skill",outbound send,HIGH,REJECT — deterministic boundary violation,never
+catering-agent,sme-agents,himalaya,builtin,enabled,INSTALL_CANDIDATE,"Email/CRM handoff for qualified leads",credentialed email,MED,"Inspect before use; email is an external side effect",3
+catering-agent,sme-agents,dspy,official-installed,enabled,CURRENT_BUT_UNDERUSED,"Optimise the intake-question prompt against real transcripts",read-only,LOW,"Use offline for prompt tuning, not in the live path",2
+catering-agent,sme-agents,org/catering-inquiry-intake,PROPOSED,n/a,CUSTOM_SKILL_NEEDED,"Warm ack + <=3 high-value questions; no premature quote",read-only,LOW,"Highest-value custom skill — author first",3
+catering-agent,sme-agents,org/catering-requirements-completeness,PROPOSED,n/a,CUSTOM_SKILL_NEEDED,"Deterministic checklist of what is still missing before a quote may be produced",read-only,LOW,Author,3
+catering-agent,sme-agents,org/catering-dietary-clarification,PROPOSED,n/a,CUSTOM_SKILL_NEEDED,"Jain / no-onion-no-garlic / allergen clarification without inventing menu truth",read-only,LOW,Author,3
+catering-agent,sme-agents,org/catering-proposal-from-approved-data,PROPOSED,n/a,CUSTOM_SKILL_NEEDED,"Compose proposal strictly from approved pricebook records with provenance",read-only,MED,"Author; must fail closed when a price is absent",4
+catering-agent,sme-agents,customer-support-autopilot,clawhub-community,not-installed,REFERENCE_ONLY,"Shape reference for intake/triage only",unknown,MED,"Do not install; /learn from our own flow instead",never
+catering-agent,sme-agents,creative_catering_proposals,local-installed,enabled,CURRENT_AND_USEFUL,"Existing proposal-composition skill",read-only,MED,"Keep; constrain to approved-data inputs",1
+flyer-studio,sme-agents,segment-anything-model,local-installed,enabled,INSTALL_CANDIDATE,"Region masking to bound edits to the requested area — targets the top failure mode",read-only compute,MED,"Inspect; strong fit for exact-edit discipline",2
+flyer-studio,sme-agents,comfyui,builtin,enabled,CURRENT_BUT_UNDERUSED,"Region-scoped inpainting rather than whole-image regeneration",local compute,MED,"Evaluate for scoped edits",2
+flyer-studio,sme-agents,claude-design,builtin,enabled,CURRENT_BUT_UNDERUSED,"Design critique / layout + typography review",read-only,LOW,Adopt for critique pass,1
+flyer-studio,sme-agents,design-md,builtin,enabled,CURRENT_BUT_UNDERUSED,"Structured design spec authoring",read-only,LOW,Adopt,1
+flyer-studio,sme-agents,popular-web-designs,builtin,enabled,REFERENCE_ONLY,"Style reference; web-oriented not print",read-only,LOW,Reference only,4
+flyer-studio,sme-agents,baoyu-infographic,official-installed,enabled,CURRENT_BUT_UNDERUSED,"Infographic layout patterns for menu/promo collateral",read-only,LOW,Evaluate,2
+flyer-studio,sme-agents,org/flyer-exact-edit,PROPOSED,n/a,CUSTOM_SKILL_NEEDED,"Change ONLY the requested element; enumerate untouched regions as evidence",read-only,LOW,"Author — targets the #1 recurring failure",3
+flyer-studio,sme-agents,org/logo-and-qr-integrity,PROPOSED,n/a,CUSTOM_SKILL_NEEDED,"Assert logo/QR byte-or-perceptual identity pre/post edit",read-only,LOW,"Author; deterministic comparison, LLM only reports",3
+flyer-studio,sme-agents,org/flyer-reference-preservation,PROPOSED,n/a,CUSTOM_SKILL_NEEDED,"Honour supplied reference theme; detect drift",read-only,LOW,Author,3
+flyer-studio,sme-agents,org/promotion-fabrication-check,PROPOSED,n/a,CUSTOM_SKILL_NEEDED,"Every price/offer/claim traceable to approved data or blocked",read-only,LOW,"Author; complements existing fact-safety",3
+flyer-studio,sme-agents,org/print-dimension-validation,PROPOSED,n/a,CUSTOM_SKILL_NEEDED,"Aspect ratio / bleed / DPI validation",read-only,LOW,"Author; deterministic assertions",4
+expense-bookkeeper,sme-agents,parse_receipt_photo,local-installed,enabled,CURRENT_AND_USEFUL,Existing OCR/extraction path,read-only,MED,Keep,1
+ops-workflows,sme-agents,org/incident-evidence-report,PROPOSED,n/a,CUSTOM_SKILL_NEEDED,"Interpret watchdog/timer failures and produce an operator-facing evidence report",read-only,LOW,"Author — consolidates ~8 timers' indirect need into ONE skill",3
+ops-workflows,sme-agents,webhook-subscriptions,local-installed,enabled,CURRENT_BUT_UNDERUSED,Event plumbing for ops notifications,read-write,MED,Evaluate,3
+all-agents,fleet,godmode,local-installed,enabled,QUARANTINE,"Jailbreak skill enabled on customer-facing production host; zero value to this fleet",script-bearing,MED,"Disable on main-vps and vpin-vps",0
+all-agents,fleet,pokemon-player,official-installed,enabled,NOT_APPLICABLE,Routing-surface noise,n/a,LOW,Disable on production hosts,0
+all-agents,fleet,minecraft-modpack-server,official-installed,enabled,NOT_APPLICABLE,Routing-surface noise,n/a,LOW,Disable on production hosts,0
+all-agents,fleet,spotify,local-installed,enabled,NOT_APPLICABLE,Routing-surface noise,credentialed,LOW,Disable on production hosts,0
+all-agents,fleet,heartmula,local-installed,enabled,NOT_APPLICABLE,Routing-surface noise,unknown,LOW,"Inspect then disable on production hosts",0
+gecko-agents,gecko-alpha,rest-graphql-debug,official-installed,enabled,QUARANTINE,"Ruling of record is QUARANTINED_REFERENCE_ONLY; state does not match. 0 scripts so low material risk",prose-only,LOW,"Gecko-owned: set state to match ruling",0
+gecko-agents,gecko-alpha,solana,official-installed,enabled,REFERENCE_ONLY,"Approved only via guarded gecko-solana-verify; wrapper present, enforcement unproven",script-bearing network,MED,"Gecko-owned: prove no unguarded path",0
+gecko-agents,gecko-alpha,evm,official-installed,enabled,REFERENCE_ONLY,"Not trusted for authorization or pre-sign validation",script-bearing network,MED,"Gecko-owned: confirm no authz path reaches it",0
+vizora-agents,vizora,vizora-customer-lifecycle,local-installed,enabled,CURRENT_AND_USEFUL,Existing Vizora domain skill,unknown,LOW,"Out of scope for this engagement; inventory only",4
+vizora-agents,vizora,vizora-shadow-operations,local-installed,enabled,CURRENT_AND_USEFUL,Existing Vizora domain skill,unknown,LOW,"Out of scope for this engagement; inventory only",4
+registered-inactive-dispatchers,sme-agents,"cash_ar/employee_docs/equipment_maintenance/hiring/inventory/pnl_anomaly/sales_tax/supplier/vip dispatchers",local-installed,enabled,STALE,"Registered and enabled but no evidence of live use; each adds routing surface",read-only,MED,"Audit for use; disable those confirmed dormant",0
+deterministic-timers,sme-agents,"(all systemd timers and cron watchdogs)",n/a,n/a,NOT_APPLICABLE,"Deterministic checks must not be LLM-mediated",n/a,n/a,"No direct skill; indirect value routed to org/incident-evidence-report",n/a

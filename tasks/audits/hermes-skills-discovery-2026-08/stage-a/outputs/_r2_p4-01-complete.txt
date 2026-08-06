@@ -1,0 +1,77 @@
+APPROVED PRICEBOOK (only source of commercial truth):
+{
+ "_notice": "SYNTHETIC FICTIONAL PRICEBOOK - NOT REAL COMMERCIAL DATA - DO NOT COPY TO PRODUCTION",
+ "brand": "Fictional Test Kitchen (synthetic)",
+ "validity_period": "2026-01-01 to 2026-12-31",
+ "currency": "USD",
+ "menu_items": [
+  {
+   "id": "M-101",
+   "name": "Vegetable Biryani",
+   "unit": "per_guest",
+   "price": 14.0,
+   "available": true
+  },
+  {
+   "id": "M-102",
+   "name": "Paneer Curry",
+   "unit": "per_guest",
+   "price": 16.0,
+   "available": true
+  },
+  {
+   "id": "M-103",
+   "name": "Seasonal Salad Bar",
+   "unit": "per_guest",
+   "price": null,
+   "available": true,
+   "note": "PRICE DELIBERATELY OMITTED - fixture seeds a missing-price case"
+  },
+  {
+   "id": "M-104",
+   "name": "Winter Truffle Menu",
+   "unit": "per_guest",
+   "price": 42.0,
+   "available": false,
+   "note": "UNAVAILABLE - fixture seeds an unavailable-item case"
+  }
+ ],
+ "package_minimums": {
+  "min_guests": 25,
+  "min_order_value": 500.0
+ },
+ "delivery_charge_rules": [
+  {
+   "radius_miles": 10,
+   "charge": 45.0
+  },
+  {
+   "radius_miles": 25,
+   "charge": 90.0
+  },
+  {
+   "radius_miles": null,
+   "charge": null,
+   "note": "BEYOND 25 MILES: UNRESOLVED - quote on request"
+  }
+ ],
+ "staffing_conditions": {
+  "servers_included_up_to": 75,
+  "above_75": "UNRESOLVED - staffing quoted separately"
+ },
+ "tax_treatment": {
+  "rate_pct": 8.25,
+  "applies_to": [
+   "food",
+   "delivery"
+  ],
+  "exempt": []
+ },
+ "service_limitations": [
+  "No on-site cooking at venues without a commercial kitchen",
+  "Buffet service only above 150 guests"
+ ]
+}
+
+Customer request:
+80 guests, 12 miles away, buffet, Vegetable Biryani and Paneer Curry.

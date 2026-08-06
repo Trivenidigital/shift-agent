@@ -1,0 +1,78 @@
+{
+ "_notice": "SYNTHETIC FICTIONAL BRAND - no real customer asset",
+ "reference": "reference.png",
+ "qr_reference_payload": "https://example.invalid/testburgh-opening",
+ "reference_size": [
+  800,
+  1000
+ ],
+ "cases": {
+  "rev-01-logo-letterform": {
+   "file": "rev-01-logo-letterform.png",
+   "seeded_defects": [
+    "logo letterform changed (U->V)"
+   ],
+   "is_control": false
+  },
+  "rev-02-qr-payload": {
+   "file": "rev-02-qr-payload.png",
+   "seeded_defects": [
+    "QR payload replaced"
+   ],
+   "is_control": false
+  },
+  "rev-03-aspect-ratio": {
+   "file": "rev-03-aspect-ratio.png",
+   "seeded_defects": [
+    "dimensions/aspect ratio changed 800x1000 -> 800x800"
+   ],
+   "is_control": false
+  },
+  "rev-04-address-phone": {
+   "file": "rev-04-address-phone.png",
+   "seeded_defects": [
+    "address altered",
+    "phone altered"
+   ],
+   "is_control": false
+  },
+  "rev-05-approved-text": {
+   "file": "rev-05-approved-text.png",
+   "seeded_defects": [
+    "approved headline text changed"
+   ],
+   "is_control": false
+  },
+  "rev-06-unrequested-region": {
+   "file": "rev-06-unrequested-region.png",
+   "seeded_defects": [
+    "unrequested region added (badge)"
+   ],
+   "is_control": false
+  },
+  "rev-07-price-fabricated": {
+   "file": "rev-07-price-fabricated.png",
+   "seeded_defects": [
+    "price/offer changed (fabricated)"
+   ],
+   "is_control": false
+  },
+  "rev-08-brand-color": {
+   "file": "rev-08-brand-color.png",
+   "seeded_defects": [
+    "brand accent colour materially changed"
+   ],
+   "is_control": false
+  },
+  "ctrl-01-identical": {
+   "file": "ctrl-01-identical.png",
+   "seeded_defects": [],
+   "is_control": true
+  },
+  "ctrl-02-identical": {
+   "file": "ctrl-02-identical.png",
+   "seeded_defects": [],
+   "is_control": true
+  }
+ }
+}

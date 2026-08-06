@@ -1,0 +1,36 @@
+=== 1. ROUTING SCOPE: skill gating in config ===
+49:skills:
+93:platform_toolsets:
+
+=== 2. DESCRIPTIONS (routing triggers) ===
+--- godmode  (path=/home/gecko-agent/.hermes/skills/red-teaming/godmode)
+name: godmode
+description: "Jailbreak LLMs: Parseltongue, GODMODE, ULTRAPLINIAN."
+license: MIT
+--- rest-graphql-debug  (path=/home/gecko-agent/.hermes/skills/software-development/rest-graphql-debug)
+name: rest-graphql-debug
+description: "Debug REST/GraphQL APIs: status codes, auth, schemas, repro."
+license: MIT
+--- solana  (path=/home/gecko-agent/.hermes/skills/blockchain/solana)
+name: solana
+description: Query Solana wallets, tokens, txs, and NFTs in USD.
+license: MIT
+--- evm  (path=/home/gecko-agent/.hermes/skills/blockchain/evm)
+name: evm
+description: "Read-only EVM client: wallets, tokens, gas across 8 chains."
+license: MIT
+
+=== 3. TOOL CAPABILITY: scripts/binaries shipped ===
+godmode: 4 scripts, 152K
+rest-graphql-debug: 0 scripts, 20K
+solana: 1 scripts, 44K
+evm: 1 scripts, 76K
+
+=== 4. EVIDENCE OF USE (gateway log mentions) ===
+godmode: 0 log hits
+rest-graphql-debug: 0 log hits
+solana: 429 log hits
+evm: 0 log hits
+
+=== 5. guarded solana wrapper present? ===
+-rwxr-xr-x 1 root root 2870 Aug  1 22:50 /usr/local/bin/gecko-solana-verify

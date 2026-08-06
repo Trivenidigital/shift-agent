@@ -1,0 +1,4 @@
+It seems that the flyer file is not accessible at the specified path. Could you please confirm the correct path where the flyer is stored, or if you would like to upload the file for editing?
+
+⚠️ File-mutation verifier: 1 file(s) were NOT modified this turn despite any wording above that may suggest otherwise. Run `git status` or `read_file` to confirm.
+  • `/path/to/flyer.png` — [patch] Failed to read file: `/path/to/flyer.png`

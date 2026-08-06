@@ -1,0 +1,18 @@
+{
+  "estimated_cost_usd": 0.002013,
+  "cost_status": "estimated",
+  "cost_source": "provider_models_api",
+  "input_tokens": 596,
+  "output_tokens": 150,
+  "cache_read_tokens": 24448,
+  "cache_write_tokens": 0,
+  "reasoning_tokens": 0,
+  "total_tokens": 25194,
+  "api_calls": 2,
+  "model": "openai/gpt-4o-mini",
+  "provider": "openrouter",
+  "session_id": "20260802_005002_5d377b",
+  "completed": true,
+  "failed": false,
+  "service_tier": null
+}

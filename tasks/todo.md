@@ -1,5 +1,32 @@
 # Backlog — pending items
 
+## CLOSED — Hermes structured-output skills programme (P1/P3/P4/P5/P6) — 2026-08-03
+
+**Terminal: all five workflows `REJECT_AND_RETIRE`.** No pending work under this programme. Full
+evidence: `tasks/audits/hermes-skills-discovery-2026-08/BOUNDED_AUTONOMOUS_SESSION_REPORT.md`.
+
+| | ruling | ground |
+|---|---|---|
+| P1 | `REJECT_AND_RETIRE` | model summarization layer retired |
+| P3 | `REJECT_AND_RETIRE` | valid 72-case round, preflight 14/14; `silent_disambiguations = 2` vs zero-tolerance gate |
+| P4 | `REJECT_AND_RETIRE` | operator assessment 12/12; missing material conditions 12, accepted-or-wording-only 0% |
+| P5 | `REJECT_AND_RETIRE` | mandatory preflight structurally invalid before case 1; 0 of 54 cases executable |
+| P6 | `REJECT_AND_RETIRE` | 8 executable-contract classes, 6 unreachable required gates, 1 material authorization defect |
+
+**Artifacts that survive — reuse requires EXPLICIT authorization under a NEW programme, not
+continuation of this one:**
+- `structured-stage-a/stage-b/model-adapter` P4 deterministic renderer `render-1` — `p4.rerender_byte_equality` now genuinely functional (it previously compared a string to itself). The **template** `p4.proposal.v1` is retired; the renderer is not.
+- `structured-stage-a/stage-b/visual/p5_holdout_v4/` — 84 integrity-verified PNGs + manifest, authored blind. Internally consistent; completeness vs intended approved-after coverage is **unmeasurable** (the frozen target specified zero such entries).
+- `hostlib/preflight.py` (`preflight-4`, 14 steps) and `hostlib/gate_registry.py` (`gate-registry-2`) — reusable provenance/reachability harness.
+- P6 operation split (`p6_operations_v5`): `op.resize_canvas` / `op.scale_content` / `op.crop_content` / `op.export_output`. Survived 36,800 requests with zero invariant violations. The clause/intent layer (`p6_scan`, `p6_clause`) is what failed.
+
+**Known open defects in the surviving harness — fix before any reuse:**
+1. `EXCLUDED_FROM_AUTHORING` is case-sensitive substring matching. Too strict: an author's own brief (`..._P5_...md`) and deliverable (`..._cases.json`) trip it. Too loose: uppercase `"P5_"` never matches `visual/p5_holdout_v3/`, so **prior-round package directories are not covered at all**.
+2. `visual/run_p5_holdout_v4.py` passes none of `gate_registry` / `gate_workflow` / `gate_sources` / `gate_probe_evidence` to `run_preflight`. P3's runner passes all four — use it as the template.
+3. `score_p5_v4.score_all(case_results, *, provenance, ...)` cannot satisfy `run_integrated_probes`' two-positional contract; `callable_provenance` hashes the defining file, so the adapter must live inside the scorer.
+4. A future authoring brief must state the approved-after requirement per operation type — two competent independent derivations differed by two files because nothing specified it.
+
+
 ## Active - Flyer CD v2 narrative quality referee (2026-06-22)
 
 **Drift-check tag:** extends-Hermes

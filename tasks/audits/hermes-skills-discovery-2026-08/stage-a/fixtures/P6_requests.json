@@ -1,0 +1,17 @@
+{
+ "p6-01-replace-photo": {
+  "request": "Swap the food photo for a different one. Nothing else changes."
+ },
+ "p6-02-add-phone": {
+  "request": "Add a second phone number to the footer: 555-0142."
+ },
+ "p6-03-remove-section": {
+  "request": "Remove the 'Catering Available' strip but keep the layout intact."
+ },
+ "p6-04-change-date": {
+  "request": "Change the date from March 14 to March 21. All other text stays."
+ },
+ "p6-05-resize-print": {
+  "request": "Resize for 11x17 print while keeping the content hierarchy."
+ }
+}

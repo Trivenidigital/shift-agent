@@ -1,0 +1,8 @@
+Yes, the host is running an outdated Hermes version. The reported version is 0.14.0, while the fleet baseline is 0.19.1. 
+
+To confirm this conclusion, the following evidence would be required:
+1. The current version of Hermes running on other hosts in the fleet to verify they are all on the baseline version (0.19.1).
+2. The release notes or changelog for Hermes between versions 0.14.0 and 0.19.1 to understand what changes, fixes, or improvements have been introduced.
+3. The method or process for upgrading Hermes to ensure that the host can be brought up to the correct version (e.g., commands or package managers used).
+
+Additionally, identifying any known issues or vulnerabilities in version 0.14.0 compared to 0.19.1 would also be beneficial for risk assessment.

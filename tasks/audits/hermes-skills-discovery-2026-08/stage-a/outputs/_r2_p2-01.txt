@@ -1,0 +1,34 @@
+Output ONLY a Mermaid diagram inside a ```mermaid fenced code block, printed directly in your reply. Do NOT write any file. Include every host, the outbound channel, plugins, ownership labels, trust boundaries, shared vs isolated components, and a list of unresolved facts as nodes or notes. Invent nothing.
+
+SANITIZED FLEET TOPOLOGY â€” SOURCE OF TRUTH (synthetic labels, real structure)
+
+HOST-A  role=canary      HERMES_HOME=/home/svc-a/.hermes        hermes=0.19.1
+  gateway service owner: svc-a
+  skills toolset: ENABLED (no disabled_toolsets key)
+  available-skills index: EMITTED
+  plugins: none
+  workload: trading-domain agents (5 local domain skills) + deterministic cron watchdogs
+  WhatsApp: NOT configured
+
+HOST-B  role=production  HERMES_HOME=/root/.hermes              hermes=0.19.1
+  gateway service owner: svc-b
+  skills toolset: DISABLED (disabled_toolsets includes skills, delegation, terminal,
+                  code_execution, file, browser, clarify)
+  available-skills index: SUPPRESSED
+  plugins: router-plugin, policy-plugin (policy-plugin provides the outbound screen
+           and an ExecStartPre preflight that refuses start unless screening is live)
+  workload: 32 LLM agent skills (shift, catering, flyer, expense, commerce, query)
+            + ~15 deterministic timers
+  WhatsApp: ENABLED â€” the only host with an outbound customer channel
+
+HOST-C  role=production  HERMES_HOME=/root/.hermes              hermes=0.19.1
+  gateway service owner: root
+  skills toolset: ENABLED
+  available-skills index: EMITTED
+  plugins: none
+  workload: 2 lifecycle-domain agents + ML/fine-tuning skills + deterministic trading cron
+  WhatsApp: NOT configured
+
+SHARED: all three run the same Hermes version and share a common builtin skill core.
+ISOLATED: each host has its own HERMES_HOME; no cross-host state sharing.
+UNRESOLVED: per-agent routing bindings; per-skill invocation telemetry (unavailable).

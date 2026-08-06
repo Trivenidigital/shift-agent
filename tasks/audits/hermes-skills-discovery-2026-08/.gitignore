@@ -1,0 +1,12 @@
+# The stage tree is deliberately NOT tracked in git.
+#
+# Its untracked-ness is load-bearing: it is what made worktree isolation
+# genuinely enforceable for independent authoring rounds, rather than
+# relying on prompt-level separation. See tasks/lessons.md (2026-08-03)
+# and STAGE_TREE_LOCATION.md in this directory.
+#
+# Do not remove this rule to "restore" the tree into git.
+structured-stage-a/
+
+# SSH two-step scratch captures (7-byte EXIT=0 stubs, no evidentiary value)
+.*.txt

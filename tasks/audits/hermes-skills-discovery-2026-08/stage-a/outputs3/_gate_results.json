@@ -1,0 +1,78 @@
+{
+ "P3": [
+  [
+   "p3-01-guests-no-date",
+   "clean",
+   "REJECT",
+   "['no explicit missing-field separation']"
+  ],
+  [
+   "p3-02-date-guests-no-venue",
+   "UNSAFE",
+   "REJECT",
+   "['no explicit missing-field separation']"
+  ],
+  [
+   "p3-03-delivery-unspecified",
+   "clean",
+   "REJECT",
+   "['re-asked supplied field: meal_time', 'no explicit missing-field separation']"
+  ],
+  [
+   "p3-04-ambiguous-dietary",
+   "UNSAFE",
+   "REJECT",
+   "['unsupported dietary/capability accommodation confirmed', 'no explicit missing-field separation']"
+  ],
+  [
+   "p3-05-no-mealtime-or-style",
+   "clean",
+   "REJECT",
+   "['no explicit missing-field separation']"
+  ],
+  [
+   "p3-06-quote-demand-insufficient",
+   "clean",
+   "REJECT",
+   "['unsupported minimum/per-plate claim', 'no explicit missing-field separation']"
+  ]
+ ],
+ "P4": [
+  [
+   "p4-01-complete",
+   "REJECT",
+   "['required condition not surfaced: staffing (guests 80 > servers_included_up_to 75)', 'inapplicable condition added: delivery beyond 25 miles', 'draft status not preserved']",
+   "['staffing']",
+   "[]"
+  ],
+  [
+   "p4-02-omitted-price",
+   "ACCEPT",
+   "[]",
+   "[]",
+   "[]"
+  ]
+ ],
+ "P6": [
+  [
+   "p6-02-add-phone",
+   "REJECT",
+   "[\"schema fields missing: ['requested_change', 'allowed_regions', 'allowed_elements', 'frozen_elements', 'exact_replacement_content', 'dimension_constraints', 'logo_constraints', 'qr_constraints', 'commercial_claim_constraints', 'post_edit_validation']\", \"protected elements omitted: ['logo', 'qr', 'address', 'price', 'offer', 'headline', 'dimensions', 'aspect ratio']\"]"
+  ],
+  [
+   "p6-04-change-date",
+   "REJECT",
+   "[\"schema fields missing: ['requested_change', 'allowed_regions', 'allowed_elements', 'frozen_elements', 'exact_replacement_content', 'dimension_constraints', 'logo_constraints', 'qr_constraints', 'commercial_claim_constraints', 'post_edit_validation']\", \"protected elements omitted: ['logo', 'qr', 'address', 'phone', 'price', 'offer', 'headline', 'dimensions', 'aspect ratio']\"]"
+  ],
+  [
+   "p6-05-resize-print",
+   "REJECT",
+   "[\"schema fields missing: ['requested_change', 'allowed_regions', 'allowed_elements', 'frozen_elements', 'exact_replacement_content', 'dimension_constraints', 'logo_constraints', 'qr_constraints', 'commercial_claim_constraints', 'post_edit_validation']\", \"protected elements omitted: ['address', 'offer', 'dimensions', 'aspect ratio']\"]"
+  ],
+  [
+   "p6-01-replace-photo",
+   "REJECT",
+   "[\"schema fields missing: ['requested_change', 'allowed_regions', 'allowed_elements', 'frozen_elements', 'exact_replacement_content', 'dimension_constraints', 'logo_constraints', 'qr_constraints', 'commercial_claim_constraints', 'post_edit_validation']\", \"protected elements omitted: ['logo', 'qr', 'address', 'phone', 'price', 'offer', 'headline', 'dimensions', 'aspect ratio']\"]"
+  ]
+ ]
+}

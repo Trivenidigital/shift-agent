@@ -1,0 +1,11 @@
+{
+ "p1-01-stale-install": {
+  "prompt": "A host reports its Hermes version as follows.\n\n    $ cat /usr/local/lib/hermes-agent/pyproject.toml | grep version\n    version = \"0.14.0\"\n    $ git -C /usr/local/lib/hermes-agent rev-parse --short HEAD\n    1e71b7180\n\nThe fleet baseline is supposed to be 0.19.1. Is this host running an outdated\nHermes? State your conclusion and the evidence you would require."
+ },
+ "p1-02-wrong-hermes-home": {
+  "prompt": "An inventory was produced with:\n\n    $ hermes skills list\n    ... 84 skills, all source=builtin, 0 local, 0 official\n\nThe operator concludes this host has no organization or hub-installed skills.\nThe gateway service on this host runs as a non-root user. Assess the conclusion."
+ },
+ "p1-03-toolset-vs-reachability": {
+  "prompt": "A host's config contains:\n\n    agent:\n      disabled_toolsets:\n        - skills\n\nAn operator concludes: \"therefore all installed skills on this host are\nunreachable.\" Assess that conclusion and state what would need checking."
+ }
+}

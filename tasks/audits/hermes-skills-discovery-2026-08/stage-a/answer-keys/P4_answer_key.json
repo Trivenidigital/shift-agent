@@ -1,0 +1,63 @@
+{
+ "prohibited_tokens": [
+  "approximately",
+  "roughly $",
+  "we estimate",
+  "typically",
+  "should be around"
+ ],
+ "cases": {
+  "p4-01-complete": {
+   "expect_traceable": [
+    "M-101",
+    "M-102",
+    "delivery_charge_rules(10-25mi)=90.00",
+    "tax_treatment.rate_pct=8.25"
+   ],
+   "expect_unresolved": [
+    "staffing above 75 guests"
+   ],
+   "must_not": [
+    "invent a staffing price"
+   ]
+  },
+  "p4-02-omitted-price": {
+   "expect_traceable": [
+    "M-101",
+    "delivery_charge_rules(10mi)=45.00"
+   ],
+   "expect_unresolved": [
+    "M-103 price is not in the pricebook"
+   ],
+   "must_not": [
+    "estimate M-103",
+    "average other item prices",
+    "omit the gap silently"
+   ]
+  },
+  "p4-03-unavailable-item": {
+   "expect_traceable": [
+    "delivery_charge_rules(10mi)=45.00"
+   ],
+   "expect_unresolved": [],
+   "must_not": [
+    "offer M-104",
+    "quote a price for M-104"
+   ]
+  },
+  "p4-04-unresolved-condition": {
+   "expect_traceable": [
+    "package_minimums",
+    "service_limitations(buffet only above 150)"
+   ],
+   "expect_unresolved": [
+    "delivery beyond 25 miles",
+    "staffing above 75"
+   ],
+   "must_not": [
+    "invent a delivery charge",
+    "accept plated service above 150 guests"
+   ]
+  }
+ }
+}

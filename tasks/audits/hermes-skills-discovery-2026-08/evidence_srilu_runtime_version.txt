@@ -1,0 +1,20 @@
+=== ACTIVE SERVICE ===
+1912637
+/etc/systemd/system/hermes-gateway.service
+{ path=/home/gecko-agent/.hermes/hermes-agent/venv/bin/python ; argv[]=/home/gecko-agent/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main gateway run --replace ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
+MainPID=1912637
+=== ACTIVE PROCESS IDENTITY ===
+exe:     /home/gecko-agent/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/bin/python3.11
+cmdline: /home/gecko-agent/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main gateway run --replace 
+cwd:     /home/gecko-agent/.hermes/hermes-agent
+=== VERSION FROM THE ACTIVE INTERPRETER ===
+active python: /home/gecko-agent/.hermes/hermes-agent/venv/bin/python
+hermes_cli path: /home/gecko-agent/.hermes/hermes-agent/hermes_cli
+installed dist version: 0.19.1
+=== resolve that package dir to a checkout ===
+pkg root: /home/gecko-agent/.hermes/hermes-agent  -> realpath /home/gecko-agent/.hermes/hermes-agent
+pyproject: version = "0.19.1"
+git HEAD:  
+git desc:  
+=== other hermes installs present? ===
+drwxr-xr-x 35 root root 4096 May 22 19:49 /usr/local/lib/hermes-agent

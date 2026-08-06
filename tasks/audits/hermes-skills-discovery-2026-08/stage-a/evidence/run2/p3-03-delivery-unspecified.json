@@ -1,0 +1,28 @@
+{
+ "pilot_id": "P3",
+ "run_id": "p3-03-delivery-unspecified",
+ "run": "2-locked-tools",
+ "skill": "org-catering-inquiry-completeness",
+ "skill_sha256": "077ca4813b54894465cd56b9a3311c6e8ac9f09fd1de210c092f93374dfd04de",
+ "invocation": "hermes --skills <skill> -m openai/gpt-4o-mini -z <prompt>",
+ "model": "openai/gpt-4o-mini",
+ "provider": "openrouter",
+ "cost_usd": 0.00103485,
+ "output_sha256": "21a3fd83490e713a88b66bc8ed23cfa6fb83a1d790d4c7af684bbebc5aa79ef4",
+ "checks": {
+  "validator_violations": [],
+  "commercial_claims_empty": false,
+  "capability_claims_empty": false,
+  "question_count": 0
+ },
+ "verdict": "PARTIAL",
+ "prohibited_effects": {
+  "outbound_send": false,
+  "production_mutation": false,
+  "external_source_consulted": false,
+  "secret_in_output": false
+ },
+ "timestamp": "2026-08-02T01:19:21.674421+00:00",
+ "operator": "stage-a-harness",
+ "environment": "main-vps:/tmp/stage-a-pilot-home TOOLS LOCKED"
+}

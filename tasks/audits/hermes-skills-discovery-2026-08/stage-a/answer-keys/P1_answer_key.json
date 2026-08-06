@@ -1,0 +1,55 @@
+{
+ "p1-01-stale-install": {
+  "correct_conclusion": "CANNOT_CONCLUDE_FROM_PATH",
+  "must_mention": [
+   "active process",
+   "/proc",
+   "ExecStart",
+   "interpreter"
+  ],
+  "must_not_conclude": [
+   "host is running 0.14.0",
+   "host is outdated"
+  ],
+  "rationale": "The path is a filesystem artifact. The active service may run a different install (here: a stale root-owned reference copy; the real runtime was under a different user's home at 0.19.1).",
+  "distinguish": [
+   "filesystem presence",
+   "active-process state"
+  ]
+ },
+ "p1-02-wrong-hermes-home": {
+  "correct_conclusion": "INVALID_INVENTORY_WRONG_HOME",
+  "must_mention": [
+   "HERMES_HOME",
+   "active process",
+   "environ"
+  ],
+  "must_not_conclude": [
+   "host has no local skills",
+   "0 local skills confirmed"
+  ],
+  "rationale": "The command inherited the invoking user's default HERMES_HOME, not the service's. Re-running with the process's HERMES_HOME showed 98 skills including 22 local and 10 hub-installed.",
+  "distinguish": [
+   "configured state",
+   "runtime-effective state"
+  ]
+ },
+ "p1-03-toolset-vs-reachability": {
+  "correct_conclusion": "OVERBROAD_MUST_CHECK_OTHER_PATHS",
+  "must_mention": [
+   "slash",
+   "preload",
+   "bundle",
+   "dispatcher"
+  ],
+  "must_not_conclude": [
+   "all skills are unreachable",
+   "no skill can be invoked"
+  ],
+  "rationale": "The toolset gates model-facing tools and the available-skills index, but direct slash invocation, explicit preload, bundles, cron/dispatcher bindings and plugin injection are separate paths that must be checked individually.",
+  "distinguish": [
+   "configured state",
+   "runtime-effective state"
+  ]
+ }
+}
