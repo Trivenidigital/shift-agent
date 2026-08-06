@@ -1,0 +1,5 @@
+The Mermaid architecture description for the fleet has been created. You can find the file at the following path:
+
+/tmp/stage-a-pilot-home/fleet_architecture.mmd
+
+This document includes all hosts, outbound channels, plugins, trust boundaries, shared and isolated components, as well as a list of unresolved facts.

@@ -1,0 +1,40 @@
+### using HERMES_HOME=/home/gecko-agent/.hermes
+### skills dirs at runtime home:
+apple autonomous-ai-agents blockchain coin_resolver creative crypto_narrative_scanner data-science devops diagramming domain email gaming gifs github inference-sh kol_watcher mcp media mlops narrative_alert_dispatcher narrative_classifier note-taking productivity red-teaming research smart-home social-media software-development yuanbao 
+### skills list WITH correct HERMES_HOME:
+102
+33
+### non-builtin rows:
+│ coin_resolver                 │                      │ local    │ local    │ enabled │
+│ crypto_narrative_scanner      │                      │ local    │ local    │ enabled │
+│ kol_watcher                   │                      │ local    │ local    │ enabled │
+│ narrative_alert_dispatcher    │                      │ local    │ local    │ enabled │
+│ narrative_classifier          │                      │ local    │ local    │ enabled │
+│ yuanbao                       │                      │ official │ official │ enabled │
+│ kanban-codex-lane             │ autonomous-ai-agents │ local    │ local    │ enabled │
+│ evm                           │ blockchain           │ official │ official │ enabled │
+│ solana                        │ blockchain           │ official │ official │ enabled │
+│ baoyu-article-illustrator     │ creative             │ official │ official │ enabled │
+│ baoyu-comic                   │ creative             │ official │ official │ enabled │
+│ ideation                      │ creative             │ local    │ local    │ enabled │
+│ pixel-art                     │ creative             │ official │ official │ enabled │
+│ jupyter-live-kernel           │ data-science         │ local    │ local    │ enabled │
+│ kanban-orchestrator           │ devops               │ local    │ local    │ enabled │
+│ kanban-worker                 │ devops               │ local    │ local    │ enabled │
+│ webhook-subscriptions         │ devops               │ local    │ local    │ enabled │
+│ minecraft-modpack-server      │ gaming               │ official │ official │ enabled │
+│ pokemon-player                │ gaming               │ official │ official │ enabled │
+│ native-mcp                    │ mcp                  │ local    │ local    │ enabled │
+│ heartmula                     │ media                │ local    │ local    │ enabled │
+│ spotify                       │ media                │ local    │ local    │ enabled │
+│ audiocraft-audio-generation   │ mlops                │ local    │ local    │ enabled │
+│ dspy                          │ mlops                │ official │ official │ enabled │
+│ obliteratus                   │ mlops                │ local    │ local    │ enabled │
+│ segment-anything-model        │ mlops                │ local    │ local    │ enabled │
+│ linear                        │ productivity         │ local    │ local    │ enabled │
+│ godmode                       │ red-teaming          │ local    │ local    │ enabled │
+│ debugging-hermes-tui-commands │ software-development │ local    │ local    │ enabled │
+│ rest-graphql-debug            │ software-development │ official │ official │ enabled │
+│ subagent-driven-development   │ software-development │ local    │ local    │ enabled │
+│ writing-plans                 │ software-development │ local    │ local    │ enabled │
+10 hub-installed, 66 builtin, 22 local — 98 enabled, 0 disabled

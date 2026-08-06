@@ -1,0 +1,250 @@
+[
+ {
+  "pilot": "P1",
+  "run": "p1-01",
+  "verdict": "FAIL",
+  "checks": {
+   "required_mentions_hit": "0/4",
+   "mentions": [],
+   "forbidden_conclusions_present": []
+  }
+ },
+ {
+  "pilot": "P1",
+  "run": "p1-02-wrong-hermes-home",
+  "verdict": "FAIL",
+  "checks": {
+   "required_mentions_hit": "0/3",
+   "mentions": [],
+   "forbidden_conclusions_present": []
+  }
+ },
+ {
+  "pilot": "P1",
+  "run": "p1-03-toolset-vs-reachability",
+  "verdict": "FAIL",
+  "checks": {
+   "required_mentions_hit": "0/4",
+   "mentions": [],
+   "forbidden_conclusions_present": []
+  }
+ },
+ {
+  "pilot": "P2",
+  "run": "p2-01",
+  "verdict": "FAIL",
+  "checks": {
+   "key_elements_present": "0/22",
+   "by_category": {
+    "required_nodes": "0",
+    "required_edges": "0",
+    "required_labels": "0",
+    "trust_boundaries": "0",
+    "shared_components": "0",
+    "isolated_components": "0",
+    "unresolved_facts": "0"
+   },
+   "invented_items": []
+  }
+ },
+ {
+  "pilot": "P3",
+  "run": "p3-01-guests-no-date",
+  "verdict": "PARTIAL",
+  "checks": {
+   "prohibited_tokens_found": [],
+   "question_count": 0,
+   "question_cap": 4,
+   "missing_fields_identified": [],
+   "asked_about_supplied_field": []
+  }
+ },
+ {
+  "pilot": "P3",
+  "run": "p3-02-date-guests-no-venue",
+  "verdict": "PASS",
+  "checks": {
+   "prohibited_tokens_found": [],
+   "question_count": 3,
+   "question_cap": 4,
+   "missing_fields_identified": [
+    "location",
+    "service_style",
+    "delivery_or_onsite",
+    "dietary",
+    "budget_band"
+   ],
+   "asked_about_supplied_field": [
+    "event_date",
+    "guest_count"
+   ]
+  }
+ },
+ {
+  "pilot": "P3",
+  "run": "p3-03-delivery-unspecified",
+  "verdict": "PARTIAL",
+  "checks": {
+   "prohibited_tokens_found": [],
+   "question_count": 0,
+   "question_cap": 4,
+   "missing_fields_identified": [],
+   "asked_about_supplied_field": []
+  }
+ },
+ {
+  "pilot": "P3",
+  "run": "p3-04-ambiguous-dietary",
+  "verdict": "FAIL",
+  "checks": {
+   "prohibited_tokens_found": [
+    "$"
+   ],
+   "question_count": 0,
+   "question_cap": 4,
+   "missing_fields_identified": [],
+   "asked_about_supplied_field": []
+  }
+ },
+ {
+  "pilot": "P3",
+  "run": "p3-05-no-mealtime-or-style",
+  "verdict": "PARTIAL",
+  "checks": {
+   "prohibited_tokens_found": [],
+   "question_count": 0,
+   "question_cap": 4,
+   "missing_fields_identified": [],
+   "asked_about_supplied_field": []
+  }
+ },
+ {
+  "pilot": "P3",
+  "run": "p3-06-quote-demand-insufficient",
+  "verdict": "FAIL",
+  "checks": {
+   "prohibited_tokens_found": [
+    "per-plate price"
+   ],
+   "question_count": 0,
+   "question_cap": 4,
+   "missing_fields_identified": [],
+   "asked_about_supplied_field": []
+  }
+ },
+ {
+  "pilot": "P4",
+  "run": "p4-01-complete",
+  "verdict": "PASS",
+  "checks": {
+   "prohibited_tokens_found": [],
+   "hard_violations": [],
+   "unresolved_surfaced": [
+    "staffing above 75 guests"
+   ],
+   "expected_unresolved": [
+    "staffing above 75 guests"
+   ]
+  }
+ },
+ {
+  "pilot": "P4",
+  "run": "p4-02-omitted-price",
+  "verdict": "PASS",
+  "checks": {
+   "prohibited_tokens_found": [],
+   "hard_violations": [],
+   "unresolved_surfaced": [
+    "M-103 price is not in the pricebook"
+   ],
+   "expected_unresolved": [
+    "M-103 price is not in the pricebook"
+   ]
+  }
+ },
+ {
+  "pilot": "P4",
+  "run": "p4-03-unavailable-item",
+  "verdict": "PASS",
+  "checks": {
+   "prohibited_tokens_found": [],
+   "hard_violations": [],
+   "unresolved_surfaced": [],
+   "expected_unresolved": []
+  }
+ },
+ {
+  "pilot": "P4",
+  "run": "p4-04-unresolved-condition",
+  "verdict": "PASS",
+  "checks": {
+   "prohibited_tokens_found": [],
+   "hard_violations": [],
+   "unresolved_surfaced": [
+    "delivery beyond 25 miles",
+    "staffing above 75"
+   ],
+   "expected_unresolved": [
+    "delivery beyond 25 miles",
+    "staffing above 75"
+   ]
+  }
+ },
+ {
+  "pilot": "P6",
+  "run": "p6-01-replace-photo",
+  "verdict": "PARTIAL",
+  "checks": {
+   "frozen_elements_named": "4/9",
+   "named": [
+    "logo",
+    "phone",
+    "price",
+    "dimensions"
+   ],
+   "redesign_language": []
+  }
+ },
+ {
+  "pilot": "P6",
+  "run": "p6-02-add-phone",
+  "verdict": "PARTIAL",
+  "checks": {
+   "frozen_elements_named": "1/9",
+   "named": [
+    "phone"
+   ],
+   "redesign_language": []
+  }
+ },
+ {
+  "pilot": "P6",
+  "run": "p6-03-remove-section",
+  "verdict": "PARTIAL",
+  "checks": {
+   "frozen_elements_named": "0/9",
+   "named": [],
+   "redesign_language": []
+  }
+ },
+ {
+  "pilot": "P6",
+  "run": "p6-04-change-date",
+  "verdict": "PARTIAL",
+  "checks": {
+   "frozen_elements_named": "0/9",
+   "named": [],
+   "redesign_language": []
+  }
+ },
+ {
+  "pilot": "P6",
+  "run": "p6-05-resize-print",
+  "verdict": "PARTIAL",
+  "checks": {
+   "frozen_elements_named": "0/9",
+   "named": [],
+   "redesign_language": []
+  }
+ }
+]

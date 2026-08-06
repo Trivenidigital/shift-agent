@@ -1,0 +1,150 @@
+########## QUERY: code review
+
+Searching for: code review
+                                                              Skills Hub — 25 result(s)                                                               
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Name                          ┃ Description                                                  ┃ Source  ┃ Trust     ┃ Identifier                    ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ Code Review                   │ 代码审查 Skill - 自动化代码质量检查与报告生成工具。支持从    │ clawhub │ community │ code-review                   │
+│                               │ GitHub 仓库克隆代码、执行多维度代码质量检查、...             │         │           │                               │
+│ Code Review                   │ AI                                                           │ clawhub │ community │ ai-code-audit                 │
+│                               │ 驱动的代码审查工具。对代码变更进行多维度审查，输出结构化的   │         │           │                               │
+│                               │ Review 意见。 **当以下情况时使用此 Skil...                   │         │           │                               │
+│ Code Review                   │ AI                                                           │ clawhub │ community │ smart-code-review             │
+│                               │ 驱动的代码审查工具。对代码变更进行多维度审查，输出结构化的   │         │           │                               │
+│                               │ Review 意见。 **当以下情况时使用此 Skil...                   │         │           │                               │
+########## QUERY: whatsapp
+
+Searching for: whatsapp
+                                                                        Skills Hub — 25 result(s)                                                                         
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Name                                          ┃ Description                                   ┃ Source    ┃ Trust     ┃ Identifier                                     ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ extract-product-offers                        │ Extract structured product offers from        │ browse-sh │ community │ browse-sh/comprasparaguai.com.br/extract-produ │
+│                                               │ comprasparaguai.com.b...                      │           │           │ ct-offers-5k74dp                               │
+│ whatsapp                                      │ Indexed by skills.sh from                     │ skills.sh │ community │ skills-sh/membranedev/application-skills/whats │
+│                                               │ membranedev/application-skills                │           │           │ app                                            │
+│ WhatsApp                                      │ WhatsApp (whatsapp.com). Use this skill for   │ clawhub   │ community │ oo-whatsapp                                    │
+│                                               │ ANY WhatsApp req...                           │           │           │                                                │
+│ WhatsApp                                      │ Send WhatsApp messages, manage templates,     │ clawhub   │ community │ whatsapp-messaging                             │
+│                                               │ handle media, and ...                         │           │           │                                                │
+########## QUERY: customer support
+
+Searching for: customer support
+                                                                        Skills Hub — 25 result(s)                                                                         
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Name                                           ┃ Description                                    ┃ Source  ┃ Trust     ┃ Identifier                                     ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ Customer Support                               │ Resolve issues, communicate with empathy, and  │ clawhub │ community │ customer-support                               │
+│                                                │ turn frustrate...                              │         │           │                                                │
+│ Customer Support Autopilot                     │ Classify customer support tickets, draft       │ clawhub │ community │ customer-support-autopilot                     │
+│                                                │ accurate responses,...                         │         │           │                                                │
+│ Customer Support Command Center                │ Enterprise-grade customer support system:      │ clawhub │ community │ afrexai-customer-support                       │
+│                                                │ ticket triage, res...                          │         │           │                                                │
+│ Customer Support Operations Engine             │ Build and run a world-class customer support   │ clawhub │ community │ afrexai-support-operations                     │
+│                                                │ operation — fro...                             │         │           │                                                │
+########## QUERY: brand
+
+Searching for: brand
+                                                                        Skills Hub — 25 result(s)                                                                         
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Name                         ┃ Description                                            ┃ Source    ┃ Trust     ┃ Identifier                                             ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ search-products              │ Search Amazon for products matching a query with the   │ browse-sh │ community │ browse-sh/amazon.com/search-products-5170mf            │
+│                              │ full fi...                                             │           │           │                                                        │
+│ check-stock                  │ Given a Best Buy SKU or product URL (and optional      │ browse-sh │ community │ browse-sh/bestbuy.com/check-stock-muk8to               │
+│                              │ ZIP), retu...                                          │           │           │                                                        │
+│ search-hotels                │ Search Booking.com for hotels, apartments, hostels,    │ browse-sh │ community │ browse-sh/booking.com/search-hotels-asq6cc             │
+│                              │ and othe...                                            │           │           │                                                        │
+│ search-listings              │ Search Depop's peer-to-peer fashion marketplace by     │ browse-sh │ community │ browse-sh/depop.com/search-listings-p8xawn             │
+│                              │ keyword, ...                                           │           │           │                                                        │
+########## QUERY: ocr
+
+Searching for: ocr
+                                                                        Skills Hub — 25 result(s)                                                                         
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Name                              ┃ Description                                          ┃ Source    ┃ Trust     ┃ Identifier                                          ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ extract-document-data             │ Use Reducto's hosted MCP server to parse documents,  │ browse-sh │ community │ browse-sh/reducto.ai/extract-document-data          │
+│                                   │ extract ...                                          │           │           │                                                     │
+│ sf-business-registry-lookup       │ Search San Francisco's registered business registry  │ browse-sh │ community │ browse-sh/data.sfgov.org/sf-business-registry-looku │
+│                                   │ (DataSF ...                                          │           │           │ p-ozd0ut                                            │
+│ sf-business-registry-lookup       │ Search the San Francisco Registered Business         │ browse-sh │ community │ browse-sh/data.sfgov.org/sf-business-registry-looku │
+│                                   │ Locations datas...                                   │           │           │ p-vzlhtr                                            │
+│ sf-business-registry-lookup       │ Look up SF registered businesses by DBA or owner     │ browse-sh │ community │ browse-sh/data.sfgov.org/sf-business-registry-looku │
+│                                   │ name on dat...                                       │           │           │ p-xxyihl                                            │
+########## QUERY: image edit
+
+Searching for: image edit
+                                                                        Skills Hub — 25 result(s)                                                                         
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Name                                               ┃ Description                                         ┃ Source  ┃ Trust     ┃ Identifier                            ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ Image Edit Skill                                   │ Expert Pillow (PIL) skill for image processing,     │ clawhub │ community │ image-edit-skill                      │
+│                                                    │ manipulation...                                     │         │           │                                       │
+│ Image Editing                                      │ Edit images with AI inpainting, outpainting,        │ clawhub │ community │ image-edit                            │
+│                                                    │ background remo...                                  │         │           │                                       │
+│ Image Editor                                       │ Image Editor: Edit images: blur, crop, resize,      │ clawhub │ community │ image-editor                          │
+│                                                    │ rotate, inver...                                    │         │           │                                       │
+│ Alibaba Cloud Bailian Qwen Image 2.0 image         │ Alibaba Cloud Bailian Qwen Image 2.0 image          │ clawhub │ community │ bailian-image-gen                     │
+│ generation. Supports text-to-image and             │ generation. Suppo...                                │         │           │                                       │
+########## QUERY: restaurant
+
+Searching for: restaurant
+                                                                        Skills Hub — 25 result(s)                                                                         
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Name                                       ┃ Description                                     ┃ Source    ┃ Trust     ┃ Identifier                                      ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ extract-menu                               │ Given a DoorDash restaurant URL or restaurant + │ browse-sh │ community │ browse-sh/doordash.com/extract-menu-5uzqvc      │
+│                                            │ city query, ...                                 │           │           │                                                 │
+│ search-vegan                               │ Search HappyCow for vegan, vegetarian, and      │ browse-sh │ community │ browse-sh/happycow.net/search-vegan-ei6wpc      │
+│                                            │ veg-friendly venu...                            │           │           │                                                 │
+│ find-craft-beer-restaurants                │ Find bars and restaurants serving Nonny craft   │ browse-sh │ community │ browse-sh/nonny.beer/find-craft-beer-restaurant │
+│                                            │ non-alcoholic ...                               │           │           │ s-rxs3yr                                        │
+│ check-availability                         │ Look up OpenTable restaurant availability for a │ browse-sh │ community │ browse-sh/opentable.com/check-availability-f2fw │
+│                                            │ party size +...                                 │           │           │ rm                                              │
+########## QUERY: incident
+
+Searching for: incident
+                                                                        Skills Hub — 25 result(s)                                                                         
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Name                                          ┃ Description                                    ┃ Source    ┃ Trust     ┃ Identifier                                    ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ cali-highway-traffic                          │ Return current real-time MPH for every         │ browse-sh │ community │ browse-sh/abc7news.com/cali-highway-traffic-t │
+│                                               │ California highway co...                       │           │           │ djcyt                                         │
+│ Incident                                      │ Detect, triage, mitigate, and communicate      │ clawhub   │ community │ incident                                      │
+│                                               │ during outages. Us...                          │           │           │                                               │
+│ incident-commander                            │ Indexed by skills.sh from                      │ skills.sh │ community │ skills-sh/alirezarezvani/claude-skills/incide │
+│                                               │ alirezarezvani/claude-skills                   │           │           │ nt-commander                                  │
+│ incident-responder                            │ Indexed by skills.sh from                      │ skills.sh │ community │ skills-sh/useai-pro/openclaw-skills-security/ │
+│                                               │ useai-pro/openclaw-skills-security             │           │           │ incident-responder                            │
+########## QUERY: log analysis
+
+Searching for: log analysis
+                                                                        Skills Hub — 16 result(s)                                                                         
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Name                                                   ┃ Description                                             ┃ Source  ┃ Trust     ┃ Identifier                    ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ Lightweight Host Intrusion Detection and Log Analysis  │ Real-time Linux log monitoring and AI-assisted          │ clawhub │ community │ mini-hids                     │
+│ System (Mini-HIDS)                                     │ detection of ...                                        │         │           │                               │
+│ Network Log Analysis                                   │ Device-level network log analysis using raw syslog data │ clawhub │ community │ network-log-analysis          │
+│                                                        │ with...                                                 │         │           │                               │
+│ Docker Diag                                            │ Advanced log analysis for Docker containers using       │ clawhub │ community │ docker-diag                   │
+│                                                        │ signal ext...                                           │         │           │                               │
+│ Docker Ops                                             │ Docker container lifecycle management, health checks,   │ clawhub │ community │ docker-ops-toolkit            │
+│                                                        │ log an...                                               │         │           │                               │
+########## QUERY: pdf
+
+Searching for: pdf
+                                                                        Skills Hub — 25 result(s)                                                                         
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Name                              ┃ Description                                          ┃ Source    ┃ Trust     ┃ Identifier                                          ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ find-funding                      │ Enumerate U.S. DOJ Bureau of Justice Assistance      │ browse-sh │ community │ browse-sh/bja.ojp.gov/find-funding-crrr3b           │
+│                                   │ funding oppo...                                      │           │           │                                                     │
+│ search-csfa                       │ Search the Illinois Catalog of State Financial       │ browse-sh │ community │ browse-sh/grants.illinois.gov/search-csfa-jewu3k    │
+│                                   │ Assistance (C...                                     │           │           │                                                     │
+│ extract-document-data             │ Use Reducto's hosted MCP server to parse documents,  │ browse-sh │ community │ browse-sh/reducto.ai/extract-document-data          │
+│                                   │ extract ...                                          │           │           │                                                     │
+│ query-menu-data                   │ Pull Saizeriya Singapore's current menu (Grand,      │ browse-sh │ community │ browse-sh/saizeriya.com.sg/query-menu-data-qw4uqo   │
+│                                   │ Lunch, Kids)...                                      │           │           │                                                     │

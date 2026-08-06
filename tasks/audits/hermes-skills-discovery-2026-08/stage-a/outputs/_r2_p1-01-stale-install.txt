@@ -1,0 +1,9 @@
+A host reports its Hermes version as follows.
+
+    $ cat /usr/local/lib/hermes-agent/pyproject.toml | grep version
+    version = "0.14.0"
+    $ git -C /usr/local/lib/hermes-agent rev-parse --short HEAD
+    1e71b7180
+
+The fleet baseline is supposed to be 0.19.1. Is this host running an outdated
+Hermes? State your conclusion and the evidence you would require.

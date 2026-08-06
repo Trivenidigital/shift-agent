@@ -1,0 +1,53 @@
+graph TD
+    subgraph "Host-A (Canary)"
+        A1["Role: Canarius"]
+        A2["Hermes Home: /home/svc-a/.hermes"]
+        A3["Hermes Version: 0.19.1"]
+        A4["Gateway Service Owner: svc-a"]
+        A5["Skills Toolset: ENABLED"]
+        A6["Available Skills Index: EMITTED"]
+        A7["Plugins: None"]
+        A8["Workload: Trading-Domain Agents (5 local domain skills) + Deterministic Cron Watchdogs"]
+        A9["WhatsApp: NOT configured"]
+    end
+    subgraph "Host-B (Production)"
+        B1["Role: Production"]
+        B2["Hermes Home: /root/.hermes"]
+        B3["Hermes Version: 0.19.1"]
+        B4["Gateway Service Owner: svc-b"]
+        B5["Skills Toolset: DISABLED"]
+        B6["Available Skills Index: SUPPRESSED"]
+        B7["Plugins: Router-Plugin, Policy-Plugin"]
+        B8["Workload: 32 LLM Agent Skills + ~15 Deterministic Timers"]
+        B9["WhatsApp: ENABLED"]
+    end
+    subgraph "Host-C (Production)"
+        C1["Role: Production"]
+        C2["Hermes Home: /root/.hermes"]
+        C3["Hermes Version: 0.19.1"]
+        C4["Gateway Service Owner: Root"]
+        C5["Skills Toolset: ENABLED"]
+        C6["Available Skills Index: EMITTED"]
+        C7["Plugins: None"]
+        C8["Workload: 2 Lifecycle-Domain Agents + ML/Fine-Tuning Skills + Deterministic Trading Cron"]
+        C9["WhatsApp: NOT configured"]
+    end
+    %% Outbound Channel
+    B9 -- Outbound Channel -->|WhatsApp| B4
+    %% Trust Boundaries
+    A1 --|Isolated|-->  A2
+    B4 --|Isolated|--> B5
+    C1 --|Isolated|--> C2
+    %% Shared Components
+    subgraph "Shared Components"
+        SHARED["Common Builtin Skill Core"]
+    end
+    SHARED --> A1
+    SHARED --> B1
+    SHARED --> C1
+    %% Unresolved Facts
+    UNRESOLVED["Unresolved Facts:"]
+    FA1["Per-Agent Routing Bindings"]
+    FA2["Per-Skill Invocation Telemetry"]
+    UNRESOLVED --> FA1
+    UNRESOLVED --> FA2

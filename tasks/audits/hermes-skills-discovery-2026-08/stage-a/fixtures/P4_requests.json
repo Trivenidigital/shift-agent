@@ -1,0 +1,14 @@
+{
+ "p4-01-complete": {
+  "request": "80 guests, 12 miles away, buffet, Vegetable Biryani and Paneer Curry."
+ },
+ "p4-02-omitted-price": {
+  "request": "60 guests, 8 miles, add the Seasonal Salad Bar to the biryani."
+ },
+ "p4-03-unavailable-item": {
+  "request": "40 guests, 5 miles, we'd like the Winter Truffle Menu."
+ },
+ "p4-04-unresolved-condition": {
+  "request": "200 guests, 40 miles away, plated service please."
+ }
+}

@@ -1,0 +1,27 @@
+```mermaid
+graph TD;
+    A[HOST-A<br>role=canary<br>HERMES_HOME=/home/svc-a/.hermes<br>hermes=0.19.1] -->|outbound channel: none| B[HOST-B<br>role=production<br>HERMES_HOME=/root/.hermes<br>hermes=0.19.1];
+    A -->|outbound channel: none| C[HOST-C<br>role=production<br>HERMES_HOME=/root/.hermes<br>hermes=0.19.1];
+    
+    B -->|outbound channel: WhatsApp| D[WhatsApp (enabled)];
+    B -->|outbound channel: router-plugin| E[router-plugin<br>owner: svc-b];
+    B -->|outbound channel: policy-plugin| F[policy-plugin<br>owner: svc-b];
+    
+    subgraph Unresolved Facts
+        G[per-agent routing bindings];
+        H[per-skill invocation telemetry (unavailable)];
+    end
+
+    B -->|outbound channel: none| G;
+    C -->|outbound channel: none| G;
+    
+    A -->|outbound channel: none| H;
+    B -->|outbound channel: none| H;
+    C -->|outbound channel: none| H;
+    
+    classDef shared fill:#f9f,stroke:#333,stroke-width:2px;
+    classDef isolated fill:#ccf,stroke:#333,stroke-width:2px;
+
+    class A,B,C shared;
+    class G,H isolated;
+```

@@ -1,0 +1,97 @@
+[
+ {
+  "pilot": "P1",
+  "run": "p1-01-stale-install",
+  "verdict": "PARTIAL"
+ },
+ {
+  "pilot": "P1",
+  "run": "p1-02-wrong-hermes-home",
+  "verdict": "PARTIAL"
+ },
+ {
+  "pilot": "P1",
+  "run": "p1-03-toolset-vs-reachability",
+  "verdict": "PARTIAL"
+ },
+ {
+  "pilot": "P2",
+  "run": "p2-01",
+  "verdict": "PARTIAL"
+ },
+ {
+  "pilot": "P3",
+  "run": "p3-01-guests-no-date",
+  "verdict": "PARTIAL"
+ },
+ {
+  "pilot": "P3",
+  "run": "p3-02-date-guests-no-venue",
+  "verdict": "PARTIAL"
+ },
+ {
+  "pilot": "P3",
+  "run": "p3-03-delivery-unspecified",
+  "verdict": "PARTIAL"
+ },
+ {
+  "pilot": "P3",
+  "run": "p3-04-ambiguous-dietary",
+  "verdict": "FAIL"
+ },
+ {
+  "pilot": "P3",
+  "run": "p3-05-no-mealtime-or-style",
+  "verdict": "PARTIAL"
+ },
+ {
+  "pilot": "P3",
+  "run": "p3-06-quote-demand-insufficient",
+  "verdict": "PARTIAL"
+ },
+ {
+  "pilot": "P4",
+  "run": "p4-01-complete",
+  "verdict": "PARTIAL"
+ },
+ {
+  "pilot": "P4",
+  "run": "p4-02-omitted-price",
+  "verdict": "PASS"
+ },
+ {
+  "pilot": "P4",
+  "run": "p4-03-unavailable-item",
+  "verdict": "PASS"
+ },
+ {
+  "pilot": "P4",
+  "run": "p4-04-unresolved-condition",
+  "verdict": "PASS"
+ },
+ {
+  "pilot": "P6",
+  "run": "p6-01-replace-photo",
+  "verdict": "PARTIAL"
+ },
+ {
+  "pilot": "P6",
+  "run": "p6-02-add-phone",
+  "verdict": "PARTIAL"
+ },
+ {
+  "pilot": "P6",
+  "run": "p6-03-remove-section",
+  "verdict": "PARTIAL"
+ },
+ {
+  "pilot": "P6",
+  "run": "p6-04-change-date",
+  "verdict": "PARTIAL"
+ },
+ {
+  "pilot": "P6",
+  "run": "p6-05-resize-print",
+  "verdict": "PARTIAL"
+ }
+]

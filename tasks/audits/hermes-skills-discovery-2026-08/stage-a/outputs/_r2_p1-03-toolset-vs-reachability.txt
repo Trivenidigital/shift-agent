@@ -1,0 +1,8 @@
+A host's config contains:
+
+    agent:
+      disabled_toolsets:
+        - skills
+
+An operator concludes: "therefore all installed skills on this host are
+unreachable." Assess that conclusion and state what would need checking.

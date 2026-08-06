@@ -1,0 +1,4 @@
+Approved flyer: 800x1000px, fictional TESTBURGH wordmark logo top-left on gold band, headline 'GRAND OPENING WEEKEND', body 'Fresh plates, made to order', food photo region, price '$9.99 LUNCH SPECIAL', QR bottom-right, footer '42 Fictional Ave, Testburgh', phone '555-0100'.
+
+Revision request:
+Swap the food photo for a different one. Nothing else changes.

@@ -1,0 +1,20 @@
+{
+ "p3-01-guests-no-date": {
+  "inquiry": "Hi, we need catering for about 60 people. Can you send me a quote?"
+ },
+ "p3-02-date-guests-no-venue": {
+  "inquiry": "We're planning a lunch on the 14th of next month for 120 guests. What can you do?"
+ },
+ "p3-03-delivery-unspecified": {
+  "inquiry": "Need food for an office event, 40 people, next Friday evening at our office park."
+ },
+ "p3-04-ambiguous-dietary": {
+  "inquiry": "Party of 80 on the 3rd, at the community hall, dinner. Some guests don't eat onion or garlic and a few are vegetarian - is that OK?"
+ },
+ "p3-05-no-mealtime-or-style": {
+  "inquiry": "Booking catering for 200 guests at the Riverside Hall on the 22nd."
+ },
+ "p3-06-quote-demand-insufficient": {
+  "inquiry": "What's your per-plate price? Just give me a number so I can compare vendors."
+ }
+}

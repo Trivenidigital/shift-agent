@@ -1,0 +1,161 @@
+{
+ "required_fields": [
+  "event_date",
+  "guest_count",
+  "location",
+  "meal_time",
+  "service_style",
+  "delivery_or_onsite",
+  "dietary",
+  "budget_band"
+ ],
+ "prohibited_tokens": [
+  "per-plate price",
+  "per plate",
+  "$",
+  "\u20b9",
+  "starts at",
+  "typically costs",
+  "around $",
+  "minimum order",
+  "we can accommodate",
+  "we have availability",
+  "discount",
+  "we guarantee"
+ ],
+ "cases": {
+  "p3-01-guests-no-date": {
+   "supplied": [
+    "guest_count"
+   ],
+   "missing": [
+    "event_date",
+    "location",
+    "meal_time",
+    "service_style",
+    "delivery_or_onsite",
+    "dietary",
+    "budget_band"
+   ],
+   "expected_questions": [
+    "event_date",
+    "location",
+    "service_style"
+   ],
+   "unnecessary_questions": [
+    "guest_count"
+   ]
+  },
+  "p3-02-date-guests-no-venue": {
+   "supplied": [
+    "event_date",
+    "guest_count",
+    "meal_time"
+   ],
+   "missing": [
+    "location",
+    "service_style",
+    "delivery_or_onsite",
+    "dietary",
+    "budget_band"
+   ],
+   "expected_questions": [
+    "location",
+    "service_style",
+    "dietary"
+   ],
+   "unnecessary_questions": [
+    "event_date",
+    "guest_count"
+   ]
+  },
+  "p3-03-delivery-unspecified": {
+   "supplied": [
+    "guest_count",
+    "event_date",
+    "location",
+    "meal_time"
+   ],
+   "missing": [
+    "service_style",
+    "delivery_or_onsite",
+    "dietary",
+    "budget_band"
+   ],
+   "expected_questions": [
+    "delivery_or_onsite",
+    "service_style",
+    "dietary"
+   ],
+   "unnecessary_questions": [
+    "guest_count",
+    "location"
+   ]
+  },
+  "p3-04-ambiguous-dietary": {
+   "supplied": [
+    "guest_count",
+    "event_date",
+    "location",
+    "meal_time",
+    "dietary"
+   ],
+   "missing": [
+    "service_style",
+    "delivery_or_onsite",
+    "budget_band"
+   ],
+   "expected_questions": [
+    "dietary_clarification",
+    "service_style",
+    "delivery_or_onsite"
+   ],
+   "unnecessary_questions": [
+    "guest_count",
+    "event_date"
+   ]
+  },
+  "p3-05-no-mealtime-or-style": {
+   "supplied": [
+    "guest_count",
+    "location",
+    "event_date"
+   ],
+   "missing": [
+    "meal_time",
+    "service_style",
+    "delivery_or_onsite",
+    "dietary",
+    "budget_band"
+   ],
+   "expected_questions": [
+    "meal_time",
+    "service_style",
+    "dietary"
+   ],
+   "unnecessary_questions": [
+    "guest_count",
+    "location"
+   ]
+  },
+  "p3-06-quote-demand-insufficient": {
+   "supplied": [],
+   "missing": [
+    "event_date",
+    "guest_count",
+    "location",
+    "meal_time",
+    "service_style",
+    "delivery_or_onsite",
+    "dietary",
+    "budget_band"
+   ],
+   "expected_questions": [
+    "guest_count",
+    "event_date",
+    "service_style"
+   ],
+   "unnecessary_questions": []
+  }
+ }
+}

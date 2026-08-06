@@ -1,0 +1,7 @@
+An inventory was produced with:
+
+    $ hermes skills list
+    ... 84 skills, all source=builtin, 0 local, 0 official
+
+The operator concludes this host has no organization or hub-installed skills.
+The gateway service on this host runs as a non-root user. Assess the conclusion.

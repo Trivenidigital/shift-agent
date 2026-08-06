@@ -1,0 +1,44 @@
+{
+ "required_nodes": [
+  "HOST-A",
+  "HOST-B",
+  "HOST-C",
+  "WhatsApp channel",
+  "router-plugin",
+  "policy-plugin",
+  "deterministic timers"
+ ],
+ "required_edges": [
+  "HOST-B -> WhatsApp channel",
+  "policy-plugin -> outbound screen on HOST-B",
+  "preflight -> gateway start gate on HOST-B"
+ ],
+ "required_labels": [
+  "0.19.1 on all three",
+  "skills toolset DISABLED on HOST-B",
+  "index SUPPRESSED on HOST-B",
+  "index EMITTED on HOST-A and HOST-C"
+ ],
+ "trust_boundaries": [
+  "WhatsApp customer channel is the only outbound customer boundary",
+  "each HERMES_HOME is an isolation boundary"
+ ],
+ "shared_components": [
+  "hermes 0.19.1",
+  "common builtin skill core"
+ ],
+ "isolated_components": [
+  "per-host HERMES_HOME",
+  "no cross-host state sharing"
+ ],
+ "unresolved_facts": [
+  "per-agent routing bindings",
+  "per-skill invocation telemetry"
+ ],
+ "must_not_invent": [
+  "any host D",
+  "WhatsApp on HOST-A or HOST-C",
+  "plugins on HOST-A or HOST-C",
+  "cross-host state sharing"
+ ]
+}
