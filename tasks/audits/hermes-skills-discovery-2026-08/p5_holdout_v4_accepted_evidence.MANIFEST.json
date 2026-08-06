@@ -1,0 +1,855 @@
+{
+  "archive": "p5_holdout_v4_accepted_evidence.tar.gz",
+  "holdout_id": "p5_holdout_v4",
+  "target": "p5-v4-freeze-1",
+  "case_id_namespace": "hv4p5-",
+  "programme": "Hermes structured-output skills programme (P1/P3/P4/P5/P6)",
+  "programme_status": "TERMINALLY CLOSED 2026-08-03 \u2014 all five REJECT_AND_RETIRE",
+  "preserved_because": "P5 authoring succeeded and its harness failed. These 84 PNGs are integrity-verified and reusable; the closure record prohibits re-authoring them.",
+  "reuse_condition": "Requires explicit authorization under a NEW programme.",
+  "entry_count_png": 84,
+  "total_png_bytes": 3247681,
+  "integrity": "all 84 SHA-256 verified against the original authoring manifest",
+  "files": [
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-apu-01_after.png",
+      "sha256": "039dacd998f99f7d9a7ae1935aa08e71524348c03af1eed0d6a1fe602e3d6a27",
+      "bytes": 37314,
+      "layout_id": "L1",
+      "case_id": "hv4p5-apu-01",
+      "evidence_role": "approved_after",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-apu-01_edited.png",
+      "sha256": "ad14e9519320b7534343869a18f531e807bd50bb2ab245d20cf78ca5473a295f",
+      "bytes": 36968,
+      "layout_id": "L1",
+      "case_id": "hv4p5-apu-01",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-arw-01_after.png",
+      "sha256": "ea65586b2a431b18aeef50ce47452e87d8cb4f4c97172c8cd2a97605792253d6",
+      "bytes": 37977,
+      "layout_id": "L1",
+      "case_id": "hv4p5-arw-01",
+      "evidence_role": "approved_after",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-arw-01_edited.png",
+      "sha256": "03f1fad3f0164bdf9be8b62d1234b4c29539307a0d96aa61fee0f81ba19334a4",
+      "bytes": 37877,
+      "layout_id": "L1",
+      "case_id": "hv4p5-arw-01",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-arw-04_after.png",
+      "sha256": "df916e6536d1ba88c8ab112e1f60c17cd7a91e5295bc13fb63dea6ae471d1cfc",
+      "bytes": 37580,
+      "layout_id": "L1",
+      "case_id": "hv4p5-arw-04",
+      "evidence_role": "approved_after",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-arw-04_edited.png",
+      "sha256": "054d3e54f58794a753be497a4910f9f18cd28f00d13a4ab40aaacf4275f22453",
+      "bytes": 37306,
+      "layout_id": "L1",
+      "case_id": "hv4p5-arw-04",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-arw-05_after.png",
+      "sha256": "df916e6536d1ba88c8ab112e1f60c17cd7a91e5295bc13fb63dea6ae471d1cfc",
+      "bytes": 37580,
+      "layout_id": "L1",
+      "case_id": "hv4p5-arw-05",
+      "evidence_role": "approved_after",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-arw-05_edited.png",
+      "sha256": "918ce7d171682f506064bb7966575dab491f1f380d491e1f3bdfa994ee5079bb",
+      "bytes": 37832,
+      "layout_id": "L1",
+      "case_id": "hv4p5-arw-05",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-asi-01_after.png",
+      "sha256": "c3ebfb9563ab530231e9f5192cc968044f6460f8c3b1312dc2d28a7991d80c45",
+      "bytes": 37590,
+      "layout_id": "L1",
+      "case_id": "hv4p5-asi-01",
+      "evidence_role": "approved_after",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-asi-01_edited.png",
+      "sha256": "e59d2e8b6d447a5b18aafa6f33fb91840086690f366234b31a5d70c0c9b631c9",
+      "bytes": 38793,
+      "layout_id": "L1",
+      "case_id": "hv4p5-asi-01",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-ave-01_after.png",
+      "sha256": "ea65586b2a431b18aeef50ce47452e87d8cb4f4c97172c8cd2a97605792253d6",
+      "bytes": 37977,
+      "layout_id": "L1",
+      "case_id": "hv4p5-ave-01",
+      "evidence_role": "approved_after",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-ave-01_edited.png",
+      "sha256": "ea65586b2a431b18aeef50ce47452e87d8cb4f4c97172c8cd2a97605792253d6",
+      "bytes": 37977,
+      "layout_id": "L1",
+      "case_id": "hv4p5-ave-01",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-ccr-01_edited.png",
+      "sha256": "5dac0118156784db03188f39f4355a8a464d11afe2b9431c1732513aeef26390",
+      "bytes": 37029,
+      "layout_id": "L1",
+      "case_id": "hv4p5-ccr-01",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1092
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-ccr-02_edited.png",
+      "sha256": "5dac0118156784db03188f39f4355a8a464d11afe2b9431c1732513aeef26390",
+      "bytes": 37029,
+      "layout_id": "L1",
+      "case_id": "hv4p5-ccr-02",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1092
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-ccr-03_edited.png",
+      "sha256": "6059daa217dc144c7b25dec6c8a7e3ff98bc457b456f6d6b709d9b58ef5deada",
+      "bytes": 37289,
+      "layout_id": "L1",
+      "case_id": "hv4p5-ccr-03",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1092
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-cid-01_edited.png",
+      "sha256": "df916e6536d1ba88c8ab112e1f60c17cd7a91e5295bc13fb63dea6ae471d1cfc",
+      "bytes": 37580,
+      "layout_id": "L1",
+      "case_id": "hv4p5-cid-01",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-cpv-02_edited.png",
+      "sha256": "25ad064fc444465c1eb4cda07126cce2aafa6ecdfbfbdc6b753b8580a3583a4f",
+      "bytes": 131126,
+      "layout_id": "L1",
+      "case_id": "hv4p5-cpv-02",
+      "evidence_role": "delivered_edited",
+      "width": 1148,
+      "height": 1652
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-cpv-03_edited.png",
+      "sha256": "9158c11e71856faabd70ab0467eba2cb361fc3c67f4d8537d82e5ed95f2a96a1",
+      "bytes": 58531,
+      "layout_id": "L1",
+      "case_id": "hv4p5-cpv-03",
+      "evidence_role": "delivered_edited",
+      "width": 492,
+      "height": 708
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-cvr-03_edited.png",
+      "sha256": "ff4fcc8c4110337c772c07aafadbe23b22e7ecfa855ce5edc204b7485e298bd7",
+      "bytes": 86554,
+      "layout_id": "L1",
+      "case_id": "hv4p5-cvr-03",
+      "evidence_role": "delivered_edited",
+      "width": 720,
+      "height": 1080
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-qrg-01_after.png",
+      "sha256": "990b3242fccbc1d8716ddb204888f6a3dd6b4335326e2eeaf52651a44e5d186c",
+      "bytes": 37583,
+      "layout_id": "L1",
+      "case_id": "hv4p5-qrg-01",
+      "evidence_role": "approved_after",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-qrg-01_edited.png",
+      "sha256": "990b3242fccbc1d8716ddb204888f6a3dd6b4335326e2eeaf52651a44e5d186c",
+      "bytes": 37583,
+      "layout_id": "L1",
+      "case_id": "hv4p5-qrg-01",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-qrg-02_after.png",
+      "sha256": "2b7766c3635ab95738e7fbc8b4c3bf5edbec6ae9e8a378a28a780d235b46eaeb",
+      "bytes": 37585,
+      "layout_id": "L1",
+      "case_id": "hv4p5-qrg-02",
+      "evidence_role": "approved_after",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-qrg-02_edited.png",
+      "sha256": "a1d953a716f68d0d6cda8bbf973d64c814f62571e8479a83a76cdc8a58710dcf",
+      "bytes": 37551,
+      "layout_id": "L1",
+      "case_id": "hv4p5-qrg-02",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-qrg-03_edited.png",
+      "sha256": "c43188c47f451661d3ff25c21553874d4ac18ff99512bdac3627d92d8e3ba729",
+      "bytes": 37583,
+      "layout_id": "L1",
+      "case_id": "hv4p5-qrg-03",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-qrp-01_after.png",
+      "sha256": "692722fa28c8ff53a50368ecb0377bf5813c297b50b198c3b1234dbd08a3eb0b",
+      "bytes": 37563,
+      "layout_id": "L1",
+      "case_id": "hv4p5-qrp-01",
+      "evidence_role": "approved_after",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-qrp-01_edited.png",
+      "sha256": "692722fa28c8ff53a50368ecb0377bf5813c297b50b198c3b1234dbd08a3eb0b",
+      "bytes": 37563,
+      "layout_id": "L1",
+      "case_id": "hv4p5-qrp-01",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-qrp-02_after.png",
+      "sha256": "692722fa28c8ff53a50368ecb0377bf5813c297b50b198c3b1234dbd08a3eb0b",
+      "bytes": 37563,
+      "layout_id": "L1",
+      "case_id": "hv4p5-qrp-02",
+      "evidence_role": "approved_after",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-qrp-02_edited.png",
+      "sha256": "0dc650316fc26396595179e611a61539af2410df38d4455ad1897baface6861c",
+      "bytes": 37569,
+      "layout_id": "L1",
+      "case_id": "hv4p5-qrp-02",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-qrp-03_after.png",
+      "sha256": "692722fa28c8ff53a50368ecb0377bf5813c297b50b198c3b1234dbd08a3eb0b",
+      "bytes": 37563,
+      "layout_id": "L1",
+      "case_id": "hv4p5-qrp-03",
+      "evidence_role": "approved_after",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-qrp-03_edited.png",
+      "sha256": "692722fa28c8ff53a50368ecb0377bf5813c297b50b198c3b1234dbd08a3eb0b",
+      "bytes": 37563,
+      "layout_id": "L1",
+      "case_id": "hv4p5-qrp-03",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-qtr-05_edited.png",
+      "sha256": "08562a035d2801c7bd6e0c996a753942373cf1d4ca97f125eead1743eb300af7",
+      "bytes": 37566,
+      "layout_id": "L1",
+      "case_id": "hv4p5-qtr-05",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-qtr-06_edited.png",
+      "sha256": "b585acfa11608a77ada9735e86020b3a28861f5817c251f4ec539741be0a83a8",
+      "bytes": 38376,
+      "layout_id": "L1",
+      "case_id": "hv4p5-qtr-06",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-rmv-03_after.png",
+      "sha256": "eae027887823f1c28b831c5332c0ef2535c1001534d48d67b3bfc42eea21c7f4",
+      "bytes": 30736,
+      "layout_id": "L1",
+      "case_id": "hv4p5-rmv-03",
+      "evidence_role": "approved_after",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-rmv-03_edited.png",
+      "sha256": "eae027887823f1c28b831c5332c0ef2535c1001534d48d67b3bfc42eea21c7f4",
+      "bytes": 30736,
+      "layout_id": "L1",
+      "case_id": "hv4p5-rmv-03",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_hv4p5-urc-01_edited.png",
+      "sha256": "8798726323deb7a3ffa60e32152d57f2ac67253802fe1f5384d31380f3dc1c0c",
+      "bytes": 37753,
+      "layout_id": "L1",
+      "case_id": "hv4p5-urc-01",
+      "evidence_role": "delivered_edited",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L1_reference.png",
+      "sha256": "df916e6536d1ba88c8ab112e1f60c17cd7a91e5295bc13fb63dea6ae471d1cfc",
+      "bytes": 37580,
+      "layout_id": "L1",
+      "case_id": null,
+      "evidence_role": "layout_reference",
+      "width": 820,
+      "height": 1180
+    },
+    {
+      "relative_path": "p5_holdout_v4/L2_hv4p5-arw-03_after.png",
+      "sha256": "ca22b65a1fad558fdd827e0098dcda57b7aa27a8ab2481c1b19edaa09f44eb16",
+      "bytes": 37702,
+      "layout_id": "L2",
+      "case_id": "hv4p5-arw-03",
+      "evidence_role": "approved_after",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "relative_path": "p5_holdout_v4/L2_hv4p5-arw-03_edited.png",
+      "sha256": "914e82e287c9c7dc1b61787cd0a0238189d29c27e94aec311323296fef01c537",
+      "bytes": 37600,
+      "layout_id": "L2",
+      "case_id": "hv4p5-arw-03",
+      "evidence_role": "delivered_edited",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "relative_path": "p5_holdout_v4/L2_hv4p5-ave-02_after.png",
+      "sha256": "27ab0c9078dd1cee0f1f9e349a9f62815d27c349819553bcf9bb201f4e053c81",
+      "bytes": 37637,
+      "layout_id": "L2",
+      "case_id": "hv4p5-ave-02",
+      "evidence_role": "approved_after",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "relative_path": "p5_holdout_v4/L2_hv4p5-ave-02_edited.png",
+      "sha256": "27ab0c9078dd1cee0f1f9e349a9f62815d27c349819553bcf9bb201f4e053c81",
+      "bytes": 37637,
+      "layout_id": "L2",
+      "case_id": "hv4p5-ave-02",
+      "evidence_role": "delivered_edited",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "relative_path": "p5_holdout_v4/L2_hv4p5-cid-02_edited.png",
+      "sha256": "6b9b49c2a46b19114eff6f942675fc01ae2d1b5333e5d2c11f6cce5480354d86",
+      "bytes": 36990,
+      "layout_id": "L2",
+      "case_id": "hv4p5-cid-02",
+      "evidence_role": "delivered_edited",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "relative_path": "p5_holdout_v4/L2_hv4p5-cpv-01_edited.png",
+      "sha256": "0550d2eab5301d63a566deed12cefb84dc2531c08af518b98f325e57e465d5b8",
+      "bytes": 40071,
+      "layout_id": "L2",
+      "case_id": "hv4p5-cpv-01",
+      "evidence_role": "delivered_edited",
+      "width": 500,
+      "height": 350
+    },
+    {
+      "relative_path": "p5_holdout_v4/L2_hv4p5-cts-01_edited.png",
+      "sha256": "695d9f3d325248b9f87836ada209a69bb14cb3d5b9b974a6d31f1f26f8226e1d",
+      "bytes": 56837,
+      "layout_id": "L2",
+      "case_id": "hv4p5-cts-01",
+      "evidence_role": "delivered_edited",
+      "width": 800,
+      "height": 700
+    },
+    {
+      "relative_path": "p5_holdout_v4/L2_hv4p5-cvr-01_edited.png",
+      "sha256": "6d6d3bca75199cd07f01ab67a3524eda92d9271e44c38b73e798d35e3e94a92b",
+      "bytes": 61094,
+      "layout_id": "L2",
+      "case_id": "hv4p5-cvr-01",
+      "evidence_role": "delivered_edited",
+      "width": 700,
+      "height": 490
+    },
+    {
+      "relative_path": "p5_holdout_v4/L2_hv4p5-cvr-04_edited.png",
+      "sha256": "51743998c4f24bef8cb8d1a66994fdbe8c70b74e98603212fb05cfbe7501d29e",
+      "bytes": 65484,
+      "layout_id": "L2",
+      "case_id": "hv4p5-cvr-04",
+      "evidence_role": "delivered_edited",
+      "width": 720,
+      "height": 504
+    },
+    {
+      "relative_path": "p5_holdout_v4/L2_hv4p5-quc-01_after.png",
+      "sha256": "d2c7356b9a92b321ef286704e0b939e24e5c24f19cd5956278a37c764e7afdd4",
+      "bytes": 36729,
+      "layout_id": "L2",
+      "case_id": "hv4p5-quc-01",
+      "evidence_role": "approved_after",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "relative_path": "p5_holdout_v4/L2_hv4p5-quc-01_edited.png",
+      "sha256": "d2c7356b9a92b321ef286704e0b939e24e5c24f19cd5956278a37c764e7afdd4",
+      "bytes": 36729,
+      "layout_id": "L2",
+      "case_id": "hv4p5-quc-01",
+      "evidence_role": "delivered_edited",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "relative_path": "p5_holdout_v4/L2_hv4p5-rmv-02_after.png",
+      "sha256": "695d4af140528da1d0fe5cbdc1ba2d57889fd01559216d4e2a908224a06967ee",
+      "bytes": 30856,
+      "layout_id": "L2",
+      "case_id": "hv4p5-rmv-02",
+      "evidence_role": "approved_after",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "relative_path": "p5_holdout_v4/L2_hv4p5-rmv-02_edited.png",
+      "sha256": "6b9b49c2a46b19114eff6f942675fc01ae2d1b5333e5d2c11f6cce5480354d86",
+      "bytes": 36990,
+      "layout_id": "L2",
+      "case_id": "hv4p5-rmv-02",
+      "evidence_role": "delivered_edited",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "relative_path": "p5_holdout_v4/L2_reference.png",
+      "sha256": "6b9b49c2a46b19114eff6f942675fc01ae2d1b5333e5d2c11f6cce5480354d86",
+      "bytes": 36990,
+      "layout_id": "L2",
+      "case_id": null,
+      "evidence_role": "layout_reference",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "relative_path": "p5_holdout_v4/L3_hv4p5-ave-04_after.png",
+      "sha256": "9c8b1839c2600a297331c7684b5c580205a15196e56ee2202b23a91c7f3d9faa",
+      "bytes": 18086,
+      "layout_id": "L3",
+      "case_id": "hv4p5-ave-04",
+      "evidence_role": "approved_after",
+      "width": 640,
+      "height": 640
+    },
+    {
+      "relative_path": "p5_holdout_v4/L3_hv4p5-ave-04_edited.png",
+      "sha256": "9c8b1839c2600a297331c7684b5c580205a15196e56ee2202b23a91c7f3d9faa",
+      "bytes": 18086,
+      "layout_id": "L3",
+      "case_id": "hv4p5-ave-04",
+      "evidence_role": "delivered_edited",
+      "width": 640,
+      "height": 640
+    },
+    {
+      "relative_path": "p5_holdout_v4/L3_hv4p5-cts-02_edited.png",
+      "sha256": "a6680fd7d4423b064786dd4642b83b1df2afbd84887ae3cc5a5eedeb3799739d",
+      "bytes": 22541,
+      "layout_id": "L3",
+      "case_id": "hv4p5-cts-02",
+      "evidence_role": "delivered_edited",
+      "width": 640,
+      "height": 800
+    },
+    {
+      "relative_path": "p5_holdout_v4/L3_hv4p5-cvr-02_edited.png",
+      "sha256": "6036c15421c3db638f89d4d5a446c694ba09e11f86effa17e60818916116fece",
+      "bytes": 57021,
+      "layout_id": "L3",
+      "case_id": "hv4p5-cvr-02",
+      "evidence_role": "delivered_edited",
+      "width": 800,
+      "height": 800
+    },
+    {
+      "relative_path": "p5_holdout_v4/L3_hv4p5-cvr-05_edited.png",
+      "sha256": "2b6961c9261b8fe29e8b2d5a6b99a484d44990cd303178f360c74350d52f2f9a",
+      "bytes": 40493,
+      "layout_id": "L3",
+      "case_id": "hv4p5-cvr-05",
+      "evidence_role": "delivered_edited",
+      "width": 512,
+      "height": 512
+    },
+    {
+      "relative_path": "p5_holdout_v4/L3_hv4p5-qtr-01_edited.png",
+      "sha256": "9c4b0a2cd23417aa932550a607f96f75cc28f7a960db8a40f75d2ce7daaa1bbe",
+      "bytes": 18076,
+      "layout_id": "L3",
+      "case_id": "hv4p5-qtr-01",
+      "evidence_role": "delivered_edited",
+      "width": 640,
+      "height": 640
+    },
+    {
+      "relative_path": "p5_holdout_v4/L3_hv4p5-qtr-02_edited.png",
+      "sha256": "f97186216934beae451e1accd40a19ef6985f08a792a07794598e7acddcfe850",
+      "bytes": 18087,
+      "layout_id": "L3",
+      "case_id": "hv4p5-qtr-02",
+      "evidence_role": "delivered_edited",
+      "width": 640,
+      "height": 640
+    },
+    {
+      "relative_path": "p5_holdout_v4/L3_hv4p5-qtr-03_edited.png",
+      "sha256": "94f6e8b82be584628544ce7155237e0780acd39152407a48d58afdc52eea6209",
+      "bytes": 28402,
+      "layout_id": "L3",
+      "case_id": "hv4p5-qtr-03",
+      "evidence_role": "delivered_edited",
+      "width": 640,
+      "height": 640
+    },
+    {
+      "relative_path": "p5_holdout_v4/L3_hv4p5-qtr-04_edited.png",
+      "sha256": "5cdb0ada575552ca08ffc5b6f5265dd295fb955f593b17b88d54d91cd390e42e",
+      "bytes": 18068,
+      "layout_id": "L3",
+      "case_id": "hv4p5-qtr-04",
+      "evidence_role": "delivered_edited",
+      "width": 640,
+      "height": 640
+    },
+    {
+      "relative_path": "p5_holdout_v4/L3_reference.png",
+      "sha256": "396decc933bd1ac34cbf5594a11e5e1031840a2719c8b5a2cab355c8b37828db",
+      "bytes": 18084,
+      "layout_id": "L3",
+      "case_id": null,
+      "evidence_role": "layout_reference",
+      "width": 640,
+      "height": 640
+    },
+    {
+      "relative_path": "p5_holdout_v4/L4_hv4p5-apu-02_after.png",
+      "sha256": "2bade22b073cb078fff5fbf31a40efc148eaf0162953eab4d92f41fe58cfeb62",
+      "bytes": 29450,
+      "layout_id": "L4",
+      "case_id": "hv4p5-apu-02",
+      "evidence_role": "approved_after",
+      "width": 900,
+      "height": 1200
+    },
+    {
+      "relative_path": "p5_holdout_v4/L4_hv4p5-apu-02_edited.png",
+      "sha256": "f5a074641aad518f7a60cf75e15bb01dbbe67633c1ac1135cd78c77ba03c5be3",
+      "bytes": 29467,
+      "layout_id": "L4",
+      "case_id": "hv4p5-apu-02",
+      "evidence_role": "delivered_edited",
+      "width": 900,
+      "height": 1200
+    },
+    {
+      "relative_path": "p5_holdout_v4/L4_hv4p5-ave-03_after.png",
+      "sha256": "2242091188321ca17006be17407e9ec26377b6f1e1895cf2618982421e4fb15f",
+      "bytes": 29716,
+      "layout_id": "L4",
+      "case_id": "hv4p5-ave-03",
+      "evidence_role": "approved_after",
+      "width": 900,
+      "height": 1200
+    },
+    {
+      "relative_path": "p5_holdout_v4/L4_hv4p5-ave-03_edited.png",
+      "sha256": "2242091188321ca17006be17407e9ec26377b6f1e1895cf2618982421e4fb15f",
+      "bytes": 29716,
+      "layout_id": "L4",
+      "case_id": "hv4p5-ave-03",
+      "evidence_role": "delivered_edited",
+      "width": 900,
+      "height": 1200
+    },
+    {
+      "relative_path": "p5_holdout_v4/L4_hv4p5-exp-01_edited.png",
+      "sha256": "cb355f2772af7ec5f0d33e450d52da3e1d9e0ec156b9dbe828605901ca43c64b",
+      "bytes": 56739,
+      "layout_id": "L4",
+      "case_id": "hv4p5-exp-01",
+      "evidence_role": "delivered_edited",
+      "width": 900,
+      "height": 1200
+    },
+    {
+      "relative_path": "p5_holdout_v4/L4_hv4p5-exp-02_edited.png",
+      "sha256": "d79ac2e73bdd9f3df24523e0a2ce0ab78b59bb007dabaa496451219cbd3532c4",
+      "bytes": 61750,
+      "layout_id": "L4",
+      "case_id": "hv4p5-exp-02",
+      "evidence_role": "delivered_edited",
+      "width": 720,
+      "height": 960
+    },
+    {
+      "relative_path": "p5_holdout_v4/L4_hv4p5-lbd-01_after.png",
+      "sha256": "9331414031bae05a7411cfe32966d98943bd415130927f92cb4a15232036aac5",
+      "bytes": 29034,
+      "layout_id": "L4",
+      "case_id": "hv4p5-lbd-01",
+      "evidence_role": "approved_after",
+      "width": 900,
+      "height": 1200
+    },
+    {
+      "relative_path": "p5_holdout_v4/L4_hv4p5-lbd-01_edited.png",
+      "sha256": "9331414031bae05a7411cfe32966d98943bd415130927f92cb4a15232036aac5",
+      "bytes": 29034,
+      "layout_id": "L4",
+      "case_id": "hv4p5-lbd-01",
+      "evidence_role": "delivered_edited",
+      "width": 900,
+      "height": 1200
+    },
+    {
+      "relative_path": "p5_holdout_v4/L4_hv4p5-lbd-02_after.png",
+      "sha256": "7923c0042b9e0c5891861b59e8df8378e7512f55559586674d5e30486c024aab",
+      "bytes": 29224,
+      "layout_id": "L4",
+      "case_id": "hv4p5-lbd-02",
+      "evidence_role": "approved_after",
+      "width": 900,
+      "height": 1200
+    },
+    {
+      "relative_path": "p5_holdout_v4/L4_hv4p5-lbd-02_edited.png",
+      "sha256": "7923c0042b9e0c5891861b59e8df8378e7512f55559586674d5e30486c024aab",
+      "bytes": 29224,
+      "layout_id": "L4",
+      "case_id": "hv4p5-lbd-02",
+      "evidence_role": "delivered_edited",
+      "width": 900,
+      "height": 1200
+    },
+    {
+      "relative_path": "p5_holdout_v4/L4_hv4p5-urc-02_edited.png",
+      "sha256": "59e14415680f02d70fd2b91f01d36d73c26bbbabf71c7f7d34f3de6f9a923696",
+      "bytes": 29479,
+      "layout_id": "L4",
+      "case_id": "hv4p5-urc-02",
+      "evidence_role": "delivered_edited",
+      "width": 900,
+      "height": 1200
+    },
+    {
+      "relative_path": "p5_holdout_v4/L4_reference.png",
+      "sha256": "8da848d0d4c1fa97d26c618376ccca46a45d7059d1e44d269c1d4a8614cc1189",
+      "bytes": 29456,
+      "layout_id": "L4",
+      "case_id": null,
+      "evidence_role": "layout_reference",
+      "width": 900,
+      "height": 1200
+    },
+    {
+      "relative_path": "p5_holdout_v4/L5_hv4p5-arw-02_after.png",
+      "sha256": "29fa0ebff616eb037c90d297309279ca99689d901b761c1388bb70fe3b489bca",
+      "bytes": 37453,
+      "layout_id": "L5",
+      "case_id": "hv4p5-arw-02",
+      "evidence_role": "approved_after",
+      "width": 1080,
+      "height": 1080
+    },
+    {
+      "relative_path": "p5_holdout_v4/L5_hv4p5-arw-02_edited.png",
+      "sha256": "d897372b302258ab8a6dcb7996e6395b5f659183a6f5525b74505ee958671c8c",
+      "bytes": 37457,
+      "layout_id": "L5",
+      "case_id": "hv4p5-arw-02",
+      "evidence_role": "delivered_edited",
+      "width": 1080,
+      "height": 1080
+    },
+    {
+      "relative_path": "p5_holdout_v4/L5_hv4p5-asi-02_edited.png",
+      "sha256": "bd6468552b655f94a0801559d0f8190b9c4006cc1347321246bc4ed9ad632e1b",
+      "bytes": 37440,
+      "layout_id": "L5",
+      "case_id": "hv4p5-asi-02",
+      "evidence_role": "delivered_edited",
+      "width": 1080,
+      "height": 1080
+    },
+    {
+      "relative_path": "p5_holdout_v4/L5_hv4p5-cpv-04_edited.png",
+      "sha256": "7d135fa7077ba3e4a5f805bb9b99fc58c7d6a54a2c07d2b6228c0e8df11d6e80",
+      "bytes": 85637,
+      "layout_id": "L5",
+      "case_id": "hv4p5-cpv-04",
+      "evidence_role": "delivered_edited",
+      "width": 1200,
+      "height": 900
+    },
+    {
+      "relative_path": "p5_holdout_v4/L5_hv4p5-qqz-01_after.png",
+      "sha256": "00fa52321d10356a9098055bc37c27c3420c7534101f4cb628fd7d3ff80a4916",
+      "bytes": 37462,
+      "layout_id": "L5",
+      "case_id": "hv4p5-qqz-01",
+      "evidence_role": "approved_after",
+      "width": 1080,
+      "height": 1080
+    },
+    {
+      "relative_path": "p5_holdout_v4/L5_hv4p5-qqz-01_edited.png",
+      "sha256": "00fa52321d10356a9098055bc37c27c3420c7534101f4cb628fd7d3ff80a4916",
+      "bytes": 37462,
+      "layout_id": "L5",
+      "case_id": "hv4p5-qqz-01",
+      "evidence_role": "delivered_edited",
+      "width": 1080,
+      "height": 1080
+    },
+    {
+      "relative_path": "p5_holdout_v4/L5_hv4p5-qqz-02_edited.png",
+      "sha256": "a8af0bd3d5a405fc83ea0583f9bfa71854ac0a02381ea0cddbfc99d92a7ed37f",
+      "bytes": 37991,
+      "layout_id": "L5",
+      "case_id": "hv4p5-qqz-02",
+      "evidence_role": "delivered_edited",
+      "width": 1080,
+      "height": 1080
+    },
+    {
+      "relative_path": "p5_holdout_v4/L5_hv4p5-quc-02_after.png",
+      "sha256": "b78737f3abd1bdbb3607a7c0ff13fdc1ba4e7d3bf9b9fb1bd6aac44236ec08e8",
+      "bytes": 37382,
+      "layout_id": "L5",
+      "case_id": "hv4p5-quc-02",
+      "evidence_role": "approved_after",
+      "width": 1080,
+      "height": 1080
+    },
+    {
+      "relative_path": "p5_holdout_v4/L5_hv4p5-quc-02_edited.png",
+      "sha256": "b78737f3abd1bdbb3607a7c0ff13fdc1ba4e7d3bf9b9fb1bd6aac44236ec08e8",
+      "bytes": 37382,
+      "layout_id": "L5",
+      "case_id": "hv4p5-quc-02",
+      "evidence_role": "delivered_edited",
+      "width": 1080,
+      "height": 1080
+    },
+    {
+      "relative_path": "p5_holdout_v4/L5_hv4p5-rmv-01_after.png",
+      "sha256": "9f6bbfc9d5af99d96cf11403267a15946f064760f398db101055f2dab2b75326",
+      "bytes": 31033,
+      "layout_id": "L5",
+      "case_id": "hv4p5-rmv-01",
+      "evidence_role": "approved_after",
+      "width": 1080,
+      "height": 1080
+    },
+    {
+      "relative_path": "p5_holdout_v4/L5_hv4p5-rmv-01_edited.png",
+      "sha256": "9f6bbfc9d5af99d96cf11403267a15946f064760f398db101055f2dab2b75326",
+      "bytes": 31033,
+      "layout_id": "L5",
+      "case_id": "hv4p5-rmv-01",
+      "evidence_role": "delivered_edited",
+      "width": 1080,
+      "height": 1080
+    },
+    {
+      "relative_path": "p5_holdout_v4/L5_reference.png",
+      "sha256": "2d9351d5f086b27247d25e5a64fb4f650f837c7556139b395855557ea36844ef",
+      "bytes": 37445,
+      "layout_id": "L5",
+      "case_id": null,
+      "evidence_role": "layout_reference",
+      "width": 1080,
+      "height": 1080
+    }
+  ]
+}

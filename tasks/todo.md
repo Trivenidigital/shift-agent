@@ -16,7 +16,7 @@ evidence: `tasks/audits/hermes-skills-discovery-2026-08/BOUNDED_AUTONOMOUS_SESSI
 **Artifacts that survive — reuse requires EXPLICIT authorization under a NEW programme, not
 continuation of this one:**
 - `structured-stage-a/stage-b/model-adapter` P4 deterministic renderer `render-1` — `p4.rerender_byte_equality` now genuinely functional (it previously compared a string to itself). The **template** `p4.proposal.v1` is retired; the renderer is not.
-- `structured-stage-a/stage-b/visual/p5_holdout_v4/` — 84 integrity-verified PNGs + manifest, authored blind. Internally consistent; completeness vs intended approved-after coverage is **unmeasurable** (the frozen target specified zero such entries).
+- `structured-stage-a/stage-b/visual/p5_holdout_v4/` — 84 integrity-verified PNGs + manifest, authored blind. Internally consistent; completeness vs intended approved-after coverage is **unmeasurable** (the frozen target specified zero such entries). **Preserved durably** at `tasks/audits/hermes-skills-discovery-2026-08/p5_holdout_v4_accepted_evidence.tar.gz` (SHA-256 `f280273c5a5edcf7ce8ccc07977c63bc513e0e324a69e42bb33617cf83ba83a7`, 2636981 bytes, 87 entries); per-file hashes in the committed `.MANIFEST.json` beside it. **Do not re-author these.**
 - `hostlib/preflight.py` (`preflight-4`, 14 steps) and `hostlib/gate_registry.py` (`gate-registry-2`) — reusable provenance/reachability harness.
 - P6 operation split (`p6_operations_v5`): `op.resize_canvas` / `op.scale_content` / `op.crop_content` / `op.export_output`. Survived 36,800 requests with zero invariant violations. The clause/intent layer (`p6_scan`, `p6_clause`) is what failed.
 
