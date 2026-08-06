@@ -1,0 +1,17 @@
+{
+  "topic": "turn-observability",
+  "task_text": "turn-observability — per-turn skill-selection and tool-call observability for the catering menu-ingestion blocker, via native Hermes plugin hooks on cf-router",
+  "completed_at": "2026-08-06T22:47:44Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 7,
+  "hermes_step_count": 8,
+  "files_to_read_first": [
+    "src/platform/schemas.py",
+    "src/plugins/cf-router/__init__.py",
+    "src/plugins/cf-router/plugin.yaml",
+    "src/platform/safe_io.py",
+    "src/platform/audit_helpers.py",
+    "/usr/local/lib/hermes-agent/hermes_cli/hooks.py",
+    "tests/test_catering_v02_scripts.py"
+  ]
+}
