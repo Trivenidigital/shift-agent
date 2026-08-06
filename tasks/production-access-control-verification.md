@@ -552,12 +552,49 @@ The sole login path is Pushover OTP. Its credentials are **present and well-form
 `owner.phone` set). They are absent from the process environment because the cockpit reads them
 from `config.yaml`, not env — the same file-versus-process distinction recorded in §B.1.
 
-**No lockout was introduced.** Completing the full
-`authenticate → authenticated GET → logout` chain requires a live 6-digit code delivered to the
-owner's device, so it is owner-in-the-loop by construction and was not performed: triggering
-`POST /auth/request-otp` sends a real push notification, and guessing at `/auth/verify-otp` would
-consume the 5-attempt limit and risk locking the operator out. Everything up to the credential
-boundary is verified above.
+**No lockout was introduced** — confirmed empirically in §H.5c, where the owner completed a real
+login.
+
+### H.5c Operator authentication — EXECUTED 2026-08-06, owner-in-the-loop
+
+The full chain was performed by the owner through the loopback tunnel. **The OTP was entered
+directly into the Cockpit form and was never disclosed to, recorded by, or transmitted through the
+session.** Verification used only server-side status codes and audit event names; no response body
+was read, no configuration changed, no service restarted, no other identity tested, no TOTP
+enrolment attempted, and no mutating business endpoint called.
+
+| time (UTC) | event / request | result |
+|---|---|---|
+| 15:37:43 | `GET /api/auth/me` — before login | **401** |
+| 15:42:50 | `auth.otp.verify_success` | login succeeds |
+| 15:42:51 | `GET /api/auth/me` — after login | **200** |
+| 15:43:10 | `GET /api/roster` — representative authenticated GET | **200** |
+| 15:44:46 | `GET /api/decisions.csv` — fresh-OTP tier, **+1m56s** after login | **200** |
+| 15:44:46 | `decisions.csv_export` audit entry | export audited |
+| 15:45:09 | `POST /api/auth/logout` | **200** |
+| 15:45:10 | `GET /api/auth/me` — after logout | **401** |
+| 15:45:21 | `auth.otp.verify_success` — second login | login succeeds |
+| 15:45:32 | `GET /api/roster` | **200** |
+| 15:46:21 | `POST /api/auth/logout` | **200** |
+| 15:46:21 | `GET /api/auth/me` — after logout | **401** |
+
+The authenticate → authenticated GET → logout → rejected chain is proven **twice**, independently.
+
+**Two precision notes, so the record is not read as claiming more than it shows:**
+
+1. **Post-logout rejection was observed on `/api/auth/me`, not `/api/roster`.** The SPA gates on
+   `/api/auth/me` and redirects to login before issuing `/api/roster`, so no post-logout
+   `/api/roster` request reaches the server. `/api/auth/me` is a protected route returning 401 after
+   logout, twice — session termination is demonstrated, but on that endpoint.
+2. **The fresh-OTP tier is proven positively, not negatively.** `GET /api/decisions.csv` returned
+   200 at **+1m56s**, inside the 5-minute window — correct behaviour, and paired with the
+   unauthenticated **401** on the same route at 15:15:00 it demonstrates the gate admits fresh
+   sessions and refuses unauthenticated ones. It does **not** demonstrate that an *aged* session is
+   refused, which is the specific behaviour `COCKPIT_AUTH_BYPASS` used to disable. That negative
+   case remains unproven by observation and rests on the restored unconditional guard (§H.1), the
+   absent bypass variables (§H.5), the startup-refusal test (§H.5), and the static route inventory
+   (§D). Confirming it would take one non-mutating retry of the CSV export more than five minutes
+   after a login.
 
 ### H.6 Blast-radius confirmation
 
