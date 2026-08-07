@@ -702,15 +702,38 @@ def test_fork_child_does_not_retain_singleton_ownership(tmp_path):
     lock = tel.SingletonLock(lockpath)
     lock.acquire()
     r, w = os.pipe()
+    # Readiness channel, child -> parent. The at-fork child handler that closes the
+    # inherited lock fd runs INSIDE os.fork() in the child, before fork() returns
+    # there -- but the PARENT's fork() returns concurrently, with no ordering between
+    # the two. Without an explicit handshake the parent can reach the fresh acquire()
+    # below while the child still holds the inherited flock, so the test would be
+    # asserting "the child's handler wins the race" rather than the invariant, and
+    # fails spuriously with SingletonLockError on a loaded runner. Synchronise on the
+    # event actually under test instead of hoping for a scheduling order.
+    ready_r, ready_w = os.pipe()
     pid = os.fork()
     if pid == 0:  # child
         os.close(w)
+        os.close(ready_r)
         try:
+            # Control reaching here means the post-fork handler has ALREADY run, so
+            # this byte positively signals "inherited lock fd closed" -- not merely
+            # "child was scheduled".
+            os.write(ready_w, b"x")
+            os.close(ready_w)
             os.read(r, 1)  # stay alive until the parent lets us exit
         finally:
             os._exit(0)
     os.close(r)
+    os.close(ready_w)
     try:
+        # Block until the child is past its post-fork cleanup. This is a blocking
+        # read on a pipe, not a timeout or a retry: it cannot pass early, and if the
+        # child never signals the test hangs and is killed rather than passing on a
+        # weakened invariant.
+        assert os.read(ready_r, 1) == b"x", "child never signalled post-fork readiness"
+        os.close(ready_r)
+        ready_r = None
         # parent alive + holding → a 3rd instance cannot acquire
         with pytest.raises(tel.SingletonLockError):
             tel.SingletonLock(lockpath).acquire()
@@ -726,6 +749,8 @@ def test_fork_child_does_not_retain_singleton_ownership(tmp_path):
         assert fresh.held
         fresh.release()
     finally:
+        if ready_r is not None:
+            os.close(ready_r)
         os.close(w)  # release the child so it exits
         os.waitpid(pid, 0)
 
