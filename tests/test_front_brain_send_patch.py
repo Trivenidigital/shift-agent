@@ -504,34 +504,43 @@ def test_send_and_edit_layout_budget_before_screen(tmp_path):
 # ── deploy-gate wiring (the real check-shift-agent-patch.sh text) ──────────────
 
 def test_gate_script_wires_front_brain_checks():
+    """The INVARIANT is unchanged -- the deploy gate must refuse to ship a tree that
+    cannot prove the front-brain outbound screen is live. The MECHANISM changed on
+    Hermes 0.19.1: the screen moved out of gateway/platforms/whatsapp.py (a file that
+    no longer exists upstream) into the shift-agent-policy plugin, so the gate now
+    proves it by invoking the deterministic policy preflight instead of grepping for
+    markers in a deleted file. Asserting the old markers could never pass again.
+    """
     gate = GATE_SCRIPT.read_text(encoding="utf-8")
-    assert 'grep -q "BEGIN shift-agent-front-brain-send" "$WA"' in gate
-    assert 'grep -q "BEGIN shift-agent-front-brain-edit" "$WA"' in gate
-    assert "front-brain-send marker drifted from format_message anchor" in gate
-    assert "front-brain-edit marker drifted from /edit anchor" in gate
+    # the screen is still required, now via the canonical plugin implementation
+    assert "front_brain_screen_gateway_send" in gate
+    assert "class ScreenedWhatsAppAdapter" in gate
+    assert "src/plugins/shift-agent-policy" in gate
+    # ...and proven at runtime by the preflight, fail-closed both ways
+    assert "/usr/local/bin/shift-agent-policy-preflight" in gate
+    assert "preflight FAILED" in gate
+    assert "missing or not executable" in gate
 
 
-def test_gate_script_wires_turn_budget_checks():
+def test_gate_no_longer_asserts_the_superseded_in_tree_patch_architecture():
+    """Regression guard for the repair itself: the run.py / whatsapp.py marker and
+    anchor assertions attested an architecture that was superseded by the plugin, and
+    on 0.19.1 gateway/platforms/whatsapp.py does not exist at all -- so those checks
+    made the gate permanently unpassable. They must not come back."""
     gate = GATE_SCRIPT.read_text(encoding="utf-8")
-    # run.py boundary + adapter sentinel + BOTH drop-check markers are all pinned.
-    assert 'grep -q "BEGIN shift-agent-turn-send-budget" "$RUN"' in gate
-    assert 'grep -q "END shift-agent-turn-send-budget" "$RUN"' in gate
-    assert 'grep -q "BEGIN shift-agent-turn-budget-sentinel" "$WA"' in gate
-    assert 'grep -q "END shift-agent-turn-budget-sentinel" "$WA"' in gate
-    assert 'grep -q "BEGIN shift-agent-turn-budget-send-drop" "$WA"' in gate
-    assert 'grep -q "END shift-agent-turn-budget-send-drop" "$WA"' in gate
-    assert 'grep -q "BEGIN shift-agent-turn-budget-edit-drop" "$WA"' in gate
-    assert 'grep -q "END shift-agent-turn-budget-edit-drop" "$WA"' in gate
-    assert 'grep -q "_SHIFT_DROP_SEND = " "$WA"' in gate
-    assert 'grep -q "content is _SHIFT_DROP_SEND" "$WA"' in gate
-    assert "turn-send-budget marker drifted from _prepare_inbound_message_text anchor" in gate
-    assert "turn-budget-send-drop marker drifted from format_message anchor" in gate
-    assert "turn-budget-edit-drop marker drifted from /edit anchor" in gate
-    # F2: the deploy gate asserts the enforcing safe_io symbol exists when the adapter
-    # patch is present (version-skew closure), gated to the sentinel marker.
-    assert 'PLATFORM=/opt/shift-agent' in gate
-    assert 'grep -q "def turn_send_budget_gate" "$PLATFORM/safe_io.py"' in gate
-    assert 'if grep -q "BEGIN shift-agent-turn-budget-sentinel" "$WA"; then' in gate
+    for obsolete in (
+        'grep -q "BEGIN shift-agent-front-brain-send" "$WA"',
+        'grep -q "BEGIN shift-agent-front-brain-edit" "$WA"',
+        'grep -q "BEGIN shift-agent-turn-send-budget" "$RUN"',
+        'grep -q "BEGIN shift-agent-turn-budget-sentinel" "$WA"',
+        'grep -q "_SHIFT_DROP_SEND = " "$WA"',
+        "front-brain-send marker drifted from format_message anchor",
+        "turn-send-budget marker drifted from _prepare_inbound_message_text anchor",
+    ):
+        assert obsolete not in gate, f"gate re-introduced a superseded assertion: {obsolete}"
+    # run.py itself still EXISTS on 0.19.1 and still hosts the hook surface the
+    # plugin depends on, so that one check is deliberately retained.
+    assert 'grep -q "pre_gateway_dispatch" "$RUN"' in gate
 
 
 # ── deploy-gate predicates driven against fixture trees (mirror the gate) ──────

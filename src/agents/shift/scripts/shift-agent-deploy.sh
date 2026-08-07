@@ -287,6 +287,19 @@ install_artifacts() {
     # + Shift-Agent-specific (shift-agent-*, send-coverage-message, etc.).
     install -m 755 src/platform/scripts/* /usr/local/bin/
     install -m 755 src/agents/shift/scripts/* /usr/local/bin/
+    # EXPLICIT named install for the policy preflight. It is already covered by the
+    # glob above, but it is named here deliberately and asserted by a focused test:
+    # it is hermes-gateway.service's ExecStartPre refusal gate AND the runtime proof
+    # invoked by tools/check-shift-agent-patch.sh, so its installation must be a
+    # visible, testable dependency rather than an incidental consequence of a glob.
+    # Fail the deploy loudly if it is absent instead of shipping a tree whose gate
+    # cannot prove WhatsApp screening is live.
+    if [ -f src/agents/shift/scripts/shift-agent-policy-preflight ]; then
+        install -m 755 src/agents/shift/scripts/shift-agent-policy-preflight /usr/local/bin/shift-agent-policy-preflight
+    else
+        echo "FATAL: src/agents/shift/scripts/shift-agent-policy-preflight missing from this tree" >&2
+        exit 1
+    fi
     # Rollback hygiene for files introduced after older tarballs. If a
     # rollback target predates this readiness CLI, remove the previously
     # installed copy instead of leaving residue outside the tarball surface.

@@ -30,6 +30,27 @@
 # is NOT content-sha-pinned here (same convention as the sender-id whatsapp.py
 # patch — protected by the commit pin + marker + anchor-proximity checks in
 # check-shift-agent-patch.sh), so no value below changes.
-HERMES_COMMIT=1e71b7180e5b4e84905b9a3086cf9cecca139562
-HERMES_VERSION=0.14.0
-BRIDGE_POST_PATCH_SHA256=94a13a926798d5c2e6e69dd4f227ef940f88e3076bab60333d1b92fa55680913
+#
+# 2026-08-07 re-baseline: Hermes 0.14.0 -> 0.19.1. The fleet upgrade to
+# commit cc4cab2f (tag v2026.7.30) landed 2026-08-01 but this file was never
+# regenerated, so the pin attested 0.14.0 while the runtime ran 0.19.1 and the
+# deploy gate could only pass under HERMES_PIN_OVERRIDE.
+#
+# ARCHITECTURE CHANGE recorded with this re-baseline: the Python-side patches
+# (gateway/run.py, gateway/platforms/whatsapp.py) were SUPERSEDED by the
+# shift-agent-policy Hermes plugin, which keeps the Hermes checkout stock. On
+# 0.19.1 the WhatsApp platform relocated to plugins/platforms/whatsapp/adapter.py
+# and gateway/platforms/whatsapp.py no longer exists. Only the bridge.js JS-side
+# patches remain in-tree, so BRIDGE_POST_PATCH_SHA256 is now the only content pin.
+#
+# BRIDGE_POST_PATCH_SHA256 below is REPRODUCIBLE, not a snapshot of the box:
+#   pristine 0.19.1 bridge.js  9e1c4745da7d385a56fe3e48ff510e94f577ccd4cd01daa66c02d69267226185
+#     + tools/hermes-patch-port-v0191/patch1_port_v0191.py
+#     + tools/hermes-patch-port-v0191/patch2_failclosed.py
+#   = f8bdb2ab... , byte-identical to the running bridge.
+# Caveat recorded honestly: both scripts hard-code ROOT=/usr/local/lib/hermes-agent,
+# so the reproduction used temporary copies differing by exactly that ONE line
+# (diff-verified). Same algorithm, root path redirected -- NOT "ran as-is".
+HERMES_COMMIT=cc4cab2f592e60a197e796506de9168f74baf3ea
+HERMES_VERSION=0.19.1
+BRIDGE_POST_PATCH_SHA256=f8bdb2abc2a2a5bc8f80b9eb6373fa67dc78a23793db92fd7e5552d11724bb0d
