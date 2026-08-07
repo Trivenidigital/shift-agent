@@ -9,7 +9,11 @@ Static assertions on the real tracked artifacts; no VPS, no network, no fork.
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 BASELINE = REPO / "tools" / "hermes-patch-baseline.txt"
@@ -147,16 +151,78 @@ def test_policy_plugin_is_tracked():
     assert POLICY.is_file(), "the screening plugin must be tracked (rsync --delete would remove it otherwise)"
 
 
-def test_bridge_anchor_threshold_accommodates_the_attested_0191_layout():
-    """The attested 0.19.1 bridge places the first sender-id BEGIN at line 207 and
-    messageQueue.push at 409 -> delta 202. The old 200 threshold was calibrated on
-    the 0.14 layout and made the gate fail on a bridge that hashes to the attested,
-    reproducible BRIDGE_POST_PATCH_SHA256 (i.e. exactly where our own patch scripts
-    put the block). Pin the widened bound so it cannot silently regress below the
-    measured value."""
+# ── bridge anchor proximity: widened, but STILL A REAL GUARD ───────────────
+# A bound-only assertion of ">= 202" would also accept 500 or 5000, i.e. it would
+# accept silently disabling the guard. These drive the REAL threshold parsed out of
+# the gate script against synthetic bridges, proving it was widened just enough to
+# admit the verified 0.19.1 layout while still rejecting genuine drift.
+
+ANCHOR_THRESHOLD = 260          # measured 0.19.1 delta is 202 (marker 207, anchor 409)
+MEASURED_0191_DELTA = 202
+
+
+def _gate_threshold() -> int:
     m = re.search(r'\[ "\$DIFF3" -le (\d+) \]', GATE_TEXT)
-    assert m, "bridge anchor-proximity check missing"
-    assert int(m.group(1)) >= 202, (
-        f"threshold {m.group(1)} is below the measured 0.19.1 delta of 202 — "
-        "the gate would fail on a correctly-patched, SHA-attested bridge"
+    assert m, "bridge anchor-proximity check missing from the gate"
+    return int(m.group(1))
+
+
+def _run_proximity(tmp_path, marker_line: int, anchor_line: int) -> int:
+    """Exercise the gate's own DIFF3 predicate, using the threshold parsed from the
+    real script, against a synthetic bridge.js with a known marker/anchor distance."""
+    total = max(marker_line, anchor_line) + 5
+    lines = ["// filler"] * total
+    lines[marker_line - 1] = "// BEGIN shift-agent-sender-id"
+    lines[anchor_line - 1] = "  messageQueue.push(msg)"
+    br = tmp_path / "bridge.js"
+    br.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    script = f'''
+BR="$1"
+BB=$(grep -n "BEGIN shift-agent-sender-id" "$BR" | head -1 | cut -d: -f1)
+BA=$(grep -n "messageQueue.push" "$BR" | head -1 | cut -d: -f1)
+[ -n "$BB" ] && [ -n "$BA" ] || exit 2
+DIFF3=$(( BB > BA ? BB - BA : BA - BB ))
+[ "$DIFF3" -le {_gate_threshold()} ] || exit 1
+exit 0
+'''
+    return subprocess.run([_BASH, "-c", script, "_", str(br)]).returncode
+
+
+def _working_bash() -> str | None:
+    """shutil.which() only proves PATH resolution, not executability -- on Windows it
+    can resolve to a WSL relay whose /bin/bash does not exist. Probe it."""
+    exe = shutil.which("bash")
+    if not exe:
+        return None
+    try:
+        if subprocess.run([exe, "-c", "exit 0"], capture_output=True, timeout=15).returncode == 0:
+            return exe
+    except Exception:  # noqa: BLE001 - any launch failure means unusable
+        pass
+    return None
+
+
+_BASH = _working_bash()
+requires_bash = pytest.mark.skipif(_BASH is None, reason="needs a working bash (POSIX CI)")
+
+
+def test_anchor_threshold_is_pinned_to_the_intended_bound():
+    assert _gate_threshold() == ANCHOR_THRESHOLD, (
+        "the proximity bound must stay pinned: a larger value would quietly disable "
+        "a guard we deliberately retained for the next re-baseline"
     )
+
+
+@requires_bash
+def test_anchor_guard_admits_the_verified_0191_layout(tmp_path):
+    # marker 207 / anchor 409 -> delta 202, the real attested placement
+    assert _run_proximity(tmp_path, 207, 409) == 0
+    assert _run_proximity(tmp_path, 1, 1 + MEASURED_0191_DELTA) == 0
+
+
+@requires_bash
+def test_anchor_guard_still_rejects_real_drift(tmp_path):
+    # exactly at the bound passes; one line beyond it fails — the guard is real
+    assert _run_proximity(tmp_path, 1, 1 + ANCHOR_THRESHOLD) == 0
+    assert _run_proximity(tmp_path, 1, 1 + ANCHOR_THRESHOLD + 1) == 1
+    assert _run_proximity(tmp_path, 1, 1 + 5000) == 1
