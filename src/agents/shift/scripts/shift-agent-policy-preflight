@@ -1,0 +1,116 @@
+#!/root/.hermes/hermes-agent/venv/bin/python
+"""shift-agent-policy-preflight — refuse gateway start unless screening is live.
+
+Runs from hermes-gateway.service ExecStartPre. A non-zero exit makes systemd
+refuse to start the unit.
+
+Why this exists as a separate preflight rather than an assertion inside the
+plugin: hermes_cli.plugins._load_plugin swallows every exception raised by a
+plugin's register() (it only logs a warning). So a plugin that fails to load is
+SILENT -- and worse, the bundled WhatsApp adapter's deferred loader is still
+registered, so the gateway would fall back to the stock, UNSCREENED adapter.
+Nothing inside the plugin can catch that, because nothing inside the plugin
+runs. This process asserts the end state from outside.
+
+Refuses to start when ANY of these is false:
+  A. safe_io.front_brain_screen_gateway_send is importable
+  B. the shift-agent-policy plugin is enabled and loaded
+  C. the pre_gateway_dispatch sender-context hook is registered
+  D. the registered 'whatsapp' platform resolves to OUR screening subclass
+     (proves the last-writer-wins override actually took effect at runtime)
+"""
+import sys
+import traceback
+
+HERMES_ROOT = "/usr/local/lib/hermes-agent"
+sys.path.insert(0, HERMES_ROOT)
+
+FAILURES = []
+
+
+def fail(code, msg):
+    FAILURES.append(f"[{code}] {msg}")
+    print(f"REFUSE  {code}: {msg}", file=sys.stderr)
+
+
+def ok(code, msg):
+    print(f"ok      {code}: {msg}")
+
+
+# ── A. screening import ────────────────────────────────────────────────
+try:
+    if "/opt/shift-agent" not in sys.path:
+        sys.path.insert(0, "/opt/shift-agent")
+    from safe_io import front_brain_screen_gateway_send  # noqa: F401
+
+    ok("A", "safe_io.front_brain_screen_gateway_send importable")
+except Exception as exc:
+    fail("A", f"front-brain screen unimportable: {type(exc).__name__}: {exc}")
+
+# ── B/C/D. plugin discovery + override verification ────────────────────
+try:
+    from hermes_cli.plugins import discover_plugins, get_plugin_manager
+
+    discover_plugins(force=True)
+    mgr = get_plugin_manager()
+
+    loaded = None
+    for key, plug in getattr(mgr, "_plugins", {}).items():
+        if key == "shift-agent-policy" or getattr(plug.manifest, "name", "") == "shift-agent-policy":
+            loaded = plug
+            break
+
+    if loaded is None:
+        fail("B", "shift-agent-policy plugin not discovered (check "
+                  "/root/.hermes/plugins/shift-agent-policy)")
+    elif not getattr(loaded, "enabled", False):
+        fail("B", f"shift-agent-policy discovered but NOT enabled: "
+                  f"{getattr(loaded, 'error', 'unknown reason')} "
+                  f"(add it to plugins.enabled in config.yaml)")
+    else:
+        ok("B", "shift-agent-policy plugin enabled and loaded")
+
+    if mgr.has_hook("pre_gateway_dispatch"):
+        ok("C", "pre_gateway_dispatch sender-context hook registered")
+    else:
+        fail("C", "pre_gateway_dispatch hook NOT registered -- inbound "
+                  "sender-context defence would be absent")
+
+    from gateway.config import PlatformConfig
+    from gateway.platform_registry import platform_registry
+
+    entry = platform_registry.get("whatsapp")
+    if entry is None:
+        fail("D", "no 'whatsapp' platform registered at all")
+    else:
+        cfg = PlatformConfig()
+        if not hasattr(cfg, "extra") or cfg.extra is None:
+            cfg.extra = {}
+        # Call the factory directly so this check is independent of check_fn()
+        # (node availability) -- we are asserting WHICH class serves whatsapp.
+        adapter = entry.adapter_factory(cfg)
+        cls = type(adapter)
+        if cls.__name__ == "ScreenedWhatsAppAdapter" and cls.__module__.startswith(
+            "hermes_plugins.shift_agent_policy"
+        ):
+            ok("D", f"whatsapp resolves to {cls.__module__}.{cls.__name__} "
+                    f"(plugin={entry.plugin_name})")
+        else:
+            fail("D", f"whatsapp resolves to UNSCREENED {cls.__module__}."
+                      f"{cls.__name__} -- the plugin override did not take effect")
+except Exception as exc:
+    fail("BCD", f"{type(exc).__name__}: {exc}")
+    traceback.print_exc()
+
+if FAILURES:
+    print(
+        "\nshift-agent-policy preflight FAILED -- refusing to start the gateway "
+        "rather than relay unscreened WhatsApp traffic:",
+        file=sys.stderr,
+    )
+    for f in FAILURES:
+        print("  " + f, file=sys.stderr)
+    sys.exit(1)
+
+print("OK: shift-agent-policy preflight passed (screening is live)")
+sys.exit(0)

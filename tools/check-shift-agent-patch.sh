@@ -164,60 +164,63 @@ if [ "$ACTUAL_BRIDGE_SHA" != "$PINNED_BRIDGE_SHA" ]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────
-# 3. Patch markers present in all 3 target files (fail-closed)
+# 3. Policy architecture (plugin + preflight) + bridge markers (fail-closed)
 # ─────────────────────────────────────────────────────────────────
 
-for f in "$RUN" "$WA" "$BR"; do
-    [ -f "$f" ] || fail "missing target file $f"
-    grep -q "BEGIN shift-agent-sender-id" "$f" || fail "$f missing BEGIN shift-agent-sender-id marker"
-    grep -q "END shift-agent-sender-id" "$f" || fail "$f missing END shift-agent-sender-id marker"
-done
+# ARCHITECTURE NOTE (2026-08-07, Hermes 0.19.1). The Python-side patches that
+# used to be injected into gateway/run.py and gateway/platforms/whatsapp.py were
+# SUPERSEDED by the shift-agent-policy Hermes plugin (src/plugins/shift-agent-policy/),
+# whose stated purpose is to keep the Hermes checkout stock. On 0.19.1 the WhatsApp
+# platform RELOCATED to plugins/platforms/whatsapp/adapter.py and
+# gateway/platforms/whatsapp.py NO LONGER EXISTS -- so every former $WA marker
+# assertion attested an architecture that is gone and could never pass again. They
+# are replaced here by checks against the CURRENT architecture. The bridge.js
+# (JS-side) patches are unchanged and are still asserted, below and in section 2.
 
-# Front-brain Phase-1 outbound-send screen (2026-07-12). LLM free-form replies
-# exit via WhatsAppAdapter.send() (bridge /send), NOT via safe_io.bridge_post, so
-# this patch is the ONLY screen on them. Fail-closed so a Hermes upgrade that
-# drops the patch cannot silently ship un-screened LLM replies to customers.
-grep -q "BEGIN shift-agent-front-brain-send" "$WA" || fail "$WA missing BEGIN shift-agent-front-brain-send marker (LLM outbound replies would send UN-screened)"
-grep -q "END shift-agent-front-brain-send" "$WA" || fail "$WA missing END shift-agent-front-brain-send marker"
-# edit_message() is the SECOND text-egress path (streamed drafts + finalized
-# answer via stream_consumer.py). Config-proof coverage requires screening it too.
-grep -q "BEGIN shift-agent-front-brain-edit" "$WA" || fail "$WA missing BEGIN shift-agent-front-brain-edit marker (streamed/finalized LLM edits would send UN-screened)"
-grep -q "END shift-agent-front-brain-edit" "$WA" || fail "$WA missing END shift-agent-front-brain-edit marker"
+# 3a. Canonical policy implementation must exist in the tree being deployed. If it
+# does not, the deploy would rsync --delete it off the box and leave WhatsApp
+# UNSCREENED, so this is fail-closed.
+POLICY_SRC="$SCRIPT_DIR/../src/plugins/shift-agent-policy"
+[ -f "$POLICY_SRC/policy.py" ] || fail "missing $POLICY_SRC/policy.py -- the screening policy plugin is absent from this tree; deploying would remove it and relay UNSCREENED WhatsApp traffic"
+[ -f "$POLICY_SRC/plugin.yaml" ] || fail "missing $POLICY_SRC/plugin.yaml -- the plugin would not be discovered by Hermes"
+[ -f "$POLICY_SRC/__init__.py" ] || fail "missing $POLICY_SRC/__init__.py -- the plugin package would not import"
+grep -q "class ScreenedWhatsAppAdapter" "$POLICY_SRC/policy.py" || fail "$POLICY_SRC/policy.py does not define ScreenedWhatsAppAdapter (outbound egress screen absent)"
+grep -q "front_brain_screen_gateway_send" "$POLICY_SRC/policy.py" || fail "$POLICY_SRC/policy.py does not reference front_brain_screen_gateway_send (outbound screen would not be consulted)"
+grep -q "pre_gateway_dispatch" "$POLICY_SRC/policy.py" || fail "$POLICY_SRC/policy.py does not register pre_gateway_dispatch (inbound sender-context defence absent)"
 
-# Per-INBOUND-TURN send budget (2026-07-22 — the TRUE volume cap #641 couldn't
-# provide). run.py sets a fresh per-turn budget at the inbound-turn boundary; the
-# adapter wrapper returns a not-send sentinel once the turn is exhausted so
-# send()/edit_message() relay NOTHING. Fail-closed so a Hermes upgrade that drops
-# EITHER half (the run.py boundary OR the adapter sentinel drop-check) cannot
-# silently ship the un-capped send path.
-grep -q "BEGIN shift-agent-turn-send-budget" "$RUN" || fail "$RUN missing BEGIN shift-agent-turn-send-budget marker (per-turn send cap boundary would be absent → sends would fail closed)"
-grep -q "END shift-agent-turn-send-budget" "$RUN" || fail "$RUN missing END shift-agent-turn-send-budget marker"
-grep -q "_SHIFT_DROP_SEND = " "$WA" || fail "$WA missing _SHIFT_DROP_SEND sentinel definition (per-turn send cap could not suppress a relay)"
-grep -q "content is _SHIFT_DROP_SEND" "$WA" || fail "$WA missing 'content is _SHIFT_DROP_SEND' drop-check in send()/edit_message() (per-turn send cap would never suppress)"
-# INSTALLER-CORRECTNESS (2026-07-24): the adapter-side sentinel + send() drop-check
-# + edit_message() drop-check now each carry their OWN marker (independent of
-# shift-agent-front-brain-send) so the volume cap installs on a tree that already
-# carries the front-brain screen. REQUIRE all three unconditionally so EVERY partial
-# combination fails closed (e.g. run.py boundary present but the send-drop absent →
-# the send-drop grep below fails → deploy blocked); no half-capped tree ships.
-grep -q "BEGIN shift-agent-turn-budget-sentinel" "$WA" || fail "$WA missing BEGIN shift-agent-turn-budget-sentinel marker (per-turn send cap sentinel absent → cap cannot suppress a relay)"
-grep -q "END shift-agent-turn-budget-sentinel" "$WA" || fail "$WA missing END shift-agent-turn-budget-sentinel marker"
-grep -q "BEGIN shift-agent-turn-budget-send-drop" "$WA" || fail "$WA missing BEGIN shift-agent-turn-budget-send-drop marker (send() would never suppress on an exhausted turn)"
-grep -q "END shift-agent-turn-budget-send-drop" "$WA" || fail "$WA missing END shift-agent-turn-budget-send-drop marker"
-grep -q "BEGIN shift-agent-turn-budget-edit-drop" "$WA" || fail "$WA missing BEGIN shift-agent-turn-budget-edit-drop marker (edit_message() would never suppress on an exhausted turn)"
-grep -q "END shift-agent-turn-budget-edit-drop" "$WA" || fail "$WA missing END shift-agent-turn-budget-edit-drop marker"
+# 3b. The canonical preflight must ship in this tree. It is the gateway's own
+# ExecStartPre refusal gate; without it a silently-unloaded plugin would fall back
+# to the stock UNSCREENED adapter with no error.
+PREFLIGHT_SRC="$SCRIPT_DIR/../src/agents/shift/scripts/shift-agent-policy-preflight"
+[ -f "$PREFLIGHT_SRC" ] || fail "missing $PREFLIGHT_SRC -- the policy preflight is not in this tree; the gateway would start without proving screening is live"
 
-# F2 (version-skew closure): the turn-budget ADAPTER lazily imports safe_io from the
-# flat platform install and calls turn_send_budget_gate. If the adapter is patched but
-# the deployed /opt/shift-agent/safe_io.py lacks that enforcing symbol (whatsapp.py and
-# safe_io.py shipped out of lockstep), an ARMED budget cannot be consulted. Assert the
-# symbol at DEPLOY so the skew is caught here, not at runtime. Gated to the sentinel
-# marker so a tree WITHOUT the budget patch does not require it.
-PLATFORM=/opt/shift-agent
-if grep -q "BEGIN shift-agent-turn-budget-sentinel" "$WA"; then
-    [ -f "$PLATFORM/safe_io.py" ] || fail "$PLATFORM/safe_io.py missing while the turn-budget adapter patch is installed (enforcing gate symbol cannot be present)"
-    grep -q "def turn_send_budget_gate" "$PLATFORM/safe_io.py" || fail "$PLATFORM/safe_io.py missing 'def turn_send_budget_gate' while the turn-budget adapter patch is installed (version skew: armed adapter, no enforcing gate)"
+# 3c. RUNTIME proof. Invoke the deployed deterministic preflight rather than
+# duplicating its logic: it asserts (A) the screen is importable, (B) the plugin is
+# enabled AND loaded, (C) the pre_gateway_dispatch sender-context hook is
+# registered, and (D) 'whatsapp' resolves to OUR ScreenedWhatsAppAdapter -- i.e.
+# that the last-writer-wins override actually took effect at runtime. Non-zero exit
+# is fail-closed here exactly as it is for systemd.
+PREFLIGHT_BIN=/usr/local/bin/shift-agent-policy-preflight
+if [ -x "$PREFLIGHT_BIN" ]; then
+    if PREFLIGHT_OUT=$("$PREFLIGHT_BIN" 2>&1); then
+        info "policy preflight PASSED (screening live: plugin loaded, hook registered, ScreenedWhatsAppAdapter resolved)."
+    else
+        echo "$PREFLIGHT_OUT" >&2
+        fail "shift-agent-policy preflight FAILED -- WhatsApp screening is not provably live (see REFUSE lines above)"
+    fi
+else
+    fail "$PREFLIGHT_BIN missing or not executable -- cannot prove WhatsApp screening is live"
 fi
+
+# 3d. Bridge.js (JS-side) patch markers -- UNCHANGED by the plugin migration and
+# still the only screen on the CTA / sender-id bridge path.
+[ -f "$BR" ] || fail "missing target file $BR"
+grep -q "BEGIN shift-agent-sender-id" "$BR" || fail "$BR missing BEGIN shift-agent-sender-id marker"
+grep -q "END shift-agent-sender-id" "$BR" || fail "$BR missing END shift-agent-sender-id marker"
+grep -q "BEGIN shift-agent-cta-buttons" "$BR" || fail "$BR missing BEGIN shift-agent-cta-buttons marker"
+grep -q "END shift-agent-cta-buttons" "$BR" || fail "$BR missing END shift-agent-cta-buttons marker"
+
+PLATFORM=/opt/shift-agent
 
 # Bridge.js template-bypass patch — OBSOLETE in Hermes >= 0.12.0 (the
 # upstream chatter filter the patch extended was removed). The patch
@@ -231,22 +234,12 @@ if grep -qE "owner_bypass|FILTER_OWNER_JID" "$BR" 2>/dev/null; then
 fi
 
 # ─────────────────────────────────────────────────────────────────
-# 4. Anchor proximity — markers near expected upstream symbols
+# 4. Anchor proximity — bridge.js markers near expected upstream symbols
 # ─────────────────────────────────────────────────────────────────
 
-# run.py: INJECT-SITE marker (last BEGIN, near _prepare_inbound_message_text)
-RB=$(grep -n "BEGIN shift-agent-sender-id" "$RUN" | tail -1 | cut -d: -f1)
-RA=$(grep -n "_prepare_inbound_message_text" "$RUN" | head -1 | cut -d: -f1)
-[ -n "$RB" ] && [ -n "$RA" ] || fail "$RUN missing BEGIN marker or anchor symbol"
-DIFF=$(( RB > RA ? RB - RA : RA - RB ))
-[ "$DIFF" -le 60 ] || fail "$RUN BEGIN marker drifted from anchor (delta=$DIFF lines)"
-
-# whatsapp.py: _resolve_sender_context helper
-WB=$(grep -n "BEGIN shift-agent-sender-id" "$WA" | head -1 | cut -d: -f1)
-WA_=$(grep -n "_build_message_event\|_resolve_sender_context" "$WA" | head -1 | cut -d: -f1)
-[ -n "$WB" ] && [ -n "$WA_" ] || fail "$WA missing BEGIN marker or anchor symbol"
-DIFF2=$(( WB > WA_ ? WB - WA_ : WA_ - WB ))
-[ "$DIFF2" -le 50 ] || fail "$WA BEGIN marker drifted from anchor (delta=$DIFF2 lines)"
+# Only the bridge.js anchor survives the plugin migration: run.py and
+# whatsapp.py no longer carry our markers (see the architecture note in section 3),
+# so their proximity checks were removed rather than left to fail permanently.
 
 # bridge.js: messageQueue.push inject site
 BB=$(grep -n "BEGIN shift-agent-sender-id" "$BR" | head -1 | cut -d: -f1)
@@ -254,55 +247,6 @@ BA=$(grep -n "messageQueue.push" "$BR" | head -1 | cut -d: -f1)
 [ -n "$BB" ] && [ -n "$BA" ] || fail "$BR missing BEGIN marker or anchor symbol"
 DIFF3=$(( BB > BA ? BB - BA : BA - BB ))
 [ "$DIFF3" -le 200 ] || fail "$BR BEGIN marker drifted from anchor (delta=$DIFF3 lines)"
-
-# whatsapp.py: front-brain send-screen inject site. The LAST front-brain BEGIN
-# marker (the send-site one, after the module-level helper) must sit next to the
-# format_message(content) relay anchor inside send(). Drift => the screen call
-# may no longer wrap the composed reply.
-FBB=$(grep -n "BEGIN shift-agent-front-brain-send" "$WA" | tail -1 | cut -d: -f1)
-FBA=$(grep -n "formatted = self.format_message(content)" "$WA" | head -1 | cut -d: -f1)
-[ -n "$FBB" ] && [ -n "$FBA" ] || fail "$WA missing front-brain-send marker or format_message anchor"
-DIFF4=$(( FBB > FBA ? FBB - FBA : FBA - FBB ))
-[ "$DIFF4" -le 10 ] || fail "$WA front-brain-send marker drifted from format_message anchor (delta=$DIFF4 lines)"
-
-# whatsapp.py: front-brain edit-screen inject site — the edit marker must sit
-# next to the bridge /edit relay anchor inside edit_message(). Drift => streamed
-# / finalized edits may no longer be screened.
-FEB=$(grep -n "BEGIN shift-agent-front-brain-edit" "$WA" | head -1 | cut -d: -f1)
-FEA=$(grep -n '/edit"' "$WA" | head -1 | cut -d: -f1)
-[ -n "$FEB" ] && [ -n "$FEA" ] || fail "$WA missing front-brain-edit marker or /edit anchor"
-DIFF5=$(( FEB > FEA ? FEB - FEA : FEA - FEB ))
-[ "$DIFF5" -le 10 ] || fail "$WA front-brain-edit marker drifted from /edit anchor (delta=$DIFF5 lines)"
-
-# whatsapp.py: turn-budget send-drop inject site. The send drop-check sits just
-# above the front-brain-send screen call, so it must stay next to the
-# format_message(content) relay anchor. Drift => the volume cap no longer guards
-# the send path.
-TSB=$(grep -n "BEGIN shift-agent-turn-budget-send-drop" "$WA" | tail -1 | cut -d: -f1)
-TSA=$(grep -n "formatted = self.format_message(content)" "$WA" | head -1 | cut -d: -f1)
-[ -n "$TSB" ] && [ -n "$TSA" ] || fail "$WA missing turn-budget-send-drop marker or format_message anchor"
-DIFF7=$(( TSB > TSA ? TSB - TSA : TSA - TSB ))
-[ "$DIFF7" -le 12 ] || fail "$WA turn-budget-send-drop marker drifted from format_message anchor (delta=$DIFF7 lines)"
-
-# whatsapp.py: turn-budget edit-drop inject site — must stay next to the /edit
-# relay anchor (it sits just above the front-brain-edit screen call). Drift => the
-# volume cap no longer guards the streamed/finalized edit path.
-TEB=$(grep -n "BEGIN shift-agent-turn-budget-edit-drop" "$WA" | head -1 | cut -d: -f1)
-TEA=$(grep -n '/edit"' "$WA" | head -1 | cut -d: -f1)
-[ -n "$TEB" ] && [ -n "$TEA" ] || fail "$WA missing turn-budget-edit-drop marker or /edit anchor"
-DIFF8=$(( TEB > TEA ? TEB - TEA : TEA - TEB ))
-[ "$DIFF8" -le 15 ] || fail "$WA turn-budget-edit-drop marker drifted from /edit anchor (delta=$DIFF8 lines)"
-
-# run.py: per-inbound-turn send-budget inject site. The LAST turn-send-budget
-# BEGIN marker (the begin() call inside _prepare_inbound_message_text, after the
-# module-level flag block) must sit next to the _prepare_inbound_message_text
-# anchor. Drift => the per-turn budget may not be set at the inbound-turn boundary,
-# so every send in an enabled turn fails closed.
-TBB=$(grep -n "BEGIN shift-agent-turn-send-budget" "$RUN" | tail -1 | cut -d: -f1)
-TBA=$(grep -n "_prepare_inbound_message_text" "$RUN" | head -1 | cut -d: -f1)
-[ -n "$TBB" ] && [ -n "$TBA" ] || fail "$RUN missing turn-send-budget marker or _prepare_inbound_message_text anchor"
-DIFF6=$(( TBB > TBA ? TBB - TBA : TBA - TBB ))
-[ "$DIFF6" -le 60 ] || fail "$RUN turn-send-budget marker drifted from _prepare_inbound_message_text anchor (delta=$DIFF6 lines)"
 
 # Flyer Studio delivery depends on native media send support. Fail before
 # deploy if the pinned Hermes bridge lacks the companion endpoint used by
