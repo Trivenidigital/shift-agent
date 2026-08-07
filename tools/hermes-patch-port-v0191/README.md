@@ -31,22 +31,37 @@ executable bits (755 on the two patch scripts and the three Python probes) are p
 
 ## ✅ Bridge reproducibility — PROVEN 2026-08-07
 
-Run in an isolated `/tmp` tree (production untouched), starting from the pristine unpatched 0.19.1
-sources via `git show HEAD:<path>`:
+> **Precision, because this distinction matters.** The committed scripts were **NOT** runnable as-is
+> for this proof. Both hard-code `ROOT = "/usr/local/lib/hermes-agent"` with no override, so running
+> them unmodified would have targeted **production**. The proof therefore used **temporary copies**
+> whose *only* difference from the committed files is that single `ROOT` line. Claim exactly this —
+> *"same algorithm, root path redirected"* — never *"the committed script ran directly."*
+
+Exact chain, all writes confined to `/tmp`, production untouched:
 
 ```
-pristine  bridge.js         9e1c4745da7d385a56fe3e48ff510e94f577ccd4cd01daa66c02d69267226185
-  + patch1_port_v0191.py -> 70c2aaeed99e58f785d385d5bd8936ccd351b1687e29cec1f1549be917adb8af
-  + patch2_failclosed.py -> f8bdb2abc2a2a5bc8f80b9eb6373fa67dc78a23793db92fd7e5552d11724bb0d
-running production bridge  f8bdb2abc2a2a5bc8f80b9eb6373fa67dc78a23793db92fd7e5552d11724bb0d   ✅ MATCH
+tracked patch1_port_v0191.py / patch2_failclosed.py   (as committed here)
+  → temporary copy, one substitution:
+        -ROOT = "/usr/local/lib/hermes-agent"
+        +ROOT = "<tmpdir>/hermes"
+    verified with `diff`: EXACTLY ONE changed line per script, and it is the ROOT constant
+  → isolated pristine 0.19.1 tree, populated via `git show HEAD:<path>`
+        bridge.js  9e1c4745da7d385a56fe3e48ff510e94f577ccd4cd01daa66c02d69267226185
+  → patch1  →      70c2aaeed99e58f785d385d5bd8936ccd351b1687e29cec1f1549be917adb8af
+  → patch2  →      f8bdb2abc2a2a5bc8f80b9eb6373fa67dc78a23793db92fd7e5552d11724bb0d
+running production bridge
+                   f8bdb2abc2a2a5bc8f80b9eb6373fa67dc78a23793db92fd7e5552d11724bb0d   ✅ BYTE-IDENTICAL
 ```
 
 `BRIDGE_POST_PATCH_SHA256=f8bdb2ab…` is therefore a **reproducible post-patch attestation** derived
-from versioned source — no longer merely "the hash of today's box". This is the precondition for
-regenerating `tools/hermes-patch-baseline.txt`.
+from versioned source — no longer merely "the hash of today's box" — subject to the root-path
+redirection stated above. This is the precondition for regenerating `tools/hermes-patch-baseline.txt`.
 
 Both scripts are marker-guarded and idempotent, and abort fail-closed (`rc=2`, no files written) if an
 anchor is missing or ambiguous.
+
+**FOLLOW_UP:** adding a `--root` option (defaulting to the current constant) would make this proof
+runnable directly from the committed files, removing the copy step and this caveat entirely.
 
 ## ⚠⚠ DO NOT re-run these scripts against production
 
