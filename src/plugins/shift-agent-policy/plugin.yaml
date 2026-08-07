@@ -1,0 +1,13 @@
+name: shift-agent-policy
+label: Shift Agent WhatsApp Policy
+kind: platform
+version: 1.0.0
+description: >
+  Shift Agent application/security policy for the Hermes WhatsApp platform.
+  Replaces the bundled WhatsApp adapter with a screening subclass so every
+  free-form outbound reply (send and streamed edit_message) passes through the
+  front-brain egress screen, fail-closed on exception or timeout. Also registers
+  a pre_gateway_dispatch hook that stamps an authenticated sender-context block
+  onto inbound messages and sanitises untrusted bodies against prompt injection.
+  Supersedes the in-tree core patches so the Hermes checkout stays stock.
+author: Shift Agent
