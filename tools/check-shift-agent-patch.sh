@@ -241,12 +241,24 @@ fi
 # whatsapp.py no longer carry our markers (see the architecture note in section 3),
 # so their proximity checks were removed rather than left to fail permanently.
 
-# bridge.js: messageQueue.push inject site
+# bridge.js: messageQueue.push inject site.
+# Threshold 200 -> 260 (2026-08-07). The 200 was calibrated against the Hermes
+# 0.14 bridge layout. On the attested 0.19.1 bridge the first BEGIN marker (the
+# module-level sender-id helper block) sits at line 207 and messageQueue.push at
+# line 409 — delta 202, i.e. two lines over a threshold that upstream growth had
+# simply outrun. The patch is NOT misplaced: this bridge hashes to the attested
+# BRIDGE_POST_PATCH_SHA256, which is reproducible by applying our own patch
+# scripts to the pristine 0.19.1 bridge, so 202 is exactly where our algorithm
+# puts the block. Widened with headroom rather than removed: once the content SHA
+# pin above passes, this check is largely redundant, but it still earns its place
+# at the NEXT re-baseline, when the SHA legitimately changes and we want a cheap
+# signal that the block landed somewhere sensible rather than at the far end of
+# the file.
 BB=$(grep -n "BEGIN shift-agent-sender-id" "$BR" | head -1 | cut -d: -f1)
 BA=$(grep -n "messageQueue.push" "$BR" | head -1 | cut -d: -f1)
 [ -n "$BB" ] && [ -n "$BA" ] || fail "$BR missing BEGIN marker or anchor symbol"
 DIFF3=$(( BB > BA ? BB - BA : BA - BB ))
-[ "$DIFF3" -le 200 ] || fail "$BR BEGIN marker drifted from anchor (delta=$DIFF3 lines)"
+[ "$DIFF3" -le 260 ] || fail "$BR BEGIN marker drifted from anchor (delta=$DIFF3 lines)"
 
 # Flyer Studio delivery depends on native media send support. Fail before
 # deploy if the pinned Hermes bridge lacks the companion endpoint used by
