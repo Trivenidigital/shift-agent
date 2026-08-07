@@ -1397,6 +1397,12 @@ PY
     # unit files are installed above but arming is a one-time operator step:
     #   systemctl daemon-reload && systemctl enable --now openrouter-balance-check.timer
     # (2026-07-06 ops-hardening; see the timer unit's comment.)
+    # Hermes version-check monitor (read-only; reports upstream vs pinned baseline,
+    # never mutates Hermes/gateway/baseline/skills). Unlike the sibling
+    # openrouter-balance-check timer above, this one IS enabled here: it is already
+    # enabled+active in production (weekly, last fired 2026-08-03), and `enable --now`
+    # is idempotent, so this reproduces the live state rather than changing it.
+    systemctl enable --now hermes-version-check.timer 2>/dev/null || true
 
     # 2026-05-04 canonical-cleanup: F8/F9 watchdog files were deleted from the
     # repo (cf-router plugin was meant to take over in PR-CF6). F8

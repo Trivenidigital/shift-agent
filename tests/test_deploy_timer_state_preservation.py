@@ -63,6 +63,11 @@ EXPECTED_OTHER_ENABLES = sorted([
     "systemctl enable --now check-corrupt-state.timer 2>/dev/null || true",
     "systemctl enable --now prune-expense-receipts.timer 2>/dev/null || true",
     "systemctl enable --now check-compliance-deadlines.timer 2>/dev/null || true",
+    # Added deliberately by the Hermes version-check monitor PR (#509) — this is the
+    # guard working as designed, not drift. The monitor's timer is already enabled and
+    # active in production; `enable --now` is idempotent, so the deploy line reproduces
+    # the live state. Nothing above this line was modified.
+    "systemctl enable --now hermes-version-check.timer 2>/dev/null || true",
 ])
 
 
