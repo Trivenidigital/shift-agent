@@ -29,6 +29,7 @@ ARCHETYPES = (
     "event",
     "festival_dessert",
     "weekend_one_price",
+    "shared_price",
 )
 
 # Occasion names that mark an EVENT archetype (specific festivals/occasions — NOT the
@@ -251,6 +252,15 @@ def classify_archetype(
             return "festival_dessert"
         if _shared_price(facts) and _covers_weekend(_schedule(facts) or _value_of("schedule", facts)):
             return "weekend_one_price"
+        # A flat/shared price with NO weekend schedule (or no schedule at all) is a
+        # legitimate campaign — weekend_one_price (the only other shared-price archetype)
+        # requires a weekend schedule and its templates carry the word "weekend" which
+        # the temporal firewall rejects against an empty schedule. shared_price classifies
+        # on the GROUNDED shared price alone (lowest precedence, so the more-specific
+        # archetypes above still win) and its templates carry no day word — so the price
+        # reaches the customer instead of being dropped to the bare campaign_title.
+        if _shared_price(facts):
+            return "shared_price"
         return "none"
     except Exception:  # pragma: no cover - public API must never raise
         return "none"
@@ -286,6 +296,16 @@ def compose_archetype_headlines(
                 out.append(f"{price} favorites all weekend.")
             out.append("Weekend favorites, one easy price.")
             out.append("One price. Weekend favorites.")
+        elif arch == "shared_price":
+            # Flat shared price, no day constraint. Templates carry the GROUNDED price
+            # (verified via _is_grounded_slot) and NO day/temporal word, so they pass the
+            # resolver's temporal firewall even with an empty schedule. The no-slot
+            # fallback never names a price (fail-closed, never fabricates one).
+            price = _shared_price(facts)
+            if price and _is_grounded_slot(price, facts):
+                out.append(f"{price} for anything on the menu.")
+                out.append(f"One price: {price}. Your choice.")
+            out.append("One easy price for the whole menu.")
         elif arch == "combo":
             if _combo_count(facts) >= 2:
                 out.append("Two combos. One easy choice.")
