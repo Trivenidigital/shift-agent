@@ -114,7 +114,8 @@ def classify_update(local: dict, upstream: dict) -> dict:
             "Do NOT auto-update. Custom WhatsApp patches (sender-id-context + CTA "
             "buttons) are anchored to the pinned Hermes internals and will fail-closed "
             "on upgrade. Port the patches to the new version OR migrate to the official "
-            "WhatsApp Business Cloud API before updating. See the Hermes 0.17 upgrade plan."
+            "WhatsApp Business Cloud API before updating. Review the installed Hermes "
+            "version and patch baseline before taking upgrade action."
         )
     else:
         action = "Update available. Review release notes; no local custom patches recorded."

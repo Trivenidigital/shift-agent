@@ -140,6 +140,53 @@ def test_should_alert_false_when_not_update_available():
     assert hvc.should_alert(None, rep) is False
 
 
+def test_should_alert_fires_when_severity_changes():
+    # same version, but the risk classification escalated ⇒ the action we owe changed
+    prior = {"status": "update_available", "severity": "minor", "patch_port_required": True,
+             "latest": {"version": "0.17.0", "commit": "a" * 40}}
+    rep = {"status": "update_available", "severity": "breaking", "patch_port_required": True,
+           "latest": {"version": "0.17.0", "commit": "a" * 40}}
+    assert hvc.should_alert(prior, rep) is True
+
+
+def test_should_alert_fires_when_patch_port_required_changes():
+    # same version+severity, but the patch-port obligation appeared ⇒ actionable change
+    prior = {"status": "update_available", "severity": "minor", "patch_port_required": False,
+             "latest": {"version": "0.17.0", "commit": "a" * 40}}
+    rep = {"status": "update_available", "severity": "minor", "patch_port_required": True,
+           "latest": {"version": "0.17.0", "commit": "a" * 40}}
+    assert hvc.should_alert(prior, rep) is True
+
+
+def test_should_alert_fires_when_status_changes_into_update_available():
+    # up_to_date -> update_available is the canonical newly-actionable transition
+    prior = {"status": "up_to_date", "severity": "none", "patch_port_required": False,
+             "latest": {"version": "0.14.0", "commit": "a" * 40}}
+    rep = {"status": "update_available", "severity": "minor", "patch_port_required": True,
+           "latest": {"version": "0.17.0", "commit": "a" * 40}}
+    assert hvc.should_alert(prior, rep) is True
+
+
+def test_should_alert_false_on_recovery_out_of_update_available():
+    # update_available -> up_to_date must NOT page: nothing is owed once we are current
+    prior = {"status": "update_available", "severity": "minor", "patch_port_required": True,
+             "latest": {"version": "0.17.0", "commit": "a" * 40}}
+    rep = {"status": "up_to_date", "severity": "none", "patch_port_required": False,
+           "latest": {"version": "0.17.0", "commit": "a" * 40}}
+    assert hvc.should_alert(prior, rep) is False
+
+
+def test_report_still_records_commit_churn_that_does_not_alert():
+    # the throttle suppresses the PAGE, never the RECORD: the new commit must still
+    # reach the report so history/forensics stay complete.
+    prior = {"status": "update_available", "severity": "minor", "patch_port_required": True,
+             "latest": {"version": "0.17.0", "commit": "a" * 40}}
+    rep = {"status": "update_available", "severity": "minor", "patch_port_required": True,
+           "latest": {"version": "0.17.0", "commit": "b" * 40}}
+    assert hvc.should_alert(prior, rep) is False
+    assert rep["latest"]["commit"] == "b" * 40
+
+
 # --- build_report -----------------------------------------------------------
 
 def test_build_report_shape():
