@@ -23,6 +23,8 @@ import importlib.util
 import json
 import os
 import secrets
+import select
+import signal
 import stat
 import sys
 from datetime import datetime, timedelta, timezone
@@ -702,15 +704,50 @@ def test_fork_child_does_not_retain_singleton_ownership(tmp_path):
     lock = tel.SingletonLock(lockpath)
     lock.acquire()
     r, w = os.pipe()
+    # Deadlock guard only (see below): generous enough that it can never fire on a
+    # merely-slow runner, so it cannot reintroduce timing sensitivity.
+    _POST_FORK_READY_TIMEOUT_SEC = 30
+    # Readiness channel, child -> parent. The at-fork child handler that closes the
+    # inherited lock fd runs INSIDE os.fork() in the child, before fork() returns
+    # there -- but the PARENT's fork() returns concurrently, with no ordering between
+    # the two. Without an explicit handshake the parent can reach the fresh acquire()
+    # below while the child still holds the inherited flock, so the test would be
+    # asserting "the child's handler wins the race" rather than the invariant, and
+    # fails spuriously with SingletonLockError on a loaded runner. Synchronise on the
+    # event actually under test instead of hoping for a scheduling order.
+    ready_r, ready_w = os.pipe()
     pid = os.fork()
     if pid == 0:  # child
         os.close(w)
+        os.close(ready_r)
         try:
+            # Control reaching here means the post-fork handler has ALREADY run, so
+            # this byte positively signals "inherited lock fd closed" -- not merely
+            # "child was scheduled".
+            os.write(ready_w, b"x")
+            os.close(ready_w)
             os.read(r, 1)  # stay alive until the parent lets us exit
         finally:
             os._exit(0)
     os.close(r)
+    os.close(ready_w)
     try:
+        # Wait for the child to pass its post-fork cleanup. The PIPE is the only
+        # synchronisation mechanism -- the timeout below is a fail-fast deadlock
+        # guard, never a substitute for it. It can only ever FAIL the test: it never
+        # yields success, never retries the acquire, and never widens the window in
+        # the hope of winning a race.
+        rlist, _, _ = select.select([ready_r], [], [], _POST_FORK_READY_TIMEOUT_SEC)
+        if not rlist:
+            # Kill the child first so the waitpid() in `finally` cannot hang too.
+            os.kill(pid, signal.SIGKILL)
+            raise AssertionError(
+                "child failed to reach post-fork readiness within "
+                f"{_POST_FORK_READY_TIMEOUT_SEC}s (fail-fast guard)"
+            )
+        assert os.read(ready_r, 1) == b"x", "child never signalled post-fork readiness"
+        os.close(ready_r)
+        ready_r = None
         # parent alive + holding → a 3rd instance cannot acquire
         with pytest.raises(tel.SingletonLockError):
             tel.SingletonLock(lockpath).acquire()
@@ -726,6 +763,8 @@ def test_fork_child_does_not_retain_singleton_ownership(tmp_path):
         assert fresh.held
         fresh.release()
     finally:
+        if ready_r is not None:
+            os.close(ready_r)
         os.close(w)  # release the child so it exits
         os.waitpid(pid, 0)
 
