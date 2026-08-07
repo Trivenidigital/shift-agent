@@ -145,3 +145,18 @@ def test_preflight_is_tracked_executable_and_fail_closed():
 
 def test_policy_plugin_is_tracked():
     assert POLICY.is_file(), "the screening plugin must be tracked (rsync --delete would remove it otherwise)"
+
+
+def test_bridge_anchor_threshold_accommodates_the_attested_0191_layout():
+    """The attested 0.19.1 bridge places the first sender-id BEGIN at line 207 and
+    messageQueue.push at 409 -> delta 202. The old 200 threshold was calibrated on
+    the 0.14 layout and made the gate fail on a bridge that hashes to the attested,
+    reproducible BRIDGE_POST_PATCH_SHA256 (i.e. exactly where our own patch scripts
+    put the block). Pin the widened bound so it cannot silently regress below the
+    measured value."""
+    m = re.search(r'\[ "\$DIFF3" -le (\d+) \]', GATE_TEXT)
+    assert m, "bridge anchor-proximity check missing"
+    assert int(m.group(1)) >= 202, (
+        f"threshold {m.group(1)} is below the measured 0.19.1 delta of 202 — "
+        "the gate would fail on a correctly-patched, SHA-attested bridge"
+    )
