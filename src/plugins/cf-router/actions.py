@@ -47,6 +47,7 @@ THROTTLE_PATH = Path("/opt/shift-agent/state/cf-router-throttle.json")
 
 APPLY_OWNER_DECISION_BIN = Path("/usr/local/bin/apply-catering-owner-decision")
 APPLY_MENU_UPDATE_BIN = Path("/usr/local/bin/apply-menu-update")
+PARSE_MENU_PHOTO_BIN = Path("/usr/local/bin/parse-menu-photo")  # menu extractor
 NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
 CREATE_LEAD_BIN = Path("/usr/local/bin/create-catering-lead")  # F7 path
 CREATE_CATERING_PROPOSALS_BIN = Path("/usr/local/bin/create-catering-proposal-options")
@@ -72,6 +73,9 @@ IDENTIFY_SENDER_BIN = Path("/usr/local/bin/identify-sender")
 SEND_CATERING_ACK_BIN = Path("/usr/local/bin/send-catering-ack")
 
 SUBPROCESS_TIMEOUT_SEC = 30
+# A vision extraction over a full menu photo routinely outruns the 30s default
+# (measured on the Triveni box); the SKILL's LLM caller had no timeout at all.
+MENU_EXTRACT_TIMEOUT_SEC = 180
 FLYER_RENDER_TIMEOUT_SEC = 900
 ALERT_THROTTLE_SEC = 300  # Suppress duplicate Pushover alerts within 5 min
 F7_DISPATCHER_LOOKBACK_SEC = 5  # Grace window when scanning audit log
@@ -628,6 +632,27 @@ def find_menu_pending_by_code(code: str) -> Optional[dict]:
         return None
     except Exception:
         return None
+
+
+def find_menu_pending_by_update_id(update_id: str) -> Optional[dict]:
+    """Return the staged pending update ONLY if it is the one `update_id` names.
+
+    The durable half of the menu-ingestion receipt: `parse-menu-photo` reporting
+    an update_id on stdout is a CLAIM, and this is what turns it into evidence.
+    A missing store, an unreadable store, or a store holding a DIFFERENT
+    update_id all return None — the proposal the owner would be asked to approve
+    is not the one that was just extracted, so there is nothing to confirm.
+    """
+    if not update_id:
+        return None
+    try:
+        with MENU_PENDING_PATH.open() as f:
+            pending = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(pending, dict) or pending.get("update_id") != update_id:
+        return None
+    return pending
 
 
 # === Subprocess invocations ===
@@ -1971,6 +1996,36 @@ def audit_dispatcher_routed(
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
         sys.stderr.write(f"cf-router: dispatcher_routed audit emit failed (non-fatal): {e}\n")
+
+
+def invoke_parse_menu_photo(
+    *, image_path: str, source_image_id: str, sender_phone: str,
+) -> tuple[int, str, str]:
+    """Run the Catering-owned menu extractor — the ONE script
+    `update_catering_menu/SKILL.md` says is that SKILL's only job to call.
+
+    Same shape as invoke_shift_sick_call: the deterministic route owns WHEN the
+    script runs, the script owns everything it does (vision, extraction,
+    normalization, ambiguity notes, schema validation, code minting, the pending
+    write and the audit row). Returns (rc, stdout, stderr) verbatim so the caller
+    reads the script's documented exit codes rather than re-deriving success.
+    """
+    try:
+        result = subprocess.run(
+            [
+                str(PYTHON_BIN),
+                str(PARSE_MENU_PHOTO_BIN),
+                "--image-path", image_path,
+                "--source-image-id", source_image_id,
+                "--owner-phone", sender_phone,
+            ],
+            capture_output=True, text=True, timeout=MENU_EXTRACT_TIMEOUT_SEC,
+        )
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired as exc:
+        return 124, exc.stdout or "", exc.stderr or "timeout"
+    except OSError as exc:
+        return 127, "", str(exc)
 
 
 def invoke_shift_sick_call(*, chat_id: str, text: str, message_id: str) -> tuple[int, str, str]:

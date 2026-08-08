@@ -159,10 +159,17 @@ def _sha256(path: Path) -> str:
 _run_seq = [0]
 
 
-def _parse_menu_photo(box: _Box, *, source_image_id: str = MESSAGE_ID) -> dict:
-    """Run the REAL parse-menu-photo — the script the ceded SKILL must call —
+def _run_parse_menu_photo(
+    box: _Box, *, source_image_id: str = MESSAGE_ID,
+) -> tuple[int, str, str]:
+    """Run the REAL parse-menu-photo — the script the ceded route must call —
     bound to the sandbox, with only the vision call recorded. A FRESH module per
-    call: each invocation is its own process-of-record in production."""
+    call: each invocation is its own process-of-record in production.
+
+    Returns (rc, stdout, stderr) — the exact triple `actions.invoke_parse_menu_
+    photo` returns from its subprocess — so this stands in for the subprocess
+    boundary without weakening anything on either side of it.
+    """
     _run_seq[0] += 1
     mod = load_script(f"cession_parse_menu_photo_{_run_seq[0]}", SCRIPTS / "parse-menu-photo")
     for name, value in {
@@ -188,23 +195,48 @@ def _parse_menu_photo(box: _Box, *, source_image_id: str = MESSAGE_ID) -> dict:
         rc = e.code if isinstance(e.code, int) else 1
     finally:
         sys.argv = old_argv
-    assert rc == 0, (out.getvalue(), err.getvalue())
-    for line in reversed([ln for ln in out.getvalue().splitlines() if ln.strip()]):
+    return rc, out.getvalue(), err.getvalue()
+
+
+def _parse_menu_photo(box: _Box, *, source_image_id: str = MESSAGE_ID) -> dict:
+    """The same run, decoded — for cells that drive the extractor directly."""
+    rc, out, err = _run_parse_menu_photo(box, source_image_id=source_image_id)
+    assert rc == 0, (out, err)
+    for line in reversed([ln for ln in out.splitlines() if ln.strip()]):
         try:
             return json.loads(line)
         except json.JSONDecodeError:
             continue
-    raise AssertionError(f"parse-menu-photo emitted no JSON: {out.getvalue()!r}")
+    raise AssertionError(f"parse-menu-photo emitted no JSON: {out!r}")
 
 
 def _cede(monkeypatch, box: _Box, *, live_replay_guard: bool = False,
           message_id: str = MESSAGE_ID, role: str = "owner"):
     """Drive one inbound through the real dispatch. With `live_replay_guard` the
     cf-router inbound dedupe file is pointed at the sandbox, which also lifts the
-    pytest bypass in `mark_cf_router_inbound_seen` — so the guard is LIVE."""
+    pytest bypass in `mark_cf_router_inbound_seen` — so the guard is LIVE.
+
+    2026-08-08: the ceded route now runs the extractor itself, so this drives the
+    whole owner-menu workflow in one call. The unit harness's two menu stubs are
+    undone here — the REAL script executes, and the REAL pending store on disk is
+    what the route's update_id verification reads. Only the subprocess boundary is
+    bridged (in-process, same (rc, stdout, stderr) contract), because a Windows
+    dev box has no /usr/local/bin to spawn.
+    """
     hooks_mod, actions_mod = _load_plugin()
     real_seen = actions_mod.mark_cf_router_inbound_seen
+    real_verify = actions_mod.find_menu_pending_by_update_id
     s = _wire(monkeypatch, hooks_mod, actions_mod, role=role)
+    monkeypatch.setattr(actions_mod, "MENU_PENDING_PATH", box.pending)
+    monkeypatch.setattr(actions_mod, "find_menu_pending_by_update_id", real_verify)
+
+    def _real_extract(*, image_path, source_image_id, sender_phone):
+        s.menu_calls.append({"image_path": image_path,
+                             "source_image_id": source_image_id,
+                             "sender_phone": sender_phone})
+        return _run_parse_menu_photo(box, source_image_id=source_image_id)
+
+    monkeypatch.setattr(actions_mod, "invoke_parse_menu_photo", _real_extract)
     if live_replay_guard:
         monkeypatch.setattr(actions_mod, "CF_ROUTER_INBOUND_DEDUPE_PATH", box.dedupe)
         monkeypatch.setattr(actions_mod, "mark_cf_router_inbound_seen", real_seen)
@@ -233,26 +265,38 @@ def test_ceded_route_stages_a_pending_proposal_with_an_approval_code(monkeypatch
     import approval_code_pools
 
     result, s = _cede(monkeypatch, box)
-    assert result is None and s.primary_calls == []
-    assert s.reasons == ["menu_caption_ceded_to_dispatcher"]
-    assert not box.pending.exists(), "routing alone must stage nothing"
 
-    out = _parse_menu_photo(box)
+    # ONE inbound produced the whole workflow: no flyer arm, one extraction, a
+    # terminal result (no second routing decision), and a staged proposal.
+    assert s.primary_calls == []
+    assert s.reasons == ["menu_caption_ceded_to_dispatcher", "menu_ingestion_staged"]
+    assert result["action"] == "skip"
+    assert result["reason"].startswith("cf-router menu ingestion staged MU")
+    assert len(s.menu_calls) == 1
+    assert s.menu_calls[0] == {"image_path": MEDIA,
+                               "source_image_id": MESSAGE_ID,
+                               "sender_phone": OWNER_PHONE}
 
-    assert CODE_RE.match(out["confirmation_code"]), out["confirmation_code"]
-    assert out["item_count"] == 3
-    assert out["preview_text"].strip(), "the existing extraction-preview card"
     pending = json.loads(box.pending.read_text(encoding="utf-8"))
-    assert pending["confirmation_code"] == out["confirmation_code"]
+    assert CODE_RE.match(pending["confirmation_code"]), pending["confirmation_code"]
     assert pending["source_image_id"] == MESSAGE_ID
-    assert pending["update_id"] == out["update_id"]
     assert len(pending["extracted_items"]) == 3
     rows = _proposed_rows(box)
     assert len(rows) == 1
-    assert rows[0]["confirmation_code"] == out["confirmation_code"]
+    assert rows[0]["confirmation_code"] == pending["confirmation_code"]
     # The EXISTING approval mechanism now owns this code — no parallel registry.
-    assert out["confirmation_code"] in approval_code_pools.all_live_codes()
-    assert box.sent == [], "no outbound from routing or extraction"
+    assert pending["confirmation_code"] in approval_code_pools.all_live_codes()
+
+    # The owner's single reply carries THAT code and THAT proposal, and its
+    # context claims completion only because the durable store confirmed it.
+    assert len(s.sent) == 1
+    body, ctx = s.sent[0][1], s.sent[0][2]
+    assert pending["confirmation_code"] in body
+    assert pending["update_id"] in body
+    assert ctx.verified_action_result is True and ctx.claims_action_completed is True
+    assert ctx.action_id.endswith(pending["update_id"])
+    assert ctx.audit_row_id is None, "no receipt id exists; none may be invented"
+    assert box.sent == [], "nothing reached a real endpoint"
 
 
 def test_the_ceded_route_runs_the_deployed_ingestion_script(box):
@@ -266,25 +310,21 @@ def test_the_ceded_route_runs_the_deployed_ingestion_script(box):
 # ── Proofs 8 + 9: no approved state moves until the owner approves ──────────
 def test_routing_leaves_the_approved_menu_and_active_pricebook_byte_unchanged(
         monkeypatch, box):
-    """The cession only YIELDS to the dispatcher. It must not activate a
-    pricebook or mutate the approved menu — and neither must the extraction step
-    that follows it. Byte-level, against real pre-existing approved state."""
+    """The ceded route STAGES a proposal. It must not activate a pricebook or
+    mutate the approved menu — staging is the whole point of the preview-confirm
+    loop. Byte-level, against real pre-existing approved state."""
     menu_before = _sha256(box.menu)
     pricebook_before = _sha256(box.pricebook)
 
-    result, s = _cede(monkeypatch, box)
-
-    assert result is None and s.reasons == ["menu_caption_ceded_to_dispatcher"]
-    assert _sha256(box.menu) == menu_before, "the cession mutated the approved menu"
-    assert _sha256(box.pricebook) == pricebook_before, "the cession touched the pricebook"
-
-    out = _parse_menu_photo(box)
+    _result, s = _cede(monkeypatch, box)
 
     # The preview EXISTS — staging is expected and fine — and both COMMERCIAL
     # stores are still byte-identical. Mutation only past the #code approval.
-    assert box.pending.exists() and CODE_RE.match(out["confirmation_code"])
-    assert _sha256(box.menu) == menu_before, "extraction mutated the approved menu"
-    assert _sha256(box.pricebook) == pricebook_before, "extraction activated a pricebook"
+    assert s.reasons[-1] == "menu_ingestion_staged"
+    pending = json.loads(box.pending.read_text(encoding="utf-8"))
+    assert CODE_RE.match(pending["confirmation_code"])
+    assert _sha256(box.menu) == menu_before, "ingestion mutated the approved menu"
+    assert _sha256(box.pricebook) == pricebook_before, "ingestion activated a pricebook"
     assert box.sent == []
 
 
@@ -293,7 +333,6 @@ def test_the_previously_approved_menu_stays_active_through_preview(monkeypatch, 
     preview, the menu the owner approved EARLIER is still the live one — same
     version, same items. Nothing goes live until the `#code` + yes arrives."""
     _cede(monkeypatch, box)
-    _parse_menu_photo(box)
 
     live = json.loads(box.menu.read_text(encoding="utf-8"))
     assert live == APPROVED_MENU
@@ -313,22 +352,23 @@ def test_duplicate_delivery_yields_exactly_one_pending_update_and_one_code(
     pending update, one approval code. Without this the owner would get two codes
     for one photo and could approve the stale one."""
     first, s1 = _cede(monkeypatch, box, live_replay_guard=True)
-    assert first is None
-    assert s1.reasons == ["menu_caption_ceded_to_dispatcher"]
-
-    out = _parse_menu_photo(box)  # the hand-off the first delivery earned
+    assert s1.reasons == ["menu_caption_ceded_to_dispatcher", "menu_ingestion_staged"]
+    first_code = json.loads(box.pending.read_text(encoding="utf-8"))["confirmation_code"]
+    assert first["reason"].startswith("cf-router menu ingestion staged MU")
 
     second, s2 = _cede(monkeypatch, box, live_replay_guard=True)
 
     assert second == {"action": "skip", "reason": "cf-router duplicate inbound"}
     assert "menu_caption_ceded_to_dispatcher" not in s2.reasons, (
         "a replayed delivery must not cede a second time")
+    assert s2.menu_calls == [], "and must not run a second extraction"
     assert s2.primary_calls == [], "and must not fall through to flyer either"
-    # One hand-off ⇒ one staged proposal ⇒ one code, unchanged by the replay.
+    # One delivery ⇒ one extraction ⇒ one staged proposal ⇒ one code.
     pending = json.loads(box.pending.read_text(encoding="utf-8"))
-    assert pending["confirmation_code"] == out["confirmation_code"]
+    assert pending["confirmation_code"] == first_code
     assert len(_proposed_rows(box)) == 1, "ONE logical processing outcome"
-    assert box.sent == [], "and no duplicate outbound — no outbound at all"
+    assert s2.sent == [], "and no duplicate reply to the owner"
+    assert box.sent == [], "and no outbound reached a real endpoint"
 
 
 def test_the_pending_store_is_single_slot_by_construction(monkeypatch, box):
@@ -339,7 +379,7 @@ def test_the_pending_store_is_single_slot_by_construction(monkeypatch, box):
     second pending proposal from existing alongside the first."""
     menu_before = box.menu.read_bytes()
     _cede(monkeypatch, box)
-    first = _parse_menu_photo(box)
+    first = json.loads(box.pending.read_text(encoding="utf-8"))
     second = _parse_menu_photo(box)
 
     pending = json.loads(box.pending.read_text(encoding="utf-8"))
