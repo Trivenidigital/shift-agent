@@ -7045,6 +7045,25 @@ class ComplianceItemMarkedDone(_BaseEntry):
     sentinel_keys_pruned: int = Field(ge=0)
 
 
+class ComplianceItemUpserted(_BaseEntry):
+    """An item was added to (or updated in) state/compliance-items.json.
+
+    Wave-1 2026-08-08: the items file shipped documented as "operator-seeded"
+    with no seeding path in the repo, so every deployment read an empty list and
+    Agent #13 answered "nothing due" regardless of reality. `replaced` records
+    whether an existing id was overwritten, which is the difference between
+    seeding a calendar and silently editing a live deadline.
+    """
+    type: Literal["compliance_item_upserted"]
+    item_id: str = Field(min_length=1, max_length=40)
+    renewal_date: date
+    recurrence_days: int = Field(ge=0, le=3650)
+    category: str = Field(min_length=1, max_length=40)
+    actor: Literal["owner", "operator", "system"]
+    replaced: bool
+    previous_renewal_date: Optional[date] = None  # set only when replaced=True
+
+
 # ─────────────────────────────────────────────────────────────────
 # P&L Anomaly Detective audit variants (Agent #22 — PR-Agent22-v0.1 2026-05-04)
 # v0.1 ships these as scaffold; v0.2 anomaly-detection logic emits PnlAnomalyDetected,
@@ -7997,6 +8016,7 @@ LogEntry = Annotated[
         Annotated[ComplianceReminderSkipped, Tag("compliance_reminder_skipped")],
         Annotated[ComplianceReminderDeferred, Tag("compliance_reminder_deferred")],
         Annotated[ComplianceItemMarkedDone, Tag("compliance_item_marked_done")],
+        Annotated[ComplianceItemUpserted, Tag("compliance_item_upserted")],
         # PR-Agent22-v0.1 2026-05-04 — P&L Anomaly Detective scaffold
         Annotated[PnlAnomalyDetected, Tag("pnl_anomaly_detected")],
         Annotated[PnlAnomalyDeclined, Tag("pnl_anomaly_declined")],
@@ -8387,6 +8407,7 @@ __all__ = [
     "ComplianceReminderAttempted", "ComplianceReminderSent",
     "ComplianceReminderFailed", "ComplianceReminderSkipped",
     "ComplianceReminderDeferred", "ComplianceItemMarkedDone",
+    "ComplianceItemUpserted",
     # PR-Agent22-v0.1 — P&L Anomaly Detective
     "PnlAnomalyConfig", "PnlAnomalyDetected", "PnlAnomalyDeclined",
     # PR-Agent19-v0.1 — Equipment & Maintenance scaffold

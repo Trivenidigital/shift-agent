@@ -131,6 +131,23 @@ catering:
   deposit_pct: 0.25                 # 25% deposit
   stale_after_hours: 336            # 14 days — silent leads move to STALE
 
+# Agent #13 — Compliance Calendar. Default OFF (opt-in). Tracks licence/permit/
+# filing deadlines and answers the owner's "what's coming up?".
+#
+# The deadline list lives in state/compliance-items.json, NOT here — it is
+# mutable (mark-done advances the renewal date) and safe_io has no atomic YAML
+# writer. Seed it after enabling:
+#   add-compliance-item.py --id health_inspect_houston \
+#       --name "Health Inspection Houston" --category inspection \
+#       --renewal-date 2026-09-01 --recurrence-days 365 --agency HCPHTX
+# An empty items file is why the agent answers "nothing due" on a fresh box.
+# Categories: license_renewal | tax_filing | inspection | certification |
+#             insurance | other.  recurrence_days: 0 = one-shot.
+compliance:
+  enabled: false
+  advance_warning_days: [30, 14, 7, 3, 1]   # reminder gates, days before renewal
+  max_deferral_days: 7                      # skip rather than send a stale reminder
+
 # Agent #21 — Expense Bookkeeper. Default OFF (opt-in). v0.1 ships with
 # mocked QBOClient; v0.2 will swap to real QBO OAuth + write API.
 expense_bookkeeper:
