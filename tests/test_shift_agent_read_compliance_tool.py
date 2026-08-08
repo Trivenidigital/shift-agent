@@ -7,7 +7,10 @@ proven against the pinned 0.19.1 runtime before this code was written; that
 research harness is NOT recreated here. What these tests pin is our side of the
 contract, with `gateway.session_context` stubbed so they need no gateway.
 
-Linux-only: the populated paths load the store through safe_io (fcntl).
+Tests that need a POSIX host are marked `linux_only` — see the marker for the
+two reasons. Everything that runs portably (schema shape, identity-free
+arguments, unbound session, registration) stays unmarked and runs everywhere,
+including the Windows build gate.
 """
 from __future__ import annotations
 
@@ -26,9 +29,18 @@ REPO = Path(__file__).resolve().parent.parent
 PLUGIN_DIR = REPO / "src" / "plugins" / "shift-agent-read"
 PLATFORM_DIR = REPO / "src" / "platform"
 
+# Two distinct POSIX dependencies, both real:
+#   1. loading the store goes through safe_io, which uses fcntl;
+#   2. the fake identify-sender fixture is a `#!/usr/bin/env python3` script, so
+#      any test that must reach a resolved ROLE needs a POSIX exec. On Windows
+#      subprocess raises OSError, resolve_identity returns None, and the handler
+#      correctly reports `identity_unresolved` — right behavior, wrong precondition
+#      for those assertions. Production runs the Linux identify-sender kernel;
+#      making the synthetic fixture Windows-executable is not a product need.
 linux_only = pytest.mark.skipif(
     platform.system() == "Windows",
-    reason="store load depends on safe_io which uses fcntl (Linux only)",
+    reason="needs POSIX: safe_io/fcntl for store loads, and an executable "
+           "shebang fixture for identify-sender role resolution (Linux only)",
 )
 
 
@@ -163,6 +175,7 @@ def test_owner_succeeds(env):
     assert out["ok"] is True and out["source_status"] == "populated"
 
 
+@linux_only  # needs the shebang fixture to resolve role=employee
 def test_non_owner_refuses(env):
     out = json.loads(_tool("19045550200@s.whatsapp.net").handler({}))
     assert out == {"ok": False, "refused": "not_owner"}
@@ -181,6 +194,7 @@ def test_refusals_carry_no_items_key(env):
         assert "items" not in out and "in_window" not in out and "tracked_total" not in out
 
 
+@linux_only  # needs the shebang fixture to resolve role=employee
 def test_model_supplied_identity_arguments_cannot_grant_owner(env):
     spoof = {"owner": True, "role": "owner", "phone": "+19045550100"}
     out = json.loads(_tool("19045550200@s.whatsapp.net").handler(spoof))
@@ -189,6 +203,7 @@ def test_model_supplied_identity_arguments_cannot_grant_owner(env):
 
 # ── the three states ───────────────────────────────────────────────────────
 
+@linux_only  # owner must resolve before the store check is reached
 def test_missing_state_is_distinct(env):
     assert not (env / "state" / "compliance-items.json").exists()
     out = json.loads(_tool().handler({}))
