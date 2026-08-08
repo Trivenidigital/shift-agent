@@ -7322,6 +7322,32 @@ class FrontBrainOutboundRefused(_BaseEntry):
     template_fallback_used: bool = True
 
 
+class OutboundTurnOverrideApplied(_BaseEntry):
+    """A turn-bound deterministic override replaced the composed reply at the
+    gateway egress seam.
+
+    Emitted by `safe_io.front_brain_screen_gateway_send` when the exact current
+    turn — keyed (HERMES_SESSION_ID, HERMES_SESSION_MESSAGE_ID) — has a
+    registered replacement. The seam reads no wording: the substitution is
+    decided entirely by turn identity, which is what makes the W1 compliance
+    truthfulness invariant hold regardless of how the model phrased its answer.
+
+    Typed deliberately rather than left to the `_UnknownLogEntry` forward-compat
+    path. That shim accepted these rows (extra="allow", no field validation), so
+    nothing was lost — but a deterministic safety intervention that overrides
+    customer-visible text deserves a real variant, like every other intentional
+    entry here. The shim stays exactly as designed for genuinely unknown tags.
+
+    No message text is recorded: the substituted string is a bounded template
+    known from the emitting call site, and the composed text it replaced is the
+    model's, not evidence worth persisting.
+    """
+    type: Literal["outbound_turn_override_applied"]
+    chat_key_hash: str = Field(default="", max_length=64)
+    send_kind: Literal["gateway_send"] = "gateway_send"
+    logical_turn_id: str = ""
+
+
 class FrontBrainRequestQueued(_BaseEntry):
     """A customer asked the front-brain cohort for something not yet fulfillable
     (a theme/style change, a not-built feature) so the request was recorded in
@@ -8199,6 +8225,7 @@ LogEntry = Annotated[
         Annotated[FrontBrainReplyComposed, Tag("front_brain_reply_composed")],
         # Front-brain outbound enforcement — refusal audit (P0-3a)
         Annotated[FrontBrainOutboundRefused, Tag("front_brain_outbound_refused")],
+        Annotated[OutboundTurnOverrideApplied, Tag("outbound_turn_override_applied")],
         # Front-brain Phase-1 — durable unfulfillable-request queue (item 5)
         Annotated[FrontBrainRequestQueued, Tag("front_brain_request_queued")],
         # PR-5 — catering automation-control kernel (STOP/pause/opt-out + takeover)

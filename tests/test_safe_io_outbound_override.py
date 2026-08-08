@@ -122,22 +122,49 @@ def test_pre_agent_session_registration_cannot_match_post_rebind_turn(sio):
 
 
 @linux_only
-def test_concurrent_turns_do_not_leak(sio):
-    seen = {}
+def test_concurrent_turns_do_not_leak(sio, monkeypatch):
+    """Two turns genuinely in flight at once must not see each other's override.
 
-    def worker(label, sid, mid, register):
-        _install_session_stub(sid, mid)   # module-level stub; re-read per call below
-        if register:
-            sio.register_turn_outbound_override(TEXT)
-        seen[label] = (sid, mid)
+    The first version of this test defined a worker and never started a thread —
+    it was three sequential stub swaps asserting nothing about concurrency. The
+    P6 pre-implementation proof WAS threaded; the committed regression was not,
+    so the property was unpinned. It is pinned here.
 
-    # Registration under two distinct keys, then assert each resolves only itself.
-    _install_session_stub("sess-X", "msg-X")
-    sio.register_turn_outbound_override(TEXT)
-    _install_session_stub("sess-Y", "msg-Y")
-    assert sio.lookup_turn_outbound_override() is None
-    _install_session_stub("sess-X", "msg-X")
-    assert sio.lookup_turn_outbound_override() == TEXT
+    `_current_turn_key` is stubbed thread-locally because the module-level
+    session stub is process-global and cannot represent two simultaneous turns.
+    The registry itself — lock, dict, exact-key lookup — is the real thing.
+    """
+    local = threading.local()
+
+    def thread_local_turn_key():
+        return getattr(local, "key", None)
+
+    monkeypatch.setattr(sio, "_current_turn_key", thread_local_turn_key)
+
+    barrier = threading.Barrier(2)
+    results: dict[str, object] = {}
+    errors: list[BaseException] = []
+
+    def run(label, key, text):
+        try:
+            local.key = key
+            sio.register_turn_outbound_override(text)
+            barrier.wait(timeout=5)      # both registered before either resolves
+            results[label] = sio.lookup_turn_outbound_override()
+        except BaseException as exc:      # noqa: BLE001 - surfaced below
+            errors.append(exc)
+
+    text_a = "A: none of your tracked deadlines are due in the next 90 days."
+    text_b = "B: your compliance calendar has no tracked records."
+    ta = threading.Thread(target=run, args=("A", ("sess-A", "msg-A"), text_a))
+    tb = threading.Thread(target=run, args=("B", ("sess-B", "msg-B"), text_b))
+    ta.start(); tb.start(); ta.join(10); tb.join(10)
+
+    assert not errors, f"worker raised: {errors}"
+    assert results["A"] == text_a
+    assert results["B"] == text_b
+    assert results["A"] != results["B"], "distinct turns must not share a value"
+    assert len(sio._turn_overrides) == 2, "both registrations must coexist"
 
 
 @linux_only
@@ -235,3 +262,74 @@ def test_automation_control_retains_precedence_over_the_override(sio, monkeypatc
     out = sio.front_brain_screen_gateway_send("19045550100@s.whatsapp.net", "x")
     assert out.startswith("REFUSED:automation_suppressed")
     assert out != TEXT
+
+
+# ── audit variant is typed, not swallowed by forward-compat ────────────────
+
+@linux_only
+def test_emitted_audit_payload_resolves_to_the_typed_variant(sio, monkeypatch):
+    """The exact payload the seam emits must validate AS the typed variant.
+
+    Before this variant existed the row still validated — `_pick_log_entry_tag`
+    routes unknown tags to `_UnknownLogEntry` (extra="allow"), which is a
+    deliberate forward-compat shim and worked as designed. But that path does no
+    field validation, so a deterministic safety intervention that overrides
+    customer-visible text was being recorded untyped. This pins that it is not.
+    """
+    from pydantic import TypeAdapter
+    from schemas import LogEntry, OutboundTurnOverrideApplied, _UnknownLogEntry
+
+    captured = {}
+    monkeypatch.setattr(
+        sio, "_try_emit_audit_row",
+        lambda t, f: captured.update({"type": t, "fields": f}),
+    )
+    monkeypatch.setattr(sio, "front_brain_outbound_enforce_enabled", lambda jid: False)
+    monkeypatch.setattr(sio, "_agent_disabled", lambda: False)
+    monkeypatch.setattr(sio, "_automation_control_suppressed_mode", lambda jid: None)
+
+    _install_session_stub("sess-audit", "msg-audit")
+    sio.register_turn_outbound_override(TEXT)
+    assert sio.front_brain_screen_gateway_send(
+        "19045550100@s.whatsapp.net", "unsafe wording") == TEXT
+
+    assert captured["type"] == "outbound_turn_override_applied"
+    row = {"ts": "2026-08-08T18:14:41.313214Z",
+           "type": captured["type"], **captured["fields"]}
+    parsed = TypeAdapter(LogEntry).validate_python(row)
+    assert isinstance(parsed, OutboundTurnOverrideApplied), (
+        f"row fell through to {type(parsed).__name__}; the typed variant is not "
+        "wired into the LogEntry union"
+    )
+    assert not isinstance(parsed, _UnknownLogEntry)
+    assert parsed.send_kind == "gateway_send"
+
+
+def test_historical_production_row_still_validates_as_the_typed_variant():
+    """The row already written to production (2026-08-08T18:14:41Z) must remain
+    readable after the schema addition — a typed variant that rejects the rows
+    it was added for would break `shift-agent-smoke-test.sh`, which validates
+    the LAST line of decisions.log and auto-rolls-back the deploy on failure."""
+    from pydantic import TypeAdapter
+    from schemas import LogEntry, OutboundTurnOverrideApplied
+
+    historical = {
+        "ts": "2026-08-08T18:14:41.313214Z",
+        "type": "outbound_turn_override_applied",
+        "chat_key_hash": "798ef6009df419526e9369c37dc00000",
+        "send_kind": "gateway_send",
+        "logical_turn_id": "",
+    }
+    parsed = TypeAdapter(LogEntry).validate_python(historical)
+    assert isinstance(parsed, OutboundTurnOverrideApplied)
+
+
+def test_genuinely_unknown_tags_still_reach_the_forward_compat_shim():
+    """The `_UnknownLogEntry` mechanism is untouched — it is doing exactly what
+    it was designed for, and typing one variant must not narrow it."""
+    from pydantic import TypeAdapter
+    from schemas import LogEntry, _UnknownLogEntry
+
+    parsed = TypeAdapter(LogEntry).validate_python(
+        {"ts": "2026-08-08T00:00:00Z", "type": "some_future_variant", "x": 1})
+    assert isinstance(parsed, _UnknownLogEntry)
