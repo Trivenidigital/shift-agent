@@ -35,13 +35,24 @@ def ok(**fields) -> str:
 
 
 def refuse(reason: str, **fields) -> str:
-    """A refusal as JSON TEXT.
+    """An AUTHORIZATION refusal as JSON TEXT.
 
     Deliberately carries NO `items` key and no count fields. A refusal must not
     be readable as an authoritative empty result — that is the difference
     between "I could not check" and "there is nothing due".
     """
     return json.dumps({"ok": False, "refused": reason, **fields})
+
+
+def fail(error: str, **fields) -> str:
+    """An OPERATIONAL failure as JSON TEXT — the caller was allowed, the read
+    could not be completed.
+
+    Same absence discipline as `refuse`: no `items`, no counts, nothing a model
+    can read as "nothing due". Kept distinct from `refuse` so an unreadable store
+    is never mistaken for an authorization problem, or vice versa.
+    """
+    return json.dumps({"ok": False, "error": error, **fields})
 
 
 def session_principal() -> str:

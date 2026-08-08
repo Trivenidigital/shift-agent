@@ -12,12 +12,7 @@ router, no intent classifier and no keyword dispatch anywhere in this plugin.
 """
 from __future__ import annotations
 
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import compliance_tool  # noqa: E402
+from . import compliance_tool
 
 
 def register(ctx) -> None:

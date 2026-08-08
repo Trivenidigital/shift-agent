@@ -78,16 +78,38 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("SHIFT_AGENT_IDENTIFY_SENDER_BIN", str(fake))
     monkeypatch.setenv("SHIFT_AGENT_NOW_OVERRIDE", "2026-08-08T09:00:00-04:00")
     monkeypatch.syspath_prepend(str(PLATFORM_DIR))
-    monkeypatch.syspath_prepend(str(PLUGIN_DIR))
     return tmp_path
 
 
+PKG = "shift_agent_read_pkg"  # the shipped dir name has a hyphen; alias for import
+
+
+def _load_package():
+    """Import the plugin as a PACKAGE so its relative imports resolve.
+
+    The shipped directory is `shift-agent-read`, which is not a legal module
+    name, so it is aliased. Hermes' own loader does the equivalent; the point of
+    doing it here is that `from .identity import ...` must work exactly as it
+    will at runtime — no sys.path insertion of the plugin directory.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        PKG, PLUGIN_DIR / "__init__.py",
+        submodule_search_locations=[str(PLUGIN_DIR)],
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[PKG] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _tool(principal="19045550100@s.whatsapp.net"):
-    """(Re)import the handler with a session stub already in place."""
+    """(Re)load the plugin package with a session stub already in place."""
     _install_session_stub(principal)
-    for name in ("identity", "compliance_tool"):
-        sys.modules.pop(name, None)
-    return importlib.import_module("compliance_tool")
+    for name in list(sys.modules):
+        if name == PKG or name.startswith(PKG + "."):
+            del sys.modules[name]
+    return _load_package().compliance_tool
 
 
 def _seed(env, items):
@@ -217,6 +239,67 @@ def test_handler_returns_json_text_not_a_dict(env):
     res = _tool().handler({})
     assert isinstance(res, str)
     assert isinstance(json.loads(res), dict)
+
+
+# ── fail closed: never an authoritative empty ──────────────────────────────
+
+@linux_only
+def test_unreadable_state_fails_closed(env):
+    """A corrupt/schema-invalid store is NOT an authoritative empty result.
+
+    The owner's deadlines may exist and simply be unreadable; answering
+    "nothing due" here is the UNVERIFIED_ABSENCE_CLAIM failure in its purest
+    form. This is that invariant in executable form.
+    """
+    (env / "state" / "compliance-items.json").write_text(
+        json.dumps({"schema_version": 1, "items": [{"id": "no_name_field"}]}),
+        encoding="utf-8")
+    out = json.loads(_tool().handler({}))
+    assert out["ok"] is False
+    assert out["error"] == "state_unreadable"
+    for absent in ("items", "tracked_total", "in_window", "source_status"):
+        assert absent not in out, f"{absent!r} must not appear in a failure result"
+
+
+@linux_only
+def test_unresolvable_customer_timezone_fails_closed(env, monkeypatch):
+    """No silent UTC fallback: days_until must never come from a guessed zone."""
+    monkeypatch.delenv("SHIFT_AGENT_NOW_OVERRIDE", raising=False)
+    (env / "config.yaml").write_text("customer: {timezone: \n", encoding="utf-8")
+    _seed(env, [_item("health_inspect", "2026-09-01")])
+    out = json.loads(_tool().handler({}))
+    assert out["ok"] is False
+    assert out["error"] == "customer_timezone_unavailable"
+    for absent in ("items", "tracked_total", "in_window", "source_status"):
+        assert absent not in out
+
+
+# ── registration smoke ─────────────────────────────────────────────────────
+
+def test_register_uses_package_relative_imports_and_registers_the_tool(env):
+    """Loads the plugin as a package (no sys.path insertion of the plugin dir)
+    and drives register() with a collector standing in for PluginContext."""
+    _install_session_stub("19045550100@s.whatsapp.net")
+    for name in list(sys.modules):
+        if name == PKG or name.startswith(PKG + "."):
+            del sys.modules[name]
+    pkg = _load_package()
+
+    captured = {}
+
+    class FakeCtx:
+        def register_tool(self, **kw):
+            captured.update(kw)
+
+    pkg.register(FakeCtx())
+    assert captured["name"] == "get_compliance_deadlines"
+    assert captured["toolset"] == "shift_agent_read"
+    assert callable(captured["handler"])
+    assert captured["schema"]["name"] == "get_compliance_deadlines"
+    assert captured["description"] == captured["schema"]["description"]
+    assert str(PLUGIN_DIR) not in sys.path, (
+        "importing the plugin must not put its own directory on sys.path"
+    )
 
 
 @linux_only
