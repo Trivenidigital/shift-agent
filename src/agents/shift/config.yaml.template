@@ -70,6 +70,18 @@ daily_brief:
     - "alerts"
   catchup_window_minutes: 180  # 3h grace period after brief_time
 
+# Agent #33 — Loyalty (v0.1: customer birthdays in the Daily Brief).
+# Turning this on takes TWO edits, both required:
+#   1. loyalty.enabled: true          (below)
+#   2. add "birthdays" to daily_brief.sections (above)
+# Either one alone renders nothing. Seed customers with:
+#   record-customer-birthday --phone "+15555550100" --name "Suresh Patel" \
+#       --birthday 03-15
+# The brief then lists whoever has a birthday that day. Recording a birthday is
+# always allowed regardless of this flag — the flag gates OUTPUT, not capture.
+loyalty:
+  enabled: false
+
 # Agent #5 — EOD Reconciliation. Snapshot of today's events at close time.
 # Output is consumed by Daily Brief tomorrow morning + sent to owner via Pushover.
 eod:
