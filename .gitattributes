@@ -15,3 +15,8 @@ src/agents/*/scripts/*       text eol=lf
 # Systemd unit files
 *.service                    text eol=lf
 *.timer                      text eol=lf
+
+# Governance preservation fixture — byte-exact historical document.
+# `-text` disables all line-ending conversion so its sha256 is identical on
+# every platform. tests/test_architecture_governance.py pins that hash.
+tests/fixtures/governance/AGENTS.pre-consolidation.md -text
