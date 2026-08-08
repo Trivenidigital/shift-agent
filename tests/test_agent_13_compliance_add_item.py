@@ -82,7 +82,7 @@ def _add(env_dir, **kw):
     }
     for k, v in flags.items():
         args += [k, v]
-    for opt in ("agency", "notes", "location_id", "resource_url", "actor"):
+    for opt in ("agency", "notes", "location_id", "resource_url"):
         if opt in kw:
             args += [f"--{opt.replace('_', '-')}", str(kw.pop(opt))]
     if kw.pop("replace", False):
@@ -90,6 +90,21 @@ def _add(env_dir, **kw):
     if kw.pop("dry_run", False):
         args.append("--dry-run")
     assert not kw, f"unconsumed kwargs: {kw}"
+    return subprocess.run(args, env=_env(env_dir), capture_output=True,
+                          text=True, timeout=20)
+
+
+STORE_NAME = "compliance-items.json"
+AUDIT_TYPE = "compliance_item_upserted"
+ID_KW = "item_id"
+
+
+def _add_raw(env_dir, extra):
+    """Invoke with valid required args PLUS `extra` (for rejected-flag tests)."""
+    args = [sys.executable, str(ADD_SCRIPT),
+            "--id", "health_inspect_houston", "--name", "Health Inspection Houston",
+            "--category", "inspection", "--renewal-date", "2026-09-01",
+            "--recurrence-days", "365"] + list(extra)
     return subprocess.run(args, env=_env(env_dir), capture_output=True,
                           text=True, timeout=20)
 
@@ -200,15 +215,6 @@ def test_bad_category_rejected_by_argparse(env_dir):
     assert r.returncode == 2
 
 
-def test_dry_run_reports_without_mutating(env_dir):
-    r = _add(env_dir, dry_run=True)
-    assert r.returncode == 0, r.stderr
-    out = json.loads(r.stdout)
-    assert out["dry_run"] is True and out["n_items"] == 1
-    assert _items(env_dir).get("items", []) == [], "dry-run must not persist"
-    assert not [e for e in _audit(env_dir) if e.get("type") == "compliance_item_upserted"]
-
-
 # ── the round trip that makes this a delivery ──────────────────────────────
 
 def test_seeded_item_is_visible_to_the_deadline_checker(env_dir):
@@ -248,3 +254,81 @@ def test_seeded_item_can_then_be_marked_done(env_dir):
     assert out["completed"] == "2026-09-01"
     assert out["next"] == "2027-09-01"
     assert out["deleted"] is False
+
+
+# ── dry-run contract (Wave-1 review 2026-08-08) ────────────────────────────
+# The original dry-run test only asserted `items == []`, which PASSED while the
+# script was creating the store file on a fresh box. Three explicit properties
+# now, one per failure mode.
+
+
+def _snapshot(p):
+    return p.read_bytes() if p.exists() else None
+
+
+def test_dry_run_leaves_absent_store_absent(env_dir):
+    """THE bug: on a fresh box --dry-run used to materialize the empty store."""
+    store = env_dir / "state" / STORE_NAME
+    assert not store.exists(), "fixture precondition: store absent"
+    r = _add(env_dir, dry_run=True)
+    assert r.returncode == 0, r.stderr
+    assert not store.exists(), (
+        "--dry-run created the store file on a fresh box; dry-run must not "
+        "mutate persistent state"
+    )
+
+
+def test_dry_run_leaves_existing_store_byte_identical(env_dir):
+    assert _add(env_dir).returncode == 0
+    store = env_dir / "state" / STORE_NAME
+    before = _snapshot(store)
+    r = _add(env_dir, **{ID_KW: "second_item"}, dry_run=True)
+    assert r.returncode == 0, r.stderr
+    assert _snapshot(store) == before, "--dry-run mutated an existing store"
+
+
+def test_dry_run_leaves_decisions_log_byte_identical(env_dir):
+    log = env_dir / "logs" / "decisions.log"
+    before = _snapshot(log)
+    assert _add(env_dir, dry_run=True).returncode == 0
+    assert _snapshot(log) == before, "--dry-run wrote an audit row"
+
+
+# ── audit actor provenance ─────────────────────────────────────────────────
+
+def test_cli_cannot_fabricate_actor_owner(env_dir):
+    """argv must not be able to assert owner provenance.
+
+    No authenticated sender context exists for a shell caller, so an audit row
+    claiming `actor=owner` would be unproven. The flag is gone; passing it is a
+    hard argparse error, and the row that IS written says `operator`.
+    """
+    r = _add_raw(env_dir, ["--actor", "owner"])
+    assert r.returncode == 2, (
+        f"--actor should be rejected outright, got rc={r.returncode}"
+    )
+    assert "unrecognized arguments" in (r.stderr or "").lower()
+
+    assert _add(env_dir).returncode == 0
+    rows = [e for e in _audit(env_dir) if e.get("type") == AUDIT_TYPE]
+    assert rows and all(row["actor"] == "operator" for row in rows), (
+        f"seed CLI must record actor=operator, got {[r_['actor'] for r_ in rows]}"
+    )
+
+
+# ── config failure modes exit cleanly, never as a traceback ────────────────
+
+@pytest.mark.parametrize("mangle,label", [
+    (lambda p: p.unlink(), "missing"),
+    (lambda p: p.write_text("customer: [unclosed\n", encoding="utf-8"), "malformed-yaml"),
+    (lambda p: p.write_text("schema_version: 1\ncustomer: {}\n", encoding="utf-8"),
+     "schema-invalid"),
+])
+def test_bad_config_exits_two_without_traceback(env_dir, mangle, label):
+    mangle(env_dir / "config.yaml")
+    r = _add(env_dir)
+    assert r.returncode == 2, f"{label}: expected rc=2, got {r.returncode}"
+    assert "Traceback" not in (r.stderr or ""), (
+        f"{label}: config failure escaped as an uncaught traceback:\n{r.stderr}"
+    )
+    assert not (env_dir / "state" / STORE_NAME).exists()

@@ -28,17 +28,29 @@ CLI:
   --resource-url <url>      optional
   --notes <str>             optional
   --replace                 allow overwriting an existing id
-  --actor owner|operator|system   default operator
-  --dry-run                 validate + report; no state mutation
+  --dry-run                 validate + report; NO state mutation whatsoever
+
+There is deliberately no `--actor` flag. This is an operator seed tool invoked
+from a shell with no authenticated sender context, so the audit actor is
+hardcoded `operator`. Letting argv assert `actor=owner` would let any shell
+caller mint an audit row claiming the owner did something they did not — the
+audit actor must describe proven provenance, not caller-supplied text. If an
+authenticated owner-facing mutation path is added later, that path may supply
+`owner` from verified sender context; this one may not.
 
 Output (JSON to stdout):
   {"item_id": "...", "renewal_date": "YYYY-MM-DD", "replaced": bool,
    "previous_renewal_date": "YYYY-MM-DD"|null, "n_items": int, "dry_run": bool}
 
+Dry-run contract (enforced by tests): if the store was absent it stays absent;
+if it was present it stays byte-identical; decisions.log stays byte-identical.
+The only artifact dry-run may leave is the advisory `.lock` file, which is a
+lock and not state.
+
 Exit codes:
   0 — item written (or would be, under --dry-run)
   1 — id already exists and --replace was not passed
-  2 — bad input (schema violation, unreadable config, items file full)
+  2 — bad input (schema violation, missing/malformed/invalid config, store full)
 """
 from __future__ import annotations
 
@@ -73,6 +85,10 @@ DECISIONS_LOG = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH",
 # ComplianceItemsFile caps `items` at 200. Checked before append so the operator
 # gets a clear message instead of a raw pydantic max_length error.
 MAX_ITEMS = 200
+
+# Hardcoded: this tool has no authenticated sender context. See the module
+# docstring — argv must not be able to assert owner provenance.
+AUDIT_ACTOR = "operator"
 
 
 def _customer_now(tz_name: str) -> datetime:
@@ -109,18 +125,25 @@ def main() -> int:
     ap.add_argument("--notes", default=None)
     ap.add_argument("--replace", action="store_true",
                     help="overwrite an existing item with this id")
-    ap.add_argument("--actor", default="operator",
-                    choices=["owner", "operator", "system"])
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     assert_local_disk(ITEMS_PATH.parent)
+    # Missing, unparseable and schema-invalid config all exit 2 cleanly. An
+    # uncaught ValidationError traceback is not a usable operator message.
     try:
         cfg_dict = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
     except OSError as e:
         sys.stderr.write(f"config not found at {CONFIG_PATH}: {e}\n")
         return 2
-    cfg = Config.model_validate(cfg_dict)
+    except yaml.YAMLError as e:
+        sys.stderr.write(f"config at {CONFIG_PATH} is not valid YAML: {e}\n")
+        return 2
+    try:
+        cfg = Config.model_validate(cfg_dict)
+    except ValidationError as e:
+        sys.stderr.write(f"config at {CONFIG_PATH} failed schema validation: {e}\n")
+        return 2
 
     # Build + validate the item BEFORE taking the lock — a malformed id or date
     # should never hold the items lock or touch the file.
@@ -141,20 +164,26 @@ def main() -> int:
         return 2
 
     items_lock = Path(str(ITEMS_PATH) + ".lock")
+    # The lock lives beside the store, so its directory must exist before
+    # FileLock. Creating a directory is not creating state; the store file
+    # itself is still only written below, and only when this is not a dry run.
+    ITEMS_PATH.parent.mkdir(parents=True, exist_ok=True)
     with FileLock(items_lock):
-        if not ITEMS_PATH.exists():
-            # First seed on a fresh box is the expected path, not an anomaly —
-            # create the container silently and continue into the append below.
-            ITEMS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(ITEMS_PATH, ComplianceItemsFile().model_dump(mode="json"))
-
-        try:
-            f, _ = load_model(ITEMS_PATH, ComplianceItemsFile)
-        except Exception as e:
-            _emit_invariant("compliance_items_file_unreadable_on_add",
-                            f"could not load {ITEMS_PATH}: {e}")
-            sys.stderr.write(f"items file unreadable at {ITEMS_PATH}: {e}\n")
-            return 2
+        if ITEMS_PATH.exists():
+            try:
+                f, _ = load_model(ITEMS_PATH, ComplianceItemsFile)
+            except Exception as e:
+                _emit_invariant("compliance_items_file_unreadable_on_add",
+                                f"could not load {ITEMS_PATH}: {e}")
+                sys.stderr.write(f"items file unreadable at {ITEMS_PATH}: {e}\n")
+                return 2
+        else:
+            # First seed on a fresh box is the expected path, not an anomaly.
+            # Build the container IN MEMORY: validation, duplicate detection and
+            # the cap all run against this model, and it reaches disk only in the
+            # write below. Materializing it here is what made --dry-run mutate
+            # state on a fresh box.
+            f = ComplianceItemsFile()
 
         existing = next((i for i in f.items if i.id == item.id), None)
         if existing is not None and not args.replace:
@@ -192,7 +221,7 @@ def main() -> int:
             renewal_date=item.renewal_date,
             recurrence_days=item.recurrence_days,
             category=item.category,
-            actor=args.actor,
+            actor=AUDIT_ACTOR,
             replaced=replaced,
             previous_renewal_date=previous_renewal_date,
         )
