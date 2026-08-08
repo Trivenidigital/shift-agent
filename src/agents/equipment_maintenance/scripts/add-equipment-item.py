@@ -27,8 +27,17 @@ CLI:
   --interval-days <int>         required  0 = one-shot
   --location-id / --vendor-name / --vendor-phone / --serial / --notes  optional
   --replace                     allow overwriting an existing id
-  --actor owner|operator|system default operator
-  --dry-run                     validate + report; no state mutation
+  --dry-run                     validate + report; NO state mutation whatsoever
+
+There is deliberately no `--actor` flag. This is an operator seed tool invoked
+from a shell with no authenticated sender context, so the audit actor is
+hardcoded `operator`. Letting argv assert `actor=owner` would let any shell
+caller mint an audit row claiming the owner did something they did not — the
+audit actor must describe proven provenance, not caller-supplied text.
+
+Dry-run contract (enforced by tests): absent store stays absent; present store
+stays byte-identical; decisions.log stays byte-identical. The only artifact
+dry-run may leave is the advisory `.lock` file, which is a lock and not state.
 
 Exit codes:
   0 — written (or would be, under --dry-run)
@@ -67,6 +76,9 @@ DECISIONS_LOG = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH",
 
 MAX_ITEMS = 200  # matches EquipmentItemsFile.items max_length
 
+# Hardcoded: no authenticated sender context here. See the module docstring.
+AUDIT_ACTOR = "operator"
+
 
 def _customer_now(tz_name: str) -> datetime:
     override = os.environ.get("SHIFT_AGENT_NOW_OVERRIDE", "")
@@ -100,18 +112,25 @@ def main() -> int:
     ap.add_argument("--serial", default=None)
     ap.add_argument("--notes", default=None)
     ap.add_argument("--replace", action="store_true")
-    ap.add_argument("--actor", default="operator",
-                    choices=["owner", "operator", "system"])
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     assert_local_disk(ITEMS_PATH.parent)
+    # Missing, unparseable and schema-invalid config all exit 2 cleanly. An
+    # uncaught ValidationError traceback is not a usable operator message.
     try:
         cfg_dict = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
     except OSError as e:
         sys.stderr.write(f"config not found at {CONFIG_PATH}: {e}\n")
         return 2
-    cfg = Config.model_validate(cfg_dict)
+    except yaml.YAMLError as e:
+        sys.stderr.write(f"config at {CONFIG_PATH} is not valid YAML: {e}\n")
+        return 2
+    try:
+        cfg = Config.model_validate(cfg_dict)
+    except ValidationError as e:
+        sys.stderr.write(f"config at {CONFIG_PATH} failed schema validation: {e}\n")
+        return 2
 
     # Validate before taking the lock — malformed input never touches the store.
     try:
@@ -132,19 +151,25 @@ def main() -> int:
         return 2
 
     items_lock = Path(str(ITEMS_PATH) + ".lock")
+    # The lock lives beside the store, so its directory must exist before
+    # FileLock. A directory is not state; the store file itself is written
+    # below, and only when this is not a dry run.
+    ITEMS_PATH.parent.mkdir(parents=True, exist_ok=True)
     with FileLock(items_lock):
-        if not ITEMS_PATH.exists():
-            # First seed on a fresh box — expected, not an anomaly.
-            ITEMS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(ITEMS_PATH, EquipmentItemsFile().model_dump(mode="json"))
-
-        try:
-            f, _ = load_model(ITEMS_PATH, EquipmentItemsFile)
-        except Exception as e:
-            _emit_invariant("equipment_items_file_unreadable_on_add",
-                            f"could not load {ITEMS_PATH}: {e}")
-            sys.stderr.write(f"items file unreadable at {ITEMS_PATH}: {e}\n")
-            return 2
+        if ITEMS_PATH.exists():
+            try:
+                f, _ = load_model(ITEMS_PATH, EquipmentItemsFile)
+            except Exception as e:
+                _emit_invariant("equipment_items_file_unreadable_on_add",
+                                f"could not load {ITEMS_PATH}: {e}")
+                sys.stderr.write(f"items file unreadable at {ITEMS_PATH}: {e}\n")
+                return 2
+        else:
+            # First seed on a fresh box is expected, not an anomaly. Build the
+            # container IN MEMORY: validation, duplicate detection and the cap
+            # all run against this model, and it reaches disk only in the write
+            # below. Materializing it here is what made --dry-run mutate state.
+            f = EquipmentItemsFile()
 
         existing = next((i for i in f.items if i.id == item.id), None)
         if existing is not None and not args.replace:
@@ -182,7 +207,7 @@ def main() -> int:
             next_service_date=item.next_service_date,
             interval_days=item.interval_days,
             category=item.category,
-            actor=args.actor,
+            actor=AUDIT_ACTOR,
             replaced=replaced,
             previous_next_service_date=previous,
         )
