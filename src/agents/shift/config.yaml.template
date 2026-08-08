@@ -120,6 +120,23 @@ catering:
   deposit_pct: 0.25                 # 25% deposit
   stale_after_hours: 336            # 14 days — silent leads move to STALE
 
+# Agent #19 — Equipment & Maintenance. Default OFF (opt-in). v0.1 is READ-only:
+# the owner asks what service is due and the agent answers from the asset list.
+# Logging breakdowns, marking service done and vendor routing are v0.2.
+#
+# The asset list lives in state/equipment-items.json (mutable, so JSON not YAML).
+# Seed it after enabling:
+#   add-equipment-item.py --id walkin_cooler_main --name "Walk-in Cooler (main)" \
+#       --category refrigeration --next-service-date 2026-09-01 \
+#       --interval-days 90 --vendor-name "Hobart Service"
+# Categories: refrigeration | cooking | pos | vehicle | hvac | fire_safety | other.
+# interval_days: 0 = one-shot. An empty list makes the agent say "nothing tracked
+# yet" — deliberately NOT "you're all clear", which would be a false claim.
+equipment_maintenance:
+  enabled: false
+  advance_warning_days: [30, 14, 7, 3, 1]   # reserved for the v0.2 reminder cron
+  auto_route_to_vendor: false               # v0.2 only; v0.1 is always owner-mediated
+
 # Agent #21 — Expense Bookkeeper. Default OFF (opt-in). v0.1 ships with
 # mocked QBOClient; v0.2 will swap to real QBO OAuth + write API.
 expense_bookkeeper:

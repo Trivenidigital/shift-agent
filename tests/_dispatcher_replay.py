@@ -71,7 +71,13 @@ NO_HANDLER_FOUND = "<no-handler-found>"
 # holds (no fixture carries a follow-up store or a follow-up approval code). The
 # mock deliberately gains no follow-up branch: adding one would encode a route no
 # fixture exercises.
-SKILL_MD_KNOWN_SHA256 = "18e8cf34f6b2f2253d854986a5594f6130e05a6d288957bd56df8f302786fe82"
+# Wave-1 2026-08-08 — re-validated after adding the Agent #19 equipment routing
+# row (owner-gated, sits after compliance, before the handle_owner_command
+# catch-all). Guard steps performed: mock_llm_priority_order re-read (unchanged —
+# the new row is additive and owner-only); all 24 fixtures re-scanned against the
+# new equipment regex, 0 matches, so no expected_handler changes; handler added
+# to KNOWN_HANDLERS above.
+SKILL_MD_KNOWN_SHA256 = "81fdf5b878391c102a063ea6ae86af2dd9046d9b0ec9322b6c280b06f21538e3"
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -187,6 +193,7 @@ KNOWN_HANDLERS = frozenset({
     "flyer_dispatcher",
     "catering_dispatcher",
     "compliance_owner_query",
+    "equipment_maintenance_dispatcher",
     "customer_location_query",
     "handle_candidate_response",
     "handle_sick_call",

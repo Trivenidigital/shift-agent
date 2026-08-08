@@ -99,6 +99,7 @@ You are the front door for every inbound message. Your ONLY job: identify who se
 | Text contains flyer intent keyword (see list below) AND `cfg.flyer.enabled` | any | **flyer_dispatcher** |
 | Text contains catering keyword (see list below) AND `cfg.catering.enabled` | any | **catering_dispatcher** |
 | Owner text matches compliance regex (see below) AND `cfg.compliance.enabled` | owner | **compliance_owner_query** |
+| Owner text matches equipment regex (see below) AND `cfg.equipment_maintenance.enabled` | owner | **equipment_maintenance_dispatcher** |
 | Text matches store-locator regex (see below) AND `cfg.multi_location.locations` is non-empty | unknown | **customer_location_query** |
 | Text only, no code, no catering keyword | owner | **handle_owner_command** |
 | Text only, no code, no customer-facing keyword | employee | **handle_sick_call** |
@@ -137,6 +138,18 @@ PR-Agent13-v0.1 — compliance regex (case-insensitive, owner-only — gated by 
 ```
 
 The first alternation matches generic compliance keywords. The second matches mark-done intents with REQUIRED compliance-keyword colocation within 80 chars (defense against false positives like "marked her cake done" — Reviewer B-v1 M1 fix). The compliance row is positioned BEFORE handle_owner_command catch-all so owner queries about compliance route to compliance_owner_query rather than the generic owner handler. compliance_owner_query SKILL adds defensive role check as a second layer (in case dispatcher mis-routes).
+
+PR-Agent19-Wave1 — equipment regex (case-insensitive, owner-only — gated by `sender_role=owner` AND `cfg.equipment_maintenance.enabled`):
+
+```
+(?i)\b(maintenance|servicing|preventive|pm\s+due)\b
+| (?i)\b(service|serviced|repair|repaired|filter\s+change|calibration)\b.{0,40}\b(walk[\s-]?in|cooler|freezer|fridge|refrigerat\w*|oven|fryer|grill|hood|pos|terminal|register|van|truck|vehicle|a/?c|hvac|fire\s+suppression|equipment)\b
+| (?i)\b(walk[\s-]?in|cooler|freezer|oven|fryer|hood|fire\s+suppression)\b.{0,30}\b(due|overdue|schedule[d]?|next\s+service|serviced|service|repair(?:ed)?)\b
+```
+
+The third alternation is the mirror of the second: English puts the equipment noun on either side of the verb ("repair the fryer" vs "when was the walk-in serviced"). Both orders must match or the row silently misses half of real owner phrasing.
+
+The bare-keyword alternation is limited to words that are unambiguously about upkeep (`maintenance`, `servicing`, `preventive`, `pm due`). Every other alternation REQUIRES an equipment noun colocated with a service verb, so "service was slow today" and "repair the flyer wording" do not match. This row sits AFTER compliance because "fire suppression inspection" is a compliance deadline question first — compliance's `inspection` keyword claims it, which is the correct reading for a filing/inspection calendar. It sits BEFORE the generic `handle_owner_command` catch-all so equipment questions reach the equipment SKILL rather than the generic owner handler. `equipment_maintenance_dispatcher` re-checks `sender_role` defensively.
 
 The matrix is in priority order — earlier rows fire first. A `#XXXXX` code from the owner short-circuits the catering keyword check; a menu-pending code short-circuits everything.
 
