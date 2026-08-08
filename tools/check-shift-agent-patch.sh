@@ -20,6 +20,12 @@ H=/root/.hermes/hermes-agent
 RUN=$H/gateway/run.py
 WA=$H/gateway/platforms/whatsapp.py
 BR=$H/scripts/whatsapp-bridge/bridge.js
+# Second patched JS file since 0.19.1: bridge.js imports it, and our
+# shift-agent-button-response-body block lives here rather than in bridge.js.
+# FOLLOW_UP: unlike bridge.js this file is NOT content-pinned by
+# BRIDGE_POST_PATCH_SHA256, so a change here is caught only by the marker checks
+# below, not by a hash. Adding a second pin would need a baseline-format change.
+BRH=$H/scripts/whatsapp-bridge/bridge_helpers.js
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 warn() { echo "WARN: $1" >&2; }
@@ -266,7 +272,16 @@ DIFF3=$(( BB > BA ? BB - BA : BA - BB ))
 grep -q "app.post('/send-media'" "$BR" || fail "$BR missing POST /send-media endpoint (flyer media delivery would silently fail)"
 grep -q "app.post('/send-cta'" "$BR" || fail "$BR missing POST /send-cta endpoint (flyer campaign buttons would silently disappear)"
 grep -q "quick_reply" "$BR" || fail "$BR /send-cta endpoint is not using WhatsApp quick replies"
-grep -q "buttonsResponseMessage" "$BR" || fail "$BR missing button-response inbound text extraction"
+# Button-response inbound extraction moved to bridge_helpers.js in Hermes 0.19.1
+# (bridge.js imports from './bridge_helpers.js'), and our patch injects the
+# shift-agent-button-response-body block there rather than into bridge.js. Grepping
+# bridge.js for it therefore failed on a correctly-patched tree -- the capability is
+# present, the file assumption was stale. Assert it where it actually lives, and
+# guard our marker with it so the block cannot be dropped silently.
+[ -f "$BRH" ] || fail "$BRH missing (bridge helper module absent; button-response extraction cannot be present)"
+grep -q "buttonsResponseMessage" "$BRH" || fail "$BRH missing button-response inbound text extraction (interactive button replies would arrive with no usable text)"
+grep -q "BEGIN shift-agent-button-response-body" "$BRH" || fail "$BRH missing BEGIN shift-agent-button-response-body marker (our button-response patch is absent)"
+grep -q "END shift-agent-button-response-body" "$BRH" || fail "$BRH missing END shift-agent-button-response-body marker"
 
 # PR-CF6: cf-router plugin requires the pre_gateway_dispatch hook surface in
 # gateway/run.py. If Hermes upstream renames or removes the hook, the plugin's

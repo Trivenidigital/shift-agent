@@ -226,3 +226,27 @@ def test_anchor_guard_still_rejects_real_drift(tmp_path):
     assert _run_proximity(tmp_path, 1, 1 + ANCHOR_THRESHOLD) == 0
     assert _run_proximity(tmp_path, 1, 1 + ANCHOR_THRESHOLD + 1) == 1
     assert _run_proximity(tmp_path, 1, 1 + 5000) == 1
+
+
+# ── button-response extraction lives in bridge_helpers.js since 0.19.1 ─────
+def test_button_response_checked_in_the_helper_module_not_bridge_js():
+    """On 0.19.1 bridge.js imports './bridge_helpers.js' and our
+    shift-agent-button-response-body block is injected there. Grepping bridge.js for
+    buttonsResponseMessage failed on a correctly-patched tree -- the capability was
+    present, the file assumption was stale."""
+    assert "BRH=" in GATE_TEXT, "helper-module path not defined"
+    assert 'grep -q "buttonsResponseMessage" "$BRH"' in GATE_TEXT
+    assert 'grep -q "buttonsResponseMessage" "$BR"' not in GATE_TEXT, (
+        "must not re-assert button-response extraction in bridge.js, where 0.19.1 does not have it"
+    )
+
+
+def test_button_response_patch_marker_is_guarded():
+    assert 'grep -q "BEGIN shift-agent-button-response-body" "$BRH"' in GATE_TEXT
+    assert 'grep -q "END shift-agent-button-response-body" "$BRH"' in GATE_TEXT
+
+
+def test_bridge_js_only_checks_remain_on_bridge_js():
+    # endpoints genuinely still live in bridge.js -- verified on the box
+    assert """grep -q "app.post('/send-cta'" "$BR\"""" in GATE_TEXT
+    assert """grep -q "app.post('/send-media'" "$BR\"""" in GATE_TEXT
