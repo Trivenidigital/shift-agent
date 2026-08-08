@@ -105,13 +105,20 @@ FOUNDATION_SKILLS: tuple[SkillRequirement, ...] = (
         source_url="https://hermes-agent.nousresearch.com/docs/reference/skills-catalog",
         notes="Local PDF/document extraction before cloud OCR.",
     ),
-    SkillRequirement(
-        skill_id="mcp/native-mcp",
-        credential_class="none/local",
-        last_verified="2026-05-14",
-        source_url="https://hermes-agent.nousresearch.com/docs/user-guide/skills/bundled/mcp/mcp-native-mcp",
-        notes="Connector substrate; target MCP servers still need credentials.",
-    ),
+    # `mcp/native-mcp` was removed here on 2026-08-08. It was a required
+    # foundation skill under the pre-0.19.1 bundled-skill architecture, but the
+    # pinned Hermes 0.19.1 / cc4cab2f distribution does not ship it —
+    # /usr/local/lib/hermes-agent/skills/mcp/ does not exist. MCP is now a
+    # first-class CLI (`hermes mcp add|list|catalog|install`) with per-tool
+    # allowlisting via mcp_servers.<name>.tools.include. The copy that was on
+    # main-vps dated from May 13 and was a 0.14-era fossil orphaned by the
+    # upgrade, so the strict gate failed closed on every deploy and blocked
+    # unrelated work.
+    #
+    # Deliberately NOT replaced with a substitute requirement — no "an MCP server
+    # must be configured", no MCP credential check, no `mcp` package probe. That
+    # would swap one unrelated gate for another. Connector-specific MCP needs are
+    # already tracked per-agent in CONNECTOR_CANDIDATES, which is advisory.
 )
 
 
