@@ -42,6 +42,7 @@ import re
 import subprocess
 import sys
 import time
+import threading as _threading
 import uuid  # 2026-07-22 — per-inbound-turn id (turn-budget companion)
 from contextlib import contextmanager
 from pathlib import Path
@@ -1228,6 +1229,85 @@ def _front_brain_normalize_chat_key(value: str) -> str:
     return "".join(c for c in v if c.isalnum())
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Turn-bound outbound override (W1 compliance truthfulness invariant)
+#
+# WHY THIS EXISTS. A deterministic zero-result — "no TRACKED compliance
+# deadline is due in this window" — was repeatedly turned into an unqualified
+# "you have no compliance deadlines" by the model. Result-shape work reduced but
+# never eliminated it: with self-scoping field names the correct scoping still
+# dropped in 1 of 5 identical runs. Wording cannot be the safety mechanism, and
+# inspecting wording (regex/lint/classifier) is explicitly not the answer either.
+#
+# So the tool registers a deterministic replacement bound to THE EXACT TURN, and
+# the egress seam substitutes it without reading a single word the model wrote.
+#
+# THE INVARIANT THIS RESTS ON: `HERMES_SESSION_ID` is reassigned by
+# `AIAgent.run_conversation`. Registration therefore MUST happen inside the tool
+# handler, which runs after that reassignment and shares the key the adapter
+# later resolves. Registering earlier silently misses — and it misses by letting
+# the unsafe text through, a failure that looks like success. There is
+# deliberately no pre-agent registration API and no convenience wrapper that
+# would invite that mistake.
+#
+# Lookup requires the EXACT (session_id, message_id) pair. No chat/phone
+# fallback, no "single active override", no fuzzy recovery: guessing which turn
+# an override belongs to risks substituting one conversation's bounded text into
+# another, which is worse than the problem being solved. A miss passes the
+# message through unchanged.
+_TURN_OVERRIDE_TTL_SEC = 300
+_turn_override_lock = _threading.Lock()
+_turn_overrides: "dict[tuple[str, str], tuple[str, float]]" = {}
+
+
+def _current_turn_key() -> "Optional[tuple[str, str]]":
+    """The exact current turn, read from Hermes ContextVars. None if unbound."""
+    try:
+        from gateway.session_context import get_session_env  # type: ignore
+    except Exception:
+        return None
+    session_id = get_session_env("HERMES_SESSION_ID", "")
+    message_id = get_session_env("HERMES_SESSION_MESSAGE_ID", "")
+    if not session_id or not message_id:
+        return None
+    return (session_id, message_id)
+
+
+def _sweep_turn_overrides_locked(now: float) -> None:
+    cutoff = now - _TURN_OVERRIDE_TTL_SEC
+    for key in [k for k, (_t, at) in _turn_overrides.items() if at < cutoff]:
+        del _turn_overrides[key]
+
+
+def register_turn_outbound_override(text: str) -> bool:
+    """Bind `text` as THIS turn's outbound reply. Call from inside a tool handler.
+
+    Returns False when the turn is unbound — callers must fail closed rather
+    than emit an authoritative result whose qualification cannot be guaranteed.
+    """
+    key = _current_turn_key()
+    if key is None or not text:
+        return False
+    now = time.monotonic()
+    with _turn_override_lock:
+        _sweep_turn_overrides_locked(now)
+        _turn_overrides[key] = (text, now)
+    return True
+
+
+def lookup_turn_outbound_override() -> "Optional[str]":
+    """This turn's override, or None. NON-CONSUMING: a streamed draft and the
+    finalized edit both screen the same turn and both must be substituted."""
+    key = _current_turn_key()
+    if key is None:
+        return None
+    now = time.monotonic()
+    with _turn_override_lock:
+        _sweep_turn_overrides_locked(now)
+        entry = _turn_overrides.get(key)
+        return entry[0] if entry else None
+
+
 def front_brain_outbound_enforce_enabled(jid: str) -> bool:
     """ppv1 / #612 wildcard allowlist semantics — fail-closed: flag on AND
     non-empty allowlist AND chat membership (both sides normalized). Empty
@@ -1566,6 +1646,22 @@ def front_brain_screen_gateway_send(
             pass  # audit is best-effort; the refusal still stands
         return _gateway_seam_refusal_text(
             screen_jid, fallback_template, f"automation_suppressed:{_ac_label}")
+
+    # G3: turn-bound deterministic outbound override. Sits AFTER the operator
+    # kill switch and automation-control — those are higher authority and must
+    # keep their precedence — and BEFORE the FRONT_BRAIN_OUTBOUND_ENFORCE gate,
+    # so the compliance truthfulness invariant holds even with that optional
+    # tier OFF (which is its default). No wording is read: if this exact turn
+    # registered a replacement, it is sent verbatim; otherwise nothing changes.
+    _turn_override = lookup_turn_outbound_override()
+    if _turn_override is not None:
+        _try_emit_audit_row(
+            "outbound_turn_override_applied",
+            {"chat_key_hash": _front_brain_chat_key_hash(screen_jid),
+             "send_kind": "gateway_send",
+             "logical_turn_id": _current_logical_turn_id()},
+        )
+        return _turn_override
 
     if not front_brain_outbound_enforce_enabled(screen_jid):
         return message
