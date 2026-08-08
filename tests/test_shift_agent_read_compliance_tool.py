@@ -47,9 +47,13 @@ linux_only = pytest.mark.skipif(
 def _install_session_stub(principal: str) -> None:
     """Stand in for the gateway ContextVar with an explicit, exact value."""
     mod = types.ModuleType("gateway.session_context")
-    mod.get_session_env = lambda name, default="": (
-        principal if name == "HERMES_SESSION_USER_ID" else default
-    )
+    # A bound turn: the handler binds its deterministic reply through the real
+    # safe_io registry, so these tests exercise the actual guard rather than a
+    # stub of it.
+    values = {"HERMES_SESSION_USER_ID": principal,
+              "HERMES_SESSION_ID": "sess-test",
+              "HERMES_SESSION_MESSAGE_ID": "msg-test"}
+    mod.get_session_env = lambda name, default="": values.get(name, default)
     pkg = sys.modules.get("gateway") or types.ModuleType("gateway")
     pkg.session_context = mod
     sys.modules["gateway"] = pkg
@@ -207,7 +211,11 @@ def test_model_supplied_identity_arguments_cannot_grant_owner(env):
 def test_missing_state_is_distinct(env):
     assert not (env / "state" / "compliance-items.json").exists()
     out = json.loads(_tool().handler({}))
-    assert out["source_status"] == "missing" and out["tracked_total"] == 0
+    assert out["source_status"] == "missing"
+    assert out["coverage_status"] == "not_configured"
+    # Coverage is UNKNOWN, not zero: no zero-shaped authoritative fields.
+    for absent in ("tracked_total", "in_window", "items", "window_days"):
+        assert absent not in out, f"{absent!r} must not appear on a missing source"
 
 
 @linux_only
@@ -326,3 +334,102 @@ def test_result_contains_no_prose(env):
                         "in_window", "items"}
     assert set(out["items"][0]) == {"id", "name", "category", "renewal_date",
                                     "days_until", "agency", "location_id"}
+
+
+# ── turn-bound outbound binding (fail-closed) ──────────────────────────────
+#
+# Every zero state must bind its deterministic reply BEFORE returning the
+# authoritative payload. There must be no execution path that emits a zero
+# result whose outbound qualification was not bound — that combination is what
+# produced the observed false "you have no compliance deadlines" answer.
+
+
+class _Binder:
+    """Records bind attempts; can be made to fail."""
+
+    def __init__(self, succeed=True):
+        self.succeed = succeed
+        self.calls = []
+
+    def __call__(self, text):
+        self.calls.append(text)
+        return self.succeed
+
+
+@linux_only
+def test_missing_binds_exact_template_before_returning(env, monkeypatch):
+    t = _tool()
+    b = _Binder()
+    monkeypatch.setattr(t, "_bind_outbound", b)
+    out = json.loads(t.handler({}))
+    assert out["ok"] is True and out["source_status"] == "missing"
+    assert b.calls == [t.TPL_MISSING]
+
+
+@linux_only
+def test_empty_binds_exact_template(env, monkeypatch):
+    _seed(env, [])
+    t = _tool()
+    b = _Binder()
+    monkeypatch.setattr(t, "_bind_outbound", b)
+    out = json.loads(t.handler({}))
+    assert out["source_status"] == "empty"
+    assert b.calls == [t.TPL_EMPTY]
+
+
+@linux_only
+def test_populated_zero_binds_template_with_actual_window(env, monkeypatch):
+    _seed(env, [_item("far_off", "2027-06-01")])
+    t = _tool()
+    b = _Binder()
+    monkeypatch.setattr(t, "_bind_outbound", b)
+    out = json.loads(t.handler({"window_days": 30}))
+    assert out["tracked_total"] == 1 and out["in_window"] == 0
+    assert b.calls == [t.TPL_POPULATED_ZERO.format(window_days=30)]
+
+
+@linux_only
+def test_positive_rows_bind_nothing(env, monkeypatch):
+    """Hermes keeps presentation ownership when there is something real to say."""
+    _seed(env, [_item("soon", "2026-08-20")])
+    t = _tool()
+    b = _Binder()
+    monkeypatch.setattr(t, "_bind_outbound", b)
+    out = json.loads(t.handler({}))
+    assert out["in_window"] == 1
+    assert b.calls == []
+
+
+@linux_only
+@pytest.mark.parametrize("state", ["missing", "empty", "populated_zero"])
+def test_bind_failure_suppresses_every_zero_payload(env, monkeypatch, state):
+    """THE load-bearing rule: no zero evidence without a bound qualification."""
+    if state == "empty":
+        _seed(env, [])
+    elif state == "populated_zero":
+        _seed(env, [_item("far_off", "2027-06-01")])
+    t = _tool()
+    monkeypatch.setattr(t, "_bind_outbound", _Binder(succeed=False))
+    out = json.loads(t.handler({}))
+    assert out["ok"] is False
+    assert out["refused"] == "outbound_truthfulness_guard_unavailable"
+    for absent in ("tracked_total", "in_window", "items", "window_days",
+                   "source_status", "coverage_status"):
+        assert absent not in out, f"{absent!r} leaked on a guard-unavailable refusal"
+
+
+def test_description_carries_the_proven_rules(env):
+    """These sentences are the reason the falsification passed; a future edit
+    must not drop them silently."""
+    d = _tool().DESCRIPTION
+    assert "TRACKED" in d
+    assert "does NOT establish that the owner has no deadlines" in d
+    assert "NOT that there are no obligations" in d
+    assert "Do not generalize beyond the tracked calendar" in d
+    assert "OMIT window_days" in d
+    assert "90-day default" in d
+
+
+def test_window_days_description_pins_explicit_timeframe_only(env):
+    w = _tool().SCHEMA["parameters"]["properties"]["window_days"]["description"]
+    assert "ONLY" in w and "explicit" in w and "omit" in w.lower()

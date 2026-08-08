@@ -7,19 +7,26 @@ clarification. Hermes reads the JSON and writes the answer.
 THE STATE DISTINCTION IS THE POINT. Three SUCCESSFUL outcomes that must never
 collapse into each other:
 
-  missing    — no items file. No authoritative source is configured.
-  empty      — file present, zero records. Configured, nothing tracked.
+  missing    — no items file. No authoritative source is configured. Coverage is
+               UNKNOWN, so this state carries NO counts and NO items list: zeros
+               here would be absence-shaped data about something unmeasured.
+  empty      — file present, zero records. Configured, nothing TRACKED.
   populated  — records exist. `in_window` may be 0, which means nothing TRACKED
                is due inside the window — not that nothing is due.
 
-`tracked_total` is always returned alongside so the difference between "the
-store holds nothing" and "the store holds rows, none of them soon" is legible
-without inference.
-
 Everything else FAILS CLOSED. An unreadable store and an unresolvable customer
 timezone are not empty results — they are failures, and they return `ok: false`
-with no `items` and no counts, so no failure path can produce a shape a model
-might read as "nothing due".
+with no `items` and no counts.
+
+WHY THE ZERO STATES BIND AN OUTBOUND REPLY. Getting the JSON right is necessary
+and was proven insufficient: with the three states distinguished AND every field
+self-scoped, the model still rendered a zero as an unqualified "you have no
+compliance deadlines" in 1 of 5 byte-identical runs. So each zero state binds a
+deterministic reply to the exact turn via safe_io, and the gateway egress seam
+substitutes it without reading the model's wording. Binding happens BEFORE the
+payload is returned, and a failure to bind suppresses the payload entirely —
+there is no execution path on which an authoritative zero ships unqualified.
+Positive rows bind nothing; Hermes keeps presentation ownership there.
 """
 from __future__ import annotations
 
@@ -28,7 +35,7 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
-from .identity import fail, ok, require_owner
+from .identity import fail, ok, refuse, require_owner
 
 TOOLSET = "shift_agent_read"
 TOOL_NAME = "get_compliance_deadlines"
@@ -38,7 +45,36 @@ DESCRIPTION = (
     "renewals, permit and tax filings, inspections and certifications — and "
     "return upcoming due dates. Use for questions about compliance deadlines, "
     "licence renewal, permits, filings, inspections, or what is due. This is "
-    "separate from the general todo list."
+    "separate from the general todo list.\n"
+    "\n"
+    "SCOPE. This tool knows only what is in the owner's TRACKED compliance "
+    "calendar. It is never evidence about obligations outside that calendar.\n"
+    "  - 'missing': tracking is not configured and coverage is unavailable. "
+    "This does NOT establish that the owner has no deadlines or obligations.\n"
+    "  - 'empty': the source is configured and holds zero TRACKED records. That "
+    "means nothing is currently tracked, NOT that there are no obligations.\n"
+    "  - 'populated' with zero due in the window: no TRACKED deadline falls in "
+    "the checked window. Do not generalize beyond the tracked calendar.\n"
+    "\n"
+    "WINDOW: supply window_days ONLY when the user states a bounded timeframe "
+    "such as 'next 30 days' or 'before October 1'. For generic wording such as "
+    "'coming up', 'upcoming', 'soon', or 'what compliance deadlines do I have?', "
+    "OMIT window_days so the deterministic 90-day default applies."
+)
+
+# Deterministic replies bound to the turn for every zero state. Bounded strings,
+# never model-generated. Positive rows get none — Hermes presents real deadlines.
+TPL_MISSING = (
+    "Compliance tracking is not configured, so I can't determine which "
+    "compliance deadlines you have coming up."
+)
+TPL_EMPTY = (
+    "Your compliance calendar is configured, but it currently has no tracked "
+    "compliance records."
+)
+TPL_POPULATED_ZERO = (
+    "None of the compliance deadlines currently tracked in your calendar are "
+    "due within the next {window_days} days."
 )
 
 # registry.register() takes the INNER function object; get_definitions() adds the
@@ -57,7 +93,9 @@ SCHEMA = {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 365,
-                "description": "Look-ahead window in days. Defaults to 90.",
+                "description": ("Look-ahead window in days. Supply ONLY for an "
+                                "explicit user-stated timeframe; omit otherwise "
+                                "and the deterministic 90-day default applies."),
             }
         },
         "required": [],
@@ -113,6 +151,22 @@ def _window(args) -> int:
     return min(365, max(1, n))
 
 
+def _bind_outbound(text: str) -> bool:
+    """Bind the deterministic reply to THIS turn. Must run inside the handler.
+
+    `HERMES_SESSION_ID` is reassigned by `AIAgent.run_conversation`, so a key
+    read any earlier will not match the one the WhatsApp adapter resolves at
+    egress — and that mismatch fails by letting unqualified text through. There
+    is deliberately no earlier registration point.
+    """
+    _ensure_platform_path()
+    try:
+        from safe_io import register_turn_outbound_override
+        return bool(register_turn_outbound_override(text))
+    except Exception:
+        return False
+
+
 def handler(args=None, **kwargs) -> str:
     """Model arguments arrive positionally and carry no identity — see identity.py."""
     authorized, refusal = require_owner()
@@ -126,8 +180,12 @@ def handler(args=None, **kwargs) -> str:
     # `empty`: a loader that materialises a default container would erase the
     # distinction the owner most needs.
     if not ITEMS_PATH.exists():
-        return ok(source_status="missing", window_days=window_days,
-                  tracked_total=0, in_window=0, items=[])
+        # No zero-shaped fields: coverage is unknown, not zero. And the reply is
+        # bound BEFORE the result is returned, so there is no path on which an
+        # unqualified absence can ship.
+        if not _bind_outbound(TPL_MISSING):
+            return refuse("outbound_truthfulness_guard_unavailable")
+        return ok(source_status="missing", coverage_status="not_configured")
 
     from safe_io import load_model
     from schemas import ComplianceItemsFile
@@ -139,6 +197,8 @@ def handler(args=None, **kwargs) -> str:
         return fail("state_unreadable")
 
     if not store.items:
+        if not _bind_outbound(TPL_EMPTY):
+            return refuse("outbound_truthfulness_guard_unavailable")
         return ok(source_status="empty", window_days=window_days,
                   tracked_total=0, in_window=0, items=[])
 
@@ -159,5 +219,11 @@ def handler(args=None, **kwargs) -> str:
         key=lambda r: r["days_until"],
     )
     in_window = [r for r in rows if r["days_until"] <= window_days]
+    if not in_window:
+        # Tracked rows exist but none are due. This is the steady state for a
+        # real customer, and the one the model most reliably over-generalized.
+        if not _bind_outbound(TPL_POPULATED_ZERO.format(window_days=window_days)):
+            return refuse("outbound_truthfulness_guard_unavailable")
+    # Positive rows bind nothing: Hermes owns presenting real deadlines.
     return ok(source_status="populated", window_days=window_days,
               tracked_total=len(rows), in_window=len(in_window), items=in_window)
