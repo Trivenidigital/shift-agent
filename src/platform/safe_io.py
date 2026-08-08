@@ -1070,6 +1070,11 @@ def _enforce_action_context_policy(
     """Apply PR-ζ chokepoint discipline. Returns a refusal tuple, or None
     if the send is allowed.
 
+    Two rules, in order. First (2026-08-08) the success invariant:
+    ``claims_action_completed`` without ``verified_action_result`` is refused on
+    the context alone, no wording consulted. Second, the PR-γ keyword lint,
+    which remains defense-in-depth for sends that do not assert completion.
+
     Allowlist match exempts from BOTH the missing-context refusal AND the
     lint (because lint requires a verified_action_result signal bound to
     the context shape — an allowlisted None-context send is by definition
@@ -1099,6 +1104,36 @@ def _enforce_action_context_policy(
                 return False, "", f"audit_write_failed: {audit_err}", "refused"
             return False, "", "missing_action_context", "refused"
         return None  # allowlisted; pass through
+
+    # 2026-08-08 — the success invariant, stated positively and checked FIRST.
+    # A send that asserts the action completed must carry the verified result;
+    # otherwise it is refused. Deliberately ahead of the is_regulated_action
+    # early-return (a completion claim is gated on every surface) and ahead of
+    # the keyword lint (no wording is consulted, so no synonym escapes it).
+    # Unreachable unless a caller opted in — claims_action_completed defaults
+    # False, so every pre-existing callsite keeps its exact behavior.
+    if (
+        action_context.claims_action_completed
+        and not action_context.verified_action_result
+    ):
+        audit_err = _try_emit_audit_row(
+            "regulated_send_lint_violation",
+            {
+                "action_id": action_context.action_id,
+                "audit_row_id": action_context.audit_row_id,
+                "jid": jid,
+                # Not a verb: the refusal is context-bound, so the marker names
+                # the invariant rather than a matched word. Kept in the existing
+                # row type so the deployed lint-violation monitoring sees it.
+                "verb_hits": ["unverified_action_completion_claim"],
+                "message_preview": _join_parts_for_preview(message_parts)[:120],
+            },
+        )
+        if audit_err is not None:
+            return False, "", f"audit_write_failed: {audit_err}", "refused"
+        if allow_fallback and not _action_context_is_money_or_approval(action_context):
+            return False, "", _REGULATED_LINT_FALLBACK_SENTINEL, "refused"
+        return False, "", "unverified_action_completion_claim", "refused"
 
     # Regulated context — apply PR-γ lint when is_regulated_action=True.
     # Non-regulated contexts (system health alerts, internal smoke) pass
@@ -1265,7 +1300,12 @@ def _front_brain_outbound_enforce(
 
     A verified regulated completion is not clobbered: the screen receives the
     action_context's verified_action_result so an evidence-backed message (e.g.
-    "your refund has been processed") passes the content classes."""
+    "your refund has been processed") passes the content classes.
+
+    2026-08-08: an action_context asserting completion (claims_action_completed)
+    WITHOUT verified_action_result short-circuits to the fallback before the
+    screen runs. The screen is wording-based; that invariant is not, so no
+    phrasing of an unverified completion claim can pass here either."""
     if not front_brain_outbound_enforce_enabled(jid):
         return message
 
@@ -1285,6 +1325,40 @@ def _front_brain_outbound_enforce(
         if (fallback_template and str(fallback_template).strip())
         else FRONT_BRAIN_SAFE_GENERIC_ACK
     )
+    # 2026-08-08 — the same success invariant the regulated chokepoint enforces,
+    # applied at the free-form seam: an unverified completion claim never
+    # reaches the customer, whatever words it used. Checked before the screen
+    # runs because the screen is wording-based and this rule is not.
+    if (
+        action_context is not None
+        and getattr(action_context, "claims_action_completed", False)
+        and not verified
+    ):
+        _try_emit_audit_row(
+            "front_brain_outbound_refused",
+            {
+                "chat_key_hash": chat_hash,
+                "hit_classes": ["unverified_action_completion_claim"],
+                "hit_values": [str(getattr(action_context, "action_id", ""))[:80]],
+                "message_preview": str(message or "")[:120],
+                "template_fallback_used": True,
+            },
+        )
+        # Review surface (P0-5), same as the screen's own FAIL path: record the
+        # safe text that ACTUALLY went out, not the composition that did not.
+        _try_emit_audit_row(
+            "front_brain_reply_composed",
+            {
+                "chat_key_hash": chat_hash,
+                "reply_text": str(safe_fallback or "")[:2000],
+                "verdict": "passed",
+                "lint_classes_checked": [],
+                "template_fallback": True,
+                "logical_turn_id": turn_id,
+                "send_attempt_id": attempt_id,
+            },
+        )
+        return safe_fallback
 
     try:
         try:

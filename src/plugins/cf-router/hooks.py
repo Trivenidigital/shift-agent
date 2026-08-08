@@ -598,16 +598,28 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 # the photo as a flyer reference asset) and the
                 # `should_start_new_flyer_over_active` primary arm (which created
                 # F0226 live, because _MEDIA_TEMPLATE_EDIT admits the bare
-                # substring "menu" on any media message). Returning None is the
-                # established "let the dispatcher route it" fall-through: no flyer
-                # project, no asset ingestion, no catering lead. Placed AFTER the
-                # R2B-1 gate so amendment-conflict precedence is unchanged, and it
-                # reuses the `guest_role` identity already resolved above rather
-                # than spawning identify-sender again.
+                # substring "menu" on any media message). No flyer project, no
+                # asset ingestion, no catering lead. Placed AFTER the R2B-1 gate
+                # so amendment-conflict precedence is unchanged, and it reuses
+                # the `guest_role` identity already resolved above rather than
+                # spawning identify-sender again.
+                #
+                # 2026-08-08: this used to `return None` and let the LLM
+                # dispatcher decide whether to invoke `update_catering_menu`. On
+                # the live 2026-08-01 owner turn it decided not to, and answered
+                # "successfully recorded" with nothing recorded. Everything
+                # needed to run the action is already proven here — media path,
+                # documented trigger, authorized role — and the SKILL's own job
+                # is to call ONE script with mechanically derivable inputs, so
+                # the second, redundant routing decision is gone: cf-router runs
+                # the script and answers from its verified result.
                 if _menu_caption_cedes_to_dispatcher(
                     text, chat_id, media_path=media_path, role=guest_role,
                 ):
-                    return None
+                    return _run_owner_menu_ingestion(
+                        chat_id, event, text=text, media_path=media_path,
+                        role=guest_role, sender_phone=guest_phone,
+                    )
                 # P1-1: fresh-intent catering escape gate. A fresh catering
                 # inquiry from a customer with a LIVE flyer project must reach
                 # catering (F7), not be captured as a flyer edit/revision (the
@@ -4570,6 +4582,192 @@ def _menu_caption_cedes_to_dispatcher(
         return True
     except Exception:  # noqa: BLE001 — a cession decision must never claim the inbound
         return False
+
+
+_MENU_IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
+
+# The SKILL's Step-3 card, rendered here instead of by the LLM. `preview_text`
+# is passed through VERBATIM — the script rendered it deterministically (item
+# list, exclusions, and the Pricebook section that tells the owner `yes` also
+# changes what customers are charged), and the SKILL's hard rule is not to
+# paraphrase it.
+_MENU_PREVIEW_CARD = (
+    "⚕ *Catering Agent*\n"
+    "────────────\n"
+    "*Menu Update {update_id}* — preview\n\n"
+    "{preview_text}\n\n"
+    "----\n"
+    "*To apply this menu, reply:* `{code} yes`\n"
+    "*To discard and try again, reply:* `{code} no`"
+)
+
+# The failure arm's copy. Deliberately says what did NOT happen: no proposal is
+# staged, so there is no code to approve and nothing for the owner to act on
+# except re-sending. Carries no completion verb, so it is clean under the
+# regulated-send lint it also has to pass.
+_MENU_INGESTION_FAILED_TEXT = (
+    "⚕ *Catering Agent*\n"
+    "────────────\n"
+    "I could not read that menu, so there is nothing staged for your approval "
+    "yet — your current menu and prices are untouched.\n\n"
+    "Please re-send it, ideally a straight-on photo with the prices in focus."
+)
+
+
+def _menu_message_shape(media_path: Optional[str], text: str) -> str:
+    """Map the inbound to the DispatcherRouted `message_shape` enum."""
+    if not str(media_path or "").lower().endswith(_MENU_IMAGE_SUFFIXES):
+        return "media_other"  # PDF / doc — the SKILL accepts these too
+    return "image_with_caption" if str(text or "").strip() else "image_only"
+
+
+def _send_menu_ingestion_failure(chat_id: str) -> tuple[bool, str, str]:
+    """The failure arm's ONE reply. Its context reports non-completion, which is
+    why it is deliverable: the success invariant gates claims, not honesty."""
+    return actions.send_flyer_text(
+        chat_id, _MENU_INGESTION_FAILED_TEXT,
+        action_context=build_action_context(
+            action_id="catering.menu.ingestion_failed",
+            is_regulated_action=True,
+            verified_action_result=False,
+            claims_action_completed=False,
+            mutation_class="local_reversible",
+        ),
+    )
+
+
+def _run_owner_menu_ingestion(
+    chat_id: str, event: Any, *, text: str, media_path: Optional[str],
+    role: str, sender_phone: str,
+) -> dict:
+    """Terminal wrapper. This arm exists to take the action decision away from
+    the LLM, so it must ALWAYS return a terminal result: the outer plugin
+    try/except turns an exception into `None`, which would hand the turn straight
+    back to the dispatcher — the exact failure being fixed. An unexpected error
+    therefore degrades to the honest failure reply, never to an LLM turn."""
+    try:
+        return _owner_menu_ingestion_impl(
+            chat_id, event, text=text, media_path=media_path,
+            role=role, sender_phone=sender_phone,
+        )
+    except Exception as exc:  # noqa: BLE001 — see docstring: never yield the turn
+        try:
+            actions.audit_intercepted(
+                reason="menu_ingestion_failed",
+                chat_id=chat_id,
+                detail=(f"sender_role={role}; unexpected_error="
+                        f"{type(exc).__name__}: {str(exc)[:200]}"),
+            )
+            _send_menu_ingestion_failure(chat_id)
+        except Exception:
+            pass  # the terminal return below is the guarantee that matters
+        return {"action": "skip",
+                "reason": f"cf-router menu ingestion errored ({type(exc).__name__})"}
+
+
+def _owner_menu_ingestion_impl(
+    chat_id: str, event: Any, *, text: str, media_path: Optional[str],
+    role: str, sender_phone: str,
+) -> dict:
+    """Run menu ingestion deterministically for an inbound the cession already
+    proved is one: media present, a documented SKILL trigger in the caption, and
+    an owner / verified-employee sender.
+
+    Hermes still owns all the judgment — vision, extraction, normalization,
+    ambiguity notes, schema validation, code minting, the pending write and the
+    audit row all happen inside `parse-menu-photo`. What is removed is only the
+    LLM's redundant decision about WHETHER to call it.
+
+    Success is not the script's word for it. The script's stdout `update_id` is a
+    claim; this re-reads the durable pending store and requires it to hold that
+    same update_id before anything tells the owner a proposal is ready. Only that
+    verified path builds a context claiming completion — every other outcome
+    reports honestly that nothing was staged.
+    """
+    message_id = _extract_message_id(event, chat_id, text)
+    # Written BEFORE invoking, per the dispatcher contract: an arm that bypasses
+    # the LLM must be visible to routing-accuracy pairing even if it then fails.
+    try:
+        actions.audit_dispatcher_routed(
+            message_id=message_id,
+            chat_id=chat_id,
+            routed_to_skill="update_catering_menu",
+            message_shape=_menu_message_shape(media_path, text),
+        )
+    except Exception:
+        pass  # telemetry only — never block the action
+
+    rc, out, err = actions.invoke_parse_menu_photo(
+        image_path=str(media_path or ""),
+        source_image_id=message_id,
+        sender_phone=sender_phone,
+    )
+
+    update_id = ""
+    code = ""
+    preview_text = ""
+    if rc == 0:
+        for line in reversed([ln for ln in str(out or "").splitlines() if ln.strip()]):
+            try:
+                doc = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(doc, dict) and doc.get("update_id"):
+                update_id = str(doc.get("update_id") or "")
+                code = str(doc.get("confirmation_code") or "")
+                preview_text = str(doc.get("preview_text") or "")
+            break
+
+    # The durable half of the receipt. Absent / unreadable / different update_id
+    # all mean the same thing: there is no proposal to point the owner at.
+    pending = (actions.find_menu_pending_by_update_id(update_id)
+               if update_id else None)
+    verified = bool(pending) and bool(code) and bool(preview_text)
+
+    if not verified:
+        actions.audit_intercepted(
+            reason="menu_ingestion_failed",
+            chat_id=chat_id,
+            subprocess_rc=rc,
+            detail=(f"sender_role={role}; update_id={update_id or 'none'}; "
+                    f"durable_pending={'yes' if pending else 'no'}; "
+                    f"stderr={str(err)[:200]!r}"),
+        )
+        ok, mid, send_err = _send_menu_ingestion_failure(chat_id)
+        return {"action": "skip",
+                "reason": (f"cf-router menu ingestion failed (rc={rc}); "
+                           f"owner told (ok={ok} mid={mid} err={send_err[:80]})")}
+
+    actions.audit_intercepted(
+        reason="menu_ingestion_staged",
+        chat_id=chat_id,
+        code=code,
+        subprocess_rc=0,
+        detail=(f"sender_role={role}; update_id={update_id}; "
+                f"item_count={len(pending.get('extracted_items') or [])}"),
+    )
+    ok, mid, send_err = actions.send_flyer_text(
+        chat_id,
+        _MENU_PREVIEW_CARD.format(
+            update_id=update_id, preview_text=preview_text, code=code),
+        action_context=build_action_context(
+            # No money marker in the id on purpose: staging a proposal is
+            # local_reversible and nothing is charged or activated until the
+            # owner replies `{code} yes`, which apply-menu-update handles.
+            action_id=f"catering.menu.update_proposed:{update_id}",
+            is_regulated_action=True,
+            # Both flags earned: parse-menu-photo exited 0 AND the durable
+            # pending store was re-read and holds this update_id. audit_row_id
+            # stays unset — the script emits `menu_update_proposed` but returns
+            # no row identifier, and inventing one would be a fabricated receipt.
+            verified_action_result=True,
+            claims_action_completed=True,
+            mutation_class="local_reversible",
+        ),
+    )
+    return {"action": "skip",
+            "reason": (f"cf-router menu ingestion staged {update_id} "
+                       f"(ok={ok} mid={mid} err={send_err[:80]})")}
 
 
 def _flyer_edit_signal_present(text: str, *, has_media: bool) -> bool:

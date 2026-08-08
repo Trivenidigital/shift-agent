@@ -4112,6 +4112,27 @@ class SeenIds(BaseModel):
 # `verified_action_result=True` with explicit evidence (audit-row id of the
 # completion event). Mis-tagging a regulated action as non-regulated bypasses
 # the entire protection.
+#
+# 2026-08-08 — `claims_action_completed` INVERTS the success invariant.
+# Before it, verification was purely an EXEMPTION: verified_action_result=True
+# skipped the lint, while the absence of verification merely fell through to
+# forbidden-verb keyword screening. Anything the keyword list did not name
+# therefore shipped as a completion claim with no durable action behind it —
+# live on the 2026-08-01 owner menu turn, which said "successfully recorded"
+# with nothing recorded ("recorded" is in no blacklist, and adding it would
+# only move the hole to the next synonym).
+#
+# The rule is now stated positively and bound to the CONTEXT, not to wording:
+#
+#     claims_action_completed AND NOT verified_action_result  =>  REFUSE
+#
+# A sender that tells the recipient a durable action completed MUST carry the
+# evidence that it did. Wording variations cannot bypass it because no wording
+# is consulted. The keyword lint stays as defense-in-depth for everything else.
+# Default False keeps every pre-existing callsite byte-identical: a send that
+# does not assert completion (a proposal, a question, an honest "I could not
+# verify this") is not gated, which is what lets the failure path stay truthful
+# instead of being replaced by a generic ack.
 
 class ActionExecutionContext(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -4119,6 +4140,11 @@ class ActionExecutionContext(BaseModel):
     action_id: str = Field(..., min_length=1, max_length=200)
     is_regulated_action: bool
     verified_action_result: bool
+    # True ONLY when this send asserts to the recipient that `action_id`
+    # completed. Set it on the strength of a verified durable result, never to
+    # describe intent — pairing it with verified_action_result=False is the one
+    # combination the chokepoint refuses outright.
+    claims_action_completed: bool = False
     audit_row_id: Optional[str] = Field(default=None, max_length=200)
     mutation_class: Optional[Literal["local_reversible", "external_irreversible"]] = None
 
@@ -6802,6 +6828,26 @@ class CfRouterIntercepted(_BaseEntry):
         #     to `update_catering_menu`. Creates neither a flyer project nor a
         #     catering lead — records the cession only.
         "menu_caption_ceded_to_dispatcher",
+        # 2026-08-08: the cession above released the inbound to the LLM
+        # dispatcher, which on the live 2026-08-01 owner turn then declined to
+        # invoke `update_catering_menu` at all and replied "successfully
+        # recorded" with nothing recorded. The SKILL adds no judgment — its
+        # documented job is to call ONE script with mechanically derivable
+        # inputs — so cf-router now calls that script itself and the LLM is
+        # never asked to re-select the action. Both arms are telemetry-visible
+        # under the same rule as every LLM-bypassing arm above.
+        #   menu_ingestion_staged — parse-menu-photo exited 0 AND the durable
+        #     pending store was re-read and proved to hold the update_id it
+        #     reported. subprocess_rc=0; `code` carries the approval code the
+        #     owner replies with. This is the ONLY arm that may tell the owner
+        #     the extraction is ready for approval.
+        #   menu_ingestion_failed — the script exited non-zero, emitted
+        #     unreadable stdout, or the durable store did not confirm the
+        #     update_id. subprocess_rc carries the script's exit code (124
+        #     timeout / 127 spawn failure / the documented 2,3,5,6). The owner
+        #     gets a bounded "could not read it" reply; no proposal is claimed.
+        "menu_ingestion_staged",
+        "menu_ingestion_failed",
         "flyer_brief_approved",
         "flyer_brief_project_create_failed",
         "flyer_starter_preference_off",
