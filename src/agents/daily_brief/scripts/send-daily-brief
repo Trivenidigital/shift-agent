@@ -577,7 +577,13 @@ def _render_brief_text(
     # the section is in cfg.daily_brief.sections (R1-B1 fix from PR review —
     # prevents permanent "Birthdays today: None today." line for customers
     # who haven't opted in).
-    if "birthdays" in cfg.daily_brief.sections:
+    #
+    # Wave-1 2026-08-08: ALSO require cfg.loyalty.enabled. LoyaltyConfig shipped
+    # documented as Agent #33's opt-in gate but had no production consumer, so
+    # the flag controlled nothing in either direction. Both gates must be open;
+    # `record-customer-birthday` stays ungated on purpose — capturing a birthday
+    # the owner typed is not the same as broadcasting it back.
+    if cfg.loyalty.enabled and "birthdays" in cfg.daily_brief.sections:
         today_local = _customer_now(cfg.customer.timezone)
         birthdays_today = _aggregate_birthdays(today_local)
         # R2-M2 PR review fix: \n\n matches the blank-line spacing between

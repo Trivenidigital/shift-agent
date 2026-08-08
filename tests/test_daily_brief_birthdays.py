@@ -402,6 +402,11 @@ def test_render_brief_text_includes_birthdays_when_section_enabled(env_dir):
         "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
         "backup": {"gpg_recipient_email": "x@y"},
         "daily_brief": {"sections": ["yesterday", "today_outlook", "alerts", "birthdays"]},
+        # Wave-1 2026-08-08: the birthdays render now requires BOTH the section
+        # and cfg.loyalty.enabled (see tests/test_loyalty_gate_is_real.py — the
+        # flag previously had no production consumer). This test asserts the
+        # opted-in path, so it opens both gates.
+        "loyalty": {"enabled": True},
     }
     cfg = Config.model_validate(cfg_dict)
 
