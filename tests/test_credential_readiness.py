@@ -26,7 +26,7 @@ def _touch(path: Path, text: str = "") -> Path:
 def _make_foundation(tmp_path: Path) -> tuple[Path, Path]:
     hermes_home = tmp_path / "home" / ".hermes"
     install_root = tmp_path / "hermes-agent"
-    for skill_id in ("productivity/maps", "productivity/ocr-and-documents", "mcp/native-mcp"):
+    for skill_id in ("productivity/maps", "productivity/ocr-and-documents"):
         _touch(hermes_home / "skills" / skill_id / "SKILL.md", f"# {skill_id}\n")
     return hermes_home, install_root
 
@@ -48,7 +48,6 @@ def test_foundation_skills_resolve_from_live_and_bundled_roots(tmp_path: Path):
     install_root = tmp_path / "hermes-agent"
     _touch(hermes_home / "skills" / "productivity/maps" / "SKILL.md")
     _touch(install_root / "skills" / "productivity/ocr-and-documents" / "SKILL.md")
-    _touch(install_root / "skills" / "mcp/native-mcp" / "SKILL.md")
 
     report = cr.build_report(
         cr.ReadinessOptions(
@@ -63,9 +62,66 @@ def test_foundation_skills_resolve_from_live_and_bundled_roots(tmp_path: Path):
     assert statuses == {
         "productivity/maps": "present",
         "productivity/ocr-and-documents": "present",
-        "mcp/native-mcp": "present",
     }
     assert report["strict_foundation_ok"] is True
+
+
+def test_strict_foundation_passes_without_native_mcp(tmp_path: Path):
+    """THE regression this change exists for.
+
+    `mcp/native-mcp` was a required FOUNDATION_SKILLS entry from the pre-0.19.1
+    bundled-skill architecture. Pinned Hermes 0.19.1 / cc4cab2f does not ship it
+    (/usr/local/lib/hermes-agent/skills/mcp/ does not exist); MCP is now the
+    `hermes mcp` CLI. The stale entry made the deploy gate fail closed on every
+    install with "mcp/native-mcp: missing", blocking unrelated work.
+
+    Exactly the two genuinely-bundled foundation skills present, native-mcp
+    absent from disk AND from the required set, strict gate passes.
+    """
+    hermes_home = tmp_path / "home" / ".hermes"
+    install_root = tmp_path / "hermes-agent"
+    _touch(hermes_home / "skills" / "productivity/maps" / "SKILL.md")
+    _touch(hermes_home / "skills" / "productivity/ocr-and-documents" / "SKILL.md")
+    assert not (hermes_home / "skills" / "mcp" / "native-mcp").exists()
+
+    report = cr.build_report(
+        cr.ReadinessOptions(
+            hermes_home=hermes_home,
+            hermes_install_root=install_root,
+            strict_foundation=True,
+            today=cr.parse_date("2026-08-08"),
+        )
+    )
+
+    assert report["strict_foundation_ok"] is True
+    ids = {row["id"] for row in report["foundation"]}
+    assert ids == {"productivity/maps", "productivity/ocr-and-documents"}
+    assert "mcp/native-mcp" not in ids, (
+        "the retired entry must not reappear in the required foundation set"
+    )
+
+
+def test_strict_foundation_still_fails_when_a_required_skill_is_missing(tmp_path: Path):
+    """Guard the other direction: retiring native-mcp must not weaken the gate
+    for the two skills that ARE still required."""
+    for missing in ("productivity/maps", "productivity/ocr-and-documents"):
+        hermes_home = tmp_path / missing.replace("/", "_") / ".hermes"
+        install_root = tmp_path / missing.replace("/", "_") / "hermes-agent"
+        for skill_id in ("productivity/maps", "productivity/ocr-and-documents"):
+            if skill_id != missing:
+                _touch(hermes_home / "skills" / skill_id / "SKILL.md")
+
+        report = cr.build_report(
+            cr.ReadinessOptions(
+                hermes_home=hermes_home,
+                hermes_install_root=install_root,
+                strict_foundation=True,
+                today=cr.parse_date("2026-08-08"),
+            )
+        )
+        assert report["strict_foundation_ok"] is False, f"{missing} absent must fail"
+        statuses = {row["id"]: row["status"] for row in report["foundation"]}
+        assert statuses[missing] != "present"
 
 
 def test_bundled_only_foundation_skill_warns_but_still_passes(tmp_path: Path):
@@ -78,7 +134,6 @@ def test_bundled_only_foundation_skill_warns_but_still_passes(tmp_path: Path):
     install_root = tmp_path / "hermes-agent"
     _touch(hermes_home / "skills" / "productivity/maps" / "SKILL.md")           # LIVE
     _touch(install_root / "skills" / "productivity/ocr-and-documents" / "SKILL.md")  # bundled-only
-    _touch(install_root / "skills" / "mcp/native-mcp" / "SKILL.md")            # bundled-only
 
     report = cr.build_report(
         cr.ReadinessOptions(
@@ -92,7 +147,6 @@ def test_bundled_only_foundation_skill_warns_but_still_passes(tmp_path: Path):
     assert report["strict_foundation_ok"] is True  # non-blocking: bundled-only still passes
     text = cr.format_text_report(report)
     assert "WARN: productivity/ocr-and-documents present in bundled" in text
-    assert "WARN: mcp/native-mcp present in bundled" in text
     assert "WARN: productivity/maps" not in text    # a LIVE skill gets no WARN
 
 
@@ -112,7 +166,7 @@ def test_local_dev_skill_root_does_not_satisfy_live_strict_mode(tmp_path: Path):
 
     assert report["strict_foundation_ok"] is False
     missing = {row["id"] for row in report["foundation"] if row["status"] == "missing"}
-    assert {"productivity/maps", "productivity/ocr-and-documents", "mcp/native-mcp"} <= missing
+    assert {"productivity/maps", "productivity/ocr-and-documents"} <= missing
 
 
 def test_local_dev_present_reflects_actual_repo_match(tmp_path: Path):
@@ -121,7 +175,7 @@ def test_local_dev_present_reflects_actual_repo_match(tmp_path: Path):
     bug where `any(repo_root.glob(p) for p in ...)` was always True (glob yields a truthy
     generator), so local_dev_present never reflected a real match."""
     repo_root = tmp_path / "repo"
-    # Only 'maps' exists locally; ocr-and-documents + native-mcp do NOT.
+    # Only 'maps' exists locally; ocr-and-documents does NOT.
     _touch(repo_root / "src" / "agents" / "demo" / "skills" / "maps" / "SKILL.md")
 
     report = cr.build_report(
@@ -137,7 +191,6 @@ def test_local_dev_present_reflects_actual_repo_match(tmp_path: Path):
     local = {row["id"]: row["local_dev_present"] for row in report["foundation"]}
     assert local["productivity/maps"] is True                # actually present under repo_root
     assert local["productivity/ocr-and-documents"] is False  # NOT in repo — bug would report True
-    assert local["mcp/native-mcp"] is False
 
 
 def test_strict_foundation_ignores_missing_repo_installed_cf_router(tmp_path: Path):
@@ -442,7 +495,10 @@ def test_script_subprocess_json_and_strict_exit_codes(tmp_path: Path):
     assert proc_ok.returncode == 0, proc_ok.stderr
     assert json.loads(proc_ok.stdout)["strict_foundation_ok"] is True
 
-    (hermes_home / "skills" / "mcp" / "native-mcp" / "SKILL.md").unlink()
+    # Remove a STILL-REQUIRED foundation skill. This used to delete
+    # mcp/native-mcp; that entry was retired from FOUNDATION_SKILLS, so deleting
+    # it would no longer exercise the strict failure this test exists to prove.
+    (hermes_home / "skills" / "productivity" / "ocr-and-documents" / "SKILL.md").unlink()
     proc_strict = subprocess.run(
         [
             sys.executable,
@@ -460,7 +516,7 @@ def test_script_subprocess_json_and_strict_exit_codes(tmp_path: Path):
         check=False,
     )
     assert proc_strict.returncode == 1
-    assert "mcp/native-mcp" in proc_strict.stdout
+    assert "productivity/ocr-and-documents" in proc_strict.stdout
 
 
 def test_plugin_validation_unreadable_config_exits_2(tmp_path: Path):
