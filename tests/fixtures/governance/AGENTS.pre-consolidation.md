@@ -1,0 +1,172 @@
+# AGENTS.md — SMB-Agents Project
+
+## ⚠️ CRITICAL RULE — Check Hermes capabilities BEFORE writing code
+
+**Hermes owns the substrate.** Before designing any agent, skill, spec, or implementation plan, enumerate what Hermes already does for the task. Only write custom code for what Hermes provably cannot do.
+
+### How to apply (mandatory checklist before any code/spec)
+
+1. **List every step** the agent / feature takes (e.g. "receive image → extract → classify → respond → push to QBO")
+2. **For each step**, ask: *"Does Hermes already do this for Catering, Shift, or Daily Brief?"*
+3. **Mark each step** as `[Hermes]` or `[net-new]`
+4. **Effort estimate = net-new steps only.** Steps marked `[Hermes]` cost ~zero engineering — skill scaffold + config wiring at most
+5. **Red flag**: if the spec marks most steps `[net-new]`, you almost certainly missed a Hermes capability — go re-check before continuing
+
+### What Hermes natively handles (verified in production for Catering Agent as of 2026-04-29)
+
+- **Source ingestion across formats:** image (JPEG/PNG), PDF, Excel/CSV, Word, plain text
+- **Source origins:** WhatsApp inbound media, mounted filesystems, Google Drive (point-to-folder), URLs
+- **Vision extraction:** complex layouts, multi-column, low-quality scans, multi-language
+- **Structured output:** JSON-schema-conformant extraction
+- **Skill chaining:** extract → classify → respond, with audit at each step
+- **Approval workflows:** `#XXXXX` 5-char codes, 4h proposal TTL, dead-man escalation
+- **Identity + role gating:** `sender_role` check (owner / staff / customer)
+- **Audit chain:** `decisions.log` discriminated-union entries
+- **Multi-channel response:** WhatsApp text/image/document, Telegram, email
+- **Skill dispatch:** routing by `sender_role` + `media_type` + content
+- **Per-VPS state:** JSON / SQLite + encrypted backups
+- **LLM gateway:** text + vision, swappable provider
+
+**Canonical reference (the test that proves the loop):** Owner sends menu image to their WhatsApp → Hermes extracts → structured menu created → customer-facing reply with menu items. End-to-end, all inside Hermes. This is the template for "image/document-in → structured-out → response-out" — works for receipts, invoices, supplier price sheets, with only the schema swapping.
+
+### Install-now ecosystem skills (verified 2026-05-03; cover 6 of 17 prioritized agents)
+
+Per `tasks/skills-roadmap.md` (4-source ecosystem audit), these 5 official-bundled skills replace ~1,200 LOC of substrate work across the portfolio. Install proactively before scaffolding the named agents — and check this list FIRST in the per-step Hermes-first checklist before tagging anything `[net-new]`:
+
+1. **`productivity/google-workspace`** — Calendar/Sheets/Drive/Gmail/Docs OAuth. Covers agents #1, #4, #10, #12, #13, #14 (~500 LOC saved).
+2. **`productivity/maps`** — OSRM routing + Nominatim geocoding (free, 1 req/s). Covers agent #3 + future routing (~150 LOC saved).
+3. **`productivity/airtable`** — CRUD for SKU lists, cost data, P&L history. Covers agents #6, #7, #17, #22 (~250 LOC saved).
+4. **`productivity/ocr-and-documents`** — pymupdf (instant) + marker-pdf (90+ langs, table support). Complements Hermes vision for non-image PDFs. Covers agents #6, #7, #14, #21, #8 (~200 LOC saved).
+5. **`productivity/notion`** — Notion CRUD as Airtable alternative. Covers agents #6, #12 (~100 LOC saved).
+
+**Strategic escape hatch — `mcp/native-mcp`**: bridges Hermes to ~8,600+ MCP servers in the broader ecosystem. Likely path for QBO/Stripe/DocuSign integrations the in-house Hermes ecosystem does NOT cover. Investigate maintained MCP server BEFORE estimating ~400 LOC custom QBO write etc.
+
+### What is genuine net-new engineering (NOT Hermes substrate)
+
+- **External write APIs:** QuickBooks OAuth + write scope, Stripe charges, e-sign services, calendar invites, etc. Hermes consumes externals; writing to them is per-agent work. **Verified 2026-05-03 against 4-source ecosystem audit (`tasks/skills-roadmap.md`)** — no Hermes/OpenClaw/community skill exists for QBO write, Stripe/Square/PayPal/Venmo standalone, DocuSign/HelloSign/PandaDoc, state tax filings, DoorDash/UberEats/GrubHub, or restaurant equipment vendor APIs. **Always check `mcp/native-mcp` for community MCP servers before estimating custom LOC** for these.
+- **Money-moving UX discipline:** code+amount approval format, perceptual-hash dedup, per-amount cockpit-vs-WhatsApp thresholds, reversibility windows
+- **Per-customer business logic:** chart-of-accounts mapping, supplier roster matching, festival-calendar regional variants, etc.
+- **Specialised classifiers** beyond what a prompt-engineered LLM call can do
+- **Cross-agent coordination logic:** state-machine handoffs between agents (rare; usually a skill chain handles this)
+- **Trap skills to AVOID** (per skills-roadmap.md): `bookkeeper` meta-skill (writes to Xero not QBO; paid Maton+DeepRead deps; VirusTotal "Suspicious"-flagged), `sentiment-priority-scorer` (real-estate-specific, misleading for #9/#20), `cognify-skills` (referenced as 19 business ops skills but repo returns 404), `farmos-equipment` for #19 (farm not restaurant). Do not waste investigation cycles on these.
+
+### Why this rule exists
+
+The Stage 1 decision doc for Expense Bookkeeper (drafted before this rule landed) described 4 "architectural surfaces" as if greenfield infrastructure. Reality: Hermes already handled vision extraction, WhatsApp media routing, structured output, audit chain, approval codes, skill chaining. The genuinely net-new surfaces shrank from 4 to 1.5 (QBO write API + money-moving discipline) once Hermes was credited honestly. This rule prevents the same failure mode from repeating.
+
+### How this rule is enforced (mechanical, not discipline-based)
+
+The rule fired for the v0.4 catering paradigm change (PR-B), then went unapplied at PR-B2 design time — 8 commits / 476 LOC of design slipped past, of which only 2 commits / 125 LOC were the actual paradigm change. The other ~350 LOC was scaffolding. Five reviewers caught security and correctness BLOCKERs but, given scope-assumed lenses, did not push back on whether the scope itself was needed. Documentation alone is insufficient — the system needs interception points.
+
+**Three enforcement mechanisms (added 2026-04-30, all live):**
+
+1. **Hook on `Write`/`Edit` to plan/design/spec docs in `tasks/`.** Configured in `~/.Codex/settings.json` `PreToolUse`. Runs `~/.Codex/hooks/hermes-first-check.py`, which blocks the write if the resulting content lacks BOTH a `**Drift-check tag:**` line AND a `Hermes-first` checklist heading. Exit code 2 returns stderr to Codex as feedback. Catches the omission at doc-creation time.
+
+2. **`/hermes-check <task>` slash command.** Templated walk-through of the per-step capability checklist. Lives at `~/.Codex/commands/hermes-check.md`. Use proactively before any plan/spec/design/build/bug-fix work; the command body itself instructs to refuse skipping.
+
+3. **Reviewer-lens addition for 5-agent review cycles.** When dispatching parallel reviewers, ALWAYS include one reviewer with the explicit lens *"could Hermes already do this — is the scope itself needed?"*. The five existing lenses (security / drift / schema / truth-guard / deploy) take scope as given; this sixth lens questions it. Without it, the reviewers find BLOCKERs *within* the proposed scope but never flag the scope as bloated. This is the lens that, applied at PR-B2 design time, would have flagged 5 of 8 commits as avoidable.
+
+**Procedural rule: at every stage transition** (plan → design → build → PR → review → merge → bug-fix), re-run the per-step `[Hermes]` / `[net-new]` checklist if any step has changed since the last application. The hook catches plan/design files; the slash command + procedural rule covers everything else.
+
+---
+
+## ⚠️ DRIFT RULES — Read deployed code BEFORE proposing
+
+Authoritative source: `docs/hermes-alignment.md` (Parts 1 and 3 are binding). This section summarises; the doc is canonical.
+
+### The rule (Part 3 working agreement)
+
+**Before proposing schema, test, or architecture work, READ the relevant deployed code first.**
+
+| Work type | Read first (mandatory before drafting) |
+|---|---|
+| Schema work | `src/platform/schemas.py` — grep for the relevant model first |
+| Test work | 1–2 existing test files (e.g. `tests/test_catering_v02_scripts.py`, `tests/test_catering_b1_cases.py`) |
+| Routing / dispatcher work | `src/agents/shift/skills/dispatch_shift_agent/SKILL.md` + at least one handler SKILL |
+| New script proposal | grep `src/platform/scripts/` + `src/agents/*/scripts/` for the closest similar |
+| Audit-log entries | `LogEntry` discriminated union in `src/platform/schemas.py` |
+| Deploy work | `src/agents/shift/scripts/shift-agent-deploy.sh` + `tools/check-shift-agent-patch.sh` |
+| New SKILL | one existing SKILL.md to mirror frontmatter + structure |
+| File-locking / atomic writes | `src/platform/safe_io.py` — see what helpers exist |
+
+This rule eliminates ~80% of corrections at zero infrastructure cost. Most "drift" in this codebase comes from importing a SaaS-style frame before grounding in this codebase's specific shape.
+
+### Drift-check tag (mandatory at top of every plan/spec/design doc)
+
+Every plan, spec, or design document MUST carry one tag at the top:
+
+- **`Hermes-native`** — uses Hermes primitives without modification
+- **`extends-Hermes`** — adds custom infrastructure on top (most platform work falls here)
+- **`drifts-from-Hermes`** — explicitly fights Hermes conventions; MUST explain operationally what compensating infrastructure exists
+
+Self-disclosure mechanism. Surfaces deviation at proposal time so reviewers can engage with it explicitly. Does NOT replace the read-deployed-code rule.
+
+### Deployed pattern checklist (Part 1 — verify, do NOT silently import alternatives)
+
+- **Storage:** JSON-on-disk + `safe_io.atomic_write_json` + `fcntl.flock`. Do NOT introduce SQLite/Postgres without explicit `drifts-from-Hermes` tag + reason.
+- **NDJSON audit log:** append via `safe_io.ndjson_append` through the `log-decision-direct` chokepoint (used by SKILLs) or via per-agent scripts that share the same chokepoint. Add new variants to `LogEntry` discriminated union (subclass `_BaseEntry`, set `type: Literal["..."]`).
+- **Approval codes:** 5-char `#XXXXX` from the 28.6M-entry alphabet via `generate_unique_code` helper. Do NOT invent parallel generators. Codes share a namespace across agents; the dispatcher disambiguates by state-file priority.
+- **Schemas:** Pydantic v2 with explicit `model_config`. `extra="forbid"` on state schemas; `extra="ignore"` on LLM-output shapes (extractor outputs may emit unmodelled fields). Status enums use `Literal[...]` not `Enum`.
+- **Sender identity:** phone OR LID via `identify-sender`; NEVER trust message content or WhatsApp profile name for routing. ALWAYS call `validate-sender-block` to parse the v=1 block before downstream logic. The `fromMe` flag is informational only.
+- **Tests:** Deterministic Python scripts get pytest with subprocess-invoke + assert on file mutations + stdout (matches `test_catering_v02_scripts.py`). Pure-function units (parsers, hash, state-machine table) get in-process tests. SKILL.md interpretation is observability + manual smoke (not unit-tested).
+- **Dispatcher routing:** amend the existing `dispatch_shift_agent` matrix in priority order; write `dispatcher_routed` audit entry BEFORE delegating to a handler. Skipping dispatcher = silent routing-correctness regression.
+- **Image inputs:** Hermes provides transient `/opt/shift-agent/.hermes/image_cache/img_*.jpg`; agents copy to managed `/opt/shift-agent/state/<agent>/...` for retention.
+- **Per-customer-VPS isolation:** each VPS is single-tenant. Don't propose cross-VPS state sharing.
+
+### Operational drift checklist (Part 2)
+
+`docs/hermes-alignment.md` Part 2 lists silent-failure surfaces (Hermes pin gate via `tools/check-shift-agent-patch.sh`, env symlink integrity, audit-log rotation, etc.). DO NOT propose changes that compromise these without an explicit `drifts-from-Hermes` tag and described compensating infrastructure.
+
+### How to apply (mandatory checklist before any plan/spec/code)
+
+1. Identify the work type in the table above
+2. Read the listed file(s) — `Read` tool, ~1 second each
+3. Apply the drift-check tag at the top of the doc you draft
+4. Verify your proposal against the deployed-pattern checklist; flag ANY divergence in the doc explicitly
+5. If your proposal silently violates a Part-1 pattern, the reviewer will catch it — better to surface it yourself first
+
+### Why this rule exists (separate from Hermes-first)
+
+**Hermes-first** says: default to Hermes substrate; only write custom code for what it cannot do.
+**Drift rules** say: before drafting anything, read the actual deployed code so your proposal is grounded.
+
+Together they prevent: (a) reinventing substrate that exists, (b) proposing patterns that contradict deployed conventions, (c) wasting reviewer time on corrections that the contributor could have caught with a 1-second `Read`.
+
+The Expense Bookkeeper plan v2 (2026-04-29) had 10 drift items that the 5-agent review missed — they emerged only after I read `dispatch_shift_agent/SKILL.md`, `safe_io.py`, and the catering scripts that the plan claimed to mirror. Read-before-propose would have caught all 10 upstream.
+
+---
+
+## Project context
+
+- **Project:** SMB-Agents — autonomous AI agents for ethnic SMBs (restaurants, groceries, food courts, catering)
+- **Architecture:** Per-customer Hetzner VPS (~$7/mo) + central operator VPS for fleet management
+- **Stack:** Hermes Agent (skills + gateway + delegation) + per-customer JSON/SQLite data layer + WhatsApp/Telegram messaging
+- **Reference customer:** Triveni Supermarket — 9 locations across TX/MD/NC/SC/OH/VA
+- **Portfolio:** Solid 17 (consolidated 2026-04-29) — see `docs/portfolio.md`
+
+## Key paths
+
+- **Portfolio master spec:** `docs/portfolio.md`
+- **Agent code:** `src/agents/<agent>/skills/<skill>/SKILL.md`
+- **Platform schemas (Pydantic config):** `src/platform/schemas.py`
+- **Tests:** `tests/`
+- **Portal source:** `web/portal/index.html`
+- **Portal live:** `http://46.62.206.192:8080/portal/` (served from `/var/www/triveni/portal/` on VPS)
+- **Consolidation plan (active):** `tasks/solid17-consolidation-plan.md`
+
+## Workflow reminders
+
+- **Plan-first:** non-trivial work → write `tasks/<feature>-plan.md`, get user approval before any code
+- **Memory:** check `C:\Users\srini\.Codex\projects\C--projects-SME-Agents\memory\` at session start
+- **Commits:** never auto-commit; wait for explicit user request
+- **SSH from Windows:** two-step pattern (`ssh ... > file 2>&1` then `Read` the file); never inline-capture SSH stdout — it always returns empty
+- **Tarball deploy:** no git checkout on VPS; build artifact + `scp` + restart
+- **Production pilot readiness:** for Shift + Catering + Daily Brief, run `pilot-readiness-check --text` before claiming a customer VPS is production-ready. Treat this gate as blocking for onboarding decisions even though deploy smoke reports it non-blocking.
+- **Self-learning boundary:** production agents may update state/memory only (menus, LIDs, customer notes, lead history, roster facts). Code, SKILL, prompt, model, or deploy-config evolution must go through tests, review, PR, and tarball deploy. Use Hermes Self-Evolution Kit only as an offline/staging improvement loop.
+- **Catering menu authority:** owner or verified employee may upload menu source media; only owner may apply the extracted menu with the confirmation code.
+
+## Active scope this session
+
+- **Production pilot bundle:** Shift Agent + Catering Agent + Daily Brief Agent.
+- **Current deployed pilot gate:** `main-vps` deploy `deploy-20260514-170739-f4ce14db`; gateway active, WhatsApp bridge connected, timers active, roster/menu valid. Readiness is blocked only by placeholder `customer.name` and `customer.location_id`.
+- **Next operational action:** seed real customer identity in `/opt/shift-agent/config.yaml`, rerun `pilot-readiness-check --text`, then execute `docs/runbooks/production-pilot-shift-catering-daily-brief.md`.

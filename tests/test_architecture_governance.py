@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -899,15 +900,109 @@ def test_legacy_policy_contract_preserved(rule, destination, markers):
     )
 
 
+# The governance consolidation commit and the immutable document it replaced.
+# The historical AGENTS.md is its PARENT — resolved once, pinned here as a
+# concrete SHA so nothing about it can drift.
+GOVERNANCE_CONSOLIDATION_COMMIT = "8685b2530cc4a65c9aa27797cb29c9d8b135aff6"
+PRE_CONSOLIDATION_COMMIT = "b8652ab568b5b218648cf4089d7558221e9c1f0d"
+
+# The historical document is VENDORED rather than read through git.
+#
+# It used to be read as `git show main:AGENTS.md`. That ref moves: on a push to
+# main it resolves to the POST-consolidation document, so the test compared the
+# current file against a map describing the old one and could never pass. It had
+# been red on every main push since consolidation.
+#
+# Pinning PRE_CONSOLIDATION_COMMIT alone does not fix it either — send-path-ci
+# checks out with the default shallow depth, so that object is unreachable there
+# and the test would silently skip. Skipping is the same failure wearing a green
+# tick. A vendored byte-exact copy is reachable in any clone, on any platform,
+# on both PR and main-push CI, and needs no git at all.
+PRE_CONSOLIDATION_AGENTS_MD = (
+    REPO_ROOT / "tests" / "fixtures" / "governance" / "AGENTS.pre-consolidation.md"
+)
+# sha256 of that file's exact bytes == `git show <PRE_CONSOLIDATION_COMMIT>:AGENTS.md`.
+# .gitattributes marks the fixture `-text` so no platform rewrites its endings.
+PRE_CONSOLIDATION_AGENTS_MD_SHA256 = (
+    "6677ec8ec8328fd67b6038fef5470c9cde50421192c90bedd1d6af36248ed06e"
+)
+
+
+def test_pre_consolidation_fixture_is_immutable():
+    """The historical fixture must be byte-stable and independent of any ref.
+
+    Never skips: the hash half needs no git, so a shallow clone still proves the
+    document under test has not drifted. If git history IS reachable, the second
+    half additionally proves the vendored bytes equal the pinned commit's blob.
+    """
+    assert PRE_CONSOLIDATION_AGENTS_MD.exists(), (
+        f"vendored governance fixture is missing: {PRE_CONSOLIDATION_AGENTS_MD}"
+    )
+    raw = PRE_CONSOLIDATION_AGENTS_MD.read_bytes()
+    actual = hashlib.sha256(raw).hexdigest()
+    assert actual == PRE_CONSOLIDATION_AGENTS_MD_SHA256, (
+        "the historical AGENTS.md fixture changed. It is a frozen record of the "
+        "pre-consolidation document, not a living file — if you meant to change "
+        "what is preserved, change ACCOUNTED_PRE_PR_HEADINGS instead.\n"
+        f"  expected {PRE_CONSOLIDATION_AGENTS_MD_SHA256}\n  actual   {actual}"
+    )
+
+    try:
+        from_git = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "show",
+             f"{PRE_CONSOLIDATION_COMMIT}:AGENTS.md"],
+            capture_output=True,
+        )
+    except OSError:
+        return  # no git binary at all (e.g. a minimal container) — hash half ran
+    if from_git.returncode != 0 or not from_git.stdout:
+        return  # shallow clone: the hash assertion above already ran
+    assert hashlib.sha256(from_git.stdout).hexdigest() == actual, (
+        f"vendored fixture no longer matches {PRE_CONSOLIDATION_COMMIT}:AGENTS.md"
+    )
+
+
+def test_historical_fixture_is_not_the_live_document():
+    """Regression for the actual defect.
+
+    The old test read `git show main:AGENTS.md`, so on a main push the
+    "historical" document WAS the live one and preservation was compared against
+    itself. Contrast against the live working-tree AGENTS.md rather than any ref:
+    no git, no skip, and no dependence on where a local branch happens to point
+    (an early draft of this test compared against `main` and tripped on a stale
+    local ref — the very fragility being removed).
+    """
+    live = (REPO_ROOT / "AGENTS.md").read_bytes()
+    assert hashlib.sha256(live).hexdigest() != PRE_CONSOLIDATION_AGENTS_MD_SHA256, (
+        "the historical fixture is byte-identical to the live AGENTS.md, so the "
+        "preservation test would be comparing the document against itself. "
+        "Either the fixture started tracking the live file again, or the "
+        "governance consolidation was reverted."
+    )
+
+    live_headings = {
+        h.strip("# ").strip() for h in live.decode("utf-8").splitlines()
+        if h.startswith(("## ", "### "))
+    }
+    fixture_headings = {
+        h.strip("# ").strip()
+        for h in PRE_CONSOLIDATION_AGENTS_MD.read_text(encoding="utf-8").splitlines()
+        if h.startswith(("## ", "### "))
+    }
+    assert live_headings != fixture_headings, (
+        "live and historical heading sets are identical — the fixture is not "
+        "capturing the pre-consolidation document"
+    )
+
+
 def test_every_pre_pr_section_heading_is_accounted_for():
-    """Each substantive heading in the pre-PR AGENTS.md is preserved or listed
-    as intentionally superseded. Nothing may be dropped silently."""
-    pre = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "show", "main:AGENTS.md"],
-        capture_output=True, text=True,
-    ).stdout
-    if not pre:
-        pytest.skip("pre-PR AGENTS.md not reachable (shallow clone)")
+    """Each substantive heading in the pre-consolidation AGENTS.md is preserved
+    or listed as intentionally superseded. Nothing may be dropped silently.
+
+    Reads the vendored fixture, so it behaves identically on PR CI and on a push
+    to main, and never skips.
+    """
+    pre = PRE_CONSOLIDATION_AGENTS_MD.read_text(encoding="utf-8")
     headings = [h.strip("# ").strip() for h in pre.splitlines() if h.startswith(("## ", "### "))]
     # Point-in-time status sections are intentionally superseded — they record a
     # moment, not a rule, and were already stale at consolidation time.
