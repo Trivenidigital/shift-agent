@@ -1,0 +1,14 @@
+name: shift-agent-read
+label: Shift Agent Owner Reads
+kind: standalone
+version: 1.0.0
+description: >
+  Owner-facing read-only Hermes tools over the agent's deterministic local
+  stores. Each tool authenticates from the gateway session, resolves the caller
+  through the existing identify-sender kernel, reads a validated store, and
+  returns structured JSON. Hermes owns intent, clarification, reasoning and the
+  final wording; these tools own only identity, authorization, validated reads
+  and deterministic date arithmetic.
+author: Shift Agent
+provides_tools:
+  - get_compliance_deadlines
