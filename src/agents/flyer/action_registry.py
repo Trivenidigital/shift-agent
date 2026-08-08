@@ -352,6 +352,7 @@ def build_action_context(
     action_id: str,
     is_regulated_action: bool,
     verified_action_result: bool = False,
+    claims_action_completed: bool = False,
     mutation_class: Optional[FlyerActionMutationClass] = None,
     audit_row_id: Optional[str] = None,
 ) -> ActionExecutionContext:
@@ -361,11 +362,17 @@ def build_action_context(
     replies, ad-hoc fallbacks). verified_action_result defaults False — most
     outbound replies are not completion claims; the caller flips True only
     after a verified action outcome.
+
+    claims_action_completed defaults False for the same reason and is the
+    stronger statement: set it only when the copy tells the recipient the action
+    is done. Paired with verified_action_result=False the chokepoint refuses the
+    send outright (see the ActionExecutionContext note).
     """
     return ActionExecutionContext(
         action_id=action_id,
         is_regulated_action=is_regulated_action,
         verified_action_result=verified_action_result,
+        claims_action_completed=claims_action_completed,
         mutation_class=mutation_class,
         audit_row_id=audit_row_id,
     )
