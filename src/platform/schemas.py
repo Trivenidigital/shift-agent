@@ -3687,6 +3687,14 @@ class ReceiptExtraction(BaseModel):
 
 ExpenseLeadStatus = Literal[
     "EXTRACTING",
+    # Wave-2 DRAFT tier: extracted, classified and persisted for owner REVIEW
+    # only. Distinct from AWAITING_OWNER_APPROVAL because no approval was ever
+    # requested — no code is minted and no reachable approval path exists while
+    # RealQBOClient is unimplemented. Reusing AWAITING_OWNER_APPROVAL here would
+    # make the durable record claim the owner was asked to approve, and would
+    # make the retention timer later tell them an approval they never received
+    # had expired. Terminal for this tier; a later tier may add an outbound edge.
+    "DRAFTED",
     "AWAITING_OWNER_APPROVAL",
     "APPROVED_PENDING_PUSH",
     "PUSHED",
@@ -3696,24 +3704,30 @@ ExpenseLeadStatus = Literal[
     "EXPIRED",
 ]
 
-EXPENSE_TERMINAL_STATUSES: frozenset[str] = frozenset({"REVERSED", "REJECTED", "EXPIRED"})
+EXPENSE_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {"DRAFTED", "REVERSED", "REJECTED", "EXPIRED"}
+)
 """Strict no-outbound-transitions terminals. PUSHED is NOT here because
 owner can still `undo` to REVERSED within the reversibility window."""
 
 EXPENSE_RETENTION_CANDIDATES: frozenset[str] = frozenset(
-    {"PUSHED", "REVERSED", "REJECTED", "EXPIRED"}
+    {"DRAFTED", "PUSHED", "REVERSED", "REJECTED", "EXPIRED"}
 )
 """Statuses whose receipt JPEGs are eligible for retention-based pruning.
 Used by prune-and-expire-expenses.py."""
 
 EXPENSE_APPROVAL_CLOSED_STATUSES: frozenset[str] = frozenset(
-    {"PUSHED", "REVERSED", "REJECTED", "EXPIRED"}
+    {"DRAFTED", "PUSHED", "REVERSED", "REJECTED", "EXPIRED"}
 )
 """Statuses where owner approval flow is no longer active. Used by
 _find_lead_by_code to skip leads that already completed approval."""
 
 EXPENSE_TRANSITIONS: dict[str, frozenset[str]] = {
-    "EXTRACTING":              frozenset({"AWAITING_OWNER_APPROVAL", "REJECTED", "EXPIRED"}),
+    "EXTRACTING":              frozenset({"DRAFTED", "AWAITING_OWNER_APPROVAL",
+                                          "REJECTED", "EXPIRED"}),
+    # Terminal for the Wave-2 DRAFT tier: there is no reachable approval action,
+    # so there is no truthful edge out of it yet.
+    "DRAFTED":                 frozenset(),
     "AWAITING_OWNER_APPROVAL": frozenset({"APPROVED_PENDING_PUSH", "REJECTED", "EXPIRED"}),
     "APPROVED_PENDING_PUSH":   frozenset({"PUSHED", "PUSH_FAILED"}),
     "PUSH_FAILED":             frozenset({"APPROVED_PENDING_PUSH", "REJECTED"}),
@@ -6848,6 +6862,21 @@ class CfRouterIntercepted(_BaseEntry):
         #     gets a bounded "could not read it" reply; no proposal is claimed.
         "menu_ingestion_staged",
         "menu_ingestion_failed",
+        #   receipt_caption_ceded_to_dispatcher — an OWNER media message whose
+        #     caption explicitly says it is a business expense receipt. Owner-only
+        #     (unlike the menu cession, which also admits verified employees),
+        #     because an expense is a money record.
+        #   receipt_drafted — extract-receipt --review-only exited cleanly AND the
+        #     durable store was re-read and proved to hold that expense_id at
+        #     DRAFTED with no approval code. Wave-2 DRAFT tier: nothing is
+        #     approved, pushed or posted, so this arm never carries a `code`.
+        #   receipt_ingestion_failed — the script exited non-zero, emitted
+        #     unreadable stdout, or the durable store did not confirm the draft.
+        #     subprocess_rc carries the exit code. The owner gets a bounded
+        #     "could not read it" reply; no expense is claimed.
+        "receipt_caption_ceded_to_dispatcher",
+        "receipt_drafted",
+        "receipt_ingestion_failed",
         "flyer_brief_approved",
         "flyer_brief_project_create_failed",
         "flyer_starter_preference_off",

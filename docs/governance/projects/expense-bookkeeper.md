@@ -1,6 +1,6 @@
 # Expense Bookkeeper — Project Directive
 
-    Version: 1.0.0
+    Version: 1.1.0
     Status:  Mandatory
     Level:   3 (project)
     Project id: expense-bookkeeper
@@ -27,6 +27,14 @@ mirrors Catering's `parse-menu-photo` vision-call shape).
 
 Do not add an OCR layer, a receipt parser, or a vendor classifier alongside
 this.
+
+**Accuracy note — this path is not Hermes-native.** `scripts/extract-receipt`
+makes its own direct OpenRouter calls (`VISION_MODEL`, default
+`openai/gpt-4o-mini`, against `https://openrouter.ai/api/v1/chat/completions`)
+for both extraction and classification, rather than going through the Hermes
+gateway. Describe the current shape honestly as **existing cognition path +
+deterministic supervised ingestion**. Reuse it as-is: utility is the priority,
+and a Hermes-native migration is a separate, non-blocking piece of work.
 
 ## Deterministic kernels — reuse
 
@@ -61,12 +69,46 @@ BLOCKER.
 - an expense-local approval mechanism outside the shared code pool;
 - a parallel expense store;
 - a second QBO client or write path;
-- auto-posting to QBO without owner confirmation, at any amount.
+- auto-posting to QBO without owner confirmation, at any amount;
+- exposing the mock QBO push as a customer-visible success;
+- reusing `AWAITING_OWNER_APPROVAL`, `REJECTED`, `EXPIRED` or `EXTRACTING` to
+  represent a review-only draft;
+- routing owner media on anything but an explicit deterministic caption trigger
+  — no intent classifier, and image-only intake stays unsupported for now;
+- accepting receipts from a customer or employee sender.
+
+## Authority tiers
+
+Two tiers. Only the first is currently authorized, because
+`RealQBOClient.__init__` raises `NotImplementedError` and `qbo_client_mode`
+defaults to `mock` — so no supervised accounting write can actually occur, and
+the existing pushed-confirmation template would falsely claim one if used.
+
+**DRAFT — currently authorized.** Receipt extraction, classification and owner
+review only. No approval action and no external accounting write. The lead
+persists at `DRAFTED`, which mints no approval code, requests no approval and
+emits no `expense_owner_approval_requested`. `DRAFTED` is deliberately distinct
+from `AWAITING_OWNER_APPROVAL`: with no reachable approval path, the latter
+would make the durable record claim an approval was requested, and would later
+make the retention timer tell the owner an approval they never received had
+expired. `DRAFTED` is terminal for this tier and retention-eligible, so review
+receipts are pruned normally rather than becoming immortal.
+
+**SUPERVISED — not authorized, not implemented.** Approval reply, lead
+transition, QBO push and undo. Unavailable until a real QBO client exists with
+onboarded credentials; nothing in this tier may be exercised through the mock.
 
 ## Required vertical E2E proof
 
-A real receipt photo → approval card → owner code → QBO entry → audit rows,
-with the undo path exercised.
+**DRAFT tier (current):** a real owner WhatsApp receipt with an explicit
+receipt/expense caption → bounded cf-router intake → existing extraction and
+classification → durable `DRAFTED` expense → deterministic review-only card →
+real owner-visible egress. **No QBO write is part of DRAFT completion**, and a
+passing DRAFT proof must not be described as supervised action or as QuickBooks
+integration being live.
+
+**SUPERVISED tier (future):** a real receipt photo → approval card → owner
+code → QBO entry → audit rows, with the undo path exercised.
 
 ## Escalation boundaries
 
@@ -78,4 +120,5 @@ and scopes are HIGH or above.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.1.0 | 2026-08-09 | Added the bounded DRAFT authority tier (extraction/classification/review only, `DRAFTED` state, no approval action, no external write) and recorded that supervised QBO action remains unavailable because `RealQBOClient` is unimplemented. Reachability is the cf-router owner-media arm gated on owner + media + explicit receipt caption. |
 | 1.0.0 | 2026-08-01 | Initial Expense Bookkeeper directive. |

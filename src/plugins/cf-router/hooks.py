@@ -620,6 +620,21 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                         chat_id, event, text=text, media_path=media_path,
                         role=guest_role, sender_phone=guest_phone,
                     )
+                # Wave-2 DRAFT tier: an owner photo whose caption explicitly says
+                # "expense receipt" is an expense record, not flyer artwork. Placed
+                # in the same tier as the menu cession — AFTER the R2B-1 gate, so
+                # amendment precedence is unchanged, and BEFORE every flyer claim,
+                # so an unresolved Flyer Studio project cannot ingest the receipt
+                # as a reference asset (the live F0226 failure mode). Owner-only,
+                # and the caption trigger is required: bare owner images stay
+                # unsupported in this wave rather than being guessed at.
+                if _receipt_caption_cedes_to_dispatcher(
+                    text, chat_id, media_path=media_path, role=guest_role,
+                ):
+                    return _run_owner_receipt_ingestion(
+                        chat_id, event, text=text, media_path=media_path,
+                        role=guest_role, sender_phone=guest_phone,
+                    )
                 # P1-1: fresh-intent catering escape gate. A fresh catering
                 # inquiry from a customer with a LIVE flyer project must reach
                 # catering (F7), not be captured as a flyer edit/revision (the
@@ -4768,6 +4783,174 @@ def _owner_menu_ingestion_impl(
     return {"action": "skip",
             "reason": (f"cf-router menu ingestion staged {update_id} "
                        f"(ok={ok} mid={mid} err={send_err[:80]})")}
+
+
+def _receipt_caption_cedes_to_dispatcher(
+    text: str, chat_id: str, *, media_path: Optional[str], role: str,
+) -> bool:
+    """True when cf-router must claim an inbound as an owner expense receipt.
+
+    Mirrors `_menu_caption_cedes_to_dispatcher` with two deliberate differences:
+
+      * **owner only.** The menu gate admits a verified employee; an expense is a
+        money record, so an employee or customer receipt must NOT enter it.
+      * the caption trigger is `actions.is_receipt_caption`.
+
+    Both remaining conditions are unchanged — media must be present, and an
+    explicit flyer edit signal vetoes the cession. Defensive: any error means NO
+    cession, so the flyer path stays byte-identical.
+    """
+    if not media_path or role != "owner":
+        return False
+    try:
+        if not actions.is_receipt_caption(text):
+            return False
+        if _flyer_edit_signal_present(text, has_media=True):
+            return False
+        actions.audit_intercepted(
+            reason="receipt_caption_ceded_to_dispatcher",
+            chat_id=chat_id,
+            detail=f"sender_role={role}; has_media=true; skill=parse_receipt_photo",
+        )
+        return True
+    except Exception:  # noqa: BLE001 — a cession decision must never claim the inbound
+        return False
+
+
+# DRAFT-tier card copy. States the boundary explicitly and carries no approval
+# code, no approve/reject instruction and no push language, because none of
+# those actions exist while RealQBOClient is unimplemented.
+_RECEIPT_INGESTION_FAILED_TEXT = (
+    "⚕ *Expense Bookkeeper*\n"
+    "────────────\n"
+    "I could not read that receipt, so nothing was recorded.\n\n"
+    "Please re-send it, ideally a straight-on photo with the total in focus."
+)
+
+
+def _expense_leads_path():
+    """Expense store, derived from the state dir this plugin is configured for
+    (tests patch `actions.LEADS_PATH`), so verification reads the SAME file the
+    extractor wrote."""
+    return actions.LEADS_PATH.parent / "expense-bookkeeper" / "leads.json"
+
+
+def _owner_receipt_ingestion_impl(
+    chat_id: str, event: Any, *, text: str, media_path: Optional[str],
+    role: str, sender_phone: str,
+) -> dict:
+    """Run receipt ingestion deterministically for an inbound already proven to
+    be one: media present, a documented receipt caption, and an owner sender.
+
+    Hermes still owns all the cognition — vision, extraction, classification,
+    dedup and schema validation all happen inside `extract-receipt`. What is
+    removed is only the LLM's redundant decision about WHETHER to call it, which
+    is unreachable anyway while the `skills` toolset is disabled.
+
+    DRAFT tier: `--review-only`. No approval code, no approval request, no QBO
+    client. Success is not the script's word for it — its stdout `expense_id` is
+    a claim, so the durable store is re-read and must hold that id at status
+    DRAFTED before the owner is told anything was recorded.
+    """
+    message_id = _extract_message_id(event, chat_id, text)
+    try:
+        actions.audit_dispatcher_routed(
+            message_id=message_id,
+            chat_id=chat_id,
+            routed_to_skill="parse_receipt_photo",
+            message_shape=_menu_message_shape(media_path, text),
+        )
+    except Exception:
+        pass  # telemetry only — never block the action
+
+    sender_lid = chat_id if str(chat_id).endswith("@lid") else ""
+    rc, out, err = actions.invoke_extract_receipt(
+        image_path=str(media_path or ""),
+        source_image_id=message_id,
+        sender_phone=sender_phone,
+        sender_lid=sender_lid,
+    )
+
+    expense_id, card_text = "", ""
+    try:
+        doc = json.loads(out or "{}")
+        expense_id = str(doc.get("expense_id") or "")
+        card_text = str(doc.get("approval_card_text") or "")
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # EXIT_IDEMPOTENCY (9) means this exact message already produced a draft;
+    # the original card was already sent, so re-sending would double-report.
+    if rc == 9 and expense_id:
+        return {"action": "skip",
+                "reason": f"cf-router receipt ingestion idempotent {expense_id}"}
+
+    verified = False
+    if rc in (0, 7) and expense_id:
+        try:
+            doc = json.loads(_expense_leads_path().read_text(encoding="utf-8"))
+            verified = any(
+                l.get("expense_id") == expense_id and l.get("status") == "DRAFTED"
+                and not l.get("owner_approval_code")
+                for l in (doc.get("leads") or [])
+            )
+        except (OSError, json.JSONDecodeError, AttributeError):
+            verified = False
+
+    if not verified or not card_text:
+        actions.audit_intercepted(
+            reason="receipt_ingestion_failed", chat_id=chat_id, subprocess_rc=rc,
+            detail=f"sender_role={role}; expense_id={expense_id or '-'}; "
+                   f"verified={verified}; err={err[:120]}",
+        )
+        actions.send_flyer_text(
+            chat_id, _RECEIPT_INGESTION_FAILED_TEXT,
+            action_context=build_action_context(
+                action_id="expense.receipt.ingestion_failed",
+                is_regulated_action=False,
+                verified_action_result=True,
+                claims_action_completed=False,
+                mutation_class="none",
+            ),
+        )
+        return {"action": "skip",
+                "reason": f"cf-router receipt ingestion failed (rc={rc})"}
+
+    actions.audit_intercepted(
+        reason="receipt_drafted", chat_id=chat_id, subprocess_rc=0,
+        detail=f"sender_role={role}; expense_id={expense_id}; tier=DRAFT",
+    )
+    ok, mid, send_err = actions.send_flyer_text(
+        chat_id, card_text,
+        action_context=build_action_context(
+            action_id=f"expense.receipt.drafted:{expense_id}",
+            # Not regulated: nothing is approved, charged, pushed or activated.
+            is_regulated_action=False,
+            # Both earned: the script exited cleanly AND the durable store was
+            # re-read and holds this expense_id at DRAFTED with no approval code.
+            verified_action_result=True,
+            claims_action_completed=True,
+            mutation_class="local_reversible",
+        ),
+    )
+    return {"action": "skip",
+            "reason": (f"cf-router receipt drafted {expense_id} "
+                       f"(ok={ok} mid={mid} err={send_err[:80]})")}
+
+
+def _run_owner_receipt_ingestion(
+    chat_id: str, event: Any, *, text: str, media_path: Optional[str],
+    role: str, sender_phone: str,
+) -> dict:
+    """Error boundary: ingestion must never raise into dispatch."""
+    try:
+        return _owner_receipt_ingestion_impl(
+            chat_id, event, text=text, media_path=media_path,
+            role=role, sender_phone=sender_phone,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"action": "skip",
+                "reason": f"cf-router receipt ingestion errored ({type(exc).__name__})"}
 
 
 def _flyer_edit_signal_present(text: str, *, has_media: bool) -> bool:
