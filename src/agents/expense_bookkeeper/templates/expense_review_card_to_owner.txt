@@ -1,0 +1,13 @@
+{{expense_id}} — Receipt review
+
+Vendor: {{vendor_display}}
+Date:   {{receipt_date}}
+
+{{top_items}}
+
+Total: ${{total_display}}
+
+Category: {{qbo_account}} ({{biz_personal}})
+Why: {{rationale}}{{low_confidence_marker}}
+{{duplicate_warning}}{{threshold_warning}}
+Review only — this expense has not been posted to QuickBooks.

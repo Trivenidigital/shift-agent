@@ -48,6 +48,7 @@ THROTTLE_PATH = Path("/opt/shift-agent/state/cf-router-throttle.json")
 APPLY_OWNER_DECISION_BIN = Path("/usr/local/bin/apply-catering-owner-decision")
 APPLY_MENU_UPDATE_BIN = Path("/usr/local/bin/apply-menu-update")
 PARSE_MENU_PHOTO_BIN = Path("/usr/local/bin/parse-menu-photo")  # menu extractor
+EXTRACT_RECEIPT_BIN = Path("/usr/local/bin/extract-receipt")    # Agent #21 extractor
 NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
 CREATE_LEAD_BIN = Path("/usr/local/bin/create-catering-lead")  # F7 path
 CREATE_CATERING_PROPOSALS_BIN = Path("/usr/local/bin/create-catering-proposal-options")
@@ -3216,6 +3217,66 @@ def is_menu_update_caption(text: str) -> bool:
     if _MENU_UPDATE_CAPTION_RE.search(body):
         return True
     return body.strip(" .!?,:;\"'").lower() == "menu"
+
+
+_RECEIPT_CAPTION_RE = re.compile(
+    r"\b(?:expense\s+receipt|receipt\s+expense|log\s+(?:this\s+)?(?:expense|receipt)|"
+    r"expense\s+this|book\s+(?:this\s+)?(?:expense|receipt))\b",
+    re.IGNORECASE,
+)
+
+
+def is_receipt_caption(text: str) -> bool:
+    """Return True when a media caption explicitly says the attachment is a
+    business expense receipt. Deterministic; NO LLM, and deliberately NOT a
+    general receipt-image recognizer — it answers the caption question only,
+    and the caller supplies the media + owner-role conditions.
+
+    Narrower than the `expense_bookkeeper_dispatcher` SKILL, which routes on ANY
+    owner image. A bare owner photo is genuinely ambiguous between a menu and a
+    receipt, and resolving that without a caption would need exactly the intent
+    classifier this wave forbids. Bare "receipt" as the WHOLE caption also
+    qualifies, mirroring how `is_menu_update_caption` accepts a bare "menu".
+    """
+    body = " ".join(flyer_visible_message_text(text).split())
+    if not body:
+        return False
+    if _RECEIPT_CAPTION_RE.search(body):
+        return True
+    return body.strip(" .!?,:;\"'").lower() in ("receipt", "expense")
+
+
+def invoke_extract_receipt(
+    *, image_path: str, source_image_id: str, sender_phone: str,
+    sender_lid: str = "",
+) -> tuple[int, str, str]:
+    """Run the Agent #21 extractor in DRAFT (review-only) mode.
+
+    `--review-only` is not optional here: it is the whole authority boundary. It
+    mints no approval code, persists DRAFTED rather than AWAITING_OWNER_APPROVAL,
+    emits no approval-requested row, and never constructs a QBO client. Returns
+    (rc, stdout, stderr) verbatim so the caller reads the script's documented
+    exit codes rather than re-deriving success.
+    """
+    argv = [
+        str(PYTHON_BIN),
+        str(EXTRACT_RECEIPT_BIN),
+        "--image-path", image_path,
+        "--source-image-id", source_image_id,
+        "--owner-phone", sender_phone,
+        "--review-only",
+    ]
+    if sender_lid:
+        argv += ["--sender-lid", sender_lid]
+    try:
+        result = subprocess.run(
+            argv, capture_output=True, text=True, timeout=MENU_EXTRACT_TIMEOUT_SEC,
+        )
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired as exc:
+        return 124, exc.stdout or "", exc.stderr or "timeout"
+    except OSError as exc:
+        return 127, "", str(exc)
 
 
 def is_exact_reference_edit_request(text: str, *, has_media: bool = False) -> bool:

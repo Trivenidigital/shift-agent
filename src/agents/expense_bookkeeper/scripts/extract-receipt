@@ -367,12 +367,21 @@ def _render_template(name: str, **fields) -> str:
     return text
 
 
+def _IDEMPOTENT_CARD_TEXT(review_only: bool) -> str:
+    """Idempotency wording must match the tier. The approval phrasing would tell
+    the owner an approval is pending when the DRAFT tier never requested one."""
+    return ("(already reviewed; original review card already sent)" if review_only
+            else "(idempotency hit; original card already sent)")
+
+
 def _build_approval_card(
     lead: ExpenseLead,
     extraction: ReceiptExtraction,
     classification: ExpenseClassification,
     cfg: Config,
     duplicate_match: ExpenseLead | None = None,
+    *,
+    review_only: bool = False,
 ) -> tuple[str, str]:
     """Pick the right template + render. Returns (template_name, card_text)."""
     threshold = cfg.expense_bookkeeper.cockpit_threshold_cents
@@ -412,6 +421,24 @@ def _build_approval_card(
         low_confidence_marker=low_conf_marker,
         approval_code=lead.owner_approval_code or "",
     )
+
+    if review_only:
+        # One deterministic template carrying every warning inline. Chosen over
+        # reusing the three approval templates because each of those states an
+        # approval affordance in its own body; deleting that prose after the fact
+        # would be fragile and could silently regress if a template is edited.
+        return "expense_review_card_to_owner.txt", _render_template(
+            "expense_review_card_to_owner.txt",
+            **{k: v for k, v in common.items() if k != "approval_code"},
+            duplicate_warning=(
+                f"\n⚠ Possible duplicate of {duplicate_match.expense_id}.\n"
+                if has_dup else ""
+            ),
+            threshold_warning=(
+                f"\n⚠ Above the ${threshold / 100:.2f} review threshold.\n"
+                if above_threshold else ""
+            ),
+        )
 
     # Pick template
     if has_dup and above_threshold:
@@ -494,6 +521,13 @@ def main():
     ap.add_argument("--source-image-id", required=True)
     ap.add_argument("--owner-phone", required=True)
     ap.add_argument("--sender-lid", default=None)
+    ap.add_argument(
+        "--review-only", action="store_true",
+        help=("DRAFT tier: extract, classify, dedup and persist as DRAFTED for "
+              "owner REVIEW only. Mints no approval code, requests no approval, "
+              "and never constructs a QBO client. Used while no reachable "
+              "approval path exists (RealQBOClient is unimplemented)."),
+    )
     args = ap.parse_args()
 
     # FIX (PR #34): config.yaml is YAML, NOT JSON. load_model calls
@@ -565,7 +599,7 @@ def main():
                     ),
                     "image_phash": lead.image_phash,
                     "duplicate_of": lead.duplicate_of,
-                    "approval_card_text": "(idempotency hit; original card already sent)",
+                    "approval_card_text": _IDEMPOTENT_CARD_TEXT(args.review_only),
                 }))
                 return EXIT_IDEMPOTENCY
 
@@ -686,24 +720,34 @@ def main():
                 extraction=extraction,
                 classification=classification,
                 qbo_account=classification.qbo_account,
-                owner_approval_code=code,
+                owner_approval_code=(None if args.review_only else code),
                 extracted_total_cents=extraction.total_cents,
                 status="EXTRACTING",
                 duplicate_of=duplicate_match.expense_id if duplicate_match else None,
             )
-            assert is_expense_transition_allowed("EXTRACTING", "AWAITING_OWNER_APPROVAL")
-            lead.status = "AWAITING_OWNER_APPROVAL"
+            _target = "DRAFTED" if args.review_only else "AWAITING_OWNER_APPROVAL"
+            assert is_expense_transition_allowed("EXTRACTING", _target)
+            lead.status = _target
             store2.leads.append(lead)
             store2.last_id = max(store2.last_id, next_id)
             atomic_write_json(LEADS_PATH, store2.model_dump(mode="json"))
             _commit_out["lead"] = lead
         return code
 
-    approval_code, _ = approval_code_pools.atomic_scan_and_commit(
-        _commit,
-        paths=approval_code_pools.pool_paths_under(_pool_state_dir),
-        state_dir=_pool_state_dir,
-    )
+    if args.review_only:
+        # Deliberately NOT atomic_scan_and_commit: that helper ALWAYS generates a
+        # cross-pool code before invoking the writer, and a DRAFT must not consume
+        # one. The leads FileLock inside _commit still gives the same store
+        # atomicity + idempotency re-read; only the code-pool lock is skipped,
+        # because nothing here touches the shared code namespace.
+        approval_code = ""
+        _commit("")
+    else:
+        approval_code, _ = approval_code_pools.atomic_scan_and_commit(
+            _commit,
+            paths=approval_code_pools.pool_paths_under(_pool_state_dir),
+            state_dir=_pool_state_dir,
+        )
 
     if _commit_out.get("rc"):
         return _commit_out["rc"]
@@ -717,7 +761,7 @@ def main():
             ),
             "image_phash": l.image_phash,
             "duplicate_of": l.duplicate_of,
-            "approval_card_text": "(idempotency hit; original card already sent)",
+            "approval_card_text": _IDEMPOTENT_CARD_TEXT(args.review_only),
         }))
         return EXIT_IDEMPOTENCY
     lead = _commit_out["lead"]
@@ -726,16 +770,23 @@ def main():
     _log(ExpenseLeadStatusChange(
         ts=now, type="expense_lead_status_change",
         expense_id=expense_id, from_status="EXTRACTING",
-        to_status="AWAITING_OWNER_APPROVAL", reason="extraction complete",
+        to_status=("DRAFTED" if args.review_only else "AWAITING_OWNER_APPROVAL"),
+        reason=("review-only extraction complete"
+                if args.review_only else "extraction complete"),
     ))
-    _log(ExpenseOwnerApprovalRequested(
-        ts=now, type="expense_owner_approval_requested",
-        expense_id=expense_id, owner_approval_code=approval_code,
-        extracted_total_cents=extraction.total_cents or 0,
-        routed_to="whatsapp",
-    ))
+    if not args.review_only:
+        # No ExpenseOwnerApprovalRequested in the DRAFT tier: no approval was
+        # requested, and a durable row saying otherwise is the exact lie the
+        # retention timer would later repeat to the owner.
+        _log(ExpenseOwnerApprovalRequested(
+            ts=now, type="expense_owner_approval_requested",
+            expense_id=expense_id, owner_approval_code=approval_code,
+            extracted_total_cents=extraction.total_cents or 0,
+            routed_to="whatsapp",
+        ))
     template_name, card_text = _build_approval_card(
-        lead, extraction, classification, cfg, duplicate_match
+        lead, extraction, classification, cfg, duplicate_match,
+        review_only=args.review_only,
     )
 
     print(json.dumps({

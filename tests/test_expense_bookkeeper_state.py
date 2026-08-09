@@ -62,31 +62,36 @@ def test_terminal_states_have_no_outbound(terminal):
 
 
 def test_known_valid_transition_count():
-    """Sanity: 11 valid forward transitions.
+    """Sanity: 12 valid forward transitions.
 
     Breakdown:
-      EXTRACTING → AWAITING_OWNER_APPROVAL, REJECTED, EXPIRED (3)
+      EXTRACTING → DRAFTED, AWAITING_OWNER_APPROVAL, REJECTED, EXPIRED (4)
       AWAITING_OWNER_APPROVAL → APPROVED_PENDING_PUSH, REJECTED, EXPIRED (3)
       APPROVED_PENDING_PUSH → PUSHED, PUSH_FAILED (2)
       PUSH_FAILED → APPROVED_PENDING_PUSH, REJECTED (2)
       PUSHED → REVERSED (1)
-      REVERSED, REJECTED, EXPIRED → (0)
+      DRAFTED, REVERSED, REJECTED, EXPIRED → (0)
+
+    DRAFTED is the Wave-2 review-only tier and has NO outbound edge: there is no
+    reachable approval action, so any edge out of it would be a state the runtime
+    cannot actually perform.
     """
     valid = _valid_pairs()
-    assert len(valid) == 11, f"expected 11 valid transitions, got {len(valid)}"
+    assert len(valid) == 12, f"expected 12 valid transitions, got {len(valid)}"
 
 
 def test_known_terminal_states():
     """STRICT terminal = no outbound transitions. PUSHED is NOT here
     because `undo` to REVERSED is still possible within the window."""
-    expected = {"REVERSED", "REJECTED", "EXPIRED"}
+    expected = {"DRAFTED", "REVERSED", "REJECTED", "EXPIRED"}
     assert EXPENSE_TERMINAL_STATUSES == frozenset(expected)
 
 
 def test_all_states_covered():
     """Every state in the type appears in transition table."""
     expected = {
-        "EXTRACTING", "AWAITING_OWNER_APPROVAL", "APPROVED_PENDING_PUSH",
+        "EXTRACTING", "DRAFTED", "AWAITING_OWNER_APPROVAL",
+        "APPROVED_PENDING_PUSH",
         "PUSHED", "PUSH_FAILED", "REVERSED", "REJECTED", "EXPIRED",
     }
     assert set(EXPENSE_TRANSITIONS.keys()) == expected

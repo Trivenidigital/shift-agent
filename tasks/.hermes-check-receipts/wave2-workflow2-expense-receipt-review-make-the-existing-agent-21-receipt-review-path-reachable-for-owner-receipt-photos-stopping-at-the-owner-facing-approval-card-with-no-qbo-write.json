@@ -1,0 +1,18 @@
+{
+  "topic": "wave2-workflow2-expense-receipt-review-make-the-existing-agent-21-receipt-review-path-reachable-for-owner-receipt-photos-stopping-at-the-owner-facing-approval-card-with-no-qbo-write",
+  "task_text": "wave2-workflow2-expense-receipt-review \u2014 make the existing Agent #21 receipt-review path reachable for owner receipt photos, stopping at the owner-facing approval card with no QBO write",
+  "completed_at": "2026-08-09T20:04:38Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 5,
+  "hermes_step_count": 10,
+  "files_to_read_first": [
+    "src/plugins/cf-router/hooks.py",
+    "src/plugins/cf-router/actions.py",
+    "src/agents/expense_bookkeeper/scripts/extract-receipt",
+    "src/agents/expense_bookkeeper/scripts/prune-and-expire-expenses.py",
+    "src/agents/expense_bookkeeper/templates/expense_approval_card_to_owner.txt",
+    "src/platform/schemas.py",
+    "src/platform/qbo_client.py",
+    "src/platform/approval_code_pools.py"
+  ]
+}
