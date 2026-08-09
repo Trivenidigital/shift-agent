@@ -308,18 +308,26 @@ def test_register_uses_package_relative_imports_and_registers_the_tool(env):
             del sys.modules[name]
     pkg = _load_package()
 
-    captured = {}
+    # A list, not a dict: the package registers more than one tool, and an
+    # overwriting collector would silently assert only about the last one.
+    registered = []
 
     class FakeCtx:
         def register_tool(self, **kw):
-            captured.update(kw)
+            registered.append(kw)
 
     pkg.register(FakeCtx())
-    assert captured["name"] == "get_compliance_deadlines"
+    by_name = {r["name"]: r for r in registered}
+    assert "get_compliance_deadlines" in by_name
+    captured = by_name["get_compliance_deadlines"]
     assert captured["toolset"] == "shift_agent_read"
     assert callable(captured["handler"])
     assert captured["schema"]["name"] == "get_compliance_deadlines"
     assert captured["description"] == captured["schema"]["description"]
+    # Every tool this package registers must land in the dedicated toolset;
+    # a stray default toolset would be suppressed by `disabled_toolsets`.
+    assert {r["toolset"] for r in registered} == {"shift_agent_read"}
+    assert len(by_name) == len(registered), "duplicate tool name registered"
     assert str(PLUGIN_DIR) not in sys.path, (
         "importing the plugin must not put its own directory on sys.path"
     )

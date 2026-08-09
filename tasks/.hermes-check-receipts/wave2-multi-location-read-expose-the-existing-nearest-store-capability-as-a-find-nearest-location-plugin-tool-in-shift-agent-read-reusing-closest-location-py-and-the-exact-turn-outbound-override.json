@@ -1,0 +1,23 @@
+{
+  "topic": "wave2-multi-location-read-expose-the-existing-nearest-store-capability-as-a-find-nearest-location-plugin-tool-in-shift-agent-read-reusing-closest-location-py-and-the-exact-turn-outbound-override",
+  "task_text": "wave2-multi-location-read — expose the existing nearest-store capability as a find_nearest_location plugin tool in shift-agent-read, reusing closest-location.py and the exact-turn outbound override",
+  "completed_at": "2026-08-09T02:52:59Z",
+  "drift_check_tag": "extends-Hermes",
+  "net_new_step_count": 4,
+  "hermes_step_count": 11,
+  "files_to_read_first": [
+    "src/plugins/shift-agent-read/compliance_tool.py",
+    "src/plugins/shift-agent-read/__init__.py",
+    "src/plugins/shift-agent-read/plugin.yaml",
+    "src/agents/multi_location/scripts/closest-location.py",
+    "src/platform/schemas.py",
+    "src/platform/safe_io.py",
+    "src/agents/multi_location/skills/customer_location_query/SKILL.md",
+    "src/agents/multi_location/skills/multi_location_query/SKILL.md",
+    "tests/test_agent_3_multi_location.py",
+    "tests/test_shift_agent_read_compliance_tool.py",
+    "docs/governance/projects/multi-location.md",
+    "docs/governance/shared-platform-directive.md",
+    "docs/governance/project-registry.yaml"
+  ]
+}
