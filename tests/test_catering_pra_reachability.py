@@ -238,11 +238,19 @@ def test_r2a_canary_amendment_keeps_capture_path(monkeypatch):
 
 # ── Inquiry-shaped, matching identity → one clarification, no lead/capture ──
 def test_inquiry_matching_identity_clarifies_once(monkeypatch):
+    # The inbound year is EXPLICIT ("August 8th, 2026") and must stay that way.
+    # `_resolve_year` rolls a BARE month/day forward once the day has passed, so
+    # the original bare "August 8th" silently became 2027-08-08 on 2026-08-09 —
+    # turning this matching-identity case into a date contradiction and failing
+    # the test on wall-clock time alone. An explicit year takes the
+    # `explicit_year` branch and never rolls. Do not "fix" a future failure here
+    # by moving both dates forward; that just re-arms the same bomb.
     hooks_mod, actions_mod = _load_plugin()
     s = _wire(monkeypatch, hooks_mod, actions_mod,
               active_lead=_stale_lead(event_date="2026-08-08", headcount=120))
     out = hooks_mod._try_f7_primary_intercept(
-        "We're finalizing catering for 120 guests for the wedding on August 8th.",
+        "We're finalizing catering for 120 guests for the wedding on "
+        "August 8th, 2026.",
         CHAT, _event("wamid.SAME"), allow_new_lead=True)
     assert out is not None and out["action"] == "skip" and "clarified" in out["reason"]
     assert len(s.clarify) == 1, "exactly one clarification"
