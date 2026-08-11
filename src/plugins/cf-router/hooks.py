@@ -4801,17 +4801,26 @@ def _receipt_caption_cedes_to_dispatcher(
     explicit flyer edit signal vetoes the cession. Defensive: any error means NO
     cession, so the flyer path stays byte-identical.
 
-    Authorization asks OWNER MEMBERSHIP, not the legacy scalar `role`. A
-    principal who is both owner and an active roster employee resolves scalar
-    `employee` by LID, so the previous `role != "owner"` check refused a
-    genuine owner. The business rule is unchanged and NOT weakened — only the
-    lossy input to it is fixed.
+    Owner proof is EITHER the caller-resolved scalar already being `owner`, OR
+    owner membership. The scalar is kept as the fast path because the caller has
+    already resolved identity — re-resolving would spend a subprocess to learn
+    what we were just handed. Membership is consulted only when the scalar does
+    not already prove owner, which is exactly the dual-role case: a principal
+    who is both owner and an active roster employee resolves scalar `employee`
+    by LID, and the previous `role != "owner"` check refused them.
+
+    The business rule is unchanged and NOT weakened — a principal with neither
+    proof is still refused, so employee-only, customer and guest senders cannot
+    enter a money record.
     """
     if not media_path:
         return False
     try:
-        if not actions.has_owner_capability(chat_id):
-            return False
+        owner_proof = "scalar" if role == "owner" else ""
+        if not owner_proof:
+            if not actions.has_owner_capability(chat_id):
+                return False
+            owner_proof = "membership"
         if not actions.is_receipt_caption(text):
             return False
         if _flyer_edit_signal_present(text, has_media=True):
@@ -4819,7 +4828,7 @@ def _receipt_caption_cedes_to_dispatcher(
         actions.audit_intercepted(
             reason="receipt_caption_ceded_to_dispatcher",
             chat_id=chat_id,
-            detail=(f"sender_role={role}; owner_capability=true; "
+            detail=(f"sender_role={role}; owner_proof={owner_proof}; "
                     f"has_media=true; skill=parse_receipt_photo"),
         )
         return True

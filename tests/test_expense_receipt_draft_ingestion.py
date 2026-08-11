@@ -151,6 +151,40 @@ def test_gate_rejects_non_owner_roles(plugin, monkeypatch, role):
                  media="/tmp/img_1.jpg", role=role) is False
 
 
+def test_gate_claims_dual_role_owner_whose_scalar_says_employee(plugin, monkeypatch):
+    """Multi-role: owner membership is accepted even when the scalar says employee.
+
+    A principal who is BOTH owner and an active roster employee resolves scalar
+    `employee` by LID (the LID branch checks the roster first), which is exactly
+    how a genuine owner's receipt was refused in production on 2026-08-10.
+    """
+    hooks_mod, _ = plugin
+    monkeypatch.setattr(hooks_mod.actions, "has_owner_capability",
+                        lambda chat_id: True, raising=False)
+    assert _gate(hooks_mod, monkeypatch, text="Expense receipt — review this",
+                 media="/tmp/img_1.jpg", role="employee") is True
+
+
+def test_gate_still_rejects_employee_without_owner_membership(plugin, monkeypatch):
+    """The safety rule: employee membership alone NEVER satisfies the owner gate."""
+    hooks_mod, _ = plugin
+    monkeypatch.setattr(hooks_mod.actions, "has_owner_capability",
+                        lambda chat_id: False, raising=False)
+    assert _gate(hooks_mod, monkeypatch, text="Expense receipt — review this",
+                 media="/tmp/img_1.jpg", role="employee") is False
+
+
+def test_gate_owner_scalar_does_not_spend_a_subprocess(plugin, monkeypatch):
+    """The scalar fast path must short-circuit before any membership lookup."""
+    hooks_mod, _ = plugin
+    calls = []
+    monkeypatch.setattr(hooks_mod.actions, "has_owner_capability",
+                        lambda chat_id: calls.append(chat_id) or True, raising=False)
+    assert _gate(hooks_mod, monkeypatch, text="Expense receipt",
+                 media="/tmp/img_1.jpg", role="owner") is True
+    assert calls == [], "scalar owner must not trigger a membership lookup"
+
+
 def test_gate_rejects_owner_image_only(plugin, monkeypatch):
     """Image-only owner media stays unsupported this wave — a bare photo is
     genuinely ambiguous between a menu and a receipt."""
