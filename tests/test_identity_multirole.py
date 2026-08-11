@@ -44,11 +44,14 @@ EMP_PHONE = "+19045550101"
 EMP_LID = "100000000000001@lid"
 INACTIVE_PHONE = "+19045550102"
 INACTIVE_LID = "100000000000002@lid"
+# e003's former number, reassigned away — its phone_history window is closed.
+RECYCLED_PHONE = "+19045550177"
+CURRENT_E003_PHONE = "+19045550103"
 STRANGER_PHONE = "+19045559999"
 STRANGER_LID = "999999999999999@lid"
 
 
-def _config(*, authorized: bool) -> dict:
+def _config(*, authorized: bool, alias_lid: bool = True) -> dict:
     owner = {
         "name": "Owner",
         "phone": OWNER_PHONE,
@@ -56,7 +59,10 @@ def _config(*, authorized: bool) -> dict:
         "lid": OWNER_LID,
     }
     if authorized:
-        owner["authorized_identities"] = [{"phone": DUAL_PHONE, "lid": DUAL_LID}]
+        alias = {"phone": DUAL_PHONE}
+        if alias_lid:
+            alias["lid"] = DUAL_LID
+        owner["authorized_identities"] = [alias]
     return {
         "schema_version": 1,
         "customer": {"name": "Triveni", "location_id": "loc_jax_01",
@@ -78,6 +84,13 @@ def _roster() -> dict:
              "phone": EMP_PHONE, "lid": EMP_LID, "status": "active"},
             {"id": "e002", "name": "Former Employee", "role": "cashier",
              "phone": INACTIVE_PHONE, "lid": INACTIVE_LID, "status": "terminated"},
+            # Held RECYCLED_PHONE until 2025; the window is closed, so that
+            # number must no longer resolve to anyone.
+            {"id": "e003", "name": "Renumbered Employee", "role": "cashier",
+             "phone": CURRENT_E003_PHONE, "status": "active",
+             "phone_history": [{"phone": RECYCLED_PHONE,
+                                "effective_from": "2024-01-01T00:00:00Z",
+                                "effective_to": "2025-01-01T00:00:00Z"}]},
         ],
     }
 
@@ -85,11 +98,12 @@ def _roster() -> dict:
 @pytest.fixture
 def env(tmp_path):
     """Write config + roster fixtures; return the env for identify-sender."""
-    def _build(*, authorized: bool):
-        cfg_path = tmp_path / "config.yaml"
+    def _build(*, authorized: bool, alias_lid: bool = True):
+        cfg_path = tmp_path / f"config-{int(authorized)}{int(alias_lid)}.yaml"
         roster_path = tmp_path / "roster.json"
-        cfg_path.write_text(yaml.safe_dump(_config(authorized=authorized)),
-                            encoding="utf-8")
+        cfg_path.write_text(
+            yaml.safe_dump(_config(authorized=authorized, alias_lid=alias_lid)),
+            encoding="utf-8")
         roster_path.write_text(json.dumps(_roster()), encoding="utf-8")
         import os
         e = os.environ.copy()
@@ -100,10 +114,12 @@ def env(tmp_path):
     return _build
 
 
-def resolve(env_build, identifier: str, *, authorized: bool = True) -> dict:
+def resolve(env_build, identifier: str, *, authorized: bool = True,
+            alias_lid: bool = True) -> dict:
     proc = subprocess.run(
         [sys.executable, str(IDENTIFY), identifier],
-        capture_output=True, text=True, timeout=30, env=env_build(authorized=authorized),
+        capture_output=True, text=True, timeout=30,
+        env=env_build(authorized=authorized, alias_lid=alias_lid),
     )
     assert proc.returncode == 0, f"rc={proc.returncode} stderr={proc.stderr}"
     return json.loads(proc.stdout)
@@ -207,6 +223,53 @@ def test_inactive_employee_still_reports_membership(env):
     doc = resolve(env, INACTIVE_LID)
     assert doc["roles"] == ["employee"]
     assert doc["employee_id"] == "e002"
+
+
+def test_inactive_employee_converges_across_phone_and_lid(env):
+    """HARD REGRESSION — branch-independence for a NON-active employee.
+
+    `Roster.find_by_phone` skips `status != "active"` (schemas.py), so routing
+    the membership lookup through it made an inactive employee answer
+    `roles=["employee"]` by LID and `roles=[]` by phone. The earlier test
+    exercised only the LID side and could not see the contradiction.
+
+    Membership is the relationship; ACTIVE status is an authorization condition
+    enforced by the consumer. Both identifiers must therefore agree.
+    """
+    by_lid = resolve(env, INACTIVE_LID)
+    by_phone = resolve(env, INACTIVE_PHONE)
+    assert by_lid["roles"] == by_phone["roles"] == ["employee"]
+    assert by_lid["employee_id"] == by_phone["employee_id"] == "e002"
+    assert by_lid["phone_normalized"] == by_phone["phone_normalized"] == INACTIVE_PHONE
+
+
+def test_owner_alias_with_phone_only_still_resolves_via_lid(env):
+    """The production alias should need PHONE ONLY.
+
+    An inbound arriving by LID resolves the employee row, which supplies the
+    canonical phone; owner membership is then derived from that phone. Storing
+    the LID in config too would create a second pair-consistency surface to
+    keep correct, so this pins that it is unnecessary.
+    """
+    doc = resolve(env, DUAL_LID, alias_lid=False)
+    assert doc["roles"] == ["employee", "owner"], (
+        "LID inbound must widen through the employee identity to the canonical "
+        "phone and pick up the phone-only owner alias")
+    assert doc["employee_id"] == "e008"
+    assert doc["phone_normalized"] == DUAL_PHONE
+
+
+def test_expired_historical_phone_does_not_confer_membership(env):
+    """A recycled number must not inherit its former holder's identity.
+
+    The status filter was dropped from the phone lookup, but `phone_history`
+    effective windows are preserved exactly. `RECYCLED_PHONE` was e003's number
+    until it was reassigned, so it must resolve to nobody now.
+    """
+    doc = resolve(env, RECYCLED_PHONE)
+    assert doc["roles"] == [], doc
+    assert doc["role"] == "unknown", doc
+    assert "employee_id" not in doc, doc
 
 
 def test_phone_jid_form_matches_e164_form(env):

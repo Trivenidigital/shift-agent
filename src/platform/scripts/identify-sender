@@ -36,6 +36,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, "/opt/shift-agent")
@@ -97,19 +98,53 @@ def _match_owner_identity(owner, *, phone=None, lid=None):
     return None
 
 
+def _employee_by_phone_any_status(roster, phone):
+    """Status-neutral phone lookup mirroring `Roster.find_by_phone`.
+
+    `Roster.find_by_phone` skips every employee whose status is not "active"
+    (schemas.py). Using it here would make membership depend on WHICH
+    identifier the caller held: the LID path returns inactive employees, so an
+    inactive employee would answer `roles=["employee"]` by LID and `roles=[]`
+    by phone. That contradicts the branch-independence contract.
+
+    Membership is the relationship; ACTIVE status is an authorization
+    condition, and it stays in the consumer (`has_employee_capability` /
+    `is_employee_chat`). So this lookup drops the status filter and keeps
+    everything else identical.
+
+    `phone_history` effective windows are preserved exactly as upstream: a
+    reassigned number outside its window must NOT confer membership on its
+    former holder, or a recycled phone would silently inherit an identity.
+    """
+    canonical = E164Phone.from_any(phone)
+    now = datetime.now(timezone.utc)
+    for emp in roster.employees:
+        if emp.phone == canonical:
+            return emp
+        for hist in emp.phone_history:
+            if hist.phone != canonical:
+                continue
+            if hist.effective_from and hist.effective_from > now:
+                continue
+            if hist.effective_to is not None and hist.effective_to < now:
+                continue
+            return emp
+    return None
+
+
 def _match_employee(roster, *, phone=None, lid=None):
     """Return the matching Employee, else None. Checks both identifiers.
 
-    Status is NOT filtered here: callers need to distinguish "not an employee"
-    from "an inactive employee". Active-status enforcement lives in the
-    consumer (`is_employee_chat` / `has_employee_capability`).
+    Status is NOT filtered on EITHER path — see `_employee_by_phone_any_status`
+    for why that symmetry is load-bearing. Active-status enforcement lives in
+    the consumer (`is_employee_chat` / `has_employee_capability`).
     """
     if lid is not None:
         for emp in roster.employees:
             if emp.lid and emp.lid == lid:
                 return emp
     if phone is not None:
-        emp = roster.find_by_phone(phone)
+        emp = _employee_by_phone_any_status(roster, phone)
         if emp:
             return emp
     return None
