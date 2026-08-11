@@ -229,7 +229,10 @@ def is_owner_chat(chat_id: str) -> bool:
         owner_jid = (cfg or {}).get("owner", {}).get("self_chat_jid", "")
         if owner_jid and chat_id == owner_jid:
             return True
-        # F13: LID fallback via identify-sender
+        # F13: LID fallback via identify-sender.
+        # Reads OWNER MEMBERSHIP, not the legacy scalar: a principal who is
+        # both owner and roster employee resolves scalar `employee` by LID, and
+        # a scalar check here would reject every owner-only operation for them.
         if chat_id.endswith("@lid"):
             try:
                 result = subprocess.run(
@@ -238,12 +241,45 @@ def is_owner_chat(chat_id: str) -> bool:
                 )
                 if result.returncode == 0:
                     doc = json.loads(result.stdout)
+                    roles = doc.get("roles")
+                    if isinstance(roles, list):
+                        return "owner" in roles
+                    # Older identify-sender without `roles` (rollback window).
                     return doc.get("role") == "owner"
             except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
                 return False
         return False
     except Exception:
         return False
+
+
+def has_owner_capability(chat_id: str) -> bool:
+    """True when this principal holds OWNER membership.
+
+    The owner-authorization question for every new/migrated call site. Employee
+    membership alone NEVER satisfies it.
+    """
+    identity = identify_sender_metadata(chat_id)
+    roles = identity.get("roles")
+    if isinstance(roles, list):
+        return "owner" in roles
+    return identity.get("role") == "owner"  # rollback-window fallback
+
+
+def has_employee_capability(chat_id: str) -> bool:
+    """True when this principal holds ACTIVE employee membership.
+
+    Membership alone is insufficient: `identify-sender` reports employee
+    membership regardless of roster `status`, so the deployed active-roster
+    verification is retained rather than replaced.
+    """
+    identity = identify_sender_metadata(chat_id)
+    roles = identity.get("roles")
+    if isinstance(roles, list):
+        member = "employee" in roles
+    else:
+        member = identity.get("role") == "employee"  # rollback-window fallback
+    return member and is_employee_chat(chat_id)
 
 
 def is_employee_chat(chat_id: str) -> bool:
@@ -277,11 +313,14 @@ def is_verified_employee_chat(chat_id: str) -> bool:
     F9 used to be alert-only, so roster-only matching was enough. Once F9 can
     skip the LLM and invoke Shift directly, the route must be gated by the same
     identity authority as dispatch_shift_agent: identify-sender metadata.
+
+    Reads EMPLOYEE MEMBERSHIP rather than the legacy scalar. The previous
+    `role != "employee"` check rejected a principal who is both owner and an
+    active employee, because the scalar can only name one of the two.
+    Active-roster verification is unchanged — it lives inside
+    `has_employee_capability`.
     """
-    identity = identify_sender_metadata(chat_id)
-    if identity.get("role") != "employee":
-        return False
-    return is_employee_chat(chat_id)
+    return has_employee_capability(chat_id)
 
 
 def has_pending_candidate_response(chat_id: str) -> bool:

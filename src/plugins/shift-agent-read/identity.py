@@ -80,13 +80,23 @@ def resolve_identity(principal: str) -> dict | None:
 
 
 def require_owner() -> tuple[bool, str]:
-    """Return (True, "") for the owner, else (False, <refusal JSON text>)."""
+    """Return (True, "") for a principal holding OWNER MEMBERSHIP, else refusal.
+
+    Reads `roles` rather than the legacy scalar `role`. A principal who is both
+    owner and an active roster employee resolves scalar `employee` when looked
+    up by LID, so a scalar check refused a genuine owner. Authorization is not
+    weakened: employee membership alone still fails this check.
+    """
     principal = session_principal()
     if not principal:
         return False, refuse("unbound_session")
     identity = resolve_identity(principal)
     if identity is None:
         return False, refuse("identity_unresolved")
-    if identity.get("role") != "owner":
+    roles = identity.get("roles")
+    if isinstance(roles, list):
+        if "owner" not in roles:
+            return False, refuse("not_owner")
+    elif identity.get("role") != "owner":  # rollback-window fallback
         return False, refuse("not_owner")
     return True, ""

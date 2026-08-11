@@ -8,9 +8,21 @@ Usage:
   identify-sender --json +19045550101
 
 Output (JSON to stdout):
-  {"role": "employee", "employee_id": "e001", "name": "Ravi Kumar", "phone_normalized": "+19045550101"}
-  {"role": "owner", "name": "Sally Patel", "phone_normalized": "+19045550100"}
-  {"role": "unknown", "phone_normalized": "+19045559999"}
+  {"role": "employee", "roles": ["employee"], "employee_id": "e001", "name": "Ravi Kumar", ...}
+  {"role": "owner", "roles": ["owner"], "name": "Sally Patel", "phone_normalized": "+19045550100"}
+  {"role": "unknown", "roles": [], "phone_normalized": "+19045559999"}
+
+  A principal may hold BOTH relationships at once:
+  {"role": "employee", "roles": ["employee", "owner"], "employee_id": "e008", ...}
+
+`roles` is the authorization surface and is independent of which identifier
+(phone or LID) was used to look the principal up.
+
+`role` is a LEGACY COMPATIBILITY PROJECTION. It preserves each branch's
+original precedence — employee-first by LID, primary-owner-first by phone — so
+the ~38 deployed `role == "owner"` / `role != "owner"` consumers keep their
+exact current behavior, including the many that use `!= "owner"` as shorthand
+for "customer". New authorization MUST read `roles`, never the scalar.
 
 Exit codes:
   0 — resolved (even if unknown; the JSON indicates role)
@@ -56,46 +68,109 @@ def _classify_input(raw: str) -> tuple[str, str]:
 # END shift-agent-sender-id
 
 
-def _emit_employee(emp, *, phone=None, lid=None) -> int:
+# BEGIN shift-agent-multirole
+# Owner and employee are NOT mutually exclusive relationships. `roles` is the
+# authorization surface; the scalar `role` below is a LEGACY COMPATIBILITY
+# PROJECTION kept bit-for-bit identical to pre-change behavior so the ~38
+# existing `role == "owner"` / `role != "owner"` consumers are untouched.
+#
+# Authorization MUST ask `"owner" in roles` / `"employee" in roles`.
+# It MUST NOT ask `role == "owner"` where multi-role correctness matters.
+
+
+def _match_owner_identity(owner, *, phone=None, lid=None):
+    """Return the matched owner identity record, else None.
+
+    Checks the primary owner identity AND every `authorized_identities` entry,
+    against BOTH identifiers, so the answer never depends on which identifier
+    the caller happened to hold.
+    """
+    if phone is not None and phone == owner.phone:
+        return owner
+    if lid is not None and owner.lid and lid == owner.lid:
+        return owner
+    for alias in owner.authorized_identities:
+        if phone is not None and alias.phone == phone:
+            return alias
+        if lid is not None and alias.lid and alias.lid == lid:
+            return alias
+    return None
+
+
+def _match_employee(roster, *, phone=None, lid=None):
+    """Return the matching Employee, else None. Checks both identifiers.
+
+    Status is NOT filtered here: callers need to distinguish "not an employee"
+    from "an inactive employee". Active-status enforcement lives in the
+    consumer (`is_employee_chat` / `has_employee_capability`).
+    """
+    if lid is not None:
+        for emp in roster.employees:
+            if emp.lid and emp.lid == lid:
+                return emp
+    if phone is not None:
+        emp = roster.find_by_phone(phone)
+        if emp:
+            return emp
+    return None
+
+
+def _resolve_principal(cfg, roster, *, phone=None, lid=None):
+    """Resolve one principal to (employee_or_None, owner_match_or_None, phone, lid).
+
+    Identifiers are widened from whatever the roster/owner records teach us, so
+    a principal resolved by LID yields the same memberships as the same
+    principal resolved by phone.
+    """
+    emp = _match_employee(roster, phone=phone, lid=lid)
+    eff_phone = phone if phone is not None else (emp.phone if emp else None)
+    eff_lid = lid if lid is not None else (emp.lid if emp else None)
+
+    owner_match = _match_owner_identity(cfg.owner, phone=eff_phone, lid=eff_lid)
+
+    # Second pass: an owner match may supply the phone the roster lookup lacked.
+    if owner_match is not None and eff_phone is None:
+        eff_phone = getattr(owner_match, "phone", None)
+        if emp is None and eff_phone is not None:
+            emp = _match_employee(roster, phone=eff_phone)
+            if emp is not None and eff_lid is None:
+                eff_lid = emp.lid
+
+    return emp, owner_match, eff_phone, eff_lid
+
+
+def _emit(scalar_role, emp, owner_match, cfg, *, phone=None, lid=None) -> int:
+    """Emit the identity document: frozen scalar + additive `roles` membership set."""
+    roles = []
+    if owner_match is not None:
+        roles.append("owner")
+    if emp is not None:
+        roles.append("employee")
+
+    name = None
+    if emp is not None:
+        name = emp.name
+    elif owner_match is not None:
+        name = cfg.owner.name
+
     out = {
-        "role": "employee",
-        "employee_id": emp.id,
-        "name": emp.name,
-        "phone_normalized": phone if phone is not None else emp.phone,
-        "primary_role": emp.role,
-        "languages": emp.languages,
-        "can_cover_roles": sorted(emp.can_cover_roles),
-        # BEGIN shift-agent-sender-id
-        "lid": lid if lid is not None else emp.lid,
-        # END shift-agent-sender-id
-    }
-    print(json.dumps(out))
-    return EXIT_OK
-
-
-def _emit_owner(owner, *, phone=None, lid=None) -> int:
-    out = {
-        "role": "owner",
-        "name": owner.name,
-        "phone_normalized": phone if phone is not None else owner.phone,
-        # BEGIN shift-agent-sender-id
-        "lid": lid if lid is not None else owner.lid,
-        # END shift-agent-sender-id
-    }
-    print(json.dumps(out))
-    return EXIT_OK
-
-
-def _emit_unknown(*, phone=None, lid=None) -> int:
-    out = {
-        "role": "unknown",
+        "role": scalar_role,
+        "roles": sorted(roles),
+        "name": name,
         "phone_normalized": phone,
-        # BEGIN shift-agent-sender-id
         "lid": lid,
-        # END shift-agent-sender-id
     }
+    # Employee detail rides along whenever employee membership is held, so an
+    # owner-scalar principal who is also an employee still exposes employee_id.
+    # Owner membership alone NEVER synthesizes one.
+    if emp is not None:
+        out["employee_id"] = emp.id
+        out["primary_role"] = emp.role
+        out["languages"] = emp.languages
+        out["can_cover_roles"] = sorted(emp.can_cover_roles)
     print(json.dumps(out))
     return EXIT_OK
+# END shift-agent-multirole
 
 
 def main():
@@ -145,26 +220,40 @@ def main():
         print(json.dumps({"role": "error", "error": f"roster_load_failed: {status}"}))
         return EXIT_INVALID_INPUT
 
-    # BEGIN shift-agent-sender-id (LID branch)
+    # BEGIN shift-agent-multirole (memberships are branch-independent; the
+    # scalar keeps each branch's ORIGINAL precedence so no existing consumer
+    # observes a behavior change)
     if kind == "lid":
-        for e in roster.employees:
-            if e.lid == normalized:
-                return _emit_employee(e, lid=normalized)
-        if cfg.owner.lid == normalized:
-            return _emit_owner(cfg.owner, lid=normalized)
-        return _emit_unknown(lid=normalized)
-    # END shift-agent-sender-id
+        emp, owner_match, eff_phone, eff_lid = _resolve_principal(
+            cfg, roster, lid=normalized)
+        # Original LID precedence: employee checked first, owner second.
+        if emp is not None:
+            scalar = "employee"
+        elif owner_match is not None:
+            scalar = "owner"
+        else:
+            scalar = "unknown"
+        return _emit(scalar, emp, owner_match, cfg,
+                     phone=eff_phone, lid=eff_lid or normalized)
 
-    # kind == "phone": preserved legacy behavior + populate lid in output
+    # kind == "phone"
     canonical = normalized
+    emp, owner_match, eff_phone, eff_lid = _resolve_principal(
+        cfg, roster, phone=canonical)
+    # Original phone precedence: the PRIMARY owner identity wins first, then
+    # the roster. An authorized-identity-only match is new configuration that
+    # could not exist before, so resolving it to "owner" regresses nothing.
     if canonical == cfg.owner.phone:
-        return _emit_owner(cfg.owner, phone=canonical, lid=cfg.owner.lid)
-
-    emp = roster.find_by_phone(canonical)
-    if emp:
-        return _emit_employee(emp, phone=canonical, lid=emp.lid)
-
-    return _emit_unknown(phone=canonical)
+        scalar = "owner"
+    elif emp is not None:
+        scalar = "employee"
+    elif owner_match is not None:
+        scalar = "owner"
+    else:
+        scalar = "unknown"
+    return _emit(scalar, emp, owner_match, cfg,
+                 phone=eff_phone or canonical, lid=eff_lid)
+    # END shift-agent-multirole
 
 
 if __name__ == "__main__":

@@ -4792,17 +4792,26 @@ def _receipt_caption_cedes_to_dispatcher(
 
     Mirrors `_menu_caption_cedes_to_dispatcher` with two deliberate differences:
 
-      * **owner only.** The menu gate admits a verified employee; an expense is a
-        money record, so an employee or customer receipt must NOT enter it.
+      * **owner capability required.** The menu gate admits a verified employee;
+        an expense is a money record, so a principal WITHOUT owner membership
+        must NOT enter it. Employee membership alone never satisfies this.
       * the caption trigger is `actions.is_receipt_caption`.
 
     Both remaining conditions are unchanged — media must be present, and an
     explicit flyer edit signal vetoes the cession. Defensive: any error means NO
     cession, so the flyer path stays byte-identical.
+
+    Authorization asks OWNER MEMBERSHIP, not the legacy scalar `role`. A
+    principal who is both owner and an active roster employee resolves scalar
+    `employee` by LID, so the previous `role != "owner"` check refused a
+    genuine owner. The business rule is unchanged and NOT weakened — only the
+    lossy input to it is fixed.
     """
-    if not media_path or role != "owner":
+    if not media_path:
         return False
     try:
+        if not actions.has_owner_capability(chat_id):
+            return False
         if not actions.is_receipt_caption(text):
             return False
         if _flyer_edit_signal_present(text, has_media=True):
@@ -4810,7 +4819,8 @@ def _receipt_caption_cedes_to_dispatcher(
         actions.audit_intercepted(
             reason="receipt_caption_ceded_to_dispatcher",
             chat_id=chat_id,
-            detail=f"sender_role={role}; has_media=true; skill=parse_receipt_photo",
+            detail=(f"sender_role={role}; owner_capability=true; "
+                    f"has_media=true; skill=parse_receipt_photo"),
         )
         return True
     except Exception:  # noqa: BLE001 — a cession decision must never claim the inbound
