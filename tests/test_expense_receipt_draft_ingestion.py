@@ -129,9 +129,20 @@ def test_menu_caption_routing_is_unchanged(plugin):
 
 # ── cession gate ────────────────────────────────────────────────────────────
 
-def _gate(hooks_mod, monkeypatch, *, text, media, role):
+def _gate(hooks_mod, monkeypatch, *, text, media, role, owner_capability=None):
+    """Drive the gate by OWNER CAPABILITY, which is what it now authorizes on.
+
+    `role` is retained because the gate still records it in the audit row, but
+    it is no longer proof of anything. `owner_capability` defaults to the
+    legacy scalar equivalence (`role == "owner"`) so every pre-existing case
+    keeps its original meaning; the dual-role cases set it explicitly.
+    """
+    if owner_capability is None:
+        owner_capability = (role == "owner")
     monkeypatch.setattr(hooks_mod.actions, "audit_intercepted",
                         lambda **kw: None, raising=False)
+    monkeypatch.setattr(hooks_mod.actions, "has_owner_capability",
+                        lambda chat_id: owner_capability, raising=False)
     return hooks_mod._receipt_caption_cedes_to_dispatcher(
         text, "chat@lid", media_path=media, role=role)
 
@@ -149,6 +160,54 @@ def test_gate_rejects_non_owner_roles(plugin, monkeypatch, role):
     hooks_mod, _ = plugin
     assert _gate(hooks_mod, monkeypatch, text="Expense receipt",
                  media="/tmp/img_1.jpg", role=role) is False
+
+
+def test_gate_claims_dual_role_owner_whose_scalar_says_employee(plugin, monkeypatch):
+    """Multi-role: owner membership is accepted even when the scalar says employee.
+
+    A principal who is BOTH owner and an active roster employee resolves scalar
+    `employee` by LID (the LID branch checks the roster first), which is exactly
+    how a genuine owner's receipt was refused in production on 2026-08-10.
+    """
+    hooks_mod, _ = plugin
+    assert _gate(hooks_mod, monkeypatch, text="Expense receipt — review this",
+                 media="/tmp/img_1.jpg", role="employee",
+                 owner_capability=True) is True
+
+
+def test_gate_rejects_employee_without_owner_membership(plugin, monkeypatch):
+    """The safety rule: employee membership alone NEVER satisfies the owner gate."""
+    hooks_mod, _ = plugin
+    assert _gate(hooks_mod, monkeypatch, text="Expense receipt — review this",
+                 media="/tmp/img_1.jpg", role="employee",
+                 owner_capability=False) is False
+
+
+def test_gate_ignores_a_scalar_owner_claim_without_capability(plugin, monkeypatch):
+    """The scalar is NOT proof: a caller claiming `owner` cannot open a money gate.
+
+    Authorization has exactly one path — membership. This pins that the gate
+    resolves it itself rather than trusting the label it was handed, so a stale
+    or wrong caller-supplied role cannot admit a receipt.
+    """
+    hooks_mod, _ = plugin
+    assert _gate(hooks_mod, monkeypatch, text="Expense receipt",
+                 media="/tmp/img_1.jpg", role="owner",
+                 owner_capability=False) is False
+
+
+def test_gate_consults_membership_exactly_once(plugin, monkeypatch):
+    """Authorization is resolved by the gate, on every call, for every role."""
+    hooks_mod, _ = plugin
+    calls = []
+    monkeypatch.setattr(hooks_mod.actions, "audit_intercepted",
+                        lambda **kw: None, raising=False)
+    monkeypatch.setattr(hooks_mod.actions, "has_owner_capability",
+                        lambda chat_id: calls.append(chat_id) or True, raising=False)
+    assert hooks_mod._receipt_caption_cedes_to_dispatcher(
+        "Expense receipt", "chat@lid", media_path="/tmp/img_1.jpg",
+        role="owner") is True
+    assert calls == ["chat@lid"]
 
 
 def test_gate_rejects_owner_image_only(plugin, monkeypatch):

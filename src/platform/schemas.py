@@ -277,6 +277,27 @@ class Roster(BaseModel):
 # Config
 # ─────────────────────────────────────────────────────────────────
 
+class OwnerAuthorizedIdentity(BaseModel):
+    """An additional WhatsApp identity that holds OWNER AUTHORIZATION only.
+
+    Deliberately not a second owner record. `OwnerConfig.phone` /
+    `self_chat_jid` / `lid` remain the single notification-and-contact
+    identity: owner alerts, daily briefs and dead-man escalations keep
+    delivering exactly where they do today. Nothing reads this model for
+    outbound routing.
+
+    It exists because owner and employee are NOT mutually exclusive
+    relationships. Granting owner capability to a number that is already an
+    active roster employee must not require replacing the owner record (which
+    would silently reroute operator notifications) nor reclassifying the
+    employee (which would discard their employee_id and history).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    phone: E164Phone
+    lid: Optional[str] = Field(default=None, pattern=r"^\d{6,20}@lid$")
+
+
 class OwnerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
@@ -285,6 +306,11 @@ class OwnerConfig(BaseModel):
     # BEGIN shift-agent-sender-id
     lid: Optional[str] = Field(default=None, pattern=r"^\d{6,20}@lid$")
     # END shift-agent-sender-id
+    # Additive owner AUTHORIZATION only — never a notification destination.
+    # Same `extra="forbid"` additive-field pattern as `Employee.lid`: on
+    # rollback, strip `authorized_identities` from config.yaml BEFORE reverting
+    # schemas.py, or the older model rejects the newer config.
+    authorized_identities: list[OwnerAuthorizedIdentity] = []
 
 
 class LimitsConfig(BaseModel):

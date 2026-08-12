@@ -4792,17 +4792,34 @@ def _receipt_caption_cedes_to_dispatcher(
 
     Mirrors `_menu_caption_cedes_to_dispatcher` with two deliberate differences:
 
-      * **owner only.** The menu gate admits a verified employee; an expense is a
-        money record, so an employee or customer receipt must NOT enter it.
+      * **owner capability required.** The menu gate admits a verified employee;
+        an expense is a money record, so a principal WITHOUT owner membership
+        must NOT enter it. Employee membership alone never satisfies this.
       * the caption trigger is `actions.is_receipt_caption`.
 
     Both remaining conditions are unchanged — media must be present, and an
     explicit flyer edit signal vetoes the cession. Defensive: any error means NO
     cession, so the flyer path stays byte-identical.
+
+    Authorization has EXACTLY ONE path: owner membership. The caller-supplied
+    scalar `role` is NOT accepted as proof and is retained only for the audit
+    row. This is a money record, so the gate resolves authorization itself
+    rather than trusting a label it was handed — a caller passing a stale or
+    wrong role must not be able to open it.
+
+    Membership is what makes the dual-role case work: a principal who is both
+    owner and an active roster employee resolves scalar `employee` by LID, and
+    the previous `role != "owner"` check refused a genuine owner.
+
+    The business rule is unchanged and NOT weakened — employee membership alone
+    never satisfies this gate, so employee-only, customer and guest senders
+    cannot enter a money record.
     """
-    if not media_path or role != "owner":
+    if not media_path:
         return False
     try:
+        if not actions.has_owner_capability(chat_id):
+            return False
         if not actions.is_receipt_caption(text):
             return False
         if _flyer_edit_signal_present(text, has_media=True):
@@ -4810,7 +4827,8 @@ def _receipt_caption_cedes_to_dispatcher(
         actions.audit_intercepted(
             reason="receipt_caption_ceded_to_dispatcher",
             chat_id=chat_id,
-            detail=f"sender_role={role}; has_media=true; skill=parse_receipt_photo",
+            detail=(f"sender_role={role}; owner_capability=true; "
+                    f"has_media=true; skill=parse_receipt_photo"),
         )
         return True
     except Exception:  # noqa: BLE001 — a cession decision must never claim the inbound
