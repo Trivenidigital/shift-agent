@@ -4237,6 +4237,24 @@ def _try_flyer_existing_onboarding_intercept(text: str, chat_id: str, event: Any
 
 def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_path: str) -> Optional[dict]:
     """Capture logo/template uploads during onboarding or flyer requests."""
+    # Yield the EXACT owner-receipt candidate the later receipt cession claims.
+    # This arm is terminal and runs before that cession, so without this a
+    # genuine owner receipt is stored as a brand asset and the cession is never
+    # reached — the live 2026-08-10 (B0009) and 2026-08-12 (B0010) failures.
+    #
+    # The owner exemption below cannot cover it: it reads the LEGACY SCALAR,
+    # which is deliberately frozen at `employee` for a principal holding both
+    # memberships, so the exemption never fires for exactly the sender this
+    # matters for.
+    #
+    # Scoped to the four-way receipt predicate on purpose — NOT to owner
+    # membership alone. A dual-role owner acting as a Flyer Studio customer
+    # must still be able to upload a logo, template or reference.
+    #
+    # No audit row here: `receipt_caption_ceded_to_dispatcher` belongs to the
+    # receipt arm when it actually claims the turn.
+    if _is_owner_receipt_candidate(text, chat_id, media_path=media_path):
+        return None
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     if role == "owner":
@@ -4785,6 +4803,47 @@ def _owner_menu_ingestion_impl(
                        f"(ok={ok} mid={mid} err={send_err[:80]})")}
 
 
+def _is_owner_receipt_candidate(
+    text: str, chat_id: str, *, media_path: Optional[str],
+) -> bool:
+    """PURE predicate: is this inbound the exact owner-expense-receipt shape?
+
+    No audit row, no state change, no send — it answers a question and nothing
+    else, because it is evaluated TWICE per turn: once by the terminal
+    brand-asset arm (to yield) and once by the receipt cession (to claim).
+    Emitting anything here would double-count or, worse, log a cession that
+    never happened.
+
+    Four conditions, deliberately ALL of them:
+
+      * media present — an expense needs the image;
+      * OWNER MEMBERSHIP — `has_owner_capability`, not the legacy scalar;
+      * an explicit documented receipt caption;
+      * no explicit Flyer edit signal, which vetoes.
+
+    Narrowness is the point. `has_owner_capability` ALONE would be wrong: the
+    same dual-role principal is intentionally allowed to act as a Flyer Studio
+    customer, so "owner membership ⇒ never capture a brand asset" would stop
+    them uploading a logo or template. Only this exact four-way conjunction
+    yields the Flyer arm.
+
+    Defensive: any error means NOT a candidate, so the flyer path stays
+    byte-identical on failure.
+    """
+    if not media_path:
+        return False
+    try:
+        if not actions.has_owner_capability(chat_id):
+            return False
+        if not actions.is_receipt_caption(text):
+            return False
+        if _flyer_edit_signal_present(text, has_media=True):
+            return False
+        return True
+    except Exception:  # noqa: BLE001 — never claim an inbound on an error
+        return False
+
+
 def _receipt_caption_cedes_to_dispatcher(
     text: str, chat_id: str, *, media_path: Optional[str], role: str,
 ) -> bool:
@@ -4815,15 +4874,9 @@ def _receipt_caption_cedes_to_dispatcher(
     never satisfies this gate, so employee-only, customer and guest senders
     cannot enter a money record.
     """
-    if not media_path:
+    if not _is_owner_receipt_candidate(text, chat_id, media_path=media_path):
         return False
     try:
-        if not actions.has_owner_capability(chat_id):
-            return False
-        if not actions.is_receipt_caption(text):
-            return False
-        if _flyer_edit_signal_present(text, has_media=True):
-            return False
         actions.audit_intercepted(
             reason="receipt_caption_ceded_to_dispatcher",
             chat_id=chat_id,
