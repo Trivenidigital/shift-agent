@@ -366,6 +366,15 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
         # the bridge delivers — body head + quote/reply-shaped event attrs —
         # BEFORE any routing. Best-effort; never blocks the flow.
         actions.audit_raw_body(event, chat_id, message_id, text)
+        # TURN-SCOPED SNAPSHOT of owner-receipt candidacy. Declared here so it is
+        # in scope for both consumers, but deliberately NOT resolved here: the
+        # lookup is an identify-sender subprocess, and resolving it at dispatch
+        # entry would put that latency and failure surface on EVERY media inbound
+        # — including turns a higher-priority intercept returns from long before
+        # receipt-vs-brand arbitration. It is resolved lazily at the first
+        # brand-asset decision instead, which is the earliest point the answer
+        # can actually matter.
+        owner_receipt_candidate = False
         flyer_generation_enabled = actions.is_flyer_enabled()
         flyer_workflow_enabled = flyer_generation_enabled or actions.is_flyer_workflow_enabled()
         # P1-1 send-now-compound fix: ONE dispatch-scoped single-flight memo shared
@@ -562,7 +571,15 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             if scope_auth_result is not None:
                 return scope_auth_result
             if media_path:
-                brand_result = _try_flyer_brand_asset_intercept(text, chat_id, event, media_path)
+                # Resolve ONCE, here — the first point the answer is needed. The
+                # receipt cession below consumes this same boolean and must not
+                # re-resolve it: a second identity read could contradict the
+                # first and drop the turn into active-project Flyer routing.
+                owner_receipt_candidate = _is_owner_receipt_candidate(
+                    text, chat_id, media_path=media_path)
+                brand_result = _try_flyer_brand_asset_intercept(
+                    text, chat_id, event, media_path,
+                    owner_receipt_candidate=owner_receipt_candidate)
                 if brand_result is not None:
                     return brand_result
             onboarding_reply_result = _try_flyer_existing_onboarding_intercept(text, chat_id, event)
@@ -630,6 +647,7 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 # unsupported in this wave rather than being guessed at.
                 if _receipt_caption_cedes_to_dispatcher(
                     text, chat_id, media_path=media_path, role=guest_role,
+                    owner_receipt_candidate=owner_receipt_candidate,
                 ):
                     return _run_owner_receipt_ingestion(
                         chat_id, event, text=text, media_path=media_path,
@@ -4235,8 +4253,33 @@ def _try_flyer_existing_onboarding_intercept(text: str, chat_id: str, event: Any
     return _try_flyer_onboarding_intercept(text, chat_id, event)
 
 
-def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_path: str) -> Optional[dict]:
-    """Capture logo/template uploads during onboarding or flyer requests."""
+def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_path: str,
+                                     *, owner_receipt_candidate: bool = False) -> Optional[dict]:
+    """Capture logo/template uploads during onboarding or flyer requests.
+
+    `owner_receipt_candidate` is the TURN-SCOPED snapshot resolved once in
+    dispatch. This arm must not re-resolve it: a second identity read could
+    disagree with the first and let a brand asset be written for a message the
+    turn already classified as an owner receipt.
+    """
+    # Yield the EXACT owner-receipt candidate the later receipt cession claims.
+    # This arm is terminal and runs before that cession, so without this a
+    # genuine owner receipt is stored as a brand asset and the cession is never
+    # reached — the live 2026-08-10 (B0009) and 2026-08-12 (B0010) failures.
+    #
+    # The owner exemption below cannot cover it: it reads the LEGACY SCALAR,
+    # which is deliberately frozen at `employee` for a principal holding both
+    # memberships, so the exemption never fires for exactly the sender this
+    # matters for.
+    #
+    # Scoped to the four-way receipt predicate on purpose — NOT to owner
+    # membership alone. A dual-role owner acting as a Flyer Studio customer
+    # must still be able to upload a logo, template or reference.
+    #
+    # No audit row here: `receipt_caption_ceded_to_dispatcher` belongs to the
+    # receipt arm when it actually claims the turn.
+    if owner_receipt_candidate:
+        return None
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     if role == "owner":
@@ -4785,8 +4828,58 @@ def _owner_menu_ingestion_impl(
                        f"(ok={ok} mid={mid} err={send_err[:80]})")}
 
 
+def _is_owner_receipt_candidate(
+    text: str, chat_id: str, *, media_path: Optional[str],
+) -> bool:
+    """Is this inbound the exact owner-expense-receipt shape?
+
+    Side-effect-free — no audit row, no state change, no send — but NOT
+    deterministic: `has_owner_capability` shells out to identify-sender with a
+    timeout, so two calls in one turn can disagree.
+
+    Therefore call this EXACTLY ONCE per inbound, in `_pre_gateway_dispatch_impl`,
+    and pass the resulting boolean to both consumers. Re-resolving it at the
+    receipt cession would let a transient identity failure contradict the answer
+    the brand-asset arm already acted on, and the turn would fall through into
+    the active-project Flyer intercept — the same misclassification class this
+    predicate exists to prevent.
+
+    Emitting an audit row here would also be wrong: it would log a cession that
+    may never happen.
+
+    Four conditions, deliberately ALL of them:
+
+      * media present — an expense needs the image;
+      * OWNER MEMBERSHIP — `has_owner_capability`, not the legacy scalar;
+      * an explicit documented receipt caption;
+      * no explicit Flyer edit signal, which vetoes.
+
+    Narrowness is the point. `has_owner_capability` ALONE would be wrong: the
+    same dual-role principal is intentionally allowed to act as a Flyer Studio
+    customer, so "owner membership ⇒ never capture a brand asset" would stop
+    them uploading a logo or template. Only this exact four-way conjunction
+    yields the Flyer arm.
+
+    Defensive: any error means NOT a candidate, so the flyer path stays
+    byte-identical on failure.
+    """
+    if not media_path:
+        return False
+    try:
+        if not actions.has_owner_capability(chat_id):
+            return False
+        if not actions.is_receipt_caption(text):
+            return False
+        if _flyer_edit_signal_present(text, has_media=True):
+            return False
+        return True
+    except Exception:  # noqa: BLE001 — never claim an inbound on an error
+        return False
+
+
 def _receipt_caption_cedes_to_dispatcher(
     text: str, chat_id: str, *, media_path: Optional[str], role: str,
+    owner_receipt_candidate: bool,
 ) -> bool:
     """True when cf-router must claim an inbound as an owner expense receipt.
 
@@ -4815,15 +4908,10 @@ def _receipt_caption_cedes_to_dispatcher(
     never satisfies this gate, so employee-only, customer and guest senders
     cannot enter a money record.
     """
-    if not media_path:
+    # Consumes the turn-scoped snapshot — deliberately does NOT re-resolve.
+    if not owner_receipt_candidate:
         return False
     try:
-        if not actions.has_owner_capability(chat_id):
-            return False
-        if not actions.is_receipt_caption(text):
-            return False
-        if _flyer_edit_signal_present(text, has_media=True):
-            return False
         actions.audit_intercepted(
             reason="receipt_caption_ceded_to_dispatcher",
             chat_id=chat_id,

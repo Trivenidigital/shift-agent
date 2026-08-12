@@ -143,8 +143,11 @@ def _gate(hooks_mod, monkeypatch, *, text, media, role, owner_capability=None):
                         lambda **kw: None, raising=False)
     monkeypatch.setattr(hooks_mod.actions, "has_owner_capability",
                         lambda chat_id: owner_capability, raising=False)
+    candidate = hooks_mod._is_owner_receipt_candidate(
+        text, "chat@lid", media_path=media)
     return hooks_mod._receipt_caption_cedes_to_dispatcher(
-        text, "chat@lid", media_path=media, role=role)
+        text, "chat@lid", media_path=media, role=role,
+        owner_receipt_candidate=candidate)
 
 
 def test_gate_claims_owner_with_media_and_receipt_caption(plugin, monkeypatch):
@@ -204,10 +207,13 @@ def test_gate_consults_membership_exactly_once(plugin, monkeypatch):
                         lambda **kw: None, raising=False)
     monkeypatch.setattr(hooks_mod.actions, "has_owner_capability",
                         lambda chat_id: calls.append(chat_id) or True, raising=False)
+    candidate = hooks_mod._is_owner_receipt_candidate(
+        "Expense receipt", "chat@lid", media_path="/tmp/img_1.jpg")
     assert hooks_mod._receipt_caption_cedes_to_dispatcher(
         "Expense receipt", "chat@lid", media_path="/tmp/img_1.jpg",
-        role="owner") is True
-    assert calls == ["chat@lid"]
+        role="owner", owner_receipt_candidate=candidate) is True
+    assert calls == ["chat@lid"], (
+        "membership must be resolved exactly once per turn, by the predicate")
 
 
 def test_gate_rejects_owner_image_only(plugin, monkeypatch):
@@ -451,3 +457,175 @@ def test_non_review_mode_still_requests_approval(draft_env):
     assert leads[0]["status"] == "AWAITING_OWNER_APPROVAL"
     assert leads[0]["owner_approval_code"]
     assert "expense_owner_approval_requested" in _audit_types(draft_env)
+
+
+# ── live-shape dispatch regression (B0009 2026-08-10 / B0010 2026-08-12) ─────
+#
+# Both live failures were routing PRECEDENCE, not gate logic: the terminal
+# brand-asset arm runs BEFORE the receipt cession and exempted owners using the
+# LEGACY SCALAR, which is deliberately frozen at `employee` for a dual-role
+# principal — so the exemption never fired for exactly the sender that mattered,
+# and the cession was never reached.
+#
+# These drive the REAL `_pre_gateway_dispatch_impl` with the exact live shape:
+# scalar `employee`, membership ["employee","owner"], an ACTIVE stale flyer
+# project (which is what made the brand-asset arm claim the turn), media, and
+# the documented receipt caption. A unit test of the guard alone would not have
+# caught either failure.
+
+from types import SimpleNamespace  # noqa: E402
+
+LIVE_CHAT = "201975216009469@lid"
+LIVE_PHONE = "+17329837841"
+LIVE_MEDIA = "/root/.hermes/cache/images/img_live.jpg"
+LIVE_CAPTION = "Expense receipt — review this"
+
+
+def _dispatch_env(hooks_mod, actions_mod, monkeypatch, tmp_path, *,
+                  owner_capability=True, caption=LIVE_CAPTION,
+                  media=LIVE_MEDIA, extract_rc=0):
+    """Wire the live failure shape and return the recorders."""
+    rec = {"brand_asset": [], "audits": [], "sends": [], "extract": [],
+           "dispatcher_routed": []}
+
+    monkeypatch.setattr(actions_mod, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions_mod, "is_flyer_workflow_enabled", lambda: True)
+    monkeypatch.setattr(actions_mod, "front_brain_converse_admits", lambda c: False)
+    # THE live shape: frozen legacy scalar says employee, membership says both.
+    monkeypatch.setattr(actions_mod, "lid_to_phone_via_identify_sender",
+                        lambda c: (LIVE_PHONE, "employee"))
+    monkeypatch.setattr(actions_mod, "has_owner_capability",
+                        lambda c: owner_capability)
+    # The stale active flyer project is what made the brand-asset arm fire.
+    monkeypatch.setattr(actions_mod, "find_active_flyer_project_by_sender",
+                        lambda p, c: {"project_id": "F0226", "status": "revising_design"})
+    monkeypatch.setattr(actions_mod, "find_flyer_customer_by_sender",
+                        lambda p, c: {"customer_id": "CUST0001", "status": "active"})
+    monkeypatch.setattr(actions_mod, "should_start_new_flyer_over_active",
+                        lambda t, has_media=False: False)
+
+    def _brand(**kw):
+        rec["brand_asset"].append(kw)
+        return True, "stored", {"asset_id": "B9999"}
+    monkeypatch.setattr(actions_mod, "trigger_store_flyer_brand_asset", _brand)
+
+    def _audit(**kw):
+        rec["audits"].append(kw)
+    monkeypatch.setattr(actions_mod, "audit_intercepted", _audit)
+    monkeypatch.setattr(actions_mod, "audit_dispatcher_routed",
+                        lambda **kw: rec["dispatcher_routed"].append(kw))
+
+    def _send(chat_id, text, **kw):
+        rec["sends"].append(text)
+        return True, "mid1", ""
+    monkeypatch.setattr(actions_mod, "send_flyer_text", _send)
+
+    card = ("*Expense Bookkeeper*\nVendor: Costco\nTotal: $42.17\n\n"
+            "Review only — this expense has not been posted to QuickBooks.")
+    leads = tmp_path / "leads.json"
+    leads.write_text(json.dumps({"leads": [
+        {"expense_id": "E0001", "status": "DRAFTED", "owner_approval_code": None}]}),
+        encoding="utf-8")
+    monkeypatch.setattr(hooks_mod, "_expense_leads_path", lambda: leads)
+
+    def _extract(**kw):
+        rec["extract"].append(kw)
+        return extract_rc, json.dumps(
+            {"expense_id": "E0001", "approval_card_text": card}), ""
+    monkeypatch.setattr(actions_mod, "invoke_extract_receipt", _extract)
+
+    event = SimpleNamespace(text=caption, chat_id=LIVE_CHAT,
+                            message_id="wamid.LIVE", media_urls=[media] if media else [])
+    return rec, event
+
+
+def test_live_shape_receipt_preempts_brand_asset_capture(plugin, monkeypatch, tmp_path):
+    """THE regression. Reproduces B0009/B0010 end-to-end through dispatch."""
+    hooks_mod, actions_mod = plugin
+    rec, event = _dispatch_env(hooks_mod, actions_mod, monkeypatch, tmp_path)
+
+    hooks_mod._pre_gateway_dispatch_impl(event)
+
+    reasons = [a.get("reason") for a in rec["audits"]]
+    # 1. the flyer arm must never mutate
+    assert rec["brand_asset"] == [], (
+        "receipt candidate reached brand-asset mutation — this is B0009/B0010")
+    assert "flyer_brand_asset_saved" not in reasons
+    # 2. the receipt arm claimed the turn
+    assert "receipt_caption_ceded_to_dispatcher" in reasons, reasons
+    # 3. extractor invoked exactly once, on the real media
+    assert len(rec["extract"]) == 1, rec["extract"]
+    assert rec["extract"][0]["image_path"] == LIVE_MEDIA
+    # 4/5. durable DRAFTED, no approval code, no approval request
+    assert "receipt_drafted" in reasons, reasons
+    assert not any("approval" in (r or "") for r in reasons), reasons
+    # 6. no QBO push
+    assert not any("qbo" in (r or "").lower() for r in reasons), reasons
+    # 7. truthful review card returned
+    assert rec["sends"], "no card sent"
+    assert rec["sends"][-1].rstrip().endswith(
+        "Review only — this expense has not been posted to QuickBooks.")
+
+
+def test_dual_role_owner_can_still_upload_a_flyer_logo(plugin, monkeypatch, tmp_path):
+    """NEGATIVE CONTROL — the reason the fix is scoped to the receipt predicate.
+
+    The same dual-role principal acting as a Flyer Studio customer must still be
+    able to upload a logo. A blanket `has_owner_capability -> return None` in the
+    brand-asset arm would pass the test above and silently break this.
+    """
+    hooks_mod, actions_mod = plugin
+    rec, event = _dispatch_env(hooks_mod, actions_mod, monkeypatch, tmp_path,
+                               caption="here is our new logo")
+
+    hooks_mod._pre_gateway_dispatch_impl(event)
+
+    assert rec["brand_asset"], (
+        "dual-role owner lost the ability to upload a Flyer brand asset")
+    assert rec["extract"] == [], "logo upload must not invoke the extractor"
+
+
+def test_employee_without_owner_membership_gets_no_expense(plugin, monkeypatch, tmp_path):
+    """NEGATIVE AUTHORIZATION CONTROL — employee-only receipt creates nothing."""
+    hooks_mod, actions_mod = plugin
+    rec, event = _dispatch_env(hooks_mod, actions_mod, monkeypatch, tmp_path,
+                               owner_capability=False)
+
+    hooks_mod._pre_gateway_dispatch_impl(event)
+
+    reasons = [a.get("reason") for a in rec["audits"]]
+    assert rec["extract"] == [], "employee-only sender reached the extractor"
+    assert "receipt_caption_ceded_to_dispatcher" not in reasons, reasons
+
+
+def test_turn_snapshot_survives_a_transient_identity_failure(plugin, monkeypatch, tmp_path):
+    """SPLIT-BRAIN REGRESSION — one identity answer per inbound turn.
+
+    `has_owner_capability` shells out to identify-sender with a timeout, so it is
+    side-effect-free but not deterministic. If the candidate were resolved twice,
+    a transient failure between the two reads would let the brand-asset arm yield
+    on `True` while the cession refused on `False` — and the turn would fall
+    through into the active-project Flyer intercept, recreating B0009/B0010.
+
+    Here the second call would return False. The corrected implementation must
+    never make it: exactly one read, and the turn honours that answer throughout.
+    """
+    hooks_mod, actions_mod = plugin
+    rec, event = _dispatch_env(hooks_mod, actions_mod, monkeypatch, tmp_path)
+
+    calls = {"n": 0}
+
+    def _flaky(chat_id):
+        calls["n"] += 1
+        return calls["n"] == 1          # True first, False (or worse) after
+    monkeypatch.setattr(actions_mod, "has_owner_capability", _flaky)
+
+    hooks_mod._pre_gateway_dispatch_impl(event)
+
+    assert calls["n"] == 1, (
+        f"owner membership resolved {calls['n']}x in one turn — a second read can "
+        f"contradict the first and drop the turn into Flyer routing")
+    reasons = [a.get("reason") for a in rec["audits"]]
+    assert rec["brand_asset"] == [], "brand asset written after a receipt candidate"
+    assert "receipt_caption_ceded_to_dispatcher" in reasons, reasons
+    assert len(rec["extract"]) == 1, rec["extract"]

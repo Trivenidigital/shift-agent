@@ -384,7 +384,7 @@ def test_router_starts_new_work_over_active_state_for_explicit_or_media_template
     assert "_WRONG_FLYER_CORRECTION" in actions
     assert "force_new=True" in hooks
     assert hooks.index("flyer_campaign_cta_text(text)") < hooks.index("should_start_new_flyer_over_active(text, has_media=bool(media_path))")
-    assert hooks.index("_try_flyer_brand_asset_intercept(text, chat_id, event, media_path)") < hooks.index("should_start_new_flyer_over_active(text, has_media=bool(media_path))")
+    assert hooks.index("brand_result = _try_flyer_brand_asset_intercept(") < hooks.index("should_start_new_flyer_over_active(text, has_media=bool(media_path))")
     assert "def _try_flyer_reference_scope_choice_intercept" in hooks
     assert "def _try_flyer_reference_scope_authorization_intercept" in hooks
     assert "save_flyer_reference_scope_pending" in hooks
@@ -416,7 +416,7 @@ def test_onboarding_is_whatsapp_native_and_plan_config_driven():
     assert "_try_flyer_brand_asset_intercept" in hooks
     assert "_try_flyer_onboarding_intercept" in hooks
     assert "_try_flyer_existing_onboarding_intercept" in hooks
-    assert hooks.index("_try_flyer_brand_asset_intercept(text, chat_id, event, media_path)") < hooks.index("_try_flyer_existing_onboarding_intercept(text, chat_id, event)")
+    assert hooks.index("brand_result = _try_flyer_brand_asset_intercept(") < hooks.index("_try_flyer_existing_onboarding_intercept(text, chat_id, event)")
     assert hooks.index("_try_flyer_existing_onboarding_intercept(text, chat_id, event)") < hooks.index("should_start_new_flyer_over_active(text, has_media=bool(media_path))")
     existing_onboarding_call = hooks.index("_try_flyer_existing_onboarding_intercept(text, chat_id, event)")
     general_active_project_call = hooks.index(
