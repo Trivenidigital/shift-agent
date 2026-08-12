@@ -366,19 +366,15 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
         # the bridge delivers — body head + quote/reply-shaped event attrs —
         # BEFORE any routing. Best-effort; never blocks the flow.
         actions.audit_raw_body(event, chat_id, message_id, text)
-        # TURN-SCOPED SNAPSHOT — resolve owner-receipt candidacy exactly ONCE.
-        #
-        # `_is_owner_receipt_candidate` is side-effect-free but NOT deterministic
-        # across calls: `has_owner_capability` shells out to identify-sender with
-        # a 10s timeout, so a transient failure between two reads would let the
-        # brand-asset arm yield on the first answer while the cession refuses on
-        # the second — and execution would fall through to the active-project
-        # Flyer intercept, recreating the very misclassification this fixes.
-        # One read, one answer, carried to both consumers.
-        #
-        # Guarded on media_path so text-only turns never pay for the subprocess.
-        owner_receipt_candidate = bool(media_path) and _is_owner_receipt_candidate(
-            text, chat_id, media_path=media_path)
+        # TURN-SCOPED SNAPSHOT of owner-receipt candidacy. Declared here so it is
+        # in scope for both consumers, but deliberately NOT resolved here: the
+        # lookup is an identify-sender subprocess, and resolving it at dispatch
+        # entry would put that latency and failure surface on EVERY media inbound
+        # — including turns a higher-priority intercept returns from long before
+        # receipt-vs-brand arbitration. It is resolved lazily at the first
+        # brand-asset decision instead, which is the earliest point the answer
+        # can actually matter.
+        owner_receipt_candidate = False
         flyer_generation_enabled = actions.is_flyer_enabled()
         flyer_workflow_enabled = flyer_generation_enabled or actions.is_flyer_workflow_enabled()
         # P1-1 send-now-compound fix: ONE dispatch-scoped single-flight memo shared
@@ -575,6 +571,12 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             if scope_auth_result is not None:
                 return scope_auth_result
             if media_path:
+                # Resolve ONCE, here — the first point the answer is needed. The
+                # receipt cession below consumes this same boolean and must not
+                # re-resolve it: a second identity read could contradict the
+                # first and drop the turn into active-project Flyer routing.
+                owner_receipt_candidate = _is_owner_receipt_candidate(
+                    text, chat_id, media_path=media_path)
                 brand_result = _try_flyer_brand_asset_intercept(
                     text, chat_id, event, media_path,
                     owner_receipt_candidate=owner_receipt_candidate)
