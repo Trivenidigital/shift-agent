@@ -137,6 +137,28 @@ def test_owner_only_principal_unchanged(env):
             f"owner membership must never synthesize an employee_id ({ident})")
 
 
+def test_owner_by_phone_still_reports_owner_lid(env):
+    """PRE-#692 output parity: owner BY PHONE must still carry `owner.lid`.
+
+    The original phone branch emitted
+    `_emit_owner(cfg.owner, phone=canonical, lid=cfg.owner.lid)`, so resolving
+    the primary owner by phone reported the configured LID. Rebuilding the emit
+    around widened identifiers silently dropped it to null, because an
+    owner-only principal has no roster row to widen from.
+
+    It is not cosmetic: `audit_dispatcher_routed` reads `sender_lid` directly
+    from this field, so a null would degrade routing audit rows. The earlier
+    regression test asserted role/roles/employee_id and never looked at `lid`,
+    which is why it passed.
+    """
+    by_phone = resolve(env, OWNER_PHONE)
+    by_lid = resolve(env, OWNER_LID)
+    assert by_phone["lid"] == OWNER_LID, (
+        f"owner-by-phone must report owner.lid, got {by_phone['lid']!r}")
+    assert by_lid["lid"] == OWNER_LID
+    assert by_phone["phone_normalized"] == by_lid["phone_normalized"] == OWNER_PHONE
+
+
 def test_employee_only_principal_unchanged(env):
     """Plain employee: scalar `employee` by BOTH identifiers, no owner membership."""
     for ident in (EMP_PHONE, EMP_LID):

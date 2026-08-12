@@ -163,13 +163,21 @@ def _resolve_principal(cfg, roster, *, phone=None, lid=None):
 
     owner_match = _match_owner_identity(cfg.owner, phone=eff_phone, lid=eff_lid)
 
-    # Second pass: an owner match may supply the phone the roster lookup lacked.
-    if owner_match is not None and eff_phone is None:
-        eff_phone = getattr(owner_match, "phone", None)
-        if emp is None and eff_phone is not None:
-            emp = _match_employee(roster, phone=eff_phone)
-            if emp is not None and eff_lid is None:
-                eff_lid = emp.lid
+    # Second pass: an owner match may supply identifiers the roster lookup
+    # lacked. Widening the LID here is what preserves the PRE-#692 contract
+    # `_emit_owner(cfg.owner, phone=canonical, lid=cfg.owner.lid)` — resolving
+    # the primary owner BY PHONE must still report `owner.lid`, not null.
+    # Consumers read it: `audit_dispatcher_routed` takes `sender_lid` straight
+    # from this field.
+    if owner_match is not None:
+        if eff_phone is None:
+            eff_phone = getattr(owner_match, "phone", None)
+            if emp is None and eff_phone is not None:
+                emp = _match_employee(roster, phone=eff_phone)
+                if emp is not None and eff_lid is None:
+                    eff_lid = emp.lid
+        if eff_lid is None:
+            eff_lid = getattr(owner_match, "lid", None)
 
     return emp, owner_match, eff_phone, eff_lid
 
