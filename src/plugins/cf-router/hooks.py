@@ -366,6 +366,19 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
         # the bridge delivers — body head + quote/reply-shaped event attrs —
         # BEFORE any routing. Best-effort; never blocks the flow.
         actions.audit_raw_body(event, chat_id, message_id, text)
+        # TURN-SCOPED SNAPSHOT — resolve owner-receipt candidacy exactly ONCE.
+        #
+        # `_is_owner_receipt_candidate` is side-effect-free but NOT deterministic
+        # across calls: `has_owner_capability` shells out to identify-sender with
+        # a 10s timeout, so a transient failure between two reads would let the
+        # brand-asset arm yield on the first answer while the cession refuses on
+        # the second — and execution would fall through to the active-project
+        # Flyer intercept, recreating the very misclassification this fixes.
+        # One read, one answer, carried to both consumers.
+        #
+        # Guarded on media_path so text-only turns never pay for the subprocess.
+        owner_receipt_candidate = bool(media_path) and _is_owner_receipt_candidate(
+            text, chat_id, media_path=media_path)
         flyer_generation_enabled = actions.is_flyer_enabled()
         flyer_workflow_enabled = flyer_generation_enabled or actions.is_flyer_workflow_enabled()
         # P1-1 send-now-compound fix: ONE dispatch-scoped single-flight memo shared
@@ -562,7 +575,9 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             if scope_auth_result is not None:
                 return scope_auth_result
             if media_path:
-                brand_result = _try_flyer_brand_asset_intercept(text, chat_id, event, media_path)
+                brand_result = _try_flyer_brand_asset_intercept(
+                    text, chat_id, event, media_path,
+                    owner_receipt_candidate=owner_receipt_candidate)
                 if brand_result is not None:
                     return brand_result
             onboarding_reply_result = _try_flyer_existing_onboarding_intercept(text, chat_id, event)
@@ -630,6 +645,7 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 # unsupported in this wave rather than being guessed at.
                 if _receipt_caption_cedes_to_dispatcher(
                     text, chat_id, media_path=media_path, role=guest_role,
+                    owner_receipt_candidate=owner_receipt_candidate,
                 ):
                     return _run_owner_receipt_ingestion(
                         chat_id, event, text=text, media_path=media_path,
@@ -4235,8 +4251,15 @@ def _try_flyer_existing_onboarding_intercept(text: str, chat_id: str, event: Any
     return _try_flyer_onboarding_intercept(text, chat_id, event)
 
 
-def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_path: str) -> Optional[dict]:
-    """Capture logo/template uploads during onboarding or flyer requests."""
+def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_path: str,
+                                     *, owner_receipt_candidate: bool = False) -> Optional[dict]:
+    """Capture logo/template uploads during onboarding or flyer requests.
+
+    `owner_receipt_candidate` is the TURN-SCOPED snapshot resolved once in
+    dispatch. This arm must not re-resolve it: a second identity read could
+    disagree with the first and let a brand asset be written for a message the
+    turn already classified as an owner receipt.
+    """
     # Yield the EXACT owner-receipt candidate the later receipt cession claims.
     # This arm is terminal and runs before that cession, so without this a
     # genuine owner receipt is stored as a brand asset and the cession is never
@@ -4253,7 +4276,7 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
     #
     # No audit row here: `receipt_caption_ceded_to_dispatcher` belongs to the
     # receipt arm when it actually claims the turn.
-    if _is_owner_receipt_candidate(text, chat_id, media_path=media_path):
+    if owner_receipt_candidate:
         return None
     message_id = _extract_message_id(event, chat_id, text)
     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
@@ -4806,13 +4829,21 @@ def _owner_menu_ingestion_impl(
 def _is_owner_receipt_candidate(
     text: str, chat_id: str, *, media_path: Optional[str],
 ) -> bool:
-    """PURE predicate: is this inbound the exact owner-expense-receipt shape?
+    """Is this inbound the exact owner-expense-receipt shape?
 
-    No audit row, no state change, no send — it answers a question and nothing
-    else, because it is evaluated TWICE per turn: once by the terminal
-    brand-asset arm (to yield) and once by the receipt cession (to claim).
-    Emitting anything here would double-count or, worse, log a cession that
-    never happened.
+    Side-effect-free — no audit row, no state change, no send — but NOT
+    deterministic: `has_owner_capability` shells out to identify-sender with a
+    timeout, so two calls in one turn can disagree.
+
+    Therefore call this EXACTLY ONCE per inbound, in `_pre_gateway_dispatch_impl`,
+    and pass the resulting boolean to both consumers. Re-resolving it at the
+    receipt cession would let a transient identity failure contradict the answer
+    the brand-asset arm already acted on, and the turn would fall through into
+    the active-project Flyer intercept — the same misclassification class this
+    predicate exists to prevent.
+
+    Emitting an audit row here would also be wrong: it would log a cession that
+    may never happen.
 
     Four conditions, deliberately ALL of them:
 
@@ -4846,6 +4877,7 @@ def _is_owner_receipt_candidate(
 
 def _receipt_caption_cedes_to_dispatcher(
     text: str, chat_id: str, *, media_path: Optional[str], role: str,
+    owner_receipt_candidate: bool,
 ) -> bool:
     """True when cf-router must claim an inbound as an owner expense receipt.
 
@@ -4874,7 +4906,8 @@ def _receipt_caption_cedes_to_dispatcher(
     never satisfies this gate, so employee-only, customer and guest senders
     cannot enter a money record.
     """
-    if not _is_owner_receipt_candidate(text, chat_id, media_path=media_path):
+    # Consumes the turn-scoped snapshot — deliberately does NOT re-resolve.
+    if not owner_receipt_candidate:
         return False
     try:
         actions.audit_intercepted(

@@ -143,8 +143,11 @@ def _gate(hooks_mod, monkeypatch, *, text, media, role, owner_capability=None):
                         lambda **kw: None, raising=False)
     monkeypatch.setattr(hooks_mod.actions, "has_owner_capability",
                         lambda chat_id: owner_capability, raising=False)
+    candidate = hooks_mod._is_owner_receipt_candidate(
+        text, "chat@lid", media_path=media)
     return hooks_mod._receipt_caption_cedes_to_dispatcher(
-        text, "chat@lid", media_path=media, role=role)
+        text, "chat@lid", media_path=media, role=role,
+        owner_receipt_candidate=candidate)
 
 
 def test_gate_claims_owner_with_media_and_receipt_caption(plugin, monkeypatch):
@@ -204,10 +207,13 @@ def test_gate_consults_membership_exactly_once(plugin, monkeypatch):
                         lambda **kw: None, raising=False)
     monkeypatch.setattr(hooks_mod.actions, "has_owner_capability",
                         lambda chat_id: calls.append(chat_id) or True, raising=False)
+    candidate = hooks_mod._is_owner_receipt_candidate(
+        "Expense receipt", "chat@lid", media_path="/tmp/img_1.jpg")
     assert hooks_mod._receipt_caption_cedes_to_dispatcher(
         "Expense receipt", "chat@lid", media_path="/tmp/img_1.jpg",
-        role="owner") is True
-    assert calls == ["chat@lid"]
+        role="owner", owner_receipt_candidate=candidate) is True
+    assert calls == ["chat@lid"], (
+        "membership must be resolved exactly once per turn, by the predicate")
 
 
 def test_gate_rejects_owner_image_only(plugin, monkeypatch):
@@ -590,3 +596,36 @@ def test_employee_without_owner_membership_gets_no_expense(plugin, monkeypatch, 
     reasons = [a.get("reason") for a in rec["audits"]]
     assert rec["extract"] == [], "employee-only sender reached the extractor"
     assert "receipt_caption_ceded_to_dispatcher" not in reasons, reasons
+
+
+def test_turn_snapshot_survives_a_transient_identity_failure(plugin, monkeypatch, tmp_path):
+    """SPLIT-BRAIN REGRESSION — one identity answer per inbound turn.
+
+    `has_owner_capability` shells out to identify-sender with a timeout, so it is
+    side-effect-free but not deterministic. If the candidate were resolved twice,
+    a transient failure between the two reads would let the brand-asset arm yield
+    on `True` while the cession refused on `False` — and the turn would fall
+    through into the active-project Flyer intercept, recreating B0009/B0010.
+
+    Here the second call would return False. The corrected implementation must
+    never make it: exactly one read, and the turn honours that answer throughout.
+    """
+    hooks_mod, actions_mod = plugin
+    rec, event = _dispatch_env(hooks_mod, actions_mod, monkeypatch, tmp_path)
+
+    calls = {"n": 0}
+
+    def _flaky(chat_id):
+        calls["n"] += 1
+        return calls["n"] == 1          # True first, False (or worse) after
+    monkeypatch.setattr(actions_mod, "has_owner_capability", _flaky)
+
+    hooks_mod._pre_gateway_dispatch_impl(event)
+
+    assert calls["n"] == 1, (
+        f"owner membership resolved {calls['n']}x in one turn — a second read can "
+        f"contradict the first and drop the turn into Flyer routing")
+    reasons = [a.get("reason") for a in rec["audits"]]
+    assert rec["brand_asset"] == [], "brand asset written after a receipt candidate"
+    assert "receipt_caption_ceded_to_dispatcher" in reasons, reasons
+    assert len(rec["extract"]) == 1, rec["extract"]
