@@ -8566,3 +8566,139 @@ def test_save_flyer_reference_scope_pending_still_replaces_same_chat_id(tmp_path
 
     state = actions._read_reference_scope_state()
     assert [row["media_path"] for row in state.get("pending", [])] == ["/tmp/ref-new.jpg"]
+# ─── active-project selection orders by parsed time, not raw string (P2-18) ──
+#
+# `find_active_flyer_project_by_sender` ranked candidates with max() over the
+# RAW updated_at string. Two defects followed: sub-second ISO variants sort
+# lexicographically rather than chronologically, and a row carrying neither
+# timestamp sorted as "" — losing to every dated row forever, so it could never
+# be selected even when it was the only candidate.
+
+def _projects_store(tmp_path, actions, rows: str) -> None:
+    customer_path = tmp_path / "customers.json"
+    projects_path = tmp_path / "projects.json"
+    actions.FLYER_CUSTOMERS_PATH = customer_path
+    actions.FLYER_PROJECTS_PATH = projects_path
+    customer_path.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "next_customer_sequence": 2,
+            "next_brand_asset_sequence": 1,
+            "customers": [],
+            "onboarding_sessions": [],
+        }),
+        encoding="utf-8",
+    )
+    projects_path.write_text(
+        '{"schema_version": 1, "next_sequence": 61, "projects": [' + rows + "]}",
+        encoding="utf-8",
+    )
+
+
+def test_active_project_selection_survives_subsecond_format_variants(tmp_path):
+    """Same second, one row carrying microseconds. The strings share the prefix
+    '2026-05-30T20:40:00', then differ at '.' (0x2E) vs 'Z' (0x5A), so the
+    string comparison ranks the microsecond row LOWER while it is in fact 0.9s
+    NEWER. F0070 is the genuinely newer project."""
+    actions = _load_actions()
+    _projects_store(
+        tmp_path, actions,
+        '{"project_id": "F0070", "customer_phone": "+19045550104",'
+        ' "status": "awaiting_final_approval",'
+        ' "updated_at": "2026-05-30T20:40:00.900000Z",'
+        ' "created_at": "2026-05-30T20:00:00Z"},'
+        '{"project_id": "F0071", "customer_phone": "+19045550104",'
+        ' "status": "awaiting_final_approval",'
+        ' "updated_at": "2026-05-30T20:40:00Z",'
+        ' "created_at": "2026-05-30T20:00:00Z"}'
+    )
+
+    active = actions.find_active_flyer_project_by_sender(
+        "+19045550104", "19045550104@s.whatsapp.net")
+
+    assert active is not None
+    assert active["project_id"] == "F0070"
+
+
+def test_active_project_selection_survives_utc_offset_variants(tmp_path):
+    """A local-offset timestamp is compared against a 'Z' one character by
+    character, so '16:40-05:00' (21:40 UTC) ranks below '20:50Z' despite being
+    50 minutes later. Same class of defect, larger error."""
+    actions = _load_actions()
+    _projects_store(
+        tmp_path, actions,
+        '{"project_id": "F0080", "customer_phone": "+19045550104",'
+        ' "status": "awaiting_final_approval",'
+        ' "updated_at": "2026-05-30T16:40:00-05:00",'
+        ' "created_at": "2026-05-30T15:00:00Z"},'
+        '{"project_id": "F0081", "customer_phone": "+19045550104",'
+        ' "status": "awaiting_final_approval",'
+        ' "updated_at": "2026-05-30T20:50:00Z",'
+        ' "created_at": "2026-05-30T15:00:00Z"}'
+    )
+
+    active = actions.find_active_flyer_project_by_sender(
+        "+19045550104", "19045550104@s.whatsapp.net")
+
+    assert active is not None
+    assert active["project_id"] == "F0080"
+
+
+def test_project_without_any_timestamp_is_still_selectable_when_alone(tmp_path):
+    """A row with neither updated_at nor created_at sorted as "" and became
+    permanently invisible. It must still be reachable as the sole candidate."""
+    actions = _load_actions()
+    _projects_store(
+        tmp_path, actions,
+        '{"project_id": "F0072", "customer_phone": "+19045550104",'
+        ' "status": "awaiting_final_approval"}'
+    )
+
+    active = actions.find_active_flyer_project_by_sender(
+        "+19045550104", "19045550104@s.whatsapp.net")
+
+    assert active is not None
+    assert active["project_id"] == "F0072"
+
+
+def test_project_without_timestamp_loses_to_a_dated_project(tmp_path):
+    """Selectable is not the same as preferred: a timestampless row must lose
+    every tie it is in, so it cannot displace a genuinely active project."""
+    actions = _load_actions()
+    _projects_store(
+        tmp_path, actions,
+        '{"project_id": "F0073", "customer_phone": "+19045550104",'
+        ' "status": "awaiting_final_approval"},'
+        '{"project_id": "F0074", "customer_phone": "+19045550104",'
+        ' "status": "awaiting_final_approval",'
+        ' "updated_at": "2026-05-30T20:41:00Z",'
+        ' "created_at": "2026-05-30T20:00:00Z"}'
+    )
+
+    active = actions.find_active_flyer_project_by_sender(
+        "+19045550104", "19045550104@s.whatsapp.net")
+
+    assert active is not None
+    assert active["project_id"] == "F0074"
+
+
+def test_active_project_selection_normal_ordering_unchanged(tmp_path):
+    """Plain same-format timestamps keep the pre-existing newest-wins result,
+    including the created_at fallback when updated_at is absent."""
+    actions = _load_actions()
+    _projects_store(
+        tmp_path, actions,
+        '{"project_id": "F0075", "customer_phone": "+19045550104",'
+        ' "status": "awaiting_final_approval",'
+        ' "updated_at": "2026-05-30T20:18:00Z",'
+        ' "created_at": "2026-05-30T20:15:00Z"},'
+        '{"project_id": "F0076", "customer_phone": "+19045550104",'
+        ' "status": "awaiting_final_approval",'
+        ' "created_at": "2026-05-30T21:00:00Z"}'
+    )
+
+    active = actions.find_active_flyer_project_by_sender(
+        "+19045550104", "19045550104@s.whatsapp.net")
+
+    assert active is not None
+    assert active["project_id"] == "F0076"
