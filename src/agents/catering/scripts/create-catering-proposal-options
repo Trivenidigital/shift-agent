@@ -303,17 +303,47 @@ _VEG_TEXT_RE = re.compile(
 # Non-vegetarian signal: "non-veg" plus FLESH words. Deliberately no dish names —
 # biryani, tikka, kebab and curry all have vegetarian versions, so matching them
 # would recreate the same false-positive problem on the other side.
-_NON_VEG_TEXT_RE = re.compile(
-    r"non[\s-]?veg"
-    r"|\bchicken\b|\bmutton\b|\bgoat\b|\blamb\b|\bbeef\b|\bpork\b|\bturkey\b|\bduck\b"
-    r"|\bfish\b|\bprawns?\b|\bshrimps?\b|\bcrabs?\b|\blobsters?\b"
-    r"|\bkeema\b|\beggs?\b|\bmeat\b"
+_FLESH_WORDS = (
+    r"chicken|mutton|goat|lamb|beef|pork|turkey|duck"
+    r"|fish|prawns?|shrimps?|crabs?|lobsters?"
+    r"|keema|eggs?|meat"
 )
+_FLESH_RE = re.compile(rf"\b(?:{_FLESH_WORDS})\b")
+_NON_VEG_TEXT_RE = re.compile(rf"non[\s-]?veg|\b(?:{_FLESH_WORDS})\b")
 # Phrases that STATE a vegetarian requirement using a meat word. Stripped before the
 # meat scan — the mirror of stripping "non-veg" before the veg scan. Without this,
 # "no meat" would fire the meat detector and turn an explicitly vegetarian event
 # into a mixed one.
-_VEG_NEGATION_RE = re.compile(r"\bno\s+meat\b|\bmeat[-\s]?free\b|\bmeatless\b")
+#
+# v3: this used to be three literals (no meat / meat-free / meatless) while the meat
+# detector matched EVERY flesh word unconditionally. So a negated flesh word read as
+# a meat signal: "all vegetarian, no chicken" came out `mixed`, and under `mixed` the
+# section guard REFUSES all-veg options — i.e. it REQUIRED meat at an explicitly
+# vegetarian event. That is the original P0 in its sharpest form.
+#
+# The negator now generalises over the SAME `_FLESH_WORDS` alternation the detector
+# uses, so the two cannot drift apart. `no fish or meat` and `no dairy or eggs` are
+# both handled: the list may start with a non-flesh word, and only the flesh words
+# inside the negated run are removed.
+#
+# The list is joined by `or` ONLY, deliberately not by commas. "no rush, chicken is
+# fine" would otherwise read the comma as list continuation and strip a chicken the
+# customer actually wants.
+_NEGATED_FLESH_RE = re.compile(
+    r"\b(?:absolutely\s+no|no|without|free\s+of)\s+"      # longest negator first
+    r"(?:any\s+)?"
+    r"(?:\w+(?:\s+or\s+(?:no\s+)?(?:any\s+)?\w+)*)"
+)
+_VEG_NEGATION_RE = re.compile(r"\bmeat[-\s]?free\b|\bmeatless\b")
+
+
+def _negated_flesh_spans(blob: str) -> list[str]:
+    """The negated runs that actually name a flesh word, e.g. "no fish or meat".
+
+    A run that names none ("no rush", "no dairy") is not a dietary statement and is
+    left completely alone."""
+    return [m.group(0) for m in _NEGATED_FLESH_RE.finditer(blob)
+            if _FLESH_RE.search(m.group(0))]
 
 
 def _lead_diet_profile(lead) -> str:
@@ -340,8 +370,17 @@ def _lead_diet_profile(lead) -> str:
     # neither detector can be tricked by the other's vocabulary: "non-veg" is not a
     # veg mention, and "no meat" is not a meat mention.
     veg_scan = re.sub(r"non[\s-]?veg\w*", " ", blob)
-    non_veg_scan = _VEG_NEGATION_RE.sub(" ", blob)
-    text_veg = bool(_VEG_TEXT_RE.search(veg_scan))
+    # A negated flesh phrase is BOTH: a vegetarian requirement (so "no eggs please"
+    # is veg_only with no vegetarian word present anywhere) and a non-signal for the
+    # meat scan. Only the flesh words INSIDE the negated run are removed, so
+    # "no chicken but lamb is fine" keeps its lamb and stays mixed — the negation
+    # must strip exactly what it negates and nothing further.
+    negated = _negated_flesh_spans(blob)
+    non_veg_scan = blob
+    for span in negated:
+        non_veg_scan = non_veg_scan.replace(span, _FLESH_RE.sub(" ", span), 1)
+    non_veg_scan = _VEG_NEGATION_RE.sub(" ", non_veg_scan)
+    text_veg = bool(_VEG_TEXT_RE.search(veg_scan)) or bool(negated)
     text_non_veg = bool(_NON_VEG_TEXT_RE.search(non_veg_scan))
     if text_veg and text_non_veg:
         return "mixed"

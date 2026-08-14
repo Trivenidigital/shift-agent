@@ -855,6 +855,26 @@ def _fake_lead(dietary=None, raw_inquiry: str = "", notes: str = ""):
         ([], "veggie platter for the table", "unknown"),
         # "eggless" is not an egg.
         ([], "eggless cake for the table", "unknown"),
+        # ── v3: a NEGATED flesh word is a vegetarian requirement ────────────
+        # The meat detector matched flesh words unconditionally while the
+        # negation strip knew only three literals (no meat / meat-free /
+        # meatless). So "no chicken" read as a MEAT signal, the lead came out
+        # `mixed`, and under mixed the guard refuses all-veg options — i.e. it
+        # REQUIRED meat at a stated-vegetarian event. That is the original P0
+        # in its sharpest form: every one of these was served chicken + goat.
+        ([], "all vegetarian, no chicken", "veg_only"),
+        ([], "pure veg, no eggs please", "veg_only"),
+        ([], "strictly veg, without any meat", "veg_only"),
+        ([], "vegetarian only, absolutely no mutton", "veg_only"),
+        ([], "temple event, no fish or meat", "veg_only"),
+        ([], "vegan, no dairy or eggs", "veg_only"),
+        # No vegetarian word at all — the negation alone carries the meaning.
+        ([], "no eggs please", "veg_only"),
+        # COUNTER-CASE: the negation must strip ONLY what it negates. "chicken"
+        # is negated, "lamb" is not, so the event genuinely serves both.
+        # Without this, a broader strip would read the whole clause as
+        # vegetarian and drop the lamb the customer asked for.
+        ([], "no chicken but lamb is fine", "mixed"),
     ],
 )
 def test_lead_diet_profile_classification(env_dir, dietary, raw_inquiry, expected):
