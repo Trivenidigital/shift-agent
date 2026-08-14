@@ -55,6 +55,8 @@ EXPECTED_OTHER_ENABLES = sorted([
     "systemctl enable --now shift-agent-fsck.timer 2>/dev/null || true",
     "systemctl enable --now send-daily-brief.timer 2>/dev/null || true",
     "systemctl enable --now catering-pattern-report.timer 2>/dev/null || true",
+    "systemctl enable --now catering-lead-ttl-sweep.timer 2>/dev/null || true",
+    "systemctl enable --now catering-proposal-expiry-sweep.timer 2>/dev/null || true",
     "systemctl enable --now catering-owner-action-watchdog.service 2>/dev/null || true",
     "systemctl enable --now eod-reconcile.timer 2>/dev/null || true",
     "systemctl enable --now send-routing-accuracy-summary.timer 2>/dev/null || true",
