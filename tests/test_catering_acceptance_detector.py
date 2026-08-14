@@ -9,6 +9,8 @@ sys.path.
 """
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from catering_extraction import detect_quote_acceptance
@@ -226,11 +228,26 @@ def test_none_and_non_string_inputs_are_safe():
     ("we accept as soon as you confirm the date", None),
     ("please go ahead once you have the deposit", None),
     ("we accept while we wait for approval", None),
-    ("we accept until the manager says otherwise", None),
     # the marker attaches to the headcount NOUN and the number arrives later
     ("we want to proceed with fewer guests, say 90", None),
     ("confirmed, proceed but reduce it to 150 people", None),
     ("go ahead, but we may need to change the date later", None),
+    # a QUESTION cannot be a commitment, but it can withdraw one
+    ("we accept. can you cancel the earlier order?", None),
+    ("we accept. can we talk price first?", None),
+    ("We accept! But first, can you do it cheaper?", None),
+    ("we accept the quote. can you knock off a discount?", None),
+    # haggling with no digit and no negotiating verb
+    ("we accept, any flexibility on the price?", None),
+    ("please go ahead, can you come down a bit", None),
+    # the decision is still outstanding
+    ("we accept, hold on - let me check with my wife first", None),
+    ("we accept, need to confirm with my partner", None),
+    ("we accept, lets revisit the per-head price", None),
+    ("we need to renegotiate the cost, but go ahead for now", None),
+    # adding covers locks a quote priced for the OLD headcount
+    ("yes we accept, and please add 20 more guests", None),
+    ("we accept the quote, plus 15 extra plates", None),
     # a yes that moves a material term is an amendment, not an acceptance
     ("we want to proceed with a smaller headcount of 80", None),
     ("go ahead but for 120 people", None),
@@ -267,31 +284,31 @@ def test_commitment_verb_without_a_real_commitment(text, expected):
     "let's book it for the 17th",
     # "tasting menu" is a menu, not an appointment
     "please proceed with the tasting menu",
+    # scene-setting, not a condition the acceptance hangs on
+    "we accept, the venue is ours until 10pm",
+    "we accept, waiting on your invoice",
 ])
 def test_genuine_acceptance_survives_the_guards(text):
     assert _outcome(text) == "accepted"
 
 
-# ── the measured cost of the bare-`if` widening ─────────────────────────────
+# ── `if` does two opposite jobs ─────────────────────────────────────────────
 @pytest.mark.parametrize("text", [
+    "we accept, let us know if you need a deposit",
     "we accept the quote, if you need anything let us know",
     "please go ahead, if that works for you",
+    "we accept - call us if there's anything else",
 ])
-def test_bare_if_over_blocks_a_courtesy_clause(text):
-    """These ARE acceptances and the detector deliberately drops them.
+def test_a_courtesy_if_clause_still_books(text):
+    """An offer of help is not a condition on the acceptance.
 
-    `_CONDITIONAL_RE` matches bare `if` with any subject, which is what stops
-    "we accept if the total stays under $2000" from booking a counter-offer.
-    The cost is a trailing courtesy clause that happens to use "if". Ruled the
-    safe direction at review: this loses a booking to the ordinary follow-up
-    path, where a human still sees the message, whereas the alternative books
-    an event on a condition nobody agreed to.
-
-    Pinned so the trade is visible rather than discovered. If it is ever
-    re-ruled, narrowing `if` back is a one-line change and this cell is the
-    one that must flip.
+    The counterpart cells live in the disqualifier table above: "we accept if
+    the total stays under $2000" and "we accept if you include dessert" are
+    counter-offers and must never book. The discriminator is the clause the
+    `if` sits in, so both directions have to be pinned or the next narrowing
+    of one silently breaks the other.
     """
-    assert _outcome(text) is None
+    assert _outcome(text) == "accepted"
 
 
 # ── shape contract ──────────────────────────────────────────────────────────
@@ -304,6 +321,26 @@ def test_result_shape():
 def test_matched_phrase_is_bounded():
     result = detect_quote_acceptance("we accept " + "x" * 500)
     assert len(result["matched_phrase"]) <= 120
+
+
+def test_a_long_adversarial_inbound_stays_linear():
+    """The detector runs synchronously inside the router's pre-dispatch hook,
+    so a message it is slow on stalls the whole router.
+
+    This input is the worst case for the change-marker adjacency scan: many
+    markers, many material terms, and NO pair ever close enough to short-
+    circuit. The first version compared every marker against every term and
+    re-counted the tokens between each pair, which took 31s on this 18KB
+    string — and WhatsApp permits 65K characters. The bound is deliberately
+    loose (the linear version runs in ~5ms); it is here to fail loudly if a
+    future edit reintroduces the quadratic, not to police milliseconds.
+    """
+    unit = "instead alpha bravo charlie delta echo 250 guests foxtrot golf hotel india juliet "
+    text = "we accept the quote " + (unit * 230)[:18 * 1024]
+
+    start = time.perf_counter()
+    detect_quote_acceptance(text)
+    assert time.perf_counter() - start < 1.0
 
 
 def test_detector_is_deterministic():

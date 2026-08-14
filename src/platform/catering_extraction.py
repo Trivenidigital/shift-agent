@@ -27,6 +27,7 @@ Deployed FLAT to /opt/shift-agent/ so scripts + the cf-router plugin can import 
 """
 from __future__ import annotations
 
+import bisect
 import re
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -591,7 +592,10 @@ _DISQUALIFYING_OBJECT_RE = re.compile(
     r"\b(?:book|booking|schedul(?:e|ing)|proceed(?:ing)?|go(?:ing)?\s+ahead|"
     r"confirm(?:ing)?|accept(?:ing)?)\b"
     r"(?:\s+\S+){0,5}?\s+"
-    r"(?:call|meeting|meet|tasting(?!\s+menu)|visit|demo|demonstration|"
+    # "call us if anything changes" offers a phone number; "book a call" books
+    # a meeting. Only the second is an object.
+    r"(?:call(?!s?\s+(?:us|me|him|her|them))|meeting|meet|tasting(?!\s+menu)|"
+    r"visit|demo|demonstration|"
     r"discussion|discussing|chat|zoom|appointment|consultation|"
     r"walk[\s-]?through|question)s?\b",
     re.IGNORECASE,
@@ -601,25 +605,92 @@ _DISQUALIFYING_OBJECT_RE = re.compile(
 # price" picks an option and then reopens the price — the commitment is to a
 # conversation about what it costs, and no digit has to appear for that.
 _STILL_NEGOTIATING_RE = re.compile(
-    r"\b(?:talk|talking|discuss|discussing|chat|negotiate|negotiating|"
-    r"go\s+over|going\s+over|work\s+out|nail\s+down)\s+"
-    r"(?:about\s+|over\s+|through\s+)?(?:the\s+|our\s+|a\s+|some\s+|your\s+)?"
-    r"(?:price|pricing|cost|costs|budget|numbers|figures|rates?)\b",
+    r"\b(?:talk|talking|discuss|discussing|chat|(?:re)?negotiat(?:e|ing)|"
+    r"go\s+over|going\s+over|work\s+out|nail\s+down|revisit(?:ing)?)\b"
+    r"(?:\s+\S+){0,3}?\s+"
+    r"(?:price|pricing|cost|costs|budget|numbers|figures|rates?|per[\s-]?head)\b",
+    re.IGNORECASE,
+)
+
+# Pushing back on the number without naming one. "We accept! But first, can
+# you do it cheaper?" is a haggle, and it carries no digit and no negotiating
+# VERB, so neither _STILL_NEGOTIATING_RE nor the material-change guard sees it.
+_PRICE_PUSHBACK_RE = re.compile(
+    r"\b(?:cheaper|discount(?:ed)?|better\s+(?:price|rate|deal)|"
+    r"lower\s+(?:the\s+)?(?:price|cost|rate)|come\s+down|"
+    r"bring\s+(?:it|the\s+price)\s+down|any\s+flexibility|"
+    r"match\s+(?:the|a|their)\s+price)\b",
+    re.IGNORECASE,
+)
+
+# Explicitly not final yet. "we accept, hold on — let me check with my wife
+# first" is a yes with the decision still outstanding.
+_NOT_FINAL_RE = re.compile(
+    r"\b(?:hold\s+(?:on|off)|let\s+(?:me|us)\s+(?:check|confirm|ask|speak|talk|"
+    r"run\s+it)|need\s+to\s+(?:check|confirm|ask|speak)|checking\s+with|"
+    r"not\s+final|tentative(?:ly)?)\b",
     re.IGNORECASE,
 )
 
 # "yes, but only if …" is a counter-offer. The condition is the customer's
-# actual message and only a human can price it. Bare `if` is included, and so
-# are the wait-for-something-else forms ("pending", "once we", "as soon as"):
-# over-blocking is the safe direction here, because a conditional read as a
-# plain yes books an event the customer has not agreed to.
+# actual message and only a human can price it.
+#
+# `until` and a bare "waiting on/for" are NOT here: ruled at review, they are
+# ordinary scene-setting in a real yes ("the venue is ours until 10pm",
+# "we accept, waiting on your invoice"). "while we wait" keeps its place —
+# that one suspends the acceptance rather than describing the surroundings.
 _CONDITIONAL_RE = re.compile(
-    r"\b(?:if|provided(?:\s+that)?|as\s+long\s+as|so\s+long\s+as|"
+    r"\b(?:provided(?:\s+that)?|as\s+long\s+as|so\s+long\s+as|"
     r"on\s+(?:the\s+)?condition|contingent\s+(?:up)?on|subject\s+to|"
     r"assuming(?:\s+that)?|pending|once\s+(?:we|you|i)|as\s+soon\s+as|"
-    r"until|while\s+we\s+wait|wait(?:ing)?\s+(?:on|for))\b",
+    r"while\s+we\s+wait)\b",
     re.IGNORECASE,
 )
+
+# Bare `if` is handled per-occurrence rather than as a flat pattern, because it
+# does two opposite jobs. "we accept if the total stays under $2000" is a
+# counter-offer and must never book; "we accept, let us know if you need a
+# deposit" is a plain yes with a courtesy clause attached and must book. The
+# discriminator is the CLAUSE the `if` sits in: an offer of help is courtesy,
+# anything else is a condition on the acceptance.
+_IF_RE = re.compile(r"\bif\b", re.IGNORECASE)
+_COURTESY_IF_RE = re.compile(
+    r"\b(?:let\s+(?:us|me)\s+know|tell\s+(?:us|me)|reach\s+out|get\s+in\s+touch|"
+    r"contact\s+(?:us|me)|call\s+(?:us|me)|text\s+(?:us|me)|email\s+(?:us|me)|"
+    r"if\s+(?:that|this)\s+works|if\s+you\s+need\s+anything|"
+    r"if\s+there(?:'?s|\s+is)\s+anything|if\s+you\s+have\s+any\s+questions?)\b",
+    re.IGNORECASE,
+)
+_CLAUSE_SPLIT_RE = re.compile(r"[,.;:!?]+|\s+[—–-]\s+")
+
+
+def _clause_spans(text: str) -> list:
+    """The message cut into clauses. Computed ONCE per message."""
+    spans, pos = [], 0
+    for m in _CLAUSE_SPLIT_RE.finditer(text):
+        if m.start() > pos:
+            spans.append((pos, m.start()))
+        pos = m.end()
+    if pos < len(text):
+        spans.append((pos, len(text)))
+    return spans
+
+
+def _has_binding_condition(text: str) -> bool:
+    """A condition the acceptance hangs on, as opposed to a courtesy clause."""
+    if _CONDITIONAL_RE.search(text):
+        return True
+    ifs = list(_IF_RE.finditer(text))
+    if not ifs:
+        return False
+    clauses = _clause_spans(text)
+    clause_starts = [s for s, _ in clauses]
+    for m in ifs:
+        i = bisect.bisect_right(clause_starts, m.start()) - 1
+        start, end = clauses[i] if i >= 0 else (0, len(text))
+        if not _COURTESY_IF_RE.search(text[start:end]):
+            return True
+    return False
 
 # "proceed with a SMALLER headcount of 80" is an amendment wearing a yes.
 # Deliberately narrow, because a demoted acceptance is SILENT — no audit row is
@@ -655,6 +726,19 @@ _HEADCOUNT_NOUN_RE = re.compile(
 _WORD_RE = re.compile(r"\w+")
 _MAX_CHANGE_MARKER_GAP_TOKENS = 3
 
+# "yes we accept, and please add 20 more guests" locks in a quote priced for
+# the OLD headcount. The added quantity is its own material change — the verb,
+# the number and the noun are adjacent by construction, so this needs no
+# marker-distance check. A restatement ("for the 250 guests as quoted") has no
+# add/plus verb and still books.
+_ADDED_QUANTITY_RE = re.compile(
+    r"\b(?:add|adding|plus|extra|additional|throw\s+in)\s+"
+    r"(?:another\s+|an?\s+)?\d{1,4}\s+(?:more\s+|extra\s+|additional\s+)?"
+    r"(?:guests?|people|persons?|pax|plates?|mains?|items?|covers?|heads?|"
+    r"portions?|servings?)\b",
+    re.IGNORECASE,
+)
+
 
 def _material_term_spans(statements: str) -> list:
     """Where the headcounts, amounts and dates are — the terms a quote is
@@ -668,32 +752,71 @@ def _material_term_spans(statements: str) -> list:
     return spans
 
 
-def _has_material_change(statements: str) -> bool:
-    """A change marker sitting NEXT TO a material term."""
-    marker_spans = [m.span() for m in _CHANGE_MARKER_RE.finditer(statements)]
+def _has_material_change(text: str) -> bool:
+    """A change marker sitting NEXT TO a material term.
+
+    LINEAR BY CONSTRUCTION, and it has to stay that way: this runs
+    synchronously inside the router's pre-dispatch hook, so a message the
+    detector is slow on stalls the whole router. The first version compared
+    every marker against every term and re-scanned the text between each pair
+    for its token count — O(markers x terms x span), which measured 31s on an
+    18KB inbound (WhatsApp permits 65K chars). Two changes make it linear:
+    the message is tokenized ONCE and adjacency becomes index arithmetic, and
+    each term consults only its nearest marker on either side — the gap grows
+    monotonically with distance, so no farther marker can be closer.
+    """
+    marker_spans = sorted(m.span() for m in _CHANGE_MARKER_RE.finditer(text))
     if not marker_spans:
         return False
-    for term in _material_term_spans(statements):
-        for marker in marker_spans:
-            lo, hi = (marker[1], term[0]) if marker[1] <= term[0] else (term[1], marker[0])
-            gap = len(_WORD_RE.findall(statements[lo:hi])) if hi > lo else 0
+    term_spans = sorted(_material_term_spans(text))
+    if not term_spans:
+        return False
+
+    token_starts = [m.start() for m in _WORD_RE.finditer(text)]
+    marker_starts = [s for s, _ in marker_spans]
+
+    for t_start, t_end in term_spans:
+        i = bisect.bisect_left(marker_starts, t_start)
+        for m_start, m_end in marker_spans[max(0, i - 1):i + 1]:
+            if m_end <= t_start:
+                lo, hi = m_end, t_start
+            elif t_end <= m_start:
+                lo, hi = t_end, m_start
+            else:
+                return True                      # overlapping — gap of zero
+            gap = (bisect.bisect_left(token_starts, hi)
+                   - bisect.bisect_left(token_starts, lo))
             if gap <= _MAX_CHANGE_MARKER_GAP_TOKENS:
                 return True
     return False
 
 
-def _acceptance_disqualified(statements: str) -> bool:
-    """True when a commitment verb is present but the sentence around it means
-    something other than "yes to this quote"."""
-    if _CANCEL_SIGNAL_RE.search(statements):
+def _acceptance_disqualified(text: str) -> bool:
+    """True when a commitment verb is present but the message around it means
+    something other than "yes to this quote".
+
+    Takes the FULL message, questions included — unlike the accept patterns,
+    which only ever read assertions. A question cannot BE a commitment, but it
+    can certainly withdraw one: "we accept. can you cancel the earlier order?"
+    and "we accept. can we talk price first?" both booked events while the
+    guards were reading the question-stripped text and never saw the clause
+    that took the yes back.
+    """
+    if _CANCEL_SIGNAL_RE.search(text):
         return True
-    if _DISQUALIFYING_OBJECT_RE.search(statements):
+    if _DISQUALIFYING_OBJECT_RE.search(text):
         return True
-    if _STILL_NEGOTIATING_RE.search(statements):
+    if _STILL_NEGOTIATING_RE.search(text):
         return True
-    if _CONDITIONAL_RE.search(statements):
+    if _PRICE_PUSHBACK_RE.search(text):
         return True
-    return _has_material_change(statements)
+    if _NOT_FINAL_RE.search(text):
+        return True
+    if _has_binding_condition(text):
+        return True
+    if _ADDED_QUANTITY_RE.search(text):
+        return True
+    return _has_material_change(text)
 
 
 _ACCEPT_PATTERNS = [
@@ -765,7 +888,7 @@ def detect_quote_acceptance(text: str) -> Optional[dict]:
             if m:
                 return {"outcome": "declined", "matched_phrase": m.group(0)[:120]}
         if (not _NEGATED_ACCEPT_RE.search(statements)
-                and not _acceptance_disqualified(statements)):
+                and not _acceptance_disqualified(normalized)):
             for pattern in _ACCEPT_PATTERNS:
                 m = pattern.search(statements)
                 if m:
