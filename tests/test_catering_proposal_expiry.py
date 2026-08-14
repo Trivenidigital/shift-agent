@@ -15,10 +15,12 @@ had since changed. Three layers here:
 """
 from __future__ import annotations
 
+import configparser
 import json
 import os
 import platform
 import py_compile
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -209,8 +211,98 @@ def test_sweep_owner_alert_is_plain_text_and_never_reaches_the_customer():
 
 
 def test_sweep_never_fails_its_timer():
+    """Watchdog discipline: every exit path returns 0 so a bad cycle cannot put
+    the timer unit into failed state. Asserted against the code, not against the
+    docstring that describes the code."""
     t = _SWEEP.read_text(encoding="utf-8")
-    assert "a watchdog must never fail its timer" in t
+    assert "except Exception" in t
+    assert "sys.exit(main())" in t
+    assert not re.search(r"^\s*return [1-9]", t, re.M)
+    assert not re.search(r"sys\.exit\([1-9]", t)
+
+
+# ── the timer that runs it (P1: the sweep was unschedulable in prod) ─────────
+#
+# The unit files did not exist, so shift-agent-deploy.sh installed the sweep
+# binary with nothing to run it. The old version of this section asserted a
+# sentence from the sweep's own docstring, which could not fail on a missing
+# unit. These assertions are anchored on the real filenames instead.
+
+_UNIT_DIR = _REPO / "src" / "agents" / "catering" / "systemd"
+_SERVICE = _UNIT_DIR / "catering-proposal-expiry-sweep.service"
+_TIMER = _UNIT_DIR / "catering-proposal-expiry-sweep.timer"
+_DEPLOY = _REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
+_SMOKE = _REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-smoke-test.sh"
+
+
+def _unit(path: Path) -> configparser.ConfigParser:
+    """systemd units are INI-ish: values contain '%' and directives may repeat,
+    so read them without interpolation and without case-folding keys."""
+    parser = configparser.ConfigParser(strict=False, interpolation=None)
+    parser.optionxform = str
+    parser.read_string(path.read_text(encoding="utf-8"))
+    return parser
+
+
+def test_sweep_systemd_units_exist():
+    assert _SERVICE.exists(), "sweep binary ships with no unit to run it"
+    assert _TIMER.exists(), "service with no timer is still unschedulable"
+
+
+def test_service_runs_the_sweep_binary_as_the_agent_user():
+    unit = _unit(_SERVICE)
+    assert unit["Service"]["ExecStart"].endswith("/usr/local/bin/catering-proposal-expiry-sweep")
+    assert unit["Service"]["Type"] == "oneshot"
+    assert unit["Service"]["User"] == "shift-agent"
+    assert unit["Service"]["Group"] == "shift-agent"
+    assert unit["Service"]["EnvironmentFile"] == "/opt/shift-agent/.env"
+    assert unit["Service"]["NoNewPrivileges"] == "true"
+    assert unit["Service"]["ProtectSystem"] == "strict"
+    assert unit["Service"]["ReadWritePaths"] == "/opt/shift-agent"
+
+
+def test_service_does_not_arm_the_sweep():
+    """The unit must not set the enable flag: scheduling the sweep and arming it
+    are separate operator decisions, and live SENT sets are money-adjacent."""
+    body = _SERVICE.read_text(encoding="utf-8")
+    assert "CATERING_PROPOSAL_SWEEP_ENABLED" not in body.split("[Service]", 1)[1]
+
+
+def test_timer_has_a_schedule_and_installs():
+    unit = _unit(_TIMER)
+    assert unit["Timer"]["OnCalendar"] == "*-*-* 03:40:00"
+    assert unit["Timer"]["Unit"] == "catering-proposal-expiry-sweep.service"
+    assert unit["Timer"]["Persistent"] == "true"
+    assert unit["Install"]["WantedBy"] == "timers.target"
+    assert unit["Unit"]["Requires"] == "catering-proposal-expiry-sweep.service"
+
+
+def test_timer_does_not_collide_with_the_lead_ttl_sweep():
+    """Both sweeps take catering state locks; separate minutes keep them clear
+    of each other and of catering-pattern-report (02:00)."""
+    other = _unit(_UNIT_DIR / "catering-lead-ttl-sweep.timer")
+    assert _unit(_TIMER)["Timer"]["OnCalendar"] != other["Timer"]["OnCalendar"]
+
+
+def test_deploy_installs_and_enables_the_timer():
+    deploy = _DEPLOY.read_text(encoding="utf-8")
+    assert "install -m 644 src/agents/catering/systemd/*.service" in deploy
+    assert "install -m 644 src/agents/catering/systemd/*.timer" in deploy
+    assert "systemctl enable --now catering-proposal-expiry-sweep.timer" in deploy
+
+
+def test_deploy_still_leaves_the_followup_sweep_timer_unenabled():
+    """catering-followup-sweep is a deliberately dormant triple-gated feature —
+    adding sibling timers must not sweep it along."""
+    deploy = _DEPLOY.read_text(encoding="utf-8")
+    assert "enable --now catering-followup-sweep.timer" not in deploy
+
+
+def test_smoke_test_checks_the_timer_is_enabled_and_the_units_parse():
+    smoke = _SMOKE.read_text(encoding="utf-8")
+    assert "catering-proposal-expiry-sweep.timer" in smoke
+    assert "/etc/systemd/system/catering-proposal-expiry-sweep.service" in smoke
+    assert "/etc/systemd/system/catering-proposal-expiry-sweep.timer" in smoke
 
 
 # ── subprocess integration (Linux-only, fcntl) ──────────────────────────────

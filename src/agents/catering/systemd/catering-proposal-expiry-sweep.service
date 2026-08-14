@@ -1,0 +1,30 @@
+[Unit]
+# M3 money-side lifecycle guard. Retires SENT proposal sets whose per-set
+# expires_at (stamped at send time, matching the validity the customer was told)
+# has passed, so options cannot be selected months later against prices the
+# owner has since changed. Sets with expires_at=None — every set sent before M3
+# — are skipped by the sweep itself.
+#
+# Enabling this timer changes NOTHING on its own: the sweep returns 0 without
+# reading state unless CATERING_PROPOSAL_SWEEP_ENABLED=1 in
+# /opt/shift-agent/.env. Arming is a deliberate operator step, and
+# `catering-proposal-expiry-sweep --dry-run` reports the blast radius first
+# (dry-run works while the flag is off).
+Description=Catering proposal expiry sweep (M3) - retire SENT sets past validity
+After=network-online.target
+Wants=network-online.target
+ConditionFileIsExecutable=/usr/local/bin/catering-proposal-expiry-sweep
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+Environment=HOME=/opt/shift-agent
+ExecStart=/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/catering-proposal-expiry-sweep
+StandardOutput=append:/opt/shift-agent/logs/catering-proposal-expiry-sweep.log
+StandardError=append:/opt/shift-agent/logs/catering-proposal-expiry-sweep.log
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shift-agent

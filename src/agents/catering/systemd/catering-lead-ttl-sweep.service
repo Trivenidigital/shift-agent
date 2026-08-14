@@ -1,0 +1,29 @@
+[Unit]
+# PR-A lifecycle guard. Retires AWAITING_OWNER_APPROVAL leads past
+# CATERING_LEAD_TTL_DAYS (21) and QUALIFYING leads past
+# catering.qualifying_stale_after_hours (72h) to the terminal STALE status,
+# alerting the owner at the write site (§12b).
+#
+# Enabling this timer changes NOTHING on its own: the sweep returns 0 without
+# reading state unless CATERING_LEAD_TTL_SWEEP_ENABLED=1 in
+# /opt/shift-agent/.env. Arming is a deliberate operator step, and
+# `catering-lead-ttl-sweep --dry-run` reports the blast radius first (dry-run
+# works while the flag is off).
+Description=Catering lead TTL sweep (PR-A) - retire stale leads to STALE
+After=network-online.target
+Wants=network-online.target
+ConditionFileIsExecutable=/usr/local/bin/catering-lead-ttl-sweep
+
+[Service]
+Type=oneshot
+User=shift-agent
+Group=shift-agent
+EnvironmentFile=/opt/shift-agent/.env
+Environment=HOME=/opt/shift-agent
+ExecStart=/usr/local/lib/hermes-agent/venv/bin/python /usr/local/bin/catering-lead-ttl-sweep
+StandardOutput=append:/opt/shift-agent/logs/catering-lead-ttl-sweep.log
+StandardError=append:/opt/shift-agent/logs/catering-lead-ttl-sweep.log
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shift-agent

@@ -1,0 +1,17 @@
+[Unit]
+Description=Catering lead TTL sweep timer (daily at 03:20 local, off-hours)
+Requires=catering-lead-ttl-sweep.service
+
+[Timer]
+# Daily. The windows this sweep enforces are 21 days (AWAITING_OWNER_APPROVAL)
+# and 72 hours (QUALIFYING), so a daily cycle lands within ~1.4% of the
+# shortest window — more frequent firing would buy nothing against a store of
+# tens of leads. Off-hours and offset from catering-pattern-report (02:00) and
+# catering-followup-sweep (:30) so the catering state files are never contended.
+OnCalendar=*-*-* 03:20:00
+Persistent=true
+AccuracySec=5min
+Unit=catering-lead-ttl-sweep.service
+
+[Install]
+WantedBy=timers.target

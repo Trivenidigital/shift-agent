@@ -887,6 +887,8 @@ for unit in \
     shift-agent-fsck.timer \
     send-daily-brief.timer \
     catering-pattern-report.timer \
+    catering-lead-ttl-sweep.timer \
+    catering-proposal-expiry-sweep.timer \
     flyer-source-edit-sla-watchdog.timer \
     alert-integrity-watchdog.timer \
     check-corrupt-state.timer \
@@ -902,6 +904,10 @@ echo "✓ systemd units enabled"
 sd_verify_units=(
     /etc/systemd/system/catering-pattern-report.service
     /etc/systemd/system/catering-pattern-report.timer
+    /etc/systemd/system/catering-lead-ttl-sweep.service
+    /etc/systemd/system/catering-lead-ttl-sweep.timer
+    /etc/systemd/system/catering-proposal-expiry-sweep.service
+    /etc/systemd/system/catering-proposal-expiry-sweep.timer
     /etc/systemd/system/send-daily-brief.service
     /etc/systemd/system/send-daily-brief.timer
     /etc/systemd/system/send-routing-accuracy-summary.service
