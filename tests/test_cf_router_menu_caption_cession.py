@@ -659,6 +659,97 @@ def test_caption_non_triggers_do_not_match(caption):
     assert actions_mod.is_menu_update_caption(caption) is False
 
 
+# ── Natural phrasings of the same documented trigger (PR-E) ─────────────────
+#
+# The precedence fix made cession candidacy faithful to this predicate, which
+# left the trigger VOCABULARY as the remaining gap: an owner who writes the
+# obvious English form of "update menu" fell through to flyer routing.
+@pytest.mark.parametrize("caption", [
+    "updated menu",
+    "Updated Menu",
+    "menu updates",
+    "our updated menu prices",
+    "here is the menu",
+    "here is our new menu",
+    "Here are the updated menu",
+    "here is my menu.",
+])
+def test_natural_menu_update_phrasings_match(caption):
+    _, actions_mod = _load_plugin()
+    assert actions_mod.is_menu_update_caption(caption) is True
+
+
+# The "here is/are ... menu" arm is END-ANCHORED. Unanchored it would swallow
+# every flyer brief that opens by presenting the menu as source material, which
+# is a far more common message than the one the arm exists to catch.
+@pytest.mark.parametrize("caption", [
+    "here are our menu items for the weekend flyer",
+    "here is the menu, put it on a poster",
+    "here is my menu and here is the logo to go on the flyer",
+])
+def test_here_is_the_menu_arm_is_end_anchored(caption):
+    _, actions_mod = _load_plugin()
+    assert actions_mod.is_menu_update_caption(caption) is False
+
+
+def test_the_flyer_veto_still_carries_trigger_phrases_used_mid_sentence():
+    """Scope note for the cell above. Only the "here is/are … menu" arm is
+    anchored; "updated menu" / "new menu" stay matchable mid-sentence, exactly
+    as "new menu" already was. So "here is our new menu — design a banner from
+    it" DOES match the predicate, and the explicit-flyer veto is what keeps it
+    on the flyer path — the same division of labour as "design a new menu
+    flyer". Anchoring the first alternation too would break the live incident
+    caption this whole cession exists for."""
+    _, actions_mod = _load_plugin()
+    caption = "here is our new menu — design a banner from it"
+    assert actions_mod.is_menu_update_caption(caption) is True
+    assert actions_mod.classify_flyer_intent(caption)[0] is True
+
+
+def test_widening_did_not_reach_for_a_bare_possessive_menu():
+    """`(?:our|the)\\s+menu` was rejected deliberately: it is the shape every
+    flyer brief uses to name its source material."""
+    _, actions_mod = _load_plugin()
+    for caption in ("weekend flyer using our menu", "put the menu on a poster",
+                    "a poster from our menu", "the menu goes on the flyer"):
+        assert actions_mod.is_menu_update_caption(caption) is False, caption
+
+
+def test_non_ascii_menu_word_stays_unmatched():
+    """The predicate matches the SKILL's documented ASCII trigger tokens only.
+    "menü" is not one of them and is NOT handled here — noted so a future
+    localization pass finds the gap rather than assuming coverage."""
+    _, actions_mod = _load_plugin()
+    assert actions_mod.is_menu_update_caption("menü") is False
+    assert actions_mod.is_menu_update_caption("neue menü") is False
+
+
+def test_accepted_residual_flyer_brief_captioned_exactly_here_is_the_menu():
+    """ACCEPTED BY RULING, pinned so it is a known cell and not a surprise.
+
+    An owner who attaches a flyer brief and captions it exactly "here is the
+    menu" now gets menu ingestion. Nothing downstream rescues this: the flyer
+    signal check needs a literal flyer/poster/banner token and the exact-edit
+    check needs an edit verb plus a singular target, and this caption has
+    neither. End-anchoring is the only thing bounding the arm, and it is what
+    keeps the far commoner "here is the menu, put it on a poster" safe."""
+    _, actions_mod = _load_plugin()
+    assert actions_mod.is_menu_update_caption("here is the menu") is True
+    assert actions_mod.classify_flyer_intent("here is the menu")[0] is False
+
+
+@pytest.mark.parametrize("caption", ["updated menu", "menu updates",
+                                     "here is our new menu"])
+def test_natural_phrasings_cede_end_to_end(monkeypatch, caption):
+    """The predicate is not the product. #697 made cession candidacy consume
+    this predicate, so a widened vocabulary must actually reach the SKILL
+    through the real dispatch, not just satisfy the unit cell."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, role="owner")
+
+    _assert_staged(_dispatch(hooks_mod, caption), s, role="owner")
+
+
 def test_explicit_flyer_edit_naming_a_flyer_still_wins(monkeypatch):
     """"update menu prices on this flyer" carries the trigger AND an explicit
     flyer signal. The same deterministic exclusion the P1-1 escape gate uses
