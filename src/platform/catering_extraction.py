@@ -27,6 +27,7 @@ Deployed FLAT to /opt/shift-agent/ so scripts + the cf-router plugin can import 
 """
 from __future__ import annotations
 
+import bisect
 import re
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -519,6 +520,9 @@ def extract_catering_fields(text: str, signals: Optional[list] = None) -> Option
 #   decline before accept          — "not going ahead" contains "going ahead"
 #   negated-accept before accept   — "we don't accept credit cards" is a payment
 #     remark, not a decline; it returns None (no automated state change at all)
+#   disqualifiers before accept    — a commitment verb whose object, condition or
+#     amended term shows it is not a yes to THIS quote returns None too
+#     (see _acceptance_disqualified)
 #   ambiguous last, whole-message  — a message that is ONLY "ok"/"sounds good"
 #     gets one clarification; the same words with real content after them
 #     ("sounds good, add 20 plates") are an amendment and fall through untouched.
@@ -548,6 +552,317 @@ _NEGATED_ACCEPT_RE = re.compile(
     r"(?:\w+\s+){0,2}?(?:accept(?:ing)?|proceed(?:ing)?|book(?:ing)?|confirm(?:ing)?)\b",
     re.IGNORECASE,
 )
+
+# ── Acceptance disqualifiers ────────────────────────────────────────────────
+# The commitment patterns below match a VERB with no object and no clause
+# context, so five shapes booked an event off a message that committed to
+# nothing:
+#   "please go ahead and cancel"                        — a cancellation
+#   "lets book a call to discuss the price"             — a meeting, not the quote
+#   "go ahead with option 2 but we need to talk price"  — still negotiating
+#   "we accept only if you include dessert"             — a counter-offer
+#   "we want to proceed with a smaller headcount of 80" — an amendment
+#
+# All five return None rather than "ambiguous": each needs a real answer about
+# the cancellation / meeting / condition / change, and the one clarification
+# "ambiguous" buys ("did you mean to accept?") would talk past it. None is also
+# the only other value available — `CateringLead.customer_acceptance` is
+# Literal["accepted", "declined"] and the writer script keys its replies and its
+# BOOKED/CLOSED target on the three existing outcomes, so a fifth outcome would
+# be a schema change on a money path.
+
+# Any cancellation signal outranks every commitment verb. Deliberately WIDER
+# than _DECLINE_PATTERNS, which require an object ("cancel the quote") before
+# they will close a lead: a bare "cancel" is too thin to close on but far too
+# strong to book on.
+_CANCEL_SIGNAL_RE = re.compile(
+    # "what is your cancellation policy?" asks about a TERM of the deal; it is
+    # the opposite of cancelling, and it is a normal thing to ask in the same
+    # breath as accepting. The noun-question form is excluded by object.
+    r"\b(?:cancel(?:l?ed|l?ing|lation)?"
+    r"(?!\s+(?:policy|policies|window|terms|fee|fees|charge|charges|deadline|"
+    r"date|period|notice))|"
+    r"call(?:ed|ing)?\s+(?:it|them|everything)\s+off|"
+    r"back(?:ed|ing)?\s+out|not\s+(?:going|moving)\s+(?:ahead|forward)|"
+    r"declin(?:e|ed|ing)|no\s+longer\s+need(?:ed|ing)?|not\s+interested|"
+    r"scrap(?:ped|ping)?)\b",
+    re.IGNORECASE,
+)
+
+# The commitment verb takes an object that is a CONVERSATION, not the quote.
+# "book a call", "book a tasting", "proceed to discussing the menu" commit to
+# talking; only "book/proceed" with the quote itself books an event, so "the
+# quote" is deliberately NOT an object here.
+# `tasting menu` is excluded — that is a menu, not an appointment.
+_DISQUALIFYING_OBJECT_RE = re.compile(
+    r"\b(?:book|booking|schedul(?:e|ing)|proceed(?:ing)?|go(?:ing)?\s+ahead|"
+    r"confirm(?:ing)?|accept(?:ing)?)\b"
+    r"(?:\s+\S+){0,5}?\s+"
+    # "call us if anything changes" offers a phone number; "book a call" books
+    # a meeting. Only the second is an object.
+    r"(?:call(?!s?\s+(?:us|me|him|her|them))|meeting|meet|tasting(?!\s+menu)|"
+    r"visit|demo|demonstration|"
+    r"discussion|discussing|chat|zoom|appointment|consultation|"
+    r"walk[\s-]?through|question)s?\b",
+    re.IGNORECASE,
+)
+
+# Still negotiating the number. "go ahead with option 2 but we need to talk
+# price" picks an option and then reopens the price — the commitment is to a
+# conversation about what it costs, and no digit has to appear for that.
+_STILL_NEGOTIATING_RE = re.compile(
+    r"\b(?:talk|talking|discuss|discussing|chat|(?:re)?negotiat(?:e|ing)|"
+    r"go\s+over|going\s+over|work\s+out|nail\s+down|revisit(?:ing)?)\b"
+    r"(?:\s+\S+){0,3}?\s+"
+    r"(?:price|pricing|cost|costs|budget|numbers|figures|rates?|per[\s-]?head)\b",
+    re.IGNORECASE,
+)
+
+# Pushing back on the number without naming one. "We accept! But first, can
+# you do it cheaper?" is a haggle, and it carries no digit and no negotiating
+# VERB, so neither _STILL_NEGOTIATING_RE nor the material-change guard sees it.
+#
+# Split into two arms. The first are idioms that only ever mean "lower your
+# price". The second are words that mean pushback ONLY as a request —
+# "thanks for the discount you gave us" is gratitude for a price already
+# granted, and it books.
+_PRICE_REQUEST_SHAPE = (
+    r"(?:can|could|would|will)\s+(?:you|we|u)\b|"
+    r"\bany\b|\bwhat\s+about\b|\bhow\s+about\b|"
+    r"(?:give|do|cut|offer)\s+(?:us|me)\b|\bplease\b"
+)
+_PRICE_PUSHBACK_RE = re.compile(
+    # Unambiguous haggling idioms — no request shape needed.
+    r"\b(?:cheaper|better\s+(?:price|rate|deal|number)|"
+    r"lower\s+(?:the\s+)?(?:price|cost|rate)|come\s+down|"
+    r"bring\s+(?:it|the\s+price)\s+down|sharpen\s+(?:the\s+)?pencil|"
+    r"wiggle\s+room|shave\s+[^.?!]{0,20}?\boff\b|"
+    r"move\s+on\s+(?:the\s+)?price|any\s+flexibility|"
+    r"match\s+(?:the|a|their)\s+price)\b"
+    # Request-shaped only: the same words are ordinary gratitude otherwise.
+    rf"|(?:{_PRICE_REQUEST_SHAPE})[^.?!]{{0,40}}?"
+    r"\b(?:discount(?:ed)?|knock\s+(?:something|anything|a\s+bit|some)?\s*off)\b",
+    re.IGNORECASE,
+)
+
+# Explicitly not final yet. "we accept, hold on — let me check with my wife
+# first" is a yes with the decision still outstanding.
+#
+# "let me confirm" needs an OBJECT to be a deferral. Confirming a decision
+# with someone leaves the acceptance open; confirming the delivery address is
+# ordinary logistics inside a yes, so the logistics objects are excluded.
+_LOGISTICS_OBJECT = (
+    r"(?!\s+(?:\w+\s+){0,2}(?:address|addresses|details|spelling|email|phone|"
+    r"number|postcode|zip|directions)\b)"
+)
+_NOT_FINAL_RE = re.compile(
+    r"\b(?:hold\s+(?:on|off)|"
+    rf"let\s+(?:me|us)\s+(?:check|confirm){_LOGISTICS_OBJECT}|"
+    r"let\s+(?:me|us)\s+(?:ask|speak|talk|run\s+it)|"
+    rf"need\s+to\s+(?:check|confirm){_LOGISTICS_OBJECT}|"
+    r"need\s+to\s+(?:ask|speak)|checking\s+with|"
+    r"not\s+final|tentative(?:ly)?)\b",
+    re.IGNORECASE,
+)
+
+# "yes, but only if …" is a counter-offer. The condition is the customer's
+# actual message and only a human can price it.
+#
+# `until` and a bare "waiting on/for" are NOT here: ruled at review, they are
+# ordinary scene-setting in a real yes ("the venue is ours until 10pm",
+# "we accept, waiting on your invoice"). "while we wait" keeps its place —
+# that one suspends the acceptance rather than describing the surroundings.
+_CONDITIONAL_RE = re.compile(
+    r"\b(?:provided(?:\s+that)?|as\s+long\s+as|so\s+long\s+as|"
+    r"on\s+(?:the\s+)?condition|contingent\s+(?:up)?on|subject\s+to|"
+    r"assuming(?:\s+that)?|pending|once\s+(?:we|you|i)|as\s+soon\s+as|"
+    r"while\s+we\s+wait)\b",
+    re.IGNORECASE,
+)
+
+# Bare `if` is handled per-occurrence rather than as a flat pattern, because it
+# does two opposite jobs. "we accept if the total stays under $2000" is a
+# counter-offer and must never book; "we accept, let us know if you need a
+# deposit" is a plain yes with a courtesy clause attached and must book. The
+# discriminator is the CLAUSE the `if` sits in: an offer of help is courtesy,
+# anything else is a condition on the acceptance.
+_IF_RE = re.compile(r"\bif\b", re.IGNORECASE)
+_COURTESY_IF_RE = re.compile(
+    r"\b(?:let\s+(?:us|me)\s+know|tell\s+(?:us|me)|reach\s+out|get\s+in\s+touch|"
+    r"contact\s+(?:us|me)|call\s+(?:us|me)|text\s+(?:us|me)|email\s+(?:us|me)|"
+    r"if\s+(?:that|this)\s+works|if\s+you\s+need\s+anything|"
+    r"if\s+there(?:'?s|\s+is)\s+anything|if\s+you\s+have\s+any\s+questions?|"
+    # "if you could email the invoice" is a polite REQUEST, not a condition on
+    # the acceptance; "if that's what it takes" is resignation — both book.
+    r"if\s+you\s+could\s+\w+|"
+    r"if\s+(?:that|this)(?:'?s|\s+is)\s+what\s+it\s+takes)\b",
+    re.IGNORECASE,
+)
+_CLAUSE_SPLIT_RE = re.compile(r"[,.;:!?]+|\s+[—–-]\s+")
+
+
+def _clause_spans(text: str) -> list:
+    """The message cut into clauses. Computed ONCE per message."""
+    spans, pos = [], 0
+    for m in _CLAUSE_SPLIT_RE.finditer(text):
+        if m.start() > pos:
+            spans.append((pos, m.start()))
+        pos = m.end()
+    if pos < len(text):
+        spans.append((pos, len(text)))
+    return spans
+
+
+def _has_binding_condition(text: str) -> bool:
+    """A condition the acceptance hangs on, as opposed to a courtesy clause."""
+    if _CONDITIONAL_RE.search(text):
+        return True
+    ifs = list(_IF_RE.finditer(text))
+    if not ifs:
+        return False
+    clauses = _clause_spans(text)
+    clause_starts = [s for s, _ in clauses]
+    # Cached per CLAUSE, not per `if`. A message that is one giant clause
+    # containing many `if`s would otherwise re-scan the whole clause once per
+    # `if` — quadratic on exactly the shape this branch exists to read.
+    courtesy: dict[int, bool] = {}
+    for m in ifs:
+        i = bisect.bisect_right(clause_starts, m.start()) - 1
+        hit = courtesy.get(i)
+        if hit is None:
+            start, end = clauses[i] if i >= 0 else (0, len(text))
+            hit = bool(_COURTESY_IF_RE.search(text[start:end]))
+            courtesy[i] = hit
+        if not hit:
+            return True
+    return False
+
+# "proceed with a SMALLER headcount of 80" is an amendment wearing a yes.
+# Deliberately narrow, because a demoted acceptance is SILENT — no audit row is
+# written for a message the detector declines to classify, so a guard that eats
+# real acceptances loses bookings invisibly. Two narrowings do that work:
+#   * `but` and `only` are NOT change markers. They are the ordinary connectives
+#     of a restatement — "we accept the quote for 250 guests only", "we accept,
+#     but can you confirm the June 5 date" — and including them demoted the
+#     common shape of a real yes.
+#   * the marker must sit WITHIN _MAX_CHANGE_MARKER_GAP_TOKENS of the material
+#     term it supposedly changes. "smaller headcount of 80" is a change;
+#     a marker in a different clause from the number is not.
+_CHANGE_MARKER_RE = re.compile(
+    r"\b(?:instead|actually|rather\s+than|make\s+it|chang(?:e|ed|ing)|"
+    r"revis(?:e|ed)|updat(?:e|ed)|smaller|larger|bigger|fewer|reduc(?:e|ed)|"
+    r"increas(?:e|ed)|drop(?:ped)?\s+(?:to|down)|up\s+to|down\s+to)\b",
+    re.IGNORECASE,
+)
+_MONEY_RE = re.compile(
+    r"(?:[$£€]\s?\d|\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:dollars|usd)\b)",
+    re.IGNORECASE,
+)
+# A headcount NOUN carrying no digit. "fewer guests, say 90" is a change to the
+# headcount that HEADCOUNT_PATTERNS cannot see, because the marker attaches to
+# the noun and the number arrives later in a shape the extractor does not parse.
+# Only counted next to a change marker, so a bare "250 guests" restatement is
+# still not a change.
+_HEADCOUNT_NOUN_RE = re.compile(
+    r"\b(?:guests?|people|persons?|ppl|attendees?|heads?|plates?|covers?|"
+    r"pax|headcount)\b",
+    re.IGNORECASE,
+)
+_WORD_RE = re.compile(r"\w+")
+_MAX_CHANGE_MARKER_GAP_TOKENS = 3
+
+# "yes we accept, and please add 20 more guests" locks in a quote priced for
+# the OLD headcount. The added quantity is its own material change — the verb,
+# the number and the noun are adjacent by construction, so this needs no
+# marker-distance check. A restatement ("for the 250 guests as quoted") has no
+# add/plus verb and still books.
+_ADDED_QUANTITY_RE = re.compile(
+    r"\b(?:add|adding|plus|extra|additional|throw\s+in)\s+"
+    r"(?:another\s+|an?\s+)?\d{1,4}\s+(?:more\s+|extra\s+|additional\s+)?"
+    r"(?:guests?|people|persons?|pax|plates?|mains?|items?|covers?|heads?|"
+    r"portions?|servings?)\b",
+    re.IGNORECASE,
+)
+
+
+def _material_term_spans(statements: str) -> list:
+    """Where the headcounts, amounts and dates are — the terms a quote is
+    priced on. Reuses the deployed extractor grammar so the guard and the
+    amendment path agree on what a material term is."""
+    spans = []
+    for pat in HEADCOUNT_PATTERNS:
+        spans.extend(m.span() for m in pat.finditer(statements))
+    for pat in (_MONEY_RE, MONTH_DAY_RE, NUMERIC_DATE_RE, _HEADCOUNT_NOUN_RE):
+        spans.extend(m.span() for m in pat.finditer(statements))
+    return spans
+
+
+def _has_material_change(text: str) -> bool:
+    """A change marker sitting NEXT TO a material term.
+
+    LINEAR BY CONSTRUCTION, and it has to stay that way: this runs
+    synchronously inside the router's pre-dispatch hook, so a message the
+    detector is slow on stalls the whole router. The first version compared
+    every marker against every term and re-scanned the text between each pair
+    for its token count — O(markers x terms x span), which measured 31s on an
+    18KB inbound (WhatsApp permits 65K chars). Two changes make it linear:
+    the message is tokenized ONCE and adjacency becomes index arithmetic, and
+    each term consults only its nearest marker on either side — the gap grows
+    monotonically with distance, so no farther marker can be closer.
+    """
+    marker_spans = sorted(m.span() for m in _CHANGE_MARKER_RE.finditer(text))
+    if not marker_spans:
+        return False
+    term_spans = sorted(_material_term_spans(text))
+    if not term_spans:
+        return False
+
+    token_starts = [m.start() for m in _WORD_RE.finditer(text)]
+    marker_starts = [s for s, _ in marker_spans]
+
+    for t_start, t_end in term_spans:
+        i = bisect.bisect_left(marker_starts, t_start)
+        for m_start, m_end in marker_spans[max(0, i - 1):i + 1]:
+            if m_end <= t_start:
+                lo, hi = m_end, t_start
+            elif t_end <= m_start:
+                lo, hi = t_end, m_start
+            else:
+                return True                      # overlapping — gap of zero
+            gap = (bisect.bisect_left(token_starts, hi)
+                   - bisect.bisect_left(token_starts, lo))
+            if gap <= _MAX_CHANGE_MARKER_GAP_TOKENS:
+                return True
+    return False
+
+
+def _acceptance_disqualified(text: str) -> bool:
+    """True when a commitment verb is present but the message around it means
+    something other than "yes to this quote".
+
+    Takes the FULL message, questions included — unlike the accept patterns,
+    which only ever read assertions. A question cannot BE a commitment, but it
+    can certainly withdraw one: "we accept. can you cancel the earlier order?"
+    and "we accept. can we talk price first?" both booked events while the
+    guards were reading the question-stripped text and never saw the clause
+    that took the yes back.
+    """
+    if _CANCEL_SIGNAL_RE.search(text):
+        return True
+    if _DISQUALIFYING_OBJECT_RE.search(text):
+        return True
+    if _STILL_NEGOTIATING_RE.search(text):
+        return True
+    if _PRICE_PUSHBACK_RE.search(text):
+        return True
+    if _NOT_FINAL_RE.search(text):
+        return True
+    if _has_binding_condition(text):
+        return True
+    if _ADDED_QUANTITY_RE.search(text):
+        return True
+    return _has_material_change(text)
+
 
 _ACCEPT_PATTERNS = [
     # The customer, as the subject, accepting. "do YOU accept venmo" cannot match.
@@ -601,6 +916,11 @@ def detect_quote_acceptance(text: str) -> Optional[dict]:
 
     ``"ambiguous"`` means "this MIGHT be a yes and we refuse to guess": the caller
     sends exactly one clarification and records that it did, never a booking.
+
+    ``None`` also covers messages that DO carry a commitment verb this grammar
+    deliberately refuses to read as acceptance — a cancellation, a request to
+    book a call, a conditional yes, an amendment. They take the unchanged
+    follow-up path, exactly as they did before this detector existed.
     """
     normalized = " ".join((text or "").split())
     if not normalized:
@@ -612,7 +932,8 @@ def detect_quote_acceptance(text: str) -> Optional[dict]:
             m = pattern.search(statements)
             if m:
                 return {"outcome": "declined", "matched_phrase": m.group(0)[:120]}
-        if not _NEGATED_ACCEPT_RE.search(statements):
+        if (not _NEGATED_ACCEPT_RE.search(statements)
+                and not _acceptance_disqualified(normalized)):
             for pattern in _ACCEPT_PATTERNS:
                 m = pattern.search(statements)
                 if m:
