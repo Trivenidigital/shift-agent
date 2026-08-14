@@ -3103,12 +3103,21 @@ def _send_flyer_finalization_failed_ack(
     # PR-ζ.1b §13.F — kwarg flip. Single caller (2969) passes
     # for_command(PROJECT_ACTIONS, "finalization.failed_ack",
     # is_regulated_action=False). Wrapper passes through.
+    #
+    # P0-4: this used to promise "I'll review it and send an update here" with
+    # nothing queued, nothing scheduled and no timer that would ever produce
+    # that message. The project stays in `finalizing_assets` — the only status
+    # `send-flyer-package` accepts, and the one the retry gate keys on — so the
+    # honest copy names the reply that genuinely re-enters that gate. "SEND IT"
+    # is in the approval alias set; bare "SEND" is in neither alias set and
+    # would be an instruction that does nothing.
     return actions.send_flyer_text(
         chat_id,
         (
             "Flyer Studio\n"
             "------------\n"
-            "I hit an issue preparing the final files. I'll review it and send an update here."
+            "I could not finish preparing your final files just now, and nothing was sent.\n\n"
+            "Your flyer is still here. Reply SEND IT when you want me to try again."
         ),
         action_context=action_context,
     )
@@ -3120,12 +3129,16 @@ def _send_flyer_final_delivery_failed_ack(
     *,
     action_context: ActionExecutionContext,
 ) -> tuple[bool, str, str]:
+    # P0-4, same reasoning as the finalization ack above. The one difference is
+    # the truth: finalization failed BEFORE anything went out, this one failed
+    # at the send itself, so only that clause differs.
     return actions.send_flyer_text(
         chat_id,
         (
             "Flyer Studio\n"
             "------------\n"
-            "I hit an issue sending the final files. I'll review it and send an update here."
+            "I could not send your final files just now.\n\n"
+            "Your flyer is still here. Reply SEND IT when you want me to try again."
         ),
         action_context=action_context,
     )
@@ -5886,6 +5899,11 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             subprocess_rc=0 if ok else 2,
             detail=(
                 f"project_id={project_id}; retry_finalizing_assets=true; "
+                # Stable marker so recovery.classify_decision ingests this
+                # regardless of what the underlying script's prose says. The
+                # project stays in finalizing_assets, so without it a failure
+                # that never mentions `exit=` ages there unobserved.
+                f"{'' if ok else 'delivery_send_failed=true; '}"
                 f"sender_role={role}; message_id={message_id}; {detail[:500]}"
             ),
             binding_source=binding_source,
@@ -5994,7 +6012,14 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         actions.audit_intercepted(
             reason="flyer_primary_project_created" if ok else "flyer_primary_failed",
             chat_id=chat_id, subprocess_rc=0 if ok else 2,
-            detail=f"project_id={project_id}; approve=true; binding_source={binding_source}; sender_role={role}; {detail[:500]}",
+            # `finalize_failed=true` is the stable marker recovery.classify_decision
+            # keys on; see the delivery-retry site above for why prose alone was
+            # not enough.
+            detail=(
+                f"project_id={project_id}; approve=true; "
+                f"{'' if ok else 'finalize_failed=true; '}"
+                f"binding_source={binding_source}; sender_role={role}; {detail[:500]}"
+            ),
             binding_source=binding_source,
         )
         if ok:

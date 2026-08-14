@@ -66,6 +66,23 @@ FORBIDDEN_CUSTOMER_TERMS = [
     "deploy",
 ]
 
+# Ways of promising the customer an unprompted future message. Truthful ONLY
+# when something is actually queued to produce it, which is what
+# `followup_recorded` asserts. The list started as the single literal "follow
+# up", which is why the finalize and delivery failure acks could say "I'll
+# review it and send an update here" — nothing queued, nothing scheduled,
+# nothing that would ever send it — and pass the lint (P0-4).
+UNBACKED_FOLLOWUP_PHRASES = (
+    "follow up",
+    "send an update",
+    "send you an update",
+    "get back to you",
+    "let you know",
+    "update you",
+    "keep you posted",
+    "circle back",
+)
+
 BUNDLE_SENSITIVE_KEYS = {
     "chat_id",
     "sender_phone",
@@ -416,7 +433,15 @@ def classify_decision(row: dict, projects: dict[str, dict]) -> RecoverySignal | 
         failure_class = "provider_unavailable"
     elif ack_error_present or any(marker in lower for marker in ["bridge_send_failed", "connect_failed", "http_error"]):
         failure_class = "bridge_send_failed"
-    elif any(marker in lower for marker in ["json_parse_failed", "select_failed", "status_failed", "exit="]):
+    elif any(marker in lower for marker in [
+        "json_parse_failed", "select_failed", "status_failed", "exit=",
+        # Stable markers the finalize / final-delivery failure sites stamp.
+        # Both previously relied on whatever the underlying script happened to
+        # put in the detail: a failure reporting `exit=` landed here, one
+        # reporting only prose classified as nothing and the project aged in
+        # finalizing_assets unseen. Same event, same class, either way now.
+        "finalize_failed", "delivery_send_failed",
+    ]):
         if project_id:
             failure_class = "state_transition_failed"
     if not failure_class:
@@ -582,7 +607,7 @@ def lint_recovery_copy(text: str, failure_class: str, followup_recorded: bool) -
         reasons.append("project_id")
     if re.search(r"\b\d+\s*(minutes?|hours?)\b", lower):
         reasons.append("sla_promise")
-    if "follow up" in lower and not followup_recorded:
+    if not followup_recorded and any(p in lower for p in UNBACKED_FOLLOWUP_PHRASES):
         reasons.append("followup_without_record")
     return CopyLintResult(ok=not reasons, reasons=reasons)
 

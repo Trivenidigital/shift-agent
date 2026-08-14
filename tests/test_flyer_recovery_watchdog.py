@@ -7,6 +7,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "src" / "agents" / "flyer" / "scripts" / "flyer-recovery-watchdog"
 sys.path.insert(0, str(REPO / "src"))
@@ -1639,3 +1641,93 @@ def test_watchdog_worker_unavailable_threshold_is_configurable(tmp_path):
     assert "operator_action_required=0" in result.stdout
     state = json.loads(recovery_state.read_text(encoding="utf-8"))
     assert state["incidents"][0]["status"] == "open"
+
+
+# ─── the failure acks are observable, not silent (P0-4) ─────────────────────
+#
+# The customer-facing half of P0-4 is truthful copy; this is the operator half.
+# Both failure sites already write `flyer_primary_failed` rows through
+# audit_intercepted, and recovery.classify_decision ingests them — so a project
+# left in finalizing_assets is picked up by the watchdog and, post-#698, is
+# escalated to the owner once it stops making progress.
+
+_OBSERVE_CONFIG = """
+schema_version: 1
+customer: {name: Triveni, location_id: loc_pineville_01, timezone: America/New_York}
+owner: {name: Owner, phone: '+19045550000'}
+limits: {}
+alerting: {pushover_user_key: k, pushover_app_token: t}
+backup: {gpg_recipient_email: owner@example.com}
+flyer:
+  enabled: false
+  recovery:
+    mode: observe
+    enable_timer: true
+    scan_window_minutes: 240
+"""
+
+
+def _run_watchdog_dry(tmp_path, detail: str):
+    """Seed one failure row exactly as the ack sites emit it, then observe."""
+    config = tmp_path / "config.yaml"
+    log = tmp_path / "decisions.log"
+    projects = tmp_path / "projects.json"
+    customers = tmp_path / "customers.json"
+    recovery_state = tmp_path / "recovery.json"
+    config.write_text(_OBSERVE_CONFIG.strip(), encoding="utf-8")
+    ts = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    log.write_text(json.dumps({
+        "type": "cf_router_intercepted",
+        "ts": ts,
+        "reason": "flyer_primary_failed",
+        "chat_id": "15550100001@s.whatsapp.net",
+        "message_id": "wamid.fail",
+        "subprocess_rc": 2,
+        "detail": detail,
+    }) + "\n", encoding="utf-8")
+    projects.write_text('{"projects":[]}', encoding="utf-8")
+    customers.write_text('{"customers":[],"onboarding_sessions":[],"intake_sessions":[]}', encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--config-path", str(config), "--log-path", str(log),
+         "--project-state-path", str(projects), "--customer-state-path", str(customers),
+         "--recovery-state-path", str(recovery_state), "--dry-run", "--text"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return result, recovery_state
+
+
+@pytest.mark.parametrize("detail", [
+    # finalization failure whose prose happens to carry a recognised marker
+    "project_id=F0085; approve=true; finalize_failed=true; binding_source=active; "
+    "sender_role=customer; visual_qa_failed: missing required visible facts",
+    # final-delivery retry failure, same
+    "project_id=F7791; retry_finalizing_assets=true; delivery_send_failed=true; "
+    "sender_role=customer; message_id=m1; send-flyer-package exit=2",
+    # ...and the shapes that used to be invisible: prose with no marker of its
+    # own, carried only by the stamp the failure site now adds. These are the
+    # rows the classifier previously refused while the project aged in
+    # finalizing_assets with nobody watching.
+    "project_id=F0085; approve=true; finalize_failed=true; binding_source=active; "
+    "sender_role=customer; could not build the final package",
+    "project_id=F7791; retry_finalizing_assets=true; delivery_send_failed=true; "
+    "sender_role=customer; message_id=m1; uncertain delivery requires reconciliation",
+])
+def test_failure_rows_are_seen_by_the_recovery_watchdog(tmp_path, detail):
+    result, recovery_state = _run_watchdog_dry(tmp_path, detail)
+    assert "opened=1" in result.stdout
+    # --dry-run observes without mutating.
+    assert not recovery_state.exists()
+
+
+def test_an_unclassifiable_detail_is_still_refused(tmp_path):
+    """Control for the cells above: the classifier did not become a catch-all.
+    A flyer row carrying no recognised marker and none of the new stamps is
+    still not ingested, so `opened=1` above is evidence about the stamps rather
+    than about every row being opened."""
+    result, _state = _run_watchdog_dry(
+        tmp_path,
+        "project_id=F0085; approve=true; sender_role=customer; nothing recognisable here",
+    )
+    assert "opened=0" in result.stdout
