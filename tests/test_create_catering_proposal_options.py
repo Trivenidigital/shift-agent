@@ -39,6 +39,11 @@ class _BridgeStub(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
+        # P17b: 200 with no id is safe_io's `send_uncertain` — the bridge ACCEPTED
+        # the menu, so it most likely reached the customer.
+        if self.__class__.response_mode == "empty_id":
+            self.wfile.write(json.dumps({"accepted": True}).encode())
+            return
         self.wfile.write(
             json.dumps({"id": f"msg_{int(time.time() * 1000)}_{len(self.__class__.requests)}"}).encode()
         )
@@ -1209,3 +1214,81 @@ def test_veg_only_lead_small_all_veg_menu_still_sends(bridge_server, env_dir):
 
     assert parsed["rc"] == 0, result.stderr
     assert len(stub.requests) == 1
+
+
+# ── P17b: the proposal set's delivery status is recorded ────────────────────
+# All three send sites already PAGE the owner via _fail_generation. What was
+# missing was the STATUS: the failure row hardcodes reason="bridge_unreachable"
+# (a schema Literal), so a send_uncertain — bridge accepted, menu most likely
+# delivered — was recorded as a definite non-delivery.
+
+def _unconfirmed(env_dir):
+    return [r for r in _read_audit(env_dir)
+            if r["type"] == "catering_customer_send_unconfirmed"]
+
+
+def test_failed_proposal_send_records_the_real_status(bridge_server, env_dir):
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+    stub.response_mode = "down"
+
+    result, parsed = _run_script(env_dir, port)
+
+    assert parsed["rc"] == 6, result.stderr
+    rows = _unconfirmed(env_dir)
+    assert len(rows) == 1
+    assert rows[0]["send_kind"] == "proposal_options"
+    assert rows[0]["script"] == "create-catering-proposal-options"
+    assert rows[0]["delivery_certainty"] == "failed"
+    assert rows[0]["send_status"] == "http_error"
+    assert rows[0]["owner_paged"] is True, (
+        "_fail_generation already pages; the row reflects that page rather than "
+        "adding a second one for the same event")
+
+
+def test_uncertain_proposal_send_is_not_recorded_as_a_definite_failure(bridge_server, env_dir):
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+    stub.response_mode = "empty_id"
+
+    result, parsed = _run_script(env_dir, port)
+
+    assert parsed["rc"] == 6, result.stderr
+    rows = _unconfirmed(env_dir)
+    assert rows[0]["delivery_certainty"] == "uncertain"
+    assert rows[0]["send_status"] == "send_uncertain"
+    assert len(stub.requests) == 1, "never re-sent"
+    # The pre-existing failure row still says bridge_unreachable — its `reason` is
+    # a schema Literal that cannot carry the real status without a schemas.py
+    # change. The new row is where the truth lives.
+    failed = [r for r in _read_audit(env_dir)
+              if r["type"] == "catering_proposal_generation_failed"]
+    assert failed and failed[-1]["reason"] == "bridge_unreachable"
+
+
+def test_successful_proposal_send_emits_no_unconfirmed_row(bridge_server, env_dir):
+    port, _stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+
+    result, parsed = _run_script(env_dir, port)
+
+    assert parsed["rc"] == 0, result.stderr
+    assert _unconfirmed(env_dir) == []
+
+
+def test_failed_recompose_clarify_records_its_status(bridge_server, env_dir):
+    """The clarify arm is a third send site with its own early return."""
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir)
+    _seed_recompose_sent_set(env_dir)
+    stub.response_mode = "down"
+
+    result, parsed = _run_recompose(env_dir, port, "option 2 starters with option 1 mains")
+
+    assert parsed["rc"] == 6, result.stderr
+    rows = _unconfirmed(env_dir)
+    assert len(rows) == 1 and rows[0]["delivery_certainty"] == "failed"
