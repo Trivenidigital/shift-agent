@@ -722,6 +722,12 @@ def test_non_ascii_menu_word_stays_unmatched():
     _, actions_mod = _load_plugin()
     assert actions_mod.is_menu_update_caption("menü") is False
     assert actions_mod.is_menu_update_caption("neue menü") is False
+    # Same accepted-tradeoff class (reviewer-verified, documented not fixed):
+    # "here is the menu for you" — trailing words defeat the end anchor and it
+    # carries no flyer token, so it gets neither cession nor flyer routing and
+    # falls to the LLM. "here are my menus" — the plural defeats the token.
+    assert actions_mod.is_menu_update_caption("here is the menu for you") is False
+    assert actions_mod.is_menu_update_caption("here are my menus") is False
 
 
 def test_accepted_residual_flyer_brief_captioned_exactly_here_is_the_menu():
