@@ -22,6 +22,9 @@ on:
       - "tests/test_flyer_generate_concepts.py"
       - "tests/test_flyer_scripts_static.py"
       - "tests/test_flyer_recovery*.py"
+      - "tests/test_flyer_onboarding.py"
+      - "tests/test_flyer_canonical_identity_wiring.py"
+      - "tests/test_cf_router_flyer_routing.py"
       - ".github/workflows/flyer-extended-ci.yml"
   push:
     branches: [main]
@@ -50,4 +53,7 @@ jobs:
             tests/test_flyer_generate_concepts.py \
             tests/test_flyer_scripts_static.py \
             tests/test_flyer_recovery.py \
-            tests/test_flyer_recovery_watchdog.py
+            tests/test_flyer_recovery_watchdog.py \
+            tests/test_flyer_onboarding.py \
+            tests/test_flyer_canonical_identity_wiring.py \
+            tests/test_cf_router_flyer_routing.py
