@@ -2936,3 +2936,142 @@ def test_start_trial_sample_handoff_copy_promises_ideas_not_text_mode(tmp_path):
     assert "type your flyer request" not in handoff.reply_text.lower()
     store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
     assert store.onboarding_sessions[0].creation_mode == "sample"
+
+
+# ─── LID-only session scoping (P0: `None != None` predicate collapse) ─────────
+#
+# Session replacement/discard predicates dropped every row whose phone was not
+# unequal to the incoming one. Two LID-only principals both carry
+# sender_phone=None, and `None != None` is False, so ANY new LID-only session
+# wiped EVERY other LID-only session across customers.
+
+
+def _lid_session(chat_id: str, *, status="collecting_business_name", sender_phone=None):
+    now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+    return FlyerOnboardingSession(
+        chat_id=chat_id,
+        sender_phone=sender_phone,
+        status=status,
+        started_at=now,
+        updated_at=now,
+    )
+
+
+def test_replace_session_keeps_other_lid_only_principal():
+    from agents.flyer.onboarding import _replace_session
+
+    other = _lid_session("100000000000002@lid")
+    store = FlyerCustomerStore(onboarding_sessions=[other])
+
+    _replace_session(store, _lid_session("100000000000001@lid"))
+
+    chat_ids = {s.chat_id for s in store.onboarding_sessions}
+    assert chat_ids == {"100000000000001@lid", "100000000000002@lid"}
+
+
+def test_replace_session_still_replaces_same_chat_id():
+    from agents.flyer.onboarding import _replace_session
+
+    store = FlyerCustomerStore(onboarding_sessions=[_lid_session("100000000000001@lid")])
+
+    _replace_session(store, _lid_session("100000000000001@lid", status="choosing_plan"))
+
+    assert len(store.onboarding_sessions) == 1
+    assert store.onboarding_sessions[0].status == "choosing_plan"
+
+
+def test_replace_session_still_replaces_same_phone_other_chat_id():
+    from agents.flyer.onboarding import _replace_session
+
+    old = _lid_session("15550100001@s.whatsapp.net", sender_phone="+15550100001")
+    store = FlyerCustomerStore(onboarding_sessions=[old])
+
+    _replace_session(
+        store,
+        _lid_session("100000000000001@lid", status="choosing_plan", sender_phone="+15550100001"),
+    )
+
+    assert len(store.onboarding_sessions) == 1
+    assert store.onboarding_sessions[0].chat_id == "100000000000001@lid"
+
+
+def test_discard_session_keeps_other_lid_only_principal():
+    from agents.flyer.onboarding import _discard_session
+
+    other = _lid_session("100000000000002@lid")
+    store = FlyerCustomerStore(onboarding_sessions=[other, _lid_session("100000000000001@lid")])
+
+    _discard_session(store, _lid_session("100000000000001@lid"))
+
+    assert [s.chat_id for s in store.onboarding_sessions] == ["100000000000002@lid"]
+
+
+def test_discard_session_still_removes_same_phone_other_chat_id():
+    from agents.flyer.onboarding import _discard_session
+
+    old = _lid_session("15550100001@s.whatsapp.net", sender_phone="+15550100001")
+    store = FlyerCustomerStore(onboarding_sessions=[old])
+
+    _discard_session(
+        store,
+        _lid_session("100000000000001@lid", sender_phone="+15550100001"),
+    )
+
+    assert store.onboarding_sessions == []
+
+
+def test_onboarding_start_keeps_other_lid_only_principal(tmp_path):
+    """The reset path (session is None / payment_pending / active) prunes the
+    store before appending — a LID-only prospect must not evict another."""
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+
+    handle_onboarding_message(
+        state_path=state_path,
+        chat_id="100000000000002@lid",
+        sender_phone=None,
+        message_id="m1",
+        text="start",
+        now=now,
+    )
+    handle_onboarding_message(
+        state_path=state_path,
+        chat_id="100000000000001@lid",
+        sender_phone=None,
+        message_id="m2",
+        text="start",
+        now=now,
+    )
+
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    assert {s.chat_id for s in store.onboarding_sessions} == {
+        "100000000000001@lid",
+        "100000000000002@lid",
+    }
+
+
+def test_intake_onboarding_handoff_keeps_other_lid_only_principal():
+    from agents.flyer.intake import _replace_onboarding_session
+
+    other = _lid_session("100000000000002@lid")
+    store = FlyerCustomerStore(onboarding_sessions=[other])
+
+    _replace_onboarding_session(store, _lid_session("100000000000001@lid"))
+
+    assert {s.chat_id for s in store.onboarding_sessions} == {
+        "100000000000001@lid",
+        "100000000000002@lid",
+    }
+
+
+def test_intake_onboarding_handoff_still_replaces_same_chat_id():
+    from agents.flyer.intake import _replace_onboarding_session
+
+    store = FlyerCustomerStore(onboarding_sessions=[_lid_session("100000000000001@lid")])
+
+    _replace_onboarding_session(
+        store, _lid_session("100000000000001@lid", status="choosing_plan")
+    )
+
+    assert len(store.onboarding_sessions) == 1
+    assert store.onboarding_sessions[0].status == "choosing_plan"
