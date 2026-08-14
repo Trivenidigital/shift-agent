@@ -8918,3 +8918,249 @@ def test_a_successful_finalize_carries_no_failure_marker(monkeypatch):
     for row in audits:
         assert "finalize_failed" not in row.get("detail", "")
         assert "delivery_send_failed" not in row.get("detail", "")
+# ─── customer lookup is monotonic in identity knowledge (P1-11) ─────────────
+#
+# `find_flyer_customer_by_sender` reached the primary_chat_id clause ONLY when
+# no phone resolved. So a customer onboarded under a LID became an UNKNOWN
+# SENDER the moment the lid-cache learned their phone pairing: better identity
+# data made recognition WORSE. Adding identity knowledge must only ever widen
+# recognition, never narrow it.
+
+CUST_LID = "158024815611933@lid"
+CUST_PHONE = "+19045550104"
+CUST_PHONE_JID = "19045550104@s.whatsapp.net"
+
+
+def _customer_row(customer_id, *, primary_chat_id="", onboarded_by_phone="",
+                  public_phone="", business_whatsapp_number="", authorized=()):
+    row = {
+        "customer_id": customer_id,
+        "business_name": f"Biz {customer_id}",
+        "business_address": "1 Test Rd",
+        "business_category": "Indian Restaurant",
+        "preferred_language": "en",
+        "plan_id": "trial",
+        "status": "trial",
+        "created_at": "2026-05-18T17:42:34Z",
+        "updated_at": "2026-05-18T17:42:34Z",
+    }
+    if primary_chat_id:
+        row["primary_chat_id"] = primary_chat_id
+    if onboarded_by_phone:
+        row["onboarded_by_phone"] = onboarded_by_phone
+    if public_phone:
+        row["public_phone"] = public_phone
+    if business_whatsapp_number:
+        row["business_whatsapp_number"] = business_whatsapp_number
+    if authorized:
+        row["authorized_request_numbers"] = list(authorized)
+    return row
+
+
+def _customer_store(tmp_path, monkeypatch, actions, rows, *, lid_pairs=()):
+    path = tmp_path / "customers.json"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "next_customer_sequence": len(rows) + 1,
+        "next_brand_asset_sequence": 1,
+        "customers": rows,
+        "onboarding_sessions": [],
+    }), encoding="utf-8")
+    actions.FLYER_CUSTOMERS_PATH = path
+    cache = tmp_path / "lid-cache.json"
+    cache.write_text(json.dumps({
+        "schema_version": 1,
+        "pairs": [{"phone": p, "lid": l} for p, l in lid_pairs],
+    }), encoding="utf-8")
+    monkeypatch.setenv("SHIFT_AGENT_LID_CACHE_PATH", str(cache))
+    return path
+
+
+def test_lid_onboarded_customer_survives_the_lid_cache_learning_their_phone(tmp_path, monkeypatch):
+    """(a) Onboarded LID-only. The lid-cache later LEARNS the pairing, so the
+    next message resolves a phone — which used to skip the chat_id clause and
+    return None. The customer must stay recognized."""
+    actions = _load_actions()
+    _customer_store(tmp_path, monkeypatch, actions,
+                    [_customer_row("CUST0003", primary_chat_id=CUST_LID)],
+                    lid_pairs=[(CUST_PHONE, CUST_LID)])
+
+    # Same LID chat, but identify-sender now resolves the phone.
+    found = actions.find_flyer_customer_by_sender(CUST_PHONE, CUST_LID)
+    assert found is not None and found["customer_id"] == "CUST0003"
+
+    # And the message arriving on the phone-JID instead.
+    found_jid = actions.find_flyer_customer_by_sender(CUST_PHONE, CUST_PHONE_JID)
+    assert found_jid is not None and found_jid["customer_id"] == "CUST0003"
+
+
+def test_phone_onboarded_customer_is_found_from_their_lid(tmp_path, monkeypatch):
+    """(b) The reverse direction: record keyed to the phone-JID, message arrives
+    under the LID the cache pairs with it."""
+    actions = _load_actions()
+    _customer_store(tmp_path, monkeypatch, actions,
+                    [_customer_row("CUST0004", primary_chat_id=CUST_PHONE_JID,
+                                   onboarded_by_phone=CUST_PHONE)],
+                    lid_pairs=[(CUST_PHONE, CUST_LID)])
+
+    found = actions.find_flyer_customer_by_sender(None, CUST_LID)
+    assert found is not None and found["customer_id"] == "CUST0004"
+
+
+def test_two_customers_sharing_a_number_are_split_by_chat_id(tmp_path, monkeypatch):
+    """(c) The chat_id tiebreaker. Two customers genuinely share a number; a
+    message from one of their own chats is not ambiguous."""
+    actions = _load_actions()
+    _customer_store(tmp_path, monkeypatch, actions, [
+        _customer_row("CUST0010", primary_chat_id="10000000000001@lid",
+                      business_whatsapp_number=CUST_PHONE),
+        _customer_row("CUST0011", primary_chat_id="10000000000002@lid",
+                      business_whatsapp_number=CUST_PHONE),
+    ])
+
+    a = actions.find_flyer_customer_by_sender(CUST_PHONE, "10000000000001@lid")
+    b = actions.find_flyer_customer_by_sender(CUST_PHONE, "10000000000002@lid")
+    assert a is not None and a["customer_id"] == "CUST0010"
+    assert b is not None and b["customer_id"] == "CUST0011"
+
+
+def test_a_shared_number_from_an_unrelated_chat_stays_ambiguous(tmp_path, monkeypatch):
+    """(c, other half) No tiebreaker available — guessing here would disclose
+    one customer's account to another, so the refusal is preserved."""
+    actions = _load_actions()
+    _customer_store(tmp_path, monkeypatch, actions, [
+        _customer_row("CUST0010", primary_chat_id="10000000000001@lid",
+                      business_whatsapp_number=CUST_PHONE),
+        _customer_row("CUST0011", primary_chat_id="10000000000002@lid",
+                      business_whatsapp_number=CUST_PHONE),
+    ])
+
+    assert actions.find_flyer_customer_by_sender(CUST_PHONE, "99999999999999@lid") is None
+    assert actions.find_flyer_customer_by_sender(CUST_PHONE, "") is None
+
+
+def test_plain_phone_onboarded_customer_is_unchanged(tmp_path, monkeypatch):
+    """(d) The ordinary case must not move."""
+    actions = _load_actions()
+    _customer_store(tmp_path, monkeypatch, actions, [
+        _customer_row("CUST0001", primary_chat_id=CUST_PHONE_JID,
+                      onboarded_by_phone=CUST_PHONE, public_phone=CUST_PHONE,
+                      business_whatsapp_number=CUST_PHONE,
+                      authorized=["+19045550105"]),
+    ])
+
+    assert actions.find_flyer_customer_by_sender(CUST_PHONE, CUST_PHONE_JID)["customer_id"] == "CUST0001"
+    assert actions.find_flyer_customer_by_sender("+19045550105", "")["customer_id"] == "CUST0001"
+    assert actions.find_flyer_customer_by_sender("+19999999999", "") is None
+    assert actions.find_flyer_customer_by_sender(None, "") is None
+
+
+# ─── A/B matrix: every difference vs main must be None -> match ─────────────
+#
+# The monotonicity claim is only worth as much as its counter-evidence. This
+# transcribes main's lookup verbatim, runs both over a matrix of stored-record
+# shapes x query shapes, and asserts the ONLY differences are cells that used
+# to return None. No previously-matching input may change identity.
+
+def _legacy_customer_lookup(actions, store, phone, chat_id):
+    """main@c767620 `find_flyer_customer_by_sender`, transcribed."""
+    canonical = actions._canonical_phone(phone)
+    if not canonical and chat_id.endswith("@s.whatsapp.net"):
+        canonical = actions._canonical_phone(chat_id.split("@", 1)[0])
+    customers = store.get("customers", [])
+    if not canonical and chat_id:
+        matches = [c for c in customers
+                   if isinstance(c, dict) and c.get("primary_chat_id") == chat_id]
+        return matches[0] if len(matches) == 1 else None
+    if not canonical:
+        return None
+    matches = []
+    for customer in customers:
+        numbers = set(customer.get("authorized_request_numbers") or [])
+        for key in ("business_whatsapp_number", "onboarded_by_phone", "public_phone"):
+            value = customer.get(key)
+            if value:
+                numbers.add(value)
+        if canonical in numbers:
+            matches.append(customer)
+    return matches[0] if len(matches) == 1 else None
+
+
+_OTHER_LID = "20000000000009@lid"
+_OTHER_PHONE = "+19045559999"
+
+_MATRIX_STORES = {
+    "lid_only": [_customer_row("C1", primary_chat_id=CUST_LID)],
+    "phone_jid_full": [_customer_row("C1", primary_chat_id=CUST_PHONE_JID,
+                                     onboarded_by_phone=CUST_PHONE,
+                                     public_phone=CUST_PHONE,
+                                     business_whatsapp_number=CUST_PHONE)],
+    "lid_with_phone": [_customer_row("C1", primary_chat_id=CUST_LID,
+                                     onboarded_by_phone=CUST_PHONE)],
+    "authorized_only": [_customer_row("C1", primary_chat_id=CUST_LID,
+                                      authorized=[CUST_PHONE])],
+    "two_share_number": [
+        _customer_row("C1", primary_chat_id="10000000000001@lid",
+                      business_whatsapp_number=CUST_PHONE),
+        _customer_row("C2", primary_chat_id="10000000000002@lid",
+                      business_whatsapp_number=CUST_PHONE),
+    ],
+    "two_distinct": [
+        _customer_row("C1", primary_chat_id=CUST_LID, onboarded_by_phone=CUST_PHONE),
+        _customer_row("C2", primary_chat_id=_OTHER_LID, onboarded_by_phone=_OTHER_PHONE),
+    ],
+    "no_identifiers": [_customer_row("C1")],
+}
+
+_MATRIX_QUERIES = [
+    (None, CUST_LID), (CUST_PHONE, CUST_LID), (CUST_PHONE, CUST_PHONE_JID),
+    (None, CUST_PHONE_JID), (CUST_PHONE, ""), (None, ""),
+    (_OTHER_PHONE, _OTHER_LID), (None, _OTHER_LID), (_OTHER_PHONE, ""),
+    (CUST_PHONE, "10000000000001@lid"), (CUST_PHONE, "10000000000002@lid"),
+    (CUST_PHONE, "99999999999999@lid"), ("+19999999999", ""),
+]
+
+
+def test_ab_matrix_every_difference_is_none_to_match(tmp_path, monkeypatch):
+    actions = _load_actions()
+    widened, identical = [], 0
+    for shape, rows in _MATRIX_STORES.items():
+        store_path = _customer_store(tmp_path, monkeypatch, actions, rows,
+                                     lid_pairs=[(CUST_PHONE, CUST_LID)])
+        store = json.loads(store_path.read_text(encoding="utf-8"))
+        for phone, chat_id in _MATRIX_QUERIES:
+            old = _legacy_customer_lookup(actions, store, phone, chat_id)
+            new = actions.find_flyer_customer_by_sender(phone, chat_id)
+            old_id = old["customer_id"] if old else None
+            new_id = new["customer_id"] if new else None
+            if old_id == new_id:
+                identical += 1
+                continue
+            # The ONLY admissible difference: nothing recognized before, a
+            # customer recognized now. A changed identity or a lost match is a
+            # regression, not a widening.
+            assert old_id is None, (
+                f"{shape} {(phone, chat_id)}: identity CHANGED {old_id!r} -> {new_id!r}"
+            )
+            assert new_id is not None
+            widened.append((shape, phone, chat_id, new_id))
+
+    assert identical + len(widened) == len(_MATRIX_STORES) * len(_MATRIX_QUERIES)
+    # Non-vacuity: the matrix must actually exercise the widening, or it would
+    # pass just as well against an unchanged function.
+    assert widened, "matrix proved nothing — no cell changed"
+    widened_shapes = {w[0] for w in widened}
+    assert "lid_only" in widened_shapes
+    assert "two_share_number" in widened_shapes
+
+
+def test_ab_matrix_never_widens_a_genuinely_ambiguous_cell(tmp_path, monkeypatch):
+    """The shared-number store must keep returning None for every query that
+    cannot name one of the two records — the widening is scoped, not blanket."""
+    actions = _load_actions()
+    _customer_store(tmp_path, monkeypatch, actions,
+                    _MATRIX_STORES["two_share_number"],
+                    lid_pairs=[(CUST_PHONE, CUST_LID)])
+    for phone, chat_id in [(CUST_PHONE, ""), (CUST_PHONE, "99999999999999@lid"),
+                           (CUST_PHONE, CUST_LID), (None, "")]:
+        assert actions.find_flyer_customer_by_sender(phone, chat_id) is None, (phone, chat_id)
