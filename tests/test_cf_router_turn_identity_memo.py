@@ -413,19 +413,37 @@ def test_metadata_accessor_failure_semantics_are_unchanged(monkeypatch, payload,
 def test_metadata_callers_cannot_mutate_the_memo(monkeypatch):
     """`identify_sender_metadata` hands back a dict. Pre-memo each caller got a
     freshly parsed one; now they would share the memoized payload, so a caller
-    mutating its copy could rewrite another arm's view of the sender."""
+    mutating its copy could rewrite another arm's view of the sender.
+
+    Both mutation shapes, because only one of them falsifies a shallow copy:
+    rebinding or removing a TOP-LEVEL key is contained by `dict(...)`, but
+    mutating a nested value IN PLACE is not — a shallow copy still shares the
+    `roles` list by reference. `roles` is the authorization surface, and
+    `has_owner_capability` reads the memoized payload directly, so an in-place
+    append would hand every later reader in the turn a fabricated role.
+    """
     hooks_mod, actions_mod = _load_plugin()
     s = _wire(monkeypatch, hooks_mod, actions_mod, payloads=[DUAL_ROLE])
 
     def _probe():
         first = actions_mod.identify_sender_metadata(CHAT)
-        first["role"] = "tampered"
-        first.pop("roles", None)
+        first["role"] = "tampered"          # rebind a top-level key
+        first.pop("phone_normalized", None)  # remove a top-level key
+        first["roles"].append("TAMPERED_ROLE")  # mutate a nested value IN PLACE
+        first["roles"].remove("owner")
         s.probes.append(actions_mod.identify_sender_metadata(CHAT))
+        s.probes.append(actions_mod.has_owner_capability(CHAT))
 
     _in_turn_probe(monkeypatch, actions_mod, _probe)
 
     _dispatch(hooks_mod)
 
-    assert s.probes[0]["role"] == "employee", "a caller's mutation reached the memo"
-    assert s.probes[0]["roles"] == ["employee", "owner"]
+    second, owner_membership = s.probes
+    assert second["role"] == "employee", "a caller's mutation reached the memo"
+    assert second["phone_normalized"] == PHONE
+    assert second["roles"] == ["employee", "owner"], (
+        "a caller's in-place roles[] mutation reached the memo — a shallow copy "
+        "shares the list by reference")
+    assert owner_membership is True, (
+        "a caller removed `owner` from the shared roles list and the "
+        "authorization check followed it")

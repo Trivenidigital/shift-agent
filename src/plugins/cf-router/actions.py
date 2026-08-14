@@ -8,6 +8,7 @@ Test override: set the module-level path constants before invoking hooks
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import contextvars
@@ -2078,12 +2079,18 @@ def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
 def identify_sender_metadata(identifier: str) -> dict:
     """Return identify-sender JSON for phone/LID/JID, or an unknown-role stub.
 
-    A COPY of the memoized payload: callers used to each get a freshly parsed
-    dict, and handing them the shared one would let a caller's mutation rewrite
-    another arm's view of the sender.
+    A DEEP copy of the memoized payload: callers used to each get a freshly
+    parsed dict, and handing them the shared one would let a caller's mutation
+    rewrite another arm's view of the sender.
+
+    Deep, not shallow. A shallow `dict(...)` still shares the `roles` LIST by
+    reference, so `metadata["roles"].append(...)` mutates the memoized payload
+    in place and every later reader in the turn — `has_owner_capability`
+    included — sees the tampered list. `roles` IS the authorization surface this
+    memo exists to keep stable, so the copy has to cover it.
     """
     resolution = _resolve_identify_sender(identifier)
-    return dict(resolution.doc) if resolution.ok else {"role": "unknown"}
+    return copy.deepcopy(resolution.doc) if resolution.ok else {"role": "unknown"}
 
 
 def audit_dispatcher_routed(
