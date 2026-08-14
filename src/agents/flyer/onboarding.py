@@ -23,6 +23,10 @@ from schemas import (
     FlyerIntakeSession,
     FlyerOnboardingSession,
     FlyerPlanTier,
+    # Module-private in schemas, imported here on purpose: the session-key
+    # derivation must be the SAME one `find_session` matches on, or the write
+    # side would dedupe on a key the read side never looks for.
+    _flyer_onboarding_session_key,
 )
 
 try:
@@ -630,17 +634,21 @@ def _is_other_principal(
 
 
 def _replace_session(store: FlyerCustomerStore, session: FlyerOnboardingSession) -> None:
+    key = _flyer_onboarding_session_key(session)
     store.onboarding_sessions = [
         s for s in store.onboarding_sessions
         if _is_other_principal(s, session.chat_id, session.sender_phone)
+        and not (key and _flyer_onboarding_session_key(s) == key)
     ]
     store.onboarding_sessions.append(session)
 
 
 def _discard_session(store: FlyerCustomerStore, session: FlyerOnboardingSession) -> None:
+    key = _flyer_onboarding_session_key(session)
     store.onboarding_sessions = [
         s for s in store.onboarding_sessions
         if _is_other_principal(s, session.chat_id, session.sender_phone)
+        and not (key and _flyer_onboarding_session_key(s) == key)
     ]
 
 
