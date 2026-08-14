@@ -3103,12 +3103,21 @@ def _send_flyer_finalization_failed_ack(
     # PR-ζ.1b §13.F — kwarg flip. Single caller (2969) passes
     # for_command(PROJECT_ACTIONS, "finalization.failed_ack",
     # is_regulated_action=False). Wrapper passes through.
+    #
+    # P0-4: this used to promise "I'll review it and send an update here" with
+    # nothing queued, nothing scheduled and no timer that would ever produce
+    # that message. The project stays in `finalizing_assets` — the only status
+    # `send-flyer-package` accepts, and the one the retry gate keys on — so the
+    # honest copy names the reply that genuinely re-enters that gate. "SEND IT"
+    # is in the approval alias set; bare "SEND" is in neither alias set and
+    # would be an instruction that does nothing.
     return actions.send_flyer_text(
         chat_id,
         (
             "Flyer Studio\n"
             "------------\n"
-            "I hit an issue preparing the final files. I'll review it and send an update here."
+            "I could not finish preparing your final files just now, and nothing was sent.\n\n"
+            "Your flyer is still here. Reply SEND IT when you want me to try again."
         ),
         action_context=action_context,
     )
@@ -3120,12 +3129,16 @@ def _send_flyer_final_delivery_failed_ack(
     *,
     action_context: ActionExecutionContext,
 ) -> tuple[bool, str, str]:
+    # P0-4, same reasoning as the finalization ack above. The one difference is
+    # the truth: finalization failed BEFORE anything went out, this one failed
+    # at the send itself, so only that clause differs.
     return actions.send_flyer_text(
         chat_id,
         (
             "Flyer Studio\n"
             "------------\n"
-            "I hit an issue sending the final files. I'll review it and send an update here."
+            "I could not send your final files just now.\n\n"
+            "Your flyer is still here. Reply SEND IT when you want me to try again."
         ),
         action_context=action_context,
     )

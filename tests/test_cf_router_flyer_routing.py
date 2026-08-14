@@ -6622,11 +6622,7 @@ def test_final_visual_qa_failure_after_approve_gets_review_ack(monkeypatch):
     )
 
     assert result == {"action": "skip", "reason": "cf-router flyer active: finalization failed for F0085"}
-    assert sent == [
-        "Flyer Studio\n"
-        "------------\n"
-        "I hit an issue preparing the final files. I'll review it and send an update here."
-    ]
+    assert sent == [NEW_FINALIZATION_ACK]
     assert "approval has been processed" not in sent[0].lower()
     assert audit_reasons
     assert audit_reasons[-1] == "flyer_primary_failed"
@@ -6793,11 +6789,7 @@ def test_finalizing_assets_retry_failure_sends_delivery_failure_ack(monkeypatch)
     )
 
     assert result == {"action": "skip", "reason": "cf-router flyer active: final delivery retry failed for F7791"}
-    assert sent == [
-        "Flyer Studio\n"
-        "------------\n"
-        "I hit an issue sending the final files. I'll review it and send an update here."
-    ]
+    assert sent == [NEW_DELIVERY_ACK]
     assert audits[-2]["reason"] == "flyer_primary_failed"
     assert "retry_finalizing_assets=true" in audits[-2]["detail"]
     assert audits[-1]["reason"] == "flyer_primary_failed"

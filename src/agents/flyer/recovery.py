@@ -66,6 +66,23 @@ FORBIDDEN_CUSTOMER_TERMS = [
     "deploy",
 ]
 
+# Ways of promising the customer an unprompted future message. Truthful ONLY
+# when something is actually queued to produce it, which is what
+# `followup_recorded` asserts. The list started as the single literal "follow
+# up", which is why the finalize and delivery failure acks could say "I'll
+# review it and send an update here" — nothing queued, nothing scheduled,
+# nothing that would ever send it — and pass the lint (P0-4).
+UNBACKED_FOLLOWUP_PHRASES = (
+    "follow up",
+    "send an update",
+    "send you an update",
+    "get back to you",
+    "let you know",
+    "update you",
+    "keep you posted",
+    "circle back",
+)
+
 BUNDLE_SENSITIVE_KEYS = {
     "chat_id",
     "sender_phone",
@@ -582,7 +599,7 @@ def lint_recovery_copy(text: str, failure_class: str, followup_recorded: bool) -
         reasons.append("project_id")
     if re.search(r"\b\d+\s*(minutes?|hours?)\b", lower):
         reasons.append("sla_promise")
-    if "follow up" in lower and not followup_recorded:
+    if not followup_recorded and any(p in lower for p in UNBACKED_FOLLOWUP_PHRASES):
         reasons.append("followup_without_record")
     return CopyLintResult(ok=not reasons, reasons=reasons)
 
