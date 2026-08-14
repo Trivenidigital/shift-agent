@@ -939,7 +939,11 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             if admit:
                 if flyer_generation_enabled:
                     phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
-                    if role != "owner" and actions.has_non_delivered_flyer_project_by_sender(phone, chat_id):
+                    # Staleness-bounded on purpose: an abandoned or orphaned
+                    # flyer row used to suppress catering routing for this
+                    # sender permanently. Only THIS site is bounded — the other
+                    # two callers govern flyer routing and need their own review.
+                    if role != "owner" and actions.has_recent_non_delivered_flyer_project_by_sender(phone, chat_id):
                         return None
                 f7_result = _try_f7_primary_intercept(
                     text, chat_id, event, signals=signals,
@@ -1848,6 +1852,9 @@ def _try_flyer_primary_intercept(
     if exact_reference_edit:
         visible_request = " ".join(actions.flyer_visible_message_text(text).split())
         raw_request = f"Edit uploaded flyer/source artwork. Customer requested: {visible_request}"
+    quota_precheck = _flyer_quota_precheck_or_reply(chat_id, phone, message_id)
+    if quota_precheck is not None:
+        return quota_precheck
     ok, detail, project = actions.trigger_create_flyer_project(
         customer_phone=phone,
         chat_id=chat_id,
@@ -2160,6 +2167,9 @@ def _try_flyer_reference_scope_choice_intercept(text: str, chat_id: str, event: 
         f"Create a new original {business_name} flyer with a similar menu/content structure. "
         f"Do not copy {source} branding/layout exactly."
     ).strip()
+    quota_precheck = _flyer_quota_precheck_or_reply(chat_id, phone, message_id)
+    if quota_precheck is not None:
+        return quota_precheck
     ok, detail, project = actions.trigger_create_flyer_project(
         customer_phone=phone,
         chat_id=chat_id,
@@ -2877,6 +2887,73 @@ def _try_flyer_reference_scope_authorization_intercept(text: str, chat_id: str, 
     return {"action": "skip", "reason": f"cf-router flyer reference scope authorization {choice}"}
 
 
+# Shared by the pre-create precheck and the reserve path, so the two cannot
+# drift apart in what a blocked customer is told.
+_FLYER_QUOTA_BLOCKED_FALLBACK = (
+    "Flyer Studio\n------------\n"
+    "Please complete payment first. Tap Create One Flyer - $4, pay, then send your flyer details here."
+)
+
+
+def _flyer_quota_precheck_or_reply(
+    chat_id: str, phone: str, message_id: str,
+) -> Optional[dict]:
+    """Answer the quota question BEFORE any project row exists.
+
+    THE DEFECT THIS CLOSES: `trigger_create_flyer_project` ran first and the
+    quota wall was hit a few lines later, leaving the project row behind
+    forever. Nothing releases it — both quota-block returns from
+    `_reserve_flyer_access_or_reply` yield `access == ""`, and
+    `_release_flyer_access` short-circuits on that with `no_access_to_release`,
+    so there is no reservation to give back and "release on the block path" is
+    a no-op. The orphan row then makes
+    `has_non_delivered_flyer_project_by_sender` true for that sender forever,
+    and the catering-admission gate hands every later catering inquiry from
+    them to the LLM.
+
+    EARLY-OUT ONLY, and only on a DEFINITE block. A paid guest order (which
+    bypasses quota entirely), an allowed quota, a missing customer record, a
+    subprocess failure or an unparseable result all return None so the inbound
+    takes today's path unchanged and the AUTHORITATIVE reservation still
+    happens after the project exists. That keeps this a pure optimisation of
+    when the customer is told, never a new way to be refused.
+    """
+    try:
+        if actions.find_paid_flyer_guest_order(phone, chat_id):
+            return None
+        ok, detail, result = actions.trigger_flyer_check_quota(
+            customer_phone=phone, message_id=message_id,
+        )
+    except Exception:  # noqa: BLE001 — an optimisation must never break the route
+        # Latent rather than live: both calls already return rather than raise.
+        # But this runs ahead of project creation on the primary flyer path, so
+        # a future raise inside either would take out flyer creation entirely
+        # to save a row. Falling through costs at most one orphan row, which is
+        # the exact state this branch is an optimisation against.
+        return None
+    if not ok or not result or result.get("quota_allowed") is not False:
+        return None
+    ack_ok, mid, err = actions.send_flyer_text(
+        chat_id,
+        str(result.get("reply_text") or "") or _FLYER_QUOTA_BLOCKED_FALLBACK,
+        action_context=build_action_context(
+            action_id="flyer.quota.blocked",
+            is_regulated_action=False,
+        ),
+    )
+    actions.audit_intercepted(
+        reason="flyer_quota_blocked",
+        chat_id=chat_id,
+        subprocess_rc=0 if ack_ok else 2,
+        detail=(
+            f"project_id=; precheck=pre_create; quota_detail={detail[:300]}; "
+            f"ack_message_id={mid}; ack_error={err[:200]}"
+        ),
+    )
+    return {"action": "skip",
+            "reason": "cf-router flyer quota blocked before project creation"}
+
+
 def _reserve_flyer_access_or_reply(
     chat_id: str,
     phone: str,
@@ -2930,10 +3007,7 @@ def _reserve_flyer_access_or_reply(
     reply = (result or {}).get("reply_text") if result else ""
     ack_ok, mid, err = actions.send_flyer_text(
         chat_id,
-        reply or (
-            "Flyer Studio\n------------\n"
-            "Please complete payment first. Tap Create One Flyer - $4, pay, then send your flyer details here."
-        ),
+        reply or _FLYER_QUOTA_BLOCKED_FALLBACK,
         action_context=build_action_context(
             action_id="flyer.quota.blocked",
             is_regulated_action=False,

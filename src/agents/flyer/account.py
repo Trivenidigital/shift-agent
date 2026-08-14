@@ -490,6 +490,50 @@ def activate_customer(
     return AccountResult(True, True, _activation_reply(customer, tiers), customer.customer_id, customer.status)
 
 
+def check_quota(
+    *,
+    state_path: Path,
+    customer_phone: str,
+    plan_tiers: Optional[list[FlyerPlanTier]] = None,
+    now: Optional[datetime] = None,
+) -> AccountResult:
+    """Would `reserve_quota` admit this customer right now — without reserving?
+
+    READ-ONLY: no usage event, no store write. It exists so the router can
+    discover a request is quota-blocked BEFORE it creates a flyer project row.
+    A row created and then blocked is never cleaned up (there is no reservation
+    to release), and it permanently suppresses catering routing for that
+    sender.
+
+    Takes no `project_id` because there is no project yet — which is the whole
+    point — and `reserve_quota` needs one only to key the reservation, never to
+    look anything up. The one branch that behaves differently without it is
+    reserve's idempotent re-reservation of an EXISTING reservation, and a
+    project that does not exist cannot have one.
+
+    The blocked reply comes from the same `_quota_blocked_reply` the reserve
+    path uses, so the customer-visible text cannot drift between the two.
+    """
+    now = now or datetime.now(timezone.utc)
+    tiers = plan_tiers or FlyerPlanTier.default_tiers()
+    store = load_customer_store(state_path)
+    customer = store.find_customer_by_phone(customer_phone)
+    if customer is None or customer.status not in {"active", "trial"}:
+        return AccountResult(False, True, "", detail="active_customer_not_found")
+    customer = _roll_period(customer, now)
+    if customer.can_create_flyer(tiers):
+        return AccountResult(True, True, "", customer.customer_id, customer.status,
+                             quota_allowed=True)
+    # NO typed `FlyerQuotaBlocked` row here, deliberately: its `project_id` is
+    # constrained to `^F\d{4,}$`, and the entire point of this function is that
+    # no project exists yet. Inventing an id to satisfy the pattern would put a
+    # reference to a nonexistent project into the audit chain. The block is
+    # still audited one layer up, where cf-router writes its
+    # `flyer_quota_blocked` intercept row for the same decision.
+    return AccountResult(True, True, _quota_blocked_reply(customer, tiers),
+                         customer.customer_id, customer.status, quota_allowed=False)
+
+
 def reserve_quota(
     *,
     state_path: Path,
