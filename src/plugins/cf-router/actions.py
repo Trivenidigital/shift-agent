@@ -6315,7 +6315,8 @@ def save_flyer_reference_scope_pending(
         state = _read_reference_scope_state(now_ts)
         pending = [
             item for item in state.get("pending", [])
-            if item.get("chat_id") != chat_id and item.get("sender_phone") != sender_phone
+            if item.get("chat_id") != chat_id
+            and (not sender_phone or item.get("sender_phone") != sender_phone)
         ]
         pending.append({
             "chat_id": chat_id,

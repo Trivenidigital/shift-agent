@@ -1608,7 +1608,7 @@ class FlyerCustomerStore(BaseModel):
         self.intake_sessions = [
             s for s in self.intake_sessions
             if s.chat_id != session.chat_id
-            and s.sender_phone != session.sender_phone
+            and (not session.sender_phone or s.sender_phone != session.sender_phone)
             and not (key and _flyer_intake_session_key(s) == key)
         ]
         self.intake_sessions.append(session)
@@ -1626,11 +1626,14 @@ class FlyerCustomerStore(BaseModel):
         return expired
 
     def discard_intake_session(self, session: FlyerIntakeSession) -> None:
+        # `not session.sender_phone` guard: a phone-less session (LID-only
+        # sender) must not match every other phone-less session — `None !=
+        # None` is False, which turned any discard into a store-wide wipe.
         key = _flyer_intake_session_key(session)
         self.intake_sessions = [
             s for s in self.intake_sessions
             if s.chat_id != session.chat_id
-            and s.sender_phone != session.sender_phone
+            and (not session.sender_phone or s.sender_phone != session.sender_phone)
             and not (key and _flyer_intake_session_key(s) == key)
         ]
 

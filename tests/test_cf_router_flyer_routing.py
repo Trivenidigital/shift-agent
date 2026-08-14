@@ -8512,3 +8512,57 @@ def test_send_warn_tier_concept_previews_requires_customer_text(monkeypatch):
     params = sig.parameters
     assert "customer_text" in params
     assert params["customer_text"].default is inspect.Parameter.empty
+
+
+def test_save_flyer_reference_scope_pending_keeps_other_lid_only_principal(tmp_path):
+    """A LID-only sender has no phone. Pre-fix the prune kept a row only when
+    its phone was unequal to the incoming one, and `"" != ""` is False — so any
+    new LID-only scope-pending row deleted every other customer's row."""
+    actions = _load_actions()
+    actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"
+
+    for chat_id, media in (
+        ("100000000000002@lid", "/tmp/ref-b.jpg"),
+        ("100000000000001@lid", "/tmp/ref-a.jpg"),
+    ):
+        actions.save_flyer_reference_scope_pending(
+            chat_id=chat_id,
+            sender_phone="",
+            customer={"business_name": "Lakshmis Kitchen"},
+            raw_request="Use this flyer as a reference.",
+            media_path=media,
+            scope={"visible_organization_names": ["Triveni Express"]},
+        )
+
+    state = actions._read_reference_scope_state()
+    assert {row["chat_id"] for row in state.get("pending", [])} == {
+        "100000000000001@lid",
+        "100000000000002@lid",
+    }
+
+    # The earlier prospect's row is still consumable under their own chat.
+    pending = actions.consume_flyer_reference_scope_choice(
+        "use as reference",
+        chat_id="100000000000002@lid",
+        sender_phone="",
+    )
+    assert pending is not None
+    assert pending["media_path"] == "/tmp/ref-b.jpg"
+
+
+def test_save_flyer_reference_scope_pending_still_replaces_same_chat_id(tmp_path):
+    actions = _load_actions()
+    actions.FLYER_REFERENCE_SCOPE_PATH = tmp_path / "reference_scope_pending.json"
+
+    for media in ("/tmp/ref-old.jpg", "/tmp/ref-new.jpg"):
+        actions.save_flyer_reference_scope_pending(
+            chat_id="100000000000001@lid",
+            sender_phone="",
+            customer={"business_name": "Lakshmis Kitchen"},
+            raw_request="Use this flyer as a reference.",
+            media_path=media,
+            scope={"visible_organization_names": ["Triveni Express"]},
+        )
+
+    state = actions._read_reference_scope_state()
+    assert [row["media_path"] for row in state.get("pending", [])] == ["/tmp/ref-new.jpg"]

@@ -218,3 +218,59 @@ def test_store_replace_intake_session_dedupes_identity_twin(tmp_path, monkeypatc
     # Exactly one session survives — no LID+phone duplicate for one customer.
     assert len(store.intake_sessions) == 1
     assert store.intake_sessions[0].status == "choosing_language"
+
+
+# ── (1c) LID-only scoping: `None != None` must not mean "same principal" ──────
+#
+# Two unmapped LID prospects both carry sender_phone=None. Pre-fix the
+# replace/discard predicates kept a row only when its phone was unequal to the
+# incoming one, so any new LID-only session evicted every other one.
+
+def _lid_only_session(chat_id: str, *, status="choosing_mode"):
+    import schemas
+    return schemas.FlyerIntakeSession(
+        chat_id=chat_id,
+        sender_phone=None,
+        status=status,
+        source="start_trial",
+        started_at=datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc),
+    )
+
+
+def test_store_replace_intake_session_keeps_other_lid_only_principal(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHIFT_AGENT_LID_CACHE_PATH", str(tmp_path / "lid-cache.json"))
+    _write_lid_cache(tmp_path / "lid-cache.json")
+    import schemas
+    other = _lid_only_session("555000111222444@lid")
+    store = schemas.FlyerCustomerStore(intake_sessions=[other])
+
+    store.replace_intake_session(_lid_only_session(UNMAPPED_LID))
+
+    assert {s.chat_id for s in store.intake_sessions} == {UNMAPPED_LID, "555000111222444@lid"}
+
+
+def test_store_discard_intake_session_keeps_other_lid_only_principal(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHIFT_AGENT_LID_CACHE_PATH", str(tmp_path / "lid-cache.json"))
+    _write_lid_cache(tmp_path / "lid-cache.json")
+    import schemas
+    other = _lid_only_session("555000111222444@lid")
+    store = schemas.FlyerCustomerStore(
+        intake_sessions=[other, _lid_only_session(UNMAPPED_LID)]
+    )
+
+    store.discard_intake_session(_lid_only_session(UNMAPPED_LID))
+
+    assert [s.chat_id for s in store.intake_sessions] == ["555000111222444@lid"]
+
+
+def test_store_replace_intake_session_still_replaces_same_chat_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHIFT_AGENT_LID_CACHE_PATH", str(tmp_path / "lid-cache.json"))
+    _write_lid_cache(tmp_path / "lid-cache.json")
+    import schemas
+    store = schemas.FlyerCustomerStore(intake_sessions=[_lid_only_session(UNMAPPED_LID)])
+
+    store.replace_intake_session(_lid_only_session(UNMAPPED_LID, status="choosing_language"))
+
+    assert len(store.intake_sessions) == 1
+    assert store.intake_sessions[0].status == "choosing_language"
