@@ -3642,6 +3642,45 @@ class EquipmentMaintenanceConfig(BaseModel):
         return sorted(set(v), reverse=True)
 
 
+# Agent #19 equipment store (Wave-1 2026-08-08). state/equipment-items.json is
+# the mutable source of truth, mirroring the Agent #13 compliance-items shape
+# for the same reason: safe_io has no atomic_write_yaml, so JSON is the only
+# safely-mutable on-disk format.
+#
+# Deliberately NOT sharing a store abstraction with compliance: the entities
+# differ (an asset with a service interval vs a recurring org obligation), and
+# v0.2 adds an append-only issue history + vendor routing that compliance has no
+# analogue for.
+class EquipmentItem(BaseModel):
+    """One tracked asset with a preventive-maintenance schedule.
+
+    id constraint matches ComplianceItem's rationale: lowercase/underscore only.
+    No ':' — v0.2's reminder sentinel keys will use `<id>:<gate_days>` and a
+    colon in the id would corrupt key parsing. Settling it now costs nothing;
+    discovering it after operators have seeded ids costs a migration.
+    """
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9_]+$")
+    name: str = Field(min_length=1, max_length=100)
+    category: Literal[
+        "refrigeration", "cooking", "pos", "vehicle",
+        "hvac", "fire_safety", "other",
+    ]
+    next_service_date: date          # the NEXT scheduled service
+    interval_days: int = Field(ge=0, le=3650)  # 0 = one-shot (no recurrence)
+    location_id: Optional[str] = Field(default=None, max_length=40)
+    vendor_name: Optional[str] = Field(default=None, max_length=200)
+    vendor_phone: Optional[str] = Field(default=None, max_length=40)
+    serial: Optional[str] = Field(default=None, max_length=80)
+    notes: Optional[str] = Field(default=None, max_length=500)
+
+
+class EquipmentItemsFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal[1] = 1
+    items: list[EquipmentItem] = Field(default_factory=list, max_length=200)
+
+
 # Agent #22 — P&L Anomaly Detective (Tier-2 scaffold; PR-Agent22-v0.1 2026-05-04)
 # Replaces retired Agent #17 Unit Economics. v0.1 ships scaffold only —
 # anomaly-detection logic + POS integration deferred to v0.2 (gated on
@@ -7168,6 +7207,25 @@ class EquipmentMaintenanceDeclined(_BaseEntry):
     reason: Literal["agent_disabled"]
 
 
+class EquipmentItemUpserted(_BaseEntry):
+    """An asset was added to (or updated in) state/equipment-items.json.
+
+    Wave-1 2026-08-08: Agent #19's v0.1 SKILL was a self-declining stub with no
+    store, so the agent was deployed and had no data to answer from. This
+    variant records the seed path for the READ workflow (owner asks what service
+    is due). `replaced` distinguishes seeding a new asset from editing a live
+    service date.
+    """
+    type: Literal["equipment_item_upserted"]
+    equipment_id: str = Field(min_length=1, max_length=80)
+    next_service_date: date
+    interval_days: int = Field(ge=0, le=3650)
+    category: str = Field(min_length=1, max_length=40)
+    actor: Literal["owner", "operator", "system"]
+    replaced: bool
+    previous_next_service_date: Optional[date] = None  # set only when replaced=True
+
+
 class InterLocationTransferProposed(_BaseEntry):
     """Agent #3 proposed an employee transfer between locations to cover a gap."""
     type: Literal["inter_location_transfer_proposed"]
@@ -8104,6 +8162,7 @@ LogEntry = Annotated[
         # PR-Agent19-v0.1 2026-05-04 — Equipment & Maintenance scaffold
         Annotated[EquipmentIssueLogged, Tag("equipment_issue_logged")],
         Annotated[EquipmentMaintenanceDeclined, Tag("equipment_maintenance_declined")],
+        Annotated[EquipmentItemUpserted, Tag("equipment_item_upserted")],
         # Agent #2 Catering Lead
         Annotated[CateringLeadCreated, Tag("catering_lead_created")],
         Annotated[CateringLeadStatusChange, Tag("catering_lead_status_change")],
@@ -8495,6 +8554,7 @@ __all__ = [
     # PR-Agent19-v0.1 — Equipment & Maintenance scaffold
     "EquipmentMaintenanceConfig", "EquipmentIssueLogged",
     "EquipmentMaintenanceDeclined",
+    "EquipmentItem", "EquipmentItemsFile", "EquipmentItemUpserted",
     "CateringLeadCreated", "CateringLeadStatusChange", "CateringLeadRejected", "CateringQuoteDrafted",
     "CateringOwnerApprovalRequested", "CateringOwnerDecision", "CateringQuoteSent",
     "CateringProposalsGenerated", "CateringProposalGenerationFailed",
