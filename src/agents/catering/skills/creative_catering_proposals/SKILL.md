@@ -24,9 +24,10 @@ deterministic generator rather than composing an item list yourself.
    id is provided, resolve the active lead from sender context in
    `/opt/shift-agent/state/catering-leads.json`.
 2. Invoke the deterministic menu-grounded generator (it reads
-   `catering-menu.json`, honors the lead's headcount + dietary mix, and produces
-   2 options — or 3 when the request text asks for `three` / `3` — each a COMPLETE
-   course-spanning menu; you supply NO options JSON):
+   `catering-menu.json`, classifies the lead's stated diet, and produces 2 options —
+   or 3 when the request text asks for `three` / `3` — each a COMPLETE
+   course-spanning menu; you supply NO options JSON). Headcount is NOT an input to
+   item selection; it only drives the owner-side indicative pricing ledger:
 
    ```bash
    /usr/local/bin/create-catering-proposal-options \
@@ -40,12 +41,25 @@ deterministic generator rather than composing an item list yourself.
 ## Composition rules
 
 - **Default (deterministic generation)** — do NOT compose the item list. The
-  `--auto-generate-from-menu` mode selects menu-grounded options that fit the
-  lead's headcount and dietary mix (e.g. a 90-non-veg / 30-veg wedding gets options
-  with real non-veg and veg catalog items, not veg-only) and guarantees each option
-  is a COMPLETE menu spanning courses (at least one starter/appetizer AND at least
-  one main; a dessert/side when the menu offers them). This invariant lives in the
-  script, not in an LLM-composed payload.
+  `--auto-generate-from-menu` mode selects menu-grounded options and guarantees each
+  option is a COMPLETE menu spanning courses (at least one starter/appetizer AND at
+  least one main; a dessert/side when the menu offers them). These invariants live in
+  the script, not in an LLM-composed payload.
+- **Diet handling (what the script actually enforces)** — the script classifies the
+  lead as one of `veg_only` / `non_veg_only` / `mixed` / `unknown` from
+  `extracted.dietary_restrictions` plus the raw inquiry text, and then:
+  - `veg_only` (all-vegetarian, Jain, vegan, temple event) — non-veg items are
+    excluded from the candidate pool entirely, and a fail-closed guard refuses to
+    send any option containing a non-veg item. Vegan and Jain fold into `veg_only`
+    because the menu schema carries no vegan/Jain flag, so those leads still need
+    owner review before send.
+  - `mixed` (e.g. a 90-non-veg / 30-veg wedding) — every option gets BOTH real
+    non-veg and veg catalog items, enforced fail-closed.
+  - `non_veg_only` and `unknown` — both diets stay available; an unstated diet is
+    never guessed, and the owner reviews before send.
+  Do NOT claim to the owner or the customer that the script honors any dietary
+  detail beyond this — headcount, allergies, and no-onion/no-garlic are NOT inputs
+  to item selection.
 - **Mix-and-match / recomposition** — when the customer asks to combine sections
   of already-SENT options (e.g. "option 1 starters with the option 2 mains",
   "keep option 2's mains, option 1's desserts"), do NOT compose the item list

@@ -717,11 +717,11 @@ def test_mixed_lead_degenerate_options_fail_closed_no_send(bridge_server, env_di
     assert parsed["notify_calls"], "owner is alerted on fail-closed"
 
 
-def test_non_mixed_lead_skips_section_balance_guard(bridge_server, env_dir):
-    """The guard is a no-op for a non-mixed lead — a single-diet menu is a legitimate
-    delivery when the event is not a mixed veg/non-veg event."""
+def test_unknown_diet_lead_skips_section_balance_guard(bridge_server, env_dir):
+    """The guard is a no-op for a lead that states no diet — a single-diet menu is a
+    legitimate delivery when nothing is known, and the owner reviews before send."""
     port, stub = bridge_server
-    _seed_lead(env_dir, dietary=[])  # no mixed-diet signal
+    _seed_lead(env_dir, dietary=[])  # no diet signal at all
     _seed_menu(env_dir, WEDDING_MENU)
     veg_only = [
         {"option_id": "1", "style_key": "balanced_mixed", "tier": "balanced",
@@ -733,7 +733,117 @@ def test_non_mixed_lead_skips_section_balance_guard(bridge_server, env_dir):
     result, parsed = _run_script(env_dir, port, options=veg_only)
 
     assert parsed["rc"] == 0, result.stderr
-    assert len(stub.requests) == 1, "single-diet menu delivered for a non-mixed event"
+    assert len(stub.requests) == 1, "single-diet menu delivered for an unstated-diet event"
+
+
+def test_unknown_diet_lead_auto_generate_keeps_both_diets(bridge_server, env_dir):
+    """An unstated diet must NOT be guessed either way — generation keeps the full
+    menu pool, so the non-veg items still appear."""
+    port, stub = bridge_server
+    _seed_lead(env_dir, dietary=[])
+    _seed_menu(env_dir, WEDDING_MENU)
+
+    result, parsed = _run_script(env_dir, port, auto_generate=True)
+
+    assert parsed["rc"] == 0, result.stderr
+    sent = [s for s in _read_store(env_dir)["sets"] if s["status"] == "SENT"]
+    assert len(sent) == 1
+    for option in sent[0]["options"]:
+        assert any(n in _NON_VEG_NAMES for n in option["item_names"]), (
+            f"option {option['option_id']} dropped non-veg for an unstated-diet lead")
+
+
+# ── Diet-aware generation: a stated all-veg / Jain / temple event ─────────────
+
+def test_veg_only_lead_auto_generate_excludes_all_non_veg(bridge_server, env_dir):
+    """A stated all-vegetarian event must receive ZERO non-veg items in EVERY option,
+    even though the menu offers non-veg — and the options must stay coherent
+    (multi-section, with a main) after the exclusion."""
+    port, stub = bridge_server
+    _seed_lead(env_dir, dietary=["veg"],
+               raw_inquiry="Temple event for 120 guests, pure vegetarian only")
+    _seed_menu(env_dir, WEDDING_MENU)
+
+    result, parsed = _run_script(
+        env_dir, port,
+        request_text="Please send two sample menus for our temple event.",
+        auto_generate=True,
+    )
+
+    assert parsed["rc"] == 0, result.stderr
+    sent = [s for s in _read_store(env_dir)["sets"] if s["status"] == "SENT"]
+    assert len(sent) == 1 and len(sent[0]["options"]) == 2
+    for option in sent[0]["options"]:
+        names = option["item_names"]
+        non_veg = [n for n in names if n in _NON_VEG_NAMES]
+        assert not non_veg, f"option {option['option_id']} forced non-veg {non_veg}: {names}"
+        cats = {_cat_of(n) for n in names}
+        assert len(cats) >= 3, f"option {option['option_id']} spans too few sections: {sorted(cats)}"
+        assert "main" in cats, f"option {option['option_id']} has no main course: {names}"
+    body = stub.requests[0]["message"]
+    for non_veg_name in _NON_VEG_NAMES:
+        assert non_veg_name not in body, f"{non_veg_name} reached a vegetarian-only customer"
+
+
+def test_veg_only_lead_non_veg_options_fail_closed_no_send(bridge_server, env_dir):
+    """Owner-supplied options bypass the generation-side pool filter, so the guard is
+    the backstop: a non-veg item smuggled into a vegetarian-only lead's options fails
+    closed (owner alerted, nothing sent) rather than reaching the customer."""
+    port, stub = bridge_server
+    _seed_lead(env_dir, dietary=["jain"], raw_inquiry="Jain wedding, no onion no garlic")
+    _seed_menu(env_dir, WEDDING_MENU)
+    smuggled = [
+        {"option_id": "1", "style_key": "balanced_mixed", "tier": "balanced",
+         "item_names": ["Idli", "Paneer Butter Masala", "Gulab Jamun"]},
+        {"option_id": "2", "style_key": "premium_mixed", "tier": "premium",
+         "item_names": ["Masala Dosa", "Chicken Biryani", "Gajar Halwa"]},
+    ]
+
+    result, parsed = _run_script(env_dir, port, options=smuggled)
+
+    assert parsed["rc"] == 2, result.stderr
+    assert stub.requests == [], "no non-veg menu is sent to a vegetarian-only event"
+    failed = [row for row in _read_audit(env_dir)
+              if row["type"] == "catering_proposal_generation_failed"]
+    assert failed and failed[0]["reason"] == "insufficient_section_balance"
+    assert "Chicken Biryani" in failed[0]["detail"]
+    assert parsed["notify_calls"], "owner is alerted on fail-closed"
+
+
+def _fake_lead(dietary=None, raw_inquiry: str = "", notes: str = ""):
+    """Minimal stand-in for the diet classifier, which reads only these three fields."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        raw_inquiry=raw_inquiry,
+        extracted=SimpleNamespace(dietary_restrictions=dietary or [], notes=notes),
+    )
+
+
+@pytest.mark.parametrize(
+    "dietary,raw_inquiry,expected",
+    [
+        (["veg"], "", "veg_only"),
+        (["vegetarian"], "", "veg_only"),
+        (["jain"], "", "veg_only"),
+        (["vegan"], "", "veg_only"),
+        (["pure veg"], "", "veg_only"),
+        ([], "Temple lunch, pure veg only please", "veg_only"),
+        ([], "Jain family gathering for 40", "veg_only"),
+        ([], "Office lunch, no meat", "veg_only"),
+        (["halal"], "", "non_veg_only"),
+        (["non-veg"], "", "non_veg_only"),
+        ([], "Non-veg biryani party for 60", "non_veg_only"),
+        (["veg", "non-veg"], "", "mixed"),
+        ([], "Wedding: 90 veg and 90 non-veg guests", "mixed"),
+        ([], "Need catering ideas", "unknown"),
+        ([], "", "unknown"),
+    ],
+)
+def test_lead_diet_profile_classification(env_dir, dietary, raw_inquiry, expected):
+    mod = _load_script_for_env(env_dir)
+
+    assert mod._lead_diet_profile(_fake_lead(dietary, raw_inquiry)) == expected
 
 
 # ── PR-D mix-and-match recomposition (deterministic combine of SENT sections) ──
