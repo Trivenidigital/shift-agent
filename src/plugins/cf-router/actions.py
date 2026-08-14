@@ -4165,6 +4165,23 @@ def _flyer_candidate_projects_by_sender(phone: Optional[str], chat_id: str) -> l
     return matches
 
 
+def _flyer_project_recency_key(row: dict) -> datetime:
+    """Chronological ordering key for the newest-updated heuristic.
+
+    Comparing the raw ISO strings inverts whenever they first differ at a FORMAT
+    character rather than a time digit: '...20:40:00.900000Z' sorts below
+    '...20:40:00Z' because '.' < 'Z', and a local-offset stamp sorts against a
+    'Z' one by wall-clock digits rather than by instant.
+
+    A row with no parseable timestamp sorts at epoch zero: it loses every tie,
+    but it is still a candidate, so a project missing both stamps stays
+    reachable when it is the only one rather than becoming unselectable.
+    """
+    ts = (_flyer_intake_parse_ts(row.get("updated_at"))
+          or _flyer_intake_parse_ts(row.get("created_at")))
+    return ts or datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
 def find_active_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> Optional[dict]:
     """Look up a non-terminal flyer project by sender phone, for routing
     new-request / revision / approval flow. Newest-updated heuristic; see
@@ -4174,7 +4191,12 @@ def find_active_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> O
         matches = _flyer_candidate_projects_by_sender(phone, chat_id)
         if not matches:
             return None
-        return max(matches, key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""))
+        # RE-TARGET HAZARD: recency is driven by updated_at, so ANY mutation of
+        # an older project — an operator completing a long-queued manual edit,
+        # for instance — moves it to the front and silently re-points the
+        # customer's next revision onto it. Which field should drive selection
+        # is a design question, deliberately not decided here.
+        return max(matches, key=_flyer_project_recency_key)
     except Exception:
         return None
 
