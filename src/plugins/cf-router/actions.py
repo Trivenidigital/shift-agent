@@ -5058,7 +5058,19 @@ def _with_starter_prompt_metadata(customer: dict, store: dict) -> dict:
 
 
 def find_flyer_customer_by_sender(phone: Optional[str], chat_id: str) -> Optional[dict]:
-    """Return registered Flyer customer for this sender, if any."""
+    """Return registered Flyer customer for this sender, if any.
+
+    MONOTONIC in identity knowledge: learning more about who the sender is may
+    only ever widen recognition. The chat_id clause used to be reachable ONLY
+    when no phone resolved, so a customer onboarded under a LID turned into an
+    unknown sender the moment the lid-cache learned their phone pairing — better
+    data made the answer worse. Every clause below is now reachable, tried
+    narrowest-evidence-first, and each one only ADDS candidates.
+
+    Ambiguity is NOT resolved by guessing. Two customers really can share a
+    number, and handing one of them the other's account is a cross-customer
+    disclosure, so a tie that the chat_id cannot break still returns None.
+    """
     canonical = _canonical_phone(phone)
     if not canonical and chat_id.endswith("@s.whatsapp.net"):
         canonical = _canonical_phone(chat_id.split("@", 1)[0])
@@ -5066,24 +5078,56 @@ def find_flyer_customer_by_sender(phone: Optional[str], chat_id: str) -> Optiona
         return None
     try:
         store = _read_customer_state()
-        if not canonical and chat_id:
-            matches = [
-                customer for customer in store.get("customers", [])
-                if isinstance(customer, dict) and customer.get("primary_chat_id") == chat_id
+        customers = [c for c in store.get("customers", []) if isinstance(c, dict)]
+
+        def _by_chat_id() -> Optional[dict]:
+            if not chat_id:
+                return None
+            rows = [c for c in customers if c.get("primary_chat_id") == chat_id]
+            return rows[0] if len(rows) == 1 else None
+
+        if canonical:
+            matches = []
+            for customer in customers:
+                numbers = set(customer.get("authorized_request_numbers") or [])
+                for key in ("business_whatsapp_number", "onboarded_by_phone", "public_phone"):
+                    value = customer.get(key)
+                    if value:
+                        numbers.add(value)
+                if canonical in numbers:
+                    matches.append(customer)
+            if len(matches) == 1:
+                return _with_starter_prompt_metadata(matches[0], store)
+            if len(matches) > 1:
+                # Shared number. The chat_id is stronger evidence than the
+                # number here, so break the tie with it when it names exactly
+                # one of the tied records; otherwise keep refusing.
+                narrowed = [c for c in matches if chat_id and c.get("primary_chat_id") == chat_id]
+                if len(narrowed) == 1:
+                    return _with_starter_prompt_metadata(narrowed[0], store)
+                return None
+            # No phone membership. Fall through rather than returning None —
+            # this is the anti-monotonic edge: the record may predate the
+            # pairing and carry only a chat_id.
+
+        exact_chat = _by_chat_id()
+        if exact_chat is not None:
+            return _with_starter_prompt_metadata(exact_chat, store)
+
+        # Canonical convergence, the same additive clause the onboarding and
+        # intake finders carry: a customer onboarded under one identifier must
+        # stay recognized when the other one shows up.
+        want_key = flyer_canonical_identity_key(chat_id, phone)
+        if want_key:
+            keyed = [
+                c for c in customers
+                if flyer_canonical_identity_key(
+                    str(c.get("primary_chat_id") or ""), c.get("onboarded_by_phone")
+                ) == want_key
             ]
-            return _with_starter_prompt_metadata(matches[0], store) if len(matches) == 1 else None
-        if not canonical:
-            return None
-        matches = []
-        for customer in store.get("customers", []):
-            numbers = set(customer.get("authorized_request_numbers") or [])
-            for key in ("business_whatsapp_number", "onboarded_by_phone", "public_phone"):
-                value = customer.get(key)
-                if value:
-                    numbers.add(value)
-            if canonical in numbers:
-                matches.append(customer)
-        return _with_starter_prompt_metadata(matches[0], store) if len(matches) == 1 else None
+            if len(keyed) == 1:
+                return _with_starter_prompt_metadata(keyed[0], store)
+        return None
     except Exception:
         return None
 
