@@ -205,7 +205,7 @@ def handle_onboarding_message(
         )
         store.onboarding_sessions = [
             s for s in store.onboarding_sessions
-            if s.chat_id != chat_id and (not sender_phone or s.sender_phone != _phone_or_none(sender_phone))
+            if _is_other_principal(s, chat_id, _phone_or_none(sender_phone))
         ]
         store.onboarding_sessions.append(session)
         write_customer_store(state_path, store)
@@ -614,10 +614,25 @@ def _handle_session_control(
     return session.model_copy(update={"status": status, "updated_at": now, **clears})
 
 
+def _is_other_principal(
+    candidate: FlyerOnboardingSession, chat_id: str, phone: Optional[str]
+) -> bool:
+    """True when `candidate` belongs to a different principal than (chat_id, phone).
+
+    A missing phone is the normal shape for LID-only senders (new prospects).
+    `None != None` is False, so an unguarded phone inequality made every
+    phone-less session look like the same principal — one new LID-only session
+    then wiped every other customer's session.
+    """
+    if candidate.chat_id == chat_id:
+        return False
+    return not phone or candidate.sender_phone != phone
+
+
 def _replace_session(store: FlyerCustomerStore, session: FlyerOnboardingSession) -> None:
     store.onboarding_sessions = [
         s for s in store.onboarding_sessions
-        if s.chat_id != session.chat_id and s.sender_phone != session.sender_phone
+        if _is_other_principal(s, session.chat_id, session.sender_phone)
     ]
     store.onboarding_sessions.append(session)
 
@@ -625,7 +640,7 @@ def _replace_session(store: FlyerCustomerStore, session: FlyerOnboardingSession)
 def _discard_session(store: FlyerCustomerStore, session: FlyerOnboardingSession) -> None:
     store.onboarding_sessions = [
         s for s in store.onboarding_sessions
-        if s.chat_id != session.chat_id and s.sender_phone != session.sender_phone
+        if _is_other_principal(s, session.chat_id, session.sender_phone)
     ]
 
 

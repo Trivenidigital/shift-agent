@@ -759,9 +759,13 @@ def _needs_onboarding(customer: Optional[FlyerCustomerProfile], source: str) -> 
 
 
 def _replace_onboarding_session(store: FlyerCustomerStore, session) -> None:
+    # A phone-less session (the normal shape for LID-only senders) must never
+    # match another phone-less one — `None != None` is False, so an unguarded
+    # inequality here evicted every other prospect's session.
     store.onboarding_sessions = [
         s for s in store.onboarding_sessions
-        if s.chat_id != session.chat_id and s.sender_phone != session.sender_phone
+        if s.chat_id != session.chat_id
+        and (not session.sender_phone or s.sender_phone != session.sender_phone)
     ]
     store.onboarding_sessions.append(session)
 
