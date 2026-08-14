@@ -766,3 +766,120 @@ def test_page_path_untouched_by_suppression(tmp_path):
     assert result["status"] == "alerted"
     assert result["alerted_project_ids"] == ["F9003"]
     assert len(pages) == 1  # operator paged — page path unaffected by throttled-append suppression
+
+
+# ─── monitored reason codes (P1: 12 of 14 reasons paged nobody) ──────────────
+#
+# The .service unit passes no --reason-codes, so the default set IS the
+# production set. It covered 2 of the 14 FlyerManualReviewReason values, which
+# meant a queue row stuck on any other reason aged past SLA in silence.
+
+
+def _manual_review_reasons() -> set[str]:
+    import sys
+    from pathlib import Path as _Path
+    from typing import get_args
+
+    sys.path.insert(0, str(REPO / "src" / "platform"))
+    from schemas import FlyerManualReviewReason
+
+    return set(get_args(FlyerManualReviewReason))
+
+
+def test_default_reason_codes_cover_every_manual_review_reason():
+    """Set equality, not containment — a new reason added to the schema without
+    a deliberate decision here must fail this test rather than page nobody."""
+    module = load_module()
+    assert set(module.DEFAULT_REASON_CODES) == _manual_review_reasons()
+
+
+def test_previously_unmonitored_reason_code_pages_operator(tmp_path):
+    module = load_module()
+    projects = tmp_path / "projects.json"
+    calls: list[dict] = []
+    projects.write_text(
+        json.dumps({"projects": [_project("F9040", reason_code="missing_required_facts")]}),
+        encoding="utf-8",
+    )
+
+    result = module.run_watchdog(
+        projects_path=projects,
+        alert_state_path=tmp_path / "sla-alerts.json",
+        decisions_log_path=tmp_path / "decisions.log",
+        now=module.parse_utc("2026-05-21T00:11:00Z"),
+        threshold_minutes=10,
+        repeat_minutes=60,
+        notify_func=lambda title, message, priority, source: calls.append(
+            {"title": title, "message": message, "priority": priority, "source": source}
+        ) is None or True,
+    )
+
+    assert result["status"] == "alerted"
+    assert result["alerted_project_ids"] == ["F9040"]
+    assert "missing_required_facts" in calls[0]["message"]
+
+
+def test_previously_monitored_reason_codes_still_page(tmp_path):
+    module = load_module()
+    projects = tmp_path / "projects.json"
+    calls: list[dict] = []
+    projects.write_text(
+        json.dumps(
+            {
+                "projects": [
+                    _project("F9041", reason_code="source_edit_provider_unavailable"),
+                    _project("F9042", reason_code="visual_qa_failed"),
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = module.run_watchdog(
+        projects_path=projects,
+        alert_state_path=tmp_path / "sla-alerts.json",
+        decisions_log_path=tmp_path / "decisions.log",
+        now=module.parse_utc("2026-05-21T00:11:00Z"),
+        threshold_minutes=10,
+        repeat_minutes=60,
+        notify_func=lambda title, message, priority, source: calls.append(
+            {"title": title, "message": message, "priority": priority, "source": source}
+        ) is None or True,
+    )
+
+    assert result["status"] == "alerted"
+    assert result["alerted_project_ids"] == ["F9041", "F9042"]
+
+
+def test_reason_codes_override_still_narrows_to_one_new_code(tmp_path):
+    module = load_module()
+    projects = tmp_path / "projects.json"
+    calls: list[dict] = []
+    projects.write_text(
+        json.dumps(
+            {
+                "projects": [
+                    _project("F9043", reason_code="policy_block"),
+                    _project("F9044", reason_code="visual_qa_failed"),
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = module.run_watchdog(
+        projects_path=projects,
+        alert_state_path=tmp_path / "sla-alerts.json",
+        decisions_log_path=tmp_path / "decisions.log",
+        now=module.parse_utc("2026-05-21T00:11:00Z"),
+        threshold_minutes=10,
+        repeat_minutes=60,
+        reason_codes=("policy_block",),
+        notify_func=lambda title, message, priority, source: calls.append(
+            {"title": title, "message": message, "priority": priority, "source": source}
+        ) is None or True,
+    )
+
+    assert result["status"] == "alerted"
+    assert result["alerted_project_ids"] == ["F9043"]
+    assert "Monitored reason codes: policy_block." in calls[0]["message"]

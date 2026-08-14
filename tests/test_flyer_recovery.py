@@ -566,3 +566,187 @@ def test_write_repair_bundle_redacts_customer_identifiers(tmp_path):
     assert "15550100001@s.whatsapp.net" not in serialized
     assert doc["incident_id"] == incident["incident_id"]
     assert doc["sanitized_context"]["chat_id_hash"].startswith("sha256:")
+
+
+# ─── worker-unavailable escalation (P1: escalation was structurally unreachable) ──
+#
+# The terminal-status arm below only fires once the worker reports completed or
+# failed. When the worker never runs at all — auto-run disabled, or its
+# credentials are dead, which is the current production shape — codex.status
+# stays 'queued' forever, so operator_action_required and the owner page were
+# never reachable and incidents aged silently for weeks.
+
+
+def _stuck_incident(codex: dict | None, *, age: timedelta) -> dict:
+    incident = _incident()
+    incident["incident_id"] = "FRI20260523-STUCK"
+    incident["first_seen"] = (NOW - age).isoformat()
+    incident["last_seen"] = (NOW - age).isoformat()
+    if codex is None:
+        incident.pop("codex", None)
+    else:
+        incident["codex"] = codex
+    return incident
+
+
+def test_escalates_worker_queued_past_threshold_once():
+    incident = _stuck_incident(
+        {"status": "queued", "queued_at": (NOW - timedelta(hours=5)).isoformat(), "bundle_path": "/tmp/b.json"},
+        age=timedelta(hours=6),
+    )
+    state = {"schema_version": 1, "incidents": [incident]}
+
+    escalated = recovery.escalate_unrepaired_incidents(
+        state,
+        now=NOW,
+        stale_after=timedelta(minutes=30),
+        worker_unavailable_after=timedelta(minutes=240),
+    )
+
+    assert [item["incident_id"] for item in escalated] == ["FRI20260523-STUCK"]
+    assert incident["status"] == "operator_action_required"
+    assert incident["operator_action"]["reason"] == "worker_unavailable"
+    assert incident["operator_action"]["required_action"] == "verify_customer_outcome_or_repair_manually"
+
+    escalated_again = recovery.escalate_unrepaired_incidents(
+        state,
+        now=NOW + timedelta(minutes=5),
+        stale_after=timedelta(minutes=30),
+        worker_unavailable_after=timedelta(minutes=240),
+    )
+    assert escalated_again == []
+
+
+def test_escalates_worker_that_never_queued_at_all():
+    """codex absent entirely — the incident was never even bundled."""
+    incident = _stuck_incident(None, age=timedelta(hours=6))
+    state = {"schema_version": 1, "incidents": [incident]}
+
+    escalated = recovery.escalate_unrepaired_incidents(
+        state,
+        now=NOW,
+        stale_after=timedelta(minutes=30),
+        worker_unavailable_after=timedelta(minutes=240),
+    )
+
+    assert [item["incident_id"] for item in escalated] == ["FRI20260523-STUCK"]
+    assert incident["operator_action"]["reason"] == "worker_unavailable"
+
+
+def test_escalates_worker_stuck_running_past_threshold():
+    """A run that died without writing a terminal status is the same silent stall."""
+    incident = _stuck_incident(
+        {"status": "running", "started_at": (NOW - timedelta(hours=5)).isoformat()},
+        age=timedelta(hours=6),
+    )
+    state = {"schema_version": 1, "incidents": [incident]}
+
+    escalated = recovery.escalate_unrepaired_incidents(
+        state,
+        now=NOW,
+        stale_after=timedelta(minutes=30),
+        worker_unavailable_after=timedelta(minutes=240),
+    )
+
+    assert [item["incident_id"] for item in escalated] == ["FRI20260523-STUCK"]
+    assert incident["operator_action"]["reason"] == "worker_unavailable"
+
+
+def test_does_not_escalate_worker_queued_below_threshold():
+    incident = _stuck_incident(
+        {"status": "queued", "queued_at": (NOW - timedelta(hours=1)).isoformat()},
+        age=timedelta(hours=6),
+    )
+    state = {"schema_version": 1, "incidents": [incident]}
+
+    escalated = recovery.escalate_unrepaired_incidents(
+        state,
+        now=NOW,
+        stale_after=timedelta(minutes=30),
+        worker_unavailable_after=timedelta(minutes=240),
+    )
+
+    assert escalated == []
+    assert incident["status"] == "open"
+
+
+def test_worker_unavailable_arm_is_opt_in():
+    """Callers that do not pass the threshold keep the pre-existing behavior."""
+    incident = _stuck_incident(
+        {"status": "queued", "queued_at": (NOW - timedelta(days=21)).isoformat()},
+        age=timedelta(days=21),
+    )
+    state = {"schema_version": 1, "incidents": [incident]}
+
+    escalated = recovery.escalate_unrepaired_incidents(
+        state,
+        now=NOW,
+        stale_after=timedelta(minutes=30),
+    )
+
+    assert escalated == []
+    assert incident["status"] == "open"
+
+
+def test_terminal_worker_status_keeps_its_own_reason_when_worker_arm_enabled():
+    completed = _incident()
+    completed["incident_id"] = "FRI20260523-COMPLETED"
+    completed["last_seen"] = (NOW - timedelta(hours=6)).isoformat()
+    completed["codex"] = {
+        "status": "completed",
+        "completed_at": (NOW - timedelta(hours=1)).isoformat(),
+        "bundle_path": "/tmp/bundle.json",
+    }
+    failed = _incident()
+    failed["incident_id"] = "FRI20260523-FAILED"
+    failed["last_seen"] = (NOW - timedelta(hours=6)).isoformat()
+    failed["codex"] = {
+        "status": "failed",
+        "failed_at": (NOW - timedelta(hours=1)).isoformat(),
+        "bundle_path": "/tmp/bundle.json",
+    }
+    state = {"schema_version": 1, "incidents": [completed, failed]}
+
+    recovery.escalate_unrepaired_incidents(
+        state,
+        now=NOW,
+        stale_after=timedelta(minutes=30),
+        worker_unavailable_after=timedelta(minutes=240),
+    )
+
+    assert completed["operator_action"]["reason"] == "worker_completed_no_customer_visible_success"
+    assert failed["operator_action"]["reason"] == "worker_failed_no_customer_visible_success"
+
+
+def test_customer_visible_success_resolves_worker_unavailable_escalation():
+    """Escalating must not create a new permanently-stuck state: a later
+    customer-visible success closes a worker_unavailable incident the same way
+    it closes the two terminal-status reasons."""
+    incident = _stuck_incident(
+        {"status": "queued", "queued_at": (NOW - timedelta(hours=5)).isoformat()},
+        age=timedelta(hours=6),
+    )
+    state = {"schema_version": 1, "incidents": [incident]}
+    recovery.escalate_unrepaired_incidents(
+        state,
+        now=NOW,
+        stale_after=timedelta(minutes=30),
+        worker_unavailable_after=timedelta(minutes=240),
+    )
+    assert incident["status"] == "operator_action_required"
+
+    resolved = recovery.resolve_incidents_from_customer_visible_repairs(
+        state,
+        [
+            {
+                "type": "flyer_concept_previews_sent",
+                "ts": (NOW + timedelta(minutes=1)).isoformat(),
+                "chat_id": "15550100001@s.whatsapp.net",
+                "project_id": "F0065",
+            }
+        ],
+        NOW + timedelta(minutes=2),
+    )
+
+    assert [item["incident_id"] for item in resolved] == ["FRI20260523-STUCK"]
+    assert incident["status"] == "resolved"

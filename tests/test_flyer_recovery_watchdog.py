@@ -1496,3 +1496,142 @@ def test_customer_ack_missing_origin_suppression_alerts_in_customer_ack_mode(tmp
     text = log.read_text(encoding="utf-8")
     assert '"type":"flyer_recovery_customer_ack_suppressed"' in text
     assert '"type":"flyer_recovery_owner_alert"' in text
+
+
+# ─── worker-unavailable escalation reaches the operator (P1) ─────────────────
+#
+# Production runs worker_draft with worker_auto_run false and dead worker
+# credentials, so codex.status never leaves 'queued'. Before this arm existed
+# the incident stayed 'open' forever and the owner was never paged.
+
+
+def _worker_never_ran_state(recovery_state: Path, *, queued_hours: float) -> None:
+    now = datetime.now(timezone.utc)
+    stamp = (now - timedelta(hours=queued_hours)).isoformat()
+    recovery_state.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "incidents": [
+                    {
+                        "incident_id": "FRI20260814-STUCK",
+                        "status": "open",
+                        "failure_class": "concept_generation_failed",
+                        "severity": "warning",
+                        "source_fingerprint": "fp-stuck",
+                        "ack_dedupe_key": "ack-stuck",
+                        "project_id": "F0226",
+                        "chat_id": "74290284261595@lid",
+                        "chat_id_hash": recovery.sha256_text("74290284261595@lid"),
+                        "sender_phone_hash": "",
+                        "root_message_id": "wamid.stuck",
+                        "provider_message_id_hash": "sha256:msg",
+                        "evidence_quality": "strong",
+                        "first_seen": stamp,
+                        "last_seen": stamp,
+                        "ack": {"status": "none"},
+                        "codex": {
+                            "status": "queued",
+                            "queued_at": stamp,
+                            "bundle_path": "/tmp/bundle.json",
+                            "queue_path": "/tmp/queue/FRI20260814-STUCK.json",
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _run_recovery_watchdog(tmp_path: Path, config_body: str, recovery_state: Path):
+    config = tmp_path / "config.yaml"
+    log = tmp_path / "decisions.log"
+    projects = tmp_path / "projects.json"
+    customers = tmp_path / "customers.json"
+    config.write_text(config_body.strip(), encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    projects.write_text('{"projects":[]}', encoding="utf-8")
+    customers.write_text('{"customers":[],"onboarding_sessions":[],"intake_sessions":[]}', encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--config-path", str(config),
+            "--log-path", str(log),
+            "--project-state-path", str(projects),
+            "--customer-state-path", str(customers),
+            "--recovery-state-path", str(recovery_state),
+            "--bundle-dir", str(tmp_path / "bundles"),
+            "--worker-queue-dir", str(tmp_path / "queue"),
+            "--text",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return result, log
+
+
+_WORKER_DRAFT_CONFIG = """
+schema_version: 1
+customer: {name: Triveni, location_id: loc_pineville_01, timezone: America/New_York}
+owner: {name: Owner, phone: '+19045550000'}
+limits: {}
+alerting: {pushover_user_key: k, pushover_app_token: t}
+backup: {gpg_recipient_email: owner@example.com}
+flyer:
+  enabled: true
+  recovery:
+    mode: worker_draft
+    enable_timer: true
+    scan_window_minutes: 240
+    operator_escalation_stale_minutes: 30
+    worker_auto_run: false
+"""
+
+
+def test_watchdog_escalates_incident_whose_worker_never_ran(tmp_path):
+    recovery_state = tmp_path / "recovery.json"
+    _worker_never_ran_state(recovery_state, queued_hours=6)
+
+    result, log = _run_recovery_watchdog(tmp_path, _WORKER_DRAFT_CONFIG, recovery_state)
+
+    assert result.returncode == 0, result.stderr
+    assert "operator_action_required=1" in result.stdout
+    state = json.loads(recovery_state.read_text(encoding="utf-8"))
+    incident = state["incidents"][0]
+    assert incident["status"] == "operator_action_required"
+    assert incident["operator_action"]["reason"] == "worker_unavailable"
+    text = log.read_text(encoding="utf-8")
+    assert '"type":"flyer_recovery_operator_action_required"' in text
+    assert '"reason":"worker_unavailable"' in text
+    assert '"incident_id":"FRI20260814-STUCK"' in text
+    # Owner notification attempt is recorded on the incident, same path as the
+    # existing escalation reasons.
+    assert incident["owner_alert"]["trigger"] == "operator_action_required"
+
+
+def test_watchdog_does_not_escalate_worker_queued_below_threshold(tmp_path):
+    recovery_state = tmp_path / "recovery.json"
+    _worker_never_ran_state(recovery_state, queued_hours=1)
+
+    result, _log = _run_recovery_watchdog(tmp_path, _WORKER_DRAFT_CONFIG, recovery_state)
+
+    assert result.returncode == 0, result.stderr
+    assert "operator_action_required=0" in result.stdout
+    state = json.loads(recovery_state.read_text(encoding="utf-8"))
+    assert state["incidents"][0]["status"] == "open"
+
+
+def test_watchdog_worker_unavailable_threshold_is_configurable(tmp_path):
+    recovery_state = tmp_path / "recovery.json"
+    _worker_never_ran_state(recovery_state, queued_hours=6)
+    config_body = _WORKER_DRAFT_CONFIG + "    worker_unavailable_escalation_minutes: 1440\n"
+
+    result, _log = _run_recovery_watchdog(tmp_path, config_body, recovery_state)
+
+    assert result.returncode == 0, result.stderr
+    assert "operator_action_required=0" in result.stdout
+    state = json.loads(recovery_state.read_text(encoding="utf-8"))
+    assert state["incidents"][0]["status"] == "open"
