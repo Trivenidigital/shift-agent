@@ -769,9 +769,15 @@ install_artifacts() {
     fi
 
     # Equipment & Maintenance (Agent #19) — scaffold-only v0.1
+    # scripts include add-equipment-item.py, the operator seed path for
+    # state/equipment-items.json (the read half is the shift-agent-read plugin,
+    # shipped with the other plugins above).
     if [ -d src/agents/equipment_maintenance/skills ]; then
         rsync -a src/agents/equipment_maintenance/skills/ /root/.hermes/skills/
         chown -R shift-agent:shift-agent /root/.hermes/skills/
+    fi
+    if compgen -G "src/agents/equipment_maintenance/scripts/*" > /dev/null; then
+        install -m 755 src/agents/equipment_maintenance/scripts/* /usr/local/bin/
     fi
 
     # Compliance Calendar (Agent #13)
