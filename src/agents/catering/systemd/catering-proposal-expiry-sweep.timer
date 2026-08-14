@@ -1,0 +1,18 @@
+[Unit]
+Description=Catering proposal expiry sweep timer (daily at 03:40 local, off-hours)
+Requires=catering-proposal-expiry-sweep.service
+
+[Timer]
+# Daily. Validity is quoted to the customer in days (14 by default), so a daily
+# cycle retires a set within a day of its stated deadline; the read-time expiry
+# checks in select-catering-proposal and record-catering-acceptance already
+# refuse an expired set in the meantime, which is why this sweep is state
+# hygiene rather than the authorization boundary. Offset from the lead TTL sweep
+# (03:20) so the two catering state locks are never taken at the same minute.
+OnCalendar=*-*-* 03:40:00
+Persistent=true
+AccuracySec=5min
+Unit=catering-proposal-expiry-sweep.service
+
+[Install]
+WantedBy=timers.target

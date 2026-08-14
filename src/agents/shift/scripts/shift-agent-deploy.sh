@@ -1392,6 +1392,15 @@ PY
     systemctl enable --now shift-agent-fsck.timer 2>/dev/null || true
     systemctl enable --now send-daily-brief.timer 2>/dev/null || true
     systemctl enable --now catering-pattern-report.timer 2>/dev/null || true
+    # Catering lifecycle sweeps (unit files installed by the catering systemd
+    # wildcard above). Enabling the timers does NOT arm the sweeps: each one
+    # returns 0 without reading state unless its own flag —
+    # CATERING_LEAD_TTL_SWEEP_ENABLED / CATERING_PROPOSAL_SWEEP_ENABLED — is set
+    # in /opt/shift-agent/.env. This wiring exists so arming is a .env flip
+    # rather than a deploy. catering-followup-sweep.timer stays deliberately
+    # unenabled (triple-gated dormant feature; see its unit comment).
+    systemctl enable --now catering-lead-ttl-sweep.timer 2>/dev/null || true
+    systemctl enable --now catering-proposal-expiry-sweep.timer 2>/dev/null || true
     # F8 catering-owner-action-watchdog (restored 2026-07-11, census C2). Long-
     # running poller shipped service-only (see the unit comment); enable + start
     # it here like the sibling timers. `--now` starts it; on a box without
