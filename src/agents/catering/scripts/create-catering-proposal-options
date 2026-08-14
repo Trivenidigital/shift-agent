@@ -173,8 +173,10 @@ def _ensure_diet_balance(
     selected: list[str], menu_items: dict[str, MenuItem],
     veg_items: list[MenuItem], non_veg_items: list[MenuItem],
 ) -> None:
-    """Guarantee BOTH a veg and a non-veg item appear when the menu offers both —
-    a mixed veg/non-veg event must never receive a single-diet option."""
+    """Guarantee BOTH a veg and a non-veg item appear when the CANDIDATE POOL offers
+    both — a mixed veg/non-veg event must never receive a single-diet option. A
+    veg_only lead's pool carries no non-veg items, so the non-veg append is a no-op
+    there; the diet decision lives in the pool, not in this helper."""
     if non_veg_items and not any(_is_non_veg(menu_items[name]) for name in selected):
         _append_unique(selected, non_veg_items, limit=len(selected) + 1)
     if veg_items and not any(not _is_non_veg(menu_items[name]) for name in selected):
@@ -196,10 +198,22 @@ def _ensure_section_coverage(
             covered.add(category)
 
 
-def _auto_option_items(menu_items: dict[str, MenuItem], *, style_key: str) -> list[str]:
+def _auto_option_items(
+    menu_items: dict[str, MenuItem], *, style_key: str, diet_profile: str = "unknown",
+) -> list[str]:
     available = list(menu_items.values())
     if not available:
         raise ValueError("menu has no available items")
+
+    # Diet-aware candidate pool. A veg_only lead (all-vegetarian / Jain / temple
+    # event) never sees a non-veg item: excluding them HERE means every downstream
+    # step — style seed, diet balance, section coverage, backfill — is veg by
+    # construction. non_veg_only and unknown keep the full pool: a non-veg event
+    # still eats veg sides, and an unstated diet must not be guessed either way.
+    if diet_profile == "veg_only":
+        available = [item for item in available if not _is_non_veg(item)]
+        if not available:
+            raise ValueError("menu has no vegetarian items for a vegetarian-only event")
 
     veg_items = [item for item in available if not _is_non_veg(item)]
     non_veg_items = [item for item in available if _is_non_veg(item)]
@@ -246,6 +260,8 @@ def _auto_option_items(menu_items: dict[str, MenuItem], *, style_key: str) -> li
 def _auto_generate_options(
     menu_items: dict[str, MenuItem],
     request_text: str,
+    *,
+    diet_profile: str = "unknown",
 ) -> list[CateringProposalOption]:
     templates = [
         ("balanced_mixed", "balanced"),
@@ -260,46 +276,202 @@ def _auto_generate_options(
                 option_id=str(idx),
                 style_key=style_key,
                 tier=tier,
-                item_names=_auto_option_items(menu_items, style_key=style_key),
+                item_names=_auto_option_items(
+                    menu_items, style_key=style_key, diet_profile=diet_profile),
             )
         )
     return options
 
 
-def _lead_is_mixed_diet(lead) -> bool:
-    """True when the lead's guest mix spans BOTH veg and non-veg (a wedding-scale
-    mixed event). Reads extracted.dietary_restrictions first, then falls back to
-    scanning raw_inquiry + notes for an explicit vegetarian mention alongside a
-    non-veg mention. Deterministic; the "veg" inside "non-veg" is stripped before the
-    veg scan so a non-veg-only lead is not mis-read as mixed."""
+_VEG_DIET_TAGS = {"veg", "vegetarian", "vegan", "jain", "pure veg", "pure-veg",
+                  "veg only", "veg-only"}
+_NON_VEG_DIET_TAGS = {"non-veg", "nonveg", "non-vegetarian", "halal"}
+
+# The two free-text detectors are deliberately SYMMETRIC in strength. An earlier
+# version paired an unbounded `\bveg` against a non-veg side that knew only the
+# literal "non-veg", and the asymmetry silently dropped meat the customer had
+# asked for: "half veg half chicken" and "We want Veg Biryani and Chicken Biryani"
+# both read as veg_only, so the chicken was excluded from generation and a
+# recompose of the customer's own Goat Curry was REFUSED.
+#
+# Vegetarian signal. Every token is bounded, so "vegetable(s)" and "veggie" — which
+# describe a dish, not a dietary requirement — no longer register as one. `\bveg\b`
+# still covers "pure veg", "veg only" and "veg-only" (the hyphen is a boundary).
+_VEG_TEXT_RE = re.compile(
+    r"\bveg\b|\bvegetarian\b|\bvegan\b|\bjain\b|\bno\s+meat\b|\bmeat[-\s]?free\b"
+)
+# Non-vegetarian signal: "non-veg" plus FLESH words. Deliberately no dish names —
+# biryani, tikka, kebab and curry all have vegetarian versions, so matching them
+# would recreate the same false-positive problem on the other side.
+_FLESH_WORDS = (
+    r"chicken|mutton|goat|lamb|beef|pork|turkey|duck"
+    r"|fish|prawns?|shrimps?|crabs?|lobsters?"
+    r"|keema|eggs?|meat"
+)
+_FLESH_RE = re.compile(rf"\b(?:{_FLESH_WORDS})\b")
+_NON_VEG_TEXT_RE = re.compile(rf"non[\s-]?veg|\b(?:{_FLESH_WORDS})\b")
+# Phrases that STATE a vegetarian requirement using a meat word. Stripped before the
+# meat scan — the mirror of stripping "non-veg" before the veg scan. Without this,
+# "no meat" would fire the meat detector and turn an explicitly vegetarian event
+# into a mixed one.
+#
+# v3: this used to be three literals (no meat / meat-free / meatless) while the meat
+# detector matched EVERY flesh word unconditionally. So a negated flesh word read as
+# a meat signal: "all vegetarian, no chicken" came out `mixed`, and under `mixed` the
+# section guard REFUSES all-veg options — i.e. it REQUIRED meat at an explicitly
+# vegetarian event. That is the original P0 in its sharpest form.
+#
+# The negator now generalises over the SAME `_FLESH_WORDS` alternation the detector
+# uses, so the two cannot drift apart. `no fish or meat` and `no dairy or eggs` are
+# both handled: the list may start with a non-flesh word, and only the flesh words
+# inside the negated run are removed.
+#
+# The list is joined by `or` ONLY, deliberately not by commas. "no rush, chicken is
+# fine" would otherwise read the comma as list continuation and strip a chicken the
+# customer actually wants.
+_NEGATED_FLESH_RE = re.compile(
+    r"\b(?:absolutely\s+no|no|without|free\s+of)\s+"      # longest negator first
+    r"(?:any\s+)?"
+    r"(?:\w+(?:\s+or\s+(?:no\s+)?(?:any\s+)?\w+)*)"
+)
+_VEG_NEGATION_RE = re.compile(r"\bmeat[-\s]?free\b|\bmeatless\b")
+
+
+def _negated_flesh_spans(blob: str) -> list[str]:
+    """The negated runs that actually name a flesh word, e.g. "no fish or meat".
+
+    A run that names none ("no rush", "no dairy") is not a dietary statement and is
+    left completely alone."""
+    return [m.group(0) for m in _NEGATED_FLESH_RE.finditer(blob)
+            if _FLESH_RE.search(m.group(0))]
+
+
+def _lead_diet_profile(lead) -> str:
+    """Classify the lead's guest diet as "mixed" / "veg_only" / "non_veg_only" /
+    "unknown". Reads extracted.dietary_restrictions first, then falls back to scanning
+    raw_inquiry + notes. Deterministic; the "veg" inside "non-veg" is stripped before
+    the veg scan so a non-veg-only lead is not mis-read as vegetarian.
+
+    "mixed" whenever BOTH signals come from the tags, or BOTH from the text — a menu
+    serving both diets is the safe outcome when the lead mentions both. A veg signal
+    from one source and a non-veg signal from the other stays "unknown": too weak to
+    act on, and "unknown" is the branch that changes nothing.
+
+    Limitation: vegan and Jain both fold into "veg_only" because MenuItem carries no
+    vegan/Jain flag — the pool can only be filtered down to vegetarian, so a vegan or
+    Jain lead still needs owner review before send."""
     tags = {str(tag).lower() for tag in (lead.extracted.dietary_restrictions or [])}
-    has_veg = bool(tags & {"veg", "vegetarian", "vegan", "jain"})
-    has_non_veg = bool(tags & {"non-veg", "nonveg", "non-vegetarian", "halal"})
-    if has_veg and has_non_veg:
-        return True
+    tag_veg = bool(tags & _VEG_DIET_TAGS)
+    tag_non_veg = bool(tags & _NON_VEG_DIET_TAGS)
+    if tag_veg and tag_non_veg:
+        return "mixed"
     blob = f"{lead.raw_inquiry} {getattr(lead.extracted, 'notes', '') or ''}".lower()
-    non_veg_text = bool(re.search(r"non[\s-]?veg", blob))
+    # Each side scans a blob with the OTHER side's overlapping phrases removed, so
+    # neither detector can be tricked by the other's vocabulary: "non-veg" is not a
+    # veg mention, and "no meat" is not a meat mention.
     veg_scan = re.sub(r"non[\s-]?veg\w*", " ", blob)
-    veg_text = bool(re.search(r"\bveg", veg_scan))
-    return non_veg_text and veg_text
+    # A negated flesh phrase is BOTH: a vegetarian requirement (so "no eggs please"
+    # is veg_only with no vegetarian word present anywhere) and a non-signal for the
+    # meat scan. Only the flesh words INSIDE the negated run are removed, so
+    # "no chicken but lamb is fine" keeps its lamb and stays mixed — the negation
+    # must strip exactly what it negates and nothing further.
+    negated = _negated_flesh_spans(blob)
+    non_veg_scan = blob
+    for span in negated:
+        non_veg_scan = non_veg_scan.replace(span, _FLESH_RE.sub(" ", span), 1)
+    non_veg_scan = _VEG_NEGATION_RE.sub(" ", non_veg_scan)
+    text_veg = bool(_VEG_TEXT_RE.search(veg_scan)) or bool(negated)
+    text_non_veg = bool(_NON_VEG_TEXT_RE.search(non_veg_scan))
+    if text_veg and text_non_veg:
+        return "mixed"
+    has_veg = tag_veg or text_veg
+    has_non_veg = tag_non_veg or text_non_veg
+    if has_veg and not has_non_veg:
+        return "veg_only"
+    if has_non_veg and not has_veg:
+        return "non_veg_only"
+    return "unknown"
+
+
+def _assert_no_non_veg_items(
+    item_names: list[str], menu_items: dict[str, MenuItem], *, label: str,
+) -> None:
+    """The vegetarian-only invariant, in one place: a veg_only lead never receives a
+    non-veg item from this script. Shared by the proposal guard and the recompose
+    chokepoint so both send paths enforce the SAME rule."""
+    non_veg = [name for name in item_names
+               if name in menu_items and _is_non_veg(menu_items[name])]
+    if non_veg:
+        raise SectionBalanceError(
+            f"{label} contains non-veg items {non_veg} for a vegetarian-only event")
+
+
+def _assert_section_coverage(
+    options: list[CateringProposalOption], menu_items: dict[str, MenuItem],
+    *, diet_profile: str,
+) -> None:
+    """Every option must be a coherent MENU, not a plate of sweets.
+
+    Without this a veg_only lead could be sent a dessert-only "menu": the pool
+    filter guarantees nothing non-veg reaches them, which says nothing about
+    whether what DOES reach them is a meal.
+
+    Two menu-relative bounds, deliberately relative to DIFFERENT pools:
+
+    * section count — against the pool this lead can actually be served (veg items
+      only, for veg_only). A small all-vegetarian menu must not be rejected for
+      lacking variety it never offered.
+    * has-a-main — against the FULL menu. If the menu offers mains but every one of
+      them is non-veg, we cannot build a vegetarian main course, and that is exactly
+      when the owner needs to hear about it. Sending a side-and-dessert spread to a
+      temple event instead is the worse failure, so this fails closed.
+    """
+    servable = ({name: item for name, item in menu_items.items()
+                 if not _is_non_veg(item)}
+                if diet_profile == "veg_only" else menu_items)
+    servable_categories = {item.category for item in servable.values()}
+    full_menu_categories = {item.category for item in menu_items.values()}
+    required_sections = min(3, len(servable_categories))
+    for option in options:
+        items = [menu_items[name] for name in option.item_names if name in menu_items]
+        opt_categories = {item.category for item in items}
+        if len(opt_categories) < required_sections:
+            raise SectionBalanceError(
+                f"option {option.option_id} spans {sorted(opt_categories)}; a "
+                f"{diet_profile} event needs >= {required_sections} sections")
+        if "main" in full_menu_categories and "main" not in opt_categories:
+            raise SectionBalanceError(
+                f"option {option.option_id} has no main course"
+                + ("" if diet_profile != "veg_only" or "main" in servable_categories
+                   else " (the menu's only mains are non-veg, so no vegetarian main "
+                        "course can be offered for this event)"))
 
 
 def _assert_section_balance(
     options: list[CateringProposalOption], menu_items: dict[str, MenuItem],
-    *, lead_is_mixed: bool,
+    *, diet_profile: str,
 ) -> None:
-    """Fail-closed menu-quality guard (turn-arbitration 2026-07-26). A mixed veg/non-veg
-    event must not receive a degenerate proposal — single-diet, or spanning too few
-    sections, or missing a main course — WHEN the menu itself offers the variety. The
-    check is menu-relative so a genuinely small menu is not rejected. Raises
-    SectionBalanceError (→ fail_generation, no send) rather than deliver an incoherent
-    menu. No-op when the lead is not a mixed-diet event."""
-    if not lead_is_mixed:
+    """Fail-closed menu-quality guard (turn-arbitration 2026-07-26). Raises
+    SectionBalanceError (→ fail_generation, no send) rather than deliver a proposal
+    that contradicts the lead.
+
+    - veg_only: NO option may contain a non-veg item, AND the option must still be a
+      coherent menu — the same section/main coverage a mixed event gets. Applies to
+      owner-supplied --options-json too, which the pool filter cannot reach.
+    - mixed: an option must not be degenerate — single-diet, or spanning too few
+      sections, or missing a main course — WHEN the menu itself offers the variety.
+      The check is menu-relative so a genuinely small menu is not rejected.
+    - non_veg_only / unknown: no-op; both diets remain legitimate."""
+    if diet_profile == "veg_only":
+        for option in options:
+            _assert_no_non_veg_items(option.item_names, menu_items,
+                                     label=f"option {option.option_id}")
+        _assert_section_coverage(options, menu_items, diet_profile="veg_only")
+        return
+    if diet_profile != "mixed":
         return
     menu_has_veg = any(not _is_non_veg(item) for item in menu_items.values())
     menu_has_non_veg = any(_is_non_veg(item) for item in menu_items.values())
-    menu_categories = {item.category for item in menu_items.values()}
-    required_sections = min(3, len(menu_categories))
     for option in options:
         items = [menu_items[name] for name in option.item_names if name in menu_items]
         opt_has_veg = any(not _is_non_veg(item) for item in items)
@@ -308,13 +480,10 @@ def _assert_section_balance(
             raise SectionBalanceError(
                 f"option {option.option_id} is single-diet "
                 f"(veg={opt_has_veg} non_veg={opt_has_non_veg}) for a mixed event")
-        opt_categories = {item.category for item in items}
-        if len(opt_categories) < required_sections:
-            raise SectionBalanceError(
-                f"option {option.option_id} spans {sorted(opt_categories)}; a mixed "
-                f"event needs >= {required_sections} sections")
-        if "main" in menu_categories and "main" not in opt_categories:
-            raise SectionBalanceError(f"option {option.option_id} has no main course")
+    # Shared with the veg_only branch, so the two diets cannot drift apart on what
+    # counts as a complete menu. For mixed, `servable` is the whole menu, which is
+    # what the original inline check used.
+    _assert_section_coverage(options, menu_items, diet_profile="mixed")
 
 
 def _load_lead(lead_id: str):
@@ -734,8 +903,9 @@ def _render_recomposed(item_names: list[str], menu_items: dict[str, MenuItem],
 def _run_recompose(args) -> int:
     """PR-D mix-and-match: deterministically combine sections of already-SENT
     options. The payload is pulled verbatim from the sent options (never composed
-    by an LLM), and a sections-match assertion runs in this chokepoint before send
-    so prose-matches-payload is TESTED per send. Any imperfect request clarifies."""
+    by an LLM), and a diet check plus a sections-match assertion run in this
+    chokepoint before send so prose-matches-payload is TESTED per send. Any imperfect
+    request clarifies."""
     _set_run_identity(
         logical_turn_id=(args.logical_turn_id or args.source_message_id),
         send_attempt_id=uuid.uuid4().hex,
@@ -778,6 +948,22 @@ def _run_recompose(args) -> int:
         return EXIT_OK
 
     # kind == merge
+    # Diet chokepoint, BEFORE the body is built. Recompose pulls items VERBATIM from
+    # options that may pre-date the lead's stated diet (a customer who says "make it
+    # all vegetarian" after the first send, or a set generated before this guard
+    # existed), so the generation-side pool filter cannot cover this path. Fail
+    # closed rather than filter: the recompose contract is verbatim-or-clarify, and
+    # silently dropping the non-veg half of a section the customer explicitly named
+    # would either substitute a dish behind their back or trip the sections-match
+    # assertion below under a misleading reason. A refusal the owner sees is better.
+    if _lead_diet_profile(lead) == "veg_only":
+        try:
+            _assert_no_non_veg_items(plan["item_names"], menu_items, label="recomposed menu")
+        except SectionBalanceError as e:
+            _fail_generation(args.lead_id, "insufficient_section_balance", str(e))
+            sys.stderr.write(f"insufficient_section_balance: {e}\n")
+            return EXIT_INVALID_INPUT
+
     try:
         body, rendered_cats = _render_recomposed(plan["item_names"], menu_items, plan["combination"])
     except KeyError as e:
@@ -861,8 +1047,10 @@ def main() -> int:
     try:
         if args.auto_generate_from_menu and args.options_json:
             raise ValueError("--options-json cannot be combined with --auto-generate-from-menu")
+        diet_profile = _lead_diet_profile(lead)
         if args.auto_generate_from_menu:
-            options = _auto_generate_options(menu_items, args.request_text)
+            options = _auto_generate_options(
+                menu_items, args.request_text, diet_profile=diet_profile)
         elif args.options_json:
             options = _read_options(args.options_json)
         else:
@@ -870,7 +1058,7 @@ def main() -> int:
         allowed = _allowed_option_count(args.request_text)
         if len(options) != allowed:
             raise ValueError(f"{len(options)} options supplied; expected exactly {allowed}")
-        _assert_section_balance(options, menu_items, lead_is_mixed=_lead_is_mixed_diet(lead))
+        _assert_section_balance(options, menu_items, diet_profile=diet_profile)
         body = _render_body(options, menu_items)
     except SectionBalanceError as e:
         _fail_generation(args.lead_id, "insufficient_section_balance", str(e))
