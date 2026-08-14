@@ -285,10 +285,16 @@ def test_unreadable_state_fails_closed(env):
 
 
 @linux_only
-def test_unresolvable_customer_timezone_fails_closed(env, monkeypatch):
-    """No silent UTC fallback: days_until must never come from a guessed zone."""
-    monkeypatch.delenv("SHIFT_AGENT_NOW_OVERRIDE", raising=False)
-    (env / "config.yaml").write_text("customer: {timezone: \n", encoding="utf-8")
+def test_unestablishable_today_fails_closed(env, monkeypatch):
+    """No silent fallback: days_until must never come from a guessed date.
+
+    Driven through an unparseable SHIFT_AGENT_NOW_OVERRIDE rather than a bad
+    timezone, because a malformed config now surfaces as config_unavailable at
+    the enable gate before this path is reached (mirrors the equipment tool's
+    test of the same invariant).
+    """
+    monkeypatch.setenv("SHIFT_AGENT_NOW_OVERRIDE", "not-a-timestamp")
+    _write_cfg(env)
     _seed(env, [_item("health_inspect", "2026-09-01")])
     out = json.loads(_tool().handler({}))
     assert out["ok"] is False
@@ -441,3 +447,120 @@ def test_description_carries_the_proven_rules(env):
 def test_window_days_description_pins_explicit_timeframe_only(env):
     w = _tool().SCHEMA["parameters"]["properties"]["window_days"]["description"]
     assert "ONLY" in w and "explicit" in w and "omit" in w.lower()
+
+
+# ── the config enable gate ─────────────────────────────────────────────────
+#
+# cfg.compliance.enabled defaults False, and an absent block validates to that
+# default, so an un-onboarded business must hear that tracking is off — never
+# "nothing due". The gate was documented as the lever and never read by the
+# tool; check-compliance-deadlines.py:488 has always honored it, so only the
+# owner-facing read was ungated.
+#
+# These resolve identity by monkeypatching `resolve_identity` rather than
+# through the shebang fixture the rest of this file uses, mirroring
+# test_shift_agent_read_equipment_tool.py — the gate must be provable on any
+# host, and a POSIX-only skip would leave it unverified where CI runs.
+
+
+def _gated_tool(monkeypatch, principal="19045550100@s.whatsapp.net"):
+    tool = _tool(principal)
+    import importlib
+    identity = importlib.import_module(PKG + ".identity")
+    monkeypatch.setattr(identity, "resolve_identity",
+                        lambda p: {"role": "owner", "roles": ["owner"]}
+                        if p.startswith("19045550100") else None)
+    return tool
+
+
+def _write_cfg(env, compliance_block=...):
+    """Rewrite config.yaml. Pass compliance_block=None to omit the block."""
+    cfg = {
+        "schema_version": 1,
+        "customer": {"name": "T", "location_id": "loc_t", "timezone": "America/New_York"},
+        "owner": {"name": "Owner", "phone": "+19045550100",
+                  "self_chat_jid": "19045550100@s.whatsapp.net"},
+        "limits": {},
+        "alerting": {"pushover_user_key": "k", "pushover_app_token": "t"},
+        "backup": {"gpg_recipient_email": "x@y"},
+    }
+    if compliance_block is ...:
+        compliance_block = {"enabled": True}
+    if compliance_block is not None:
+        cfg["compliance"] = compliance_block
+    (env / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+
+def test_disabled_agent_reports_disabled_not_nothing_due(env, monkeypatch):
+    _write_cfg(env, {"enabled": False})
+    _seed(env, [_item("food_licence", "2026-08-12")])   # would be due
+    t = _gated_tool(monkeypatch)
+    b = _Binder()
+    monkeypatch.setattr(t, "_bind_outbound", b)
+    out = json.loads(t.handler({}))
+    assert out["source_status"] == "disabled"
+    assert out["coverage_status"] == "not_enabled"
+    assert b.calls == [t.TPL_DISABLED]
+    # No zero-shaped fields and no leak of the store that was never consulted.
+    for absent in ("tracked_total", "in_window", "items", "window_days"):
+        assert absent not in out, f"{absent!r} must not appear on a disabled agent"
+    assert "food_licence" not in json.dumps(out)
+
+
+def test_disabled_agent_does_not_read_the_store(env, monkeypatch):
+    """Falsifiable: the store is corrupt, so any read would surface
+    state_unreadable. Getting `disabled` proves the gate returned first."""
+    _write_cfg(env, {"enabled": False})
+    (env / "state" / "compliance-items.json").write_text("{not json", encoding="utf-8")
+    t = _gated_tool(monkeypatch)
+    monkeypatch.setattr(t, "_bind_outbound", _Binder())
+    assert json.loads(t.handler({}))["source_status"] == "disabled"
+
+
+def test_absent_config_block_is_treated_as_disabled(env, monkeypatch):
+    """ComplianceConfig.enabled defaults False — same as the equipment block —
+    so an unconfigured box is OFF."""
+    _write_cfg(env, None)
+    _seed(env, [_item("food_licence", "2026-08-12")])
+    t = _gated_tool(monkeypatch)
+    b = _Binder()
+    monkeypatch.setattr(t, "_bind_outbound", b)
+    out = json.loads(t.handler({}))
+    assert out["source_status"] == "disabled"
+    assert b.calls == [t.TPL_DISABLED]
+
+
+def test_bind_failure_suppresses_the_disabled_payload(env, monkeypatch):
+    _write_cfg(env, {"enabled": False})
+    # Seeded in-window item: without the gate the handler would reach the
+    # populated path and return ok=True, so this test fails if the gate is gone.
+    _seed(env, [_item("food_licence", "2026-08-12")])
+    t = _gated_tool(monkeypatch)
+    monkeypatch.setattr(t, "_bind_outbound", _Binder(succeed=False))
+    out = json.loads(t.handler({}))
+    assert out["ok"] is False
+    assert out["refused"] == "outbound_truthfulness_guard_unavailable"
+    assert "source_status" not in out and "coverage_status" not in out
+
+
+def test_unreadable_config_fails_closed_rather_than_claiming_disabled(env, monkeypatch):
+    """"Not enabled" is a claim about configuration. If the config could not be
+    read, that claim is unproven — and so is any answer from the store."""
+    (env / "config.yaml").write_text("customer: [unclosed\n", encoding="utf-8")
+    _seed(env, [_item("food_licence", "2026-08-12")])
+    out = json.loads(_gated_tool(monkeypatch).handler({}))
+    assert out["ok"] is False
+    assert out["error"] == "config_unavailable"
+    for absent in ("items", "tracked_total", "in_window", "source_status"):
+        assert absent not in out
+
+
+@linux_only
+def test_enabled_agent_reads_the_store_normally(env, monkeypatch):
+    _write_cfg(env, {"enabled": True})
+    _seed(env, [_item("food_licence", "2026-08-12")])
+    t = _gated_tool(monkeypatch)
+    monkeypatch.setattr(t, "_bind_outbound", _Binder())
+    out = json.loads(t.handler({}))
+    assert out["source_status"] == "populated"
+    assert out["tracked_total"] == 1
