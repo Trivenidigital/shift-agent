@@ -285,10 +285,16 @@ def test_unreadable_state_fails_closed(env):
 
 
 @linux_only
-def test_unresolvable_customer_timezone_fails_closed(env, monkeypatch):
-    """No silent UTC fallback: days_until must never come from a guessed zone."""
-    monkeypatch.delenv("SHIFT_AGENT_NOW_OVERRIDE", raising=False)
-    (env / "config.yaml").write_text("customer: {timezone: \n", encoding="utf-8")
+def test_unestablishable_today_fails_closed(env, monkeypatch):
+    """No silent fallback: days_until must never come from a guessed date.
+
+    Driven through an unparseable SHIFT_AGENT_NOW_OVERRIDE rather than a bad
+    timezone, because a malformed config now surfaces as config_unavailable at
+    the enable gate before this path is reached (mirrors the equipment tool's
+    test of the same invariant).
+    """
+    monkeypatch.setenv("SHIFT_AGENT_NOW_OVERRIDE", "not-a-timestamp")
+    _write_cfg(env)
     _seed(env, [_item("health_inspect", "2026-09-01")])
     out = json.loads(_tool().handler({}))
     assert out["ok"] is False
