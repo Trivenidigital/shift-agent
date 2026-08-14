@@ -2918,11 +2918,19 @@ def _flyer_quota_precheck_or_reply(
     happens after the project exists. That keeps this a pure optimisation of
     when the customer is told, never a new way to be refused.
     """
-    if actions.find_paid_flyer_guest_order(phone, chat_id):
+    try:
+        if actions.find_paid_flyer_guest_order(phone, chat_id):
+            return None
+        ok, detail, result = actions.trigger_flyer_check_quota(
+            customer_phone=phone, message_id=message_id,
+        )
+    except Exception:  # noqa: BLE001 — an optimisation must never break the route
+        # Latent rather than live: both calls already return rather than raise.
+        # But this runs ahead of project creation on the primary flyer path, so
+        # a future raise inside either would take out flyer creation entirely
+        # to save a row. Falling through costs at most one orphan row, which is
+        # the exact state this branch is an optimisation against.
         return None
-    ok, detail, result = actions.trigger_flyer_check_quota(
-        customer_phone=phone, message_id=message_id,
-    )
     if not ok or not result or result.get("quota_allowed") is not False:
         return None
     ack_ok, mid, err = actions.send_flyer_text(

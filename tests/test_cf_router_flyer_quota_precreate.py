@@ -9,9 +9,16 @@ fix is a no-op. The row simply stays.
 
 WHY THAT IS A CATERING BUG. `has_non_delivered_flyer_project_by_sender` reads
 projects.json with no staleness bound, and the catering-admission gate yields
-to the LLM for every catering inquiry from a sender who has one. So a customer
-who once hit the flyer paywall silently loses deterministic catering routing —
-permanently, with no audit row saying so.
+to the LLM for a sender who has one. So a customer who once hit the flyer
+paywall silently loses deterministic catering routing — permanently, with no
+audit row saying so.
+
+NARROWER THAN IT FIRST LOOKS, and the cells encode the real scope: a CLEAR
+catering inquiry from such a sender never reaches the admission gate, because
+`_try_flyer_catering_escape_gate` (hooks.py:705) already escapes it to F7. The
+gate only decides when the escape gate falls through — a follow-up carrying no
+catering signal of its own, admitted by a qualifying lead. Those are the
+inbounds the orphan row silently dropped.
 
 TWO FIXES, PINNED SEPARATELY because they fail independently:
   * the quota check runs BEFORE `trigger_create_flyer_project`, so a blocked
@@ -22,9 +29,12 @@ TWO FIXES, PINNED SEPARATELY because they fail independently:
 The other two call sites of the broad predicate are deliberately untouched and
 pinned as such — each needs its own review.
 
-Dispatch-level, in the style of tests/test_cf_router_menu_caption_cession.py:
-the unit under test is which arm claims the inbound and what state it leaves
-behind, not what any arm renders.
+TWO LEVELS, on purpose. The staleness cells named `..._catering_admission` call
+the predicate DIRECTLY — they pin its answer, not its wiring. Only the two
+`..._through_dispatch` cells drive `_pre_gateway_dispatch_impl`, and only they
+pin WHICH call site is bounded: a verifier moved the bounded predicate onto a
+different caller with both source-inspection counts unchanged and the suite
+stayed green. Those two cells are what fail under that move.
 """
 from __future__ import annotations
 
@@ -103,6 +113,12 @@ class _Spies:
         self.created: list[dict] = []
         self.reserve_calls: list[dict] = []
         self.check_calls: list[dict] = []
+        # Every F7 (catering) claim. Empty means the admission gate dropped the
+        # inbound to the LLM — the exact symptom the orphan row caused.
+        self.f7_calls: list[dict] = []
+        # Every answer the admission gate's predicate gave. Empty means the gate
+        # never ran, which makes any routing assertion below vacuous.
+        self.predicate_calls: list[bool] = []
 
     @property
     def reasons(self) -> list[str]:
@@ -309,6 +325,151 @@ def test_a_delivered_project_never_blocks_either_way(monkeypatch, plugin):
     assert actions_mod.has_non_delivered_flyer_project_by_sender(PHONE, CHAT) is False
 
 
+# ── the site pin, driven through the REAL dispatch ──────────────────────────
+# A source-inspection count cannot tell WHICH caller was bounded, and the
+# predicate cells above call the predicate directly. Only driving
+# `_pre_gateway_dispatch_impl` proves the bound sits on the catering-admission
+# gate, because only dispatch runs that gate.
+#
+# THE INBOUND HERE IS NOT A PLAIN CATERING INQUIRY, and that is load-bearing.
+# `_try_flyer_catering_escape_gate` (hooks.py:705, well before the admission
+# gate) already routes a clear catering inquiry from a sender with an active
+# project straight to F7. A first version of these cells used "we need catering
+# for 80 guests" and passed with the admission gate NEVER EXECUTED — the escape
+# gate had claimed the inbound. The admission gate only bites when the escape
+# gate falls through, i.e. `classify_catering` is False and admission comes from
+# a qualifying lead or a follow-up signal: a slot-filling answer to our own
+# intake question. That is the inbound below.
+#
+# `_predicate_calls` exists so the cells cannot silently go vacuous again: if a
+# future edit stops the gate from running, the assertion on it fails loudly
+# instead of the cell passing for the wrong reason.
+_NEUTRALIZED_HOOKS = (
+    "_try_f8_intercept",
+    "_try_automation_control",
+    "_try_revenue_route_clarification_choice",
+    "_try_flyer_campaign_cta_intercept",
+    "_try_flyer_quote_echo_choice",
+    "_try_flyer_account_intercept",
+    "_try_flyer_sample_prompt_request_intercept",
+    "_try_flyer_regulated_account_guard",
+    "_try_flyer_quote_echo_guard",
+    "_try_flyer_intake_intercept",
+    "_try_flyer_reference_scope_choice_intercept",
+    "_try_flyer_source_vs_new_choice_intercept",
+    "_try_flyer_reference_scope_authorization_intercept",
+    "_try_flyer_existing_onboarding_intercept",
+    "_try_amendment_conflict_intercept",
+    "_try_flyer_active_project_intercept",
+    "_try_flyer_delivery_state_guard",
+    "_try_flyer_onboarding_intercept",
+    "_try_catering_acceptance_intercept",
+    "_try_revenue_route_clarification_start",
+    "_try_flyer_brand_asset_intercept",
+)
+
+
+def _wire_dispatch(monkeypatch, hooks_mod, actions_mod, project):
+    """A catering inquiry reaching dispatch from a sender who owns `project`."""
+    s = _Spies()
+    for name in _NEUTRALIZED_HOOKS:
+        monkeypatch.setattr(hooks_mod, name, lambda *_a, **_kw: None, raising=False)
+
+    monkeypatch.setattr(actions_mod, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions_mod, "is_flyer_workflow_enabled", lambda: True)
+    monkeypatch.setattr(actions_mod, "mark_cf_router_inbound_seen", lambda *_a, **_kw: False)
+    monkeypatch.setattr(actions_mod, "audit_raw_body", lambda *_a, **_kw: None)
+    monkeypatch.setattr(actions_mod, "begin_flyer_intent_shadow", lambda **_kw: None)
+    monkeypatch.setattr(actions_mod, "finalize_flyer_intent_shadow", lambda **_kw: None)
+    monkeypatch.setattr(actions_mod, "reset_flyer_intent_shadow", lambda _t: None)
+    monkeypatch.setattr(actions_mod, "is_owner_chat", lambda _cid: False)
+    monkeypatch.setattr(actions_mod, "is_verified_employee_chat", lambda _cid: False)
+    monkeypatch.setattr(actions_mod, "has_owner_capability", lambda _cid: False)
+    monkeypatch.setattr(actions_mod, "front_brain_converse_admits", lambda _cid: False)
+    monkeypatch.setattr(actions_mod, "flyer_campaign_cta_text", lambda _t: "")
+    monkeypatch.setattr(actions_mod, "recent_bare_flyer_for_chat", lambda _cid: False)
+    monkeypatch.setattr(actions_mod, "lid_to_phone_via_identify_sender",
+                        lambda _cid: (PHONE, "customer"))
+    monkeypatch.setattr(actions_mod, "find_active_flyer_project_by_sender",
+                        lambda _p, _c: project)
+    monkeypatch.setattr(actions_mod, "find_active_catering_lead_by_sender", lambda _p, _c: None)
+    monkeypatch.setattr(actions_mod, "find_flyer_customer_by_sender", lambda _p, _c: None)
+    monkeypatch.setattr(actions_mod, "audit_intercepted", lambda **kw: s.audits.append(kw))
+    monkeypatch.setattr(actions_mod, "audit_dispatcher_routed", lambda **kw: None)
+    # The sender has a live catering lead they are answering — this is what
+    # admits a signal-less follow-up and carries it to the admission gate.
+    monkeypatch.setattr(hooks_mod, "_sender_has_qualifying_lead", lambda _cid: True)
+
+    real_predicate = actions_mod.has_recent_non_delivered_flyer_project_by_sender
+
+    def _predicate(phone, chat_id):
+        answer = real_predicate(phone, chat_id)
+        s.predicate_calls.append(answer)
+        return answer
+
+    monkeypatch.setattr(actions_mod, "has_recent_non_delivered_flyer_project_by_sender",
+                        _predicate)
+
+    def _f7(text, chat_id, event, **kw):
+        s.f7_calls.append({"text": text, **kw})
+        return {"action": "skip", "reason": "cf-router F7: catering lead created"}
+
+    monkeypatch.setattr(hooks_mod, "_try_f7_primary_intercept", _f7)
+    return s
+
+
+# A slot-filling answer to our own intake question: no catering signal of its
+# own, so the escape gate falls through and the admission gate decides.
+FOLLOW_UP_ANSWER = "6pm works for us"
+
+
+def _dispatch(hooks_mod, text=FOLLOW_UP_ANSWER):
+    return hooks_mod._pre_gateway_dispatch_impl(SimpleNamespace(
+        text=text, chat_id=CHAT, message_id="wamid.ADMIT1", media_path=None,
+    ))
+
+
+def test_a_stale_orphan_lets_catering_intent_reach_f7_through_dispatch(
+        monkeypatch, plugin):
+    """THE site pin. Fails if the staleness bound is on any other caller.
+
+    A quota-blocked orphan sat in projects.json forever, and this gate handed
+    every later catering inquiry from that sender to the LLM. Bounding the
+    predicate ANYWHERE ELSE leaves this dispatch returning None while the
+    source-inspection counts stay 1 and 2.
+    """
+    hooks_mod, actions_mod = plugin
+    s = _wire_dispatch(monkeypatch, hooks_mod, actions_mod,
+                       _project("collecting_required_info", age_hours=48))
+
+    result = _dispatch(hooks_mod)
+
+    assert s.predicate_calls == [False], (
+        "the catering-admission gate did not run, so this cell proves nothing "
+        f"about the site (predicate answers: {s.predicate_calls})")
+    assert s.f7_calls, (
+        "a catering follow-up from a sender with a STALE orphan flyer row was "
+        "dropped to the LLM at the admission gate — the staleness bound is "
+        "not on the catering-admission site")
+    assert result == {"action": "skip", "reason": "cf-router F7: catering lead created"}
+
+
+def test_a_fresh_project_still_wins_the_inbound_through_dispatch(
+        monkeypatch, plugin):
+    """The counterpart, also through dispatch: a live flyer conversation must
+    still take the inbound, or a mid-flyer message is read as catering."""
+    hooks_mod, actions_mod = plugin
+    s = _wire_dispatch(monkeypatch, hooks_mod, actions_mod,
+                       _project("collecting_required_info", age_hours=0.25))
+
+    result = _dispatch(hooks_mod)
+
+    assert s.predicate_calls == [True], (
+        f"the admission gate did not run (predicate answers: {s.predicate_calls})")
+    assert s.f7_calls == [], "a live flyer project must still suppress catering"
+    assert result is None, "the gate yields to the existing flyer/LLM route"
+
+
 # ── (e) the other two call sites keep the BROAD predicate ───────────────────
 def test_the_broad_predicate_is_unchanged_for_its_other_callers(monkeypatch, plugin):
     """Only the catering-admission site is bounded by this PR.
@@ -327,11 +488,16 @@ def test_the_broad_predicate_is_unchanged_for_its_other_callers(monkeypatch, plu
 
 
 def test_only_the_catering_admission_site_uses_the_bounded_predicate():
-    """Pins WHICH call sites moved, by source inspection.
+    """Counts occurrences, which is NOT the same as pinning the site.
 
-    The two other callers of the broad predicate (the flyer-active-project
-    guard and the catering-acceptance arm) each need their own review; a silent
-    swap there would change flyer routing, not just catering admission.
+    This cell is satisfied by moving the bounded predicate onto a DIFFERENT
+    caller — a verifier did exactly that and both counts stayed 1 and 2 with
+    the suite green. It survives only as a cheap guard that the other two
+    callers were not additionally converted.
+
+    `test_a_stale_orphan_lets_catering_intent_reach_f7_through_dispatch` is
+    what actually pins the site: it drives the real dispatch and fails if the
+    staleness bound is anywhere other than the catering-admission gate.
     """
     source = (PLUGIN_DIR / "hooks.py").read_text(encoding="utf-8")
     assert source.count("has_recent_non_delivered_flyer_project_by_sender") == 1, (
