@@ -40,6 +40,14 @@ CUSTOMER_JID = "19045550199@s.whatsapp.net"
 
 class _BridgeStub(BaseHTTPRequestHandler):
     requests: list = []
+    # P17: which safe_io.bridge_post status the next POST should produce.
+    #   "ok"          -> 200 + {"id": ...}                    -> status "sent"
+    #   "http_error"  -> 500                                  -> status "http_error"
+    #   "empty_id"    -> 200 + {} (accepted, no id)           -> status "send_uncertain"
+    #   "bad_ack"     -> 200 + non-JSON body                  -> status "send_uncertain"
+    # The two uncertain shapes are both exercised because they enter safe_io on
+    # different branches (empty_message_id vs ack_parse_failed).
+    response_mode = "ok"
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -49,10 +57,20 @@ class _BridgeStub(BaseHTTPRequestHandler):
         except Exception:
             doc = {}
         self.__class__.requests.append(doc)
+        mode = self.__class__.response_mode
+        if mode == "http_error":
+            self.send_response(500)
+            self.end_headers()
+            return
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps({"id": f"msg_{int(time.time()*1000)}"}).encode())
+        if mode == "empty_id":
+            self.wfile.write(json.dumps({"ok": True}).encode())
+        elif mode == "bad_ack":
+            self.wfile.write(b"<html>gateway said something else</html>")
+        else:
+            self.wfile.write(json.dumps({"id": f"msg_{int(time.time()*1000)}"}).encode())
 
     def log_message(self, format, *args):
         return
@@ -79,6 +97,7 @@ def bridge_server(monkeypatch):
     """Local stub on an ephemeral port (never :3000, so the live-bridge tripwire
     stays dormant) wired into the canonical safe_io.BRIDGE_URL."""
     _BridgeStub.requests = []
+    _BridgeStub.response_mode = "ok"
     server = HTTPServer(("127.0.0.1", 0), _BridgeStub)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
@@ -145,8 +164,40 @@ def _rows(env_dir, type_):
     return [r for r in _read_audit(env_dir) if r["type"] == type_]
 
 
-def _run(env_dir, text, *, message_id="wamid.1", sender_role="customer"):
+def _run(env_dir, text, *, message_id="wamid.1", sender_role="customer",
+         notify_sink=None):
+    """`notify_sink`, when given, collects the argv of every
+    `shift-agent-notify-owner` invocation instead of shelling out — the owner
+    page is the P17 assertion surface and the real binary is absent under test."""
     mod = load_script("record_catering_acceptance_mod", SCRIPT)
+    if notify_sink is not None:
+        import subprocess as _sp
+
+        _real_run = _sp.run
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _fake_run(argv, **kwargs):
+            if str(argv[0]) == str(mod.NOTIFY_OWNER_BIN):
+                notify_sink.append([str(part) for part in argv])
+                return _Result()
+            return _real_run(argv, **kwargs)
+
+        mod.subprocess.run = _fake_run
+        _restore = (mod.subprocess, _real_run)
+    else:
+        _restore = None
+    try:
+        return _run_loaded(mod, env_dir, text, message_id, sender_role)
+    finally:
+        if _restore is not None:
+            _restore[0].run = _restore[1]
+
+
+def _run_loaded(mod, env_dir, text, message_id, sender_role):
     mod.CONFIG_PATH = env_dir / "config.yaml"
     mod.LEADS_PATH = env_dir / "state" / "catering-leads.json"
     mod.LEADS_LOCK = env_dir / "state" / "catering-leads.json.lock"
@@ -373,3 +424,92 @@ def test_script_calls_no_llm():
     t = SCRIPT.read_text(encoding="utf-8").lower()
     for token in ("openrouter", "llm_call", "gateway_complete", "hermes_complete"):
         assert token not in t
+
+
+# ── P17: send-status truthfulness on already-committed state ────────────────
+# The BOOKED write, the acceptance audit rows and the owner card ALL land before
+# the customer reply is attempted. When that reply does not land, the lead used to
+# keep asserting a confirmed booking while the customer had heard nothing, and the
+# only trace was a line on stderr.
+
+def test_booked_but_failed_customer_send_marks_lead_and_pages_owner(bridge_server, env_dir):
+    _seed_lead(env_dir)
+    _BridgeStub.response_mode = "http_error"
+    pages: list = []
+
+    rc = _run(env_dir, "we accept", notify_sink=pages)
+
+    lead = _read_lead(env_dir)
+    assert lead["status"] == "BOOKED", "the booking itself is never rolled back by a send"
+    assert lead["customer_ack_status"] == "failed"
+    assert lead["customer_ack_status_at"]
+    rows = _rows(env_dir, "catering_customer_send_unconfirmed")
+    assert len(rows) == 1, "exactly one row for the one unconfirmed send"
+    assert rows[0]["delivery_certainty"] == "failed"
+    assert rows[0]["send_kind"] == "acceptance_reply"
+    assert rows[0]["send_status"] == "http_error"
+    assert rows[0]["script"] == "record-catering-acceptance"
+    assert rows[0]["owner_paged"] is True
+    body = " ".join(pages[-1])
+    assert "NOT told" in body, f"the page must say the customer heard nothing: {body}"
+    assert rows[0]["lead_id"] == "L0001"
+    assert rc == 6
+
+
+def test_failed_customer_send_does_not_retry(bridge_server, env_dir):
+    """No auto-retry anywhere on this path — one attempt, then tell a human."""
+    _seed_lead(env_dir)
+    _BridgeStub.response_mode = "http_error"
+
+    _run(env_dir, "we accept", notify_sink=[])
+
+    assert len(_sent_to(bridge_server, CUSTOMER_JID)) == 1
+
+
+@pytest.mark.parametrize("mode", ["empty_id", "bad_ack"])
+def test_uncertain_customer_send_is_marked_uncertain_not_failed(bridge_server, env_dir, mode):
+    """`send_uncertain` means the bridge ACCEPTED it, so it most likely arrived.
+    Recording that as a flat failure would invite a duplicate booking message."""
+    _seed_lead(env_dir)
+    _BridgeStub.response_mode = mode
+    pages: list = []
+
+    _run(env_dir, "we accept", notify_sink=pages)
+
+    lead = _read_lead(env_dir)
+    assert lead["status"] == "BOOKED"
+    assert lead["customer_ack_status"] == "uncertain", (
+        "an accepted-but-unconfirmed send must not be recorded as a definite failure")
+    rows = _rows(env_dir, "catering_customer_send_unconfirmed")
+    assert rows[-1]["delivery_certainty"] == "uncertain"
+    assert rows[-1]["send_status"] == "send_uncertain"
+    body = " ".join(pages[-1])
+    assert "do NOT resend" in body, f"the page must warn against duplicating: {body}"
+    assert len(_sent_to(bridge_server, CUSTOMER_JID)) == 1, "never re-sent"
+
+
+def test_successful_customer_send_records_sent_and_no_unconfirmed_row(bridge_server, env_dir):
+    """Success path unchanged, plus the marker now says so durably — None must
+    keep meaning 'this path never ran', not 'nobody checked'."""
+    _seed_lead(env_dir)
+
+    rc = _run(env_dir, "we accept")
+
+    lead = _read_lead(env_dir)
+    assert rc == 0
+    assert lead["status"] == "BOOKED"
+    assert lead["customer_ack_status"] == "sent"
+    assert _rows(env_dir, "catering_customer_send_unconfirmed") == []
+
+
+def test_declined_lead_also_records_the_send_disposition(bridge_server, env_dir):
+    """The decline confirmation is the same class of promise as the acceptance."""
+    _seed_lead(env_dir)
+    _BridgeStub.response_mode = "http_error"
+
+    _run(env_dir, "we decline", notify_sink=[])
+
+    lead = _read_lead(env_dir)
+    assert lead["status"] == "CLOSED"
+    assert lead["customer_ack_status"] == "failed"
+    assert _rows(env_dir, "catering_customer_send_unconfirmed")[-1]["send_kind"] == "acceptance_reply"
