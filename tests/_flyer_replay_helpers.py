@@ -234,6 +234,11 @@ def install_common_replay_mocks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     monkeypatch.setattr(actions, "send_flyer_text", send_text)
     monkeypatch.setattr(actions, "send_flyer_concept_previews", lambda *_a, **_kw: calls.append("send_previews") or (True, "preview-mid", ""))
     monkeypatch.setattr(hooks, "_reserve_flyer_access_or_reply", lambda *_a, **_kw: ("quota:CUST0001", None))
+    # Same stance as the reserve stub above: these fixtures replay ROUTING, and
+    # every one of them is a quota-allowed customer. Without this the pre-create
+    # precheck reaches its real subprocess and the harness fails the fixture on
+    # "unregistered live surface" — which is the harness working correctly.
+    monkeypatch.setattr(hooks, "_flyer_quota_precheck_or_reply", lambda *_a, **_kw: None)
     monkeypatch.setattr(hooks, "_release_flyer_access", lambda *_a, **_kw: (True, "released"))
     monkeypatch.setattr(hooks, "_send_preview_then_finalize_access", lambda *_a, **_kw: calls.append("send_preview_then_finalize_access") or (True, "preview-mid", ""))
 

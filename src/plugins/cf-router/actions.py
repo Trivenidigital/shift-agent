@@ -4623,6 +4623,25 @@ def has_non_delivered_flyer_project_by_sender(phone: Optional[str], chat_id: str
     return bool(project and project.get("status") != "delivered")
 
 
+def has_recent_non_delivered_flyer_project_by_sender(phone: Optional[str], chat_id: str) -> bool:
+    """Same question as above, but bounded by `is_stale_for_new_request`.
+
+    Used ONLY by the catering-admission gate. The unbounded predicate means "a
+    flyer conversation is in progress, so a catering inquiry from this sender
+    is probably really about the flyer" — true for a live project, false for a
+    row that has sat untouched for days. An abandoned or orphaned row was
+    suppressing deterministic catering routing for that sender permanently,
+    with no audit row saying it had happened.
+
+    The two other callers of the unbounded predicate keep it: each governs
+    flyer routing rather than catering admission and needs its own review.
+    """
+    project = find_active_flyer_project_by_sender(phone, chat_id)
+    if not project or project.get("status") == "delivered":
+        return False
+    return not is_stale_for_new_request(project)
+
+
 # Per-status thresholds in hours beyond which an active project is "stale" — a
 # new inbound that is NOT a clear status check or revision will bypass the
 # active-project attach path. Empirical baseline: F0036/F0043/F0045 on prod
@@ -5778,6 +5797,17 @@ def _trigger_flyer_quota(
 
 def trigger_flyer_reserve_quota(*, customer_phone: str, project_id: str, message_id: str) -> tuple[bool, str, Optional[dict]]:
     return _trigger_flyer_quota("--reserve-quota", customer_phone=customer_phone, project_id=project_id, message_id=message_id)
+
+
+def trigger_flyer_check_quota(*, customer_phone: str, message_id: str) -> tuple[bool, str, Optional[dict]]:
+    """Read-only "would the quota admit this?", for use BEFORE a project exists.
+
+    Reserves nothing and writes no usage event, so it is safe to call on the
+    hot path ahead of `trigger_create_flyer_project`. `--project-id` is left
+    empty deliberately — there is no project yet.
+    """
+    return _trigger_flyer_quota("--check-quota", customer_phone=customer_phone,
+                                project_id="", message_id=message_id)
 
 
 def trigger_flyer_finalize_usage(*, customer_phone: str, project_id: str, message_id: str) -> tuple[bool, str, Optional[dict]]:

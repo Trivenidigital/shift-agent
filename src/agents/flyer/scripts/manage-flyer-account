@@ -15,6 +15,7 @@ sys.path.insert(0, str(SRC_ROOT))
 try:
     from agents.flyer.account import (  # type: ignore  # noqa: E402
         activate_customer,
+        check_quota,
         finalize_usage,
         handle_account_command,
         claim_starter_prompt_send,
@@ -25,6 +26,7 @@ try:
 except ModuleNotFoundError:
     from flyer_account import (  # type: ignore  # noqa: E402
         activate_customer,
+        check_quota,
         finalize_usage,
         handle_account_command,
         claim_starter_prompt_send,
@@ -87,6 +89,7 @@ def main() -> int:
     mode.add_argument("--command-text", default="")
     mode.add_argument("--activate-customer", default="")
     mode.add_argument("--reserve-quota", action="store_true")
+    mode.add_argument("--check-quota", action="store_true")
     mode.add_argument("--finalize-usage", action="store_true")
     mode.add_argument("--release-quota", action="store_true")
     mode.add_argument("--claim-starter-prompt", default="")
@@ -155,7 +158,14 @@ def main() -> int:
                     "plan_tiers": tiers,
                     "audit_log_path": audit_path,
                 }
-                if args.reserve_quota:
+                if args.check_quota:
+                    # Read-only: no project_id, no usage event, no store write.
+                    result = check_quota(
+                        state_path=state_path,
+                        customer_phone=args.customer_phone,
+                        plan_tiers=tiers,
+                    )
+                elif args.reserve_quota:
                     result = reserve_quota(**kwargs)
                 elif args.finalize_usage:
                     result = finalize_usage(**kwargs)
