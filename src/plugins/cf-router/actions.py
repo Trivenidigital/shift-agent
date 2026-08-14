@@ -3239,15 +3239,33 @@ def should_start_new_flyer_over_active(text: str, *, has_media: bool = False) ->
 # weekend flyer with our menu items") must NOT match, so only the two-word
 # trigger phrases match inside a sentence; the single word "menu" matches only
 # when it is the WHOLE caption.
+# The trigger VOCABULARY, widened (PR-E) once the precedence fix made cession
+# candidacy faithful to this predicate. `updated menu`, `menu updates` and
+# `here is the menu` are the obvious English forms of the same documented
+# trigger, and an owner who used them fell through to flyer routing.
+#
+# The "here is/are ... menu" arm is END-ANCHORED and the others are not, and the
+# asymmetry is load-bearing. Unanchored, that arm would swallow every flyer brief
+# that opens by presenting the menu as source material ("here are our menu items
+# for the weekend flyer"), which is commoner than the message it exists to catch.
+# The two-word phrases stay matchable mid-sentence because the live incident
+# caption is one of them; a brief that carries one AND names a flyer is stopped
+# by the explicit-flyer veto downstream, not here.
+#
+# Deliberately NOT widened to `(?:our|the)\s+menu`: that is the shape every
+# flyer brief uses to name its source material ("weekend flyer using our menu",
+# "put the menu on a poster").
 _MENU_UPDATE_CAPTION_RE = re.compile(
-    r"\b(?:update\s+menu|menu\s+update|new\s+menu)\b",
+    r"\b(?:updated?\s+menu|menu\s+updates?|new\s+menu)\b"
+    r"|\bhere\s+(?:is|are)\s+(?:the|our|my)\s+(?:new\s+|updated\s+)?menu\b[\s.!,]*$",
     re.IGNORECASE,
 )
 
 
 def is_menu_update_caption(text: str) -> bool:
     """Return True when a media caption carries a documented `update_catering_menu`
-    trigger: "update menu" / "menu update" / "new menu" anywhere in the caption, or
+    trigger: "update(d) menu" / "menu update(s)" / "new menu" anywhere in the
+    caption, "here is/are the|our|my (new|updated) menu" as the whole caption, or
     a bare "menu" as the entire caption. Deterministic; NO LLM. Caller supplies the
     media + sender-role conditions — this answers the caption question only."""
     body = " ".join(flyer_visible_message_text(text).split())
