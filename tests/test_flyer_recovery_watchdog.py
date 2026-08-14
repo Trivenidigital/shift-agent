@@ -1699,12 +1699,20 @@ def _run_watchdog_dry(tmp_path, detail: str):
 
 
 @pytest.mark.parametrize("detail", [
-    # finalization failure — the audit detail the approve path writes
-    "project_id=F0085; approve=true; binding_source=active; sender_role=customer; "
-    "visual_qa_failed: missing required visible facts",
-    # final-delivery retry failure — the detail the retry path writes
-    "project_id=F7791; retry_finalizing_assets=true; sender_role=customer; "
-    "message_id=m1; send-flyer-package exit=2",
+    # finalization failure whose prose happens to carry a recognised marker
+    "project_id=F0085; approve=true; finalize_failed=true; binding_source=active; "
+    "sender_role=customer; visual_qa_failed: missing required visible facts",
+    # final-delivery retry failure, same
+    "project_id=F7791; retry_finalizing_assets=true; delivery_send_failed=true; "
+    "sender_role=customer; message_id=m1; send-flyer-package exit=2",
+    # ...and the shapes that used to be invisible: prose with no marker of its
+    # own, carried only by the stamp the failure site now adds. These are the
+    # rows the classifier previously refused while the project aged in
+    # finalizing_assets with nobody watching.
+    "project_id=F0085; approve=true; finalize_failed=true; binding_source=active; "
+    "sender_role=customer; could not build the final package",
+    "project_id=F7791; retry_finalizing_assets=true; delivery_send_failed=true; "
+    "sender_role=customer; message_id=m1; uncertain delivery requires reconciliation",
 ])
 def test_failure_rows_are_seen_by_the_recovery_watchdog(tmp_path, detail):
     result, recovery_state = _run_watchdog_dry(tmp_path, detail)
@@ -1713,18 +1721,13 @@ def test_failure_rows_are_seen_by_the_recovery_watchdog(tmp_path, detail):
     assert not recovery_state.exists()
 
 
-def test_a_failure_detail_with_no_recognised_marker_is_not_ingested(tmp_path):
-    """KNOWN GAP, pinned so it is a documented shape rather than a surprise.
-
-    classify_decision derives failure_class from markers inside the detail
-    (`visual_qa_failed`, `exit=`, `bridge_send_failed`, ...). Both failure sites
-    interpolate whatever the underlying script returned, so a failure that
-    reports none of those markers writes its audit row and is still invisible to
-    the watchdog. Closing that would mean widening the classifier, which changes
-    how many incidents get opened and paged — a population decision, not a
-    copy fix, so it is left to a ruling."""
+def test_an_unclassifiable_detail_is_still_refused(tmp_path):
+    """Control for the cells above: the classifier did not become a catch-all.
+    A flyer row carrying no recognised marker and none of the new stamps is
+    still not ingested, so `opened=1` above is evidence about the stamps rather
+    than about every row being opened."""
     result, _state = _run_watchdog_dry(
         tmp_path,
-        "project_id=F0085; approve=true; sender_role=customer; finalize failed",
+        "project_id=F0085; approve=true; sender_role=customer; nothing recognisable here",
     )
     assert "opened=0" in result.stdout

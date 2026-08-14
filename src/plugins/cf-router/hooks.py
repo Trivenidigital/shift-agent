@@ -5899,6 +5899,11 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
             subprocess_rc=0 if ok else 2,
             detail=(
                 f"project_id={project_id}; retry_finalizing_assets=true; "
+                # Stable marker so recovery.classify_decision ingests this
+                # regardless of what the underlying script's prose says. The
+                # project stays in finalizing_assets, so without it a failure
+                # that never mentions `exit=` ages there unobserved.
+                f"{'' if ok else 'delivery_send_failed=true; '}"
                 f"sender_role={role}; message_id={message_id}; {detail[:500]}"
             ),
             binding_source=binding_source,
@@ -6007,7 +6012,14 @@ def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, med
         actions.audit_intercepted(
             reason="flyer_primary_project_created" if ok else "flyer_primary_failed",
             chat_id=chat_id, subprocess_rc=0 if ok else 2,
-            detail=f"project_id={project_id}; approve=true; binding_source={binding_source}; sender_role={role}; {detail[:500]}",
+            # `finalize_failed=true` is the stable marker recovery.classify_decision
+            # keys on; see the delivery-retry site above for why prose alone was
+            # not enough.
+            detail=(
+                f"project_id={project_id}; approve=true; "
+                f"{'' if ok else 'finalize_failed=true; '}"
+                f"binding_source={binding_source}; sender_role={role}; {detail[:500]}"
+            ),
             binding_source=binding_source,
         )
         if ok:

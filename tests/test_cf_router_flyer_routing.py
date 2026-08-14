@@ -8841,3 +8841,80 @@ def test_the_advertised_retry_still_works_after_a_failure_ack(monkeypatch):
     assert retries[0][1] == "F7791"
     assert result == {"action": "skip",
                       "reason": "cf-router flyer active: retried final delivery for F7791"}
+
+
+@pytest.mark.parametrize("marker,body,project,stub", [
+    ("finalize_failed=true", "APPROVE", "F0085", "finalize_and_send_flyer"),
+    ("delivery_send_failed=true", "send now", "F7791", "retry_send_flyer_package"),
+])
+def test_failure_sites_stamp_the_marker_the_classifier_keys_on(monkeypatch, marker, body, project, stub):
+    """The classifier arm is only worth having if the sites really emit the
+    stamp. Drives the real dispatch with a failure whose prose carries NO
+    recognised marker, and asserts the stamp is on the audit row and that
+    recovery.classify_decision now ingests exactly that row."""
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": project,
+        "customer_phone": "+15550100001",
+        "status": "finalizing_assets" if project == "F7791" else "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Weekend Specials", "contact_info": "+15550100001"},
+        "concepts": [{"concept_id": "C1"}],
+        "final_asset_ids": ["A0001"],
+    }
+    audits: list[dict] = []
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+15550100001", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _p, _c: active_project)
+    # Prose with no marker of its own — the shape that used to classify as nothing.
+    monkeypatch.setattr(actions, stub, lambda *_a: (False, "could not complete the request"))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_a, **_kw: (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    hooks._try_flyer_active_project_intercept(
+        body, "15550100001@s.whatsapp.net", {"message_id": "m-marker"})
+
+    failure_rows = [a for a in audits if a.get("reason") == "flyer_primary_failed"]
+    assert failure_rows, audits
+    assert marker in failure_rows[0]["detail"]
+
+    sys.path.insert(0, str(REPO / "src"))
+    from agents.flyer import recovery
+    signal = recovery.classify_decision({
+        "type": "cf_router_intercepted",
+        "reason": "flyer_primary_failed",
+        "chat_id": "15550100001@s.whatsapp.net",
+        "subprocess_rc": failure_rows[0].get("subprocess_rc", 2),
+        "detail": failure_rows[0]["detail"],
+        "ts": "2026-08-14T12:00:00+00:00",
+    }, {})
+    assert signal is not None
+    assert signal.failure_class == "state_transition_failed"
+    assert signal.project_id == project
+
+
+def test_a_successful_finalize_carries_no_failure_marker(monkeypatch):
+    """The stamp is conditional. A success must not look like a failure to the
+    classifier — that would open an incident for a flyer that shipped."""
+    hooks, actions = _load_plugin_modules()
+    active_project = {
+        "project_id": "F0086",
+        "customer_phone": "+15550100001",
+        "status": "awaiting_final_approval",
+        "fields": {"event_or_business_name": "Mid-Night Biryani", "contact_info": "+15550100001"},
+        "concepts": [{"concept_id": "C1"}],
+    }
+    audits: list[dict] = []
+    monkeypatch.setattr(actions, "lid_to_phone_via_identify_sender", lambda _c: ("+15550100001", "customer"))
+    monkeypatch.setattr(actions, "find_flyer_customer_by_sender", lambda _p, _c: {"customer_id": "CUST0001", "status": "trial"})
+    monkeypatch.setattr(actions, "find_active_flyer_project_by_sender", lambda _p, _c: active_project)
+    monkeypatch.setattr(actions, "finalize_and_send_flyer", lambda *_a: (True, "delivered"))
+    monkeypatch.setattr(actions, "send_flyer_text", lambda *_a, **_kw: (True, "mid", ""))
+    monkeypatch.setattr(actions, "audit_intercepted", lambda **kwargs: audits.append(kwargs))
+
+    hooks._try_flyer_active_project_intercept(
+        "APPROVE", "15550100001@s.whatsapp.net", {"message_id": "m-ok"})
+
+    assert audits
+    for row in audits:
+        assert "finalize_failed" not in row.get("detail", "")
+        assert "delivery_send_failed" not in row.get("detail", "")

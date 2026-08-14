@@ -433,7 +433,15 @@ def classify_decision(row: dict, projects: dict[str, dict]) -> RecoverySignal | 
         failure_class = "provider_unavailable"
     elif ack_error_present or any(marker in lower for marker in ["bridge_send_failed", "connect_failed", "http_error"]):
         failure_class = "bridge_send_failed"
-    elif any(marker in lower for marker in ["json_parse_failed", "select_failed", "status_failed", "exit="]):
+    elif any(marker in lower for marker in [
+        "json_parse_failed", "select_failed", "status_failed", "exit=",
+        # Stable markers the finalize / final-delivery failure sites stamp.
+        # Both previously relied on whatever the underlying script happened to
+        # put in the detail: a failure reporting `exit=` landed here, one
+        # reporting only prose classified as nothing and the project aged in
+        # finalizing_assets unseen. Same event, same class, either way now.
+        "finalize_failed", "delivery_send_failed",
+    ]):
         if project_id:
             failure_class = "state_transition_failed"
     if not failure_class:
