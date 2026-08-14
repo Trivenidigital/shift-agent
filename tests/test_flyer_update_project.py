@@ -6,7 +6,7 @@ import importlib.util
 import json
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1106,3 +1106,115 @@ def test_generic_status_finalizing_does_not_promote_inferred(tmp_path, monkeypat
     assert persisted["status"] == "finalizing_assets"
     facts = {f["fact_id"]: f for f in persisted["locked_facts"]}
     assert facts["item:0:name"]["source"] == "hermes_inferred"  # operator/system path must NOT promote
+
+
+# ─── manual-review landmines (P2 batch-2) ───────────────────────────────────
+#
+# Two pre-existing defects in the --queue-manual-review path:
+#   1. the --manual-reason-code `choices` list was hand-maintained and had
+#      already drifted from FlyerManualReviewReason, so queueing either of the
+#      two missing codes exited 2 — a promise with no row, the same defect class
+#      the SLA watchdog fix (#698) closed on the paging side.
+#   2. a re-queue inherited the prior queued_at, so the row was born already
+#      breaching the SLA and slipped straight past the close-freshness guard.
+
+
+def _manual_review_reasons() -> set[str]:
+    from typing import get_args
+
+    sys.path.insert(0, str(PLATFORM))
+    from schemas import FlyerManualReviewReason
+
+    return set(get_args(FlyerManualReviewReason))
+
+
+def _store_with_queued_row(tmp_path: Path, *, queued_at: str, reason_code: str = "operator_request") -> str:
+    """The shared store builder emits no manual_review; inject an aged queue row."""
+    store = json.loads(_project_store_json(tmp_path, status="manual_edit_required"))
+    store["projects"][0]["manual_review"] = {
+        "status": "queued",
+        "reason": reason_code,
+        "reason_code": reason_code,
+        "detail": "first pass",
+        "queued_at": queued_at,
+    }
+    return json.dumps(store)
+
+
+def test_manual_reason_code_choices_match_the_schema():
+    """Set equality against FlyerManualReviewReason, mirroring the SLA watchdog's
+    guard. This catches a regression to a hand-maintained list; it cannot catch
+    the decision to add a new reason value — that is a schema-side choice, and
+    this test only insists the CLI is not silently narrower than it."""
+    module = _load_script(pytest.MonkeyPatch())
+    assert set(module.MANUAL_REASON_CODES) == _manual_review_reasons()
+
+
+@pytest.mark.parametrize("reason_code", ["dependency_missing", "price_conflict"])
+def test_drifted_reason_codes_are_accepted_and_write_a_row(tmp_path, monkeypatch, capsys, reason_code):
+    """RED before the fix: argparse rejected both codes and exited 2, so the
+    caller reported a queued manual review that does not exist."""
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    state_path.write_text(
+        _project_store_json(tmp_path, status="manual_edit_required"), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--queue-manual-review",
+        "--manual-reason-code", reason_code,
+        "--manual-detail", "drifted code must reach the store",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    capsys.readouterr()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+    assert persisted["manual_review"]["status"] == "queued"
+    assert persisted["manual_review"]["reason_code"] == reason_code
+
+
+def test_requeue_resets_the_sla_clock(tmp_path, monkeypatch, capsys):
+    """RED before the fix: the new row inherited a 2h-old queued_at, so it was
+    born breaching the SLA. Driven through the REAL close-freshness guard, not a
+    re-implementation of its arithmetic."""
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    module = _load_script(monkeypatch)
+    state_path = tmp_path / "projects.json"
+    stale = datetime.now(timezone.utc) - timedelta(hours=2)
+    state_path.write_text(
+        _store_with_queued_row(tmp_path, queued_at=stale.isoformat()), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "update-flyer-project",
+        "--project-id", "F9001",
+        "--queue-manual-review",
+        "--manual-reason-code", "provider_timeout",
+        "--manual-detail", "second pass",
+        "--state-path", str(state_path),
+    ])
+
+    assert module.main() == 0
+    capsys.readouterr()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+
+    requeued_at = datetime.fromisoformat(persisted["manual_review"]["queued_at"])
+    assert requeued_at > stale + timedelta(minutes=90), (
+        "re-queue inherited the prior queued_at; the row is born breaching the SLA")
+
+    # The real consumer: enforce_close_freshness_guard blocks --close of a row
+    # younger than CLOSE_FRESH_MIN_AGE_MINUTES. Pre-fix the inherited 2h stamp
+    # made it return silently; post-fix it must engage.
+    sys.path.insert(0, str(SRC))
+    from agents.flyer.manual_queue import (  # noqa: E402
+        CLOSE_FRESH_MIN_AGE_MINUTES, _queue_row_age_minutes, enforce_close_freshness_guard,
+    )
+    from schemas import FlyerProjectStore  # noqa: E402
+
+    store = FlyerProjectStore.model_validate(json.loads(state_path.read_text(encoding="utf-8")))
+    now = datetime.now(timezone.utc)
+    assert _queue_row_age_minutes(store.projects[0], now=now) < CLOSE_FRESH_MIN_AGE_MINUTES
+    with pytest.raises(ValueError, match="queue row is only"):
+        enforce_close_freshness_guard(store, "F9001", reason="cleanup", force=False, now=now)
