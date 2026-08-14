@@ -76,6 +76,7 @@ from safe_io import bridge_post  # noqa: E402
 from schemas import (  # noqa: E402
     ActionExecutionContext, Config, CateringLeadStore, CateringLeadStatusChange,
     CateringLeadAcceptanceRecorded, CateringLeadHoldBlockedSend,
+    CateringCustomerSendUnconfirmed,
     is_catering_transition_allowed,
 )
 from exit_codes import (  # noqa: E402
@@ -181,11 +182,17 @@ _CTX_OWNER = ActionExecutionContext(
 )
 
 
-def _post(jid: str, message: str, context: ActionExecutionContext) -> tuple[bool, str]:
-    """(ok, message_id_or_error) — the 2-tuple shape the sibling catering scripts
-    unpack, over the canonical 4-tuple chokepoint."""
+def _post(jid: str, message: str,
+          context: ActionExecutionContext) -> tuple[bool, str, str]:
+    """(ok, message_id_or_error, status) over the canonical 4-tuple chokepoint.
+
+    P17: `status` is carried out rather than dropped. The old 2-tuple shape
+    collapsed 'send_uncertain' (bridge accepted it; it most likely ARRIVED) into
+    the same falsey result as 'connect_failed' (it definitely did not), which is
+    the distinction the caller needs to decide between "tell the owner nobody was
+    confirmed" and "do not send this money message twice"."""
     ok, mid, err, status = bridge_post(jid, message, action_context=context)
-    return (True, mid) if ok else (False, err or status)
+    return (True, mid, status) if ok else (False, err or status, status)
 
 
 def _append_audit_under_leadslock(adapter: TypeAdapter, entry) -> None:
@@ -248,6 +255,121 @@ def _notify_owner(cfg, lead, outcome: str, version_hint: str) -> None:
     except Exception as e:  # noqa: BLE001 — alerting is best-effort
         sys.stderr.write(f"catering_acceptance_alert_delivery_failed lead={lead.lead_id} "
                          f"error={type(e).__name__}: {e}\n")
+
+
+_CERTAINTY_BY_STATUS = {"send_uncertain": "uncertain"}
+
+
+def _delivery_certainty(send_status: str) -> str:
+    """'uncertain' only for safe_io's `send_uncertain` (bridge accepted, ack body
+    unparseable → most likely delivered). Every other non-sent status — transport
+    faults AND the policy drops ('refused', 'throttled', 'suppressed', 'disabled')
+    — means the customer definitively received nothing."""
+    return _CERTAINTY_BY_STATUS.get(send_status, "failed")
+
+
+def _mark_customer_ack_status(lead_id: str, marker: str, now) -> bool:
+    """Persist `customer_ack_status` on the lead. Re-opens LEADS_LOCK: the send
+    happens outside the lock by design (no network under a lock), so this is a
+    second, short critical section. Best-effort — a marker write that fails must
+    not mask the send failure it is describing."""
+    try:
+        with FileLock(LEADS_LOCK):
+            store, status = load_model(LEADS_PATH, CateringLeadStore,
+                                       default=CateringLeadStore())
+            idx = next((i for i, le in enumerate(store.leads)
+                        if le.lead_id == lead_id), None)
+            if idx is None:
+                return False
+            store.leads[idx] = store.leads[idx].model_copy(update={
+                "customer_ack_status": marker,
+                "customer_ack_status_at": now,
+            })
+            atomic_write_json(LEADS_PATH, store)
+        return True
+    except Exception as e:  # noqa: BLE001 — never mask the send failure
+        sys.stderr.write(f"WARN: customer_ack_status marker write failed "
+                         f"({type(e).__name__}: {e}); the audit row still stands\n")
+        return False
+
+
+def _page_owner_unconfirmed(cfg, lead, lead_id: str, certainty: str,
+                            outcome: str, detail: str) -> bool:
+    """Tell the owner the CUSTOMER was not confirmed. Deliberately goes out over
+    `shift-agent-notify-owner` (Pushover) and NOT over the bridge: the bridge is
+    the thing that just failed, so paging over it could vanish the same way. The
+    earlier owner card already said the customer accepted — this is the correction
+    to that, so it must not share the failed channel."""
+    if certainty == "uncertain":
+        headline = (f"Catering {lead_id}: customer confirmation NOT verified — "
+                    f"do NOT resend")
+        guidance = ("The bridge accepted the message but did not confirm it, so it "
+                    "most likely DID arrive. Sending it again would double-message "
+                    "the customer about their booking. Check the chat before acting.")
+    else:
+        headline = (f"Catering {lead_id}: customer was NOT told — manual message "
+                    f"needed")
+        guidance = ("The confirmation did not reach the customer. The booking IS "
+                    "recorded on our side, so the customer believes nothing is "
+                    "settled. Message them manually.")
+    body = (
+        f"{headline}\n"
+        f"Recorded outcome: {outcome}\n"
+        f"Customer: {(lead.customer_name if lead is not None else None) or '(unknown)'} "
+        f"({lead.customer_phone if lead is not None else '(unknown)'})\n"
+        f"{guidance}\n"
+        f"Detail: {detail[:200]}"
+    )
+    sys.stderr.write(f"catering_ack_unconfirmed_alert_dispatched lead={lead_id} "
+                     f"certainty={certainty}\n")
+    try:
+        proc = subprocess.run(
+            [str(NOTIFY_OWNER_BIN), "--priority", "1",
+             "--title", "Catering customer NOT confirmed", "--", body],
+            check=False, capture_output=True, text=True, timeout=10,
+        )
+        delivered = proc.returncode == 0
+    except Exception as e:  # noqa: BLE001 — alerting is best-effort
+        sys.stderr.write(f"catering_ack_unconfirmed_alert_delivery_failed "
+                         f"lead={lead_id} error={type(e).__name__}: {e}\n")
+        return False
+    sys.stderr.write(f"catering_ack_unconfirmed_alert_delivered lead={lead_id} "
+                     f"ok={delivered}\n")
+    return delivered
+
+
+def _record_customer_ack_disposition(*, lead_id: str, cfg, lead, ok: bool,
+                                     send_status: str, detail: str, outcome: str,
+                                     customer_jid: str, logical_turn_id: str,
+                                     now) -> None:
+    """Marker + audit row + owner page for the acceptance reply's real fate.
+
+    On success this writes ONLY the marker, so a lead that reached the customer
+    says so durably instead of leaving None (which means "path never ran")
+    indistinguishable from "we never checked"."""
+    if ok:
+        _mark_customer_ack_status(lead_id, "sent", now)
+        return
+
+    certainty = _delivery_certainty(send_status)
+    _mark_customer_ack_status(lead_id, certainty, now)
+    paged = _page_owner_unconfirmed(cfg, lead, lead_id, certainty, outcome, detail)
+    try:
+        with FileLock(LEADS_LOCK):
+            _append_audit_under_leadslock(
+                TypeAdapter(CateringCustomerSendUnconfirmed),
+                CateringCustomerSendUnconfirmed(
+                    type="catering_customer_send_unconfirmed", ts=now,
+                    lead_id=lead_id, script="record-catering-acceptance",
+                    send_kind="acceptance_reply", send_status=send_status,
+                    delivery_certainty=certainty, detail=detail[:2000],
+                    owner_paged=paged, logical_turn_id=logical_turn_id,
+                    transport_destination=customer_jid, outcome=send_status,
+                ),
+            )
+    except Exception as e:  # noqa: BLE001 — audit is best-effort
+        sys.stderr.write(f"audit emit (customer_send_unconfirmed) failed "
+                         f"(non-fatal): {type(e).__name__}: {e}\n")
 
 
 def _rollback_unsent_clarification(lead_id: str, customer_message_id: str,
@@ -547,7 +669,7 @@ def main() -> int:
     elif outcome in ("accepted", "declined"):
         _notify_owner(cfg, lead_snapshot, outcome, _latest_quote_version(args.lead_id))
 
-    ok, mid_or_err = True, ""
+    ok, mid_or_err, send_status = True, "", "sent"
     if send_customer_reply:
         template = _EXPIRED_REPLY if quote_expired else {
             "accepted": _ACCEPT_REPLY,
@@ -555,7 +677,7 @@ def main() -> int:
             "ambiguous": _CLARIFY_REPLY,
         }[outcome]
         context = _CTX_CLARIFY if outcome == "ambiguous" else _CTX_ACCEPT
-        ok, mid_or_err = _post(
+        ok, mid_or_err, send_status = _post(
             args.customer_jid, BRIDGE_PREFIX + template.format(lead_id=args.lead_id),
             context)
         if not ok:
@@ -563,6 +685,20 @@ def main() -> int:
             if outcome == "ambiguous":
                 _rollback_unsent_clarification(args.lead_id, args.customer_message_id,
                                                cfg, lead_snapshot, now, mid_or_err)
+        # P17: the BOOKED/CLOSED commit and the owner card are BOTH already done by
+        # the time we get here — the owner has been told the customer accepted. If
+        # the customer heard nothing, the lead must say so, the audit must say so,
+        # and the owner must be told a second time that the confirmation did not
+        # land. The state is never rolled back (that contract predates this) and
+        # nothing auto-retries: 'send_uncertain' forbids it outright, and a
+        # definite failure is a human's call on a message about a booking.
+        _record_customer_ack_disposition(
+            lead_id=args.lead_id, cfg=cfg, lead=lead_snapshot,
+            ok=ok, send_status=send_status, detail=str(mid_or_err),
+            outcome=("acceptance_of_expired" if quote_expired else outcome),
+            customer_jid=args.customer_jid,
+            logical_turn_id=args.customer_message_id, now=now,
+        )
 
     print(json.dumps({
         "lead_id": args.lead_id,

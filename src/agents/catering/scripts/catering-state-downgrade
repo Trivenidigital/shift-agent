@@ -117,6 +117,12 @@ LEAD_FIELDS_UNKNOWN_TO_OLD = (
     "acceptance_clarification_sent_message_id",
     # M4/G4 per-lead hold
     "on_hold", "hold_reason", "hold_set_at",
+    # P17 send-status truthfulness markers. Dropping them on a downgrade is safe:
+    # the old release has no consumer for them, and the sidecar preserves the
+    # values so the disposition of an unconfirmed send is recoverable.
+    "customer_ack_status", "customer_ack_status_at",
+    "quote_delivery_status", "quote_delivery_status_at",
+    "card_delivery_status", "card_delivery_status_at",
 )
 
 # M3 stamped a validity window on the proposal SET. Old CateringProposalSet is

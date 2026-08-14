@@ -127,6 +127,24 @@ def _capture(sends: list, via: str, *, ok: bool = True):
     return _bp
 
 
+def _capture4(sends: list, via: str, *, ok: bool = True):
+    """P17 companion for the scripts whose sends moved to the CANONICAL 4-tuple
+    `bridge_post` so they can read `status`. Same capture, 4-tuple shape."""
+    def _bp(jid: str, message: str, **kwargs):
+        sends.append({"via": via, "jid": jid, "message": message})
+        if ok:
+            return True, f"msg_{via}_{len(sends):04d}", "", "sent"
+        return False, "", "bridge_unreachable: connection refused", "connect_failed"
+    return _bp
+
+
+def _wire_bridge(mod, sends: list, via: str, *, ok: bool = True) -> None:
+    """Stub BOTH send entry points. A script may use either the 2-tuple adapter
+    or the canonical 4-tuple; wiring both keeps this shim independent of which."""
+    mod._bridge_post = _capture(sends, via, ok=ok)
+    mod._bridge_post_4tuple = _capture4(sends, via, ok=ok)
+
+
 def _shim_trigger_create_lead(sb: _Sandbox, sends: list):
     def _t(customer_phone, customer_name, raw_inquiry, message_id,
            extracted_fields=None, suppress_customer_ack=False,
@@ -143,7 +161,7 @@ def _shim_trigger_create_lead(sb: _Sandbox, sends: list):
         mod.LOG_PATH = sb.log
         mod.TEMPLATE_DIR = sb.templates
         mod.MENU_PATH = sb.menu
-        mod._bridge_post = _capture(sends, "create-catering-lead")
+        _wire_bridge(mod, sends, "create-catering-lead")
         argv = ["create-catering-lead", "--customer-phone", customer_phone,
                 "--customer-name", customer_name or "", "--raw-inquiry", raw_inquiry[:1000],
                 "--message-id", message_id, "--fields-json", json.dumps(fields)]
@@ -168,7 +186,7 @@ def _shim_invoke_create_proposals(sb: _Sandbox, sends: list):
         mod.MENU_PATH = sb.menu
         mod.LOG_PATH = sb.log
         mod.LOG_LOCK = Path(str(sb.log) + ".lock")
-        mod._bridge_post = _capture(sends, "create-catering-proposal-options")
+        _wire_bridge(mod, sends, "create-catering-proposal-options")
         mod._notify_owner_generation_failed = lambda *a, **k: None
         argv = ["create-catering-proposal-options", "--lead-id", lead_id, "--customer-jid", chat_id,
                 "--source-message-id", message_id, "--request-text", text, "--auto-generate-from-menu"]
@@ -187,7 +205,7 @@ def _shim_invoke_select(sb: _Sandbox, sends: list, finalize_calls: list, *, ack_
         mod.MENU_PATH = sb.menu
         mod.LOG_PATH = sb.log
         mod.LOG_LOCK = Path(str(sb.log) + ".lock")
-        mod._bridge_post = _capture(sends, "select-catering-proposal", ok=ack_ok)
+        _wire_bridge(mod, sends, "select-catering-proposal", ok=ack_ok)
 
         # Capture the downstream finalize-catering-menu / notify-owner subprocesses (they
         # have their own tests). Returning rc=0 makes finalize "succeed" so the real
@@ -511,7 +529,7 @@ def _run_finalize_autodefault(sb: _Sandbox, code: str, message_id: str,
     mod.PROPOSALS_LOCK = Path(str(sb.proposals) + ".lock")
     mod.LEDGER_PATH = sb.state / "catering-quote-ledger.json"
     mod.TEMPLATE_DIR = sb.templates
-    mod._bridge_post = _capture([], "finalize-owner-card", ok=owner_ok)
+    _wire_bridge(mod, [], "finalize-owner-card", ok=owner_ok)
     argv = ["finalize-catering-menu", "--code", code,
             "--customer-message-id", message_id, "--logical-turn-id", logical_turn_id,
             "--auto-default"]
@@ -523,7 +541,7 @@ def _run_send_ack(sb: _Sandbox, name: str, jid: str, logical_turn_id: str,
     """Drive the REAL send-catering-ack in-process (bridge POST stubbed)."""
     mod = load_script(name, SCRIPTS / "send-catering-ack")
     mod.LOG_PATH = sb.log
-    mod._bridge_post = _capture([], "send-catering-ack", ok=ok)
+    _wire_bridge(mod, [], "send-catering-ack", ok=ok)
     argv = ["send-catering-ack", "--customer-jid", jid, "--message-text", "Noted, thank you.",
             "--lead-id", lead_id, "--logical-turn-id", logical_turn_id]
     return _run_main(mod, argv)
@@ -611,7 +629,7 @@ def _run_apply_approve(sb: _Sandbox, module_name: str, code: str, logical_turn_i
     mod.LEADS_LOCK = Path(str(sb.leads) + ".lock")
     mod.LOG_PATH = sb.log
     mod.LEDGER_PATH = sb.state / "catering-quote-ledger.json"
-    mod._bridge_post = _capture([], "apply-owner-decision", ok=bridge_ok)
+    _wire_bridge(mod, [], "apply-owner-decision", ok=bridge_ok)
     argv = ["apply-catering-owner-decision", "--code", code, "--decision", "approve",
             "--sender-role", "owner", "--quote-from-lead-state",
             "--logical-turn-id", logical_turn_id]
@@ -720,7 +738,12 @@ def test_quote_sent_lead_missing_divergence_row_carries_identity(tmp_path):
         # customer receives the quote, but the lead disappears before the re-load
         sb.leads.write_text(json.dumps({"schema_version": 1, "leads": []}), encoding="utf-8")
         return True, "msg_diverge_0001"
+
+    def _bp4_then_vanish(jid, message, **kwargs):
+        sb.leads.write_text(json.dumps({"schema_version": 1, "leads": []}), encoding="utf-8")
+        return True, "msg_diverge_0001", "", "sent"
     mod._bridge_post = _bp_then_vanish
+    mod._bridge_post_4tuple = _bp4_then_vanish
     argv = ["apply-catering-owner-decision", "--code", "#PAYRZ", "--decision", "approve",
             "--sender-role", "owner", "--quote-from-lead-state", "--logical-turn-id", LTID]
     rc, _out, _err = _run_main(mod, argv)
@@ -819,7 +842,7 @@ def _run_recompose_merge(sb: _Sandbox, module_name: str, lead_id: str, message_i
     mod.MENU_PATH = sb.menu
     mod.LOG_PATH = sb.log
     mod.LOG_LOCK = Path(str(sb.log) + ".lock")
-    mod._bridge_post = _capture([], "recompose")
+    _wire_bridge(mod, [], "recompose")
     argv = ["create-catering-proposal-options", "--lead-id", lead_id,
             "--customer-jid", PHONE_DIGITS + "@lid", "--source-message-id", message_id,
             "--logical-turn-id", message_id, "--request-text",

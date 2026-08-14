@@ -95,7 +95,12 @@ def sb(tmp_path, monkeypatch):
 
 
 def _create(sb: Sandbox, fields: dict, *, gate=False, message_id="wamid.NEW",
-            phone="+19045550199", raw="need catering", bridge_ok=True):
+            phone="+19045550199", raw="need catering", bridge_ok=True,
+            bridge_status=None, notify_sink=None):
+    """`bridge_status` (P17) picks the safe_io status the stubbed send reports —
+    "send_uncertain" means the bridge ACCEPTED the message, which the script must
+    not record as a definite failure. Defaults keep every existing caller's
+    behaviour: "sent" when bridge_ok, "connect_failed" otherwise."""
     mod = load_script("create_lead_under_test", SCRIPTS / "create-catering-lead")
     mod.CONFIG_PATH = sb.config
     mod.LEADS_PATH = sb.leads
@@ -104,10 +109,41 @@ def _create(sb: Sandbox, fields: dict, *, gate=False, message_id="wamid.NEW",
     mod.TEMPLATE_DIR = TEMPLATES
     mod.MENU_PATH = sb.state / "catering-menu.json"
 
+    default = "sent" if bridge_ok else "connect_failed"
+    # A list gives a per-send sequence (the last entry repeats), so a test can
+    # let the owner card through and fail only the customer send after it.
+    statuses = list(bridge_status) if isinstance(bridge_status, (list, tuple))         else [bridge_status or default]
+
+    def _next_status() -> str:
+        return statuses.pop(0) if len(statuses) > 1 else statuses[0]
+
     def _bridge(jid, message):
         sb.sends.append({"jid": jid, "message": message})
-        return (True, "wamid.OUT") if bridge_ok else (False, "connection refused")
+        status = _next_status()
+        return (True, "wamid.OUT") if status == "sent" else (False, "connection refused")
     mod._bridge_post = _bridge
+
+    def _bridge4(jid, message, **kwargs):
+        sb.sends.append({"jid": jid, "message": message})
+        status = _next_status()
+        if status == "sent":
+            return True, "wamid.OUT", "", "sent"
+        return False, "", "connection refused", status
+    mod._bridge_post_4tuple = _bridge4
+
+    if notify_sink is not None:
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _fake_run(argv, **kwargs):
+            notify_sink.append([str(part) for part in argv])
+            return _Result()
+        _real_subprocess_run = mod.subprocess.run
+        mod.subprocess.run = _fake_run
+    else:
+        _real_subprocess_run = None
 
     argv = ["create-catering-lead", "--customer-phone", phone, "--customer-name", "",
             "--raw-inquiry", raw, "--message-id", message_id,
@@ -125,6 +161,8 @@ def _create(sb: Sandbox, fields: dict, *, gate=False, message_id="wamid.NEW",
         rc = e.code if isinstance(e.code, int) else 1
     finally:
         sys.argv = old_argv
+        if _real_subprocess_run is not None:
+            mod.subprocess.run = _real_subprocess_run
     stdout = out.getvalue().strip()
     payload = json.loads(stdout.splitlines()[-1]) if stdout else {}
     return rc, payload, err.getvalue()
@@ -252,3 +290,95 @@ def test_gated_and_ungated_leads_coexist_in_one_store(sb):
 
     statuses = {l["lead_id"]: l["status"] for l in sb.leads_list()}
     assert statuses == {"L0001": "QUALIFYING", "L0002": "AWAITING_OWNER_APPROVAL"}
+
+
+# ── P17: the card's real fate is recorded, not asserted ─────────────────────
+# The lead is persisted before the owner card is sent. When the card did not
+# arrive, the only trace was a stderr line and an audit row that hardcoded
+# reason="bridge_unreachable" — so a send_uncertain (bridge ACCEPTED it) was
+# recorded as the opposite fact. The replay breadcrumb in the script said as
+# much: "the lead schema does not yet persist a card_sent flag, so we cannot
+# assert the original card was delivered."
+
+def test_delivered_owner_card_is_recorded_on_the_lead(sb):
+    rc, payload, _err = _create(sb, BARELY_ANYTHING, gate=False)
+
+    assert rc == 0 and payload["card_sent"] is True
+    assert sb.leads_list()[0]["card_delivery_status"] == "sent"
+    assert sb.audit_rows("catering_customer_send_unconfirmed") == []
+
+
+def test_failed_owner_card_marks_the_lead_and_pages_the_owner(sb):
+    pages: list = []
+    rc, payload, err = _create(sb, BARELY_ANYTHING, gate=False,
+                               bridge_ok=False, notify_sink=pages)
+
+    lead = sb.leads_list()[0]
+    assert rc == 6 and payload["card_sent"] is False
+    assert lead["status"] == "AWAITING_OWNER_APPROVAL", "the lead is still saved"
+    assert lead["card_delivery_status"] == "failed"
+    assert lead["card_delivery_status_at"]
+    rows = sb.audit_rows("catering_customer_send_unconfirmed")
+    assert len(rows) == 1
+    assert rows[0]["send_kind"] == "owner_approval_card"
+    assert rows[0]["delivery_certainty"] == "failed"
+    assert rows[0]["send_status"] == "connect_failed"
+    assert rows[0]["owner_paged"] is True
+    body = " ".join(pages[-1])
+    assert "NOT go out" in body, f"the page must say the card never went: {body}"
+
+
+def test_uncertain_owner_card_is_not_recorded_as_a_definite_failure(sb):
+    """The bridge accepted the card, so it most likely reached the owner.
+    Recording 'failed' would send someone hunting for a card that is sitting in
+    their chat — and the old code hardcoded exactly that."""
+    pages: list = []
+    rc, _payload, _err = _create(sb, BARELY_ANYTHING, gate=False,
+                                 bridge_status="send_uncertain", notify_sink=pages)
+
+    lead = sb.leads_list()[0]
+    assert lead["card_delivery_status"] == "uncertain"
+    rows = sb.audit_rows("catering_customer_send_unconfirmed")
+    assert rows[0]["delivery_certainty"] == "uncertain"
+    assert rows[0]["send_status"] == "send_uncertain"
+    card_failed = sb.audit_rows("catering_owner_approval_card_failed")
+    assert card_failed and card_failed[0]["reason"] == "send_uncertain", (
+        "the existing card_failed row must carry the REAL status, not a "
+        "hardcoded bridge_unreachable that states the opposite")
+    assert "most likely DID arrive" in " ".join(pages[-1]), (
+        "an accepted-but-unconfirmed card must not send the owner hunting")
+    assert rc == 6
+
+
+def test_failed_customer_proposal_is_audited_with_its_real_status(sb):
+    """The F14 sample menu is a customer send on the same already-saved lead.
+    Card through, proposal not — so the owner believes the customer has a menu
+    the customer never received."""
+    pages: list = []
+    _create(sb, FULLY_QUALIFIED, gate=False,
+            bridge_status=["sent", "connect_failed"], notify_sink=pages)
+
+    lead = sb.leads_list()[0]
+    assert lead["card_delivery_status"] == "sent", "the card itself got through"
+    rows = sb.audit_rows("catering_customer_send_unconfirmed")
+    assert [r["send_kind"] for r in rows] == ["customer_proposal"]
+    assert rows[0]["delivery_certainty"] == "failed"
+    assert rows[0]["owner_paged"] is True
+    assert "sample menu" in " ".join(pages[-1])
+
+
+def test_failed_qualification_questions_are_audited(sb):
+    """The gated path's ONE customer send. The lead parks in QUALIFYING either
+    way; when the questions never arrive, the customer is waiting on a message
+    that does not exist."""
+    pages: list = []
+    rc, payload, _err = _create(sb, BARELY_ANYTHING, gate=True,
+                                bridge_ok=False, notify_sink=pages)
+
+    lead = sb.leads_list()[0]
+    assert rc == 6 and payload["questions_sent"] is False
+    assert lead["status"] == "QUALIFYING"
+    rows = sb.audit_rows("catering_customer_send_unconfirmed")
+    assert len(rows) == 1 and rows[0]["send_kind"] == "qualification_questions"
+    assert rows[0]["delivery_certainty"] == "failed"
+    assert rows[0]["owner_paged"] is True

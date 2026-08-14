@@ -21,6 +21,12 @@ _APPLY_SCRIPT = (Path(__file__).resolve().parent.parent
                  / "apply-catering-owner-decision")
 
 
+# The customer-quote send site. Keyed by an explicit marker comment in the
+# script rather than by the call expression, so these write-order pins survive
+# a rewrite of the call itself (P17 moved it to the 4-tuple bridge_post).
+_QUOTE_POST_MARKER = "# CUSTOMER-QUOTE-BRIDGE-POST"
+
+
 @pytest.fixture(scope="module")
 def script_text() -> str:
     return _APPLY_SCRIPT.read_text(encoding="utf-8")
@@ -67,7 +73,7 @@ def test_customer_phone_pre_bridge_captured_inside_lock(script_text: str):
         "customer_phone_pre_bridge captured before first LEADS_LOCK acquire"
     )
     # Bridge POST is _bridge_post call — must come AFTER the capture
-    bridge_idx = script_text.find("ok, mid_or_err = _bridge_post(")
+    bridge_idx = script_text.find(_QUOTE_POST_MARKER)
     assert bridge_idx > capture_idx, (
         "customer_phone_pre_bridge captured after bridge POST"
     )

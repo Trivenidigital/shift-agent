@@ -2447,6 +2447,45 @@ class CateringLead(BaseModel):
         default=None, min_length=1, max_length=200,
     )
 
+    # P17 2026-08-14 send-status truthfulness. Additive + default-None so every
+    # legacy lead decodes unchanged and a rollback drops them cleanly (they are on
+    # catering-state-downgrade's LEAD_FIELDS_UNKNOWN_TO_OLD).
+    #
+    # These record what the CUSTOMER (or owner, for the card) actually received on
+    # paths where the state write commits FIRST and the send happens after. Before
+    # them, a bridge failure on those paths left the lead asserting a booking, a
+    # quote, or a card that nobody could show was delivered.
+    #
+    # Three values, and the difference between the last two is load-bearing:
+    #   "sent"      — the bridge returned a message id.
+    #   "failed"    — a definite drop; the recipient got NOTHING.
+    #   "uncertain" — safe_io's `send_uncertain`: the bridge ACCEPTED it (2xx) but
+    #                 the ack body was unparseable, so it most likely DID arrive.
+    #                 A re-send would duplicate, which is why `bridge_post`
+    #                 documents "Caller MUST NOT auto-retry" for this status and
+    #                 why the approve path treats an uncertain quote as delivered
+    #                 for replay purposes instead of re-POSTing it.
+    # None means the path never ran for this lead — NOT that a send succeeded.
+    customer_ack_status: Optional[Literal["sent", "failed", "uncertain"]] = Field(
+        default=None,
+        description="record-catering-acceptance: did the accept/decline "
+                    "confirmation reach the customer?",
+    )
+    customer_ack_status_at: Optional[datetime] = None
+    quote_delivery_status: Optional[Literal["sent", "failed", "uncertain"]] = Field(
+        default=None,
+        description="apply-catering-owner-decision: did the owner-approved quote "
+                    "reach the customer?",
+    )
+    quote_delivery_status_at: Optional[datetime] = None
+    card_delivery_status: Optional[Literal["sent", "failed", "uncertain"]] = Field(
+        default=None,
+        description="create-catering-lead: did the owner-approval card reach the "
+                    "owner? The durable flag the idempotent-replay breadcrumb "
+                    "asked for.",
+    )
+    card_delivery_status_at: Optional[datetime] = None
+
     # v0.3: post-AWAITING statuses require non-empty quote_text. Legacy data
     # (pre-v0.3 leads with empty quote_text) is backfilled with sentinel by
     # mode="before" shim, then strict validator runs. Migration tool fixes
@@ -6586,6 +6625,56 @@ class CateringCustomerAckFailed(_BaseEntry):
     outcome: str = ""
 
 
+class CateringCustomerSendUnconfirmed(_BaseEntry):
+    """P17 2026-08-14: a catering send did NOT confirm delivery, on a path whose
+    state had already committed. The state write is never rolled back (the sibling
+    scripts' long-standing contract), so this row + the lead's `*_delivery_status`
+    marker are what keep the record truthful about what the customer actually got.
+
+    `send_status` is the CANONICAL `safe_io.bridge_post` status, carried verbatim
+    rather than flattened to a boolean, because the two classes need opposite
+    operator responses:
+
+      - a definite failure ('connect_failed', 'http_error', 'unknown_error',
+        'refused', 'throttled', 'suppressed', 'disabled') means the customer got
+        NOTHING and someone must send it;
+      - 'send_uncertain' means the bridge ACCEPTED the message and it was most
+        likely delivered — re-sending would duplicate a money-adjacent message,
+        which is why `safe_io.bridge_post` documents "Caller MUST NOT auto-retry"
+        for exactly this status.
+
+    NOTHING in this repo auto-retries off this row. It exists so the owner is told
+    and the lead stops claiming an unverified delivery.
+
+    A NEW `type` tag rather than a new value on an existing variant's Literal: the
+    rollback contract (tests/test_catering_rollback_compat.py::test_12) routes an
+    unknown tag to the old release's `_UnknownLogEntry` (extra="allow"), so a new
+    tag survives a downgrade intact, while widening e.g.
+    `CateringCustomerAckFailed.reason` would make the old reader REJECT the row it
+    already recognises by tag.
+    """
+    type: Literal["catering_customer_send_unconfirmed"]
+    lead_id: str = Field(min_length=1)
+    script: str = Field(min_length=1, max_length=100)
+    send_kind: Literal[
+        "acceptance_reply",       # record-catering-acceptance customer confirmation
+        "approved_quote",         # apply-catering-owner-decision customer quote
+        "owner_approval_card",    # create-catering-lead owner card
+        "customer_proposal",      # create-catering-lead F14 sample menu
+        "qualification_questions",  # create-catering-lead M1 question batch
+    ]
+    send_status: str = Field(min_length=1, max_length=60)
+    delivery_certainty: Literal["failed", "uncertain"]
+    detail: str = Field(default="", max_length=2000)
+    owner_paged: bool = False
+    # PR-4 outbound audit identity. No outbound_message_id — an unconfirmed send
+    # has no provider id we are entitled to claim.
+    logical_turn_id: str = ""
+    send_attempt_id: str = ""
+    transport_destination: str = ""
+    outcome: str = ""
+
+
 class CateringDispatcherWatchdogFired(_BaseEntry):
     """F7 2026-05-01: catering-dispatcher-watchdog detected a missed catering
     dispatch and triggered the fallback create-catering-lead invocation.
@@ -8219,6 +8308,8 @@ LogEntry = Annotated[
         # F5b 2026-05-01: customer-ack outbound observability (parse-inquiry path)
         Annotated[CateringCustomerAckSent, Tag("catering_customer_ack_sent")],
         Annotated[CateringCustomerAckFailed, Tag("catering_customer_ack_failed")],
+        # P17 2026-08-14: send-status truthfulness on already-committed state.
+        Annotated[CateringCustomerSendUnconfirmed, Tag("catering_customer_send_unconfirmed")],
         # F7 2026-05-01: dispatcher watchdog (missed-SKILL recovery)
         Annotated[CateringDispatcherWatchdogFired, Tag("catering_dispatcher_watchdog_fired")],
         Annotated[CateringDispatcherWatchdogSuppressed, Tag("catering_dispatcher_watchdog_suppressed")],
