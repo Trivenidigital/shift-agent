@@ -670,3 +670,187 @@ def test_escape_gate_hoisted_between_r2b1_gate_and_flyer_arm():
     assert any(fl > escape for fl in flyer_lines), (
         f"escape gate (line {escape}) MUST precede the flyer active-project arm "
         f"(lines {sorted(flyer_lines)})")
+
+
+# ── try-scope: an error AFTER a customer send must not add a second message ──
+#
+# P1-6. The gate's `try:` enclosed both `_try_f7_primary_intercept` returns, and
+# its `except` SENDS a clarification. F7 sends internally (and so do the two
+# in-gate senders), so any exception raised after an inner send delivered the
+# customer TWO contradictory messages in one turn: "your inquiry is with the
+# owner", then "are you after a flyer or catering?".
+
+
+def test_an_error_after_f7_sent_does_not_add_a_contradictory_message(monkeypatch):
+    """(a) F7 sends, then raises. Exactly ONE customer message may go out."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod)
+
+    def _f7_sends_then_raises(text, chat_id, event, signals=None, allow_new_lead=True):
+        s.f7_calls.append({"text": text, "signals": signals, "allow_new_lead": allow_new_lead})
+        actions_mod.send_flyer_text(chat_id, "Your inquiry is with the owner.")
+        raise RuntimeError("boom after send")
+    monkeypatch.setattr(hooks_mod, "_try_f7_primary_intercept", _f7_sends_then_raises)
+
+    out = hooks_mod._try_flyer_catering_escape_gate(INCIDENT, CHAT, _event())
+
+    assert len(s.sent) == 1, s.sent
+    assert "owner" in s.sent[0][1].lower()
+    for _chat, body in s.sent:
+        assert "catering" not in body.lower() or "owner" in body.lower()
+    # The turn ends here rather than falling through to the LLM, which would be
+    # a second reply on top of the message F7 already delivered.
+    assert out is not None and out is not hooks_mod._GATE_FALLTHROUGH
+    assert out.get("action") == "skip"
+    assert s.flyer_arm_calls == []
+
+
+def test_an_error_after_f7_sent_is_still_visible_to_the_operator(monkeypatch):
+    """Quiet for the CUSTOMER is not quiet for the operator — the failed turn
+    must leave an audit row behind."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod)
+
+    def _f7_sends_then_raises(text, chat_id, event, signals=None, allow_new_lead=True):
+        actions_mod.send_flyer_text(chat_id, "Your inquiry is with the owner.")
+        raise RuntimeError("boom after send")
+    monkeypatch.setattr(hooks_mod, "_try_f7_primary_intercept", _f7_sends_then_raises)
+
+    out = hooks_mod._try_flyer_catering_escape_gate(INCIDENT, CHAT, _event())
+
+    # The row must be the one the recovery watchdog ingests, carrying the
+    # act-phase marker — a bare substring match passed on the unfixed code via
+    # the outer handler's gate_error cause (reviewer FIX-2).
+    row = next((a for a in s.audits
+                if a.get("reason") == "flyer_primary_failed"
+                and "catering_escape_gate_action_failed=true" in str(a.get("detail", ""))), None)
+    assert row is not None, s.audits
+    assert "plan=" in str(row.get("detail", "")) and "RuntimeError" in str(row.get("detail", ""))
+    assert out == {"action": "skip",
+                   "reason": "cf-router catering escape gate: f7 failed after dispatch"}
+
+
+def test_an_audit_failure_cannot_void_the_terminal_skip(monkeypatch):
+    """Reviewer FIX-1: if the act-phase audit write itself raises, the skip must
+    still be returned — a customer message may already be out, and an escaping
+    exception hands the turn back to Hermes (the double-reply window)."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod)
+
+    def _f7_sends_then_raises(text, chat_id, event, signals=None, allow_new_lead=True):
+        actions_mod.send_flyer_text(chat_id, "Your inquiry is with the owner.")
+        raise RuntimeError("boom after send")
+    monkeypatch.setattr(hooks_mod, "_try_f7_primary_intercept", _f7_sends_then_raises)
+
+    real_audit = actions_mod.audit_intercepted
+
+    def _audit_raises(**kwargs):
+        # Only the act-phase failure row raises — the classification-phase
+        # audits must succeed so the turn genuinely reaches the act phase.
+        if kwargs.get("reason") == "flyer_primary_failed":
+            raise OSError("audit store unavailable")
+        return real_audit(**kwargs)
+    monkeypatch.setattr(actions_mod, "audit_intercepted", _audit_raises)
+
+    out = hooks_mod._try_flyer_catering_escape_gate(INCIDENT, CHAT, _event())
+
+    assert out == {"action": "skip",
+                   "reason": "cf-router catering escape gate: f7 failed after dispatch"}
+    assert len(s.sent) == 1
+
+
+def test_an_error_after_the_open_lead_escape_sent_does_not_double_up(monkeypatch):
+    """The second delegation point — same guarantee."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod,
+              open_lead={"lead_id": "L0009"}, classify=lambda t: (False, []))
+
+    def _f7_sends_then_raises(text, chat_id, event, signals=None, allow_new_lead=True):
+        actions_mod.send_flyer_text(chat_id, "Your inquiry is with the owner.")
+        raise RuntimeError("boom after send")
+    monkeypatch.setattr(hooks_mod, "_try_f7_primary_intercept", _f7_sends_then_raises)
+
+    out = hooks_mod._try_flyer_catering_escape_gate(
+        "can I see the menu options please", CHAT, _event())
+
+    assert len(s.sent) == 1, s.sent
+    assert out is not None and out is not hooks_mod._GATE_FALLTHROUGH
+
+
+def test_a_classification_error_still_sends_the_clarification(monkeypatch):
+    """(b) Nothing was sent yet, so the clarification is the right outcome and
+    must be preserved byte-for-byte, with the same gate_error audit cause."""
+    hooks_mod, actions_mod = _load_plugin()
+
+    def _boom(_t):
+        raise ValueError("classifier exploded")
+    s = _wire(monkeypatch, hooks_mod, actions_mod, classify=_boom)
+
+    out = hooks_mod._try_flyer_catering_escape_gate(INCIDENT, CHAT, _event())
+
+    assert len(s.sent) == 1
+    assert out is not None and out is not hooks_mod._GATE_FALLTHROUGH
+    causes = [str(a.get("detail", "")) for a in s.audits]
+    assert any("gate_error:ValueError" in c for c in causes), s.audits
+    assert s.f7_calls == []
+
+
+def test_an_identity_lookup_error_still_sends_the_clarification(monkeypatch):
+    """Classification-phase failure at the very first statement in the gate."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod)
+
+    def _boom(_cid):
+        raise OSError("identify-sender unavailable")
+    monkeypatch.setattr(actions_mod, "lid_to_phone_via_identify_sender", _boom)
+
+    out = hooks_mod._try_flyer_catering_escape_gate(INCIDENT, CHAT, _event())
+
+    assert len(s.sent) == 1
+    assert any("gate_error:OSError" in str(a.get("detail", "")) for a in s.audits)
+    assert out is not None and out is not hooks_mod._GATE_FALLTHROUGH
+
+
+@pytest.mark.parametrize("body,project,open_lead,expect_sends,expect_f7", [
+    # cedes-to-F7: the gate itself sends nothing; F7 owns the reply.
+    (INCIDENT, _project("manual_edit_required", "F0224"), None, 0, 1),
+    (FRESH_CATERING, _project("awaiting_final_approval", "F0231"), None, 0, 1),
+    # stays-flyer: no send, no delegation, caller runs the flyer arms.
+    ("change the headline to Diwali Special", _project(), None, 0, 0),
+    # ambiguous: exactly one clarification, no delegation.
+    (AMBIGUOUS, _project(), None, 1, 0),
+    # complaint: exactly one escalation ack, no classifier, no delegation.
+    ("Are u crazy", _project(), None, 1, 0),
+])
+def test_every_normal_branch_sends_at_most_one_message(
+        monkeypatch, body, project, open_lead, expect_sends, expect_f7):
+    """(c) The one-message-per-turn invariant stated as a count, for every
+    branch, so a future restructure of this gate cannot quietly reintroduce a
+    second outbound on the happy paths either."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, project=project, open_lead=open_lead)
+
+    hooks_mod._try_flyer_catering_escape_gate(body, CHAT, _event())
+
+    assert len(s.sent) == expect_sends, s.sent
+    assert len(s.f7_calls) == expect_f7, s.f7_calls
+
+
+def test_a_failure_in_the_complaint_escalation_does_not_add_a_clarification(monkeypatch):
+    """The complaint and ambiguous senders sat inside the old try too, so a
+    failure in either also produced a second, contradictory message. Both now
+    live in the act phase."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, open_lead=_lead("L0019"))
+
+    def _escalation_sends_then_raises(**_kwargs):
+        actions_mod.send_flyer_text(CHAT, "Sorry about that — the owner has been told.")
+        raise RuntimeError("boom after escalation send")
+    monkeypatch.setattr(hooks_mod, "_send_customer_complaint_escalation",
+                        _escalation_sends_then_raises)
+
+    out = hooks_mod._try_flyer_catering_escape_gate("Are u crazy", CHAT, _event())
+
+    assert len(s.sent) == 1, s.sent
+    assert out is not None and out is not hooks_mod._GATE_FALLTHROUGH
+    assert any("RuntimeError" in str(a.get("detail", "")) for a in s.audits)
