@@ -25,6 +25,10 @@ from pathlib import Path
 
 import pytest
 
+from fixtures_fleet import ensure_fcntl_stub
+
+ensure_fcntl_stub()  # before any safe_io / schemas import
+
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = REPO / "src" / "plugins" / "cf-router"
 for _p in (str(REPO / "src" / "platform"), str(REPO / "src")):

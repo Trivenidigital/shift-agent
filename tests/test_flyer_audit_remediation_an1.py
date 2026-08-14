@@ -13,6 +13,10 @@ import importlib.util
 import sys
 from pathlib import Path
 
+from fixtures_fleet import ensure_fcntl_stub
+
+ensure_fcntl_stub()  # before any safe_io / schemas import
+
 REPO = Path(__file__).resolve().parent.parent
 PLUGIN_DIR = REPO / "src" / "plugins" / "cf-router"
 
