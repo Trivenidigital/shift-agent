@@ -26,6 +26,7 @@ import sys
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -85,6 +86,7 @@ class Sandbox:
             "catering": {"enabled": True},
         }), encoding="utf-8")
         self.sends: list[dict] = []
+        self.pages: list = []
 
     def write_lead(self, **overrides) -> dict:
         lead = {
@@ -139,7 +141,8 @@ def sb(tmp_path, monkeypatch):
     return box
 
 
-def _run(sb: Sandbox, argv, *, bridge_ok=True, stdin_text=None):
+def _run(sb: Sandbox, argv, *, bridge_ok=True, stdin_text=None,
+         bridge_status="connect_failed"):
     mod = load_script("amend_lead_under_test", SCRIPTS / "amend-catering-lead")
     mod.CONFIG_PATH = sb.config
     mod.LEADS_PATH = sb.leads
@@ -148,10 +151,20 @@ def _run(sb: Sandbox, argv, *, bridge_ok=True, stdin_text=None):
     mod.AMENDMENTS_PATH = sb.amendments
     mod.LEDGER_PATH = sb.ledger
 
-    def _bridge(jid, message):
+    # P17b: the script consumes the CANONICAL 4-tuple, so the stub must be the
+    # 4-tuple one. The runner binds by bare setattr, so a stale `_bridge_post`
+    # name would create a DEAD attribute and the script would issue a REAL bridge
+    # POST — the stub name has to track the script.
+    def _bridge(jid, message, **_kwargs):
         sb.sends.append({"jid": jid, "message": message})
-        return (True, "wamid.OUT") if bridge_ok else (False, "connection refused")
-    mod._bridge_post = _bridge
+        return ((True, "wamid.OUT", "", "sent") if bridge_ok
+                else (False, "", "connection refused", bridge_status))
+    mod._bridge_post_4tuple = _bridge
+
+    def _notify(cmd, **_kwargs):
+        sb.pages.append({"argv": [str(part) for part in cmd]})
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    mod.subprocess = SimpleNamespace(run=_notify)
 
     old_argv, old_stdin = sys.argv, sys.stdin
     sys.argv = argv
@@ -176,7 +189,8 @@ def _amend(sb, **kw):
             "--expected-owner", OWNER, "--expected-group", GROUP]
     if kw.get("message_id"):
         argv += ["--message-id", kw["message_id"]]
-    return _run(sb, argv, bridge_ok=kw.get("bridge_ok", True))
+    return _run(sb, argv, bridge_ok=kw.get("bridge_ok", True),
+                bridge_status=kw.get("bridge_status", "connect_failed"))
 
 
 def _answer(sb, text, *, lead_id="L0001", message_id="wamid.ANS", bridge_ok=True):
@@ -873,3 +887,93 @@ def test_argv_answer_text_still_works_for_compatibility(sb):
     rc, payload, _err = _answer(sb, "Grand Ballroom")
     assert rc == 0
     assert payload["fields_filled"] == ["venue"]
+
+
+# ── P17b: the amended card's real fate is recorded, not assumed ──────────────
+# The amendment is applied and the lead persisted BEFORE the card is sent. When
+# the card does not arrive, the lead sits waiting on an approval the owner may
+# never have seen, and the only trace used to be a line on stderr.
+
+def _unconfirmed(sb):
+    return sb.audit_rows("catering_customer_send_unconfirmed")
+
+
+def test_delivered_amended_card_is_recorded_on_the_lead(sb):
+    sb.write_lead()
+    sb.capture("actually make it 280 people", message_id="wamid.A1")
+
+    rc, _payload, _err = _amend(sb)
+
+    assert rc == 0
+    assert sb.read_lead()["card_delivery_status"] == "sent"
+    assert _unconfirmed(sb) == []
+    assert sb.pages == [], "a delivered card pages nobody"
+
+
+def test_failed_amended_card_marks_the_lead_and_pages_the_owner(sb):
+    sb.write_lead()
+    sb.capture("actually make it 280 people", message_id="wamid.A1")
+
+    rc, _payload, _err = _amend(sb, bridge_ok=False)
+
+    lead = sb.read_lead()
+    assert rc == 6
+    assert lead["extracted"]["headcount"] == 280, "the amendment IS applied"
+    assert lead["card_delivery_status"] == "failed"
+    assert lead["card_delivery_status_at"]
+    rows = _unconfirmed(sb)
+    assert len(rows) == 1
+    assert rows[0]["send_kind"] == "amendment_owner_card"
+    assert rows[0]["delivery_certainty"] == "failed"
+    assert rows[0]["send_status"] == "connect_failed"
+    assert rows[0]["script"] == "amend-catering-lead"
+    assert rows[0]["owner_paged"] is True
+    body = " ".join(sb.pages[-1]["argv"])
+    assert "waiting on an approval the owner never saw" in body, body
+
+
+def test_uncertain_amended_card_is_not_recorded_as_a_definite_failure(sb):
+    """The bridge accepted the card, so it most likely reached the owner. A
+    definite-failure record would send someone hunting for a card that is sitting
+    in their chat — and would invite a duplicate for a quote that has moved."""
+    sb.write_lead()
+    sb.capture("actually make it 280 people", message_id="wamid.A1")
+
+    _amend(sb, bridge_ok=False, bridge_status="send_uncertain")
+
+    assert sb.read_lead()["card_delivery_status"] == "uncertain"
+    rows = _unconfirmed(sb)
+    assert rows[0]["delivery_certainty"] == "uncertain"
+    assert rows[0]["send_status"] == "send_uncertain"
+    assert "most likely DID arrive" in " ".join(sb.pages[-1]["argv"])
+    assert len(sb.sends) == 1, "never re-sent"
+
+
+def test_card_failed_row_carries_the_real_status_not_a_hardcoded_one(sb):
+    """CateringOwnerApprovalCardFailed.reason is a free-form str, so it must say
+    what actually happened rather than always claiming bridge_unreachable."""
+    sb.write_lead()
+    sb.capture("actually make it 280 people", message_id="wamid.A1")
+
+    _amend(sb, bridge_ok=False, bridge_status="send_uncertain")
+
+    failed = sb.audit_rows("catering_owner_approval_card_failed")
+    assert failed and failed[0]["reason"] == "send_uncertain"
+
+
+def test_failed_customer_reply_is_recorded_but_pages_nobody(sb):
+    """The customer-facing confirmation has nothing waiting on it, and
+    card_delivery_status describes the OWNER card — overloading it here would
+    corrupt the signal the owner-card arm depends on. Record only."""
+    sb.write_lead(status="QUALIFYING", pending_questions=["venue"],
+                  questions_asked=["venue"], qualification_rounds=1)
+
+    _answer(sb, "the venue is the Grand Ballroom", bridge_ok=False)
+
+    rows = [r for r in _unconfirmed(sb) if r["send_kind"] == "amendment_customer_reply"]
+    assert rows, "the customer reply's failure is recorded"
+    assert rows[0]["owner_paged"] is False
+    assert sb.pages == [], "no page for a customer-facing confirmation"
+    ack_failed = sb.audit_rows("catering_customer_ack_failed")
+    assert ack_failed and ack_failed[0]["reason"] == "bridge_unreachable", (
+        "the Literal the pinned rollback target recognises must not be widened")

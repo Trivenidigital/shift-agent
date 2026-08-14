@@ -49,6 +49,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess  # noqa: E402  # P17b owner page (Pushover, not the bridge)
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -63,7 +64,7 @@ from safe_io import (  # noqa: E402
     load_model, load_yaml_model,
     assert_load_status_clean, LoadStatusError,
 )
-from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402  # PR-ε: chokepoint consolidation
+from safe_io import bridge_post as _bridge_post_4tuple  # noqa: E402  # P17b: status is consumed
 import catering_amendments  # noqa: E402
 import catering_extraction  # noqa: E402  # the SAME grammar the lead was created with
 import catering_followups  # noqa: E402  # M5 followup trigger
@@ -75,6 +76,7 @@ from schemas import (  # noqa: E402
     CateringLeadStatusChange, CateringLeadHoldBlockedSend,
     CateringCustomerAckSent, CateringCustomerAckFailed,
     CateringOwnerApprovalCardSent, CateringOwnerApprovalCardFailed,
+    CateringCustomerSendUnconfirmed,
     CateringOwnerApprovalRequested,
     is_catering_transition_allowed,
 )
@@ -89,6 +91,10 @@ CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/c
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
 LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+# P17b: the owner page for an unconfirmed send. A DIFFERENT channel from the
+# bridge whose result is in doubt — the same binary the sibling catering scripts
+# page through.
+NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
 AMENDMENTS_PATH = Path(os.environ.get(
     "SHIFT_AGENT_CATERING_AMENDMENTS_PATH",
     "/opt/shift-agent/state/catering-amendments.json"))
@@ -318,6 +324,96 @@ def _card_failure_is_fatal(card_error: str) -> bool:
     return card_error != SELF_CHAT_JID_EMPTY
 
 
+def _delivery_certainty(send_status: str) -> str:
+    """'uncertain' only for safe_io's `send_uncertain` (bridge accepted, ack body
+    unparseable → most likely delivered). Every other non-sent status — transport
+    faults AND the policy drops ('refused', 'throttled', 'suppressed', 'disabled')
+    — means nothing was received."""
+    return "uncertain" if send_status == "send_uncertain" else "failed"
+
+
+def _mark_card_delivery_status(lead_id: str, marker: str, now) -> None:
+    """Persist `card_delivery_status` on the lead — the SAME field
+    create-catering-lead writes. An amended approval card is the same fact about
+    the same lead, so a second field would split the signal rather than sharpen
+    it, and no schema change is needed. Best-effort: a marker write that fails
+    must never mask the send outcome it describes."""
+    try:
+        with FileLock(LEADS_LOCK):
+            store, status = load_model(LEADS_PATH, CateringLeadStore,
+                                       default=CateringLeadStore())
+            idx = next((i for i, le in enumerate(store.leads)
+                        if le.lead_id == lead_id), None)
+            if idx is None:
+                return
+            store.leads[idx] = store.leads[idx].model_copy(update={
+                "card_delivery_status": marker,
+                "card_delivery_status_at": now,
+            })
+            atomic_write_json(LEADS_PATH, store)
+    except Exception as e:  # noqa: BLE001 — never mask the send outcome
+        sys.stderr.write(f"WARN: card_delivery_status marker write failed "
+                         f"({type(e).__name__}: {e})\n")
+
+
+def _page_owner_send_unconfirmed(lead_id: str, send_kind: str,
+                                 certainty: str, detail: str) -> bool:
+    """Page over `shift-agent-notify-owner` (Pushover), NOT the bridge — the
+    bridge is exactly what failed to confirm, so a bridge-borne warning could
+    vanish the same way."""
+    what = "amended approval card"
+    if certainty == "uncertain":
+        title = f"Catering {lead_id}: {what} NOT confirmed"
+        body = (f"Catering {lead_id}: the {what} was accepted by the bridge but "
+                f"not confirmed, so it most likely DID arrive. Check before "
+                f"re-sending — a duplicate approval card for a quote that moved "
+                f"is worse than a late check.\n"
+                f"Detail: {detail[:200]}")
+    else:
+        title = f"Catering {lead_id}: {what} NOT delivered"
+        body = (f"Catering {lead_id}: the {what} did NOT go out. The amendment IS "
+                f"applied — the lead is waiting on an approval the owner never "
+                f"saw. Review it in the cockpit and follow up manually.\n"
+                f"Detail: {detail[:200]}")
+    sys.stderr.write(f"catering_send_unconfirmed_alert_dispatched lead={lead_id} "
+                     f"kind={send_kind} certainty={certainty}\n")
+    try:
+        proc = subprocess.run(
+            [str(NOTIFY_OWNER_BIN), "--priority", "1", "--title", title, "--", body],
+            check=False, capture_output=True, text=True, timeout=10,
+        )
+        paged = proc.returncode == 0
+    except Exception as e:  # noqa: BLE001 — alerting is best-effort
+        sys.stderr.write(f"catering_send_unconfirmed_alert_delivery_failed "
+                         f"lead={lead_id} error={type(e).__name__}: {e}\n")
+        return False
+    sys.stderr.write(f"catering_send_unconfirmed_alert_delivered lead={lead_id} "
+                     f"ok={paged}\n")
+    return paged
+
+
+def _audit_send_unconfirmed(*, lead_id: str, send_kind: str, send_status: str,
+                            certainty: str, detail: str, paged: bool,
+                            destination: str, logical_turn_id: str,
+                            send_attempt_id: str, now) -> None:
+    """Locks on LOG_PATH's own lock — amend's convention. It does NOT reuse
+    LEADS_LOCK for audit the way create-catering-lead does."""
+    try:
+        with FileLock(Path(str(LOG_PATH) + ".lock")):
+            ndjson_append(LOG_PATH, CateringCustomerSendUnconfirmed(
+                ts=now, type="catering_customer_send_unconfirmed",
+                lead_id=lead_id, script="amend-catering-lead",
+                send_kind=send_kind, send_status=send_status,
+                delivery_certainty=certainty, detail=detail[:2000],
+                owner_paged=paged, logical_turn_id=logical_turn_id,
+                send_attempt_id=send_attempt_id,
+                transport_destination=destination, outcome=send_status,
+            ).model_dump_json())
+    except Exception as e:  # noqa: BLE001 — audit is best-effort
+        sys.stderr.write(f"audit emit (customer_send_unconfirmed) failed "
+                         f"(non-fatal): {type(e).__name__}: {e}\n")
+
+
 def _send_owner_card(cfg: Config, lead: CateringLead, card_text: str, *,
                      now: datetime, logical_turn_id: str) -> tuple[bool, str]:
     """Send + audit the owner card. Returns (ok, message_id_or_error). Mirrors
@@ -327,7 +423,8 @@ def _send_owner_card(cfg: Config, lead: CateringLead, card_text: str, *,
         sys.stderr.write("owner.self_chat_jid empty; lead updated but card not sent\n")
         return False, SELF_CHAT_JID_EMPTY
     send_attempt_id = uuid.uuid4().hex
-    ok, mid_or_err = _bridge_post(cfg.owner.self_chat_jid, card_text)
+    _ok, _mid, _err, _status = _bridge_post_4tuple(cfg.owner.self_chat_jid, card_text)
+    ok, mid_or_err = (True, _mid) if _ok else (False, _err or _status)
     entry = (
         CateringOwnerApprovalCardSent(
             ts=now, type="catering_owner_approval_card_sent",
@@ -337,14 +434,35 @@ def _send_owner_card(cfg: Config, lead: CateringLead, card_text: str, *,
         ) if ok else
         CateringOwnerApprovalCardFailed(
             ts=now, type="catering_owner_approval_card_failed",
-            lead_id=lead.lead_id, reason="bridge_unreachable",
+            lead_id=lead.lead_id,
+            # This variant's `reason` is a free-form str, so the REAL status goes
+            # in rather than a hardcoded "bridge_unreachable" that would report a
+            # send_uncertain as the opposite fact. (#708 made the same call.)
+            reason=_status or "bridge_unreachable",
             bridge_error=str(mid_or_err)[:2000],
             logical_turn_id=logical_turn_id, send_attempt_id=send_attempt_id,
-            transport_destination=cfg.owner.self_chat_jid, outcome="bridge_unreachable",
+            transport_destination=cfg.owner.self_chat_jid,
+            outcome=_status or "bridge_unreachable",
         )
     )
+    # P17b — this send PAGES. The amendment is already applied and the lead
+    # persisted, so an unconfirmed card leaves the lead waiting on an approval the
+    # owner may never have seen; that needs a human. No auto-retry: a duplicate
+    # approval card for a quote that moved is worse than a late check.
     if not ok:
-        sys.stderr.write(f"bridge_post failed: {mid_or_err}\n")
+        sys.stderr.write(f"bridge_post failed: {mid_or_err} (status={_status})\n")
+        certainty = _delivery_certainty(_status)
+        paged = _page_owner_send_unconfirmed(
+            lead.lead_id, "amendment_owner_card", certainty, str(mid_or_err))
+        _mark_card_delivery_status(lead.lead_id, certainty, now)
+        _audit_send_unconfirmed(
+            lead_id=lead.lead_id, send_kind="amendment_owner_card",
+            send_status=_status, certainty=certainty, detail=str(mid_or_err),
+            paged=paged, destination=cfg.owner.self_chat_jid,
+            logical_turn_id=logical_turn_id, send_attempt_id=send_attempt_id,
+            now=now)
+    else:
+        _mark_card_delivery_status(lead.lead_id, "sent", now)
     _log_best_effort(TypeAdapter(type(entry)), entry, context="owner_card")
     return ok, mid_or_err
 
@@ -383,7 +501,8 @@ def _send_customer_text(lead: CateringLead, text: str, *, now: datetime,
     cp = str(lead.customer_phone).lstrip("+").strip()
     customer_jid = cp if "@" in cp else f"{cp}@s.whatsapp.net"
     send_attempt_id = uuid.uuid4().hex
-    ok, mid_or_err = _bridge_post(customer_jid, text)
+    _ok, _mid, _err, _status = _bridge_post_4tuple(customer_jid, text)
+    ok, mid_or_err = (True, _mid) if _ok else (False, _err or _status)
     entry = (
         CateringCustomerAckSent(
             ts=now, type="catering_customer_ack_sent", customer_jid=customer_jid,
@@ -393,13 +512,29 @@ def _send_customer_text(lead: CateringLead, text: str, *, now: datetime,
         ) if ok else
         CateringCustomerAckFailed(
             ts=now, type="catering_customer_ack_failed", customer_jid=customer_jid,
+            # `reason` here IS a strict Literal that the pinned rollback target
+            # already recognises, so widening it would make the OLD reader reject a
+            # row it can read today. The real status lives on the new
+            # catering_customer_send_unconfirmed tag, which that reader routes to
+            # _UnknownLogEntry instead.
             reason="bridge_unreachable", detail=str(mid_or_err)[:2000],
             logical_turn_id=logical_turn_id, send_attempt_id=send_attempt_id,
-            outcome="bridge_unreachable",
+            outcome=_status or "bridge_unreachable",
         )
     )
+    # P17b — this send does NOT page and does NOT touch the lead marker. It is a
+    # customer-facing confirmation with nothing waiting on it, the caller already
+    # learns the failure, and `card_delivery_status` describes the OWNER card —
+    # overloading it here would corrupt the signal the owner-card arm depends on.
+    # Record only.
     if not ok:
-        sys.stderr.write(f"customer bridge_post failed: {mid_or_err}\n")
+        sys.stderr.write(f"customer bridge_post failed: {mid_or_err} (status={_status})\n")
+        _audit_send_unconfirmed(
+            lead_id=lead.lead_id, send_kind="amendment_customer_reply",
+            send_status=_status, certainty=_delivery_certainty(_status),
+            detail=str(mid_or_err), paged=False, destination=customer_jid,
+            logical_turn_id=logical_turn_id, send_attempt_id=send_attempt_id,
+            now=now)
     _log_best_effort(TypeAdapter(type(entry)), entry, context="customer_reply")
     return ok
 
