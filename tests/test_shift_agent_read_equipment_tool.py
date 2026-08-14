@@ -564,6 +564,7 @@ def test_description_carries_the_hard_rules(env):
     assert "never invent an asset or a service date" in d
     assert "Never contact a vendor" in d
     assert "not a code violation" in d
+    assert "READ-ONLY" in d and "not wired up yet" in d
 
 
 def test_window_days_description_pins_explicit_timeframe_only(env):
