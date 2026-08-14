@@ -45,7 +45,7 @@ from safe_io import (  # noqa: E402
     FileLock, atomic_write_json, customer_now,
     load_model, load_yaml_model,
 )
-from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402
+from safe_io import bridge_post as _bridge_post_4tuple  # noqa: E402
 from schemas import (  # noqa: E402
     Config, CateringLeadStore,
 )
@@ -135,19 +135,97 @@ def _emit_deposit_link_failed(
         sys.stderr.write(f"WARN: failed to emit catering_deposit_link_failed: {e}\n")
 
 
-def _notify_owner_best_effort(priority: int, title: str, body: str) -> None:
-    """Pushover P1 on money-adjacent silent failure (Reviewer B HIGH-2)."""
+def _notify_owner_best_effort(priority: int, title: str, body: str) -> bool:
+    """Pushover P1 on money-adjacent silent failure (Reviewer B HIGH-2).
+
+    Returns whether the page was delivered so the audit row can record it.
+    Existing callers ignore the return and are unaffected."""
     try:
-        subprocess.run(
+        proc = subprocess.run(
             ["/usr/local/bin/shift-agent-notify-owner",
              "--priority", str(priority), "--title", title, body],
             check=False, timeout=10,
         )
+        return proc.returncode == 0
     except Exception as e:  # noqa: BLE001 — notification is best-effort
         sys.stderr.write(
             f"WARN: shift-agent-notify-owner failed (non-fatal): "
             f"{type(e).__name__}: {e}\n"
         )
+        return False
+
+
+def _post_deposit_link(jid: str, message: str) -> tuple[bool, str, str]:
+    """(ok, message_id_or_error, status) over the canonical 4-tuple chokepoint.
+
+    P17: `status` is carried out rather than collapsed. On THIS script the
+    distinction is money-shaped — `send_uncertain` means the bridge accepted a
+    message containing a live payment link, so the customer most likely has one
+    in hand, while `connect_failed` means they have nothing."""
+    ok, mid, err, status = _bridge_post_4tuple(jid, message)
+    return (True, mid, status) if ok else (False, err or status, status)
+
+
+_CERTAINTY_BY_STATUS = {"send_uncertain": "uncertain"}
+
+
+def _delivery_certainty(send_status: str) -> str:
+    """'uncertain' only for safe_io's `send_uncertain` (bridge accepted, ack body
+    unparseable → most likely delivered). Every other non-sent status — transport
+    faults AND the policy drops — means the customer received nothing."""
+    return _CERTAINTY_BY_STATUS.get(send_status, "failed")
+
+
+def _mark_deposit_link_delivery(store, matched_idx: int, marker: str,
+                                cfg, lead_id: str) -> None:
+    """Stamp `deposit_link_delivery_status` on the lead already held in `store`.
+
+    Runs INSIDE the caller's LEADS_LOCK on the store it already loaded, so no
+    second critical section and no re-read. Best-effort: a marker write that
+    fails must never mask the send failure it describes, and must never disturb
+    the intent void / order cancel that follow it."""
+    try:
+        now = customer_now(cfg.customer.timezone)
+        store.leads[matched_idx] = store.leads[matched_idx].model_copy(update={
+            "deposit_link_delivery_status": marker,
+            "deposit_link_delivery_status_at": now,
+        })
+        atomic_write_json(LEADS_PATH, store)
+    except Exception as e:  # noqa: BLE001 — never mask the send failure
+        sys.stderr.write(f"WARN: deposit_link_delivery_status marker write failed "
+                         f"for {lead_id} ({type(e).__name__}: {e}); the audit row "
+                         f"still stands\n")
+
+
+def _emit_customer_send_unconfirmed(*, lead_id: str, certainty: str,
+                                    send_status: str, detail: str,
+                                    transport_destination: str,
+                                    owner_paged: bool, cfg) -> None:
+    """The typed row that makes an unconfirmed deposit-link send searchable.
+
+    Shares `catering_customer_send_unconfirmed` with the other P17 scripts so a
+    single query answers "which sends could we not confirm?" across catering."""
+    from commerce.audit import emit
+    try:
+        emit(
+            LOG_PATH,
+            {
+                "type": "catering_customer_send_unconfirmed",
+                "ts": customer_now(cfg.customer.timezone).isoformat(),
+                "lead_id": lead_id,
+                "script": "catering-mint-deposit",
+                "send_kind": "deposit_link",
+                "send_status": send_status,
+                "delivery_certainty": certainty,
+                "detail": detail[:2000],
+                "owner_paged": owner_paged,
+                "transport_destination": transport_destination,
+                "outcome": send_status,
+            },
+        )
+    except Exception as e:  # noqa: BLE001 — audit is best-effort
+        sys.stderr.write(f"WARN: failed to emit catering_customer_send_unconfirmed: "
+                         f"{e}\n")
 
 
 def _find_live_intent_for_lead(intent_state_path: Path, lead_id: str):
@@ -363,8 +441,16 @@ def main() -> int:
             url_status = "unconfigured"
 
         target_jid = f"{str(lead.customer_phone).lstrip('+')}@s.whatsapp.net"
-        ok, mid_or_err = _bridge_post(target_jid, BRIDGE_PREFIX + reply_body)
+        ok, mid_or_err, send_status = _post_deposit_link(
+            target_jid, BRIDGE_PREFIX + reply_body)
+        send_certainty = _delivery_certainty(send_status)
         if not ok:
+            # P17: the intent void, the order cancel and the failed-audit triple
+            # below are UNCHANGED — this branch only stops lying about WHICH
+            # kind of failure happened. `send_uncertain` means the bridge
+            # accepted the message, so the customer most likely HAS the link.
+            _mark_deposit_link_delivery(store, matched_idx, send_certainty,
+                                        cfg, lead.lead_id)
             # Reviewer A BLOCKER-2: emit failed BEFORE void so the triple holds
             commerce_payment_link.emit_payment_link_failed(
                 decisions_log_path=LOG_PATH,
@@ -405,7 +491,7 @@ def main() -> int:
                 commerce_order_id=order_result.order.order_id,
                 commerce_payment_intent_id=intent_result.intent.intent_id,
             )
-            _notify_owner_best_effort(
+            paged = _notify_owner_best_effort(
                 priority=1,
                 title=f"Catering deposit bridge fail (lead {lead.lead_id})",
                 body=(
@@ -413,7 +499,22 @@ def main() -> int:
                     f"(${deposit_amount_cents/100:.2f}) but WhatsApp bridge POST "
                     f"failed: {mid_or_err[:200]}. Intent voided. "
                     f"Re-invoke: catering-mint-deposit --lead-id {lead.lead_id}"
+                ) if send_certainty == "failed" else (
+                    f"Deposit link for lead {lead.lead_id} "
+                    f"(${deposit_amount_cents/100:.2f}) was ACCEPTED by the bridge "
+                    f"but not confirmed, so the customer most likely HAS it. "
+                    f"Do NOT re-invoke catering-mint-deposit for this lead: that "
+                    f"mints a second, different payment link. The intent was "
+                    f"voided, so the link they hold will not take a payment — "
+                    f"check the chat and reconcile manually. Detail: "
+                    f"{mid_or_err[:200]}"
                 ),
+            )
+            _emit_customer_send_unconfirmed(
+                lead_id=lead.lead_id, certainty=send_certainty,
+                send_status=send_status, detail=str(mid_or_err),
+                transport_destination=target_jid, owner_paged=bool(paged),
+                cfg=cfg,
             )
             return EXIT_DEPENDENCY_DOWN
 
@@ -431,6 +532,11 @@ def main() -> int:
             "deposit_payment_intent_id": intent_result.intent.intent_id,
             "deposit_status": "awaiting_payment" if url_status == "configured" else "unconfigured",
             "deposit_minted_at": now,
+            # Stamped in the SAME write as the deposit binding it justifies, so
+            # "the link is live" and "the customer received it" can never
+            # disagree on this path.
+            "deposit_link_delivery_status": "sent",
+            "deposit_link_delivery_status_at": now,
             "updated_at": now,
         })
         store.leads[matched_idx] = new_lead

@@ -185,11 +185,23 @@ def _patch_bridge():
         if mode == "success":
             return True, payload or "wamid_test_default"
         return False, payload or "stubbed_failure"
+    # P17b: the deposit-link send moved to the CANONICAL 4-tuple `bridge_post`
+    # so it can read `status`. Stubbing only the 2-tuple adapter would let the
+    # script fall through to a REAL bridge POST — the harness breakage class
+    # this move keeps hitting. The status is configurable because the whole
+    # point of the change is that the script branches on it.
+    def _stub_bridge_post(jid, body, **kwargs):
+        if mode == "success":
+            return True, payload or "wamid_test_default", "", "sent"
+        status = os.environ.get(
+            "PYTEST_CATERING_DEPOSIT_BRIDGE_STATUS", "connect_failed")
+        return False, "", payload or "stubbed_failure", status
     try:
         import safe_io
     except ImportError:
         return
     safe_io.bridge_post_2tuple = _stub_bridge_post_2tuple
+    safe_io.bridge_post = _stub_bridge_post
 _patch_bridge()
 ''',
         encoding="utf-8",
@@ -631,3 +643,106 @@ def test_reinvoke_with_live_intent_refuses_second_mint(isolated_state):
     # Lead remains unbound (guard fired before any binding).
     leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
     assert leads["leads"][0].get("deposit_payment_intent_id", "") == ""
+
+
+# ─────────────────────────────────────────────────────────────────
+# P17b — the deposit link's delivery status is consumed, not flattened
+#
+# `bridge_post` distinguishes "the bridge ACCEPTED this message, so the
+# customer most likely HAS a live payment link" (send_uncertain) from "it
+# definitely never left" (connect_failed). The 2-tuple adapter this script used
+# collapsed both into False, so an uncertain send was recorded — in the lead,
+# in the audit row and in the owner page — as a definite failure, and the page
+# told the owner to re-invoke, which mints a SECOND, different payment link.
+#
+# The intent void, the order cancel and the failed-audit triple are UNCHANGED
+# by these cells on purpose: this is a record fix on money-path code, not a
+# change to what the money guards do.
+# ─────────────────────────────────────────────────────────────────
+
+
+def _run_uncertain(isolated_state, *, checkout="https://pay/?o={order_id}"):
+    isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STUB"] = "fail:bridge_accepted_no_id"
+    isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STATUS"] = "send_uncertain"
+    _write_config(isolated_state["config_path"], checkout_url_template=checkout)
+    lead_id = _write_lead(isolated_state["leads_path"])
+    return lead_id, _run_script(isolated_state["env"], lead_id)
+
+
+def test_uncertain_deposit_send_is_recorded_uncertain_not_failed(isolated_state):
+    """The lead must not claim the customer got nothing when they probably did."""
+    lead_id, result = _run_uncertain(isolated_state)
+    assert result.returncode == 6, result.stderr[-800:]
+
+    leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
+    assert leads["leads"][0]["deposit_link_delivery_status"] == "uncertain", (
+        "an accepted-but-unconfirmed payment link recorded as a definite "
+        "failure invites a second, different link")
+    assert leads["leads"][0]["deposit_link_delivery_status_at"]
+
+
+def test_uncertain_deposit_send_emits_the_shared_unconfirmed_row(isolated_state):
+    lead_id, result = _run_uncertain(isolated_state)
+
+    rows = _read_audit_rows(isolated_state["log_path"])
+    unconfirmed = [r for r in rows if r["type"] == "catering_customer_send_unconfirmed"]
+    assert len(unconfirmed) == 1, [r["type"] for r in rows]
+    row = unconfirmed[0]
+    assert row["delivery_certainty"] == "uncertain"
+    assert row["send_status"] == "send_uncertain"
+    assert row["send_kind"] == "deposit_link"
+    assert row["script"] == "catering-mint-deposit"
+    assert row["lead_id"] == lead_id
+
+
+def test_a_definite_deposit_failure_is_still_recorded_failed(isolated_state):
+    """The other half of the distinction — unchanged behaviour, now recorded."""
+    isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STUB"] = "fail:simulated_bridge_outage"
+    _write_config(isolated_state["config_path"], checkout_url_template="https://pay/?o={order_id}")
+    lead_id = _write_lead(isolated_state["leads_path"])
+
+    result = _run_script(isolated_state["env"], lead_id)
+    assert result.returncode == 6
+
+    leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
+    assert leads["leads"][0]["deposit_link_delivery_status"] == "failed"
+    row = next(r for r in _read_audit_rows(isolated_state["log_path"])
+               if r["type"] == "catering_customer_send_unconfirmed")
+    assert row["delivery_certainty"] == "failed"
+
+
+def test_the_money_guards_are_untouched_by_an_uncertain_send(isolated_state):
+    """The void / cancel / failed-audit triple must behave exactly as before.
+
+    This cell is the guard on the guard: the record fix above must not have
+    quietly changed what happens to the intent or the order.
+    """
+    lead_id, result = _run_uncertain(isolated_state)
+
+    rows = _read_audit_rows(isolated_state["log_path"])
+    types = [r["type"] for r in rows]
+    assert "commerce_payment_link_failed" in types
+    assert "commerce_payment_intent_voided" in types
+    assert "catering_deposit_link_failed" in types
+    intents = json.loads(
+        (isolated_state["commerce_state"] / "payment_intents.json").read_text(encoding="utf-8"))
+    assert intents["intents"][0]["status"] == "voided"
+    orders = json.loads(
+        (isolated_state["commerce_state"] / "orders.json").read_text(encoding="utf-8"))
+    assert orders["orders"][0]["status"] == "cancelled"
+    # And the binding is still NOT persisted, exactly as on a definite failure.
+    leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
+    assert leads["leads"][0].get("deposit_payment_intent_id", "") == ""
+
+
+def test_a_delivered_deposit_link_says_so_on_the_lead(isolated_state):
+    """`None` must mean "this path never ran", not "we never checked"."""
+    _write_config(isolated_state["config_path"], checkout_url_template="https://pay/?o={order_id}")
+    lead_id = _write_lead(isolated_state["leads_path"])
+
+    result = _run_script(isolated_state["env"], lead_id)
+    assert result.returncode == 0, result.stderr[-800:]
+
+    leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
+    assert leads["leads"][0]["deposit_link_delivery_status"] == "sent"
+    assert leads["leads"][0]["deposit_link_delivery_status_at"]

@@ -123,6 +123,7 @@ LEAD_FIELDS_UNKNOWN_TO_OLD = (
     "customer_ack_status", "customer_ack_status_at",
     "quote_delivery_status", "quote_delivery_status_at",
     "card_delivery_status", "card_delivery_status_at",
+    "deposit_link_delivery_status", "deposit_link_delivery_status_at",
 )
 
 # M3 stamped a validity window on the proposal SET. Old CateringProposalSet is
