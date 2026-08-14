@@ -21,6 +21,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "platfor
 from agents.flyer.onboarding import handle_onboarding_message, store_brand_asset  # noqa: E402
 from schemas import FlyerBrandAsset, FlyerCustomerStore, FlyerOnboardingSession  # noqa: E402
 
+# Brand-asset uploads are content-sniffed, so placeholder media must carry real
+# PNG magic bytes. These fixtures assert bookkeeping, not pixels.
+_PNG_MAGIC = bytes.fromhex("89504e470d0a1a0a")
+
+
 
 def _active_customer_store(state_path: Path, now: datetime) -> FlyerCustomerStore:
     store = FlyerCustomerStore()
@@ -61,9 +66,9 @@ def test_same_kind_logo_reupload_writes_deactivation_audit_row(tmp_path, monkeyp
     _active_customer_store(state_path, now)
 
     first_logo = tmp_path / "logo1.png"
-    first_logo.write_bytes(b"first")
+    first_logo.write_bytes(_PNG_MAGIC + b"first")
     second_logo = tmp_path / "logo2.png"
-    second_logo.write_bytes(b"second")
+    second_logo.write_bytes(_PNG_MAGIC + b"second")
 
     store_brand_asset(
         state_path=state_path,

@@ -248,8 +248,8 @@ def test_f6_site1_no_audit_row_when_persist_fails(tmp_path, monkeypatch):
     now = datetime(2026, 5, 15, tzinfo=timezone.utc)
     _active_logo_customer_store(state_path, now)
 
-    first = tmp_path / "logo1.png"; first.write_bytes(b"first")
-    second = tmp_path / "logo2.png"; second.write_bytes(b"second")
+    first = tmp_path / "logo1.png"; first.write_bytes(bytes.fromhex("89504e470d0a1a0a") + b"first")
+    second = tmp_path / "logo2.png"; second.write_bytes(bytes.fromhex("89504e470d0a1a0a") + b"second")
     onboarding.store_brand_asset(
         state_path=state_path, chat_id="15550100003@s.whatsapp.net",
         sender_phone="+15550100003", message_id="logo1", media_path=first,

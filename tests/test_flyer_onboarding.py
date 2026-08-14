@@ -17,6 +17,10 @@ from agents.flyer.intake import handle_intake_message  # noqa: E402
 from agents.flyer.onboarding import handle_onboarding_message, store_brand_asset  # noqa: E402
 from schemas import FlyerCustomerStore, FlyerIntakeSession, FlyerOnboardingSession, FlyerPlanTier, FlyerUsageEvent  # noqa: E402
 
+# Brand-asset uploads are content-sniffed, so placeholder media must be a real
+# image. These fixtures assert store/transfer bookkeeping, not pixels.
+_PNG_MAGIC = bytes.fromhex("89504e470d0a1a0a")
+
 
 def _trial_customer(*, customer_id: str, business_name: str, phone: str, now: datetime):
     store = FlyerCustomerStore()
@@ -1929,7 +1933,7 @@ def test_brand_assets_uploaded_during_onboarding_transfer_to_customer(tmp_path, 
     monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     state_path = tmp_path / "customers.json"
     media_path = tmp_path / "logo.png"
-    media_path.write_bytes(b"fake logo bytes")
+    media_path.write_bytes(_PNG_MAGIC + b"fake logo bytes")
     now = datetime(2026, 5, 15, tzinfo=timezone.utc)
 
     asset_result = store_brand_asset(
@@ -1990,9 +1994,9 @@ def test_registered_customer_can_replace_logo_any_time(tmp_path, monkeypatch):
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
 
     first_logo = tmp_path / "logo1.png"
-    first_logo.write_bytes(b"first")
+    first_logo.write_bytes(_PNG_MAGIC + b"first")
     second_logo = tmp_path / "logo2.png"
-    second_logo.write_bytes(b"second")
+    second_logo.write_bytes(_PNG_MAGIC + b"second")
 
     store_brand_asset(
         state_path=state_path,
@@ -2017,7 +2021,7 @@ def test_registered_customer_can_replace_logo_any_time(tmp_path, monkeypatch):
     logo_assets = [asset for asset in updated.customers[0].brand_assets if asset.kind == "logo"]
     assert len(logo_assets) == 2
     assert [asset.active for asset in logo_assets] == [False, True]
-    assert Path(logo_assets[-1].path).read_bytes() == b"second"
+    assert Path(logo_assets[-1].path).read_bytes() == _PNG_MAGIC + b"second"
 
 
 def test_non_admin_cannot_replace_saved_brand_asset(tmp_path, monkeypatch):
@@ -2038,7 +2042,7 @@ def test_non_admin_cannot_replace_saved_brand_asset(tmp_path, monkeypatch):
     ).model_copy(update={"status": "active"}))
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
     logo = tmp_path / "logo.png"
-    logo.write_bytes(b"logo")
+    logo.write_bytes(_PNG_MAGIC + b"logo")
 
     denied = store_brand_asset(
         state_path=state_path,
@@ -2073,7 +2077,7 @@ def test_menu_or_price_image_upload_is_classified_as_template(tmp_path, monkeypa
     ).model_copy(update={"status": "active"}))
     state_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
     media_path = tmp_path / "dosa.png"
-    media_path.write_bytes(b"dosa menu")
+    media_path.write_bytes(_PNG_MAGIC + b"dosa menu")
 
     store_brand_asset(
         state_path=state_path,
@@ -2094,9 +2098,9 @@ def test_payment_pending_signup_thread_can_replace_logo_after_plan_choice(tmp_pa
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 15, tzinfo=timezone.utc)
     first_logo = tmp_path / "logo1.png"
-    first_logo.write_bytes(b"first")
+    first_logo.write_bytes(_PNG_MAGIC + b"first")
     second_logo = tmp_path / "logo2.png"
-    second_logo.write_bytes(b"second")
+    second_logo.write_bytes(_PNG_MAGIC + b"second")
 
     store_brand_asset(
         state_path=state_path,
@@ -2139,7 +2143,7 @@ def test_payment_pending_signup_thread_can_replace_logo_after_plan_choice(tmp_pa
     logo_assets = updated.customers[0].brand_assets
     assert len(logo_assets) == 2
     assert [asset.active for asset in logo_assets] == [False, True]
-    assert Path(logo_assets[-1].path).read_bytes() == b"second"
+    assert Path(logo_assets[-1].path).read_bytes() == _PNG_MAGIC + b"second"
 
 
 def test_onboarding_script_returns_reply_json(tmp_path):

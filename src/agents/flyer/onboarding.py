@@ -8,7 +8,6 @@ import calendar
 from difflib import SequenceMatcher
 import hashlib
 import json
-import mimetypes
 import os
 import re
 from typing import Optional
@@ -1177,6 +1176,45 @@ def _asset_owner_key(store: FlyerCustomerStore, chat_id: str, sender_phone: Opti
     return re.sub(r"[^A-Za-z0-9_-]", "_", chat_id)[:80] or "unknown"
 
 
+# Content types the flyer render/vision path actually consumes. `render.py`
+# reads `asset.mime_type`, checks only `startswith("image/")`, and base64s the
+# bytes into the vision request under that label — so this table IS the
+# guarantee that the label describes the bytes.
+#
+# WEBP is included because it is already consumed successfully today (a .webp
+# upload gets image/webp from the extension guess and passes the render check),
+# and the neighbouring inbound-media allowlist `_MENU_IMAGE_SUFFIXES` lists it;
+# dropping it here would be a silent capability regression rather than a fix.
+# GIF is excluded — it appears nowhere in the flyer render or vision path.
+_BRAND_ASSET_MAGIC: tuple[tuple[bytes, str, str], ...] = (
+    (b"\xff\xd8\xff", "image/jpeg", ".jpg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png", ".png"),
+)
+
+# WhatsApp caps inbound images at 5MB, so nothing legitimate reaches us above
+# that. 10 MiB leaves generous headroom for a re-encoded or forwarded original
+# while still bounding the base64 payload (~13.6MB) a single vision request can
+# be handed.
+MAX_BRAND_ASSET_BYTES = 10 * 1024 * 1024
+
+
+def _sniff_brand_asset_media(raw: bytes) -> tuple[str, str]:
+    """Return (mime, extension) derived from the CONTENT, or raise ValueError.
+
+    The extension on the inbound path is attacker- and accident-controlled and
+    tells us nothing; only the leading bytes do.
+    """
+    for magic, mime, suffix in _BRAND_ASSET_MAGIC:
+        if raw.startswith(magic):
+            return mime, suffix
+    # RIFF container: bytes 0-3 "RIFF", 4-7 length, 8-11 the form type.
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp", ".webp"
+    raise ValueError(
+        "brand asset media is not a supported image (expected JPEG, PNG or WEBP)"
+    )
+
+
 def _copy_brand_asset(
     *,
     store: FlyerCustomerStore,
@@ -1191,9 +1229,18 @@ def _copy_brand_asset(
     raw = media_path.read_bytes()
     if not raw:
         raise ValueError("brand asset media file is empty")
+    if len(raw) > MAX_BRAND_ASSET_BYTES:
+        raise ValueError(
+            f"brand asset media is {len(raw)} bytes, over the "
+            f"{MAX_BRAND_ASSET_BYTES}-byte limit"
+        )
+    # Sniff BEFORE anything is reserved or written, so a refused upload consumes
+    # neither an asset id nor a file on disk. The suffix comes from the content
+    # too: a PNG saved as `.jpg` on disk is the same latent trap one layer down,
+    # since several downstream readers fall back to guessing from the path.
+    mime, suffix = _sniff_brand_asset_media(raw)
     asset_id = f"B{store.next_brand_asset_sequence:04d}"
     store.next_brand_asset_sequence += 1
-    suffix = media_path.suffix.lower() or ".bin"
     dest_dir = state_path.parent / "brand_assets" / owner_key
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{asset_id}-{kind}{suffix}"
@@ -1203,12 +1250,11 @@ def _copy_brand_asset(
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, dest)
-    mime, _ = mimetypes.guess_type(str(dest))
     return FlyerBrandAsset(
         asset_id=asset_id,
         kind=kind,  # type: ignore[arg-type]
         path=str(dest),
-        mime_type=mime or "application/octet-stream",
+        mime_type=mime,
         sha256=hashlib.sha256(raw).hexdigest(),
         original_message_id=message_id,
         received_at=now,
