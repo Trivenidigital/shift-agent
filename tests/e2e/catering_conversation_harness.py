@@ -293,7 +293,11 @@ def run_select_proposal(*, lead_id, customer_jid, customer_message_id, selection
         "LEADS_PATH": LEADS_PATH, "LEADS_LOCK": Path(str(LEADS_PATH) + ".lock"),
         "MENU_PATH": MENU_PATH, "LOG_PATH": DECISIONS_LOG,
         "LOG_LOCK": Path(str(DECISIONS_LOG) + ".lock"),
-        "_bridge_post": _make_capture("select-catering-proposal"),
+        # P17b: select-catering-proposal reads `status`, so it calls the canonical
+        # 4-tuple. Patching the old `_bridge_post` name here would bind a DEAD
+        # attribute and let the script issue REAL bridge POSTs — the exact defect
+        # detector 3 in test_send_chokepoint_singularity.py exists to catch.
+        "_bridge_post_4tuple": _make_capture_4tuple("select-catering-proposal"),
     })
     argv = ["select-catering-proposal", "--lead-id", lead_id, "--customer-jid", customer_jid,
             "--customer-message-id", customer_message_id, "--selection-text", selection_text]
