@@ -248,6 +248,19 @@ def test_none_and_non_string_inputs_are_safe():
     # adding covers locks a quote priced for the OLD headcount
     ("yes we accept, and please add 20 more guests", None),
     ("we accept the quote, plus 15 extra plates", None),
+    ("we accept, add another 2 mains", None),
+    # haggling idioms that name no number at all
+    ("we accept, can you do a better number", None),
+    ("we accept, sharpen the pencil a bit", None),
+    ("we accept, any wiggle room on the price", None),
+    ("we accept, can you knock something off", None),
+    ("we accept, can you shave 200 off", None),
+    ("we accept, lets move on the price", None),
+    ("we accept the quote. can you knock off a discount?", None),
+    ("we accept, any flexibility on the price?", None),
+    # a deferral WITH a decision object is still a deferral
+    ("we accept, need to confirm with my partner", None),
+    ("we accept, let me check with my wife first", None),
     # a yes that moves a material term is an amendment, not an acceptance
     ("we want to proceed with a smaller headcount of 80", None),
     ("go ahead but for 120 people", None),
@@ -264,6 +277,12 @@ def test_commitment_verb_without_a_real_commitment(text, expected):
 # message it declines to classify, so a guard that over-reaches loses real
 # bookings invisibly. These cells bound that: every one is a plain yes that
 # happens to sit next to a connective, a restated term, or an aside.
+#
+# THIS TABLE IS THE FULL GENUINE SET AND EVERY ROW IS PINNED. A row that is
+# only ever checked by hand is a row a later narrowing can break in silence:
+# the cancellation-policy cell below was regressed for a whole review round
+# because it lived in a hand-run A/B list instead of here, and the suite
+# passed over it. Anything claimed as "still books" belongs in this table.
 @pytest.mark.parametrize("text", [
     "we accept the quote",
     "please go ahead",
@@ -287,9 +306,39 @@ def test_commitment_verb_without_a_real_commitment(text, expected):
     # scene-setting, not a condition the acceptance hangs on
     "we accept, the venue is ours until 10pm",
     "we accept, waiting on your invoice",
+    # asking ABOUT a cancellation term is the opposite of cancelling, and it is
+    # a normal thing to ask in the same breath as saying yes
+    "we accept the quote. what is your cancellation policy?",
+    "we accept the quote. what is your cancellation window?",
+    # gratitude for a price already granted is not a request to lower it
+    "thanks for the discount you gave us, we accept",
+    "we accept, and thanks for the discounted rate",
+    # confirming LOGISTICS is not deferring the decision
+    "we accept, let me confirm the delivery address",
+    "we accept, let me confirm the spelling of the business name",
+    "we accept. please confirm",
+    # adding a person or an unquantified item is not a headcount change
+    "add my husband to the invite list, we accept",
+    "we accept, add extra naan",
 ])
 def test_genuine_acceptance_survives_the_guards(text):
     assert _outcome(text) == "accepted"
+
+
+def test_an_acceptance_with_no_sentence_break_before_its_question_is_lost():
+    """PRE-EXISTING limitation, pinned so it is not rediscovered as a new bug.
+
+    `_assertion_text` drops per SENTENCE, and this message is a single
+    interrogative sentence — the dash is not a sentence break — so nothing is
+    left to match. The same words with a full stop instead of the dash book
+    normally, and that pair is the whole difference.
+
+    Verified None on the pre-v2 module too, so no guard added across v2-v4
+    caused it. Widening the sentence splitter would change which text every
+    other rule reads, which is a bigger change than this row is worth.
+    """
+    assert _outcome("we accept - what are the cancellation terms?") is None
+    assert _outcome("we accept. what are the cancellation terms?") == "accepted"
 
 
 # ── `if` does two opposite jobs ─────────────────────────────────────────────
@@ -298,6 +347,9 @@ def test_genuine_acceptance_survives_the_guards(text):
     "we accept the quote, if you need anything let us know",
     "please go ahead, if that works for you",
     "we accept - call us if there's anything else",
+    # a polite request and a resignation idiom, neither of them a condition
+    "we accept, if you could email the invoice that'd be great",
+    "we accept, if that's what it takes",
 ])
 def test_a_courtesy_if_clause_still_books(text):
     """An offer of help is not a condition on the acceptance.
@@ -341,6 +393,39 @@ def test_a_long_adversarial_inbound_stays_linear():
     start = time.perf_counter()
     detect_quote_acceptance(text)
     assert time.perf_counter() - start < 1.0
+
+
+@pytest.mark.parametrize("unit,label", [
+    ("instead alpha bravo charlie delta echo 250 guests foxtrot golf hotel india juliet ",
+     "change-marker adjacency, no pair ever close enough to short-circuit"),
+    ("if the total alpha bravo charlie delta echo foxtrot golf hotel india ",
+     "ONE giant clause with no boundaries, packed with bare ifs"),
+    ("if you could email alpha bravo charlie delta echo foxtrot golf hotel ",
+     "ONE giant clause packed with COURTESY ifs — every if resolves, none exits"),
+])
+def test_the_quadratic_shapes_all_stay_linear(unit, label):
+    """Three different ways to make this detector quadratic, all pinned.
+
+    The clause-scan one is the subtle member: `_has_binding_condition` looks up
+    the clause each `if` sits in, and a message that is ONE clause containing
+    hundreds of `if`s re-scanned that whole clause once per `if` until the
+    result was cached per clause.
+
+    Asserted as a per-KB RATE rather than a wall-clock total, because a rate is
+    what distinguishes "slow machine" from "wrong complexity" — a quadratic
+    reintroduction makes the rate climb with size even on a fast host.
+    """
+    rates = []
+    for kb in (4.6, 18, 73):
+        text = "we accept the quote " + (unit * (int(kb * 1024 // len(unit)) + 1))[:int(kb * 1024)]
+        start = time.perf_counter()
+        detect_quote_acceptance(text)
+        rates.append((time.perf_counter() - start) * 1000 / kb)
+
+    assert max(rates) < 20.0, f"{label}: {rates} ms/KB — measured ~1 ms/KB"
+    assert max(rates) < 8 * min(rates), (
+        f"{label}: cost per KB grew {max(rates) / max(min(rates), 1e-9):.1f}x "
+        f"with size ({rates} ms/KB) — that is superlinear, not a slow host")
 
 
 def test_detector_is_deterministic():

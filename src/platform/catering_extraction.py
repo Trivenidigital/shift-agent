@@ -576,7 +576,13 @@ _NEGATED_ACCEPT_RE = re.compile(
 # they will close a lead: a bare "cancel" is too thin to close on but far too
 # strong to book on.
 _CANCEL_SIGNAL_RE = re.compile(
-    r"\b(?:cancel(?:l?ed|l?ing|lation)?|call(?:ed|ing)?\s+(?:it|them|everything)\s+off|"
+    # "what is your cancellation policy?" asks about a TERM of the deal; it is
+    # the opposite of cancelling, and it is a normal thing to ask in the same
+    # breath as accepting. The noun-question form is excluded by object.
+    r"\b(?:cancel(?:l?ed|l?ing|lation)?"
+    r"(?!\s+(?:policy|policies|window|terms|fee|fees|charge|charges|deadline|"
+    r"date|period|notice))|"
+    r"call(?:ed|ing)?\s+(?:it|them|everything)\s+off|"
     r"back(?:ed|ing)?\s+out|not\s+(?:going|moving)\s+(?:ahead|forward)|"
     r"declin(?:e|ed|ing)|no\s+longer\s+need(?:ed|ing)?|not\s+interested|"
     r"scrap(?:ped|ping)?)\b",
@@ -615,19 +621,46 @@ _STILL_NEGOTIATING_RE = re.compile(
 # Pushing back on the number without naming one. "We accept! But first, can
 # you do it cheaper?" is a haggle, and it carries no digit and no negotiating
 # VERB, so neither _STILL_NEGOTIATING_RE nor the material-change guard sees it.
+#
+# Split into two arms. The first are idioms that only ever mean "lower your
+# price". The second are words that mean pushback ONLY as a request —
+# "thanks for the discount you gave us" is gratitude for a price already
+# granted, and it books.
+_PRICE_REQUEST_SHAPE = (
+    r"(?:can|could|would|will)\s+(?:you|we|u)\b|"
+    r"\bany\b|\bwhat\s+about\b|\bhow\s+about\b|"
+    r"(?:give|do|cut|offer)\s+(?:us|me)\b|\bplease\b"
+)
 _PRICE_PUSHBACK_RE = re.compile(
-    r"\b(?:cheaper|discount(?:ed)?|better\s+(?:price|rate|deal)|"
+    # Unambiguous haggling idioms — no request shape needed.
+    r"\b(?:cheaper|better\s+(?:price|rate|deal|number)|"
     r"lower\s+(?:the\s+)?(?:price|cost|rate)|come\s+down|"
-    r"bring\s+(?:it|the\s+price)\s+down|any\s+flexibility|"
-    r"match\s+(?:the|a|their)\s+price)\b",
+    r"bring\s+(?:it|the\s+price)\s+down|sharpen\s+(?:the\s+)?pencil|"
+    r"wiggle\s+room|shave\s+[^.?!]{0,20}?\boff\b|"
+    r"move\s+on\s+(?:the\s+)?price|any\s+flexibility|"
+    r"match\s+(?:the|a|their)\s+price)\b"
+    # Request-shaped only: the same words are ordinary gratitude otherwise.
+    rf"|(?:{_PRICE_REQUEST_SHAPE})[^.?!]{{0,40}}?"
+    r"\b(?:discount(?:ed)?|knock\s+(?:something|anything|a\s+bit|some)?\s*off)\b",
     re.IGNORECASE,
 )
 
 # Explicitly not final yet. "we accept, hold on — let me check with my wife
 # first" is a yes with the decision still outstanding.
+#
+# "let me confirm" needs an OBJECT to be a deferral. Confirming a decision
+# with someone leaves the acceptance open; confirming the delivery address is
+# ordinary logistics inside a yes, so the logistics objects are excluded.
+_LOGISTICS_OBJECT = (
+    r"(?!\s+(?:\w+\s+){0,2}(?:address|addresses|details|spelling|email|phone|"
+    r"number|postcode|zip|directions)\b)"
+)
 _NOT_FINAL_RE = re.compile(
-    r"\b(?:hold\s+(?:on|off)|let\s+(?:me|us)\s+(?:check|confirm|ask|speak|talk|"
-    r"run\s+it)|need\s+to\s+(?:check|confirm|ask|speak)|checking\s+with|"
+    r"\b(?:hold\s+(?:on|off)|"
+    rf"let\s+(?:me|us)\s+(?:check|confirm){_LOGISTICS_OBJECT}|"
+    r"let\s+(?:me|us)\s+(?:ask|speak|talk|run\s+it)|"
+    rf"need\s+to\s+(?:check|confirm){_LOGISTICS_OBJECT}|"
+    r"need\s+to\s+(?:ask|speak)|checking\s+with|"
     r"not\s+final|tentative(?:ly)?)\b",
     re.IGNORECASE,
 )
@@ -658,7 +691,11 @@ _COURTESY_IF_RE = re.compile(
     r"\b(?:let\s+(?:us|me)\s+know|tell\s+(?:us|me)|reach\s+out|get\s+in\s+touch|"
     r"contact\s+(?:us|me)|call\s+(?:us|me)|text\s+(?:us|me)|email\s+(?:us|me)|"
     r"if\s+(?:that|this)\s+works|if\s+you\s+need\s+anything|"
-    r"if\s+there(?:'?s|\s+is)\s+anything|if\s+you\s+have\s+any\s+questions?)\b",
+    r"if\s+there(?:'?s|\s+is)\s+anything|if\s+you\s+have\s+any\s+questions?|"
+    # "if you could email the invoice" is a polite REQUEST, not a condition on
+    # the acceptance; "if that's what it takes" is resignation — both book.
+    r"if\s+you\s+could\s+\w+|"
+    r"if\s+(?:that|this)(?:'?s|\s+is)\s+what\s+it\s+takes)\b",
     re.IGNORECASE,
 )
 _CLAUSE_SPLIT_RE = re.compile(r"[,.;:!?]+|\s+[—–-]\s+")
@@ -685,10 +722,18 @@ def _has_binding_condition(text: str) -> bool:
         return False
     clauses = _clause_spans(text)
     clause_starts = [s for s, _ in clauses]
+    # Cached per CLAUSE, not per `if`. A message that is one giant clause
+    # containing many `if`s would otherwise re-scan the whole clause once per
+    # `if` — quadratic on exactly the shape this branch exists to read.
+    courtesy: dict[int, bool] = {}
     for m in ifs:
         i = bisect.bisect_right(clause_starts, m.start()) - 1
-        start, end = clauses[i] if i >= 0 else (0, len(text))
-        if not _COURTESY_IF_RE.search(text[start:end]):
+        hit = courtesy.get(i)
+        if hit is None:
+            start, end = clauses[i] if i >= 0 else (0, len(text))
+            hit = bool(_COURTESY_IF_RE.search(text[start:end]))
+            courtesy[i] = hit
+        if not hit:
             return True
     return False
 
