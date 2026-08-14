@@ -1603,12 +1603,16 @@ def test_watchdog_escalates_incident_whose_worker_never_ran(tmp_path):
     incident = state["incidents"][0]
     assert incident["status"] == "operator_action_required"
     assert incident["operator_action"]["reason"] == "worker_unavailable"
-    text = log.read_text(encoding="utf-8")
-    assert '"type":"flyer_recovery_operator_action_required"' in text
-    assert '"reason":"worker_unavailable"' in text
-    assert '"incident_id":"FRI20260814-STUCK"' in text
-    # Owner notification attempt is recorded on the incident, same path as the
-    # existing escalation reasons.
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    escalation_rows = [row for row in rows if row["type"] == "flyer_recovery_operator_action_required"]
+    assert [row["reason"] for row in escalation_rows] == ["worker_unavailable"]
+    assert escalation_rows[0]["incident_id"] == "FRI20260814-STUCK"
+    # The owner notification goes out on the same path as the existing reasons
+    # (delivery itself fails in tests — no Pushover — and is retried).
+    alert_rows = [row for row in rows if row["type"] == "flyer_recovery_owner_alert"]
+    assert [(row["trigger"], row["reason"]) for row in alert_rows] == [
+        ("operator_action_required", "worker_unavailable")
+    ]
     assert incident["owner_alert"]["trigger"] == "operator_action_required"
 
 
