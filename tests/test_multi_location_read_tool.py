@@ -475,7 +475,7 @@ def test_audit_payload_validates_as_the_existing_log_entry_variant(tool, monkeyp
 
 # ── registration ───────────────────────────────────────────────────────────
 
-def test_plugin_registers_both_tools_under_shift_agent_read(monkeypatch):
+def test_plugin_registers_every_tool_under_shift_agent_read(monkeypatch):
     monkeypatch.syspath_prepend(str(PLATFORM_DIR))
     pkg = _load()
     registered = []
@@ -486,7 +486,10 @@ def test_plugin_registers_both_tools_under_shift_agent_read(monkeypatch):
 
     pkg.register(FakeCtx())
     names = {r["name"] for r in registered}
-    assert names == {"get_compliance_deadlines", "find_nearest_location"}
+    # Exhaustive on purpose: a stray or duplicate registration is exactly what
+    # this catches. Update the set when a tool lands, do not loosen it.
+    assert names == {"get_compliance_deadlines", "find_nearest_location",
+                     "get_equipment_maintenance_due"}
     assert {r["toolset"] for r in registered} == {"shift_agent_read"}
     for r in registered:
         assert r["description"] == r["schema"]["description"]
