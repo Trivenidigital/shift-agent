@@ -716,9 +716,47 @@ def test_an_error_after_f7_sent_is_still_visible_to_the_operator(monkeypatch):
         raise RuntimeError("boom after send")
     monkeypatch.setattr(hooks_mod, "_try_f7_primary_intercept", _f7_sends_then_raises)
 
-    hooks_mod._try_flyer_catering_escape_gate(INCIDENT, CHAT, _event())
+    out = hooks_mod._try_flyer_catering_escape_gate(INCIDENT, CHAT, _event())
 
-    assert any("RuntimeError" in str(a.get("detail", "")) for a in s.audits), s.audits
+    # The row must be the one the recovery watchdog ingests, carrying the
+    # act-phase marker — a bare substring match passed on the unfixed code via
+    # the outer handler's gate_error cause (reviewer FIX-2).
+    row = next((a for a in s.audits
+                if a.get("reason") == "flyer_primary_failed"
+                and "catering_escape_gate_action_failed=true" in str(a.get("detail", ""))), None)
+    assert row is not None, s.audits
+    assert "plan=" in str(row.get("detail", "")) and "RuntimeError" in str(row.get("detail", ""))
+    assert out == {"action": "skip",
+                   "reason": "cf-router catering escape gate: f7 failed after dispatch"}
+
+
+def test_an_audit_failure_cannot_void_the_terminal_skip(monkeypatch):
+    """Reviewer FIX-1: if the act-phase audit write itself raises, the skip must
+    still be returned — a customer message may already be out, and an escaping
+    exception hands the turn back to Hermes (the double-reply window)."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod)
+
+    def _f7_sends_then_raises(text, chat_id, event, signals=None, allow_new_lead=True):
+        actions_mod.send_flyer_text(chat_id, "Your inquiry is with the owner.")
+        raise RuntimeError("boom after send")
+    monkeypatch.setattr(hooks_mod, "_try_f7_primary_intercept", _f7_sends_then_raises)
+
+    real_audit = actions_mod.audit_intercepted
+
+    def _audit_raises(**kwargs):
+        # Only the act-phase failure row raises — the classification-phase
+        # audits must succeed so the turn genuinely reaches the act phase.
+        if kwargs.get("reason") == "flyer_primary_failed":
+            raise OSError("audit store unavailable")
+        return real_audit(**kwargs)
+    monkeypatch.setattr(actions_mod, "audit_intercepted", _audit_raises)
+
+    out = hooks_mod._try_flyer_catering_escape_gate(INCIDENT, CHAT, _event())
+
+    assert out == {"action": "skip",
+                   "reason": "cf-router catering escape gate: f7 failed after dispatch"}
+    assert len(s.sent) == 1
 
 
 def test_an_error_after_the_open_lead_escape_sent_does_not_double_up(monkeypatch):

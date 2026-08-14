@@ -5374,13 +5374,20 @@ def _try_flyer_catering_escape_gate(
         # LLM, which would answer on top of whatever was already delivered
         # (pre_gateway_dispatch re-raises, so an escaping exception's handling
         # is Hermes' to decide — not something to depend on here).
-        actions.audit_intercepted(
-            reason="flyer_primary_failed",
-            chat_id=chat_id,
-            subprocess_rc=2,
-            detail=(f"catering_escape_gate_action_failed=true; plan={plan[0]}; "
-                    f"error={type(exc).__name__}: {str(exc)[:200]}"),
-        )
+        try:
+            actions.audit_intercepted(
+                reason="flyer_primary_failed",
+                chat_id=chat_id,
+                subprocess_rc=2,
+                detail=(f"catering_escape_gate_action_failed=true; plan={plan[0]}; "
+                        f"error={type(exc).__name__}: {str(exc)[:200]}"),
+            )
+        except Exception:
+            # The audit write must never void the terminal skip: with a customer
+            # message possibly already delivered, an escaping exception here
+            # hands the turn back to Hermes and re-opens the double-reply
+            # window this handler exists to close.
+            pass
         return {"action": "skip",
                 "reason": f"cf-router catering escape gate: {plan[0]} failed after dispatch"}
 
