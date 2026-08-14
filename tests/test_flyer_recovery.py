@@ -751,3 +751,74 @@ def test_customer_visible_success_resolves_worker_unavailable_escalation():
 
     assert [item["incident_id"] for item in resolved] == ["FRI20260523-STUCK"]
     assert incident["status"] == "resolved"
+
+
+# ─── unbacked follow-up promises in customer copy (P0-4) ────────────────────
+#
+# The lint already encoded this invariant — a customer must not be promised an
+# unprompted future message unless something is actually queued to produce one
+# — but it recognised only the literal phrase "follow up". The finalize and
+# delivery failure acks said "I'll review it and send an update here" with
+# nothing queued, nothing scheduled and no observation path, and sailed through.
+
+OLD_FINALIZATION_ACK = (
+    "Flyer Studio\n------------\n"
+    "I hit an issue preparing the final files. I'll review it and send an update here."
+)
+OLD_DELIVERY_ACK = (
+    "Flyer Studio\n------------\n"
+    "I hit an issue sending the final files. I'll review it and send an update here."
+)
+
+
+@pytest.mark.parametrize("copy", [OLD_FINALIZATION_ACK, OLD_DELIVERY_ACK])
+def test_lint_rejects_the_old_unbacked_failure_acks(copy):
+    """The exact strings that shipped. If either is ever reintroduced, this
+    fails rather than the customer being promised a message nobody will send."""
+    result = recovery.lint_recovery_copy(copy, "bridge_send_failed", False)
+    assert result.ok is False
+    assert "followup_without_record" in result.reasons
+
+
+@pytest.mark.parametrize("phrase", [
+    "I will send an update here",
+    "I'll send you an update once it's sorted",
+    "I will get back to you",
+    "I'll let you know when it's done",
+    "I will update you shortly",
+    "I'll keep you posted",
+    "I will follow up here",
+])
+def test_lint_rejects_every_promise_of_an_unprompted_message(phrase):
+    result = recovery.lint_recovery_copy(phrase, "bridge_send_failed", False)
+    assert result.ok is False
+    assert "followup_without_record" in result.reasons
+
+
+@pytest.mark.parametrize("phrase", [
+    "I will send an update here",
+    "I will follow up here",
+])
+def test_the_same_promises_are_allowed_once_something_is_recorded(phrase):
+    """The rule is about backing, not vocabulary: when a follow-up really is
+    recorded the promise is truthful and must still be sendable."""
+    assert recovery.lint_recovery_copy(phrase, "bridge_send_failed", True).ok is True
+
+
+def test_lint_accepts_a_truthful_failure_ack_that_points_at_the_real_retry():
+    """The replacement shape: say what happened, say nothing is queued, and
+    name the reply that genuinely re-enters the retry path."""
+    copy = (
+        "Flyer Studio\n------------\n"
+        "I could not finish preparing your final files just now, and nothing was sent.\n\n"
+        "Reply SEND IT when you want me to try again."
+    )
+    assert recovery.lint_recovery_copy(copy, "bridge_send_failed", False).ok is True
+
+
+def test_render_recovery_ack_still_passes_its_own_lint():
+    """Non-vacuity: the widened phrase list must not have caught the recovery
+    acks the module itself renders."""
+    for followup_recorded in (False, True):
+        _template_id, message = recovery.render_recovery_ack(followup_recorded)
+        assert recovery.lint_recovery_copy(message, "bridge_send_failed", followup_recorded).ok is True
