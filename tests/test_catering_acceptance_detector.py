@@ -287,6 +287,11 @@ def test_commitment_verb_without_a_real_commitment(text, expected):
     "we accept the quote",
     "please go ahead",
     "confirmed, proceed with the quote",
+    "we would like to proceed",
+    "confirmed, please go ahead",
+    "we accept, the date of June 5 works for us",
+    "please proceed with the booking",
+    "we accept and will pay the deposit today",
     "we'd like to proceed",
     # "but"/"only" are the connectives of a RESTATEMENT, not change markers
     "we accept the quote for 250 guests only",
