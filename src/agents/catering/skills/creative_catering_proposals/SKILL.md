@@ -82,6 +82,14 @@ deterministic generator rather than composing an item list yourself.
   that was never sent, a section the named option lacks, or fewer than two
   sections named), the script sends ONE clarifying question instead of a
   best-guess merge — you compose nothing in that case.
+
+  The recompose path enforces the same vegetarian-only rule as generation. If the
+  lead is `veg_only` and the requested combination would pull a non-veg item
+  forward out of an option sent earlier, the script REFUSES and alerts the owner
+  rather than sending. It does not quietly drop the item, because a mix-and-match
+  merge is verbatim by contract — substituting a dish behind the customer's back
+  would be worse than a refusal the owner can act on. Do not retry the same
+  combination; the owner resolves it.
 - **Off-menu items** — an item the customer named that is NOT in
   `catering-menu.json` NEVER appears in an option: both the deterministic generator
   and the recompose merge draw only from the catalog, and the script rejects any

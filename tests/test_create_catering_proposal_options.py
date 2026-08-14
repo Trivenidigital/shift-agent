@@ -970,6 +970,78 @@ def test_recompose_unknown_option_clarifies(bridge_server, env_dir):
     assert "options 1 and 2" in stub.requests[-1]["message"]
 
 
+def test_recompose_veg_only_lead_refuses_non_veg_pull_forward(bridge_server, env_dir):
+    """Recompose pulls items VERBATIM from options sent earlier, which may pre-date
+    the lead's stated diet. A veg_only lead must never receive a non-veg item this
+    way: the merge fails closed (owner alerted, nothing sent) rather than quietly
+    dropping a dish the customer explicitly named."""
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir, dietary=["jain"],
+               raw_inquiry="Actually please make the whole event pure vegetarian")
+    _seed_recompose_sent_set(env_dir)
+
+    # Option 2's mains are Goat Curry — non-veg, and sent before the diet was stated.
+    result, parsed = _run_recompose(env_dir, port, "option 1 starters with the option 2 mains")
+
+    assert parsed["rc"] == 2, result.stderr
+    assert stub.requests == [], "no non-veg menu is sent to a vegetarian-only event"
+    audit = _read_audit(env_dir)
+    failed = [e for e in audit if e["type"] == "catering_proposal_generation_failed"]
+    assert failed and failed[0]["reason"] == "insufficient_section_balance"
+    assert "Goat Curry" in failed[0]["detail"]
+    assert not any(e["type"] == "catering_recomposed_menu_sent" for e in audit)
+
+
+def test_recompose_veg_only_lead_sends_all_veg_combination(bridge_server, env_dir):
+    """The refusal is item-specific, not a blanket block: a veg_only lead's
+    all-vegetarian combination still goes out."""
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir, dietary=["veg"], raw_inquiry="Temple lunch, pure vegetarian")
+    veg_sent = {
+        "proposal_set_id": "CPS-L0014-000001", "lead_id": "L0014", "status": "SENT",
+        "created_at": "2026-04-30T10:00:00-04:00", "sent_at": "2026-04-30T10:01:00-04:00",
+        "outbound_message_id": "old_msg", "source_message_id": "msg_old",
+        "request_text": "two ideas",
+        "options": [
+            {"option_id": "1", "style_key": "balanced_mixed", "tier": "balanced",
+             "item_names": ["Samosa", "Gulab Jamun"]},
+            {"option_id": "2", "style_key": "premium_mixed", "tier": "premium",
+             "item_names": ["Samosa", "Gulab Jamun"]},
+        ],
+        "selected_option_id": None, "failure_reason": "",
+    }
+    (env_dir / "state" / "catering-proposals.json").write_text(
+        json.dumps({"schema_version": 1, "next_sequence": 2, "sets": [veg_sent]}), encoding="utf-8")
+
+    result, parsed = _run_recompose(env_dir, port, "option 1 starters with the option 2 desserts")
+
+    assert parsed["rc"] == 0, result.stderr
+    body = stub.requests[-1]["message"]
+    assert "- Samosa" in body and "- Gulab Jamun" in body
+    assert any(e["type"] == "catering_recomposed_menu_sent" for e in _read_audit(env_dir))
+
+
+def test_recompose_mixed_lead_keeps_non_veg_combination(bridge_server, env_dir):
+    """A mixed-diet lead's recompose is unchanged — the non-veg section still ships,
+    and the guard adds no section/main requirement to a mix-and-match merge (a
+    customer may legitimately ask for just starters + mains)."""
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir, dietary=["veg", "non-veg"],
+               raw_inquiry="Wedding, 90 veg and 90 non-veg")
+    _seed_recompose_sent_set(env_dir)
+
+    result, parsed = _run_recompose(env_dir, port, "option 1 starters with the option 2 mains")
+
+    assert parsed["rc"] == 0, result.stderr
+    body = stub.requests[-1]["message"]
+    assert "- Samosa" in body and "- Goat Curry" in body
+    assert any(e["type"] == "catering_recomposed_menu_sent" and e["section_count"] == 2
+               for e in _read_audit(env_dir))
+
+
 def test_recompose_price_free_on_combined_menu(bridge_server, env_dir):
     port, stub = bridge_server
     _seed_menu(env_dir, _RECOMPOSE_MENU)

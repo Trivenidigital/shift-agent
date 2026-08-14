@@ -325,6 +325,19 @@ def _lead_diet_profile(lead) -> str:
     return "unknown"
 
 
+def _assert_no_non_veg_items(
+    item_names: list[str], menu_items: dict[str, MenuItem], *, label: str,
+) -> None:
+    """The vegetarian-only invariant, in one place: a veg_only lead never receives a
+    non-veg item from this script. Shared by the proposal guard and the recompose
+    chokepoint so both send paths enforce the SAME rule."""
+    non_veg = [name for name in item_names
+               if name in menu_items and _is_non_veg(menu_items[name])]
+    if non_veg:
+        raise SectionBalanceError(
+            f"{label} contains non-veg items {non_veg} for a vegetarian-only event")
+
+
 def _assert_section_balance(
     options: list[CateringProposalOption], menu_items: dict[str, MenuItem],
     *, diet_profile: str,
@@ -341,12 +354,8 @@ def _assert_section_balance(
     - non_veg_only / unknown: no-op; both diets remain legitimate."""
     if diet_profile == "veg_only":
         for option in options:
-            non_veg = [name for name in option.item_names
-                       if name in menu_items and _is_non_veg(menu_items[name])]
-            if non_veg:
-                raise SectionBalanceError(
-                    f"option {option.option_id} contains non-veg items {non_veg} "
-                    f"for a vegetarian-only event")
+            _assert_no_non_veg_items(option.item_names, menu_items,
+                                     label=f"option {option.option_id}")
         return
     if diet_profile != "mixed":
         return
@@ -788,8 +797,9 @@ def _render_recomposed(item_names: list[str], menu_items: dict[str, MenuItem],
 def _run_recompose(args) -> int:
     """PR-D mix-and-match: deterministically combine sections of already-SENT
     options. The payload is pulled verbatim from the sent options (never composed
-    by an LLM), and a sections-match assertion runs in this chokepoint before send
-    so prose-matches-payload is TESTED per send. Any imperfect request clarifies."""
+    by an LLM), and a diet check plus a sections-match assertion run in this
+    chokepoint before send so prose-matches-payload is TESTED per send. Any imperfect
+    request clarifies."""
     _set_run_identity(
         logical_turn_id=(args.logical_turn_id or args.source_message_id),
         send_attempt_id=uuid.uuid4().hex,
@@ -832,6 +842,22 @@ def _run_recompose(args) -> int:
         return EXIT_OK
 
     # kind == merge
+    # Diet chokepoint, BEFORE the body is built. Recompose pulls items VERBATIM from
+    # options that may pre-date the lead's stated diet (a customer who says "make it
+    # all vegetarian" after the first send, or a set generated before this guard
+    # existed), so the generation-side pool filter cannot cover this path. Fail
+    # closed rather than filter: the recompose contract is verbatim-or-clarify, and
+    # silently dropping the non-veg half of a section the customer explicitly named
+    # would either substitute a dish behind their back or trip the sections-match
+    # assertion below under a misleading reason. A refusal the owner sees is better.
+    if _lead_diet_profile(lead) == "veg_only":
+        try:
+            _assert_no_non_veg_items(plan["item_names"], menu_items, label="recomposed menu")
+        except SectionBalanceError as e:
+            _fail_generation(args.lead_id, "insufficient_section_balance", str(e))
+            sys.stderr.write(f"insufficient_section_balance: {e}\n")
+            return EXIT_INVALID_INPUT
+
     try:
         body, rendered_cats = _render_recomposed(plan["item_names"], menu_items, plan["combination"])
     except KeyError as e:
