@@ -7,6 +7,7 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import get_args
 import sys
 
 SRC_ROOT = Path(__file__).resolve().parents[3]
@@ -16,6 +17,7 @@ sys.path.insert(0, str(SRC_ROOT / "platform"))
 from schemas import (  # noqa: E402
     FlyerLockedFact,
     FlyerManualReview,
+    FlyerManualReviewReason,
     FlyerPendingRevisionConfirmation,
     FlyerProjectStore,
     FlyerRequestFields,
@@ -38,6 +40,12 @@ except ImportError:
     from agents.flyer.facts import promote_inferred_to_confirmed as _promote_inferred_to_confirmed  # noqa: E402
 
 STATE_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
+# Derived, never hand-maintained: the previous literal list had already drifted
+# two codes behind FlyerManualReviewReason, and argparse rejects an unlisted
+# choice with exit 2 — so a caller that reported queueing a manual review for
+# dependency_missing or price_conflict queued nothing at all. Same single-
+# source-of-truth shape the SLA watchdog adopted for DEFAULT_REASON_CODES.
+MANUAL_REASON_CODES = get_args(FlyerManualReviewReason)
 RAW_REQUEST_MAX_LEN = 2000
 PENDING_REVISION_TTL_SEC = 4 * 60 * 60
 
@@ -302,20 +310,7 @@ def main() -> int:
     p.add_argument(
         "--manual-reason-code",
         default="operator_request",
-        choices=[
-            "unclassified",
-            "legacy_unknown",
-            "reference_low_confidence",
-            "reference_provider_unavailable",
-            "reference_unsupported",
-            "reference_not_run",
-            "visual_qa_failed",
-            "source_edit_provider_unavailable",
-            "operator_request",
-            "policy_block",
-            "provider_timeout",
-            "missing_required_facts",
-        ],
+        choices=MANUAL_REASON_CODES,
     )
     p.add_argument("--manual-detail", default="")
     p.add_argument("--state-path", default=str(STATE_PATH))
@@ -699,11 +694,21 @@ def main() -> int:
                 should_write = True
             if args.queue_manual_review:
                 now = datetime.now(timezone.utc)
+                # queued_at is THIS queue row's entry time, not the project's
+                # first-ever queueing: manual_queue._queue_row_age_minutes
+                # documents it as "the row's queue entry time", and every
+                # consumer (SLA watchdog, cockpit age, recovery staleness) asks
+                # "how long has this row been waiting". Inheriting the prior
+                # stamp made a re-queued row born already breaching the SLA and
+                # slipped it past enforce_close_freshness_guard, which is the
+                # opposite of what a fresh row should get. No first_queued_at
+                # field is introduced: FlyerManualReview is extra="forbid", and
+                # no consumer wants the original queue time.
                 manual = make_manual_review(
                     reason_code=args.manual_reason_code,
                     reason=args.manual_reason,
                     detail=(args.manual_detail or "").strip(),
-                    queued_at=updated.manual_review.queued_at or now,
+                    queued_at=now,
                 )
                 if updated.status != "manual_edit_required":
                     if not is_flyer_transition_allowed(updated.status, "manual_edit_required"):
