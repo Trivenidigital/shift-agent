@@ -30,6 +30,12 @@ _APPLY_SCRIPT = (Path(__file__).resolve().parent.parent
                  / "apply-catering-owner-decision")
 
 
+# The customer-quote send site. Keyed by an explicit marker comment in the
+# script rather than by the call expression, so these write-order pins survive
+# a rewrite of the call itself (P17 moved it to the 4-tuple bridge_post).
+_QUOTE_POST_MARKER = "# CUSTOMER-QUOTE-BRIDGE-POST"
+
+
 @pytest.fixture(scope="module")
 def script_text() -> str:
     return _APPLY_SCRIPT.read_text(encoding="utf-8")
@@ -131,7 +137,7 @@ def test_quote_sent_tail_scan_inside_first_leadslock(script_text: str):
     tail_scan_idx = script_text.find("_tail_scan_quote_sent(LOG_PATH, lead.lead_id)")
     assert tail_scan_idx != -1
     # Should be after first lock acquire and before the bridge POST call
-    bridge_idx = script_text.find("ok, mid_or_err = _bridge_post(")
+    bridge_idx = script_text.find(_QUOTE_POST_MARKER)
     assert first_lock_idx < tail_scan_idx < bridge_idx
 
 

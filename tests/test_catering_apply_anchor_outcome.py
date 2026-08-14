@@ -22,6 +22,12 @@ _APPLY_SCRIPT = (Path(__file__).resolve().parent.parent
                  / "apply-catering-owner-decision")
 
 
+# The customer-quote send site. Keyed by an explicit marker comment in the
+# script rather than by the call expression, so these write-order pins survive
+# a rewrite of the call itself (P17 moved it to the 4-tuple bridge_post).
+_QUOTE_POST_MARKER = "# CUSTOMER-QUOTE-BRIDGE-POST"
+
+
 @pytest.fixture(scope="module")
 def script_text() -> str:
     return _APPLY_SCRIPT.read_text(encoding="utf-8")
@@ -35,7 +41,7 @@ def test_anchor_unknown_written_in_first_leadslock(script_text: str):
     assert first_anchor_idx != -1
     # Should appear between the first LEADS_LOCK and the bridge POST call
     first_lock = script_text.find("with FileLock(LEADS_LOCK):")
-    bridge_call = script_text.find("ok, mid_or_err = _bridge_post(")
+    bridge_call = script_text.find(_QUOTE_POST_MARKER)
     assert first_lock < first_anchor_idx < bridge_call
 
 
@@ -62,7 +68,7 @@ def test_post_bridge_write_order_reordered(script_text: str):
     write order is CateringQuoteSent FIRST → success-anchor → state mutation
     → status_change LAST."""
     # Find the SECOND LEADS_LOCK block (after the bridge POST)
-    bridge_idx = script_text.find("ok, mid_or_err = _bridge_post(")
+    bridge_idx = script_text.find(_QUOTE_POST_MARKER)
     assert bridge_idx != -1
     after_bridge = script_text[bridge_idx:]
     # Locate position of each row write within the post-bridge section

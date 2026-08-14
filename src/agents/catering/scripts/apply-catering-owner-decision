@@ -1284,6 +1284,12 @@ def main() -> int:
     # _normalize_quote_text → _truth_guard_check → prepend prefix → bridge POST.
     quote_text_with_prefix = f"⚕ *Catering Agent*\n────────────\n{quote_text}"
 
+    # CUSTOMER-QUOTE-BRIDGE-POST — the single customer-facing quote send. The
+    # anchor-ordering pins in tests/test_catering_apply_anchor_outcome.py,
+    # test_catering_apply_idempotent_replay.py and
+    # test_catering_apply_post_bridge_missing_lead.py locate this line by THIS
+    # marker. Keep the marker on the send call if the call is ever rewritten;
+    # those tests pin real write-order invariants, not this expression's spelling.
     _ok4, _mid4, _err4, _send_status = _bridge_post_4tuple(
         target_jid, quote_text_with_prefix)
     ok, mid_or_err = (True, _mid4) if _ok4 else (False, _err4 or _send_status)
