@@ -168,11 +168,21 @@ def _patch_bridge():
         if mode == "success":
             return True, payload or "wamid_default"
         return False, payload or "stubbed_failure"
+    # P17: the customer quote send moved to the CANONICAL 4-tuple `bridge_post`
+    # so it can read `status`. Both entry points are stubbed, and the 4-tuple one
+    # reports a real status string rather than "" — the script now branches on it.
+    def _stub4(jid, body, **kwargs):
+        if mode == "success":
+            return True, payload or "wamid_default", "", "sent"
+        status = os.environ.get(
+            "PYTEST_CATERING_DEPOSIT_BRIDGE_STATUS", "connect_failed")
+        return False, "", payload or "stubbed_failure", status
     try:
         import safe_io
     except ImportError:
         return
     safe_io.bridge_post_2tuple = _stub
+    safe_io.bridge_post = _stub4
 _patch_bridge()
 ''',
         encoding="utf-8",

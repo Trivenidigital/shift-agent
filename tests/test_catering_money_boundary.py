@@ -65,6 +65,10 @@ DEAD_BRIDGE_URL = "http://127.0.0.1:9/send"
 # ── harness ──────────────────────────────────────────────────────────────────
 class _BridgeStub(BaseHTTPRequestHandler):
     requests: list = []
+    # P17: "ok" -> 200 + {"id":...} (safe_io status "sent");
+    #      "empty_id" -> 200 + no id, which is safe_io's `send_uncertain`: the
+    #      bridge ACCEPTED the message, so it most likely reached the customer.
+    response_mode = "ok"
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -76,7 +80,10 @@ class _BridgeStub(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps({"id": f"msg_{int(time.time()*1000)}"}).encode())
+        if self.__class__.response_mode == "empty_id":
+            self.wfile.write(json.dumps({"accepted": True}).encode())
+        else:
+            self.wfile.write(json.dumps({"id": f"msg_{int(time.time()*1000)}"}).encode())
 
     def log_message(self, format, *args):
         return
@@ -85,6 +92,7 @@ class _BridgeStub(BaseHTTPRequestHandler):
 @pytest.fixture
 def bridge(monkeypatch):
     _BridgeStub.requests = []
+    _BridgeStub.response_mode = "ok"
     server = HTTPServer(("127.0.0.1", 0), _BridgeStub)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{server.server_port}/send"
@@ -780,3 +788,103 @@ def test_a_delivered_clarification_still_burns_the_one_ask(bridge, env):
     rc, out = run_record(env, "sounds good", message_id="amb2")
     assert rc == 0 and out["replayed"] is True
     assert bridge.requests == [], "no second question"
+
+
+# ── P17 — the approved quote's delivery status is consumed, not dropped ───────
+# `bridge_post` returns a 4-tuple whose `status` distinguishes "the bridge
+# accepted it and it most likely arrived" (send_uncertain) from "it definitely
+# did not". The 2-tuple adapter this script used flattened both into False, so a
+# send_uncertain wrote the "failed" retry anchor and the next approve re-POSTed a
+# priced, owner-approved quote to a customer who probably already had it.
+
+def _approve_ready(env):
+    seed_lead(env)
+    assert run_finalize(env, *PACKAGE_LEAD)[0] == 0
+
+
+def test_uncertain_quote_send_is_recorded_uncertain_not_failed(bridge, env):
+    _approve_ready(env)
+    _BridgeStub.response_mode = "empty_id"
+
+    rc, out = run_apply(env, "--decision", "approve", "--quote-from-lead-state")
+
+    lead = read_lead(env)
+    assert lead["quote_delivery_status"] == "uncertain", (
+        "the bridge accepted the quote; recording a definite failure invites a "
+        "duplicate send of a priced message")
+    assert lead["quote_delivery_status_at"]
+    rows = audit(env, "catering_customer_send_unconfirmed")
+    assert rows and rows[-1]["delivery_certainty"] == "uncertain"
+    assert rows[-1]["send_kind"] == "approved_quote"
+    assert rows[-1]["send_status"] == "send_uncertain"
+    assert rows[-1]["script"] == "apply-catering-owner-decision"
+    assert out.get("delivery_uncertain") is True
+    assert rc == 6
+
+
+def test_uncertain_quote_send_writes_no_failed_retry_anchor(bridge, env):
+    """The "failed" anchor is what tells the retry state-machine to POST again.
+    An accepted-but-unconfirmed send must not write it."""
+    _approve_ready(env)
+    _BridgeStub.response_mode = "empty_id"
+
+    run_apply(env, "--decision", "approve", "--quote-from-lead-state")
+
+    anchors = audit(env, "catering_quote_attempted")
+    assert anchors, "the pre-bridge anchor is still written"
+    assert [a["bridge_post_outcome"] for a in anchors] == ["unknown"], (
+        "no failed-anchor may follow an uncertain send")
+    assert audit(env, "catering_quote_sent") == [], (
+        "and no delivery may be claimed either — we cannot show one")
+
+
+def test_replay_after_uncertain_send_does_not_double_send_the_quote(bridge, env):
+    """THE pin: approve twice with the same code after an uncertain first send.
+    The customer must be quoted once."""
+    _approve_ready(env)
+    _BridgeStub.response_mode = "empty_id"
+    assert run_apply(env, "--decision", "approve", "--quote-from-lead-state")[0] == 6
+    posts_after_first = len(_BridgeStub.requests)
+
+    _BridgeStub.response_mode = "ok"          # bridge healthy again
+    rc, out = run_apply(env, "--decision", "approve", "--quote-from-lead-state")
+
+    assert rc == 0
+    assert out.get("resend_refused") is True
+    assert len(_BridgeStub.requests) == posts_after_first, (
+        "the second approve must not POST the quote again")
+    assert audit(env, "catering_quote_sent") == [], (
+        "and must not fabricate a delivery row for a send it did not make")
+
+
+def test_successful_quote_send_records_sent(bridge, env):
+    """Success path unchanged, plus the durable marker."""
+    _approve_ready(env)
+
+    rc, _ = run_apply(env, "--decision", "approve", "--quote-from-lead-state")
+
+    lead = read_lead(env)
+    assert rc == 0
+    assert lead["status"] == "SENT_TO_CUSTOMER"
+    assert lead["quote_delivery_status"] == "sent"
+    assert audit(env, "catering_customer_send_unconfirmed") == []
+    assert audit(env, "catering_quote_sent"), "a real delivery still gets its row"
+
+
+def test_definite_quote_send_failure_still_allows_retry(bridge, env, monkeypatch):
+    """A DEFINITE failure keeps the old behaviour — the customer got nothing, so
+    the failed anchor and a later retry are correct. Only the uncertain case
+    changes."""
+    _approve_ready(env)
+    monkeypatch.setenv("HERMES_BRIDGE_URL", DEAD_BRIDGE_URL)
+    monkeypatch.setattr(safe_io, "BRIDGE_URL", DEAD_BRIDGE_URL, raising=False)
+
+    rc, _ = run_apply(env, "--decision", "approve", "--quote-from-lead-state")
+
+    lead = read_lead(env)
+    assert rc == 6
+    assert lead["quote_delivery_status"] == "failed"
+    rows = audit(env, "catering_customer_send_unconfirmed")
+    assert rows[-1]["delivery_certainty"] == "failed"
+    assert "failed" in [a["bridge_post_outcome"] for a in audit(env, "catering_quote_attempted")], (
+        "the retry anchor a definite failure needs is still written")

@@ -43,6 +43,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import unicodedata
 import uuid
@@ -59,9 +60,16 @@ from safe_io import (  # noqa: E402
     load_yaml_model,
 )
 from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402  # PR-ε: chokepoint consolidation
+# P17: the CUSTOMER quote send needs the canonical 4-tuple's `status` — the
+# 2-tuple adapter drops it, and 'send_uncertain' (bridge accepted; the quote
+# most likely ARRIVED) has to be distinguishable from a definite drop before the
+# retry state-machine decides whether to POST a money message a second time.
+# The owner-reprompt send below keeps the adapter: it has no such decision.
+from safe_io import bridge_post as _bridge_post_4tuple  # noqa: E402
 from schemas import (  # noqa: E402
     Config, CateringLeadStore,
     CateringLeadStatusChange, CateringOwnerDecision, CateringQuoteSent,
+    CateringCustomerSendUnconfirmed,
     CateringQuoteAttempted,  # PR-D2 commit 3: anchor row schema (PR-D1)
     CateringQuoteSkillFailed,  # PR-B v3: SKILL handoff failure audit
     CateringLeadHoldBlockedSend,  # M4/G4: per-lead hold refusal audit
@@ -95,6 +103,10 @@ CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/c
 LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
 LEADS_LOCK = Path(os.environ.get("SHIFT_AGENT_LEADS_LOCK", str(LEADS_PATH) + ".lock"))
 LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+# P17: the owner page for an unconfirmed quote delivery. Deliberately a DIFFERENT
+# channel from the bridge that just failed to confirm — the same binary the
+# state-outbound divergence branch below already pages through.
+NOTIFY_OWNER_BIN = Path("/usr/local/bin/shift-agent-notify-owner")
 # PR-B: retained immutable quote-version ledger sidecar (own lock; additive).
 LEDGER_PATH = Path(os.environ.get(
     "SHIFT_AGENT_CATERING_QUOTE_LEDGER_PATH",
@@ -551,6 +563,88 @@ def _tail_scan_quote_sent(
     return matches[-1] if matches else None
 
 
+def _mark_quote_delivery_status(lead_id: str, marker: str, now) -> None:
+    """Persist `quote_delivery_status` on the lead. Best-effort — a marker write
+    that fails must never mask the send outcome it describes. Its own short
+    LEADS_LOCK section: the send happens outside the lock by design."""
+    try:
+        with FileLock(LEADS_LOCK):
+            store, status = load_model(LEADS_PATH, CateringLeadStore,
+                                       default=CateringLeadStore())
+            idx = next((i for i, le in enumerate(store.leads)
+                        if le.lead_id == lead_id), None)
+            if idx is None:
+                return
+            store.leads[idx] = store.leads[idx].model_copy(update={
+                "quote_delivery_status": marker,
+                "quote_delivery_status_at": now,
+            })
+            atomic_write_json(LEADS_PATH, store)
+    except Exception as e:  # noqa: BLE001 — never mask the send outcome
+        sys.stderr.write(f"WARN: quote_delivery_status marker write failed "
+                         f"({type(e).__name__}: {e})\n")
+
+
+def _record_quote_delivery(*, lead_id: str, certainty: str, send_status: str,
+                           detail: str, target_jid: str, logical_turn_id: str,
+                           send_attempt_id: str, cfg) -> None:
+    """Marker + typed audit row + owner page when the approved quote did not
+    confirm. The owner APPROVED this quote and has no other signal that it did not
+    land, so silence here is the failure mode worth paying a page to avoid."""
+    now = customer_now(cfg.customer.timezone)
+    _mark_quote_delivery_status(lead_id, certainty, now)
+
+    if certainty == "uncertain":
+        title = f"Catering {lead_id}: quote delivery NOT confirmed"
+        body = (
+            f"The approved quote for {lead_id} was accepted by the bridge but not "
+            f"confirmed, so the customer most likely DID receive it.\n"
+            f"Do NOT re-approve or re-send — that would quote them twice. "
+            f"Check the chat, then reconcile if it is genuinely missing.\n"
+            f"Detail: {detail[:200]}"
+        )
+    else:
+        title = f"Catering {lead_id}: quote NOT delivered"
+        body = (
+            f"The approved quote for {lead_id} did NOT reach the customer.\n"
+            f"The lead is OWNER_APPROVED but the customer has no quote. "
+            f"Re-run the approval or message them directly.\n"
+            f"Detail: {detail[:200]}"
+        )
+    sys.stderr.write(f"catering_quote_delivery_alert_dispatched lead={lead_id} "
+                     f"certainty={certainty}\n")
+    paged = False
+    try:
+        proc = subprocess.run(
+            [str(NOTIFY_OWNER_BIN), "--priority", "1", "--title", title, "--", body],
+            check=False, capture_output=True, text=True, timeout=10,
+        )
+        paged = proc.returncode == 0
+    except Exception as e:  # noqa: BLE001 — alerting is best-effort
+        sys.stderr.write(f"catering_quote_delivery_alert_delivery_failed "
+                         f"lead={lead_id} error={type(e).__name__}: {e}\n")
+    sys.stderr.write(f"catering_quote_delivery_alert_delivered lead={lead_id} "
+                     f"ok={paged}\n")
+
+    try:
+        with FileLock(LEADS_LOCK):
+            _append_log_with_outer_leadslock(
+                TypeAdapter(CateringCustomerSendUnconfirmed),
+                CateringCustomerSendUnconfirmed(
+                    type="catering_customer_send_unconfirmed", ts=now,
+                    lead_id=lead_id, script="apply-catering-owner-decision",
+                    send_kind="approved_quote", send_status=send_status,
+                    delivery_certainty=certainty, detail=detail[:2000],
+                    owner_paged=paged, logical_turn_id=logical_turn_id,
+                    send_attempt_id=send_attempt_id,
+                    transport_destination=target_jid, outcome=send_status,
+                ),
+            )
+    except Exception as e:  # noqa: BLE001 — audit is best-effort
+        sys.stderr.write(f"audit emit (customer_send_unconfirmed) failed "
+                         f"(non-fatal): {type(e).__name__}: {e}\n")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--code", required=True, help="approval code from owner reply, e.g. #A3F2X")
@@ -842,6 +936,27 @@ def main() -> int:
         # If found, customer demonstrably received quote (post-B-1 reorder, this
         # row is written FIRST after bridge POST). Advance status under the
         # SAME LEADS_LOCK as the tail-scan (R2-H-2 pin).
+        # P17 ROW 1c: a prior attempt came back 'send_uncertain' — the bridge
+        # ACCEPTED that quote, so it most likely reached the customer. There is no
+        # catering_quote_sent row (we refuse to claim a delivery we cannot show),
+        # so without this branch the matcher below would treat the lead as a fresh
+        # OWNER_APPROVED retry and POST the priced quote a SECOND time. safe_io
+        # states the rule for this status outright: "Caller MUST NOT auto-retry
+        # (would duplicate)". Re-approving is an operator decision, made after
+        # looking at the chat — not something a retry does on its own.
+        if args.decision == "approve" and lead.quote_delivery_status == "uncertain":
+            sys.stderr.write(
+                f"quote delivery for {lead.lead_id} is UNCERTAIN from a prior "
+                f"attempt; refusing to re-POST (would duplicate the quote)\n")
+            print(json.dumps({
+                "lead_id": lead.lead_id,
+                "new_status": lead.status,
+                "outbound_sent": False,
+                "delivery_uncertain": True,
+                "resend_refused": True,
+            }))
+            return EXIT_OK
+
         if args.decision == "approve":
             quote_sent_existing = _tail_scan_quote_sent(LOG_PATH, lead.lead_id)
             if quote_sent_existing is not None:
@@ -1169,9 +1284,43 @@ def main() -> int:
     # _normalize_quote_text → _truth_guard_check → prepend prefix → bridge POST.
     quote_text_with_prefix = f"⚕ *Catering Agent*\n────────────\n{quote_text}"
 
-    ok, mid_or_err = _bridge_post(target_jid, quote_text_with_prefix)
+    _ok4, _mid4, _err4, _send_status = _bridge_post_4tuple(
+        target_jid, quote_text_with_prefix)
+    ok, mid_or_err = (True, _mid4) if _ok4 else (False, _err4 or _send_status)
+
+    # P17: 'send_uncertain' is NOT a failure. The bridge accepted the quote (2xx)
+    # and only the ack body was unparseable, so the customer most likely HAS it.
+    # Writing the "failed" anchor here would tell the retry state-machine to POST
+    # the quote again — the double-send of a priced, owner-approved message that
+    # this branch exists to prevent. Instead: record the uncertainty durably on the
+    # lead (which the replay branch reads as "do not re-POST"), audit it, page the
+    # owner, and stop. safe_io's own contract for this status is "Caller MUST NOT
+    # auto-retry (would duplicate)".
+    if not ok and _send_status == "send_uncertain":
+        sys.stderr.write(
+            f"bridge_post to customer UNCERTAIN (accepted, ack unparseable): "
+            f"{mid_or_err}\n")
+        _record_quote_delivery(
+            lead_id=lead_id_for_output, certainty="uncertain",
+            send_status=_send_status, detail=str(mid_or_err),
+            target_jid=target_jid, logical_turn_id=logical_turn_id,
+            send_attempt_id=send_attempt_id, cfg=cfg,
+        )
+        print(json.dumps({
+            "lead_id": lead_id_for_output, "new_status": new_status_for_output,
+            "outbound_sent": False, "delivery_uncertain": True,
+            "error": mid_or_err,
+        }))
+        return EXIT_DEPENDENCY_DOWN
+
     if not ok:
         sys.stderr.write(f"bridge_post to customer failed: {mid_or_err}\n")
+        _record_quote_delivery(
+            lead_id=lead_id_for_output, certainty="failed",
+            send_status=_send_status, detail=str(mid_or_err),
+            target_jid=target_jid, logical_turn_id=logical_turn_id,
+            send_attempt_id=send_attempt_id, cfg=cfg,
+        )
         # State has already moved to OWNER_APPROVED; quote delivery uncertain.
         # PR-D2 commit 3: write second anchor row with outcome="failed" so
         # retry knows to re-attempt bridge POST (Case C row 3 in commit 4).
@@ -1332,6 +1481,11 @@ def main() -> int:
             "updated_at": now2,
             "quote_text": quote_text,
             "quote_valid_until": quote_valid_until,
+            # P17: stamped in THIS write rather than through the marker helper —
+            # the lock is already held and the row is already being replaced, so
+            # the delivery fact lands atomically with the status it justifies.
+            "quote_delivery_status": "sent",
+            "quote_delivery_status_at": now2,
         })
         atomic_write_json(LEADS_PATH, store)
 
