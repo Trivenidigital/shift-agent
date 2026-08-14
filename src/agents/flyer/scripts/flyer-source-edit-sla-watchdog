@@ -15,7 +15,7 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, get_args
 
 
 SRC_ROOT = Path(__file__).resolve().parents[3]
@@ -24,6 +24,7 @@ sys.path.insert(0, str(SRC_ROOT / "platform"))
 sys.path.insert(0, str(SRC_ROOT))
 
 from schemas import (  # noqa: E402
+    FlyerManualReviewReason,
     FlyerProject,
     FlyerProjectStore,
     FlyerSourceEditSlaAlert,
@@ -69,7 +70,12 @@ DEFAULT_REPEAT_MINUTES = 60
 DEFAULT_CUSTOMER_UPDATE_MINUTES = 30
 DEFAULT_CUSTOMER_REPEAT_MINUTES = 120
 DEFAULT_PRIORITY = 2
-DEFAULT_REASON_CODES = ("source_edit_provider_unavailable", "visual_qa_failed")
+# Every manual-review reason, read from the schema so a newly added reason is
+# monitored by construction. The unit passes no --reason-codes, so this default
+# IS the production set; a hand-maintained subset silently stopped paging for
+# 12 of the 14 reasons. Eligibility is independently gated on the row still
+# being queued/in_progress, so no terminal state is paged on.
+DEFAULT_REASON_CODES = get_args(FlyerManualReviewReason)
 SOURCE = "flyer-source-edit-sla-watchdog"
 TITLE = "Flyer manual queue SLA breach"
 

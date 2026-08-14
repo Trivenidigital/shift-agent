@@ -576,6 +576,7 @@ def _process_repair_queue(
         return {"queued": 0, "worker_runs": 0}
     with recovery.recovery_state_lock(state_path):
         state = recovery.load_recovery_state(state_path)
+        state_dirty = False
         for incident in state.get("incidents", []):
             if queued >= cfg.flyer.recovery.max_incidents_per_run:
                 break
@@ -619,6 +620,7 @@ def _process_repair_queue(
                 "worker_mode": mode,
             })
             queued += 1
+            state_dirty = True
             if bundle_written:
                 _append_audit(log_path, FlyerRecoveryRepairBundleWritten(
                     type="flyer_recovery_repair_bundle_written",
@@ -626,6 +628,12 @@ def _process_repair_queue(
                     incident_id=str(incident.get("incident_id") or ""),
                     bundle_path=str(bundle_path),
                 ))
+        # One write per tick rather than one per incident. Safe to defer: both
+        # the bundle and the queue request are atomic writes keyed by
+        # incident_id, and nothing consumes the queue directory except this
+        # loop's own state rows — so a tick that dies mid-loop simply re-writes
+        # the same paths next tick instead of leaving duplicates behind.
+        if state_dirty:
             recovery.write_recovery_state(state_path, state)
 
     should_run = mode in WORKER_RUN_MODES and (args.run_worker or cfg.flyer.recovery.worker_auto_run)
@@ -895,11 +903,17 @@ def _escalate_unrepaired_incidents(
     now: datetime,
     *,
     stale_after: timedelta,
+    worker_unavailable_after: timedelta | None = None,
     dry_run: bool = False,
 ) -> tuple[int, set[str]]:
     with recovery.recovery_state_lock(state_path):
         state = recovery.load_recovery_state(state_path)
-        escalated = recovery.escalate_unrepaired_incidents(state, now=now, stale_after=stale_after)
+        escalated = recovery.escalate_unrepaired_incidents(
+            state,
+            now=now,
+            stale_after=stale_after,
+            worker_unavailable_after=worker_unavailable_after,
+        )
         escalated_ids = {str(incident.get("incident_id") or "") for incident in escalated}
         if dry_run:
             return len(escalated), escalated_ids
@@ -1110,6 +1124,7 @@ def main() -> int:
         Path(args.log_path),
         now,
         stale_after=timedelta(minutes=cfg.flyer.recovery.operator_escalation_stale_minutes),
+        worker_unavailable_after=timedelta(minutes=cfg.flyer.recovery.worker_unavailable_escalation_minutes),
         dry_run=args.dry_run,
     )
     repair = _process_repair_queue(

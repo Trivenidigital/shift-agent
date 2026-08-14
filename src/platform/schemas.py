@@ -935,6 +935,11 @@ class FlyerRecoveryConfig(BaseModel):
     ack_cooldown_minutes: int = Field(default=60, ge=5, le=1440)
     ack_reservation_stale_minutes: int = Field(default=10, ge=1, le=120)
     operator_escalation_stale_minutes: int = Field(default=30, ge=5, le=1440)
+    # Escalate an incident whose repair worker never reached a terminal status
+    # within this window. Without it, an incident sits 'queued' forever whenever
+    # the worker is disabled or its credentials are dead, and the operator is
+    # never told (F0226 aged three weeks that way).
+    worker_unavailable_escalation_minutes: int = Field(default=240, ge=5, le=1440)
     max_incidents_per_run: int = Field(default=20, ge=1, le=200)
     manual_queue_stale_minutes: int = Field(default=30, ge=5, le=1440)
     worker_runner: Literal["codex", "claude"] = "codex"
@@ -5187,6 +5192,7 @@ class FlyerRecoveryOperatorActionRequired(_BaseEntry):
     reason: Literal[
         "worker_completed_no_customer_visible_success",
         "worker_failed_no_customer_visible_success",
+        "worker_unavailable",
     ]
     required_action: Literal["verify_customer_outcome_or_repair_manually"]
 

@@ -90,7 +90,9 @@ def test_stale_source_edit_queue_row_pages_operator_and_writes_alert_state(tmp_p
     assert saved["project_alerts"]["F9001|source_edit_provider_unavailable|2026-05-21T00:00:00+00:00"]["last_alerted_at"] == "2026-05-21T00:11:00+00:00"
     audit = json.loads(decisions.read_text(encoding="utf-8").strip())
     assert audit["type"] == "flyer_source_edit_sla_alert"
-    assert sorted(audit["reason_codes"]) == ["source_edit_provider_unavailable", "visual_qa_failed"]
+    # The audit records the monitored set, which is now every manual-review reason.
+    assert sorted(audit["reason_codes"]) == sorted(module.DEFAULT_REASON_CODES)
+    assert {"source_edit_provider_unavailable", "visual_qa_failed"} <= set(audit["reason_codes"])
     assert audit["project_ids"] == ["F9001"]
     assert audit["notify_ok"] is True
     assert audit["outcome"] == "alerted"

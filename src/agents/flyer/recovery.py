@@ -771,6 +771,7 @@ def resolve_incidents_from_customer_visible_repairs(
         return reason in {
             "worker_completed_no_customer_visible_success",
             "worker_failed_no_customer_visible_success",
+            "worker_unavailable",
         }
 
     for incident in state.get("incidents", []):
@@ -819,7 +820,17 @@ def escalate_unrepaired_incidents(
     *,
     now: datetime,
     stale_after: timedelta,
+    worker_unavailable_after: timedelta | None = None,
 ) -> list[dict]:
+    """Mark open incidents that need an operator.
+
+    Two arms. The first fires once the repair worker reached a terminal status
+    (completed/failed) without customer-visible success. The second, enabled by
+    `worker_unavailable_after`, fires when the worker never reached a terminal
+    status at all — auto-run disabled, dead worker credentials, or a run that
+    died mid-flight. Without it the incident stays 'open' forever and nothing
+    downstream ever pages the operator.
+    """
     escalated: list[dict] = []
     for incident in state.get("incidents", []):
         if not isinstance(incident, dict):
@@ -828,18 +839,26 @@ def escalate_unrepaired_incidents(
             continue
         codex = incident.get("codex") if isinstance(incident.get("codex"), dict) else {}
         codex_status = str(codex.get("status") or "").strip().lower()
-        if codex_status not in {"completed", "failed"}:
-            continue
-        completed_at = _parse_recovery_ts(str(codex.get("completed_at") or codex.get("failed_at") or ""))
         last_seen = _parse_recovery_ts(str(incident.get("last_seen") or ""))
-        age_anchor = completed_at or last_seen
-        if age_anchor is None or now - age_anchor < stale_after:
+        if codex_status in {"completed", "failed"}:
+            completed_at = _parse_recovery_ts(str(codex.get("completed_at") or codex.get("failed_at") or ""))
+            age_anchor = completed_at or last_seen
+            threshold = stale_after
+            reason = (
+                "worker_completed_no_customer_visible_success"
+                if codex_status == "completed"
+                else "worker_failed_no_customer_visible_success"
+            )
+        elif worker_unavailable_after is not None:
+            # queued / running / never bundled at all: the worker owes us a
+            # terminal status and has not produced one.
+            age_anchor = _parse_recovery_ts(str(codex.get("queued_at") or "")) or last_seen
+            threshold = worker_unavailable_after
+            reason = "worker_unavailable"
+        else:
             continue
-        reason = (
-            "worker_completed_no_customer_visible_success"
-            if codex_status == "completed"
-            else "worker_failed_no_customer_visible_success"
-        )
+        if age_anchor is None or now - age_anchor < threshold:
+            continue
         incident["status"] = "operator_action_required"
         incident["operator_action"] = {
             "reason": reason,

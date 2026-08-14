@@ -739,10 +739,11 @@ def test_customer_visible_success_resolves_worker_unavailable_escalation():
         state,
         [
             {
-                "type": "flyer_concept_previews_sent",
+                "type": "flyer_assets_delivered",
                 "ts": (NOW + timedelta(minutes=1)).isoformat(),
-                "chat_id": "15550100001@s.whatsapp.net",
                 "project_id": "F0065",
+                "asset_ids": ["A0004"],
+                "outbound_message_ids": ["mid-preview"],
             }
         ],
         NOW + timedelta(minutes=2),
