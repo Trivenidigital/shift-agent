@@ -526,6 +526,9 @@ def test_absent_config_block_is_treated_as_disabled(env, monkeypatch):
 
 def test_bind_failure_suppresses_the_disabled_payload(env, monkeypatch):
     _write_cfg(env, {"enabled": False})
+    # Seeded in-window item: without the gate the handler would reach the
+    # populated path and return ok=True, so this test fails if the gate is gone.
+    _seed(env, [_item("food_licence", "2026-08-12")])
     t = _gated_tool(monkeypatch)
     monkeypatch.setattr(t, "_bind_outbound", _Binder(succeed=False))
     out = json.loads(t.handler({}))
