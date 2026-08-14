@@ -831,6 +831,7 @@ def _fake_lead(dietary=None, raw_inquiry: str = "", notes: str = ""):
         ([], "Temple lunch, pure veg only please", "veg_only"),
         ([], "Jain family gathering for 40", "veg_only"),
         ([], "Office lunch, no meat", "veg_only"),
+        ([], "Meat-free menu for the whole event", "veg_only"),
         (["halal"], "", "non_veg_only"),
         (["non-veg"], "", "non_veg_only"),
         ([], "Non-veg biryani party for 60", "non_veg_only"),
@@ -838,6 +839,22 @@ def _fake_lead(dietary=None, raw_inquiry: str = "", notes: str = ""):
         ([], "Wedding: 90 veg and 90 non-veg guests", "mixed"),
         ([], "Need catering ideas", "unknown"),
         ([], "", "unknown"),
+        # ── the asymmetry that silently dropped meat ────────────────────────
+        # `veg` was unbounded while the meat side knew only the literal
+        # "non-veg", so each of these read veg_only and the chicken/goat the
+        # customer asked for was excluded from generation — and a recompose of
+        # their OWN Goat Curry was refused.
+        ([], "half veg half chicken", "mixed"),
+        ([], "50 veg meals and 50 chicken meals", "mixed"),
+        ([], "We want Veg Biryani and Chicken Biryani", "mixed"),
+        ([], "Mutton curry and veg starters", "mixed"),
+        # Meat named, no vegetarian REQUIREMENT stated: "vegetables" describes a
+        # dish, not a diet, so it must not read as one.
+        ([], "plenty of vegetables and chicken tikka", "non_veg_only"),
+        ([], "lots of vegetables please", "unknown"),
+        ([], "veggie platter for the table", "unknown"),
+        # "eggless" is not an egg.
+        ([], "eggless cake for the table", "unknown"),
     ],
 )
 def test_lead_diet_profile_classification(env_dir, dietary, raw_inquiry, expected):
@@ -1052,3 +1069,123 @@ def test_recompose_price_free_on_combined_menu(bridge_server, env_dir):
     body = stub.requests[-1]["message"]
     import re
     assert not re.search(r"\$\s*\d|\bprice|\bcost|\bdeposit|\bpayment", body, re.I)
+
+
+def test_notes_do_not_override_the_meat_the_inquiry_asked_for(env_dir):
+    """Notes contamination. A cooking instruction in `notes` ("use veg stock") used
+    to outvote the chicken in the inquiry and classify the lead veg_only, dropping
+    the meat. Both signals present => mixed."""
+    mod = _load_script_for_env(env_dir)
+
+    lead = _fake_lead([], "Chicken biryani for 80 guests", notes="use veg stock")
+
+    assert mod._lead_diet_profile(lead) == "mixed"
+
+
+def test_mixed_text_lead_keeps_the_meat_it_asked_for(bridge_server, env_dir):
+    """End-to-end for the regression: "half veg half chicken" states BOTH diets, so
+    generation must keep the non-veg items rather than filter them out."""
+    port, stub = bridge_server
+    _seed_lead(env_dir, dietary=[], raw_inquiry="half veg half chicken, 100 guests")
+    _seed_menu(env_dir, WEDDING_MENU)
+
+    result, parsed = _run_script(env_dir, port, auto_generate=True)
+
+    assert parsed["rc"] == 0, result.stderr
+    sent = [s for s in _read_store(env_dir)["sets"] if s["status"] == "SENT"][0]
+    for option in sent["options"]:
+        assert any(n in _NON_VEG_NAMES for n in option["item_names"]), (
+            f"option {option['option_id']} dropped the chicken the customer asked "
+            f"for: {option['item_names']}")
+
+
+def test_mixed_text_lead_recompose_is_not_refused(bridge_server, env_dir):
+    """The cruellest form of the regression: the customer asks to keep the Goat
+    Curry from an option we already sent them, and the diet guard REFUSES it as a
+    non-veg item in a "vegetarian-only" event."""
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir, dietary=[],
+               raw_inquiry="half veg half chicken for the reception")
+    _seed_recompose_sent_set(env_dir)
+
+    result, parsed = _run_recompose(env_dir, port, "option 1 starters with the option 2 mains")
+
+    assert parsed["rc"] == 0, result.stderr
+    assert "- Goat Curry" in stub.requests[-1]["message"]
+
+
+# ── veg_only options must still be a MEAL, not just meat-free ────────────────
+
+def test_veg_only_lead_dessert_only_options_fail_closed(bridge_server, env_dir):
+    """Meat-free is not the same as complete. A dessert-only "menu" contains no
+    non-veg item at all, so the diet check passes it — the section coverage check
+    is what stops it reaching a temple event."""
+    port, stub = bridge_server
+    _seed_lead(env_dir, dietary=["jain"], raw_inquiry="Jain wedding for 200")
+    _seed_menu(env_dir, WEDDING_MENU)
+    dessert_only = [
+        {"option_id": "1", "style_key": "balanced_mixed", "tier": "balanced",
+         "item_names": ["Gulab Jamun"]},
+        {"option_id": "2", "style_key": "premium_mixed", "tier": "premium",
+         "item_names": ["Gajar Halwa"]},
+    ]
+
+    result, parsed = _run_script(env_dir, port, options=dessert_only)
+
+    assert parsed["rc"] == 2, result.stderr
+    assert stub.requests == [], "a plate of sweets is not a catering menu"
+    failed = [row for row in _read_audit(env_dir)
+              if row["type"] == "catering_proposal_generation_failed"]
+    assert failed and failed[0]["reason"] == "insufficient_section_balance"
+
+
+_ONLY_MAIN_IS_NON_VEG_MENU = [
+    {"name": "Vegetable Samosa", "price_usd": 3.0, "category": "appetizer",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Chicken Biryani", "price_usd": 15.0, "category": "main",
+     "dietary_tags": ["non-veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Jeera Rice", "price_usd": 4.0, "category": "side",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Gulab Jamun", "price_usd": 3.0, "category": "dessert",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+]
+
+
+def test_veg_only_lead_fails_closed_when_every_main_is_non_veg(bridge_server, env_dir):
+    """The menu HAS mains; none of them can be served to this event. Sending a
+    side-and-dessert spread to a temple booking is worse than telling the owner
+    their menu has no vegetarian main course."""
+    port, stub = bridge_server
+    _seed_lead(env_dir, dietary=["veg"], raw_inquiry="Temple lunch, pure vegetarian")
+    _seed_menu(env_dir, _ONLY_MAIN_IS_NON_VEG_MENU)
+
+    result, parsed = _run_script(env_dir, port, auto_generate=True)
+
+    assert parsed["rc"] == 2, result.stderr
+    assert stub.requests == [], "no main-less menu is sent"
+    failed = [row for row in _read_audit(env_dir)
+              if row["type"] == "catering_proposal_generation_failed"]
+    assert failed and failed[0]["reason"] == "insufficient_section_balance"
+    assert "main" in failed[0]["detail"]
+
+
+_SMALL_ALL_VEG_MENU = [
+    {"name": "Vegetable Samosa", "price_usd": 3.0, "category": "appetizer",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+    {"name": "Gulab Jamun", "price_usd": 3.0, "category": "dessert",
+     "dietary_tags": ["veg"], "available": True, "notes": "", "serves": None},
+]
+
+
+def test_veg_only_lead_small_all_veg_menu_still_sends(bridge_server, env_dir):
+    """The coverage check is menu-relative: a two-section all-veg menu must not be
+    rejected for lacking variety it never offered, and it has no mains to miss."""
+    port, stub = bridge_server
+    _seed_lead(env_dir, dietary=["jain"], raw_inquiry="Small jain lunch")
+    _seed_menu(env_dir, _SMALL_ALL_VEG_MENU)
+
+    result, parsed = _run_script(env_dir, port, auto_generate=True)
+
+    assert parsed["rc"] == 0, result.stderr
+    assert len(stub.requests) == 1

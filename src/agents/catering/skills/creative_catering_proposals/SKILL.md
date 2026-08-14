@@ -42,17 +42,24 @@ deterministic generator rather than composing an item list yourself.
 
 - **Default (deterministic generation)** — do NOT compose the item list. The
   `--auto-generate-from-menu` mode selects menu-grounded options and guarantees each
-  option is a COMPLETE menu spanning courses (at least one starter/appetizer AND at
-  least one main; a dessert/side when the menu offers them). These invariants live in
-  the script, not in an LLM-composed payload.
+  option is a COMPLETE menu rather than a single course: it spans at least three
+  sections (or as many as the menu can serve this lead, when the menu offers fewer),
+  and it includes a main course whenever the menu has one at all. Both are enforced
+  fail-closed for `veg_only` and `mixed` leads — an option that falls short is
+  REFUSED and the owner is notified, never sent. These invariants live in the script,
+  not in an LLM-composed payload.
 - **Diet handling (what the script actually enforces)** — the script classifies the
   lead as one of `veg_only` / `non_veg_only` / `mixed` / `unknown` from
   `extracted.dietary_restrictions` plus the raw inquiry text, and then:
   - `veg_only` (all-vegetarian, Jain, vegan, temple event) — non-veg items are
     excluded from the candidate pool entirely, and a fail-closed guard refuses to
-    send any option containing a non-veg item. Vegan and Jain fold into `veg_only`
+    send any option containing a non-veg item. The completeness rule above still
+    applies, so if the menu's only mains are non-veg the proposal is REFUSED rather
+    than sent as a side-and-dessert spread. Vegan and Jain fold into `veg_only`
     because the menu schema carries no vegan/Jain flag, so those leads still need
     owner review before send.
+  - A lead that mentions BOTH diets in its text ("half veg half chicken") is
+    `mixed`, not vegetarian — the script will not drop meat the customer asked for.
   - `mixed` (e.g. a 90-non-veg / 30-veg wedding) — every option gets BOTH real
     non-veg and veg catalog items, enforced fail-closed.
   - `non_veg_only` and `unknown` — both diets stay available; an unstated diet is
