@@ -207,6 +207,11 @@ def test_none_and_non_string_inputs_are_safe():
     ("we want to confirm a meeting for Monday", None),
     ("please book a zoom", None),
     ("we'd like to go ahead with a walkthrough", None),
+    # still negotiating the number — no digit has to appear
+    ("let's go ahead with option 2 but we need to talk price", None),
+    ("we accept, lets discuss the cost first", None),
+    ("please proceed, we should go over the budget again", None),
+    ("lets proceed to the next step of discussing the menu", None),
     # conditional acceptance is a counter-offer
     ("we accept only if you include dessert", None),
     ("we accept if you include dessert", None),
@@ -214,6 +219,18 @@ def test_none_and_non_string_inputs_are_safe():
     ("we accept provided you include delivery", None),
     ("we'd like to proceed as long as the price stays the same", None),
     ("please proceed subject to the manager approving", None),
+    # bare `if` with any subject, and the wait-for-something-else forms
+    ("we accept if the total stays under $2000", None),
+    ("we accept pending my husband's approval", None),
+    ("we accept once we hear back from the venue", None),
+    ("we accept as soon as you confirm the date", None),
+    ("please go ahead once you have the deposit", None),
+    ("we accept while we wait for approval", None),
+    ("we accept until the manager says otherwise", None),
+    # the marker attaches to the headcount NOUN and the number arrives later
+    ("we want to proceed with fewer guests, say 90", None),
+    ("confirmed, proceed but reduce it to 150 people", None),
+    ("go ahead, but we may need to change the date later", None),
     # a yes that moves a material term is an amendment, not an acceptance
     ("we want to proceed with a smaller headcount of 80", None),
     ("go ahead but for 120 people", None),
@@ -226,20 +243,55 @@ def test_commitment_verb_without_a_real_commitment(text, expected):
 
 
 # ── the same guards must not eat real acceptances ───────────────────────────
+# A demoted acceptance is SILENT — the detector writes no audit row for a
+# message it declines to classify, so a guard that over-reaches loses real
+# bookings invisibly. These cells bound that: every one is a plain yes that
+# happens to sit next to a connective, a restated term, or an aside.
 @pytest.mark.parametrize("text", [
     "we accept the quote",
     "please go ahead",
     "confirmed, proceed with the quote",
     "we'd like to proceed",
-    # a material term RESTATED is not a change — no change marker, so it books
+    # "but"/"only" are the connectives of a RESTATEMENT, not change markers
+    "we accept the quote for 250 guests only",
+    "we accept the quote, but can you confirm the June 5 date",
+    "please go ahead, but note there will be 200 guests as agreed",
+    "we accept, but please send the invoice to accounts",
+    # a material term restated or agreed-to is not a change to it
     "we accept the quote for 250 guests",
+    "we'd like to proceed with the quote for 120 people",
+    "we accept the quote, delivery for 300 guests as quoted",
+    "please go ahead with the $4500 quote",
     "we accept, see you on June 20",
+    "confirmed, proceed - the June 5 date works",
     "let's book it for the 17th",
     # "tasting menu" is a menu, not an appointment
     "please proceed with the tasting menu",
 ])
 def test_genuine_acceptance_survives_the_guards(text):
     assert _outcome(text) == "accepted"
+
+
+# ── the measured cost of the bare-`if` widening ─────────────────────────────
+@pytest.mark.parametrize("text", [
+    "we accept the quote, if you need anything let us know",
+    "please go ahead, if that works for you",
+])
+def test_bare_if_over_blocks_a_courtesy_clause(text):
+    """These ARE acceptances and the detector deliberately drops them.
+
+    `_CONDITIONAL_RE` matches bare `if` with any subject, which is what stops
+    "we accept if the total stays under $2000" from booking a counter-offer.
+    The cost is a trailing courtesy clause that happens to use "if". Ruled the
+    safe direction at review: this loses a booking to the ordinary follow-up
+    path, where a human still sees the message, whereas the alternative books
+    an event on a condition nobody agreed to.
+
+    Pinned so the trade is visible rather than discovered. If it is ever
+    re-ruled, narrowing `if` back is a one-line change and this cell is the
+    one that must flip.
+    """
+    assert _outcome(text) is None
 
 
 # ── shape contract ──────────────────────────────────────────────────────────

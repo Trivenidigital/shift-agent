@@ -554,14 +554,15 @@ _NEGATED_ACCEPT_RE = re.compile(
 
 # ── Acceptance disqualifiers ────────────────────────────────────────────────
 # The commitment patterns below match a VERB with no object and no clause
-# context, so four shapes booked an event off a message that committed to
+# context, so five shapes booked an event off a message that committed to
 # nothing:
 #   "please go ahead and cancel"                        — a cancellation
 #   "lets book a call to discuss the price"             — a meeting, not the quote
+#   "go ahead with option 2 but we need to talk price"  — still negotiating
 #   "we accept only if you include dessert"             — a counter-offer
 #   "we want to proceed with a smaller headcount of 80" — an amendment
 #
-# All four return None rather than "ambiguous": each needs a real answer about
+# All five return None rather than "ambiguous": each needs a real answer about
 # the cancellation / meeting / condition / change, and the one clarification
 # "ambiguous" buys ("did you mean to accept?") would talk past it. None is also
 # the only other value available — `CateringLead.customer_acceptance` is
@@ -582,51 +583,103 @@ _CANCEL_SIGNAL_RE = re.compile(
 )
 
 # The commitment verb takes an object that is a CONVERSATION, not the quote.
-# "book a call", "book a tasting", "proceed with the discussion" commit to
-# talking; only "book/proceed" with the quote itself books an event.
+# "book a call", "book a tasting", "proceed to discussing the menu" commit to
+# talking; only "book/proceed" with the quote itself books an event, so "the
+# quote" is deliberately NOT an object here.
 # `tasting menu` is excluded — that is a menu, not an appointment.
 _DISQUALIFYING_OBJECT_RE = re.compile(
     r"\b(?:book|booking|schedul(?:e|ing)|proceed(?:ing)?|go(?:ing)?\s+ahead|"
     r"confirm(?:ing)?|accept(?:ing)?)\b"
-    r"(?:\s+\S+){0,4}?\s+"
+    r"(?:\s+\S+){0,5}?\s+"
     r"(?:call|meeting|meet|tasting(?!\s+menu)|visit|demo|demonstration|"
-    r"discussion|chat|zoom|appointment|consultation|walk[\s-]?through|"
-    r"question)s?\b",
+    r"discussion|discussing|chat|zoom|appointment|consultation|"
+    r"walk[\s-]?through|question)s?\b",
+    re.IGNORECASE,
+)
+
+# Still negotiating the number. "go ahead with option 2 but we need to talk
+# price" picks an option and then reopens the price — the commitment is to a
+# conversation about what it costs, and no digit has to appear for that.
+_STILL_NEGOTIATING_RE = re.compile(
+    r"\b(?:talk|talking|discuss|discussing|chat|negotiate|negotiating|"
+    r"go\s+over|going\s+over|work\s+out|nail\s+down)\s+"
+    r"(?:about\s+|over\s+|through\s+)?(?:the\s+|our\s+|a\s+|some\s+|your\s+)?"
+    r"(?:price|pricing|cost|costs|budget|numbers|figures|rates?)\b",
     re.IGNORECASE,
 )
 
 # "yes, but only if …" is a counter-offer. The condition is the customer's
-# actual message and only a human can price it.
+# actual message and only a human can price it. Bare `if` is included, and so
+# are the wait-for-something-else forms ("pending", "once we", "as soon as"):
+# over-blocking is the safe direction here, because a conditional read as a
+# plain yes books an event the customer has not agreed to.
 _CONDITIONAL_RE = re.compile(
-    r"\b(?:only\s+if|but\s+only|if\s+you|if\s+we\s+can|provided(?:\s+that)?|"
-    r"as\s+long\s+as|so\s+long\s+as|on\s+(?:the\s+)?condition|"
-    r"contingent\s+(?:up)?on|subject\s+to|assuming(?:\s+that)?)\b",
+    r"\b(?:if|provided(?:\s+that)?|as\s+long\s+as|so\s+long\s+as|"
+    r"on\s+(?:the\s+)?condition|contingent\s+(?:up)?on|subject\s+to|"
+    r"assuming(?:\s+that)?|pending|once\s+(?:we|you|i)|as\s+soon\s+as|"
+    r"until|while\s+we\s+wait|wait(?:ing)?\s+(?:on|for))\b",
     re.IGNORECASE,
 )
 
-# "go ahead BUT for 120 people" is an amendment wearing a yes. Deliberately
-# narrow: a change marker AND a material term (headcount / money / date) must
-# BOTH be present, so "we accept the quote for 250 guests" — a restatement, not
-# a change — still books.
+# "proceed with a SMALLER headcount of 80" is an amendment wearing a yes.
+# Deliberately narrow, because a demoted acceptance is SILENT — no audit row is
+# written for a message the detector declines to classify, so a guard that eats
+# real acceptances loses bookings invisibly. Two narrowings do that work:
+#   * `but` and `only` are NOT change markers. They are the ordinary connectives
+#     of a restatement — "we accept the quote for 250 guests only", "we accept,
+#     but can you confirm the June 5 date" — and including them demoted the
+#     common shape of a real yes.
+#   * the marker must sit WITHIN _MAX_CHANGE_MARKER_GAP_TOKENS of the material
+#     term it supposedly changes. "smaller headcount of 80" is a change;
+#     a marker in a different clause from the number is not.
 _CHANGE_MARKER_RE = re.compile(
-    r"\b(?:but|instead|actually|rather\s+than|make\s+it|chang(?:e|ed|ing)|"
+    r"\b(?:instead|actually|rather\s+than|make\s+it|chang(?:e|ed|ing)|"
     r"revis(?:e|ed)|updat(?:e|ed)|smaller|larger|bigger|fewer|reduc(?:e|ed)|"
-    r"increas(?:e|ed)|drop(?:ped)?\s+(?:to|down)|up\s+to|down\s+to|only)\b",
+    r"increas(?:e|ed)|drop(?:ped)?\s+(?:to|down)|up\s+to|down\s+to)\b",
     re.IGNORECASE,
 )
 _MONEY_RE = re.compile(
     r"(?:[$£€]\s?\d|\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:dollars|usd)\b)",
     re.IGNORECASE,
 )
+# A headcount NOUN carrying no digit. "fewer guests, say 90" is a change to the
+# headcount that HEADCOUNT_PATTERNS cannot see, because the marker attaches to
+# the noun and the number arrives later in a shape the extractor does not parse.
+# Only counted next to a change marker, so a bare "250 guests" restatement is
+# still not a change.
+_HEADCOUNT_NOUN_RE = re.compile(
+    r"\b(?:guests?|people|persons?|ppl|attendees?|heads?|plates?|covers?|"
+    r"pax|headcount)\b",
+    re.IGNORECASE,
+)
+_WORD_RE = re.compile(r"\w+")
+_MAX_CHANGE_MARKER_GAP_TOKENS = 3
 
 
-def _has_material_term(statements: str) -> bool:
-    """A headcount, an amount, or a date — the terms a quote is priced on."""
-    if any(p.search(statements) for p in HEADCOUNT_PATTERNS):
-        return True
-    if _MONEY_RE.search(statements):
-        return True
-    return bool(MONTH_DAY_RE.search(statements) or NUMERIC_DATE_RE.search(statements))
+def _material_term_spans(statements: str) -> list:
+    """Where the headcounts, amounts and dates are — the terms a quote is
+    priced on. Reuses the deployed extractor grammar so the guard and the
+    amendment path agree on what a material term is."""
+    spans = []
+    for pat in HEADCOUNT_PATTERNS:
+        spans.extend(m.span() for m in pat.finditer(statements))
+    for pat in (_MONEY_RE, MONTH_DAY_RE, NUMERIC_DATE_RE, _HEADCOUNT_NOUN_RE):
+        spans.extend(m.span() for m in pat.finditer(statements))
+    return spans
+
+
+def _has_material_change(statements: str) -> bool:
+    """A change marker sitting NEXT TO a material term."""
+    marker_spans = [m.span() for m in _CHANGE_MARKER_RE.finditer(statements)]
+    if not marker_spans:
+        return False
+    for term in _material_term_spans(statements):
+        for marker in marker_spans:
+            lo, hi = (marker[1], term[0]) if marker[1] <= term[0] else (term[1], marker[0])
+            gap = len(_WORD_RE.findall(statements[lo:hi])) if hi > lo else 0
+            if gap <= _MAX_CHANGE_MARKER_GAP_TOKENS:
+                return True
+    return False
 
 
 def _acceptance_disqualified(statements: str) -> bool:
@@ -636,9 +689,11 @@ def _acceptance_disqualified(statements: str) -> bool:
         return True
     if _DISQUALIFYING_OBJECT_RE.search(statements):
         return True
+    if _STILL_NEGOTIATING_RE.search(statements):
+        return True
     if _CONDITIONAL_RE.search(statements):
         return True
-    return bool(_CHANGE_MARKER_RE.search(statements) and _has_material_term(statements))
+    return _has_material_change(statements)
 
 
 _ACCEPT_PATTERNS = [
