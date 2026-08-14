@@ -178,6 +178,70 @@ def test_none_and_non_string_inputs_are_safe():
     assert detect_quote_acceptance("") is None
 
 
+# ── commitment verbs that are NOT a yes to this quote ───────────────────────
+# The patterns match a commitment VERB; these are the shapes where the sentence
+# around that verb means something else. Every cell here booked a real event
+# before the disqualifier guard landed. Table-driven on purpose: a new phrase is
+# one line.
+#
+# They resolve to None, not "ambiguous": each needs a real answer about the
+# cancellation / meeting / condition / change, and one generic "shall we book?"
+# would talk past it.
+@pytest.mark.parametrize("text,expected", [
+    # cancel wins over every commitment verb it shares a message with
+    ("please go ahead and cancel", None),
+    ("go ahead and cancel it", None),
+    ("please proceed to cancel", None),
+    ("confirm the cancellation please", None),
+    ("we'd like to proceed — actually no, cancelling", None),
+    ("lets book, sorry ignore that, we are backing out", None),
+    # …but a cancellation with an object is still a real decline
+    ("please go ahead and cancel the booking", "declined"),
+    ("go ahead and cancel our order", "declined"),
+    # the object is a conversation, not the quote
+    ("lets book a call to discuss the price", None),
+    ("please book us in for a tasting first", None),
+    ("we'd like to book a site visit", None),
+    ("please proceed with the discussion tomorrow", None),
+    ("lets proceed with a call next week", None),
+    ("we want to confirm a meeting for Monday", None),
+    ("please book a zoom", None),
+    ("we'd like to go ahead with a walkthrough", None),
+    # conditional acceptance is a counter-offer
+    ("we accept only if you include dessert", None),
+    ("we accept if you include dessert", None),
+    ("we accept but only if you can do it for $2000", None),
+    ("we accept provided you include delivery", None),
+    ("we'd like to proceed as long as the price stays the same", None),
+    ("please proceed subject to the manager approving", None),
+    # a yes that moves a material term is an amendment, not an acceptance
+    ("we want to proceed with a smaller headcount of 80", None),
+    ("go ahead but for 120 people", None),
+    ("lets book it but make it 300 guests", None),
+    ("please proceed, actually change the date to June 20", None),
+    ("we'd like to proceed but only if it drops to $1800", None),
+])
+def test_commitment_verb_without_a_real_commitment(text, expected):
+    assert _outcome(text) == expected, f"{text!r} must not book an event"
+
+
+# ── the same guards must not eat real acceptances ───────────────────────────
+@pytest.mark.parametrize("text", [
+    "we accept the quote",
+    "please go ahead",
+    "confirmed, proceed with the quote",
+    "we'd like to proceed",
+    # a material term RESTATED is not a change — no change marker, so it books
+    "we accept the quote for 250 guests",
+    "we accept, see you on June 20",
+    "let's book it for the 17th",
+    # "tasting menu" is a menu, not an appointment
+    "please proceed with the tasting menu",
+])
+def test_genuine_acceptance_survives_the_guards(text):
+    assert _outcome(text) == "accepted"
+
+
 # ── shape contract ──────────────────────────────────────────────────────────
 def test_result_shape():
     result = detect_quote_acceptance("we accept")

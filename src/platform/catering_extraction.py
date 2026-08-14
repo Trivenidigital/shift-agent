@@ -519,6 +519,9 @@ def extract_catering_fields(text: str, signals: Optional[list] = None) -> Option
 #   decline before accept          — "not going ahead" contains "going ahead"
 #   negated-accept before accept   — "we don't accept credit cards" is a payment
 #     remark, not a decline; it returns None (no automated state change at all)
+#   disqualifiers before accept    — a commitment verb whose object, condition or
+#     amended term shows it is not a yes to THIS quote returns None too
+#     (see _acceptance_disqualified)
 #   ambiguous last, whole-message  — a message that is ONLY "ok"/"sounds good"
 #     gets one clarification; the same words with real content after them
 #     ("sounds good, add 20 plates") are an amendment and fall through untouched.
@@ -548,6 +551,95 @@ _NEGATED_ACCEPT_RE = re.compile(
     r"(?:\w+\s+){0,2}?(?:accept(?:ing)?|proceed(?:ing)?|book(?:ing)?|confirm(?:ing)?)\b",
     re.IGNORECASE,
 )
+
+# ── Acceptance disqualifiers ────────────────────────────────────────────────
+# The commitment patterns below match a VERB with no object and no clause
+# context, so four shapes booked an event off a message that committed to
+# nothing:
+#   "please go ahead and cancel"                        — a cancellation
+#   "lets book a call to discuss the price"             — a meeting, not the quote
+#   "we accept only if you include dessert"             — a counter-offer
+#   "we want to proceed with a smaller headcount of 80" — an amendment
+#
+# All four return None rather than "ambiguous": each needs a real answer about
+# the cancellation / meeting / condition / change, and the one clarification
+# "ambiguous" buys ("did you mean to accept?") would talk past it. None is also
+# the only other value available — `CateringLead.customer_acceptance` is
+# Literal["accepted", "declined"] and the writer script keys its replies and its
+# BOOKED/CLOSED target on the three existing outcomes, so a fifth outcome would
+# be a schema change on a money path.
+
+# Any cancellation signal outranks every commitment verb. Deliberately WIDER
+# than _DECLINE_PATTERNS, which require an object ("cancel the quote") before
+# they will close a lead: a bare "cancel" is too thin to close on but far too
+# strong to book on.
+_CANCEL_SIGNAL_RE = re.compile(
+    r"\b(?:cancel(?:l?ed|l?ing|lation)?|call(?:ed|ing)?\s+(?:it|them|everything)\s+off|"
+    r"back(?:ed|ing)?\s+out|not\s+(?:going|moving)\s+(?:ahead|forward)|"
+    r"declin(?:e|ed|ing)|no\s+longer\s+need(?:ed|ing)?|not\s+interested|"
+    r"scrap(?:ped|ping)?)\b",
+    re.IGNORECASE,
+)
+
+# The commitment verb takes an object that is a CONVERSATION, not the quote.
+# "book a call", "book a tasting", "proceed with the discussion" commit to
+# talking; only "book/proceed" with the quote itself books an event.
+# `tasting menu` is excluded — that is a menu, not an appointment.
+_DISQUALIFYING_OBJECT_RE = re.compile(
+    r"\b(?:book|booking|schedul(?:e|ing)|proceed(?:ing)?|go(?:ing)?\s+ahead|"
+    r"confirm(?:ing)?|accept(?:ing)?)\b"
+    r"(?:\s+\S+){0,4}?\s+"
+    r"(?:call|meeting|meet|tasting(?!\s+menu)|visit|demo|demonstration|"
+    r"discussion|chat|zoom|appointment|consultation|walk[\s-]?through|"
+    r"question)s?\b",
+    re.IGNORECASE,
+)
+
+# "yes, but only if …" is a counter-offer. The condition is the customer's
+# actual message and only a human can price it.
+_CONDITIONAL_RE = re.compile(
+    r"\b(?:only\s+if|but\s+only|if\s+you|if\s+we\s+can|provided(?:\s+that)?|"
+    r"as\s+long\s+as|so\s+long\s+as|on\s+(?:the\s+)?condition|"
+    r"contingent\s+(?:up)?on|subject\s+to|assuming(?:\s+that)?)\b",
+    re.IGNORECASE,
+)
+
+# "go ahead BUT for 120 people" is an amendment wearing a yes. Deliberately
+# narrow: a change marker AND a material term (headcount / money / date) must
+# BOTH be present, so "we accept the quote for 250 guests" — a restatement, not
+# a change — still books.
+_CHANGE_MARKER_RE = re.compile(
+    r"\b(?:but|instead|actually|rather\s+than|make\s+it|chang(?:e|ed|ing)|"
+    r"revis(?:e|ed)|updat(?:e|ed)|smaller|larger|bigger|fewer|reduc(?:e|ed)|"
+    r"increas(?:e|ed)|drop(?:ped)?\s+(?:to|down)|up\s+to|down\s+to|only)\b",
+    re.IGNORECASE,
+)
+_MONEY_RE = re.compile(
+    r"(?:[$£€]\s?\d|\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:dollars|usd)\b)",
+    re.IGNORECASE,
+)
+
+
+def _has_material_term(statements: str) -> bool:
+    """A headcount, an amount, or a date — the terms a quote is priced on."""
+    if any(p.search(statements) for p in HEADCOUNT_PATTERNS):
+        return True
+    if _MONEY_RE.search(statements):
+        return True
+    return bool(MONTH_DAY_RE.search(statements) or NUMERIC_DATE_RE.search(statements))
+
+
+def _acceptance_disqualified(statements: str) -> bool:
+    """True when a commitment verb is present but the sentence around it means
+    something other than "yes to this quote"."""
+    if _CANCEL_SIGNAL_RE.search(statements):
+        return True
+    if _DISQUALIFYING_OBJECT_RE.search(statements):
+        return True
+    if _CONDITIONAL_RE.search(statements):
+        return True
+    return bool(_CHANGE_MARKER_RE.search(statements) and _has_material_term(statements))
+
 
 _ACCEPT_PATTERNS = [
     # The customer, as the subject, accepting. "do YOU accept venmo" cannot match.
@@ -601,6 +693,11 @@ def detect_quote_acceptance(text: str) -> Optional[dict]:
 
     ``"ambiguous"`` means "this MIGHT be a yes and we refuse to guess": the caller
     sends exactly one clarification and records that it did, never a booking.
+
+    ``None`` also covers messages that DO carry a commitment verb this grammar
+    deliberately refuses to read as acceptance — a cancellation, a request to
+    book a call, a conditional yes, an amendment. They take the unchanged
+    follow-up path, exactly as they did before this detector existed.
     """
     normalized = " ".join((text or "").split())
     if not normalized:
@@ -612,7 +709,8 @@ def detect_quote_acceptance(text: str) -> Optional[dict]:
             m = pattern.search(statements)
             if m:
                 return {"outcome": "declined", "matched_phrase": m.group(0)[:120]}
-        if not _NEGATED_ACCEPT_RE.search(statements):
+        if (not _NEGATED_ACCEPT_RE.search(statements)
+                and not _acceptance_disqualified(statements)):
             for pattern in _ACCEPT_PATTERNS:
                 m = pattern.search(statements)
                 if m:
