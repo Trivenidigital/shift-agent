@@ -8569,10 +8569,13 @@ def test_save_flyer_reference_scope_pending_still_replaces_same_chat_id(tmp_path
 # ─── active-project selection orders by parsed time, not raw string (P2-18) ──
 #
 # `find_active_flyer_project_by_sender` ranked candidates with max() over the
-# RAW updated_at string. Two defects followed: sub-second ISO variants sort
-# lexicographically rather than chronologically, and a row carrying neither
-# timestamp sorted as "" — losing to every dated row forever, so it could never
-# be selected even when it was the only candidate.
+# RAW updated_at string, which sorts lexicographically rather than
+# chronologically. Sub-second format variants invert ordering, and the severe
+# instance is UTC offsets: "...T16:40:00-05:00" (21:40 UTC) lost to a 20:50Z
+# row by wall-clock digit comparison. A row with no timestamps was NEVER
+# invisible (max() returns a sole candidate regardless of key) — the
+# timestampless cells below are non-regression pins on the parsed-key fix,
+# not reproductions of a prior bug.
 
 def _projects_store(tmp_path, actions, rows: str) -> None:
     customer_path = tmp_path / "customers.json"
