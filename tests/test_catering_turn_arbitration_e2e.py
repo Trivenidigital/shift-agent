@@ -343,7 +343,7 @@ def test_live_transcript_unmocked_end_to_end(tmp_path, monkeypatch):
     n0 = len(w.sends)
     out1 = _drive(hooks, actions, MSG1, "wamid.M1")
     assert out1 is not None and out1["action"] == "skip"
-    leads = json.loads(sb.leads.read_text())["leads"]
+    leads = json.loads(sb.leads.read_text(encoding="utf-8"))["leads"]
     new_leads = [l for l in leads if l["lead_id"] != "L0017"]
     assert len(new_leads) == 1, f"exactly one new lead opened over the stale one: {[l['lead_id'] for l in leads]}"
     new_lead_id = new_leads[0]["lead_id"]
@@ -351,7 +351,7 @@ def test_live_transcript_unmocked_end_to_end(tmp_path, monkeypatch):
     assert "f7_fresh_inquiry_new_lead_over_stale" in reasons1
     assert "f7_proposal_request_deterministic_generation" in reasons1
     # A real SENT proposal set now exists for the new lead.
-    sets = json.loads(sb.proposals.read_text())["sets"]
+    sets = json.loads(sb.proposals.read_text(encoding="utf-8"))["sets"]
     sent = [s for s in sets if s["lead_id"] == new_lead_id and s["status"] == "SENT"]
     assert len(sent) == 1, "one real SENT proposal set generated for the new lead"
     # PR-4 (charter §4.3/§4.2): the proposals-generated send row carries the turn's
@@ -379,7 +379,7 @@ def test_live_transcript_unmocked_end_to_end(tmp_path, monkeypatch):
     assert len(selected_rows) == 1, "exactly one catering_proposal_selected through the real resolver"
     assert selected_rows[0]["option_id"] == "2"
     assert selected_rows[0]["lead_id"] == new_lead_id
-    sets2 = json.loads(sb.proposals.read_text())["sets"]
+    sets2 = json.loads(sb.proposals.read_text(encoding="utf-8"))["sets"]
     lead_sets = [s for s in sets2 if s["lead_id"] == new_lead_id]
     assert len(lead_sets) == 1, "NO menu resend / duplicate proposal set on selection"
     assert lead_sets[0]["selected_option_id"] == "2" and lead_sets[0]["status"] == "SELECTED"
@@ -419,8 +419,8 @@ def test_live_transcript_unmocked_end_to_end(tmp_path, monkeypatch):
     #   (3) no reopen/regress of the quote or selection state; (4) recorded EXACTLY ONCE
     #   (an R2A amendment-capture); (5) a DIFFERENT action type than the selection (a
     #   follow-up suppression, not a catering_proposal_selected).
-    lead_after_m2 = next(l for l in json.loads(sb.leads.read_text())["leads"] if l["lead_id"] == new_lead_id)
-    set_after_m2 = next(s for s in json.loads(sb.proposals.read_text())["sets"] if s["lead_id"] == new_lead_id)
+    lead_after_m2 = next(l for l in json.loads(sb.leads.read_text(encoding="utf-8"))["leads"] if l["lead_id"] == new_lead_id)
+    set_after_m2 = next(s for s in json.loads(sb.proposals.read_text(encoding="utf-8"))["sets"] if s["lead_id"] == new_lead_id)
     captures_before_m3 = len(w.amend_captures)
     n2 = len(w.sends)
     finals_before3 = len(w.finalize_calls)
@@ -430,11 +430,11 @@ def test_live_transcript_unmocked_end_to_end(tmp_path, monkeypatch):
     assert len(_rows_of(sb, "catering_proposal_selected")) == 1, "no double-select"
     assert len(w.finalize_calls) == finals_before3, "no second finalize invocation"
     # (2) no second proposal set, and no second owner card (no finalize AND no new create-lead).
-    sets3 = json.loads(sb.proposals.read_text())["sets"]
+    sets3 = json.loads(sb.proposals.read_text(encoding="utf-8"))["sets"]
     assert len([s for s in sets3 if s["lead_id"] == new_lead_id]) == 1, "no new proposal set"
     assert not any(s["via"] == "create-catering-lead" for s in w.sends[n2:]), "no second owner card"
     # (3) does NOT reopen or regress the selection/quote status — lead + selected set unchanged.
-    lead_after_m3 = next(l for l in json.loads(sb.leads.read_text())["leads"] if l["lead_id"] == new_lead_id)
+    lead_after_m3 = next(l for l in json.loads(sb.leads.read_text(encoding="utf-8"))["leads"] if l["lead_id"] == new_lead_id)
     assert lead_after_m3 == lead_after_m2, "lead quote/selection state unchanged by the redundant follow-up"
     set_after_m3 = next(s for s in sets3 if s["lead_id"] == new_lead_id)
     assert set_after_m3["status"] == "SELECTED" and set_after_m3["selected_option_id"] == "2", \
@@ -456,7 +456,7 @@ def test_live_transcript_unmocked_end_to_end(tmp_path, monkeypatch):
 
 def _seed_sent_set(sb: _Sandbox, lead_id: str) -> None:
     """Seed one SENT proposal set (options 1+2 grounded in the real menu) for `lead_id`."""
-    items = json.loads(sb.menu.read_text())["items"]
+    items = json.loads(sb.menu.read_text(encoding="utf-8"))["items"]
     sb.proposals.write_text(json.dumps({"schema_version": 1, "next_sequence": 10, "sets": [{
         "proposal_set_id": f"CPS-{lead_id}-000009", "lead_id": lead_id, "status": "SENT",
         "created_at": "2026-07-26T00:00:00+00:00", "sent_at": "2026-07-26T00:01:00+00:00",
@@ -475,7 +475,7 @@ def test_selection_ack_bridge_failure_records_ack_failed_metadata_only(tmp_path,
     selection is still recorded exactly once (no double-handling)."""
     sb = _build_sandbox(tmp_path)
     # Seed an active lead with a SENT set so the compound selection reaches the ack path.
-    leads = json.loads(sb.leads.read_text())
+    leads = json.loads(sb.leads.read_text(encoding="utf-8"))
     leads["leads"].append({
         "lead_id": "L0018", "status": "AWAITING_OWNER_APPROVAL", "customer_phone": PHONE,
         "customer_name": None, "raw_inquiry": "wedding 180", "original_message_id": "wamid.SEED.L0018",
@@ -554,7 +554,7 @@ def test_customer_and_owner_send_rows_share_one_logical_id_distinct_identity(tmp
     Closes the CAT-INV-09 auditability half (separate customer/owner identities)
     and the §4.2 one-logical-reply linkage across the two send classes."""
     sb = _build_sandbox(tmp_path)
-    leads = json.loads(sb.leads.read_text())
+    leads = json.loads(sb.leads.read_text(encoding="utf-8"))
     leads["leads"].append({
         "lead_id": "L0090", "status": "AWAITING_OWNER_APPROVAL", "customer_phone": "+" + PHONE_DIGITS,
         "customer_name": None, "raw_inquiry": "party of 40", "original_message_id": "wamid.SEED.L0090",
@@ -637,7 +637,7 @@ def _run_apply_approve(sb: _Sandbox, module_name: str, code: str, logical_turn_i
 
 
 def _seed_finalized_lead(sb: _Sandbox, lead_id: str, code: str) -> None:
-    leads = json.loads(sb.leads.read_text())
+    leads = json.loads(sb.leads.read_text(encoding="utf-8"))
     leads["leads"].append({
         "lead_id": lead_id, "status": "CUSTOMER_FINALIZED", "customer_phone": "+" + PHONE_DIGITS,
         "customer_name": "Test", "raw_inquiry": "wedding for 40 guests on 2026-08-08",
@@ -805,7 +805,7 @@ def test_front_brain_reply_composed_carries_send_attempt_id(tmp_path, monkeypatc
 
 # ── (C / N1) sweeping backstop: EVERY successful customer/owner send row is stamped ──
 def _seed_awaiting_lead(sb: _Sandbox, lead_id: str, code: str) -> None:
-    leads = json.loads(sb.leads.read_text())
+    leads = json.loads(sb.leads.read_text(encoding="utf-8"))
     leads["leads"].append({
         "lead_id": lead_id, "status": "AWAITING_OWNER_APPROVAL", "customer_phone": "+" + PHONE_DIGITS,
         "customer_name": "Test", "raw_inquiry": "wedding for 40 guests", "original_message_id": f"wamid.SEED.{lead_id}",

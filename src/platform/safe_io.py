@@ -190,7 +190,15 @@ def safe_load_json(path: Path, default: Any = None) -> Tuple[Any, str]:
     try:
         if not path.exists():
             return default, "missing"
-        raw = path.read_text()
+        # UTF-8 explicitly, NOT the platform default. `atomic_write_json` writes
+        # `content.encode("utf-8")` and `ndjson_append` does the same, so reading
+        # with the locale codec made the round trip asymmetric: on a Linux VPS the
+        # default happens to be UTF-8 and it works, while on a Windows dev box it
+        # is cp1252 and any non-ASCII byte a state file legitimately contains — an
+        # em-dash or smart quote in customer copy — raises UnicodeDecodeError and
+        # the load fails as though the file were unreadable. JSON is UTF-8 by
+        # definition (RFC 8259 §8.1), so the locale was never the right codec.
+        raw = path.read_text(encoding="utf-8")
         if not raw.strip():
             return default, "empty"
         return json.loads(raw), "ok"
