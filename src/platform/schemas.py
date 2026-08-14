@@ -7012,6 +7012,15 @@ class CfRouterIntercepted(_BaseEntry):
         "automation_control_customer_resume",
         "automation_control_owner_takeover",
         "automation_control_owner_release",
+        # Turn-scoped identity memo (2026-08-14, flyer P1-7 / catering P1-4).
+        # This turn's ONE identify-sender resolution FAILED, and the turn then
+        # yielded the inbound to the LLM. Identity is resolved once per turn and
+        # failures are memoized so the turn is at least internally consistent
+        # about not knowing who is speaking — but that collapses what used to be
+        # several noisy partial failures into one quiet total one, so the yield
+        # is announced (§12a). Money/authorization arms fail closed on their own
+        # and never reach this row. `detail` carries the resolved identifier.
+        "identity_unresolved_turn_yielded",
         "error",
     ]
     chat_id: str = Field(min_length=1, max_length=200)

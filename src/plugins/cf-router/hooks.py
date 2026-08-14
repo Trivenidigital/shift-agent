@@ -293,10 +293,16 @@ def _invalid_sender_block_when_present(text: str) -> bool:
 
 def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = None,
                          **_kwargs: Any) -> Optional[dict]:
-    """Wrapper that owns Flyer intent shadow context for this inbound."""
+    """Wrapper that owns Flyer intent shadow + turn identity context for this inbound."""
     token = None
     result: Optional[dict] = None
     error: Exception | None = None
+    chat_id = ""
+    # Opened FIRST and unconditionally, unlike the flyer shadow below: identity
+    # is read by the F8/catering/expense arms too, so the memo must cover the
+    # whole turn regardless of the flyer flags. Everything from here to the
+    # matching reset in `finally` sees ONE identify-sender answer per principal.
+    identity_token = actions.begin_turn_identity()
     try:
         text = _extract_text(event) or ""
         media_path = _extract_media_path(event)
@@ -331,11 +337,32 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
                 actions.sys.stderr.write(
                     f"cf-router: flyer intake bypass shadow finalizer failed (non-fatal): {bypass_exc}\n"
                 )
+            # §12a companion to memoizing FAILED identity reads. A turn that
+            # could not resolve who is speaking, and then handed the inbound to
+            # the LLM, says so exactly once — otherwise the memo turns several
+            # noisy partial failures into one silent total one. Only the
+            # fall-through case: a raised error propagates and is already
+            # visible, and a turn that CLAIMED the inbound made its decision on
+            # a consistent (if unknown) identity, with the money and
+            # authorization arms failing closed on their own.
+            try:
+                if result is None and error is None and actions.turn_identity_read_failed():
+                    actions.audit_intercepted(
+                        reason="identity_unresolved_turn_yielded",
+                        chat_id=chat_id or "unknown",
+                        detail=("identify-sender did not resolve this turn; "
+                                "inbound yielded to the LLM with sender_role unknown"),
+                    )
+            except Exception as identity_exc:
+                actions.sys.stderr.write(
+                    f"cf-router: unresolved-identity audit failed (non-fatal): {identity_exc}\n"
+                )
         finally:
             actions.reset_flyer_intent_shadow(token)
             actions.reset_flyer_intake_bypass_shadow(
                 actions.consume_pending_flyer_intake_bypass_token()
             )
+            actions.reset_turn_identity(identity_token)
 
 
 def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: Any = None,
@@ -3290,6 +3317,12 @@ def _try_flyer_regulated_account_guard(text: str, chat_id: str, event: Any) -> O
     # Pure account commands ("Upgrade to Growth", "UPDATE BUSINESS WHATSAPP")
     # never yield because is_flyer_account_command catches them earlier in
     # _try_flyer_account_intercept anyway; the early-return below is defensive.
+    # ONE resolution, consumed by both the yield check below and the audited
+    # sender_role further down. These were two identify-sender spawns five lines
+    # apart, the first discarding its role — so a role flip between them was
+    # invisible. Hoisting is spawn-neutral even before the turn memo, because
+    # the second call ran unconditionally anyway.
+    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     if not actions.is_flyer_account_command(text) and actions.flyer_text_targets_revision_field(text):
         # PR-α follow-up 2026-05-26 (LID-only blocker fix): do NOT gate on
         # phone_check truthiness before the lookup. LID-only customers
@@ -3300,12 +3333,10 @@ def _try_flyer_regulated_account_guard(text: str, chat_id: str, event: Any) -> O
         # gate; passing phone=None through trusts that function to evolve
         # toward LID-only project lookup. Either way, this code never
         # ADDS a second phone gate.
-        phone_check, _role_check = actions.lid_to_phone_via_identify_sender(chat_id)
-        active_project = actions.find_active_flyer_project_by_sender(phone_check, chat_id)
+        active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)
         if active_project:
             return None
     message_id = _extract_message_id(event, chat_id, text)
-    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
     # sender_role census gap: a flyer CUSTOMER is not in roster/config, so
     # identify-sender returns role=unknown + phone=None for their LID chat.
     # Resolve the phone via the canonical identity key (lid-cache) so both the

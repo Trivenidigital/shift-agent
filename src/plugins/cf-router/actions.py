@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional, get_args
+from typing import Any, Callable, Iterator, NamedTuple, Optional, get_args
 
 # Deployed-system paths (mutable for tests)
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
@@ -209,6 +209,103 @@ def audit_front_brain_yielded(chat_id: str, *, intercept: str, message_id: str =
 
 
 # === Owner / employee identity ===
+#
+# TURN-SCOPED IDENTITY MEMO (flyer audit P1-7 / catering audit P1-4).
+#
+# Identity used to be resolved ~10-15 times per inbound through THREE
+# independent `subprocess.run([identify-sender, ...])` call sites. Each is an
+# external process with a timeout, so successive reads inside ONE turn could
+# disagree — the sender is `employee` at the brand-asset arm and `customer` at
+# the cession fifty lines later.
+#
+# #694 and #697 froze the two DERIVED booleans that had already misrouted
+# (`owner_receipt_candidate`, `menu_caption_candidate`). That closed the two
+# observed failures but left the underlying fact unfrozen, so every other pair
+# of arms in the ladder still raced. The memo below closes it at the source.
+#
+# The memo caches the RAW identify-sender resolution, not any derived view.
+# Memoizing the accessors separately would have preserved the exact scalar-vs-
+# membership split-brain #694 closed: `lid_to_phone_via_identify_sender` reads
+# the legacy scalar and `has_owner_capability` reads roles[] membership, and for
+# the dual-role principal those two answers are deliberately different. They
+# must differ as two views of ONE payload, never as two payloads.
+
+
+class _IdentityResolution(NamedTuple):
+    """One identify-sender invocation, normalized.
+
+    `ok` is True only when the subprocess ran, exited 0, and its stdout parsed
+    to a dict; `doc` is that payload, or `{}`. Every accessor derives its own
+    view from this one fact, so no two views within a turn can describe
+    different principals.
+    """
+    ok: bool
+    doc: dict
+
+
+# None means NO TURN IS OPEN — the memo is then a complete no-op and every call
+# resolves fresh. A `threading.Timer`/`Thread` body starts with a fresh, empty
+# context and therefore reads this default, so a background job that fires
+# mid-turn is never handed the turn's frozen identity and never writes into it.
+# A script that imports this module gets the same fresh-resolve behavior.
+_TURN_IDENTITY: contextvars.ContextVar[dict[str, _IdentityResolution] | None] = (
+    contextvars.ContextVar("cf_router_turn_identity", default=None)
+)
+
+
+def begin_turn_identity() -> contextvars.Token:
+    """Open a turn-scoped identity memo. Mirrors `begin_flyer_intent_shadow`."""
+    return _TURN_IDENTITY.set({})
+
+
+def reset_turn_identity(token: contextvars.Token | None) -> None:
+    if token is not None:
+        _TURN_IDENTITY.reset(token)
+
+
+def turn_identity_read_failed() -> bool:
+    """True when any identity read in THIS turn failed to resolve.
+
+    Read before `reset_turn_identity`. Memoizing failures keeps a turn
+    internally consistent about not knowing who is speaking, which beats a
+    split-brain — but it also collapses what used to be several noisy partial
+    failures into one quiet total one, so the caller announces it (§12a).
+    """
+    memo = _TURN_IDENTITY.get()
+    if not memo:
+        return False
+    return any(not resolution.ok for resolution in memo.values())
+
+
+def _invoke_identify_sender(identifier: str) -> _IdentityResolution:
+    """The ONE place a cf-router identify-sender subprocess is spawned."""
+    try:
+        result = subprocess.run(
+            [str(IDENTIFY_SENDER_BIN), identifier],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return _IdentityResolution(False, {})
+        doc = json.loads(result.stdout)
+        if isinstance(doc, dict):
+            return _IdentityResolution(True, doc)
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+        pass
+    return _IdentityResolution(False, {})
+
+
+def _resolve_identify_sender(identifier: str) -> _IdentityResolution:
+    """Memoized per turn, keyed on the identifier. No turn open -> no caching."""
+    memo = _TURN_IDENTITY.get()
+    if memo is not None:
+        cached = memo.get(identifier)
+        if cached is not None:
+            return cached
+    resolution = _invoke_identify_sender(identifier)
+    if memo is not None:
+        memo[identifier] = resolution
+    return resolution
+
 
 def is_owner_chat(chat_id: str) -> bool:
     """Check if chat_id matches owner per config.yaml OR via identify-sender.
@@ -234,20 +331,14 @@ def is_owner_chat(chat_id: str) -> bool:
         # both owner and roster employee resolves scalar `employee` by LID, and
         # a scalar check here would reject every owner-only operation for them.
         if chat_id.endswith("@lid"):
-            try:
-                result = subprocess.run(
-                    [str(IDENTIFY_SENDER_BIN), chat_id],
-                    capture_output=True, text=True, timeout=10,
-                )
-                if result.returncode == 0:
-                    doc = json.loads(result.stdout)
-                    roles = doc.get("roles")
-                    if isinstance(roles, list):
-                        return "owner" in roles
-                    # Older identify-sender without `roles` (rollback window).
-                    return doc.get("role") == "owner"
-            except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+            resolution = _resolve_identify_sender(chat_id)
+            if not resolution.ok:
                 return False
+            roles = resolution.doc.get("roles")
+            if isinstance(roles, list):
+                return "owner" in roles
+            # Older identify-sender without `roles` (rollback window).
+            return resolution.doc.get("role") == "owner"
         return False
     except Exception:
         return False
@@ -1985,20 +2076,14 @@ def audit_intercepted(reason: str, chat_id: str, code: Optional[str] = None,
 
 
 def identify_sender_metadata(identifier: str) -> dict:
-    """Return identify-sender JSON for phone/LID/JID, or an unknown-role stub."""
-    try:
-        result = subprocess.run(
-            [str(IDENTIFY_SENDER_BIN), identifier],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            return {"role": "unknown"}
-        doc = json.loads(result.stdout)
-        if isinstance(doc, dict):
-            return doc
-    except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
-        pass
-    return {"role": "unknown"}
+    """Return identify-sender JSON for phone/LID/JID, or an unknown-role stub.
+
+    A COPY of the memoized payload: callers used to each get a freshly parsed
+    dict, and handing them the shared one would let a caller's mutation rewrite
+    another arm's view of the sender.
+    """
+    resolution = _resolve_identify_sender(identifier)
+    return dict(resolution.doc) if resolution.ok else {"role": "unknown"}
 
 
 def audit_dispatcher_routed(
@@ -7562,18 +7647,16 @@ def lid_to_phone_via_identify_sender(lid_or_jid: str) -> tuple[Optional[str], st
     Duplicates the deployed F7 daemon's helper rather than extending
     is_owner_chat / is_employee_chat (which return bool); changing those
     return types would risk PR-CF6's existing 31 tests.
+
+    Reads the LEGACY SCALAR. `has_owner_capability` reads roles[] membership,
+    and for a dual-role principal those two answers are deliberately different
+    — but they are now two views of ONE memoized resolution, so they can differ
+    only in the way they are meant to.
     """
-    try:
-        result = subprocess.run(
-            [str(IDENTIFY_SENDER_BIN), lid_or_jid],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            return None, "unknown"
-        doc = json.loads(result.stdout)
-        return doc.get("phone_normalized"), doc.get("role", "unknown")
-    except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+    resolution = _resolve_identify_sender(lid_or_jid)
+    if not resolution.ok:
         return None, "unknown"
+    return resolution.doc.get("phone_normalized"), resolution.doc.get("role", "unknown")
 
 
 BARE_FLYER_RECENT_DIR = Path("/opt/shift-agent/state/bare_flyer/recent")
