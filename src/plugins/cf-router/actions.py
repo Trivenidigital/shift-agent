@@ -5112,6 +5112,7 @@ def find_flyer_onboarding_session_by_sender(phone: Optional[str], chat_id: str) 
     try:
         store = json.loads(FLYER_CUSTOMERS_PATH.read_text(encoding="utf-8"))
         sessions = store.get("onboarding_sessions") or []
+        want_key = flyer_canonical_identity_key(chat_id, phone)
         for session in sessions:
             if not isinstance(session, dict):
                 continue
@@ -5122,6 +5123,13 @@ def find_flyer_onboarding_session_by_sender(phone: Optional[str], chat_id: str) 
             if canonical and sender_phone == canonical:
                 return session
             if session.get("sender_phone") is None and session.get("chat_id") == chat_id:
+                return session
+            # Canonical convergence, mirroring the intake finder below: a
+            # prospect who switches identifier mid-onboarding must hit the SAME
+            # session rather than starting a second one.
+            if want_key and flyer_canonical_identity_key(
+                str(session.get("chat_id") or ""), session.get("sender_phone")
+            ) == want_key:
                 return session
         return None
     except Exception:
@@ -6505,16 +6513,27 @@ def find_recent_flyer_manual_edit_project(
     """Return the most recent manual_edit_required project for this customer
     created within `window_sec` seconds. Used by the idempotent-retry
     branch of the SOURCE/NEW intercept."""
+    # No phone means no identity to match on. Without this, a row whose
+    # `customer_phone` is empty or absent compared equal to a falsy argument and
+    # was handed back as this caller's project.
+    if not customer_phone:
+        return None
     try:
         doc = json.loads(Path(str(FLYER_PROJECTS_PATH)).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     now_ts = time.time()
+    # Compare canonicalized on BOTH sides, as `_flyer_candidate_projects_by_sender`
+    # does. This lookup used raw strings, so a row persisted as "15550100001"
+    # never matched a caller holding "+15550100001" — the retry guard missed and
+    # a duplicate manual_edit_required project was created for the same request.
+    want_phone = _canonical_phone(customer_phone) or str(customer_phone)
     candidates = []
     for project in doc.get("projects", []) or []:
         if not isinstance(project, dict):
             continue
-        if project.get("customer_phone") != customer_phone:
+        row_phone = project.get("customer_phone")
+        if (_canonical_phone(row_phone) or str(row_phone or "")) != want_phone:
             continue
         if project.get("status") != "manual_edit_required":
             continue

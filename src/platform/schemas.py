@@ -1479,6 +1479,14 @@ def _flyer_intake_session_key(session: "FlyerIntakeSession") -> str:
     return _flyer_canonical_key(session.chat_id, sender_phone)
 
 
+def _flyer_onboarding_session_key(session: "FlyerOnboardingSession") -> str:
+    """Onboarding twin of `_flyer_intake_session_key` — same derivation, other
+    session type. Kept as a sibling rather than a shared generic so the intake
+    keying that shipped in 2026-06 is not disturbed."""
+    sender_phone = str(session.sender_phone) if session.sender_phone is not None else None
+    return _flyer_canonical_key(session.chat_id, sender_phone)
+
+
 class FlyerCustomerStore(BaseModel):
     model_config = ConfigDict(extra="ignore")
     schema_version: int = Field(default=1, ge=1)
@@ -1565,13 +1573,19 @@ class FlyerCustomerStore(BaseModel):
             for session in self.onboarding_sessions:
                 if session.sender_phone == canonical:
                     return session
-            for session in self.onboarding_sessions:
-                if session.sender_phone is None and session.chat_id == chat_id:
-                    return session
-            return None
         for session in self.onboarding_sessions:
             if session.sender_phone is None and session.chat_id == chat_id:
                 return session
+        # Canonical convergence (LID<->phone via lid-cache) — the same additive
+        # fallback `find_intake_session` has carried since the 2026-06-02 fix, so
+        # a prospect who switches identifier mid-onboarding hits the SAME
+        # session instead of starting a second one. An unmapped LID keys to
+        # itself, so this never merges two real principals.
+        want_key = _flyer_canonical_key(chat_id, phone)
+        if want_key:
+            for session in self.onboarding_sessions:
+                if _flyer_onboarding_session_key(session) == want_key:
+                    return session
         return None
 
     def find_intake_session(self, chat_id: str, phone: Optional[str]) -> Optional[FlyerIntakeSession]:
