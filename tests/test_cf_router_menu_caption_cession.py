@@ -124,6 +124,10 @@ class _Spies:
         # Every parse-menu-photo invocation, with the inputs it was given.
         self.menu_calls: list[dict] = []
         self.routed: list[dict] = []
+        # Every brand-asset write. The brand-asset arm is TERMINAL and runs 50+
+        # lines ahead of the cession, so this list is the evidence that the menu
+        # photo was not swallowed as a logo before the cession could be reached.
+        self.brand_assets: list[dict] = []
 
     @property
     def reasons(self) -> list[str]:
@@ -133,6 +137,14 @@ class _Spies:
 # Every hook that sits between dispatch entry and the flyer-primary arm. Each is
 # a no-op here so the ONE decision under test — which arm claims the inbound —
 # is not masked by an unrelated intercept reading state off disk.
+#
+# `_try_flyer_brand_asset_intercept` is DELIBERATELY ABSENT and must stay absent.
+# It used to be neutralized here, and that is exactly where the second defect
+# hid: it is terminal and runs 50+ lines ahead of the cession, so a menu photo it
+# claims never reaches the cession at all. Stubbing it to None made every cell
+# below pass while the live route stored the menu as a brand logo. Its one
+# mutation (`trigger_store_flyer_brand_asset`) is spied instead of stubbed away,
+# so the arm runs for real and the cells can assert it did not fire.
 _NEUTRALIZED_HOOKS = (
     "_try_f8_intercept",
     "_try_automation_control",
@@ -147,7 +159,6 @@ _NEUTRALIZED_HOOKS = (
     "_try_flyer_reference_scope_choice_intercept",
     "_try_flyer_source_vs_new_choice_intercept",
     "_try_flyer_reference_scope_authorization_intercept",
-    "_try_flyer_brand_asset_intercept",
     "_try_flyer_existing_onboarding_intercept",
     "_try_amendment_conflict_intercept",
     "_try_flyer_active_project_intercept",
@@ -158,15 +169,24 @@ _NEUTRALIZED_HOOKS = (
 )
 
 
-def _wire(monkeypatch, hooks_mod, actions_mod, *, role="employee"):
-    """Arm the flyer path exactly as the live box had it and spy the two arms
-    that can claim a menu photo: the flyer primary intercept and F7."""
+def _wire(monkeypatch, hooks_mod, actions_mod, *, role="employee",
+          owner_capability=False, flyer_generation=True):
+    """Arm the flyer path exactly as the live box had it and spy the three arms
+    that can claim a menu photo: the brand-asset intercept, the flyer primary
+    intercept and F7.
+
+    `role` is the LEGACY SCALAR from identify-sender; `owner_capability` is the
+    separate membership answer. The dual-role principal is `role="employee"` +
+    `owner_capability=True` — the shape whose scalar is deliberately frozen at
+    employee, which is why the brand-asset arm's `role == "owner"` exemption
+    cannot rescue it.
+    """
     s = _Spies()
 
     for name in _NEUTRALIZED_HOOKS:
         monkeypatch.setattr(hooks_mod, name, lambda *_a, **_kw: None)
 
-    monkeypatch.setattr(actions_mod, "is_flyer_enabled", lambda: True)
+    monkeypatch.setattr(actions_mod, "is_flyer_enabled", lambda: flyer_generation)
     monkeypatch.setattr(actions_mod, "is_flyer_workflow_enabled", lambda: True)
     monkeypatch.setattr(actions_mod, "begin_flyer_intent_shadow", lambda **_kw: None)
     monkeypatch.setattr(actions_mod, "finalize_flyer_intent_shadow", lambda **_kw: None)
@@ -181,6 +201,10 @@ def _wire(monkeypatch, hooks_mod, actions_mod, *, role="employee"):
     monkeypatch.setattr(actions_mod, "front_brain_converse_admits", lambda _cid: False)
     monkeypatch.setattr(actions_mod, "flyer_campaign_cta_text", lambda _t: "")
     monkeypatch.setattr(actions_mod, "lid_to_phone_via_identify_sender", lambda _cid: (PHONE, role))
+    # Membership, which is a DIFFERENT question from the scalar above. Stubbed so
+    # the co-resident receipt candidacy is deterministic instead of depending on
+    # whether identify-sender happens to be executable on the test host.
+    monkeypatch.setattr(actions_mod, "has_owner_capability", lambda _cid: owner_capability)
     monkeypatch.setattr(actions_mod, "find_paid_flyer_guest_order", lambda _p, _c: None)
     # No live flyer project / catering lead: the escape gate (#644) runs REAL and
     # falls through, which is what the live box did on this inbound.
@@ -197,6 +221,16 @@ def _wire(monkeypatch, hooks_mod, actions_mod, *, role="employee"):
         lambda cid, txt, **kw: s.sent.append((cid, txt, kw.get("action_context")))
         or (True, "mid1", ""))
     monkeypatch.setattr(hooks_mod, "_sender_has_qualifying_lead", lambda _cid: False)
+
+    # The brand-asset arm's ONE mutation. Spied, not neutralized: the arm itself
+    # runs for real so these cells see the precedence the live route has.
+    def _store_brand_asset(**kw):
+        s.brand_assets.append(kw)
+        return True, "stored", {"asset_id": "B9999", "next_status": "active",
+                                "customer_id": "CUST0001",
+                                "reply_text": "Flyer Studio\n------------\nBrand asset saved."}
+
+    monkeypatch.setattr(actions_mod, "trigger_store_flyer_brand_asset", _store_brand_asset)
 
     # Menu-ingestion seam. The route owns WHEN parse-menu-photo runs and whether
     # its reported result is durable; stubbing both isolates the routing decision
@@ -252,6 +286,9 @@ def _assert_staged(result, s, *, media_path=MEDIA, role="employee"):
     assert result["action"] == "skip"
     assert result["reason"].startswith(
         f"cf-router menu ingestion staged {STAGED_UPDATE_ID}"), result["reason"]
+    assert s.brand_assets == [], (
+        "the menu photo was captured as a flyer brand asset — the terminal "
+        "brand-asset arm claimed the turn before the cession could be reached")
     assert s.primary_calls == [], "no flyer project may be created or asset ingested"
     assert s.f7_calls == [], "the menu pipeline is a SKILL, not an F7 catering lead"
     assert [c["image_path"] for c in s.menu_calls] == [media_path], (
@@ -636,6 +673,122 @@ def test_explicit_flyer_edit_naming_a_flyer_still_wins(monkeypatch):
     assert "menu_caption_ceded_to_dispatcher" not in s.reasons
 
 
+# ── Brand-asset precedence: the arm that runs 50+ lines BEFORE the cession ───
+#
+# Same class as B0009/B0010, which #694 closed for receipts and left open for
+# menus. `_try_flyer_brand_asset_intercept` is TERMINAL and is invoked far ahead
+# of the cession, and #694's yield inside it is gated on the RECEIPT candidate
+# only — so a menu photo it claims never reaches the cession at all. The caption
+# that breaks it names a brand-asset word, because that is what makes the arm
+# claim the turn instead of declining.
+
+# Both carry a documented menu trigger AND an explicit asset word. The premise
+# each one rests on is pinned in test_the_brand_asset_arm_would_otherwise_claim.
+MENU_CAPTIONS_NAMING_AN_ASSET = ["new menu with our logo",
+                                 "update menu with our new logo"]
+
+
+@pytest.mark.parametrize("caption", MENU_CAPTIONS_NAMING_AN_ASSET)
+def test_menu_caption_naming_a_brand_asset_cedes_instead_of_being_captured(
+        monkeypatch, caption):
+    """A verified EMPLOYEE sends a menu photo captioned "new menu with our logo".
+
+    Pre-fix: the caption is a documented `update_catering_menu` trigger, but the
+    brand-asset arm got there first — the owner exemption does not apply to an
+    employee, `should_start_new_flyer_over_active` declines (`_CURRENT_BRAND_UPLOAD`
+    matches "logo"), and "logo" is an explicit asset word — so the menu was stored
+    as a brand LOGO and attached to every later flyer prompt, and the cession was
+    never reached.
+    """
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, role="employee")
+
+    _assert_staged(_dispatch(hooks_mod, caption), s, role="employee")
+
+
+@pytest.mark.parametrize("caption", MENU_CAPTIONS_NAMING_AN_ASSET)
+def test_dual_role_principal_menu_caption_cedes(monkeypatch, caption):
+    """The same input from the DUAL-ROLE principal: legacy scalar frozen at
+    `employee`, membership including owner. This is the identity shape both live
+    receipt misroutes had, and the reason a fix written against the scalar
+    exemption does not work — `role == "owner"` is False for exactly the sender
+    it needs to be True for."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, role="employee",
+              owner_capability=True)
+
+    _assert_staged(_dispatch(hooks_mod, caption), s, role="employee")
+
+
+def test_the_brand_asset_arm_would_otherwise_claim_these_captions():
+    """NON-VACUITY guard for the two cells above.
+
+    Each premise the defect rested on is pinned separately, so the cells cannot
+    start passing for an unrelated reason (a caption predicate drifting, or
+    `should_start_new_flyer_over_active` starting to admit the caption and
+    bouncing the turn out of the brand arm before the yield is consulted)."""
+    _, actions_mod = _load_plugin()
+    for caption in MENU_CAPTIONS_NAMING_AN_ASSET:
+        assert actions_mod.is_menu_update_caption(caption) is True, caption
+        # The arm's own early exit does NOT save these — a brand-upload caption
+        # is precisely what makes it decline and continue into capture.
+        assert actions_mod.should_start_new_flyer_over_active(
+            caption, has_media=True) is False, caption
+        # ...and "logo" is one of the arm's explicit asset words, so capture is
+        # what it would do next.
+        assert "logo" in caption
+
+
+@pytest.mark.parametrize("caption", ["here's our new logo", "our brand template",
+                                     "replace this with our logo"])
+def test_a_genuine_brand_asset_upload_is_still_captured(monkeypatch, caption):
+    """REGRESSION GUARD — the yield is scoped to the menu candidacy predicate,
+    not to the sender or to the word "menu" appearing nearby. The same employee
+    uploading a real logo must still get a brand asset, exactly as before."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, role="employee")
+
+    result = _dispatch(hooks_mod, caption)
+
+    assert len(s.brand_assets) == 1, (
+        f"{caption!r} lost brand-asset capture — the yield is over-broad")
+    assert s.brand_assets[0]["media_path"] == MEDIA
+    assert result["reason"].startswith("cf-router flyer brand asset")
+    assert s.menu_calls == [], "a logo upload must not invoke the menu extractor"
+    assert "menu_caption_ceded_to_dispatcher" not in s.reasons
+
+
+# ── Flag asymmetry: capture and cession must be armed by the SAME flag ───────
+def test_menu_cession_survives_flyer_generation_being_disabled(monkeypatch):
+    """The second defect. The brand-asset arm sits under `flyer_workflow_enabled`
+    while both cessions sat under `flyer_generation_enabled`, and the two are not
+    equivalent — `is_flyer_workflow_enabled` is True whenever a `flyer:` block
+    exists. So turning flyer generation off (the incident kill switch) disarmed
+    the cessions while leaving CAPTURE armed: the menu photo would still be
+    swallowed as a brand asset, with nothing left to rescue it.
+
+    With generation off and workflow on, a menu-captioned media turn must still
+    cede — and must still be terminal, so it does not fall to the LLM either.
+    """
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, role="owner",
+              flyer_generation=False)
+
+    _assert_staged(_dispatch(hooks_mod, INCIDENT_CAPTION), s, role="owner")
+
+
+def test_menu_cession_survives_generation_disabled_for_the_captured_shape(monkeypatch):
+    """The two defects composed: generation off (cession was dark) AND a caption
+    naming a brand asset (capture was armed). This is the cell where the flag fix
+    and the yield fix each have to hold for the turn to survive."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, role="employee",
+              owner_capability=True, flyer_generation=False)
+
+    _assert_staged(_dispatch(hooks_mod, "new menu with our logo"), s,
+                   role="employee")
+
+
 # ── Static placement proof (runs on every platform) ─────────────────────────
 def test_cession_sits_between_the_r2b1_gate_and_every_flyer_claim():
     """The cession is only a fix if nothing claims the inbound before it. Pins:
@@ -674,3 +827,38 @@ def test_cession_sits_between_the_r2b1_gate_and_every_flyer_claim():
         f"the cession (line {cession}) MUST precede the "
         f"should_start_new_flyer_over_active admission (lines {sorted(start_new_lines)}) "
         f"— the arm that created F0226 live")
+
+
+def test_the_brand_asset_arm_runs_ahead_of_the_cession_and_is_told_about_it():
+    """Why the yield exists at all, pinned structurally.
+
+    The brand-asset arm is TERMINAL and is invoked before the cession, so the
+    cession's placement guarantees above are worth nothing for any turn the arm
+    claims. That ordering is not the bug and is not being changed — the arm is
+    passed the turn's menu candidacy so it can decline those turns itself. If a
+    refactor ever drops that argument, this fails rather than silently
+    reinstating the swallow.
+    """
+    import ast
+    src = (PLUGIN_DIR / "hooks.py").read_text(encoding="utf-8")
+    dispatch = next(n for n in ast.walk(ast.parse(src))
+                    if isinstance(n, ast.FunctionDef) and n.name == "_pre_gateway_dispatch_impl")
+    brand = cession = None
+    brand_kwargs: list[str] = []
+    for node in ast.walk(dispatch):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            continue
+        if node.func.id == "_try_flyer_brand_asset_intercept" and brand is None:
+            brand = node.lineno
+            brand_kwargs = [kw.arg for kw in node.keywords]
+        if node.func.id == "_menu_caption_cedes_to_dispatcher" and cession is None:
+            cession = node.lineno
+
+    assert brand is not None and cession is not None
+    assert brand < cession, (
+        "the brand-asset arm no longer precedes the cession — re-read this cell "
+        "before deleting it; the yield may no longer be load-bearing")
+    assert "menu_caption_candidate" in brand_kwargs, (
+        f"the terminal brand-asset arm at line {brand} is not told the turn is a "
+        f"menu candidate, so it will capture the photo before the cession at "
+        f"line {cession} can claim it")

@@ -375,6 +375,17 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
         # brand-asset decision instead, which is the earliest point the answer
         # can actually matter.
         owner_receipt_candidate = False
+        # Sister snapshot for the menu cession, on the same terms and for the
+        # same reason: the brand-asset arm is terminal and runs 50+ lines ahead
+        # of `_menu_caption_cedes_to_dispatcher`, so a menu photo it claims can
+        # never reach the cession. Also declared-not-resolved here; the answer
+        # needs the sender role, and that identity read belongs inside the media
+        # guard where the receipt candidate already lives.
+        menu_caption_candidate = False
+        # The scalar identity for this turn, resolved AT MOST ONCE (see the
+        # media block below) and shared by the brand-asset arm, the menu
+        # candidacy and `guest_phone`/`guest_role`. None means not yet read.
+        turn_identity: Optional[tuple[Optional[str], str]] = None
         flyer_generation_enabled = actions.is_flyer_enabled()
         flyer_workflow_enabled = flyer_generation_enabled or actions.is_flyer_workflow_enabled()
         # P1-1 send-now-compound fix: ONE dispatch-scoped single-flight memo shared
@@ -571,21 +582,35 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             if scope_auth_result is not None:
                 return scope_auth_result
             if media_path:
-                # Resolve ONCE, here — the first point the answer is needed. The
-                # receipt cession below consumes this same boolean and must not
-                # re-resolve it: a second identity read could contradict the
+                # Resolve ONCE, here — the first point the answers are needed.
+                # The two cessions below consume these same booleans and must not
+                # re-resolve them: a second identity read could contradict the
                 # first and drop the turn into active-project Flyer routing.
                 owner_receipt_candidate = _is_owner_receipt_candidate(
                     text, chat_id, media_path=media_path)
+                # The scalar read the brand-asset arm used to do for itself, and
+                # that `guest_phone`/`guest_role` does below. Hoisted so the menu
+                # candidacy can consume it WITHOUT adding a spawn: this one read
+                # now feeds all three, so a media turn resolves the scalar the
+                # same number of times as before.
+                turn_identity = actions.lid_to_phone_via_identify_sender(chat_id)
+                menu_caption_candidate = _is_menu_caption_candidate(
+                    text, media_path=media_path, role=turn_identity[1])
                 brand_result = _try_flyer_brand_asset_intercept(
                     text, chat_id, event, media_path,
-                    owner_receipt_candidate=owner_receipt_candidate)
+                    owner_receipt_candidate=owner_receipt_candidate,
+                    menu_caption_candidate=menu_caption_candidate,
+                    identity=turn_identity)
                 if brand_result is not None:
                     return brand_result
             onboarding_reply_result = _try_flyer_existing_onboarding_intercept(text, chat_id, event)
             if onboarding_reply_result is not None:
                 return onboarding_reply_result
-            guest_phone, guest_role = actions.lid_to_phone_via_identify_sender(chat_id)
+            # Reuse the media block's read when it happened; text-only turns
+            # resolve here exactly as before.
+            guest_phone, guest_role = (
+                turn_identity if turn_identity is not None
+                else actions.lid_to_phone_via_identify_sender(chat_id))
             if (
                 flyer_generation_enabled
                 and guest_role != "owner"
@@ -607,52 +632,66 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                     text, chat_id, event, media_path)
                 if amendment_conflict_result is not None:
                     return amendment_conflict_result
-                # Menu-caption cession (2026-08-01 live F0226 defect): an owner /
-                # verified-employee media message captioned with a documented
-                # `update_catering_menu` trigger belongs to the menu→pricebook
-                # SKILL, not to Flyer Studio. Released here so it precedes EVERY
-                # flyer claim below — the active-project arm (which would ingest
-                # the photo as a flyer reference asset) and the
-                # `should_start_new_flyer_over_active` primary arm (which created
-                # F0226 live, because _MEDIA_TEMPLATE_EDIT admits the bare
-                # substring "menu" on any media message). No flyer project, no
-                # asset ingestion, no catering lead. Placed AFTER the R2B-1 gate
-                # so amendment-conflict precedence is unchanged, and it reuses
-                # the `guest_role` identity already resolved above rather than
-                # spawning identify-sender again.
-                #
-                # 2026-08-08: this used to `return None` and let the LLM
-                # dispatcher decide whether to invoke `update_catering_menu`. On
-                # the live 2026-08-01 owner turn it decided not to, and answered
-                # "successfully recorded" with nothing recorded. Everything
-                # needed to run the action is already proven here — media path,
-                # documented trigger, authorized role — and the SKILL's own job
-                # is to call ONE script with mechanically derivable inputs, so
-                # the second, redundant routing decision is gone: cf-router runs
-                # the script and answers from its verified result.
-                if _menu_caption_cedes_to_dispatcher(
-                    text, chat_id, media_path=media_path, role=guest_role,
-                ):
-                    return _run_owner_menu_ingestion(
-                        chat_id, event, text=text, media_path=media_path,
-                        role=guest_role, sender_phone=guest_phone,
-                    )
-                # Wave-2 DRAFT tier: an owner photo whose caption explicitly says
-                # "expense receipt" is an expense record, not flyer artwork. Placed
-                # in the same tier as the menu cession — AFTER the R2B-1 gate, so
-                # amendment precedence is unchanged, and BEFORE every flyer claim,
-                # so an unresolved Flyer Studio project cannot ingest the receipt
-                # as a reference asset (the live F0226 failure mode). Owner-only,
-                # and the caption trigger is required: bare owner images stay
-                # unsupported in this wave rather than being guessed at.
-                if _receipt_caption_cedes_to_dispatcher(
-                    text, chat_id, media_path=media_path, role=guest_role,
-                    owner_receipt_candidate=owner_receipt_candidate,
-                ):
-                    return _run_owner_receipt_ingestion(
-                        chat_id, event, text=text, media_path=media_path,
-                        role=guest_role, sender_phone=guest_phone,
-                    )
+            # BOTH cessions sit under `flyer_workflow_enabled`, NOT under
+            # `flyer_generation_enabled` — deliberately the same condition that
+            # arms the brand-asset arm above. The two flags are not equivalent
+            # (`is_flyer_workflow_enabled` is True whenever a `flyer:` block
+            # exists), so gating capture and cession differently left a live
+            # configuration — generation off as an incident kill switch, workflow
+            # still on — in which a menu or receipt photo was still captured as a
+            # flyer brand asset while the arms that rescue it were dark. Ordering
+            # is unchanged when both flags are on, which is the normal state: the
+            # R2B-1 amendment gate above keeps its precedence, and everything
+            # below still runs only when generation is enabled.
+            #
+            # Menu-caption cession (2026-08-01 live F0226 defect): an owner /
+            # verified-employee media message captioned with a documented
+            # `update_catering_menu` trigger belongs to the menu→pricebook
+            # SKILL, not to Flyer Studio. Released here so it precedes EVERY
+            # flyer claim below — the active-project arm (which would ingest
+            # the photo as a flyer reference asset) and the
+            # `should_start_new_flyer_over_active` primary arm (which created
+            # F0226 live, because _MEDIA_TEMPLATE_EDIT admits the bare
+            # substring "menu" on any media message). No flyer project, no
+            # asset ingestion, no catering lead. Placed AFTER the R2B-1 gate
+            # so amendment-conflict precedence is unchanged, and it consumes
+            # the turn-scoped candidacy resolved in the media block above
+            # rather than spawning identify-sender again.
+            #
+            # 2026-08-08: this used to `return None` and let the LLM
+            # dispatcher decide whether to invoke `update_catering_menu`. On
+            # the live 2026-08-01 owner turn it decided not to, and answered
+            # "successfully recorded" with nothing recorded. Everything
+            # needed to run the action is already proven here — media path,
+            # documented trigger, authorized role — and the SKILL's own job
+            # is to call ONE script with mechanically derivable inputs, so
+            # the second, redundant routing decision is gone: cf-router runs
+            # the script and answers from its verified result.
+            if _menu_caption_cedes_to_dispatcher(
+                text, chat_id, role=guest_role,
+                menu_caption_candidate=menu_caption_candidate,
+            ):
+                return _run_owner_menu_ingestion(
+                    chat_id, event, text=text, media_path=media_path,
+                    role=guest_role, sender_phone=guest_phone,
+                )
+            # Wave-2 DRAFT tier: an owner photo whose caption explicitly says
+            # "expense receipt" is an expense record, not flyer artwork. Placed
+            # in the same tier as the menu cession — AFTER the R2B-1 gate, so
+            # amendment precedence is unchanged, and BEFORE every flyer claim,
+            # so an unresolved Flyer Studio project cannot ingest the receipt
+            # as a reference asset (the live F0226 failure mode). Owner-only,
+            # and the caption trigger is required: bare owner images stay
+            # unsupported in this wave rather than being guessed at.
+            if _receipt_caption_cedes_to_dispatcher(
+                text, chat_id, media_path=media_path, role=guest_role,
+                owner_receipt_candidate=owner_receipt_candidate,
+            ):
+                return _run_owner_receipt_ingestion(
+                    chat_id, event, text=text, media_path=media_path,
+                    role=guest_role, sender_phone=guest_phone,
+                )
+            if flyer_generation_enabled:
                 # P1-1: fresh-intent catering escape gate. A fresh catering
                 # inquiry from a customer with a LIVE flyer project must reach
                 # catering (F7), not be captured as a flyer edit/revision (the
@@ -4254,13 +4293,19 @@ def _try_flyer_existing_onboarding_intercept(text: str, chat_id: str, event: Any
 
 
 def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_path: str,
-                                     *, owner_receipt_candidate: bool = False) -> Optional[dict]:
+                                     *, owner_receipt_candidate: bool = False,
+                                     menu_caption_candidate: bool = False,
+                                     identity: Optional[tuple] = None) -> Optional[dict]:
     """Capture logo/template uploads during onboarding or flyer requests.
 
-    `owner_receipt_candidate` is the TURN-SCOPED snapshot resolved once in
-    dispatch. This arm must not re-resolve it: a second identity read could
-    disagree with the first and let a brand asset be written for a message the
-    turn already classified as an owner receipt.
+    `owner_receipt_candidate` and `menu_caption_candidate` are the TURN-SCOPED
+    snapshots resolved once in dispatch. This arm must not re-resolve either: a
+    second identity read could disagree with the first and let a brand asset be
+    written for a message the turn already classified as an owner receipt or a
+    menu update.
+
+    `identity` is that same turn's `(phone, role)` scalar. Passed in so the whole
+    turn reads it once; resolved here only when a caller omits it.
     """
     # Yield the EXACT owner-receipt candidate the later receipt cession claims.
     # This arm is terminal and runs before that cession, so without this a
@@ -4280,8 +4325,28 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
     # receipt arm when it actually claims the turn.
     if owner_receipt_candidate:
         return None
+    # Same class of defect, same fix, for the menu cession — which sits 50+ lines
+    # further down and is therefore unreachable for any turn this terminal arm
+    # claims. The breaking shape is a verified EMPLOYEE (or the dual-role
+    # principal whose legacy scalar is frozen at `employee`) sending a menu photo
+    # captioned "new menu with our logo": the owner exemption below does not
+    # apply, `should_start_new_flyer_over_active` declines because
+    # `_CURRENT_BRAND_UPLOAD` matches "logo", and "logo" is an explicit asset
+    # word — so the menu is stored as a brand LOGO and attached to every later
+    # flyer prompt, and the pricebook is never updated.
+    #
+    # Scoped to the menu candidacy predicate on purpose, NOT to the caption or
+    # the role alone: a legitimate "here's our new logo" from the same sender
+    # must still be captured.
+    #
+    # No audit row here: `menu_caption_ceded_to_dispatcher` belongs to the menu
+    # arm when it actually claims the turn.
+    if menu_caption_candidate:
+        return None
     message_id = _extract_message_id(event, chat_id, text)
-    phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+    phone, role = (
+        identity if identity is not None
+        else actions.lid_to_phone_via_identify_sender(chat_id))
     if role == "owner":
         return None
     if not phone:
@@ -4601,28 +4666,37 @@ def _flyer_send_now_early_path_allowed(text: str, classify_memo: Callable[[str],
     return not is_catering
 
 
-def _menu_caption_cedes_to_dispatcher(
-    text: str, chat_id: str, *, media_path: Optional[str], role: str,
+def _is_menu_caption_candidate(
+    text: str, *, media_path: Optional[str], role: str,
 ) -> bool:
-    """Menu-caption routing precedence (2026-08-01 live F0226 defect).
+    """Is this inbound the exact owner/employee menu-photo shape?
 
-    True when cf-router must release an inbound to the Hermes dispatcher so the
-    `update_catering_menu` SKILL can claim it, instead of letting a flyer arm
-    take it first. All three conditions are required:
+    THE single source of truth for menu candidacy. Two call sites consume it and
+    neither re-derives the conditions: the brand-asset arm, which yields for this
+    exact shape, and `_menu_caption_cedes_to_dispatcher`, which claims it. A
+    yield-predicate that could drift from the cession-predicate would resurrect
+    the defect it exists to close — the arm yields, the cession declines, and the
+    turn falls through into Flyer routing anyway.
+
+    Side-effect-free: no audit row, no state change, no send. Unlike its receipt
+    sister it is also fully deterministic, because the caller supplies the
+    already-resolved sender role rather than this function spawning
+    identify-sender.
+
+    All four conditions are required:
 
       * the message carries media — the SKILL extracts from an image or a PDF,
         and `_extract_media_path` surfaces both as `media_path`
+      * the sender resolves to owner or verified employee — the SKILL's hard
+        rule; `identify-sender` returning owner/employee IS that verification
       * the visible caption carries a documented SKILL trigger
         (`actions.is_menu_update_caption`)
-      * the sender resolves to owner or verified employee — the SKILL's hard
-        rule; `identify-sender` returning owner/employee IS that verification,
-        so the caller passes the role it already resolved (no extra spawn)
+      * no explicit flyer create/edit signal, which vetoes — the same
+        deterministic exclusion the P1-1 escape gate uses, so "update menu
+        prices on this flyer" stays on the flyer path
 
-    An explicit flyer create/edit signal vetoes the cession, the same
-    deterministic exclusion the P1-1 escape gate uses, so "update menu prices on
-    this flyer" stays on the flyer path. Records the cession, then the caller
-    returns None — creating neither a flyer project nor a catering lead.
-    Defensive: any error means NO cession (the flyer path stays byte-identical).
+    Defensive: any error means NOT a candidate, so the flyer path stays
+    byte-identical on failure.
     """
     if not media_path or role not in ("owner", "employee"):
         return False
@@ -4631,6 +4705,30 @@ def _menu_caption_cedes_to_dispatcher(
             return False
         if _flyer_edit_signal_present(text, has_media=True):
             return False
+        return True
+    except Exception:  # noqa: BLE001 — never claim an inbound on an error
+        return False
+
+
+def _menu_caption_cedes_to_dispatcher(
+    text: str, chat_id: str, *, role: str, menu_caption_candidate: bool,
+) -> bool:
+    """Menu-caption routing precedence (2026-08-01 live F0226 defect).
+
+    True when cf-router must claim an inbound as a menu update so the
+    menu→pricebook pipeline runs, instead of letting a flyer arm take it first.
+    The conditions live in `_is_menu_caption_candidate`; this arm consumes the
+    turn-scoped answer the brand-asset decision already acted on and adds the
+    audit row, which belongs here because only this arm actually claims the turn.
+
+    Records the cession, then the caller runs the ingestion — creating neither a
+    flyer project nor a catering lead. Defensive: any error means NO cession
+    (the flyer path stays byte-identical).
+    """
+    # Consumes the turn-scoped snapshot — deliberately does NOT re-derive it.
+    if not menu_caption_candidate:
+        return False
+    try:
         actions.audit_intercepted(
             reason="menu_caption_ceded_to_dispatcher",
             chat_id=chat_id,
