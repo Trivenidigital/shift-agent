@@ -771,3 +771,48 @@ def test_an_identity_lookup_error_still_sends_the_clarification(monkeypatch):
     assert len(s.sent) == 1
     assert any("gate_error:OSError" in str(a.get("detail", "")) for a in s.audits)
     assert out is not None and out is not hooks_mod._GATE_FALLTHROUGH
+
+
+@pytest.mark.parametrize("body,project,open_lead,expect_sends,expect_f7", [
+    # cedes-to-F7: the gate itself sends nothing; F7 owns the reply.
+    (INCIDENT, _project("manual_edit_required", "F0224"), None, 0, 1),
+    (FRESH_CATERING, _project("awaiting_final_approval", "F0231"), None, 0, 1),
+    # stays-flyer: no send, no delegation, caller runs the flyer arms.
+    ("change the headline to Diwali Special", _project(), None, 0, 0),
+    # ambiguous: exactly one clarification, no delegation.
+    (AMBIGUOUS, _project(), None, 1, 0),
+    # complaint: exactly one escalation ack, no classifier, no delegation.
+    ("Are u crazy", _project(), None, 1, 0),
+])
+def test_every_normal_branch_sends_at_most_one_message(
+        monkeypatch, body, project, open_lead, expect_sends, expect_f7):
+    """(c) The one-message-per-turn invariant stated as a count, for every
+    branch, so a future restructure of this gate cannot quietly reintroduce a
+    second outbound on the happy paths either."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, project=project, open_lead=open_lead)
+
+    hooks_mod._try_flyer_catering_escape_gate(body, CHAT, _event())
+
+    assert len(s.sent) == expect_sends, s.sent
+    assert len(s.f7_calls) == expect_f7, s.f7_calls
+
+
+def test_a_failure_in_the_complaint_escalation_does_not_add_a_clarification(monkeypatch):
+    """The complaint and ambiguous senders sat inside the old try too, so a
+    failure in either also produced a second, contradictory message. Both now
+    live in the act phase."""
+    hooks_mod, actions_mod = _load_plugin()
+    s = _wire(monkeypatch, hooks_mod, actions_mod, open_lead=_lead("L0019"))
+
+    def _escalation_sends_then_raises(**_kwargs):
+        actions_mod.send_flyer_text(CHAT, "Sorry about that — the owner has been told.")
+        raise RuntimeError("boom after escalation send")
+    monkeypatch.setattr(hooks_mod, "_send_customer_complaint_escalation",
+                        _escalation_sends_then_raises)
+
+    out = hooks_mod._try_flyer_catering_escape_gate("Are u crazy", CHAT, _event())
+
+    assert len(s.sent) == 1, s.sent
+    assert out is not None and out is not hooks_mod._GATE_FALLTHROUGH
+    assert any("RuntimeError" in str(a.get("detail", "")) for a in s.audits)

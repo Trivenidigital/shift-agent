@@ -5279,7 +5279,8 @@ def _try_flyer_catering_escape_gate(
                           failure); caller returns None so the LLM handles it and the
                           flyer active-project arms are NOT run.
     """
-    try:
+    def _classify() -> tuple:
+        """Decide what the gate should DO. Sends nothing — see the note below."""
         phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
         active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)
         open_lead = actions.find_active_catering_lead_by_sender(phone, chat_id)
@@ -5288,13 +5289,11 @@ def _try_flyer_catering_escape_gate(
         # live must never be captured as a flyer queued-edit. One escalation ack;
         # no classifier call, no lead, no revision.
         if (active_project is not None or open_lead is not None) and actions.is_customer_complaint(text):
-            return _send_customer_complaint_escalation(
-                text=text, chat_id=chat_id, event=event, role=role,
-                project_id=str((active_project or {}).get("project_id") or ""),
-                lead_id=str((open_lead or {}).get("lead_id") or ""),
-            )
+            return ("complaint", role,
+                    str((active_project or {}).get("project_id") or ""),
+                    str((open_lead or {}).get("lead_id") or ""))
         if active_project is None:
-            return _GATE_FALLTHROUGH
+            return ("fallthrough",)
         project_id = str(active_project.get("project_id") or "")
         status = str(active_project.get("status") or "")
         is_catering, signals = (classify_fn or actions.classify_catering)(text)
@@ -5322,31 +5321,68 @@ def _try_flyer_catering_escape_gate(
                     detail=(f"project_id={project_id}; status={status}; "
                             f"sender_role={role}; open_lead={open_lead.get('lead_id')}"),
                 )
-                return _try_f7_primary_intercept(
-                    text, chat_id, event, signals=signals, allow_new_lead=True,
-                )
-            return _GATE_FALLTHROUGH
+                return ("f7", signals)
+            return ("fallthrough",)
         if _flyer_edit_signal_present(text, has_media=bool(media_path)):
-            return _send_flyer_catering_intent_clarification(
-                text=text, chat_id=chat_id, event=event,
-                project_id=project_id, status=status, role=role,
-                cause="ambiguous_flyer_and_catering",
-            )
+            return ("clarify_ambiguous", project_id, status, role)
         actions.audit_intercepted(
             reason="flyer_active_project_catering_intent_escape",
             chat_id=chat_id,
             detail=(f"project_id={project_id}; status={status}; sender_role={role}; "
                     f"signals={','.join(signals)[:200]}"),
         )
-        return _try_f7_primary_intercept(
-            text, chat_id, event, signals=signals, allow_new_lead=True,
-        )
+        return ("f7", signals)
+
+    # CLASSIFY (may fail -> clarification, since nothing has been sent yet).
+    try:
+        plan = _classify()
     except Exception as exc:  # noqa: BLE001 — a gate error must never guess a route
         return _send_flyer_catering_intent_clarification(
             text=text, chat_id=chat_id, event=event,
             project_id="", status="", role="",
             cause=f"gate_error:{type(exc).__name__}",
         )
+
+    # ACT. Outside the try on purpose: everything below can send to the
+    # customer, and a failure here must NOT be answered with a clarification —
+    # a message may already have gone out, and the pair contradicts itself.
+    if plan[0] == "fallthrough":
+        return _GATE_FALLTHROUGH
+    try:
+        if plan[0] == "complaint":
+            _kind, role, project_id, lead_id = plan
+            return _send_customer_complaint_escalation(
+                text=text, chat_id=chat_id, event=event, role=role,
+                project_id=project_id, lead_id=lead_id,
+            )
+        if plan[0] == "clarify_ambiguous":
+            _kind, project_id, status, role = plan
+            return _send_flyer_catering_intent_clarification(
+                text=text, chat_id=chat_id, event=event,
+                project_id=project_id, status=status, role=role,
+                cause="ambiguous_flyer_and_catering",
+            )
+        return _try_f7_primary_intercept(
+            text, chat_id, event, signals=plan[1], allow_new_lead=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # We cannot know whether a customer message already went out — F7 and
+        # both senders above send internally. A second message risks the
+        # contradictory pair this fix exists to remove, so the turn ends here:
+        # quiet for the CUSTOMER, audited for the operator. Returning a terminal
+        # result rather than re-raising also keeps the turn from reaching the
+        # LLM, which would answer on top of whatever was already delivered
+        # (pre_gateway_dispatch re-raises, so an escaping exception's handling
+        # is Hermes' to decide — not something to depend on here).
+        actions.audit_intercepted(
+            reason="flyer_primary_failed",
+            chat_id=chat_id,
+            subprocess_rc=2,
+            detail=(f"catering_escape_gate_action_failed=true; plan={plan[0]}; "
+                    f"error={type(exc).__name__}: {str(exc)[:200]}"),
+        )
+        return {"action": "skip",
+                "reason": f"cf-router catering escape gate: {plan[0]} failed after dispatch"}
 
 
 def _try_flyer_active_project_intercept(text: str, chat_id: str, event: Any, media_path: Optional[str] = None) -> Optional[dict]:
