@@ -1302,11 +1302,21 @@ def test_uncertain_proposal_send_lands_send_uncertain_not_send_failed(bridge_ser
     assert len(stub.requests) == 1, "never re-sent"
 
 
-def test_a_later_successful_send_does_not_supersede_an_uncertain_set(bridge_server, env_dir):
-    """P1/R1 — SEND_UNCERTAIN is terminal to AUTOMATION. The table allows
-    SEND_UNCERTAIN -> SUPERSEDED so an operator-driven resolution exists, and this
-    pins that no automated path can take it: `_mark_sent_and_supersede` supersedes
-    rows selected by `row.status == "SENT"`, so a later success walks past it."""
+def test_a_new_set_retires_a_prior_uncertain_set(bridge_server, env_dir):
+    """P1/R1 — the SEND_UNCERTAIN -> SUPERSEDED edge is REAL, not decorative.
+
+    An out-edge no writer performs is worse than no out-edge: the table advertises
+    a resolution that dead-ends, which is exactly how "uncertainty is permanently
+    irrecoverable" happens while the machine claims otherwise. So the supersede
+    loop retires a prior uncertain row exactly as it retires a stale SENT one.
+
+    This is BOOKKEEPING, NOT A RETRY, and the send count is the proof: the
+    uncertain set is never re-sent. Its options were composed for an earlier
+    request; the set that supersedes it is a NEW set, separately composed, sent
+    because a customer asked again. Nothing here reinterprets the uncertainty as
+    failure either — the row lands SUPERSEDED, which makes no claim about
+    delivery, and its ack evidence is left untouched.
+    """
     store = {
         "schema_version": 1,
         "next_sequence": 2,
@@ -1315,7 +1325,7 @@ def test_a_later_successful_send_does_not_supersede_an_uncertain_set(bridge_serv
     store["sets"][0]["failure_reason"] = "empty_message_id: {\"accepted\": true}"
     (env_dir / "state" / "catering-proposals.json").write_text(
         json.dumps(store), encoding="utf-8")
-    port, _stub = bridge_server
+    port, stub = bridge_server
     _seed_lead(env_dir)
     _seed_menu(env_dir)
 
@@ -1325,10 +1335,20 @@ def test_a_later_successful_send_does_not_supersede_an_uncertain_set(bridge_serv
     by_id = {row["proposal_set_id"]: row for row in _read_store(env_dir)["sets"]}
     assert by_id["CPS-L0014-000002"]["status"] == "SENT"
     uncertain = by_id["CPS-L0014-000001"]
-    assert uncertain["status"] == "SEND_UNCERTAIN", (
-        "automation moved a SEND_UNCERTAIN row; only an operator may resolve one")
+    assert uncertain["status"] == "SUPERSEDED", (
+        "the prior uncertain set must be retired by the new one — an out-edge "
+        "nothing takes is an advertised resolution that does not exist")
     assert uncertain["failure_reason"] == "empty_message_id: {\"accepted\": true}", (
-        "the ack evidence must survive a later send untouched")
+        "retiring the row must not erase the ack evidence an operator resolves it with")
+
+    # Through the guard, not around it: an illegal move would have been REFUSED
+    # (row untouched) and recorded, exactly as for a stale SENT row.
+    refused = [r for r in _read_audit(env_dir)
+               if r["type"] == "catering_proposal_transition_refused"]
+    assert refused == [], f"the transition was refused, not performed: {refused}"
+
+    # The retry test. ONE send: the new set's. The uncertain set is never re-sent.
+    assert len(stub.requests) == 1, "automation re-sent an unconfirmed proposal"
 
 
 def test_successful_proposal_send_emits_no_unconfirmed_row(bridge_server, env_dir):

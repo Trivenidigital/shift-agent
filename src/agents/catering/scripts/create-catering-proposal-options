@@ -807,7 +807,15 @@ def _mark_sent_and_supersede(
         for row in store.sets:
             if (
                 row.lead_id == lead_id
-                and row.status == "SENT"
+                # P1: SEND_UNCERTAIN is retired here too. Its menu most likely
+                # REACHED the customer, so a newer set genuinely supersedes it in
+                # their hands — and without this the SEND_UNCERTAIN -> SUPERSEDED
+                # edge would be one nothing ever takes, i.e. a resolution the
+                # state machine advertises and no writer performs.
+                # NOT symmetric with SEND_FAILED, deliberately: a definitely-failed
+                # set was never in the customer's hands, so there is nothing for a
+                # later set to supersede, and it stays terminal.
+                and row.status in ("SENT", "SEND_UNCERTAIN")
                 and row.proposal_set_id != proposal_set_id
                 and _proposal_sequence(row.proposal_set_id) < target_sequence
             ):

@@ -103,7 +103,7 @@ def test_illegal_transitions(frm, to):
     assert not is_proposal_set_transition_allowed(frm, to)
 
 
-def test_send_uncertain_is_operator_resolvable_but_terminal_to_automation():
+def test_send_uncertain_resolves_only_by_being_superseded():
     """P1/R1. `send_uncertain` means the bridge ACCEPTED the menu (2xx) and the ack
     body was unparseable — it most likely reached the customer. Recording that as
     SEND_FAILED asserts definite non-delivery, which is a lie the state row was
@@ -119,15 +119,12 @@ def test_send_uncertain_is_operator_resolvable_but_terminal_to_automation():
       * An empty out-edge set would make the row permanently irrecoverable, which
         R1 forbids.
 
-    So the resolution an operator actually performs — "reissue the options" — is
-    the one the table allows: the reissue mints a NEW set and the uncertain row is
-    retired as SUPERSEDED, exactly as a stale SENT set is.
-
-    Nothing automated can take that edge. `_mark_sent_and_supersede` selects the
-    rows it supersedes with `row.status == "SENT"`, so a successful later send
-    walks straight past a SEND_UNCERTAIN row — pinned behaviourally by
-    tests/test_create_catering_proposal_options.py::
-    test_a_later_successful_send_does_not_supersede_an_uncertain_set.
+    And the edge is REACHED, which is the half that makes it a resolution rather
+    than decoration: `_mark_sent_and_supersede` retires a lower-sequence
+    SEND_UNCERTAIN row when a new set goes out, exactly as it retires a stale SENT
+    one — pinned behaviourally by tests/test_create_catering_proposal_options.py::
+    test_a_new_set_retires_a_prior_uncertain_set, which also pins that the
+    uncertain set is never re-sent.
     """
     assert CATERING_PROPOSAL_SET_TRANSITIONS["SEND_UNCERTAIN"] == {"SUPERSEDED"}
 

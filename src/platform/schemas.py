@@ -2678,7 +2678,8 @@ CateringProposalStatus = Literal[
 #                              DRAFT -> SEND_UNCERTAIN (bridge accepted, ack unparseable)
 #     _mark_sent_and_supersede DRAFT -> SENT, or DRAFT -> SUPERSEDED when a
 #                              later-sequence set already went out (has_later_sent);
-#                              and, for every OTHER lower-sequence row, SENT -> SUPERSEDED
+#                              and, for every OTHER lower-sequence row,
+#                              SENT -> SUPERSEDED and SEND_UNCERTAIN -> SUPERSEDED
 #   select-catering-proposal
 #     _claim_selection         SENT -> SELECTING (optimistic claim)
 #     _finish_selection        SELECTING -> SELECTED | SELECTED_OWNER_CARD_FAILED
@@ -2691,15 +2692,23 @@ CateringProposalStatus = Literal[
 # next attempt mints a new set), and SELECTED / SELECT_FAILED / SUPERSEDED / EXPIRED
 # are end states of their respective paths.
 #
-# SEND_UNCERTAIN (P1) is the one state that is terminal to AUTOMATION without being
-# terminal outright. Its single out-edge to SUPERSEDED exists so an operator who
-# resolves the uncertainty by REISSUING the options can retire the row, exactly as a
-# stale SENT set is retired; an empty set would make the row permanently
-# irrecoverable. No automated writer can take that edge: `_mark_sent_and_supersede`
-# selects the rows it supersedes with `row.status == "SENT"`. The other two
-# conceivable resolutions are deliberately absent — SENT is unreachable by
-# CONSTRUCTION (a SENT set must carry an `outbound_message_id`, and the uncertain
-# path has none: the bridge returned no id in either sub-case), and SELECTING would
+# SEND_UNCERTAIN (P1) is not terminal: `_mark_sent_and_supersede` retires it to
+# SUPERSEDED when a NEW set for the same lead goes out, exactly as it retires a
+# stale SENT one. That edge is REACHED — an out-edge no writer performs would
+# advertise a resolution that dead-ends, which is how "uncertainty is permanently
+# irrecoverable" happens while the table claims otherwise.
+#
+# Retiring a stale row is BOOKKEEPING, NOT A RETRY: the uncertain set is never
+# re-sent, and the set that supersedes it is separately composed for a later,
+# customer-initiated request (both entry points in cf-router's hooks gate on
+# `is_proposal_request*` over an inbound message; no timer, sweep or cron invokes
+# the generator). Nothing reinterprets the uncertainty as failure either —
+# SUPERSEDED makes no claim about delivery, and the ack evidence in
+# `failure_reason` is left untouched.
+#
+# The other two conceivable resolutions are deliberately absent: SENT is unreachable
+# by CONSTRUCTION (a SENT set must carry an `outbound_message_id`, and the uncertain
+# path has none — the bridge returned no id in either sub-case), and SELECTING would
 # let a customer lock in a set nobody can show was delivered.
 CATERING_PROPOSAL_SET_TRANSITIONS: dict[CateringProposalStatus, set[CateringProposalStatus]] = {
     "DRAFT": {"SENT", "SEND_FAILED", "SEND_UNCERTAIN", "SUPERSEDED"},
