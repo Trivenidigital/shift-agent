@@ -214,7 +214,12 @@ def _run_script(
     options=None,
     request_text="please send two options",
     auto_generate: bool = False,
+    notify_rc: int | None = 0,
 ):
+    """notify_rc drives the shift-agent-notify-owner stub's exit status: 0 for a
+    page that landed, non-zero for one the notifier rejected (exit 6 = every
+    channel failed), None to make the call raise. The unconfirmed row's
+    `owner_paged` has to follow it."""
     sys_argv = [
         "create-catering-proposal-options",
         "--lead-id",
@@ -246,13 +251,17 @@ mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
 mod.LOG_LOCK = pathlib.Path({str(env_dir / 'logs' / 'decisions.log.lock')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
 notify_calls = []
+notify_rc = {notify_rc!r}
 def fake_notify_run(argv, **kwargs):
     notify_calls.append([str(part) for part in argv])
+    if notify_rc is None:
+        raise OSError("notify-owner unavailable")
     class Result:
-        returncode = 0
         stdout = ""
         stderr = ""
-    return Result()
+    result = Result()
+    result.returncode = notify_rc
+    return result
 mod.subprocess.run = fake_notify_run
 buf = io.StringIO()
 sys.stdout = buf
@@ -1297,6 +1306,32 @@ def test_a_failed_generation_send_pages_the_owner_exactly_once(
 
     assert parsed["rc"] == 6, result.stderr
     assert _unconfirmed(env_dir)[0]["owner_paged"] is True
+    assert len(parsed["notify_calls"]) == 1, parsed["notify_calls"]
+
+
+@pytest.mark.parametrize(
+    "notify_rc", [6, None],
+    ids=["notify_owner_exits_nonzero", "notify_owner_raises"],
+)
+@pytest.mark.parametrize("response_mode", ["down", "empty_id"])
+def test_a_page_that_never_landed_is_not_claimed_as_paged(
+    bridge_server, env_dir, response_mode, notify_rc
+):
+    """owner_paged is the row's claim that a HUMAN was told. shift-agent-notify-owner
+    exits non-zero when every channel failed, so a hard-coded True turns the one
+    row that exists to prove the failure surfaced into the reason nobody goes
+    looking. Still exactly one page attempt — the fix is truthfulness, not retry."""
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+    stub.response_mode = response_mode
+
+    result, parsed = _run_script(env_dir, port, notify_rc=notify_rc)
+
+    assert parsed["rc"] == 6, result.stderr
+    rows = _unconfirmed(env_dir)
+    assert len(rows) == 1
+    assert rows[0]["owner_paged"] is False
     assert len(parsed["notify_calls"]) == 1, parsed["notify_calls"]
 
 
