@@ -1242,7 +1242,13 @@ class TestQualificationTrigger:
         monkeypatch.setattr(mod, "LEADS_PATH", env["leads"])
         monkeypatch.setattr(mod, "LEADS_LOCK", Path(str(env["leads"]) + ".lock"))
         monkeypatch.setattr(mod, "LOG_PATH", env["log"])
-        monkeypatch.setattr(mod, "_bridge_post", lambda jid, msg: (True, "wamid.OK"))
+        # P17b: amend-catering-lead reads `status`, so it calls the canonical
+        # 4-tuple. `monkeypatch.setattr` (unlike a bare setattr) RAISES on a
+        # missing attribute, which is what surfaced this rename loudly instead of
+        # silently binding a dead name and letting a real bridge POST through.
+        monkeypatch.setattr(
+            mod, "_bridge_post_4tuple",
+            lambda jid, msg, **_kwargs: (True, "wamid.OK", "", "sent"))
         if patch is not None:
             monkeypatch.setattr(mod.catering_followups, "schedule_followup", patch)
         old = sys.argv

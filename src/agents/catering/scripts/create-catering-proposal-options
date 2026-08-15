@@ -25,7 +25,7 @@ from safe_io import (  # noqa: E402
     load_model,
     ndjson_append,
 )
-from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402  # PR-ε: chokepoint consolidation
+from safe_io import bridge_post as _bridge_post_4tuple  # noqa: E402  # P17b: status is consumed
 from schemas import (  # noqa: E402
     CateringLeadStore,
     CateringProposalGenerationFailed,
@@ -36,6 +36,7 @@ from schemas import (  # noqa: E402
     CateringProposalsGenerated,
     CateringRecomposedMenuSent,
     CateringRecomposeClarifySent,
+    CateringCustomerSendUnconfirmed,
     Menu,
     MenuItem,
     is_proposal_set_transition_allowed,
@@ -569,13 +570,17 @@ def _notify_owner_generation_failed(
     reason: str,
     detail: str = "",
     proposal_set_id: str = "",
-) -> None:
+) -> bool:
+    """Returns whether the page actually landed. shift-agent-notify-owner exits
+    non-zero when every channel failed, so the returncode is the only evidence the
+    owner was reached — discarding it is what let the audit row claim a page that
+    never happened."""
     message = (
         f"lead_id={lead_id} proposal_set_id={proposal_set_id or '(none)'} "
         f"proposal generation failed: {reason}. {detail[:500]}"
     )
     try:
-        subprocess.run(
+        proc = subprocess.run(
             [
                 str(NOTIFY_OWNER_BIN),
                 "--priority",
@@ -591,6 +596,11 @@ def _notify_owner_generation_failed(
         )
     except Exception as e:  # noqa: BLE001 - alerting is best-effort
         sys.stderr.write(f"WARN: shift-agent-notify-owner failed (non-fatal): {type(e).__name__}: {e}\n")
+        return False
+    if proc.returncode != 0:
+        sys.stderr.write(f"WARN: shift-agent-notify-owner exit {proc.returncode} "
+                         f"(non-fatal) lead={lead_id} reason={reason}\n")
+    return proc.returncode == 0
 
 
 def _fail_generation(
@@ -598,9 +608,80 @@ def _fail_generation(
     reason: str,
     detail: str = "",
     proposal_set_id: str = "",
-) -> None:
+    *,
+    send: tuple[str, str] | None = None,
+) -> bool:
+    """The single failure record: audit row, ONE page, and — when the failure was a
+    send (`send=(jid, send_status)`) — the customer_send_unconfirmed row carrying
+    the page's real outcome.
+
+    The unconfirmed row lives here rather than in `_post` because `_post` returns
+    BEFORE the page is attempted: a row written there could only ever guess at
+    `owner_paged`, and it guessed True. Writing it after the page is what makes the
+    field evidence instead of decoration. Returns whether the owner was reached."""
     _audit_failure(lead_id, reason, detail, proposal_set_id)
-    _notify_owner_generation_failed(lead_id, reason, detail, proposal_set_id)
+    paged = _notify_owner_generation_failed(lead_id, reason, detail, proposal_set_id)
+    if send is not None:
+        jid, send_status = send
+        _record_send_unconfirmed(jid, lead_id=lead_id, send_status=send_status,
+                                 detail=detail, paged=paged)
+    return paged
+
+
+def _delivery_certainty(send_status: str) -> str:
+    """'uncertain' only for safe_io's `send_uncertain` (bridge accepted, ack body
+    unparseable → most likely delivered). Every other non-sent status — transport
+    faults AND the policy drops ('refused', 'throttled', 'suppressed', 'disabled')
+    — means nothing was received."""
+    return "uncertain" if send_status == "send_uncertain" else "failed"
+
+
+def _record_send_unconfirmed(jid: str, *, lead_id: str, send_status: str,
+                             detail: str, paged: bool) -> None:
+    """The truthful record of a send that did not confirm.
+
+    What was missing was never the alert — it was the STATUS. The pre-existing
+    failure row hardcodes reason="bridge_unreachable" (a schema Literal, so it
+    cannot carry the real value without a schemas.py change), which reports a
+    `send_uncertain` — the bridge ACCEPTED the menu and it most likely arrived —
+    as a definite non-delivery. This row carries what actually happened, including
+    whether the page that was supposed to surface it reached anyone."""
+    try:
+        _append_audit(CateringCustomerSendUnconfirmed(
+            type="catering_customer_send_unconfirmed", ts=_now(),
+            lead_id=lead_id, script="create-catering-proposal-options",
+            send_kind="proposal_options", send_status=send_status,
+            delivery_certainty=_delivery_certainty(send_status),
+            detail=str(detail)[:2000], owner_paged=paged,
+            logical_turn_id=_RUN_IDENTITY["logical_turn_id"],
+            send_attempt_id=_RUN_IDENTITY["send_attempt_id"],
+            transport_destination=jid, outcome=send_status,
+        ))
+    except Exception as e:  # noqa: BLE001 — audit is best-effort
+        sys.stderr.write(f"audit emit (customer_send_unconfirmed) failed "
+                         f"(non-fatal): {type(e).__name__}: {e}\n")
+
+
+def _post(jid: str, text: str, *, lead_id: str) -> tuple[bool, str, str]:
+    """(ok, message_id_or_error, status) over the canonical 4-tuple chokepoint.
+
+    Per-script paging decision — this script does NOT add a page, and that is
+    deliberate rather than an omission. Every one of its three send sites already
+    calls `_fail_generation`, which pages the owner through
+    `_notify_owner_generation_failed`. A second page for the same event would be
+    noise, and the surest way to teach an owner to ignore the channel is to alert
+    twice for one failure.
+
+    For the same reason the unconfirmed row is emitted by `_fail_generation` and
+    not here: this function returns before the page is attempted, so it cannot
+    know what to put in `owner_paged`. Each failed send site passes
+    `send=(jid, status)` to `_fail_generation`, which pages first and then records
+    the real result.
+    """
+    ok4, mid, err, status = _bridge_post_4tuple(jid, text)
+    if ok4:
+        return True, mid, status
+    return False, err or status, status
 
 
 def _create_draft(
@@ -931,9 +1012,11 @@ def _run_recompose(args) -> int:
     plan = recompose_plan(args.request_text, _load_latest_sent_set(args.lead_id), menu_by_name)
 
     if plan["kind"] == "clarify":
-        ok, mid_or_err = _bridge_post(args.customer_jid, BRIDGE_PREFIX + plan["message"])
+        ok, mid_or_err, _status = _post(
+            args.customer_jid, BRIDGE_PREFIX + plan["message"], lead_id=args.lead_id)
         if not ok:
-            _fail_generation(args.lead_id, "bridge_unreachable", mid_or_err)
+            _fail_generation(args.lead_id, "bridge_unreachable", mid_or_err,
+                             send=(args.customer_jid, _status))
             print(json.dumps({"mode": "clarify", "sent": False}))
             return EXIT_DEPENDENCY_DOWN
         _append_audit(CateringRecomposeClarifySent(
@@ -983,9 +1066,10 @@ def _run_recompose(args) -> int:
         sys.stderr.write(f"recompose_sections_mismatch: {detail}\n")
         return EXIT_INVALID_INPUT
 
-    ok, mid_or_err = _bridge_post(args.customer_jid, body)
+    ok, mid_or_err, _status = _post(args.customer_jid, body, lead_id=args.lead_id)
     if not ok:
-        _fail_generation(args.lead_id, "bridge_unreachable", mid_or_err)
+        _fail_generation(args.lead_id, "bridge_unreachable", mid_or_err,
+                         send=(args.customer_jid, _status))
         print(json.dumps({"mode": "recomposed", "sent": False}))
         return EXIT_DEPENDENCY_DOWN
     _append_audit(CateringRecomposedMenuSent(
@@ -1086,10 +1170,11 @@ def main() -> int:
         sys.stderr.write(f"invalid_options: {e}\n")
         return EXIT_INVALID_INPUT
 
-    ok, message_id_or_error = _bridge_post(args.customer_jid, body)
+    ok, message_id_or_error, _status = _post(args.customer_jid, body, lead_id=args.lead_id)
     if not ok:
         _emit_transition_refusals(_mark_send_failed(proposal_set_id, message_id_or_error))
-        _fail_generation(args.lead_id, "bridge_unreachable", message_id_or_error, proposal_set_id)
+        _fail_generation(args.lead_id, "bridge_unreachable", message_id_or_error,
+                         proposal_set_id, send=(args.customer_jid, _status))
         print(json.dumps({"proposal_set_id": proposal_set_id, "sent": False}))
         return EXIT_DEPENDENCY_DOWN
 

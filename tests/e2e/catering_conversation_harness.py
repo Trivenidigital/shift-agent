@@ -157,7 +157,26 @@ SENDS: list[dict] = []      # {turn, via, jid, message}
 CURRENT_TURN = 0
 
 
+def _make_capture_4tuple(via: str):
+    """(ok, message_id, error, status) — the shape P17-converted scripts read.
+
+    They branch on `status`, so a 2-tuple capture would unpack-error rather than
+    deliver. `sent` is the delivered-cleanly status.
+    """
+    def _cap4(jid: str, message: str, **_kwargs):
+        SENDS.append({"turn": CURRENT_TURN, "via": via, "jid": jid, "message": message})
+        return True, f"msg_{via}_{len(SENDS):04d}", "", "sent"
+    return _cap4
+
+
 def _make_capture(via: str):
+    """2-tuple capture, for scripts still on the `bridge_post_2tuple` alias.
+
+    P17b: currently UNUSED — every script this harness drives now reads `status`
+    and takes the 4-tuple above. Kept because the alias still exists in safe_io
+    and other catering scripts remain on it; the next one wired into this harness
+    will need this shape again. If safe_io ever drops the alias, delete this too.
+    """
     def _cap(jid: str, message: str):
         SENDS.append({"turn": CURRENT_TURN, "via": via, "jid": jid, "message": message})
         return True, f"msg_{via}_{len(SENDS):04d}"
@@ -169,7 +188,26 @@ _SCRIPT_CACHE: dict[str, object] = {}
 
 
 def _load_patched(name: str, filename: str, patches: dict) -> object:
+    """Patch module attributes, REFUSING to create ones that do not exist.
+
+    Bare `setattr` silently creates a dead attribute when the script renames or
+    drops the name being patched, and the script then runs unintercepted — here
+    that means a real bridge POST. This harness is the worst possible place for
+    that failure to be silent: it is skipped unless OPENROUTER_API_KEY is set, so
+    nothing in CI would ever notice.
+
+    This guard covers the renamed/dropped case only. The imported-but-no-longer-
+    called case (#708) keeps `hasattr` True and is caught statically by
+    test_send_chokepoint_singularity.py's third detector instead.
+    """
     mod = load_script(name, SCRIPTS / filename)
+    missing = [k for k in patches if not hasattr(mod, k)]
+    if missing:
+        raise AttributeError(
+            f"{filename}: harness patches names the script does not define: "
+            f"{sorted(missing)}. The script was renamed or refactored and this "
+            f"harness would have run it UNINTERCEPTED (real bridge POST)."
+        )
     for k, v in patches.items():
         setattr(mod, k, v)
     return mod
@@ -198,7 +236,10 @@ def run_create_lead(*, customer_phone, customer_name, raw_inquiry, message_id, f
         "CONFIG_PATH": CONFIG_PATH, "LEADS_PATH": LEADS_PATH,
         "LEADS_LOCK": Path(str(LEADS_PATH) + ".lock"), "LOG_PATH": DECISIONS_LOG,
         "TEMPLATE_DIR": TEMPLATES, "MENU_PATH": MENU_PATH,
-        "_bridge_post": _make_capture("create-catering-lead"),
+        # P17-converted: all three sends go through the 4-tuple chokepoint, so
+        # patching the `_bridge_post` alias (still imported, never called)
+        # intercepted nothing.
+        "_bridge_post_4tuple": _make_capture_4tuple("create-catering-lead"),
     })
     argv = ["create-catering-lead", "--customer-phone", customer_phone,
             "--customer-name", customer_name, "--raw-inquiry", raw_inquiry[:1000],
@@ -212,7 +253,9 @@ def run_create_lead(*, customer_phone, customer_name, raw_inquiry, message_id, f
 
 def run_send_ack(jid, text, lead_id):
     mod = _load_patched("e2e_ack", "send-catering-ack", {
-        "LOG_PATH": DECISIONS_LOG, "_bridge_post": _make_capture("send-catering-ack"),
+        "LOG_PATH": DECISIONS_LOG,
+        # P17b-converted, same reason as create-catering-lead above.
+        "_bridge_post_4tuple": _make_capture_4tuple("send-catering-ack"),
     })
     argv = ["send-catering-ack", "--customer-jid", jid, "--message-text", text,
             "--lead-id", lead_id]
@@ -225,7 +268,8 @@ def run_proposal_options(*, lead_id, customer_jid, source_message_id, request_te
         "LEADS_PATH": LEADS_PATH, "LEADS_LOCK": Path(str(LEADS_PATH) + ".lock"),
         "MENU_PATH": MENU_PATH, "LOG_PATH": DECISIONS_LOG,
         "LOG_LOCK": Path(str(DECISIONS_LOG) + ".lock"),
-        "_bridge_post": _make_capture("create-catering-proposal-options"),
+        # P17b: this script now reads `status`, so patch the 4-tuple seam.
+        "_bridge_post_4tuple": _make_capture_4tuple("create-catering-proposal-options"),
         "_notify_owner_generation_failed": lambda *a, **k: None,
     })
     argv = ["create-catering-proposal-options", "--lead-id", lead_id,
@@ -241,7 +285,7 @@ def run_recompose_from_sent(*, lead_id, customer_jid, source_message_id, request
         "LEADS_PATH": LEADS_PATH, "LEADS_LOCK": Path(str(LEADS_PATH) + ".lock"),
         "MENU_PATH": MENU_PATH, "LOG_PATH": DECISIONS_LOG,
         "LOG_LOCK": Path(str(DECISIONS_LOG) + ".lock"),
-        "_bridge_post": _make_capture("recompose-from-sent"),
+        "_bridge_post_4tuple": _make_capture_4tuple("recompose-from-sent"),
         "_notify_owner_generation_failed": lambda *a, **k: None,
     })
     argv = ["create-catering-proposal-options", "--lead-id", lead_id,
@@ -256,7 +300,11 @@ def run_select_proposal(*, lead_id, customer_jid, customer_message_id, selection
         "LEADS_PATH": LEADS_PATH, "LEADS_LOCK": Path(str(LEADS_PATH) + ".lock"),
         "MENU_PATH": MENU_PATH, "LOG_PATH": DECISIONS_LOG,
         "LOG_LOCK": Path(str(DECISIONS_LOG) + ".lock"),
-        "_bridge_post": _make_capture("select-catering-proposal"),
+        # P17b: select-catering-proposal reads `status`, so it calls the canonical
+        # 4-tuple. Patching the old `_bridge_post` name here would bind a DEAD
+        # attribute and let the script issue REAL bridge POSTs — the exact defect
+        # detector 3 in test_send_chokepoint_singularity.py exists to catch.
+        "_bridge_post_4tuple": _make_capture_4tuple("select-catering-proposal"),
     })
     argv = ["select-catering-proposal", "--lead-id", lead_id, "--customer-jid", customer_jid,
             "--customer-message-id", customer_message_id, "--selection-text", selection_text]

@@ -19,10 +19,11 @@ from pydantic import TypeAdapter  # noqa: E402
 
 from exit_codes import EXIT_DEPENDENCY_DOWN, EXIT_INVALID_INPUT, EXIT_NOT_FOUND, EXIT_OK  # noqa: E402
 from safe_io import FileLock, assert_load_status_clean, atomic_write_json, load_model, ndjson_append  # noqa: E402
-from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402  # PR-ε: chokepoint consolidation
+from safe_io import bridge_post as _bridge_post_4tuple  # noqa: E402  # P17b: status is consumed
 from schemas import (  # noqa: E402
     CateringCustomerAckFailed,
     CateringCustomerAckSent,
+    CateringCustomerSendUnconfirmed,
     CateringLeadStore,
     CateringProposalOption,
     CateringProposalSelected,
@@ -166,6 +167,97 @@ def _audit_failed(lead_id: str, reason: str, detail: str = "", proposal_set_id: 
             outcome=reason,
         )
     )
+
+
+def _delivery_certainty(send_status: str) -> str:
+    """'uncertain' only for safe_io's `send_uncertain` (bridge accepted, ack body
+    unparseable → most likely delivered). Every other non-sent status — transport
+    faults AND the policy drops ('refused', 'throttled', 'suppressed', 'disabled')
+    — means nothing was received."""
+    return "uncertain" if send_status == "send_uncertain" else "failed"
+
+
+def _page_owner_ack_unconfirmed(lead_id: str, certainty: str, detail: str) -> bool:
+    """Page over `shift-agent-notify-owner` (Pushover), NOT the bridge that just
+    failed to confirm. Reached ONLY for the post-finalize acknowledgment — see
+    `_post`'s note on why the other eleven sends record without paging."""
+    if certainty == "uncertain":
+        title = f"Catering {lead_id}: selection ack NOT confirmed"
+        body = (f"Catering {lead_id}: the customer's selection WAS recorded and "
+                f"finalized, and the acknowledgment was accepted by the bridge "
+                f"but not confirmed — so it most likely DID arrive. Check before "
+                f"re-sending.\n"
+                f"Detail: {detail[:200]}")
+    else:
+        title = f"Catering {lead_id}: selection ack NOT delivered"
+        body = (f"Catering {lead_id}: the customer's selection WAS recorded and "
+                f"finalized, but the acknowledgment did NOT reach them. They have "
+                f"no confirmation that their choice registered. Message them "
+                f"manually.\n"
+                f"Detail: {detail[:200]}")
+    sys.stderr.write(f"catering_send_unconfirmed_alert_dispatched lead={lead_id} "
+                     f"kind=proposal_selection_reply certainty={certainty}\n")
+    try:
+        proc = subprocess.run(
+            [str(NOTIFY_OWNER_BIN), "--priority", "1", "--title", title, "--", body],
+            check=False, capture_output=True, text=True, timeout=10,
+        )
+        paged = proc.returncode == 0
+    except Exception as e:  # noqa: BLE001 — alerting is best-effort
+        sys.stderr.write(f"catering_send_unconfirmed_alert_delivery_failed "
+                         f"lead={lead_id} error={type(e).__name__}: {e}\n")
+        return False
+    sys.stderr.write(f"catering_send_unconfirmed_alert_delivered lead={lead_id} "
+                     f"ok={paged}\n")
+    return paged
+
+
+def _post(jid: str, text: str, *, lead_id: str, page: bool = False) -> tuple[bool, str]:
+    """THE customer send for this script. Every one of the twelve call sites goes
+    through here, so the status decision lives in ONE place instead of twelve
+    copies that could drift.
+
+    Returns (ok, message_id_or_error) — the shape the call sites already expect.
+
+    Per-script paging decision. Eleven of the twelve sends are responses to a
+    customer message that changed NO durable state: "that proposal expired",
+    "which option did you mean", "that didn't work". If one of those does not
+    land the customer simply gets silence and messages again — self-correcting,
+    and paging on each would train the owner to ignore the channel. They are
+    RECORDED, not paged.
+
+    The exception (`page=True`) is the acknowledgment AFTER a successful
+    selection+finalize. There the lead has moved to CUSTOMER_FINALIZED and the
+    owner card has fired, so the state says the customer chose while the customer
+    was told nothing — the same shape as #708's BOOKED-but-silent case, and the
+    one a human has to close.
+
+    No lead marker: `customer_ack_status` belongs to record-catering-acceptance's
+    accept/decline confirmation, and writing a selection outcome into it would
+    corrupt the acceptance signal. The audit row carries this fact instead.
+    """
+    ok4, mid, err, status = _bridge_post_4tuple(jid, text)
+    if ok4:
+        return True, mid
+    detail = err or status
+    certainty = _delivery_certainty(status)
+    paged = _page_owner_ack_unconfirmed(lead_id, certainty, detail) if page else False
+    sys.stderr.write(f"customer send failed: {detail} (status={status})\n")
+    try:
+        _append_audit(CateringCustomerSendUnconfirmed(
+            type="catering_customer_send_unconfirmed", ts=_now(),
+            lead_id=lead_id, script="select-catering-proposal",
+            send_kind="proposal_selection_reply", send_status=status,
+            delivery_certainty=certainty, detail=str(detail)[:2000],
+            owner_paged=paged,
+            logical_turn_id=_RUN_IDENTITY["logical_turn_id"],
+            send_attempt_id=_RUN_IDENTITY["send_attempt_id"],
+            transport_destination=jid, outcome=status,
+        ))
+    except Exception as e:  # noqa: BLE001 — audit is best-effort
+        sys.stderr.write(f"audit emit (customer_send_unconfirmed) failed "
+                         f"(non-fatal): {type(e).__name__}: {e}\n")
+    return False, detail
 
 
 def _audit_ack(lead_id: str, customer_jid: str, ok: bool, message_id_or_error: str) -> None:
@@ -702,11 +794,11 @@ def main() -> int:
     except Exception as e:
         sys.stderr.write(f"proposal load failed: {e}\n")
         _audit_failed(args.lead_id, "no_sent_proposal", str(e))
-        _bridge_post(args.customer_jid, _no_active_proposal_text())
+        _post(args.customer_jid, _no_active_proposal_text(), lead_id=args.lead_id)
         return EXIT_NOT_FOUND
     if proposal is None:
         _audit_failed(args.lead_id, "no_sent_proposal", "latest proposal is not SENT")
-        _bridge_post(args.customer_jid, _no_active_proposal_text())
+        _post(args.customer_jid, _no_active_proposal_text(), lead_id=args.lead_id)
         return EXIT_NOT_FOUND
 
     # The "valid until <date>" line the customer was sent is a commitment, and until
@@ -717,7 +809,7 @@ def main() -> int:
     if find_expired_sent_proposal_sets([proposal], _now()):
         refusals = _expire_proposal_set(proposal.proposal_set_id)
         _emit_transition_refusals(refusals)
-        _bridge_post(args.customer_jid, _expired_proposal_text())
+        _post(args.customer_jid, _expired_proposal_text(), lead_id=args.lead_id)
         _audit_failed(
             args.lead_id, "proposal_expired",
             f"expires_at={proposal.expires_at.isoformat() if proposal.expires_at else ''} "
@@ -730,7 +822,7 @@ def main() -> int:
 
     option_id, reason = _resolve_selection(args.selection_text, proposal.options)
     if option_id is None:
-        _bridge_post(args.customer_jid, _clarification_text(proposal.options))
+        _post(args.customer_jid, _clarification_text(proposal.options), lead_id=args.lead_id)
         _audit_failed(args.lead_id, reason, args.selection_text, proposal.proposal_set_id)
         return EXIT_INVALID_INPUT
 
@@ -739,11 +831,11 @@ def main() -> int:
     except Exception as e:
         sys.stderr.write(f"lead load failed: {e}\n")
         _audit_failed(args.lead_id, "lead_not_found", str(e), proposal.proposal_set_id)
-        _bridge_post(args.customer_jid, _no_active_proposal_text())
+        _post(args.customer_jid, _no_active_proposal_text(), lead_id=args.lead_id)
         return EXIT_NOT_FOUND
     if code is None:
         _audit_failed(args.lead_id, "lead_not_found", "lead missing owner_approval_code", proposal.proposal_set_id)
-        _bridge_post(args.customer_jid, _no_active_proposal_text())
+        _post(args.customer_jid, _no_active_proposal_text(), lead_id=args.lead_id)
         return EXIT_NOT_FOUND
 
     try:
@@ -756,12 +848,12 @@ def main() -> int:
     except Exception as e:
         sys.stderr.write(f"proposal selection claim failed: {e}\n")
         _audit_failed(args.lead_id, "no_sent_proposal", str(e), proposal.proposal_set_id)
-        _bridge_post(args.customer_jid, _no_active_proposal_text())
+        _post(args.customer_jid, _no_active_proposal_text(), lead_id=args.lead_id)
         return EXIT_NOT_FOUND
 
     if isinstance(claim, SelectionClaimFailure):
         _emit_transition_refusals(claim.refusals)
-        _bridge_post(args.customer_jid, _failed_text(claim.options) if claim.options else _no_active_proposal_text())
+        _post(args.customer_jid, _failed_text(claim.options) if claim.options else _no_active_proposal_text(), lead_id=args.lead_id)
         _audit_failed(args.lead_id, claim.reason, claim.detail, claim.proposal_set_id)
         return claim.exit_code
 
@@ -773,14 +865,14 @@ def main() -> int:
         options, refusals = _fail_claim_after_finalize_exception(
             claim.proposal_set_id, claim.option_id, detail)
         _emit_transition_refusals(refusals)
-        _bridge_post(args.customer_jid, _failed_text(options or claim.options))
+        _post(args.customer_jid, _failed_text(options or claim.options), lead_id=args.lead_id)
         _audit_failed(args.lead_id, "finalize_exit_other", detail, claim.proposal_set_id)
         return EXIT_DEPENDENCY_DOWN
 
     result = _finish_selection(args.lead_id, claim.proposal_set_id, claim.option_id, finalize_rc)
     _emit_transition_refusals(result.refusals)
     if isinstance(result, SelectionClaimFailure):
-        _bridge_post(args.customer_jid, _failed_text(result.options) if result.options else _no_active_proposal_text())
+        _post(args.customer_jid, _failed_text(result.options) if result.options else _no_active_proposal_text(), lead_id=args.lead_id)
         _audit_failed(args.lead_id, result.reason, result.detail, result.proposal_set_id)
         return result.exit_code
 
@@ -792,7 +884,9 @@ def main() -> int:
             _notify_owner_card_failed(args.lead_id, result.proposal_set_id, result.option_id)
         # Capture the ack's bridge outbound message id so the customer-facing selection
         # (and compound selection+pricing) response is traceable in the audit trail.
-        ack_ok, ack_mid_or_err = _bridge_post(args.customer_jid, _ack_text(result.option_id))
+        ack_ok, ack_mid_or_err = _post(
+            args.customer_jid, _ack_text(result.option_id),
+            lead_id=args.lead_id, page=True)
         _audit_ack(args.lead_id, args.customer_jid, ack_ok, ack_mid_or_err)
         return finalize_rc
 
@@ -802,7 +896,7 @@ def main() -> int:
         f"finalize exited {finalize_rc}",
         result.proposal_set_id,
     )
-    _bridge_post(args.customer_jid, _failed_text(result.options))
+    _post(args.customer_jid, _failed_text(result.options), lead_id=args.lead_id)
     return finalize_rc if finalize_rc in {2, 4, 11} else EXIT_INVALID_INPUT
 
 

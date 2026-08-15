@@ -24,14 +24,28 @@ PLATFORM_DIR = REPO / "src" / "platform"
 
 class _BridgeStub(BaseHTTPRequestHandler):
     requests: list[dict] = []
+    # P17b: which safe_io.bridge_post status the next POST produces.
+    #   "ok"         -> 200 + {"id": ...}          -> "sent"
+    #   "http_error" -> 500                        -> "http_error"
+    #   "empty_id"   -> 200 + no id                -> "send_uncertain"
+    # `send_uncertain` means the bridge ACCEPTED the message, so it most likely
+    # DID reach the customer — never a definite failure.
+    response_mode = "ok"
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode("utf-8")
         self.__class__.requests.append(json.loads(body))
+        if self.__class__.response_mode == "http_error":
+            self.send_response(500)
+            self.end_headers()
+            return
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
+        if self.__class__.response_mode == "empty_id":
+            self.wfile.write(json.dumps({"accepted": True}).encode())
+            return
         self.wfile.write(
             json.dumps({"id": f"msg_{int(time.time() * 1000)}_{len(self.__class__.requests)}"}).encode()
         )
@@ -43,6 +57,7 @@ class _BridgeStub(BaseHTTPRequestHandler):
 @pytest.fixture
 def bridge_server():
     _BridgeStub.requests = []
+    _BridgeStub.response_mode = "ok"
     server = HTTPServer(("127.0.0.1", 0), _BridgeStub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -722,3 +737,90 @@ def test_menu_problem_blocks_finalize_and_audits_invalid_selection(
     assert audit["type"] == "catering_proposal_selection_failed"
     assert audit["reason"] == "invalid_selection"
     assert expected_detail in audit["detail"]
+
+
+# ── P17b: the selection reply's real fate is recorded ────────────────────────
+# All twelve customer sends here went through the 2-tuple adapter and dropped
+# `status`, so a failed or merely-unconfirmed reply left no trace but stderr.
+
+def _unconfirmed(env_dir):
+    return [r for r in _read_audit(env_dir)
+            if r["type"] == "catering_customer_send_unconfirmed"]
+
+
+def test_failed_selection_ack_is_recorded_and_pages_the_owner(bridge_server, env_dir, monkeypatch):
+    """The ack AFTER a successful selection+finalize is the one send here that
+    pages: the lead has moved to CUSTOMER_FINALIZED and the owner card has fired,
+    so the state says the customer chose while the customer was told nothing."""
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_proposals(env_dir, [_proposal_set("CPS-L0014-000001", "SENT")])
+    _seed_menu(env_dir)
+    mod, calls = _load_script(env_dir, port, monkeypatch)
+    stub.response_mode = "http_error"
+
+    rc = _run_main(mod, "Option 2")
+
+    assert rc == 0, "the selection itself still succeeded"
+    rows = _unconfirmed(env_dir)
+    assert len(rows) == 1
+    assert rows[0]["send_kind"] == "proposal_selection_reply"
+    assert rows[0]["script"] == "select-catering-proposal"
+    assert rows[0]["delivery_certainty"] == "failed"
+    assert rows[0]["send_status"] == "http_error"
+    assert rows[0]["owner_paged"] is True
+    notify = [c for c in calls if str(mod.NOTIFY_OWNER_BIN) in [str(p) for p in c]]
+    assert notify, "the owner is paged over Pushover, not the bridge that just failed"
+    assert "no confirmation that their choice registered" in " ".join(
+        str(p) for p in notify[-1])
+    assert len(stub.requests) == 1, "never re-sent"
+
+
+def test_uncertain_selection_ack_is_not_recorded_as_a_definite_failure(bridge_server, env_dir, monkeypatch):
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_proposals(env_dir, [_proposal_set("CPS-L0014-000001", "SENT")])
+    _seed_menu(env_dir)
+    mod, calls = _load_script(env_dir, port, monkeypatch)
+    stub.response_mode = "empty_id"
+
+    _run_main(mod, "Option 2")
+
+    rows = _unconfirmed(env_dir)
+    assert rows[0]["delivery_certainty"] == "uncertain"
+    assert rows[0]["send_status"] == "send_uncertain"
+    notify = [c for c in calls if str(mod.NOTIFY_OWNER_BIN) in [str(p) for p in c]]
+    assert "most likely DID arrive" in " ".join(str(p) for p in notify[-1])
+
+
+def test_failed_clarification_is_recorded_but_pages_nobody(bridge_server, env_dir, monkeypatch):
+    """The other eleven sends answer a customer message that changed NO durable
+    state. If one does not land the customer gets silence and messages again —
+    self-correcting. Paging on each would train the owner to ignore the channel."""
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_proposals(env_dir, [_proposal_set("CPS-L0014-000001", "SENT")])
+    _seed_menu(env_dir)
+    mod, calls = _load_script(env_dir, port, monkeypatch)
+    stub.response_mode = "http_error"
+
+    rc = _run_main(mod, "what's in these menus?")
+
+    assert rc != 0, "an info query clarifies rather than selecting"
+    rows = _unconfirmed(env_dir)
+    assert len(rows) == 1
+    assert rows[0]["send_kind"] == "proposal_selection_reply"
+    assert rows[0]["owner_paged"] is False
+    notify = [c for c in calls if str(mod.NOTIFY_OWNER_BIN) in [str(p) for p in c]]
+    assert notify == [], "a clarification that did not land pages nobody"
+
+
+def test_successful_sends_emit_no_unconfirmed_row(bridge_server, env_dir, monkeypatch):
+    port, _stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_proposals(env_dir, [_proposal_set("CPS-L0014-000001", "SENT")])
+    _seed_menu(env_dir)
+    mod, _calls = _load_script(env_dir, port, monkeypatch)
+
+    assert _run_main(mod, "Option 2") == 0
+    assert _unconfirmed(env_dir) == []

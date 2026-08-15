@@ -26,6 +26,7 @@ import sys
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -63,7 +64,8 @@ OWNER, GROUP = _ids()
 
 
 class Sandbox:
-    def __init__(self, tmp_path: Path):
+    def __init__(self, tmp_path: Path, monkeypatch):
+        self.monkeypatch = monkeypatch
         self.root = tmp_path
         self.state = tmp_path / "state"
         self.logs = tmp_path / "logs"
@@ -85,6 +87,7 @@ class Sandbox:
             "catering": {"enabled": True},
         }), encoding="utf-8")
         self.sends: list[dict] = []
+        self.pages: list = []
 
     def write_lead(self, **overrides) -> dict:
         lead = {
@@ -124,7 +127,7 @@ class Sandbox:
 
 @pytest.fixture
 def sb(tmp_path, monkeypatch):
-    box = Sandbox(tmp_path)
+    box = Sandbox(tmp_path, monkeypatch)
     monkeypatch.setenv("SHIFT_AGENT_CATERING_AMENDMENTS_PATH", str(box.amendments))
     monkeypatch.setenv("SHIFT_AGENT_CATERING_QUOTE_LEDGER_PATH", str(box.ledger))
     # The ledger's POSIX fs-owner contract defaults to shift-agent:shift-agent (the
@@ -139,7 +142,8 @@ def sb(tmp_path, monkeypatch):
     return box
 
 
-def _run(sb: Sandbox, argv, *, bridge_ok=True, stdin_text=None):
+def _run(sb: Sandbox, argv, *, bridge_ok=True, stdin_text=None,
+         bridge_status="connect_failed"):
     mod = load_script("amend_lead_under_test", SCRIPTS / "amend-catering-lead")
     mod.CONFIG_PATH = sb.config
     mod.LEADS_PATH = sb.leads
@@ -148,10 +152,21 @@ def _run(sb: Sandbox, argv, *, bridge_ok=True, stdin_text=None):
     mod.AMENDMENTS_PATH = sb.amendments
     mod.LEDGER_PATH = sb.ledger
 
-    def _bridge(jid, message):
+    # P17b: the script consumes the CANONICAL 4-tuple, so the stub must be the
+    # 4-tuple one. Both seams are bound through monkeypatch.setattr with the
+    # default raising=True: a bare assignment to a stale name (`_bridge_post`)
+    # would create a DEAD attribute and the script would issue a REAL bridge POST,
+    # whereas this fails test SETUP the moment the production name moves.
+    def _bridge(jid, message, **_kwargs):
         sb.sends.append({"jid": jid, "message": message})
-        return (True, "wamid.OUT") if bridge_ok else (False, "connection refused")
-    mod._bridge_post = _bridge
+        return ((True, "wamid.OUT", "", "sent") if bridge_ok
+                else (False, "", "connection refused", bridge_status))
+    sb.monkeypatch.setattr(mod, "_bridge_post_4tuple", _bridge)
+
+    def _notify(cmd, **_kwargs):
+        sb.pages.append({"argv": [str(part) for part in cmd]})
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    sb.monkeypatch.setattr(mod, "subprocess", SimpleNamespace(run=_notify))
 
     old_argv, old_stdin = sys.argv, sys.stdin
     sys.argv = argv
@@ -176,13 +191,15 @@ def _amend(sb, **kw):
             "--expected-owner", OWNER, "--expected-group", GROUP]
     if kw.get("message_id"):
         argv += ["--message-id", kw["message_id"]]
-    return _run(sb, argv, bridge_ok=kw.get("bridge_ok", True))
+    return _run(sb, argv, bridge_ok=kw.get("bridge_ok", True),
+                bridge_status=kw.get("bridge_status", "connect_failed"))
 
 
-def _answer(sb, text, *, lead_id="L0001", message_id="wamid.ANS", bridge_ok=True):
+def _answer(sb, text, *, lead_id="L0001", message_id="wamid.ANS", bridge_ok=True,
+            bridge_status="connect_failed"):
     return _run(sb, ["amend-catering-lead", "--lead-id", lead_id, "--mode", "answer",
                      "--answer-text", text, "--message-id", message_id],
-                bridge_ok=bridge_ok)
+                bridge_ok=bridge_ok, bridge_status=bridge_status)
 
 
 def _answer_via_stdin(sb, text, *, lead_id="L0001", message_id="wamid.ANS"):
@@ -873,3 +890,149 @@ def test_argv_answer_text_still_works_for_compatibility(sb):
     rc, payload, _err = _answer(sb, "Grand Ballroom")
     assert rc == 0
     assert payload["fields_filled"] == ["venue"]
+
+
+# ── P17b: the amended card's real fate is recorded, not assumed ──────────────
+# The amendment is applied and the lead persisted BEFORE the card is sent. When
+# the card does not arrive, the lead sits waiting on an approval the owner may
+# never have seen, and the only trace used to be a line on stderr.
+
+def _unconfirmed(sb):
+    return sb.audit_rows("catering_customer_send_unconfirmed")
+
+
+def test_delivered_amended_card_is_recorded_on_the_lead(sb):
+    sb.write_lead()
+    sb.capture("actually make it 280 people", message_id="wamid.A1")
+
+    rc, _payload, _err = _amend(sb)
+
+    assert rc == 0
+    assert sb.read_lead()["card_delivery_status"] == "sent"
+    assert _unconfirmed(sb) == []
+    assert sb.pages == [], "a delivered card pages nobody"
+
+
+def test_failed_amended_card_marks_the_lead_and_pages_the_owner(sb):
+    sb.write_lead()
+    sb.capture("actually make it 280 people", message_id="wamid.A1")
+
+    rc, _payload, _err = _amend(sb, bridge_ok=False)
+
+    lead = sb.read_lead()
+    assert rc == 6
+    assert lead["extracted"]["headcount"] == 280, "the amendment IS applied"
+    assert lead["card_delivery_status"] == "failed"
+    assert lead["card_delivery_status_at"]
+    rows = _unconfirmed(sb)
+    assert len(rows) == 1
+    assert rows[0]["send_kind"] == "amendment_owner_card"
+    assert rows[0]["delivery_certainty"] == "failed"
+    assert rows[0]["send_status"] == "connect_failed"
+    assert rows[0]["script"] == "amend-catering-lead"
+    assert rows[0]["owner_paged"] is True
+    body = " ".join(sb.pages[-1]["argv"])
+    assert "waiting on an approval the owner never saw" in body, body
+
+
+def test_uncertain_amended_card_is_not_recorded_as_a_definite_failure(sb):
+    """The bridge accepted the card, so it most likely reached the owner. A
+    definite-failure record would send someone hunting for a card that is sitting
+    in their chat — and would invite a duplicate for a quote that has moved."""
+    sb.write_lead()
+    sb.capture("actually make it 280 people", message_id="wamid.A1")
+
+    _amend(sb, bridge_ok=False, bridge_status="send_uncertain")
+
+    assert sb.read_lead()["card_delivery_status"] == "uncertain"
+    rows = _unconfirmed(sb)
+    assert rows[0]["delivery_certainty"] == "uncertain"
+    assert rows[0]["send_status"] == "send_uncertain"
+    assert "most likely DID arrive" in " ".join(sb.pages[-1]["argv"])
+    assert len(sb.sends) == 1, "never re-sent"
+
+
+def test_card_failed_row_carries_the_real_status_not_a_hardcoded_one(sb):
+    """CateringOwnerApprovalCardFailed.reason is a free-form str, so it must say
+    what actually happened rather than always claiming bridge_unreachable."""
+    sb.write_lead()
+    sb.capture("actually make it 280 people", message_id="wamid.A1")
+
+    _amend(sb, bridge_ok=False, bridge_status="send_uncertain")
+
+    failed = sb.audit_rows("catering_owner_approval_card_failed")
+    assert failed and failed[0]["reason"] == "send_uncertain"
+
+
+def _customer_reply_rows(sb):
+    return [r for r in _unconfirmed(sb) if r["send_kind"] == "amendment_customer_reply"]
+
+
+def test_failed_customer_reply_pages_the_owner(sb):
+    """The customer reply goes out AFTER the answer is merged and the qualification
+    round advanced on disk, and nothing retries it. So a failure strands a customer
+    mid-interview waiting on a question the lead's own state says was asked — that
+    needs a human. It still must NOT touch card_delivery_status: that field
+    describes the OWNER card, and overloading it here would corrupt the signal the
+    owner-card arm depends on."""
+    sb.write_lead(status="QUALIFYING", pending_questions=["venue"],
+                  questions_asked=["venue"], qualification_rounds=1)
+
+    _answer(sb, "the venue is the Grand Ballroom", bridge_ok=False)
+
+    lead = sb.read_lead()
+    assert lead["status"] == "QUALIFYING", "the owner card never entered this turn"
+    assert len(sb.sends) == 1, "exactly one send was attempted"
+    assert lead["extracted"]["venue"] == "the venue is the Grand Ballroom", (
+        "the merge IS committed")
+    assert lead["qualification_rounds"] == 2, "the round advance IS committed"
+    assert lead["card_delivery_status"] is None, "the OWNER card's field is untouched"
+    assert lead["card_delivery_status_at"] is None
+    rows = _customer_reply_rows(sb)
+    assert len(rows) == 1
+    assert rows[0]["delivery_certainty"] == "failed"
+    assert rows[0]["owner_paged"] is True
+    assert len(sb.pages) == 1, "exactly one page per unconfirmed send, never two"
+    body = " ".join(sb.pages[-1]["argv"])
+    assert "did NOT go out" in body, body
+    ack_failed = sb.audit_rows("catering_customer_ack_failed")
+    assert ack_failed and ack_failed[0]["reason"] == "bridge_unreachable", (
+        "the Literal the pinned rollback target recognises must not be widened")
+
+
+def test_uncertain_customer_reply_pages_without_inviting_a_blind_resend(sb):
+    """The bridge accepted the reply, so it most likely reached the customer. The
+    owner still has to know — nothing retries — but the page must say so, or the
+    fix becomes a second identical message to a customer who already got the
+    first."""
+    sb.write_lead(status="QUALIFYING", pending_questions=["venue"],
+                  questions_asked=["venue"], qualification_rounds=1)
+
+    _answer(sb, "the venue is the Grand Ballroom", bridge_ok=False,
+            bridge_status="send_uncertain")
+
+    lead = sb.read_lead()
+    assert lead["extracted"]["venue"] == "the venue is the Grand Ballroom", (
+        "the merge IS committed")
+    assert lead["card_delivery_status"] is None, "the OWNER card's field is untouched"
+    rows = _customer_reply_rows(sb)
+    assert len(rows) == 1
+    assert rows[0]["delivery_certainty"] == "uncertain"
+    assert rows[0]["send_status"] == "send_uncertain"
+    assert rows[0]["owner_paged"] is True
+    assert len(sb.pages) == 1, "exactly one page per unconfirmed send, never two"
+    body = " ".join(sb.pages[-1]["argv"])
+    assert "most likely DID arrive" in body, body
+    assert "duplicate message to the customer" in body, body
+    assert len(sb.sends) == 1, "never re-sent"
+
+
+def test_a_delivered_customer_reply_pages_nobody(sb):
+    sb.write_lead(status="QUALIFYING", pending_questions=["venue"],
+                  questions_asked=["venue"], qualification_rounds=1)
+
+    rc, _payload, _err = _answer(sb, "the venue is the Grand Ballroom")
+
+    assert rc == 0
+    assert _customer_reply_rows(sb) == []
+    assert sb.pages == []

@@ -2485,6 +2485,14 @@ class CateringLead(BaseModel):
                     "asked for.",
     )
     card_delivery_status_at: Optional[datetime] = None
+    deposit_link_delivery_status: Optional[Literal["sent", "failed", "uncertain"]] = Field(
+        default=None,
+        description="catering-mint-deposit: did the deposit payment link reach "
+                    "the customer? 'uncertain' is the one that matters on this "
+                    "path — the customer most likely HAS a link, so a re-invoke "
+                    "would put a second, different link in front of them.",
+    )
+    deposit_link_delivery_status_at: Optional[datetime] = None
 
     # v0.3: post-AWAITING statuses require non-empty quote_text. Legacy data
     # (pre-v0.3 leads with empty quote_text) is backfilled with sentinel by
@@ -6662,6 +6670,19 @@ class CateringCustomerSendUnconfirmed(_BaseEntry):
         "owner_approval_card",    # create-catering-lead owner card
         "customer_proposal",      # create-catering-lead F14 sample menu
         "qualification_questions",  # create-catering-lead M1 question batch
+        # P17b — the remaining status-blind senders. Widening this Literal is
+        # safe HERE, unlike widening a pre-existing variant's: the pinned
+        # rollback target (dc7a81a2) does not know the
+        # `catering_customer_send_unconfirmed` TAG at all, so it routes every
+        # row of this type to `_UnknownLogEntry` regardless of send_kind. The
+        # anti-pattern the tag was created to avoid is widening a Literal on a
+        # variant the old reader already recognises.
+        "deposit_link",             # catering-mint-deposit customer payment link
+        "proposal_selection_reply",  # select-catering-proposal customer replies
+        "customer_ack",             # send-catering-ack customer acknowledgement
+        "proposal_options",         # create-catering-proposal-options customer set
+        "amendment_owner_card",     # amend-catering-lead owner re-approval card
+        "amendment_customer_reply",  # amend-catering-lead customer confirmation
     ]
     send_status: str = Field(min_length=1, max_length=60)
     delivery_certainty: Literal["failed", "uncertain"]

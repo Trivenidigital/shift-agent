@@ -49,9 +49,10 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
 
 from safe_io import load_model, ndjson_append  # noqa: E402
-from safe_io import bridge_post_2tuple as _bridge_post  # noqa: E402  # PR-ε: chokepoint consolidation
+from safe_io import bridge_post as _bridge_post_4tuple  # noqa: E402  # P17b: status is consumed
 from schemas import (  # noqa: E402
     CateringCustomerAckSent, CateringCustomerAckFailed,
+    CateringCustomerSendUnconfirmed,
     CateringLeadHoldBlockedSend, CateringLeadStore,
 )
 from exit_codes import (  # noqa: E402
@@ -97,6 +98,51 @@ def _emit_ack_failed(jid: str, reason: str, detail: str, *,
         ndjson_append(LOG_PATH, entry.model_dump_json())
     except Exception as e:
         sys.stderr.write(f"audit emit failed (non-fatal): {e}\n")
+
+
+_CERTAINTY_BY_STATUS = {"send_uncertain": "uncertain"}
+
+
+def _delivery_certainty(send_status: str) -> str:
+    """'uncertain' only for safe_io's `send_uncertain` (bridge accepted, ack body
+    unparseable → most likely delivered). Everything else means the customer
+    received nothing."""
+    return _CERTAINTY_BY_STATUS.get(send_status, "failed")
+
+
+def _emit_send_unconfirmed(jid: str, lead_id: str, send_status: str, detail: str, *,
+                           logical_turn_id: str, send_attempt_id: str) -> None:
+    """The shared P17 row, emitted ALONGSIDE `catering_customer_ack_failed`.
+
+    `CateringCustomerAckFailed.reason` is deliberately NOT given a new value:
+    that Literal is already recognised by the pinned rollback target, and
+    widening it would make the old reader REJECT a row it knows by tag. The new
+    tag routes to `_UnknownLogEntry` there instead, which is the whole reason
+    this variant exists.
+
+    Requires a lead_id (the variant's field is min_length=1). A lead-less ack
+    still gets its `catering_customer_ack_failed` row, unchanged."""
+    if not lead_id:
+        return
+    try:
+        entry = CateringCustomerSendUnconfirmed(
+            ts=_now_iso(),
+            type="catering_customer_send_unconfirmed",
+            lead_id=lead_id,
+            script="send-catering-ack",
+            send_kind="customer_ack",
+            send_status=send_status,
+            delivery_certainty=_delivery_certainty(send_status),
+            detail=detail[:2000],
+            owner_paged=False,
+            logical_turn_id=logical_turn_id,
+            send_attempt_id=send_attempt_id,
+            transport_destination=jid,
+            outcome=send_status,
+        )
+        ndjson_append(LOG_PATH, entry.model_dump_json())
+    except Exception as e:  # noqa: BLE001 — audit is best-effort
+        sys.stderr.write(f"audit emit (send_unconfirmed) failed (non-fatal): {e}\n")
 
 
 def _emit_ack_sent(jid: str, mid: str, lead_id: str, *,
@@ -220,11 +266,24 @@ def main() -> int:
         return EXIT_LEAD_ON_HOLD
 
     full_message = f"{BRIDGE_PREFIX}{body}"
-    ok, mid_or_err = _bridge_post(jid, full_message)
+    # Calls the 4-tuple chokepoint DIRECTLY, exactly as #708's merged
+    # create-catering-lead does. An intermediate wrapper would have given this
+    # script a bespoke seam, and the e2e harness patches scripts by attribute
+    # name — a private seam here means the harness silently fails to intercept.
+    ok, mid, err, send_status = _bridge_post_4tuple(jid, full_message)
+    mid_or_err = mid if ok else (err or send_status)
 
     if not ok:
+        # `reason` stays "bridge_unreachable" — see _emit_send_unconfirmed for why
+        # that Literal must not gain a value. The certainty lives in the new row.
+        # No owner page and no lead marker here, deliberately: this is the GENERIC
+        # ack sender with many callers, its failure already reaches the caller as
+        # rc 6, and paging on every ack would drown the pages that mean something
+        # (a quote, a booking, a payment link).
         _emit_ack_failed(jid, "bridge_unreachable", mid_or_err, **_ids)
-        sys.stderr.write(f"bridge_post failed: {mid_or_err}\n")
+        _emit_send_unconfirmed(jid, args.lead_id.strip(), send_status,
+                               mid_or_err, **_ids)
+        sys.stderr.write(f"bridge_post failed: {mid_or_err} (status={send_status})\n")
         return EXIT_DEPENDENCY_DOWN
 
     if not mid_or_err:

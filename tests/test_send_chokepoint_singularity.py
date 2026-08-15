@@ -207,3 +207,76 @@ def test_canonical_helpers_present_in_safe_io():
         assert re.search(rf"^def\s+{fn}\s*\(", safe_io_text, re.MULTILINE), (
             f"safe_io.py must define `{fn}` — gate is meaningless otherwise."
         )
+
+
+# ── Detector 3: the e2e harness must patch a seam the script actually CALLS ──
+#
+# `tests/e2e/catering_conversation_harness.py` intercepts sends by setattr-ing
+# the send helper on each freshly loaded script module. Two ways that goes
+# silently dead, both of which end with the harness running a script
+# UNINTERCEPTED — i.e. issuing a real bridge POST:
+#
+#   1. the script renames or drops the patched name (bare setattr happily
+#      creates a dead attribute); the harness now guards this itself.
+#   2. the script keeps the name IMPORTED but stops CALLING it. `hasattr` is
+#      still True, so no guard fires.
+#
+# (2) is not hypothetical. #708 moved create-catering-lead's three sends onto
+# `_bridge_post_4tuple` and left `_bridge_post` imported-but-uncalled, so the
+# harness injection went dead on merge. Nothing caught it: the e2e test is
+# skipped unless OPENROUTER_API_KEY is set, so it runs in no CI at all.
+#
+# This detector is static and collected everywhere, which is the point — it
+# fails in ordinary CI the moment a converted script and the harness disagree.
+
+E2E_HARNESS = REPO / "tests" / "e2e" / "catering_conversation_harness.py"
+CATERING_SCRIPTS = REPO / "src" / "agents" / "catering" / "scripts"
+
+# Patch keys that are data/config injections, not send seams. Only names that
+# look like a send helper are required to be called.
+_SEND_SEAM_RE = re.compile(r"bridge_post|bridge_send")
+
+
+def _harness_patch_sites():
+    """[(script_filename, [patch_key, ...]), ...] from every _load_patched call."""
+    import ast
+    tree = ast.parse(E2E_HARNESS.read_text(encoding="utf-8"))
+    sites = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "_load_patched" and len(node.args) >= 3
+                and isinstance(node.args[1], ast.Constant)
+                and isinstance(node.args[2], ast.Dict)):
+            keys = [k.value for k in node.args[2].keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+            sites.append((node.args[1].value, keys))
+    return sites
+
+
+def test_e2e_harness_patches_a_send_seam_the_script_actually_calls():
+    sites = _harness_patch_sites()
+    assert sites, "no _load_patched call sites found — did the harness move?"
+
+    problems = []
+    for filename, keys in sites:
+        path = CATERING_SCRIPTS / filename
+        if not path.exists():
+            problems.append(f"{filename}: harness loads a script that does not exist")
+            continue
+        text = path.read_text(encoding="utf-8")
+        seam_keys = [k for k in keys if _SEND_SEAM_RE.search(k)]
+        if not seam_keys:
+            continue
+        for key in seam_keys:
+            if not re.search(rf"(?<![\w.]){re.escape(key)}\s*\(", text):
+                called = sorted(set(re.findall(r"(?<![\w.])(_?bridge_post\w*)\s*\(", text)))
+                problems.append(
+                    f"{filename}: harness patches `{key}` but the script never "
+                    f"calls it (it calls {called or 'no bridge helper'}). The e2e "
+                    f"harness would run this script unintercepted."
+                )
+
+    assert not problems, (
+        "e2e send interception is dead for these scripts:\n"
+        + "\n".join(f"  {p}" for p in problems)
+    )

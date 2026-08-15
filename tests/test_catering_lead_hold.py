@@ -77,9 +77,16 @@ def _run_hold(env, *argv):
 def _run_ack(env, monkeypatch, *argv, bridge=None):
     mod = load_script("send_catering_ack", ACK_SCRIPT)
     sent: list = []
+    # P17b: the ack send reads `status` off the canonical 4-tuple, so the seam
+    # is `_bridge_post_4tuple` — the SAME attribute name #708's converted scripts
+    # expose, so every harness that patches these scripts patches one name.
+    # `monkeypatch.setattr` raises on a missing attribute, so a future rename
+    # fails here loudly instead of leaving a dead stub (the tests/e2e harness
+    # uses bare setattr and does NOT get that protection — see the note there).
     monkeypatch.setattr(
-        mod, "_bridge_post",
-        bridge or (lambda jid, msg: (sent.append((jid, msg)), (True, "wamid.OK"))[1]),
+        mod, "_bridge_post_4tuple",
+        bridge or (lambda jid, msg: (sent.append((jid, msg)),
+                                     (True, "wamid.OK", "", "sent"))[1]),
     )
     old = sys.argv
     sys.argv = ["send-catering-ack", *argv]
@@ -221,3 +228,81 @@ class TestAckBlockedByHold:
         rc, sent = _run_ack(env, monkeypatch, "--customer-jid", CUSTOMER_JID,
                             "--message-text", "Thanks!", "--lead-id", "L0001")
         assert rc == 0 and len(sent) == 1
+
+
+# ── P17b — the ack's delivery status is recorded, not flattened ──────────────
+# `bridge_post` separates "the bridge ACCEPTED it, so the customer most likely
+# saw it" (send_uncertain) from "it never left" (connect_failed). The 2-tuple
+# adapter this script used collapsed both into False, so the audit trail could
+# not tell an operator which of the two had happened.
+#
+# This script commits no state before its send, so there is no false anchor to
+# undo — the fix is the RECORD. It deliberately gets no owner page and no lead
+# marker: it is the generic ack sender with many callers, its failure already
+# reaches the caller as rc 6, and paging on every ack would drown the pages that
+# mean something (a quote, a booking, a payment link).
+
+def _failing_ack(status):
+    return lambda jid, msg: (False, "", f"stub_{status}", status)
+
+
+@pytest.mark.parametrize("status,certainty", [
+    ("send_uncertain", "uncertain"),
+    ("connect_failed", "failed"),
+    ("http_error", "failed"),
+    ("refused", "failed"),
+])
+def test_a_failed_ack_records_which_kind_of_failure(env, monkeypatch,
+                                                    status, certainty):
+    rc, _sent = _run_ack(env, monkeypatch, "--customer-jid", CUSTOMER_JID,
+                         "--message-text", "Thanks!", "--lead-id", "L0001",
+                         bridge=_failing_ack(status))
+
+    assert rc == 6, "rc semantics are unchanged"
+    rows = [r for r in _rows(env)
+            if r["type"] == "catering_customer_send_unconfirmed"]
+    assert len(rows) == 1, [r["type"] for r in _rows(env)]
+    assert rows[0]["delivery_certainty"] == certainty
+    assert rows[0]["send_status"] == status
+    assert rows[0]["send_kind"] == "customer_ack"
+    assert rows[0]["script"] == "send-catering-ack"
+    assert rows[0]["owner_paged"] is False
+
+
+def test_the_existing_ack_failed_row_is_unchanged(env, monkeypatch):
+    """`CateringCustomerAckFailed.reason` must NOT gain a value.
+
+    The pinned rollback target already recognises that tag, so widening its
+    Literal would make the old reader REJECT a row it knows how to read. The
+    certainty goes in the new tag instead, which the old reader routes to
+    `_UnknownLogEntry`.
+    """
+    _run_ack(env, monkeypatch, "--customer-jid", CUSTOMER_JID,
+             "--message-text", "Thanks!", "--lead-id", "L0001",
+             bridge=_failing_ack("send_uncertain"))
+
+    failed = [r for r in _rows(env) if r["type"] == "catering_customer_ack_failed"]
+    assert len(failed) == 1
+    assert failed[0]["reason"] == "bridge_unreachable"
+
+
+def test_a_lead_less_ack_still_only_writes_the_old_row(env, monkeypatch):
+    """The new variant requires a lead_id (min_length=1). An ack invoked without
+    one keeps exactly its old audit trail rather than failing to emit."""
+    rc, _sent = _run_ack(env, monkeypatch, "--customer-jid", CUSTOMER_JID,
+                         "--message-text", "Thanks!",
+                         bridge=_failing_ack("send_uncertain"))
+
+    assert rc == 6
+    types = [r["type"] for r in _rows(env)]
+    assert "catering_customer_ack_failed" in types
+    assert "catering_customer_send_unconfirmed" not in types
+
+
+def test_a_delivered_ack_writes_no_unconfirmed_row(env, monkeypatch):
+    rc, sent = _run_ack(env, monkeypatch, "--customer-jid", CUSTOMER_JID,
+                        "--message-text", "Thanks!", "--lead-id", "L0001")
+
+    assert rc == 0 and len(sent) == 1
+    assert [r for r in _rows(env)
+            if r["type"] == "catering_customer_send_unconfirmed"] == []
