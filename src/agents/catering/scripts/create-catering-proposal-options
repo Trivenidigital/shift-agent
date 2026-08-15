@@ -565,20 +565,50 @@ def _audit_failure(lead_id: str, reason: str, detail: str = "", proposal_set_id:
     )
 
 
+def _uncertain_page(lead_id: str, proposal_set_id: str, detail: str) -> tuple[str, str]:
+    """(title, message) for a send the bridge ACCEPTED but never acknowledged.
+
+    The failure copy was wrong twice over here — generation succeeded and the
+    bridge was reached — and, worse, it named no action, leaving an owner alarmed
+    with nothing to do. This says what happened and what actually works. The
+    resolution it names is real: reissuing mints a new set, which retires this one
+    through the SEND_UNCERTAIN -> SUPERSEDED edge.
+
+    ASCII only, and no new punctuation the notifier might render as markup: the
+    body already carries `lead_id=` / `proposal_set_id=` underscores, and a page
+    the owner cannot read is the same as no page.
+    """
+    return (
+        "Catering options sent - delivery unconfirmed",
+        f"lead_id={lead_id} proposal_set_id={proposal_set_id or '(none)'}: the menu "
+        f"options were composed and the bridge ACCEPTED them, so the customer most "
+        f"likely HAS them. This is not a failure and nothing was re-sent - what is "
+        f"missing is only the delivery receipt. If the customer does not reply, "
+        f"reissuing the options is the supported fix, and doing so also retires "
+        f"this set. Bridge evidence: {detail[:500]}"
+    )
+
+
 def _notify_owner_generation_failed(
     lead_id: str,
     reason: str,
     detail: str = "",
     proposal_set_id: str = "",
+    *,
+    send_status: str = "",
 ) -> bool:
     """Returns whether the page actually landed. shift-agent-notify-owner exits
     non-zero when every channel failed, so the returncode is the only evidence the
     owner was reached — discarding it is what let the audit row claim a page that
     never happened."""
-    message = (
-        f"lead_id={lead_id} proposal_set_id={proposal_set_id or '(none)'} "
-        f"proposal generation failed: {reason}. {detail[:500]}"
-    )
+    if send_status == "send_uncertain":
+        title, message = _uncertain_page(lead_id, proposal_set_id, detail)
+    else:
+        title = "Catering proposal generation failed"
+        message = (
+            f"lead_id={lead_id} proposal_set_id={proposal_set_id or '(none)'} "
+            f"proposal generation failed: {reason}. {detail[:500]}"
+        )
     try:
         proc = subprocess.run(
             [
@@ -586,7 +616,7 @@ def _notify_owner_generation_failed(
                 "--priority",
                 "2",
                 "--title",
-                "Catering proposal generation failed",
+                title,
                 message,
             ],
             check=False,
@@ -618,11 +648,28 @@ def _fail_generation(
     The unconfirmed row lives here rather than in `_post` because `_post` returns
     BEFORE the page is attempted: a row written there could only ever guess at
     `owner_paged`, and it guessed True. Writing it after the page is what makes the
-    field evidence instead of decoration. Returns whether the owner was reached."""
-    _audit_failure(lead_id, reason, detail, proposal_set_id)
-    paged = _notify_owner_generation_failed(lead_id, reason, detail, proposal_set_id)
+    field evidence instead of decoration. Returns whether the owner was reached.
+
+    AN UNCERTAIN SEND EMITS NO FAILURE ROW. `CateringProposalGenerationFailed`
+    asserts two things that are both false when the bridge returned 2xx: that
+    generation failed (the menu composed fine) and, via its `reason`/`outcome`
+    fields, that the bridge was unreachable (it answered). Widening that Literal is
+    NOT the alternative — dc7a81a2 knows this tag, so a new value makes the old
+    reader REJECT a row it accepts today instead of degrading it to
+    `_UnknownLogEntry`; new tags are free, new values in a known tag are not. No
+    new tag is needed either, because the truthful row already exists on this path:
+    `_record_send_unconfirmed` writes `catering_customer_send_unconfirmed` with the
+    real `send_status` and `delivery_certainty`. So the false row is dropped, the
+    true one is kept, and the page still fires exactly once.
+
+    Suppression lives HERE rather than at the three call sites so every send arm
+    this script has behaves the same way."""
+    jid, send_status = send if send is not None else ("", "")
+    if send_status != "send_uncertain":
+        _audit_failure(lead_id, reason, detail, proposal_set_id)
+    paged = _notify_owner_generation_failed(lead_id, reason, detail, proposal_set_id,
+                                            send_status=send_status)
     if send is not None:
-        jid, send_status = send
         _record_send_unconfirmed(jid, lead_id=lead_id, send_status=send_status,
                                  detail=detail, paged=paged)
     return paged

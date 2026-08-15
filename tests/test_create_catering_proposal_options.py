@@ -1269,12 +1269,68 @@ def test_uncertain_proposal_send_is_not_recorded_as_a_definite_failure(bridge_se
     assert rows[0]["delivery_certainty"] == "uncertain"
     assert rows[0]["send_status"] == "send_uncertain"
     assert len(stub.requests) == 1, "never re-sent"
-    # The pre-existing failure row still says bridge_unreachable — its `reason` is
-    # a schema Literal that cannot carry the real status without a schemas.py
-    # change. The new row is where the truth lives.
+    # No failure row AT ALL on this arm. It used to emit
+    # catering_proposal_generation_failed(reason="bridge_unreachable"), which is
+    # false twice over — generation succeeded (the menu composed) and the bridge
+    # was reached (it returned 2xx). Widening the `reason` Literal is not the fix:
+    # dc7a81a2 KNOWS this tag, so a new value makes the old reader REJECT a row it
+    # accepts today rather than degrade to _UnknownLogEntry. The truthful row on
+    # this path already exists and is asserted above.
     failed = [r for r in _read_audit(env_dir)
               if r["type"] == "catering_proposal_generation_failed"]
-    assert failed and failed[-1]["reason"] == "bridge_unreachable"
+    assert failed == [], (
+        f"an uncertain send must not be recorded as a generation failure: {failed}")
+
+
+def test_the_uncertain_page_says_what_happened_and_what_works(bridge_server, env_dir):
+    """The state row and the audit row now tell the truth; the PAGE is the third
+    place the owner meets this event, and it was still calling a delivered menu a
+    failure. Exactly one page (the p17b invariant) — this changes its words, not
+    its count."""
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+    stub.response_mode = "empty_id"
+
+    result, parsed = _run_script(env_dir, port)
+
+    assert parsed["rc"] == 6, result.stderr
+    assert len(parsed["notify_calls"]) == 1, parsed["notify_calls"]
+    call = parsed["notify_calls"][0]
+    title = call[call.index("--title") + 1]
+    body = call[-1]
+
+    assert "failed" not in title.lower(), f"the page still calls it a failure: {title!r}"
+    assert "generation failed" not in body.lower(), body
+    assert "bridge_unreachable" not in body, (
+        "the internal failure code names a condition that did not happen")
+    # What actually happened, and what actually works.
+    assert "most likely" in body.lower(), body
+    assert "reissu" in body.lower(), (
+        "the page must name the resolution that is actually supported")
+    # Still carries the identifiers and the bridge's own evidence.
+    assert "L0014" in body and "CPS-L0014-000001" in body
+    assert "empty_message_id:" in body or "ack_parse_failed:" in body
+
+
+def test_the_definite_failure_page_and_row_are_unchanged(bridge_server, env_dir):
+    """The split must not disturb the definite arm. A bridge that never accepted
+    the menu is still a generation failure, still audited as one, still paged with
+    the same words."""
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+    stub.response_mode = "down"
+
+    result, parsed = _run_script(env_dir, port)
+
+    assert parsed["rc"] == 6, result.stderr
+    failed = [r for r in _read_audit(env_dir)
+              if r["type"] == "catering_proposal_generation_failed"]
+    assert len(failed) == 1 and failed[0]["reason"] == "bridge_unreachable"
+    call = parsed["notify_calls"][0]
+    assert call[call.index("--title") + 1] == "Catering proposal generation failed"
+    assert "bridge_unreachable" in call[-1]
 
 
 def test_uncertain_proposal_send_lands_send_uncertain_not_send_failed(bridge_server, env_dir):
@@ -1422,3 +1478,26 @@ def test_failed_recompose_clarify_records_its_status(bridge_server, env_dir):
     assert parsed["rc"] == 6, result.stderr
     rows = _unconfirmed(env_dir)
     assert len(rows) == 1 and rows[0]["delivery_certainty"] == "failed"
+
+
+def test_uncertain_recompose_clarify_emits_no_failure_row_either(bridge_server, env_dir):
+    """The suppression lives in `_fail_generation`, not at one call site, so it
+    holds on every send arm this script has. Pinned on the clarify arm because a
+    per-site fix would pass the proposal-set test and silently leave this one
+    lying."""
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir)
+    _seed_recompose_sent_set(env_dir)
+    stub.response_mode = "empty_id"
+
+    result, parsed = _run_recompose(env_dir, port, "option 2 starters with option 1 mains")
+
+    assert parsed["rc"] == 6, result.stderr
+    rows = _unconfirmed(env_dir)
+    assert len(rows) == 1 and rows[0]["delivery_certainty"] == "uncertain"
+    failed = [r for r in _read_audit(env_dir)
+              if r["type"] == "catering_proposal_generation_failed"]
+    assert failed == [], f"the clarify arm still records a false failure: {failed}"
+    # Page copy is asserted on the proposal arm, whose harness stubs the notifier;
+    # `_run_recompose` does not capture notify calls.
