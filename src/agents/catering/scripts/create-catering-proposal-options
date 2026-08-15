@@ -687,12 +687,15 @@ def _record_send_unconfirmed(jid: str, *, lead_id: str, send_status: str,
                              detail: str, paged: bool) -> None:
     """The truthful record of a send that did not confirm.
 
-    What was missing was never the alert — it was the STATUS. The pre-existing
-    failure row hardcodes reason="bridge_unreachable" (a schema Literal, so it
-    cannot carry the real value without a schemas.py change), which reports a
-    `send_uncertain` — the bridge ACCEPTED the menu and it most likely arrived —
-    as a definite non-delivery. This row carries what actually happened, including
-    whether the page that was supposed to surface it reached anyone."""
+    What was missing was never the alert — it was the STATUS. This row carries what
+    actually happened, including whether the page that was supposed to surface it
+    reached anyone.
+
+    On the UNCERTAIN arm it is now the ONLY row: `_fail_generation` no longer emits
+    `catering_proposal_generation_failed` there, because that row's `reason` and
+    `outcome` are the Literal "bridge_unreachable" — a claim of definite
+    non-delivery that contradicts this one. On a DEFINITE failure both rows are
+    written and they agree."""
     try:
         _append_audit(CateringCustomerSendUnconfirmed(
             type="catering_customer_send_unconfirmed", ts=_now(),
