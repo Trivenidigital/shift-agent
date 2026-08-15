@@ -711,28 +711,51 @@ def test_a_definite_deposit_failure_is_still_recorded_failed(isolated_state):
     assert row["delivery_certainty"] == "failed"
 
 
-def test_the_money_guards_are_untouched_by_an_uncertain_send(isolated_state):
-    """The void / cancel / failed-audit triple must behave exactly as before.
+def test_an_uncertain_send_does_not_take_the_destructive_transitions(isolated_state):
+    """TWO-FACTS PIN: link-creation truth and message-delivery truth are separate.
 
-    This cell is the guard on the guard: the record fix above must not have
-    quietly changed what happens to the intent or the order.
+    A WhatsApp send we could not confirm must never imply the provider intent
+    does not exist. The void + cancel pair is the destructive transition the two
+    facts must not share: firing it here erases a real provider fact because a
+    message fact was unknown, and leaves the customer holding a link that
+    silently cannot pay. The definite-failure arm keeps that pair, and
+    `test_bridge_send_failed_voids_intent_and_audits` above pins it there.
+
+    (This cell previously asserted the opposite — that the uncertain arm voided,
+    cancelled and left the lead unbound. That WAS the P1 defect: the voided
+    intent is invisible to `_find_live_intent_for_lead`, and the unbound lead
+    passes the idempotency check, so a re-invoke minted a second live link.)
     """
     lead_id, result = _run_uncertain(isolated_state)
 
     rows = _read_audit_rows(isolated_state["log_path"])
     types = [r["type"] for r in rows]
+    # The evidence rows that already survived must keep surviving — both record
+    # the SEND, which did fail, and neither mutates the intent.
     assert "commerce_payment_link_failed" in types
-    assert "commerce_payment_intent_voided" in types
     assert "catering_deposit_link_failed" in types
+    # ...but nothing may have destroyed the money objects behind the link.
+    assert "commerce_payment_intent_voided" not in types, (
+        "the intent behind a link the customer probably holds was voided")
+    assert "commerce_order_cancelled" not in types, (
+        "the order behind a link the customer probably holds was cancelled")
+
     intents = json.loads(
         (isolated_state["commerce_state"] / "payment_intents.json").read_text(encoding="utf-8"))
-    assert intents["intents"][0]["status"] == "voided"
+    assert intents["intents"][0]["status"] == "minted", (
+        "the payment intent must stay live so the link the customer most likely "
+        f"holds can still take a payment: {intents!r}")
     orders = json.loads(
         (isolated_state["commerce_state"] / "orders.json").read_text(encoding="utf-8"))
-    assert orders["orders"][0]["status"] == "cancelled"
-    # And the binding is still NOT persisted, exactly as on a definite failure.
+    assert orders["orders"][0]["status"] == "pending_payment", (
+        "the order backing a live link is not an orphan and must not be "
+        f"cancelled: {orders!r}")
+
+    # And the lead IS bound — `commerce-payment-confirm` finds the lead for an
+    # incoming payment by `deposit_payment_intent_id` alone, so an unbound lead
+    # orphans a payment the customer can still make on the link they hold.
     leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
-    assert leads["leads"][0].get("deposit_payment_intent_id", "") == ""
+    assert leads["leads"][0]["deposit_payment_intent_id"] == intents["intents"][0]["intent_id"]
 
 
 def test_a_delivered_deposit_link_says_so_on_the_lead(isolated_state):
@@ -749,25 +772,28 @@ def test_a_delivered_deposit_link_says_so_on_the_lead(isolated_state):
 
 
 # ─────────────────────────────────────────────────────────────────
-# P1 — an uncertain send must not be silently re-mintable  [RED-FIRST]
+# P1 — an uncertain send must not be silently re-mintable
 #
 # `send_uncertain` means the bridge ACCEPTED a message carrying a live payment
-# link, so the customer most likely holds one. The failure arm then voids the
-# intent and cancels the order WITHOUT ever binding `deposit_payment_intent_id`
-# on the lead — so on a re-invoke BOTH money guards wave the run through:
+# link, so the customer most likely holds one. The failure arm USED TO void the
+# intent and cancel the order without ever binding `deposit_payment_intent_id`
+# on the lead — so on a re-invoke BOTH money guards waved the run through:
 #
-#   1. the post-lock idempotency check reads an unbound lead, and
+#   1. the post-lock idempotency check read an unbound lead, and
 #   2. `_find_live_intent_for_lead` excludes `voided` from its live set, so the
-#      intent the uncertain send just voided is invisible to it.
+#      intent the uncertain send had just voided was invisible to it.
 #
-# The re-invoke therefore builds a fresh cart -> fresh order -> fresh intent and
-# sends a SECOND, DIFFERENT payment link to a customer who probably already has
-# one. The owner page on this path says "do NOT re-invoke", which is a request,
+# The re-invoke therefore built a fresh cart -> fresh order -> fresh intent and
+# sent a SECOND, DIFFERENT payment link to a customer who probably already had
+# one. The owner page on this path said "do NOT re-invoke", which is a request,
 # not a guard.
 #
-# The three cells below pin that: two are expected to FAIL until the fix lands,
-# and the third fences the fix so it cannot over-block a DEFINITE failure (where
-# the customer received nothing and a re-mint is the correct recovery).
+# The fix separates the two facts: an unconfirmed MESSAGE never destroys the
+# payment intent. The intent stays live, the lead is bound to it, and the
+# re-invoke is refused outright. The cells below pin the refusal, pin that the
+# minted ids stay recoverable from the lead, and fence the fix so it cannot
+# over-block a DEFINITE failure (where the customer received nothing and a
+# re-mint is the correct recovery).
 # ─────────────────────────────────────────────────────────────────
 
 
@@ -780,7 +806,7 @@ def _commerce_rows(isolated_state, filename: str, key: str) -> list[dict]:
 
 
 def test_reinvoke_after_uncertain_send_refuses_second_mint(isolated_state):
-    """RED: re-invoking after an uncertain send must REFUSE, not mint link #2.
+    """Re-invoking after an uncertain send must REFUSE, not mint link #2.
 
     The second run here has a HEALTHY bridge — the operator re-invoking once
     connectivity is back is exactly the sequence that puts two live payment
@@ -790,7 +816,7 @@ def test_reinvoke_after_uncertain_send_refuses_second_mint(isolated_state):
     lead_id, first = _run_uncertain(isolated_state)
     assert first.returncode == 6, first.stderr[-800:]
     intents_after_first = _commerce_rows(isolated_state, "payment_intents.json", "intents")
-    assert len(intents_after_first) == 1 and intents_after_first[0]["status"] == "voided"
+    assert len(intents_after_first) == 1 and intents_after_first[0]["status"] == "minted"
     minted_first = intents_after_first[0]["intent_id"]
 
     # Bridge is healthy again; the lead is NOT re-seeded — this is the same
@@ -826,13 +852,14 @@ def test_reinvoke_after_uncertain_send_refuses_second_mint(isolated_state):
 
 
 def test_uncertain_send_leaves_the_minted_intent_recoverable_from_the_lead(isolated_state):
-    """RED: the durable lead record must not forget that a link was minted.
+    """The durable lead record must not forget that a link was minted.
 
-    The uncertain path stamps `deposit_link_delivery_status` and nothing else,
-    so the lead carries "we could not confirm a send" with no trace of WHAT was
-    sent. Everything the operator needs to reconcile — which intent, which
-    order, how much — lives only in the audit log. The lead is the record the
-    re-invoke guard and the operator both read, so the id has to survive there.
+    The uncertain path used to stamp `deposit_link_delivery_status` and nothing
+    else, so the lead carried "we could not confirm a send" with no trace of
+    WHAT was sent. Everything the operator needs to reconcile — which intent,
+    which order, how much — lived only in the audit log. The lead is the record
+    the re-invoke guard, `commerce-payment-confirm` and the operator all read,
+    so the ids have to survive there.
     """
     lead_id, result = _run_uncertain(isolated_state)
     assert result.returncode == 6, result.stderr[-800:]
@@ -851,13 +878,43 @@ def test_uncertain_send_leaves_the_minted_intent_recoverable_from_the_lead(isola
     assert minted_order_id in json.dumps(lead), (
         f"order {minted_order_id} is unrecoverable from the lead: {lead!r}")
 
-    # The evidence that already survives must keep surviving: the voided intent
-    # stays in the ledger and the audit row keeps both cross-references.
-    assert intents[0]["status"] == "voided"
+    # The evidence that already survives must keep surviving: the intent stays
+    # in the ledger — live, per the two-facts pin above — and the audit row keeps
+    # both cross-references.
+    assert intents[0]["status"] == "minted"
     deposit_failed = next(r for r in _read_audit_rows(isolated_state["log_path"])
                           if r["type"] == "catering_deposit_link_failed")
     assert deposit_failed["commerce_payment_intent_id"] == minted_intent_id
     assert deposit_failed["commerce_order_id"] == minted_order_id
+
+
+def test_the_refusal_is_audited_under_its_own_tag(isolated_state):
+    """The refusal has to be findable later, and under a NEW tag.
+
+    `CateringDepositLinkFailed.reason` is byte-identical in the pinned rollback
+    target, so widening it would make the old reader REJECT a row it recognises
+    today. An unknown TAG routes to `_UnknownLogEntry` instead and survives a
+    downgrade intact.
+    """
+    lead_id, _ = _run_uncertain(isolated_state)
+    isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STUB"] = "success:wamid_test_004"
+    _run_script(isolated_state["env"], lead_id)
+
+    rows = _read_audit_rows(isolated_state["log_path"])
+    refused = [r for r in rows if r["type"] == "catering_deposit_reinvoke_refused"]
+    assert len(refused) == 1, [r["type"] for r in rows]
+    row = refused[0]
+    assert row["lead_id"] == lead_id
+    assert row["prior_delivery_status"] == "uncertain"
+    intent_id = _commerce_rows(isolated_state, "payment_intents.json", "intents")[0]["intent_id"]
+    assert row["commerce_payment_intent_id"] == intent_id, (
+        "the refusal must name the link the operator has to reconcile")
+    assert row["commerce_order_id"]
+    assert row["amount_cents"] > 0
+    # The reason Literal on the pre-existing variant must NOT have been widened.
+    assert not [r for r in rows
+                if r["type"] == "catering_deposit_link_failed"
+                and r["reason"] not in {"bridge_send_failed"}]
 
 
 def test_reinvoke_after_a_definite_failure_still_mints(isolated_state):

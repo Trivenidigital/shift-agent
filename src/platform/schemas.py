@@ -8180,6 +8180,34 @@ class CateringDepositLinkFailed(_BaseEntry):
     commerce_payment_intent_id: str = Field(default="", max_length=40)
 
 
+class CateringDepositReinvokeRefused(_BaseEntry):
+    """P1 2026-08-15: catering-mint-deposit refused to mint a second deposit
+    link because the first one's delivery was never confirmed.
+
+    A NEW tag rather than a new `CateringDepositLinkFailed.reason`. That
+    variant's `reason` Literal is byte-identical in the pinned rollback target
+    (dc7a81a2), so widening it would make the OLD reader REJECT a row it
+    recognises by tag today. The old release does not know THIS tag at all, so
+    it routes the row to `_UnknownLogEntry` (extra="allow") and the evidence
+    survives a downgrade intact.
+
+    Distinct from the `reinvoke_live_intent_exists` reason on
+    CateringDepositLinkFailed: that one fires when a prior mint CRASHED before
+    binding the lead. This one fires when the prior mint completed and its
+    customer-facing send came back UNCERTAIN — the customer most likely holds a
+    link, and only a supervised operator action may resolve that (R1).
+    """
+    type: Literal["catering_deposit_reinvoke_refused"]
+    lead_id: str = Field(min_length=1, max_length=40)
+    prior_delivery_status: Literal["uncertain"]
+    prior_delivery_status_at: Optional[datetime] = None
+    commerce_order_id: str = Field(default="", max_length=40)
+    commerce_payment_intent_id: str = Field(default="", max_length=40)
+    amount_cents: int = Field(default=0, ge=0, le=10_000_000_000)
+    owner_paged: bool = False
+    detail: str = Field(default="", max_length=500)
+
+
 # ─────────────────────────────────────────────────────────────────
 # Slice-3 PR-2 catering deposit confirmation
 # Emitted by commerce-payment-confirm after Stripe webhook confirms a
@@ -8536,6 +8564,8 @@ LogEntry = Annotated[
         # Slice-2 catering deposit caller
         Annotated[CateringDepositLinkSent, Tag("catering_deposit_link_sent")],
         Annotated[CateringDepositLinkFailed, Tag("catering_deposit_link_failed")],
+        # P1 2026-08-15: uncertain-send re-invoke refusal (new tag, not a widened reason)
+        Annotated[CateringDepositReinvokeRefused, Tag("catering_deposit_reinvoke_refused")],
         # Slice-3 PR-2: catering deposit confirmation + commerce confirmation-failure
         Annotated[CateringDepositPaid, Tag("catering_deposit_paid")],
         Annotated[CommercePaymentConfirmationFailed, Tag("commerce_payment_confirmation_failed")],

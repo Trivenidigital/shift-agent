@@ -135,6 +135,45 @@ def _emit_deposit_link_failed(
         sys.stderr.write(f"WARN: failed to emit catering_deposit_link_failed: {e}\n")
 
 
+def _emit_deposit_reinvoke_refused(
+    *,
+    lead_id: str,
+    prior_status_at,
+    commerce_order_id: str,
+    commerce_payment_intent_id: str,
+    amount_cents: int,
+    owner_paged: bool,
+    detail: str,
+    cfg,
+) -> None:
+    """Best-effort: emit catering_deposit_reinvoke_refused; swallow errors.
+
+    A NEW audit tag rather than another `CateringDepositLinkFailed.reason`.
+    That variant's `reason` Literal is byte-identical in the pinned rollback
+    target, so widening it would make the OLD reader reject a row it recognises
+    today; an unknown TAG routes cleanly to `_UnknownLogEntry` instead.
+    """
+    from commerce.audit import emit
+    try:
+        emit(
+            LOG_PATH,
+            {
+                "type": "catering_deposit_reinvoke_refused",
+                "ts": customer_now(cfg.customer.timezone).isoformat(),
+                "lead_id": lead_id,
+                "prior_delivery_status": "uncertain",
+                "prior_delivery_status_at": prior_status_at,
+                "commerce_order_id": commerce_order_id,
+                "commerce_payment_intent_id": commerce_payment_intent_id,
+                "amount_cents": amount_cents,
+                "owner_paged": owner_paged,
+                "detail": detail[:500],
+            },
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort by contract
+        sys.stderr.write(f"WARN: failed to emit catering_deposit_reinvoke_refused: {e}\n")
+
+
 def _notify_owner_best_effort(priority: int, title: str, body: str) -> bool:
     """Pushover P1 on money-adjacent silent failure (Reviewer B HIGH-2).
 
@@ -195,6 +234,51 @@ def _mark_deposit_link_delivery(store, matched_idx: int, marker: str,
         sys.stderr.write(f"WARN: deposit_link_delivery_status marker write failed "
                          f"for {lead_id} ({type(e).__name__}: {e}); the audit row "
                          f"still stands\n")
+
+
+def _bind_unconfirmed_deposit_evidence(store, matched_idx: int, *, cfg, lead_id: str,
+                                       commerce_order_id: str,
+                                       commerce_payment_intent_id: str,
+                                       amount_cents: int, url_status: str) -> None:
+    """Persist WHAT was minted on a send we could not confirm (R3, literal).
+
+    The uncertain arm's counterpart to the success-path binding. The link is
+    LIVE and the customer most likely holds it, so the lead has to carry the
+    provider intent, the order, the amount and the mint time. Two reasons this
+    is not optional: `commerce-payment-confirm` finds the lead for an incoming
+    payment by `deposit_payment_intent_id` alone, so an unbound lead orphans a
+    payment the customer can still make; and the re-invoke guard needs a durable
+    record to refuse against.
+
+    `deposit_status` follows the same rule as the delivered path because it
+    describes the MONEY fact — a live link is awaiting payment whether or not we
+    can prove the message arrived. The delivery fact lives in its own field, and
+    the two must never be collapsed into one transition.
+
+    One atomic write for both facts, inside the caller's LEADS_LOCK, so "a link
+    exists" and "we could not confirm delivery" can never disagree on disk.
+    Best-effort in the same sense as the marker it replaces: a write failure
+    must not mask the send failure that provoked it.
+    """
+    try:
+        now = customer_now(cfg.customer.timezone)
+        store.leads[matched_idx] = store.leads[matched_idx].model_copy(update={
+            "deposit_required": True,
+            "deposit_amount_cents": amount_cents,
+            "deposit_commerce_order_id": commerce_order_id,
+            "deposit_payment_intent_id": commerce_payment_intent_id,
+            "deposit_status": "awaiting_payment" if url_status == "configured" else "unconfigured",
+            "deposit_minted_at": now,
+            "deposit_link_delivery_status": "uncertain",
+            "deposit_link_delivery_status_at": now,
+            "updated_at": now,
+        })
+        atomic_write_json(LEADS_PATH, store)
+    except Exception as e:  # noqa: BLE001 — never mask the send failure
+        sys.stderr.write(f"WARN: unconfirmed-deposit evidence bind failed for "
+                         f"{lead_id} ({type(e).__name__}: {e}); intent "
+                         f"{commerce_payment_intent_id} is live and unrecorded on "
+                         f"the lead — reconcile from the audit log\n")
 
 
 def _emit_customer_send_unconfirmed(*, lead_id: str, certainty: str,
@@ -279,6 +363,55 @@ def main() -> int:
             return EXIT_NOT_FOUND
 
         lead = store.leads[matched_idx]
+
+        # P1 2026-08-15 — an unconfirmed deposit send is terminal to AUTOMATION.
+        # `uncertain` means the bridge ACCEPTED a message carrying a live payment
+        # link, so the customer most likely holds one. That is a message-delivery
+        # fact we cannot resolve from here, and no automated path may try to:
+        # minting again would put a SECOND, different link in front of someone who
+        # probably already has one. Only a supervised operator action resolves it.
+        #
+        # Ordered BEFORE the idempotency check below on purpose. The uncertain arm
+        # binds `deposit_payment_intent_id`, so that check would otherwise answer
+        # first with a clean `already_minted` no-op at EXIT_OK — turning an
+        # unreconciled money state into silence. It also precedes the
+        # `_find_live_intent_for_lead` guard, which would refuse too (the intent
+        # stays live) but with the wrong story: that guard reports a mint that
+        # crashed before binding, not a link that most likely reached the customer.
+        if lead.deposit_link_delivery_status == "uncertain":
+            paged = _notify_owner_best_effort(
+                priority=1,
+                title=f"Catering deposit re-invoke refused (lead {lead.lead_id})",
+                body=(f"Lead {lead.lead_id} already has a LIVE deposit link "
+                      f"(intent {lead.deposit_payment_intent_id}, order "
+                      f"{lead.deposit_commerce_order_id}, "
+                      f"${lead.deposit_amount_cents/100:.2f}) whose delivery was "
+                      f"never confirmed — the customer most likely holds it and it "
+                      f"can still take a payment. Refusing to mint a second link. "
+                      f"Reconcile by hand: check the chat, then either confirm "
+                      f"delivery or void "
+                      f"{lead.deposit_payment_intent_id} before any re-mint."),
+            )
+            _emit_deposit_reinvoke_refused(
+                lead_id=lead.lead_id,
+                prior_status_at=lead.deposit_link_delivery_status_at,
+                commerce_order_id=lead.deposit_commerce_order_id,
+                commerce_payment_intent_id=lead.deposit_payment_intent_id,
+                amount_cents=lead.deposit_amount_cents,
+                owner_paged=bool(paged),
+                detail=("prior deposit-link send was accepted by the bridge but "
+                        "unconfirmed; refusing a 2nd mint pending operator "
+                        "reconciliation"),
+                cfg=cfg,
+            )
+            print(json.dumps({
+                "lead_id": lead.lead_id,
+                "refused": "delivery_uncertain",
+                "intent_id": lead.deposit_payment_intent_id,
+                "order_id": lead.deposit_commerce_order_id,
+                "owner_paged": bool(paged),
+            }))
+            return EXIT_INVALID_INPUT
 
         # Reviewer A HIGH-2: re-check idempotency AFTER acquiring lock so a
         # parallel manual invocation can't interleave between the post-send
@@ -445,46 +578,66 @@ def main() -> int:
             target_jid, BRIDGE_PREFIX + reply_body)
         send_certainty = _delivery_certainty(send_status)
         if not ok:
-            # P17: the intent void, the order cancel and the failed-audit triple
-            # below are UNCHANGED — this branch only stops lying about WHICH
-            # kind of failure happened. `send_uncertain` means the bridge
-            # accepted the message, so the customer most likely HAS the link.
-            _mark_deposit_link_delivery(store, matched_idx, send_certainty,
-                                        cfg, lead.lead_id)
-            # Reviewer A BLOCKER-2: emit failed BEFORE void so the triple holds
+            # Two facts, and they must never share one transition: whether a
+            # payment link EXISTS is a provider fact; whether the message
+            # carrying it ARRIVED is a transport fact. A definite drop resolves
+            # both — the customer got nothing, so the link should not outlive the
+            # send, and a re-invoke is the correct recovery. `send_uncertain`
+            # resolves only the transport fact, and resolves it to "unknown", so
+            # the destructive half (void + cancel) must not fire on it: that
+            # would erase a real provider fact because a message fact was unknown,
+            # and leave the customer holding a link that silently cannot pay.
+            definite_failure = send_certainty == "failed"
+            if definite_failure:
+                _mark_deposit_link_delivery(store, matched_idx, send_certainty,
+                                            cfg, lead.lead_id)
+            else:
+                _bind_unconfirmed_deposit_evidence(
+                    store, matched_idx, cfg=cfg, lead_id=lead.lead_id,
+                    commerce_order_id=order_result.order.order_id,
+                    commerce_payment_intent_id=intent_result.intent.intent_id,
+                    amount_cents=deposit_amount_cents, url_status=url_status,
+                )
+            # Reviewer A BLOCKER-2: emit failed BEFORE void so the triple holds.
+            # Emitted on both arms — it records the SEND, which failed either
+            # way, and makes no claim about the intent's own lifecycle.
             commerce_payment_link.emit_payment_link_failed(
                 decisions_log_path=LOG_PATH,
                 intent_id=intent_result.intent.intent_id,
                 order_id=order_result.order.order_id,
                 reason=f"bridge_send_failed: {mid_or_err[:150]}",
             )
-            commerce_payment_link.void(
-                intent_state_path=COMMERCE_INTENTS_PATH,
-                decisions_log_path=LOG_PATH,
-                intent_id=intent_result.intent.intent_id,
-                reason="customer_send_failed",
-                actor="caller",  # Reviewer A HIGH-3 + B HIGH-3
-            )
-            # Slice-2.5 ledger-cleanliness fix (operator-flagged from
-            # 2026-05-29 deploy smoke). Parallel to the intent_mint_failed
-            # cleanup ~30 lines above: cancel the orphan order so it doesn't
-            # sit in `pending_payment` accumulating drift. Operator re-
-            # invocation will mint a fresh intent against a NEW order_id;
-            # without this, the prior order persists as ledger noise that
-            # only the §12a freshness watchdog (slice 3) would notice.
-            try:
-                commerce_order.cancel(
-                    state_path=COMMERCE_ORDERS_PATH,
+            if definite_failure:
+                commerce_payment_link.void(
+                    intent_state_path=COMMERCE_INTENTS_PATH,
                     decisions_log_path=LOG_PATH,
-                    order_id=order_result.order.order_id,
-                    reason="bridge_send_failed_orphan_cleanup",
-                    actor="cron",  # order_state.cancel actor is Literal[customer|operator|cron]
+                    intent_id=intent_result.intent.intent_id,
+                    reason="customer_send_failed",
+                    actor="caller",  # Reviewer A HIGH-3 + B HIGH-3
                 )
-            except Exception as cancel_err:  # noqa: BLE001 — best-effort cleanup
-                sys.stderr.write(
-                    f"WARN: order cancel-on-bridge-fail failed (non-fatal): "
-                    f"{type(cancel_err).__name__}: {cancel_err}\n"
-                )
+                # Slice-2.5 ledger-cleanliness fix (operator-flagged from
+                # 2026-05-29 deploy smoke). Parallel to the intent_mint_failed
+                # cleanup ~30 lines above: cancel the orphan order so it doesn't
+                # sit in `pending_payment` accumulating drift. Operator re-
+                # invocation will mint a fresh intent against a NEW order_id;
+                # without this, the prior order persists as ledger noise that
+                # only the §12a freshness watchdog (slice 3) would notice.
+                #
+                # Only on the definite arm. An uncertain send's order backs a
+                # link the customer probably holds, so it is not an orphan.
+                try:
+                    commerce_order.cancel(
+                        state_path=COMMERCE_ORDERS_PATH,
+                        decisions_log_path=LOG_PATH,
+                        order_id=order_result.order.order_id,
+                        reason="bridge_send_failed_orphan_cleanup",
+                        actor="cron",  # order_state.cancel actor is Literal[customer|operator|cron]
+                    )
+                except Exception as cancel_err:  # noqa: BLE001 — best-effort cleanup
+                    sys.stderr.write(
+                        f"WARN: order cancel-on-bridge-fail failed (non-fatal): "
+                        f"{type(cancel_err).__name__}: {cancel_err}\n"
+                    )
             _emit_deposit_link_failed(
                 lead_id=lead.lead_id, reason="bridge_send_failed",
                 detail=mid_or_err[:500],
@@ -499,15 +652,19 @@ def main() -> int:
                     f"(${deposit_amount_cents/100:.2f}) but WhatsApp bridge POST "
                     f"failed: {mid_or_err[:200]}. Intent voided. "
                     f"Re-invoke: catering-mint-deposit --lead-id {lead.lead_id}"
-                ) if send_certainty == "failed" else (
+                ) if definite_failure else (
                     f"Deposit link for lead {lead.lead_id} "
                     f"(${deposit_amount_cents/100:.2f}) was ACCEPTED by the bridge "
-                    f"but not confirmed, so the customer most likely HAS it. "
-                    f"Do NOT re-invoke catering-mint-deposit for this lead: that "
-                    f"mints a second, different payment link. The intent was "
-                    f"voided, so the link they hold will not take a payment — "
-                    f"check the chat and reconcile manually. Detail: "
-                    f"{mid_or_err[:200]}"
+                    f"but never confirmed, so the customer most likely HAS it. "
+                    f"The link is LIVE and can still take a payment — intent "
+                    f"{intent_result.intent.intent_id}, order "
+                    f"{order_result.order.order_id}, both now recorded on the "
+                    f"lead. Re-invoking catering-mint-deposit is REFUSED for this "
+                    f"lead and will stay refused until someone resolves it by "
+                    f"hand: read the customer's chat to see whether the link "
+                    f"arrived, then either leave it live to be paid, or void "
+                    f"{intent_result.intent.intent_id} before any re-mint. "
+                    f"Detail: {mid_or_err[:200]}"
                 ),
             )
             _emit_customer_send_unconfirmed(
