@@ -29,13 +29,17 @@ Second axis — deposit-link delivery disposition (P1 2026-08-15, ruling R1):
   make uncertainty permanently irrecoverable."
 
   --deposit-delivery confirmed-delivered  — the customer DID get the link: the
-      uncertainty becomes `sent`, and the binding + live intent are left exactly
-      as they are so the deposit stays payable.
+      uncertainty becomes `sent`, and the binding + intent are left exactly as
+      they are so the deposit stays payable. Refused unless the bound intent is
+      actually still payable, since that claim is the whole point of this arm.
   --deposit-delivery not-delivered        — the customer did NOT get it: void
       the intent, cancel the order behind it, unbind the lead, and record the
       delivery as the definite failure it was, so a legitimate re-mint can
-      proceed. The end state is the definite-failure arm's end state, because
-      the operator has just asserted the definite-failure arm's fact.
+      proceed. What the re-mint path sees is the definite-failure arm's end
+      state — no bound intent, no live intent, no open order, marker `failed`.
+      Two lead fields deliberately differ from that arm and neither is read by
+      the re-mint path: `deposit_status` is `voided` rather than untouched
+      (truthful — an operator did void it), and `deposit_required` stays True.
 
   Operator-only by construction, per R1: no timer, sweep or retry may take this
   state. It lives here, on the existing operator status-correction primitive,
@@ -108,6 +112,12 @@ COMMERCE_ORDERS_PATH = Path(os.environ.get(
 
 ALLOWED_TARGETS = ("SENT_TO_CUSTOMER", "OWNER_REJECTED", "CLOSED")
 ALLOWED_DEPOSIT_DELIVERY = ("confirmed-delivered", "not-delivered")
+# An intent in one of these can never take a payment again. Mirrors the live-set
+# exclusion in catering-mint-deposit's `_find_live_intent_for_lead`, so the two
+# scripts cannot disagree about what "still payable" means. `confirmed` is NOT
+# terminal here: the customer paid, which is the strongest evidence a link was
+# delivered.
+TERMINAL_INTENT_STATUSES = frozenset({"voided", "refunded", "chargeback"})
 SAFE_FROM_STATUSES = (
     "AWAITING_OWNER_APPROVAL", "OWNER_APPROVED", "OWNER_EDITED",
     "OWNER_REJECTED", "SENT_TO_CUSTOMER",
@@ -144,22 +154,55 @@ def _resolve_deposit_delivery(store, matched_idx: int, *, resolution: str,
         )
         return EXIT_INVALID_INPUT
 
-    # The customer already paid — nothing about this delivery is unresolved, and
-    # unbinding would drop the record of a real payment.
-    if lead.deposit_status == "paid":
+    # The customer already paid, so there is no live link to void and unbinding
+    # would drop the record of a real payment. Scoped to THIS arm: a paid
+    # deposit can still have its delivery confirmed — see below.
+    if resolution == "not-delivered" and lead.deposit_status == "paid":
         sys.stderr.write(
-            f"lead {lead.lead_id} deposit is already paid; refusing to "
-            f"reconcile its delivery\n"
+            f"lead {lead.lead_id} deposit is already paid; refusing to void it "
+            f"on a non-delivery claim\n"
         )
         return EXIT_INVALID_INPUT
 
-    if resolution == "confirmed-delivered" and not lead.deposit_payment_intent_id:
-        sys.stderr.write(
-            f"lead {lead.lead_id} names no payment intent, so there is no link "
-            f"whose delivery can be confirmed; use --deposit-delivery "
-            f"not-delivered to clear the marker\n"
-        )
-        return EXIT_INVALID_INPUT
+    if resolution == "confirmed-delivered":
+        if not lead.deposit_payment_intent_id:
+            sys.stderr.write(
+                f"lead {lead.lead_id} names no payment intent, so there is no "
+                f"link whose delivery can be confirmed; use --deposit-delivery "
+                f"not-delivered to clear the marker\n"
+            )
+            return EXIT_INVALID_INPUT
+
+        # This arm's whole claim is that the link is LIVE: it keeps the binding,
+        # leaves `deposit_status` asserting a payment is awaited, and stamps the
+        # delivery `sent`. Against a terminal intent every part of that is
+        # false, and the result is worse than the state this branch exists to
+        # remove — the lead would await payment on an intent that can never take
+        # one, and nothing could reach it again, because this disposition
+        # refuses once the marker is no longer `uncertain` and a re-mint is a
+        # silent `already_minted` no-op. So look before claiming, and fail
+        # closed if the ledger cannot be read at all: an unverifiable money
+        # claim must not be written.
+        try:
+            intent_store = commerce_payment_link.load_intent_store(COMMERCE_INTENTS_PATH)
+        except Exception as e:  # noqa: BLE001 — cannot verify => must not claim
+            sys.stderr.write(
+                f"cannot read the payment-intent ledger "
+                f"({type(e).__name__}: {e}); refusing to record a delivery "
+                f"whose link cannot be verified\n"
+            )
+            return EXIT_INVALID_INPUT
+        intent = next((i for i in intent_store.intents
+                       if i.intent_id == lead.deposit_payment_intent_id), None)
+        if intent is None or intent.status in TERMINAL_INTENT_STATUSES:
+            found = "absent from the ledger" if intent is None else f"status={intent.status!r}"
+            sys.stderr.write(
+                f"lead {lead.lead_id} is bound to intent "
+                f"{lead.deposit_payment_intent_id} ({found}), so it holds no "
+                f"payable link and confirming delivery would record one that "
+                f"does not exist; use --deposit-delivery not-delivered\n"
+            )
+            return EXIT_INVALID_INPUT
 
     if dry_run:
         print(json.dumps({

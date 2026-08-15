@@ -138,8 +138,8 @@ def _write_uncertain_lead(leads_path: Path, **overrides) -> str:
     return lead_id
 
 
-def _seed_live_intent(intents_path: Path, lead_id: str) -> None:
-    intents_path.write_text(json.dumps({"intents": [{
+def _seed_live_intent(intents_path: Path, lead_id: str, status: str = "minted") -> None:
+    intent = {
         "intent_id": "CPI00001",
         "order_id": "CO00001",
         "originating_message_id": f"catering_deposit_{lead_id}",
@@ -147,10 +147,13 @@ def _seed_live_intent(intents_path: Path, lead_id: str) -> None:
         "currency": "USD",
         "provider": "placeholder",
         "checkout_url": "https://pay/?o=CO00001",
-        "status": "minted",
+        "status": status,
         "created_at": TS.isoformat(),
         "updated_at": TS.isoformat(),
-    }]}, indent=2), encoding="utf-8")
+    }
+    if status == "voided":
+        intent["voided_at"] = TS.isoformat()
+    intents_path.write_text(json.dumps({"intents": [intent]}, indent=2), encoding="utf-8")
 
 
 def _seed_order(orders_path: Path, status: str = "pending_payment") -> None:
@@ -253,6 +256,121 @@ def test_confirmed_delivery_needs_a_link_to_confirm(isolated_state):
     assert _lead(isolated_state["leads_path"])["deposit_link_delivery_status"] == "uncertain"
 
 
+@_LINUX_ONLY
+@pytest.mark.parametrize("intent_status", ["voided", "refunded", "chargeback"])
+def test_confirmed_delivery_refuses_when_the_link_is_not_payable(
+        isolated_state, intent_status):
+    """B1: confirming delivery asserts the link is LIVE, so it must look.
+
+    The bound intent is the whole basis of the claim this arm writes — marker
+    `sent`, binding kept, `deposit_status` left at `awaiting_payment`. Against a
+    terminal intent every part of that is false, and the result is worse than
+    the state this branch exists to remove: the lead then says a payment is
+    awaited on an intent that can never take one, and NOTHING can reach it
+    again — this disposition refuses (the marker is no longer `uncertain`), and
+    a re-mint is a silent `already_minted` no-op.
+
+    Reachable without anything exotic: a crash in the window between the void
+    and the lead write leaves exactly this shape, and the operator who then
+    re-reads the chat and concludes "it arrived" picks this arm.
+    """
+    lead_id = _write_uncertain_lead(isolated_state["leads_path"])
+    _seed_live_intent(isolated_state["intents_path"], lead_id, status=intent_status)
+
+    r = _run(isolated_state["env"], "--lead-id", lead_id,
+             "--deposit-delivery", "confirmed-delivered", "--reason", "looks delivered")
+    assert r.returncode == 2, f"stdout={r.stdout!r} stderr={r.stderr[-800:]!r}"
+
+    lead = _lead(isolated_state["leads_path"])
+    assert lead["deposit_link_delivery_status"] == "uncertain", (
+        "the refusal must leave the lead resolvable")
+    assert lead["deposit_status"] == "awaiting_payment"
+    assert lead["deposit_payment_intent_id"] == "CPI00001"
+    assert not [r_ for r_ in _audit_rows(isolated_state["log_path"])
+                if r_["type"] == "catering_deposit_delivery_reconciled"]
+
+
+@_LINUX_ONLY
+def test_confirmed_delivery_refuses_when_the_intent_is_missing_from_the_ledger(
+        isolated_state):
+    """A bound id the ledger does not know cannot be verified as payable, so
+    the claim must not be written. `not-delivered` is the disposition that
+    handles it — it treats `intent_not_found` as nothing-to-void."""
+    lead_id = _write_uncertain_lead(isolated_state["leads_path"])
+    isolated_state["intents_path"].write_text(
+        json.dumps({"intents": []}), encoding="utf-8")
+
+    r = _run(isolated_state["env"], "--lead-id", lead_id,
+             "--deposit-delivery", "confirmed-delivered", "--reason", "x")
+    assert r.returncode == 2, f"stdout={r.stdout!r}"
+    assert _lead(isolated_state["leads_path"])["deposit_link_delivery_status"] == "uncertain"
+
+
+@_LINUX_ONLY
+def test_the_refused_confirm_still_leaves_the_other_disposition_open(
+        isolated_state):
+    """The escape hatch must not close behind the operator. After the refusal
+    the lead is still `uncertain`, so `not-delivered` resolves it — which is
+    exactly what the refusal message tells them to run."""
+    lead_id = _write_uncertain_lead(isolated_state["leads_path"])
+    _seed_live_intent(isolated_state["intents_path"], lead_id, status="voided")
+
+    refused = _run(isolated_state["env"], "--lead-id", lead_id,
+                   "--deposit-delivery", "confirmed-delivered", "--reason", "x")
+    assert refused.returncode == 2
+    assert "not-delivered" in refused.stderr, (
+        "a refusal that does not name the way out is half a trapdoor")
+
+    r = _run(isolated_state["env"], "--lead-id", lead_id,
+             "--deposit-delivery", "not-delivered", "--reason", "nothing arrived")
+    assert r.returncode == 0, f"stdout={r.stdout!r} stderr={r.stderr[-800:]!r}"
+
+    lead = _lead(isolated_state["leads_path"])
+    assert lead["deposit_payment_intent_id"] == ""
+    assert lead["deposit_link_delivery_status"] == "failed"
+
+
+@_LINUX_ONLY
+def test_a_paid_deposit_can_still_have_its_delivery_confirmed(isolated_state):
+    """Payment is the strongest possible evidence of delivery — the customer
+    used the link. Refusing here would strand the webhook race (payment lands
+    while the marker is still `uncertain`) with NO disposition available, since
+    `not-delivered` cannot void a confirmed intent. That is the trapdoor this
+    branch is supposed to be closing, not opening."""
+    lead_id = _write_uncertain_lead(isolated_state["leads_path"],
+                                    deposit_status="paid")
+    _seed_live_intent(isolated_state["intents_path"], lead_id, status="confirmed")
+
+    r = _run(isolated_state["env"], "--lead-id", lead_id,
+             "--deposit-delivery", "confirmed-delivered",
+             "--reason", "deposit paid, so the link plainly arrived")
+    assert r.returncode == 0, f"stdout={r.stdout!r} stderr={r.stderr[-800:]!r}"
+
+    lead = _lead(isolated_state["leads_path"])
+    assert lead["deposit_link_delivery_status"] == "sent"
+    assert lead["deposit_status"] == "paid", "a paid deposit stays paid"
+    assert lead["deposit_payment_intent_id"] == "CPI00001"
+    assert _intents(isolated_state["intents_path"])[0]["status"] == "confirmed"
+
+
+@_LINUX_ONLY
+def test_a_paid_deposit_is_never_voided_by_a_not_delivered_call(isolated_state):
+    """The other half: money that moved is not undone by an operator asserting
+    non-delivery."""
+    lead_id = _write_uncertain_lead(isolated_state["leads_path"],
+                                    deposit_status="paid")
+    _seed_live_intent(isolated_state["intents_path"], lead_id, status="confirmed")
+
+    r = _run(isolated_state["env"], "--lead-id", lead_id,
+             "--deposit-delivery", "not-delivered", "--reason", "x")
+    assert r.returncode == 2, f"stdout={r.stdout!r}"
+
+    lead = _lead(isolated_state["leads_path"])
+    assert lead["deposit_status"] == "paid"
+    assert lead["deposit_payment_intent_id"] == "CPI00001"
+    assert _intents(isolated_state["intents_path"])[0]["status"] == "confirmed"
+
+
 # ─────────────────────────────────────────────────────────────────
 # R1 outcome 2 — the customer did NOT get the link
 # ─────────────────────────────────────────────────────────────────
@@ -260,11 +378,17 @@ def test_confirmed_delivery_needs_a_link_to_confirm(isolated_state):
 
 @_LINUX_ONLY
 def test_not_delivered_reaches_the_definite_failure_arms_end_state(isolated_state):
-    """The operator is asserting the definite-failure arm's fact, so the end
-    state must be that arm's end state — voided intent, CANCELLED order, unbound
-    lead, marker `failed`. Anything less leaves the orphan the slice-2.5 cleanup
-    exists to remove (see
+    """The operator is asserting the definite-failure arm's fact, so what the
+    re-mint path sees must be that arm's end state — voided intent, CANCELLED
+    order, unbound lead, marker `failed`. Anything less leaves the orphan the
+    slice-2.5 cleanup exists to remove (see
     test_catering_mint_deposit_script.py::test_bridge_send_failed_voids_intent_and_audits).
+
+    Two lead fields differ from that arm on purpose and neither is read by the
+    re-mint path: `deposit_status` is `voided` where the definite arm leaves it
+    untouched, and `deposit_required` stays True. `_should_mint_deposit` reads
+    neither, and `voided` is the more truthful value here — an operator did void
+    it.
 
     It also resolves the durable lie R1 names: a voided ledger intent under a
     lead still asserting `awaiting_payment`.
@@ -452,6 +576,30 @@ def test_status_correction_still_works_untouched(isolated_state):
 # ─────────────────────────────────────────────────────────────────
 
 
+_SCANNED_SUFFIXES = {
+    ".py", ".sh", ".service", ".timer", ".md", "",
+    # A manifest can wire an invocation as surely as a script can, and these
+    # were invisible to the first version of this fence.
+    ".yaml", ".yml", ".json",
+}
+
+
+def _is_prose(path: Path) -> bool:
+    """Markdown that only DOCUMENTS the command, as opposed to markdown that
+    Hermes executes.
+
+    The distinction is load-bearing in this repo: a `SKILL.md` is an automation
+    surface — Hermes runs what a SKILL tells it to run — so exempting `*.md`
+    wholesale, as the first version of this fence did, left the hole exactly
+    where this codebase keeps its automation. Only `docs/` and `tasks/` are
+    prose.
+    """
+    if path.suffix != ".md":
+        return False
+    parts = path.relative_to(_REPO_ROOT).parts
+    return bool(parts) and parts[0] in {"docs", "tasks"}
+
+
 def test_the_disposition_is_not_reachable_by_automation():
     """R1: no timer, sweep or retry may take this state. Only an operator
     running the command by hand resolves it."""
@@ -459,9 +607,9 @@ def test_the_disposition_is_not_reachable_by_automation():
     for path in _REPO_ROOT.rglob("*"):
         if not path.is_file() or ".git" in path.parts or "tests" in path.parts:
             continue
-        if path.suffix not in {".py", ".sh", ".service", ".timer", ".md", ""}:
+        if path.suffix not in _SCANNED_SUFFIXES:
             continue
-        if path.name in {"catering-lead-reconcile"}:
+        if path.name == "catering-lead-reconcile":
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -469,13 +617,31 @@ def test_the_disposition_is_not_reachable_by_automation():
             continue
         if "--deposit-delivery" not in text:
             continue
-        # Documentation and the owner page may NAME the command; nothing may
-        # schedule or subprocess it.
-        if path.suffix == ".md" or path.name == "catering-mint-deposit":
+        # Prose may NAME the command, and so may the owner-facing page that
+        # tells an operator what to run. Nothing may schedule or spawn it.
+        if _is_prose(path) or path.name == "catering-mint-deposit":
             continue
         offenders.append(str(path.relative_to(_REPO_ROOT)))
     assert offenders == [], (
         f"--deposit-delivery is invoked outside an operator's hands: {offenders}")
+
+
+def test_the_page_that_names_the_command_does_not_spawn_it():
+    """The one exemption above is for COPY, so pin that it stays copy.
+
+    catering-mint-deposit is allowed to name the reconciler because it prints
+    the command for a human to run. If it ever ran the command itself, the
+    exemption would silently launder an automated invocation past the fence.
+    """
+    text = MINT_PATH.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if "catering-lead-reconcile" not in line:
+            continue
+        for marker in ("subprocess", "Popen", "check_call", "check_output",
+                       "os.system", "os.exec", "run("):
+            assert marker not in line, (
+                f"the owner page's mention of the reconciler looks like an "
+                f"invocation, not copy: {line.strip()!r}")
 
 
 def test_the_owner_page_names_the_command_that_actually_resolves_it():
