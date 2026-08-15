@@ -135,6 +135,44 @@ def _emit_deposit_link_failed(
         sys.stderr.write(f"WARN: failed to emit catering_deposit_link_failed: {e}\n")
 
 
+def _emit_deposit_link_send_unconfirmed(
+    *,
+    lead_id: str,
+    commerce_order_id: str,
+    commerce_payment_intent_id: str,
+    amount_cents: int,
+    detail: str,
+    cfg,
+) -> None:
+    """Best-effort: emit catering_deposit_link_send_unconfirmed; swallow errors.
+
+    The uncertain arm's money-evidence row. It replaces the
+    `commerce_payment_link_failed` + `catering_deposit_link_failed` pair rather
+    than joining them: with no void on this arm, the first row's
+    attempted -> failed -> voided contract no longer holds, and the second would
+    claim a `bridge_send_failed` that did not happen. Both told an operator the
+    link was dead while it was live and payable.
+    """
+    from commerce.audit import emit
+    try:
+        emit(
+            LOG_PATH,
+            {
+                "type": "catering_deposit_link_send_unconfirmed",
+                "ts": customer_now(cfg.customer.timezone).isoformat(),
+                "lead_id": lead_id,
+                "delivery_certainty": "uncertain",
+                "commerce_order_id": commerce_order_id,
+                "commerce_payment_intent_id": commerce_payment_intent_id,
+                "amount_cents": amount_cents,
+                "detail": detail[:500],
+            },
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort by contract
+        sys.stderr.write(
+            f"WARN: failed to emit catering_deposit_link_send_unconfirmed: {e}\n")
+
+
 def _emit_deposit_reinvoke_refused(
     *,
     lead_id: str,
@@ -598,16 +636,17 @@ def main() -> int:
                     commerce_payment_intent_id=intent_result.intent.intent_id,
                     amount_cents=deposit_amount_cents, url_status=url_status,
                 )
-            # Reviewer A BLOCKER-2: emit failed BEFORE void so the triple holds.
-            # Emitted on both arms — it records the SEND, which failed either
-            # way, and makes no claim about the intent's own lifecycle.
-            commerce_payment_link.emit_payment_link_failed(
-                decisions_log_path=LOG_PATH,
-                intent_id=intent_result.intent.intent_id,
-                order_id=order_result.order.order_id,
-                reason=f"bridge_send_failed: {mid_or_err[:150]}",
-            )
             if definite_failure:
+                # Reviewer A BLOCKER-2: emit failed BEFORE void so the triple
+                # holds. Definite arm only — this row's documented contract is
+                # to explain the void that follows it, and on the uncertain arm
+                # there is no void for it to explain.
+                commerce_payment_link.emit_payment_link_failed(
+                    decisions_log_path=LOG_PATH,
+                    intent_id=intent_result.intent.intent_id,
+                    order_id=order_result.order.order_id,
+                    reason=f"bridge_send_failed: {mid_or_err[:150]}",
+                )
                 commerce_payment_link.void(
                     intent_state_path=COMMERCE_INTENTS_PATH,
                     decisions_log_path=LOG_PATH,
@@ -638,12 +677,25 @@ def main() -> int:
                         f"WARN: order cancel-on-bridge-fail failed (non-fatal): "
                         f"{type(cancel_err).__name__}: {cancel_err}\n"
                     )
-            _emit_deposit_link_failed(
-                lead_id=lead.lead_id, reason="bridge_send_failed",
-                detail=mid_or_err[:500],
-                commerce_order_id=order_result.order.order_id,
-                commerce_payment_intent_id=intent_result.intent.intent_id,
-            )
+            # One evidence row per arm, each named for what actually happened.
+            # `bridge_send_failed` is a claim about the customer receiving
+            # nothing, so it belongs only where that is true.
+            if definite_failure:
+                _emit_deposit_link_failed(
+                    lead_id=lead.lead_id, reason="bridge_send_failed",
+                    detail=mid_or_err[:500],
+                    commerce_order_id=order_result.order.order_id,
+                    commerce_payment_intent_id=intent_result.intent.intent_id,
+                )
+            else:
+                _emit_deposit_link_send_unconfirmed(
+                    lead_id=lead.lead_id,
+                    commerce_order_id=order_result.order.order_id,
+                    commerce_payment_intent_id=intent_result.intent.intent_id,
+                    amount_cents=deposit_amount_cents,
+                    detail=str(mid_or_err),
+                    cfg=cfg,
+                )
             paged = _notify_owner_best_effort(
                 priority=1,
                 title=f"Catering deposit bridge fail (lead {lead.lead_id})",

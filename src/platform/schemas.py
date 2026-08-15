@@ -8180,6 +8180,42 @@ class CateringDepositLinkFailed(_BaseEntry):
     commerce_payment_intent_id: str = Field(default="", max_length=40)
 
 
+class CateringDepositLinkSendUnconfirmed(_BaseEntry):
+    """P1 2026-08-15: the deposit link was minted and sent, and the send was
+    never confirmed. The link is LIVE.
+
+    Replaces the pair this arm used to emit, both of which became untrue once
+    the void stopped firing: `commerce_payment_link_failed`, whose documented
+    contract is to PRECEDE a void so the trail reads attempted -> failed ->
+    voided with no gap, and `catering_deposit_link_failed` with
+    `reason="bridge_send_failed"`, when the truth is "unconfirmed, probably
+    delivered". Together they told an operator the link was dead while it sat
+    live and payable in the customer's chat.
+
+    Carries the cross-references those rows carried so the R3 evidence does not
+    regress. Deliberately records NO intent status: the operator may void the
+    intent during reconciliation, and a status stamped here would become a lie
+    the moment they did. The ledger is the authority on that.
+
+    A NEW tag for the same reason as CateringDepositReinvokeRefused — the pinned
+    rollback target routes an unknown tag to `_UnknownLogEntry` (extra="allow"),
+    whereas widening `CateringDepositLinkFailed.reason` would make the old
+    reader REJECT a row it recognises today.
+
+    Distinct from `catering_customer_send_unconfirmed`, which is p17b's
+    cross-catering row answering "which sends could we not confirm?" for every
+    script and carrying no commerce cross-references. This one is the deposit
+    money evidence.
+    """
+    type: Literal["catering_deposit_link_send_unconfirmed"]
+    lead_id: str = Field(min_length=1, max_length=40)
+    delivery_certainty: Literal["uncertain"]
+    commerce_order_id: str = Field(default="", max_length=40)
+    commerce_payment_intent_id: str = Field(default="", max_length=40)
+    amount_cents: int = Field(default=0, ge=0, le=10_000_000_000)
+    detail: str = Field(default="", max_length=500)
+
+
 class CateringDepositReinvokeRefused(_BaseEntry):
     """P1 2026-08-15: catering-mint-deposit refused to mint a second deposit
     link because the first one's delivery was never confirmed.
@@ -8564,7 +8600,9 @@ LogEntry = Annotated[
         # Slice-2 catering deposit caller
         Annotated[CateringDepositLinkSent, Tag("catering_deposit_link_sent")],
         Annotated[CateringDepositLinkFailed, Tag("catering_deposit_link_failed")],
-        # P1 2026-08-15: uncertain-send re-invoke refusal (new tag, not a widened reason)
+        # P1 2026-08-15: unconfirmed-send evidence + re-invoke refusal.
+        # New tags, not widened reasons — see the class docstrings.
+        Annotated[CateringDepositLinkSendUnconfirmed, Tag("catering_deposit_link_send_unconfirmed")],
         Annotated[CateringDepositReinvokeRefused, Tag("catering_deposit_reinvoke_refused")],
         # Slice-3 PR-2: catering deposit confirmation + commerce confirmation-failure
         Annotated[CateringDepositPaid, Tag("catering_deposit_paid")],

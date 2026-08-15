@@ -730,11 +730,7 @@ def test_an_uncertain_send_does_not_take_the_destructive_transitions(isolated_st
 
     rows = _read_audit_rows(isolated_state["log_path"])
     types = [r["type"] for r in rows]
-    # The evidence rows that already survived must keep surviving — both record
-    # the SEND, which did fail, and neither mutates the intent.
-    assert "commerce_payment_link_failed" in types
-    assert "catering_deposit_link_failed" in types
-    # ...but nothing may have destroyed the money objects behind the link.
+    # Nothing may have destroyed the money objects behind the link.
     assert "commerce_payment_intent_voided" not in types, (
         "the intent behind a link the customer probably holds was voided")
     assert "commerce_order_cancelled" not in types, (
@@ -756,6 +752,77 @@ def test_an_uncertain_send_does_not_take_the_destructive_transitions(isolated_st
     # orphans a payment the customer can still make on the link they hold.
     leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
     assert leads["leads"][0]["deposit_payment_intent_id"] == intents["intents"][0]["intent_id"]
+
+
+def test_the_uncertain_arm_emits_no_row_claiming_the_link_failed(isolated_state):
+    """The audit log must not collapse uncertainty into failure either.
+
+    Fixing the STATE while leaving the audit lying would be half a fix. Two rows
+    used to be written on this arm and both were untrue once the void stopped
+    firing:
+
+      - `commerce_payment_link_failed`, whose documented contract
+        (payment_link.py) is to PRECEDE a void so the operator reads
+        attempted -> failed -> voided with no gap. With no void it leaves
+        attempted -> failed -> nothing, and the operator concludes the link is
+        dead when it is live and payable.
+      - `catering_deposit_link_failed` with `reason="bridge_send_failed"`, when
+        the truth is "unconfirmed, probably delivered".
+
+    One truthfully-named row replaces both, carrying the same cross-references
+    so the R3 evidence does not regress.
+    """
+    lead_id, result = _run_uncertain(isolated_state)
+
+    rows = _read_audit_rows(isolated_state["log_path"])
+    types = [r["type"] for r in rows]
+    assert "commerce_payment_link_failed" not in types, (
+        "a row whose contract is to explain a void was emitted on an arm that "
+        "does not void")
+    assert "catering_deposit_link_failed" not in types, (
+        "the deposit link did not fail — its delivery is unknown and the link "
+        "is live")
+
+    unconfirmed = [r for r in rows if r["type"] == "catering_deposit_link_send_unconfirmed"]
+    assert len(unconfirmed) == 1, [r["type"] for r in rows]
+    row = unconfirmed[0]
+    intents = _commerce_rows(isolated_state, "payment_intents.json", "intents")
+    orders = _commerce_rows(isolated_state, "orders.json", "orders")
+    assert row["lead_id"] == lead_id
+    assert row["delivery_certainty"] == "uncertain"
+    assert row["commerce_payment_intent_id"] == intents[0]["intent_id"]
+    assert row["commerce_order_id"] == orders[0]["order_id"]
+    assert row["detail"]
+
+    # p17b's cross-catering row is untouched — it answers "which sends could we
+    # not confirm?" across every script and carries no commerce cross-refs.
+    assert len([r for r in rows if r["type"] == "catering_customer_send_unconfirmed"]) == 1
+
+
+def test_the_definite_arm_still_emits_the_full_failed_and_voided_triple(isolated_state):
+    """Fence on the row change: the definite arm's audit is untouched.
+
+    A customer who received nothing DOES have a failed link and a voided intent,
+    and the operator must still read the whole triple there.
+    """
+    isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STUB"] = "fail:simulated_bridge_outage"
+    _write_config(isolated_state["config_path"], checkout_url_template="https://pay/?o={order_id}")
+    lead_id = _write_lead(isolated_state["leads_path"])
+
+    result = _run_script(isolated_state["env"], lead_id)
+    assert result.returncode == 6, result.stderr[-800:]
+
+    rows = _read_audit_rows(isolated_state["log_path"])
+    types = [r["type"] for r in rows]
+    assert "commerce_payment_link_attempted" in types
+    assert "commerce_payment_link_failed" in types
+    assert "commerce_payment_intent_voided" in types
+    assert "commerce_order_cancelled" in types
+    deposit_failed = [r for r in rows if r["type"] == "catering_deposit_link_failed"]
+    assert len(deposit_failed) == 1
+    assert deposit_failed[0]["reason"] == "bridge_send_failed"
+    # ...and the uncertain arm's row must NOT appear where delivery is known.
+    assert "catering_deposit_link_send_unconfirmed" not in types
 
 
 def test_a_delivered_deposit_link_says_so_on_the_lead(isolated_state):
@@ -882,10 +949,10 @@ def test_uncertain_send_leaves_the_minted_intent_recoverable_from_the_lead(isola
     # in the ledger — live, per the two-facts pin above — and the audit row keeps
     # both cross-references.
     assert intents[0]["status"] == "minted"
-    deposit_failed = next(r for r in _read_audit_rows(isolated_state["log_path"])
-                          if r["type"] == "catering_deposit_link_failed")
-    assert deposit_failed["commerce_payment_intent_id"] == minted_intent_id
-    assert deposit_failed["commerce_order_id"] == minted_order_id
+    evidence = next(r for r in _read_audit_rows(isolated_state["log_path"])
+                    if r["type"] == "catering_deposit_link_send_unconfirmed")
+    assert evidence["commerce_payment_intent_id"] == minted_intent_id
+    assert evidence["commerce_order_id"] == minted_order_id
 
 
 def test_the_refusal_is_audited_under_its_own_tag(isolated_state):
@@ -911,10 +978,10 @@ def test_the_refusal_is_audited_under_its_own_tag(isolated_state):
         "the refusal must name the link the operator has to reconcile")
     assert row["commerce_order_id"]
     assert row["amount_cents"] > 0
-    # The reason Literal on the pre-existing variant must NOT have been widened.
-    assert not [r for r in rows
-                if r["type"] == "catering_deposit_link_failed"
-                and r["reason"] not in {"bridge_send_failed"}]
+    # The pre-existing variant must not have been reused for either of the two
+    # new events — its `reason` Literal is byte-identical in the rollback target,
+    # so a widened value there is what would break the old reader.
+    assert "catering_deposit_link_failed" not in [r["type"] for r in rows]
 
 
 def test_reinvoke_after_a_definite_failure_still_mints(isolated_state):
