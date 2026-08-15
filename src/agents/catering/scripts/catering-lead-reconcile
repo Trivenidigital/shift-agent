@@ -32,8 +32,10 @@ Second axis — deposit-link delivery disposition (P1 2026-08-15, ruling R1):
       uncertainty becomes `sent`, and the binding + live intent are left exactly
       as they are so the deposit stays payable.
   --deposit-delivery not-delivered        — the customer did NOT get it: void
-      the intent, unbind the lead, and record the delivery as the definite
-      failure it was, so a legitimate re-mint can proceed.
+      the intent, cancel the order behind it, unbind the lead, and record the
+      delivery as the definite failure it was, so a legitimate re-mint can
+      proceed. The end state is the definite-failure arm's end state, because
+      the operator has just asserted the definite-failure arm's fact.
 
   Operator-only by construction, per R1: no timer, sweep or retry may take this
   state. It lives here, on the existing operator status-correction primitive,
@@ -92,6 +94,7 @@ from exit_codes import (  # noqa: E402
 from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
+from commerce import order_state as commerce_order  # noqa: E402
 from commerce import payment_link as commerce_payment_link  # noqa: E402
 
 CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
@@ -100,6 +103,8 @@ LEADS_LOCK = Path(os.environ.get("SHIFT_AGENT_LEADS_LOCK", "/opt/shift-agent/sta
 LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
 COMMERCE_INTENTS_PATH = Path(os.environ.get(
     "COMMERCE_INTENTS_PATH", "/opt/shift-agent/state/commerce/payment_intents.json"))
+COMMERCE_ORDERS_PATH = Path(os.environ.get(
+    "COMMERCE_ORDERS_PATH", "/opt/shift-agent/state/commerce/orders.json"))
 
 ALLOWED_TARGETS = ("SENT_TO_CUSTOMER", "OWNER_REJECTED", "CLOSED")
 ALLOWED_DEPOSIT_DELIVERY = ("confirmed-delivered", "not-delivered")
@@ -166,6 +171,7 @@ def _resolve_deposit_delivery(store, matched_idx: int, *, resolution: str,
         return EXIT_OK
 
     intent_voided = False
+    order_cancelled = False
     if resolution == "not-delivered" and lead.deposit_payment_intent_id:
         result = commerce_payment_link.void(
             intent_state_path=COMMERCE_INTENTS_PATH,
@@ -186,6 +192,43 @@ def _resolve_deposit_delivery(store, matched_idx: int, *, resolution: str,
             return EXIT_INVALID_INPUT
         # intent_not_found: nothing live to void, so the unbind below is the
         # whole disposition. `intent_voided` stays False and the audit says so.
+
+        # The operator is asserting the customer never received the link, which
+        # is the definite-failure arm's fact, so the end state has to be the
+        # definite arm's end state: voided intent, CANCELLED order, unbound
+        # lead. catering-mint-deposit cancels there for exactly this reason
+        # (slice-2.5 ledger cleanliness) — an order left in `pending_payment`
+        # behind a voided intent is an orphan that only the §12a freshness
+        # watchdog would eventually notice. Same best-effort wrapping as that
+        # arm: the void has already happened, and a failed cancel must not
+        # strand the disposition half-applied.
+        #
+        # Ordered before the lead write for the same reason the void is: a
+        # crash here leaves the marker `uncertain`, so the command can simply be
+        # run again. After the lead write it could not be — the marker check
+        # would refuse — and the orphan would be stranded.
+        if lead.deposit_commerce_order_id:
+            try:
+                cancel_result = commerce_order.cancel(
+                    state_path=COMMERCE_ORDERS_PATH,
+                    decisions_log_path=LOG_PATH,
+                    order_id=lead.deposit_commerce_order_id,
+                    reason="operator_confirmed_link_never_delivered_orphan_cleanup",
+                    actor="operator",  # actor Literal is customer|operator|cron
+                )
+                order_cancelled = bool(cancel_result.ok)
+                if not cancel_result.ok:
+                    sys.stderr.write(
+                        f"WARN: order {lead.deposit_commerce_order_id} not "
+                        f"cancelled ({cancel_result.detail}); intent "
+                        f"{lead.deposit_payment_intent_id} is voided and the "
+                        f"disposition still applies\n"
+                    )
+            except Exception as e:  # noqa: BLE001 — best-effort cleanup
+                sys.stderr.write(
+                    f"WARN: order cancel failed (non-fatal): "
+                    f"{type(e).__name__}: {e}\n"
+                )
 
     prior_status_at = lead.deposit_link_delivery_status_at
     prior_intent_id = lead.deposit_payment_intent_id
@@ -238,6 +281,7 @@ def _resolve_deposit_delivery(store, matched_idx: int, *, resolution: str,
             commerce_payment_intent_id=prior_intent_id,
             amount_cents=prior_amount_cents,
             intent_voided=intent_voided,
+            order_cancelled=order_cancelled,
             reason=reason[:2000],
             operator_uid=os.getuid() if hasattr(os, "getuid") else 0,
         ),
@@ -248,6 +292,7 @@ def _resolve_deposit_delivery(store, matched_idx: int, *, resolution: str,
         "deposit_delivery": resolution,
         "commerce_payment_intent_id": prior_intent_id,
         "intent_voided": intent_voided,
+        "order_cancelled": order_cancelled,
         "reconciled": True,
     }))
     return EXIT_OK

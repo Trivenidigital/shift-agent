@@ -8253,11 +8253,15 @@ class CateringDepositDeliveryReconciled(_BaseEntry):
     one row that says which of the two happened, who decided it and what it did
     to the money objects.
 
-    `intent_voided` is carried rather than inferred: only the `not_delivered`
-    resolution voids, and only when the lead was bound to an intent that was
-    still voidable, so the audit reader must not have to guess. The ledger's own
-    `commerce_payment_intent_voided` row remains the authority on the void
-    itself; this row records the catering-side decision that caused it.
+    `intent_voided` and `order_cancelled` are carried rather than inferred: only
+    the `not_delivered` resolution touches the money objects, and only when the
+    lead was bound to ones that were still voidable/cancellable, so the audit
+    reader must not have to guess. Both cleanups are best-effort in the same
+    sense as the definite-failure arm's, which means "the disposition applied"
+    and "the ledger was fully tidied" are different facts and this row states
+    both. The ledger's own `commerce_payment_intent_voided` /
+    `commerce_order_cancelled` rows remain the authority on the mutations
+    themselves; this row records the catering-side decision that caused them.
 
     A NEW tag for the same reason as its two siblings above — the pinned
     rollback target routes an unknown tag to `_UnknownLogEntry` (extra="allow"),
@@ -8273,6 +8277,7 @@ class CateringDepositDeliveryReconciled(_BaseEntry):
     commerce_payment_intent_id: str = Field(default="", max_length=40)
     amount_cents: int = Field(default=0, ge=0, le=10_000_000_000)
     intent_voided: bool = False
+    order_cancelled: bool = False
     reason: str = Field(min_length=1, max_length=2000)
     operator_uid: int  # os.getuid() — captures who ran the script
 

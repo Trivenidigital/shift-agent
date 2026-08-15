@@ -212,7 +212,7 @@ def test_catering_deposit_p1_rows_round_trip_through_the_union():
          "prior_delivery_status": "uncertain",
          "prior_delivery_status_at": TS.isoformat(),
          "commerce_order_id": "CO00001", "commerce_payment_intent_id": "CPI00001",
-         "amount_cents": 15000, "intent_voided": True,
+         "amount_cents": 15000, "intent_voided": True, "order_cancelled": True,
          "reason": "nothing in the customer's chat", "operator_uid": 0},
     ]
     for payload in payloads:

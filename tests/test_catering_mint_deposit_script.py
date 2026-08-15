@@ -1142,13 +1142,16 @@ def test_operator_confirming_delivery_makes_the_lead_workable_again(isolated_sta
 def test_operator_authorizing_a_fresh_attempt_makes_the_lead_mintable_again(isolated_state):
     """R1 outcome 2: the customer did NOT get the link.
 
-    The intent is voided, the lead is unbound and `deposit_status` stops
-    asserting `awaiting_payment` against a dead intent. A legitimate re-mint
-    then proceeds and produces exactly one live link.
+    The disposition lands on the same end state
+    `test_bridge_send_failed_voids_intent_and_audits` pins for the definite arm
+    — voided intent, cancelled order, unbound lead — because the operator has
+    just asserted that arm's fact. A legitimate re-mint then proceeds and
+    produces exactly one live link.
     """
     lead_id, first = _run_uncertain(isolated_state)
     assert first.returncode == 6, first.stderr[-800:]
     stranded = _commerce_rows(isolated_state, "payment_intents.json", "intents")[0]["intent_id"]
+    stranded_order = _commerce_rows(isolated_state, "orders.json", "orders")[0]["order_id"]
 
     rec = _run_reconcile(isolated_state["env"], lead_id, "not-delivered")
     assert rec.returncode == 0, f"stdout={rec.stdout!r} stderr={rec.stderr[-800:]!r}"
@@ -1160,6 +1163,11 @@ def test_operator_authorizing_a_fresh_attempt_makes_the_lead_mintable_again(isol
         "operator just voided")
     voided = _commerce_rows(isolated_state, "payment_intents.json", "intents")[0]
     assert voided["intent_id"] == stranded and voided["status"] == "voided"
+    order = next(o for o in _commerce_rows(isolated_state, "orders.json", "orders")
+                 if o["order_id"] == stranded_order)
+    assert order["status"] == "cancelled", (
+        "the order behind the voided intent was left as an orphan: "
+        f"{order['status']!r}")
 
     isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STUB"] = "success:wamid_test_006"
     second = _run_script(isolated_state["env"], lead_id)

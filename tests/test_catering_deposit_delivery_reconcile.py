@@ -64,6 +64,7 @@ def isolated_state(tmp_path: Path) -> dict:
         "SHIFT_AGENT_LEADS_LOCK": str(state / "catering-leads.json.lock"),
         "SHIFT_AGENT_LOG_PATH": str(logs / "decisions.log"),
         "COMMERCE_INTENTS_PATH": str(commerce_state / "payment_intents.json"),
+        "COMMERCE_ORDERS_PATH": str(commerce_state / "orders.json"),
         "PYTHONPATH": f"{_REPO_ROOT / 'src' / 'platform'}{os.pathsep}"
                       f"{os.environ.get('PYTHONPATH', '')}",
     }
@@ -71,6 +72,7 @@ def isolated_state(tmp_path: Path) -> dict:
         "leads_path": leads_path,
         "log_path": logs / "decisions.log",
         "intents_path": commerce_state / "payment_intents.json",
+        "orders_path": commerce_state / "orders.json",
         "env": env,
     }
 
@@ -151,6 +153,22 @@ def _seed_live_intent(intents_path: Path, lead_id: str) -> None:
     }]}, indent=2), encoding="utf-8")
 
 
+def _seed_order(orders_path: Path, status: str = "pending_payment") -> None:
+    orders_path.write_text(json.dumps({"orders": [{
+        "order_id": "CO00001",
+        "sender_phone": "+15551234567",
+        "chat_id": "catering_deposit_L0007@s.whatsapp.net",
+        "cart_id": "CC00001",
+        "line_items": [],
+        "subtotal_cents": 15000,
+        "total_cents": 15000,
+        "currency": "USD",
+        "status": status,
+        "created_at": TS.isoformat(),
+        "updated_at": TS.isoformat(),
+    }]}, indent=2), encoding="utf-8")
+
+
 def _run(env: dict, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(RECONCILE_PATH), *args],
@@ -171,6 +189,10 @@ def _lead(leads_path: Path) -> dict:
 
 def _intents(intents_path: Path) -> list[dict]:
     return json.loads(intents_path.read_text(encoding="utf-8"))["intents"]
+
+
+def _orders(orders_path: Path) -> list[dict]:
+    return json.loads(orders_path.read_text(encoding="utf-8"))["orders"]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -237,11 +259,19 @@ def test_confirmed_delivery_needs_a_link_to_confirm(isolated_state):
 
 
 @_LINUX_ONLY
-def test_not_delivered_voids_the_intent_unbinds_the_lead_and_stops_the_lie(isolated_state):
-    """The durable lie R1 names: a voided ledger intent under a lead still
-    asserting `awaiting_payment`. One command has to resolve both."""
+def test_not_delivered_reaches_the_definite_failure_arms_end_state(isolated_state):
+    """The operator is asserting the definite-failure arm's fact, so the end
+    state must be that arm's end state — voided intent, CANCELLED order, unbound
+    lead, marker `failed`. Anything less leaves the orphan the slice-2.5 cleanup
+    exists to remove (see
+    test_catering_mint_deposit_script.py::test_bridge_send_failed_voids_intent_and_audits).
+
+    It also resolves the durable lie R1 names: a voided ledger intent under a
+    lead still asserting `awaiting_payment`.
+    """
     lead_id = _write_uncertain_lead(isolated_state["leads_path"])
     _seed_live_intent(isolated_state["intents_path"], lead_id)
+    _seed_order(isolated_state["orders_path"])
 
     r = _run(isolated_state["env"], "--lead-id", lead_id,
              "--deposit-delivery", "not-delivered",
@@ -255,20 +285,74 @@ def test_not_delivered_voids_the_intent_unbinds_the_lead_and_stops_the_lie(isola
     assert lead["deposit_link_delivery_status"] == "failed", (
         "the customer received nothing — that is the definite arm's marker")
 
-    intent = _intents(isolated_state["intents_path"])[0]
-    assert intent["status"] == "voided"
+    assert _intents(isolated_state["intents_path"])[0]["status"] == "voided"
+    assert _orders(isolated_state["orders_path"])[0]["status"] == "cancelled", (
+        "the order behind a voided intent is an orphan; the definite arm "
+        "cancels it and so must this")
 
     rows = _audit_rows(isolated_state["log_path"])
     types = [r_["type"] for r_ in rows]
     assert "commerce_payment_intent_voided" in types, "the ledger must record the void"
     voided_row = next(r_ for r_ in rows if r_["type"] == "commerce_payment_intent_voided")
     assert voided_row["actor"] == "operator"
+    cancelled_rows = [r_ for r_ in rows if r_["type"] == "commerce_order_cancelled"]
+    assert len(cancelled_rows) == 1, types
+    assert cancelled_rows[0]["actor"] == "operator"
+    assert cancelled_rows[0]["reason"].endswith("_orphan_cleanup"), (
+        "mirror the definite arm's reason convention: "
+        f"{cancelled_rows[0]['reason']!r}")
 
     reconciled = [r_ for r_ in rows if r_["type"] == "catering_deposit_delivery_reconciled"]
     assert len(reconciled) == 1, types
     assert reconciled[0]["resolution"] == "not_delivered"
     assert reconciled[0]["intent_voided"] is True
+    assert reconciled[0]["order_cancelled"] is True
     assert reconciled[0]["commerce_payment_intent_id"] == "CPI00001"
+
+
+@_LINUX_ONLY
+@pytest.mark.parametrize(
+    "order_status, expect_order_status",
+    [
+        # The order is gone from the ledger: cancel returns ok=False
+        # ("order_not_found").
+        (None, None),
+        # `paid` -> `cancelled` is not in LEGAL_TRANSITIONS, so the cancel
+        # RAISES rather than returning — the failure mode an unwrapped call
+        # would turn into a traceback.
+        ("paid", "paid"),
+    ],
+    ids=["order_missing", "order_uncancellable"],
+)
+def test_a_failed_cancel_does_not_strand_the_disposition(
+        isolated_state, order_status, expect_order_status):
+    """The cancel is best-effort, and it runs AFTER the void. If it could fail
+    the command, the intent would already be voided while the lead still claimed
+    it — the half-applied state that is worse than either end."""
+    lead_id = _write_uncertain_lead(isolated_state["leads_path"])
+    _seed_live_intent(isolated_state["intents_path"], lead_id)
+    if order_status is None:
+        isolated_state["orders_path"].write_text(
+            json.dumps({"orders": []}), encoding="utf-8")
+    else:
+        _seed_order(isolated_state["orders_path"], status=order_status)
+
+    r = _run(isolated_state["env"], "--lead-id", lead_id,
+             "--deposit-delivery", "not-delivered", "--reason", "x")
+    assert r.returncode == 0, f"stdout={r.stdout!r} stderr={r.stderr[-800:]!r}"
+
+    lead = _lead(isolated_state["leads_path"])
+    assert lead["deposit_payment_intent_id"] == ""
+    assert lead["deposit_link_delivery_status"] == "failed"
+    assert _intents(isolated_state["intents_path"])[0]["status"] == "voided"
+    if expect_order_status is not None:
+        assert _orders(isolated_state["orders_path"])[0]["status"] == expect_order_status
+
+    row = next(r_ for r_ in _audit_rows(isolated_state["log_path"])
+               if r_["type"] == "catering_deposit_delivery_reconciled")
+    assert row["intent_voided"] is True
+    assert row["order_cancelled"] is False, (
+        "the row must not claim a cleanup that did not happen")
 
 
 @_LINUX_ONLY
@@ -289,6 +373,7 @@ def test_not_delivered_on_an_unbound_lead_still_clears_the_marker(isolated_state
     row = next(r_ for r_ in _audit_rows(isolated_state["log_path"])
                if r_["type"] == "catering_deposit_delivery_reconciled")
     assert row["intent_voided"] is False
+    assert row["order_cancelled"] is False
     assert row["commerce_payment_intent_id"] == ""
 
 
