@@ -393,6 +393,80 @@ def test_newer_proposal_during_finalize_blocks_stale_selection(bridge_server, en
     assert "superseded during finalize" in audit["detail"]
 
 
+def test_uncertain_proposal_during_finalize_blocks_stale_selection(bridge_server, env_dir, monkeypatch):
+    """P1 — the mid-flight race, `_finish_selection` arm. Exact analogue of
+    test_newer_proposal_during_finalize_blocks_stale_selection with the newer set
+    landing SEND_UNCERTAIN instead of SENT.
+
+    An uncertain set most likely REACHED the customer. If they are holding the
+    newer menu, booking a selection against the older one books the wrong food for
+    a real event — friction is recoverable, a wrong menu at a catered event is
+    not. So it must block exactly as a SENT set does. This also closes an
+    inconsistency rather than inventing policy: outside the race, a newer uncertain
+    set ALREADY refuses the customer, because `_latest_proposal_for_lead` requires
+    the max-sequence set to be SENT.
+    """
+    port, _ = bridge_server
+    _seed_lead(env_dir)
+    _seed_proposals(env_dir, [_proposal_set("CPS-L0014-000001", "SENT")])
+    _seed_menu(env_dir)
+
+    def create_newer_uncertain_proposal(_real_run):
+        store = _read_store(env_dir)
+        store["sets"].append(_proposal_set("CPS-L0014-000002", "SEND_UNCERTAIN"))
+        store["next_sequence"] = 3
+        (env_dir / "state" / "catering-proposals.json").write_text(
+            json.dumps(store), encoding="utf-8"
+        )
+
+    mod, calls = _load_script(env_dir, port, monkeypatch,
+                              finalize_probe=create_newer_uncertain_proposal)
+
+    rc = _run_main(mod, "Let's go with option 2")
+
+    assert rc == 4
+    assert len(calls) == 1
+    by_id = {row["proposal_set_id"]: row for row in _read_store(env_dir)["sets"]}
+    assert by_id["CPS-L0014-000001"]["status"] == "SELECT_FAILED"
+    assert by_id["CPS-L0014-000001"]["selected_option_id"] is None
+    assert by_id["CPS-L0014-000002"]["status"] == "SEND_UNCERTAIN", (
+        "blocking the stale selection must not disturb the uncertain set itself")
+    audit = _read_audit(env_dir)[-1]
+    assert audit["type"] == "catering_proposal_selection_failed"
+    assert audit["reason"] == "no_sent_proposal"
+    assert "superseded during finalize" in audit["detail"]
+
+
+def test_uncertain_proposal_created_before_claim_blocks_stale_selection(
+    bridge_server, env_dir, monkeypatch
+):
+    """P1 — the same race one stage earlier, at `_claim_selection`. The stale read
+    is injected the way this suite already models a mid-flight store change: the
+    lookup returns the snapshot it saw while a higher-sequence set is on disk."""
+    port, _ = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+    stale = _proposal_set("CPS-L0014-000001", "SENT")
+    _seed_proposals(env_dir, [stale, _proposal_set("CPS-L0014-000002", "SEND_UNCERTAIN")])
+    mod, calls = _load_script(env_dir, port, monkeypatch)
+    stale_snapshot = mod.CateringProposalSet.model_validate(stale)
+    monkeypatch.setattr(mod, "_latest_proposal_for_lead",
+                        lambda lead_id: stale_snapshot, raising=True)
+
+    rc = _run_main(mod, "Option 2")
+
+    assert rc == 4
+    assert calls == [], "nothing may be finalized against a superseded set"
+    by_id = {row["proposal_set_id"]: row for row in _read_store(env_dir)["sets"]}
+    assert by_id["CPS-L0014-000001"]["status"] == "SENT", (
+        "the claim is refused before any status write — the set is left untouched")
+    assert by_id["CPS-L0014-000001"]["selected_option_id"] is None
+    audit = _read_audit(env_dir)[-1]
+    assert audit["type"] == "catering_proposal_selection_failed"
+    assert audit["reason"] == "no_sent_proposal"
+    assert "superseded by CPS-L0014-000002" in audit["detail"]
+
+
 def test_non_action_numeric_mention_asks_clarification(bridge_server, env_dir, monkeypatch):
     port, stub = bridge_server
     _seed_lead(env_dir)
