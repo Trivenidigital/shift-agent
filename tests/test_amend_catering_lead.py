@@ -64,7 +64,8 @@ OWNER, GROUP = _ids()
 
 
 class Sandbox:
-    def __init__(self, tmp_path: Path):
+    def __init__(self, tmp_path: Path, monkeypatch):
+        self.monkeypatch = monkeypatch
         self.root = tmp_path
         self.state = tmp_path / "state"
         self.logs = tmp_path / "logs"
@@ -126,7 +127,7 @@ class Sandbox:
 
 @pytest.fixture
 def sb(tmp_path, monkeypatch):
-    box = Sandbox(tmp_path)
+    box = Sandbox(tmp_path, monkeypatch)
     monkeypatch.setenv("SHIFT_AGENT_CATERING_AMENDMENTS_PATH", str(box.amendments))
     monkeypatch.setenv("SHIFT_AGENT_CATERING_QUOTE_LEDGER_PATH", str(box.ledger))
     # The ledger's POSIX fs-owner contract defaults to shift-agent:shift-agent (the
@@ -152,19 +153,20 @@ def _run(sb: Sandbox, argv, *, bridge_ok=True, stdin_text=None,
     mod.LEDGER_PATH = sb.ledger
 
     # P17b: the script consumes the CANONICAL 4-tuple, so the stub must be the
-    # 4-tuple one. The runner binds by bare setattr, so a stale `_bridge_post`
-    # name would create a DEAD attribute and the script would issue a REAL bridge
-    # POST — the stub name has to track the script.
+    # 4-tuple one. Both seams are bound through monkeypatch.setattr with the
+    # default raising=True: a bare assignment to a stale name (`_bridge_post`)
+    # would create a DEAD attribute and the script would issue a REAL bridge POST,
+    # whereas this fails test SETUP the moment the production name moves.
     def _bridge(jid, message, **_kwargs):
         sb.sends.append({"jid": jid, "message": message})
         return ((True, "wamid.OUT", "", "sent") if bridge_ok
                 else (False, "", "connection refused", bridge_status))
-    mod._bridge_post_4tuple = _bridge
+    sb.monkeypatch.setattr(mod, "_bridge_post_4tuple", _bridge)
 
     def _notify(cmd, **_kwargs):
         sb.pages.append({"argv": [str(part) for part in cmd]})
         return SimpleNamespace(returncode=0, stdout="", stderr="")
-    mod.subprocess = SimpleNamespace(run=_notify)
+    sb.monkeypatch.setattr(mod, "subprocess", SimpleNamespace(run=_notify))
 
     old_argv, old_stdin = sys.argv, sys.stdin
     sys.argv = argv
@@ -193,10 +195,11 @@ def _amend(sb, **kw):
                 bridge_status=kw.get("bridge_status", "connect_failed"))
 
 
-def _answer(sb, text, *, lead_id="L0001", message_id="wamid.ANS", bridge_ok=True):
+def _answer(sb, text, *, lead_id="L0001", message_id="wamid.ANS", bridge_ok=True,
+            bridge_status="connect_failed"):
     return _run(sb, ["amend-catering-lead", "--lead-id", lead_id, "--mode", "answer",
                      "--answer-text", text, "--message-id", message_id],
-                bridge_ok=bridge_ok)
+                bridge_ok=bridge_ok, bridge_status=bridge_status)
 
 
 def _answer_via_stdin(sb, text, *, lead_id="L0001", message_id="wamid.ANS"):
@@ -961,19 +964,75 @@ def test_card_failed_row_carries_the_real_status_not_a_hardcoded_one(sb):
     assert failed and failed[0]["reason"] == "send_uncertain"
 
 
-def test_failed_customer_reply_is_recorded_but_pages_nobody(sb):
-    """The customer-facing confirmation has nothing waiting on it, and
-    card_delivery_status describes the OWNER card — overloading it here would
-    corrupt the signal the owner-card arm depends on. Record only."""
+def _customer_reply_rows(sb):
+    return [r for r in _unconfirmed(sb) if r["send_kind"] == "amendment_customer_reply"]
+
+
+def test_failed_customer_reply_pages_the_owner(sb):
+    """The customer reply goes out AFTER the answer is merged and the qualification
+    round advanced on disk, and nothing retries it. So a failure strands a customer
+    mid-interview waiting on a question the lead's own state says was asked — that
+    needs a human. It still must NOT touch card_delivery_status: that field
+    describes the OWNER card, and overloading it here would corrupt the signal the
+    owner-card arm depends on."""
     sb.write_lead(status="QUALIFYING", pending_questions=["venue"],
                   questions_asked=["venue"], qualification_rounds=1)
 
     _answer(sb, "the venue is the Grand Ballroom", bridge_ok=False)
 
-    rows = [r for r in _unconfirmed(sb) if r["send_kind"] == "amendment_customer_reply"]
-    assert rows, "the customer reply's failure is recorded"
-    assert rows[0]["owner_paged"] is False
-    assert sb.pages == [], "no page for a customer-facing confirmation"
+    lead = sb.read_lead()
+    assert lead["status"] == "QUALIFYING", "the owner card never entered this turn"
+    assert len(sb.sends) == 1, "exactly one send was attempted"
+    assert lead["extracted"]["venue"] == "the venue is the Grand Ballroom", (
+        "the merge IS committed")
+    assert lead["qualification_rounds"] == 2, "the round advance IS committed"
+    assert lead["card_delivery_status"] is None, "the OWNER card's field is untouched"
+    assert lead["card_delivery_status_at"] is None
+    rows = _customer_reply_rows(sb)
+    assert len(rows) == 1
+    assert rows[0]["delivery_certainty"] == "failed"
+    assert rows[0]["owner_paged"] is True
+    assert len(sb.pages) == 1, "exactly one page per unconfirmed send, never two"
+    body = " ".join(sb.pages[-1]["argv"])
+    assert "did NOT go out" in body, body
     ack_failed = sb.audit_rows("catering_customer_ack_failed")
     assert ack_failed and ack_failed[0]["reason"] == "bridge_unreachable", (
         "the Literal the pinned rollback target recognises must not be widened")
+
+
+def test_uncertain_customer_reply_pages_without_inviting_a_blind_resend(sb):
+    """The bridge accepted the reply, so it most likely reached the customer. The
+    owner still has to know — nothing retries — but the page must say so, or the
+    fix becomes a second identical message to a customer who already got the
+    first."""
+    sb.write_lead(status="QUALIFYING", pending_questions=["venue"],
+                  questions_asked=["venue"], qualification_rounds=1)
+
+    _answer(sb, "the venue is the Grand Ballroom", bridge_ok=False,
+            bridge_status="send_uncertain")
+
+    lead = sb.read_lead()
+    assert lead["extracted"]["venue"] == "the venue is the Grand Ballroom", (
+        "the merge IS committed")
+    assert lead["card_delivery_status"] is None, "the OWNER card's field is untouched"
+    rows = _customer_reply_rows(sb)
+    assert len(rows) == 1
+    assert rows[0]["delivery_certainty"] == "uncertain"
+    assert rows[0]["send_status"] == "send_uncertain"
+    assert rows[0]["owner_paged"] is True
+    assert len(sb.pages) == 1, "exactly one page per unconfirmed send, never two"
+    body = " ".join(sb.pages[-1]["argv"])
+    assert "most likely DID arrive" in body, body
+    assert "duplicate message to the customer" in body, body
+    assert len(sb.sends) == 1, "never re-sent"
+
+
+def test_a_delivered_customer_reply_pages_nobody(sb):
+    sb.write_lead(status="QUALIFYING", pending_questions=["venue"],
+                  questions_asked=["venue"], qualification_rounds=1)
+
+    rc, _payload, _err = _answer(sb, "the venue is the Grand Ballroom")
+
+    assert rc == 0
+    assert _customer_reply_rows(sb) == []
+    assert sb.pages == []

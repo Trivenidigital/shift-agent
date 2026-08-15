@@ -360,20 +360,32 @@ def _page_owner_send_unconfirmed(lead_id: str, send_kind: str,
                                  certainty: str, detail: str) -> bool:
     """Page over `shift-agent-notify-owner` (Pushover), NOT the bridge — the
     bridge is exactly what failed to confirm, so a bridge-borne warning could
-    vanish the same way."""
-    what = "amended approval card"
+    vanish the same way.
+
+    The wording is per-`send_kind`: the two arms strand DIFFERENT people, and the
+    re-send that a generic page invites is a duplicate to a different recipient."""
+    customer_reply = send_kind == "amendment_customer_reply"
+    what = "reply to the customer" if customer_reply else "amended approval card"
     if certainty == "uncertain":
+        duplicate_risk = (
+            "a duplicate message to the customer for an answer already recorded"
+            if customer_reply else
+            "a duplicate approval card for a quote that moved")
         title = f"Catering {lead_id}: {what} NOT confirmed"
         body = (f"Catering {lead_id}: the {what} was accepted by the bridge but "
                 f"not confirmed, so it most likely DID arrive. Check before "
-                f"re-sending — a duplicate approval card for a quote that moved "
-                f"is worse than a late check.\n"
+                f"re-sending — {duplicate_risk} is worse than a late check.\n"
                 f"Detail: {detail[:200]}")
     else:
+        stranded = (
+            "The customer's answer IS recorded and the lead moved on — the "
+            "customer is waiting on a reply they never received."
+            if customer_reply else
+            "The amendment IS applied — the lead is waiting on an approval the "
+            "owner never saw.")
         title = f"Catering {lead_id}: {what} NOT delivered"
-        body = (f"Catering {lead_id}: the {what} did NOT go out. The amendment IS "
-                f"applied — the lead is waiting on an approval the owner never "
-                f"saw. Review it in the cockpit and follow up manually.\n"
+        body = (f"Catering {lead_id}: the {what} did NOT go out. {stranded} "
+                f"Review it in the cockpit and follow up manually.\n"
                 f"Detail: {detail[:200]}")
     sys.stderr.write(f"catering_send_unconfirmed_alert_dispatched lead={lead_id} "
                      f"kind={send_kind} certainty={certainty}\n")
@@ -522,17 +534,23 @@ def _send_customer_text(lead: CateringLead, text: str, *, now: datetime,
             outcome=_status or "bridge_unreachable",
         )
     )
-    # P17b — this send does NOT page and does NOT touch the lead marker. It is a
-    # customer-facing confirmation with nothing waiting on it, the caller already
-    # learns the failure, and `card_delivery_status` describes the OWNER card —
-    # overloading it here would corrupt the signal the owner-card arm depends on.
-    # Record only.
+    # P17b — this send PAGES, but must NEVER touch the lead marker. It runs only
+    # after the answer merge and the qualification advance are persisted, and
+    # nothing retries it: a failure leaves a customer waiting on a reply the lead's
+    # own state says was sent, which no automated path will ever correct. The
+    # marker stays out of it — `card_delivery_status` describes the OWNER card, so
+    # writing it here would corrupt the signal the owner-card arm depends on.
+    # Exactly one page per unconfirmed send; the stderr line and the audit row
+    # remain the durable record.
     if not ok:
         sys.stderr.write(f"customer bridge_post failed: {mid_or_err} (status={_status})\n")
+        certainty = _delivery_certainty(_status)
+        paged = _page_owner_send_unconfirmed(
+            lead.lead_id, "amendment_customer_reply", certainty, str(mid_or_err))
         _audit_send_unconfirmed(
             lead_id=lead.lead_id, send_kind="amendment_customer_reply",
-            send_status=_status, certainty=_delivery_certainty(_status),
-            detail=str(mid_or_err), paged=False, destination=customer_jid,
+            send_status=_status, certainty=certainty,
+            detail=str(mid_or_err), paged=paged, destination=customer_jid,
             logical_turn_id=logical_turn_id, send_attempt_id=send_attempt_id,
             now=now)
     _log_best_effort(TypeAdapter(type(entry)), entry, context="customer_reply")

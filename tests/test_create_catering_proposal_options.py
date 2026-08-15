@@ -1279,6 +1279,27 @@ def test_successful_proposal_send_emits_no_unconfirmed_row(bridge_server, env_di
     assert _unconfirmed(env_dir) == []
 
 
+@pytest.mark.parametrize("response_mode", ["down", "empty_id"])
+def test_a_failed_generation_send_pages_the_owner_exactly_once(
+    bridge_server, env_dir, response_mode
+):
+    """Every failure path in this script converges on `_fail_generation`, which
+    already pages. `_post` therefore records owner_paged=True WITHOUT paging again,
+    and the row is only honest while that stays true — a refactor that adds a page
+    at the send site would alert twice for one failure, which is how an owner
+    learns to ignore the channel."""
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+    stub.response_mode = response_mode
+
+    result, parsed = _run_script(env_dir, port)
+
+    assert parsed["rc"] == 6, result.stderr
+    assert _unconfirmed(env_dir)[0]["owner_paged"] is True
+    assert len(parsed["notify_calls"]) == 1, parsed["notify_calls"]
+
+
 def test_failed_recompose_clarify_records_its_status(bridge_server, env_dir):
     """The clarify arm is a third send site with its own early return."""
     port, stub = bridge_server
