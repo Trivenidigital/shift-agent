@@ -258,10 +258,10 @@ def test_confirmed_delivery_needs_a_link_to_confirm(isolated_state):
 
 
 @_LINUX_ONLY
-@pytest.mark.parametrize("intent_status", ["voided", "refunded", "chargeback"])
-def test_confirmed_delivery_refuses_when_the_link_is_not_payable(
+@pytest.mark.parametrize("intent_status", ["voided"])
+def test_confirmed_delivery_refuses_when_there_is_no_delivery_evidence(
         isolated_state, intent_status):
-    """B1: confirming delivery asserts the link is LIVE, so it must look.
+    """B1: confirming delivery makes a claim, so it must look before claiming.
 
     The bound intent is the whole basis of the claim this arm writes — marker
     `sent`, binding kept, `deposit_status` left at `awaiting_payment`. Against a
@@ -271,13 +271,15 @@ def test_confirmed_delivery_refuses_when_the_link_is_not_payable(
     again — this disposition refuses (the marker is no longer `uncertain`), and
     a re-mint is a silent `already_minted` no-op.
 
-    The `voided` case is reachable without anything exotic: a crash in the
-    window between the void and the lead write leaves exactly that shape, and
-    the operator who then re-reads the chat and concludes "it arrived" picks
-    this arm. `refunded` and `chargeback` are NOT reachable that way — nothing
-    in the tree writes either status today — and are covered here because the
-    claim this arm makes is false against any terminal intent, not because that
-    window can produce them.
+    A `voided` intent was killed before anything was paid on it, so there is no
+    evidence the customer ever received a link and this arm must not record one.
+    Reachable without anything exotic: a crash in the window between the void
+    and the lead write leaves exactly that shape, and the operator who then
+    re-reads the chat and concludes "it arrived" picks this arm.
+
+    A terminal intent is NOT automatically evidence-free — see
+    `test_confirmed_delivery_accepts_an_intent_that_was_paid_and_reversed`,
+    which is the other half of this distinction.
     """
     lead_id = _write_uncertain_lead(isolated_state["leads_path"])
     _seed_live_intent(isolated_state["intents_path"], lead_id, status=intent_status)
@@ -313,54 +315,95 @@ def test_confirmed_delivery_refuses_when_the_intent_is_missing_from_the_ledger(
 
 @_LINUX_ONLY
 @pytest.mark.parametrize(
-    "intent_status, escape_works",
-    [("voided", True), ("refunded", False), ("chargeback", False)],
+    "intent_status, deposit_status, refused_arm, named_escape",
+    [
+        # No payment evidence -> confirm refuses and sends them to the void arm.
+        ("voided", "awaiting_payment", "confirmed-delivered", "not-delivered"),
+        (None, "awaiting_payment", "confirmed-delivered", "not-delivered"),
+        # Money moved -> the void arm refuses and sends them to the confirm arm.
+        ("confirmed", "paid", "not-delivered", "confirmed-delivered"),
+        ("refunded", "awaiting_payment", "not-delivered", "confirmed-delivered"),
+        ("chargeback", "awaiting_payment", "not-delivered", "confirmed-delivered"),
+    ],
+    ids=["voided", "intent_absent", "confirmed", "refunded", "chargeback"],
 )
-def test_a_confirm_refusal_never_names_an_escape_that_refuses(
-        isolated_state, intent_status, escape_works):
-    """A refusal may only name a command that actually resolves the lead.
+def test_a_refusal_names_an_escape_that_actually_works(
+        isolated_state, intent_status, deposit_status, refused_arm, named_escape):
+    """Every refusal points at a command that resolves the lead — and the test
+    runs that command instead of trusting the copy.
 
-    The first version of this cell asserted exactly this property and was
-    parametrized over nothing — it ran the single status where the property
-    happened to hold. `payment_link.void` refuses on
-    `{confirmed, refunded, chargeback}` (payment_link.py:447), so for a refunded
-    or charged-back intent the `not-delivered` the message named refuses too,
-    and an operator who follows the copy lands where they started. Naming a
-    dead escape is the same defect as naming a command that does not exist,
-    with the failure moved one step later.
+    An earlier version of this cell asserted the property and was parametrized
+    over the single status where it held, which is how copy naming a dead escape
+    survived a review. It now covers both directions: each arm refuses some
+    shapes, and for every one of them the OTHER arm is the answer.
+    """
+    lead_id = _write_uncertain_lead(isolated_state["leads_path"],
+                                    deposit_status=deposit_status)
+    if intent_status is None:
+        isolated_state["intents_path"].write_text(
+            json.dumps({"intents": []}), encoding="utf-8")
+    else:
+        _seed_live_intent(isolated_state["intents_path"], lead_id, status=intent_status)
+    _seed_order(isolated_state["orders_path"])
 
-    So the property is checked against what the message actually says, for every
-    status the parametrize claims to cover.
+    refused = _run(isolated_state["env"], "--lead-id", lead_id,
+                   "--deposit-delivery", refused_arm, "--reason", "x")
+    assert refused.returncode == 2, f"stdout={refused.stdout!r}"
+    assert named_escape in refused.stderr, (
+        f"the refusal does not name the way out: {refused.stderr!r}")
+
+    followed = _run(isolated_state["env"], "--lead-id", lead_id,
+                    "--deposit-delivery", named_escape, "--reason", "following the page")
+    assert followed.returncode == 0, (
+        f"the copy named {named_escape!r} and it refused: "
+        f"{followed.stderr[-400:]!r}")
+    assert _lead(isolated_state["leads_path"])["deposit_link_delivery_status"] in {
+        "sent", "failed"}, "the lead is still unresolved after following the copy"
+
+
+@_LINUX_ONLY
+@pytest.mark.parametrize("intent_status", ["refunded", "chargeback"])
+def test_confirmed_delivery_accepts_an_intent_that_was_paid_and_reversed(
+        isolated_state, intent_status):
+    """A refunded or charged-back intent was PAID first, and payment is the
+    strongest evidence of delivery there is — the customer used the link.
+
+    Refusing here is what created a shape neither arm could resolve, and it also
+    made the arm's own copy point at `not-delivered`, which cannot void these
+    (payment_link.py:447). Accepting is the truthful reading, not a rescue: the
+    operator is recording that delivery happened, which it demonstrably did.
+
+    The assumption this rests on — that reaching these statuses requires having
+    been paid — is semantically unambiguous but structurally unenforced (payment
+    intents have no transition table), and is recorded at the constant.
     """
     lead_id = _write_uncertain_lead(isolated_state["leads_path"])
     _seed_live_intent(isolated_state["intents_path"], lead_id, status=intent_status)
 
-    refused = _run(isolated_state["env"], "--lead-id", lead_id,
-                   "--deposit-delivery", "confirmed-delivered", "--reason", "x")
-    assert refused.returncode == 2, f"stdout={refused.stdout!r}"
+    r = _run(isolated_state["env"], "--lead-id", lead_id,
+             "--deposit-delivery", "confirmed-delivered",
+             "--reason", "customer paid it; the refund came later")
+    assert r.returncode == 0, f"stdout={r.stdout!r} stderr={r.stderr[-800:]!r}"
 
-    names_the_escape = "not-delivered" in refused.stderr
-    assert names_the_escape == escape_works, (
-        f"refusal copy for intent status {intent_status!r} "
-        f"{'omits a working escape' if escape_works else 'names an escape that refuses'}: "
-        f"{refused.stderr!r}"
-    )
+    lead = _lead(isolated_state["leads_path"])
+    assert lead["deposit_link_delivery_status"] == "sent"
+    assert lead["deposit_payment_intent_id"] == "CPI00001", (
+        "confirming delivery must not disturb the money objects")
+    assert _intents(isolated_state["intents_path"])[0]["status"] == intent_status
 
-    attempted = _run(isolated_state["env"], "--lead-id", lead_id,
-                     "--deposit-delivery", "not-delivered", "--reason", "following the page")
-    if escape_works:
-        assert attempted.returncode == 0, (
-            f"the named escape refused: {attempted.stderr[-400:]!r}")
-        lead = _lead(isolated_state["leads_path"])
-        assert lead["deposit_payment_intent_id"] == ""
-        assert lead["deposit_link_delivery_status"] == "failed"
-    else:
-        # Proves the omission is right rather than merely cautious.
-        assert attempted.returncode == 2, (
-            "the escape works after all; the refusal copy should name it")
-        lead = _lead(isolated_state["leads_path"])
-        assert lead["deposit_link_delivery_status"] == "uncertain"
-        assert lead["deposit_payment_intent_id"] == "CPI00001"
+    row = next(r_ for r_ in _audit_rows(isolated_state["log_path"])
+               if r_["type"] == "catering_deposit_delivery_reconciled")
+    assert row["resolution"] == "confirmed_delivered"
+    assert row["intent_voided"] is False
+
+    # The write stays marker-only, deliberately. `deposit_status` still reads
+    # `awaiting_payment` against a reversed intent — but that disagreement is
+    # produced by the refund, not by this command, and it is already true before
+    # this runs. Repairing it means writing a money field: `refunded` exists in
+    # the deposit_status Literal, `chargeback` does not, and adding it would land
+    # in the one rollback category nothing can repair (a widened Literal on a
+    # non-`status` field of a migrated store). That belongs to the refund slice.
+    assert _lead(isolated_state["leads_path"])["deposit_status"] == "awaiting_payment"
 
 
 @_LINUX_ONLY
@@ -610,34 +653,31 @@ def test_status_correction_still_works_untouched(isolated_state):
 
 
 # Every shape an `uncertain` lead can be in, and the disposition that resolves
-# it. `None` means NEITHER arm resolves it — a real gap, listed rather than
-# discovered.
+# it. EVERY row names one: an operator can get any uncertain lead out of the
+# uncertain state, which is ruling R1's requirement stated as a table.
 #
-# The three `None` rows are all "the intent went to a terminal money state that
-# is not a void". They are UNREACHABLE today: nothing in the tree writes
-# `refunded` or `chargeback` onto a payment intent (payment_link.py has mint /
-# mark_attempted / mark_sent / mark_confirmed / void and no refund writer;
-# order_state.py's module docstring reserves the matching order states for a
-# later slice). They are recorded because the slice that lands a refund writer
-# makes them reachable in the same commit, and the semantics are genuinely
-# undecided — unbinding after a refund is plausibly right, while a chargeback is
-# a dispute IN PROGRESS where unbinding may be exactly wrong. That decision
-# belongs to whoever has a real refund path to check it against.
+# The last three rows are why this table exists. They were originally recorded
+# as gaps — no disposition — because the confirm arm refused every terminal
+# intent while the void arm cannot void a paid one. Writing the shapes down is
+# what made the missing question obvious: the two arms ask DIFFERENT things, and
+# "was this paid at some point" is the right question for a DELIVERY claim even
+# when "is this payable now" is no.
 #
-# DO NOT delete a `None` row to make this test pass. Landing a disposition for
-# one of these shapes means changing the row to the command that resolves it.
+# Keep every row resolvable. A change that leaves a shape with no disposition is
+# a change that strands a real lead, and the fix is to make an arm accept it —
+# not to record `None` here.
 _UNCERTAIN_SHAPES = [
     # (id, lead deposit_status, seeded intent status | None = no intent row,
-    #  bound?, resolving disposition | None)
+    #  bound?, resolving disposition)
     ("bound_minted", "awaiting_payment", "minted", True, "confirmed-delivered"),
     ("bound_sent", "awaiting_payment", "sent", True, "confirmed-delivered"),
     ("paid_confirmed", "paid", "confirmed", True, "confirmed-delivered"),
     ("bound_voided", "awaiting_payment", "voided", True, "not-delivered"),
     ("bound_intent_absent", "awaiting_payment", None, True, "not-delivered"),
     ("unbound", "none", None, False, "not-delivered"),
-    ("bound_refunded", "awaiting_payment", "refunded", True, None),
-    ("bound_chargeback", "awaiting_payment", "chargeback", True, None),
-    ("paid_refunded", "paid", "refunded", True, None),
+    ("bound_refunded", "awaiting_payment", "refunded", True, "confirmed-delivered"),
+    ("bound_chargeback", "awaiting_payment", "chargeback", True, "confirmed-delivered"),
+    ("paid_refunded", "paid", "refunded", True, "confirmed-delivered"),
 ]
 
 
@@ -647,14 +687,18 @@ _UNCERTAIN_SHAPES = [
     [row[1:] for row in _UNCERTAIN_SHAPES],
     ids=[row[0] for row in _UNCERTAIN_SHAPES],
 )
-def test_every_uncertain_shape_has_a_known_disposition_or_a_recorded_gap(
+def test_every_uncertain_shape_has_a_disposition_that_resolves_it(
         isolated_state, deposit_status, intent_status, bound, resolves_with):
-    """The map of what an operator can and cannot resolve, asserted.
+    """R1 as a table: no uncertain lead is stuck.
 
     Written because the claim "every uncertain shape has a working disposition"
-    was made in a report and was FALSE for three of them. An invariant that is
-    almost true is worse than a gap that is written down: the gap gets handled,
-    the almost-invariant gets relied on.
+    was made in a report while being false for three of them. Enumerating the
+    shapes is what turned that from an assertion into something checkable — and
+    then into three shapes that needed fixing rather than documenting.
+
+    This is a reachability map, not a behavioural pin: it asserts that the named
+    disposition exits 0, and the per-shape state assertions live in the cells
+    above.
     """
     overrides = {"deposit_status": deposit_status}
     if not bound:
@@ -685,14 +729,10 @@ def test_every_uncertain_shape_has_a_known_disposition_or_a_recorded_gap(
         outcomes[disposition] = r.returncode
 
     working = [d for d, rc in outcomes.items() if rc == 0]
-    if resolves_with is None:
-        assert working == [], (
-            f"this shape is recorded as having NO disposition, but {working} "
-            f"resolved it — update _UNCERTAIN_SHAPES rather than this assertion")
-    else:
-        assert resolves_with in working, (
-            f"the recorded disposition {resolves_with!r} does not resolve this "
-            f"shape; exit codes were {outcomes}")
+    assert resolves_with in working, (
+        f"the recorded disposition {resolves_with!r} does not resolve this "
+        f"shape, so an operator holding this lead is stuck; exit codes were "
+        f"{outcomes}")
 
 
 # ─────────────────────────────────────────────────────────────────

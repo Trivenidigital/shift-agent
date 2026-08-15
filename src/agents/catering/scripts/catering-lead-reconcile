@@ -112,17 +112,38 @@ COMMERCE_ORDERS_PATH = Path(os.environ.get(
 
 ALLOWED_TARGETS = ("SENT_TO_CUSTOMER", "OWNER_REJECTED", "CLOSED")
 ALLOWED_DEPOSIT_DELIVERY = ("confirmed-delivered", "not-delivered")
-# An intent in one of these can never take a payment again. Mirrors the live-set
-# exclusion in catering-mint-deposit's `_find_live_intent_for_lead`, so the two
-# scripts cannot disagree about what "still payable" means. `confirmed` is NOT
-# terminal here: the customer paid, which is the strongest evidence a link was
-# delivered.
-TERMINAL_INTENT_STATUSES = frozenset({"voided", "refunded", "chargeback"})
-# The subset `not-delivered` cannot resolve either, because its void is refused
-# (payment_link.py:447). A lead bound to one of these has NO disposition today —
-# recorded in tests/test_catering_deposit_delivery_reconcile.py's shape matrix,
-# and unreachable until something writes those statuses.
-UNVOIDABLE_INTENT_STATUSES = frozenset({"refunded", "chargeback"})
+# The two arms ask DIFFERENT questions of the same intent, and conflating them
+# is what produced a shape neither arm could resolve.
+#
+#   not-delivered      asks "is this payable now" — it voids, so it needs a
+#                      voidable intent.
+#   confirmed-delivered asks "did the customer receive the link" — a question
+#                      about the past, which a dead intent can still answer.
+#
+# Money having moved is the strongest evidence of delivery there is: the
+# customer used the link to pay. `confirmed`, `refunded` and `chargeback` all
+# carry that evidence — a refund or a chargeback is a payment that was later
+# reversed, and the payment still happened — so all three are CONFIRMABLE.
+# Only `voided` (killed before any payment) and an intent the ledger does not
+# have carry no delivery evidence at all.
+#
+# ASSUMPTION, written down because nothing enforces it: reaching `refunded` or
+# `chargeback` requires having been paid first. That is semantically
+# unambiguous but structurally unenforced. Payment intents have NO transition
+# table — unlike orders, which have `order_state.LEGAL_TRANSITIONS` and raise on
+# an illegal move — and status is governed only by ad-hoc guards inside each
+# writer (payment_link.py:169, :320, :327, :447). Today no writer sets either
+# status at all: payment_link.py only ever writes `minted`, `sent`, `confirmed`
+# and `voided`. Whoever lands the refund path is therefore load-bearing for a
+# delivery claim made HERE — if a never-paid intent can be stamped `refunded`,
+# this acceptance becomes wrong. FOLLOW-UP for that slice: give payment intents
+# a LEGAL_TRANSITIONS table so `confirmed -> refunded` is enforced, not assumed.
+NO_DELIVERY_EVIDENCE_STATUSES = frozenset({"voided"})
+# What `not-delivered` cannot resolve, because `payment_link.void` refuses on
+# these (payment_link.py:447). Every one of them carries payment evidence, so
+# `confirmed-delivered` is the disposition for that shape — which is why the
+# refusals below name it.
+UNVOIDABLE_INTENT_STATUSES = frozenset({"confirmed", "refunded", "chargeback"})
 SAFE_FROM_STATUSES = (
     "AWAITING_OWNER_APPROVAL", "OWNER_APPROVED", "OWNER_EDITED",
     "OWNER_REJECTED", "SENT_TO_CUSTOMER",
@@ -165,7 +186,8 @@ def _resolve_deposit_delivery(store, matched_idx: int, *, resolution: str,
     if resolution == "not-delivered" and lead.deposit_status == "paid":
         sys.stderr.write(
             f"lead {lead.lead_id} deposit is already paid; refusing to void it "
-            f"on a non-delivery claim\n"
+            f"on a non-delivery claim — the customer paid, so they had the "
+            f"link: use --deposit-delivery confirmed-delivered\n"
         )
         return EXIT_INVALID_INPUT
 
@@ -199,29 +221,13 @@ def _resolve_deposit_delivery(store, matched_idx: int, *, resolution: str,
             return EXIT_INVALID_INPUT
         intent = next((i for i in intent_store.intents
                        if i.intent_id == lead.deposit_payment_intent_id), None)
-        if intent is None or intent.status in TERMINAL_INTENT_STATUSES:
+        if intent is None or intent.status in NO_DELIVERY_EVIDENCE_STATUSES:
             found = "absent from the ledger" if intent is None else f"status={intent.status!r}"
-            # Only name `not-delivered` where it actually works. It voids, and
-            # `payment_link.void` refuses on {confirmed, refunded, chargeback}
-            # (payment_link.py:447), so on a refunded or charged-back intent the
-            # operator who follows this copy lands exactly where they started.
-            # Naming a dead escape is the same defect as naming a command that
-            # does not exist, one step later.
-            resolvable = intent is None or intent.status not in UNVOIDABLE_INTENT_STATUSES
-            remedy = (
-                "use --deposit-delivery not-delivered" if resolvable else
-                "neither disposition resolves this lead: voiding a "
-                f"{intent.status} intent is refused by the ledger, and "
-                "confirming delivery would record a link that cannot take a "
-                "payment. The lead stays 'uncertain' rather than being recorded "
-                "wrongly — escalate; refund/chargeback handling is not "
-                "implemented here"
-            )
             sys.stderr.write(
                 f"lead {lead.lead_id} is bound to intent "
-                f"{lead.deposit_payment_intent_id} ({found}), so it holds no "
-                f"payable link and confirming delivery would record one that "
-                f"does not exist; {remedy}\n"
+                f"{lead.deposit_payment_intent_id} ({found}), which carries no "
+                f"evidence the customer ever received a link — nothing was "
+                f"paid on it; use --deposit-delivery not-delivered\n"
             )
             return EXIT_INVALID_INPUT
 
@@ -248,10 +254,14 @@ def _resolve_deposit_delivery(store, matched_idx: int, *, resolution: str,
             intent_voided = True
         elif result.detail != "intent_not_found":
             # cannot_void_confirmed / _refunded / _chargeback — the money moved.
-            # Refuse rather than unbind a lead from an intent that is still real.
+            # Refuse rather than unbind a lead from an intent that is still real,
+            # and name the arm that DOES resolve this shape: money having moved
+            # is exactly the delivery evidence `confirmed-delivered` accepts.
             sys.stderr.write(
                 f"refusing to unbind lead {lead.lead_id}: void of "
-                f"{lead.deposit_payment_intent_id} failed ({result.detail})\n"
+                f"{lead.deposit_payment_intent_id} failed ({result.detail}) — "
+                f"money moved on this intent, so the customer plainly had the "
+                f"link: use --deposit-delivery confirmed-delivered\n"
             )
             return EXIT_INVALID_INPUT
         # intent_not_found: nothing live to void, so the unbind below is the
