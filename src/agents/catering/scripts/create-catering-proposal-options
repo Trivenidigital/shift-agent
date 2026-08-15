@@ -565,27 +565,56 @@ def _audit_failure(lead_id: str, reason: str, detail: str = "", proposal_set_id:
     )
 
 
-def _uncertain_page(lead_id: str, proposal_set_id: str, detail: str) -> tuple[str, str]:
+# What each send arm actually put in front of the customer. The page has to name
+# THIS, not "the menu options" for all three: the clarify arm sends a QUESTION, and
+# telling an owner a menu went out when a question did is the same class of untruth
+# as calling an accepted send a failure.
+_UNCERTAIN_SENT_KIND = {
+    "proposal_options": ("Catering options sent", "the menu options"),
+    "recompose_clarify": ("Catering question sent",
+                          "a question asking which options to combine"),
+    "recompose_menu": ("Catering combined menu sent", "the combined menu they asked for"),
+}
+
+
+def _uncertain_page(lead_id: str, proposal_set_id: str, detail: str,
+                    sent_kind: str) -> tuple[str, str]:
     """(title, message) for a send the bridge ACCEPTED but never acknowledged.
 
     The failure copy was wrong twice over here — generation succeeded and the
-    bridge was reached — and, worse, it named no action, leaving an owner alarmed
-    with nothing to do. This says what happened and what actually works. The
-    resolution it names is real: reissuing mints a new set, which retires this one
-    through the SEND_UNCERTAIN -> SUPERSEDED edge.
+    bridge was reached — and it named no action, leaving an owner alarmed with
+    nothing to do.
+
+    THE ACTION NAMED HAS TO BE ONE THE READER CAN PERFORM. This page goes to the
+    OWNER, and an owner cannot reissue proposals: every generating path is gated
+    `sender_role != "owner"` (catering_dispatcher/SKILL.md) and both cf-router
+    entry points require a CUSTOMER inbound. So the copy names what the owner can
+    actually do — contact the customer — and describes the automatic reissue as
+    what it is: something the CUSTOMER triggers by asking again.
+
+    Set-specific sentences are guarded on `proposal_set_id`, because the two
+    recompose arms carry none: promising that "this set" is retired when there is
+    no set is a resolution that cannot happen.
 
     ASCII only, and no new punctuation the notifier might render as markup: the
-    body already carries `lead_id=` / `proposal_set_id=` underscores, and a page
-    the owner cannot read is the same as no page.
+    body already carries `lead_id=` underscores, and a page the owner cannot read
+    is the same as no page.
     """
+    headline, what = _UNCERTAIN_SENT_KIND.get(
+        sent_kind, _UNCERTAIN_SENT_KIND["proposal_options"])
+    subject = f"lead_id={lead_id}"
+    retirement = ""
+    if proposal_set_id:
+        subject += f" proposal_set_id={proposal_set_id}"
+        retirement = (" If they ask for options again, a fresh set goes out "
+                      "automatically and this one is retired then.")
     return (
-        "Catering options sent - delivery unconfirmed",
-        f"lead_id={lead_id} proposal_set_id={proposal_set_id or '(none)'}: the menu "
-        f"options were composed and the bridge ACCEPTED them, so the customer most "
-        f"likely HAS them. This is not a failure and nothing was re-sent - what is "
-        f"missing is only the delivery receipt. If the customer does not reply, "
-        f"reissuing the options is the supported fix, and doing so also retires "
-        f"this set. Bridge evidence: {detail[:500]}"
+        f"{headline} - delivery unconfirmed",
+        f"{subject}: {what} was composed and the bridge ACCEPTED it, so the customer "
+        f"most likely HAS it. This is not a failure and nothing was re-sent - what is "
+        f"missing is only the delivery receipt. Nothing needs doing unless the "
+        f"customer goes quiet; if they do, contact them directly.{retirement} "
+        f"Bridge evidence: {detail[:500]}"
     )
 
 
@@ -596,13 +625,14 @@ def _notify_owner_generation_failed(
     proposal_set_id: str = "",
     *,
     send_status: str = "",
+    sent_kind: str = "proposal_options",
 ) -> bool:
     """Returns whether the page actually landed. shift-agent-notify-owner exits
     non-zero when every channel failed, so the returncode is the only evidence the
     owner was reached — discarding it is what let the audit row claim a page that
     never happened."""
     if send_status == "send_uncertain":
-        title, message = _uncertain_page(lead_id, proposal_set_id, detail)
+        title, message = _uncertain_page(lead_id, proposal_set_id, detail, sent_kind)
     else:
         title = "Catering proposal generation failed"
         message = (
@@ -640,6 +670,7 @@ def _fail_generation(
     proposal_set_id: str = "",
     *,
     send: tuple[str, str] | None = None,
+    sent_kind: str = "proposal_options",
 ) -> bool:
     """The single failure record: audit row, ONE page, and — when the failure was a
     send (`send=(jid, send_status)`) — the customer_send_unconfirmed row carrying
@@ -668,7 +699,7 @@ def _fail_generation(
     if send_status != "send_uncertain":
         _audit_failure(lead_id, reason, detail, proposal_set_id)
     paged = _notify_owner_generation_failed(lead_id, reason, detail, proposal_set_id,
-                                            send_status=send_status)
+                                            send_status=send_status, sent_kind=sent_kind)
     if send is not None:
         _record_send_unconfirmed(jid, lead_id=lead_id, send_status=send_status,
                                  detail=detail, paged=paged)
@@ -848,6 +879,15 @@ def _mark_sent_and_supersede(
         assert_load_status_clean(PROPOSALS_PATH, status, context="proposal-options sent load")
         target = next(row for row in store.sets if row.proposal_set_id == proposal_set_id)
         target_sequence = _proposal_sequence(target.proposal_set_id)
+        # DELIBERATELY still SENT-only, unlike the supersede loop below, which P1
+        # widened to SEND_UNCERTAIN. This asks a different question — "did a later
+        # set already go out, so THIS one must not become the live set?" — and it
+        # takes two concurrent generator runs to reach a disagreement between the
+        # two. If it is reached, the outcome is fail-closed: the older set becomes
+        # SENT while the newer uncertain set is the max-sequence row, so
+        # `_latest_proposal_for_lead` refuses the customer rather than letting them
+        # select. Widening it would change which set is live, which is a
+        # customer-visible call and not part of the P1 change.
         has_later_sent = any(
             row.lead_id == lead_id
             and row.status == "SENT"
@@ -1095,7 +1135,8 @@ def _run_recompose(args) -> int:
             args.customer_jid, BRIDGE_PREFIX + plan["message"], lead_id=args.lead_id)
         if not ok:
             _fail_generation(args.lead_id, "bridge_unreachable", mid_or_err,
-                             send=(args.customer_jid, _status))
+                             send=(args.customer_jid, _status),
+                             sent_kind="recompose_clarify")
             print(json.dumps({"mode": "clarify", "sent": False}))
             return EXIT_DEPENDENCY_DOWN
         _append_audit(CateringRecomposeClarifySent(
@@ -1148,7 +1189,8 @@ def _run_recompose(args) -> int:
     ok, mid_or_err, _status = _post(args.customer_jid, body, lead_id=args.lead_id)
     if not ok:
         _fail_generation(args.lead_id, "bridge_unreachable", mid_or_err,
-                         send=(args.customer_jid, _status))
+                         send=(args.customer_jid, _status),
+                         sent_kind="recompose_menu")
         print(json.dumps({"mode": "recomposed", "sent": False}))
         return EXIT_DEPENDENCY_DOWN
     _append_audit(CateringRecomposedMenuSent(

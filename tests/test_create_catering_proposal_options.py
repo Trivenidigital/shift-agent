@@ -951,6 +951,15 @@ mod.MENU_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-menu.json')!r})
 mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
 mod.LOG_LOCK = pathlib.Path({str(env_dir / 'logs' / 'decisions.log.lock')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
+notify_calls = []
+def fake_notify_run(argv, **kwargs):
+    notify_calls.append([str(part) for part in argv])
+    class Result:
+        stdout = ""
+        stderr = ""
+        returncode = 0
+    return Result()
+mod.subprocess.run = fake_notify_run
 buf = io.StringIO(); sys.stdout = buf; rc = -99
 try:
     rc = mod.main()
@@ -958,7 +967,7 @@ except SystemExit as se:
     rc = se.code if isinstance(se.code, int) else -1
 finally:
     sys.stdout = sys.__stdout__
-print(json.dumps({{"rc": rc, "stdout": buf.getvalue()}}))
+print(json.dumps({{"rc": rc, "stdout": buf.getvalue(), "notify_calls": notify_calls}}))
 """
     result = subprocess.run(
         [sys.executable, "-c", wrapper], capture_output=True, text=True, timeout=15,
@@ -1304,10 +1313,16 @@ def test_the_uncertain_page_says_what_happened_and_what_works(bridge_server, env
     assert "generation failed" not in body.lower(), body
     assert "bridge_unreachable" not in body, (
         "the internal failure code names a condition that did not happen")
-    # What actually happened, and what actually works.
+    # What actually happened.
     assert "most likely" in body.lower(), body
-    assert "reissu" in body.lower(), (
-        "the page must name the resolution that is actually supported")
+    # What the OWNER can actually do. Proposal generation is gated
+    # `sender_role != "owner"` (catering_dispatcher/SKILL.md) and both cf-router
+    # entry points require a CUSTOMER inbound, so an owner cannot reissue and the
+    # page must not tell them to. A named action the reader cannot perform is the
+    # same dead-end as a command that does not exist.
+    assert "contact them directly" in body.lower(), body
+    assert "reissu" not in body.lower(), (
+        "the owner cannot reissue - proposal generation is customer-gated")
     # Still carries the identifiers and the bridge's own evidence.
     assert "L0014" in body and "CPS-L0014-000001" in body
     assert "empty_message_id:" in body or "ack_parse_failed:" in body
@@ -1499,5 +1514,57 @@ def test_uncertain_recompose_clarify_emits_no_failure_row_either(bridge_server, 
     failed = [r for r in _read_audit(env_dir)
               if r["type"] == "catering_proposal_generation_failed"]
     assert failed == [], f"the clarify arm still records a false failure: {failed}"
-    # Page copy is asserted on the proposal arm, whose harness stubs the notifier;
-    # `_run_recompose` does not capture notify calls.
+
+
+def test_the_uncertain_clarify_page_describes_the_question_not_a_menu(bridge_server, env_dir):
+    """The clarify arm sends a QUESTION about which options to combine, and it
+    carries NO proposal_set_id. Copy written for the proposal arm is false here
+    twice: it calls the question "the menu options", and it promises the set will
+    be retired when `proposal_set_id=(none)` means there is no set to retire."""
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir)
+    _seed_recompose_sent_set(env_dir)
+    stub.response_mode = "empty_id"
+
+    result, parsed = _run_recompose(env_dir, port, "option 2 starters with option 1 mains")
+
+    assert parsed["rc"] == 6, result.stderr
+    assert len(parsed["notify_calls"]) == 1, parsed["notify_calls"]
+    call = parsed["notify_calls"][0]
+    title = call[call.index("--title") + 1]
+    body = call[-1]
+
+    assert "failed" not in title.lower(), title
+    assert "menu options" not in body.lower(), (
+        f"a clarifying question is not a menu of options: {body!r}")
+    assert "question" in body.lower(), body
+    # No set exists on this arm, so no sentence may claim one is retired.
+    assert "retire" not in body.lower(), (
+        f"names a retirement that cannot happen - there is no set: {body!r}")
+    assert "proposal_set_id" not in body, (
+        "an empty set id should be omitted, not printed as '(none)'")
+    assert "most likely" in body.lower() and "contact them directly" in body.lower()
+
+
+def test_the_uncertain_recompose_menu_page_describes_the_combined_menu(bridge_server, env_dir):
+    """The merge arm really does send a menu — the COMBINED one the customer asked
+    for — but still carries no proposal_set_id, so the retirement sentence must be
+    absent here too."""
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir)
+    _seed_recompose_sent_set(env_dir)
+    stub.response_mode = "empty_id"
+
+    result, parsed = _run_recompose(env_dir, port, "option 1 starters with the option 2 mains")
+
+    assert parsed["rc"] == 6, result.stderr
+    assert len(parsed["notify_calls"]) == 1, parsed["notify_calls"]
+    body = parsed["notify_calls"][0][-1]
+
+    assert "combined menu" in body.lower(), body
+    assert "retire" not in body.lower(), (
+        f"names a retirement that cannot happen - there is no set: {body!r}")
+    assert "proposal_set_id" not in body, body
+    assert "most likely" in body.lower() and "contact them directly" in body.lower()
