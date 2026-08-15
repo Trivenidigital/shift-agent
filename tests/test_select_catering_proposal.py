@@ -430,6 +430,40 @@ def test_send_failed_set_is_not_selectable(bridge_server, env_dir, monkeypatch):
     assert calls == []
 
 
+def test_send_uncertain_set_is_not_selectable(bridge_server, env_dir, monkeypatch):
+    """P1. SEND_UNCERTAIN is recorded because the bridge accepted the menu but no
+    ack came back — so nothing can show the customer holds these options. It must
+    be no more selectable than SEND_FAILED, and for the same reason the SENT gate
+    already gives: `_latest_proposal_for_lead` and `_claim_selection` both require
+    `status == "SENT"`. Asserted rather than assumed, because the gate is what
+    keeps a new status from silently becoming selectable."""
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+    _seed_proposals(
+        env_dir,
+        [
+            _proposal_set("CPS-L0014-000001", "SENT"),
+            _proposal_set("CPS-L0014-000002", "SEND_UNCERTAIN"),
+        ],
+    )
+    mod, calls = _load_script(env_dir, port, monkeypatch)
+
+    rc = _run_main(mod, "Option 1")
+
+    assert rc == 4
+    assert calls == [], "nothing may be finalized off an unconfirmed set"
+    # Refused by the SENT gate specifically — not by a store that failed to load,
+    # which would refuse everything and prove nothing about the gate.
+    audit = _read_audit(env_dir)[-1]
+    assert audit["type"] == "catering_proposal_selection_failed"
+    assert audit["reason"] == "no_sent_proposal"
+    assert len(stub.requests) == 1, "the customer is still answered"
+    by_id = {row["proposal_set_id"]: row for row in _read_store(env_dir)["sets"]}
+    assert by_id["CPS-L0014-000002"]["status"] == "SEND_UNCERTAIN", (
+        "the selection attempt must leave the uncertain set exactly as it found it")
+
+
 def test_stale_proposal_target_does_not_finalize_or_mark_selected(bridge_server, env_dir, monkeypatch):
     port, _ = bridge_server
     _seed_lead(env_dir)

@@ -1277,6 +1277,60 @@ def test_uncertain_proposal_send_is_not_recorded_as_a_definite_failure(bridge_se
     assert failed and failed[-1]["reason"] == "bridge_unreachable"
 
 
+def test_uncertain_proposal_send_lands_send_uncertain_not_send_failed(bridge_server, env_dir):
+    """P1 defect A. The audit row already told the truth; the STATE ROW was the
+    liar — the send-failure writer recorded a bridge-accepted send as definite
+    non-delivery, and that row is what every later reader consults."""
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+    stub.response_mode = "empty_id"
+
+    result, parsed = _run_script(env_dir, port)
+
+    assert parsed["rc"] == 6, result.stderr
+    row = _read_store(env_dir)["sets"][-1]
+    assert row["status"] == "SEND_UNCERTAIN", (
+        "a bridge-accepted send whose ack was unparseable is NOT a definite failure")
+    # The evidence is preserved verbatim: the bridge's own ack body, unchanged.
+    assert row["failure_reason"].startswith(("ack_parse_failed:", "empty_message_id:")), (
+        f"the ack evidence was dropped: {row['failure_reason']!r}")
+    assert "accepted" in row["failure_reason"], "the ack body itself must survive"
+    # Unchanged from the SEND_FAILED path and deliberately so: the bridge returned
+    # no id in either uncertain sub-case, so there is none to record.
+    assert row["outbound_message_id"] == ""
+    assert len(stub.requests) == 1, "never re-sent"
+
+
+def test_a_later_successful_send_does_not_supersede_an_uncertain_set(bridge_server, env_dir):
+    """P1/R1 — SEND_UNCERTAIN is terminal to AUTOMATION. The table allows
+    SEND_UNCERTAIN -> SUPERSEDED so an operator-driven resolution exists, and this
+    pins that no automated path can take it: `_mark_sent_and_supersede` supersedes
+    rows selected by `row.status == "SENT"`, so a later success walks past it."""
+    store = {
+        "schema_version": 1,
+        "next_sequence": 2,
+        "sets": [_proposal_set("CPS-L0014-000001", "SEND_UNCERTAIN")],
+    }
+    store["sets"][0]["failure_reason"] = "empty_message_id: {\"accepted\": true}"
+    (env_dir / "state" / "catering-proposals.json").write_text(
+        json.dumps(store), encoding="utf-8")
+    port, _stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+
+    result, parsed = _run_script(env_dir, port)
+
+    assert parsed["rc"] == 0, result.stderr
+    by_id = {row["proposal_set_id"]: row for row in _read_store(env_dir)["sets"]}
+    assert by_id["CPS-L0014-000002"]["status"] == "SENT"
+    uncertain = by_id["CPS-L0014-000001"]
+    assert uncertain["status"] == "SEND_UNCERTAIN", (
+        "automation moved a SEND_UNCERTAIN row; only an operator may resolve one")
+    assert uncertain["failure_reason"] == "empty_message_id: {\"accepted\": true}", (
+        "the ack evidence must survive a later send untouched")
+
+
 def test_successful_proposal_send_emits_no_unconfirmed_row(bridge_server, env_dir):
     port, _stub = bridge_server
     _seed_lead(env_dir)

@@ -746,15 +746,36 @@ def _emit_transition_refusals(refusals: list[dict]) -> None:
                 f"{type(e).__name__}: {e}\n")
 
 
-def _mark_send_failed(proposal_set_id: str, reason: str) -> list[dict]:
+def _unconfirmed_set_status(send_status: str) -> str:
+    """The proposal-set status for a send that did not confirm. Mirrors
+    `_delivery_certainty` one layer down: `send_uncertain` is the ONLY status that
+    is not a definite non-delivery, so it is the only one that must not be written
+    as SEND_FAILED."""
+    return "SEND_UNCERTAIN" if send_status == "send_uncertain" else "SEND_FAILED"
+
+
+def _mark_send_outcome(proposal_set_id: str, reason: str, send_status: str) -> list[dict]:
+    """Record what the send actually did.
+
+    This used to write SEND_FAILED unconditionally, discarding the status the
+    chokepoint returned — so a `send_uncertain` (bridge accepted the menu; it most
+    likely ARRIVED) was recorded as definite non-delivery, contradicting the
+    catering_customer_send_unconfirmed row written beside it by the same run.
+
+    `reason` is untouched by the split: on the uncertain path it already carries the
+    bridge's own ack body (`ack_parse_failed: ...` / `empty_message_id: ...`), which
+    is the evidence an operator resolves the row with. `outbound_message_id` is
+    cleared on BOTH paths and that is not a loss — the bridge returned no id in
+    either uncertain sub-case, so there has never been one to keep."""
+    to_status = _unconfirmed_set_status(send_status)
     refusals: list[dict] = []
     with FileLock(PROPOSALS_LOCK):
         store, status = load_model(PROPOSALS_PATH, CateringProposalStore, default=CateringProposalStore())
         assert_load_status_clean(PROPOSALS_PATH, status, context="proposal-options fail load")
         target = next(row for row in store.sets if row.proposal_set_id == proposal_set_id)
-        if not _transition_ok(target, "SEND_FAILED", "mark_send_failed", refusals):
+        if not _transition_ok(target, to_status, "mark_send_outcome", refusals):
             return refusals
-        target.status = "SEND_FAILED"
+        target.status = to_status
         target.failure_reason = reason[:200]
         target.outbound_message_id = ""
         atomic_write_json(PROPOSALS_PATH, store)
@@ -1172,7 +1193,8 @@ def main() -> int:
 
     ok, message_id_or_error, _status = _post(args.customer_jid, body, lead_id=args.lead_id)
     if not ok:
-        _emit_transition_refusals(_mark_send_failed(proposal_set_id, message_id_or_error))
+        _emit_transition_refusals(
+            _mark_send_outcome(proposal_set_id, message_id_or_error, _status))
         _fail_generation(args.lead_id, "bridge_unreachable", message_id_or_error,
                          proposal_set_id, send=(args.customer_jid, _status))
         print(json.dumps({"proposal_set_id": proposal_set_id, "sent": False}))

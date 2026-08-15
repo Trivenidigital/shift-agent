@@ -2658,6 +2658,12 @@ CateringProposalStatus = Literal[
     "DRAFT", "SENT", "SEND_FAILED", "SUPERSEDED",
     "SELECTING", "SELECTED", "SELECTED_OWNER_CARD_FAILED", "SELECT_FAILED",
     "EXPIRED",  # M3 — validity window elapsed with no selection
+    # P1 — the bridge ACCEPTED the send (2xx) but its ack was unparseable, so the
+    # menu most likely reached the customer and nothing can prove either way.
+    # DISTINCT from SEND_FAILED, which asserts definite non-delivery: recording
+    # uncertainty as failure made the state row contradict the
+    # catering_customer_send_unconfirmed audit row written beside it.
+    "SEND_UNCERTAIN",
 ]
 
 # M3: proposal-set state machine. Mirrors CATERING_TRANSITIONS' shape (typed against
@@ -2668,7 +2674,8 @@ CateringProposalStatus = Literal[
 # Encoded from the two deployed writers, NOT invented:
 #   create-catering-proposal-options
 #     _create_draft            mints DRAFT (initial state, not a transition)
-#     _mark_send_failed        DRAFT -> SEND_FAILED
+#     _mark_send_outcome       DRAFT -> SEND_FAILED (definite non-delivery), or
+#                              DRAFT -> SEND_UNCERTAIN (bridge accepted, ack unparseable)
 #     _mark_sent_and_supersede DRAFT -> SENT, or DRAFT -> SUPERSEDED when a
 #                              later-sequence set already went out (has_later_sent);
 #                              and, for every OTHER lower-sequence row, SENT -> SUPERSEDED
@@ -2683,10 +2690,22 @@ CateringProposalStatus = Literal[
 # Every terminal state has an empty set: a SEND_FAILED set is never resurrected (the
 # next attempt mints a new set), and SELECTED / SELECT_FAILED / SUPERSEDED / EXPIRED
 # are end states of their respective paths.
+#
+# SEND_UNCERTAIN (P1) is the one state that is terminal to AUTOMATION without being
+# terminal outright. Its single out-edge to SUPERSEDED exists so an operator who
+# resolves the uncertainty by REISSUING the options can retire the row, exactly as a
+# stale SENT set is retired; an empty set would make the row permanently
+# irrecoverable. No automated writer can take that edge: `_mark_sent_and_supersede`
+# selects the rows it supersedes with `row.status == "SENT"`. The other two
+# conceivable resolutions are deliberately absent — SENT is unreachable by
+# CONSTRUCTION (a SENT set must carry an `outbound_message_id`, and the uncertain
+# path has none: the bridge returned no id in either sub-case), and SELECTING would
+# let a customer lock in a set nobody can show was delivered.
 CATERING_PROPOSAL_SET_TRANSITIONS: dict[CateringProposalStatus, set[CateringProposalStatus]] = {
-    "DRAFT": {"SENT", "SEND_FAILED", "SUPERSEDED"},
+    "DRAFT": {"SENT", "SEND_FAILED", "SEND_UNCERTAIN", "SUPERSEDED"},
     "SENT": {"SELECTING", "SUPERSEDED", "EXPIRED"},
     "SEND_FAILED": set(),                                                 # terminal
+    "SEND_UNCERTAIN": {"SUPERSEDED"},                                     # operator-resolvable only
     "SUPERSEDED": set(),                                                  # terminal
     "SELECTING": {"SELECTED", "SELECTED_OWNER_CARD_FAILED", "SELECT_FAILED"},
     "SELECTED": set(),                                                    # terminal

@@ -381,6 +381,57 @@ def test_02c_status_map_covers_every_new_status_and_targets_a_legal_old_one(
     assert script.LEAD_STATUS_DOWNGRADE["BOOKED"] == "CLOSED"
 
 
+def test_02d_proposal_status_map_covers_every_new_status_and_targets_a_legal_old_one(
+    old_schemas: Path,
+):
+    """The pin that was missing. ``PROPOSAL_FIELDS_UNKNOWN_TO_OLD`` has been checked
+    against the real delta since P0-2, but the proposal STATUS delta was checked by
+    nothing at all — the proposals store ran with ``status_map={}``. M3 then added
+    ``EXPIRED``, which ``select-catering-proposal`` writes UNGATED whenever a customer
+    replies after the validity window, and a live set carries ``expires_at`` today. So
+    one late reply was enough to make ``catering-proposals.json`` unreadable by the
+    rollback target, and no test said so.
+
+    This is the same shape as test_02c, one store over. Its value is not the mapping
+    it asserts today — it is that the NEXT proposal status cannot be added without
+    either a mapping or a deliberate, visible failure here.
+    """
+    from typing import get_args
+
+    from schemas import CateringProposalStatus
+
+    script = load_script("p02_downgrade_constants_d", DOWNGRADE_SCRIPT)
+    old_statuses = set(old_release_symbol(
+        old_schemas, "sorted(get_args(mod.CateringProposalStatus))"))
+    new_statuses = set(get_args(CateringProposalStatus))
+    new_only = new_statuses - old_statuses
+
+    assert set(script.PROPOSAL_STATUS_DOWNGRADE) == new_only, (
+        "every proposal status the old release lacks needs a mapping, and no mapping "
+        "may name a status the new release no longer has; "
+        f"missing={sorted(new_only - set(script.PROPOSAL_STATUS_DOWNGRADE))} "
+        f"stale={sorted(set(script.PROPOSAL_STATUS_DOWNGRADE) - new_only)}"
+    )
+    for source, target in script.PROPOSAL_STATUS_DOWNGRADE.items():
+        assert target in old_statuses, (
+            f"{source} maps to {target}, which the old release does not define")
+        # dc7a81a2's select-catering-proposal claims a set only when its status is
+        # exactly "SENT" (both `_latest_proposal_for_lead` and `_claim_selection`),
+        # so anything else is non-selectable there. A downgrade target that WERE
+        # selectable would hand the old release a set it must not act on.
+        assert target != "SENT", (
+            f"{source} maps to {target}, which the old release treats as selectable")
+
+    # The two semantic choices, pinned so a later edit is a deliberate one.
+    assert script.PROPOSAL_STATUS_DOWNGRADE["EXPIRED"] == "SUPERSEDED", (
+        "an EXPIRED set really was sent and is now dead; SUPERSEDED is the old "
+        "release's terminal for exactly that, and it does not claim the send failed")
+    assert script.PROPOSAL_STATUS_DOWNGRADE["SEND_UNCERTAIN"] == "SEND_FAILED", (
+        "the old release has no way to express uncertainty, and its only terminal "
+        "for a set that never confirmed is SEND_FAILED. The sidecar keeps the real "
+        "status, so the downgrade is lossy only to the OLD reader, never on disk")
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # 3. The NEW release reads the old store and writes new-format state into it.
 # ═════════════════════════════════════════════════════════════════════════════
@@ -464,9 +515,13 @@ def test_05_seed_the_remaining_new_only_surfaces(sb: _Sandbox):
         }
     sb.leads.write_text(json.dumps(doc, indent=2), encoding="utf-8")
 
-    # A proposal set carrying the M3 expires_at the old CateringProposalSet forbids.
+    # Three proposal sets, one per hazard the old CateringProposalSet presents:
+    #   000001  the M3 `expires_at` field it forbids
+    #   000002  EXPIRED  — a status its Literal does not name (M3)
+    #   000003  SEND_UNCERTAIN — likewise (P1), and with NO forbidden field, so the
+    #           remap-only path through plan_downgrade is exercised too
     sb.proposals.write_text(json.dumps({
-        "schema_version": 1, "next_sequence": 2,
+        "schema_version": 1, "next_sequence": 4,
         "sets": [{
             "proposal_set_id": f"CPS-{SEED_LEAD_ID}-000001",
             "lead_id": SEED_LEAD_ID, "status": "SENT",
@@ -483,6 +538,38 @@ def test_05_seed_the_remaining_new_only_surfaces(sb: _Sandbox):
                  "item_names": ["Masala Dosa"]},
             ],
             "selected_option_id": None, "failure_reason": "",
+        }, {
+            "proposal_set_id": f"CPS-{SEED_LEAD_ID}-000002",
+            "lead_id": SEED_LEAD_ID, "status": "EXPIRED",
+            "created_at": "2026-06-01T00:00:00+00:00",
+            "sent_at": "2026-06-01T00:05:00+00:00",
+            "expires_at": "2026-06-15T00:05:00+00:00",
+            "outbound_message_id": "wamid.P02.OLDSET",
+            "source_message_id": "wamid.P02.OLDREQ",
+            "request_text": "options for the June party",
+            "options": [
+                {"option_id": "1", "style_key": "classic", "tier": "classic",
+                 "item_names": ["Idly (3 PCS)"]},
+                {"option_id": "2", "style_key": "balanced", "tier": "balanced",
+                 "item_names": ["Masala Dosa"]},
+            ],
+            "selected_option_id": None,
+            "failure_reason": "validity window elapsed before selection",
+        }, {
+            "proposal_set_id": f"CPS-{SEED_LEAD_ID}-000003",
+            "lead_id": SEED_LEAD_ID, "status": "SEND_UNCERTAIN",
+            "created_at": "2026-07-04T00:00:00+00:00",
+            "sent_at": None, "outbound_message_id": "",
+            "source_message_id": "wamid.P02.UNCREQ",
+            "request_text": "one more set of options",
+            "options": [
+                {"option_id": "1", "style_key": "classic", "tier": "classic",
+                 "item_names": ["Idly (3 PCS)"]},
+                {"option_id": "2", "style_key": "balanced", "tier": "balanced",
+                 "item_names": ["Masala Dosa"]},
+            ],
+            "selected_option_id": None,
+            "failure_reason": 'empty_message_id: {"accepted": true}',
         }],
     }, indent=2), encoding="utf-8")
 
@@ -523,6 +610,21 @@ def test_06_the_new_state_is_unreadable_by_the_old_release(sb: _Sandbox, old_sch
 
     ok, output = validate_under_old_release(old_schemas, "CateringProposalStore", sb.proposals)
     assert not ok, "expected the expires_at proposal set to be REJECTED by dc7a81a2"
+
+    # The STATUS alone breaks the old reader, independently of expires_at — the
+    # gap the proposals store's `status_map={}` left open. Probed on a store built
+    # from the SEND_UNCERTAIN set, which carries no field the old model forbids.
+    status_only = old_schemas.parent / "status_only_probe.json"
+    sets = json.loads(sb.proposals.read_text(encoding="utf-8"))["sets"]
+    uncertain = next(s for s in sets if s["status"] == "SEND_UNCERTAIN")
+    assert not (set(uncertain) & set(("expires_at",))), (
+        "this probe only proves anything while the set carries no forbidden field")
+    status_only.write_text(json.dumps(
+        {"schema_version": 1, "next_sequence": 2, "sets": [uncertain]}), encoding="utf-8")
+    ok, output = validate_under_old_release(old_schemas, "CateringProposalStore", status_only)
+    assert not ok, "expected SEND_UNCERTAIN alone to be REJECTED by dc7a81a2"
+    assert "literal_error" in output or "Input should be" in output, (
+        f"rejected, but not by the status Literal: {output[:600]}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -642,12 +744,27 @@ def test_10_no_data_was_lost(sb: _Sandbox):
         assert not (set(script.LEAD_FIELDS_UNKNOWN_TO_OLD) & set(lead)), (
             f"lead {lead['lead_id']} still carries forbidden fields")
 
-    # The proposal sidecar keeps the validity window the customer was told.
+    # The proposal sidecar keeps the validity window the customer was told, and the
+    # real status of every set the old release cannot name.
     prop_sidecars = _sidecars(sb, "catering-proposals")
     assert len(prop_sidecars) == 1
     prop_payload = json.loads(prop_sidecars[0].read_text(encoding="utf-8"))
-    assert prop_payload["records"][0]["stripped_fields"]["expires_at"] == \
+    prop_recovered = {row["id"]: row for row in prop_payload["records"]}
+    assert prop_recovered[f"CPS-{SEED_LEAD_ID}-000001"]["stripped_fields"]["expires_at"] == \
         "2026-07-17T00:05:00+00:00"
+    assert prop_recovered[f"CPS-{SEED_LEAD_ID}-000002"]["original_status"] == "EXPIRED"
+    assert prop_recovered[f"CPS-{SEED_LEAD_ID}-000003"]["original_status"] == "SEND_UNCERTAIN", (
+        "an uncertain send is recoverable as uncertain; the downgrade must not be "
+        "the thing that turns it into a definite failure on disk")
+
+    # ...and on disk the sets now carry statuses the old release names.
+    prop_sets = {row["proposal_set_id"]: row
+                 for row in json.loads(sb.proposals.read_text(encoding="utf-8"))["sets"]}
+    assert prop_sets[f"CPS-{SEED_LEAD_ID}-000002"]["status"] == "SUPERSEDED"
+    assert prop_sets[f"CPS-{SEED_LEAD_ID}-000003"]["status"] == "SEND_FAILED"
+    assert prop_sets[f"CPS-{SEED_LEAD_ID}-000003"]["failure_reason"] == \
+        'empty_message_id: {"accepted": true}', (
+            "the ack evidence is old-release-legal and must survive the downgrade")
 
 
 def test_11_audit_rows_record_the_downgrade(sb: _Sandbox):
