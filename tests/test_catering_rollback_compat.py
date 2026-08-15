@@ -2,7 +2,7 @@
 
 THE BUG THIS FILE PINS
 ----------------------
-The Studio MVP added 12 fields and 2 statuses (``QUALIFYING``, ``BOOKED``) to
+The Studio MVP and P17 added 20 fields and 2 statuses (``QUALIFYING``, ``BOOKED``) to
 ``CateringLead``, and ``expires_at`` to ``CateringProposalSet``. Both models are
 ``extra="forbid"`` in the PREVIOUS release (``dc7a81a2``), and its
 ``CateringLeadStatus`` Literal names neither new status. So ONE lead written by

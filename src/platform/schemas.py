@@ -2677,7 +2677,12 @@ CateringProposalStatus = Literal[
 #     _mark_send_outcome       DRAFT -> SEND_FAILED (definite non-delivery), or
 #                              DRAFT -> SEND_UNCERTAIN (bridge accepted, ack unparseable)
 #     _mark_sent_and_supersede DRAFT -> SENT, or DRAFT -> SUPERSEDED when a
-#                              later-sequence set already went out (has_later_sent);
+#                              later-sequence set is already in status SENT
+#                              (has_later_sent — it tests SENT ONLY, and so does
+#                              NOT count a later SEND_UNCERTAIN set, even though
+#                              such a set most likely reached the customer too;
+#                              see the note at its definition for why that
+#                              asymmetry stands);
 #                              and, for every OTHER lower-sequence row,
 #                              SENT -> SUPERSEDED and SEND_UNCERTAIN -> SUPERSEDED
 #   select-catering-proposal

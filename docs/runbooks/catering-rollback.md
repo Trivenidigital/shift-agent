@@ -8,8 +8,9 @@ already written catering state**. For the general lightest-lever-first ladder se
 
 ## The problem this exists for
 
-The Studio release added 12 fields and 2 statuses (`QUALIFYING`, `BOOKED`) to
-`CateringLead`, and `expires_at` plus 2 statuses (`EXPIRED`, `SEND_UNCERTAIN`) to
+The Studio release and P17 together added 20 fields and 2 statuses (`QUALIFYING`,
+`BOOKED`) to `CateringLead` — 12 M1-M4 fields plus 8 P17 send-status markers —
+and `expires_at` plus 2 statuses (`EXPIRED`, `SEND_UNCERTAIN`) to
 `CateringProposalSet`. In `dc7a81a2` both models are `extra="forbid"`, and its
 status Literals name none of the four new statuses.
 
@@ -128,7 +129,7 @@ tail -f /opt/shift-agent/logs/decisions.log
 
 | Store | Action | Why |
 |---|---|---|
-| `catering-leads.json` | rewritten | `CateringLead` is `extra="forbid"` in `dc7a81a2`; 12 new fields + 2 new statuses |
+| `catering-leads.json` | rewritten | `CateringLead` is `extra="forbid"` in `dc7a81a2`; 20 new fields + 2 new statuses |
 | `catering-proposals.json` | rewritten | `CateringProposalSet` is `extra="forbid"`; M3 added `expires_at`, and the old status `Literal` names neither `EXPIRED` (M3) nor `SEND_UNCERTAIN` (P1) |
 | `catering-quote-ledger.json` | untouched | store is `extra="allow"` with `records: list[dict]`; the strict record model runs only at append, never on read |
 | `catering-amendments.json` | untouched | same preservation-safe tolerant-dict shape |

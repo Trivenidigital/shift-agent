@@ -3,9 +3,12 @@
 
 WHY THIS EXISTS (P0-2, rollback-compatibility activation blocker)
 ----------------------------------------------------------------
-The Catering Studio MVP added 12 fields and 2 statuses (``QUALIFYING``, ``BOOKED``)
-to ``CateringLead``, and ``expires_at`` plus two statuses (``EXPIRED``,
-``SEND_UNCERTAIN``) to ``CateringProposalSet``. In the PREVIOUS release
+The Catering Studio MVP and P17 together added 20 fields and 2 statuses
+(``QUALIFYING``, ``BOOKED``) to ``CateringLead`` — 12 M1-M4 fields plus 8 P17
+send-status markers — and ``expires_at`` plus two statuses (``EXPIRED``,
+``SEND_UNCERTAIN``) to ``CateringProposalSet``. The authority for that count is
+``LEAD_FIELDS_UNKNOWN_TO_OLD`` below, which ``tests/test_catering_rollback_compat.py``
+pins against the REAL new-minus-old delta; count the list, not this sentence. In the PREVIOUS release
 (``dc7a81a2``) both models carry ``extra="forbid"`` and a status ``Literal``
 that names none of them. So ONE lead written by the new release makes
 ``/opt/shift-agent/state/catering-leads.json`` unreadable by the old code after a
@@ -22,7 +25,7 @@ touched, so a later re-upgrade or an audit can recover every fact.
 
 STORE AUDIT (evidence: ``git show dc7a81a2:src/platform/schemas.py``)
 --------------------------------------------------------------------
-  catering-leads.json      HAZARD — CateringLead is extra="forbid"; 12 new fields
+  catering-leads.json      HAZARD — CateringLead is extra="forbid"; 20 new fields
                            + QUALIFYING/BOOKED absent from the old status Literal.
   catering-proposals.json  HAZARD — CateringProposalSet is extra="forbid"; M3 added
                            expires_at, and the old status Literal names neither
