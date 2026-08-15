@@ -16,6 +16,7 @@ code); the static cells run everywhere.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import platform
@@ -270,9 +271,13 @@ def test_confirmed_delivery_refuses_when_the_link_is_not_payable(
     again — this disposition refuses (the marker is no longer `uncertain`), and
     a re-mint is a silent `already_minted` no-op.
 
-    Reachable without anything exotic: a crash in the window between the void
-    and the lead write leaves exactly this shape, and the operator who then
-    re-reads the chat and concludes "it arrived" picks this arm.
+    The `voided` case is reachable without anything exotic: a crash in the
+    window between the void and the lead write leaves exactly that shape, and
+    the operator who then re-reads the chat and concludes "it arrived" picks
+    this arm. `refunded` and `chargeback` are NOT reachable that way — nothing
+    in the tree writes either status today — and are covered here because the
+    claim this arm makes is false against any terminal intent, not because that
+    window can produce them.
     """
     lead_id = _write_uncertain_lead(isolated_state["leads_path"])
     _seed_live_intent(isolated_state["intents_path"], lead_id, status=intent_status)
@@ -307,27 +312,55 @@ def test_confirmed_delivery_refuses_when_the_intent_is_missing_from_the_ledger(
 
 
 @_LINUX_ONLY
-def test_the_refused_confirm_still_leaves_the_other_disposition_open(
-        isolated_state):
-    """The escape hatch must not close behind the operator. After the refusal
-    the lead is still `uncertain`, so `not-delivered` resolves it — which is
-    exactly what the refusal message tells them to run."""
+@pytest.mark.parametrize(
+    "intent_status, escape_works",
+    [("voided", True), ("refunded", False), ("chargeback", False)],
+)
+def test_a_confirm_refusal_never_names_an_escape_that_refuses(
+        isolated_state, intent_status, escape_works):
+    """A refusal may only name a command that actually resolves the lead.
+
+    The first version of this cell asserted exactly this property and was
+    parametrized over nothing — it ran the single status where the property
+    happened to hold. `payment_link.void` refuses on
+    `{confirmed, refunded, chargeback}` (payment_link.py:447), so for a refunded
+    or charged-back intent the `not-delivered` the message named refuses too,
+    and an operator who follows the copy lands where they started. Naming a
+    dead escape is the same defect as naming a command that does not exist,
+    with the failure moved one step later.
+
+    So the property is checked against what the message actually says, for every
+    status the parametrize claims to cover.
+    """
     lead_id = _write_uncertain_lead(isolated_state["leads_path"])
-    _seed_live_intent(isolated_state["intents_path"], lead_id, status="voided")
+    _seed_live_intent(isolated_state["intents_path"], lead_id, status=intent_status)
 
     refused = _run(isolated_state["env"], "--lead-id", lead_id,
                    "--deposit-delivery", "confirmed-delivered", "--reason", "x")
-    assert refused.returncode == 2
-    assert "not-delivered" in refused.stderr, (
-        "a refusal that does not name the way out is half a trapdoor")
+    assert refused.returncode == 2, f"stdout={refused.stdout!r}"
 
-    r = _run(isolated_state["env"], "--lead-id", lead_id,
-             "--deposit-delivery", "not-delivered", "--reason", "nothing arrived")
-    assert r.returncode == 0, f"stdout={r.stdout!r} stderr={r.stderr[-800:]!r}"
+    names_the_escape = "not-delivered" in refused.stderr
+    assert names_the_escape == escape_works, (
+        f"refusal copy for intent status {intent_status!r} "
+        f"{'omits a working escape' if escape_works else 'names an escape that refuses'}: "
+        f"{refused.stderr!r}"
+    )
 
-    lead = _lead(isolated_state["leads_path"])
-    assert lead["deposit_payment_intent_id"] == ""
-    assert lead["deposit_link_delivery_status"] == "failed"
+    attempted = _run(isolated_state["env"], "--lead-id", lead_id,
+                     "--deposit-delivery", "not-delivered", "--reason", "following the page")
+    if escape_works:
+        assert attempted.returncode == 0, (
+            f"the named escape refused: {attempted.stderr[-400:]!r}")
+        lead = _lead(isolated_state["leads_path"])
+        assert lead["deposit_payment_intent_id"] == ""
+        assert lead["deposit_link_delivery_status"] == "failed"
+    else:
+        # Proves the omission is right rather than merely cautious.
+        assert attempted.returncode == 2, (
+            "the escape works after all; the refusal copy should name it")
+        lead = _lead(isolated_state["leads_path"])
+        assert lead["deposit_link_delivery_status"] == "uncertain"
+        assert lead["deposit_payment_intent_id"] == "CPI00001"
 
 
 @_LINUX_ONLY
@@ -572,6 +605,97 @@ def test_status_correction_still_works_untouched(isolated_state):
 
 
 # ─────────────────────────────────────────────────────────────────
+# Which uncertain leads can actually be resolved — the whole map, gaps included
+# ─────────────────────────────────────────────────────────────────
+
+
+# Every shape an `uncertain` lead can be in, and the disposition that resolves
+# it. `None` means NEITHER arm resolves it — a real gap, listed rather than
+# discovered.
+#
+# The three `None` rows are all "the intent went to a terminal money state that
+# is not a void". They are UNREACHABLE today: nothing in the tree writes
+# `refunded` or `chargeback` onto a payment intent (payment_link.py has mint /
+# mark_attempted / mark_sent / mark_confirmed / void and no refund writer;
+# order_state.py's module docstring reserves the matching order states for a
+# later slice). They are recorded because the slice that lands a refund writer
+# makes them reachable in the same commit, and the semantics are genuinely
+# undecided — unbinding after a refund is plausibly right, while a chargeback is
+# a dispute IN PROGRESS where unbinding may be exactly wrong. That decision
+# belongs to whoever has a real refund path to check it against.
+#
+# DO NOT delete a `None` row to make this test pass. Landing a disposition for
+# one of these shapes means changing the row to the command that resolves it.
+_UNCERTAIN_SHAPES = [
+    # (id, lead deposit_status, seeded intent status | None = no intent row,
+    #  bound?, resolving disposition | None)
+    ("bound_minted", "awaiting_payment", "minted", True, "confirmed-delivered"),
+    ("bound_sent", "awaiting_payment", "sent", True, "confirmed-delivered"),
+    ("paid_confirmed", "paid", "confirmed", True, "confirmed-delivered"),
+    ("bound_voided", "awaiting_payment", "voided", True, "not-delivered"),
+    ("bound_intent_absent", "awaiting_payment", None, True, "not-delivered"),
+    ("unbound", "none", None, False, "not-delivered"),
+    ("bound_refunded", "awaiting_payment", "refunded", True, None),
+    ("bound_chargeback", "awaiting_payment", "chargeback", True, None),
+    ("paid_refunded", "paid", "refunded", True, None),
+]
+
+
+@_LINUX_ONLY
+@pytest.mark.parametrize(
+    "deposit_status, intent_status, bound, resolves_with",
+    [row[1:] for row in _UNCERTAIN_SHAPES],
+    ids=[row[0] for row in _UNCERTAIN_SHAPES],
+)
+def test_every_uncertain_shape_has_a_known_disposition_or_a_recorded_gap(
+        isolated_state, deposit_status, intent_status, bound, resolves_with):
+    """The map of what an operator can and cannot resolve, asserted.
+
+    Written because the claim "every uncertain shape has a working disposition"
+    was made in a report and was FALSE for three of them. An invariant that is
+    almost true is worse than a gap that is written down: the gap gets handled,
+    the almost-invariant gets relied on.
+    """
+    overrides = {"deposit_status": deposit_status}
+    if not bound:
+        overrides.update({"deposit_payment_intent_id": "",
+                          "deposit_commerce_order_id": "",
+                          "deposit_amount_cents": 0})
+    lead_id = _write_uncertain_lead(isolated_state["leads_path"], **overrides)
+    if intent_status is None:
+        isolated_state["intents_path"].write_text(
+            json.dumps({"intents": []}), encoding="utf-8")
+    else:
+        _seed_live_intent(isolated_state["intents_path"], lead_id, status=intent_status)
+    _seed_order(isolated_state["orders_path"])
+
+    outcomes = {}
+    for disposition in ("confirmed-delivered", "not-delivered"):
+        # Each disposition runs against the same starting state; the first one
+        # to succeed ends the shape, so re-seed between attempts.
+        lead_id = _write_uncertain_lead(isolated_state["leads_path"], **overrides)
+        if intent_status is None:
+            isolated_state["intents_path"].write_text(
+                json.dumps({"intents": []}), encoding="utf-8")
+        else:
+            _seed_live_intent(isolated_state["intents_path"], lead_id, status=intent_status)
+        _seed_order(isolated_state["orders_path"])
+        r = _run(isolated_state["env"], "--lead-id", lead_id,
+                 "--deposit-delivery", disposition, "--reason", "shape probe")
+        outcomes[disposition] = r.returncode
+
+    working = [d for d, rc in outcomes.items() if rc == 0]
+    if resolves_with is None:
+        assert working == [], (
+            f"this shape is recorded as having NO disposition, but {working} "
+            f"resolved it — update _UNCERTAIN_SHAPES rather than this assertion")
+    else:
+        assert resolves_with in working, (
+            f"the recorded disposition {resolves_with!r} does not resolve this "
+            f"shape; exit codes were {outcomes}")
+
+
+# ─────────────────────────────────────────────────────────────────
 # Static contract — R1's "supervised" half
 # ─────────────────────────────────────────────────────────────────
 
@@ -580,7 +704,7 @@ _SCANNED_SUFFIXES = {
     ".py", ".sh", ".service", ".timer", ".md", "",
     # A manifest can wire an invocation as surely as a script can, and these
     # were invisible to the first version of this fence.
-    ".yaml", ".yml", ".json",
+    ".yaml", ".yml", ".json", ".toml", ".conf", ".ini", ".cron",
 }
 
 
@@ -626,22 +750,86 @@ def test_the_disposition_is_not_reachable_by_automation():
         f"--deposit-delivery is invoked outside an operator's hands: {offenders}")
 
 
+_SPAWN_CALLS = {
+    "run", "Popen", "call", "check_call", "check_output", "system",
+    "execv", "execve", "execvp", "execl", "execlp", "spawnv", "spawnl",
+    "popen",
+}
+
+
+def _spawn_calls_mentioning(tree: ast.AST, needle: str) -> list[str]:
+    """Every spawn-shaped call whose arguments mention `needle`, anywhere.
+
+    An AST walk rather than a line scan. The first version of this check
+    compared markers against the SAME line as the command name, which any
+    formatter defeats by wrapping — `subprocess.run([` on one line and the
+    command on the next passes a line scan while spawning the process just the
+    same. The argument list is one node here however it is wrapped.
+    """
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if name not in _SPAWN_CALLS:
+            continue
+        mentions = any(
+            isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+            and needle in sub.value
+            for arg in list(node.args) + [kw.value for kw in node.keywords]
+            for sub in ast.walk(arg)
+        )
+        if mentions:
+            found.append(f"{name}() at line {node.lineno}")
+    return found
+
+
 def test_the_page_that_names_the_command_does_not_spawn_it():
     """The one exemption above is for COPY, so pin that it stays copy.
 
     catering-mint-deposit is allowed to name the reconciler because it prints
     the command for a human to run. If it ever ran the command itself, the
-    exemption would silently launder an automated invocation past the fence.
+    exemption would silently launder past the fence exactly the automated
+    invocation the fence exists to stop.
     """
-    text = MINT_PATH.read_text(encoding="utf-8")
-    for line in text.splitlines():
-        if "catering-lead-reconcile" not in line:
+    tree = ast.parse(MINT_PATH.read_text(encoding="utf-8"))
+    spawns = _spawn_calls_mentioning(tree, "catering-lead-reconcile")
+    assert spawns == [], (
+        f"the owner page's mention of the reconciler is an invocation, not "
+        f"copy: {spawns}")
+
+
+def test_no_python_source_spawns_the_reconciler_with_the_deposit_flag():
+    """The fence's other half, on the same AST footing.
+
+    The suffix/prose scan above catches a file that MENTIONS the flag; this
+    catches a file that RUNS the script, whatever string it passes and however
+    the call is wrapped. Between them, a caller has to both avoid the flag
+    literal and avoid every spawn primitive to stay invisible.
+    """
+    offenders = {}
+    for path in _REPO_ROOT.rglob("*"):
+        if not path.is_file() or ".git" in path.parts or "tests" in path.parts:
             continue
-        for marker in ("subprocess", "Popen", "check_call", "check_output",
-                       "os.system", "os.exec", "run("):
-            assert marker not in line, (
-                f"the owner page's mention of the reconciler looks like an "
-                f"invocation, not copy: {line.strip()!r}")
+        if path.suffix not in {".py", ""}:
+            continue
+        if path.name == "catering-lead-reconcile":
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError, OSError, ValueError):
+            continue  # not python, or not parseable — the text scan covers it
+        spawns = _spawn_calls_mentioning(tree, "catering-lead-reconcile")
+        if spawns:
+            offenders[str(path.relative_to(_REPO_ROOT))] = spawns
+    # tools/synthetic-retry-harness.py spawns it for probe CLEANUP with a
+    # hard-coded --target-status CLOSED — the other axis entirely, and not a
+    # deposit disposition. Anything else is a finding.
+    offenders.pop("tools/synthetic-retry-harness.py", None)
+    offenders.pop(str(Path("tools/synthetic-retry-harness.py")), None)
+    assert offenders == {}, (
+        f"the reconciler is spawned outside an operator's hands: {offenders}")
 
 
 def test_the_owner_page_names_the_command_that_actually_resolves_it():

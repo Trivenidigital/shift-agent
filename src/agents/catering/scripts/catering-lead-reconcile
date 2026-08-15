@@ -118,6 +118,11 @@ ALLOWED_DEPOSIT_DELIVERY = ("confirmed-delivered", "not-delivered")
 # terminal here: the customer paid, which is the strongest evidence a link was
 # delivered.
 TERMINAL_INTENT_STATUSES = frozenset({"voided", "refunded", "chargeback"})
+# The subset `not-delivered` cannot resolve either, because its void is refused
+# (payment_link.py:447). A lead bound to one of these has NO disposition today —
+# recorded in tests/test_catering_deposit_delivery_reconcile.py's shape matrix,
+# and unreachable until something writes those statuses.
+UNVOIDABLE_INTENT_STATUSES = frozenset({"refunded", "chargeback"})
 SAFE_FROM_STATUSES = (
     "AWAITING_OWNER_APPROVAL", "OWNER_APPROVED", "OWNER_EDITED",
     "OWNER_REJECTED", "SENT_TO_CUSTOMER",
@@ -196,11 +201,27 @@ def _resolve_deposit_delivery(store, matched_idx: int, *, resolution: str,
                        if i.intent_id == lead.deposit_payment_intent_id), None)
         if intent is None or intent.status in TERMINAL_INTENT_STATUSES:
             found = "absent from the ledger" if intent is None else f"status={intent.status!r}"
+            # Only name `not-delivered` where it actually works. It voids, and
+            # `payment_link.void` refuses on {confirmed, refunded, chargeback}
+            # (payment_link.py:447), so on a refunded or charged-back intent the
+            # operator who follows this copy lands exactly where they started.
+            # Naming a dead escape is the same defect as naming a command that
+            # does not exist, one step later.
+            resolvable = intent is None or intent.status not in UNVOIDABLE_INTENT_STATUSES
+            remedy = (
+                "use --deposit-delivery not-delivered" if resolvable else
+                "neither disposition resolves this lead: voiding a "
+                f"{intent.status} intent is refused by the ledger, and "
+                "confirming delivery would record a link that cannot take a "
+                "payment. The lead stays 'uncertain' rather than being recorded "
+                "wrongly — escalate; refund/chargeback handling is not "
+                "implemented here"
+            )
             sys.stderr.write(
                 f"lead {lead.lead_id} is bound to intent "
                 f"{lead.deposit_payment_intent_id} ({found}), so it holds no "
                 f"payable link and confirming delivery would record one that "
-                f"does not exist; use --deposit-delivery not-delivered\n"
+                f"does not exist; {remedy}\n"
             )
             return EXIT_INVALID_INPUT
 
