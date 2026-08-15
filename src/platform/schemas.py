@@ -8244,6 +8244,39 @@ class CateringDepositReinvokeRefused(_BaseEntry):
     detail: str = Field(default="", max_length=500)
 
 
+class CateringDepositDeliveryReconciled(_BaseEntry):
+    """P1 2026-08-15: an operator resolved an unconfirmed deposit-link send.
+
+    The other half of the refusal above. Ruling R1 requires that uncertainty be
+    resolvable — "an explicit supervised reconciliation can later resolve it to
+    a confirmed-delivered state or authorize a fresh attempt" — so this is the
+    one row that says which of the two happened, who decided it and what it did
+    to the money objects.
+
+    `intent_voided` is carried rather than inferred: only the `not_delivered`
+    resolution voids, and only when the lead was bound to an intent that was
+    still voidable, so the audit reader must not have to guess. The ledger's own
+    `commerce_payment_intent_voided` row remains the authority on the void
+    itself; this row records the catering-side decision that caused it.
+
+    A NEW tag for the same reason as its two siblings above — the pinned
+    rollback target routes an unknown tag to `_UnknownLogEntry` (extra="allow"),
+    whereas widening an existing `reason` Literal would make the old reader
+    REJECT a row it recognises today.
+    """
+    type: Literal["catering_deposit_delivery_reconciled"]
+    lead_id: str = Field(min_length=1, max_length=40)
+    resolution: Literal["confirmed_delivered", "not_delivered"]
+    prior_delivery_status: Literal["uncertain"]
+    prior_delivery_status_at: Optional[datetime] = None
+    commerce_order_id: str = Field(default="", max_length=40)
+    commerce_payment_intent_id: str = Field(default="", max_length=40)
+    amount_cents: int = Field(default=0, ge=0, le=10_000_000_000)
+    intent_voided: bool = False
+    reason: str = Field(min_length=1, max_length=2000)
+    operator_uid: int  # os.getuid() — captures who ran the script
+
+
 # ─────────────────────────────────────────────────────────────────
 # Slice-3 PR-2 catering deposit confirmation
 # Emitted by commerce-payment-confirm after Stripe webhook confirms a
@@ -8604,6 +8637,7 @@ LogEntry = Annotated[
         # New tags, not widened reasons — see the class docstrings.
         Annotated[CateringDepositLinkSendUnconfirmed, Tag("catering_deposit_link_send_unconfirmed")],
         Annotated[CateringDepositReinvokeRefused, Tag("catering_deposit_reinvoke_refused")],
+        Annotated[CateringDepositDeliveryReconciled, Tag("catering_deposit_delivery_reconciled")],
         # Slice-3 PR-2: catering deposit confirmation + commerce confirmation-failure
         Annotated[CateringDepositPaid, Tag("catering_deposit_paid")],
         Annotated[CommercePaymentConfirmationFailed, Tag("commerce_payment_confirmation_failed")],

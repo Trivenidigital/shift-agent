@@ -18,6 +18,30 @@ Whitelist (per design v2 §9.1 B-1 R3+R4+R5 convergent fix):
 Special source-status rule:
   CUSTOMER_FINALIZED can only be reconciled to CLOSED for stale cleanup.
 
+Second axis — deposit-link delivery disposition (P1 2026-08-15, ruling R1):
+
+  catering-mint-deposit refuses to mint while a lead carries
+  `deposit_link_delivery_status="uncertain"` (the bridge accepted a message
+  carrying a live payment link, so the customer most likely holds one). Nothing
+  else in the tree ever cleared that marker, which made the refusal permanent —
+  R1 requires the opposite: "an explicit supervised reconciliation can later
+  resolve it to a confirmed-delivered state or authorize a fresh attempt. Do not
+  make uncertainty permanently irrecoverable."
+
+  --deposit-delivery confirmed-delivered  — the customer DID get the link: the
+      uncertainty becomes `sent`, and the binding + live intent are left exactly
+      as they are so the deposit stays payable.
+  --deposit-delivery not-delivered        — the customer did NOT get it: void
+      the intent, unbind the lead, and record the delivery as the definite
+      failure it was, so a legitimate re-mint can proceed.
+
+  Operator-only by construction, per R1: no timer, sweep or retry may take this
+  state. It lives here, on the existing operator status-correction primitive,
+  rather than in a script automation could reach.
+
+  This axis does NOT touch lead.status, and `--target-status` does not touch the
+  deposit — one invocation does exactly one of the two.
+
 Usage:
   catering-lead-reconcile \\
       --lead-id L00042 \\
@@ -29,9 +53,15 @@ Usage:
       --target-status CLOSED \\
       --reason "synthetic-probe-cleanup"
 
+  catering-lead-reconcile \\
+      --lead-id L00042 \\
+      --deposit-delivery confirmed-delivered \\
+      --reason "customer replied quoting the link"
+
 Exit codes:
   0 — reconciled
-  2 — invalid args / forbidden transition / same-state refusal
+  2 — invalid args / forbidden transition / same-state refusal /
+      deposit disposition not applicable
   3 — lead not found
   4 — leads.json corrupt (load failed)
 """
@@ -54,6 +84,7 @@ from safe_io import (  # noqa: E402
 from schemas import (  # noqa: E402
     Config, CateringLeadStore,
     CateringLeadStatusChange, CateringLeadManuallyReconciled,
+    CateringDepositDeliveryReconciled,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_NOT_FOUND, EXIT_SCHEMA_VIOLATION,
@@ -61,12 +92,17 @@ from exit_codes import (  # noqa: E402
 from audit_helpers import log_config_load_failed_best_effort  # noqa: E402
 from pydantic import TypeAdapter, ValidationError  # noqa: E402
 
+from commerce import payment_link as commerce_payment_link  # noqa: E402
+
 CONFIG_PATH = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
-LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
-LEADS_LOCK = Path("/opt/shift-agent/state/catering-leads.json.lock")
-LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
+LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
+LEADS_LOCK = Path(os.environ.get("SHIFT_AGENT_LEADS_LOCK", "/opt/shift-agent/state/catering-leads.json.lock"))
+LOG_PATH = Path(os.environ.get("SHIFT_AGENT_LOG_PATH", "/opt/shift-agent/logs/decisions.log"))
+COMMERCE_INTENTS_PATH = Path(os.environ.get(
+    "COMMERCE_INTENTS_PATH", "/opt/shift-agent/state/commerce/payment_intents.json"))
 
 ALLOWED_TARGETS = ("SENT_TO_CUSTOMER", "OWNER_REJECTED", "CLOSED")
+ALLOWED_DEPOSIT_DELIVERY = ("confirmed-delivered", "not-delivered")
 SAFE_FROM_STATUSES = (
     "AWAITING_OWNER_APPROVAL", "OWNER_APPROVED", "OWNER_EDITED",
     "OWNER_REJECTED", "SENT_TO_CUSTOMER",
@@ -81,10 +117,151 @@ def _append_audit_under_leadslock(adapter: TypeAdapter, entry) -> None:
         ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
 
 
+def _resolve_deposit_delivery(store, matched_idx: int, *, resolution: str,
+                              reason: str, now, dry_run: bool) -> int:
+    """Supervised resolution of an unconfirmed deposit-link send (R1).
+
+    Caller MUST hold LEADS_LOCK. Returns the process exit code.
+
+    On `not-delivered` the void runs BEFORE the lead write on purpose. If the
+    process dies between the two, the lead still names a voided intent and still
+    carries the `uncertain` marker — ugly, but the command is re-runnable and
+    nothing live is orphaned. The other order leaves a LIVE intent that no lead
+    points at, and re-running would then be refused by the marker check below.
+    """
+    lead = store.leads[matched_idx]
+
+    if lead.deposit_link_delivery_status != "uncertain":
+        sys.stderr.write(
+            f"lead {lead.lead_id} deposit-link delivery is "
+            f"{lead.deposit_link_delivery_status!r}, not 'uncertain'; this "
+            f"disposition only resolves uncertainty\n"
+        )
+        return EXIT_INVALID_INPUT
+
+    # The customer already paid — nothing about this delivery is unresolved, and
+    # unbinding would drop the record of a real payment.
+    if lead.deposit_status == "paid":
+        sys.stderr.write(
+            f"lead {lead.lead_id} deposit is already paid; refusing to "
+            f"reconcile its delivery\n"
+        )
+        return EXIT_INVALID_INPUT
+
+    if resolution == "confirmed-delivered" and not lead.deposit_payment_intent_id:
+        sys.stderr.write(
+            f"lead {lead.lead_id} names no payment intent, so there is no link "
+            f"whose delivery can be confirmed; use --deposit-delivery "
+            f"not-delivered to clear the marker\n"
+        )
+        return EXIT_INVALID_INPUT
+
+    if dry_run:
+        print(json.dumps({
+            "lead_id": lead.lead_id,
+            "deposit_delivery": resolution,
+            "commerce_payment_intent_id": lead.deposit_payment_intent_id,
+            "dry_run": True,
+        }))
+        return EXIT_OK
+
+    intent_voided = False
+    if resolution == "not-delivered" and lead.deposit_payment_intent_id:
+        result = commerce_payment_link.void(
+            intent_state_path=COMMERCE_INTENTS_PATH,
+            decisions_log_path=LOG_PATH,
+            intent_id=lead.deposit_payment_intent_id,
+            reason="operator_confirmed_link_never_delivered",
+            actor="operator",
+        )
+        if result.ok:
+            intent_voided = True
+        elif result.detail != "intent_not_found":
+            # cannot_void_confirmed / _refunded / _chargeback — the money moved.
+            # Refuse rather than unbind a lead from an intent that is still real.
+            sys.stderr.write(
+                f"refusing to unbind lead {lead.lead_id}: void of "
+                f"{lead.deposit_payment_intent_id} failed ({result.detail})\n"
+            )
+            return EXIT_INVALID_INPUT
+        # intent_not_found: nothing live to void, so the unbind below is the
+        # whole disposition. `intent_voided` stays False and the audit says so.
+
+    prior_status_at = lead.deposit_link_delivery_status_at
+    prior_intent_id = lead.deposit_payment_intent_id
+    prior_order_id = lead.deposit_commerce_order_id
+    prior_amount_cents = lead.deposit_amount_cents
+
+    if resolution == "confirmed-delivered":
+        # Delivery is the ONLY fact this resolves. The binding, the amount and
+        # `deposit_status` all describe a link that is live and payable, and the
+        # operator has just confirmed the customer holds it.
+        update = {
+            "deposit_link_delivery_status": "sent",
+            "deposit_link_delivery_status_at": now,
+            "updated_at": now,
+        }
+    else:
+        # The customer received nothing, which is the definite-failure marker,
+        # and no money object on the lead may keep claiming otherwise: an
+        # unbound lead is what lets a legitimate re-mint through
+        # (`_should_mint_deposit` refuses while `deposit_payment_intent_id` is
+        # set), and `deposit_status` must stop asserting a payment is awaited on
+        # an intent that no longer exists.
+        update = {
+            "deposit_payment_intent_id": "",
+            "deposit_commerce_order_id": "",
+            "deposit_amount_cents": 0,
+            "deposit_minted_at": None,
+            "deposit_status": (
+                "voided" if intent_voided
+                else ("none" if lead.deposit_status in ("awaiting_payment", "unconfigured")
+                      else lead.deposit_status)
+            ),
+            "deposit_link_delivery_status": "failed",
+            "deposit_link_delivery_status_at": now,
+            "updated_at": now,
+        }
+    store.leads[matched_idx] = lead.model_copy(update=update)
+    atomic_write_json(LEADS_PATH, store)
+
+    _append_audit_under_leadslock(
+        TypeAdapter(CateringDepositDeliveryReconciled),
+        CateringDepositDeliveryReconciled(
+            type="catering_deposit_delivery_reconciled", ts=now,
+            lead_id=lead.lead_id,
+            resolution=("confirmed_delivered"
+                        if resolution == "confirmed-delivered" else "not_delivered"),
+            prior_delivery_status="uncertain",
+            prior_delivery_status_at=prior_status_at,
+            commerce_order_id=prior_order_id,
+            commerce_payment_intent_id=prior_intent_id,
+            amount_cents=prior_amount_cents,
+            intent_voided=intent_voided,
+            reason=reason[:2000],
+            operator_uid=os.getuid() if hasattr(os, "getuid") else 0,
+        ),
+    )
+
+    print(json.dumps({
+        "lead_id": lead.lead_id,
+        "deposit_delivery": resolution,
+        "commerce_payment_intent_id": prior_intent_id,
+        "intent_voided": intent_voided,
+        "reconciled": True,
+    }))
+    return EXIT_OK
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--lead-id", required=True, help="Lead ID, e.g. L00042")
-    ap.add_argument("--target-status", required=True, choices=ALLOWED_TARGETS)
+    axis = ap.add_mutually_exclusive_group(required=True)
+    axis.add_argument("--target-status", choices=ALLOWED_TARGETS,
+                      help="Correct lead.status (state-vs-outbound divergence)")
+    axis.add_argument("--deposit-delivery", choices=ALLOWED_DEPOSIT_DELIVERY,
+                      help="Resolve an unconfirmed deposit-link send (R1). "
+                           "Operator-only: nothing automated may invoke this.")
     ap.add_argument("--reason", required=True, help="Operator reason (1-2000 chars)")
     ap.add_argument("--dry-run", action="store_true",
                     help="Validate inputs + state without mutating")
@@ -120,6 +297,15 @@ def main() -> int:
         if matched_idx is None:
             sys.stderr.write(f"lead {args.lead_id} not found\n")
             return EXIT_NOT_FOUND
+
+        if args.deposit_delivery:
+            # Different axis: resolves the deposit-link delivery fact and never
+            # lead.status. Returns from inside the lock, exactly as the
+            # status-correction path below does.
+            return _resolve_deposit_delivery(
+                store, matched_idx, resolution=args.deposit_delivery,
+                reason=args.reason, now=now, dry_run=args.dry_run,
+            )
 
         lead = store.leads[matched_idx]
         from_status = lead.status

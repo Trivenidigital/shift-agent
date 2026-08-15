@@ -416,7 +416,19 @@ def main() -> int:
         # `_find_live_intent_for_lead` guard, which would refuse too (the intent
         # stays live) but with the wrong story: that guard reports a mint that
         # crashed before binding, not a link that most likely reached the customer.
-        if lead.deposit_link_delivery_status == "uncertain":
+        #
+        # The BINDING is required as well as the marker, and that is not belt-and-
+        # braces. The PREVIOUS release voided the intent and left the lead unbound
+        # on this arm, so every lead it stranded carries the marker with no intent,
+        # no order and no amount: on a marker-only test those leads are refused
+        # forever while the page and the audit row announce a LIVE link and name
+        # `intent ""`, `order ""`, `$0.00` — three false claims about money. They
+        # have nothing live in the customer's hands, so a re-mint is their correct
+        # recovery. Narrowing reopens nothing: this arm always binds now, and an
+        # unbound lead whose intent IS still live is caught a few lines below by
+        # `_find_live_intent_for_lead`, which is the guard that describes that
+        # state accurately.
+        if lead.deposit_link_delivery_status == "uncertain" and lead.deposit_payment_intent_id:
             paged = _notify_owner_best_effort(
                 priority=1,
                 title=f"Catering deposit re-invoke refused (lead {lead.lead_id})",
@@ -426,9 +438,13 @@ def main() -> int:
                       f"${lead.deposit_amount_cents/100:.2f}) whose delivery was "
                       f"never confirmed — the customer most likely holds it and it "
                       f"can still take a payment. Refusing to mint a second link. "
-                      f"Reconcile by hand: check the chat, then either confirm "
-                      f"delivery or void "
-                      f"{lead.deposit_payment_intent_id} before any re-mint."),
+                      f"Read the customer's chat, then resolve it by hand: "
+                      f"catering-lead-reconcile --lead-id {lead.lead_id} "
+                      f"--deposit-delivery confirmed-delivered --reason '...' if "
+                      f"the link arrived (it stays live and payable), or "
+                      f"--deposit-delivery not-delivered --reason '...' if it did "
+                      f"not (voids {lead.deposit_payment_intent_id}, unbinds the "
+                      f"lead and frees it for a fresh mint)."),
             )
             _emit_deposit_reinvoke_refused(
                 lead_id=lead.lead_id,
@@ -714,9 +730,12 @@ def main() -> int:
                     f"lead. Re-invoking catering-mint-deposit is REFUSED for this "
                     f"lead and will stay refused until someone resolves it by "
                     f"hand: read the customer's chat to see whether the link "
-                    f"arrived, then either leave it live to be paid, or void "
-                    f"{intent_result.intent.intent_id} before any re-mint. "
-                    f"Detail: {mid_or_err[:200]}"
+                    f"arrived, then run catering-lead-reconcile --lead-id "
+                    f"{lead.lead_id} --deposit-delivery confirmed-delivered "
+                    f"--reason '...' if it did (the link stays live to be paid), "
+                    f"or --deposit-delivery not-delivered --reason '...' if it "
+                    f"did not (voids {intent_result.intent.intent_id} and frees "
+                    f"the lead for a fresh mint). Detail: {mid_or_err[:200]}"
                 ),
             )
             _emit_customer_send_unconfirmed(
