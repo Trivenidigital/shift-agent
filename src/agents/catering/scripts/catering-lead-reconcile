@@ -139,11 +139,6 @@ ALLOWED_DEPOSIT_DELIVERY = ("confirmed-delivered", "not-delivered")
 # this acceptance becomes wrong. FOLLOW-UP for that slice: give payment intents
 # a LEGAL_TRANSITIONS table so `confirmed -> refunded` is enforced, not assumed.
 NO_DELIVERY_EVIDENCE_STATUSES = frozenset({"voided"})
-# What `not-delivered` cannot resolve, because `payment_link.void` refuses on
-# these (payment_link.py:447). Every one of them carries payment evidence, so
-# `confirmed-delivered` is the disposition for that shape — which is why the
-# refusals below name it.
-UNVOIDABLE_INTENT_STATUSES = frozenset({"confirmed", "refunded", "chargeback"})
 SAFE_FROM_STATUSES = (
     "AWAITING_OWNER_APPROVAL", "OWNER_APPROVED", "OWNER_EDITED",
     "OWNER_REJECTED", "SENT_TO_CUSTOMER",
@@ -253,10 +248,12 @@ def _resolve_deposit_delivery(store, matched_idx: int, *, resolution: str,
         if result.ok:
             intent_voided = True
         elif result.detail != "intent_not_found":
-            # cannot_void_confirmed / _refunded / _chargeback — the money moved.
+            # `payment_link.void` refuses on {confirmed, refunded, chargeback}
+            # (payment_link.py:447) — every one of them means money moved.
             # Refuse rather than unbind a lead from an intent that is still real,
             # and name the arm that DOES resolve this shape: money having moved
-            # is exactly the delivery evidence `confirmed-delivered` accepts.
+            # is exactly the delivery evidence `confirmed-delivered` accepts, so
+            # no shape is left without a disposition.
             sys.stderr.write(
                 f"refusing to unbind lead {lead.lead_id}: void of "
                 f"{lead.deposit_payment_intent_id} failed ({result.detail}) — "
