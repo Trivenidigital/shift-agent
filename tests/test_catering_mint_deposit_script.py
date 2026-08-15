@@ -746,3 +746,145 @@ def test_a_delivered_deposit_link_says_so_on_the_lead(isolated_state):
     leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
     assert leads["leads"][0]["deposit_link_delivery_status"] == "sent"
     assert leads["leads"][0]["deposit_link_delivery_status_at"]
+
+
+# ─────────────────────────────────────────────────────────────────
+# P1 — an uncertain send must not be silently re-mintable  [RED-FIRST]
+#
+# `send_uncertain` means the bridge ACCEPTED a message carrying a live payment
+# link, so the customer most likely holds one. The failure arm then voids the
+# intent and cancels the order WITHOUT ever binding `deposit_payment_intent_id`
+# on the lead — so on a re-invoke BOTH money guards wave the run through:
+#
+#   1. the post-lock idempotency check reads an unbound lead, and
+#   2. `_find_live_intent_for_lead` excludes `voided` from its live set, so the
+#      intent the uncertain send just voided is invisible to it.
+#
+# The re-invoke therefore builds a fresh cart -> fresh order -> fresh intent and
+# sends a SECOND, DIFFERENT payment link to a customer who probably already has
+# one. The owner page on this path says "do NOT re-invoke", which is a request,
+# not a guard.
+#
+# The three cells below pin that: two are expected to FAIL until the fix lands,
+# and the third fences the fix so it cannot over-block a DEFINITE failure (where
+# the customer received nothing and a re-mint is the correct recovery).
+# ─────────────────────────────────────────────────────────────────
+
+
+def _commerce_rows(isolated_state, filename: str, key: str) -> list[dict]:
+    """Rows from a commerce state file, or [] when the file was never written."""
+    path = isolated_state["commerce_state"] / filename
+    if not path.exists():
+        return []
+    return json.loads(path.read_text(encoding="utf-8")).get(key, [])
+
+
+def test_reinvoke_after_uncertain_send_refuses_second_mint(isolated_state):
+    """RED: re-invoking after an uncertain send must REFUSE, not mint link #2.
+
+    The second run here has a HEALTHY bridge — the operator re-invoking once
+    connectivity is back is exactly the sequence that puts two live payment
+    links in the customer's chat. Asserted on the commerce ledger, not stdout:
+    the harm is a second intent/order existing at all.
+    """
+    lead_id, first = _run_uncertain(isolated_state)
+    assert first.returncode == 6, first.stderr[-800:]
+    intents_after_first = _commerce_rows(isolated_state, "payment_intents.json", "intents")
+    assert len(intents_after_first) == 1 and intents_after_first[0]["status"] == "voided"
+    minted_first = intents_after_first[0]["intent_id"]
+
+    # Bridge is healthy again; the lead is NOT re-seeded — this is the same
+    # lead, in the state the uncertain send left it in.
+    isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STUB"] = "success:wamid_test_002"
+    second = _run_script(isolated_state["env"], lead_id)
+
+    assert second.returncode != 0, (
+        "a re-invoke after an accepted-but-unconfirmed deposit link exited "
+        f"cleanly (rc={second.returncode}); stdout={second.stdout!r}"
+    )
+    refusal = json.loads(second.stdout.strip().splitlines()[-1])
+    assert "refused" in refusal, (
+        f"expected a refusal payload from the re-invoke, got {refusal!r}")
+
+    # No SECOND payment link may exist, in any status.
+    intents = _commerce_rows(isolated_state, "payment_intents.json", "intents")
+    assert [i["intent_id"] for i in intents] == [minted_first], (
+        "a second, different payment intent was minted for a customer who "
+        f"most likely already holds link {minted_first}: {intents!r}")
+
+    # ...and no second order/cart behind it.
+    orders = _commerce_rows(isolated_state, "orders.json", "orders")
+    assert len(orders) == 1, f"second order created by the re-invoke: {orders!r}"
+    carts = _commerce_rows(isolated_state, "carts.json", "carts")
+    assert len(carts) == 1, f"second cart created by the re-invoke: {carts!r}"
+
+    minted_rows = [r for r in _read_audit_rows(isolated_state["log_path"])
+                   if r["type"] == "commerce_payment_intent_minted"]
+    assert len(minted_rows) == 1, (
+        f"{len(minted_rows)} mint rows; the uncertain send's mint is the only "
+        "one that may exist")
+
+
+def test_uncertain_send_leaves_the_minted_intent_recoverable_from_the_lead(isolated_state):
+    """RED: the durable lead record must not forget that a link was minted.
+
+    The uncertain path stamps `deposit_link_delivery_status` and nothing else,
+    so the lead carries "we could not confirm a send" with no trace of WHAT was
+    sent. Everything the operator needs to reconcile — which intent, which
+    order, how much — lives only in the audit log. The lead is the record the
+    re-invoke guard and the operator both read, so the id has to survive there.
+    """
+    lead_id, result = _run_uncertain(isolated_state)
+    assert result.returncode == 6, result.stderr[-800:]
+
+    intents = _commerce_rows(isolated_state, "payment_intents.json", "intents")
+    orders = _commerce_rows(isolated_state, "orders.json", "orders")
+    assert len(intents) == 1 and len(orders) == 1
+    minted_intent_id = intents[0]["intent_id"]
+    minted_order_id = orders[0]["order_id"]
+
+    lead = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))["leads"][0]
+    assert lead["deposit_link_delivery_status"] == "uncertain"
+    assert minted_intent_id in json.dumps(lead), (
+        f"intent {minted_intent_id} was minted and most likely reached the "
+        f"customer, but no field on the lead records it: {lead!r}")
+    assert minted_order_id in json.dumps(lead), (
+        f"order {minted_order_id} is unrecoverable from the lead: {lead!r}")
+
+    # The evidence that already survives must keep surviving: the voided intent
+    # stays in the ledger and the audit row keeps both cross-references.
+    assert intents[0]["status"] == "voided"
+    deposit_failed = next(r for r in _read_audit_rows(isolated_state["log_path"])
+                          if r["type"] == "catering_deposit_link_failed")
+    assert deposit_failed["commerce_payment_intent_id"] == minted_intent_id
+    assert deposit_failed["commerce_order_id"] == minted_order_id
+
+
+def test_reinvoke_after_a_definite_failure_still_mints(isolated_state):
+    """GREEN FENCE: a definite failure means the customer got nothing.
+
+    `connect_failed` is the case the re-invoke recovery was built for — there is
+    no link in the customer's hands, so a second mint is the correct outcome,
+    not a double-charge. The uncertain-send guard must not swallow this path.
+    """
+    isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STUB"] = "fail:simulated_bridge_outage"
+    _write_config(isolated_state["config_path"], checkout_url_template="https://pay/?o={order_id}")
+    lead_id = _write_lead(isolated_state["leads_path"])
+
+    first = _run_script(isolated_state["env"], lead_id)
+    assert first.returncode == 6, first.stderr[-800:]
+    leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
+    assert leads["leads"][0]["deposit_link_delivery_status"] == "failed"
+
+    isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STUB"] = "success:wamid_test_003"
+    second = _run_script(isolated_state["env"], lead_id)
+    assert second.returncode == 0, (
+        "a definite send failure left the customer with nothing; the re-invoke "
+        f"must still mint. stdout={second.stdout!r} stderr={second.stderr[-800:]!r}")
+
+    lead = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))["leads"][0]
+    assert lead["deposit_payment_intent_id"].startswith("CPI")
+    assert lead["deposit_link_delivery_status"] == "sent"
+    live = [i for i in _commerce_rows(isolated_state, "payment_intents.json", "intents")
+            if i["status"] not in {"voided", "refunded", "chargeback"}]
+    assert [i["intent_id"] for i in live] == [lead["deposit_payment_intent_id"]]
