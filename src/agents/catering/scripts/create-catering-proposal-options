@@ -569,8 +569,9 @@ def _audit_failure(lead_id: str, reason: str, detail: str = "", proposal_set_id:
 # THIS, not "the menu options" for all three: the clarify arm sends a QUESTION, and
 # telling an owner a menu went out when a question did is the same class of untruth
 # as calling an accepted send a failure.
+# Each phrase is the SUBJECT of "<what> was composed", so every one is singular.
 _UNCERTAIN_SENT_KIND = {
-    "proposal_options": ("Catering options sent", "the menu options"),
+    "proposal_options": ("Catering options sent", "the menu of options"),
     "recompose_clarify": ("Catering question sent",
                           "a question asking which options to combine"),
     "recompose_menu": ("Catering combined menu sent", "the combined menu they asked for"),
@@ -599,15 +600,22 @@ def _uncertain_page(lead_id: str, proposal_set_id: str, detail: str,
     ASCII only, and no new punctuation the notifier might render as markup: the
     body already carries `lead_id=` underscores, and a page the owner cannot read
     is the same as no page.
+
+    RAISES KeyError on an unknown arm, deliberately. A `.get(kind, proposal_options)`
+    default meant a future fourth send arm would render the proposal copy without
+    complaint — reproducing the exact defect this function exists to fix, silently.
+    A crash at the moment someone adds an arm is the cheapest possible signal.
     """
-    headline, what = _UNCERTAIN_SENT_KIND.get(
-        sent_kind, _UNCERTAIN_SENT_KIND["proposal_options"])
+    headline, what = _UNCERTAIN_SENT_KIND[sent_kind]
     subject = f"lead_id={lead_id}"
     retirement = ""
     if proposal_set_id:
         subject += f" proposal_set_id={proposal_set_id}"
-        retirement = (" If they ask for options again, a fresh set goes out "
-                      "automatically and this one is retired then.")
+        # "once that send succeeds" rather than "then": retirement rides on the
+        # REPLACEMENT send succeeding, so back-to-back uncertain sends leave this
+        # set un-retired.
+        retirement = (" If they ask for options again, a fresh set goes out and "
+                      "this one is retired once that send succeeds.")
     return (
         f"{headline} - delivery unconfirmed",
         f"{subject}: {what} was composed and the bridge ACCEPTED it, so the customer "
@@ -625,7 +633,7 @@ def _notify_owner_generation_failed(
     proposal_set_id: str = "",
     *,
     send_status: str = "",
-    sent_kind: str = "proposal_options",
+    sent_kind: str = "",
 ) -> bool:
     """Returns whether the page actually landed. shift-agent-notify-owner exits
     non-zero when every channel failed, so the returncode is the only evidence the
@@ -670,7 +678,7 @@ def _fail_generation(
     proposal_set_id: str = "",
     *,
     send: tuple[str, str] | None = None,
-    sent_kind: str = "proposal_options",
+    sent_kind: str = "",
 ) -> bool:
     """The single failure record: audit row, ONE page, and — when the failure was a
     send (`send=(jid, send_status)`) — the customer_send_unconfirmed row carrying
@@ -694,7 +702,18 @@ def _fail_generation(
     true one is kept, and the page still fires exactly once.
 
     Suppression lives HERE rather than at the three call sites so every send arm
-    this script has behaves the same way."""
+    this script has behaves the same way.
+
+    A SEND FAILURE MUST NAME ITS ARM. `sent_kind` drives both the page copy and the
+    unconfirmed row's `send_kind`, and a default would let a future fourth send arm
+    inherit "proposal_options" silently — the same failure the strict lookup in
+    `_uncertain_page` closes, one level up. Non-send failures pass nothing, having
+    no arm to name."""
+    if send is not None and not sent_kind:
+        raise ValueError(
+            "a send failure must name its arm: pass sent_kind=<one of "
+            f"{sorted(_UNCERTAIN_SENT_KIND)}>"
+        )
     jid, send_status = send if send is not None else ("", "")
     if send_status != "send_uncertain":
         _audit_failure(lead_id, reason, detail, proposal_set_id)
@@ -702,7 +721,7 @@ def _fail_generation(
                                             send_status=send_status, sent_kind=sent_kind)
     if send is not None:
         _record_send_unconfirmed(jid, lead_id=lead_id, send_status=send_status,
-                                 detail=detail, paged=paged)
+                                 detail=detail, paged=paged, sent_kind=sent_kind)
     return paged
 
 
@@ -715,7 +734,7 @@ def _delivery_certainty(send_status: str) -> str:
 
 
 def _record_send_unconfirmed(jid: str, *, lead_id: str, send_status: str,
-                             detail: str, paged: bool) -> None:
+                             detail: str, paged: bool, sent_kind: str) -> None:
     """The truthful record of a send that did not confirm.
 
     What was missing was never the alert — it was the STATUS. This row carries what
@@ -731,7 +750,7 @@ def _record_send_unconfirmed(jid: str, *, lead_id: str, send_status: str,
         _append_audit(CateringCustomerSendUnconfirmed(
             type="catering_customer_send_unconfirmed", ts=_now(),
             lead_id=lead_id, script="create-catering-proposal-options",
-            send_kind="proposal_options", send_status=send_status,
+            send_kind=sent_kind, send_status=send_status,
             delivery_certainty=_delivery_certainty(send_status),
             detail=str(detail)[:2000], owner_paged=paged,
             logical_turn_id=_RUN_IDENTITY["logical_turn_id"],
@@ -1296,7 +1315,8 @@ def main() -> int:
         _emit_transition_refusals(
             _mark_send_outcome(proposal_set_id, message_id_or_error, _status))
         _fail_generation(args.lead_id, "bridge_unreachable", message_id_or_error,
-                         proposal_set_id, send=(args.customer_jid, _status))
+                         proposal_set_id, send=(args.customer_jid, _status),
+                         sent_kind="proposal_options")
         print(json.dumps({"proposal_set_id": proposal_set_id, "sent": False}))
         return EXIT_DEPENDENCY_DOWN
 

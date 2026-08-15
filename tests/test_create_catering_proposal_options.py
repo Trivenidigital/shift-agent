@@ -1493,6 +1493,38 @@ def test_failed_recompose_clarify_records_its_status(bridge_server, env_dir):
     assert parsed["rc"] == 6, result.stderr
     rows = _unconfirmed(env_dir)
     assert len(rows) == 1 and rows[0]["delivery_certainty"] == "failed"
+    assert rows[0]["send_kind"] == "recompose_clarify", (
+        "the durable row must name the arm too - a truthful page beside an audit "
+        "row that still says 'proposal_options' is the same half-fix, inverted")
+
+
+@pytest.mark.parametrize(
+    ("request_text", "expected_kind"),
+    [
+        ("option 2 starters with option 1 mains", "recompose_clarify"),
+        ("option 1 starters with the option 2 mains", "recompose_menu"),
+    ],
+    ids=["clarify_arm", "merge_arm"],
+)
+def test_the_unconfirmed_row_names_the_arm_that_sent(bridge_server, env_dir,
+                                                     request_text, expected_kind):
+    """`send_kind` was hardcoded to "proposal_options" for all three arms, so the
+    DURABLE record said a menu of options went out when a clarifying question or a
+    combined menu did. Same defect this branch fixed at the state row, the audit
+    row and the page — one layer further in."""
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir)
+    _seed_recompose_sent_set(env_dir)
+    stub.response_mode = "empty_id"
+
+    result, parsed = _run_recompose(env_dir, port, request_text)
+
+    assert parsed["rc"] == 6, result.stderr
+    rows = _unconfirmed(env_dir)
+    assert len(rows) == 1
+    assert rows[0]["send_kind"] == expected_kind
+    assert rows[0]["delivery_certainty"] == "uncertain"
 
 
 def test_uncertain_recompose_clarify_emits_no_failure_row_either(bridge_server, env_dir):
@@ -1514,6 +1546,30 @@ def test_uncertain_recompose_clarify_emits_no_failure_row_either(bridge_server, 
     failed = [r for r in _read_audit(env_dir)
               if r["type"] == "catering_proposal_generation_failed"]
     assert failed == [], f"the clarify arm still records a false failure: {failed}"
+
+
+def test_an_unknown_sent_kind_fails_loudly(env_dir):
+    """The copy lookup used `.get(kind, ...["proposal_options"])`, so rendering with
+    an unrecognised arm returned the proposal copy WITHOUT complaint. A future
+    fourth send arm would then reproduce exactly the bug this branch fixed — a page
+    describing something other than what went out — with no signal at all. A loud
+    failure at the one moment someone adds an arm is worth more than a graceful
+    default that lies."""
+    mod = _load_script_for_env(env_dir)
+
+    with pytest.raises(KeyError):
+        mod._uncertain_page("L0014", "CPS-L0014-000001", "detail", "bogus_kind")
+
+
+def test_a_send_failure_must_name_its_arm(env_dir):
+    """The other half of the same hole: a new arm that forgets `sent_kind` entirely
+    would have silently inherited the default. Non-send failures are unaffected —
+    they have no arm to name."""
+    mod = _load_script_for_env(env_dir)
+
+    with pytest.raises(ValueError, match="sent_kind"):
+        mod._fail_generation("L0014", "bridge_unreachable", "detail",
+                             send=("19045550199@s.whatsapp.net", "send_uncertain"))
 
 
 def test_the_uncertain_clarify_page_describes_the_question_not_a_menu(bridge_server, env_dir):

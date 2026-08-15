@@ -6716,6 +6716,16 @@ class CateringCustomerSendUnconfirmed(_BaseEntry):
         "proposal_options",         # create-catering-proposal-options customer set
         "amendment_owner_card",     # amend-catering-lead owner re-approval card
         "amendment_customer_reply",  # amend-catering-lead customer confirmation
+        # P1 — the other two arms of create-catering-proposal-options, which had
+        # been recording themselves as `proposal_options`. Safe for the SAME reason
+        # the P17b block above gives and for no other: dc7a81a2 does not know the
+        # `catering_customer_send_unconfirmed` tag at all (verified — zero
+        # occurrences in `git show dc7a81a2:src/platform/schemas.py`), so every row
+        # of this type routes to `_UnknownLogEntry` whatever `send_kind` holds.
+        # NOT a precedent for widening a Literal in a tag the old release DOES
+        # know: there the old reader validates the variant and REJECTS the row.
+        "recompose_clarify",        # --recompose-from-sent clarifying question
+        "recompose_menu",           # --recompose-from-sent combined menu
     ]
     send_status: str = Field(min_length=1, max_length=60)
     delivery_certainty: Literal["failed", "uncertain"]
