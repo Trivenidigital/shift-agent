@@ -335,6 +335,109 @@ def test_durable_brand_styling_instruction_is_a_brand_asset(monkeypatch, caption
     assert result is not None and result["action"] == "skip"
 
 
+# A durable styling caption is only a donation when it POINTS AT the attachment.
+# "use this theme going forward" hands over the attached art; "always use a
+# bigger font going forward" and "our fonts always look bad" describe a desired
+# or defective property and donate nothing. The distinction is a deictic bound
+# to the styling noun — a donation says *this one*, a directive says *do it this
+# way* — which is why "in future the design should not be this dark" declines
+# even though it contains the word "this".
+DURABLE_NON_DONATIONS = [
+    # durable COMPLAINTS about styling
+    "the colors are always wrong on these flyers",
+    "our fonts always look bad",
+    "the design always comes out too dark",
+    "the theme is always off",
+    "our flyers always look too busy, fix the style",
+    "the style is always wrong, correct it going forward",
+    "going forward the palette needs to be warmer",
+    "from now on the style should be less busy",
+    "in future the design should not be this dark",
+    "the look came out wrong again, always check the colors",
+    "always fix the colours before sending",
+    "the theme was too dark, from now on lighten it",
+    # durable DIRECTIVES donating no artifact at all
+    "always use a bigger font going forward",
+    "from now on use our red and gold colors",
+    "going forward keep the design minimal",
+    "always match the style of our website",
+    # imperative-durable non-donations that already held
+    "always put our phone number on the flyer",
+    "from now on make them brighter",
+    "use this layout for every store",
+]
+
+
+@pytest.mark.parametrize("caption", DURABLE_NON_DONATIONS)
+def test_durable_caption_that_donates_nothing_is_not_a_brand_asset(monkeypatch, caption):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, caption)
+
+    assert w.store_calls == []
+    assert result is None
+    assert w.sends == []
+
+
+@pytest.mark.parametrize("caption", [
+    "this flyer has no logo",
+    "do not use our logo on this",
+    "the logo is missing from this poster",
+])
+def test_negated_logo_caption_is_not_a_brand_asset(monkeypatch, caption):
+    """The classifier's `logo` branch has no negation handling, so these reached
+    `role_logo` and walked straight past the defect-frame guard added for
+    exactly this shape. The guard now runs first."""
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, caption)
+
+    assert w.store_calls == []
+    assert result is None
+    assert w.sends == []
+
+
+def test_supplied_artifact_survives_its_edit_verb(monkeypatch):
+    """"replace this with our logo" reads as an edit, but the edit verb acts on
+    something else and the artifact is what is being handed over. Ordering the
+    defect-frame check above `role_logo` broke this — it is pinned by a
+    pre-existing regression guard in the menu-cession suite, and now here too so
+    the interaction is visible where the rule lives."""
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, "replace this with our logo")
+
+    assert len(w.store_calls) == 1
+    assert result is not None and result["action"] == "skip"
+
+
+def test_edit_that_supplies_nothing_still_declines(monkeypatch):
+    """The other side of it — an edit naming the artifact but supplying no
+    replacement is not a donation."""
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, "replace the logo with a bigger one")
+
+    assert w.store_calls == []
+    assert result is None
+
+
+def test_durable_donation_pointing_at_the_attachment_is_captured(monkeypatch):
+    """The other side of the same rule — a durable instruction that DOES point at
+    the attached art stays captured."""
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, "this is the design we always use for our flyers")
+
+    assert len(w.store_calls) == 1
+    assert result is not None and result["action"] == "skip"
+
+
 def test_one_off_style_request_is_not_a_brand_asset(monkeypatch):
     """B0007's real caption. A style reference for THIS flyer carries no durable
     scope, so it is ambiguous media and belongs to normal routing — it was
@@ -389,15 +492,36 @@ def test_defect_frame_decline_that_carried_evidence_is_audited(monkeypatch):
 def test_durable_instruction_survives_its_own_edit_verb(monkeypatch):
     """B0008's real caption uses "change". A defect frame must not veto a
     caption that also offers the media for durable use, or the production store
-    loses the asset it is actually made of."""
+    loses the asset it is actually made of.
+
+    Pinned VERBATIM. An earlier version of this cell used a truncation that
+    stopped before "follow theme like this" — which is precisely the clause that
+    points at the attachment, so the truncation is a durable DIRECTIVE and now
+    correctly declines. Paraphrasing a production caption changes what it is."""
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(
+        hooks,
+        "I want you to change theme of my fliers going forward, "
+        "can you follow theme like this")
+
+    assert len(w.store_calls) == 1
+    assert result is not None and result["action"] == "skip"
+
+
+def test_durable_directive_without_the_deictic_declines(monkeypatch):
+    """The other half of the pair above — same caption, deictic clause removed.
+    It asks for a change without donating the attachment, so it routes normally
+    rather than writing a durable template."""
     hooks, actions = _load_plugin_modules()
     w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
 
     result = _intercept(
         hooks, "I want you to change theme of my fliers going forward")
 
-    assert len(w.store_calls) == 1
-    assert result is not None and result["action"] == "skip"
+    assert w.store_calls == []
+    assert result is None
 
 
 # `\btemplates?\b` is bare, so it matched menu media too. Menu/price semantics

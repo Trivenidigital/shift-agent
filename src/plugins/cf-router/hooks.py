@@ -4418,28 +4418,61 @@ def _try_flyer_existing_onboarding_intercept(text: str, chat_id: str, event: Any
 # / `previous` qualify only when bound to a brand-artifact noun, and `brand`
 # only in a brand-artifact compound ("brand kit", "brand colors"), never bare.
 #
-# The final two alternatives (the same shape in either word order) cover what
-# the noun rule misses, and what the production store is mostly made of: a
-# DURABLE styling instruction naming no
-# artifact at all ("use this theme for all flyers going forward" — B0004, B0006
-# and B0008, the only asset active on the box today). Durability is what makes
-# it brand art rather than a one-off reference, so the temporal scope is
-# required: "can you redesign in this style" (B0007, filed in production as a
-# `logo`, which it is not) stays ambiguous and goes to normal routing. This is
-# caption evidence like every other alternative here — an active project is
-# still never sufficient.
+# Durable styling instructions are handled separately, by
+# `_durable_style_donation` — see there for why they cannot live as another
+# alternative in this regex.
 _BRAND_ASSET_EVIDENCE = re.compile(
     r"\b(?:logos?|letterheads?|watermarks?|branding)\b"
     r"|\bbrand\s*(?:kit|mark|book|guide|guidelines|colou?rs?|fonts?|assets?|identity)\b"
     r"|\btemplates?\b"
     r"|\b(?:sample|reference|old|previous|existing|past)\s+(?:\w+\s+){0,2}"
-    r"(?:flyer|flier|poster|banner|design|artwork|creative|template)s?\b"
-    r"|\b(?:theme|style|look|design|colou?rs?|fonts?|palette)\b[^.!?]{0,80}"
-    r"\b(?:going\s+forward|from\s+now\s+on|from\s+here\s+on|in\s+(?:the\s+)?future|always)\b"
-    r"|\b(?:going\s+forward|from\s+now\s+on|from\s+here\s+on|in\s+(?:the\s+)?future|always)\b"
-    r"[^.!?]{0,80}\b(?:theme|style|look|design|colou?rs?|fonts?|palette)\b",
+    r"(?:flyer|flier|poster|banner|design|artwork|creative|template)s?\b",
     re.IGNORECASE,
 )
+
+# A durable styling instruction — what the production brand-asset store is
+# mostly made of (B0004, B0006, B0008, the last being the only asset active on
+# the box today). It names no artifact noun, so the rule above cannot see it.
+#
+# BOTH halves are required, and the second is the one that carries the weight.
+# Durability alone says a preference is permanent; it does not say the attached
+# image IS that preference. A donation POINTS AT the attachment — "use THIS
+# theme", "the SAME theme", "follow theme LIKE THIS" — whereas a directive
+# describes a property to apply ("always use a bigger font") and a complaint
+# describes a defect ("our fonts always look bad"). Neither donates anything,
+# and capturing them writes a durable template that `render.py` reads on every
+# later render.
+#
+# The deictic must MODIFY the styling noun, not merely appear in the sentence:
+# "in future the design should not be this dark" contains "this" as an
+# intensifier and donates nothing, so a free-floating deictic would readmit it.
+_DURABLE_SCOPE = re.compile(
+    r"\b(?:going\s+forward|from\s+now\s+on|from\s+here\s+on|in\s+(?:the\s+)?future|always)\b",
+    re.IGNORECASE,
+)
+_STYLE_NOUN = r"(?:theme|style|look|design|colou?rs?|fonts?|palette|branding)"
+_ATTACHED_STYLE_REFERENCE = re.compile(
+    r"\b(?:this|these|the\s+same|attached|uploaded)\s+(?:\w+\s+){0,2}" + _STYLE_NOUN + r"\b"
+    r"|\b" + _STYLE_NOUN + r"\b\s*(?:\w+\s+){0,2}"
+    r"(?:like\s+(?:this|these)|of\s+this|from\s+this|in\s+this)\b",
+    re.IGNORECASE,
+)
+
+
+def _durable_style_donation(text: str) -> bool:
+    """Is this a durable styling instruction that DONATES the attached art?
+
+    Kept out of `_BRAND_ASSET_EVIDENCE` deliberately: the temporal half of this
+    rule used to be an alternative there, and the same five phrases also sat in
+    `_BRAND_ASSET_OFFER`. That made the pair circular — every caption authorized
+    by durability satisfied the offer test with its own durability phrase, so
+    `_BRAND_ASSET_DEFECT_FRAME` could never veto the class it was added to veto.
+    Sixteen durable complaints and directives authorized as a result. Splitting
+    the rule out and requiring an attachment deictic closes it at the source
+    rather than patching the interaction.
+    """
+    body = text or ""
+    return bool(_DURABLE_SCOPE.search(body)) and bool(_ATTACHED_STYLE_REFERENCE.search(body))
 
 # Genuine menu/price semantics — menu-ish media goes to normal routing, never to
 # the brand store. Deliberately NOT gated on the classifier's role, for two
@@ -4471,23 +4504,52 @@ _MENU_PRICE_SEMANTICS = re.compile(
 # offering — see `_BRAND_ASSET_OFFER`, which is the closable set and which wins
 # whenever both match. That is what lets B0008's real caption ("change theme of
 # my fliers going forward") keep its edit verb and still be captured.
+#
+# The last alternative covers absence rather than defect — "this flyer has no
+# logo" reports that the artifact is MISSING from the attachment, which is the
+# opposite of donating one.
 _BRAND_ASSET_DEFECT_FRAME = re.compile(
     r"\b(?:remove|delete|erase|get\s+rid\s+of|take\s+(?:it\s+)?off|fix|correct|redo|"
     r"crop|resize|change|replace|update|edit|modify|revise)\b"
     r"|\b(?:is|are|was|were|looks?|looked|seems?|seemed|has|have|had|came\s+out)\b"
     r"[^.!?]{0,40}\b(?:too\s+\w+|wrong|bad|blurry|dark|light|small|tiny|big|huge|"
-    r"typo|error|mistake|missing|cut\s+off|incorrect|outdated|ugly|misspel)\w*",
+    r"typo|error|mistake|missing|cut\s+off|incorrect|outdated|ugly|misspel)\w*"
+    r"|\b(?:no|without|missing|lacks?|lacking)\s+(?:\w+\s+){0,2}"
+    r"(?:logos?|watermarks?|branding|templates?|flyers?|fliers?|posters?)\b",
     re.IGNORECASE,
 )
 
 # Affirmative evidence that the customer is HANDING OVER the attached media
 # rather than talking about it. Small and closable by design, which is why the
 # gate is built on this side rather than on the complaint side.
+#
+# The five temporal phrases that used to sit here are GONE. They made this
+# regex and the durability rule mutually self-satisfying (see
+# `_durable_style_donation`), and they rescued nothing: all three production
+# captions carry a non-temporal signal anyway — B0004 and B0006 match `use`,
+# B0008 matches `want you to`.
+#
+# The last alternative is the "supplied artifact" shape: in "replace this with
+# our logo" the edit verb acts ON something else and the artifact is what is
+# being HANDED OVER, so the caption is a donation despite reading as an edit.
+# It is bound to a possessive ("our"/"my"/"this"/"the attached") on purpose —
+# "replace the logo with a bigger one" supplies nothing and stays declined.
 _BRAND_ASSET_OFFER = re.compile(
     r"\b(?:here\s+is|here's|here\s+are|this\s+is|these\s+are|attached\s+is|attaching|"
     r"i(?:'m|\s+am)\s+(?:sending|attaching|uploading)|want\s+you\s+to|"
-    r"(?:please\s+)?(?:use|save|keep|store|apply)\b|"
-    r"going\s+forward|from\s+now\s+on|from\s+here\s+on|in\s+(?:the\s+)?future|always)\b",
+    r"(?:please\s+)?(?:use|save|keep|store|apply))\b"
+    r"|\b(?:with|to)\s+(?:our|my|this|the\s+attached)\s+(?:\w+\s+){0,2}"
+    r"(?:logos?|watermarks?|branding|templates?|letterheads?|designs?|artworks?)\b",
+    re.IGNORECASE,
+)
+
+# "do not use our logo on this" contains `use`, so the offer test matches a verb
+# the sentence is actually refusing. Python has no variable-length lookbehind,
+# so the negation is detected separately and both suppresses the offer and
+# counts as a defect frame in its own right.
+_BRAND_ASSET_NEGATED_OFFER = re.compile(
+    r"\b(?:do\s+not|don'?t|never|no\s+need\s+to)\s+(?:\w+\s+){0,2}"
+    r"(?:use|save|keep|store|apply|add|put|include)\b",
     re.IGNORECASE,
 )
 
@@ -4552,7 +4614,11 @@ def _flyer_brand_asset_authorized(text: str, media_path: str) -> tuple[bool, str
     last one is the false-negative class; it is rare and it is the one an
     operator needs to be able to count, so the caller audits it.
     """
-    evidence = bool(_BRAND_ASSET_EVIDENCE.search(text or ""))
+    body = text or ""
+    negated = bool(_BRAND_ASSET_NEGATED_OFFER.search(body))
+    evidence = bool(_BRAND_ASSET_EVIDENCE.search(body)) or _durable_style_donation(body)
+    offer = bool(_BRAND_ASSET_OFFER.search(body)) and not negated
+    defect = bool(_BRAND_ASSET_DEFECT_FRAME.search(body)) or negated
     try:
         role = _classify_flyer_reference_role(text, media_path)
     except Exception as e:  # noqa: BLE001 — a classifier failure must never write
@@ -4560,18 +4626,22 @@ def _flyer_brand_asset_authorized(text: str, media_path: str) -> tuple[bool, str
     over = "_over_evidence" if evidence else ""
     if role == "source_edit_template":
         return False, "role_source_edit_template" + over
+    # Ordered ABOVE the `logo` return on purpose. The classifier's logo branch
+    # has no negation handling, so "this flyer has no logo", "do not use our
+    # logo on this" and "the logo is missing from this poster" all resolve to
+    # `logo` and would otherwise walk straight past the guard added for exactly
+    # that shape — a guard inconsistent with itself.
+    if evidence and defect and not offer:
+        return False, "defect_frame_without_offer_over_evidence"
     if role == "logo":
         return True, "role_logo"
-    if _MENU_PRICE_SEMANTICS.search(text or ""):
+    if _MENU_PRICE_SEMANTICS.search(body):
         return False, "menu_price_semantics" + over
     # Deliberately NOT keyed on `old_flyer_reference`: that role fires on a bare
     # "sample" or "reference" anywhere in the caption, which is the standalone
     # evidence this fix exists to reject.
     if not evidence:
         return False, f"no_brand_asset_evidence (role={role})"
-    if (_BRAND_ASSET_DEFECT_FRAME.search(text or "")
-            and not _BRAND_ASSET_OFFER.search(text or "")):
-        return False, "defect_frame_without_offer_over_evidence"
     return True, "brand_artifact_evidence"
 
 
