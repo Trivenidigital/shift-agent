@@ -294,7 +294,14 @@ def assert_expected_route(
         assert "flyer_primary_failed" in audit_reasons
         assert "approve=true" in audit_details
         assert "visual_qa_failed" in audit_details
-        assert any("issue preparing the final files" in text for text in sent)
+        # P0-4 retired the "I hit an issue preparing the final files. I'll review
+        # it and send an update here." ack — it promised an unprompted follow-up
+        # nothing was queued to send. tests/test_flyer_recovery.py keeps that exact
+        # string as a negative lint fixture, so assert the replacement's shape:
+        # nothing was sent, and the reply that genuinely re-enters the retry gate.
+        assert any(
+            "nothing was sent" in text and "Reply SEND IT" in text for text in sent
+        ), sent
     elif route == "clarification":
         assert sent
         assert "trigger_create_flyer_project" not in calls

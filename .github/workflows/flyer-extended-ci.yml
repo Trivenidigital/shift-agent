@@ -6,6 +6,12 @@
 # blocking gate — a regression there (e.g. the S2-9 kill-switch fail-open or
 # the S2-11 manual_queue misroute) could merge green.
 #
+# NOTE: tests/test_flyer_manual_queue_cli.py was listed here but is 0 bytes —
+# PR #561 shipped the `--no-notify` silent close and added that file empty, so
+# the gate advertised CLI coverage that does not exist. Removed rather than left
+# misleading; writing the missing coverage is tracked separately. The invariant
+# in tests/test_repo_invariants.py now fails if any gate names an empty file.
+#
 # This job gates a CURATED, deterministic subset (unit-style, no network / no
 # real-model / no golden-scenario harness). It is an initial down-payment, NOT
 # the full 93-file flyer suite: heavier suites (golden_scenarios_real_model,
@@ -49,7 +55,6 @@ jobs:
         run: |
           python -m pytest -q -p no:cacheprovider \
             tests/test_flyer_manual_queue.py \
-            tests/test_flyer_manual_queue_cli.py \
             tests/test_flyer_generate_concepts.py \
             tests/test_flyer_scripts_static.py \
             tests/test_flyer_recovery.py \

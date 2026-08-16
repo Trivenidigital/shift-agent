@@ -1,0 +1,26 @@
+# flyer render subsystem: Pillow, produced pixels, visual QA, brand style.
+# Owned by the "render" job in flyer-core-ci.yml.
+tests/test_flyer_art_director_oracle.py
+tests/test_flyer_autorepair.py
+tests/test_flyer_brand_asset_content_validation.py
+tests/test_flyer_brand_style_transfer.py
+tests/test_flyer_campaign_scene_prompts.py
+tests/test_flyer_cdv2_overlay.py
+tests/test_flyer_cdv2_render.py
+tests/test_flyer_derive_brand_style.py
+tests/test_flyer_derived_style_schema.py
+tests/test_flyer_festive_vernacular.py
+tests/test_flyer_machine_read_guard.py
+tests/test_flyer_premium_overlay.py
+tests/test_flyer_qa_hardening.py
+tests/test_flyer_reference_extract.py
+tests/test_flyer_reference_quality.py
+tests/test_flyer_repair_instruction.py
+tests/test_flyer_set_brand_asset_state.py
+tests/test_flyer_skill_driven_scene.py
+tests/test_flyer_typeset_assembly.py
+tests/test_flyer_visual_qa_fabrication.py
+tests/test_flyer_visual_qa_regional_model.py
+tests/test_flyer_visual_qa_uniform_price.py
+tests/test_flyer_ws2b_letterbox_finals.py
+tests/test_flyer_ws5_pdf_twin_qa.py
