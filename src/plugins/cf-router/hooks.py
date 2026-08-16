@@ -4559,18 +4559,6 @@ _BRAND_ASSET_DEFECT_FRAME = re.compile(
 # captions carry a non-temporal signal anyway — B0004 and B0006 match `use`,
 # B0008 matches `want you to`.
 #
-# The last alternative is the "supplied artifact" shape: in "replace this with
-# our logo" the edit verb acts ON something else and the artifact is what is
-# being HANDED OVER, so the caption is a donation despite reading as an edit.
-#
-# A possessive alone does NOT make it one — possessives appear in complaints
-# just as freely ("the flyer with our logo is wrong", "the banner with our
-# watermark came out blurry"), and reading those as offers skipped the defect
-# gate entirely. So the alternative is bound to a DONATING CONTEXT: a
-# substitution verb acting on a deictic object. "replace THIS with our logo"
-# donates; "replace the date with our template date" substitutes one field for
-# another and donates nothing.
-#
 # The verb list is a NAMED TUPLE OF ITS OWN because two regexes need to agree on
 # it, and they silently stopped agreeing: `follow` was added here and not to the
 # negation side, so "do not follow this theme going forward" read as a donation.
