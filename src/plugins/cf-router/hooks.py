@@ -4441,16 +4441,53 @@ _BRAND_ASSET_EVIDENCE = re.compile(
     re.IGNORECASE,
 )
 
-# Genuine menu/price semantics. `classify_reference_role`'s `menu_reference`
-# branch (`reference_extract.py:135`) fires on the SINGULAR noun "flyer" with no
-# menu or price word anywhere — "this is the flyer template we use" classifies
-# as `menu_reference`. Vetoing on that role alone dropped six realistic template
-# uploads, so the veto is honored only when the caption actually names a menu,
-# a price list, prices or items. Without one, the turn falls through to the
-# evidence check; "sample menu template" and "this menu template - extract the
-# prices" name a menu and are still vetoed.
+# Genuine menu/price semantics — menu-ish media goes to normal routing, never to
+# the brand store. Deliberately NOT gated on the classifier's role, for two
+# reasons pulling in opposite directions:
+#
+#   * `classify_reference_role`'s `menu_reference` branch
+#     (`reference_extract.py:135`) fires on the SINGULAR noun "flyer" with no
+#     menu or price word anywhere, so "this is the flyer template we use"
+#     classifies as `menu_reference`. Vetoing on that role ALONE dropped six
+#     realistic template uploads.
+#   * conversely the role misses menu media that names no deictic, so "our menu
+#     template" and "price list template" classified as `inspiration` and rode
+#     the bare `\btemplates?\b` alternative straight into the store.
+#
+# Keying the veto on the menu/price WORDS rather than on the role fixes both.
 _MENU_PRICE_SEMANTICS = re.compile(
     r"\b(?:menus?|price\s*lists?|prices?|pricing|items?)\b",
+    re.IGNORECASE,
+)
+
+# Naming a brand artifact is not offering one. "remove the watermark" and "the
+# existing flyer has a typo" name one and complain about it; capturing those
+# recreates the B0009 shape, and the result is not inert — `_brand_asset_kind`
+# (`onboarding.py:1155`) files anything containing "flyer" as a `template`, and
+# an active template steers every later render.
+#
+# Complaint phrasing is open-ended, so this is not an attempt to enumerate it.
+# It only has to be good enough to catch captions that ALSO carry no evidence of
+# offering — see `_BRAND_ASSET_OFFER`, which is the closable set and which wins
+# whenever both match. That is what lets B0008's real caption ("change theme of
+# my fliers going forward") keep its edit verb and still be captured.
+_BRAND_ASSET_DEFECT_FRAME = re.compile(
+    r"\b(?:remove|delete|erase|get\s+rid\s+of|take\s+(?:it\s+)?off|fix|correct|redo|"
+    r"crop|resize|change|replace|update|edit|modify|revise)\b"
+    r"|\b(?:is|are|was|were|looks?|looked|seems?|seemed|has|have|had|came\s+out)\b"
+    r"[^.!?]{0,40}\b(?:too\s+\w+|wrong|bad|blurry|dark|light|small|tiny|big|huge|"
+    r"typo|error|mistake|missing|cut\s+off|incorrect|outdated|ugly|misspel)\w*",
+    re.IGNORECASE,
+)
+
+# Affirmative evidence that the customer is HANDING OVER the attached media
+# rather than talking about it. Small and closable by design, which is why the
+# gate is built on this side rather than on the complaint side.
+_BRAND_ASSET_OFFER = re.compile(
+    r"\b(?:here\s+is|here's|here\s+are|this\s+is|these\s+are|attached\s+is|attaching|"
+    r"i(?:'m|\s+am)\s+(?:sending|attaching|uploading)|want\s+you\s+to|"
+    r"(?:please\s+)?(?:use|save|keep|store|apply)\b|"
+    r"going\s+forward|from\s+now\s+on|from\s+here\s+on|in\s+(?:the\s+)?future|always)\b",
     re.IGNORECASE,
 )
 
@@ -4500,36 +4537,42 @@ def _flyer_brand_asset_authorized(text: str, media_path: str) -> tuple[bool, str
         anything else            -> NOT authorized; normal routing
         classifier failure       -> NOT authorized (`classifier_unavailable`)
 
-    The two vetoes are deliberately asymmetric. `source_edit_template` is a HARD
-    veto: the edit path owns those turns whatever the caption also says.
-    `menu_reference` is honored only alongside genuine menu/price semantics,
-    because that role fires on the bare singular "flyer" — see
-    `_MENU_PRICE_SEMANTICS`.
+    `source_edit_template` is a HARD veto: the edit path owns those turns
+    whatever the caption also says. The menu/price veto is keyed on the caption
+    words, not on the classifier's role — see `_MENU_PRICE_SEMANTICS`.
+
+    Evidence alone is not enough. A caption that NAMES a brand artifact while
+    complaining about it ("remove the watermark", "the existing flyer has a
+    typo") is not an upload, so a defect frame with no offer declines.
 
     Returns `(authorized, reason)`. Three reason classes matter to the caller:
     an ordinary decline (no audit row — declining is the common case), a
     fail-closed `classifier_unavailable`, and a `..._over_evidence` decline
-    where brand-artifact evidence WAS present and a veto overrode it. That last
-    one is the false-negative class; it is rare and it is the one an operator
-    needs to be able to count, so the caller audits it.
+    where brand-artifact evidence WAS present and something overrode it. That
+    last one is the false-negative class; it is rare and it is the one an
+    operator needs to be able to count, so the caller audits it.
     """
     evidence = bool(_BRAND_ASSET_EVIDENCE.search(text or ""))
     try:
         role = _classify_flyer_reference_role(text, media_path)
     except Exception as e:  # noqa: BLE001 — a classifier failure must never write
         return False, f"classifier_unavailable: {type(e).__name__}: {e}"
+    over = "_over_evidence" if evidence else ""
     if role == "source_edit_template":
-        return False, "role_source_edit_template" + ("_over_evidence" if evidence else "")
+        return False, "role_source_edit_template" + over
     if role == "logo":
         return True, "role_logo"
-    if role == "menu_reference" and _MENU_PRICE_SEMANTICS.search(text or ""):
-        return False, "role_menu_reference" + ("_over_evidence" if evidence else "")
+    if _MENU_PRICE_SEMANTICS.search(text or ""):
+        return False, "menu_price_semantics" + over
     # Deliberately NOT keyed on `old_flyer_reference`: that role fires on a bare
     # "sample" or "reference" anywhere in the caption, which is the standalone
     # evidence this fix exists to reject.
-    if evidence:
-        return True, "brand_artifact_evidence"
-    return False, f"no_brand_asset_evidence (role={role})"
+    if not evidence:
+        return False, f"no_brand_asset_evidence (role={role})"
+    if (_BRAND_ASSET_DEFECT_FRAME.search(text or "")
+            and not _BRAND_ASSET_OFFER.search(text or "")):
+        return False, "defect_frame_without_offer_over_evidence"
+    return True, "brand_artifact_evidence"
 
 
 def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_path: str,

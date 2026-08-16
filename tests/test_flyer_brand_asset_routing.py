@@ -348,6 +348,113 @@ def test_one_off_style_request_is_not_a_brand_asset(monkeypatch):
     assert result is None
 
 
+# A caption that NAMES a brand artifact is not the same as one that OFFERS it.
+# "remove the watermark" and "the existing flyer has a typo" name one and
+# complain about it; capturing those recreates the B0009 shape, and it is not
+# inert — `_brand_asset_kind` (`onboarding.py:1155`) files anything containing
+# "flyer" as `template`, and an active template steers `render.py` on every
+# later render (the F0217 wrong-brand vector when style transfer is off).
+@pytest.mark.parametrize("caption", [
+    "remove the watermark",
+    "the watermark is too dark",
+    "the existing flyer has a typo",
+    "our old flyer looks bad, make a new one",
+    "the previous poster had the wrong price",
+    "our brand colors are wrong on this flyer",
+])
+def test_complaint_about_a_brand_artifact_is_not_an_upload(monkeypatch, caption):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, caption)
+
+    assert w.store_calls == []
+    assert result is None
+    assert w.sends == []
+
+
+def test_defect_frame_decline_that_carried_evidence_is_audited(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, "the existing flyer has a typo")
+
+    assert w.store_calls == []
+    assert result is None
+    rows = [r for r in w.audits
+            if r.get("reason") == "flyer_brand_asset_declined_over_evidence"]
+    assert len(rows) == 1
+
+
+def test_durable_instruction_survives_its_own_edit_verb(monkeypatch):
+    """B0008's real caption uses "change". A defect frame must not veto a
+    caption that also offers the media for durable use, or the production store
+    loses the asset it is actually made of."""
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(
+        hooks, "I want you to change theme of my fliers going forward")
+
+    assert len(w.store_calls) == 1
+    assert result is not None and result["action"] == "skip"
+
+
+# `\btemplates?\b` is bare, so it matched menu media too. Menu/price semantics
+# now decline regardless of which role the classifier assigned.
+@pytest.mark.parametrize("caption", [
+    "our menu template",
+    "template of our menu",
+    "price list template",
+])
+def test_menu_sense_template_is_not_a_brand_asset(monkeypatch, caption):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, caption)
+
+    assert w.store_calls == []
+    assert result is None
+
+
+# The adjective-position family: every one of these authorized under the old
+# six-substring rule. Keeping them declined is load-bearing.
+@pytest.mark.parametrize("caption", [
+    "brand new signage",
+    "our brand ambassador photo",
+    "brand awareness campaign pic",
+    "we are rebranding",
+    "our branded cups",
+    "sample of the dosa",
+    "reference photo of the shop",
+])
+def test_adjective_position_and_bare_word_collisions_stay_declined(monkeypatch, caption):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, caption)
+
+    assert w.store_calls == []
+    assert result is None
+
+
+@pytest.mark.parametrize("caption", [
+    "this is our branding",
+    "our poster template",
+    "save this template",
+    "use this template for our flyers",   # plural
+    "use this template for our flyer",    # singular — the FN class
+])
+def test_genuine_offers_are_captured_in_both_number_forms(monkeypatch, caption):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, caption)
+
+    assert len(w.store_calls) == 1
+    assert result is not None and result["action"] == "skip"
+
+
 # The menu/price side of the veto must hold exactly as firmly as the positives.
 @pytest.mark.parametrize("caption", [
     "sample menu template",
@@ -492,7 +599,7 @@ def test_decline_that_overrode_brand_evidence_is_audited(monkeypatch):
     rows = [r for r in w.audits
             if r.get("reason") == "flyer_brand_asset_declined_over_evidence"]
     assert len(rows) == 1
-    assert "role_menu_reference_over_evidence" in rows[0]["detail"]
+    assert "menu_price_semantics_over_evidence" in rows[0]["detail"]
 
 
 def test_ordinary_no_evidence_decline_is_not_audited(monkeypatch):
