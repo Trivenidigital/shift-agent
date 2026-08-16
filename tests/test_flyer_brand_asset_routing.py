@@ -500,6 +500,102 @@ def test_negation_elsewhere_does_not_suppress_a_genuine_offer(monkeypatch, capti
     assert result is not None and result["action"] == "skip"
 
 
+@pytest.mark.parametrize("caption", [
+    "do not follow this theme going forward",
+    "don't follow this style from now on",
+    "never follow this design going forward",
+])
+def test_refusing_to_follow_a_style_is_not_a_donation(monkeypatch, caption):
+    """`follow` was added to the offer list and not to the negation list, so a
+    refusal read as a donation. It matters more than the usual typo because
+    `follow` is the verb this class leans on — B0008's own caption uses it — so
+    the unguarded verb was the one most likely to appear here. A competitor's
+    flyer captioned "don't follow this style" became a durable brand template."""
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, caption)
+
+    assert w.store_calls == []
+    assert result is None
+    assert w.sends == []
+
+
+def test_every_offer_verb_has_a_negated_form():
+    """The mechanical guard, and the reason this bug is not a fourth leak shape.
+
+    Complaint phrasing is unbounded; offer verbs are a closed list. So a verb
+    present on the offer side and missing on the negation side is a PARITY
+    ERROR between two enumerable sets — checkable rather than endless. Both
+    directions are asserted, so a verb that drifts out of either regex fails
+    here rather than in production."""
+    hooks, _actions = _load_plugin_modules()
+
+    assert hooks._OFFER_VERBS, "offer verb list is empty — invariant is vacuous"
+    for verb in hooks._OFFER_VERBS:
+        assert hooks._BRAND_ASSET_OFFER.search(f"please {verb} this"), (
+            f"{verb!r} is listed as an offer verb but the offer regex misses it")
+        if verb in hooks._OFFER_VERBS_EXEMPT_FROM_NEGATION:
+            continue
+        assert hooks._BRAND_ASSET_NEGATED_OFFER.search(f"do not {verb} this"), (
+            f"{verb!r} can open an offer but its refusal is not detected — "
+            "add it to the negation side or name it in "
+            "_OFFER_VERBS_EXEMPT_FROM_NEGATION with a reason")
+
+
+def test_backward_reference_is_not_a_donation(monkeypatch):
+    """"as before" points at prior work, not at the attachment. `follow` takes a
+    backward-referring object far more naturally than use/save/keep/store/apply,
+    so the verb that carries this class is also the one that can aim its deictic
+    away from the media that is actually attached."""
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, "follow the same style as before going forward")
+
+    assert w.store_calls == []
+    assert result is None
+
+
+def test_b0008_like_this_is_not_read_as_a_backward_reference(monkeypatch):
+    """The guard above must not catch "like this", which points AT the media."""
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(
+        hooks,
+        "I want you to change theme of my fliers going forward, "
+        "can you follow theme like this")
+
+    assert len(w.store_calls) == 1
+
+
+def test_durable_capture_is_marked_on_the_manual_review_path(monkeypatch):
+    """The third capture path. When generation fails into manual review the arm
+    returns early having emitted only `flyer_reference_manual_review_queued` —
+    but the asset IS already stored by then, so the marker never landed while
+    the capture happened. A compensating control with a hole is worse than one
+    known to be absent."""
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+    monkeypatch.setattr(actions, "trigger_generate_flyer_concepts",
+                        lambda _pid: (False, "queued_manual_review"))
+    monkeypatch.setattr(actions, "flyer_generation_queued_manual_review",
+                        lambda _detail: True)
+    monkeypatch.setattr(actions, "send_flyer_manual_review_ack",
+                        lambda *_a, **_kw: (True, "manual-mid", ""))
+
+    result = _intercept(hooks, "use this theme going forward")
+
+    assert len(w.store_calls) == 1, "the asset is stored on this path"
+    assert result is not None and result["action"] == "skip"
+    queued = [r for r in w.audits
+              if r.get("reason") == "flyer_reference_manual_review_queued"]
+    assert queued, "manual-review path must still emit its own row"
+    assert any("durable_style_donation=true" in r.get("detail", "") for r in queued), (
+        "durable capture happened on this path but carries no marker")
+
+
 def test_durable_style_near_miss_decline_is_countable(monkeypatch):
     """A durable styling caption that fails to qualify used to decline as plain
     `no_brand_asset_evidence` — silent and uncountable, which is the exact

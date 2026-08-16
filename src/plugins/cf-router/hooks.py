@@ -4500,6 +4500,8 @@ def _durable_style_donation(text: str) -> bool:
     body = text or ""
     if not _DURABLE_SCOPE.search(body) or not _ATTACHED_STYLE_REFERENCE.search(body):
         return False
+    if _BACKWARD_REFERENCE.search(body):
+        return False
     return bool(_BRAND_ASSET_OFFER.search(body)) and not _BRAND_ASSET_NEGATED_OFFER.search(body)
 
 # Genuine menu/price semantics — menu-ish media goes to normal routing, never to
@@ -4568,10 +4570,41 @@ _BRAND_ASSET_DEFECT_FRAME = re.compile(
 # substitution verb acting on a deictic object. "replace THIS with our logo"
 # donates; "replace the date with our template date" substitutes one field for
 # another and donates nothing.
+#
+# The verb list is a NAMED TUPLE OF ITS OWN because two regexes need to agree on
+# it, and they silently stopped agreeing: `follow` was added here and not to the
+# negation side, so "do not follow this theme going forward" read as a donation.
+# That is not the open-ended-language problem — offer verbs are a closed set, so
+# a verb present on one side and missing on the other is a parity error between
+# two enumerable lists. `_BRAND_ASSET_NEGATED_OFFER` is now BUILT from this
+# tuple, which makes the drift impossible rather than merely detectable, and
+# `test_every_offer_verb_has_a_negated_form` fails if a future edit hardcodes a
+# verb into either regex instead of adding it here.
+_OFFER_VERBS = ("use", "save", "keep", "store", "apply", "follow")
+
+# Not offer cues on their own, but refusing them still says "do not put this on
+# the flyer", so the negation side carries them too.
+_NEGATION_ONLY_VERBS = ("add", "put", "include")
+
+# Offer verbs that deliberately need no negated form. Empty on purpose — the
+# parity test refuses to pass over an entry here without a stated reason.
+_OFFER_VERBS_EXEMPT_FROM_NEGATION: tuple[str, ...] = ()
+
+# The last alternative is the "supplied artifact" shape: in "replace this with
+# our logo" the edit verb acts ON something else and the artifact is what is
+# being HANDED OVER, so the caption is a donation despite reading as an edit.
+#
+# A possessive alone does NOT make it one — possessives appear in complaints
+# just as freely ("the flyer with our logo is wrong", "the banner with our
+# watermark came out blurry"), and reading those as offers skipped the defect
+# gate entirely. So the alternative is bound to a DONATING CONTEXT: a
+# substitution verb acting on a deictic object. "replace THIS with our logo"
+# donates; "replace the date with our template date" substitutes one field for
+# another and donates nothing.
 _BRAND_ASSET_OFFER = re.compile(
     r"\b(?:here\s+is|here's|here\s+are|this\s+is|these\s+are|attached\s+is|attaching|"
     r"i(?:'m|\s+am)\s+(?:sending|attaching|uploading)|want\s+you\s+to|"
-    r"(?:please\s+)?(?:use|save|keep|store|apply|follow))\b"
+    r"(?:please\s+)?(?:" + "|".join(_OFFER_VERBS) + r"))\b"
     r"|\b(?:replace|swap|change|update)\s+(?:this|that|these|those|it)\b[^.!?]{0,20}"
     r"\b(?:with|to)\s+(?:our|my|the\s+attached)\s+(?:\w+\s+){0,2}"
     r"(?:logos?|watermarks?|branding|templates?|letterheads?|designs?|artworks?)\b",
@@ -4584,7 +4617,18 @@ _BRAND_ASSET_OFFER = re.compile(
 # counts as a defect frame in its own right.
 _BRAND_ASSET_NEGATED_OFFER = re.compile(
     r"\b(?:do\s+not|don'?t|never|no\s+need\s+to)\s+(?:\w+\s+){0,2}"
-    r"(?:use|save|keep|store|apply|add|put|include)\b",
+    r"(?:" + "|".join(_OFFER_VERBS + _NEGATION_ONLY_VERBS) + r")\b",
+    re.IGNORECASE,
+)
+
+# "follow the same style AS BEFORE" points at prior work, not at the attachment.
+# `follow` takes a backward-referring object far more naturally than the other
+# offer verbs, so the verb this class leans on is also the one that can aim its
+# deictic away from the media actually attached. Deliberately narrow: "like
+# this" points AT the media and must keep working — it is how B0008 donates.
+_BACKWARD_REFERENCE = re.compile(
+    r"\b(?:as|like)\s+(?:before|last\s+time|previously|usual|always)\b"
+    r"|\bsame\s+as\s+(?:before|last\s+time|always)\b",
     re.IGNORECASE,
 )
 
@@ -4780,8 +4824,15 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
     # language. Complaint phrasing has no closed vocabulary, so a fourth leak
     # shape is possible; marking the CAPTURES makes a residual leak greppable in
     # production within a day instead of waiting on a fifth review. Carried on
-    # the existing `flyer_brand_asset_saved` rows rather than a new audit reason,
-    # so it adds nothing to the widened-Literal rollback exposure.
+    # the existing audit rows rather than a new audit reason, so it adds nothing
+    # to the widened-Literal rollback exposure.
+    #
+    # It must reach ALL THREE terminal capture paths, not just the two obvious
+    # ones. The store call above has already succeeded by the time any of them
+    # runs, so the manual-review branch — which returns early with only its own
+    # `flyer_reference_manual_review_queued` row — captured the asset while
+    # carrying no marker. A compensating control with a hole is worse than one
+    # known to be absent, because it is trusted.
     durable_marker = (
         "; durable_style_donation=true" if decision == "brand_artifact_evidence"
         and _durable_style_donation(text or "") else "")
@@ -4853,7 +4904,8 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
                     subprocess_rc=0 if ack_ok else 3,
                     detail=(
                         f"project_id={project_id}; brand_asset_regeneration_manual=true; "
-                        f"status={result.get('next_status')}; ack_message_id={manual_mid}; ack_error={ack_err[:300]}"
+                        f"status={result.get('next_status')}; ack_message_id={manual_mid}; "
+                        f"ack_error={ack_err[:300]}{durable_marker}"
                     ),
                 )
                 return {"action": "skip", "reason": f"cf-router flyer brand asset manual review queued {project_id}"}
