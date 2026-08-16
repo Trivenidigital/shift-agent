@@ -1036,3 +1036,154 @@ def test_classifier_failure_makes_no_brand_mutation_and_no_reply(monkeypatch):
     assert result is None
     assert any(row.get("reason") == "flyer_brand_asset_classifier_unavailable"
                for row in w.audits)
+
+
+# ---------------------------------------------------------------------------
+# Generated variant matrix for the durable-style class.
+#
+# Two things make this different from a longer list of hand-written rows.
+#
+# LABELS BY CONSTRUCTION. Rows are assembled from labeled fragments, so the
+# expected outcome is known before any code runs — a fragment is deictic because
+# it came from the deictic list, not because a regex agreed. A generator whose
+# labels are read off the implementation agrees with every bug the
+# implementation has.
+#
+# DRIVEN OFF THE REAL LISTS. The offer fragments come from `hooks._OFFER_VERBS`
+# and the style nouns are parsed out of `hooks._STYLE_NOUN`, so this tests the
+# module's lists AGAINST EACH OTHER rather than against a frozen row set. That
+# is where this class of bug now lives: `follow` sat in the offer list and not
+# in the negation list, and a matrix over a hand-copied verb list would have
+# missed it exactly as the hand-written rows did. This one generates a negated
+# row for every offer verb, so the next verb added is covered on the day it is
+# added rather than on the day someone thinks of the sentence.
+_MATRIX_WHEN = ("going forward", "from now on", "always")
+_MATRIX_DEICTIC = ("this {n}", "the same {n}", "these {n}")
+_MATRIX_NON_DEICTIC = ("a warmer {n}", "the {n}", "our {n}")
+_MATRIX_NON_OFFER = ("make", "we need", "")
+_MATRIX_COMPLAINT = (", it comes out wrong", ", it looks bad", ", it is too dark")
+
+
+def _matrix_style_nouns(hooks):
+    """Literal style nouns parsed from the module's own `_STYLE_NOUN` pattern.
+
+    Optional-character groups are collapsed (`colou?rs?` -> `color`), and every
+    result is checked back against the compiled pattern, so a parsing failure
+    surfaces as a test failure instead of quietly generating rows that exercise
+    nothing.
+
+    Nouns that are ALSO bare-noun brand evidence are dropped: they authorize
+    through a different rule entirely, which would make labels-by-construction
+    silently wrong for every row containing them.
+    """
+    body = hooks._STYLE_NOUN
+    assert body.startswith("(?:") and body.endswith(")"), body
+    nouns = []
+    for alt in body[3:-1].split("|"):
+        literal, i = "", 0
+        while i < len(alt):
+            if i + 1 < len(alt) and alt[i + 1] == "?":
+                i += 2  # optional char — drop it
+                continue
+            literal += alt[i]
+            i += 1
+        assert hooks._STYLE_NOUN_RE.fullmatch(literal), (
+            f"parsed {literal!r} from {alt!r} but it is not a style noun")
+        if not hooks._BRAND_ASSET_EVIDENCE.search(literal):
+            nouns.append(literal)
+    assert nouns, "every style noun was excluded — matrix would be vacuous"
+    return nouns
+
+
+def _durable_matrix_rows(hooks):
+    """(text, deictic, offer, negated, complaint) with axes known by construction."""
+    nouns = _matrix_style_nouns(hooks)
+    rows = []
+    for v_i, verb in enumerate(hooks._OFFER_VERBS):
+        for deictic, phrases in ((True, _MATRIX_DEICTIC), (False, _MATRIX_NON_DEICTIC)):
+            for negated in (False, True):
+                for complaint in (False, True):
+                    noun = nouns[v_i % len(nouns)]
+                    when = _MATRIX_WHEN[v_i % len(_MATRIX_WHEN)]
+                    phrase = phrases[v_i % len(phrases)].format(n=noun)
+                    prefix = f"do not {verb}" if negated else f"please {verb}"
+                    suffix = _MATRIX_COMPLAINT[v_i % len(_MATRIX_COMPLAINT)] if complaint else ""
+                    rows.append((f"{prefix} {phrase} {when}{suffix}".strip(),
+                                 deictic, True, negated, complaint))
+    # Controls: no offer verb at all, so nothing may authorize regardless.
+    for d_i, (deictic, phrases) in enumerate(
+            ((True, _MATRIX_DEICTIC), (False, _MATRIX_NON_DEICTIC))):
+        for complaint in (False, True):
+            noun = nouns[d_i % len(nouns)]
+            phrase = phrases[d_i % len(phrases)].format(n=noun)
+            suffix = _MATRIX_COMPLAINT[d_i % len(_MATRIX_COMPLAINT)] if complaint else ""
+            rows.append((f"{_MATRIX_NON_OFFER[d_i]} {phrase} "
+                         f"{_MATRIX_WHEN[d_i]}{suffix}".strip(),
+                         deictic, False, False, complaint))
+    return rows
+
+
+def test_durable_matrix_is_driven_off_the_modules_own_lists():
+    """Guards the generator's inputs, so the matrix cannot quietly go vacuous.
+
+    `branding` and `template` are styling nouns that are also bare-noun brand
+    evidence — they authorize through a different rule and would invalidate
+    labels-by-construction, so they are excluded and the exclusion is asserted
+    rather than assumed."""
+    hooks, _actions = _load_plugin_modules()
+
+    nouns = _matrix_style_nouns(hooks)
+    assert "branding" not in nouns, "branding is bare-noun evidence; it cannot be a matrix noun"
+    assert {"theme", "style", "design"} <= set(nouns), nouns
+    assert hooks._BRAND_ASSET_EVIDENCE.search("template"), (
+        "template was expected to be bare-noun evidence; the exclusion rationale "
+        "in _matrix_style_nouns no longer holds")
+
+    rows = _durable_matrix_rows(hooks)
+    # Every offer verb appears in both an affirmative and a negated row.
+    for verb in hooks._OFFER_VERBS:
+        assert any(f"please {verb} " in t for t, *_ in rows), verb
+        assert any(f"do not {verb} " in t for t, *_ in rows), verb
+
+
+def test_durable_matrix_matches_the_intended_rule():
+    """A durable styling caption donates iff it POINTS AT the attachment and
+    OFFERS it — and a refusal is not an offer. Durability is constant across the
+    matrix, so it drops out."""
+    hooks, _actions = _load_plugin_modules()
+    rows = _durable_matrix_rows(hooks)
+
+    covered, wrong = set(), []
+    for text, deictic, offer, negated, complaint in rows:
+        covered.add((deictic, offer, negated, complaint))
+        want = deictic and offer and not negated
+        authorized, reason = hooks._flyer_brand_asset_authorized(text, MEDIA)
+        if authorized is not want:
+            wrong.append((text, want, authorized, reason))
+
+    assert len(covered) >= 8, f"matrix reached only {len(covered)} axis cells"
+    assert not wrong, "rows disagreeing with the intended rule: " + repr(wrong[:5])
+
+
+def test_durable_matrix_outcome_is_independent_of_complaint_phrasing():
+    """The premise of the whole class, verified as a property.
+
+    Requiring an affirmative offer was supposed to move this class off the
+    open-ended complaint side. If that holds, flipping the complaint axis cannot
+    change the verdict for any (deictic, offer, negated) combination — and if it
+    cannot, an unlisted phrasing has no route in, because the rule never
+    consults that axis. Three review passes leaked on three different
+    phrasings; this is what says there will not be a fourth."""
+    hooks, _actions = _load_plugin_modules()
+
+    outcomes: dict = {}
+    for text, deictic, offer, negated, complaint in _durable_matrix_rows(hooks):
+        authorized, _reason = hooks._flyer_brand_asset_authorized(text, MEDIA)
+        (outcomes.setdefault((deictic, offer, negated), {})
+                 .setdefault(complaint, set()).add(authorized))
+
+    assert outcomes
+    for axes, by_complaint in outcomes.items():
+        assert by_complaint[True] == by_complaint[False], (
+            f"complaint phrasing changed the verdict at "
+            f"(deictic, offer, negated)={axes}: {by_complaint}")
