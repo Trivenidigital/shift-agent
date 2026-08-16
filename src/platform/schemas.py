@@ -8180,6 +8180,108 @@ class CateringDepositLinkFailed(_BaseEntry):
     commerce_payment_intent_id: str = Field(default="", max_length=40)
 
 
+class CateringDepositLinkSendUnconfirmed(_BaseEntry):
+    """P1 2026-08-15: the deposit link was minted and sent, and the send was
+    never confirmed. The link is LIVE.
+
+    Replaces the pair this arm used to emit, both of which became untrue once
+    the void stopped firing: `commerce_payment_link_failed`, whose documented
+    contract is to PRECEDE a void so the trail reads attempted -> failed ->
+    voided with no gap, and `catering_deposit_link_failed` with
+    `reason="bridge_send_failed"`, when the truth is "unconfirmed, probably
+    delivered". Together they told an operator the link was dead while it sat
+    live and payable in the customer's chat.
+
+    Carries the cross-references those rows carried so the R3 evidence does not
+    regress. Deliberately records NO intent status: the operator may void the
+    intent during reconciliation, and a status stamped here would become a lie
+    the moment they did. The ledger is the authority on that.
+
+    A NEW tag for the same reason as CateringDepositReinvokeRefused — the pinned
+    rollback target routes an unknown tag to `_UnknownLogEntry` (extra="allow"),
+    whereas widening `CateringDepositLinkFailed.reason` would make the old
+    reader REJECT a row it recognises today.
+
+    Distinct from `catering_customer_send_unconfirmed`, which is p17b's
+    cross-catering row answering "which sends could we not confirm?" for every
+    script and carrying no commerce cross-references. This one is the deposit
+    money evidence.
+    """
+    type: Literal["catering_deposit_link_send_unconfirmed"]
+    lead_id: str = Field(min_length=1, max_length=40)
+    delivery_certainty: Literal["uncertain"]
+    commerce_order_id: str = Field(default="", max_length=40)
+    commerce_payment_intent_id: str = Field(default="", max_length=40)
+    amount_cents: int = Field(default=0, ge=0, le=10_000_000_000)
+    detail: str = Field(default="", max_length=500)
+
+
+class CateringDepositReinvokeRefused(_BaseEntry):
+    """P1 2026-08-15: catering-mint-deposit refused to mint a second deposit
+    link because the first one's delivery was never confirmed.
+
+    A NEW tag rather than a new `CateringDepositLinkFailed.reason`. That
+    variant's `reason` Literal is byte-identical in the pinned rollback target
+    (dc7a81a2), so widening it would make the OLD reader REJECT a row it
+    recognises by tag today. The old release does not know THIS tag at all, so
+    it routes the row to `_UnknownLogEntry` (extra="allow") and the evidence
+    survives a downgrade intact.
+
+    Distinct from the `reinvoke_live_intent_exists` reason on
+    CateringDepositLinkFailed: that one fires when a prior mint CRASHED before
+    binding the lead. This one fires when the prior mint completed and its
+    customer-facing send came back UNCERTAIN — the customer most likely holds a
+    link, and only a supervised operator action may resolve that (R1).
+    """
+    type: Literal["catering_deposit_reinvoke_refused"]
+    lead_id: str = Field(min_length=1, max_length=40)
+    prior_delivery_status: Literal["uncertain"]
+    prior_delivery_status_at: Optional[datetime] = None
+    commerce_order_id: str = Field(default="", max_length=40)
+    commerce_payment_intent_id: str = Field(default="", max_length=40)
+    amount_cents: int = Field(default=0, ge=0, le=10_000_000_000)
+    owner_paged: bool = False
+    detail: str = Field(default="", max_length=500)
+
+
+class CateringDepositDeliveryReconciled(_BaseEntry):
+    """P1 2026-08-15: an operator resolved an unconfirmed deposit-link send.
+
+    The other half of the refusal above. Ruling R1 requires that uncertainty be
+    resolvable — "an explicit supervised reconciliation can later resolve it to
+    a confirmed-delivered state or authorize a fresh attempt" — so this is the
+    one row that says which of the two happened, who decided it and what it did
+    to the money objects.
+
+    `intent_voided` and `order_cancelled` are carried rather than inferred: only
+    the `not_delivered` resolution touches the money objects, and only when the
+    lead was bound to ones that were still voidable/cancellable, so the audit
+    reader must not have to guess. Both cleanups are best-effort in the same
+    sense as the definite-failure arm's, which means "the disposition applied"
+    and "the ledger was fully tidied" are different facts and this row states
+    both. The ledger's own `commerce_payment_intent_voided` /
+    `commerce_order_cancelled` rows remain the authority on the mutations
+    themselves; this row records the catering-side decision that caused them.
+
+    A NEW tag for the same reason as its two siblings above — the pinned
+    rollback target routes an unknown tag to `_UnknownLogEntry` (extra="allow"),
+    whereas widening an existing `reason` Literal would make the old reader
+    REJECT a row it recognises today.
+    """
+    type: Literal["catering_deposit_delivery_reconciled"]
+    lead_id: str = Field(min_length=1, max_length=40)
+    resolution: Literal["confirmed_delivered", "not_delivered"]
+    prior_delivery_status: Literal["uncertain"]
+    prior_delivery_status_at: Optional[datetime] = None
+    commerce_order_id: str = Field(default="", max_length=40)
+    commerce_payment_intent_id: str = Field(default="", max_length=40)
+    amount_cents: int = Field(default=0, ge=0, le=10_000_000_000)
+    intent_voided: bool = False
+    order_cancelled: bool = False
+    reason: str = Field(min_length=1, max_length=2000)
+    operator_uid: int  # os.getuid() — captures who ran the script
+
+
 # ─────────────────────────────────────────────────────────────────
 # Slice-3 PR-2 catering deposit confirmation
 # Emitted by commerce-payment-confirm after Stripe webhook confirms a
@@ -8536,6 +8638,11 @@ LogEntry = Annotated[
         # Slice-2 catering deposit caller
         Annotated[CateringDepositLinkSent, Tag("catering_deposit_link_sent")],
         Annotated[CateringDepositLinkFailed, Tag("catering_deposit_link_failed")],
+        # P1 2026-08-15: unconfirmed-send evidence + re-invoke refusal.
+        # New tags, not widened reasons — see the class docstrings.
+        Annotated[CateringDepositLinkSendUnconfirmed, Tag("catering_deposit_link_send_unconfirmed")],
+        Annotated[CateringDepositReinvokeRefused, Tag("catering_deposit_reinvoke_refused")],
+        Annotated[CateringDepositDeliveryReconciled, Tag("catering_deposit_delivery_reconciled")],
         # Slice-3 PR-2: catering deposit confirmation + commerce confirmation-failure
         Annotated[CateringDepositPaid, Tag("catering_deposit_paid")],
         Annotated[CommercePaymentConfirmationFailed, Tag("commerce_payment_confirmation_failed")],

@@ -711,28 +711,118 @@ def test_a_definite_deposit_failure_is_still_recorded_failed(isolated_state):
     assert row["delivery_certainty"] == "failed"
 
 
-def test_the_money_guards_are_untouched_by_an_uncertain_send(isolated_state):
-    """The void / cancel / failed-audit triple must behave exactly as before.
+def test_an_uncertain_send_does_not_take_the_destructive_transitions(isolated_state):
+    """TWO-FACTS PIN: link-creation truth and message-delivery truth are separate.
 
-    This cell is the guard on the guard: the record fix above must not have
-    quietly changed what happens to the intent or the order.
+    A WhatsApp send we could not confirm must never imply the provider intent
+    does not exist. The void + cancel pair is the destructive transition the two
+    facts must not share: firing it here erases a real provider fact because a
+    message fact was unknown, and leaves the customer holding a link that
+    silently cannot pay. The definite-failure arm keeps that pair, and
+    `test_bridge_send_failed_voids_intent_and_audits` above pins it there.
+
+    (This cell previously asserted the opposite — that the uncertain arm voided,
+    cancelled and left the lead unbound. That WAS the P1 defect: the voided
+    intent is invisible to `_find_live_intent_for_lead`, and the unbound lead
+    passes the idempotency check, so a re-invoke minted a second live link.)
     """
     lead_id, result = _run_uncertain(isolated_state)
 
     rows = _read_audit_rows(isolated_state["log_path"])
     types = [r["type"] for r in rows]
-    assert "commerce_payment_link_failed" in types
-    assert "commerce_payment_intent_voided" in types
-    assert "catering_deposit_link_failed" in types
+    # Nothing may have destroyed the money objects behind the link.
+    assert "commerce_payment_intent_voided" not in types, (
+        "the intent behind a link the customer probably holds was voided")
+    assert "commerce_order_cancelled" not in types, (
+        "the order behind a link the customer probably holds was cancelled")
+
     intents = json.loads(
         (isolated_state["commerce_state"] / "payment_intents.json").read_text(encoding="utf-8"))
-    assert intents["intents"][0]["status"] == "voided"
+    assert intents["intents"][0]["status"] == "minted", (
+        "the payment intent must stay live so the link the customer most likely "
+        f"holds can still take a payment: {intents!r}")
     orders = json.loads(
         (isolated_state["commerce_state"] / "orders.json").read_text(encoding="utf-8"))
-    assert orders["orders"][0]["status"] == "cancelled"
-    # And the binding is still NOT persisted, exactly as on a definite failure.
+    assert orders["orders"][0]["status"] == "pending_payment", (
+        "the order backing a live link is not an orphan and must not be "
+        f"cancelled: {orders!r}")
+
+    # And the lead IS bound — `commerce-payment-confirm` finds the lead for an
+    # incoming payment by `deposit_payment_intent_id` alone, so an unbound lead
+    # orphans a payment the customer can still make on the link they hold.
     leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
-    assert leads["leads"][0].get("deposit_payment_intent_id", "") == ""
+    assert leads["leads"][0]["deposit_payment_intent_id"] == intents["intents"][0]["intent_id"]
+
+
+def test_the_uncertain_arm_emits_no_row_claiming_the_link_failed(isolated_state):
+    """The audit log must not collapse uncertainty into failure either.
+
+    Fixing the STATE while leaving the audit lying would be half a fix. Two rows
+    used to be written on this arm and both were untrue once the void stopped
+    firing:
+
+      - `commerce_payment_link_failed`, whose documented contract
+        (payment_link.py) is to PRECEDE a void so the operator reads
+        attempted -> failed -> voided with no gap. With no void it leaves
+        attempted -> failed -> nothing, and the operator concludes the link is
+        dead when it is live and payable.
+      - `catering_deposit_link_failed` with `reason="bridge_send_failed"`, when
+        the truth is "unconfirmed, probably delivered".
+
+    One truthfully-named row replaces both, carrying the same cross-references
+    so the R3 evidence does not regress.
+    """
+    lead_id, result = _run_uncertain(isolated_state)
+
+    rows = _read_audit_rows(isolated_state["log_path"])
+    types = [r["type"] for r in rows]
+    assert "commerce_payment_link_failed" not in types, (
+        "a row whose contract is to explain a void was emitted on an arm that "
+        "does not void")
+    assert "catering_deposit_link_failed" not in types, (
+        "the deposit link did not fail — its delivery is unknown and the link "
+        "is live")
+
+    unconfirmed = [r for r in rows if r["type"] == "catering_deposit_link_send_unconfirmed"]
+    assert len(unconfirmed) == 1, [r["type"] for r in rows]
+    row = unconfirmed[0]
+    intents = _commerce_rows(isolated_state, "payment_intents.json", "intents")
+    orders = _commerce_rows(isolated_state, "orders.json", "orders")
+    assert row["lead_id"] == lead_id
+    assert row["delivery_certainty"] == "uncertain"
+    assert row["commerce_payment_intent_id"] == intents[0]["intent_id"]
+    assert row["commerce_order_id"] == orders[0]["order_id"]
+    assert row["detail"]
+
+    # p17b's cross-catering row is untouched — it answers "which sends could we
+    # not confirm?" across every script and carries no commerce cross-refs.
+    assert len([r for r in rows if r["type"] == "catering_customer_send_unconfirmed"]) == 1
+
+
+def test_the_definite_arm_still_emits_the_full_failed_and_voided_triple(isolated_state):
+    """Fence on the row change: the definite arm's audit is untouched.
+
+    A customer who received nothing DOES have a failed link and a voided intent,
+    and the operator must still read the whole triple there.
+    """
+    isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STUB"] = "fail:simulated_bridge_outage"
+    _write_config(isolated_state["config_path"], checkout_url_template="https://pay/?o={order_id}")
+    lead_id = _write_lead(isolated_state["leads_path"])
+
+    result = _run_script(isolated_state["env"], lead_id)
+    assert result.returncode == 6, result.stderr[-800:]
+
+    rows = _read_audit_rows(isolated_state["log_path"])
+    types = [r["type"] for r in rows]
+    assert "commerce_payment_link_attempted" in types
+    assert "commerce_payment_link_failed" in types
+    assert "commerce_payment_intent_voided" in types
+    assert "commerce_order_cancelled" in types
+    deposit_failed = [r for r in rows if r["type"] == "catering_deposit_link_failed"]
+    assert len(deposit_failed) == 1
+    assert deposit_failed[0]["reason"] == "bridge_send_failed"
+    # ...and the uncertain arm's row must NOT appear where delivery is known.
+    assert "catering_deposit_link_send_unconfirmed" not in types
 
 
 def test_a_delivered_deposit_link_says_so_on_the_lead(isolated_state):
@@ -746,3 +836,378 @@ def test_a_delivered_deposit_link_says_so_on_the_lead(isolated_state):
     leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
     assert leads["leads"][0]["deposit_link_delivery_status"] == "sent"
     assert leads["leads"][0]["deposit_link_delivery_status_at"]
+
+
+# ─────────────────────────────────────────────────────────────────
+# P1 — an uncertain send must not be silently re-mintable
+#
+# `send_uncertain` means the bridge ACCEPTED a message carrying a live payment
+# link, so the customer most likely holds one. The failure arm USED TO void the
+# intent and cancel the order without ever binding `deposit_payment_intent_id`
+# on the lead — so on a re-invoke BOTH money guards waved the run through:
+#
+#   1. the post-lock idempotency check read an unbound lead, and
+#   2. `_find_live_intent_for_lead` excludes `voided` from its live set, so the
+#      intent the uncertain send had just voided was invisible to it.
+#
+# The re-invoke therefore built a fresh cart -> fresh order -> fresh intent and
+# sent a SECOND, DIFFERENT payment link to a customer who probably already had
+# one. The owner page on this path said "do NOT re-invoke", which is a request,
+# not a guard.
+#
+# The fix separates the two facts: an unconfirmed MESSAGE never destroys the
+# payment intent. The intent stays live, the lead is bound to it, and the
+# re-invoke is refused outright. The cells below pin the refusal, pin that the
+# minted ids stay recoverable from the lead, and fence the fix so it cannot
+# over-block a DEFINITE failure (where the customer received nothing and a
+# re-mint is the correct recovery).
+# ─────────────────────────────────────────────────────────────────
+
+
+def _commerce_rows(isolated_state, filename: str, key: str) -> list[dict]:
+    """Rows from a commerce state file, or [] when the file was never written."""
+    path = isolated_state["commerce_state"] / filename
+    if not path.exists():
+        return []
+    return json.loads(path.read_text(encoding="utf-8")).get(key, [])
+
+
+def test_reinvoke_after_uncertain_send_refuses_second_mint(isolated_state):
+    """Re-invoking after an uncertain send must REFUSE, not mint link #2.
+
+    The second run here has a HEALTHY bridge — the operator re-invoking once
+    connectivity is back is exactly the sequence that puts two live payment
+    links in the customer's chat. Asserted on the commerce ledger, not stdout:
+    the harm is a second intent/order existing at all.
+    """
+    lead_id, first = _run_uncertain(isolated_state)
+    assert first.returncode == 6, first.stderr[-800:]
+    intents_after_first = _commerce_rows(isolated_state, "payment_intents.json", "intents")
+    assert len(intents_after_first) == 1 and intents_after_first[0]["status"] == "minted"
+    minted_first = intents_after_first[0]["intent_id"]
+
+    # Bridge is healthy again; the lead is NOT re-seeded — this is the same
+    # lead, in the state the uncertain send left it in.
+    isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STUB"] = "success:wamid_test_002"
+    second = _run_script(isolated_state["env"], lead_id)
+
+    assert second.returncode != 0, (
+        "a re-invoke after an accepted-but-unconfirmed deposit link exited "
+        f"cleanly (rc={second.returncode}); stdout={second.stdout!r}"
+    )
+    refusal = json.loads(second.stdout.strip().splitlines()[-1])
+    assert "refused" in refusal, (
+        f"expected a refusal payload from the re-invoke, got {refusal!r}")
+
+    # No SECOND payment link may exist, in any status.
+    intents = _commerce_rows(isolated_state, "payment_intents.json", "intents")
+    assert [i["intent_id"] for i in intents] == [minted_first], (
+        "a second, different payment intent was minted for a customer who "
+        f"most likely already holds link {minted_first}: {intents!r}")
+
+    # ...and no second order/cart behind it.
+    orders = _commerce_rows(isolated_state, "orders.json", "orders")
+    assert len(orders) == 1, f"second order created by the re-invoke: {orders!r}"
+    carts = _commerce_rows(isolated_state, "carts.json", "carts")
+    assert len(carts) == 1, f"second cart created by the re-invoke: {carts!r}"
+
+    minted_rows = [r for r in _read_audit_rows(isolated_state["log_path"])
+                   if r["type"] == "commerce_payment_intent_minted"]
+    assert len(minted_rows) == 1, (
+        f"{len(minted_rows)} mint rows; the uncertain send's mint is the only "
+        "one that may exist")
+
+
+def test_uncertain_send_leaves_the_minted_intent_recoverable_from_the_lead(isolated_state):
+    """The durable lead record must not forget that a link was minted.
+
+    The uncertain path used to stamp `deposit_link_delivery_status` and nothing
+    else, so the lead carried "we could not confirm a send" with no trace of
+    WHAT was sent. Everything the operator needs to reconcile — which intent,
+    which order, how much — lived only in the audit log. The lead is the record
+    the re-invoke guard, `commerce-payment-confirm` and the operator all read,
+    so the ids have to survive there.
+    """
+    lead_id, result = _run_uncertain(isolated_state)
+    assert result.returncode == 6, result.stderr[-800:]
+
+    intents = _commerce_rows(isolated_state, "payment_intents.json", "intents")
+    orders = _commerce_rows(isolated_state, "orders.json", "orders")
+    assert len(intents) == 1 and len(orders) == 1
+    minted_intent_id = intents[0]["intent_id"]
+    minted_order_id = orders[0]["order_id"]
+
+    lead = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))["leads"][0]
+    assert lead["deposit_link_delivery_status"] == "uncertain"
+    assert minted_intent_id in json.dumps(lead), (
+        f"intent {minted_intent_id} was minted and most likely reached the "
+        f"customer, but no field on the lead records it: {lead!r}")
+    assert minted_order_id in json.dumps(lead), (
+        f"order {minted_order_id} is unrecoverable from the lead: {lead!r}")
+
+    # The evidence that already survives must keep surviving: the intent stays
+    # in the ledger — live, per the two-facts pin above — and the audit row keeps
+    # both cross-references.
+    assert intents[0]["status"] == "minted"
+    evidence = next(r for r in _read_audit_rows(isolated_state["log_path"])
+                    if r["type"] == "catering_deposit_link_send_unconfirmed")
+    assert evidence["commerce_payment_intent_id"] == minted_intent_id
+    assert evidence["commerce_order_id"] == minted_order_id
+
+
+def test_the_refusal_is_audited_under_its_own_tag(isolated_state):
+    """The refusal has to be findable later, and under a NEW tag.
+
+    `CateringDepositLinkFailed.reason` is byte-identical in the pinned rollback
+    target, so widening it would make the old reader REJECT a row it recognises
+    today. An unknown TAG routes to `_UnknownLogEntry` instead and survives a
+    downgrade intact.
+    """
+    lead_id, _ = _run_uncertain(isolated_state)
+    isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STUB"] = "success:wamid_test_004"
+    _run_script(isolated_state["env"], lead_id)
+
+    rows = _read_audit_rows(isolated_state["log_path"])
+    refused = [r for r in rows if r["type"] == "catering_deposit_reinvoke_refused"]
+    assert len(refused) == 1, [r["type"] for r in rows]
+    row = refused[0]
+    assert row["lead_id"] == lead_id
+    assert row["prior_delivery_status"] == "uncertain"
+    intent_id = _commerce_rows(isolated_state, "payment_intents.json", "intents")[0]["intent_id"]
+    assert row["commerce_payment_intent_id"] == intent_id, (
+        "the refusal must name the link the operator has to reconcile")
+    assert row["commerce_order_id"]
+    assert row["amount_cents"] > 0
+    # The pre-existing variant must not have been reused for either of the two
+    # new events — its `reason` Literal is byte-identical in the rollback target,
+    # so a widened value there is what would break the old reader.
+    assert "catering_deposit_link_failed" not in [r["type"] for r in rows]
+
+
+def test_a_legacy_uncertain_lead_left_unbound_is_still_mintable(isolated_state):
+    """The guard must not strand leads written by the PREVIOUS release.
+
+    Before this branch, an uncertain send voided the intent and never bound the
+    lead — so every lead the old code left behind carries the marker with NO
+    intent, NO order and NO amount. A marker-only guard refuses those forever:
+    the lead can never get a deposit link again, and both the page and the audit
+    row announce a LIVE link while naming `intent ""`, `order ""`, `$0.00`.
+
+    Requiring a binding as well as the marker reopens nothing. The state the
+    guard exists to catch always carries one, and the unbound-with-a-live-intent
+    case is already caught one check later by `_find_live_intent_for_lead`
+    (`test_reinvoke_with_live_intent_refuses_second_mint`). Here the intent is
+    VOIDED, so there is nothing live in the customer's hands and a re-mint is
+    the correct recovery.
+    """
+    _write_config(isolated_state["config_path"], checkout_url_template="https://pay/?o={order_id}")
+    lead_id = _write_lead(
+        isolated_state["leads_path"],
+        deposit_link_delivery_status="uncertain",
+        deposit_link_delivery_status_at=TS.isoformat(),
+    )
+    # The shape the old release left: marker set, lead unbound, intent voided.
+    intents_path = isolated_state["commerce_state"] / "payment_intents.json"
+    intents_path.write_text(json.dumps({"intents": [{
+        "intent_id": "CPI00001",
+        "order_id": "CO00001",
+        "originating_message_id": f"catering_deposit_{lead_id}",
+        "amount_cents": 15000,
+        "currency": "USD",
+        "provider": "placeholder",
+        "checkout_url": "https://pay.example/CO00001",
+        "status": "voided",
+        "created_at": TS.isoformat(),
+        "updated_at": TS.isoformat(),
+        "voided_at": TS.isoformat(),
+    }]}, indent=2), encoding="utf-8")
+
+    result = _run_script(isolated_state["env"], lead_id)
+    assert result.returncode == 0, (
+        "a lead the previous release left unbound can never be re-minted; "
+        f"rc={result.returncode} stdout={result.stdout!r} "
+        f"stderr={result.stderr[-800:]!r}")
+
+    lead = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))["leads"][0]
+    assert lead["deposit_payment_intent_id"].startswith("CPI")
+    assert lead["deposit_link_delivery_status"] == "sent"
+
+    rows = _read_audit_rows(isolated_state["log_path"])
+    assert "catering_deposit_reinvoke_refused" not in [r["type"] for r in rows], (
+        "a refusal claiming the customer holds a LIVE link was written for a "
+        "lead whose only intent is voided")
+
+
+def test_a_legacy_uncertain_lead_with_a_LIVE_intent_is_still_refused(isolated_state):
+    """The hole narrowing the guard could have opened, closed one check later.
+
+    Requiring a binding means an unbound lead walks past the uncertain-guard —
+    so the case that matters is unbound with an intent that is still LIVE. The
+    double-charge guard owns that state and describes it accurately: a mint that
+    crashed before persisting the binding. It must still refuse, and the money
+    ledger must be untouched.
+    """
+    _write_config(isolated_state["config_path"], checkout_url_template="https://pay/?o={order_id}")
+    lead_id = _write_lead(
+        isolated_state["leads_path"],
+        deposit_link_delivery_status="uncertain",
+        deposit_link_delivery_status_at=TS.isoformat(),
+    )
+    intents_path = isolated_state["commerce_state"] / "payment_intents.json"
+    intents_path.write_text(json.dumps({"intents": [{
+        "intent_id": "CPI00001",
+        "order_id": "CO00001",
+        "originating_message_id": f"catering_deposit_{lead_id}",
+        "amount_cents": 15000,
+        "currency": "USD",
+        "provider": "placeholder",
+        "checkout_url": "https://pay.example/CO00001",
+        "status": "sent",
+        "created_at": TS.isoformat(),
+        "updated_at": TS.isoformat(),
+    }]}, indent=2), encoding="utf-8")
+
+    result = _run_script(isolated_state["env"], lead_id)
+    assert result.returncode == 2, (
+        f"a live link was re-minted over; stdout={result.stdout!r}")
+    assert "reinvoke_live_intent_exists" in result.stdout
+
+    rows = _read_audit_rows(isolated_state["log_path"])
+    assert "commerce_payment_intent_minted" not in [r["type"] for r in rows]
+    assert [i["intent_id"] for i in
+            _commerce_rows(isolated_state, "payment_intents.json", "intents")] == ["CPI00001"]
+
+
+# ─────────────────────────────────────────────────────────────────
+# P1 / operator ruling R1 — the uncertain state must be RESOLVABLE
+#
+# Refusing the re-invoke is only half of R1: "an explicit supervised
+# reconciliation can later resolve it to a confirmed-delivered state or
+# authorize a fresh attempt. Do not make uncertainty permanently
+# irrecoverable." Both outcomes are driven from the operator script, and these
+# two cells pin what each one does to the MONEY path — the reconciler's own
+# behaviour is covered in test_catering_deposit_delivery_reconcile.py.
+# ─────────────────────────────────────────────────────────────────
+
+
+RECONCILE_PATH = (Path(__file__).resolve().parent.parent / "src" / "agents"
+                  / "catering" / "scripts" / "catering-lead-reconcile")
+
+
+def _run_reconcile(env: dict, lead_id: str, resolution: str,
+                   reason: str = "checked the customer's chat") -> subprocess.CompletedProcess:
+    """Subprocess-invoke the operator reconciler on the same isolated state."""
+    platform_path = SCRIPT_PATH.parents[4] / "src" / "platform"
+    return subprocess.run(
+        [sys.executable, str(RECONCILE_PATH), "--lead-id", lead_id,
+         "--deposit-delivery", resolution, "--reason", reason],
+        env={**env, "PYTHONPATH": f"{platform_path}{os.pathsep}{env.get('PYTHONPATH', '')}"},
+        capture_output=True, text=True, timeout=30,
+    )
+
+
+def test_operator_confirming_delivery_makes_the_lead_workable_again(isolated_state):
+    """R1 outcome 1: the customer DID get the link.
+
+    The uncertainty is resolved to `sent`, the live intent and its binding are
+    untouched — the deposit stays payable — and the money path stops paging: a
+    later invocation is the ordinary `already_minted` no-op, not a P1 refusal.
+    """
+    lead_id, first = _run_uncertain(isolated_state)
+    assert first.returncode == 6, first.stderr[-800:]
+    minted = _commerce_rows(isolated_state, "payment_intents.json", "intents")[0]["intent_id"]
+
+    rec = _run_reconcile(isolated_state["env"], lead_id, "confirmed-delivered")
+    assert rec.returncode == 0, f"stdout={rec.stdout!r} stderr={rec.stderr[-800:]!r}"
+
+    lead = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))["leads"][0]
+    assert lead["deposit_link_delivery_status"] == "sent"
+    assert lead["deposit_payment_intent_id"] == minted, (
+        "the binding backing a link the customer demonstrably holds was dropped")
+    assert lead["deposit_status"] == "awaiting_payment"
+    intents = _commerce_rows(isolated_state, "payment_intents.json", "intents")
+    assert [i["intent_id"] for i in intents] == [minted]
+    assert intents[0]["status"] == "minted", "the live link was voided by a CONFIRMED delivery"
+
+    isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STUB"] = "success:wamid_test_005"
+    after = _run_script(isolated_state["env"], lead_id)
+    assert after.returncode == 0, (
+        "the lead is still refused after a supervised confirmation; "
+        f"stdout={after.stdout!r}")
+    assert "already_minted" in after.stdout
+    assert [i["intent_id"] for i in
+            _commerce_rows(isolated_state, "payment_intents.json", "intents")] == [minted]
+
+
+def test_operator_authorizing_a_fresh_attempt_makes_the_lead_mintable_again(isolated_state):
+    """R1 outcome 2: the customer did NOT get the link.
+
+    The disposition lands on the same end state
+    `test_bridge_send_failed_voids_intent_and_audits` pins for the definite arm
+    — voided intent, cancelled order, unbound lead — because the operator has
+    just asserted that arm's fact. A legitimate re-mint then proceeds and
+    produces exactly one live link.
+    """
+    lead_id, first = _run_uncertain(isolated_state)
+    assert first.returncode == 6, first.stderr[-800:]
+    stranded = _commerce_rows(isolated_state, "payment_intents.json", "intents")[0]["intent_id"]
+    stranded_order = _commerce_rows(isolated_state, "orders.json", "orders")[0]["order_id"]
+
+    rec = _run_reconcile(isolated_state["env"], lead_id, "not-delivered")
+    assert rec.returncode == 0, f"stdout={rec.stdout!r} stderr={rec.stderr[-800:]!r}"
+
+    lead = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))["leads"][0]
+    assert lead["deposit_payment_intent_id"] == "", "the lead still names a voided intent"
+    assert lead["deposit_status"] != "awaiting_payment", (
+        "the lead asserts a deposit is awaiting payment on an intent the "
+        "operator just voided")
+    voided = _commerce_rows(isolated_state, "payment_intents.json", "intents")[0]
+    assert voided["intent_id"] == stranded and voided["status"] == "voided"
+    order = next(o for o in _commerce_rows(isolated_state, "orders.json", "orders")
+                 if o["order_id"] == stranded_order)
+    assert order["status"] == "cancelled", (
+        "the order behind the voided intent was left as an orphan: "
+        f"{order['status']!r}")
+
+    isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STUB"] = "success:wamid_test_006"
+    second = _run_script(isolated_state["env"], lead_id)
+    assert second.returncode == 0, (
+        "the operator authorized a fresh attempt and the mint was still "
+        f"refused; stdout={second.stdout!r} stderr={second.stderr[-800:]!r}")
+
+    lead = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))["leads"][0]
+    assert lead["deposit_link_delivery_status"] == "sent"
+    live = [i for i in _commerce_rows(isolated_state, "payment_intents.json", "intents")
+            if i["status"] not in {"voided", "refunded", "chargeback"}]
+    assert [i["intent_id"] for i in live] == [lead["deposit_payment_intent_id"]], (
+        f"expected exactly one live link after the fresh attempt: {live!r}")
+
+
+def test_reinvoke_after_a_definite_failure_still_mints(isolated_state):
+    """GREEN FENCE: a definite failure means the customer got nothing.
+
+    `connect_failed` is the case the re-invoke recovery was built for — there is
+    no link in the customer's hands, so a second mint is the correct outcome,
+    not a double-charge. The uncertain-send guard must not swallow this path.
+    """
+    isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STUB"] = "fail:simulated_bridge_outage"
+    _write_config(isolated_state["config_path"], checkout_url_template="https://pay/?o={order_id}")
+    lead_id = _write_lead(isolated_state["leads_path"])
+
+    first = _run_script(isolated_state["env"], lead_id)
+    assert first.returncode == 6, first.stderr[-800:]
+    leads = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))
+    assert leads["leads"][0]["deposit_link_delivery_status"] == "failed"
+
+    isolated_state["env"]["PYTEST_CATERING_DEPOSIT_BRIDGE_STUB"] = "success:wamid_test_003"
+    second = _run_script(isolated_state["env"], lead_id)
+    assert second.returncode == 0, (
+        "a definite send failure left the customer with nothing; the re-invoke "
+        f"must still mint. stdout={second.stdout!r} stderr={second.stderr[-800:]!r}")
+
+    lead = json.loads(isolated_state["leads_path"].read_text(encoding="utf-8"))["leads"][0]
+    assert lead["deposit_payment_intent_id"].startswith("CPI")
+    assert lead["deposit_link_delivery_status"] == "sent"
+    live = [i for i in _commerce_rows(isolated_state, "payment_intents.json", "intents")
+            if i["status"] not in {"voided", "refunded", "chargeback"}]
+    assert [i["intent_id"] for i in live] == [lead["deposit_payment_intent_id"]]

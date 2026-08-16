@@ -35,6 +35,9 @@ from schemas import (
     CommerceOrderOwnerApprovalRequired,
     CommerceOrderOwnerApprovalThresholdUnconfigured,
     CommerceBlockedCategoryOverride,
+    CateringDepositLinkSendUnconfirmed,
+    CateringDepositReinvokeRefused,
+    CateringDepositDeliveryReconciled,
 )
 
 
@@ -182,6 +185,92 @@ def test_all_20_commerce_variants_discriminated_union_round_trips():
     for v in variants:
         parsed = ADAPTER.validate_python(v)
         assert parsed.type == v["type"]
+
+
+def test_catering_deposit_p1_rows_round_trip_through_the_union():
+    """P1 2026-08-15: the three deposit rows the money path writes.
+
+    They are emitted through `commerce/audit.py:emit`, which deliberately does
+    NOT validate, and the money-path tests read the raw dicts back — so nothing
+    else in CI compares what the scripts write against the schema. A field-shape
+    drift would surface only when a reader finally hit the row. These payloads
+    are the ones the scripts build, field for field.
+    """
+    payloads = [
+        {"type": "catering_deposit_link_send_unconfirmed", "ts": TS.isoformat(),
+         "lead_id": "L0007", "delivery_certainty": "uncertain",
+         "commerce_order_id": "CO00001", "commerce_payment_intent_id": "CPI00001",
+         "amount_cents": 15000, "detail": "bridge accepted, ack unparseable"},
+        {"type": "catering_deposit_reinvoke_refused", "ts": TS.isoformat(),
+         "lead_id": "L0007", "prior_delivery_status": "uncertain",
+         "prior_delivery_status_at": TS.isoformat(),
+         "commerce_order_id": "CO00001", "commerce_payment_intent_id": "CPI00001",
+         "amount_cents": 15000, "owner_paged": True,
+         "detail": "refusing a 2nd mint pending operator reconciliation"},
+        {"type": "catering_deposit_delivery_reconciled", "ts": TS.isoformat(),
+         "lead_id": "L0007", "resolution": "not_delivered",
+         "prior_delivery_status": "uncertain",
+         "prior_delivery_status_at": TS.isoformat(),
+         "commerce_order_id": "CO00001", "commerce_payment_intent_id": "CPI00001",
+         "amount_cents": 15000, "intent_voided": True, "order_cancelled": True,
+         "reason": "nothing in the customer's chat", "operator_uid": 0},
+    ]
+    for payload in payloads:
+        out = _round_trip(payload)
+        assert out["type"] == payload["type"]
+        assert out["lead_id"] == "L0007"
+
+
+def test_catering_deposit_p1_rows_constrain_their_literals():
+    """The uncertain arm is the only state these rows describe, and the
+    reconciliation has exactly two outcomes."""
+    with pytest.raises(ValidationError):
+        CateringDepositLinkSendUnconfirmed(
+            type="catering_deposit_link_send_unconfirmed", ts=TS,
+            lead_id="L0007", delivery_certainty="failed",  # only "uncertain"
+        )
+    with pytest.raises(ValidationError):
+        CateringDepositReinvokeRefused(
+            type="catering_deposit_reinvoke_refused", ts=TS,
+            lead_id="L0007", prior_delivery_status="sent",  # only "uncertain"
+        )
+    with pytest.raises(ValidationError):
+        CateringDepositDeliveryReconciled(
+            type="catering_deposit_delivery_reconciled", ts=TS,
+            lead_id="L0007", resolution="maybe_delivered",
+            prior_delivery_status="uncertain", reason="x", operator_uid=0,
+        )
+
+
+def test_catering_deposit_p1_rows_forbid_extras():
+    with pytest.raises(ValidationError):
+        CateringDepositLinkSendUnconfirmed(
+            type="catering_deposit_link_send_unconfirmed", ts=TS,
+            lead_id="L0007", delivery_certainty="uncertain", surprise="x",
+        )
+    with pytest.raises(ValidationError):
+        CateringDepositReinvokeRefused(
+            type="catering_deposit_reinvoke_refused", ts=TS,
+            lead_id="L0007", prior_delivery_status="uncertain", surprise="x",
+        )
+    with pytest.raises(ValidationError):
+        CateringDepositDeliveryReconciled(
+            type="catering_deposit_delivery_reconciled", ts=TS,
+            lead_id="L0007", resolution="not_delivered",
+            prior_delivery_status="uncertain", reason="x", operator_uid=0,
+            surprise="x",
+        )
+
+
+def test_catering_deposit_delivery_reconciled_requires_an_operator_reason():
+    """The row exists to record a supervised decision; an empty reason would
+    make it indistinguishable from an automated write."""
+    with pytest.raises(ValidationError):
+        CateringDepositDeliveryReconciled(
+            type="catering_deposit_delivery_reconciled", ts=TS,
+            lead_id="L0007", resolution="confirmed_delivered",
+            prior_delivery_status="uncertain", reason="", operator_uid=0,
+        )
 
 
 def test_commerce_order_action_refused_round_trip_and_reasons():

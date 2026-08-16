@@ -79,10 +79,13 @@ def old_schemas(tmp_path_factory) -> Path:
     when the object is unreachable — a shallow clone is an environment problem,
     not a regression in the code under test."""
     out = tmp_path_factory.mktemp("old_release") / "old_schemas.py"
-    proc = subprocess.run(
-        ["git", "show", f"{OLD_RELEASE}:src/platform/schemas.py"],
-        cwd=str(REPO), capture_output=True, text=True,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "show", f"{OLD_RELEASE}:src/platform/schemas.py"],
+            cwd=str(REPO), capture_output=True, text=True,
+        )
+    except FileNotFoundError:  # no git binary — same class as a shallow clone
+        pytest.skip("git is not available; cannot materialise the old release")
     if proc.returncode != 0:
         pytest.skip(f"{OLD_RELEASE}:src/platform/schemas.py unreachable: {proc.stderr[:200]}")
     out.write_text(proc.stdout, encoding="utf-8")
@@ -695,6 +698,74 @@ def test_12_old_release_tolerates_the_new_audit_row_type(sb: _Sandbox, old_schem
     assert lines[0] == "_UnknownLogEntry", f"expected the forward-compat variant, got {lines}"
     assert lines[1] == "catering_state_downgraded", (
         "the original tag must round-trip so audit tooling can still find the row")
+
+
+def test_12b_every_tag_the_new_release_adds_degrades_under_the_old_union(old_schemas: Path):
+    """The same guarantee as test_12, for the CLASS instead of one instance.
+
+    test_12 pins one tag that someone remembered to pin. Every audit tag added
+    since dc7a81a2 has the same rollback contract — write it before the
+    rollback, and the old reader must absorb it rather than fail the parse — and
+    hand-verification that never becomes a test is how a gap survives for
+    months. So the delta is computed rather than listed: every tag the new
+    union knows and the old one does not is probed against the OLD union.
+
+    A minimal `{type, ts}` payload is the right probe: the old release has no
+    model for these tags, so it routes them by tag alone to `_UnknownLogEntry`
+    (`type: str`, extra="allow") and never sees the new model's required fields.
+    That is exactly the property under test — if a tag ever failed to route, it
+    would raise here regardless of payload.
+    """
+    from schemas import _KNOWN_LOG_ENTRY_TYPES as new_tags
+
+    probe = old_schemas.parent / "new_tags_probe.json"
+    probe.write_text(json.dumps(sorted(new_tags)), encoding="utf-8")
+
+    script = old_schemas.parent / "validate_new_tags_under_old.py"
+    script.write_text(
+        "import importlib.machinery, importlib.util, json, sys\n"
+        "from pydantic import TypeAdapter\n"
+        f"loader = importlib.machinery.SourceFileLoader('old_release_schemas', {str(old_schemas)!r})\n"
+        "spec = importlib.util.spec_from_loader('old_release_schemas', loader)\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "sys.modules['old_release_schemas'] = mod\n"
+        "loader.exec_module(mod)\n"
+        "new_tags = json.loads(open(sys.argv[1], encoding='utf-8').read())\n"
+        "new_only = sorted(set(new_tags) - set(mod._KNOWN_LOG_ENTRY_TYPES))\n"
+        "adapter = TypeAdapter(mod.LogEntry)\n"
+        "out = {}\n"
+        "for tag in new_only:\n"
+        "    try:\n"
+        "        entry = adapter.validate_python(\n"
+        "            {'type': tag, 'ts': '2026-08-15T12:00:00+00:00'})\n"
+        "        out[tag] = [type(entry).__name__, entry.type]\n"
+        "    except Exception as e:\n"
+        "        out[tag] = ['RAISED', f'{type(e).__name__}: {e}'[:200]]\n"
+        "print(json.dumps(out))\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run([sys.executable, str(script), str(probe)],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"the {OLD_RELEASE} tag-delta probe failed: {proc.stderr[:600]}")
+    results = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    # A pin that covers nothing passes silently, so anchor it on tags this
+    # branch added. If a later release removes them, this list is the reminder
+    # to re-anchor rather than to delete the cell.
+    for anchor in ("catering_deposit_link_send_unconfirmed",
+                   "catering_deposit_reinvoke_refused",
+                   "catering_deposit_delivery_reconciled"):
+        assert anchor in results, (
+            f"{anchor} is not in the new-vs-{OLD_RELEASE} tag delta; the probe "
+            f"is covering nothing. Delta was: {sorted(results)}")
+
+    bad = {tag: got for tag, got in results.items()
+           if got[0] != "_UnknownLogEntry" or got[1] != tag}
+    assert not bad, (
+        f"tags added since {OLD_RELEASE} that the old union does not absorb "
+        f"cleanly: {bad}. Writing one of these before a rollback poisons the "
+        f"old release's log reads.")
 
 
 def test_13_the_new_release_can_read_its_own_downgrade_output(sb: _Sandbox):
