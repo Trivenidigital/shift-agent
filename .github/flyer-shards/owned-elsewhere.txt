@@ -1,0 +1,41 @@
+# test_flyer* files already gated by ANOTHER workflow. Listed here so the
+# `contract` job's complement does not run them a second time. This file is
+# NOT a gate — it only subtracts. If you remove a file from the workflow that
+# owns it, delete it here too or it silently loses its gate.
+#
+# flyer-premium-ci.yml (premium-poster blast radius)
+tests/test_flyer_extraction_seam.py
+tests/test_flyer_extraction_v2_golden.py
+tests/test_flyer_intake_fields.py
+tests/test_flyer_premium_poster_v1.py
+tests/test_flyer_premium_poster_v1_bare_obs.py
+tests/test_flyer_premium_poster_v1_best_of_n.py
+tests/test_flyer_premium_poster_v1_critique.py
+tests/test_flyer_premium_poster_v1_deploy_parity.py
+tests/test_flyer_premium_poster_v1_director.py
+tests/test_flyer_premium_poster_v1_food.py
+tests/test_flyer_premium_poster_v1_integration.py
+tests/test_flyer_premium_poster_v1_managed.py
+tests/test_flyer_premium_poster_v1_offer.py
+tests/test_flyer_quarantine.py
+tests/test_flyer_renderer.py
+tests/test_flyer_source_edit_sla_watchdog.py
+tests/test_flyer_tranche2_telemetry.py
+tests/test_flyer_visual_qa.py
+#
+# flyer-extended-ci.yml (delivery / recovery / kill-switch / routing)
+tests/test_flyer_canonical_identity_wiring.py
+tests/test_flyer_generate_concepts.py
+tests/test_flyer_manual_queue.py
+tests/test_flyer_onboarding.py
+tests/test_flyer_recovery.py
+tests/test_flyer_recovery_watchdog.py
+tests/test_flyer_scripts_static.py
+#
+# send-path-ci.yml (named TTL-0 observe step)
+tests/test_flyer_ttl0_observe.py
+#
+# Pre-registered: the P0 branch adds this file to flyer-premium-ci.yml. Listed
+# ahead of that merge so the contract job never double-runs it (and never runs
+# a Pillow-dependent test in the no-Pillow job). Inert until the file exists.
+tests/test_flyer_brand_asset_routing.py

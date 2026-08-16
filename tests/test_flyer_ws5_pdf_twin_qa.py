@@ -441,7 +441,10 @@ def _run_backfill(tmp_path: Path, state_path: Path, work_dir: Path) -> tuple[int
 # fcntl into sys.modules, which would un-skip these on Windows while the
 # SUBPROCESS (a clean interpreter) still fails on the real fcntl import.
 @pytest.mark.skipif(sys.platform == "win32", reason="tool takes real safe_io fcntl locks")
-def test_backfill_tool_qas_preview_standin_and_writes_only_the_audit_row(tmp_path):
+def test_backfill_tool_qas_preview_standin_and_writes_only_the_audit_row(tmp_path, monkeypatch):
+    # _backfill_store builds FlyerAsset in THIS process, where the path validator
+    # reads FLYER_STATE_ROOT; _run_backfill only sets it for the subprocess.
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     state_path = _backfill_store(tmp_path, with_preview=True)
     store_bytes_before = state_path.read_bytes()
     work_dir = tmp_path / "work"
@@ -469,7 +472,8 @@ def test_backfill_tool_qas_preview_standin_and_writes_only_the_audit_row(tmp_pat
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="tool takes real safe_io fcntl locks")
-def test_backfill_tool_records_raster_missing_when_nothing_on_disk(tmp_path):
+def test_backfill_tool_records_raster_missing_when_nothing_on_disk(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
     state_path = _backfill_store(tmp_path, with_preview=False)
     work_dir = tmp_path / "work"
     work_dir.mkdir()

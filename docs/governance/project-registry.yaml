@@ -498,6 +498,10 @@ projects:
       tests: []
       ops:
         - .github/workflows/**
+        # CI shard manifests consumed by flyer-core-ci.yml. Ops config, not
+        # owned by a single product: they only partition which job runs which
+        # existing test file.
+        - .github/flyer-shards/**
         - .gitignore
         - .gitattributes
         - requirements-hermes-venv.txt

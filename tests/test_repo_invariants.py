@@ -8,6 +8,7 @@ old-branch merge silently re-introduces a removed feature.
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -95,6 +96,64 @@ def test_send_path_ci_runs_dynamic_non_flyer_suite_and_agent_changes():
     assert "find tests -maxdepth 1 -type f -name 'test_*.py' ! -name 'test_flyer*'" in workflow
     assert "test_bridge_send_harness.py \\" not in workflow
     assert "test_shift_reconcile.py" not in workflow
+
+
+def test_every_test_file_named_in_a_workflow_collects_at_least_one_test():
+    """A gate that names a file which collects nothing advertises coverage it
+    does not have, and pytest reports no error for it.
+
+    This fired on `tests/test_flyer_manual_queue_cli.py`: PR #561 shipped the
+    `--no-notify` silent-close CLI and, as its ONLY test change, added that file
+    at 0 bytes. flyer-extended-ci listed it for ~6 weeks, so the silent-close
+    path read as gated while having no coverage at all.
+    """
+    workflow_dir = REPO_ROOT / ".github" / "workflows"
+    workflows = sorted(set(workflow_dir.glob("*.yml")) | set(workflow_dir.glob("*.yaml")))
+    assert workflows, "no workflows found — path wrong?"
+
+    named = re.compile(r"tests/(test_[A-Za-z0-9_]+\.py)")
+    # Jobs may declare `defaults.run.working-directory` (cockpit-ci runs from
+    # web/backend, which has its own tests/). Resolve against every root the
+    # workflow mentions, plus the repo root, so a correctly-rooted reference is
+    # not reported as missing.
+    working_dir = re.compile(r"working-directory:\s*(\S+)")
+
+    def strip_yaml_comments(text: str) -> str:
+        """A path mentioned in a comment is documentation, not a gate — this
+        test's own rationale comment in flyer-extended-ci.yml names the empty
+        file it removed, and must not re-flag it."""
+        kept = []
+        for line in text.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            kept.append(line.split(" #", 1)[0])
+        return "\n".join(kept)
+
+    offenders = []
+    for workflow in workflows:
+        text = strip_yaml_comments(workflow.read_text(encoding="utf-8"))
+        roots = [REPO_ROOT] + [REPO_ROOT / d for d in set(working_dir.findall(text))]
+        for filename in sorted(set(named.findall(text))):
+            candidates = [root / "tests" / filename for root in roots]
+            path = next((c for c in candidates if c.exists()), None)
+            if path is None:
+                offenders.append(f"{workflow.name} names tests/{filename} — file does not exist")
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            has_test = any(
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name.startswith("test_")
+                for node in ast.walk(tree)
+            )
+            if not has_test:
+                offenders.append(
+                    f"{workflow.name} names tests/{filename} but it defines no test_* function"
+                    f" ({path.stat().st_size} bytes)"
+                )
+
+    assert not offenders, (
+        "CI gates name test files that collect nothing:\n  " + "\n  ".join(offenders)
+    )
 
 
 def test_cockpit_ci_checks_committed_typegen_schema():

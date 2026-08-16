@@ -1,0 +1,46 @@
+# flyer lifecycle: on-disk project store, state machine, delivery/recovery,
+# replay harnesses, audit-remediation clusters, tool subprocesses.
+# Owned by the "lifecycle" job in flyer-core-ci.yml.
+tests/test_flyer_action_registry.py
+tests/test_flyer_agent_static.py
+tests/test_flyer_allowlist_wildcard.py
+tests/test_flyer_audit_remediation_an1.py
+tests/test_flyer_audit_remediation_an4.py
+tests/test_flyer_audit_remediation_bc6.py
+tests/test_flyer_audit_remediation_clusterA.py
+tests/test_flyer_audit_remediation_clusterB.py
+tests/test_flyer_audit_remediation_in12.py
+tests/test_flyer_audit_remediation_in3.py
+tests/test_flyer_audit_remediation_in4.py
+tests/test_flyer_audit_remediation_review_fixes.py
+tests/test_flyer_audit_remediation_sw1.py
+tests/test_flyer_autonomous_train.py
+tests/test_flyer_backend_flag_route.py
+tests/test_flyer_check_quota.py
+tests/test_flyer_context_builder_cdv2.py
+tests/test_flyer_context_builder_retry.py
+tests/test_flyer_create_project.py
+tests/test_flyer_delivery_retry.py
+tests/test_flyer_golden_scenarios.py
+tests/test_flyer_golden_scenarios_real_model.py
+tests/test_flyer_guest_order.py
+tests/test_flyer_identity.py
+tests/test_flyer_incident_replay.py
+tests/test_flyer_intake_hijack_regression.py
+tests/test_flyer_intake_session_ttl.py
+tests/test_flyer_integrated_eligibility.py
+tests/test_flyer_iteration.py
+tests/test_flyer_operating_layer.py
+tests/test_flyer_payment_state.py
+tests/test_flyer_pr3_wiring.py
+tests/test_flyer_premium_outcome_script.py
+tests/test_flyer_project_actions.py
+tests/test_flyer_project_isolation.py
+tests/test_flyer_quota_precreate_dispatch.py
+tests/test_flyer_rollout_readiness.py
+tests/test_flyer_rollout_replay.py
+tests/test_flyer_self_evaluation.py
+tests/test_flyer_source_edit_preflight.py
+tests/test_flyer_store_maintenance.py
+tests/test_flyer_update_project.py
+tests/test_flyer_workflow.py

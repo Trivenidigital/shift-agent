@@ -1,0 +1,128 @@
+# Flyer core CI — blocking gate for the flyer test surface that no other
+# workflow covered.
+#
+# Measured 2026-08-16 on ubuntu/py3.11: `pytest tests/ -k flyer` collects 4,038
+# tests, of which 1,623 were ALREADY blocking — 577 ride send-path-ci's glob
+# (it excludes only `test_flyer*`, so the 20 contributing files with other
+# names, incl. the 397-test test_cf_router_flyer_routing.py, were never
+# ungated), 610 in flyer-premium-ci, 410 in flyer-extended-ci, 26 in
+# send-path-ci's named ttl0 step. This workflow gates the remaining 2,415.
+#
+# Three jobs on dependency/subsystem seams, NOT alphabetical slices. The whole
+# monolith runs in 12m42s against a 15-minute job timeout, and two of its five
+# failures exist only in that single-process configuration; sharding both fits
+# the budget with room and drops those two artifacts.
+#
+#   contract   1,146 tests   ~28s   pydantic/text only — deliberately NO Pillow
+#   render       376 tests   ~50s   Pillow: render/overlay/typeset/visual-QA
+#   lifecycle    893 tests  ~103s   on-disk project store, replay, tooling
+#
+# The no-Pillow constraint on `contract` is load-bearing, not incidental: it is
+# what send-path-ci relies on when it excludes test_flyer*, and this job turns
+# that assumption into an enforced invariant. A pure-model test that grows an
+# image dependency fails here instead of silently importing PIL. (This already
+# caught test_flyer_festive_vernacular.py, which reaches PIL through
+# premium_poster_v1 and therefore belongs to the render subsystem.)
+#
+# `contract` is defined as the COMPLEMENT of the other lists, never as its own
+# list. Explicit file lists fossilize — that is precisely how 91 files ended up
+# ungated — so a new tests/test_flyer_*.py file is blocking the day it lands
+# without anyone remembering to register it.
+name: flyer-core-ci
+
+on:
+  pull_request:
+    paths:
+      - "src/agents/flyer/**"
+      - "src/plugins/cf-router/**"
+      - "src/platform/schemas.py"
+      - "tests/test_flyer*.py"
+      - "tests/_flyer_replay_helpers.py"
+      - ".github/workflows/flyer-core-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/agents/flyer/**"
+      - "src/plugins/cf-router/**"
+      - "src/platform/schemas.py"
+      - ".github/workflows/flyer-core-ci.yml"
+
+concurrency:
+  group: flyer-core-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── render: everything that needs Pillow or asserts on produced pixels ────
+  render:
+    name: "flyer render / visual-QA / brand-style (Pillow)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps (Hermes-venv parity + Pillow)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pydantic pyyaml pytest pillow
+      - name: Render / visual-QA / brand-style suites
+        run: |
+          FILES=$(grep -vE '^\s*(#|$)' .github/flyer-shards/render.txt | tr '\n' ' ')
+          test -n "$FILES" || { echo "empty shard list"; exit 1; }
+          python -m pytest -q -p no:cacheprovider $FILES
+
+  # ── lifecycle: on-disk project store, state machine, replay, tooling ─────
+  lifecycle:
+    name: "flyer lifecycle / delivery / replay / audit-remediation"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # fastapi + python-multipart are required by test_flyer_backend_flag_route.py.
+      # Without them its 6 tests SKIP rather than fail, which reads green while
+      # asserting nothing; with them all 6 pass (verified 2026-08-16).
+      - name: Install deps (Hermes-venv parity + Pillow + backend router deps)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pydantic pyyaml pytest pillow fastapi python-multipart
+      - name: Lifecycle / delivery / replay suites
+        run: |
+          FILES=$(grep -vE '^\s*(#|$)' .github/flyer-shards/lifecycle.txt | tr '\n' ' ')
+          test -n "$FILES" || { echo "empty shard list"; exit 1; }
+          python -m pytest -q -p no:cacheprovider $FILES
+
+  # ── contract: the complement. New flyer test files land here by default. ──
+  contract:
+    name: "flyer contract / schema / copy-policy (no Pillow)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Pillow is deliberately ABSENT — see the header note.
+      - name: Install deps (Hermes-venv parity, no Pillow)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pydantic pyyaml pytest
+      - name: Contract / schema / copy-policy suites (complement of the other shards)
+        run: |
+          # Every root-level test_flyer* file that the render and lifecycle
+          # shards, flyer-premium-ci and flyer-extended-ci do not already own.
+          # The *.txt glob is the whole exclusion set, so adding a file to any
+          # shard list automatically removes it from the complement.
+          comm -23 \
+            <(find tests -maxdepth 1 -type f -name 'test_flyer*.py' | LC_ALL=C sort) \
+            <(cat .github/flyer-shards/*.txt | grep -vE '^\s*(#|$)' | LC_ALL=C sort -u) \
+            > /tmp/contract-shard.txt
+          echo "contract shard files:"; cat /tmp/contract-shard.txt
+          test -s /tmp/contract-shard.txt || { echo "empty shard — selection broke"; exit 1; }
+          python -m pytest -q -p no:cacheprovider $(tr '\n' ' ' < /tmp/contract-shard.txt)
