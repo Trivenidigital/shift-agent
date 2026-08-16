@@ -56,8 +56,10 @@ def test_terminal_statuses_have_no_outgoing_edges():
 @pytest.mark.parametrize(("frm", "to"), [
     # create-catering-proposal-options
     ("DRAFT", "SENT"),                    # _mark_sent_and_supersede, no later set
-    ("DRAFT", "SEND_FAILED"),             # _mark_send_failed (bridge unreachable)
+    ("DRAFT", "SEND_FAILED"),             # _mark_send_outcome, definite non-delivery
+    ("DRAFT", "SEND_UNCERTAIN"),          # _mark_send_outcome, bridge accepted / ack unparseable
     ("DRAFT", "SUPERSEDED"),              # _mark_sent_and_supersede, has_later_sent
+    ("SEND_UNCERTAIN", "SUPERSEDED"),     # OPERATOR-driven resolution only (see below)
     ("SENT", "SUPERSEDED"),               # older set superseded by a newer send
     # select-catering-proposal
     ("SENT", "SELECTING"),                # _claim_selection
@@ -89,9 +91,42 @@ def test_legal_transitions(frm, to):
     ("EXPIRED", "SENT"),             # an expired quote is never silently revived
     ("EXPIRED", "SELECTING"),        # the whole point: no selection after expiry
     ("EXPIRED", "EXPIRED"),          # no self-edge → the sweep cannot double-fire
+    # P1 — SEND_UNCERTAIN is terminal to AUTOMATION.
+    ("SEND_UNCERTAIN", "SENT"),      # no outbound_message_id exists to claim delivery with
+    ("SEND_UNCERTAIN", "SELECTING"), # a set nobody can prove arrived is not selectable
+    ("SEND_UNCERTAIN", "SEND_FAILED"),   # uncertainty never hardens into a definite failure
+    ("SEND_UNCERTAIN", "EXPIRED"),   # no validity window was ever stamped on it
+    ("SEND_FAILED", "SEND_UNCERTAIN"),   # nor a definite failure into uncertainty
+    ("SENT", "SEND_UNCERTAIN"),      # it went out with an id; the send is not in doubt
 ])
 def test_illegal_transitions(frm, to):
     assert not is_proposal_set_transition_allowed(frm, to)
+
+
+def test_send_uncertain_resolves_only_by_being_superseded():
+    """P1/R1. `send_uncertain` means the bridge ACCEPTED the menu (2xx) and the ack
+    body was unparseable — it most likely reached the customer. Recording that as
+    SEND_FAILED asserts definite non-delivery, which is a lie the state row was
+    telling while the audit row beside it told the truth.
+
+    SUPERSEDED is the ONLY out-edge, and it is the honest one:
+
+      * SENT is unreachable by construction, not by policy — a SENT set must carry
+        an `outbound_message_id` (CateringProposalSet._validate_proposal_set), and
+        the uncertain path has none to carry: the bridge returned no id in EITHER
+        sub-case. An operator cannot supply evidence the transport never produced.
+      * SELECTING would let a customer lock in a set nobody can show was delivered.
+      * An empty out-edge set would make the row permanently irrecoverable, which
+        R1 forbids.
+
+    And the edge is REACHED, which is the half that makes it a resolution rather
+    than decoration: `_mark_sent_and_supersede` retires a lower-sequence
+    SEND_UNCERTAIN row when a new set goes out, exactly as it retires a stale SENT
+    one — pinned behaviourally by tests/test_create_catering_proposal_options.py::
+    test_a_new_set_retires_a_prior_uncertain_set, which also pins that the
+    uncertain set is never re-sent.
+    """
+    assert CATERING_PROPOSAL_SET_TRANSITIONS["SEND_UNCERTAIN"] == {"SUPERSEDED"}
 
 
 def test_unknown_statuses_are_refused_not_crashed():

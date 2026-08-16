@@ -507,9 +507,31 @@ def _notify_owner_proposal_expired(lead_id: str, proposal_set_id: str,
                          f"{type(e).__name__}: {e}\n")
 
 
+# A higher-sequence set in one of these statuses means the set the customer is
+# replying about is no longer the live one, so the selection is refused rather
+# than booked. Reached only in the mid-flight race (a newer set created between
+# `_latest_proposal_for_lead`'s read and the claim/finalize) — outside the race
+# that lookup already returns None for a non-SENT max-sequence set.
+#
+# SEND_UNCERTAIN is in the set (P1). Its menu most likely REACHED the customer,
+# and if they are holding it, booking a selection against the older set books the
+# wrong food for a real event: friction is recoverable, a wrong menu at a catered
+# event is not. This also makes the race path agree with the non-race path, which
+# already refuses the customer when the max-sequence set is uncertain.
+#
+# THE RULE THAT GOVERNS MEMBERSHIP is "could this set plausibly be what the
+# customer is holding right now" — NOT terminality. Do not derive membership from
+# the transition table: three terminal statuses (SELECTED,
+# SELECTED_OWNER_CARD_FAILED, SELECT_FAILED) are IN this set, because a set the
+# customer already acted on is certainly one they received.
+#
+# By that rule SEND_FAILED and EXPIRED stay OUT: a definitely-failed set never
+# reached the customer, so it cannot be what they are replying about, and an
+# EXPIRED set was explicitly retired with the customer told so.
 SUPERSEDING_PROPOSAL_STATUSES = {
     "DRAFT",
     "SENT",
+    "SEND_UNCERTAIN",
     "SELECTING",
     "SELECTED",
     "SELECTED_OWNER_CARD_FAILED",

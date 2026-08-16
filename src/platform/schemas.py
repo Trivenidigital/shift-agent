@@ -2658,6 +2658,12 @@ CateringProposalStatus = Literal[
     "DRAFT", "SENT", "SEND_FAILED", "SUPERSEDED",
     "SELECTING", "SELECTED", "SELECTED_OWNER_CARD_FAILED", "SELECT_FAILED",
     "EXPIRED",  # M3 — validity window elapsed with no selection
+    # P1 — the bridge ACCEPTED the send (2xx) but its ack was unparseable, so the
+    # menu most likely reached the customer and nothing can prove either way.
+    # DISTINCT from SEND_FAILED, which asserts definite non-delivery: recording
+    # uncertainty as failure made the state row contradict the
+    # catering_customer_send_unconfirmed audit row written beside it.
+    "SEND_UNCERTAIN",
 ]
 
 # M3: proposal-set state machine. Mirrors CATERING_TRANSITIONS' shape (typed against
@@ -2668,10 +2674,17 @@ CateringProposalStatus = Literal[
 # Encoded from the two deployed writers, NOT invented:
 #   create-catering-proposal-options
 #     _create_draft            mints DRAFT (initial state, not a transition)
-#     _mark_send_failed        DRAFT -> SEND_FAILED
+#     _mark_send_outcome       DRAFT -> SEND_FAILED (definite non-delivery), or
+#                              DRAFT -> SEND_UNCERTAIN (bridge accepted, ack unparseable)
 #     _mark_sent_and_supersede DRAFT -> SENT, or DRAFT -> SUPERSEDED when a
-#                              later-sequence set already went out (has_later_sent);
-#                              and, for every OTHER lower-sequence row, SENT -> SUPERSEDED
+#                              later-sequence set is already in status SENT
+#                              (has_later_sent — it tests SENT ONLY, and so does
+#                              NOT count a later SEND_UNCERTAIN set, even though
+#                              such a set most likely reached the customer too;
+#                              see the note at its definition for why that
+#                              asymmetry stands);
+#                              and, for every OTHER lower-sequence row,
+#                              SENT -> SUPERSEDED and SEND_UNCERTAIN -> SUPERSEDED
 #   select-catering-proposal
 #     _claim_selection         SENT -> SELECTING (optimistic claim)
 #     _finish_selection        SELECTING -> SELECTED | SELECTED_OWNER_CARD_FAILED
@@ -2683,10 +2696,30 @@ CateringProposalStatus = Literal[
 # Every terminal state has an empty set: a SEND_FAILED set is never resurrected (the
 # next attempt mints a new set), and SELECTED / SELECT_FAILED / SUPERSEDED / EXPIRED
 # are end states of their respective paths.
+#
+# SEND_UNCERTAIN (P1) is not terminal: `_mark_sent_and_supersede` retires it to
+# SUPERSEDED when a NEW set for the same lead goes out, exactly as it retires a
+# stale SENT one. That edge is REACHED — an out-edge no writer performs would
+# advertise a resolution that dead-ends, which is how "uncertainty is permanently
+# irrecoverable" happens while the table claims otherwise.
+#
+# Retiring a stale row is BOOKKEEPING, NOT A RETRY: the uncertain set is never
+# re-sent, and the set that supersedes it is separately composed for a later,
+# customer-initiated request (both entry points in cf-router's hooks gate on
+# `is_proposal_request*` over an inbound message; no timer, sweep or cron invokes
+# the generator). Nothing reinterprets the uncertainty as failure either —
+# SUPERSEDED makes no claim about delivery, and the ack evidence in
+# `failure_reason` is left untouched.
+#
+# The other two conceivable resolutions are deliberately absent: SENT is unreachable
+# by CONSTRUCTION (a SENT set must carry an `outbound_message_id`, and the uncertain
+# path has none — the bridge returned no id in either sub-case), and SELECTING would
+# let a customer lock in a set nobody can show was delivered.
 CATERING_PROPOSAL_SET_TRANSITIONS: dict[CateringProposalStatus, set[CateringProposalStatus]] = {
-    "DRAFT": {"SENT", "SEND_FAILED", "SUPERSEDED"},
+    "DRAFT": {"SENT", "SEND_FAILED", "SEND_UNCERTAIN", "SUPERSEDED"},
     "SENT": {"SELECTING", "SUPERSEDED", "EXPIRED"},
     "SEND_FAILED": set(),                                                 # terminal
+    "SEND_UNCERTAIN": {"SUPERSEDED"},                                     # operator-resolvable only
     "SUPERSEDED": set(),                                                  # terminal
     "SELECTING": {"SELECTED", "SELECTED_OWNER_CARD_FAILED", "SELECT_FAILED"},
     "SELECTED": set(),                                                    # terminal
@@ -6683,6 +6716,16 @@ class CateringCustomerSendUnconfirmed(_BaseEntry):
         "proposal_options",         # create-catering-proposal-options customer set
         "amendment_owner_card",     # amend-catering-lead owner re-approval card
         "amendment_customer_reply",  # amend-catering-lead customer confirmation
+        # P1 — the other two arms of create-catering-proposal-options, which had
+        # been recording themselves as `proposal_options`. Safe for the SAME reason
+        # the P17b block above gives and for no other: dc7a81a2 does not know the
+        # `catering_customer_send_unconfirmed` tag at all (verified — zero
+        # occurrences in `git show dc7a81a2:src/platform/schemas.py`), so every row
+        # of this type routes to `_UnknownLogEntry` whatever `send_kind` holds.
+        # NOT a precedent for widening a Literal in a tag the old release DOES
+        # know: there the old reader validates the variant and REJECTS the row.
+        "recompose_clarify",        # --recompose-from-sent clarifying question
+        "recompose_menu",           # --recompose-from-sent combined menu
     ]
     send_status: str = Field(min_length=1, max_length=60)
     delivery_certainty: Literal["failed", "uncertain"]

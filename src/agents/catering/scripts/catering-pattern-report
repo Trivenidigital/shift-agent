@@ -255,7 +255,17 @@ def _build_learning_summary(
         if created_at < window_start:
             continue
         status = str(proposal_set.status)
-        if status in {"SENT", "SUPERSEDED"}:
+        # P1: SEND_UNCERTAIN counts as sent, NOT as send_failed. The bridge accepted
+        # the menu and it most likely reached the customer, so `send_failed` — the
+        # counter an owner reads as "options that never arrived" — would be wrong,
+        # and leaving it in no bucket at all would silently under-count the health
+        # summary. Nothing is hidden by the coarser bucket: every uncertain send
+        # already pages the owner and writes a catering_customer_send_unconfirmed
+        # audit row carrying delivery_certainty="uncertain".
+        # A dedicated counter would need a new field on CateringLearningProposalHealth,
+        # which dc7a81a2 validates with extra="forbid" and this migration does not
+        # cover — a rollback regression for a number that is already reported twice.
+        if status in {"SENT", "SUPERSEDED", "SEND_UNCERTAIN"}:
             health.sent += 1
         elif status == "SELECTED":
             health.selected += 1

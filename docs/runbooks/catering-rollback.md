@@ -8,16 +8,22 @@ already written catering state**. For the general lightest-lever-first ladder se
 
 ## The problem this exists for
 
-The Studio release added 12 fields and 2 statuses (`QUALIFYING`, `BOOKED`) to
-`CateringLead`, and `expires_at` to `CateringProposalSet`. In `dc7a81a2` both
-models are `extra="forbid"`, and its `CateringLeadStatus` Literal names neither
-new status.
+The Studio release and P17 together added 20 fields and 2 statuses (`QUALIFYING`,
+`BOOKED`) to `CateringLead` — 12 M1-M4 fields plus 8 P17 send-status markers —
+and `expires_at` plus 2 statuses (`EXPIRED`, `SEND_UNCERTAIN`) to
+`CateringProposalSet`. In `dc7a81a2` both models are `extra="forbid"`, and its
+status Literals name none of the four new statuses.
 
 So **one** lead written by the new release makes
 `/opt/shift-agent/state/catering-leads.json` unreadable by the old code. The old
 `safe_io.load_model` raises, and cf-router's tolerant raw-JSON lookups degrade to
 "no lead" **without erroring** — a live customer's lead simply stops being found.
-Same for `catering-proposals.json` once any set carries `expires_at`.
+
+Same for `catering-proposals.json`, and it does **not** take a rare edge case to
+get there. Any of these is enough on its own: a set carrying `expires_at`; a set
+that reached `EXPIRED`, which happens whenever a customer replies after the
+validity window; or a set that reached `SEND_UNCERTAIN`, which happens whenever
+the bridge accepts a send without returning a usable acknowledgement.
 
 `catering-state-downgrade` is the reverse migration that fixes this. It is
 **lossless**: everything it strips or remaps is written to a per-store sidecar
@@ -123,14 +129,16 @@ tail -f /opt/shift-agent/logs/decisions.log
 
 | Store | Action | Why |
 |---|---|---|
-| `catering-leads.json` | rewritten | `CateringLead` is `extra="forbid"` in `dc7a81a2`; 12 new fields + 2 new statuses |
-| `catering-proposals.json` | rewritten | `CateringProposalSet` is `extra="forbid"`; M3 added `expires_at` |
+| `catering-leads.json` | rewritten | `CateringLead` is `extra="forbid"` in `dc7a81a2`; 20 new fields + 2 new statuses |
+| `catering-proposals.json` | rewritten | `CateringProposalSet` is `extra="forbid"`; M3 added `expires_at`, and the old status `Literal` names neither `EXPIRED` (M3) nor `SEND_UNCERTAIN` (P1) |
 | `catering-quote-ledger.json` | untouched | store is `extra="allow"` with `records: list[dict]`; the strict record model runs only at append, never on read |
 | `catering-amendments.json` | untouched | same preservation-safe tolerant-dict shape |
 | `catering-followups.json` | untouched | the filename does not appear anywhere in `dc7a81a2`'s tree — the old release never opens it |
 | `catering-pricebook.json` | untouched | likewise absent from the old tree |
 
-Status remapping, both recorded in the sidecar:
+Status remapping, every one recorded in the sidecar as `original_status`:
+
+**Leads** (`catering-leads.json`):
 
 - `QUALIFYING` → `NEW` — pre-quote, pre-approval, still workable, and nothing in
   the old release auto-acts on it. (`AWAITING_OWNER_APPROVAL` would trip the old
@@ -138,6 +146,24 @@ Status remapping, both recorded in the sidecar:
   approval — one approval away from sending a sentinel to a customer.)
 - `BOOKED` → `CLOSED` — the old terminal for "booked or customer-declined". The
   acceptance facts survive in the sidecar.
+
+**Proposal sets** (`catering-proposals.json`):
+
+- `EXPIRED` → `SUPERSEDED` — the set really was sent and is now dead.
+  `SUPERSEDED` is the old release's terminal for exactly that and makes no claim
+  about the send. (`SEND_FAILED` would assert the customer never received options
+  they demonstrably did receive, and were given a validity date for.)
+- `SEND_UNCERTAIN` → `SEND_FAILED` — the old release has no vocabulary for "the
+  bridge accepted it but never acknowledged it". Of the two terminals available,
+  `SEND_FAILED` is the honest one: nothing ever confirmed and the set carries no
+  `outbound_message_id`, so the old code must not treat it as delivered.
+  (`SUPERSEDED` would imply a LATER set replaced it, which is a different fact.)
+  **The loss is to the OLD READER only** — the sidecar keeps `SEND_UNCERTAIN` as
+  `original_status`, so the uncertainty is recoverable in full on re-upgrade.
+
+Both proposal targets are non-selectable under `dc7a81a2`, whose
+`select-catering-proposal` claims a set only when its status is exactly `SENT`.
+So neither remap can hand the old release a set it might act on.
 
 ## Recovering what was stripped
 

@@ -951,6 +951,15 @@ mod.MENU_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-menu.json')!r})
 mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
 mod.LOG_LOCK = pathlib.Path({str(env_dir / 'logs' / 'decisions.log.lock')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
+notify_calls = []
+def fake_notify_run(argv, **kwargs):
+    notify_calls.append([str(part) for part in argv])
+    class Result:
+        stdout = ""
+        stderr = ""
+        returncode = 0
+    return Result()
+mod.subprocess.run = fake_notify_run
 buf = io.StringIO(); sys.stdout = buf; rc = -99
 try:
     rc = mod.main()
@@ -958,7 +967,7 @@ except SystemExit as se:
     rc = se.code if isinstance(se.code, int) else -1
 finally:
     sys.stdout = sys.__stdout__
-print(json.dumps({{"rc": rc, "stdout": buf.getvalue()}}))
+print(json.dumps({{"rc": rc, "stdout": buf.getvalue(), "notify_calls": notify_calls}}))
 """
     result = subprocess.run(
         [sys.executable, "-c", wrapper], capture_output=True, text=True, timeout=15,
@@ -1269,12 +1278,148 @@ def test_uncertain_proposal_send_is_not_recorded_as_a_definite_failure(bridge_se
     assert rows[0]["delivery_certainty"] == "uncertain"
     assert rows[0]["send_status"] == "send_uncertain"
     assert len(stub.requests) == 1, "never re-sent"
-    # The pre-existing failure row still says bridge_unreachable — its `reason` is
-    # a schema Literal that cannot carry the real status without a schemas.py
-    # change. The new row is where the truth lives.
+    # No failure row AT ALL on this arm. It used to emit
+    # catering_proposal_generation_failed(reason="bridge_unreachable"), which is
+    # false twice over — generation succeeded (the menu composed) and the bridge
+    # was reached (it returned 2xx). Widening the `reason` Literal is not the fix:
+    # dc7a81a2 KNOWS this tag, so a new value makes the old reader REJECT a row it
+    # accepts today rather than degrade to _UnknownLogEntry. The truthful row on
+    # this path already exists and is asserted above.
     failed = [r for r in _read_audit(env_dir)
               if r["type"] == "catering_proposal_generation_failed"]
-    assert failed and failed[-1]["reason"] == "bridge_unreachable"
+    assert failed == [], (
+        f"an uncertain send must not be recorded as a generation failure: {failed}")
+
+
+def test_the_uncertain_page_says_what_happened_and_what_works(bridge_server, env_dir):
+    """The state row and the audit row now tell the truth; the PAGE is the third
+    place the owner meets this event, and it was still calling a delivered menu a
+    failure. Exactly one page (the p17b invariant) — this changes its words, not
+    its count."""
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+    stub.response_mode = "empty_id"
+
+    result, parsed = _run_script(env_dir, port)
+
+    assert parsed["rc"] == 6, result.stderr
+    assert len(parsed["notify_calls"]) == 1, parsed["notify_calls"]
+    call = parsed["notify_calls"][0]
+    title = call[call.index("--title") + 1]
+    body = call[-1]
+
+    assert "failed" not in title.lower(), f"the page still calls it a failure: {title!r}"
+    assert "generation failed" not in body.lower(), body
+    assert "bridge_unreachable" not in body, (
+        "the internal failure code names a condition that did not happen")
+    # What actually happened.
+    assert "most likely" in body.lower(), body
+    # What the OWNER can actually do. Proposal generation is gated
+    # `sender_role != "owner"` (catering_dispatcher/SKILL.md) and both cf-router
+    # entry points require a CUSTOMER inbound, so an owner cannot reissue and the
+    # page must not tell them to. A named action the reader cannot perform is the
+    # same dead-end as a command that does not exist.
+    assert "contact them directly" in body.lower(), body
+    assert "reissu" not in body.lower(), (
+        "the owner cannot reissue - proposal generation is customer-gated")
+    # Still carries the identifiers and the bridge's own evidence.
+    assert "L0014" in body and "CPS-L0014-000001" in body
+    assert "empty_message_id:" in body or "ack_parse_failed:" in body
+
+
+def test_the_definite_failure_page_and_row_are_unchanged(bridge_server, env_dir):
+    """The split must not disturb the definite arm. A bridge that never accepted
+    the menu is still a generation failure, still audited as one, still paged with
+    the same words."""
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+    stub.response_mode = "down"
+
+    result, parsed = _run_script(env_dir, port)
+
+    assert parsed["rc"] == 6, result.stderr
+    failed = [r for r in _read_audit(env_dir)
+              if r["type"] == "catering_proposal_generation_failed"]
+    assert len(failed) == 1 and failed[0]["reason"] == "bridge_unreachable"
+    call = parsed["notify_calls"][0]
+    assert call[call.index("--title") + 1] == "Catering proposal generation failed"
+    assert "bridge_unreachable" in call[-1]
+
+
+def test_uncertain_proposal_send_lands_send_uncertain_not_send_failed(bridge_server, env_dir):
+    """P1 defect A. The audit row already told the truth; the STATE ROW was the
+    liar — the send-failure writer recorded a bridge-accepted send as definite
+    non-delivery, and that row is what every later reader consults."""
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+    stub.response_mode = "empty_id"
+
+    result, parsed = _run_script(env_dir, port)
+
+    assert parsed["rc"] == 6, result.stderr
+    row = _read_store(env_dir)["sets"][-1]
+    assert row["status"] == "SEND_UNCERTAIN", (
+        "a bridge-accepted send whose ack was unparseable is NOT a definite failure")
+    # The evidence is preserved verbatim: the bridge's own ack body, unchanged.
+    assert row["failure_reason"].startswith(("ack_parse_failed:", "empty_message_id:")), (
+        f"the ack evidence was dropped: {row['failure_reason']!r}")
+    assert "accepted" in row["failure_reason"], "the ack body itself must survive"
+    # Unchanged from the SEND_FAILED path and deliberately so: the bridge returned
+    # no id in either uncertain sub-case, so there is none to record.
+    assert row["outbound_message_id"] == ""
+    assert len(stub.requests) == 1, "never re-sent"
+
+
+def test_a_new_set_retires_a_prior_uncertain_set(bridge_server, env_dir):
+    """P1/R1 — the SEND_UNCERTAIN -> SUPERSEDED edge is REAL, not decorative.
+
+    An out-edge no writer performs is worse than no out-edge: the table advertises
+    a resolution that dead-ends, which is exactly how "uncertainty is permanently
+    irrecoverable" happens while the machine claims otherwise. So the supersede
+    loop retires a prior uncertain row exactly as it retires a stale SENT one.
+
+    This is BOOKKEEPING, NOT A RETRY, and the send count is the proof: the
+    uncertain set is never re-sent. Its options were composed for an earlier
+    request; the set that supersedes it is a NEW set, separately composed, sent
+    because a customer asked again. Nothing here reinterprets the uncertainty as
+    failure either — the row lands SUPERSEDED, which makes no claim about
+    delivery, and its ack evidence is left untouched.
+    """
+    store = {
+        "schema_version": 1,
+        "next_sequence": 2,
+        "sets": [_proposal_set("CPS-L0014-000001", "SEND_UNCERTAIN")],
+    }
+    store["sets"][0]["failure_reason"] = "empty_message_id: {\"accepted\": true}"
+    (env_dir / "state" / "catering-proposals.json").write_text(
+        json.dumps(store), encoding="utf-8")
+    port, stub = bridge_server
+    _seed_lead(env_dir)
+    _seed_menu(env_dir)
+
+    result, parsed = _run_script(env_dir, port)
+
+    assert parsed["rc"] == 0, result.stderr
+    by_id = {row["proposal_set_id"]: row for row in _read_store(env_dir)["sets"]}
+    assert by_id["CPS-L0014-000002"]["status"] == "SENT"
+    uncertain = by_id["CPS-L0014-000001"]
+    assert uncertain["status"] == "SUPERSEDED", (
+        "the prior uncertain set must be retired by the new one — an out-edge "
+        "nothing takes is an advertised resolution that does not exist")
+    assert uncertain["failure_reason"] == "empty_message_id: {\"accepted\": true}", (
+        "retiring the row must not erase the ack evidence an operator resolves it with")
+
+    # Through the guard, not around it: an illegal move would have been REFUSED
+    # (row untouched) and recorded, exactly as for a stale SENT row.
+    refused = [r for r in _read_audit(env_dir)
+               if r["type"] == "catering_proposal_transition_refused"]
+    assert refused == [], f"the transition was refused, not performed: {refused}"
+
+    # The retry test. ONE send: the new set's. The uncertain set is never re-sent.
+    assert len(stub.requests) == 1, "automation re-sent an unconfirmed proposal"
 
 
 def test_successful_proposal_send_emits_no_unconfirmed_row(bridge_server, env_dir):
@@ -1348,3 +1493,134 @@ def test_failed_recompose_clarify_records_its_status(bridge_server, env_dir):
     assert parsed["rc"] == 6, result.stderr
     rows = _unconfirmed(env_dir)
     assert len(rows) == 1 and rows[0]["delivery_certainty"] == "failed"
+    assert rows[0]["send_kind"] == "recompose_clarify", (
+        "the durable row must name the arm too - a truthful page beside an audit "
+        "row that still says 'proposal_options' is the same half-fix, inverted")
+
+
+@pytest.mark.parametrize(
+    ("request_text", "expected_kind"),
+    [
+        ("option 2 starters with option 1 mains", "recompose_clarify"),
+        ("option 1 starters with the option 2 mains", "recompose_menu"),
+    ],
+    ids=["clarify_arm", "merge_arm"],
+)
+def test_the_unconfirmed_row_names_the_arm_that_sent(bridge_server, env_dir,
+                                                     request_text, expected_kind):
+    """`send_kind` was hardcoded to "proposal_options" for all three arms, so the
+    DURABLE record said a menu of options went out when a clarifying question or a
+    combined menu did. Same defect this branch fixed at the state row, the audit
+    row and the page — one layer further in."""
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir)
+    _seed_recompose_sent_set(env_dir)
+    stub.response_mode = "empty_id"
+
+    result, parsed = _run_recompose(env_dir, port, request_text)
+
+    assert parsed["rc"] == 6, result.stderr
+    rows = _unconfirmed(env_dir)
+    assert len(rows) == 1
+    assert rows[0]["send_kind"] == expected_kind
+    assert rows[0]["delivery_certainty"] == "uncertain"
+
+
+def test_uncertain_recompose_clarify_emits_no_failure_row_either(bridge_server, env_dir):
+    """The suppression lives in `_fail_generation`, not at one call site, so it
+    holds on every send arm this script has. Pinned on the clarify arm because a
+    per-site fix would pass the proposal-set test and silently leave this one
+    lying."""
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir)
+    _seed_recompose_sent_set(env_dir)
+    stub.response_mode = "empty_id"
+
+    result, parsed = _run_recompose(env_dir, port, "option 2 starters with option 1 mains")
+
+    assert parsed["rc"] == 6, result.stderr
+    rows = _unconfirmed(env_dir)
+    assert len(rows) == 1 and rows[0]["delivery_certainty"] == "uncertain"
+    failed = [r for r in _read_audit(env_dir)
+              if r["type"] == "catering_proposal_generation_failed"]
+    assert failed == [], f"the clarify arm still records a false failure: {failed}"
+
+
+def test_an_unknown_sent_kind_fails_loudly(env_dir):
+    """The copy lookup used `.get(kind, ...["proposal_options"])`, so rendering with
+    an unrecognised arm returned the proposal copy WITHOUT complaint. A future
+    fourth send arm would then reproduce exactly the bug this branch fixed — a page
+    describing something other than what went out — with no signal at all. A loud
+    failure at the one moment someone adds an arm is worth more than a graceful
+    default that lies."""
+    mod = _load_script_for_env(env_dir)
+
+    with pytest.raises(KeyError):
+        mod._uncertain_page("L0014", "CPS-L0014-000001", "detail", "bogus_kind")
+
+
+def test_a_send_failure_must_name_its_arm(env_dir):
+    """The other half of the same hole: a new arm that forgets `sent_kind` entirely
+    would have silently inherited the default. Non-send failures are unaffected —
+    they have no arm to name."""
+    mod = _load_script_for_env(env_dir)
+
+    with pytest.raises(ValueError, match="sent_kind"):
+        mod._fail_generation("L0014", "bridge_unreachable", "detail",
+                             send=("19045550199@s.whatsapp.net", "send_uncertain"))
+
+
+def test_the_uncertain_clarify_page_describes_the_question_not_a_menu(bridge_server, env_dir):
+    """The clarify arm sends a QUESTION about which options to combine, and it
+    carries NO proposal_set_id. Copy written for the proposal arm is false here
+    twice: it calls the question "the menu options", and it promises the set will
+    be retired when `proposal_set_id=(none)` means there is no set to retire."""
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir)
+    _seed_recompose_sent_set(env_dir)
+    stub.response_mode = "empty_id"
+
+    result, parsed = _run_recompose(env_dir, port, "option 2 starters with option 1 mains")
+
+    assert parsed["rc"] == 6, result.stderr
+    assert len(parsed["notify_calls"]) == 1, parsed["notify_calls"]
+    call = parsed["notify_calls"][0]
+    title = call[call.index("--title") + 1]
+    body = call[-1]
+
+    assert "failed" not in title.lower(), title
+    assert "menu options" not in body.lower(), (
+        f"a clarifying question is not a menu of options: {body!r}")
+    assert "question" in body.lower(), body
+    # No set exists on this arm, so no sentence may claim one is retired.
+    assert "retire" not in body.lower(), (
+        f"names a retirement that cannot happen - there is no set: {body!r}")
+    assert "proposal_set_id" not in body, (
+        "an empty set id should be omitted, not printed as '(none)'")
+    assert "most likely" in body.lower() and "contact them directly" in body.lower()
+
+
+def test_the_uncertain_recompose_menu_page_describes_the_combined_menu(bridge_server, env_dir):
+    """The merge arm really does send a menu — the COMBINED one the customer asked
+    for — but still carries no proposal_set_id, so the retirement sentence must be
+    absent here too."""
+    port, stub = bridge_server
+    _seed_menu(env_dir, _RECOMPOSE_MENU)
+    _seed_lead(env_dir)
+    _seed_recompose_sent_set(env_dir)
+    stub.response_mode = "empty_id"
+
+    result, parsed = _run_recompose(env_dir, port, "option 1 starters with the option 2 mains")
+
+    assert parsed["rc"] == 6, result.stderr
+    assert len(parsed["notify_calls"]) == 1, parsed["notify_calls"]
+    body = parsed["notify_calls"][0][-1]
+
+    assert "combined menu" in body.lower(), body
+    assert "retire" not in body.lower(), (
+        f"names a retirement that cannot happen - there is no set: {body!r}")
+    assert "proposal_set_id" not in body, body
+    assert "most likely" in body.lower() and "contact them directly" in body.lower()

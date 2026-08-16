@@ -395,6 +395,42 @@ def test_learning_summary_counts_proposal_buckets_and_ignores_old(tmp_path: Path
     assert summary.proposal_health.select_failed == 1
 
 
+def test_learning_summary_counts_send_uncertain_as_sent_not_failed(
+    tmp_path: Path, now: datetime,
+) -> None:
+    """P1. A SEND_UNCERTAIN set was ACCEPTED by the bridge and most likely reached
+    the customer, so it must not land in `send_failed` — the counter an owner reads
+    as "options that never arrived". Counting it nowhere would be just as wrong in
+    the other direction: the set would vanish from the health summary entirely.
+
+    There is no dedicated counter on purpose: adding a field to
+    CateringLearningProposalHealth would be a rollback regression, since dc7a81a2
+    validates that model with extra="forbid" and reads the summary file
+    (send-daily-brief), while catering-state-downgrade does not cover that store.
+    Nothing is hidden by the coarser bucket — an uncertain send already pages the
+    owner and writes a catering_customer_send_unconfirmed audit row.
+    """
+    _write_json(tmp_path / "leads.json", {"leads": []})
+    created = now - timedelta(days=1)
+    _write_json(tmp_path / "proposals.json", {
+        "sets": [
+            _proposal_set("CPS-L9001-000001", status="SEND_UNCERTAIN", created_at=created),
+            _proposal_set("CPS-L9001-000002", status="SEND_FAILED", created_at=created),
+        ],
+    })
+    _write_json(tmp_path / "menu.json", {"updated_at": now.isoformat(), "items": []})
+
+    summary = mod._build_learning_summary(
+        tmp_path / "leads.json", tmp_path / "proposals.json", tmp_path / "menu.json",
+        now, 30,
+    )
+
+    assert summary.proposal_health.sent == 1, (
+        "an accepted-but-unacknowledged send belongs with the sends, not nowhere")
+    assert summary.proposal_health.send_failed == 1, (
+        "only the DEFINITE failure counts as a failed send")
+
+
 def test_learning_summary_degrades_on_bad_sources(tmp_path: Path, now: datetime) -> None:
     (tmp_path / "leads.json").write_text("not json", encoding="utf-8")
     (tmp_path / "proposals.json").write_text("not json", encoding="utf-8")

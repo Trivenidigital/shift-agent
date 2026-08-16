@@ -565,20 +565,88 @@ def _audit_failure(lead_id: str, reason: str, detail: str = "", proposal_set_id:
     )
 
 
+# What each send arm actually put in front of the customer. The page has to name
+# THIS, not "the menu options" for all three: the clarify arm sends a QUESTION, and
+# telling an owner a menu went out when a question did is the same class of untruth
+# as calling an accepted send a failure.
+# Each phrase is the SUBJECT of "<what> was composed", so every one is singular.
+_UNCERTAIN_SENT_KIND = {
+    "proposal_options": ("Catering options sent", "the menu of options"),
+    "recompose_clarify": ("Catering question sent",
+                          "a question asking which options to combine"),
+    "recompose_menu": ("Catering combined menu sent", "the combined menu they asked for"),
+}
+
+
+def _uncertain_page(lead_id: str, proposal_set_id: str, detail: str,
+                    sent_kind: str) -> tuple[str, str]:
+    """(title, message) for a send the bridge ACCEPTED but never acknowledged.
+
+    The failure copy was wrong twice over here — generation succeeded and the
+    bridge was reached — and it named no action, leaving an owner alarmed with
+    nothing to do.
+
+    THE ACTION NAMED HAS TO BE ONE THE READER CAN PERFORM. This page goes to the
+    OWNER, and an owner cannot reissue proposals: every generating path is gated
+    `sender_role != "owner"` (catering_dispatcher/SKILL.md) and both cf-router
+    entry points require a CUSTOMER inbound. So the copy names what the owner can
+    actually do — contact the customer — and describes the automatic reissue as
+    what it is: something the CUSTOMER triggers by asking again.
+
+    Set-specific sentences are guarded on `proposal_set_id`, because the two
+    recompose arms carry none: promising that "this set" is retired when there is
+    no set is a resolution that cannot happen.
+
+    ASCII only, and no new punctuation the notifier might render as markup: the
+    body already carries `lead_id=` underscores, and a page the owner cannot read
+    is the same as no page.
+
+    RAISES KeyError on an unknown arm, deliberately. A `.get(kind, proposal_options)`
+    default meant a future fourth send arm would render the proposal copy without
+    complaint — reproducing the exact defect this function exists to fix, silently.
+    A crash at the moment someone adds an arm is the cheapest possible signal.
+    """
+    headline, what = _UNCERTAIN_SENT_KIND[sent_kind]
+    subject = f"lead_id={lead_id}"
+    retirement = ""
+    if proposal_set_id:
+        subject += f" proposal_set_id={proposal_set_id}"
+        # "once that send succeeds" rather than "then": retirement rides on the
+        # REPLACEMENT send succeeding, so back-to-back uncertain sends leave this
+        # set un-retired.
+        retirement = (" If they ask for options again, a fresh set goes out and "
+                      "this one is retired once that send succeeds.")
+    return (
+        f"{headline} - delivery unconfirmed",
+        f"{subject}: {what} was composed and the bridge ACCEPTED it, so the customer "
+        f"most likely HAS it. This is not a failure and nothing was re-sent - what is "
+        f"missing is only the delivery receipt. Nothing needs doing unless the "
+        f"customer goes quiet; if they do, contact them directly.{retirement} "
+        f"Bridge evidence: {detail[:500]}"
+    )
+
+
 def _notify_owner_generation_failed(
     lead_id: str,
     reason: str,
     detail: str = "",
     proposal_set_id: str = "",
+    *,
+    send_status: str = "",
+    sent_kind: str = "",
 ) -> bool:
     """Returns whether the page actually landed. shift-agent-notify-owner exits
     non-zero when every channel failed, so the returncode is the only evidence the
     owner was reached — discarding it is what let the audit row claim a page that
     never happened."""
-    message = (
-        f"lead_id={lead_id} proposal_set_id={proposal_set_id or '(none)'} "
-        f"proposal generation failed: {reason}. {detail[:500]}"
-    )
+    if send_status == "send_uncertain":
+        title, message = _uncertain_page(lead_id, proposal_set_id, detail, sent_kind)
+    else:
+        title = "Catering proposal generation failed"
+        message = (
+            f"lead_id={lead_id} proposal_set_id={proposal_set_id or '(none)'} "
+            f"proposal generation failed: {reason}. {detail[:500]}"
+        )
     try:
         proc = subprocess.run(
             [
@@ -586,7 +654,7 @@ def _notify_owner_generation_failed(
                 "--priority",
                 "2",
                 "--title",
-                "Catering proposal generation failed",
+                title,
                 message,
             ],
             check=False,
@@ -610,6 +678,7 @@ def _fail_generation(
     proposal_set_id: str = "",
     *,
     send: tuple[str, str] | None = None,
+    sent_kind: str = "",
 ) -> bool:
     """The single failure record: audit row, ONE page, and — when the failure was a
     send (`send=(jid, send_status)`) — the customer_send_unconfirmed row carrying
@@ -618,13 +687,41 @@ def _fail_generation(
     The unconfirmed row lives here rather than in `_post` because `_post` returns
     BEFORE the page is attempted: a row written there could only ever guess at
     `owner_paged`, and it guessed True. Writing it after the page is what makes the
-    field evidence instead of decoration. Returns whether the owner was reached."""
-    _audit_failure(lead_id, reason, detail, proposal_set_id)
-    paged = _notify_owner_generation_failed(lead_id, reason, detail, proposal_set_id)
+    field evidence instead of decoration. Returns whether the owner was reached.
+
+    AN UNCERTAIN SEND EMITS NO FAILURE ROW. `CateringProposalGenerationFailed`
+    asserts two things that are both false when the bridge returned 2xx: that
+    generation failed (the menu composed fine) and, via its `reason`/`outcome`
+    fields, that the bridge was unreachable (it answered). Widening that Literal is
+    NOT the alternative — dc7a81a2 knows this tag, so a new value makes the old
+    reader REJECT a row it accepts today instead of degrading it to
+    `_UnknownLogEntry`; new tags are free, new values in a known tag are not. No
+    new tag is needed either, because the truthful row already exists on this path:
+    `_record_send_unconfirmed` writes `catering_customer_send_unconfirmed` with the
+    real `send_status` and `delivery_certainty`. So the false row is dropped, the
+    true one is kept, and the page still fires exactly once.
+
+    Suppression lives HERE rather than at the three call sites so every send arm
+    this script has behaves the same way.
+
+    A SEND FAILURE MUST NAME ITS ARM. `sent_kind` drives both the page copy and the
+    unconfirmed row's `send_kind`, and a default would let a future fourth send arm
+    inherit "proposal_options" silently — the same failure the strict lookup in
+    `_uncertain_page` closes, one level up. Non-send failures pass nothing, having
+    no arm to name."""
+    if send is not None and not sent_kind:
+        raise ValueError(
+            "a send failure must name its arm: pass sent_kind=<one of "
+            f"{sorted(_UNCERTAIN_SENT_KIND)}>"
+        )
+    jid, send_status = send if send is not None else ("", "")
+    if send_status != "send_uncertain":
+        _audit_failure(lead_id, reason, detail, proposal_set_id)
+    paged = _notify_owner_generation_failed(lead_id, reason, detail, proposal_set_id,
+                                            send_status=send_status, sent_kind=sent_kind)
     if send is not None:
-        jid, send_status = send
         _record_send_unconfirmed(jid, lead_id=lead_id, send_status=send_status,
-                                 detail=detail, paged=paged)
+                                 detail=detail, paged=paged, sent_kind=sent_kind)
     return paged
 
 
@@ -637,20 +734,23 @@ def _delivery_certainty(send_status: str) -> str:
 
 
 def _record_send_unconfirmed(jid: str, *, lead_id: str, send_status: str,
-                             detail: str, paged: bool) -> None:
+                             detail: str, paged: bool, sent_kind: str) -> None:
     """The truthful record of a send that did not confirm.
 
-    What was missing was never the alert — it was the STATUS. The pre-existing
-    failure row hardcodes reason="bridge_unreachable" (a schema Literal, so it
-    cannot carry the real value without a schemas.py change), which reports a
-    `send_uncertain` — the bridge ACCEPTED the menu and it most likely arrived —
-    as a definite non-delivery. This row carries what actually happened, including
-    whether the page that was supposed to surface it reached anyone."""
+    What was missing was never the alert — it was the STATUS. This row carries what
+    actually happened, including whether the page that was supposed to surface it
+    reached anyone.
+
+    On the UNCERTAIN arm it is now the ONLY row: `_fail_generation` no longer emits
+    `catering_proposal_generation_failed` there, because that row's `reason` and
+    `outcome` are the Literal "bridge_unreachable" — a claim of definite
+    non-delivery that contradicts this one. On a DEFINITE failure both rows are
+    written and they agree."""
     try:
         _append_audit(CateringCustomerSendUnconfirmed(
             type="catering_customer_send_unconfirmed", ts=_now(),
             lead_id=lead_id, script="create-catering-proposal-options",
-            send_kind="proposal_options", send_status=send_status,
+            send_kind=sent_kind, send_status=send_status,
             delivery_certainty=_delivery_certainty(send_status),
             detail=str(detail)[:2000], owner_paged=paged,
             logical_turn_id=_RUN_IDENTITY["logical_turn_id"],
@@ -746,15 +846,36 @@ def _emit_transition_refusals(refusals: list[dict]) -> None:
                 f"{type(e).__name__}: {e}\n")
 
 
-def _mark_send_failed(proposal_set_id: str, reason: str) -> list[dict]:
+def _unconfirmed_set_status(send_status: str) -> str:
+    """The proposal-set status for a send that did not confirm. Mirrors
+    `_delivery_certainty` one layer down: `send_uncertain` is the ONLY status that
+    is not a definite non-delivery, so it is the only one that must not be written
+    as SEND_FAILED."""
+    return "SEND_UNCERTAIN" if send_status == "send_uncertain" else "SEND_FAILED"
+
+
+def _mark_send_outcome(proposal_set_id: str, reason: str, send_status: str) -> list[dict]:
+    """Record what the send actually did.
+
+    This used to write SEND_FAILED unconditionally, discarding the status the
+    chokepoint returned — so a `send_uncertain` (bridge accepted the menu; it most
+    likely ARRIVED) was recorded as definite non-delivery, contradicting the
+    catering_customer_send_unconfirmed row written beside it by the same run.
+
+    `reason` is untouched by the split: on the uncertain path it already carries the
+    bridge's own ack body (`ack_parse_failed: ...` / `empty_message_id: ...`), which
+    is the evidence an operator resolves the row with. `outbound_message_id` is
+    cleared on BOTH paths and that is not a loss — the bridge returned no id in
+    either uncertain sub-case, so there has never been one to keep."""
+    to_status = _unconfirmed_set_status(send_status)
     refusals: list[dict] = []
     with FileLock(PROPOSALS_LOCK):
         store, status = load_model(PROPOSALS_PATH, CateringProposalStore, default=CateringProposalStore())
         assert_load_status_clean(PROPOSALS_PATH, status, context="proposal-options fail load")
         target = next(row for row in store.sets if row.proposal_set_id == proposal_set_id)
-        if not _transition_ok(target, "SEND_FAILED", "mark_send_failed", refusals):
+        if not _transition_ok(target, to_status, "mark_send_outcome", refusals):
             return refusals
-        target.status = "SEND_FAILED"
+        target.status = to_status
         target.failure_reason = reason[:200]
         target.outbound_message_id = ""
         atomic_write_json(PROPOSALS_PATH, store)
@@ -777,6 +898,15 @@ def _mark_sent_and_supersede(
         assert_load_status_clean(PROPOSALS_PATH, status, context="proposal-options sent load")
         target = next(row for row in store.sets if row.proposal_set_id == proposal_set_id)
         target_sequence = _proposal_sequence(target.proposal_set_id)
+        # DELIBERATELY still SENT-only, unlike the supersede loop below, which P1
+        # widened to SEND_UNCERTAIN. This asks a different question — "did a later
+        # set already go out, so THIS one must not become the live set?" — and it
+        # takes two concurrent generator runs to reach a disagreement between the
+        # two. If it is reached, the outcome is fail-closed: the older set becomes
+        # SENT while the newer uncertain set is the max-sequence row, so
+        # `_latest_proposal_for_lead` refuses the customer rather than letting them
+        # select. Widening it would change which set is live, which is a
+        # customer-visible call and not part of the P1 change.
         has_later_sent = any(
             row.lead_id == lead_id
             and row.status == "SENT"
@@ -786,7 +916,15 @@ def _mark_sent_and_supersede(
         for row in store.sets:
             if (
                 row.lead_id == lead_id
-                and row.status == "SENT"
+                # P1: SEND_UNCERTAIN is retired here too. Its menu most likely
+                # REACHED the customer, so a newer set genuinely supersedes it in
+                # their hands — and without this the SEND_UNCERTAIN -> SUPERSEDED
+                # edge would be one nothing ever takes, i.e. a resolution the
+                # state machine advertises and no writer performs.
+                # NOT symmetric with SEND_FAILED, deliberately: a definitely-failed
+                # set was never in the customer's hands, so there is nothing for a
+                # later set to supersede, and it stays terminal.
+                and row.status in ("SENT", "SEND_UNCERTAIN")
                 and row.proposal_set_id != proposal_set_id
                 and _proposal_sequence(row.proposal_set_id) < target_sequence
             ):
@@ -1016,7 +1154,8 @@ def _run_recompose(args) -> int:
             args.customer_jid, BRIDGE_PREFIX + plan["message"], lead_id=args.lead_id)
         if not ok:
             _fail_generation(args.lead_id, "bridge_unreachable", mid_or_err,
-                             send=(args.customer_jid, _status))
+                             send=(args.customer_jid, _status),
+                             sent_kind="recompose_clarify")
             print(json.dumps({"mode": "clarify", "sent": False}))
             return EXIT_DEPENDENCY_DOWN
         _append_audit(CateringRecomposeClarifySent(
@@ -1069,7 +1208,8 @@ def _run_recompose(args) -> int:
     ok, mid_or_err, _status = _post(args.customer_jid, body, lead_id=args.lead_id)
     if not ok:
         _fail_generation(args.lead_id, "bridge_unreachable", mid_or_err,
-                         send=(args.customer_jid, _status))
+                         send=(args.customer_jid, _status),
+                         sent_kind="recompose_menu")
         print(json.dumps({"mode": "recomposed", "sent": False}))
         return EXIT_DEPENDENCY_DOWN
     _append_audit(CateringRecomposedMenuSent(
@@ -1172,9 +1312,11 @@ def main() -> int:
 
     ok, message_id_or_error, _status = _post(args.customer_jid, body, lead_id=args.lead_id)
     if not ok:
-        _emit_transition_refusals(_mark_send_failed(proposal_set_id, message_id_or_error))
+        _emit_transition_refusals(
+            _mark_send_outcome(proposal_set_id, message_id_or_error, _status))
         _fail_generation(args.lead_id, "bridge_unreachable", message_id_or_error,
-                         proposal_set_id, send=(args.customer_jid, _status))
+                         proposal_set_id, send=(args.customer_jid, _status),
+                         sent_kind="proposal_options")
         print(json.dumps({"proposal_set_id": proposal_set_id, "sent": False}))
         return EXIT_DEPENDENCY_DOWN
 
