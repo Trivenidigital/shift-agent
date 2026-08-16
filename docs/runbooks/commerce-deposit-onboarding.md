@@ -19,20 +19,25 @@ The `.ssh_*.txt` files are local operator scratch files. Do not commit them, and
 
 ## Why this runbook exists
 
-PR #324 wired Catering Agent #2 to the Commerce slice-1 primitives. After deploy, qualifying catering leads (headcount ≥ `cfg.catering.deposit_threshold_guests` AND `quote_total_usd > 0` AND `cfg.catering.deposit_pct > 0`) automatically trigger a deposit link in WhatsApp after owner approval.
+PR #324 wired Catering Agent #2 to the Commerce slice-1 primitives. After deploy, qualifying catering leads (`cfg.catering.enabled` AND `cfg.catering.deposit_pct > 0` AND headcount ≥ `cfg.catering.deposit_threshold_guests` AND `quote_total_usd > 0`) automatically trigger a deposit link in WhatsApp after owner approval.
 
-**Default behaviour with no operator action:** `cfg.commerce.payment_checkout_url_template` defaults to `""`. Every qualifying lead gets the fail-closed customer copy `"Payment link is not configured yet. We'll send it when it's ready."` until the operator configures the template.
+**Default behaviour with no operator action:** nothing mints — `cfg.catering.deposit_pct` defaults to `0`. Once the percentage is armed (Step 3), the *next* thing that can bite is an unset `cfg.commerce.payment_checkout_url_template`, which defaults to `""`: every qualifying lead then gets the fail-closed customer copy `"Payment link is not configured yet. We'll send it when it's ready."` until the operator configures the template.
 
 This is correct — but it's also dead-on-arrival from the customer's POV. This runbook tells the operator how to configure it.
 
-> **⚠️ Ordering matters — configure OR disable *before* the first qualifying lead.**
-> The deposit hook ships **armed** (`cfg.catering.deposit_pct` defaults to `0.25`,
-> `> 0`). If a qualifying lead reaches `SENT_TO_CUSTOMER` while the template is still
-> empty, the system mints an intent and sends the "not configured yet" promise it
-> then **cannot auto-fulfil** (re-invoke no-ops — see Steps 5, 6, 6a). If you are not
-> ready to accept deposits yet, set the Step 7 kill switch (`deposit_pct: 0`) **now**,
-> not after. Confirm current runtime posture:
-> `ssh main-vps 'grep -E "deposit_pct|payment_checkout_url_template" /opt/shift-agent/config.yaml'`.
+> **⚠️ Ordering matters — configure the template *before* you arm the percentage.**
+> The deposit hook ships **disarmed**: `cfg.catering.deposit_pct` defaults to `0`,
+> `config.yaml.template` states `deposit_pct: 0` explicitly, and the mint additionally
+> requires `cfg.catering.enabled`. Nothing mints until an operator deliberately sets a
+> nonzero percentage on this customer — doing that is the arming act this runbook
+> walks through, and there is no step you must remember in order to stay safe.
+> The ordering risk is on the way IN, not the way out: if you set `deposit_pct > 0`
+> while the template is still empty, the next qualifying lead to reach
+> `SENT_TO_CUSTOMER` mints an intent and sends the "not configured yet" promise the
+> system then **cannot auto-fulfil** (re-invoke no-ops — see Steps 5, 6, 6a). So
+> configure the template (Step 2), verify it renders, and only then set the
+> percentage (Step 3). Confirm current runtime posture:
+> `ssh main-vps 'grep -E "enabled|deposit_pct|payment_checkout_url_template" /opt/shift-agent/config.yaml'`.
 
 ---
 
@@ -88,18 +93,29 @@ minimum_deposit_cents: 500
 
 ---
 
-## Step 3 — Configure the deposit-trigger thresholds (optional; defaults are sane)
+## Step 3 — Arm the deposit percentage (REQUIRED — deposits ship off)
 
-Default behaviour:
+What a freshly provisioned box carries. This mints nothing:
 
 ```yaml
 catering:
-  enabled: true
-  deposit_threshold_guests: 50   # inclusive — 50-guest events trigger the deposit
+  enabled: false
+  deposit_threshold_guests: 50   # inclusive — 50-guest events would trigger the deposit
+  deposit_pct: 0                 # DISARMED — shipped default, no deposit is ever minted
+```
+
+**Arming is deliberate and this is the step that does it.** Do it only after Step 2
+verified that `payment_checkout_url_template` renders, because a nonzero percentage
+with an empty template sends a promise the system cannot auto-fulfil:
+
+```yaml
+catering:
+  enabled: true                  # required — the mint checks this first
   deposit_pct: 0.25              # 25% of quote_total_usd
 ```
 
-To **disable the entire deposit hook** (kill switch — safe rollback without redeploying):
+To **disable the entire deposit hook again** (kill switch — safe rollback without
+redeploying; also the state every box starts in):
 
 ```yaml
 catering:
@@ -161,15 +177,24 @@ python3 /usr/local/bin/catering-mint-deposit --lead-id LSMOKE
 # Then read .ssh_commerce_deposit_smoke.txt locally.
 ```
 
-**Expected outcome (template configured):**
+> **Precondition — this smoke only exercises the mint on an ARMED box.** Line
+> `cp /opt/shift-agent/config.yaml ./config.yaml` copies the *live* config, so the
+> smoke inherits that customer's real switches. If `catering.enabled` is false or
+> `deposit_pct` is still `0` (the shipped default — a box that has not done Step 3
+> yet), `_should_mint_deposit` refuses first and you get **`{"noop": "threshold_not_met"}`
+> at exit 0**, no audit rows, no bridge attempt. That is the gate working, not a
+> failure. Run this smoke *after* Step 3, or point `SHIFT_AGENT_CONFIG_PATH` at a
+> scratch config with both switches set.
+
+**Expected outcome (armed box, template configured):**
 - Exit code 6 (`bridge_send_failed` — the fake phone `+15550000099` doesn't exist on WhatsApp, so the bridge POST fails; this is expected and proves the script reached the bridge stage)
 - Audit log shows the full attempted/failed/voided/cancelled triple
 - Order in `cancelled` state (slice-2.5 ledger-cleanliness fix)
 
-**Expected outcome (template `""`):**
+**Expected outcome (armed box, template `""`):**
 - Same as above but with the "Payment link is not configured yet" copy attempted instead of a real URL
 
-If exit code is something other than 6 (e.g., 2 = invalid input, 5 = schema violation), check the audit log row + stderr for the failure reason.
+If exit code is something other than 6, check the audit log row + stderr for the failure reason — except exit 0 with `noop: threshold_not_met`, which means the deposit path is disarmed (see the precondition above) rather than broken. Other codes: 2 = invalid input, 5 = schema violation.
 
 **Cleanup:**
 ```bash
@@ -192,7 +217,7 @@ ssh main-vps 'grep -E "catering_deposit_link_(sent|failed)" /opt/shift-agent/log
 ```
 
 - **`catering_deposit_link_sent` with `url_status="configured"`** → happy path; customer received the link
-- **`catering_deposit_link_sent` with `url_status="unconfigured"`** → template is empty; operator forgot Step 2. Customer got the "not configured yet" copy. **⚠️ A plain re-invoke does NOT fix this** — the unconfigured send still persisted `lead.deposit_payment_intent_id` and set `deposit_status="unconfigured"`, so re-invoking `catering-mint-deposit --lead-id <id>` returns `noop: already_minted` (see Step 6). To actually deliver the real link the operator must first clear the stale intent — see **Step 6a — Unconfigured-send remediation**. The durable fix is to configure Step 2 (or set the Step 7 kill switch) **before** any qualifying lead arrives.
+- **`catering_deposit_link_sent` with `url_status="unconfigured"`** → template is empty; operator forgot Step 2. Customer got the "not configured yet" copy. **⚠️ A plain re-invoke does NOT fix this** — the unconfigured send still persisted `lead.deposit_payment_intent_id` and set `deposit_status="unconfigured"`, so re-invoking `catering-mint-deposit --lead-id <id>` returns `noop: already_minted` (see Step 6). To actually deliver the real link the operator must first clear the stale intent — see **Step 6a — Unconfigured-send remediation**. The durable fix is ordering, not vigilance: this state is only reachable on a box where someone armed `deposit_pct` (Step 3) ahead of the template (Step 2), so complete Step 2 first and the failure cannot occur. A box left at the shipped default never lands here.
 - **`catering_deposit_link_failed`** → mint or send failure. Pushover P1 fires on `bridge_send_failed`. Check the `reason` field:
   - `below_minimum` → quote total too small for deposit; expected
   - `cart_build_failed` / `order_create_failed` / `intent_mint_failed` → operator-side bug; check stderr in journald
@@ -268,12 +293,11 @@ the stale intent first. **This is manual state surgery — do it under
    intent and sends the real link (`url_status="configured"`,
    `deposit_status="awaiting_payment"`).
 
-> **Preferred: avoid this path entirely.** If no payment template is ready, set the
-> Step 7 kill switch (`cfg.catering.deposit_pct: 0`) **before** any qualifying
-> (≥ `deposit_threshold_guests`, quoted, owner-approved) lead arrives. That prevents
-> the system from minting an unfulfillable "we'll send it when it's ready" promise in
-> the first place. A future slice-3 operator remint/void tool will make Step 6a a
-> one-command action; today it is manual.
+> **Preferred: avoid this path entirely.** If no payment template is ready, do not
+> arm Step 3 — leave `cfg.catering.deposit_pct` at the shipped `0`. A box only reaches
+> this remediation because someone armed the percentage ahead of the template, so the
+> way to never need it is to complete Step 2 first. A future slice-3 operator
+> remint/void tool will make Step 6a a one-command action; today it is manual.
 
 ---
 
@@ -288,6 +312,8 @@ catering:
 ```
 
 Effect: `_should_mint_deposit` returns False for every lead → hook short-circuits before any commerce primitive runs. The next `apply-catering-owner-decision` invocation picks up the new config (no restart needed; YAML re-read on each invocation).
+
+Either condition alone is sufficient to disarm: the predicate requires **both** `cfg.catering.enabled` (checked first) and `cfg.catering.deposit_pct > 0`, so setting `enabled: false` also stops every mint — though on such a box `create-catering-lead` already refuses to create the lead at all, so `deposit_pct: 0` is the switch to reach for when catering itself must keep running.
 
 ---
 

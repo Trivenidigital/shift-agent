@@ -45,6 +45,7 @@ def _should_mint_deposit(cfg, lead) -> bool:
     """Threshold predicate per design §2 'Threshold logic'.
 
     Returns True only when ALL of:
+    - cfg.catering.enabled (a box that isn't running catering never mints)
     - cfg.catering.deposit_pct > 0 (kill switch off)
     - lead.extracted.headcount is set
     - headcount >= cfg.catering.deposit_threshold_guests (inclusive — Reviewer B MEDIUM-1)
@@ -52,6 +53,11 @@ def _should_mint_deposit(cfg, lead) -> bool:
     - per-guest spend is plausible (BL-CATER-03 — fail-closed unscaled-basket guard)
     - lead has not already been minted (idempotent skip via deposit_payment_intent_id)
     """
+    # Both switches must be affirmative. deposit_pct alone is not enough: a box
+    # provisioned with catering off still carried a percentage, so the arming of
+    # an irreversible money path rested on one config value nobody had to set.
+    if not cfg.catering.enabled:
+        return False
     if cfg.catering.deposit_pct <= 0:
         return False
     if lead.extracted is None or lead.extracted.headcount is None:

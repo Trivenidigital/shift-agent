@@ -185,6 +185,13 @@ ssh main-vps '/usr/local/bin/catering-mint-deposit --lead-id LSMOKE_S3' > .ssh_c
 # Then read .ssh_commerce_mint_smoke.txt locally.
 ```
 
+   > **Precondition:** this runs against the live config, and the mint requires
+   > `cfg.catering.enabled` AND `cfg.catering.deposit_pct > 0`. `deposit_pct` ships
+   > at `0`, so on a box that has not armed deposits the command returns
+   > **`{"noop": "threshold_not_met"}` at exit 0** with no audit row — the gate
+   > refusing, not Stripe failing. Arm it (`commerce-deposit-onboarding.md` Step 3)
+   > before reading step 3 below as a failure.
+
 3. The audit log should show a `commerce_payment_intent_minted` row with `provider=stripe` and the lead's `deposit_payment_intent_id` populated.
 4. Open the returned Stripe Payment Link URL in a browser. Use Stripe's test card: `4242 4242 4242 4242`, any future expiry, any 3-digit CVC, any ZIP.
 5. Complete the payment.
