@@ -399,6 +399,151 @@ def test_negated_logo_caption_is_not_a_brand_asset(monkeypatch, caption):
     assert w.sends == []
 
 
+# A complaint points at the attachment just as readily as a donation does, so
+# the deictic discriminates nothing on its own. Every one of these binds a
+# deictic to a styling noun and still donates nothing — and the defect frame
+# misses most of them ("comes out" vs "came out", "fixing" vs "fix", "ends up",
+# "print badly", "disappoints", "renders poorly"). That list has no end, which
+# is the point: durability-only evidence now requires an AFFIRMATIVE offer
+# rather than the mere absence of a complaint, restoring the closable-side rule
+# the rest of the gate already follows.
+DURABLE_DEICTIC_COMPLAINTS = [
+    "this design always comes out too dark",
+    "this style always ends up too busy",
+    "this theme always needs fixing",
+    "these colours always print badly",
+    "this look always disappoints going forward",
+    "this design always renders poorly",
+]
+
+
+@pytest.mark.parametrize("caption", DURABLE_DEICTIC_COMPLAINTS)
+def test_durable_complaint_pointing_at_the_attachment_still_declines(monkeypatch, caption):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, caption)
+
+    assert w.store_calls == []
+    assert result is None
+    assert w.sends == []
+
+
+# The mirror of the rows above: same shape, an offer instead of a complaint.
+# Added deliberately as VARIANTS of existing rows — the previous corpus was
+# uniformly deictic-free, so it proved only half the class.
+@pytest.mark.parametrize("caption", [
+    "use this design going forward",
+    "please use these colours from now on",
+    "keep this theme going forward",
+])
+def test_durable_offer_pointing_at_the_attachment_is_captured(monkeypatch, caption):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, caption)
+
+    assert len(w.store_calls) == 1
+    assert result is not None and result["action"] == "skip"
+
+
+# Three descriptive adjectives is ordinary phrasing. B0004 survived only by
+# saying "the same theme" with zero words in between.
+@pytest.mark.parametrize("caption", [
+    "use the same clean modern minimal theme going forward",
+    "please follow this bright festive traditional style going forward",
+    "from now on use the same warm earthy south indian palette",
+])
+def test_durable_donation_with_adjectives_before_the_noun_is_captured(monkeypatch, caption):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, caption)
+
+    assert len(w.store_calls) == 1
+    assert result is not None and result["action"] == "skip"
+
+
+# A possessive appears in complaints as freely as in donations, so the
+# supplied-artifact rule is bound to a donating context: a substitution verb
+# acting on a DEICTIC object. "replace this with our logo" donates; "the flyer
+# with our logo is wrong" merely mentions one.
+@pytest.mark.parametrize("caption", [
+    "the flyer with our logo is wrong",
+    "the banner with our watermark came out blurry",
+    "replace the date with our template date",
+])
+def test_possessive_artifact_in_a_complaint_is_not_an_offer(monkeypatch, caption):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, caption)
+
+    assert w.store_calls == []
+    assert result is None
+
+
+# Regression guard: a negation elsewhere in a genuine donation must not
+# suppress the offer.
+@pytest.mark.parametrize("caption", [
+    "here is our logo, do not stretch it",
+    "use this template going forward, never change the colors",
+    "save our letterhead, don't crop it",
+])
+def test_negation_elsewhere_does_not_suppress_a_genuine_offer(monkeypatch, caption):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, caption)
+
+    assert len(w.store_calls) == 1
+    assert result is not None and result["action"] == "skip"
+
+
+def test_durable_style_near_miss_decline_is_countable(monkeypatch):
+    """A durable styling caption that fails to qualify used to decline as plain
+    `no_brand_asset_evidence` — silent and uncountable, which is the exact
+    property that made the first false-negative class expensive to find."""
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, "this design always comes out too dark")
+
+    assert w.store_calls == []
+    assert result is None
+    rows = [r for r in w.audits
+            if r.get("reason") == "flyer_brand_asset_declined_over_evidence"]
+    assert len(rows) == 1
+    assert "durable_style_without_donation" in rows[0]["detail"]
+
+
+def test_durable_style_capture_is_audited(monkeypatch):
+    """Defense in depth. Complaint phrasing is open-ended, so a fourth leak
+    shape is possible; auditing the CAPTURES of this one class is what makes a
+    residual leak detectable in production instead of silent."""
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions)
+
+    result = _intercept(hooks, "use this theme going forward")
+
+    assert len(w.store_calls) == 1
+    assert result is not None and result["action"] == "skip"
+    saved = [r for r in w.audits if r.get("reason") == "flyer_brand_asset_saved"]
+    assert saved, "capture must still emit its saved row"
+    assert any("durable_style_donation=true" in r.get("detail", "") for r in saved)
+
+
+def test_non_durable_capture_is_not_marked_durable(monkeypatch):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions)
+
+    _intercept(hooks, "Here is our new logo")
+
+    saved = [r for r in w.audits if r.get("reason") == "flyer_brand_asset_saved"]
+    assert saved
+    assert not any("durable_style_donation=true" in r.get("detail", "") for r in saved)
+
+
 def test_supplied_artifact_survives_its_edit_verb(monkeypatch):
     """"replace this with our logo" reads as an edit, but the edit verb acts on
     something else and the artifact is what is being handed over. Ordering the

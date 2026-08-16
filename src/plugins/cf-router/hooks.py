@@ -4451,28 +4451,56 @@ _DURABLE_SCOPE = re.compile(
     re.IGNORECASE,
 )
 _STYLE_NOUN = r"(?:theme|style|look|design|colou?rs?|fonts?|palette|branding)"
+_STYLE_NOUN_RE = re.compile(r"\b" + _STYLE_NOUN + r"\b", re.IGNORECASE)
+# Four words of slack before the noun: "the same warm earthy south indian
+# palette" is ordinary phrasing, and B0004 survived the previous two-word
+# window only by saying "the same theme" with nothing in between. Widening is
+# safe in both directions — every known complaint in this class binds its
+# deictic at zero words ("this design", "these colours"), so a wider window
+# admits no complaint that a narrow one excluded.
 _ATTACHED_STYLE_REFERENCE = re.compile(
-    r"\b(?:this|these|the\s+same|attached|uploaded)\s+(?:\w+\s+){0,2}" + _STYLE_NOUN + r"\b"
-    r"|\b" + _STYLE_NOUN + r"\b\s*(?:\w+\s+){0,2}"
+    r"\b(?:this|these|the\s+same|attached|uploaded)\s+(?:\w+\s+){0,4}" + _STYLE_NOUN + r"\b"
+    r"|\b" + _STYLE_NOUN + r"\b\s*(?:\w+\s+){0,4}"
     r"(?:like\s+(?:this|these)|of\s+this|from\s+this|in\s+this)\b",
     re.IGNORECASE,
 )
 
 
+def _durable_style_signal(text: str) -> bool:
+    """The near-miss shape: a durable styling caption, before it has qualified.
+
+    Used only to make the decline COUNTABLE. Without it this class declines as
+    plain `no_brand_asset_evidence` — silent and uncountable, which is the
+    property that made the first false-negative class expensive to find.
+    """
+    body = text or ""
+    return bool(_DURABLE_SCOPE.search(body)) and bool(_STYLE_NOUN_RE.search(body))
+
+
 def _durable_style_donation(text: str) -> bool:
     """Is this a durable styling instruction that DONATES the attached art?
 
-    Kept out of `_BRAND_ASSET_EVIDENCE` deliberately: the temporal half of this
-    rule used to be an alternative there, and the same five phrases also sat in
-    `_BRAND_ASSET_OFFER`. That made the pair circular — every caption authorized
-    by durability satisfied the offer test with its own durability phrase, so
-    `_BRAND_ASSET_DEFECT_FRAME` could never veto the class it was added to veto.
-    Sixteen durable complaints and directives authorized as a result. Splitting
-    the rule out and requiring an attachment deictic closes it at the source
-    rather than patching the interaction.
+    THREE conditions, and the third is the one that makes the class safe.
+
+    This rule is the only place in the gate that ever authorized on the absence
+    of a complaint rather than the presence of an offer, and that inversion is
+    why the class regrew in a new shape on each of three review passes. A
+    complaint points AT the attachment as readily as a donation does ("this
+    design always comes out too dark"), so the deictic discriminates nothing on
+    its own, and no defect-frame vocabulary is ever finished — "comes out",
+    "ends up", "print badly", "renders poorly", "needs fixing" were all missed.
+    Requiring an affirmative offer puts this class back on the closable side
+    that the rest of the gate is built on.
+
+    Kept out of `_BRAND_ASSET_EVIDENCE` deliberately: the temporal half used to
+    be an alternative there while the same five phrases also sat in
+    `_BRAND_ASSET_OFFER`, which made the pair mutually self-satisfying and the
+    defect frame structurally unreachable for the class.
     """
     body = text or ""
-    return bool(_DURABLE_SCOPE.search(body)) and bool(_ATTACHED_STYLE_REFERENCE.search(body))
+    if not _DURABLE_SCOPE.search(body) or not _ATTACHED_STYLE_REFERENCE.search(body):
+        return False
+    return bool(_BRAND_ASSET_OFFER.search(body)) and not _BRAND_ASSET_NEGATED_OFFER.search(body)
 
 # Genuine menu/price semantics — menu-ish media goes to normal routing, never to
 # the brand store. Deliberately NOT gated on the classifier's role, for two
@@ -4532,13 +4560,20 @@ _BRAND_ASSET_DEFECT_FRAME = re.compile(
 # The last alternative is the "supplied artifact" shape: in "replace this with
 # our logo" the edit verb acts ON something else and the artifact is what is
 # being HANDED OVER, so the caption is a donation despite reading as an edit.
-# It is bound to a possessive ("our"/"my"/"this"/"the attached") on purpose —
-# "replace the logo with a bigger one" supplies nothing and stays declined.
+#
+# A possessive alone does NOT make it one — possessives appear in complaints
+# just as freely ("the flyer with our logo is wrong", "the banner with our
+# watermark came out blurry"), and reading those as offers skipped the defect
+# gate entirely. So the alternative is bound to a DONATING CONTEXT: a
+# substitution verb acting on a deictic object. "replace THIS with our logo"
+# donates; "replace the date with our template date" substitutes one field for
+# another and donates nothing.
 _BRAND_ASSET_OFFER = re.compile(
     r"\b(?:here\s+is|here's|here\s+are|this\s+is|these\s+are|attached\s+is|attaching|"
     r"i(?:'m|\s+am)\s+(?:sending|attaching|uploading)|want\s+you\s+to|"
-    r"(?:please\s+)?(?:use|save|keep|store|apply))\b"
-    r"|\b(?:with|to)\s+(?:our|my|this|the\s+attached)\s+(?:\w+\s+){0,2}"
+    r"(?:please\s+)?(?:use|save|keep|store|apply|follow))\b"
+    r"|\b(?:replace|swap|change|update)\s+(?:this|that|these|those|it)\b[^.!?]{0,20}"
+    r"\b(?:with|to)\s+(?:our|my|the\s+attached)\s+(?:\w+\s+){0,2}"
     r"(?:logos?|watermarks?|branding|templates?|letterheads?|designs?|artworks?)\b",
     re.IGNORECASE,
 )
@@ -4641,8 +4676,23 @@ def _flyer_brand_asset_authorized(text: str, media_path: str) -> tuple[bool, str
     # "sample" or "reference" anywhere in the caption, which is the standalone
     # evidence this fix exists to reject.
     if not evidence:
+        if _durable_style_signal(body):
+            # Countable, not silent. This is the shape that leaked in a new
+            # phrasing on each of three passes, so a residual leak has to be
+            # visible in production rather than found by a fourth review.
+            return False, "durable_style_without_donation"
         return False, f"no_brand_asset_evidence (role={role})"
     return True, "brand_artifact_evidence"
+
+
+def _decline_is_countable(decision: str) -> bool:
+    """Does this decline belong in the audited false-negative class?
+
+    Two shapes: a decline that overrode explicit brand evidence, and a durable
+    styling caption that did not qualify as a donation. Ordinary no-evidence
+    declines are the common case and stay silent, or the signal drowns in them.
+    """
+    return decision.endswith("_over_evidence") or decision == "durable_style_without_donation"
 
 
 def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_path: str,
@@ -4719,16 +4769,22 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
                 reason="flyer_brand_asset_classifier_unavailable", chat_id=chat_id,
                 subprocess_rc=2, detail=decision[:500],
             )
-        elif decision.endswith("_over_evidence"):
-            # The false-negative class, made countable. A decline that overrode
-            # explicit brand evidence is the one an operator needs to see; a
-            # plain no-evidence decline is the common case and stays silent, or
-            # the signal drowns in it.
+        elif _decline_is_countable(decision):
+            # The false-negative class, made countable.
             actions.audit_intercepted(
                 reason="flyer_brand_asset_declined_over_evidence", chat_id=chat_id,
                 detail=f"decision={decision}; media_path={media_path}",
             )
         return None
+    # Defense in depth for the one class whose safety rests on open-ended
+    # language. Complaint phrasing has no closed vocabulary, so a fourth leak
+    # shape is possible; marking the CAPTURES makes a residual leak greppable in
+    # production within a day instead of waiting on a fifth review. Carried on
+    # the existing `flyer_brand_asset_saved` rows rather than a new audit reason,
+    # so it adds nothing to the widened-Literal rollback exposure.
+    durable_marker = (
+        "; durable_style_donation=true" if decision == "brand_artifact_evidence"
+        and _durable_style_donation(text or "") else "")
     active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)
 
     ok, detail, result = actions.trigger_store_flyer_brand_asset(
@@ -4776,7 +4832,7 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
                 actions.audit_intercepted(
                     reason="flyer_brand_asset_saved", chat_id=chat_id,
                     subprocess_rc=0 if preview_ok else 3,
-                    detail=f"project_id={project_id}; regenerated=true; status={result.get('next_status')}; ack_message_id={preview_mid}; ack_error={preview_err[:300]}",
+                    detail=f"project_id={project_id}; regenerated=true; status={result.get('next_status')}; ack_message_id={preview_mid}; ack_error={preview_err[:300]}{durable_marker}",
                 )
                 if preview_ok:
                     return {"action": "skip", "reason": f"cf-router flyer brand asset saved and regenerated {project_id}"}
@@ -4816,7 +4872,8 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
         subprocess_rc=0 if ack_ok else 3,
         detail=(
             f"status={result.get('next_status')}; customer_id={result.get('customer_id') or ''}; "
-            f"sender_role={role}; media_path={media_path}; ack_message_id={mid}; ack_error={err[:300]}"
+            f"sender_role={role}; media_path={media_path}; ack_message_id={mid}; "
+            f"ack_error={err[:300]}{durable_marker}"
         ),
     )
     return {"action": "skip",
