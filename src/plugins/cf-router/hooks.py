@@ -4411,26 +4411,46 @@ def _try_flyer_existing_onboarding_intercept(text: str, chat_id: str, event: Any
     return _try_flyer_onboarding_intercept(text, chat_id, event)
 
 
-# Roles that belong to another path entirely. `source_edit_template` is an
-# exact edit of the ATTACHED flyer and `menu_reference` is menu/price media to
-# extract from — neither is durable brand art, and both have arms of their own
-# further down dispatch. Vetoing here (before any evidence is weighed) is what
-# keeps "replace X with Y on this flyer" and "extract items from this menu" off
-# the brand-asset store even when the caption also names a brand artifact.
-_BRAND_ASSET_ROLE_VETO = ("source_edit_template", "menu_reference")
-
 # The deterministic sufficiency evidence: an explicit brand-artifact NOUN in the
 # visible caption. Context-dependent words are NOT evidence on their own — the
 # six-substring gate this replaces read "replace chicken with paneer", "sample
 # menu" and "brand new menu" as brand assets — so `sample` / `reference` / `old`
 # / `previous` qualify only when bound to a brand-artifact noun, and `brand`
 # only in a brand-artifact compound ("brand kit", "brand colors"), never bare.
+#
+# The final two alternatives (the same shape in either word order) cover what
+# the noun rule misses, and what the production store is mostly made of: a
+# DURABLE styling instruction naming no
+# artifact at all ("use this theme for all flyers going forward" — B0004, B0006
+# and B0008, the only asset active on the box today). Durability is what makes
+# it brand art rather than a one-off reference, so the temporal scope is
+# required: "can you redesign in this style" (B0007, filed in production as a
+# `logo`, which it is not) stays ambiguous and goes to normal routing. This is
+# caption evidence like every other alternative here — an active project is
+# still never sufficient.
 _BRAND_ASSET_EVIDENCE = re.compile(
     r"\b(?:logos?|letterheads?|watermarks?|branding)\b"
     r"|\bbrand\s*(?:kit|mark|book|guide|guidelines|colou?rs?|fonts?|assets?|identity)\b"
     r"|\btemplates?\b"
     r"|\b(?:sample|reference|old|previous|existing|past)\s+(?:\w+\s+){0,2}"
-    r"(?:flyer|flier|poster|banner|design|artwork|creative|template)s?\b",
+    r"(?:flyer|flier|poster|banner|design|artwork|creative|template)s?\b"
+    r"|\b(?:theme|style|look|design|colou?rs?|fonts?|palette)\b[^.!?]{0,80}"
+    r"\b(?:going\s+forward|from\s+now\s+on|from\s+here\s+on|in\s+(?:the\s+)?future|always)\b"
+    r"|\b(?:going\s+forward|from\s+now\s+on|from\s+here\s+on|in\s+(?:the\s+)?future|always)\b"
+    r"[^.!?]{0,80}\b(?:theme|style|look|design|colou?rs?|fonts?|palette)\b",
+    re.IGNORECASE,
+)
+
+# Genuine menu/price semantics. `classify_reference_role`'s `menu_reference`
+# branch (`reference_extract.py:135`) fires on the SINGULAR noun "flyer" with no
+# menu or price word anywhere — "this is the flyer template we use" classifies
+# as `menu_reference`. Vetoing on that role alone dropped six realistic template
+# uploads, so the veto is honored only when the caption actually names a menu,
+# a price list, prices or items. Without one, the turn falls through to the
+# evidence check; "sample menu template" and "this menu template - extract the
+# prices" name a menu and are still vetoed.
+_MENU_PRICE_SEMANTICS = re.compile(
+    r"\b(?:menus?|price\s*lists?|prices?|pricing|items?)\b",
     re.IGNORECASE,
 )
 
@@ -4474,27 +4494,40 @@ def _flyer_brand_asset_authorized(text: str, media_path: str) -> tuple[bool, str
 
         receipt / menu candidate -> handled by the cessions above this
         explicit flyer edit      -> vetoed here; the edit path owns it
+        menu/price media         -> vetoed here; the menu path owns it
         classifier says logo     -> authorized
-        explicit brand artifact  -> authorized
+        explicit brand evidence  -> authorized
         anything else            -> NOT authorized; normal routing
-        classifier failure       -> NOT authorized (reason `classifier_unavailable`)
+        classifier failure       -> NOT authorized (`classifier_unavailable`)
 
-    Returns `(authorized, reason)`. The reason distinguishes an ordinary decline
-    (no audit row — declining is the common case) from a fail-closed classifier
-    failure, which the caller audits.
+    The two vetoes are deliberately asymmetric. `source_edit_template` is a HARD
+    veto: the edit path owns those turns whatever the caption also says.
+    `menu_reference` is honored only alongside genuine menu/price semantics,
+    because that role fires on the bare singular "flyer" — see
+    `_MENU_PRICE_SEMANTICS`.
+
+    Returns `(authorized, reason)`. Three reason classes matter to the caller:
+    an ordinary decline (no audit row — declining is the common case), a
+    fail-closed `classifier_unavailable`, and a `..._over_evidence` decline
+    where brand-artifact evidence WAS present and a veto overrode it. That last
+    one is the false-negative class; it is rare and it is the one an operator
+    needs to be able to count, so the caller audits it.
     """
+    evidence = bool(_BRAND_ASSET_EVIDENCE.search(text or ""))
     try:
         role = _classify_flyer_reference_role(text, media_path)
     except Exception as e:  # noqa: BLE001 — a classifier failure must never write
         return False, f"classifier_unavailable: {type(e).__name__}: {e}"
-    if role in _BRAND_ASSET_ROLE_VETO:
-        return False, f"role_{role}"
+    if role == "source_edit_template":
+        return False, "role_source_edit_template" + ("_over_evidence" if evidence else "")
     if role == "logo":
         return True, "role_logo"
+    if role == "menu_reference" and _MENU_PRICE_SEMANTICS.search(text or ""):
+        return False, "role_menu_reference" + ("_over_evidence" if evidence else "")
     # Deliberately NOT keyed on `old_flyer_reference`: that role fires on a bare
     # "sample" or "reference" anywhere in the caption, which is the standalone
     # evidence this fix exists to reject.
-    if _BRAND_ASSET_EVIDENCE.search(text or ""):
+    if evidence:
         return True, "brand_artifact_evidence"
     return False, f"no_brand_asset_evidence (role={role})"
 
@@ -4566,13 +4599,21 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
     # project is context, not evidence that the attached media is brand art.
     authorized, decision = _flyer_brand_asset_authorized(text, media_path)
     if not authorized:
+        # Neither branch replies: the turn continues down dispatch, and an ack
+        # from this arm would double up with whichever arm actually claims it.
         if decision.startswith("classifier_unavailable"):
-            # Fail-closed, and traceable. No reply: the turn continues down
-            # dispatch, and an ack from this arm would double up with whichever
-            # arm actually claims it.
             actions.audit_intercepted(
                 reason="flyer_brand_asset_classifier_unavailable", chat_id=chat_id,
                 subprocess_rc=2, detail=decision[:500],
+            )
+        elif decision.endswith("_over_evidence"):
+            # The false-negative class, made countable. A decline that overrode
+            # explicit brand evidence is the one an operator needs to see; a
+            # plain no-evidence decline is the common case and stays silent, or
+            # the signal drowns in it.
+            actions.audit_intercepted(
+                reason="flyer_brand_asset_declined_over_evidence", chat_id=chat_id,
+                detail=f"decision={decision}; media_path={media_path}",
             )
         return None
     active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)

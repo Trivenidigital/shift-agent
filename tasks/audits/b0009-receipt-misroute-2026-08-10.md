@@ -31,20 +31,26 @@ caption `Expense receipt review this`. It was ingested by Flyer Studio as brand
 asset `B0009` (a "logo") instead of reaching the expense path, and the owner was
 told *"Logo saved and will be used for future flyers."*
 
-## Causal chain (verified against deployed code)
+## Causal chain (as it stood on 2026-08-10; line numbers are of that tree)
 
-1. `hooks.py:566` calls `_try_flyer_brand_asset_intercept` **before** the receipt
-   cession at `hooks.py:631`.
-2. In `_try_flyer_brand_asset_intercept` (`hooks.py:4238`):
-   - `if role == "owner": return None` — owner is exempt, but this sender
+Step 2's mechanism no longer exists — see **Root cause closed** below. Steps 1,
+3 and 4 are unchanged in the current tree.
+
+1. `hooks.py:566` called `_try_flyer_brand_asset_intercept` **before** the
+   receipt cession at `hooks.py:631`. (Today: `hooks.py:627` and `hooks.py:714`.
+   The ordering is deliberate and unchanged; the arm yields to the cession via
+   the `owner_receipt_candidate` snapshot rather than by being moved.)
+2. In `_try_flyer_brand_asset_intercept` (then `hooks.py:4238`):
+   - `if role == "owner": return None` — owner was exempt, but this sender
      resolved as **employee `e008`**, so the exemption did not apply.
    - `is_brand_asset = active_project is not None or explicit_asset_words`
    - The caption contained **no** asset words (`logo`/`template`/`sample`/
      `reference`/`brand`/`replace`). It was captured **because the chat had an
      active flyer project**.
-3. The receipt cession `_receipt_caption_cedes_to_dispatcher` (`hooks.py:4788`)
-   requires `role == "owner"` and so would have refused regardless — but it was
-   never reached, because step 2 returned terminally first.
+3. The receipt cession `_receipt_caption_cedes_to_dispatcher` (then
+   `hooks.py:4788`, today `hooks.py:5233`) requires `role == "owner"` and so
+   would have refused regardless — but it was never reached, because step 2
+   returned terminally first.
 4. The intent classifier that could have disambiguated **timed out**:
    `classifier_status:"timeout"`, `classifier_latency_ms:4001`,
    `decision_source:"none"`, `advisory_intent:"unknown"`. The deterministic
@@ -133,3 +139,27 @@ message sent, no routing/config/permission change, gateway healthy.
 Risk closed: `flyer_render.py:_active_brand_assets` filters
 `if asset.active and Path(asset.path).exists()` — B0009 now fails both
 conditions and cannot be selected by any generation path.
+
+## Root cause closed — branch `fix/flyer-brand-asset-classification`
+
+The 2026-08-11 actions above removed **this instance**. They did not remove the
+mechanism: `is_brand_asset = active_project is not None or explicit_asset_words`
+was still live, so the next uncaptioned photo sent during an open project would
+have been captured the same way. B0010 on 2026-08-12 was exactly that.
+
+The mechanism is gone. `_flyer_brand_asset_authorized` (`hooks.py:4486`) now
+asks `reference_extract.classify_reference_role` what the media is, and an
+active project is not an input to the decision at all — it is read only for the
+regeneration branch that runs *after* a capture is authorized. Authorization
+requires the classifier's `logo` verdict or explicit brand evidence in the
+caption; a classifier failure writes nothing. The verbatim inbound of this
+incident is pinned as a test cell
+(`tests/test_flyer_brand_asset_routing.py::test_b0009_live_inbound_is_no_longer_captured_as_a_logo`),
+in a file wired into `flyer-premium-ci`.
+
+**Still true, and separate:** this receipt reaches no expense path. The sender
+resolved as employee `e008` without owner capability, so
+`_receipt_caption_cedes_to_dispatcher` still refuses it — step 3 above is
+unchanged. What changed is only that the receipt is no longer written into the
+brand-asset store on its way past. The owner-identity topology finding
+(`WHATSAPP_OWNER_JID` is the bridge's own account) remains the blocker there.

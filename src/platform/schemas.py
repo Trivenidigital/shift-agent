@@ -7032,6 +7032,7 @@ class CfRouterIntercepted(_BaseEntry):
         "flyer_brand_asset_saved",
         "flyer_brand_asset_failed",
         "flyer_brand_asset_classifier_unavailable",
+        "flyer_brand_asset_declined_over_evidence",
         "flyer_business_scope_blocked",
         "flyer_reference_manual_review_queued",
         "flyer_reference_scope_blocked",

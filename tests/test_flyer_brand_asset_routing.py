@@ -270,6 +270,107 @@ def test_explicit_reference_art_request_is_a_brand_asset(monkeypatch):
     assert result is not None and result["action"] == "skip"
 
 
+# `classify_reference_role`'s `menu_reference` branch fires on the SINGULAR noun
+# "flyer" with no menu or price semantics anywhere in the caption
+# (`reference_extract.py:135`: `(?:sample|reference|attached|uploaded|this)
+# .{0,30}(?:flyer|menu|price\s*list)`). Vetoing on the role alone therefore
+# dropped six realistic template uploads that the pre-fix code did capture — the
+# false-negative class. `\bflyer\b` does not match "flyers", which is why a
+# plural-only positive cell hid this; both forms are pinned below.
+FLYER_TEMPLATE_CAPTIONS = [
+    "this is the flyer template we use",
+    "use this flyer as our template going forward",
+    "sample flyer we like - use this style for our brand",
+    "attached is the flyer template for our brand",
+    "this flyer template is what we always use",
+    "please save this as our flyer template",
+]
+
+
+@pytest.mark.parametrize("caption", FLYER_TEMPLATE_CAPTIONS)
+def test_flyer_template_upload_is_a_brand_asset(monkeypatch, caption):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, caption)
+
+    assert len(w.store_calls) == 1
+    assert result is not None and result["action"] == "skip"
+
+
+@pytest.mark.parametrize("caption", [
+    "Please use this template for all our flyers",   # plural
+    "please use this template for our flyer",        # singular — the failing form
+    "here is our old flyer, use it as reference artwork",   # singular
+    "here are our old flyers, use them as reference artwork",  # plural
+])
+def test_template_and_reference_art_captured_in_both_number_forms(monkeypatch, caption):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions)
+
+    result = _intercept(hooks, caption)
+
+    assert len(w.store_calls) == 1
+    assert result is not None and result["action"] == "skip"
+
+
+# Real captions from `state/flyer/customers.json` on the box (B0004, B0006,
+# B0008 — B0008 is the ONLY brand asset active in production today). A durable,
+# forward-looking styling instruction names no logo and no template, so a
+# noun-only evidence rule silently drops the operator's actual brand uploads.
+# The durability is the evidence, and it is caption evidence, not project
+# context — an active project is still never sufficient.
+@pytest.mark.parametrize("caption", [
+    "I'd like you to use the same theme and style for all flyers going forward for Lakshmi's Kitchen",
+    "For all Lakshmi's kitchen flyers use this theme going forward.",
+    "I want you to change theme of my fliers going forward, can you follow theme like this",
+])
+def test_durable_brand_styling_instruction_is_a_brand_asset(monkeypatch, caption):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, caption)
+
+    assert len(w.store_calls) == 1
+    assert result is not None and result["action"] == "skip"
+
+
+def test_one_off_style_request_is_not_a_brand_asset(monkeypatch):
+    """B0007's real caption. A style reference for THIS flyer carries no durable
+    scope, so it is ambiguous media and belongs to normal routing — it was
+    filed as a `logo` in production, which it plainly is not."""
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, "Can you redesign in this style")
+
+    assert w.store_calls == []
+    assert result is None
+
+
+# The menu/price side of the veto must hold exactly as firmly as the positives.
+@pytest.mark.parametrize("caption", [
+    "sample menu template",
+    "this menu template - extract the prices",
+    "extract the items from this menu",
+    "our new price list attached",
+    "take the items from this price list",
+    "extract prices from this attached menu",
+    "use this as a reference",
+    "sample",
+    "brand",
+    "always add our phone number to the flyer",
+])
+def test_menu_price_and_bare_word_captions_are_not_brand_assets(monkeypatch, caption):
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, caption)
+
+    assert w.store_calls == []
+    assert result is None
+
+
 def test_brand_asset_with_active_project_still_regenerates(monkeypatch):
     """Authorization changed; what happens once authorized did not."""
     hooks, actions = _load_plugin_modules()
@@ -282,10 +383,17 @@ def test_brand_asset_with_active_project_still_regenerates(monkeypatch):
     assert result is not None and result["action"] == "skip"
 
 
-def test_pdf_letterhead_template_is_still_a_brand_asset(monkeypatch):
-    """A non-image brand asset is unsupported for REFERENCE EXTRACTION but is a
-    perfectly good stored template — the classifier's media verdict must not
-    veto an explicit brand-artifact request."""
+def test_pdf_media_does_not_veto_an_explicit_brand_artifact_request(monkeypatch):
+    """Scope: cf-router AUTHORIZATION only — this asserts the arm reaches the
+    store, not that a PDF is storable.
+
+    `classify_reference_role` returns `unsupported` for a non-image because it
+    cannot run REFERENCE EXTRACTION on one; that verdict must not be read as
+    "this is not a brand asset", since the caption explicitly names a template.
+    Production still refuses the file one layer down: `_sniff_brand_asset_media`
+    (`onboarding.py:1201`) accepts only JPEG/PNG/WEBP magic and raises on
+    `%PDF`, so the store exits non-zero and the arm takes its
+    `flyer_brand_asset_failed` branch."""
     hooks, actions = _load_plugin_modules()
     w = _wire(monkeypatch, hooks, actions)
 
@@ -367,6 +475,78 @@ def test_owner_scalar_is_still_exempt(monkeypatch):
 # ---------------------------------------------------------------------------
 # Fail closed.
 # ---------------------------------------------------------------------------
+
+def test_decline_that_overrode_brand_evidence_is_audited(monkeypatch):
+    """"sample menu template" names a menu AND a template. The menu veto wins —
+    per the ruling, genuinely ambiguous media goes to normal routing, not to the
+    store — but a decline that overrode explicit brand evidence is the
+    false-negative class, so production must be able to count it."""
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, "sample menu template")
+
+    assert w.store_calls == []
+    assert result is None
+    assert w.sends == []
+    rows = [r for r in w.audits
+            if r.get("reason") == "flyer_brand_asset_declined_over_evidence"]
+    assert len(rows) == 1
+    assert "role_menu_reference_over_evidence" in rows[0]["detail"]
+
+
+def test_ordinary_no_evidence_decline_is_not_audited(monkeypatch):
+    """The common case stays silent, or the countable class drowns in it."""
+    hooks, actions = _load_plugin_modules()
+    w = _wire(monkeypatch, hooks, actions, active_project=ACTIVE_PROJECT)
+
+    result = _intercept(hooks, "Here's the picture I took yesterday")
+
+    assert w.store_calls == []
+    assert result is None
+    assert w.audits == []
+
+
+def test_classify_reference_role_reads_only_mime_type():
+    """Pin the classifier's attribute surface.
+
+    cf-router hands it a MIME-only stand-in rather than a real `FlyerAsset`, to
+    avoid sha256-ing the media on the inbound path. The classifier is shared
+    with `create-flyer-project`, which DOES pass a real `FlyerAsset` — so a
+    future field read there is invisible in that call site and becomes an
+    AttributeError on the live inbound path. This fails the moment that happens.
+    """
+    from agents.flyer.reference_extract import classify_reference_role
+
+    class _AttributeProbe:
+        def __init__(self, mime_type):
+            object.__setattr__(self, "touched", set())
+            object.__setattr__(self, "_mime_type", mime_type)
+
+        def __getattr__(self, name):
+            self.touched.add(name)
+            if name == "mime_type":
+                return self._mime_type
+            raise AttributeError(name)
+
+    # One caption per branch of the classifier, so every path is walked.
+    captions = [
+        "Here is our new logo",
+        "Remove that extra 08:00 from this uploaded flyer",
+        "extract items from this attached menu",
+        "use this as a reference",
+        "Here's the picture I took yesterday",
+        "",
+    ]
+    touched: set[str] = set()
+    for caption in captions:
+        for mime in ("image/jpeg", "application/pdf", ""):
+            probe = _AttributeProbe(mime)
+            classify_reference_role(caption, probe)
+            touched |= probe.touched
+
+    assert touched == {"mime_type"}, f"classifier now reads {sorted(touched)}"
+
 
 def test_classifier_failure_makes_no_brand_mutation_and_no_reply(monkeypatch):
     hooks, actions = _load_plugin_modules()
