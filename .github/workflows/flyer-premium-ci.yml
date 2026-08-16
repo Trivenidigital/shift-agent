@@ -27,6 +27,7 @@ on:
       - "src/plugins/cf-router/**"
       - "tests/test_flyer_visual_qa.py"
       - "tests/test_flyer_quarantine.py"
+      - "tests/test_flyer_brand_asset_routing.py"
       - ".github/workflows/flyer-premium-ci.yml"
   push:
     branches: [main]
@@ -76,3 +77,6 @@ jobs:
       - name: Source-edit SLA watchdog (throttled-append suppression; was CI-orphaned)
         run: |
           python -m pytest tests/test_flyer_source_edit_sla_watchdog.py -q
+      - name: Brand-asset capture authorization (active project is context, not evidence)
+        run: |
+          python -m pytest tests/test_flyer_brand_asset_routing.py -q

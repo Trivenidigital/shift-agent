@@ -20,6 +20,7 @@ Multi-plugin: gateway iterates results; first action != "allow" wins.
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import re
 import threading
@@ -4410,6 +4411,322 @@ def _try_flyer_existing_onboarding_intercept(text: str, chat_id: str, event: Any
     return _try_flyer_onboarding_intercept(text, chat_id, event)
 
 
+# The deterministic sufficiency evidence: an explicit brand-artifact NOUN in the
+# visible caption. Context-dependent words are NOT evidence on their own — the
+# six-substring gate this replaces read "replace chicken with paneer", "sample
+# menu" and "brand new menu" as brand assets — so `sample` / `reference` / `old`
+# / `previous` qualify only when bound to a brand-artifact noun, and `brand`
+# only in a brand-artifact compound ("brand kit", "brand colors"), never bare.
+#
+# Durable styling instructions are handled separately, by
+# `_durable_style_donation` — see there for why they cannot live as another
+# alternative in this regex.
+_BRAND_ASSET_EVIDENCE = re.compile(
+    r"\b(?:logos?|letterheads?|watermarks?|branding)\b"
+    r"|\bbrand\s*(?:kit|mark|book|guide|guidelines|colou?rs?|fonts?|assets?|identity)\b"
+    r"|\btemplates?\b"
+    r"|\b(?:sample|reference|old|previous|existing|past)\s+(?:\w+\s+){0,2}"
+    r"(?:flyer|flier|poster|banner|design|artwork|creative|template)s?\b",
+    re.IGNORECASE,
+)
+
+# A durable styling instruction — what the production brand-asset store is
+# mostly made of (B0004, B0006, B0008, the last being the only asset active on
+# the box today). It names no artifact noun, so the rule above cannot see it.
+#
+# BOTH halves are required, and the second is the one that carries the weight.
+# Durability alone says a preference is permanent; it does not say the attached
+# image IS that preference. A donation POINTS AT the attachment — "use THIS
+# theme", "the SAME theme", "follow theme LIKE THIS" — whereas a directive
+# describes a property to apply ("always use a bigger font") and a complaint
+# describes a defect ("our fonts always look bad"). Neither donates anything,
+# and capturing them writes a durable template that `render.py` reads on every
+# later render.
+#
+# The deictic must MODIFY the styling noun, not merely appear in the sentence:
+# "in future the design should not be this dark" contains "this" as an
+# intensifier and donates nothing, so a free-floating deictic would readmit it.
+_DURABLE_SCOPE = re.compile(
+    r"\b(?:going\s+forward|from\s+now\s+on|from\s+here\s+on|in\s+(?:the\s+)?future|always)\b",
+    re.IGNORECASE,
+)
+_STYLE_NOUN = r"(?:theme|style|look|design|colou?rs?|fonts?|palette|branding)"
+_STYLE_NOUN_RE = re.compile(r"\b" + _STYLE_NOUN + r"\b", re.IGNORECASE)
+# Four words of slack before the noun: "the same warm earthy south indian
+# palette" is ordinary phrasing, and B0004 survived the previous two-word
+# window only by saying "the same theme" with nothing in between. Widening is
+# safe in both directions — every known complaint in this class binds its
+# deictic at zero words ("this design", "these colours"), so a wider window
+# admits no complaint that a narrow one excluded.
+_ATTACHED_STYLE_REFERENCE = re.compile(
+    r"\b(?:this|these|the\s+same|attached|uploaded)\s+(?:\w+\s+){0,4}" + _STYLE_NOUN + r"\b"
+    r"|\b" + _STYLE_NOUN + r"\b\s*(?:\w+\s+){0,4}"
+    r"(?:like\s+(?:this|these)|of\s+this|from\s+this|in\s+this)\b",
+    re.IGNORECASE,
+)
+
+
+def _durable_style_signal(text: str) -> bool:
+    """The near-miss shape: a durable styling caption, before it has qualified.
+
+    Used only to make the decline COUNTABLE. Without it this class declines as
+    plain `no_brand_asset_evidence` — silent and uncountable, which is the
+    property that made the first false-negative class expensive to find.
+    """
+    body = text or ""
+    return bool(_DURABLE_SCOPE.search(body)) and bool(_STYLE_NOUN_RE.search(body))
+
+
+def _durable_style_donation(text: str) -> bool:
+    """Is this a durable styling instruction that DONATES the attached art?
+
+    THREE conditions, and the third is the one that makes the class safe.
+
+    This rule is the only place in the gate that ever authorized on the absence
+    of a complaint rather than the presence of an offer, and that inversion is
+    why the class regrew in a new shape on each of three review passes. A
+    complaint points AT the attachment as readily as a donation does ("this
+    design always comes out too dark"), so the deictic discriminates nothing on
+    its own, and no defect-frame vocabulary is ever finished — "comes out",
+    "ends up", "print badly", "renders poorly", "needs fixing" were all missed.
+    Requiring an affirmative offer puts this class back on the closable side
+    that the rest of the gate is built on.
+
+    Kept out of `_BRAND_ASSET_EVIDENCE` deliberately: the temporal half used to
+    be an alternative there while the same five phrases also sat in
+    `_BRAND_ASSET_OFFER`, which made the pair mutually self-satisfying and the
+    defect frame structurally unreachable for the class.
+    """
+    body = text or ""
+    if not _DURABLE_SCOPE.search(body) or not _ATTACHED_STYLE_REFERENCE.search(body):
+        return False
+    if _BACKWARD_REFERENCE.search(body):
+        return False
+    return bool(_BRAND_ASSET_OFFER.search(body)) and not _BRAND_ASSET_NEGATED_OFFER.search(body)
+
+# Genuine menu/price semantics — menu-ish media goes to normal routing, never to
+# the brand store. Deliberately NOT gated on the classifier's role, for two
+# reasons pulling in opposite directions:
+#
+#   * `classify_reference_role`'s `menu_reference` branch
+#     (`reference_extract.py:135`) fires on the SINGULAR noun "flyer" with no
+#     menu or price word anywhere, so "this is the flyer template we use"
+#     classifies as `menu_reference`. Vetoing on that role ALONE dropped six
+#     realistic template uploads.
+#   * conversely the role misses menu media that names no deictic, so "our menu
+#     template" and "price list template" classified as `inspiration` and rode
+#     the bare `\btemplates?\b` alternative straight into the store.
+#
+# Keying the veto on the menu/price WORDS rather than on the role fixes both.
+_MENU_PRICE_SEMANTICS = re.compile(
+    r"\b(?:menus?|price\s*lists?|prices?|pricing|items?)\b",
+    re.IGNORECASE,
+)
+
+# Naming a brand artifact is not offering one. "remove the watermark" and "the
+# existing flyer has a typo" name one and complain about it; capturing those
+# recreates the B0009 shape, and the result is not inert — `_brand_asset_kind`
+# (`onboarding.py:1155`) files anything containing "flyer" as a `template`, and
+# an active template steers every later render.
+#
+# Complaint phrasing is open-ended, so this is not an attempt to enumerate it.
+# It only has to be good enough to catch captions that ALSO carry no evidence of
+# offering — see `_BRAND_ASSET_OFFER`, which is the closable set and which wins
+# whenever both match. That is what lets B0008's real caption ("change theme of
+# my fliers going forward") keep its edit verb and still be captured.
+#
+# The last alternative covers absence rather than defect — "this flyer has no
+# logo" reports that the artifact is MISSING from the attachment, which is the
+# opposite of donating one.
+_BRAND_ASSET_DEFECT_FRAME = re.compile(
+    r"\b(?:remove|delete|erase|get\s+rid\s+of|take\s+(?:it\s+)?off|fix|correct|redo|"
+    r"crop|resize|change|replace|update|edit|modify|revise)\b"
+    r"|\b(?:is|are|was|were|looks?|looked|seems?|seemed|has|have|had|came\s+out)\b"
+    r"[^.!?]{0,40}\b(?:too\s+\w+|wrong|bad|blurry|dark|light|small|tiny|big|huge|"
+    r"typo|error|mistake|missing|cut\s+off|incorrect|outdated|ugly|misspel)\w*"
+    r"|\b(?:no|without|missing|lacks?|lacking)\s+(?:\w+\s+){0,2}"
+    r"(?:logos?|watermarks?|branding|templates?|flyers?|fliers?|posters?)\b",
+    re.IGNORECASE,
+)
+
+# Affirmative evidence that the customer is HANDING OVER the attached media
+# rather than talking about it. Small and closable by design, which is why the
+# gate is built on this side rather than on the complaint side.
+#
+# The five temporal phrases that used to sit here are GONE. They made this
+# regex and the durability rule mutually self-satisfying (see
+# `_durable_style_donation`), and they rescued nothing: all three production
+# captions carry a non-temporal signal anyway — B0004 and B0006 match `use`,
+# B0008 matches `want you to`.
+#
+# The verb list is a NAMED TUPLE OF ITS OWN because two regexes need to agree on
+# it, and they silently stopped agreeing: `follow` was added here and not to the
+# negation side, so "do not follow this theme going forward" read as a donation.
+# That is not the open-ended-language problem — offer verbs are a closed set, so
+# a verb present on one side and missing on the other is a parity error between
+# two enumerable lists. `_BRAND_ASSET_NEGATED_OFFER` is now BUILT from this
+# tuple, which makes the drift impossible rather than merely detectable, and
+# `test_every_offer_verb_has_a_negated_form` fails if a future edit hardcodes a
+# verb into either regex instead of adding it here.
+_OFFER_VERBS = ("use", "save", "keep", "store", "apply", "follow")
+
+# Not offer cues on their own, but refusing them still says "do not put this on
+# the flyer", so the negation side carries them too.
+_NEGATION_ONLY_VERBS = ("add", "put", "include")
+
+# Offer verbs that deliberately need no negated form. Empty on purpose — the
+# parity test refuses to pass over an entry here without a stated reason.
+_OFFER_VERBS_EXEMPT_FROM_NEGATION: tuple[str, ...] = ()
+
+# The last alternative is the "supplied artifact" shape: in "replace this with
+# our logo" the edit verb acts ON something else and the artifact is what is
+# being HANDED OVER, so the caption is a donation despite reading as an edit.
+#
+# A possessive alone does NOT make it one — possessives appear in complaints
+# just as freely ("the flyer with our logo is wrong", "the banner with our
+# watermark came out blurry"), and reading those as offers skipped the defect
+# gate entirely. So the alternative is bound to a DONATING CONTEXT: a
+# substitution verb acting on a deictic object. "replace THIS with our logo"
+# donates; "replace the date with our template date" substitutes one field for
+# another and donates nothing.
+_BRAND_ASSET_OFFER = re.compile(
+    r"\b(?:here\s+is|here's|here\s+are|this\s+is|these\s+are|attached\s+is|attaching|"
+    r"i(?:'m|\s+am)\s+(?:sending|attaching|uploading)|want\s+you\s+to|"
+    r"(?:please\s+)?(?:" + "|".join(_OFFER_VERBS) + r"))\b"
+    r"|\b(?:replace|swap|change|update)\s+(?:this|that|these|those|it)\b[^.!?]{0,20}"
+    r"\b(?:with|to)\s+(?:our|my|the\s+attached)\s+(?:\w+\s+){0,2}"
+    r"(?:logos?|watermarks?|branding|templates?|letterheads?|designs?|artworks?)\b",
+    re.IGNORECASE,
+)
+
+# "do not use our logo on this" contains `use`, so the offer test matches a verb
+# the sentence is actually refusing. Python has no variable-length lookbehind,
+# so the negation is detected separately and both suppresses the offer and
+# counts as a defect frame in its own right.
+_BRAND_ASSET_NEGATED_OFFER = re.compile(
+    r"\b(?:do\s+not|don'?t|never|no\s+need\s+to)\s+(?:\w+\s+){0,2}"
+    r"(?:" + "|".join(_OFFER_VERBS + _NEGATION_ONLY_VERBS) + r")\b",
+    re.IGNORECASE,
+)
+
+# "follow the same style AS BEFORE" points at prior work, not at the attachment.
+# `follow` takes a backward-referring object far more naturally than the other
+# offer verbs, so the verb this class leans on is also the one that can aim its
+# deictic away from the media actually attached. Deliberately narrow: "like
+# this" points AT the media and must keep working — it is how B0008 donates.
+_BACKWARD_REFERENCE = re.compile(
+    r"\b(?:as|like)\s+(?:before|last\s+time|previously|usual|always)\b"
+    r"|\bsame\s+as\s+(?:before|last\s+time|always)\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_flyer_reference_role(text: str, media_path: str) -> str:
+    """What does the deployed Flyer classifier say the attached media is?
+
+    `reference_extract.classify_reference_role` is the repo's ONE answer to this
+    question — `create-flyer-project` has asked it since the source-contract work
+    — and until now it had no cf-router call site at all, which is how the
+    brand-asset arm ended up with a parallel six-substring rule of its own.
+
+    Pure and local: regex over the caption plus the media's MIME type. No
+    provider call, no network, no model — so it is viable on the inbound
+    `pre_gateway_dispatch` path, which a vision call would not be (the reference
+    vision provider carries a 60s timeout and a per-call cost, and goes dark
+    whenever OpenRouter does).
+
+    The classifier reads exactly one attribute off the asset, so it is handed a
+    MIME-only stand-in rather than a real `FlyerAsset`: building one would mean
+    sha256-ing the media on the inbound path for a value nothing here reads.
+
+    Raises on import or classification failure — the caller fails closed.
+    """
+    actions._ensure_src_path()  # type: ignore[attr-defined]
+    try:
+        from agents.flyer.reference_extract import classify_reference_role  # type: ignore
+    except ImportError:  # pragma: no cover - deployed flat-module fallback
+        from flyer_reference_extract import classify_reference_role  # type: ignore
+    mime = mimetypes.guess_type(media_path or "")[0] or ""
+    return classify_reference_role(text or "", SimpleNamespace(mime_type=mime))
+
+
+def _flyer_brand_asset_authorized(text: str, media_path: str) -> tuple[bool, str]:
+    """May this inbound MUTATE the customer's brand-asset store?
+
+    Model/classifier judgment decides what the media represents; this function
+    decides whether that judgment is sufficient to write. The fixed ruling it
+    encodes: an active Flyer project is CONTEXT, never EVIDENCE — its existence
+    alone must never authorize brand-asset persistence.
+
+        receipt / menu candidate -> handled by the cessions above this
+        explicit flyer edit      -> vetoed here; the edit path owns it
+        menu/price media         -> vetoed here; the menu path owns it
+        classifier says logo     -> authorized
+        explicit brand evidence  -> authorized
+        anything else            -> NOT authorized; normal routing
+        classifier failure       -> NOT authorized (`classifier_unavailable`)
+
+    `source_edit_template` is a HARD veto: the edit path owns those turns
+    whatever the caption also says. The menu/price veto is keyed on the caption
+    words, not on the classifier's role — see `_MENU_PRICE_SEMANTICS`.
+
+    Evidence alone is not enough. A caption that NAMES a brand artifact while
+    complaining about it ("remove the watermark", "the existing flyer has a
+    typo") is not an upload, so a defect frame with no offer declines.
+
+    Returns `(authorized, reason)`. Three reason classes matter to the caller:
+    an ordinary decline (no audit row — declining is the common case), a
+    fail-closed `classifier_unavailable`, and a `..._over_evidence` decline
+    where brand-artifact evidence WAS present and something overrode it. That
+    last one is the false-negative class; it is rare and it is the one an
+    operator needs to be able to count, so the caller audits it.
+    """
+    body = text or ""
+    negated = bool(_BRAND_ASSET_NEGATED_OFFER.search(body))
+    evidence = bool(_BRAND_ASSET_EVIDENCE.search(body)) or _durable_style_donation(body)
+    offer = bool(_BRAND_ASSET_OFFER.search(body)) and not negated
+    defect = bool(_BRAND_ASSET_DEFECT_FRAME.search(body)) or negated
+    try:
+        role = _classify_flyer_reference_role(text, media_path)
+    except Exception as e:  # noqa: BLE001 — a classifier failure must never write
+        return False, f"classifier_unavailable: {type(e).__name__}: {e}"
+    over = "_over_evidence" if evidence else ""
+    if role == "source_edit_template":
+        return False, "role_source_edit_template" + over
+    # Ordered ABOVE the `logo` return on purpose. The classifier's logo branch
+    # has no negation handling, so "this flyer has no logo", "do not use our
+    # logo on this" and "the logo is missing from this poster" all resolve to
+    # `logo` and would otherwise walk straight past the guard added for exactly
+    # that shape — a guard inconsistent with itself.
+    if evidence and defect and not offer:
+        return False, "defect_frame_without_offer_over_evidence"
+    if role == "logo":
+        return True, "role_logo"
+    if _MENU_PRICE_SEMANTICS.search(body):
+        return False, "menu_price_semantics" + over
+    # Deliberately NOT keyed on `old_flyer_reference`: that role fires on a bare
+    # "sample" or "reference" anywhere in the caption, which is the standalone
+    # evidence this fix exists to reject.
+    if not evidence:
+        if _durable_style_signal(body):
+            # Countable, not silent. This is the shape that leaked in a new
+            # phrasing on each of three passes, so a residual leak has to be
+            # visible in production rather than found by a fourth review.
+            return False, "durable_style_without_donation"
+        return False, f"no_brand_asset_evidence (role={role})"
+    return True, "brand_artifact_evidence"
+
+
+def _decline_is_countable(decision: str) -> bool:
+    """Does this decline belong in the audited false-negative class?
+
+    Two shapes: a decline that overrode explicit brand evidence, and a durable
+    styling caption that did not qualify as a donation. Ordinary no-evidence
+    declines are the common case and stay silent, or the signal drowns in them.
+    """
+    return decision.endswith("_over_evidence") or decision == "durable_style_without_donation"
+
+
 def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_path: str,
                                      *, owner_receipt_candidate: bool = False,
                                      menu_caption_candidate: bool = False,
@@ -4470,15 +4787,44 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
     if not phone:
         return None
 
-    lower = (text or "").lower()
     if actions.should_start_new_flyer_over_active(text, has_media=True):
         return None
-    active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)
-    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
-    explicit_asset_words = any(word in lower for word in ("logo", "template", "sample", "reference", "brand", "replace"))
-    is_brand_asset = active_project is not None or explicit_asset_words
-    if not is_brand_asset:
+    # The authorization decision. `active_project` is read for the regeneration
+    # branch below ONLY — it is deliberately not an input here: an open flyer
+    # project is context, not evidence that the attached media is brand art.
+    authorized, decision = _flyer_brand_asset_authorized(text, media_path)
+    if not authorized:
+        # Neither branch replies: the turn continues down dispatch, and an ack
+        # from this arm would double up with whichever arm actually claims it.
+        if decision.startswith("classifier_unavailable"):
+            actions.audit_intercepted(
+                reason="flyer_brand_asset_classifier_unavailable", chat_id=chat_id,
+                subprocess_rc=2, detail=decision[:500],
+            )
+        elif _decline_is_countable(decision):
+            # The false-negative class, made countable.
+            actions.audit_intercepted(
+                reason="flyer_brand_asset_declined_over_evidence", chat_id=chat_id,
+                detail=f"decision={decision}; media_path={media_path}",
+            )
         return None
+    # Defense in depth for the one class whose safety rests on open-ended
+    # language. Complaint phrasing has no closed vocabulary, so a fourth leak
+    # shape is possible; marking the CAPTURES makes a residual leak greppable in
+    # production within a day instead of waiting on a fifth review. Carried on
+    # the existing audit rows rather than a new audit reason, so it adds nothing
+    # to the widened-Literal rollback exposure.
+    #
+    # It must reach ALL THREE terminal capture paths, not just the two obvious
+    # ones. The store call above has already succeeded by the time any of them
+    # runs, so the manual-review branch — which returns early with only its own
+    # `flyer_reference_manual_review_queued` row — captured the asset while
+    # carrying no marker. A compensating control with a hole is worse than one
+    # known to be absent, because it is trusted.
+    durable_marker = (
+        "; durable_style_donation=true" if decision == "brand_artifact_evidence"
+        and _durable_style_donation(text or "") else "")
+    active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)
 
     ok, detail, result = actions.trigger_store_flyer_brand_asset(
         chat_id=chat_id,
@@ -4525,7 +4871,7 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
                 actions.audit_intercepted(
                     reason="flyer_brand_asset_saved", chat_id=chat_id,
                     subprocess_rc=0 if preview_ok else 3,
-                    detail=f"project_id={project_id}; regenerated=true; status={result.get('next_status')}; ack_message_id={preview_mid}; ack_error={preview_err[:300]}",
+                    detail=f"project_id={project_id}; regenerated=true; status={result.get('next_status')}; ack_message_id={preview_mid}; ack_error={preview_err[:300]}{durable_marker}",
                 )
                 if preview_ok:
                     return {"action": "skip", "reason": f"cf-router flyer brand asset saved and regenerated {project_id}"}
@@ -4546,7 +4892,8 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
                     subprocess_rc=0 if ack_ok else 3,
                     detail=(
                         f"project_id={project_id}; brand_asset_regeneration_manual=true; "
-                        f"status={result.get('next_status')}; ack_message_id={manual_mid}; ack_error={ack_err[:300]}"
+                        f"status={result.get('next_status')}; ack_message_id={manual_mid}; "
+                        f"ack_error={ack_err[:300]}{durable_marker}"
                     ),
                 )
                 return {"action": "skip", "reason": f"cf-router flyer brand asset manual review queued {project_id}"}
@@ -4565,7 +4912,8 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
         subprocess_rc=0 if ack_ok else 3,
         detail=(
             f"status={result.get('next_status')}; customer_id={result.get('customer_id') or ''}; "
-            f"sender_role={role}; media_path={media_path}; ack_message_id={mid}; ack_error={err[:300]}"
+            f"sender_role={role}; media_path={media_path}; ack_message_id={mid}; "
+            f"ack_error={err[:300]}{durable_marker}"
         ),
     )
     return {"action": "skip",
