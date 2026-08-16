@@ -20,6 +20,7 @@ Multi-plugin: gateway iterates results; first action != "allow" wins.
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import re
 import threading
@@ -4410,6 +4411,94 @@ def _try_flyer_existing_onboarding_intercept(text: str, chat_id: str, event: Any
     return _try_flyer_onboarding_intercept(text, chat_id, event)
 
 
+# Roles that belong to another path entirely. `source_edit_template` is an
+# exact edit of the ATTACHED flyer and `menu_reference` is menu/price media to
+# extract from — neither is durable brand art, and both have arms of their own
+# further down dispatch. Vetoing here (before any evidence is weighed) is what
+# keeps "replace X with Y on this flyer" and "extract items from this menu" off
+# the brand-asset store even when the caption also names a brand artifact.
+_BRAND_ASSET_ROLE_VETO = ("source_edit_template", "menu_reference")
+
+# The deterministic sufficiency evidence: an explicit brand-artifact NOUN in the
+# visible caption. Context-dependent words are NOT evidence on their own — the
+# six-substring gate this replaces read "replace chicken with paneer", "sample
+# menu" and "brand new menu" as brand assets — so `sample` / `reference` / `old`
+# / `previous` qualify only when bound to a brand-artifact noun, and `brand`
+# only in a brand-artifact compound ("brand kit", "brand colors"), never bare.
+_BRAND_ASSET_EVIDENCE = re.compile(
+    r"\b(?:logos?|letterheads?|watermarks?|branding)\b"
+    r"|\bbrand\s*(?:kit|mark|book|guide|guidelines|colou?rs?|fonts?|assets?|identity)\b"
+    r"|\btemplates?\b"
+    r"|\b(?:sample|reference|old|previous|existing|past)\s+(?:\w+\s+){0,2}"
+    r"(?:flyer|flier|poster|banner|design|artwork|creative|template)s?\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_flyer_reference_role(text: str, media_path: str) -> str:
+    """What does the deployed Flyer classifier say the attached media is?
+
+    `reference_extract.classify_reference_role` is the repo's ONE answer to this
+    question — `create-flyer-project` has asked it since the source-contract work
+    — and until now it had no cf-router call site at all, which is how the
+    brand-asset arm ended up with a parallel six-substring rule of its own.
+
+    Pure and local: regex over the caption plus the media's MIME type. No
+    provider call, no network, no model — so it is viable on the inbound
+    `pre_gateway_dispatch` path, which a vision call would not be (the reference
+    vision provider carries a 60s timeout and a per-call cost, and goes dark
+    whenever OpenRouter does).
+
+    The classifier reads exactly one attribute off the asset, so it is handed a
+    MIME-only stand-in rather than a real `FlyerAsset`: building one would mean
+    sha256-ing the media on the inbound path for a value nothing here reads.
+
+    Raises on import or classification failure — the caller fails closed.
+    """
+    actions._ensure_src_path()  # type: ignore[attr-defined]
+    try:
+        from agents.flyer.reference_extract import classify_reference_role  # type: ignore
+    except ImportError:  # pragma: no cover - deployed flat-module fallback
+        from flyer_reference_extract import classify_reference_role  # type: ignore
+    mime = mimetypes.guess_type(media_path or "")[0] or ""
+    return classify_reference_role(text or "", SimpleNamespace(mime_type=mime))
+
+
+def _flyer_brand_asset_authorized(text: str, media_path: str) -> tuple[bool, str]:
+    """May this inbound MUTATE the customer's brand-asset store?
+
+    Model/classifier judgment decides what the media represents; this function
+    decides whether that judgment is sufficient to write. The fixed ruling it
+    encodes: an active Flyer project is CONTEXT, never EVIDENCE — its existence
+    alone must never authorize brand-asset persistence.
+
+        receipt / menu candidate -> handled by the cessions above this
+        explicit flyer edit      -> vetoed here; the edit path owns it
+        classifier says logo     -> authorized
+        explicit brand artifact  -> authorized
+        anything else            -> NOT authorized; normal routing
+        classifier failure       -> NOT authorized (reason `classifier_unavailable`)
+
+    Returns `(authorized, reason)`. The reason distinguishes an ordinary decline
+    (no audit row — declining is the common case) from a fail-closed classifier
+    failure, which the caller audits.
+    """
+    try:
+        role = _classify_flyer_reference_role(text, media_path)
+    except Exception as e:  # noqa: BLE001 — a classifier failure must never write
+        return False, f"classifier_unavailable: {type(e).__name__}: {e}"
+    if role in _BRAND_ASSET_ROLE_VETO:
+        return False, f"role_{role}"
+    if role == "logo":
+        return True, "role_logo"
+    # Deliberately NOT keyed on `old_flyer_reference`: that role fires on a bare
+    # "sample" or "reference" anywhere in the caption, which is the standalone
+    # evidence this fix exists to reject.
+    if _BRAND_ASSET_EVIDENCE.search(text or ""):
+        return True, "brand_artifact_evidence"
+    return False, f"no_brand_asset_evidence (role={role})"
+
+
 def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_path: str,
                                      *, owner_receipt_candidate: bool = False,
                                      menu_caption_candidate: bool = False,
@@ -4470,15 +4559,23 @@ def _try_flyer_brand_asset_intercept(text: str, chat_id: str, event: Any, media_
     if not phone:
         return None
 
-    lower = (text or "").lower()
     if actions.should_start_new_flyer_over_active(text, has_media=True):
         return None
-    active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)
-    customer = actions.find_flyer_customer_by_sender(phone, chat_id)
-    explicit_asset_words = any(word in lower for word in ("logo", "template", "sample", "reference", "brand", "replace"))
-    is_brand_asset = active_project is not None or explicit_asset_words
-    if not is_brand_asset:
+    # The authorization decision. `active_project` is read for the regeneration
+    # branch below ONLY — it is deliberately not an input here: an open flyer
+    # project is context, not evidence that the attached media is brand art.
+    authorized, decision = _flyer_brand_asset_authorized(text, media_path)
+    if not authorized:
+        if decision.startswith("classifier_unavailable"):
+            # Fail-closed, and traceable. No reply: the turn continues down
+            # dispatch, and an ack from this arm would double up with whichever
+            # arm actually claims it.
+            actions.audit_intercepted(
+                reason="flyer_brand_asset_classifier_unavailable", chat_id=chat_id,
+                subprocess_rc=2, detail=decision[:500],
+            )
         return None
+    active_project = actions.find_active_flyer_project_by_sender(phone, chat_id)
 
     ok, detail, result = actions.trigger_store_flyer_brand_asset(
         chat_id=chat_id,
