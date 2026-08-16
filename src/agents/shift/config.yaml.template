@@ -128,7 +128,12 @@ multi_location:
 catering:
   enabled: false
   deposit_threshold_guests: 50      # require deposit for events >= N guests
-  deposit_pct: 0.25                 # 25% deposit
+  # DELIBERATE 0 — money safety. A nonzero value arms an irreversible deposit
+  # link for qualifying leads. Set it (e.g. 0.25 for 25%) only after
+  # commerce.payment_checkout_url_template is configured for this customer.
+  # Stated explicitly rather than left to the schema default so the file still
+  # disarms the box after a rollback to a release whose default was 0.25.
+  deposit_pct: 0
   stale_after_hours: 336            # 14 days — silent leads move to STALE
 
 # Agent #13 — Compliance Calendar. Default OFF (opt-in). Tracks licence/permit/

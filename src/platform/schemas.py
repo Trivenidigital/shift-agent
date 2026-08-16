@@ -640,7 +640,13 @@ class CateringConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False  # default OFF — opt-in (offshore work pending integration)
     deposit_threshold_guests: int = Field(default=50, ge=1)
-    deposit_pct: float = Field(default=0.25, ge=0.0, le=1.0)
+    # Default DISARMED. A deposit moves real money and is not reversible from our
+    # side, so arming it is an affirmative per-customer act: the operator sets a
+    # nonzero percentage once the payment template is configured. A config that
+    # omits the key must never mint. Paired with the enabled-first gate in
+    # deposit._should_mint_deposit and the explicit `deposit_pct: 0` in
+    # src/agents/shift/config.yaml.template.
+    deposit_pct: float = Field(default=0.0, ge=0.0, le=1.0)
     # BL-CATER-03: refuse to mint a deposit when the quote implies an implausibly
     # low per-guest spend (the unscaled-basket bug: a qty=1 sample basket ~$50 for
     # a 200-guest event => $0.25/guest). Defense-in-depth behind the fail-closed

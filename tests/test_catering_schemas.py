@@ -17,7 +17,7 @@ def test_catering_config_defaults():
     c = CateringConfig()
     assert c.enabled is False  # opt-in
     assert c.deposit_threshold_guests == 50
-    assert c.deposit_pct == 0.25
+    assert c.deposit_pct == 0.0  # disarmed — deposits are opt-in per customer
     assert c.stale_after_hours == 14 * 24
 
 
