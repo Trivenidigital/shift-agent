@@ -1,4 +1,7 @@
-<!-- Keep it small and PR-ready. Delete N/A rows.
+<!-- Keep it small and PR-ready. Answer EVERY row below: a blank row is
+     rejected, and `none` is a real answer that a blank one is not. Do not
+     delete rows. Evidence-bearing rows need more than a bare `none`/`n/a` --
+     say why, e.g. `n/a - CI-only change, no runtime capability added`.
      Governance: AGENTS.md → docs/governance/engineering-directive.md →
      docs/governance/project-registry.yaml. Load only the applicable
      project directives. -->

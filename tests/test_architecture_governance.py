@@ -1676,3 +1676,144 @@ def test_placeholder_in_a_LATER_section_still_blocks():
     )
     assert code == 1, out
     assert "GOV-PR-PLACEHOLDER" in out
+
+
+# ── 22. structure-aware parsing ────────────────────────────────────────────
+#
+# Every case below was found by independent review of the first cut of this
+# fix. They share one root cause: the parser read a value as exactly one
+# physical line and parsed the WHOLE body, including regions that are not the
+# author speaking. That cut both ways -- a quoted blank label poisoned a field
+# the author DID answer, and a quoted populated label supplied a value the
+# visible map contradicted.
+
+
+def test_sub_bullet_value_is_not_read_as_blank():
+    """Listing reused capabilities as sub-bullets is the natural answer here,
+    and it was reported as `blank` -- the opposite of the truth."""
+    body = reuse_map().replace(
+        "- Existing platform/model capabilities reused: Hermes vision extraction via parse-menu-photo",
+        "- Existing platform/model capabilities reused:\n"
+        "  - `safe_io.atomic_write_json` for the state write\n"
+        "  - `identify-sender` for sender identity",
+    )
+    code, out = run_checker(REPO_ROOT, changed=CATERING_CHANGE, body=body)
+    assert code == 0, out
+
+
+def test_wrapped_directive_list_is_not_truncated_to_its_first_line():
+    """Three directive paths exceed a comfortable line, so authors wrap. The
+    old reading emitted a FALSE STATEMENT: `not named in Applicable
+    directives:` about a directive named two lines below."""
+    body = reuse_map(**{
+        "Affected projects": "shift-platform, catering-studio",
+        "Applicable directives": "docs/governance/shared-platform-directive.md,\n"
+                                 "  docs/governance/projects/catering-studio.md",
+        "Shared-platform impact": "reorders the fsync in the shared atomic-write helper",
+        "Other agents affected": "catering-studio",
+    })
+    code, out = run_checker(
+        REPO_ROOT,
+        changed=["src/platform/safe_io.py", "src/agents/catering/deposit.py"],
+        body=body,
+    )
+    assert "GOV-PR-DIRECTIVE-MISSING" not in out, out
+    assert code == 0, out
+
+
+def test_a_fenced_copy_of_the_blank_schema_does_not_poison_real_answers():
+    """The PR class that MUST quote the blank schema is governance/template
+    work -- this very PR's class."""
+    quoted = "\n".join(f"- {f}:" for f in gov.REUSE_MAP_FIELDS)
+    body = ("## Summary\n\nBefore this change the schema below went green with every value "
+            "empty:\n\n```\n" + quoted + "\n```\n\n" + reuse_map())
+    code, out = run_checker(REPO_ROOT, changed=CATERING_CHANGE, body=body)
+    assert "GOV-PR-EMPTY" not in out, out
+    assert code == 0, out
+
+
+def test_a_fenced_decoy_cannot_supply_a_value_the_visible_map_contradicts():
+    """Last-writer-wins is what a human reader assumes. A quoted earlier map
+    must not answer for a visible map that says `none`."""
+    decoy = "\n".join([
+        "- Shared-platform impact: rewrites fsync ordering for every agent",
+        "- Other agents affected: catering-studio, flyer-studio",
+    ])
+    body = ("## Summary\n\nsuperseded map:\n\n```\n" + decoy + "\n```\n\n" + reuse_map(**{
+        "Affected projects": "shift-platform",
+        "Applicable directives": "docs/governance/shared-platform-directive.md",
+        "Shared-platform impact": "none",
+        "Other agents affected": "none",
+    }))
+    code, out = run_checker(REPO_ROOT, changed=["src/platform/safe_io.py"], body=body)
+    assert code == 1, out
+    assert "GOV-PR-SHARED" in out
+
+
+def test_a_reuse_map_hidden_in_an_html_comment_does_not_satisfy_the_gate():
+    """It renders on GitHub as a heading followed by whitespace: a green check
+    on content no reviewer can see defeats both halves of the design."""
+    filled = reuse_map().split(gov.REUSE_MAP_HEADING, 1)[1]
+    body = "## Summary\n\nHardens safe_io.\n\n" + gov.REUSE_MAP_HEADING + "\n\n<!--" + filled + "-->\n"
+    code, out = run_checker(REPO_ROOT, changed=["src/platform/safe_io.py"], body=body)
+    assert code == 1, out
+
+
+def test_an_extends_declaration_in_a_comment_does_not_waive_the_subsystem_gate():
+    """`extends` is the only remaining escape from the subsystem gate, so a
+    reviewer note phrased the way the finding text instructs must not trip it."""
+    body = ("## Summary\n\nAdds a receipt store.\n\n"
+            "<!-- reviewer note: confirm this extends the existing subsystem "
+            "rather than forking a new one -->\n\n" + reuse_map(**{
+                "Affected projects": "shift-platform",
+                "Applicable directives": "docs/governance/shared-platform-directive.md",
+                "New subsystem": "yes, a new durable receipt store",
+                "Shared-platform impact": "adds a durable store every agent can write to",
+                "Other agents affected": "expense-bookkeeper",
+            }))
+    code, out = run_checker(
+        REPO_ROOT,
+        changed=["src/platform/receipt_store.py"],
+        added=["src/platform/receipt_store.py"],
+        body=body,
+    )
+    assert code == 1, out
+    assert "GOV-SUBSYSTEM" in out
+
+
+@pytest.mark.parametrize("value", [
+    "Not applicable", "not applicable", "nope", "none yet", "None needed",
+    "not required", "not needed", "nothing to add", "to be determined",
+    "tbd after review", "pending review", "see summary", "same as above",
+    "done", "Done.", "green", "CI green", "passing", "0", "1", "unknown",
+])
+def test_expanded_non_answers_are_rejected(value):
+    """An author told to stop writing `n/a` writes `Not applicable`; told to
+    prove an E2E they write `green`. Catching only the abbreviation made this
+    gate theatre."""
+    assert gov.is_bare_placeholder(value), f"{value!r} accepted as a real answer"
+
+
+@pytest.mark.parametrize("value", [
+    "n/a - no new subsystem", "safe_io.atomic_write_json",
+    "todo-list store reused", "pending-order workflow reused",
+    "unknown-sender path reuses identify-sender",
+    "N/A - CI-only change, no runtime capability added",
+])
+def test_real_answers_are_not_mistaken_for_placeholders(value):
+    assert not gov.is_bare_placeholder(value), f"{value!r} rejected as a placeholder"
+
+
+def test_a_non_latin_answer_is_an_answer():
+    """`[^0-9a-z]` normalisation collapsed any CJK/Cyrillic answer to `""` and
+    rejected it as a placeholder it does not resemble."""
+    assert not gov.is_bare_placeholder("\u65e0\u9700\u8981\u7684\u8fd0\u884c\u65f6\u4ee3\u7801")
+    assert not gov.is_bare_placeholder("\u041d\u0435\u0442 \u043d\u043e\u0432\u044b\u0445 \u043f\u043e\u0434\u0441\u0438\u0441\u0442\u0435\u043c")
+
+
+def test_an_invisible_character_is_not_a_value():
+    code, out = run_checker(
+        REPO_ROOT, changed=CATERING_CHANGE, body=reuse_map(**{"Thin adapters": "\u200b"}),
+    )
+    assert code == 1, out
+    assert "GOV-PR-EMPTY" in out

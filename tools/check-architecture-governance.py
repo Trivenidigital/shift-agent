@@ -178,13 +178,36 @@ NARRATIVE_REQUIRED_FIELDS = (
 # and `Other agents affected` are nullable HERE and tightened contextually by
 # the shared-runtime checks, which is where the context to judge them exists.
 
-# Tokens that assert nothing. Compared after case-folding and stripping every
-# separator, so `N/A.`, `n / a` and `--` all normalise onto the same answer.
+# Answers that assert nothing. Compared after case-folding and stripping every
+# separator, so `N/A.`, `n / a` and `-- none --` all normalise onto one answer.
+#
+# Deliberately includes the EXPANSIONS, not just the abbreviations: an author
+# told to stop writing `n/a` writes `not applicable`, and `Vertical E2E proof:
+# done` / `green` / `passing` is what the same reflex produces there. Catching
+# `na` while accepting `notapplicable` would have made this gate theatre.
 _PLACEHOLDER_TOKENS = {
-    "", "none", "na", "nil", "null", "nothing", "tbd", "tba", "todo",
-    "x", "y", "n", "ok", "yes", "no", "same", "asabove", "seeabove",
-    "unknown", "pending", "?",
+    "", "none", "na", "nil", "null", "nothing", "nothingtoadd", "nope",
+    "notapplicable", "notrelevant", "notrequired", "notneeded", "noneneeded",
+    "noneyet", "nonerequired", "nonetodeclare",
+    "tbd", "tba", "tbc", "todo", "tobedetermined", "tobeconfirmed",
+    "pending", "pendingreview", "unknown", "unclear",
+    "x", "y", "n", "ok", "okay", "yes", "no", "done", "complete", "green",
+    "passing", "passes", "cigreen", "citgreen", "0", "1",
+    "same", "sameasabove", "asabove", "seeabove", "seesummary",
+    "seethesummary", "seetheabove", "seepr", "seedescription", "seebelow",
 }
+
+# Words meaning "no answer yet". Checked as the FIRST word of a short phrase.
+_DEFERRAL_WORDS = {"tbd", "tba", "tbc", "todo", "pending", "wip", "unknown"}
+
+# Invisible characters that survive `.strip()` and let a "populated" field carry
+# nothing a reader can see.
+_INVISIBLE_RX = re.compile(r"[\u00a0\u180e\u200b-\u200f\u202a-\u202e\u2060\ufeff]")
+
+
+def visible_value(value: str) -> str:
+    """The value with zero-width / directional characters removed."""
+    return _INVISIBLE_RX.sub("", value).strip()
 
 
 def is_bare_placeholder(value: str) -> bool:
@@ -194,8 +217,22 @@ def is_bare_placeholder(value: str) -> bool:
     TRUE -- reviewer judgement owns that -- only whether the author supplied an
     answer at all. `n/a - no new subsystem` normalises to `nanonewsubsystem`
     and passes; `n/a` normalises to `na` and does not.
+
+    Normalisation keeps unicode word characters rather than `[0-9a-z]`, so a
+    non-Latin answer stays an answer instead of collapsing to `""` and being
+    rejected as a placeholder it does not resemble.
     """
-    return re.sub(r"[^0-9a-z]+", "", value.strip().lower()) in _PLACEHOLDER_TOKENS
+    visible = visible_value(value)
+    normalised = re.sub(r"[^\w]+", "", visible, flags=re.UNICODE).lower()
+    if normalised in _PLACEHOLDER_TOKENS:
+        return True
+    # A DEFERRAL is not an answer however many words follow it: `tbd after
+    # review` says exactly what `tbd` says. Bounded to short phrases and to the
+    # first word, so a real answer that merely begins with one of these words
+    # (`todo-list store reused`) is untouched -- `todolist` is not `todo`.
+    words = visible.lower().split()
+    first = re.sub(r"[^\w]+", "", words[0], flags=re.UNICODE) if words else ""
+    return bool(words) and len(words) <= 4 and first in _DEFERRAL_WORDS
 
 # Cursor rule stem → registry project id. A stem absent here must equal an id.
 CURSOR_RULE_ALIASES = {"shared-platform-directive": "shift-platform"}
@@ -909,32 +946,64 @@ class GovernanceChecker:
         """
         return re.sub(r"\*\*|__", "", text)
 
+    # Markdown that is NOT the author's answer. A PR body routinely quotes the
+    # blank schema in a fence (every governance/template PR does) and carries
+    # `<!-- -->` guidance from the published template. Parsing those as fields
+    # cuts both ways: a quoted blank label poisons a field the author DID
+    # answer, and a quoted populated label supplies a value the visible map
+    # contradicts. Neither is the author speaking, so neither is parsed.
+    _FENCE_RX = re.compile(r"^[^\S\n]*(?P<f>```|~~~).*?(?:^[^\S\n]*(?P=f)[^\S\n]*$|\Z)",
+                           re.DOTALL | re.MULTILINE)
+    _COMMENT_RX = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
+
+    @classmethod
+    def _authored_text(cls, body: str) -> str:
+        """The body with quoted and commented-out regions removed."""
+        return cls._FENCE_RX.sub("", cls._COMMENT_RX.sub("", body))
+
     @classmethod
     def _field_occurrences(cls, body: str, label: str) -> list[str]:
         r"""Every value written against this label, in document order.
 
-        The directive tells authors to repeat the whole Reuse Map block under a
+        A value is the label's own line PLUS any following lines indented
+        strictly deeper than it, because listing several reused capabilities as
+        sub-bullets, or wrapping a long directive list, is the natural way to
+        answer these fields -- and reading only the first physical line called
+        the richest answer in the map "blank".
+
+        The deeper-indent rule is what keeps this from re-opening the defect
+        this parser exists to fix: a genuinely blank field is followed by its
+        SIBLING `- <Label>:` at the SAME indent, which is never absorbed, so it
+        still reads as `""`. A blank line also ends a value.
+
+        The directive tells authors to repeat the whole block under a
         `### <project-id>` heading for a multi-project change, so one label
-        legitimately appears more than once. Checks that ask "did the author
-        answer this ANYWHERE" union these; checks that ask "is any answer
-        blank" scan all of them.
+        legitimately appears more than once. Checks asking "was this answered
+        anywhere" union these; checks asking "is any answer blank" scan all.
 
         Horizontal-only whitespace around the colon is load-bearing. Plain
-        `\s*` also matches newlines, so a BLANK field consumed its own line
-        break and captured the NEXT line as its value. Every blank field then
-        read as populated, which silently disarmed the emptiness gates below
-        -- they can only fire on a value this function never returned -- and
-        attributed one field's text to a different field.
+        `\s*` also matches newlines, so a blank field consumed its own line
+        break and captured the next line as its value -- which read every blank
+        field as populated and made the emptiness gates unreachable.
         """
         h = r"[^\S\n]*"
-        return [
-            m.group(1).strip()
-            for m in re.finditer(
-                rf"^{h}[-*]?{h}{re.escape(label)}{h}:{h}(.*)$",
-                cls._deemphasize(body),
-                re.MULTILINE | re.IGNORECASE,
-            )
-        ]
+        rx = re.compile(rf"^({h})[-*]?{h}{re.escape(label)}{h}:{h}(.*)$", re.IGNORECASE)
+        lines = cls._deemphasize(cls._authored_text(body)).split("\n")
+        out: list[str] = []
+        for i, line in enumerate(lines):
+            m = rx.match(line)
+            if m is None:
+                continue
+            indent = len(m.group(1))
+            parts = [m.group(2).strip()]
+            for follower in lines[i + 1:]:
+                if not follower.strip():
+                    break
+                if len(follower) - len(follower.lstrip()) <= indent:
+                    break
+                parts.append(follower.strip().lstrip("-*").strip())
+            out.append(" ".join(p for p in parts if p).strip())
+        return out
 
     @classmethod
     def _field_value(cls, body: str, label: str) -> Optional[str]:
@@ -953,7 +1022,7 @@ class GovernanceChecker:
         return " ".join(cls._field_occurrences(body, label))
 
     def check_pr_body(self, body: str, changed: list[str], today: _dt.date) -> None:
-        if REUSE_MAP_HEADING not in self._deemphasize(body):
+        if REUSE_MAP_HEADING not in self._deemphasize(self._authored_text(body)):
             self.add(
                 "GOV-PR-NOMAP",
                 f"PR body has no `{REUSE_MAP_HEADING}` section — a verbal reuse claim "
@@ -968,7 +1037,7 @@ class GovernanceChecker:
             occurrences = self._field_occurrences(body, label)
             if not occurrences:
                 self.add("GOV-PR-FIELD", f"Capability Reuse Map is missing the `{label}:` field")
-            elif not all(occurrences):
+            elif not all(visible_value(v) for v in occurrences):
                 self.add(
                     "GOV-PR-EMPTY",
                     f"Capability Reuse Map field `{label}:` is blank. Write the answer "
@@ -1085,7 +1154,10 @@ class GovernanceChecker:
             return
 
         declared_new = (self._field_value(body, "New subsystem") or "").lower()
-        extends = bool(EXTENDS_DECLARATION.search(body))
+        # The author's own declaration only. Read from the raw body, a reviewer
+        # note in an HTML comment -- phrased the way GOV-SUBSYSTEM-UNDECLARED
+        # itself instructs -- silently waived the whole subsystem gate.
+        extends = bool(EXTENDS_DECLARATION.search(self._authored_text(body)))
         cited = self._field_value(body, "Architecture exception") or ""
         eids = re.findall(r"\b([A-Z][A-Z0-9]*-EX-\d+)\b", cited)
 
