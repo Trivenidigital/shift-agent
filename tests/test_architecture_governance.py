@@ -1912,3 +1912,46 @@ def test_an_answer_naming_a_real_thing_is_not_a_deferral(value):
     """A first-word deferral rule rejected these — all plausible names here —
     while still missing a deferral padded past its bound. Matched exactly now."""
     assert not gov.is_bare_placeholder(value), f"{value!r} rejected as a placeholder"
+
+
+def test_an_answer_written_on_the_following_line_is_an_answer():
+    """The other half of the sibling guard: indented CONTENT under a label is
+    the author answering on the next line, and must be read as the value —
+    only a sibling ROW is refused."""
+    body = reuse_map().replace(
+        "- Thin adapters: menu-to-pricebook adapter",
+        "- Thin adapters:\n  the menu-to-pricebook adapter, described here",
+    )
+    assert gov.GovernanceChecker._field_occurrences(body, "Thin adapters") == [
+        "the menu-to-pricebook adapter, described here"
+    ]
+    code, out = run_checker(REPO_ROOT, changed=CATERING_CHANGE, body=body)
+    assert code == 0, out
+
+
+@pytest.mark.parametrize("field", gov.REUSE_MAP_FIELDS[:-1])
+@pytest.mark.parametrize("shape", ["flush", "one_space", "three_spaces", "tab", "star_bullet", "bold_label"])
+def test_blank_is_detected_whatever_the_next_row_looks_like(field, shape):
+    """Swept invariant: a genuinely blank field is caught regardless of how the
+    FOLLOWING row is written. Every regression in this branch's review history
+    was a shape that made a blank field read as populated."""
+    nxt = gov.REUSE_MAP_FIELDS[list(gov.REUSE_MAP_FIELDS).index(field) + 1]
+    values = dict(_SHARED_VALUES)
+    values[field] = ""
+    lines = ["## Capability Reuse Map", ""]
+    for f in gov.REUSE_MAP_FIELDS:
+        row = f"- {f}: {values[f]}"
+        if f == nxt:
+            row = {
+                "flush": row,
+                "one_space": " " + row,
+                "three_spaces": "   " + row,
+                "tab": "\t" + row,
+                "star_bullet": row.replace("- ", "* ", 1),
+                "bold_label": row.replace("- ", "- **", 1).replace(":", "**:", 1),
+            }[shape]
+        lines.append(row)
+    code, out = run_checker(
+        REPO_ROOT, changed=["src/platform/safe_io.py"], body="\n".join(lines) + "\n",
+    )
+    assert "GOV-PR-EMPTY" in out, f"blank {field!r} missed with next row {shape}:\n{out}"
