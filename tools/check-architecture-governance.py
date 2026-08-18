@@ -157,7 +157,45 @@ EXTENDS_DECLARATION = re.compile(
     r"extends?\s+(?:the\s+)?existing\s+(?:sub)?system", re.IGNORECASE
 )
 
-EMPTY_VALUES = {"", "none", "n/a", "na", "-", "tbd", "todo"}
+# Fields whose ENTIRE purpose is to carry evidence. A bare placeholder in one of
+# these answers nothing: the map exists, every label is filled, and the gate goes
+# green having been told precisely nothing. Legitimate absence is still allowed,
+# but it must be EXPLAINED -- `n/a - CI-only change, no runtime capability added`
+# passes where a naked `n/a` does not.
+NARRATIVE_REQUIRED_FIELDS = (
+    "Requested outcome",
+    "Applicable directives",
+    "Existing platform/model capabilities reused",
+    "Existing deterministic kernels reused",
+    "Existing stores/workflows reused",
+    "Evidence existing capabilities were insufficient",
+    "Vertical E2E proof",
+)
+
+# Every REUSE_MAP_FIELD not listed above is genuinely nullable -- `none` is a
+# real, checkable answer for "Thin adapters" or "Architecture exception", and
+# forcing prose there would only teach authors to pad. `Shared-platform impact`
+# and `Other agents affected` are nullable HERE and tightened contextually by
+# the shared-runtime checks, which is where the context to judge them exists.
+
+# Tokens that assert nothing. Compared after case-folding and stripping every
+# separator, so `N/A.`, `n / a` and `--` all normalise onto the same answer.
+_PLACEHOLDER_TOKENS = {
+    "", "none", "na", "nil", "null", "nothing", "tbd", "tba", "todo",
+    "x", "y", "n", "ok", "yes", "no", "same", "asabove", "seeabove",
+    "unknown", "pending", "?",
+}
+
+
+def is_bare_placeholder(value: str) -> bool:
+    """Does this value consist of nothing but a placeholder token?
+
+    Deterministic and deliberately shallow. It cannot tell whether prose is
+    TRUE -- reviewer judgement owns that -- only whether the author supplied an
+    answer at all. `n/a - no new subsystem` normalises to `nanonewsubsystem`
+    and passes; `n/a` normalises to `na` and does not.
+    """
+    return re.sub(r"[^0-9a-z]+", "", value.strip().lower()) in _PLACEHOLDER_TOKENS
 
 # Cursor rule stem → registry project id. A stem absent here must equal an id.
 CURSOR_RULE_ALIASES = {"shared-platform-directive": "shift-platform"}
@@ -872,15 +910,47 @@ class GovernanceChecker:
         return re.sub(r"\*\*|__", "", text)
 
     @classmethod
+    def _field_occurrences(cls, body: str, label: str) -> list[str]:
+        r"""Every value written against this label, in document order.
+
+        The directive tells authors to repeat the whole Reuse Map block under a
+        `### <project-id>` heading for a multi-project change, so one label
+        legitimately appears more than once. Checks that ask "did the author
+        answer this ANYWHERE" union these; checks that ask "is any answer
+        blank" scan all of them.
+
+        Horizontal-only whitespace around the colon is load-bearing. Plain
+        `\s*` also matches newlines, so a BLANK field consumed its own line
+        break and captured the NEXT line as its value. Every blank field then
+        read as populated, which silently disarmed the emptiness gates below
+        -- they can only fire on a value this function never returned -- and
+        attributed one field's text to a different field.
+        """
+        h = r"[^\S\n]*"
+        return [
+            m.group(1).strip()
+            for m in re.finditer(
+                rf"^{h}[-*]?{h}{re.escape(label)}{h}:{h}(.*)$",
+                cls._deemphasize(body),
+                re.MULTILINE | re.IGNORECASE,
+            )
+        ]
+
+    @classmethod
     def _field_value(cls, body: str, label: str) -> Optional[str]:
-        m = re.search(
-            rf"^\s*[-*]?\s*{re.escape(label)}\s*:\s*(.*)$",
-            cls._deemphasize(body),
-            re.MULTILINE | re.IGNORECASE,
-        )
-        if m is None:
-            return None
-        return m.group(1).strip()
+        """The first value written against this label.
+
+        `None` means the label is absent; `""` means it is present with nothing
+        after the colon. Those are different facts and different checks key off
+        each, so they must never collapse into one another.
+        """
+        found = cls._field_occurrences(body, label)
+        return found[0] if found else None
+
+    @classmethod
+    def _field_union(cls, body: str, label: str) -> str:
+        """All values for this label joined -- for "was it named at all" checks."""
+        return " ".join(cls._field_occurrences(body, label))
 
     def check_pr_body(self, body: str, changed: list[str], today: _dt.date) -> None:
         if REUSE_MAP_HEADING not in self._deemphasize(body):
@@ -891,16 +961,62 @@ class GovernanceChecker:
             )
             return
 
+        # Layer 1 -- every label carries an explicit value. A blank field and an
+        # absent field are different author acts (forgot the schema vs. skipped
+        # the question) and get different codes, but neither is an answer.
         for label in REUSE_MAP_FIELDS:
-            if self._field_value(body, label) is None:
+            occurrences = self._field_occurrences(body, label)
+            if not occurrences:
                 self.add("GOV-PR-FIELD", f"Capability Reuse Map is missing the `{label}:` field")
+            elif not all(occurrences):
+                self.add(
+                    "GOV-PR-EMPTY",
+                    f"Capability Reuse Map field `{label}:` is blank. Write the answer "
+                    "explicitly -- for a genuinely nullable field that means `none`, not "
+                    "an empty line.",
+                )
 
+        # Layer 2 -- evidence-bearing fields reject bare placeholders.
+        for label in NARRATIVE_REQUIRED_FIELDS:
+            value = next(
+                (v for v in self._field_occurrences(body, label) if v and is_bare_placeholder(v)),
+                None,
+            )
+            if value:
+                self.add(
+                    "GOV-PR-PLACEHOLDER",
+                    f"Capability Reuse Map field `{label}:` answers `{value}`, which asserts "
+                    "nothing. This field carries evidence; if the honest answer is absence, "
+                    "say why (`n/a - CI-only change, no runtime capability added`).",
+                )
+
+        # Layer 3 -- `Affected projects` is checked against registry-resolved
+        # fact, IN ITS OWN FIELD. The previous whole-body substring let a project
+        # id satisfy this by appearing in a pasted diff path or a passing remark;
+        # `compliance` and `flyer-studio` are both substrings of their own
+        # registered paths, so for those two the check could be met by a PR that
+        # never declared them at all.
+        declared_projects = self._field_union(body, "Affected projects")
         for pid in self.affected:
-            if pid not in body:
+            if pid not in declared_projects:
                 self.add(
                     "GOV-PR-PROJECT",
-                    f"changed files affect project `{pid}` but the Capability Reuse Map "
-                    "does not name it",
+                    f"changed files affect project `{pid}` but the Capability Reuse Map's "
+                    "`Affected projects:` field does not name it",
+                )
+
+        # Layer 3 -- `Applicable directives` must name each affected project's
+        # REGISTERED directive. Naming a directive that governs something else is
+        # the same failure as naming none.
+        declared_directives = self._field_union(body, "Applicable directives")
+        for pid in self.affected:
+            proj = self.by_id.get(pid)
+            directive = proj.directive if proj else ""
+            if directive and directive not in declared_directives:
+                self.add(
+                    "GOV-PR-DIRECTIVE-MISSING",
+                    f"project `{pid}` is affected but its registered directive "
+                    f"`{directive}` is not named in `Applicable directives:`",
                 )
 
         # Shared-platform runtime changes must declare affected agents.
@@ -920,12 +1036,16 @@ class GovernanceChecker:
             )
             if not touched_runtime:
                 continue
-            value = (self._field_value(body, "Shared-platform impact") or "").lower()
-            if value in EMPTY_VALUES:
+            # `Shared-platform impact` is nullable in general -- most PRs touch no
+            # shared runtime. THIS one does, so the field stops being nullable and
+            # has to carry a description. `none`, blank and `x` are equally silent.
+            value = self._field_value(body, "Shared-platform impact") or ""
+            if is_bare_placeholder(value):
                 self.add(
                     "GOV-PR-SHARED",
                     f"`{pid}` is shared platform and its runtime changed — "
-                    "`Shared-platform impact:` must describe the effect, not be empty",
+                    "`Shared-platform impact:` must describe the effect; "
+                    f"`{value}` describes nothing",
                 )
             dependents = [
                 p.id for p in self.projects if pid in p.shared_dependencies
@@ -933,7 +1053,7 @@ class GovernanceChecker:
             # Look only in the fields that are supposed to carry the answer —
             # a project id mentioned incidentally elsewhere is not a declaration.
             declaration = " ".join(
-                self._field_value(body, label) or ""
+                self._field_union(body, label)
                 for label in ("Affected projects", "Shared-platform impact", "Other agents affected")
             )
             named = [d for d in dependents if d in declaration]
@@ -972,7 +1092,7 @@ class GovernanceChecker:
         for path, kind in suspicious:
             if extends:
                 continue
-            if declared_new not in EMPTY_VALUES:
+            if not is_bare_placeholder(declared_new):
                 # Declared as new — must be carried by an approved exception.
                 if any(self.exception_covers(eid, [path], today) for eid in eids):
                     continue
