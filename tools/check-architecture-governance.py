@@ -195,10 +195,17 @@ _PLACEHOLDER_TOKENS = {
     "passing", "passes", "cigreen", "citgreen", "0", "1",
     "same", "sameasabove", "asabove", "seeabove", "seesummary",
     "seethesummary", "seetheabove", "seepr", "seedescription", "seebelow",
+    "seethedescription", "seeprdescription", "ditto", "above", "nochanges",
+    "nothinghere", "notsure", "noidea", "asdiscussed",
+    # Whole-phrase deferrals. Matched EXACTLY, never as a prefix: a first-word
+    # rule rejected `pending approvals store` and `todo queue reused`, which are
+    # honest answers naming real things, while still missing a deferral padded
+    # past its bound. Deterministic syntax cannot separate a padded deferral
+    # from prose; reviewer judgement owns that, and a false red here is the
+    # worse failure.
+    "tbdafterreview", "tbdbeforemerge", "todoafterreview", "todobeforemerge",
+    "pendingafterreview", "tobedeterminedlater", "tobeconfirmedlater",
 }
-
-# Words meaning "no answer yet". Checked as the FIRST word of a short phrase.
-_DEFERRAL_WORDS = {"tbd", "tba", "tbc", "todo", "pending", "wip", "unknown"}
 
 # Invisible characters that survive `.strip()` and let a "populated" field carry
 # nothing a reader can see.
@@ -224,15 +231,7 @@ def is_bare_placeholder(value: str) -> bool:
     """
     visible = visible_value(value)
     normalised = re.sub(r"[^\w]+", "", visible, flags=re.UNICODE).lower()
-    if normalised in _PLACEHOLDER_TOKENS:
-        return True
-    # A DEFERRAL is not an answer however many words follow it: `tbd after
-    # review` says exactly what `tbd` says. Bounded to short phrases and to the
-    # first word, so a real answer that merely begins with one of these words
-    # (`todo-list store reused`) is untouched -- `todolist` is not `todo`.
-    words = visible.lower().split()
-    first = re.sub(r"[^\w]+", "", words[0], flags=re.UNICODE) if words else ""
-    return bool(words) and len(words) <= 4 and first in _DEFERRAL_WORDS
+    return normalised in _PLACEHOLDER_TOKENS
 
 # Cursor rule stem → registry project id. A stem absent here must equal an id.
 CURSOR_RULE_ALIASES = {"shared-platform-directive": "shift-platform"}
@@ -948,13 +947,20 @@ class GovernanceChecker:
 
     # Markdown that is NOT the author's answer. A PR body routinely quotes the
     # blank schema in a fence (every governance/template PR does) and carries
-    # `<!-- -->` guidance from the published template. Parsing those as fields
-    # cuts both ways: a quoted blank label poisons a field the author DID
-    # answer, and a quoted populated label supplies a value the visible map
-    # contradicts. Neither is the author speaking, so neither is parsed.
-    _FENCE_RX = re.compile(r"^[^\S\n]*(?P<f>```|~~~).*?(?:^[^\S\n]*(?P=f)[^\S\n]*$|\Z)",
+    # `<!-- -->` guidance from the published template. Parsing those cuts both
+    # ways: a quoted blank label poisons a field the author DID answer, and a
+    # quoted populated label supplies a value the visible map contradicts.
+    #
+    # Both patterns REQUIRE their terminator and so fail OPEN. An unterminated
+    # fence or comment used to swallow everything to end-of-body, deleting the
+    # author's real map and reporting `no Capability Reuse Map section` about a
+    # body that visibly contains one. Stripping nothing risks a stale value;
+    # stripping everything destroys the map. Fences match runs of >= 3 markers
+    # so a ````-fenced block (exactly how you quote content containing ```) is
+    # handled.
+    _FENCE_RX = re.compile(r"^[^\S\n]*(?P<f>`{3,}|~{3,})[^\n]*\n.*?^[^\S\n]*(?P=f)`*~*[^\S\n]*$",
                            re.DOTALL | re.MULTILINE)
-    _COMMENT_RX = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
+    _COMMENT_RX = re.compile(r"<!--.*?-->", re.DOTALL)
 
     @classmethod
     def _authored_text(cls, body: str) -> str:
@@ -962,44 +968,54 @@ class GovernanceChecker:
         return cls._FENCE_RX.sub("", cls._COMMENT_RX.sub("", body))
 
     @classmethod
+    def _any_field_line(cls) -> re.Pattern[str]:
+        """Matches ANY enforced Reuse Map label line, at any indent."""
+        alt = "|".join(re.escape(f) for f in REUSE_MAP_FIELDS)
+        return re.compile(rf"^[^\S\n]*[-*]?[^\S\n]*(?:{alt})[^\S\n]*:", re.IGNORECASE)
+
+    @classmethod
     def _field_occurrences(cls, body: str, label: str) -> list[str]:
         r"""Every value written against this label, in document order.
 
         A value is the label's own line PLUS any following lines indented
-        strictly deeper than it, because listing several reused capabilities as
-        sub-bullets, or wrapping a long directive list, is the natural way to
-        answer these fields -- and reading only the first physical line called
-        the richest answer in the map "blank".
+        deeper than it, because listing reused capabilities as sub-bullets, or
+        wrapping a long directive list, is the natural way to answer these
+        fields -- and reading only the first physical line called the richest
+        answer in the map "blank".
 
-        The deeper-indent rule is what keeps this from re-opening the defect
-        this parser exists to fix: a genuinely blank field is followed by its
-        SIBLING `- <Label>:` at the SAME indent, which is never absorbed, so it
-        still reads as `""`. A blank line also ends a value.
+        A SIBLING ROW IS NEVER ABSORBED, whatever its indent. That guard, not
+        the indent arithmetic, is what keeps this from re-opening the defect
+        the parser exists to fix. Indent alone was not enough: CommonMark
+        treats 0-3 spaces before `- ` as the same list level, so a row written
+        one space deeper than its predecessor renders as a flat sibling but
+        measured as a child -- which let a blank field capture the next row's
+        text again, and silenced the shared-platform gate on a one-space diff
+        no reviewer could see. Indents are tab-expanded for the same reason:
+        a raw `len` counts a tab as one column.
 
         The directive tells authors to repeat the whole block under a
         `### <project-id>` heading for a multi-project change, so one label
         legitimately appears more than once. Checks asking "was this answered
         anywhere" union these; checks asking "is any answer blank" scan all.
-
-        Horizontal-only whitespace around the colon is load-bearing. Plain
-        `\s*` also matches newlines, so a blank field consumed its own line
-        break and captured the next line as its value -- which read every blank
-        field as populated and made the emptiness gates unreachable.
         """
         h = r"[^\S\n]*"
         rx = re.compile(rf"^({h})[-*]?{h}{re.escape(label)}{h}:{h}(.*)$", re.IGNORECASE)
+        sibling = cls._any_field_line()
         lines = cls._deemphasize(cls._authored_text(body)).split("\n")
         out: list[str] = []
         for i, line in enumerate(lines):
             m = rx.match(line)
             if m is None:
                 continue
-            indent = len(m.group(1))
+            indent = len(m.group(1).expandtabs(4))
             parts = [m.group(2).strip()]
             for follower in lines[i + 1:]:
                 if not follower.strip():
                     break
-                if len(follower) - len(follower.lstrip()) <= indent:
+                if sibling.match(follower):
+                    break
+                expanded = follower.expandtabs(4)
+                if len(expanded) - len(expanded.lstrip()) <= indent:
                     break
                 parts.append(follower.strip().lstrip("-*").strip())
             out.append(" ".join(p for p in parts if p).strip())

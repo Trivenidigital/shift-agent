@@ -1817,3 +1817,98 @@ def test_an_invisible_character_is_not_a_value():
     )
     assert code == 1, out
     assert "GOV-PR-EMPTY" in out
+
+
+# ── 23. indentation cannot silence a check ─────────────────────────────────
+#
+# Found by re-review of the continuation-absorption rule. Indent alone was not
+# a safe boundary: CommonMark treats 0-3 spaces before `- ` as the SAME list
+# level, so a row written one space deeper than its predecessor renders as a
+# flat sibling but measured as a child — which let a blank field capture the
+# next row's text again (the original defect, in a new form) and silenced the
+# shared-platform gate on a diff no reviewer could see. The fix is the sibling
+# guard: a line that is itself a Reuse Map row is never absorbed, at any indent.
+
+
+def _map_lines(values, indents=None):
+    lines = ["## Capability Reuse Map", ""]
+    for i, f in enumerate(gov.REUSE_MAP_FIELDS):
+        pad = " " * ((indents or {}).get(f, 0))
+        lines.append(f"{pad}- {f}: {values[f]}")
+    return "\n".join(lines) + "\n"
+
+
+_SHARED_VALUES = {f: "real substantive answer" for f in gov.REUSE_MAP_FIELDS}
+_SHARED_VALUES.update({
+    "Affected projects": "shift-platform",
+    "Applicable directives": "docs/governance/shared-platform-directive.md",
+    "Thin adapters": "none", "Custom runtime code genuinely unavoidable": "none",
+    "New subsystem": "none", "Architecture exception": "none",
+    "Shared-platform impact": "none",
+    "Other agents affected": "catering-studio, flyer-studio, cockpit, commerce-platform, "
+                             "compliance, daily-brief, eod-reconcile, expense-bookkeeper, "
+                             "multi-location, phase0-agents, shift-agent",
+})
+
+
+def test_one_extra_space_cannot_silence_the_shared_platform_gate():
+    body = _map_lines(_SHARED_VALUES, {"Other agents affected": 1})
+    code, out = run_checker(REPO_ROOT, changed=["src/platform/safe_io.py"], body=body)
+    assert "GOV-PR-SHARED:" in out, f"one space silenced the shared-impact gate:\n{out}"
+    assert code == 1, out
+
+
+@pytest.mark.parametrize("pad", [1, 2, 3, 4])
+def test_a_blank_field_never_absorbs_a_sibling_row_at_any_indent(pad):
+    values = dict(_SHARED_VALUES)
+    values["Thin adapters"] = ""
+    body = _map_lines(values, {"Custom runtime code genuinely unavoidable": pad})
+    code, out = run_checker(REPO_ROOT, changed=["src/platform/safe_io.py"], body=body)
+    assert "GOV-PR-EMPTY" in out, f"blank field absorbed the next row at indent {pad}:\n{out}"
+    assert code == 1, out
+
+
+def test_a_staircase_indented_map_does_not_go_green():
+    """Row n indented n spaces — every field a child of the one above it."""
+    values = {f: "" for f in gov.REUSE_MAP_FIELDS}
+    values["Affected projects"] = "catering-studio"
+    values["Applicable directives"] = "docs/governance/projects/catering-studio.md"
+    indents = {f: i for i, f in enumerate(gov.REUSE_MAP_FIELDS)}
+    code, out = run_checker(
+        REPO_ROOT, changed=CATERING_CHANGE, body=_map_lines(values, indents) + "              - (end)\n",
+    )
+    assert code == 1, out
+    assert "GOV-PR-EMPTY" in out
+
+
+def test_tab_indentation_does_not_confuse_the_boundary():
+    """A raw `len` counts a tab as one column; indents are tab-expanded."""
+    values = dict(_SHARED_VALUES)
+    values["Thin adapters"] = ""
+    body = _map_lines(values).replace(
+        "- Custom runtime code genuinely unavoidable:", "\t- Custom runtime code genuinely unavoidable:")
+    code, out = run_checker(REPO_ROOT, changed=["src/platform/safe_io.py"], body=body)
+    assert "GOV-PR-EMPTY" in out, out
+
+
+@pytest.mark.parametrize("prefix", [
+    "```\nsome pasted log\n",                       # unterminated fence
+    "````\n- Requested outcome:\n- Vertical E2E proof:\n````\n",  # 4-backtick fence
+    "<!-- an unterminated reviewer note\n",          # unterminated comment
+])
+def test_an_unterminated_or_wide_fence_does_not_delete_the_map(prefix):
+    """Stripping to end-of-body reported `no Capability Reuse Map section`
+    about a body that visibly contains one. Both patterns fail OPEN."""
+    body = "## Summary\n\n" + prefix + "\n" + reuse_map()
+    code, out = run_checker(REPO_ROOT, changed=CATERING_CHANGE, body=body)
+    assert "GOV-PR-NOMAP" not in out, out
+
+
+@pytest.mark.parametrize("value", [
+    "pending approvals store", "pending order webhook", "unknown vendor SKU parser",
+    "todo queue reused", "wip branch protection rules",
+])
+def test_an_answer_naming_a_real_thing_is_not_a_deferral(value):
+    """A first-word deferral rule rejected these — all plausible names here —
+    while still missing a deferral padded past its bound. Matched exactly now."""
+    assert not gov.is_bare_placeholder(value), f"{value!r} rejected as a placeholder"
