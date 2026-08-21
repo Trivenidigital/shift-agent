@@ -41,10 +41,15 @@ on:
       - ".github/workflows/flyer-core-ci.yml"
   push:
     branches: [main]
+    # Identical to the pull_request list above, enforced by
+    # tests/test_repo_invariants.py. A path gated on the PR but not on push
+    # is verified before merge and unverified after it.
     paths:
       - "src/agents/flyer/**"
       - "src/plugins/cf-router/**"
       - "src/platform/schemas.py"
+      - "tests/test_flyer*.py"
+      - "tests/_flyer_replay_helpers.py"
       - ".github/workflows/flyer-core-ci.yml"
 
 concurrency:

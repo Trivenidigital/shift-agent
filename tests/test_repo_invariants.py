@@ -12,6 +12,9 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+import yaml
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -161,3 +164,147 @@ def test_cockpit_ci_checks_committed_typegen_schema():
 
     assert "npm run generate:types" in workflow
     assert "git diff --exit-code -- src/api/schema.ts" in workflow
+
+
+# ── flyer workflow trigger parity ──────────────────────────────────────────
+#
+# All three Flyer gates listed strictly more paths under `pull_request` than
+# under `push`, so a path could be gated on the PR and ungated once merged.
+# Concretely: a push to main touching only `src/plugins/cf-router/**` or
+# `tests/test_flyer_brand_asset_routing.py` did not run flyer-premium-ci, while
+# the identical change on a PR did.
+#
+# The asymmetry existed in all three workflows in the same direction, which is
+# why this is an invariant rather than three one-line edits: fixing only the
+# workflow named by an incident leaves the same defect beside it.
+
+FLYER_PARITY_WORKFLOWS = (
+    "flyer-premium-ci.yml",
+    "flyer-core-ci.yml",
+    "flyer-extended-ci.yml",
+)
+
+
+class _WorkflowLoader(yaml.SafeLoader):
+    """YAML 1.1 resolves a bare `on:` key to the boolean True, which silently
+    turns a workflow's trigger block into a key no lookup by name finds. Keep
+    booleans as strings so `on` stays `"on"`."""
+
+
+_WorkflowLoader.add_constructor(
+    "tag:yaml.org,2002:bool", lambda loader, node: loader.construct_scalar(node)
+)
+
+
+def _trigger_paths(workflow_name: str) -> tuple[set[str], set[str]]:
+    """(pull_request paths, push paths) for one workflow, parsed structurally."""
+    path = REPO_ROOT / ".github" / "workflows" / workflow_name
+    data = yaml.load(path.read_text(encoding="utf-8"), Loader=_WorkflowLoader)
+    triggers = data["on"]
+    def paths_for(event: str) -> set[str]:
+        block = triggers.get(event) or {}
+        return set(block.get("paths") or [])
+    return paths_for("pull_request"), paths_for("push")
+
+
+@pytest.mark.parametrize("workflow_name", FLYER_PARITY_WORKFLOWS)
+def test_flyer_workflow_pr_and_push_path_filters_match(workflow_name):
+    pr_paths, push_paths = _trigger_paths(workflow_name)
+    assert pr_paths, f"{workflow_name}: no pull_request paths parsed — shape changed?"
+    assert push_paths, f"{workflow_name}: no push paths parsed — shape changed?"
+    pr_only = sorted(pr_paths - push_paths)
+    push_only = sorted(push_paths - pr_paths)
+    assert not pr_only, (
+        f"{workflow_name} gates these paths on pull_request but NOT on push, so a "
+        f"change to them is unverified once merged: {pr_only}"
+    )
+    assert not push_only, (
+        f"{workflow_name} gates these paths on push but NOT on pull_request, so a "
+        f"change to them is unverified before merge: {push_only}"
+    )
+
+
+@pytest.mark.parametrize(
+    "workflow_name,required",
+    [
+        ("flyer-premium-ci.yml", "src/plugins/cf-router/**"),
+        ("flyer-premium-ci.yml", "tests/test_flyer_brand_asset_routing.py"),
+        ("flyer-premium-ci.yml", ".github/workflows/flyer-premium-ci.yml"),
+        ("flyer-core-ci.yml", "tests/test_flyer*.py"),
+        ("flyer-core-ci.yml", "tests/_flyer_replay_helpers.py"),
+        ("flyer-extended-ci.yml", "src/plugins/cf-router/**"),
+        ("flyer-extended-ci.yml", "tests/test_cf_router_flyer_routing.py"),
+    ],
+)
+def test_representative_path_is_gated_on_both_event_types(workflow_name, required):
+    """Named explicitly rather than left to set equality: these are the paths
+    whose one-sided gating produced the incident, and a future edit that drops
+    one from BOTH lists would satisfy parity while removing the coverage."""
+    pr_paths, push_paths = _trigger_paths(workflow_name)
+    assert required in pr_paths, f"{workflow_name} no longer gates {required} on pull_request"
+    assert required in push_paths, f"{workflow_name} no longer gates {required} on push"
+
+
+def _matches_actions_glob(pattern: str, path: str) -> bool:
+    """GitHub Actions path-filter matching.
+
+    `**` crosses directory separators, a single `*` does not. `fnmatch` would
+    let `*` swallow `/` and quietly report coverage the runner will not give.
+    """
+    out, i = [], 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif ch == "*":
+            out.append("[^/]*")
+            i += 1
+        elif ch == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(ch))
+            i += 1
+    return re.fullmatch("".join(out), path) is not None
+
+
+def _triggers(workflow_name: str, path: str) -> tuple[bool, bool]:
+    pr_paths, push_paths = _trigger_paths(workflow_name)
+    return (
+        any(_matches_actions_glob(p, path) for p in pr_paths),
+        any(_matches_actions_glob(p, path) for p in push_paths),
+    )
+
+
+@pytest.mark.parametrize(
+    "workflow_name,changed_path",
+    [
+        # The incident paths: a brand-asset routing change lives in cf-router,
+        # and its test is named directly by the premium gate.
+        ("flyer-premium-ci.yml", "src/plugins/cf-router/hooks.py"),
+        ("flyer-premium-ci.yml", "tests/test_flyer_brand_asset_routing.py"),
+        ("flyer-premium-ci.yml", ".github/workflows/flyer-premium-ci.yml"),
+        # A test-only change in each of the other two gates.
+        ("flyer-core-ci.yml", "tests/test_flyer_renderer.py"),
+        ("flyer-core-ci.yml", "tests/_flyer_replay_helpers.py"),
+        ("flyer-extended-ci.yml", "tests/test_cf_router_flyer_routing.py"),
+        ("flyer-extended-ci.yml", "src/plugins/cf-router/actions.py"),
+    ],
+)
+def test_a_representative_change_triggers_on_pr_and_on_push(workflow_name, changed_path):
+    """Membership in both lists is not the claim — matching is. A push to main
+    touching only `src/plugins/cf-router/hooks.py` did not run flyer-premium-ci
+    while the identical change on a PR did."""
+    on_pr, on_push = _triggers(workflow_name, changed_path)
+    assert on_pr, f"{changed_path} does not trigger {workflow_name} on pull_request"
+    assert on_push, f"{changed_path} does not trigger {workflow_name} on push"
+
+
+def test_the_glob_matcher_does_not_let_a_single_star_cross_a_separator():
+    """Guard the guard: if `*` matched `/`, the parity proofs above would pass
+    on filters that do not actually cover these paths."""
+    assert _matches_actions_glob("src/agents/flyer/**", "src/agents/flyer/a/b.py")
+    assert not _matches_actions_glob("tests/test_flyer*.py", "tests/sub/test_flyer_x.py")
+    assert _matches_actions_glob("tests/test_flyer*.py", "tests/test_flyer_renderer.py")
+    assert not _matches_actions_glob("src/agents/flyer/*", "src/agents/flyer/a/b.py")

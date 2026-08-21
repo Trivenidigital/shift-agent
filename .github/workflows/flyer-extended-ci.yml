@@ -34,8 +34,19 @@ on:
       - ".github/workflows/flyer-extended-ci.yml"
   push:
     branches: [main]
+    # Identical to the pull_request list above, enforced by
+    # tests/test_repo_invariants.py. A path gated on the PR but not on push
+    # is verified before merge and unverified after it.
     paths:
       - "src/agents/flyer/**"
+      - "src/plugins/cf-router/**"
+      - "tests/test_flyer_manual_queue*.py"
+      - "tests/test_flyer_generate_concepts.py"
+      - "tests/test_flyer_scripts_static.py"
+      - "tests/test_flyer_recovery*.py"
+      - "tests/test_flyer_onboarding.py"
+      - "tests/test_flyer_canonical_identity_wiring.py"
+      - "tests/test_cf_router_flyer_routing.py"
       - ".github/workflows/flyer-extended-ci.yml"
 
 jobs:
