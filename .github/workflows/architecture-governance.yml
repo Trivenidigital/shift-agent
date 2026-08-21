@@ -61,6 +61,15 @@ jobs:
       - name: Governance checker self-tests
         run: python3 -m pytest tests/test_architecture_governance.py -q
 
+      # Workflow trigger-parity invariant. It lives here because this job is the
+      # only one that runs on EVERY pull request regardless of changed paths —
+      # and the change it polices is an edit to a workflow file, which does not
+      # match send-path-ci's filter, the only other gate that executes
+      # tests/test_repo_invariants.py. Without this step the invariant would
+      # never run on its own change class.
+      - name: Workflow trigger-parity invariant
+        run: python3 -m pytest tests/test_repo_invariants.py -q
+
       # Path-scoped: only the affected projects' rules are evaluated.
       - name: Capture PR body
         if: github.event_name == 'pull_request'

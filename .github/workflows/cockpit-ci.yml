@@ -9,9 +9,13 @@ on:
   push:
     branches:
       - main
+    # Identical to the pull_request list above, enforced by
+    # tests/test_repo_invariants.py. A path gated on the PR but not on push
+    # is verified before merge and unverified after it.
     paths:
       - "web/backend/**"
       - "web/frontend/**"
+      - ".github/workflows/cockpit-ci.yml"
 
 # Allow only one concurrent run per branch; cancel earlier ones.
 concurrency:

@@ -178,13 +178,8 @@ def test_cockpit_ci_checks_committed_typegen_schema():
 # why this is an invariant rather than three one-line edits: fixing only the
 # workflow named by an incident leaves the same defect beside it.
 
-FLYER_PARITY_WORKFLOWS = (
-    "flyer-premium-ci.yml",
-    "flyer-core-ci.yml",
-    "flyer-extended-ci.yml",
-)
-
-
+# Workflows exempted from trigger parity, each with a specific reason. Parity is
+# the default; an exemption is a claim someone has to write down.
 class _WorkflowLoader(yaml.SafeLoader):
     """YAML 1.1 resolves a bare `on:` key to the boolean True, which silently
     turns a workflow's trigger block into a key no lookup by name finds. Keep
@@ -194,6 +189,35 @@ class _WorkflowLoader(yaml.SafeLoader):
 _WorkflowLoader.add_constructor(
     "tag:yaml.org,2002:bool", lambda loader, node: loader.construct_scalar(node)
 )
+
+
+PARITY_EXEMPT = {
+    # Its path-scoped steps are individually guarded by
+    # `if: github.event_name == 'pull_request'` and consume
+    # `github.event.pull_request.body` / `.base.sha`, which do not exist on a
+    # push. Its pull_request trigger deliberately has NO paths filter so the
+    # registry-integrity check runs on every PR.
+    "architecture-governance.yml": "pull_request-only steps consume PR context",
+}
+
+
+def _parity_workflows() -> list[str]:
+    """Every workflow gating BOTH event types, minus documented exemptions.
+
+    Derived, never a hardcoded list: a fourth Flyer gate added next month
+    inherits the rule the day it lands, which a literal tuple would not give.
+    """
+    out = []
+    for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        if path.name in PARITY_EXEMPT:
+            continue
+        triggers = yaml.load(path.read_text(encoding="utf-8"), Loader=_WorkflowLoader)["on"]
+        if isinstance(triggers, dict) and "pull_request" in triggers and "push" in triggers:
+            out.append(path.name)
+    return out
+
+
+PARITY_WORKFLOWS = _parity_workflows()
 
 
 def _trigger_paths(workflow_name: str) -> tuple[set[str], set[str]]:
@@ -207,8 +231,8 @@ def _trigger_paths(workflow_name: str) -> tuple[set[str], set[str]]:
     return paths_for("pull_request"), paths_for("push")
 
 
-@pytest.mark.parametrize("workflow_name", FLYER_PARITY_WORKFLOWS)
-def test_flyer_workflow_pr_and_push_path_filters_match(workflow_name):
+@pytest.mark.parametrize("workflow_name", PARITY_WORKFLOWS)
+def test_workflow_pr_and_push_path_filters_match(workflow_name):
     pr_paths, push_paths = _trigger_paths(workflow_name)
     assert pr_paths, f"{workflow_name}: no pull_request paths parsed — shape changed?"
     assert push_paths, f"{workflow_name}: no push paths parsed — shape changed?"
@@ -246,10 +270,17 @@ def test_representative_path_is_gated_on_both_event_types(workflow_name, require
 
 
 def _matches_actions_glob(pattern: str, path: str) -> bool:
-    """GitHub Actions path-filter matching.
+    """The `*` / `**` subset of GitHub Actions path-filter matching.
 
     `**` crosses directory separators, a single `*` does not. `fnmatch` would
     let `*` swallow `/` and quietly report coverage the runner will not give.
+
+    Deliberately NOT a full implementation: Actions also gives `?`, `+`, `[]`
+    and a leading `!` negation their own meanings, and `!` would additionally
+    break the set comparison above, which is order-insensitive while Actions
+    applies negations sequentially. Rather than half-implement them,
+    `test_no_parity_workflow_uses_an_unsupported_glob_feature` fails loudly if
+    one ever appears — turning a latent wrong answer into a red test.
     """
     out, i = [], 0
     while i < len(pattern):
@@ -308,3 +339,43 @@ def test_the_glob_matcher_does_not_let_a_single_star_cross_a_separator():
     assert not _matches_actions_glob("tests/test_flyer*.py", "tests/sub/test_flyer_x.py")
     assert _matches_actions_glob("tests/test_flyer*.py", "tests/test_flyer_renderer.py")
     assert not _matches_actions_glob("src/agents/flyer/*", "src/agents/flyer/a/b.py")
+
+
+def test_no_parity_workflow_uses_an_unsupported_glob_feature():
+    """`_matches_actions_glob` implements the `*` / `**` subset. Actions also
+    gives `?`, `+`, `[]` and a leading `!` their own meanings — and `!` would
+    break the set-parity comparison too, which is order-insensitive while
+    Actions applies negations sequentially. None are used today; this fails the
+    day one appears, instead of silently returning a wrong answer."""
+    offenders = []
+    for name in PARITY_WORKFLOWS:
+        pr_paths, push_paths = _trigger_paths(name)
+        for pattern in sorted(pr_paths | push_paths):
+            if pattern.startswith("!") or any(c in pattern for c in "?+[]"):
+                offenders.append(f"{name}: {pattern}")
+    assert not offenders, (
+        "path filter uses a glob feature the matcher does not implement — extend "
+        f"_matches_actions_glob (and revisit set-parity for `!`) before using it: {offenders}"
+    )
+
+
+def test_parity_workflow_list_is_derived_not_hardcoded():
+    """A fourth Flyer gate must inherit the rule the day it lands."""
+    assert "flyer-premium-ci.yml" in PARITY_WORKFLOWS
+    assert "flyer-core-ci.yml" in PARITY_WORKFLOWS
+    assert "flyer-extended-ci.yml" in PARITY_WORKFLOWS
+    assert "cockpit-ci.yml" in PARITY_WORKFLOWS, "cockpit gates both events and is not exempt"
+    assert "architecture-governance.yml" not in PARITY_WORKFLOWS, "documented exemption"
+    # Every non-exempt workflow gating both event types is covered.
+    for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        triggers = yaml.load(path.read_text(encoding="utf-8"), Loader=_WorkflowLoader)["on"]
+        gates_both = isinstance(triggers, dict) and "pull_request" in triggers and "push" in triggers
+        if gates_both and path.name not in PARITY_EXEMPT:
+            assert path.name in PARITY_WORKFLOWS, f"{path.name} gates both events but escaped the sweep"
+
+
+def test_every_parity_exemption_names_a_real_workflow():
+    """An exemption for a deleted workflow is a stale claim that hides the next
+    one to take its name."""
+    for name in PARITY_EXEMPT:
+        assert (REPO_ROOT / ".github" / "workflows" / name).is_file(), f"exempt but missing: {name}"
