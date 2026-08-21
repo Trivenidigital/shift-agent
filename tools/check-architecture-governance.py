@@ -157,7 +157,81 @@ EXTENDS_DECLARATION = re.compile(
     r"extends?\s+(?:the\s+)?existing\s+(?:sub)?system", re.IGNORECASE
 )
 
-EMPTY_VALUES = {"", "none", "n/a", "na", "-", "tbd", "todo"}
+# Fields whose ENTIRE purpose is to carry evidence. A bare placeholder in one of
+# these answers nothing: the map exists, every label is filled, and the gate goes
+# green having been told precisely nothing. Legitimate absence is still allowed,
+# but it must be EXPLAINED -- `n/a - CI-only change, no runtime capability added`
+# passes where a naked `n/a` does not.
+NARRATIVE_REQUIRED_FIELDS = (
+    "Requested outcome",
+    "Applicable directives",
+    "Existing platform/model capabilities reused",
+    "Existing deterministic kernels reused",
+    "Existing stores/workflows reused",
+    "Evidence existing capabilities were insufficient",
+    "Vertical E2E proof",
+)
+
+# Every REUSE_MAP_FIELD not listed above is genuinely nullable -- `none` is a
+# real, checkable answer for "Thin adapters" or "Architecture exception", and
+# forcing prose there would only teach authors to pad. `Shared-platform impact`
+# and `Other agents affected` are nullable HERE and tightened contextually by
+# the shared-runtime checks, which is where the context to judge them exists.
+
+# Answers that assert nothing. Compared after case-folding and stripping every
+# separator, so `N/A.`, `n / a` and `-- none --` all normalise onto one answer.
+#
+# Deliberately includes the EXPANSIONS, not just the abbreviations: an author
+# told to stop writing `n/a` writes `not applicable`, and `Vertical E2E proof:
+# done` / `green` / `passing` is what the same reflex produces there. Catching
+# `na` while accepting `notapplicable` would have made this gate theatre.
+_PLACEHOLDER_TOKENS = {
+    "", "none", "na", "nil", "null", "nothing", "nothingtoadd", "nope",
+    "notapplicable", "notrelevant", "notrequired", "notneeded", "noneneeded",
+    "noneyet", "nonerequired", "nonetodeclare",
+    "tbd", "tba", "tbc", "todo", "tobedetermined", "tobeconfirmed",
+    "pending", "pendingreview", "unknown", "unclear",
+    "x", "y", "n", "ok", "okay", "yes", "no", "done", "complete", "green",
+    "passing", "passes", "cigreen", "citgreen", "0", "1",
+    "same", "sameasabove", "asabove", "seeabove", "seesummary",
+    "seethesummary", "seetheabove", "seepr", "seedescription", "seebelow",
+    "seethedescription", "seeprdescription", "ditto", "above", "nochanges",
+    "nothinghere", "notsure", "noidea", "asdiscussed",
+    # Whole-phrase deferrals. Matched EXACTLY, never as a prefix: a first-word
+    # rule rejected `pending approvals store` and `todo queue reused`, which are
+    # honest answers naming real things, while still missing a deferral padded
+    # past its bound. Deterministic syntax cannot separate a padded deferral
+    # from prose; reviewer judgement owns that, and a false red here is the
+    # worse failure.
+    "tbdafterreview", "tbdbeforemerge", "todoafterreview", "todobeforemerge",
+    "pendingafterreview", "tobedeterminedlater", "tobeconfirmedlater",
+}
+
+# Invisible characters that survive `.strip()` and let a "populated" field carry
+# nothing a reader can see.
+_INVISIBLE_RX = re.compile(r"[\u00a0\u180e\u200b-\u200f\u202a-\u202e\u2060\ufeff]")
+
+
+def visible_value(value: str) -> str:
+    """The value with zero-width / directional characters removed."""
+    return _INVISIBLE_RX.sub("", value).strip()
+
+
+def is_bare_placeholder(value: str) -> bool:
+    """Does this value consist of nothing but a placeholder token?
+
+    Deterministic and deliberately shallow. It cannot tell whether prose is
+    TRUE -- reviewer judgement owns that -- only whether the author supplied an
+    answer at all. `n/a - no new subsystem` normalises to `nanonewsubsystem`
+    and passes; `n/a` normalises to `na` and does not.
+
+    Normalisation keeps unicode word characters rather than `[0-9a-z]`, so a
+    non-Latin answer stays an answer instead of collapsing to `""` and being
+    rejected as a placeholder it does not resemble.
+    """
+    visible = visible_value(value)
+    normalised = re.sub(r"[^\w]+", "", visible, flags=re.UNICODE).lower()
+    return normalised in _PLACEHOLDER_TOKENS
 
 # Cursor rule stem → registry project id. A stem absent here must equal an id.
 CURSOR_RULE_ALIASES = {"shared-platform-directive": "shift-platform"}
@@ -871,19 +945,100 @@ class GovernanceChecker:
         """
         return re.sub(r"\*\*|__", "", text)
 
+    # Markdown that is NOT the author's answer. A PR body routinely quotes the
+    # blank schema in a fence (every governance/template PR does) and carries
+    # `<!-- -->` guidance from the published template. Parsing those cuts both
+    # ways: a quoted blank label poisons a field the author DID answer, and a
+    # quoted populated label supplies a value the visible map contradicts.
+    #
+    # Both patterns REQUIRE their terminator and so fail OPEN. An unterminated
+    # fence or comment used to swallow everything to end-of-body, deleting the
+    # author's real map and reporting `no Capability Reuse Map section` about a
+    # body that visibly contains one. Stripping nothing risks a stale value;
+    # stripping everything destroys the map. Fences match runs of >= 3 markers
+    # so a ````-fenced block (exactly how you quote content containing ```) is
+    # handled.
+    _FENCE_RX = re.compile(r"^[^\S\n]*(?P<f>`{3,}|~{3,})[^\n]*\n.*?^[^\S\n]*(?P=f)`*~*[^\S\n]*$",
+                           re.DOTALL | re.MULTILINE)
+    _COMMENT_RX = re.compile(r"<!--.*?-->", re.DOTALL)
+
+    @classmethod
+    def _authored_text(cls, body: str) -> str:
+        """The body with quoted and commented-out regions removed."""
+        return cls._FENCE_RX.sub("", cls._COMMENT_RX.sub("", body))
+
+    @classmethod
+    def _any_field_line(cls) -> re.Pattern[str]:
+        """Matches ANY enforced Reuse Map label line, at any indent."""
+        alt = "|".join(re.escape(f) for f in REUSE_MAP_FIELDS)
+        return re.compile(rf"^[^\S\n]*[-*]?[^\S\n]*(?:{alt})[^\S\n]*:", re.IGNORECASE)
+
+    @classmethod
+    def _field_occurrences(cls, body: str, label: str) -> list[str]:
+        r"""Every value written against this label, in document order.
+
+        A value is the label's own line PLUS any following lines indented
+        deeper than it, because listing reused capabilities as sub-bullets, or
+        wrapping a long directive list, is the natural way to answer these
+        fields -- and reading only the first physical line called the richest
+        answer in the map "blank".
+
+        A SIBLING ROW IS NEVER ABSORBED, whatever its indent. That guard, not
+        the indent arithmetic, is what keeps this from re-opening the defect
+        the parser exists to fix. Indent alone was not enough: CommonMark
+        treats 0-3 spaces before `- ` as the same list level, so a row written
+        one space deeper than its predecessor renders as a flat sibling but
+        measured as a child -- which let a blank field capture the next row's
+        text again, and silenced the shared-platform gate on a one-space diff
+        no reviewer could see. Indents are tab-expanded for the same reason:
+        a raw `len` counts a tab as one column.
+
+        The directive tells authors to repeat the whole block under a
+        `### <project-id>` heading for a multi-project change, so one label
+        legitimately appears more than once. Checks asking "was this answered
+        anywhere" union these; checks asking "is any answer blank" scan all.
+        """
+        h = r"[^\S\n]*"
+        rx = re.compile(rf"^({h})[-*]?{h}{re.escape(label)}{h}:{h}(.*)$", re.IGNORECASE)
+        sibling = cls._any_field_line()
+        lines = cls._deemphasize(cls._authored_text(body)).split("\n")
+        out: list[str] = []
+        for i, line in enumerate(lines):
+            m = rx.match(line)
+            if m is None:
+                continue
+            indent = len(m.group(1).expandtabs(4))
+            parts = [m.group(2).strip()]
+            for follower in lines[i + 1:]:
+                if not follower.strip():
+                    break
+                if sibling.match(follower):
+                    break
+                expanded = follower.expandtabs(4)
+                if len(expanded) - len(expanded.lstrip()) <= indent:
+                    break
+                parts.append(follower.strip().lstrip("-*").strip())
+            out.append(" ".join(p for p in parts if p).strip())
+        return out
+
     @classmethod
     def _field_value(cls, body: str, label: str) -> Optional[str]:
-        m = re.search(
-            rf"^\s*[-*]?\s*{re.escape(label)}\s*:\s*(.*)$",
-            cls._deemphasize(body),
-            re.MULTILINE | re.IGNORECASE,
-        )
-        if m is None:
-            return None
-        return m.group(1).strip()
+        """The first value written against this label.
+
+        `None` means the label is absent; `""` means it is present with nothing
+        after the colon. Those are different facts and different checks key off
+        each, so they must never collapse into one another.
+        """
+        found = cls._field_occurrences(body, label)
+        return found[0] if found else None
+
+    @classmethod
+    def _field_union(cls, body: str, label: str) -> str:
+        """All values for this label joined -- for "was it named at all" checks."""
+        return " ".join(cls._field_occurrences(body, label))
 
     def check_pr_body(self, body: str, changed: list[str], today: _dt.date) -> None:
-        if REUSE_MAP_HEADING not in self._deemphasize(body):
+        if REUSE_MAP_HEADING not in self._deemphasize(self._authored_text(body)):
             self.add(
                 "GOV-PR-NOMAP",
                 f"PR body has no `{REUSE_MAP_HEADING}` section — a verbal reuse claim "
@@ -891,16 +1046,62 @@ class GovernanceChecker:
             )
             return
 
+        # Layer 1 -- every label carries an explicit value. A blank field and an
+        # absent field are different author acts (forgot the schema vs. skipped
+        # the question) and get different codes, but neither is an answer.
         for label in REUSE_MAP_FIELDS:
-            if self._field_value(body, label) is None:
+            occurrences = self._field_occurrences(body, label)
+            if not occurrences:
                 self.add("GOV-PR-FIELD", f"Capability Reuse Map is missing the `{label}:` field")
+            elif not all(visible_value(v) for v in occurrences):
+                self.add(
+                    "GOV-PR-EMPTY",
+                    f"Capability Reuse Map field `{label}:` is blank. Write the answer "
+                    "explicitly -- for a genuinely nullable field that means `none`, not "
+                    "an empty line.",
+                )
 
+        # Layer 2 -- evidence-bearing fields reject bare placeholders.
+        for label in NARRATIVE_REQUIRED_FIELDS:
+            value = next(
+                (v for v in self._field_occurrences(body, label) if v and is_bare_placeholder(v)),
+                None,
+            )
+            if value:
+                self.add(
+                    "GOV-PR-PLACEHOLDER",
+                    f"Capability Reuse Map field `{label}:` answers `{value}`, which asserts "
+                    "nothing. This field carries evidence; if the honest answer is absence, "
+                    "say why (`n/a - CI-only change, no runtime capability added`).",
+                )
+
+        # Layer 3 -- `Affected projects` is checked against registry-resolved
+        # fact, IN ITS OWN FIELD. The previous whole-body substring let a project
+        # id satisfy this by appearing in a pasted diff path or a passing remark;
+        # `compliance` and `flyer-studio` are both substrings of their own
+        # registered paths, so for those two the check could be met by a PR that
+        # never declared them at all.
+        declared_projects = self._field_union(body, "Affected projects")
         for pid in self.affected:
-            if pid not in body:
+            if pid not in declared_projects:
                 self.add(
                     "GOV-PR-PROJECT",
-                    f"changed files affect project `{pid}` but the Capability Reuse Map "
-                    "does not name it",
+                    f"changed files affect project `{pid}` but the Capability Reuse Map's "
+                    "`Affected projects:` field does not name it",
+                )
+
+        # Layer 3 -- `Applicable directives` must name each affected project's
+        # REGISTERED directive. Naming a directive that governs something else is
+        # the same failure as naming none.
+        declared_directives = self._field_union(body, "Applicable directives")
+        for pid in self.affected:
+            proj = self.by_id.get(pid)
+            directive = proj.directive if proj else ""
+            if directive and directive not in declared_directives:
+                self.add(
+                    "GOV-PR-DIRECTIVE-MISSING",
+                    f"project `{pid}` is affected but its registered directive "
+                    f"`{directive}` is not named in `Applicable directives:`",
                 )
 
         # Shared-platform runtime changes must declare affected agents.
@@ -920,12 +1121,16 @@ class GovernanceChecker:
             )
             if not touched_runtime:
                 continue
-            value = (self._field_value(body, "Shared-platform impact") or "").lower()
-            if value in EMPTY_VALUES:
+            # `Shared-platform impact` is nullable in general -- most PRs touch no
+            # shared runtime. THIS one does, so the field stops being nullable and
+            # has to carry a description. `none`, blank and `x` are equally silent.
+            value = self._field_value(body, "Shared-platform impact") or ""
+            if is_bare_placeholder(value):
                 self.add(
                     "GOV-PR-SHARED",
                     f"`{pid}` is shared platform and its runtime changed — "
-                    "`Shared-platform impact:` must describe the effect, not be empty",
+                    "`Shared-platform impact:` must describe the effect; "
+                    f"`{value}` describes nothing",
                 )
             dependents = [
                 p.id for p in self.projects if pid in p.shared_dependencies
@@ -933,7 +1138,7 @@ class GovernanceChecker:
             # Look only in the fields that are supposed to carry the answer —
             # a project id mentioned incidentally elsewhere is not a declaration.
             declaration = " ".join(
-                self._field_value(body, label) or ""
+                self._field_union(body, label)
                 for label in ("Affected projects", "Shared-platform impact", "Other agents affected")
             )
             named = [d for d in dependents if d in declaration]
@@ -965,14 +1170,17 @@ class GovernanceChecker:
             return
 
         declared_new = (self._field_value(body, "New subsystem") or "").lower()
-        extends = bool(EXTENDS_DECLARATION.search(body))
+        # The author's own declaration only. Read from the raw body, a reviewer
+        # note in an HTML comment -- phrased the way GOV-SUBSYSTEM-UNDECLARED
+        # itself instructs -- silently waived the whole subsystem gate.
+        extends = bool(EXTENDS_DECLARATION.search(self._authored_text(body)))
         cited = self._field_value(body, "Architecture exception") or ""
         eids = re.findall(r"\b([A-Z][A-Z0-9]*-EX-\d+)\b", cited)
 
         for path, kind in suspicious:
             if extends:
                 continue
-            if declared_new not in EMPTY_VALUES:
+            if not is_bare_placeholder(declared_new):
                 # Declared as new — must be carried by an approved exception.
                 if any(self.exception_covers(eid, [path], today) for eid in eids):
                     continue

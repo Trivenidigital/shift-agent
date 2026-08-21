@@ -1294,10 +1294,34 @@ def test_published_template_has_no_divergent_label(name):
     assert not extra, f"{name} publishes label(s) the checker does not enforce: {extra}"
 
 
-def _body_from_labels(labels: list[str]) -> str:
+# A substantive fill for every enforced label: evidence-bearing fields get real
+# prose, genuinely nullable fields get an explicit `none`, and the two
+# registry-checked fields get the facts for `catering-studio` (the project the
+# template-parity tests route through). The point of these tests is that the
+# published LABEL SET is accepted -- not that a content-free body is, which is
+# the false green this fixture used to certify.
+_SUBSTANTIVE_FILL = {
+    "Requested outcome": "verify the published template's label set is accepted",
+    "Affected projects": "catering-studio",
+    "Applicable directives": "docs/governance/projects/catering-studio.md",
+    "Existing platform/model capabilities reused": "Hermes vision extraction via parse-menu-photo",
+    "Existing deterministic kernels reused": "catering_pricing.py",
+    "Existing stores/workflows reused": "catering-leads.json and the existing approval workflow",
+    "Thin adapters": "none",
+    "Custom runtime code genuinely unavoidable": "none",
+    "New subsystem": "none",
+    "Evidence existing capabilities were insufficient": "n/a - no new subsystem is added",
+    "Architecture exception": "none",
+    "Shared-platform impact": "none",
+    "Other agents affected": "none",
+    "Vertical E2E proof": "inbound WhatsApp menu photo through to a priced pricebook",
+}
+
+
+def _body_from_labels(labels: list[str], fill=None) -> str:
+    """Build a PR body carrying exactly `labels`, substantively filled."""
     lines = ["## Summary", "", "schema conformance check", "", gov.REUSE_MAP_HEADING, ""]
-    lines += [f"- {lbl}: catering-studio" if lbl == "Affected projects" else f"- {lbl}: none"
-              for lbl in labels]
+    lines += [f"- {lbl}: {(fill or _SUBSTANTIVE_FILL).get(lbl, 'none')}" for lbl in labels]
     return "\n".join(lines) + "\n"
 
 
@@ -1360,3 +1384,574 @@ def test_field_matching_stays_exact_not_fuzzy():
     )
     assert code == 1, "a parenthetical variant label must not satisfy the gate"
     assert "`Affected projects:`" in out
+
+
+# ── 18. blank Reuse Map fields ─────────────────────────────────────────────
+#
+# A field an author left BLANK is the shape that reaches CI in practice, and it
+# is the one shape the rest of this file never produced: every emptiness test
+# above writes the literal string "none", which is non-empty TEXT that merely
+# happens to be a placeholder token. `_field_value`'s `\s*` after the colon matched
+# newlines, so a blank field captured the NEXT line instead and read as
+# populated — which silently disarmed both emptiness gates and mis-attributed
+# one field's value to another.
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        ("- New subsystem:\n- Vertical E2E proof: yes\n", ""),
+        ("- New subsystem: \n- Vertical E2E proof: yes\n", ""),
+        ("- New subsystem:\n\n- Vertical E2E proof: yes\n", ""),
+        ("- New subsystem:\n", ""),
+        ("- New subsystem:\nWe rewrote the platform.\n", ""),
+        ("- New subsystem: none\n- Vertical E2E proof: yes\n", "none"),
+        ("- **New subsystem:** none\n", "none"),
+    ],
+)
+def test_blank_field_never_captures_the_following_line(body, expected):
+    assert gov.GovernanceChecker._field_value(body, "New subsystem") == expected
+
+
+def test_blank_field_does_not_steal_a_neighbouring_fields_value():
+    body = "- Shared-platform impact:\n- Other agents affected: cockpit\n"
+    assert gov.GovernanceChecker._field_value(body, "Shared-platform impact") == ""
+    assert gov.GovernanceChecker._field_value(body, "Other agents affected") == "cockpit"
+
+
+def test_absent_field_is_still_distinguishable_from_blank_field():
+    """`None` (label absent) and `""` (label present, no value) must not merge:
+    GOV-PR-FIELD keys off the former, GOV-PR-EMPTY off the latter."""
+    assert gov.GovernanceChecker._field_value("- Thin adapters: x\n", "New subsystem") is None
+    assert gov.GovernanceChecker._field_value("- New subsystem:\n", "New subsystem") == ""
+
+
+def test_blank_shared_platform_impact_blocks_like_the_literal_none():
+    """The false green: shared-platform runtime changed and the impact field is
+    blank, yet the gate reported OK because the blank read as the next line."""
+    body = reuse_map(**{
+        "Affected projects": "shift-platform",
+        "Applicable directives": "docs/governance/shared-platform-directive.md",
+        "Shared-platform impact": "",
+    })
+    code, out = run_checker(REPO_ROOT, changed=["src/platform/safe_io.py"], body=body)
+    assert code == 1, out
+    assert "GOV-PR-SHARED" in out
+
+
+def test_blank_new_subsystem_reads_as_undeclared_not_declared():
+    """Opposite direction of the same bug: a blank `New subsystem:` read as a
+    DECLARATION, demanding an exception for a subsystem nobody declared."""
+    body = reuse_map(**{
+        "Affected projects": "catering-studio",
+        "New subsystem": "",
+    })
+    code, out = run_checker(
+        REPO_ROOT,
+        changed=["src/agents/catering/brand_new_engine.py"],
+        added=["src/agents/catering/brand_new_engine.py"],
+        body=body,
+    )
+    assert "GOV-SUBSYSTEM-NOEXC" not in out, out
+
+
+# ── 19. Reuse Map field classes ────────────────────────────────────────────
+#
+# Three layers, tested as CLASSES rather than as the handful of fields a probe
+# happened to touch:
+#   1. every label carries an explicit value (blank != `none`);
+#   2. evidence-bearing fields reject bare placeholders;
+#   3. `Affected projects` / `Applicable directives` are checked against
+#      registry-resolved fact, in their own field.
+
+CATERING_CHANGE = ["src/agents/catering/deposit.py"]
+
+
+@pytest.mark.parametrize("field", gov.REUSE_MAP_FIELDS)
+def test_every_field_blocks_when_the_label_is_absent(field):
+    body = reuse_map()
+    body = "\n".join(l for l in body.split("\n") if not l.startswith(f"- {field}:"))
+    code, out = run_checker(REPO_ROOT, changed=CATERING_CHANGE, body=body)
+    assert code == 1, out
+    assert "GOV-PR-FIELD" in out and field in out
+
+
+@pytest.mark.parametrize("field", gov.REUSE_MAP_FIELDS)
+def test_every_field_blocks_when_present_but_blank(field):
+    code, out = run_checker(
+        REPO_ROOT, changed=CATERING_CHANGE, body=reuse_map(**{field: ""}),
+    )
+    assert code == 1, out
+    assert "GOV-PR-EMPTY" in out and field in out
+
+
+@pytest.mark.parametrize("field", gov.NARRATIVE_REQUIRED_FIELDS)
+@pytest.mark.parametrize("placeholder", ["none", "n/a", "N/A.", "-", "--", "tbd", "todo", "x", "ok", "?"])
+def test_narrative_field_rejects_a_bare_placeholder(field, placeholder):
+    code, out = run_checker(
+        REPO_ROOT, changed=CATERING_CHANGE, body=reuse_map(**{field: placeholder}),
+    )
+    assert code == 1, out
+    assert "GOV-PR-PLACEHOLDER" in out or "GOV-PR-DIRECTIVE-MISSING" in out, out
+
+
+@pytest.mark.parametrize("field", gov.NARRATIVE_REQUIRED_FIELDS)
+def test_narrative_field_accepts_an_explained_absence(field):
+    explained = {
+        "Applicable directives": "docs/governance/projects/catering-studio.md",
+    }.get(field, "n/a - CI-only change, no runtime capability is added here")
+    code, out = run_checker(
+        REPO_ROOT, changed=CATERING_CHANGE, body=reuse_map(**{field: explained}),
+    )
+    assert code == 0, out
+
+
+NULLABLE_FIELDS = tuple(
+    f for f in gov.REUSE_MAP_FIELDS if f not in gov.NARRATIVE_REQUIRED_FIELDS
+    and f != "Affected projects"
+)
+
+
+@pytest.mark.parametrize("field", NULLABLE_FIELDS)
+def test_nullable_field_accepts_an_explicit_none(field):
+    """`none` is a real answer for these; forcing prose would only teach padding."""
+    code, out = run_checker(
+        REPO_ROOT, changed=CATERING_CHANGE, body=reuse_map(**{field: "none"}),
+    )
+    assert code == 0, out
+
+
+def test_affected_project_named_elsewhere_but_not_in_its_field_blocks():
+    """The old check scanned the WHOLE body, so a pasted path or a passing
+    remark could satisfy it. `compliance` and `flyer-studio` are substrings of
+    their own registered paths, so for those two a diff listing alone did it."""
+    body = reuse_map(**{
+        "Affected projects": "catering-studio",
+        "Requested outcome": "incidentally I also touched src/agents/compliance/rules.py",
+    })
+    code, out = run_checker(
+        REPO_ROOT,
+        changed=["src/agents/catering/deposit.py", "src/agents/compliance/rules.py"],
+        body=body,
+    )
+    assert code == 1, out
+    assert "GOV-PR-PROJECT" in out and "compliance" in out
+
+
+def test_applicable_directives_must_name_the_registered_directive():
+    code, out = run_checker(
+        REPO_ROOT,
+        changed=CATERING_CHANGE,
+        body=reuse_map(**{"Applicable directives": "docs/governance/projects/flyer-studio.md"}),
+    )
+    assert code == 1, out
+    assert "GOV-PR-DIRECTIVE-MISSING" in out
+
+
+def test_shared_runtime_impact_rejects_a_single_junk_character():
+    body = reuse_map(**{
+        "Affected projects": "shift-platform",
+        "Applicable directives": "docs/governance/shared-platform-directive.md",
+        "Shared-platform impact": "x",
+        "Other agents affected": "catering-studio, flyer-studio",
+    })
+    code, out = run_checker(REPO_ROOT, changed=["src/platform/safe_io.py"], body=body)
+    assert code == 1, out
+    assert "GOV-PR-SHARED" in out
+
+
+def test_shared_runtime_passes_with_substantive_impact_and_named_agents():
+    body = reuse_map(**{
+        "Affected projects": "shift-platform",
+        "Applicable directives": "docs/governance/shared-platform-directive.md",
+        "Shared-platform impact": "adds an atomic-write retry; every agent writing "
+                                 "through safe_io inherits the new retry ceiling",
+        "Other agents affected": "catering-studio, flyer-studio, cockpit",
+    })
+    code, out = run_checker(REPO_ROOT, changed=["src/platform/safe_io.py"], body=body)
+    assert code == 0, out
+
+
+# ── 20. mutation proof ─────────────────────────────────────────────────────
+
+FALSE_GREEN_BODY = """## Capability Reuse Map
+
+- Requested outcome:
+- Affected projects: shift-platform, catering-studio, cockpit, commerce-platform, compliance, daily-brief, eod-reconcile, expense-bookkeeper, flyer-studio, multi-location, phase0-agents, shift-agent
+- Applicable directives:
+- Existing platform/model capabilities reused:
+- Existing deterministic kernels reused:
+- Existing stores/workflows reused:
+- Thin adapters:
+- Custom runtime code genuinely unavoidable:
+- New subsystem:
+- Evidence existing capabilities were insufficient:
+- Architecture exception:
+- Shared-platform impact: x
+- Other agents affected:
+- Vertical E2E proof:
+"""
+
+
+def test_the_recorded_false_green_body_is_now_rejected():
+    """Verbatim the body that made the gate print `architecture governance: OK`
+    (exit 0) on 40064b1a while changing shared-platform runtime and asserting
+    nothing. This test is the closure artifact: if it ever passes again, the
+    gate has regressed to certifying an empty claim."""
+    code, out = run_checker(
+        REPO_ROOT,
+        changed=["src/plugins/cf-router/hooks.py", "src/platform/schemas.py"],
+        body=FALSE_GREEN_BODY,
+    )
+    assert code == 1, f"the recorded false-green body passed again:\n{out}"
+    # Every narrative field in this body is BLANK rather than a placeholder, so
+    # GOV-PR-EMPTY is the code that answers for them; `Shared-platform impact: x`
+    # is the one bare placeholder and GOV-PR-SHARED owns it.
+    for expected in ("GOV-PR-EMPTY", "GOV-PR-DIRECTIVE-MISSING", "GOV-PR-SHARED"):
+        assert expected in out, f"{expected} missing:\n{out}"
+
+
+@pytest.mark.parametrize("name", list(PUBLISHED_TEMPLATES))
+def test_published_template_is_a_form_not_a_passing_answer(name):
+    """The inverse of the schema-parity test above. A template ships BLANK
+    fields; copying it without answering must fail, or the template itself
+    becomes the false green."""
+    labels = _bullet_labels(PUBLISHED_TEMPLATES[name]())
+    blank = _body_from_labels(labels, fill={lbl: "" for lbl in labels})
+    code, out = run_checker(REPO_ROOT, changed=CATERING_CHANGE, body=blank)
+    assert code == 1, f"an unfilled {name} passed CI:\n{out}"
+    assert "GOV-PR-EMPTY" in out
+
+
+# ── 21. repeated per-project sections ──────────────────────────────────────
+#
+# The directive and the PR template both tell authors to repeat the whole Reuse
+# Map block under a `### <project-id>` heading for a multi-project change, so a
+# label legitimately appears more than once. Scoping the registry checks to the
+# label's own field must not break that: reading only the FIRST occurrence would
+# reject every documented multi-project PR.
+
+
+def _two_section_body(second_overrides=None):
+    first = reuse_map(**{
+        "Affected projects": "catering-studio",
+        "Applicable directives": "docs/governance/projects/catering-studio.md",
+    })
+    second_values = {
+        "Affected projects": "flyer-studio",
+        "Applicable directives": "docs/governance/projects/flyer-studio.md",
+    }
+    second_values.update(second_overrides or {})
+    second = reuse_map(**second_values)
+    # Keep one heading; the second block is a `### <project-id>` subsection.
+    second_block = second.split(gov.REUSE_MAP_HEADING, 1)[1]
+    return first + "\n### flyer-studio\n" + second_block
+
+
+def test_multi_project_body_with_repeated_sections_passes():
+    code, out = run_checker(
+        REPO_ROOT,
+        changed=["src/agents/catering/deposit.py", "src/agents/flyer/onboarding.py"],
+        body=_two_section_body(),
+    )
+    assert code == 0, out
+
+
+def test_blank_field_in_a_LATER_section_still_blocks():
+    """Reading only the first occurrence would let a second section be hollow."""
+    code, out = run_checker(
+        REPO_ROOT,
+        changed=["src/agents/catering/deposit.py", "src/agents/flyer/onboarding.py"],
+        body=_two_section_body({"Vertical E2E proof": ""}),
+    )
+    assert code == 1, out
+    assert "GOV-PR-EMPTY" in out and "Vertical E2E proof" in out
+
+
+def test_placeholder_in_a_LATER_section_still_blocks():
+    code, out = run_checker(
+        REPO_ROOT,
+        changed=["src/agents/catering/deposit.py", "src/agents/flyer/onboarding.py"],
+        body=_two_section_body({"Existing deterministic kernels reused": "n/a"}),
+    )
+    assert code == 1, out
+    assert "GOV-PR-PLACEHOLDER" in out
+
+
+# ── 22. structure-aware parsing ────────────────────────────────────────────
+#
+# Every case below was found by independent review of the first cut of this
+# fix. They share one root cause: the parser read a value as exactly one
+# physical line and parsed the WHOLE body, including regions that are not the
+# author speaking. That cut both ways -- a quoted blank label poisoned a field
+# the author DID answer, and a quoted populated label supplied a value the
+# visible map contradicted.
+
+
+def test_sub_bullet_value_is_not_read_as_blank():
+    """Listing reused capabilities as sub-bullets is the natural answer here,
+    and it was reported as `blank` -- the opposite of the truth."""
+    body = reuse_map().replace(
+        "- Existing platform/model capabilities reused: Hermes vision extraction via parse-menu-photo",
+        "- Existing platform/model capabilities reused:\n"
+        "  - `safe_io.atomic_write_json` for the state write\n"
+        "  - `identify-sender` for sender identity",
+    )
+    code, out = run_checker(REPO_ROOT, changed=CATERING_CHANGE, body=body)
+    assert code == 0, out
+
+
+def test_wrapped_directive_list_is_not_truncated_to_its_first_line():
+    """Three directive paths exceed a comfortable line, so authors wrap. The
+    old reading emitted a FALSE STATEMENT: `not named in Applicable
+    directives:` about a directive named two lines below."""
+    body = reuse_map(**{
+        "Affected projects": "shift-platform, catering-studio",
+        "Applicable directives": "docs/governance/shared-platform-directive.md,\n"
+                                 "  docs/governance/projects/catering-studio.md",
+        "Shared-platform impact": "reorders the fsync in the shared atomic-write helper",
+        "Other agents affected": "catering-studio",
+    })
+    code, out = run_checker(
+        REPO_ROOT,
+        changed=["src/platform/safe_io.py", "src/agents/catering/deposit.py"],
+        body=body,
+    )
+    assert "GOV-PR-DIRECTIVE-MISSING" not in out, out
+    assert code == 0, out
+
+
+def test_a_fenced_copy_of_the_blank_schema_does_not_poison_real_answers():
+    """The PR class that MUST quote the blank schema is governance/template
+    work -- this very PR's class."""
+    quoted = "\n".join(f"- {f}:" for f in gov.REUSE_MAP_FIELDS)
+    body = ("## Summary\n\nBefore this change the schema below went green with every value "
+            "empty:\n\n```\n" + quoted + "\n```\n\n" + reuse_map())
+    code, out = run_checker(REPO_ROOT, changed=CATERING_CHANGE, body=body)
+    assert "GOV-PR-EMPTY" not in out, out
+    assert code == 0, out
+
+
+def test_a_fenced_decoy_cannot_supply_a_value_the_visible_map_contradicts():
+    """Last-writer-wins is what a human reader assumes. A quoted earlier map
+    must not answer for a visible map that says `none`."""
+    decoy = "\n".join([
+        "- Shared-platform impact: rewrites fsync ordering for every agent",
+        "- Other agents affected: catering-studio, flyer-studio",
+    ])
+    body = ("## Summary\n\nsuperseded map:\n\n```\n" + decoy + "\n```\n\n" + reuse_map(**{
+        "Affected projects": "shift-platform",
+        "Applicable directives": "docs/governance/shared-platform-directive.md",
+        "Shared-platform impact": "none",
+        "Other agents affected": "none",
+    }))
+    code, out = run_checker(REPO_ROOT, changed=["src/platform/safe_io.py"], body=body)
+    assert code == 1, out
+    assert "GOV-PR-SHARED" in out
+
+
+def test_a_reuse_map_hidden_in_an_html_comment_does_not_satisfy_the_gate():
+    """It renders on GitHub as a heading followed by whitespace: a green check
+    on content no reviewer can see defeats both halves of the design."""
+    filled = reuse_map().split(gov.REUSE_MAP_HEADING, 1)[1]
+    body = "## Summary\n\nHardens safe_io.\n\n" + gov.REUSE_MAP_HEADING + "\n\n<!--" + filled + "-->\n"
+    code, out = run_checker(REPO_ROOT, changed=["src/platform/safe_io.py"], body=body)
+    assert code == 1, out
+
+
+def test_an_extends_declaration_in_a_comment_does_not_waive_the_subsystem_gate():
+    """`extends` is the only remaining escape from the subsystem gate, so a
+    reviewer note phrased the way the finding text instructs must not trip it."""
+    body = ("## Summary\n\nAdds a receipt store.\n\n"
+            "<!-- reviewer note: confirm this extends the existing subsystem "
+            "rather than forking a new one -->\n\n" + reuse_map(**{
+                "Affected projects": "shift-platform",
+                "Applicable directives": "docs/governance/shared-platform-directive.md",
+                "New subsystem": "yes, a new durable receipt store",
+                "Shared-platform impact": "adds a durable store every agent can write to",
+                "Other agents affected": "expense-bookkeeper",
+            }))
+    code, out = run_checker(
+        REPO_ROOT,
+        changed=["src/platform/receipt_store.py"],
+        added=["src/platform/receipt_store.py"],
+        body=body,
+    )
+    assert code == 1, out
+    assert "GOV-SUBSYSTEM" in out
+
+
+@pytest.mark.parametrize("value", [
+    "Not applicable", "not applicable", "nope", "none yet", "None needed",
+    "not required", "not needed", "nothing to add", "to be determined",
+    "tbd after review", "pending review", "see summary", "same as above",
+    "done", "Done.", "green", "CI green", "passing", "0", "1", "unknown",
+])
+def test_expanded_non_answers_are_rejected(value):
+    """An author told to stop writing `n/a` writes `Not applicable`; told to
+    prove an E2E they write `green`. Catching only the abbreviation made this
+    gate theatre."""
+    assert gov.is_bare_placeholder(value), f"{value!r} accepted as a real answer"
+
+
+@pytest.mark.parametrize("value", [
+    "n/a - no new subsystem", "safe_io.atomic_write_json",
+    "todo-list store reused", "pending-order workflow reused",
+    "unknown-sender path reuses identify-sender",
+    "N/A - CI-only change, no runtime capability added",
+])
+def test_real_answers_are_not_mistaken_for_placeholders(value):
+    assert not gov.is_bare_placeholder(value), f"{value!r} rejected as a placeholder"
+
+
+def test_a_non_latin_answer_is_an_answer():
+    """`[^0-9a-z]` normalisation collapsed any CJK/Cyrillic answer to `""` and
+    rejected it as a placeholder it does not resemble."""
+    assert not gov.is_bare_placeholder("\u65e0\u9700\u8981\u7684\u8fd0\u884c\u65f6\u4ee3\u7801")
+    assert not gov.is_bare_placeholder("\u041d\u0435\u0442 \u043d\u043e\u0432\u044b\u0445 \u043f\u043e\u0434\u0441\u0438\u0441\u0442\u0435\u043c")
+
+
+def test_an_invisible_character_is_not_a_value():
+    code, out = run_checker(
+        REPO_ROOT, changed=CATERING_CHANGE, body=reuse_map(**{"Thin adapters": "\u200b"}),
+    )
+    assert code == 1, out
+    assert "GOV-PR-EMPTY" in out
+
+
+# ── 23. indentation cannot silence a check ─────────────────────────────────
+#
+# Found by re-review of the continuation-absorption rule. Indent alone was not
+# a safe boundary: CommonMark treats 0-3 spaces before `- ` as the SAME list
+# level, so a row written one space deeper than its predecessor renders as a
+# flat sibling but measured as a child — which let a blank field capture the
+# next row's text again (the original defect, in a new form) and silenced the
+# shared-platform gate on a diff no reviewer could see. The fix is the sibling
+# guard: a line that is itself a Reuse Map row is never absorbed, at any indent.
+
+
+def _map_lines(values, indents=None):
+    lines = ["## Capability Reuse Map", ""]
+    for i, f in enumerate(gov.REUSE_MAP_FIELDS):
+        pad = " " * ((indents or {}).get(f, 0))
+        lines.append(f"{pad}- {f}: {values[f]}")
+    return "\n".join(lines) + "\n"
+
+
+_SHARED_VALUES = {f: "real substantive answer" for f in gov.REUSE_MAP_FIELDS}
+_SHARED_VALUES.update({
+    "Affected projects": "shift-platform",
+    "Applicable directives": "docs/governance/shared-platform-directive.md",
+    "Thin adapters": "none", "Custom runtime code genuinely unavoidable": "none",
+    "New subsystem": "none", "Architecture exception": "none",
+    "Shared-platform impact": "none",
+    "Other agents affected": "catering-studio, flyer-studio, cockpit, commerce-platform, "
+                             "compliance, daily-brief, eod-reconcile, expense-bookkeeper, "
+                             "multi-location, phase0-agents, shift-agent",
+})
+
+
+def test_one_extra_space_cannot_silence_the_shared_platform_gate():
+    body = _map_lines(_SHARED_VALUES, {"Other agents affected": 1})
+    code, out = run_checker(REPO_ROOT, changed=["src/platform/safe_io.py"], body=body)
+    assert "GOV-PR-SHARED:" in out, f"one space silenced the shared-impact gate:\n{out}"
+    assert code == 1, out
+
+
+@pytest.mark.parametrize("pad", [1, 2, 3, 4])
+def test_a_blank_field_never_absorbs_a_sibling_row_at_any_indent(pad):
+    values = dict(_SHARED_VALUES)
+    values["Thin adapters"] = ""
+    body = _map_lines(values, {"Custom runtime code genuinely unavoidable": pad})
+    code, out = run_checker(REPO_ROOT, changed=["src/platform/safe_io.py"], body=body)
+    assert "GOV-PR-EMPTY" in out, f"blank field absorbed the next row at indent {pad}:\n{out}"
+    assert code == 1, out
+
+
+def test_a_staircase_indented_map_does_not_go_green():
+    """Row n indented n spaces — every field a child of the one above it."""
+    values = {f: "" for f in gov.REUSE_MAP_FIELDS}
+    values["Affected projects"] = "catering-studio"
+    values["Applicable directives"] = "docs/governance/projects/catering-studio.md"
+    indents = {f: i for i, f in enumerate(gov.REUSE_MAP_FIELDS)}
+    code, out = run_checker(
+        REPO_ROOT, changed=CATERING_CHANGE, body=_map_lines(values, indents) + "              - (end)\n",
+    )
+    assert code == 1, out
+    assert "GOV-PR-EMPTY" in out
+
+
+def test_tab_indentation_does_not_confuse_the_boundary():
+    """A raw `len` counts a tab as one column; indents are tab-expanded."""
+    values = dict(_SHARED_VALUES)
+    values["Thin adapters"] = ""
+    body = _map_lines(values).replace(
+        "- Custom runtime code genuinely unavoidable:", "\t- Custom runtime code genuinely unavoidable:")
+    code, out = run_checker(REPO_ROOT, changed=["src/platform/safe_io.py"], body=body)
+    assert "GOV-PR-EMPTY" in out, out
+
+
+@pytest.mark.parametrize("prefix", [
+    "```\nsome pasted log\n",                       # unterminated fence
+    "````\n- Requested outcome:\n- Vertical E2E proof:\n````\n",  # 4-backtick fence
+    "<!-- an unterminated reviewer note\n",          # unterminated comment
+])
+def test_an_unterminated_or_wide_fence_does_not_delete_the_map(prefix):
+    """Stripping to end-of-body reported `no Capability Reuse Map section`
+    about a body that visibly contains one. Both patterns fail OPEN."""
+    body = "## Summary\n\n" + prefix + "\n" + reuse_map()
+    code, out = run_checker(REPO_ROOT, changed=CATERING_CHANGE, body=body)
+    assert "GOV-PR-NOMAP" not in out, out
+
+
+@pytest.mark.parametrize("value", [
+    "pending approvals store", "pending order webhook", "unknown vendor SKU parser",
+    "todo queue reused", "wip branch protection rules",
+])
+def test_an_answer_naming_a_real_thing_is_not_a_deferral(value):
+    """A first-word deferral rule rejected these — all plausible names here —
+    while still missing a deferral padded past its bound. Matched exactly now."""
+    assert not gov.is_bare_placeholder(value), f"{value!r} rejected as a placeholder"
+
+
+def test_an_answer_written_on_the_following_line_is_an_answer():
+    """The other half of the sibling guard: indented CONTENT under a label is
+    the author answering on the next line, and must be read as the value —
+    only a sibling ROW is refused."""
+    body = reuse_map().replace(
+        "- Thin adapters: menu-to-pricebook adapter",
+        "- Thin adapters:\n  the menu-to-pricebook adapter, described here",
+    )
+    assert gov.GovernanceChecker._field_occurrences(body, "Thin adapters") == [
+        "the menu-to-pricebook adapter, described here"
+    ]
+    code, out = run_checker(REPO_ROOT, changed=CATERING_CHANGE, body=body)
+    assert code == 0, out
+
+
+@pytest.mark.parametrize("field", gov.REUSE_MAP_FIELDS[:-1])
+@pytest.mark.parametrize("shape", ["flush", "one_space", "three_spaces", "tab", "star_bullet", "bold_label"])
+def test_blank_is_detected_whatever_the_next_row_looks_like(field, shape):
+    """Swept invariant: a genuinely blank field is caught regardless of how the
+    FOLLOWING row is written. Every regression in this branch's review history
+    was a shape that made a blank field read as populated."""
+    nxt = gov.REUSE_MAP_FIELDS[list(gov.REUSE_MAP_FIELDS).index(field) + 1]
+    values = dict(_SHARED_VALUES)
+    values[field] = ""
+    lines = ["## Capability Reuse Map", ""]
+    for f in gov.REUSE_MAP_FIELDS:
+        row = f"- {f}: {values[f]}"
+        if f == nxt:
+            row = {
+                "flush": row,
+                "one_space": " " + row,
+                "three_spaces": "   " + row,
+                "tab": "\t" + row,
+                "star_bullet": row.replace("- ", "* ", 1),
+                "bold_label": row.replace("- ", "- **", 1).replace(":", "**:", 1),
+            }[shape]
+        lines.append(row)
+    code, out = run_checker(
+        REPO_ROOT, changed=["src/platform/safe_io.py"], body="\n".join(lines) + "\n",
+    )
+    assert "GOV-PR-EMPTY" in out, f"blank {field!r} missed with next row {shape}:\n{out}"
