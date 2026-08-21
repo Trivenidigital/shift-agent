@@ -12,6 +12,9 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+import yaml
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -161,3 +164,218 @@ def test_cockpit_ci_checks_committed_typegen_schema():
 
     assert "npm run generate:types" in workflow
     assert "git diff --exit-code -- src/api/schema.ts" in workflow
+
+
+# ── flyer workflow trigger parity ──────────────────────────────────────────
+#
+# All three Flyer gates listed strictly more paths under `pull_request` than
+# under `push`, so a path could be gated on the PR and ungated once merged.
+# Concretely: a push to main touching only `src/plugins/cf-router/**` or
+# `tests/test_flyer_brand_asset_routing.py` did not run flyer-premium-ci, while
+# the identical change on a PR did.
+#
+# The asymmetry existed in all three workflows in the same direction, which is
+# why this is an invariant rather than three one-line edits: fixing only the
+# workflow named by an incident leaves the same defect beside it.
+
+# Workflows exempted from trigger parity, each with a specific reason. Parity is
+# the default; an exemption is a claim someone has to write down.
+class _WorkflowLoader(yaml.SafeLoader):
+    """YAML 1.1 resolves a bare `on:` key to the boolean True, which silently
+    turns a workflow's trigger block into a key no lookup by name finds. Keep
+    booleans as strings so `on` stays `"on"`."""
+
+
+_WorkflowLoader.add_constructor(
+    "tag:yaml.org,2002:bool", lambda loader, node: loader.construct_scalar(node)
+)
+
+
+PARITY_EXEMPT = {
+    # Its path-scoped steps are individually guarded by
+    # `if: github.event_name == 'pull_request'` and consume
+    # `github.event.pull_request.body` / `.base.sha`, which do not exist on a
+    # push. Its pull_request trigger deliberately has NO paths filter so the
+    # registry-integrity check runs on every PR.
+    "architecture-governance.yml": "pull_request-only steps consume PR context",
+}
+
+
+def _parity_workflows() -> list[str]:
+    """Every workflow gating BOTH event types, minus documented exemptions.
+
+    Derived, never a hardcoded list: a fourth Flyer gate added next month
+    inherits the rule the day it lands, which a literal tuple would not give.
+    """
+    out = []
+    for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        if path.name in PARITY_EXEMPT:
+            continue
+        triggers = yaml.load(path.read_text(encoding="utf-8"), Loader=_WorkflowLoader)["on"]
+        if isinstance(triggers, dict) and "pull_request" in triggers and "push" in triggers:
+            out.append(path.name)
+    return out
+
+
+PARITY_WORKFLOWS = _parity_workflows()
+
+
+def _trigger_paths(workflow_name: str) -> tuple[set[str], set[str]]:
+    """(pull_request paths, push paths) for one workflow, parsed structurally."""
+    path = REPO_ROOT / ".github" / "workflows" / workflow_name
+    data = yaml.load(path.read_text(encoding="utf-8"), Loader=_WorkflowLoader)
+    triggers = data["on"]
+    def paths_for(event: str) -> set[str]:
+        block = triggers.get(event) or {}
+        return set(block.get("paths") or [])
+    return paths_for("pull_request"), paths_for("push")
+
+
+@pytest.mark.parametrize("workflow_name", PARITY_WORKFLOWS)
+def test_workflow_pr_and_push_path_filters_match(workflow_name):
+    pr_paths, push_paths = _trigger_paths(workflow_name)
+    assert pr_paths, f"{workflow_name}: no pull_request paths parsed — shape changed?"
+    assert push_paths, f"{workflow_name}: no push paths parsed — shape changed?"
+    pr_only = sorted(pr_paths - push_paths)
+    push_only = sorted(push_paths - pr_paths)
+    assert not pr_only, (
+        f"{workflow_name} gates these paths on pull_request but NOT on push, so a "
+        f"change to them is unverified once merged: {pr_only}"
+    )
+    assert not push_only, (
+        f"{workflow_name} gates these paths on push but NOT on pull_request, so a "
+        f"change to them is unverified before merge: {push_only}"
+    )
+
+
+@pytest.mark.parametrize(
+    "workflow_name,required",
+    [
+        ("flyer-premium-ci.yml", "src/plugins/cf-router/**"),
+        ("flyer-premium-ci.yml", "tests/test_flyer_brand_asset_routing.py"),
+        ("flyer-premium-ci.yml", ".github/workflows/flyer-premium-ci.yml"),
+        ("flyer-core-ci.yml", "tests/test_flyer*.py"),
+        ("flyer-core-ci.yml", "tests/_flyer_replay_helpers.py"),
+        ("flyer-extended-ci.yml", "src/plugins/cf-router/**"),
+        ("flyer-extended-ci.yml", "tests/test_cf_router_flyer_routing.py"),
+    ],
+)
+def test_representative_path_is_gated_on_both_event_types(workflow_name, required):
+    """Named explicitly rather than left to set equality: these are the paths
+    whose one-sided gating produced the incident, and a future edit that drops
+    one from BOTH lists would satisfy parity while removing the coverage."""
+    pr_paths, push_paths = _trigger_paths(workflow_name)
+    assert required in pr_paths, f"{workflow_name} no longer gates {required} on pull_request"
+    assert required in push_paths, f"{workflow_name} no longer gates {required} on push"
+
+
+def _matches_actions_glob(pattern: str, path: str) -> bool:
+    """The `*` / `**` subset of GitHub Actions path-filter matching.
+
+    `**` crosses directory separators, a single `*` does not. `fnmatch` would
+    let `*` swallow `/` and quietly report coverage the runner will not give.
+
+    Deliberately NOT a full implementation: Actions also gives `?`, `+`, `[]`
+    and a leading `!` negation their own meanings, and `!` would additionally
+    break the set comparison above, which is order-insensitive while Actions
+    applies negations sequentially. Rather than half-implement them,
+    `test_no_parity_workflow_uses_an_unsupported_glob_feature` fails loudly if
+    one ever appears — turning a latent wrong answer into a red test.
+    """
+    out, i = [], 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif ch == "*":
+            out.append("[^/]*")
+            i += 1
+        elif ch == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(ch))
+            i += 1
+    return re.fullmatch("".join(out), path) is not None
+
+
+def _triggers(workflow_name: str, path: str) -> tuple[bool, bool]:
+    pr_paths, push_paths = _trigger_paths(workflow_name)
+    return (
+        any(_matches_actions_glob(p, path) for p in pr_paths),
+        any(_matches_actions_glob(p, path) for p in push_paths),
+    )
+
+
+@pytest.mark.parametrize(
+    "workflow_name,changed_path",
+    [
+        # The incident paths: a brand-asset routing change lives in cf-router,
+        # and its test is named directly by the premium gate.
+        ("flyer-premium-ci.yml", "src/plugins/cf-router/hooks.py"),
+        ("flyer-premium-ci.yml", "tests/test_flyer_brand_asset_routing.py"),
+        ("flyer-premium-ci.yml", ".github/workflows/flyer-premium-ci.yml"),
+        # A test-only change in each of the other two gates.
+        ("flyer-core-ci.yml", "tests/test_flyer_renderer.py"),
+        ("flyer-core-ci.yml", "tests/_flyer_replay_helpers.py"),
+        ("flyer-extended-ci.yml", "tests/test_cf_router_flyer_routing.py"),
+        ("flyer-extended-ci.yml", "src/plugins/cf-router/actions.py"),
+    ],
+)
+def test_a_representative_change_triggers_on_pr_and_on_push(workflow_name, changed_path):
+    """Membership in both lists is not the claim — matching is. A push to main
+    touching only `src/plugins/cf-router/hooks.py` did not run flyer-premium-ci
+    while the identical change on a PR did."""
+    on_pr, on_push = _triggers(workflow_name, changed_path)
+    assert on_pr, f"{changed_path} does not trigger {workflow_name} on pull_request"
+    assert on_push, f"{changed_path} does not trigger {workflow_name} on push"
+
+
+def test_the_glob_matcher_does_not_let_a_single_star_cross_a_separator():
+    """Guard the guard: if `*` matched `/`, the parity proofs above would pass
+    on filters that do not actually cover these paths."""
+    assert _matches_actions_glob("src/agents/flyer/**", "src/agents/flyer/a/b.py")
+    assert not _matches_actions_glob("tests/test_flyer*.py", "tests/sub/test_flyer_x.py")
+    assert _matches_actions_glob("tests/test_flyer*.py", "tests/test_flyer_renderer.py")
+    assert not _matches_actions_glob("src/agents/flyer/*", "src/agents/flyer/a/b.py")
+
+
+def test_no_parity_workflow_uses_an_unsupported_glob_feature():
+    """`_matches_actions_glob` implements the `*` / `**` subset. Actions also
+    gives `?`, `+`, `[]` and a leading `!` their own meanings — and `!` would
+    break the set-parity comparison too, which is order-insensitive while
+    Actions applies negations sequentially. None are used today; this fails the
+    day one appears, instead of silently returning a wrong answer."""
+    offenders = []
+    for name in PARITY_WORKFLOWS:
+        pr_paths, push_paths = _trigger_paths(name)
+        for pattern in sorted(pr_paths | push_paths):
+            if pattern.startswith("!") or any(c in pattern for c in "?+[]"):
+                offenders.append(f"{name}: {pattern}")
+    assert not offenders, (
+        "path filter uses a glob feature the matcher does not implement — extend "
+        f"_matches_actions_glob (and revisit set-parity for `!`) before using it: {offenders}"
+    )
+
+
+def test_parity_workflow_list_is_derived_not_hardcoded():
+    """A fourth Flyer gate must inherit the rule the day it lands."""
+    assert "flyer-premium-ci.yml" in PARITY_WORKFLOWS
+    assert "flyer-core-ci.yml" in PARITY_WORKFLOWS
+    assert "flyer-extended-ci.yml" in PARITY_WORKFLOWS
+    assert "cockpit-ci.yml" in PARITY_WORKFLOWS, "cockpit gates both events and is not exempt"
+    assert "architecture-governance.yml" not in PARITY_WORKFLOWS, "documented exemption"
+    # Every non-exempt workflow gating both event types is covered.
+    for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        triggers = yaml.load(path.read_text(encoding="utf-8"), Loader=_WorkflowLoader)["on"]
+        gates_both = isinstance(triggers, dict) and "pull_request" in triggers and "push" in triggers
+        if gates_both and path.name not in PARITY_EXEMPT:
+            assert path.name in PARITY_WORKFLOWS, f"{path.name} gates both events but escaped the sweep"
+
+
+def test_every_parity_exemption_names_a_real_workflow():
+    """An exemption for a deleted workflow is a stale claim that hides the next
+    one to take its name."""
+    for name in PARITY_EXEMPT:
+        assert (REPO_ROOT / ".github" / "workflows" / name).is_file(), f"exempt but missing: {name}"
