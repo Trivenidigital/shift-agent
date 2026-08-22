@@ -491,6 +491,39 @@ def sent_proposal_ids_for_candidate(chat_id: str) -> list[str]:
     return sorted(found)
 
 
+def proposal_notify_fields(proposal_id: str) -> dict:
+    """The few proposal fields the owner alert names, or {} if unreadable.
+
+    Read BEFORE the transition, because the caller composes the alert from the
+    shift being covered rather than from the new status. Returns {} rather than
+    raising so a store the reader cannot parse degrades to a less specific
+    alert instead of losing the alert entirely — the owner still needs to know
+    the shift is uncovered even if we cannot name the date.
+    """
+    try:
+        with PENDING_PATH.open(encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    proposals = doc.get("proposals", {}) if isinstance(doc, dict) else {}
+    if isinstance(proposals, dict):
+        row = proposals.get(proposal_id)
+    else:
+        row = next(
+            (r for r in (proposals if isinstance(proposals, list) else [])
+             if isinstance(r, dict) and r.get("proposal_id") == proposal_id),
+            None,
+        )
+    if not isinstance(row, dict):
+        return {}
+    return {
+        "candidate_name": str(row.get("candidate_name") or "").strip(),
+        "absent_date": str(row.get("absent_date") or "").strip(),
+        "absent_shift": str(row.get("absent_shift") or "").strip(),
+        "absent_role": str(row.get("absent_role") or "").strip(),
+    }
+
+
 # === State lookups ===
 
 ACTIONABLE_LEAD_STATUSES = frozenset({
@@ -2256,7 +2289,12 @@ def invoke_update_proposal_status(
             # AcceptedProposal.response_message / DeclinedProposal.response_message,
             # so an operator can see WHAT she actually said, not just the verdict
             # the classifier reached.
-            cmd += ["--response-message", response_message]
+            #
+            # `--opt=value`, not `--opt value`: a reply that begins with a hyphen
+            # ("-yes") is read by argparse as an option, exits 2, and the branch
+            # fail-closes on a message that was a perfectly clear answer. Same
+            # hazard `fire_pushover_alert` guards with `--`.
+            cmd += [f"--response-message={response_message}"]
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
         )

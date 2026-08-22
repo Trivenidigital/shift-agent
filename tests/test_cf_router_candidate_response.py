@@ -33,6 +33,7 @@ import importlib.util
 import json
 import platform
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,11 @@ def _seed_proposal(pending: Path, *, proposal_id="P0001", status="sent",
         "code": code,
         "status": status,
         "candidate_employee_id": candidate,
+        "candidate_name": "Priya",
+        "absent_employee_id": "e0001",
+        "absent_date": "2026-08-23",
+        "absent_shift": "evening",
+        "absent_role": "server",
         "sent_ts": "2026-08-22T10:00:00+00:00",
     }
     pending.write_text(json.dumps(doc), encoding="utf-8")
@@ -132,6 +138,15 @@ _AMBIGUOUS = [
     "no problem I'll cover it", "no worries I can do it",
     # nothing to act on
     "", "   ", "ok so who else is working", "thanks for letting me know",
+    # AFFIRMATIVE-PREFIXED REFUSALS. Every one of these was classified
+    # ACCEPTED by the first implementation, which admitted an answer token
+    # anywhere in the first two tokens of a <=4-token message without
+    # requiring the rest to be empty. An accept is IRREVERSIBLE --
+    # `LEGAL_TRANSITIONS["accepted"]` is empty, so no operator command, sweep
+    # or fsck repairs it -- which makes this the worst direction to be wrong in.
+    "ok im busy", "ok let me see", "ok never mind", "ok ask someone else",
+    "yes im busy", "ok call me", "yes but im late", "ok i cant though",
+    "no im free actually",
 ]
 
 
@@ -415,3 +430,194 @@ def test_the_sweeps_own_transition_is_refused_after_a_reply_is_recorded():
             f"after recording {recorded} the sweep's own transition would still "
             "succeed and page the owner"
         )
+
+
+# ─── the owner must still be told the shift is uncovered ────────────────────
+#
+# Recording the reply moves the proposal out of `sent`, which is what stops the
+# false "she never replied" page. But that page was ALSO the only real-time
+# signal that the shift still needs covering. Suppressing it without replacing
+# it is a net regression on the live box: a mis-attributed page still gets a
+# human to arrange coverage; silence does not.
+
+
+def _run(hooks_mod, text="YES"):
+    return hooks_mod._try_candidate_response(
+        text=text, chat_id=CANDIDATE_JID, message_id="wamid.1")
+
+
+@pytest.fixture
+def wired(plugin, monkeypatch):
+    hooks_mod, actions_mod, pending = plugin
+    _seed_proposal(pending)
+    alerts = []
+    monkeypatch.setattr(actions_mod, "audit_dispatcher_routed", lambda **kw: None)
+    monkeypatch.setattr(actions_mod, "invoke_update_proposal_status", lambda *a, **kw: 0)
+    monkeypatch.setattr(
+        actions_mod, "fire_pushover_alert",
+        lambda title, body, priority=2: alerts.append((title, body, priority)))
+    return hooks_mod, actions_mod, pending, alerts
+
+
+def test_a_decline_still_pages_the_owner_that_the_shift_is_uncovered(wired):
+    hooks_mod, _a, _p, alerts = wired
+
+    assert _run(hooks_mod, "no") is not None
+
+    assert len(alerts) == 1, "declining silently removes the only uncovered-shift signal"
+    title, body, priority = alerts[0]
+    assert "Priya" in body
+    assert "server" in body and "2026-08-23" in body
+    assert "uncovered" in body.lower()
+    assert priority >= 1, "an uncovered shift is actionable, not informational"
+
+
+def test_an_accept_tells_the_owner_coverage_is_arranged(wired):
+    hooks_mod, _a, _p, alerts = wired
+
+    assert _run(hooks_mod, "YES") is not None
+
+    assert len(alerts) == 1
+    title, body, priority = alerts[0]
+    assert "Priya" in body
+    assert "covered" in body.lower()
+
+
+def test_the_owner_is_not_paged_when_nothing_was_recorded(wired, monkeypatch):
+    """No page may claim an outcome the kernel refused to write."""
+    hooks_mod, actions_mod, _p, alerts = wired
+    monkeypatch.setattr(actions_mod, "invoke_update_proposal_status", lambda *a, **kw: 9)
+
+    assert _run(hooks_mod, "YES") is None
+    assert alerts == []
+
+
+def test_an_ambiguous_reply_pages_nobody(wired):
+    hooks_mod, _a, _p, alerts = wired
+    assert _run(hooks_mod, "maybe later") is None
+    assert alerts == []
+
+
+def test_a_failed_page_does_not_undo_the_recorded_reply(plugin, monkeypatch):
+    """The state change is the primary operation. Pushover being down must not
+    turn a recorded reply into an unrecorded one."""
+    hooks_mod, actions_mod, pending = plugin
+    _seed_proposal(pending)
+    monkeypatch.setattr(actions_mod, "audit_dispatcher_routed", lambda **kw: None)
+    monkeypatch.setattr(actions_mod, "invoke_update_proposal_status", lambda *a, **kw: 0)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("pushover down")
+
+    monkeypatch.setattr(actions_mod, "fire_pushover_alert", _boom)
+
+    result = _run(hooks_mod, "YES")
+    assert result is not None and result.get("action") == "skip"
+
+
+# ─── end to end, through the real dispatch entry point ──────────────────────
+
+
+def test_end_to_end_through_pre_gateway_dispatch(plugin, monkeypatch):
+    """Every other test calls _try_candidate_response directly, which cannot see
+    an earlier branch pre-empting it. This one enters where Hermes does."""
+    hooks_mod, actions_mod, pending = plugin
+    _seed_proposal(pending)
+    calls = []
+    monkeypatch.setattr(actions_mod, "audit_dispatcher_routed", lambda **kw: None)
+    monkeypatch.setattr(actions_mod, "fire_pushover_alert", lambda *a, **kw: None)
+    monkeypatch.setattr(actions_mod, "is_owner_chat", lambda cid: False)
+    monkeypatch.setattr(actions_mod, "is_verified_employee_chat", lambda cid: True)
+    monkeypatch.setattr(actions_mod, "invoke_update_proposal_status",
+                        lambda *a, **kw: calls.append(a) or 0)
+
+    event = SimpleNamespace(text="YES", chat_id=CANDIDATE_JID, message_id="wamid.e2e")
+    result = hooks_mod.pre_gateway_dispatch(event)
+
+    assert result is not None and result.get("action") == "skip"
+    assert calls and calls[0][1] == "accepted"
+
+
+def test_f9_preempts_sick_call_shaped_declines_end_to_end(plugin, monkeypatch):
+    """KNOWN RESIDUAL, pinned so it is visible rather than assumed away.
+
+    `_is_sick_call` + `has_pending_candidate_response` returns None BEFORE this
+    branch, so the most natural refusals record nothing and the false alert
+    still fires at 30 minutes. The classifier would decline all of these. It is
+    not a regression — nothing recorded them before either — but the branch does
+    not close the loop for them, and a test that hid that would be worse than
+    the gap.
+    """
+    hooks_mod, actions_mod, pending = plugin
+    _seed_proposal(pending)
+    monkeypatch.setattr(actions_mod, "audit_dispatcher_routed", lambda **kw: None)
+    monkeypatch.setattr(actions_mod, "fire_pushover_alert", lambda *a, **kw: None)
+    monkeypatch.setattr(actions_mod, "is_owner_chat", lambda cid: False)
+    monkeypatch.setattr(actions_mod, "is_verified_employee_chat", lambda cid: True)
+    calls = []
+    monkeypatch.setattr(actions_mod, "invoke_update_proposal_status",
+                        lambda *a, **kw: calls.append(a) or 0)
+
+    for text in ("cant come", "cannot come", "can't make it", "unable to work"):
+        if not hooks_mod._is_sick_call(text):
+            continue
+        event = SimpleNamespace(text=text, chat_id=CANDIDATE_JID, message_id="wamid.x")
+        hooks_mod.pre_gateway_dispatch(event)
+
+    assert calls == [], (
+        "F9 no longer pre-empts these -- good news, but update the residual note "
+        "in the branch docstring and the PR body rather than leaving it stale"
+    )
+
+
+def test_a_hyphen_prefixed_reply_is_not_read_as_an_argparse_option():
+    """`--response-message -yes` makes argparse treat the reply as an option,
+    exit 2, and fail closed on a perfectly clear answer. Assert the built
+    argv keeps it attached to its flag."""
+    hooks_mod, actions_mod = _load_plugin_modules()
+    captured = {}
+
+    class _Result:
+        returncode = 0
+
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _Result()
+
+    import subprocess as _sp
+    orig = _sp.run
+    actions_mod.subprocess.run = _fake_run
+    try:
+        rc = actions_mod.invoke_update_proposal_status(
+            "P0001", "declined", cause="candidate_declined",
+            actor="candidate", response_message="-yes",
+        )
+    finally:
+        actions_mod.subprocess.run = orig
+
+    assert rc == 0
+    assert "--response-message=-yes" in captured["cmd"], captured["cmd"]
+    assert "-yes" not in [c for c in captured["cmd"] if c == "-yes"], (
+        "the reply is still a bare argv element argparse will read as an option"
+    )
+
+
+def test_a_kernel_refusal_is_audited_so_the_routed_row_is_explained(plugin, monkeypatch):
+    """dispatcher_routed is written before delegating (deployed convention, and
+    what the sibling branch does). When the kernel then refuses, an explaining
+    row must follow, or the audit shows a route to a handler that changed
+    nothing and never says why."""
+    hooks_mod, actions_mod, pending = plugin
+    _seed_proposal(pending)
+    monkeypatch.setattr(actions_mod, "audit_dispatcher_routed", lambda **kw: None)
+    monkeypatch.setattr(actions_mod, "invoke_update_proposal_status", lambda *a, **kw: 9)
+    monkeypatch.setattr(actions_mod, "fire_pushover_alert", lambda *a, **kw: None)
+    audited = []
+    monkeypatch.setattr(actions_mod, "audit_intercepted",
+                        lambda **kw: audited.append(kw))
+
+    assert _run(hooks_mod, "YES") is None
+    assert len(audited) == 1
+    assert audited[0]["reason"] == "error"
+    assert audited[0]["subprocess_rc"] == 9
+    assert "P0001" in audited[0]["detail"]

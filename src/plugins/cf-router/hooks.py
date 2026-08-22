@@ -339,11 +339,13 @@ _CANDIDATE_YES_TOKENS = frozenset({
 _CANDIDATE_NO_TOKENS = frozenset({
     "no", "n", "nope", "nah", "cant", "cannot", "unable", "declined", "👎",
 })
-# Politeness that carries no answer. Stripped so "yes please" and "no thanks"
-# are still bare answers. Deliberately excludes "ok"/"sure" — those ARE answers
-# and live in _CANDIDATE_YES_TOKENS.
+# Politeness and bare pronouns/copulas that carry no answer. Stripped so
+# "yes please", "no thanks" and "I can't" all reduce to a single answer token.
+# Deliberately excludes "ok"/"sure" — those ARE answers and live in
+# _CANDIDATE_YES_TOKENS.
 _CANDIDATE_FILLER_TOKENS = frozenset({
     "please", "pls", "thanks", "thank", "ty", "sir", "maam", "madam",
+    "i", "im", "ill", "id", "am", "it", "its", "that", "this",
 })
 # A qualified answer is not an answer. "yes if my sister can babysit" and
 # "yes but only until 3" are commitments the owner cannot act on.
@@ -363,12 +365,6 @@ _CANDIDATE_QUALIFIER_TOKENS = frozenset({
 _CANDIDATE_NEGATION_TRAPS = re.compile(
     r"\bno\s+(?:problem|worries|prob|probs|issue|issues)\b", re.IGNORECASE)
 _CANDIDATE_WORD = re.compile(r"[\w']+|[\U0001F300-\U0001FAFF]", re.UNICODE)
-# A message that merely CONTAINS an answer word is not an answer. The table
-# caught `"ok so who else is working"` reading as consent under a looser cap.
-# Two bounds together: the reply must be short, and the answer word must be at
-# the front of it — where a real answer to "Reply YES or NO" actually lands.
-_CANDIDATE_MAX_TOKENS = 4
-_CANDIDATE_ANSWER_MAX_INDEX = 1
 
 
 def _classify_candidate_reply(text: str) -> Optional[str]:
@@ -383,24 +379,30 @@ def _classify_candidate_reply(text: str) -> Optional[str]:
         return None
     tokens = [t.lower().replace("'", "") for t in _CANDIDATE_WORD.findall(body)]
     tokens = [t for t in tokens if t and t not in _CANDIDATE_FILLER_TOKENS]
-    if not tokens or len(tokens) > _CANDIDATE_MAX_TOKENS:
+    # THE RULE: after stripping fillers, the reply must reduce to EXACTLY ONE
+    # token, and that token must be an answer. Anything else is not an answer to
+    # "Reply YES or NO" and is left to the LLM.
+    #
+    # An earlier revision instead allowed an answer token anywhere in the first
+    # two tokens of a short message, with no requirement that the rest be empty.
+    # That accepted `"ok im busy"`, `"ok never mind"`, `"ok ask someone else"`,
+    # `"yes im busy"` and `"ok call me"` — each one a refusal recorded as
+    # consent, which is the exact direction this function exists to prevent, and
+    # IRREVERSIBLE: `LEGAL_TRANSITIONS["accepted"]` is empty, so no operator
+    # command, sweep or fsck can undo a wrong accept. It is the same mistake
+    # `_is_unqualified_shift_consent` documents on the owner side — testing for
+    # the presence of a verb instead of the absence of everything else.
+    if len(tokens) != 1:
         return None
-    if any(t in _CANDIDATE_QUALIFIER_TOKENS for t in tokens):
+    token = tokens[0]
+    # Belt and braces behind the exactly-one rule: a single qualifier ("maybe")
+    # is not an answer, and these also keep firing if the filler set is ever
+    # widened in a way that would strip a word out of a longer reply.
+    if token in _CANDIDATE_QUALIFIER_TOKENS:
         return None
-    # Contradiction is checked over the WHOLE reply, not just the head: in
-    # "I can't say yes" and "no I mean yes" the second signal arrives late, and
-    # a head-only check read both as a confident decline. Both signals present
-    # is the shape most likely to be read wrong, so it is refused outright
-    # rather than resolved by precedence.
-    if (any(t in _CANDIDATE_YES_TOKENS for t in tokens)
-            and any(t in _CANDIDATE_NO_TOKENS for t in tokens)):
-        return None
-    # Position, however, is judged on the head — that is where an answer to
-    # "Reply YES or NO" actually lands.
-    head = tokens[: _CANDIDATE_ANSWER_MAX_INDEX + 1]
-    if any(t in _CANDIDATE_NO_TOKENS for t in head):
+    if token in _CANDIDATE_NO_TOKENS:
         return "declined"
-    if any(t in _CANDIDATE_YES_TOKENS for t in head):
+    if token in _CANDIDATE_YES_TOKENS:
         return "accepted"
     return None
 
@@ -458,6 +460,10 @@ def _try_candidate_response(
         message_shape="text",
     )
 
+    # Read the shift details BEFORE the transition — the alert names the shift
+    # being covered, not the new status.
+    fields = actions.proposal_notify_fields(proposal_id)
+
     rc = actions.invoke_update_proposal_status(
         proposal_id,
         verdict,
@@ -467,12 +473,72 @@ def _try_candidate_response(
     )
     if rc != 0:
         # Illegal transition, unknown proposal, or lock timeout. Nothing was
-        # recorded, so do not report it as handled — fall through and let the
-        # turn continue.
+        # recorded, so do not report it as handled and do not page the owner
+        # about an outcome that was not written — fall through instead.
+        actions.audit_intercepted(
+            reason="error",
+            chat_id=chat_id,
+            subprocess_rc=rc,
+            detail=(f"candidate_response_transition_failed; proposal_id={proposal_id}; "
+                    f"verdict={verdict}"),
+        )
         return None
+
+    _notify_owner_of_candidate_verdict(verdict, proposal_id, fields)
     return {"action": "skip",
             "reason": (f"cf-router candidate reply: invoked "
                        f"update-proposal-status {verdict} for {proposal_id} (rc=0)")}
+
+
+def _notify_owner_of_candidate_verdict(
+    verdict: str, proposal_id: str, fields: dict,
+) -> None:
+    """Tell the owner the outcome. Best-effort, AFTER the state change.
+
+    This exists because recording the reply SUPPRESSES something. Moving the
+    proposal out of `sent` is what stops the false "she never replied" page —
+    and that page was also the only real-time signal that the shift still needs
+    covering. Removing it without replacing it would be a net regression: a
+    mis-attributed page still gets a human to arrange coverage, silence does
+    not.
+
+    Deterministic f-string, never LLM text, and fired only after rc 0 so it can
+    never announce an outcome the kernel refused to write. Phrasing and priority
+    mirror `_sweep_one`'s uncovered-shift alert, which is the message this one
+    replaces for the decline case.
+
+    Best-effort by construction: the state change is the primary operation, and
+    `fire_pushover_alert` swallows its own failures. A Pushover outage must not
+    turn a recorded reply back into an unrecorded one.
+    """
+    who = fields.get("candidate_name") or "The chosen replacement"
+    role = fields.get("absent_role") or "the"
+    date = fields.get("absent_date") or "the requested date"
+    shift = fields.get("absent_shift") or ""
+    when = f"{date} ({shift})" if shift else date
+    try:
+        if verdict == "declined":
+            actions.fire_pushover_alert(
+                "Coverage still needed",
+                (f"{who} declined the coverage request for the {role} shift on "
+                 f"{when}. That shift is still uncovered — please arrange "
+                 f"coverage manually."),
+                priority=1,
+            )
+        else:
+            actions.fire_pushover_alert(
+                "Coverage confirmed",
+                (f"{who} accepted the coverage request for the {role} shift on "
+                 f"{when}. That shift is now covered."),
+                priority=0,
+            )
+    except Exception:  # noqa: BLE001 — never lose a recorded reply to an alert
+        # `fire_pushover_alert` already swallows and logs its own failures, so
+        # this outer guard is only here so a future change to that contract
+        # cannot turn an already-recorded reply into a dropped turn. The state
+        # change has committed by this point; there is nothing to roll back and
+        # nothing worth failing the turn over.
+        pass
 
 
 def _count_shift_proposals_with_code(code: str) -> int:
@@ -738,15 +804,23 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
 
         # Candidate reply path — the RETURN leg of the coverage loop.
         #
-        # Placed immediately AFTER F9 on purpose. A message that is BOTH a sick
-        # call and a refusal ("I can't come in tomorrow") is genuinely ambiguous,
-        # and F9 already resolves that collision the safe way: when the sender
-        # has a pending coverage ask it returns None above and neither branch
-        # acts. Sitting after F9 inherits that guard instead of re-deciding it.
-        #
         # Before this branch existed the reply reached nothing and the
         # no-response sweep reported her to her employer as unresponsive 30
         # minutes later.
+        #
+        # Placed immediately AFTER F9. A message that is BOTH a sick call and a
+        # refusal ("I can't come in tomorrow") is genuinely ambiguous, and F9
+        # decides it above: when the sender has a pending coverage ask it
+        # returns None and neither branch acts.
+        #
+        # KNOWN RESIDUAL, and it is not small: that F9 guard is a DOUBLE no-op,
+        # so the most natural refusals — "cant come", "can't make it", "unable
+        # to work", "no im sick" — still record nothing and still draw the false
+        # 30-minute page. The classifier below would decline every one of them.
+        # This branch therefore closes the loop for plain YES/NO replies and NOT
+        # for sick-call-shaped ones. Fixing it means deciding which arm owns an
+        # ambiguous message, which is a routing ruling, not a parser change.
+        # Pinned by test_f9_preempts_sick_call_shaped_declines_end_to_end.
         candidate_result = _try_candidate_response(
             text=text, chat_id=chat_id, message_id=message_id)
         if candidate_result is not None:
