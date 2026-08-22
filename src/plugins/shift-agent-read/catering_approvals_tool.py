@@ -76,15 +76,28 @@ DESCRIPTION = (
     "unavailable. This does NOT establish that no decisions are outstanding.\n"
     "  - 'empty': the store is configured and holds zero leads. That means no "
     "leads are recorded, NOT that no customer has enquired.\n"
-    "  - 'populated' with pending_total 0: no RECORDED lead is waiting on the "
+    "  - 'populated' with pending_total 0: no RECORDED lead can be APPROVED. "
+    "Check awaiting_redraft_total before saying nothing is waiting on the "
     "owner. Do not generalize beyond the recorded store.\n"
+    "\n"
+    "TWO LISTS, AND THEY ARE NOT INTERCHANGEABLE. `leads` holds decisions the "
+    "owner can close right now by replying with the code. `awaiting_redraft` "
+    "holds leads the owner already sent an edit on: still the owner's to "
+    "resolve, but the quote must be redrafted before they can be approved, and "
+    "those rows deliberately carry NO approval code because the apply-script "
+    "refuses both approve and reject from that state. Never offer a code for an "
+    "awaiting_redraft lead, never invent one, and do not call it approvable. "
+    "Nothing automated moves these along — only a new message from the "
+    "customer does — so if the owner is surprised one is sitting there, that "
+    "is real.\n"
     "\n"
     "RULES. Report only the leads, codes, ages and totals this tool returned — "
     "never invent a lead, an approval code or a quote total, and say a lead is "
-    "not recorded rather than guessing. Give the owner the #XXXXX code with each "
-    "lead: replying '#XXXXX approve' or '#XXXXX reject' in this chat is how the "
-    "decision is actually applied. A lead with no code cannot be decided that "
-    "way — say so rather than inventing one. `quote_total_usd` of null means no "
+    "not recorded rather than guessing. Give the owner the #XXXXX code with "
+    "each lead IN `leads`: replying '#XXXXX approve' or '#XXXXX reject' in "
+    "this chat is how the decision is actually applied. A lead with no code — "
+    "which is every awaiting_redraft row — cannot be decided that way; say so "
+    "rather than inventing one. `quote_total_usd` of null means no "
     "total has been computed yet, NOT a $0 quote. This tool is READ-ONLY: it "
     "cannot approve, reject, edit or send anything — if the owner asks you to "
     "action a lead, tell them to reply with the code rather than implying it was "
@@ -109,6 +122,15 @@ TPL_EMPTY = (
 TPL_POPULATED_ZERO = (
     "None of the {leads_total} catering leads on record are currently waiting "
     "on your approval."
+)
+# The same zero, when it would be FALSE said plainly: leads you edited are still
+# yours to resolve, they just cannot be approved with their code until the quote
+# is redrafted, and nothing automated will move them.
+TPL_POPULATED_ZERO_REDRAFT = (
+    "None of the {leads_total} catering leads on record can be approved right "
+    "now, but {redraft_total} of them are still waiting on you after your edit: "
+    "each needs its quote redrafted before it can be approved, and the approval "
+    "code will not work until then."
 )
 
 # registry.register() takes the INNER function object; get_definitions() adds the
@@ -205,6 +227,45 @@ def pending_statuses() -> frozenset[str] | None:
         return None
 
 
+def awaiting_redraft_statuses() -> frozenset[str] | None:
+    """Statuses where the owner still owns the outcome but CANNOT approve —
+    DERIVED, like the set above, from the same table: a row that can still reach
+    OWNER_REJECTED but can NOT reach OWNER_APPROVED. Today that is
+    {OWNER_EDITED}, and the two sets are disjoint.
+
+    THIS EXISTS BECAUSE THE FIRST SET ALONE PRODUCED A FALSE STATEMENT. An owner
+    who replies `#XXXXX edit make it 150 guests` parks the lead in OWNER_EDITED
+    (apply-catering-owner-decision:1002). That status cannot reach OWNER_APPROVED,
+    so `pending_statuses()` excludes it — correctly, for its own purpose — and the
+    lead became invisible while TPL_POPULATED_ZERO told the owner in bound,
+    egress-substituted text that nothing was waiting. The deployed dead-man
+    watchdog disagrees with that: catering-owner-action-watchdog:362 treats
+    {AWAITING_OWNER_APPROVAL, OWNER_EDITED} as the owner-owes-an-action set.
+
+    IT IS A SEPARATE SET, NOT AN ADDITION TO THE FIRST, because the two are
+    operationally different. apply-catering-owner-decision:810-830 accepts
+    approve from {AWAITING_OWNER_APPROVAL, CUSTOMER_FINALIZED, OWNER_APPROVED}
+    and reject/edit from {AWAITING_OWNER_APPROVAL, CUSTOMER_FINALIZED} —
+    OWNER_EDITED is in NEITHER matcher (the R2-H1 fix: retry-approve on the same
+    code would ship the un-edited quote). Widening `pending_statuses()` to cover
+    it would trade a false negative for a false instruction, telling the owner to
+    send a code the executor will refuse.
+
+    OWNER_EDITED is a RESTING state, not a transient one: its only exits are
+    customer-driven (finalize-catering-menu:1026, amend-catering-lead:118), and
+    nothing in the deployed tree — including the TTL sweep, since the table has no
+    OWNER_EDITED -> STALE edge — moves it on its own.
+    """
+    try:
+        from schemas import CATERING_TRANSITIONS
+        return frozenset(
+            status for status, allowed in CATERING_TRANSITIONS.items()
+            if "OWNER_REJECTED" in allowed and "OWNER_APPROVED" not in allowed
+        )
+    except Exception:
+        return None
+
+
 def _bind_outbound(text: str) -> bool:
     """Bind the deterministic reply to THIS turn. Must run inside the handler.
 
@@ -276,21 +337,26 @@ def handler(args=None, **kwargs) -> str:
         if not _bind_outbound(TPL_EMPTY):
             return refuse("outbound_truthfulness_guard_unavailable")
         return ok(source_status="empty", leads_total=0, pending_total=0,
-                  returned=0, truncated=False, leads=[])
+                  awaiting_redraft_total=0, returned=0, truncated=False,
+                  leads=[], awaiting_redraft=[])
 
     statuses = pending_statuses()
-    if statuses is None:
+    redraft_statuses = awaiting_redraft_statuses()
+    if statuses is None or redraft_statuses is None:
         return fail("state_machine_unavailable")
 
     today = _today(cfg)
     if today is None:
         return fail("customer_timezone_unavailable")
 
-    pending = sorted(
-        ({
+    def _row(lead, with_code: bool) -> dict:
+        """One lead. `with_code` is FALSE for the redraft list, and that omission
+        is structural rather than an instruction: Hermes cannot offer a code it
+        was never given, so a lead the executor would refuse cannot be turned
+        into "reply #XXXXX approve" by a model trying to be helpful."""
+        row = {
             "lead_id": lead.lead_id,
             "status": lead.status,
-            "owner_approval_code": lead.owner_approval_code,
             "created_at": lead.created_at.isoformat(),
             "updated_at": lead.updated_at.isoformat(),
             "age_days": _age_days(lead.created_at, today),
@@ -299,21 +365,43 @@ def handler(args=None, **kwargs) -> str:
             "customer_name": lead.customer_name or "",
             "deposit_status": lead.deposit_status,
             "on_hold": lead.on_hold,
-        } for lead in store.leads if lead.status in statuses),
-        key=lambda r: r["age_days"],
-        reverse=True,   # oldest first — the one that has waited longest leads
-    )
+        }
+        if with_code:
+            row["owner_approval_code"] = lead.owner_approval_code
+        return row
+
+    def _bucket(wanted, with_code: bool) -> list:
+        return sorted(
+            (_row(lead, with_code) for lead in store.leads
+             if lead.status in wanted),
+            key=lambda r: r["age_days"],
+            reverse=True,   # oldest first — the longest wait leads
+        )
+
+    pending = _bucket(statuses, with_code=True)
+    # Owner-owed but NOT approvable by code. Carried in its own list, without the
+    # code, so it can never be presented as an approvable decision.
+    redraft = _bucket(redraft_statuses, with_code=False)
+
     if not pending:
-        # Leads exist but none is the owner's to decide. This is the steady state
-        # for a healthy customer, and the one a model most reliably over-
-        # generalizes into "you have no catering leads".
-        if not _bind_outbound(
-                TPL_POPULATED_ZERO.format(leads_total=len(store.leads))):
+        # Leads exist but none is the owner's to APPROVE. Which of the two zero
+        # sentences applies depends on the redraft bucket, because
+        # TPL_POPULATED_ZERO is a false statement whenever that bucket is
+        # non-empty — and it is bound text, substituted verbatim at egress, so
+        # Hermes cannot soften it.
+        if redraft:
+            text = TPL_POPULATED_ZERO_REDRAFT.format(
+                leads_total=len(store.leads), redraft_total=len(redraft))
+        else:
+            text = TPL_POPULATED_ZERO.format(leads_total=len(store.leads))
+        if not _bind_outbound(text):
             return refuse("outbound_truthfulness_guard_unavailable")
     # Positive rows bind nothing: Hermes owns presenting real pending leads.
     return ok(source_status="populated",
               leads_total=len(store.leads),
               pending_total=len(pending),
+              awaiting_redraft_total=len(redraft),
               returned=len(pending[:MAX_ROWS]),
               truncated=len(pending) > MAX_ROWS,
-              leads=pending[:MAX_ROWS])
+              leads=pending[:MAX_ROWS],
+              awaiting_redraft=redraft[:MAX_ROWS])

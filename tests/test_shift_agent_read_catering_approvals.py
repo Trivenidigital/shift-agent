@@ -57,6 +57,9 @@ IDENTITIES = {
 # the derivation must produce. Written out longhand so the test suite states the
 # expected answer rather than recomputing the implementation's own expression.
 EXPECTED_PENDING = {"AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED"}
+# Owner-owed but NOT approvable: the apply-script refuses approve AND reject
+# from OWNER_EDITED (R2-H1), so it gets its own bucket rather than folding in.
+EXPECTED_REDRAFT = {"OWNER_EDITED"}
 
 NOW = "2026-08-18T09:00:00-04:00"
 
@@ -354,7 +357,8 @@ def test_disabled_agent_reports_disabled_not_nothing_pending(env, monkeypatch):
     assert out["source_status"] == "disabled"
     assert out["coverage_status"] == "not_enabled"
     assert b.calls == [t.TPL_DISABLED]
-    for absent in ("leads_total", "pending_total", "leads", "returned", "truncated"):
+    for absent in ("leads_total", "pending_total", "awaiting_redraft_total",
+                   "leads", "awaiting_redraft", "returned", "truncated"):
         assert absent not in out, f"{absent!r} must not appear on a disabled agent"
     assert "L0001" not in json.dumps(out)
 
@@ -414,7 +418,8 @@ def test_missing_state_is_distinct(env, monkeypatch):
     assert out["source_status"] == "missing"
     assert out["coverage_status"] == "not_configured"
     # Coverage is UNKNOWN, not zero: no zero-shaped authoritative fields.
-    for absent in ("leads_total", "pending_total", "leads", "returned", "truncated"):
+    for absent in ("leads_total", "pending_total", "awaiting_redraft_total",
+                   "leads", "awaiting_redraft", "returned", "truncated"):
         assert absent not in out, f"{absent!r} must not appear on a missing source"
 
 
@@ -425,7 +430,8 @@ def test_empty_state_is_distinct(env, monkeypatch):
     out = json.loads(t.handler({}))
     assert out["source_status"] == "empty"
     assert out["leads_total"] == 0 and out["pending_total"] == 0
-    assert out["leads"] == []
+    assert out["awaiting_redraft_total"] == 0
+    assert out["leads"] == [] and out["awaiting_redraft"] == []
 
 
 @linux_only
@@ -472,11 +478,14 @@ def test_every_status_is_classified_exactly_once(env, monkeypatch):
     from schemas import CateringLeadStatus
     statuses = list(get_args(CateringLeadStatus))
     _seed(env, [_lead(f"L{i:04d}", status=s) for i, s in enumerate(statuses)])
-    out = json.loads(_tool(monkeypatch).handler({}))
+    t = _tool(monkeypatch)
+    _unbound(monkeypatch, t)
+    out = json.loads(t.handler({}))
     assert out["leads_total"] == len(statuses)
-    returned = {r["status"] for r in out["leads"]}
-    assert returned == EXPECTED_PENDING
+    assert {r["status"] for r in out["leads"]} == EXPECTED_PENDING
     assert out["pending_total"] == len(EXPECTED_PENDING)
+    assert {r["status"] for r in out["awaiting_redraft"]} == EXPECTED_REDRAFT
+    assert out["awaiting_redraft_total"] == len(EXPECTED_REDRAFT)
 
 
 @linux_only
@@ -492,12 +501,113 @@ def test_customer_finalized_leads_are_reported(env, monkeypatch):
 
 
 @linux_only
-def test_owner_edited_is_not_pending_on_the_owner(env, monkeypatch):
-    """OWNER_EDITED cannot reach OWNER_APPROVED — the redraft is pending on the
-    system, not on the owner. Pins the derivation's near-miss."""
+def test_owner_edited_is_not_approvable_but_is_still_reported(env, monkeypatch):
+    """F1 REGRESSION. OWNER_EDITED cannot reach OWNER_APPROVED, so it is not in
+    `leads` — but it IS the owner's open decision, and reporting nothing was the
+    defect. It lands in `awaiting_redraft`, and the bound reply says so."""
     _seed(env, [_lead("L0001", status="OWNER_EDITED")])
+    t = _tool(monkeypatch)
+    b = _unbound(monkeypatch, t)
+    out = json.loads(t.handler({}))
+    assert out["pending_total"] == 0 and out["leads"] == []
+    assert out["awaiting_redraft_total"] == 1
+    assert [r["lead_id"] for r in out["awaiting_redraft"]] == ["L0001"]
+    assert b.calls == [t.TPL_POPULATED_ZERO_REDRAFT.format(
+        leads_total=1, redraft_total=1)]
+
+
+@linux_only
+def test_the_false_zero_sentence_is_unreachable_while_a_redraft_is_open(
+        env, monkeypatch):
+    """THE defect, stated as the invariant that prevents it. TPL_POPULATED_ZERO
+    is substituted verbatim at the egress seam, so Hermes cannot soften it — it
+    must not be reachable while a lead is still the owner's to resolve."""
+    _seed(env, [_lead("L0001", status="OWNER_EDITED"),
+                _lead("L0002", status="CLOSED")])
+    t = _tool(monkeypatch)
+    b = _unbound(monkeypatch, t)
+    json.loads(t.handler({}))
+    assert len(b.calls) == 1
+    assert b.calls[0] != t.TPL_POPULATED_ZERO.format(leads_total=2)
+    assert "waiting on you after your edit" in b.calls[0]
+
+
+@linux_only
+def test_redraft_rows_never_carry_an_approval_code(env, monkeypatch):
+    """Structural, not instructional: the apply-script refuses approve AND
+    reject from OWNER_EDITED, so a model handed no code cannot invent the
+    affordance. The code IS on the lead in the store and must not come out."""
+    _seed(env, [_lead("L0001", status="OWNER_EDITED",
+                      owner_approval_code="#GWXSR")])
+    t = _tool(monkeypatch)
+    _unbound(monkeypatch, t)
+    out = json.loads(t.handler({}))
+    assert "owner_approval_code" not in out["awaiting_redraft"][0]
+    assert "#GWXSR" not in json.dumps(out)
+
+
+@linux_only
+def test_pending_rows_still_carry_their_code(env, monkeypatch):
+    """The falsifier for the test above — the omission must be bucket-specific,
+    not a blanket suppression that breaks the F8 loop this tool exists to
+    close."""
+    _seed(env, [_lead("L0001", owner_approval_code="#4SX94"),
+                _lead("L0002", status="OWNER_EDITED",
+                      owner_approval_code="#GWXSR")])
     out = json.loads(_tool(monkeypatch).handler({}))
-    assert out["pending_total"] == 0
+    assert out["leads"][0]["owner_approval_code"] == "#4SX94"
+    assert "#GWXSR" not in json.dumps(out)
+
+
+@linux_only
+def test_both_buckets_populated_binds_nothing(env, monkeypatch):
+    """With approvable work to present, Hermes keeps presentation ownership —
+    the payload is not a zero claim, so no sentence is bound."""
+    _seed(env, [_lead("L0001"), _lead("L0002", status="OWNER_EDITED")])
+    t = _tool(monkeypatch)
+    b = _unbound(monkeypatch, t)
+    out = json.loads(t.handler({}))
+    assert out["pending_total"] == 1 and out["awaiting_redraft_total"] == 1
+    assert b.calls == []
+
+
+def test_redraft_statuses_are_derived_from_the_same_table(env):
+    """Derived, not hand-widened: can reach OWNER_REJECTED, cannot reach
+    OWNER_APPROVED. One table, two predicates, no hardcoded status literal."""
+    assert _tool().awaiting_redraft_statuses() == EXPECTED_REDRAFT
+
+
+def test_the_two_buckets_are_disjoint(env):
+    """A lead must never be both approvable and not approvable."""
+    t = _tool()
+    assert not (t.pending_statuses() & t.awaiting_redraft_statuses())
+
+
+def test_redraft_derivation_tracks_the_schema_not_a_copy(env):
+    from schemas import CATERING_TRANSITIONS
+    derived = {s for s, allowed in CATERING_TRANSITIONS.items()
+               if "OWNER_REJECTED" in allowed and "OWNER_APPROVED" not in allowed}
+    assert derived == EXPECTED_REDRAFT
+    assert _tool().awaiting_redraft_statuses() == derived
+
+
+def test_every_status_the_deployed_watchdog_calls_owner_owed_is_covered(env):
+    """catering-owner-action-watchdog:362 treats {AWAITING_OWNER_APPROVAL,
+    OWNER_EDITED} as owner-owes-an-action. Everything it names must land in one
+    bucket or the other, or this tool contradicts the deployed watchdog — which
+    is exactly how F1 got through."""
+    t = _tool()
+    covered = t.pending_statuses() | t.awaiting_redraft_statuses()
+    assert {"AWAITING_OWNER_APPROVAL", "OWNER_EDITED"} <= covered
+
+
+@linux_only
+def test_unreadable_redraft_set_also_fails_closed(env, monkeypatch):
+    t = _tool(monkeypatch)
+    monkeypatch.setattr(t, "awaiting_redraft_statuses", lambda: None)
+    _seed(env, [_lead("L0001")])
+    out = json.loads(t.handler({}))
+    assert out["ok"] is False and out["error"] == "state_machine_unavailable"
 
 
 # ── result contract ────────────────────────────────────────────────────────
@@ -532,7 +642,8 @@ def test_row_keys_are_exactly_the_contract(env, monkeypatch):
     _seed(env, [_lead("L0001")])
     out = json.loads(_tool(monkeypatch).handler({}))
     assert set(out) == {"ok", "source_status", "leads_total", "pending_total",
-                        "returned", "truncated", "leads"}
+                        "awaiting_redraft_total", "returned", "truncated",
+                        "leads", "awaiting_redraft"}
     assert set(out["leads"][0]) == {
         "lead_id", "status", "owner_approval_code", "created_at", "updated_at",
         "age_days", "days_since_update", "quote_total_usd", "customer_name",
@@ -689,8 +800,9 @@ def test_bind_failure_suppresses_every_zero_payload(env, monkeypatch, state):
     out = json.loads(t.handler({}))
     assert out["ok"] is False
     assert out["refused"] == "outbound_truthfulness_guard_unavailable"
-    for absent in ("leads_total", "pending_total", "leads", "returned",
-                   "truncated", "source_status", "coverage_status"):
+    for absent in ("leads_total", "pending_total", "awaiting_redraft_total",
+                   "leads", "awaiting_redraft", "returned", "truncated",
+                   "source_status", "coverage_status"):
         assert absent not in out, f"{absent!r} leaked on a guard-unavailable refusal"
 
 
@@ -702,6 +814,7 @@ def test_description_carries_the_scope_rules(env):
     d = _tool().DESCRIPTION
     assert "RECORDED" in d
     assert "This is NOT a statement that nothing is waiting" in d
+    assert "Check awaiting_redraft_total" in d
     assert "does NOT establish that no decisions are outstanding" in d
     assert "NOT that no customer has enquired" in d
     assert "Do not generalize beyond the recorded store" in d
@@ -712,5 +825,7 @@ def test_description_carries_the_hard_rules(env):
     assert "never invent a lead, an approval code or a quote total" in d
     assert "#XXXXX approve" in d, "the code is the actionable half of the F8 loop"
     assert "NOT a $0 quote" in d
+    assert "Never offer a code for an awaiting_redraft lead" in d
+    assert "every awaiting_redraft row" in d
     assert "READ-ONLY" in d
     assert "Never read out a customer's phone number" in d

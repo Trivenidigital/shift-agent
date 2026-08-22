@@ -101,7 +101,9 @@ DESCRIPTION = (
     "cover_roles_present and languages_present in the result — languages are "
     "stored as ISO codes ('te' for Telugu, 'gu' for Gujarati, 'ta' for Tamil), "
     "so a miss is usually the wrong code, not an absence. Retry with a value "
-    "that appears in those lists.\n"
+    "that appears in those lists. If the request named a PERSON instead, that "
+    "person is not on the ACTIVE roster — this tool cannot tell you whether they "
+    "ever were, so say that plainly and do not speculate.\n"
     "\n"
     "RULES. Report only the people, roles, languages and restrictions this tool "
     "returned — never invent an employee, a capability or a language, and say "
@@ -134,6 +136,15 @@ TPL_NO_MATCH = (
     "None of your {active_total} active staff match that. The roles your active "
     "staff can cover are: {cover_roles}. The languages they speak are: "
     "{languages}."
+)
+# The same miss when the owner named a PERSON. The roles/languages inventory is
+# useful when the miss is probably a wrong role or a wrong language code; it is a
+# non-sequitur when the question was "is Priya still with us?", and because this
+# text is bound, Hermes cannot replace it with something that fits. The name is
+# deliberately NOT echoed: this is the one text path that bypasses the model, and
+# model-supplied argument text does not belong in it.
+TPL_NO_MATCH_NAME = (
+    "None of your {active_total} active staff match that name."
 )
 
 # registry.register() takes the INNER function object; get_definitions() adds the
@@ -317,11 +328,16 @@ def handler(args=None, **kwargs) -> str:
     if not rows:
         # Active staff exist, none match. The state a model most reliably
         # over-generalizes into "nobody can cover that" — with a shift left
-        # uncovered at the end of it — so the reply names what IS available.
-        if not _bind_outbound(TPL_NO_MATCH.format(
+        # uncovered at the end of it — so a capability miss names what IS
+        # available. A NAME miss gets the plain answer instead; see the templates.
+        if name_query:
+            text = TPL_NO_MATCH_NAME.format(active_total=len(active))
+        else:
+            text = TPL_NO_MATCH.format(
                 active_total=len(active),
                 cover_roles=_sorted_join(cover_roles_present),
-                languages=_sorted_join(languages_present))):
+                languages=_sorted_join(languages_present))
+        if not _bind_outbound(text):
             return refuse("outbound_truthfulness_guard_unavailable")
     # Positive rows bind nothing: Hermes owns presenting real people.
     return ok(matched=len(rows), returned=len(rows[:MAX_ROWS]),
