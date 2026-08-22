@@ -541,43 +541,6 @@ def _notify_owner_of_candidate_verdict(
         pass
 
 
-def _count_shift_proposals_with_code(code: str) -> int:
-    """How many proposals in pending.json carry `code`.
-
-    `resolve_code` fails closed on a CROSS-pool collision, but within one pool
-    `_Pool.lookup` returns the FIRST matching row and `_shift_rows` applies no
-    status filter. Two proposals sharing a code therefore resolve silently to
-    one of them, and this branch would send a coverage ask about the wrong
-    absence to the wrong employee. Codes are minted under the shared lock
-    against `all_live_codes`, so this is unlikely — but the registry documents
-    generators outside the lock as best-effort, and it is THIS branch that
-    turns the duplicate into an outbound.
-
-    `apply-catering-owner-decision` already refuses the same way ("BUG: N
-    active leads share code; refusing"); this mirrors it at the one seam where
-    the shift equivalent can act.
-
-    Row shape deliberately mirrors `approval_code_pools._shift_rows` — the
-    pool's own reader — rather than pending.json directly: `.proposals` is a
-    dict[proposal_id, Proposal] and the pool iterates its values(). Returns 0
-    on an unreadable or unexpected document, and the caller refuses on any
-    count that is not exactly 1, so every one of those paths fails closed.
-    """
-    try:
-        path = approval_code_pools.pool_paths_under(actions.LEADS_PATH.parent)[
-            approval_code_pools.POOL_SHIFT
-        ]
-        doc = json.loads(Path(path).read_text(encoding="utf-8"))
-    except Exception:
-        return 0
-    if not isinstance(doc, dict):
-        return 0
-    proposals = doc.get("proposals", {})
-    rows = proposals.values() if isinstance(proposals, dict) else proposals
-    if not isinstance(rows, (list, tuple)) and not hasattr(rows, "__iter__"):
-        return 0
-    return sum(1 for p in rows if isinstance(p, dict) and p.get("code") == code)
-
 # Sick-call regex set (employee path — F9 replacement). Mirrors the six
 # absence-specific patterns from the old notifier. Broad courtesy/address
 # patterns were removed because F9 now skips the LLM and invokes Shift directly.
