@@ -284,15 +284,6 @@ class _Pool:
         doc = _load_json(self._path(paths))
         return [row for row_code, row in self.resolve_rows_fn(doc) if row_code == code]
 
-    def lookup(self, code: str, paths: Optional[dict] = None) -> Optional[dict]:
-        """First routing-eligible row whose code equals `code`, or None.
-
-        Retained for callers that only ask "is there one"; anything that ACTS on
-        the row must go through `resolve_code`, which refuses a duplicate.
-        """
-        rows = self.lookup_all(code, paths)
-        return rows[0] if rows else None
-
     def live_codes(self, paths: Optional[dict] = None) -> set:
         doc = _load_json(self._path(paths))
         return {row_code for row_code, _ in self.live_rows_fn(doc)}
@@ -352,8 +343,12 @@ class IntraPoolCollisionResult(CollisionResult):
 
     `pools` holds the ONE pool name, so `len(pools) == 1` is what distinguishes
     this from a cross-pool collision; `rows` is how many matched.
+
+    `rows` is REQUIRED. With a default of 0 the sentinel was constructible in a
+    state that asserts something false — "a collision of no rows" — and the
+    audit detail would have carried that untruth into the log.
     """
-    rows: int = 0
+    rows: int
 
 
 # ── Public resolution + enumeration API ──────────────────────────────────────
@@ -564,6 +559,46 @@ def _emit_collision_audit(collision: CollisionResult, detected_by: str) -> None:
         ndjson_append(log_path, entry.model_dump_json())
 
 
+def _emit_intra_pool_audit(collision: "IntraPoolCollisionResult", detected_by: str) -> None:
+    """Record an intra-pool collision as an `invariant_violation` row.
+
+    NOT `ApprovalCodeCollisionDetected`: its `pools` field is
+    `Field(min_length=2, max_length=4)`, so one pool fails validation and
+    padding to `[name, name]` would assert that two pools matched, which is
+    false. Widening that field is a schema change to a tag the deployed release
+    already reads.
+
+    `InvariantViolation` needs none of that. `check` and `detail` are
+    unconstrained free-form strings, the tag is already in the deployed
+    discriminated union, and five scripts (compliance x3, equipment, fsck)
+    already carry structured facts this way — so an old reader parses the row
+    cleanly. Zero schema delta beats a safe delta.
+
+    It is also semantically the right tag rather than a workaround: two live
+    rows sharing one approval code IS an invariant violation. Stderr alone was
+    the wrong trade — the gateway log it lands in is rotated daily/keep-14 and
+    nothing watches it, while the sentinel pages the owner exactly ONCE per
+    code+pool with no expiry, so every recurrence after the first would have
+    been invisible.
+    """
+    from safe_io import FileLock, ndjson_append  # lazy
+    from schemas import InvariantViolation  # lazy
+    ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    entry = InvariantViolation(
+        ts=ts,
+        type="invariant_violation",
+        check="approval_code_intra_pool_collision",
+        detail=(
+            f"code={collision.code} "
+            f"pool={collision.pools[0] if collision.pools else '?'} "
+            f"rows={collision.rows} detected_by={detected_by}"
+        ),
+    )
+    log_path = _decisions_log_path()
+    with FileLock(Path(str(log_path) + ".lock")):
+        ndjson_append(log_path, entry.model_dump_json())
+
+
 def _sentinel_key(collision: CollisionResult) -> str:
     """Dedup key = code + the SORTED pool set. A CHANGED collision state (the
     same code now colliding across a DIFFERENT set of pools) yields a different
@@ -601,39 +636,31 @@ def record_collision_event(collision: CollisionResult, *, detected_by: str) -> N
     never raises AND never changes the caller's routing outcome (the caller has
     already failed closed; a dropped alert leaves routing failed-closed)."""
     intra_pool = isinstance(collision, IntraPoolCollisionResult)
+    try:
+        if intra_pool:
+            _emit_intra_pool_audit(collision, detected_by)
+        else:
+            _emit_collision_audit(collision, detected_by)
+    except Exception as e:  # noqa: BLE001 — audit is best-effort
+        sys.stderr.write(
+            f"approval_code_pools: collision audit write failed: "
+            f"{type(e).__name__}: {str(e)[:200]}\n"
+        )
+
     if intra_pool:
-        # NO NDJSON row for this case, deliberately. The only fitting variant is
-        # ApprovalCodeCollisionDetected, whose `pools` field is
-        # `Field(min_length=2, max_length=4)`: a one-pool collision FAILS
-        # validation, and the write happens inside a best-effort try/except, so
-        # forcing it would produce a stderr line and no row — a silent audit
-        # hole. Padding to `[name, name]` would pass validation by asserting
-        # that two pools matched, which is false. Widening the field is a schema
-        # change to a tag the deployed release already reads, which is the
-        # category where an old reader REJECTS the row instead of degrading, so
-        # it does not ride along on a safety fix. Tracked separately; the owner
-        # notification below still fires, and this line is the written record.
-        #
-        # WHERE it lands, because the obvious guess is wrong: this runs inside
-        # the gateway, whose unit sets
-        # StandardError=append:/opt/shift-agent/logs/hermes-gateway.log. It is
-        # NOT in journald, so `journalctl -u hermes-gateway` — which is what
-        # docs/deploy.md, the shift runbook and the health-check script all tell
-        # an operator to run — will not show it. grep the log file.
+        # Belt-and-braces beside the row above. The row is the durable record
+        # (decisions.log, the audited chokepoint); this line is the one an
+        # operator tailing the gateway sees live. It lands in
+        # /opt/shift-agent/logs/hermes-gateway.log — the unit sets
+        # StandardError=append there, so `journalctl -u hermes-gateway`, which
+        # docs/deploy.md and the shift runbook both tell you to run, will NOT
+        # show it. That log is rotated daily/keep-14, which is exactly why the
+        # durable row above is not optional.
         sys.stderr.write(
             f"approval_code_pools: intra_pool_collision code={collision.code} "
             f"pool={collision.pools[0] if collision.pools else '?'} "
-            f"rows={collision.rows} detected_by={detected_by} "
-            f"(no audit row: ApprovalCodeCollisionDetected.pools requires >=2 pools)\n"
+            f"rows={collision.rows} detected_by={detected_by}\n"
         )
-    else:
-        try:
-            _emit_collision_audit(collision, detected_by)
-        except Exception as e:  # noqa: BLE001 — audit is best-effort
-            sys.stderr.write(
-                f"approval_code_pools: collision audit write failed: "
-                f"{type(e).__name__}: {str(e)[:200]}\n"
-            )
 
     try:
         from safe_io import FileLock, notify_owner_with_fallback  # lazy

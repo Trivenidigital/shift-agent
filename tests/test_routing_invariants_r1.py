@@ -1182,10 +1182,25 @@ def test_identity_direct_match_wins_over_newer_canonical(actions_id):
 # each defensible alone, composing into a silent wrong answer: acting on
 # whichever record the iterator happened to yield first.
 #
-# Latent, not live: every generator in the tree mints under
-# `code_generation_lock` against `all_live_codes`, and for all five pools the
-# live set is a superset of the resolvable set, so a re-mint can only ever
-# collide with a row that is not resolvable. These tests pin the guard for the
+# Latent for FOUR pools; LIVE for the fifth. Every generator in the tree mints
+# under `code_generation_lock` against `all_live_codes`, so the question is
+# whether a freshly minted code can land on a row that is RESOLVABLE:
+#
+#   menu-pending / expense / shift  resolve and live share one iterator -> no
+#   catering-leads                  ACTIONABLE n LIVE_EXCLUDE = {} -> no
+#   catering-followups              `approved_sent` is RESOLVABLE but absent
+#                                   from LIVE -> YES, a re-mint can collide
+#
+# An earlier revision of this header claimed the live set is a superset for all
+# five. It is not, and the claim was made by checking whether the two iterators
+# were the SAME function rather than comparing the status sets — the same
+# assert-a-relationship-without-checking-it mistake this branch fixes elsewhere.
+# `test_only_catering_followups_can_mint_onto_a_resolvable_row` now checks the
+# sets so the claim cannot rot back into prose.
+#
+# So for catering-followups this is a live defect, not a latent one: main
+# answers the owner from whichever row sorts first, including a stale
+# `approved_sent` one. For the other four, these tests pin the guard against the
 # routes minting does not cover — an operator edit, a partial restore, or the
 # next generator that forgets the lock.
 
@@ -1258,14 +1273,19 @@ def test_rows_for_code_is_the_one_reader(state_dir):
     assert all(name == pools.POOL_SHIFT for name, _ in pools.rows_for_code("#ROWS23"))
 
 
-def test_the_intra_pool_case_writes_no_audit_row_and_says_why(state_dir, tmp_path, capsys):
-    """The gate outcome, asserted rather than described in a comment.
+def test_the_intra_pool_case_writes_a_durable_row_at_zero_schema_delta(
+    state_dir, tmp_path, capsys,
+):
+    """It must NOT claim the cross-pool shape, and must NOT settle for stderr.
 
-    `ApprovalCodeCollisionDetected.pools` is Field(min_length=2), so a one-pool
-    collision cannot be recorded truthfully: it either fails validation inside a
-    best-effort try/except (a silent hole) or claims two pools matched (a lie).
-    Until that field changes, the intra-pool case emits NO row — and must say so
-    on stderr rather than passing silently.
+    `ApprovalCodeCollisionDetected.pools` is Field(min_length=2), so one pool
+    either fails validation (a silent hole, because the write is best-effort) or
+    is padded to `[name, name]`, which asserts two pools matched. Neither is
+    acceptable. `InvariantViolation` carries the fact truthfully with no schema
+    change at all — free-form `check`/`detail`, tag already in the deployed
+    union — and stderr alone would have been the wrong trade: the gateway log is
+    rotated daily/keep-14 and nothing watches it, while the owner is paged only
+    ONCE per code+pool for all time.
     """
     log = tmp_path / "decisions.log"
     os.environ["SHIFT_AGENT_DECISIONS_LOG_PATH"] = str(log)
@@ -1276,13 +1296,70 @@ def test_the_intra_pool_case_writes_no_audit_row_and_says_why(state_dir, tmp_pat
         )
     finally:
         os.environ.pop("SHIFT_AGENT_DECISIONS_LOG_PATH", None)
-    assert not log.exists() or "approval_code_collision_detected" not in log.read_text(
-        encoding="utf-8"
-    ), "an intra-pool collision must not claim a cross-pool audit shape"
-    err = capsys.readouterr().err
-    assert "intra_pool_collision" in err and "rows=2" in err, (
-        "the absent row must be traceable on stderr, not silent"
+
+    assert log.exists(), "the intra-pool collision left no durable record"
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert not any(r.get("type") == "approval_code_collision_detected" for r in rows), (
+        "an intra-pool collision must not claim the cross-pool audit shape"
     )
+    violations = [r for r in rows if r.get("type") == "invariant_violation"]
+    assert len(violations) == 1
+    assert violations[0]["check"] == "approval_code_intra_pool_collision"
+    for fragment in ("code=#AUD23", "pool=shift", "rows=2", "detected_by=unit"):
+        assert fragment in violations[0]["detail"], fragment
+
+    # Belt-and-braces: the live signal an operator tailing the log would see.
+    err = capsys.readouterr().err
+    assert "intra_pool_collision" in err and "rows=2" in err
+
+
+def test_the_intra_pool_row_round_trips_through_the_deployed_union(tmp_path):
+    """Zero schema delta is the whole justification, so prove the row parses
+    back through the SAME discriminated union an older reader uses — a tag that
+    validates on write but not on read would be worse than no row."""
+    from pydantic import TypeAdapter  # noqa: PLC0415
+    from schemas import LogEntry  # noqa: PLC0415
+
+    log = tmp_path / "rt.log"
+    os.environ["SHIFT_AGENT_DECISIONS_LOG_PATH"] = str(log)
+    try:
+        pools.record_collision_event(
+            pools.IntraPoolCollisionResult(code="#RTR23", pools=("expense",), rows=3),
+            detected_by="unit",
+        )
+    finally:
+        os.environ.pop("SHIFT_AGENT_DECISIONS_LOG_PATH", None)
+
+    line = next(ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip())
+    parsed = TypeAdapter(LogEntry).validate_json(line)
+    assert parsed.type == "invariant_violation"
+    assert parsed.check == "approval_code_intra_pool_collision"
+
+
+def test_rows_is_required_so_the_sentinel_cannot_assert_a_false_count():
+    """With a default of 0 the sentinel was constructible as "a collision of no
+    rows", and the audit detail would have carried that untruth into the log."""
+    with pytest.raises(TypeError):
+        pools.IntraPoolCollisionResult(code="#NOR23", pools=("shift",))
+
+
+def test_only_catering_followups_can_mint_onto_a_resolvable_row():
+    """The corrected reachability claim, machine-checked instead of asserted.
+
+    A pool is safe when nothing RESOLVABLE is missing from the LIVE set the
+    generators exclude against. Four pools are safe; catering-followups is not,
+    because `approved_sent` is deliberately resolvable (idempotent replay) and
+    absent from LIVE. Pinned so a change to either set fails here rather than
+    quietly re-opening the hole.
+    """
+    assert set(pools._FOLLOWUP_ACTIONABLE) - set(pools._FOLLOWUP_LIVE) == {"approved_sent"}
+    assert set(pools._CATERING_ACTIONABLE) & set(pools._CATERING_LIVE_EXCLUDE) == set()
+    for pool in pools._POOLS:
+        if pool.name in (pools.POOL_MENU_PENDING, pools.POOL_EXPENSE, pools.POOL_SHIFT):
+            assert pool.resolve_rows_fn is pool.live_rows_fn, (
+                f"{pool.name} grew a separate live filter — compare the STATUS SETS, "
+                "not the function identities, before calling it safe"
+            )
 
 
 def test_a_cross_pool_collision_still_writes_its_audit_row(state_dir, tmp_path):
