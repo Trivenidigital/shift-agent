@@ -107,7 +107,7 @@ are counted; #17/#18/#20 are retired and not addressable.)
 | 19 | Equipment & Maintenance | **PARTIAL** | **(b)** `get_equipment_maintenance_due` registered, owner-only (`equipment_tool.py:212-234`). **But** `/opt/shift-agent/state/equipment-items.json` **does not exist** and config has no `equipment_maintenance` block → returns `disabled`/`missing`. Writer `add-equipment-item.py` installed, never used. | operator data entry. Zero code. | already built |
 | 21 | Expense Bookkeeper | **BLOCKED_UNSUPPORTED_INTEGRATION** | **(a)** owner receipt cession `hooks.py:714-719` → `_run_owner_receipt_ingestion` → `extract-receipt --review-only`, gated on owner MEMBERSHIP (`hooks.py:5444-5487`). **(c)** `prune-expense-receipts.timer` nightly; ran today. `cfg.expense_bookkeeper.enabled=true`, `qbo_client_mode='mock'`. **The vertical cannot complete:** `src/platform/qbo_client.py:293-312` — `RealQBOClient.__init__` raises `NotImplementedError`; the factory (`:337`) refuses `mode="real"`. DRAFT tier issues no approval code, so `POOL_EXPENSE` codes also dead-end at `hooks.py:1349-1351`. `state/expense-bookkeeper/leads.json` does not exist and `state/expense-bookkeeper/receipts/` is **empty, created 2026-05-03, never written** — the ingest path has produced zero receipts in 3.5 months of production. | (iv) blocked on BOTH QBO sandbox credentials **and** an unwritten `RealQBOClient`. Credentials alone do not unblock it — §4.6. | no — write agent |
 | 22 | P&L Anomaly Detective | **NOT_REACHABLE** | SKILL only (`pnl_anomaly_dispatcher`). No script, tool, or timer. | (iv) blocked on POS choice per `docs/portfolio.md:1122` | no (no data) |
-| — ⚠ | **Flyer Studio** | **VERDICT OWNED BY LANE F — not re-derived here.** The row below is my 2026-08-22 pre-#729 assessment and is superseded by Lane F's re-issued readiness verdict. Per the orchestrator, #729 is deployed and a live positive control fired (2 escalations, 2 owner alerts, tick 2 zero) — reported to me, **not independently verified by me**. | **(a)** the largest surface in `hooks.py` — intake, brand-asset, quote-echo, campaign-CTA, source-edit, active-project and bare-flyer arms, `hooks.py:519-1001`. **(c)** `flyer-recovery-watchdog.timer` + `flyer-source-edit-sla-watchdog.timer` (5 min each). `cfg.flyer.enabled=true`. Live activity: `state/flyer/recovery_incidents.json` mtime 18:10 today. | — reachable; blocker is the SLA backlog, §4.4 | partly — §5.5 |
+| — ⚠ | **Flyer Studio** | **DEPLOYED_AWAITING_LIVE_E2E**, per Lane F's re-issued verdict (NOT `FLYER_STUDIO_FULL_PRODUCTION_READY`), which concurs with the row below. **Read it as a REGRESSION, not an unstarted proof** — see the ⚠ note under the status counts. #729 is deployed and its live positive control fired: `flyer_recovery_stale_project_escalated` ×2 (F0217 `ttl_hours=168 stale_hours=1005`; F0222 `stale_hours=985`), `flyer_recovery_owner_alert` ×2 both `outcome="sent"` at `20:52:02.514646Z`, tick 2 adding zero — **verified by the orchestrator directly from the production audit log**, not relayed from Lane F's report. | **(a)** the largest surface in `hooks.py` — intake, brand-asset, quote-echo, campaign-CTA, source-edit, active-project and bare-flyer arms, `hooks.py:519-1001`. **(c)** `flyer-recovery-watchdog.timer` + `flyer-source-edit-sla-watchdog.timer` (5 min each). `cfg.flyer.enabled=true`. Live activity: `state/flyer/recovery_incidents.json` mtime 18:10 today. | — reachable; blocker is the SLA backlog, §4.4 | partly — §5.5 |
 
 ### Status counts (unchanged at `24c1f1d5` — nothing was promoted)
 
@@ -125,6 +125,28 @@ are counted; #17/#18/#20 are retired and not addressable.)
 is the correct outcome, not a failure to update: two new read tools, a newly wired
 return leg and a truthfulness fix all landed, and not one of them is a live end-to-end
 run by a real user. The vocabulary is doing its job — see §4.10.
+
+### ⚠ One label currently covers two opposite conditions
+
+`DEPLOYED_AWAITING_LIVE_E2E` sits on #2, #21 and Flyer, and **it does not mean the same
+thing on all three**. This is a gap in the vocabulary, not an oversight in the rows:
+
+- **#2 and #21 have NEVER had a live end-to-end run.** The proof is *unstarted*; the risk
+  is unknown.
+- **Flyer had 145 completed projects and then stopped completing.** The proof *existed
+  and lapsed*. That is a **regression** — and it is the worse of the two, because
+  something that worked and quietly stopped is stronger evidence of an active fault than
+  something never exercised.
+
+An operator reading one label on both rows will rank them equally. **They should not be.**
+
+The status vocabulary is the operator's, specified in the mandate that authorized this
+audit, with the instruction to keep it strict. Adding a `REGRESSED` status would mean an
+agent widening the operator's taxonomy mid-run, after which no reader could tell which
+statuses were agreed and which were invented — the same provenance failure this audit
+documents elsewhere. **So the gap is recorded here and the ruling is left to the
+operator.** Until it is ruled, read Flyer's row as a regression and #2 / #21's as
+unstarted proofs, regardless of the shared label.
 
 ---
 
@@ -282,6 +304,46 @@ happens. It is newly reachable *because* of the deploy, which is precisely why
 
 Smallest remaining change for #1: wire the employee-reply leg. It is the last dead
 leg, and until it exists the loop cannot close no matter how much traffic arrives.
+
+### 4.11 ↻ The box's own deploy receipt is 78 days stale (found by Lane F, verified here)
+
+`/opt/shift-agent/DEPLOY_RECEIPT.json` — the file at the obvious path, named as the
+record of what is deployed — says:
+
+```json
+{ "commit": "3de2663", "pr": 449, "deployed_at_utc": "2026-06-05T18:27:53Z",
+  "deploy": "flyer-marketing-agent-slice1 Creative Director (FLAG-OFF / dormant)" }
+```
+
+The actual deployed commit is **`24c1f1d5`**. The file's newest nested entry (`fix_C`) is
+`2026-06-06T00:50:40Z`, and its mtime matches — **78 days behind**, spanning at least five
+deploys.
+
+**The accurate record does exist, just not there.** `/opt/shift-agent/deploys/` holds the
+deploy tarballs, named by timestamp and commit, and they are current:
+
+```
+deploy-20260815-192952-830a8087.tgz
+deploy-20260816-151221-4542d3ae.tgz
+deploy-20260818-005157-40064b1a.tgz
+deploy-20260822-201150-6809bd07.tgz
+deploy-20260822-205012-24c1f1d5.tgz   ← today
+```
+
+So this is not "we have no deploy record". It is worse in one specific way: **a stale
+artifact sits at the name an auditor would reach for first, while the live record is
+encoded in filenames somewhere else.** Anyone auditing the box directly — exactly what
+this document did all day — would read `DEPLOY_RECEIPT.json` and conclude the box was
+running June's flyer Creative Director deploy with the flag off.
+
+Same family as the portal's "5 LIVE" claim (§7) and the daily brief's "Awaiting customer
+finalize" (§4.2b): an artifact still confidently reporting a fact it stopped knowing.
+Three instances in one audit is a pattern, and the shared cause is that **each was
+written once and never given anything that would fail when it went out of date**.
+
+Not fixed here — it is a deploy-tooling concern, outside this audit's scope. The smallest
+durable fix is for `shift-agent-deploy.sh` to rewrite the receipt on every run, which
+makes staleness impossible rather than detectable.
 
 ### 4.8 Multi-Location: correcting the reason, not the verdict
 
@@ -627,9 +689,13 @@ should not be read as "one wiring change away".
   `/usr/local/bin/send-daily-brief`, `/opt/shift-agent/config.yaml`, `/root/.hermes/.env` — not
   from the repo. Original pass read repo evidence at `origin/main` `cdd89f02`, with the deployed
   `src/` surface established as current against it.
-- **Taken on report, NOT independently verified:** Flyer's post-#729 live positive control
-  (2 escalations, 2 owner alerts, tick 2 zero). Flyer's readiness verdict belongs to Lane F; the
-  Flyer row here is my superseded pre-#729 assessment and is marked ⚠ as such.
+- **↻ Now confirmed, previously taken on report:** Flyer's post-#729 live positive control was
+  verified by the orchestrator directly from the production audit log (specific rows and
+  timestamps quoted in the Flyer row of §3), not relayed from Lane F. Flyer's readiness verdict
+  itself remains Lane F's and is cited as theirs.
+- **Verified here from the box:** the `DEPLOY_RECEIPT.json` staleness in §4.11 was found by
+  Lane F and re-read independently for this document, including the `deploys/` tarball listing
+  that shows where the accurate record actually lives.
 - Box access was strictly read-only: `ls`, `stat`, `cat`, `systemctl list-*` / `cat`,
   `journalctl`, `grep` over installed scripts, and `python3 -c` reads over JSON state. No state
   mutated, no service restarted, no send-test run.
