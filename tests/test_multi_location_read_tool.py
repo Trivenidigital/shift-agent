@@ -490,7 +490,7 @@ def test_plugin_registers_every_tool_under_shift_agent_read(monkeypatch):
     # this catches. Update the set when a tool lands, do not loosen it.
     assert names == {"get_compliance_deadlines", "find_nearest_location",
                      "get_equipment_maintenance_due",
-                     "get_pending_catering_approvals", "get_catering_menu_items"}
+                     "get_pending_catering_approvals", "get_roster_capabilities"}
     assert {r["toolset"] for r in registered} == {"shift_agent_read"}
     for r in registered:
         assert r["description"] == r["schema"]["description"]
