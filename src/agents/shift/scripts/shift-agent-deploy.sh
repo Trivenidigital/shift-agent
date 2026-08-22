@@ -719,6 +719,59 @@ install_artifacts() {
     install -m 644 src/agents/shift/systemd/*.service /etc/systemd/system/ 2>/dev/null || true
     install -m 644 src/agents/shift/systemd/*.timer /etc/systemd/system/ 2>/dev/null || true
 
+    # systemd DROP-INS this repo owns.
+    #
+    # Until now no *.conf drop-in was tracked here and the deploy installed
+    # none, while the box carried 19 across 11 services. The consequence that
+    # matters: shift-agent-policy-preflight (the binary) ships and is
+    # reinstalled every deploy, but the drop-in that WIRES it as ExecStartPre
+    # did not — so a rebuilt box would have the screening gate installed and
+    # never invoked, and per that drop-in's own comment the gateway would fall
+    # back to the stock UNSCREENED WhatsApp adapter with no error.
+    #
+    # THREE RULES, in priority order:
+    #   1. ADDITIVE ONLY. Never delete a drop-in, never purge a *.service.d
+    #      directory. Most drop-ins on the box belong to codex tooling, not to
+    #      us, and removing another tool's config is out of bounds.
+    #   2. NEVER OVERWRITE A DIFFERING FILE. A box copy that differs may be a
+    #      deliberate hand edit, and nothing here can tell the difference. We
+    #      install only what is absent, leave byte-identical copies alone, and
+    #      REPORT anything else for a human.
+    #   3. Only files under src/platform/systemd/<unit>.d/ are ours. Ownership
+    #      was decided per file; see docs/runbooks/systemd-dropins.md for which
+    #      drop-ins on the box are deliberately NOT tracked and why.
+    install_tracked_dropins() {
+        local dropin_diffs=0
+        local dir unit dest f name target
+        for dir in src/platform/systemd/*.service.d; do
+            [ -d "$dir" ] || continue
+            unit="$(basename "$dir")"
+            dest="/etc/systemd/system/$unit"
+            install -d -m 755 "$dest"
+            for f in "$dir"/*.conf; do
+                [ -f "$f" ] || continue
+                name="$(basename "$f")"
+                target="$dest/$name"
+                if [ ! -e "$target" ]; then
+                    install -m 644 "$f" "$target"
+                    echo "  dropin INSTALLED  $unit/$name"
+                elif cmp -s "$f" "$target"; then
+                    echo "  dropin unchanged  $unit/$name"
+                else
+                    echo "  dropin DIFFERS    $unit/$name — NOT overwriting." >&2
+                    echo "    box copy may be a deliberate edit; diff and resolve by hand." >&2
+                    echo "    (a CRLF/LF-only difference still counts: compare with 'xxd')" >&2
+                    dropin_diffs=$((dropin_diffs + 1))
+                fi
+            done
+        done
+        if [ "$dropin_diffs" -gt 0 ]; then
+            echo "WARN: $dropin_diffs tracked drop-in(s) differ on the box and were left untouched." >&2
+        fi
+        return 0
+    }
+    install_tracked_dropins
+
     # logrotate — Shift-Agent
     [ -f src/agents/shift/logrotate/shift-agent ] && install -m 644 src/agents/shift/logrotate/shift-agent /etc/logrotate.d/
 
