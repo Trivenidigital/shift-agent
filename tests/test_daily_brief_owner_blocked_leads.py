@@ -62,8 +62,36 @@ def _write_leads(env_dir: Path, leads: list[dict]) -> None:
     path.write_text(json.dumps({"leads": leads}), encoding="utf-8")
 
 
+# The COMPLETE key set of a production catering lead, taken from
+# /opt/shift-agent/state/catering-leads.json on 2026-08-22. Fixtures carry every
+# key, not the handful this renderer happens to read today.
+#
+# Hand-picking "the fields that matter" is how a fixture omits exactly what the
+# code fails on. Here the omission would have been load-bearing: `quote_text`,
+# `raw_inquiry`, `extracted` and `selected_items` are free-text/nested fields that
+# carry customer names and dollar amounts in production. A HARD-RULES test run
+# against a fixture that lacks them proves nothing about whether they leak — it
+# just proves absent fields cannot be rendered.
+_PROD_LEAD_KEYS = (
+    "created_at", "customer_finalized_at", "customer_name", "customer_phone",
+    "customer_replied", "deposit_amount_cents", "deposit_commerce_order_id",
+    "deposit_minted_at", "deposit_payment_intent_id", "deposit_payment_reference",
+    "deposit_required", "deposit_status", "extracted", "last_finalize_message_id",
+    "lead_id", "original_message_id", "owner_approval_code", "quote_text",
+    "quote_total_usd", "quote_version", "raw_inquiry", "selected_items",
+    "status", "updated_at",
+)
+
+
 def _lead(lead_id: str, status: str, code: str, age_days: float, now: datetime,
           **extra) -> dict:
+    """A lead carrying the full production key set.
+
+    Every free-text field is seeded with content that WOULD violate a HARD RULE if
+    it were ever rendered — a dollar total, a customer name, a phone number — so
+    the HARD-RULES tests are exercised against the real shape rather than against
+    a fixture that omits the risky fields.
+    """
     ts = (now - timedelta(days=age_days)).isoformat()
     lead = {
         "lead_id": lead_id,
@@ -71,10 +99,30 @@ def _lead(lead_id: str, status: str, code: str, age_days: float, now: datetime,
         "owner_approval_code": code,
         "created_at": ts,
         "updated_at": ts,
-        "customer_phone": "+15550000000",
+        "customer_finalized_at": None,
         "customer_name": "",
+        "customer_phone": "+15550000000",
+        "customer_replied": False,
+        "deposit_amount_cents": 0,
+        "deposit_commerce_order_id": "",
+        "deposit_payment_intent_id": "",
+        "deposit_payment_reference": "",
+        "deposit_required": False,
+        "deposit_status": "none",
+        "deposit_minted_at": None,
+        "extracted": {"headcount": 200, "event_date": "2026-09-01",
+                      "contact_name": "Anjali Iyer", "budget_usd": 4820.50},
+        "last_finalize_message_id": None,
+        "original_message_id": "3ABA73E9EAC201BD6AE5",
+        "quote_text": "Hi Anjali Iyer — your quote for 200 guests is $4,820.50.",
+        "quote_total_usd": None,
+        "quote_version": 0,
+        "raw_inquiry": "Catering for my cousin Ravi Kumar's wedding, budget $5000",
+        "selected_items": [{"name": "Idly (3 PCS)", "price_usd": 5.99, "qty": 200}],
     }
     lead.update(extra)
+    missing = set(_PROD_LEAD_KEYS) - set(lead)
+    assert not missing, f"fixture drifted from the production lead shape: {missing}"
     return lead
 
 
@@ -271,7 +319,12 @@ def test_unparseable_updated_at_does_not_crash_or_invent_an_age(tmp_path, now):
 # ── HARD RULES (2026-05-11 customer-name-hallucination finding) ──────────────
 
 def test_hard_rule_no_dollar_totals_reach_the_brief(tmp_path, now):
-    """Pricing is owner-only, out-of-band via the #XXXXX approve flow."""
+    """Pricing is owner-only, out-of-band via the #XXXXX approve flow.
+
+    Every fixture lead carries money in FOUR places — `quote_total_usd`,
+    `quote_text`, `extracted.budget_usd`, `selected_items[].price_usd` — because
+    the renderer reading any one of them would leak.
+    """
     mod = _load_send_brief(tmp_path)
     _write_leads(tmp_path, [
         _lead("L0017", "AWAITING_OWNER_APPROVAL", "#4SX94", 74, now,
@@ -281,8 +334,8 @@ def test_hard_rule_no_dollar_totals_reach_the_brief(tmp_path, now):
     ])
     out = mod._render_catering(now)
     assert "$" not in out
-    assert "4820" not in out
-    assert "1299" not in out
+    for amount in ("4820", "1299", "5000", "5.99"):
+        assert amount not in out, f"{amount!r} leaked into the brief"
 
 
 def test_hard_rule_no_customer_names_reach_the_brief(tmp_path, now):
