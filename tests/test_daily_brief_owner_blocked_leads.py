@@ -7,10 +7,22 @@ approve" from ``CUSTOMER_FINALIZED`` alone. The count was right and the
 attribution was wrong, which is the one error shape that reliably produces owner
 inaction: he was told to wait on someone else.
 
-The owner-blocked set is DERIVED from ``CATERING_TRANSITIONS`` rather than written
-out, so a new owner-actionable status joins the brief automatically. The derivation
-is itself asserted below — a hardcoded pair is exactly how this under-reported
-before.
+TWO sets, both DERIVED from ``CATERING_TRANSITIONS`` rather than written out, and
+both asserted below against the table — a hardcoded literal is exactly how this
+under-reported before.
+
+The split matters more than the derivation. An earlier revision of this file used
+ONE set keyed on "reaches any owner outcome", which swept ``OWNER_EDITED`` onto the
+actionable line. `apply-catering-owner-decision:815-830` refuses every owner verb
+from that status, so the brief would have told the owner to send a code the
+executor rejects — trading a false negative for a FALSE INSTRUCTION, which is
+worse. The transition table encodes legality, not who can trigger it.
+
+So: ``decidable`` (can reach ``OWNER_APPROVED``) carries codes; ``re-draft`` (can
+reach ``OWNER_REJECTED`` but not ``OWNER_APPROVED``) is a count with no codes, and
+the withheld code is what makes the false affordance structurally impossible. Both
+are pinned against ``catering_approvals_tool`` (PR #732) so the agent and the brief
+cannot give the owner different answers about his own open decisions.
 """
 from __future__ import annotations
 
@@ -18,6 +30,7 @@ import importlib.machinery
 import importlib.util
 import json
 import platform
+import types
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -54,6 +67,31 @@ def _load_send_brief(env_dir: Path):
     mod.CATERING_LEADS_PATH = env_dir / "state" / "catering-leads.json"
     mod.CATERING_LEARNING_SUMMARY_PATH = env_dir / "state" / "catering-learning-summary.json"
     return mod
+
+
+def _load_catering_approvals_tool():
+    """Load the shift-agent-read tool for cross-checking the derived sets.
+
+    It uses a relative import (`from .identity import ...`) and lives in a
+    hyphenated directory, so it cannot be imported by name. A synthetic package
+    with `__path__` pointed at the plugin dir makes the relative import resolve.
+    This is exactly the awkwardness that makes a RUNTIME import from the brief the
+    wrong call — the coupling belongs in a test, not in the shipped script.
+    """
+    pkg_dir = REPO / "src" / "plugins" / "shift-agent-read"
+    pkg_name = "_shift_agent_read_pkg"
+    pkg = types.ModuleType(pkg_name)
+    pkg.__path__ = [str(pkg_dir)]  # type: ignore[attr-defined]
+    sys.modules[pkg_name] = pkg
+
+    mod_name = f"{pkg_name}.catering_approvals_tool"
+    path = pkg_dir / "catering_approvals_tool.py"
+    loader = importlib.machinery.SourceFileLoader(mod_name, str(path))
+    spec = importlib.util.spec_from_file_location(mod_name, str(path), loader=loader)
+    tool = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = tool
+    spec.loader.exec_module(tool)
+    return tool
 
 
 def _write_leads(env_dir: Path, leads: list[dict]) -> None:
@@ -133,34 +171,61 @@ def now() -> datetime:
 
 # ── the derivation itself ────────────────────────────────────────────────────
 
-def test_owner_blocked_set_is_derived_from_the_transition_table(tmp_path):
-    """A status is owner-blocked iff the owner can move it next.
+def test_the_two_sets_are_derived_from_the_transition_table(tmp_path):
+    """Decidable = can reach OWNER_APPROVED. Re-draft = can reach OWNER_REJECTED
+    but NOT OWNER_APPROVED.
 
-    Pinning the derivation, not a literal: the previous fix under-reported because
-    it wrote the pair out by hand. If a future status gains an OWNER_* exit it must
-    appear here without anyone editing the brief.
+    Pinning the derivation, not a literal. The discriminator is "can the owner
+    APPROVE it", not "is the owner involved" — an earlier revision used the latter,
+    swept OWNER_EDITED into the actionable line, and would have told the owner to
+    send a code the executor refuses.
     """
     mod = _load_send_brief(tmp_path)
     from schemas import CATERING_TRANSITIONS  # noqa: PLC0415
 
-    expected = {
-        status for status, exits in CATERING_TRANSITIONS.items()
-        if exits & {"OWNER_APPROVED", "OWNER_EDITED", "OWNER_REJECTED"}
-    }
-    assert mod.OWNER_BLOCKED_CATERING_STATUSES == expected
-    # Guards against a silently-empty derivation passing the line above.
-    assert expected == {"AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED", "OWNER_EDITED"}
+    decidable = {s for s, e in CATERING_TRANSITIONS.items() if "OWNER_APPROVED" in e}
+    redraft = {s for s, e in CATERING_TRANSITIONS.items()
+               if "OWNER_REJECTED" in e and "OWNER_APPROVED" not in e}
+
+    assert mod.OWNER_DECIDABLE_CATERING_STATUSES == decidable
+    assert mod.AWAITING_REDRAFT_CATERING_STATUSES == redraft
+    # Guards against a silently-empty derivation passing the lines above.
+    assert decidable == {"AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED"}
+    assert redraft == {"OWNER_EDITED"}
+    assert not (decidable & redraft), "the two lines would double-count"
 
 
-def test_owner_blocked_set_is_a_superset_of_the_watchdog_actionable_set(tmp_path):
-    """The brief must never claim fewer open owner items than the watchdog will act on.
+def test_the_sets_match_the_shared_catering_approvals_tool(tmp_path):
+    """One source of truth in practice.
 
-    catering-owner-action-watchdog gates its fallback on
-    {AWAITING_OWNER_APPROVAL, OWNER_EDITED}. A lead it would apply an owner decision
-    to, but that the brief omits, is an owner item nobody surfaces.
+    `catering_approvals_tool` (PR #732) cannot be imported at runtime from the
+    brief — it ships to /root/.hermes/plugins/shift-agent-read/, which is not on
+    send-daily-brief's sys.path, and the directory is hyphenated. The derivation is
+    therefore replicated here, and pinned by THIS test: if the agent's tool and the
+    owner's brief ever disagree about his open decisions, this fails. Two
+    authoritative surfaces returning different counts for the same question is the
+    defect class this whole file exists to remove.
     """
     mod = _load_send_brief(tmp_path)
-    assert {"AWAITING_OWNER_APPROVAL", "OWNER_EDITED"} <= mod.OWNER_BLOCKED_CATERING_STATUSES
+    tool = _load_catering_approvals_tool()
+
+    assert tool.pending_statuses() == mod.OWNER_DECIDABLE_CATERING_STATUSES
+    assert tool.awaiting_redraft_statuses() == mod.AWAITING_REDRAFT_CATERING_STATUSES
+
+
+def test_every_watchdog_actionable_status_is_surfaced_somewhere(tmp_path):
+    """The brief must not stay silent about a lead the watchdog treats as owed.
+
+    catering-owner-action-watchdog:362 uses {AWAITING_OWNER_APPROVAL, OWNER_EDITED}.
+    That is no longer a subset of the ACTIONABLE line — OWNER_EDITED is deliberately
+    on the count-only line — so the requirement is coverage by the UNION of the two,
+    not by either alone. The watchdog is the outlier on CUSTOMER_FINALIZED; that
+    stays a reported catering-domain finding, not something this file compensates for.
+    """
+    mod = _load_send_brief(tmp_path)
+    watchdog = {"AWAITING_OWNER_APPROVAL", "OWNER_EDITED"}
+    surfaced = mod.OWNER_DECIDABLE_CATERING_STATUSES | mod.AWAITING_REDRAFT_CATERING_STATUSES
+    assert watchdog <= surfaced
 
 
 # ── the live defect ──────────────────────────────────────────────────────────
@@ -196,19 +261,60 @@ def test_owner_blocked_count_includes_every_owner_blocked_status(tmp_path, now):
     assert decision_line.rstrip().endswith("5"), decision_line
 
 
-def test_owner_edited_is_counted_too(tmp_path, now):
-    """OWNER_EDITED carries an OWNER_REJECTED exit, so it is an open owner item.
+def test_owner_edited_is_surfaced_but_never_as_an_action(tmp_path, now):
+    """OWNER_EDITED must be visible AND must not be presented as actionable.
 
-    It is also unreachable by catering-lead-ttl-sweep (which selects only
-    AWAITING_OWNER_APPROVAL / QUALIFYING) AND has no STALE edge in the transition
-    table, so nothing will ever retire it. The brief is the only place it can surface.
+    `apply-catering-owner-decision:815-830` accepts approve from
+    {AWAITING_OWNER_APPROVAL, CUSTOMER_FINALIZED, OWNER_APPROVED} and reject/edit
+    from {AWAITING_OWNER_APPROVAL, CUSTOMER_FINALIZED} — OWNER_EDITED is in NEITHER
+    matcher. Printing its code on the decision line would tell the owner to send
+    something the executor refuses: a false instruction, worse than the undercount
+    this file was written to fix.
+
+    It must still appear somewhere. OWNER_EDITED is a resting state whose exits are
+    customer-driven, and the TTL sweep cannot retire it (no OWNER_EDITED -> STALE
+    edge), so silence means it sits forever.
     """
     mod = _load_send_brief(tmp_path)
     _write_leads(tmp_path, [_lead("L0030", "OWNER_EDITED", "#EDIT1", 40, now)])
     out = mod._render_catering(now)
+
     decision_line = next(l for l in out.splitlines() if "Awaiting your decision" in l)
-    assert decision_line.rstrip().endswith("1"), decision_line
-    assert "#EDIT1" in out
+    assert decision_line.rstrip().endswith("0"), decision_line
+    assert "Edited, awaiting customer re-confirm: 1" in out
+    # The withheld code is what makes the false affordance impossible.
+    assert "#EDIT1" not in out
+
+
+def test_the_redraft_line_never_carries_a_code(tmp_path, now):
+    """Count only — with several re-draft leads, not one code may appear."""
+    mod = _load_send_brief(tmp_path)
+    _write_leads(tmp_path, [
+        _lead("L0030", "OWNER_EDITED", "#EDIT1", 40, now),
+        _lead("L0031", "OWNER_EDITED", "#EDIT2", 12, now),
+    ])
+    out = mod._render_catering(now)
+    assert "Edited, awaiting customer re-confirm: 2" in out
+    assert "#EDIT1" not in out and "#EDIT2" not in out
+
+
+def test_the_redraft_line_is_omitted_when_empty(tmp_path, now):
+    """No zero-row noise for a state that is usually empty."""
+    mod = _load_send_brief(tmp_path)
+    _write_leads(tmp_path, [_lead("L0017", "AWAITING_OWNER_APPROVAL", "#4SX94", 74, now)])
+    out = mod._render_catering(now)
+    assert "awaiting customer re-confirm" not in out
+
+
+def test_redraft_leads_are_counted_in_the_pipeline_total(tmp_path, now):
+    """Surfaced as information still means counted — 1 decidable + 1 re-draft = 2."""
+    mod = _load_send_brief(tmp_path)
+    _write_leads(tmp_path, [
+        _lead("L0017", "AWAITING_OWNER_APPROVAL", "#4SX94", 74, now),
+        _lead("L0030", "OWNER_EDITED", "#EDIT1", 40, now),
+    ])
+    out = mod._render_catering(now)
+    assert "Active pipeline total: 2" in out
 
 
 # ── negative control: the status that really does wait on the customer ───────
@@ -284,8 +390,11 @@ def test_codes_are_rendered_for_every_owner_blocked_lead(tmp_path, now):
         _lead("L0030", "OWNER_EDITED", "#EDIT1", 40, now),
     ])
     out = mod._render_catering(now)
-    for code in ("#4SX94", "#KYHWU", "#EDIT1"):
-        assert code in out
+    for code in ("#4SX94", "#KYHWU"):
+        assert code in out, f"{code} is actionable and must be shown"
+    # Present in the brief as a count, but its code is withheld — the executor
+    # would refuse it.
+    assert "#EDIT1" not in out
 
 
 def test_oldest_age_is_rendered_so_74d_differs_from_1d(tmp_path, now):

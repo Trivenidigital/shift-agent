@@ -73,19 +73,41 @@ BIRTHDAYS_PATH = Path(os.environ.get("SHIFT_AGENT_BIRTHDAYS_PATH", "/opt/shift-a
 CATERING_LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_CATERING_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
 
 # ── Who is blocking a catering lead ──────────────────────────────────────────
-# DERIVED from the transition table, never written out. A lead is blocked on the
-# OWNER exactly when the owner is the actor who can move it next — i.e. when its
-# allowed-transition set contains one of his three decision outcomes.
+# TWO sets, both DERIVED from the transition table, never written out. They are
+# deliberately SEPARATE rather than one union, and the split mirrors
+# `catering_approvals_tool.pending_statuses()` / `awaiting_redraft_statuses()`
+# (PR #732) exactly — a test pins these against those, so the owner cannot get
+# one answer from the agent and a different one from his brief.
 #
-# Written by hand this was wrong twice: the brief counted CUSTOMER_FINALIZED
-# alone (under-reporting the owner's open decisions and printing the rest under a
-# label naming the CUSTOMER as blocker — the 2026-08-22 stuck-leads finding), and
-# a later hand-written pair was still one status short of OWNER_EDITED. Deriving
-# it means a new owner-actionable status joins the brief with no edit here.
-_OWNER_DECISION_OUTCOMES = frozenset({"OWNER_APPROVED", "OWNER_EDITED", "OWNER_REJECTED"})
-OWNER_BLOCKED_CATERING_STATUSES = frozenset(
+# The discriminator is "can the owner APPROVE it", not "is the owner involved":
+#
+#   decidable  — the row can reach OWNER_APPROVED. The owner sends `#XXXXX
+#                approve|reject` and the executor acts.
+#   re-draft   — the row can reach OWNER_REJECTED but NOT OWNER_APPROVED. Today
+#                only OWNER_EDITED, and it is a RESTING state: its exits are
+#                customer-driven, and the TTL sweep cannot retire it either
+#                (no OWNER_EDITED -> STALE edge), so it can sit forever.
+#
+# WHY NOT ONE SET. An earlier revision of this file derived a single set from
+# "reaches any owner outcome", which swept OWNER_EDITED in and printed its code
+# on the decision line. `apply-catering-owner-decision:815-830` accepts approve
+# from {AWAITING_OWNER_APPROVAL, CUSTOMER_FINALIZED, OWNER_APPROVED} and
+# reject/edit from {AWAITING_OWNER_APPROVAL, CUSTOMER_FINALIZED} — OWNER_EDITED
+# is in NEITHER matcher (the R2-H1 fix). Printing that code as actionable is a
+# FALSE INSTRUCTION: the owner sends it and the executor refuses. That is worse
+# than the undercount this render was written to fix, so the re-draft line
+# carries a COUNT ONLY and no codes — the withheld code is what makes the false
+# affordance structurally impossible.
+#
+# The transition table encodes LEGALITY, not who can trigger it. That is the
+# mistake the single-set derivation made.
+OWNER_DECIDABLE_CATERING_STATUSES = frozenset(
     status for status, exits in CATERING_TRANSITIONS.items()
-    if exits & _OWNER_DECISION_OUTCOMES
+    if "OWNER_APPROVED" in exits
+)
+AWAITING_REDRAFT_CATERING_STATUSES = frozenset(
+    status for status, exits in CATERING_TRANSITIONS.items()
+    if "OWNER_REJECTED" in exits and "OWNER_APPROVED" not in exits
 )
 # The one status that genuinely waits on the CUSTOMER: we asked an intake question
 # mid-conversation and they never came back (catering_lead_sweep — "QUALIFYING is
@@ -575,12 +597,17 @@ def _render_catering(now_local: datetime, include_learning: bool = False) -> str
     attribution pointed away from the reader is the one shape that reliably
     produces inaction.
 
-    The owner-blocked set is now DERIVED from the transition table
-    (``OWNER_BLOCKED_CATERING_STATUSES``) rather than enumerated, because
-    enumerating it is what went wrong. The line is labelled "your decision", not
-    "your approve": ``OWNER_EDITED`` is in the set and is awaiting a re-draft
-    rather than an approval, so "approve" would be a smaller version of the same
-    untruth.
+    The sets are now DERIVED from the transition table rather than enumerated,
+    because enumerating them is what went wrong. There are TWO
+    (``OWNER_DECIDABLE_CATERING_STATUSES`` / ``AWAITING_REDRAFT_CATERING_STATUSES``),
+    matching ``catering_approvals_tool``'s split so the owner cannot get one count
+    from the agent and a different one from his brief. Only the decidable line
+    carries codes; see the note on those constants for why a code on the re-draft
+    line would be a false instruction.
+
+    The line is labelled "your decision", not "your approve", because the set also
+    contains ``CUSTOMER_FINALIZED`` — where the owner may approve, edit or reject —
+    so "approve" would understate what he can do.
 
     Returns an empty string when there are no leads at all (lets the caller
     omit the block cleanly).
@@ -619,25 +646,38 @@ def _render_catering(now_local: datetime, include_learning: bool = False) -> str
         except (ValueError, TypeError):
             continue
 
-    owner_blocked = [l for l in leads
-                     if l.get("status") in OWNER_BLOCKED_CATERING_STATUSES]
+    decidable = [l for l in leads
+                 if l.get("status") in OWNER_DECIDABLE_CATERING_STATUSES]
+    awaiting_redraft = [l for l in leads
+                        if l.get("status") in AWAITING_REDRAFT_CATERING_STATUSES]
     customer_blocked = [l for l in leads
                         if l.get("status") in CUSTOMER_BLOCKED_CATERING_STATUSES]
     sent_to_customer = [l for l in leads if l.get("status") == "SENT_TO_CUSTOMER"]
 
-    pipeline_total = len(owner_blocked) + len(customer_blocked) + len(sent_to_customer)
+    pipeline_total = (len(decidable) + len(awaiting_redraft)
+                      + len(customer_blocked) + len(sent_to_customer))
 
     lines = ["*Catering pipeline:*"]
     lines.append(f"  • New leads (24h): {new_24h}")
 
-    # The owner's own open decisions, with the #XXXXX codes he replies to and the
-    # age of the oldest. Both matter: without codes he has no token to act on, and
-    # without an age a lead waiting 74 days reads exactly like one from yesterday.
-    if owner_blocked:
-        detail = _owner_blocked_detail(owner_blocked, now_local)
-        lines.append(f"  • Awaiting your decision{detail}: {len(owner_blocked)}")
+    # The owner's own actionable decisions, with the #XXXXX codes he replies to and
+    # the age of the oldest. Both matter: without codes he has no token to act on,
+    # and without an age a lead waiting 74 days reads exactly like one from
+    # yesterday. Every code on THIS line is one the executor will accept.
+    if decidable:
+        detail = _owner_blocked_detail(decidable, now_local)
+        lines.append(f"  • Awaiting your decision{detail}: {len(decidable)}")
     else:
         lines.append("  • Awaiting your decision: 0")
+
+    # COUNT ONLY, deliberately. See the note on AWAITING_REDRAFT_CATERING_STATUSES:
+    # the executor refuses every owner verb from these rows, so rendering a code
+    # here would instruct the owner to send something that gets rejected. The lead
+    # is still surfaced — silence about a resting lead is how it sits forever —
+    # but it is surfaced as information, not as an action.
+    if awaiting_redraft:
+        lines.append(
+            f"  • Edited, awaiting customer re-confirm: {len(awaiting_redraft)}")
 
     lines.append(f"  • Awaiting customer reply: {len(customer_blocked)}")
     lines.append(f"  • Quotes sent to customers: {len(sent_to_customer)}")
