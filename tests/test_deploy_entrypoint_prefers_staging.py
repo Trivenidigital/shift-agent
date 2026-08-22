@@ -51,12 +51,25 @@ SEARCH_ROOTS = ("tools", "docs", "tasks", ".github")
 # history. Anything not matched here is in scope, so a new operational doc is
 # covered the day it lands.
 HISTORICAL_PREFIXES = ("tasks/audits/", "docs/reviews/", "docs/superpowers/")
-HISTORICAL_MARKERS = ("-plan", "-report", "runbook-state-migration")
+
+# Whole hyphen-delimited TOKENS in the basename stem, not substrings anywhere. An earlier version used unanchored substrings
+# (`-plan`, `-report`) matched anywhere in the path, which would silently exempt
+# a future `docs/runbooks/deploy-planning.md` or `tasks/incident-reporting-
+# runbook.md` the day it landed. It also carried a marker named after one
+# specific file — an allowlist entry wearing a rule's clothes, and it let a LIVE
+# operational procedure (`tasks/runbook-state-migration.md`, a current
+# instruction to run a bare deploy) escape. An exemption must be a LOCATION or a
+# naming convention, never a spelling. Token matching keeps
+# `deploy-planning.md` and `incident-reporting-runbook.md` in scope while
+# exempting `...-execution-plan-2026-05-19.md`.
+HISTORICAL_BASENAME_TOKENS = frozenset({"plan", "report"})
 
 
 def _is_historical(rel: str) -> bool:
+    stem = rel.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    tokens = set(stem.split("-"))
     return (rel.startswith(HISTORICAL_PREFIXES)
-            or any(m in rel for m in HISTORICAL_MARKERS))
+            or bool(tokens & HISTORICAL_BASENAME_TOKENS))
 
 SUBCOMMAND = re.compile(r"shift-agent-deploy\.sh[`'\"]?\s+(list|rollback)\b")
 
@@ -106,16 +119,32 @@ def test_no_tracked_file_invokes_the_installed_entrypoint_bare():
     )
 
 
-def test_the_deploy_script_is_not_executable_in_git():
-    """The premise of the `bash` prefix, pinned rather than assumed."""
+def test_the_deploy_script_is_executable_in_git():
+    """It MUST be 100755, and the reason is the auto-rollback path.
+
+    The script re-execs ITSELF by path on every gate-failure route:
+    `"$0" rollback "$PREV_TAG"` at shift-agent-deploy.sh:1701 (reached from
+    `revert_shift_tree`, referenced 25 times), :2891 and :3157. If the tracked
+    mode is 644, a Linux-built tarball yields a non-executable staging copy, and
+    invoking it as `bash "$S"` sets `$0` to that path — so the re-exec fails
+    126 under `set -euo pipefail` and the rollback ABORTS. That happens only on
+    a deploy that has already failed a gate, i.e. exactly when auto-rollback is
+    the thing protecting the box, leaving artifacts installed and the tree
+    un-reverted. Strictly worse than the stale-hint bug this file exists for.
+
+    An earlier version of this test asserted 100644 and cited the `bash` prefix
+    as the mitigation. It was pinning the wrong premise and would have blocked
+    this fix. Recorded because "the test says so" is not evidence when the test
+    encodes the mistake.
+    """
     mode = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "ls-files", "-s",
          "src/agents/shift/scripts/shift-agent-deploy.sh"],
         capture_output=True, text=True, check=True,
     ).stdout.split()[0]
-    assert mode == "100644", (
-        f"tracked mode is {mode}; if the script became executable, revisit whether "
-        "the bash prefix and the -f probe are still required"
+    assert mode == "100755", (
+        f"tracked mode is {mode}; the deploy script re-execs itself as `\"$0\" rollback`, "
+        "so a non-executable staging copy breaks auto-rollback on a failed deploy"
     )
 
 
@@ -184,4 +213,54 @@ def test_the_fleet_payload_actually_selects_staging_for_a_mode_644_copy(tmp_path
     r2 = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     assert "RAN=INSTALLED" in r2.stdout, (
         f"fallback broken when staging is absent: {r2.stdout!r} {r2.stderr!r}"
+    )
+
+
+def _bare_staging_invocation_lines(path: Path) -> list[tuple[int, str]]:
+    """Lines that INVOKE the staging entrypoint without `bash`.
+
+    The other half of the rule, and the half a review found blind: the suite
+    pinned "do not invoke the installed copy" but not "invoke the staging copy
+    correctly", so stripping `bash` from every staging invocation passed.
+    Directly exec'ing staging is a `Permission denied` at the moment of deploy
+    whenever the tarball was built anywhere the x-bit is not synthesised.
+    """
+    bad = []
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if STAGING not in line:
+            continue
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        if SUBCOMMAND.search(line):
+            continue
+        before = line.split(STAGING)[0]
+        if before.rstrip().endswith("bash") or 'bash "$S"' in line or "$S" in before:
+            continue
+        bad.append((n, line.strip()))
+    return bad
+
+
+def test_no_live_instruction_invokes_the_staging_entrypoint_without_bash():
+    listed = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", *SEARCH_ROOTS],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    offenders = []
+    for rel in listed:
+        if _is_historical(rel):
+            continue
+        path = REPO_ROOT / rel
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if STAGING not in text:
+            continue
+        for n, line in _bare_staging_invocation_lines(path):
+            offenders.append(f"{rel}:{n}: {line}")
+    assert not offenders, (
+        "these direct-exec the staging copy; it is not guaranteed executable out "
+        "of every tarball, so this is Permission denied at deploy time: "
+        + "; ".join(offenders)
     )
