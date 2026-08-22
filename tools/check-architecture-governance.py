@@ -333,6 +333,18 @@ class Project:
 # ── path pattern handling ──────────────────────────────────────────────────
 
 
+
+def _is_test_only_path(path: str) -> bool:
+    """True for files that exist only to test other code.
+
+    Deliberately narrow: a top-level `tests/` tree, or a `tests/` directory
+    nested inside a source package. NOT any path merely containing the word
+    "test", which would exempt a real `src/platform/testing_router.py`.
+    """
+    parts = path.split("/")
+    return "tests" in parts or parts[-1].startswith("test_")
+
+
 def pattern_problems(pattern: str) -> list[str]:
     """Return the reasons `pattern` is not an acceptable registry path pattern."""
     problems: list[str] = []
@@ -1161,6 +1173,17 @@ class GovernanceChecker:
         suspicious: list[tuple[str, str]] = []
         for path in added:
             if self.matcher.is_excluded(path):
+                continue
+            if _is_test_only_path(path):
+                # A test file is never a new subsystem. The indicators match on
+                # NAME, so `tests/test_cf_router_candidate_response.py` reads as a
+                # new router purely because it tests one — and every future
+                # `test_*router*`, `test_*store*`, `test_*approval*` would too.
+                # Asking a test author "does this extend an existing subsystem?"
+                # has no true answer: it is neither new nor an extension, it is a
+                # test, and the only way past the gate was to assert something
+                # false. Nothing under tests/ is installed by the deploy, so a
+                # subsystem cannot hide here.
                 continue
             for kind, rx in SUBSYSTEM_INDICATORS.items():
                 if re.search(rx, path, re.IGNORECASE):
