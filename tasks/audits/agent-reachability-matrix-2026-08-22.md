@@ -1,5 +1,14 @@
 # Agent reachability matrix — 2026-08-22
 
+> **REFRESHED against the deployed box, same day.** First issued at deploy
+> `40064b1a`; re-verified at **`24c1f1d5`** (`deploy-20260822-205012-24c1f1d5`) after
+> #732, #734, #735 and #739 merged and shipped. Every claim below was re-read from
+> `/opt/shift-agent` and `/root/.hermes` on the box, not from the repo.
+>
+> **Three statuses were re-examined; none were promoted.** Deployment is necessary,
+> not sufficient — #1 Shift is the test case: its return leg is now wired and its
+> intake has still never executed once. Changed rows are marked **↻**.
+
 **Drift-check tag:** `Hermes-native` — this is an audit of the deployed runtime; it proposes no
 new infrastructure. The read-shaped ranking in §5 targets the EXISTING `shift-agent-read`
 plugin and Hermes's own progressive-disclosure tool discovery.
@@ -23,12 +32,19 @@ awesome-hermes-agent ecosystem check: not applicable — no new capability is pr
 ## 1. The governing runtime fact
 
 Verified deployed state on `main-vps` (app root `/opt/shift-agent`, Hermes home `/root/.hermes`,
-deployed commit `40064b1a`):
+deployed commit **`24c1f1d5`**, re-read 2026-08-22 post-deploy):
 
 - `agent.disabled_toolsets: [delegation, skills, browser, clarify, terminal, code_execution, file]`
 - `platform_toolsets.whatsapp: [hermes-whatsapp, shift_agent_read]`
 - `plugins.enabled: [cf-router, shift-agent-policy, shift-agent-read]`
 - 45 SKILL directories exist under `/root/.hermes/skills/`.
+
+**↻ `shift-agent-read` now registers FIVE tools, not three.** Read from the deployed
+`/root/.hermes/plugins/shift-agent-read/__init__.py`, whose `register()` iterates
+`(catering_approvals_tool, compliance_tool, equipment_tool, location_tool, roster_tool)`;
+all five module files are present in that directory. The two new ones (#732) are
+`get_pending_catering_approvals` and `get_roster_capabilities`, both `TOOLSET =
+"shift_agent_read"` and both owner-only via `identity.require_owner()`.
 
 **Both the `skills` toolset and the `terminal` toolset are disabled.** Every routing row in
 `src/agents/shift/skills/dispatch_shift_agent/SKILL.md` instructs the model to execute
@@ -44,10 +60,10 @@ Only three routes execute anything today:
 - **(a) cf-router** — ONE registered hook, `pre_gateway_dispatch`
   (`src/plugins/cf-router/__init__.py:37`), whose body
   (`src/plugins/cf-router/hooks.py:369-1003`) invokes handler scripts itself as subprocesses.
-- **(b) a registered tool** — `shift-agent-read` registers exactly three
-  (`src/plugins/shift-agent-read/__init__.py:28-35`). `shift-agent-policy` registers no tools;
-  it is an egress screen plus a sender-context hook (`src/plugins/shift-agent-policy/plugin.yaml`).
-- **(c) a systemd timer** — 38 timers on the box; the agent-bearing ones are named per row below.
+- **(b) a registered tool** — `shift-agent-read` registers **five** (deployed `__init__.py`
+  `register()`). `shift-agent-policy` registers no tools; it is an egress screen plus a
+  sender-context hook (`src/plugins/shift-agent-policy/plugin.yaml`).
+- **(c) a systemd timer** — 39 timers on the box (38 at first issue); the agent-bearing ones are named per row below.
 
 ---
 
@@ -72,10 +88,10 @@ are counted; #17/#18/#20 are retired and not addressable.)
 
 | # | Agent | Status | Execution path (evidence) | Smallest change to reach | Read-shaped? |
 |---|---|---|---|---|---|
-| 1 | Shift Agent | **PARTIAL** | **(a) WIRED, never fired:** `hooks.py:466-513` → `actions.invoke_shift_sick_call` (`actions.py:2163-2181`, a real `subprocess.run([PYTHON_BIN, HANDLE_SHIFT_SICK_CALL_BIN, ...])`) → `/usr/local/bin/handle-shift-sick-call`, installed, 17,482 B. **(c)** `shift-agent-proposal-sweep.timer` (15 min), `-health`, `-backup`, `-fsck`, `-tail-logger`, `send-routing-accuracy-summary.timer`. **DEAD:** owner approval of a coverage proposal — `hooks.py:1349-1351` falls a `POOL_SHIFT` code through to the LLM/dispatcher, which cannot run; `handle_candidate_response` (employee reply) is SKILL-only. Zero `dispatcher_routed` rows all-time — see §4.3. | (ii) add a `POOL_SHIFT` branch to `_try_f8_intercept` calling `update-proposal-status`, mirroring `hooks.py:1296-1319` | partly — §5.5 |
-| 2 | Catering Lead Agent | **DEPLOYED_AWAITING_LIVE_E2E** | **(a)** F7 primary intercept `hooks.py:920-947`; acceptance arm `hooks.py:900-906`; F8 owner approve/reject `hooks.py:1296-1319`; menu ingestion `hooks.py:702-713` → `parse-menu-photo`. **(c)** `catering-lead-ttl-sweep`, `catering-proposal-expiry-sweep`, `catering-pattern-report` timers; `catering-owner-action-watchdog.service` **active running**. `cfg.catering.enabled=true`. 20 real leads on disk. | — reachable; blocker is live E2E, §4.2 | **YES — top candidate, §5.1** |
+| 1 ↻ | Shift Agent | **PARTIAL** (unchanged — see §4.10) | **(a) intake WIRED, never fired:** deployed `hooks.py:548-565` → `actions.invoke_shift_sick_call` → installed `/usr/local/bin/handle-shift-sick-call`. **(a) return leg NOW WIRED (#734):** deployed `hooks.py:1443` → `_handle_shift_coverage_code` (`:7542`), which marks the proposal approved then sends, fail-closed in six places. The bare `return None` that killed it now applies to expense codes only. **(b) NEW:** `get_roster_capabilities`, owner-only (`roster_tool.py:235 require_owner()`). **(c)** `shift-agent-proposal-sweep.timer` (15 min), `-health`, `-backup`, `-fsck`, `-tail-logger`, `send-routing-accuracy-summary.timer`. **STILL DEAD:** `handle_candidate_response` (employee reply) is SKILL-only — no invoker outside the deploy scripts. **Zero `dispatcher_routed` rows all-time**, and the writer sits on the sick-call path itself at deployed `:554`, so intake has never executed once. | (ii) wire the employee-reply leg — the last dead leg | partly — §5.5 |
+| 2 ↻ | Catering Lead Agent | **DEPLOYED_AWAITING_LIVE_E2E** (unchanged) | **(a)** F7 primary intercept; acceptance arm; F8 owner approve/reject; menu ingestion → `parse-menu-photo`. **(b) NEW:** `get_pending_catering_approvals`, owner-only (`catering_approvals_tool.py:298 require_owner()`) with an outbound-truthfulness guard that refuses rather than emit an unguarded zero. **(c)** `catering-lead-ttl-sweep`, `catering-proposal-expiry-sweep`, `catering-pattern-report` timers; `catering-owner-action-watchdog.service` **active running**. `cfg.catering.enabled=true`. 20 real leads on disk. | — reachable; blocker is live E2E, §4.2. The owner can now ASK what is pending (#732) and his brief now tells him truthfully (#735) — neither is a live E2E. | §5.1 **BUILT** (#732) |
 | 3 | Multi-Location Coordinator | **PARTIAL** | **Split verdict, see §4.8.** AGENT (`multi_location_query`, `customer_location_query`) = **no execution path** — both are SKILL-only and the `skills` toolset is disabled. CAPABILITY = **(b)** `find_nearest_location` registered (`__init__.py:28-35`, `location_tool.py:217`), public, wraps installed `closest-location.py` — genuinely reachable. **But** `/opt/shift-agent/config.yaml` has NO `multi_location` block → `location_tool.py:251` returns `status="not_configured"` on every call. Portal's "LIVE" claim is false on both halves. | operator data entry: add `multi_location.locations[]` to config. Zero code. | already built |
-| 4 | Daily Brief Agent | **PRODUCTION_READY** | **(c)** `send-daily-brief.timer` (15 min; ran 18:08:14 today) → `/usr/local/bin/send-daily-brief`. Proven live: `state/last-brief-sent.json` = `{"brief_date":"2026-08-22","outbound_message_id":"3EB08A340E5FEFFF3AB4DD"}`. **All-time audit: 30 `brief_attempted` + 30 `brief_sent` over 30 days** — one send per day, every day. The 1,984 `brief_skipped` rows carry `reason: already_sent` / `catchup_expired`, which is what a 15-min timer doing a once-daily job looks like. | — | n/a |
+| 4 ↻ | Daily Brief Agent | **PRODUCTION_READY** (unchanged) | **(c)** `send-daily-brief.timer` (15 min) → `/usr/local/bin/send-daily-brief`. Proven live: `state/last-brief-sent.json` carries today's `outbound_message_id 3EB08A340E5FEFFF3AB4DD`. **All-time: 30 `brief_attempted` + 30 `brief_sent` over 30 days**; the 1,984 `brief_skipped` rows carry `reason: already_sent` / `catchup_expired`. **↻ Now truthful about who is blocking (#735, deployed):** installed `send-daily-brief:650-682` renders "Awaiting your decision" from the owner-decidable set and a count-only "Edited, awaiting customer re-confirm" line. It previously reported owner-blocked leads as "Awaiting customer finalize" (§4.2b). | — | n/a |
 | 5 | EOD Reconciliation | **PRODUCTION_READY** | **(c)** `eod-reconcile.timer` (15 min) → `/usr/local/bin/eod-reconcile`. Proven: `state/eod-snapshot.json` for `2026-08-21`, `invariant_violations: 0`. **All-time: 30 `eod_snapshot` over 30 days**; 210 `eod_skipped` all `already_done`. Feeds #4. | — | n/a |
 | 6 | Inventory Tracker | **NOT_REACHABLE** | SKILL only (`src/agents/inventory/skills/inventory_dispatcher`). No script in `/usr/local/bin`, no tool, no timer. | (i) thin READ tool — **but no inventory data file exists on disk**, so today (v) not worth doing | no (no data) |
 | 7 | Supplier Coordination | **NOT_REACHABLE** | SKILL only. No script, tool, or timer. | (v) not worth doing — no supplier roster on disk | no (no data) |
@@ -91,19 +107,24 @@ are counted; #17/#18/#20 are retired and not addressable.)
 | 19 | Equipment & Maintenance | **PARTIAL** | **(b)** `get_equipment_maintenance_due` registered, owner-only (`equipment_tool.py:212-234`). **But** `/opt/shift-agent/state/equipment-items.json` **does not exist** and config has no `equipment_maintenance` block → returns `disabled`/`missing`. Writer `add-equipment-item.py` installed, never used. | operator data entry. Zero code. | already built |
 | 21 | Expense Bookkeeper | **BLOCKED_UNSUPPORTED_INTEGRATION** | **(a)** owner receipt cession `hooks.py:714-719` → `_run_owner_receipt_ingestion` → `extract-receipt --review-only`, gated on owner MEMBERSHIP (`hooks.py:5444-5487`). **(c)** `prune-expense-receipts.timer` nightly; ran today. `cfg.expense_bookkeeper.enabled=true`, `qbo_client_mode='mock'`. **The vertical cannot complete:** `src/platform/qbo_client.py:293-312` — `RealQBOClient.__init__` raises `NotImplementedError`; the factory (`:337`) refuses `mode="real"`. DRAFT tier issues no approval code, so `POOL_EXPENSE` codes also dead-end at `hooks.py:1349-1351`. `state/expense-bookkeeper/leads.json` does not exist and `state/expense-bookkeeper/receipts/` is **empty, created 2026-05-03, never written** — the ingest path has produced zero receipts in 3.5 months of production. | (iv) blocked on BOTH QBO sandbox credentials **and** an unwritten `RealQBOClient`. Credentials alone do not unblock it — §4.6. | no — write agent |
 | 22 | P&L Anomaly Detective | **NOT_REACHABLE** | SKILL only (`pnl_anomaly_dispatcher`). No script, tool, or timer. | (iv) blocked on POS choice per `docs/portfolio.md:1122` | no (no data) |
-| — | **Flyer Studio** | **DEPLOYED_AWAITING_LIVE_E2E** | **(a)** the largest surface in `hooks.py` — intake, brand-asset, quote-echo, campaign-CTA, source-edit, active-project and bare-flyer arms, `hooks.py:519-1001`. **(c)** `flyer-recovery-watchdog.timer` + `flyer-source-edit-sla-watchdog.timer` (5 min each). `cfg.flyer.enabled=true`. Live activity: `state/flyer/recovery_incidents.json` mtime 18:10 today. | — reachable; blocker is the SLA backlog, §4.4 | partly — §5.5 |
+| — ⚠ | **Flyer Studio** | **VERDICT OWNED BY LANE F — not re-derived here.** The row below is my 2026-08-22 pre-#729 assessment and is superseded by Lane F's re-issued readiness verdict. Per the orchestrator, #729 is deployed and a live positive control fired (2 escalations, 2 owner alerts, tick 2 zero) — reported to me, **not independently verified by me**. | **(a)** the largest surface in `hooks.py` — intake, brand-asset, quote-echo, campaign-CTA, source-edit, active-project and bare-flyer arms, `hooks.py:519-1001`. **(c)** `flyer-recovery-watchdog.timer` + `flyer-source-edit-sla-watchdog.timer` (5 min each). `cfg.flyer.enabled=true`. Live activity: `state/flyer/recovery_incidents.json` mtime 18:10 today. | — reachable; blocker is the SLA backlog, §4.4 | partly — §5.5 |
 
-### Status counts
+### Status counts (unchanged at `24c1f1d5` — nothing was promoted)
 
 | Status | n | Agents |
 |---|---|---|
 | PRODUCTION_READY | 2 | #4, #5 |
-| DEPLOYED_AWAITING_LIVE_E2E | 2 | #2, Flyer |
+| DEPLOYED_AWAITING_LIVE_E2E | 2 | #2, Flyer *(Flyer's verdict is Lane F's)* |
 | PARTIAL | 4 | #1, #3, #13, #19 |
 | BLOCKED_UNSUPPORTED_INTEGRATION | 1 | #21 |
 | NOT_REACHABLE | 9 | #6, #7, #9, #10, #12, #14, #15, #16, #22 |
 | NOT_IMPLEMENTED | 2 | #8, #11 |
 | READY_TO_DEPLOY / READY_WITH_EXTERNAL_DEPENDENCY / BLOCKED_RUNTIME / BLOCKED_CREDENTIALS / INTENTIONALLY_REFUSAL_ONLY | 0 | — |
+
+**Four rows gained capability today (#1, #2, #4, Flyer) and none changed status.** That
+is the correct outcome, not a failure to update: two new read tools, a newly wired
+return leg and a truthfulness fix all landed, and not one of them is a live end-to-end
+run by a real user. The vocabulary is doing its job — see §4.10.
 
 ---
 
@@ -151,6 +172,26 @@ are pending: `catering-owner-action-watchdog.service` is active, but the recent 
 This is why catering is DEPLOYED_AWAITING_LIVE_E2E rather than PRODUCTION_READY: the approval
 half of the vertical has never closed in production. It is also what makes §5.1 the top
 read-shaped candidate — the owner currently has **no way to ask** "what is waiting on me?"
+
+### 4.2b ↻ The brief now names the owner as blocker (#735, deployed)
+
+Closed. The installed `send-daily-brief` renders "Awaiting your decision" from the
+owner-decidable set with codes and the oldest age, and a **count-only** "Edited,
+awaiting customer re-confirm" line. Verified in `/usr/local/bin/send-daily-brief`
+at `:650-682`.
+
+Two details worth keeping for the handoff. The re-draft line carries **no codes** on
+purpose: `apply-catering-owner-decision:815-830` refuses every owner verb from
+`OWNER_EDITED`, so printing its code would instruct the owner to send something the
+executor rejects. And an `OWNER_EDITED` lead was previously absent from *every* line
+and from the pipeline total — combined with the transition table having no
+`OWNER_EDITED → STALE` edge, nothing in the tree would ever have surfaced one. The
+fix therefore did more than correct a label; it made a permanently-invisible class of
+stuck lead visible.
+
+**What #735 did NOT do:** it did not act on the five leads. They remain open, and
+`catering-lead-ttl-sweep` remains disarmed — `CATERING_LEAD_TTL_SWEEP_ENABLED` is
+still absent from `/root/.hermes/.env` (re-verified). §4.2 stands.
 
 ### 4.3 Shift Agent: the sick-call leg is WIRED and has NEVER FIRED; the two return legs are DEAD
 
@@ -205,6 +246,42 @@ Combined with `handle_candidate_response` (the employee's "yes I can cover" repl
 SKILL-only, **neither the employee-reply nor the owner-approve leg of the Shift coverage loop is
 reachable.** Only the inbound sick-call leg is (§4.3). This is a structural gap, not an absence
 of traffic — which is precisely why the verdict is PARTIAL.
+
+### 4.10 ↻ Why #1 Shift stays PARTIAL after its return leg shipped
+
+The strongest test of the vocabulary today. #734 wired the leg I said was dead:
+deployed `hooks.py:1443` now routes a `POOL_SHIFT` code to
+`_handle_shift_coverage_code` (`:7542`), which marks the proposal approved and only
+then sends, fail-closed in six places. The bare `return None` I cited now covers
+expense codes alone, with a test pinning that it did not silently widen. That is a
+real fix and my §4.3b finding is closed.
+
+**It does not promote the agent, for two independent reasons.**
+
+**1. Intake has still never executed.** `dispatcher_routed` remains at **0 rows
+all-time** across the archives and the live log. Lane E's sharpening is right and
+worth stating exactly: `audit_dispatcher_routed` is called on the **sick-call path
+itself** — deployed `hooks.py:554`, immediately before `invoke_shift_sick_call` —
+so the zero is not merely "the SKILL dispatcher never ran". It proves the F9 intake
+arm has never fired either. The coverage loop has no entry event in production, ever.
+
+**2. The employee-reply leg is still dead.** `handle_candidate_response` remains
+SKILL-only; on the box nothing outside the deploy scripts references it. So the
+sequence is now: intake (wired, never used) → owner card → owner approves (wired
+today) → candidate is messaged → **candidate replies into nothing**.
+
+**And the fix created a reachable false statement.** Lane E's consequence deserves to
+sit in the matrix, not only in a lane report: with the return leg live, an owner CAN
+now approve, a candidate CAN now be messaged — and when she replies, nothing records
+it, so the 30-minute `shift-agent-proposal-sweep` will tell the owner she never
+responded. The sweep's guard is correct; it simply cannot see a reply no code path
+writes. This is the same family as the defect #735 just fixed in the brief: a
+truthful-looking statement to the owner that is false because an upstream write never
+happens. It is newly reachable *because* of the deploy, which is precisely why
+"deployed" cannot be promotion evidence.
+
+Smallest remaining change for #1: wire the employee-reply leg. It is the last dead
+leg, and until it exists the loop cannot close no matter how much traffic arrives.
 
 ### 4.8 Multi-Location: correcting the reason, not the verdict
 
@@ -321,7 +398,7 @@ the finding, because §4.7 shows the other nine agents have no data at all.
 
 Every file named below was verified present on `main-vps`.
 
-### 5.1 RANK 1 — `get_pending_catering_approvals` (owner-only)
+### 5.1 RANK 1 — `get_pending_catering_approvals` (owner-only) — ✅ **BUILT + DEPLOYED (#732)**
 
 - **(d) Exact user question:** *"What catering leads are waiting on my approval?"* (also: "anything
   I need to sign off on?", "what's outstanding on catering?")
@@ -350,7 +427,7 @@ Every file named below was verified present on `main-vps`.
   into each other. Bind the deterministic outbound text for every zero state exactly as
   `compliance_tool.py` does — this is a money-adjacent claim made to the owner.
 
-### 5.2 RANK 2 — `get_roster_capabilities` (owner-only) — **`employees` only, NOT `schedule`**
+### 5.2 RANK 2 — `get_roster_capabilities` (owner-only) — ✅ **BUILT + DEPLOYED (#732)**, `employees` only
 
 - **(d) Exact user question:** *"Who can cover the meat counter?"*, *"Which active staff speak
   Gujarati?"*, *"Who is currently on the roster?"*
@@ -440,23 +517,83 @@ config block. Writing more code here would be motion, not progress.
 
 ## 6. Recommended next actions, in order
 
-0. **Rule the scope question in §5 first** — may a new read-only tool couple to catering state?
-   The answer reorders everything below it, and it is not mine to assume.
-1. **Build §5.1 `get_pending_catering_approvals`** — closes the loop §4.2 shows is open, over
-   data that already exists, passes the currency test, actionable non-empty answer today.
-2. **Build §5.2 `get_roster_capabilities`** (`employees` only) — the only top candidate that
-   touches no catering state, so it is buildable regardless of how step 0 is ruled.
+**↻ Steps 0-2 are DONE.** Read-only coupling to catering was ruled allowed; §5.1 and §5.2 were
+built, merged and deployed as #732; and the daily-brief truthfulness fix (§4.2b) shipped as #735.
+What remains:
+
+1. ~~Rule the scope question~~ — ruled: read-only coupling to catering is allowed.
+2. ~~Build §5.1 / §5.2~~ — both deployed (#732), both owner-only, registration verified.
 3. **Then §5.3 `get_catering_menu_items`**, and only with age disclosure or without prices —
-   the file is 108 days old and prices are commitments.
+   the file is now 109 days old and prices are commitments. Still not built; still the next
+   read-shaped candidate.
 4. **Do not build any `schedule`-derived tool** (§5.4). Report instead that Shift has no
    schedule-ingestion path.
-5. **Surface to the operator; do not self-authorize:**
-   - the three catering leads stuck since June/July (§4.2);
+5. **Prove live tool discovery.** Five tools now ship on registration evidence alone; that a
+   single one surfaces in a real `tool_search` is still unverified (§8). This is now the cheapest
+   high-value check available and it gates the credibility of five rows at once.
+6. **Wire Shift's employee-reply leg** — the last dead leg, and now urgent rather than academic:
+   with #734 deployed an owner can approve, a candidate can be messaged, and her reply is
+   recorded nowhere, so the sweep will report her as unresponsive (§4.10).
+7. **Surface to the operator; do not self-authorize:**
+   - the five owner-blocked catering leads, three of them awaiting his approval since
+     June/July, oldest 74d (§4.2) — his brief now names them and shows the codes (§4.2b),
+     but nothing has acted on them;
+   - `catering-lead-ttl-sweep` still disarmed (§4.2) — operator-only, `STALE` is one-way;
    - `catering-followup-sweep.timer` being disabled (§4.5) — enabling it sends real outbound;
    - the flyer source-edit SLA backlog (§4.4);
-   - that #3 / #13 / #19 need config + data entry, not engineering (§4.1).
-6. **Consider the `POOL_SHIFT` F8 branch** (§4.3b) — roughly 20 lines mirroring an existing
-   branch, but it mutates coverage state, so it needs its own review.
+   - that #3 / #13 / #19 need config + data entry, not engineering (§4.1, §6b column A).
+
+~~8. Consider the `POOL_SHIFT` F8 branch~~ — **done, shipped as #734** (§4.10). It closed the
+owner-approve leg and, in doing so, made the missing employee-reply leg newly consequential;
+that is item 6.
+
+---
+
+## 6b. What each blocked agent is actually waiting on (for the operator)
+
+The three-way split the handoff needs. **Engineering cannot unblock the first group,
+and no amount of operator input unblocks the second.** Sorted by what the operator can
+act on today.
+
+### A — Blocked on OPERATOR INPUT (no engineering required; zero code)
+
+These are built, deployed, reachable, and returning "not configured" because nobody
+has entered the data. Each has an installed writer or a config key waiting.
+
+| Agent | What is missing | How the operator supplies it |
+|---|---|---|
+| #3 Multi-Location | no `multi_location` block in `/opt/shift-agent/config.yaml` | add `multi_location.locations[]` (name, address, hours, phone) |
+| #13 Compliance Calendar | no `compliance` block **and** no `state/compliance-items.json` | run the installed `add-compliance-item.py` per obligation, plus `compliance.enabled` |
+| #19 Equipment & Maintenance | no `equipment_maintenance` block **and** no `state/equipment-items.json` | run the installed `add-equipment-item.py` per asset |
+| #2 Catering — 5 open leads | five leads awaiting the owner's decision, oldest 74d | reply `#XXXXX approve\|reject`; the brief now shows the codes |
+| #2 Catering — TTL sweep | `CATERING_LEAD_TTL_SWEEP_ENABLED` absent from `/root/.hermes/.env` | operator decision — `STALE` is terminal and one-way (§4.2, Fix A; ruled operator-only) |
+| #10 Catering Follow-up | `catering-followup-sweep.timer` is `disabled` (vendor preset `enabled`) | operator decision — enabling it sends real customer outbound (§4.5) |
+| #2 Catering — menu freshness | `catering-menu.json` `updated_at` is 108 days old | owner re-sends a menu photo; the ingestion path is live and deterministic |
+
+All seven re-verified on the box at `24c1f1d5`. **This is the highest-yield column:
+three agents move from "returns nothing" to "answers the question" with no engineering
+at all.**
+
+### B — Blocked on ENGINEERING (operator input changes nothing)
+
+| Agent | The one missing piece | Size |
+|---|---|---|
+| #1 Shift | the employee-reply leg (`handle_candidate_response` is SKILL-only) — the last dead leg of the coverage loop; until it exists an approved candidate's reply is recorded nowhere and the 30-min sweep reports her as unresponsive (§4.10) | small, but it mutates coverage state |
+| #6 Inventory, #7 Supplier, #9 VIP, #12 Hiring, #14 Employee Docs | SKILL-only scaffolds **with no data file on disk** — a read tool would join the §4.1 "not configured" set | data model first, tool second |
+| #22 P&L Anomaly | SKILL-only; also gated on the POS choice below | blocked twice |
+
+### C — Blocked on an EXTERNAL DEPENDENCY (neither operator nor engineering can clear it alone)
+
+| Agent | Dependency | Note |
+|---|---|---|
+| #21 Expense Bookkeeper | QBO sandbox credentials **and** an unwritten `RealQBOClient` (`qbo_client.py:293-312` raises `NotImplementedError`; factory `:337` refuses `mode="real"`) | credentials alone unblock nothing — §4.6. Ingest half works; `receipts/` still empty since 2026-05-03 |
+| #16 Sales Tax | state filing portals; no Hermes/MCP coverage | per `CLAUDE.md` net-new list |
+| #22 P&L Anomaly | customer's POS choice (`docs/portfolio.md:1122`) | also in column B |
+
+### Not blocked — simply not built
+
+#8 Receiving & QA and #11 Festival & Peak Prep have no `src/agents/` directory at all.
+Neither is waiting on anything; they are unstarted backlog.
 
 ---
 
@@ -468,9 +605,9 @@ row can be corrected without reference to the rest of this document.
 
 | Portal claims LIVE | Correct status | One-line public wording | Evidence |
 |---|---|---|---|
-| **#1 Shift Agent** | **PARTIAL** | Sick-call intake is wired and deployed but has never run in production; the coverage reply and owner-approval steps are not reachable. | Wiring: `hooks.py:466-513` → `actions.py:2163-2181` → installed `/usr/local/bin/handle-shift-sick-call`. Never fired: **zero `dispatcher_routed` rows all-time**. Dead legs: `hooks.py:1349-1351`; `handle_candidate_response` is SKILL-only. §4.3, §4.3b |
+| **#1 Shift Agent** ↻ | **PARTIAL** | Sick-call intake and owner approval are wired and deployed, but intake has never run in production and an employee's reply is still recorded nowhere. | Intake wiring: deployed `hooks.py:548-565` → installed `/usr/local/bin/handle-shift-sick-call`. Owner-approve leg wired by #734 (deployed `hooks.py:1443` → `_handle_shift_coverage_code:7542`). Never fired: **zero `dispatcher_routed` rows all-time**, with the writer on the sick-call path at `:554`. Still dead: `handle_candidate_response` (SKILL-only). §4.3, §4.10 |
 | **#3 Multi-Location** | **PARTIAL** | Nearest-store lookup is deployed but no store locations are configured, so it cannot answer; the owner-facing location agent has no execution path. | Tool registered `__init__.py:28-35`; returns `not_configured` at `location_tool.py:251` — no `multi_location` block in `/opt/shift-agent/config.yaml`. Agent is SKILL-only, `skills` toolset disabled. **NB: `multi_location_query/SKILL.md` exists (6,204 B) — it is not missing.** §4.8 |
-| **#4 Daily Brief** | **PRODUCTION_READY** — claim is CORRECT | Live: sends the owner a brief every morning. | 30 `brief_sent` in 30 days; today's `outbound_message_id 3EB08A340E5FEFFF3AB4DD`. §3 row 4 |
+| **#4 Daily Brief** ↻ | **PRODUCTION_READY** — claim is CORRECT | Live: sends the owner a brief every morning, and since 2026-08-22 it names him as the blocker on decisions that wait on him. | 30 `brief_sent` in 30 days; today's `outbound_message_id 3EB08A340E5FEFFF3AB4DD`. Truthfulness fix #735 deployed — installed `send-daily-brief:650-682`. §3 row 4, §4.2b |
 | **#5 EOD Reconciliation** | **PRODUCTION_READY** — claim is CORRECT | Live: writes a nightly reconciliation snapshot. | 30 `eod_snapshot` in 30 days; `invariant_violations: 0`. §3 row 5 |
 | **#13 Compliance Calendar** | **PARTIAL** | The daily reminder job and the owner query are both deployed, but no compliance items have ever been entered, so there is nothing to remind about. | `state/compliance-items.json` absent; no `compliance` block in config; `compliance-last-cron-tick.json` = `items_scanned: 0` on a job that has run daily for 30 days. §4.1 |
 
@@ -485,8 +622,14 @@ should not be read as "one wiring change away".
 
 ## 8. Method and limits
 
-- Repo evidence read at `origin/main` `cdd89f0251aa882cb85049e3d603d3688f71a820`; the deployed
-  `src/` surface is current against it (established by the orchestrator; not re-derived here).
+- **↻ Refresh pass (post-deploy):** every changed claim was read from the DEPLOYED tree at
+  `24c1f1d5` — `/root/.hermes/plugins/{cf-router,shift-agent-read}/`,
+  `/usr/local/bin/send-daily-brief`, `/opt/shift-agent/config.yaml`, `/root/.hermes/.env` — not
+  from the repo. Original pass read repo evidence at `origin/main` `cdd89f02`, with the deployed
+  `src/` surface established as current against it.
+- **Taken on report, NOT independently verified:** Flyer's post-#729 live positive control
+  (2 escalations, 2 owner alerts, tick 2 zero). Flyer's readiness verdict belongs to Lane F; the
+  Flyer row here is my superseded pre-#729 assessment and is marked ⚠ as such.
 - Box access was strictly read-only: `ls`, `stat`, `cat`, `systemctl list-*` / `cat`,
   `journalctl`, `grep` over installed scripts, and `python3 -c` reads over JSON state. No state
   mutated, no service restarted, no send-test run.
@@ -500,12 +643,17 @@ should not be read as "one wiring change away".
   `already_sent` / `catchup_expired`, i.e. a 15-minute timer correctly declining to repeat a
   once-daily job. Same for 210 `eod_skipped` (`already_done`). A bare count would have inverted
   both verdicts.
-- **Not verified:** that the three `shift-agent-read` tools appear in a live model turn's
-  tool_search results. Registration is proven from source and from `plugins.enabled` +
-  `platform_toolsets.whatsapp` config; the gateway emits no plugin-load lines to journald, and
-  confirming discovery end-to-end would require a live inbound, which is out of scope for a
-  read-only audit. This does not affect any status above, since #3/#13/#19 are PARTIAL on the
-  data gap regardless.
+- **↻ NOW PROVEN — registration.** The earlier caveat said registration was inferred from repo
+  source. It is now read from the **deployed** `/root/.hermes/plugins/shift-agent-read/__init__.py`,
+  whose `register()` iterates all five tool modules, each of which is present in that directory.
+  The orchestrator independently confirmed `register()` returns all five against the deployed tree.
+- **STILL NOT PROVEN — live discovery.** That any of the five appears in a real model turn's
+  `tool_search` results remains unverified. The gateway emits no plugin-load lines to journald,
+  and confirming discovery end-to-end needs a live inbound, which a read-only audit cannot do.
+  **This is now the single largest untested assumption in the matrix**: five tools are shipped on
+  the strength of registration alone, and #2 and #1 each gained one today. It does not change any
+  status — #3/#13/#19 are PARTIAL on the data gap regardless, and #1/#2 are not promoted — but it
+  is the first thing a live smoke test should settle.
 - **Inferred, not verified:** that `catering-followup-sweep.timer` was disabled deliberately.
   `systemctl` shows the vendor preset as `enabled` and the current state as `disabled`, which
   means someone or something disabled it; no record of who or why was found.
