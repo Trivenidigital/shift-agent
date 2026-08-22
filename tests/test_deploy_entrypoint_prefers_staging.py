@@ -1,31 +1,39 @@
-"""A bare deploy invocation must run the STAGING copy, via `bash`.
+"""A bare deploy invocation must run the STAGING copy, and it must be executable.
 
 `/usr/local/bin/shift-agent-deploy.sh` is written BY a deploy, so it is always
 the PREVIOUS release's logic. When a tarball changes `shift-agent-deploy.sh`
 itself, running the installed copy deploys the new tree with the code it was
 meant to replace - the trap behind the 2026-08-14 failed-safe rollback.
 
-Two things this file learned from review, both the hard way:
+Three things this file learned from review, each after getting it wrong:
 
-1. `bash "$S"`, never `[ -x "$S" ]`. The deploy script is tracked mode 100644.
-   A tarball built on Linux carries no x-bit, so an `[ -x ]` probe silently
-   selects the installed copy - the exact fallback the rule exists to prevent -
-   and still exits 0. Only `install_artifacts` chmods it 755, and only at the
-   destination. The first version looked correct purely because MSYS on the
-   Windows dev box synthesises an x-bit from the shebang, so the bug was
-   invisible from the machine that wrote it. `tasks/DEPLOY_CHECKLIST.md` and
-   the deploy script's own `bash "$CLOSURE_CHECK"` were already mode-safe.
+1. The tracked mode must be 100755, and THAT is the real invariant. The script
+   re-execs itself as `"$0" rollback "$PREV_TAG"` (:1701 via revert_shift_tree,
+   :2891, :3157), so a non-executable copy breaks auto-rollback on exactly the
+   deploy that already failed a gate. The `[ -f ]` + `bash` pair is
+   defence-in-depth for the ENTRYPOINT only; measured, it converts "silently
+   deploys the previous release" into "deploys the right code, then loses
+   auto-rollback" when the x-bit is stripped. Better, but not a net the mode
+   assertion can be traded for. An earlier version of this file asserted 100644
+   and framed `bash` as the rule; it pinned the wrong premise and would have
+   blocked the correct fix.
 
 2. Assert on the LIVE INVOCATION, not on string presence. The first version
-   scanned whole files for the staging path and for fallback-ish words near any
-   installed-path mention. Two mutations passed it: demoting the staging path to
-   a comment while restoring the bare installed invocation, and replacing the
-   justification with unrelated prose containing the word "rollback" - a word
-   that appears throughout deploy tooling. It pinned documentation, not
-   behaviour.
+   scanned whole files for the staging path and for fallback-ish words near an
+   installed-path mention. Demoting the staging path to a comment while
+   restoring the bare installed invocation passed it; so did prose containing
+   the word "rollback", which is everywhere in deploy tooling.
 
-`list` and `rollback <tag>` are deliberately out of scope: they administer an
-existing install, and using the installed copy for them is correct.
+3. Pin BOTH halves. Pinning only "do not invoke the installed copy" left
+   stripping `bash` from every staging invocation passing 4/5 - and that blind
+   spot was hiding a live miss in the generated fleet runbook.
+
+Exemptions are LOCATIONS or naming conventions, never spellings: an earlier
+marker named after one file exempted a live operational procedure.
+
+`list` and `rollback <tag>` are out of scope - they administer an existing
+install, the installed copy is guaranteed 755 by install_artifacts, and staging
+may hold a half-extracted tarball at exactly the moment a rollback is needed.
 """
 from __future__ import annotations
 
