@@ -612,7 +612,14 @@ def record_collision_event(collision: CollisionResult, *, detected_by: str) -> N
         # change to a tag the deployed release already reads, which is the
         # category where an old reader REJECTS the row instead of degrading, so
         # it does not ride along on a safety fix. Tracked separately; the owner
-        # notification below still fires, and this line is the traceable record.
+        # notification below still fires, and this line is the written record.
+        #
+        # WHERE it lands, because the obvious guess is wrong: this runs inside
+        # the gateway, whose unit sets
+        # StandardError=append:/opt/shift-agent/logs/hermes-gateway.log. It is
+        # NOT in journald, so `journalctl -u hermes-gateway` — which is what
+        # docs/deploy.md, the shift runbook and the health-check script all tell
+        # an operator to run — will not show it. grep the log file.
         sys.stderr.write(
             f"approval_code_pools: intra_pool_collision code={collision.code} "
             f"pool={collision.pools[0] if collision.pools else '?'} "
