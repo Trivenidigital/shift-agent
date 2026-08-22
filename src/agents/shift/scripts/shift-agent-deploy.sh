@@ -984,6 +984,17 @@ PY
     else
         rm -f /opt/shift-agent/flyer_recovery.py
     fi
+    # flyer-ttl0-observe ships by the scripts wildcard below, so it has been on
+    # the box since 2026-08-18 — but this module never had an install line, and
+    # the CLI's `agents.flyer.ttl_observe` fallback cannot help (there is no
+    # `agents` package on the box). Every invocation raised ModuleNotFoundError
+    # until this line landed. tests/test_flyer_deploy_manifest.py now fails if a
+    # flyer CLI imports a module the manifest does not install.
+    if [ -f src/agents/flyer/ttl_observe.py ]; then
+        install -m 644 src/agents/flyer/ttl_observe.py /opt/shift-agent/flyer_ttl_observe.py
+    else
+        rm -f /opt/shift-agent/flyer_ttl_observe.py
+    fi
     # Quarantine-before-recovery chokepoint (F0197/F0208): imported flat by
     # generate-flyer-concepts + flyer_bare_render before any recovery rung
     # overwrites a QA-failed preview artifact.
