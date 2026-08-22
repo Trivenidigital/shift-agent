@@ -257,34 +257,98 @@ def test_stale_customer_turn_incident_resolves_when_project_moves_on(tmp_path):
     assert incident["resolution"] == "project_left_stale_status"
 
 
-def test_reescalates_if_the_project_parks_again(tmp_path):
-    """Resolution must not be a permanent mute.
+def _at(project_id: str, status: str, *, updated: datetime) -> dict:
+    """A project whose activity timestamp is set explicitly, so a test can drive
+    real cycles instead of stamping a shortcut to the end state."""
+    stamp = updated.isoformat().replace("+00:00", "Z")
+    return {
+        "project_id": project_id,
+        "customer_id": "CUST0007",
+        "status": status,
+        "chat_id": "15550100077@s.whatsapp.net",
+        "created_at": (updated - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+        "updated_at": stamp,
+        "assets": [{
+            "asset_id": "A0001",
+            "delivery_status": "sent",
+            "delivered_at": stamp,
+            "outbound_message_id": "wamid.DELIVERED",
+        }],
+    }
 
-    A project that goes stale, is dealt with, then goes stale a SECOND time is a
-    second incident the owner still needs. Real time cannot be advanced inside a
-    test, so the first cycle is aged by backdating the resolution: the second
-    parking's last activity (30d ago) is genuinely later than the first cycle's
-    resolution (60d ago), which is exactly the ordering merge_signals requires.
+
+def _escalate(state: dict, now: datetime) -> list[dict]:
+    return recovery.escalate_unrepaired_incidents(
+        state,
+        now=now,
+        stale_after=timedelta(minutes=30),
+        worker_unavailable_after=timedelta(minutes=240),
+    )
+
+
+def test_reescalates_after_an_in_status_activity_bump(tmp_path):
+    """A project that parks, is touched, and parks AGAIN in the same status must
+    page a second time.
+
+    This is the sequence production actually produces:
+    `_record_flyer_concept_preview_delivery` (cf-router actions.py) sets
+    `asset.delivered_at` and `project["updated_at"]` while leaving `status`
+    untouched, so a preview re-delivery on a parked `awaiting_final_approval`
+    project makes it momentarily fresh, which retires the incident.
+
+    An earlier version of this test hand-stamped `resolved_at` 60 days into the
+    past to get the ordering merge_signals wants. That ordering cannot occur --
+    `resolved_at` is always at or after the activity that caused the resolution
+    -- so the test asserted a sequence the system never produces and passed over
+    a real defect. Driven in-process here so `now` can actually advance.
     """
-    harness = _Harness(tmp_path)
-    harness.seed([_parked_project("F0217", "awaiting_final_approval", age_days=30)])
-    harness.run()
-    first = harness.incidents()
-    assert len(first) == 1 and first[0]["status"] == "operator_action_required"
+    base = datetime.now(timezone.utc)
+    state: dict = {"schema_version": 1, "incidents": []}
 
-    state = json.loads(harness.recovery_state.read_text(encoding="utf-8"))
-    state["incidents"][0]["status"] = "resolved"
-    state["incidents"][0]["resolution"] = "project_left_stale_status"
-    state["incidents"][0]["resolved_at"] = (
-        datetime.now(timezone.utc) - timedelta(days=60)
-    ).isoformat()
-    harness.recovery_state.write_text(json.dumps(state), encoding="utf-8")
+    # 1. parked well past the 168h TTL -> opens and escalates
+    parked = _at("F0217", "awaiting_final_approval", updated=base - timedelta(days=42))
+    now1 = base
+    assert recovery.merge_signals(
+        state, recovery.classify_stale_customer_turn_projects([parked], now=now1), now1
+    ) == 1
+    assert len(_escalate(state, now1)) == 1
+    first_id = state["incidents"][0]["incident_id"]
 
-    harness.run()
+    # 2. preview re-delivered: updated_at moves, status does NOT -> now fresh, retired
+    now2 = base + timedelta(minutes=5)
+    touched = _at("F0217", "awaiting_final_approval", updated=now2)
+    assert len(recovery.resolve_stale_customer_turn_incidents(state, {"F0217": touched}, now2)) == 1
+    assert state["incidents"][0]["status"] == "resolved"
 
-    open_again = [i for i in harness.incidents() if i["status"] == "operator_action_required"]
-    assert len(open_again) == 1, "a project that parks a second time never pages the owner again"
-    assert open_again[0]["incident_id"] != first[0]["incident_id"]
+    # 3. nobody replied again; 200h later it is stale once more
+    now3 = now2 + timedelta(hours=200)
+    signals = recovery.classify_stale_customer_turn_projects([touched], now=now3)
+    assert len(signals) == 1
+    recovery.merge_signals(state, signals, now3)
+    escalated = _escalate(state, now3)
+
+    assert len(escalated) == 1, (
+        "the second park never paged the owner -- resolved_at is always >= the "
+        "activity that caused it, so merge_signals suppresses the re-open forever"
+    )
+    assert escalated[0]["incident_id"] != first_id
+    assert escalated[0]["operator_action"]["reason"] == "stale_customer_turn"
+
+
+def test_a_reopened_park_still_pages_only_once_per_cycle():
+    """The re-open must not cost us the hourly-paging fix: within the SECOND
+    park, ticking for a day must still open exactly one incident."""
+    base = datetime.now(timezone.utc)
+    parked = _at("F0217", "awaiting_final_approval", updated=base - timedelta(days=42))
+    state: dict = {"schema_version": 1, "incidents": []}
+
+    opened = 0
+    for tick in range(288):
+        now = base + timedelta(minutes=5 * tick)
+        opened += recovery.merge_signals(
+            state, recovery.classify_stale_customer_turn_projects([parked], now=now), now
+        )
+    assert opened == 1, f"a day of ticks inside one park opened {opened} incidents"
 
 
 def test_corrupt_timestamps_do_not_crash_or_silently_pass(tmp_path):

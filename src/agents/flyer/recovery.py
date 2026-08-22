@@ -677,14 +677,28 @@ def classify_stale_customer_turn_project(project: dict, *, now: datetime) -> Rec
         detail=signal_detail,
         # NOT _canonical_detail(signal_detail). canonical_source is read only by
         # fingerprint_signal and ack_dedupe_key, i.e. it IS the incident's
-        # identity — and `detail` embeds stale_hours, which is derived from
-        # `now`. Hashing that mints a fresh fingerprint every hour, so
-        # merge_signals sees a new incident, escalates it (threshold 0) and pages
-        # the owner again: ~24 priority-2 emergency pages per day per project,
-        # unbounded. The identity of "this project is parked in this status"
-        # does not change as time passes. stale_hours stays in `detail` and is
-        # recomputed at escalation time for the audit row.
-        canonical_source=f"stale_customer_turn:{project_id}:{status}",
+        # identity, and it has to satisfy two opposing constraints:
+        #
+        #   STABLE while parked. `detail` embeds stale_hours, derived from `now`.
+        #   Hashing that minted a fresh fingerprint every hour, so merge_signals
+        #   saw a new incident, escalated it (threshold 0) and paged again —
+        #   ~24 priority-2 emergency pages per day per project, unbounded.
+        #
+        #   DISTINCT per park. Keyed on project+status alone, a project that
+        #   parks, is touched, and parks again in the SAME status is silent
+        #   forever: resolve_stale_customer_turn_incidents stamps
+        #   resolved_at = now, and merge_signals re-opens a resolved fingerprint
+        #   only when observed_at > previous_done_at — but observed_at IS the
+        #   activity that triggered the resolution, so it is always <=
+        #   resolved_at. Real path, not theoretical:
+        #   `_record_flyer_concept_preview_delivery` (cf-router actions.py) moves
+        #   `updated_at` and `asset.delivered_at` while leaving `status` alone.
+        #
+        # last_activity satisfies both: independent of `now`, so constant while
+        # parked; changes when the project actually moves, so each park is its
+        # own incident. stale_hours stays in `detail` and is recomputed at
+        # escalation time for the audit row.
+        canonical_source=f"stale_customer_turn:{project_id}:{status}:{last_activity.isoformat()}",
         evidence_quality="strong" if chat_id and provider_message_id else "weak",
         provider_message_id=provider_message_id,
         # Anchored to last activity, not to `now`: it keeps the incident's
