@@ -388,3 +388,30 @@ def test_the_transition_this_branch_requests_is_legal():
     # And terminal, which is what makes a double reply a no-op in the kernel.
     assert LEGAL_TRANSITIONS.get("accepted", frozenset()) == frozenset()
     assert LEGAL_TRANSITIONS.get("declined", frozenset()) == frozenset()
+
+
+def test_the_sweeps_own_transition_is_refused_after_a_reply_is_recorded():
+    """The sweep's SECOND gate, which the finder test above does not cover.
+
+    `_sweep_one` is transition-first: it calls
+    `update-proposal-status <pid> no_response_timeout` and alerts ONLY on rc 0.
+    A candidate who replied between the snapshot and the transition yields an
+    illegal transition (rc 9) and no alert.
+
+    So writing *a* status is not sufficient — it has to be a status from which
+    `no_response_timeout` is illegal, or the false "she never replied" page still
+    goes out through the race window the finder cannot see. Both statuses this
+    branch writes are terminal, which is exactly what makes that transition
+    refuse.
+    """
+    sys.path.insert(0, str(PLATFORM_DIR))
+    from schemas import LEGAL_TRANSITIONS  # noqa: E402
+
+    assert "no_response_timeout" in LEGAL_TRANSITIONS["sent"], (
+        "fixture is wrong: the sweep must be able to time out an unanswered proposal"
+    )
+    for recorded in ("accepted", "declined"):
+        assert "no_response_timeout" not in LEGAL_TRANSITIONS.get(recorded, frozenset()), (
+            f"after recording {recorded} the sweep's own transition would still "
+            "succeed and page the owner"
+        )
