@@ -11,7 +11,15 @@
 #
 # Then SCP and deploy:
 #   scp shift-agent-deploy.tgz main-vps:/tmp/
-#   ssh main-vps 'sudo tar xzf /tmp/shift-agent-deploy.tgz -C /opt/shift-agent/staging-new/ && sudo /usr/local/bin/shift-agent-deploy.sh'
+#   ssh main-vps 'sudo tar xzf /tmp/shift-agent-deploy.tgz -C /opt/shift-agent/staging-new/ \n#     && sudo /opt/shift-agent/staging-new/src/agents/shift/scripts/shift-agent-deploy.sh'
+#
+# Run the deploy script FROM STAGING, not the installed /usr/local/bin copy.
+# The installed copy is written BY a deploy, so it is the PREVIOUS release's
+# logic. When a tarball changes shift-agent-deploy.sh itself, running the
+# installed copy deploys the new tree with the old deploy logic — the trap
+# behind the 2026-08-14 failed-safe rollback. This mirrors the script's own
+# prefer-staging rule for its pre-restart gates (see the commerce webhook
+# gate: staging copy first, installed copy only for rollback compatibility).
 
 set -euo pipefail
 
@@ -91,4 +99,8 @@ echo "=== artifact sha256: $ARTIFACT_SHA256 ==="
 echo ""
 echo "Deploy with:"
 echo "  scp $TARBALL main-vps:/tmp/"
-echo "  ssh main-vps 'sudo tar xzf /tmp/shift-agent-deploy.tgz -C /opt/shift-agent/staging-new/ && sudo /usr/local/bin/shift-agent-deploy.sh'"
+echo "  ssh main-vps 'sudo tar xzf /tmp/shift-agent-deploy.tgz -C /opt/shift-agent/staging-new/ && sudo /opt/shift-agent/staging-new/src/agents/shift/scripts/shift-agent-deploy.sh'"
+echo ""
+echo "  (from STAGING, not /usr/local/bin — the installed copy is the PREVIOUS"
+echo "   release's deploy logic, so a tarball that changes shift-agent-deploy.sh"
+echo "   would otherwise be deployed by the code it was meant to replace.)"

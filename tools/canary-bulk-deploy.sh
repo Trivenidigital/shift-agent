@@ -33,7 +33,12 @@ while IFS= read -r vps; do
 
     # Per-VPS deploy. Tarball already on canary; assume operator has scp'd
     # to each remaining VPS as part of the wider deploy SOP.
-    ssh "$vps" 'cd /opt/shift-agent && /usr/local/bin/shift-agent-deploy.sh' \
+    # Prefer the staging copy: the installed /usr/local/bin script is the PREVIOUS
+    # release's deploy logic, so a tarball that changes shift-agent-deploy.sh must
+    # not be deployed by the code it replaces. Fall back to the installed copy only
+    # for rollback-tarball compatibility, mirroring the deploy script's own rule for
+    # its pre-restart gates.
+    ssh "$vps" 'S=/opt/shift-agent/staging-new/src/agents/shift/scripts/shift-agent-deploy.sh;         [ -x "$S" ] || S=/usr/local/bin/shift-agent-deploy.sh;         cd /opt/shift-agent && "$S"' \
         > "$SMOKE_OUT" 2>&1 || {
         echo "ABORT: $vps deploy failed (see $SMOKE_OUT)" >&2
         cat "$SMOKE_OUT" >&2
