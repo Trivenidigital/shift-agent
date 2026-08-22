@@ -5380,7 +5380,12 @@ class FlyerRecoveryStaleProjectEscalated(_BaseEntry):
     incident_id: str = Field(min_length=1, max_length=80)
     project_id: str = Field(min_length=1, max_length=40)
     project_status: str = Field(min_length=1, max_length=40)
-    ttl_hours: int = Field(ge=1, le=100_000)
+    # 0 means UNKNOWN, not "no TTL": the project left the monitored status set
+    # between the merge that opened the incident and the escalation that writes
+    # this row. Near-unreachable (the resolver pass runs first and retires
+    # exactly that case) but the alternative was defaulting to a plausible-
+    # looking `1`, which would put a fabricated TTL into a durable audit row.
+    ttl_hours: int = Field(ge=0, le=100_000)
     stale_hours: int = Field(ge=0, le=1_000_000)
     required_action: Literal["follow_up_with_customer_or_close_project"]
 

@@ -973,7 +973,8 @@ def _escalate_unrepaired_incidents(
                 incident_id=str(incident.get("incident_id") or ""),
                 project_id=str(incident.get("project_id") or ""),
                 project_status=str(project.get("status") or "unknown"),
-                ttl_hours=recovery.stale_customer_turn_ttl_hours(project) or 1,
+                # 0 = unknown; see the field comment. Never fabricate a TTL.
+                ttl_hours=recovery.stale_customer_turn_ttl_hours(project),
                 stale_hours=max(stale_hours, 0),
                 required_action="follow_up_with_customer_or_close_project",
             ))

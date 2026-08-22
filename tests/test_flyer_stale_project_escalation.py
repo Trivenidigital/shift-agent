@@ -54,11 +54,25 @@ flyer:
 """
 
 
-def _parked_project(project_id: str, status: str, *, age_days: float) -> dict:
+def _parked_project(
+    project_id: str, status: str, *, age_days: float, delivered_asset: bool = True
+) -> dict:
+    """A parked project in the shape production actually stores.
+
+    `delivered_asset` defaults True because that IS the normal shape for a
+    customer-turn status: the project is waiting on the customer precisely
+    BECAUSE a preview was delivered to them, and that delivery write is what set
+    `updated_at`. So `delivered_at == updated_at` exactly, to the microsecond
+    (verified on main-vps: F0217 A0002 and F0222 A0001 both sit on that knife
+    edge). An earlier version of this fixture omitted `assets` entirely, which
+    made every test in this file pass against a shape that does not occur in
+    production and hid a blocker -- see
+    test_project_parked_by_its_own_delivery_still_escalates.
+    """
     now = datetime.now(timezone.utc)
     stamp = (now - timedelta(days=age_days)).isoformat().replace("+00:00", "Z")
     created = (now - timedelta(days=age_days + 0.1)).isoformat().replace("+00:00", "Z")
-    return {
+    project = {
         "project_id": project_id,
         "customer_id": "CUST0007",
         "status": status,
@@ -66,6 +80,14 @@ def _parked_project(project_id: str, status: str, *, age_days: float) -> dict:
         "created_at": created,
         "updated_at": stamp,
     }
+    if delivered_asset:
+        project["assets"] = [{
+            "asset_id": "A0001",
+            "delivery_status": "sent",
+            "delivered_at": stamp,
+            "outbound_message_id": "wamid.DELIVERED",
+        }]
+    return project
 
 
 class _Harness:
@@ -372,3 +394,95 @@ def test_excluded_statuses_stay_excluded():
             _parked_project("F9999", status, age_days=400), now=now
         )
         assert signal is None, f"excluded status {status} was escalated"
+
+
+# ─── the two blockers found in review ───────────────────────────────────────
+
+
+def test_project_parked_by_its_own_delivery_still_escalates(tmp_path):
+    """BLOCKER 1 reproducer.
+
+    `_project_delivery_repair_rows` synthesises a `flyer_assets_delivered`
+    success event at `ts = asset.delivered_at` for any asset that was sent, and
+    `_resolve_recovered_incidents` consumes it BEFORE escalation runs. The guard
+    in `resolve_incidents_from_customer_visible_repairs` is
+    `first_seen > ts or last_seen > ts` -- strictly greater. A project parked BY
+    its own delivery has `updated_at == delivered_at` exactly, so the incident's
+    first_seen/last_seen EQUAL the event ts, the guard does not fire, and the
+    incident is closed as `customer_visible_success` before it can ever page.
+
+    That customer-visible send is what CREATED the parked state. It is not the
+    success that un-parks it.
+    """
+    harness = _Harness(tmp_path)
+    project = _parked_project("F0217", "awaiting_final_approval", age_days=42)
+    assert project["assets"][0]["delivered_at"] == project["updated_at"], "fixture must sit on the knife edge"
+    harness.seed([project])
+
+    harness.run()
+
+    incidents = harness.incidents()
+    assert len(incidents) == 1, incidents
+    assert incidents[0]["status"] == "operator_action_required", (
+        f"parked-by-delivery project was swallowed as {incidents[0].get('resolution')!r} "
+        "instead of escalating"
+    )
+    assert incidents[0]["operator_action"]["reason"] == "stale_customer_turn"
+    assert len(harness.rows("flyer_recovery_owner_alert")) == 1
+
+
+def test_fingerprint_is_stable_as_the_project_ages():
+    """BLOCKER 2 reproducer.
+
+    `fingerprint_signal` hashes `canonical_source`. If that string embeds
+    anything derived from `now`, every hour mints a NEW fingerprint, which
+    `merge_signals` reads as a new incident, which escalates (threshold 0) and
+    pages the owner again -- ~24 priority-2 emergency pages per day per project,
+    unbounded, plus an incident record each time.
+
+    The identity of "this project is parked in this status" does not change as
+    time passes, so neither may its fingerprint.
+    """
+    project = _parked_project("F0217", "awaiting_final_approval", age_days=42)
+    base = datetime.now(timezone.utc)
+
+    fingerprints = set()
+    canonicals = set()
+    for minutes in (0, 55, 60, 61, 120, 1440):
+        signal = recovery.classify_stale_customer_turn_project(
+            project, now=base + timedelta(minutes=minutes)
+        )
+        assert signal is not None
+        fingerprints.add(recovery.fingerprint_signal(signal))
+        canonicals.add(signal.canonical_source)
+
+    assert len(canonicals) == 1, f"canonical_source drifts with time: {canonicals}"
+    assert len(fingerprints) == 1, f"fingerprint drifts with time: {fingerprints}"
+
+
+def test_ageing_a_full_day_opens_exactly_one_incident():
+    """The consequence of the above, at merge level: 288 five-minute ticks over
+    24h must leave exactly one incident, not one per hour."""
+    project = _parked_project("F0217", "awaiting_final_approval", age_days=42)
+    base = datetime.now(timezone.utc)
+    state: dict = {"schema_version": 1, "incidents": []}
+
+    opened_total = 0
+    for tick in range(288):
+        now = base + timedelta(minutes=5 * tick)
+        signals = recovery.classify_stale_customer_turn_projects([project], now=now)
+        opened_total += recovery.merge_signals(state, signals, now)
+
+    assert opened_total == 1, f"a day of ticks opened {opened_total} incidents"
+    assert len(state["incidents"]) == 1
+
+
+def test_stale_hours_is_still_reported_even_though_it_left_the_fingerprint():
+    """The fix must not cost the operator the age information -- it just has to
+    live somewhere that does not participate in identity."""
+    project = _parked_project("F0217", "awaiting_final_approval", age_days=42)
+    signal = recovery.classify_stale_customer_turn_project(
+        project, now=datetime.now(timezone.utc)
+    )
+    assert "stale_hours=" in signal.detail
+    assert "stale_hours=" not in signal.canonical_source

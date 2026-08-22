@@ -553,14 +553,18 @@ def classify_stale_manual_project(project: dict, *, now: datetime, stale_after: 
 # swallowed catering inquiry).
 #
 # WHY THE TTL TABLE IS DUPLICATED FROM ttl_observe RATHER THAN IMPORTED.
-# `ttl_observe` declares exactly these TTLs, but it is NOT installed on the box:
-# shift-agent-deploy.sh installs flyer modules one explicit `install` line at a
-# time and has no line for it (verified on main-vps 2026-08-22 — no
-# /opt/shift-agent/flyer_ttl_observe.py, and no `agents` package there either).
-# Importing it would have made this arm raise ImportError inside the live
-# watchdog while every package-imported local test stayed green. The duplication
-# is deliberate; drift is pinned by tests/test_flyer_stale_project_escalation.py,
-# which fails if these tables ever diverge from ttl_observe's.
+# This module is imported by the recovery watchdog, which runs on the box as the
+# FLAT module `flyer_recovery` — there is no `agents` package at /opt/shift-agent,
+# so a package-relative import is not available, and a flat `flyer_ttl_observe`
+# import binds this timer's liveness to another module's presence in the deploy
+# manifest. That manifest lists flyer modules one explicit `install` line at a
+# time, and ttl_observe's line was missing entirely until PR #730 (the deployed
+# flyer-ttl0-observe CLI had been raising ModuleNotFoundError on every
+# invocation because of it). An import here would have failed the same way,
+# inside a live 5-minute timer, while every package-imported local test stayed
+# green. Duplication keeps this arm's liveness independent of that; drift is
+# pinned by tests/test_flyer_stale_project_escalation.py, which fails if these
+# tables ever diverge from ttl_observe's.
 STALE_CUSTOMER_TURN_FAILURE_CLASS = "stale_customer_turn"
 
 STALE_CUSTOMER_TURN_TTL_HOURS: dict[str, int] = {
@@ -671,7 +675,16 @@ def classify_stale_customer_turn_project(project: dict, *, now: datetime) -> Rec
         project_id=project_id,
         chat_id=chat_id,
         detail=signal_detail,
-        canonical_source=_canonical_detail(signal_detail),
+        # NOT _canonical_detail(signal_detail). canonical_source is read only by
+        # fingerprint_signal and ack_dedupe_key, i.e. it IS the incident's
+        # identity — and `detail` embeds stale_hours, which is derived from
+        # `now`. Hashing that mints a fresh fingerprint every hour, so
+        # merge_signals sees a new incident, escalates it (threshold 0) and pages
+        # the owner again: ~24 priority-2 emergency pages per day per project,
+        # unbounded. The identity of "this project is parked in this status"
+        # does not change as time passes. stale_hours stays in `detail` and is
+        # recomputed at escalation time for the audit row.
+        canonical_source=f"stale_customer_turn:{project_id}:{status}",
         evidence_quality="strong" if chat_id and provider_message_id else "weak",
         provider_message_id=provider_message_id,
         # Anchored to last activity, not to `now`: it keeps the incident's
@@ -986,15 +999,24 @@ def resolve_incidents_from_customer_visible_repairs(
             "worker_completed_no_customer_visible_success",
             "worker_failed_no_customer_visible_success",
             "worker_unavailable",
-            # A customer-visible success is exactly what un-parks a stale
-            # customer-turn project, so it must retire the incident too;
-            # resolve_stale_customer_turn_incidents covers the operator-close
-            # and customer-reply paths that emit no repair row.
-            "stale_customer_turn",
         }
 
     for incident in state.get("incidents", []):
         if not isinstance(incident, dict):
+            continue
+        if str(incident.get("failure_class") or "") == STALE_CUSTOMER_TURN_FAILURE_CLASS:
+            # A stale customer-turn project is parked BY a customer-visible
+            # delivery — the preview it is waiting on approval for. That send is
+            # what CREATED the parked state, so it can never be the success that
+            # retires the incident. Worse, `_project_delivery_repair_rows`
+            # synthesises its event at ts = asset.delivered_at, which for these
+            # projects equals updated_at EXACTLY (the delivery write is what set
+            # it), and the guard below is strictly-greater — so without this skip
+            # every such incident is closed as `customer_visible_success` on the
+            # same run that opened it, before it can page anyone.
+            # `resolve_stale_customer_turn_incidents` is the correct retirer:
+            # it watches durable project state, which is the only thing that
+            # actually un-parks these.
             continue
         if not resolvable_status(incident):
             continue
