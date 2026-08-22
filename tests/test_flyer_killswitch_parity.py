@@ -31,6 +31,8 @@ BARE_RENDER = REPO / "src" / "agents" / "flyer" / "bare_render.py"
 CONCEPTS = REPO / "src" / "agents" / "flyer" / "scripts" / "generate-flyer-concepts"
 
 FUNC = "_integrated_killswitch_active"
+ROUTER = "_effective_render_model"
+CONST = "_DETERMINISTIC_RENDERER_MODEL"
 
 # Values an operator might plausibly type, plus the off-switch vocabulary and
 # the empty/unset case. Every entry that is not clearly "off" must ENGAGE.
@@ -57,9 +59,30 @@ def _extract(path: Path):
 
 
 def _normalized_body(node: ast.FunctionDef) -> str:
-    """Structural form of the body: comments and formatting stripped, logic kept."""
-    stripped = ast.Module(body=list(node.body), type_ignores=[])
-    return ast.dump(ast.parse(ast.unparse(stripped)), annotate_fields=True)
+    """Structural form of the body: comments, formatting and the docstring
+    stripped, logic kept.
+
+    The docstring has to go or this compares prose: the two
+    `_effective_render_model` copies document themselves differently while
+    executing identically, and that is not a drift anyone needs paging about.
+
+    Deliberately still strict about everything else — a purely local rename
+    (`val` -> `raw`) DOES trip this even though behaviour is unchanged. That is
+    the intended trade: this test asks "did anyone touch this body", and the
+    behavioural matrix below is what asks "did the meaning change". A rename
+    fails loudly with the fail-safe tests still green, which tells the author
+    immediately that only structure moved.
+    """
+    body = list(node.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(getattr(body[0], "value", None), ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    assert body, f"{node.name} has no body beyond its docstring"
+    return ast.dump(ast.parse(ast.unparse(ast.Module(body=body, type_ignores=[]))), annotate_fields=True)
 
 
 def test_both_killswitch_implementations_are_structurally_identical():
@@ -97,3 +120,88 @@ def test_the_switch_fails_safe_on_anything_that_is_not_clearly_off(monkeypatch):
             assert fn() is False, f"{path.name}: {value!r} must leave the switch off"
         monkeypatch.delenv("FLYER_INTEGRATED_KILLSWITCH", raising=False)
         assert fn() is False, f"{path.name}: unset must leave the switch off"
+
+
+# ─── the switch is only half of it: where it ROUTES must match too ──────────
+#
+# The tests above prove both copies of the predicate agree on whether to engage.
+# They say nothing about what engaging DOES. `_effective_render_model` and the
+# `_DETERMINISTIC_RENDERER_MODEL` constant it returns are ALSO duplicated across
+# the same two files, and the parity tests above stay green if the constant
+# drifts. That failure is worse than a predicate drift: the switch engages on
+# both paths, the operator sees it engage, and one path routes to a renderer
+# name that does not exist.
+
+
+def _extract_named(path: Path, name: str):
+    """Same trick as `_extract`, for an arbitrary top-level function."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    node = next(
+        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name), None
+    )
+    assert node is not None, f"{name} not found in {path} -- renamed or removed"
+    return node
+
+
+def _extract_constant(path: Path, name: str) -> str:
+    """Read a module-level string constant without importing the module."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == name for t in stmt.targets
+        ):
+            return ast.literal_eval(stmt.value)
+    raise AssertionError(f"{name} not found in {path} -- renamed or removed")
+
+
+def _router(path: Path):
+    """`_effective_render_model` wired to its OWN file's predicate and constant.
+
+    Deliberately not cross-wired: the question is what each file does on its
+    own, so a drifted constant shows up as a behavioural difference.
+    """
+    namespace: dict = {"os": os, CONST: _extract_constant(path, CONST)}
+    exec(compile(ast.Module(body=[_extract_named(path, FUNC)], type_ignores=[]), str(path), "exec"), namespace)
+    exec(compile(ast.Module(body=[_extract_named(path, ROUTER)], type_ignores=[]), str(path), "exec"), namespace)
+    return namespace[ROUTER]
+
+
+def test_deterministic_renderer_constant_is_identical_in_both_files():
+    bare = _extract_constant(BARE_RENDER, CONST)
+    concepts = _extract_constant(CONCEPTS, CONST)
+    assert bare == concepts, (
+        f"the panic switch routes to {bare!r} in bare_render and {concepts!r} in "
+        "generate-flyer-concepts -- it would engage on both paths and only one "
+        "would reach a real renderer"
+    )
+
+
+def test_both_effective_render_model_implementations_are_structurally_identical():
+    assert _normalized_body(_extract_named(BARE_RENDER, ROUTER)) == _normalized_body(
+        _extract_named(CONCEPTS, ROUTER)
+    )
+
+
+def test_engaged_switch_routes_both_files_to_the_same_renderer(monkeypatch):
+    """Behavioural parity, and the positive control for it: engaging must
+    actually CHANGE the model on both sides, not merely agree."""
+    bare, concepts = _router(BARE_RENDER), _router(CONCEPTS)
+    configured = "openai/gpt-5.4-image-2"
+
+    monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", "1")
+    assert bare(configured) == concepts(configured), "engaged switch routes to different renderers"
+    assert bare(configured) != configured, "engaged switch left the generative model in place"
+    assert bare(configured) == _extract_constant(BARE_RENDER, CONST)
+
+    monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", "off")
+    assert bare(configured) == concepts(configured) == configured, (
+        "a disengaged switch must pass the configured model through untouched"
+    )
+
+
+def test_router_agrees_across_the_full_operator_input_matrix(monkeypatch):
+    bare, concepts = _router(BARE_RENDER), _router(CONCEPTS)
+    for value in _ENGAGE + _STAY_OFF:
+        monkeypatch.setenv("FLYER_INTEGRATED_KILLSWITCH", value)
+        for model in ("openai/gpt-5.4-image-2", "gpt-image-1", "deterministic-renderer", ""):
+            assert bare(model) == concepts(model), f"disagree on env={value!r} model={model!r}"
