@@ -26,6 +26,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
@@ -258,6 +259,99 @@ def _fb_yield_missing_info(chat_id: str, message_id: str) -> bool:
 _VERB_APPROVE = re.compile(r"\b(approve|approved|yes|send|ok|go|send it)\b", re.IGNORECASE)
 _VERB_REJECT = re.compile(r"\b(reject|rejected|no|decline|pass|cancel)\b", re.IGNORECASE)
 _VERB_EDIT = re.compile(r"\b(edit|change|modify)\b", re.IGNORECASE)
+
+# Shift coverage verbs are scoped to the POOL_SHIFT branch because the Shift
+# owner card asks for a DIFFERENT grammar than the catering card does:
+#
+#     Reply {code} to approve + send, or "DENY {code}" to reject.
+#     (Type STATUS for all pending.)
+#         -- src/agents/shift/templates/proposal_to_owner.txt
+#
+# Two consequences, both load-bearing. `DENY` is in NO existing verb set —
+# _VERB_REJECT is (reject|rejected|no|decline|pass|cancel) — so the exact word
+# the card tells the owner to type matches nothing today, and a bare-code-
+# approves rule without this set would read "DENY #ABCDE" as an APPROVAL and
+# message a real employee. And the bare code has to mean approve, because that
+# is what the card asks for; requiring a verb would leave the leg as dead as it
+# is now for every owner who followed the instruction printed on the card.
+_SHIFT_VERB_DENY = re.compile(
+    r"\b(deny|denied|denies|reject|rejected|decline|declined|no|nope|pass)\b", re.IGNORECASE)
+_SHIFT_VERB_CANCEL = re.compile(r"\b(cancel|cancelled|canceled)\b", re.IGNORECASE)
+_SHIFT_VERB_RETRY = re.compile(r"\b(retry)\b", re.IGNORECASE)
+
+# Everything that is not the code itself, once the code is removed: whitespace
+# and the punctuation a phone keyboard adds around a pasted code. If anything
+# else survives, the message is not a bare code and this branch will not read
+# it as an approval.
+_SHIFT_BARE_CODE_RESIDUE = re.compile(r"^[\s.,!:;\-–—*_\"'()\[\]]*$")
+
+# The ONLY proposal status an owner code may approve. Deliberately not a set:
+# `send_failed` is resumed with RETRY (a separate command this branch does not
+# implement), and every other status is either mid-flight or terminal.
+_SHIFT_APPROVABLE_STATUS = "awaiting_owner_approval"
+
+
+def _is_unqualified_shift_consent(text: str, code: str) -> bool:
+    """True when the owner said yes to THIS proposal and nothing else.
+
+    Strips the code, then strips the approval verbs, then requires that nothing
+    of substance is left. `#ABCDE`, `#ABCDE approve`, `approve #ABCDE` and
+    `yes #ABCDE` all reduce to nothing and are consent.
+
+    The verb strip is the load-bearing half, and an earlier revision got it
+    wrong by testing `has_approve OR bare-code`, which let any message
+    containing an approval word skip the residue check entirely. That approved
+    AND SENT on `"#ABCDE yes but ask someone else"`, `"yes #ABCDE tomorrow
+    instead"` and `"ok #ABCDE but only if she agrees"` — a coverage ask to the
+    ORIGINAL candidate about the ORIGINAL date, which is the opposite of what
+    the owner asked for in each case. It was also self-inconsistent: `"#ABCDE
+    change the candidate"` was already refused by the edit verb.
+
+    A half-agreement is not an agreement. Anything left over after the code and
+    the verb are removed means the owner said something this branch cannot act
+    on, and the only safe reading of that is to not send.
+    """
+    residue = re.sub(re.escape(code), "", text, flags=re.IGNORECASE)
+    residue = _VERB_APPROVE.sub("", residue)
+    return bool(_SHIFT_BARE_CODE_RESIDUE.match(residue))
+
+
+def _count_shift_proposals_with_code(code: str) -> int:
+    """How many proposals in pending.json carry `code`.
+
+    `resolve_code` fails closed on a CROSS-pool collision, but within one pool
+    `_Pool.lookup` returns the FIRST matching row and `_shift_rows` applies no
+    status filter. Two proposals sharing a code therefore resolve silently to
+    one of them, and this branch would send a coverage ask about the wrong
+    absence to the wrong employee. Codes are minted under the shared lock
+    against `all_live_codes`, so this is unlikely — but the registry documents
+    generators outside the lock as best-effort, and it is THIS branch that
+    turns the duplicate into an outbound.
+
+    `apply-catering-owner-decision` already refuses the same way ("BUG: N
+    active leads share code; refusing"); this mirrors it at the one seam where
+    the shift equivalent can act.
+
+    Row shape deliberately mirrors `approval_code_pools._shift_rows` — the
+    pool's own reader — rather than pending.json directly: `.proposals` is a
+    dict[proposal_id, Proposal] and the pool iterates its values(). Returns 0
+    on an unreadable or unexpected document, and the caller refuses on any
+    count that is not exactly 1, so every one of those paths fails closed.
+    """
+    try:
+        path = approval_code_pools.pool_paths_under(actions.LEADS_PATH.parent)[
+            approval_code_pools.POOL_SHIFT
+        ]
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    if not isinstance(doc, dict):
+        return 0
+    proposals = doc.get("proposals", {})
+    rows = proposals.values() if isinstance(proposals, dict) else proposals
+    if not isinstance(rows, (list, tuple)) and not hasattr(rows, "__iter__"):
+        return 0
+    return sum(1 for p in rows if isinstance(p, dict) and p.get("code") == code)
 
 # Sick-call regex set (employee path — F9 replacement). Mirrors the six
 # absence-specific patterns from the old notifier. Broad courtesy/address
@@ -1346,8 +1440,17 @@ def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional
             )
         return None
 
-    # Expense / shift codes are not F8's responsibility (owner self-chat handles
-    # only menu + catering here) — fall through so the LLM/dispatcher routes them.
+    if pool_name == approval_code_pools.POOL_SHIFT:
+        return _handle_shift_coverage_code(
+            row=row, code=code, chat_id=chat_id, text=text,
+            message_id=message_id, has_edit=has_edit,
+        )
+
+    # Expense codes are not F8's responsibility (owner self-chat handles menu,
+    # catering and shift coverage here) — fall through so the LLM/dispatcher
+    # routes them. The shift arm above used to share this line; the expense arm
+    # still means it, and `test_expense_code_still_falls_through` pins that this
+    # change did not silently widen to a pool with no wired apply path.
     return None
 
 
@@ -7433,6 +7536,106 @@ def _build_skip_or_passthrough(*, rc: int, chat_id: str, code: str,
         return {"action": "skip",
                 "reason": f"cf-router F8: invoked {action_label} (rc=0)"}
     # Non-zero exit → let LLM handle; owner gets diagnostic feedback
+    return None
+
+
+def _handle_shift_coverage_code(
+    *, row: dict, code: str, chat_id: str, text: str, message_id: str,
+    has_edit: bool,
+) -> Optional[dict]:
+    """Apply an owner answer to a Shift coverage proposal, deterministically.
+
+    Closes the RETURN half of the coverage loop. The intake half is wired — a
+    verified employee's sick call reaches `handle-shift-sick-call` through F9 —
+    and it ends by sending the owner a card carrying a `#XXXXX` code. Until now
+    that code resolved to POOL_SHIFT, hit a bare `return None`, and fell through
+    to the SKILL dispatcher, which needs the `skills` toolset that is disabled
+    on the box. The owner's answer reached nothing at all.
+
+    Ordering is the handle_owner_command SKILL contract and is not negotiable:
+    mark the proposal `approved` FIRST, and send only if that transition
+    succeeded. Both steps run in Shift-owned scripts — this function never
+    writes pending.json, never resolves a phone number, and never composes the
+    outbound body.
+
+    Fail-closed in six places: an unaddressable row, a message that is not
+    unqualified consent, a code naming anything other than exactly one
+    proposal, a proposal that is not `awaiting_owner_approval`, and a
+    transition the kernel refuses. None of them send anything.
+    """
+    if has_edit:
+        # Nothing here is editable — the candidate and the body were fixed when
+        # the proposal was rendered. Let the LLM say so rather than approving.
+        return None
+    if _SHIFT_VERB_RETRY.search(text):
+        # RETRY resumes a send_failed proposal (SKILL §3). Not implemented here,
+        # and deliberately NOT collapsed into approve: that would re-send a
+        # coverage ask the outbound gate already refused once.
+        return None
+
+    proposal_id = row.get("proposal_id")
+    if not isinstance(proposal_id, str) or not proposal_id:
+        # The pool matched a row that cannot be addressed. Never guess an id.
+        return None
+
+    # Refusal verbs are checked BEFORE consent, so "DENY #ABCDE" can never be
+    # read as the bare code it contains.
+    if _SHIFT_VERB_CANCEL.search(text):
+        target, cause = "cancelled", "owner_cancel"
+    elif _SHIFT_VERB_DENY.search(text):
+        target, cause = "denied_by_owner", "owner_deny"
+    elif _is_unqualified_shift_consent(text, code):
+        target, cause = "approved", "owner_code_match"
+    else:
+        # A code wrapped in words that are neither consent nor refusal. The card
+        # asks for a bare code or DENY; anything else is ambiguous, and an
+        # ambiguous owner message must not put a shift ask in front of staff.
+        return None
+
+    matches = _count_shift_proposals_with_code(code)
+    if matches != 1:
+        # Ambiguous or unreadable. Acting would pick whichever row the pool
+        # happened to return first and message that candidate about that
+        # absence — a real employee, about the wrong shift.
+        return None
+
+    if row.get("status") != _SHIFT_APPROVABLE_STATUS:
+        # Stale, already-answered, mid-send or terminal. Refuse the whole
+        # message: no transition, no outbound. This is also the first of the two
+        # guards that make a double tap safe — the second is the kernel refusing
+        # the illegal transition under the pending lock, which covers the race
+        # this check cannot see.
+        return None
+
+    actions.audit_dispatcher_routed(
+        message_id=message_id,
+        chat_id=chat_id,
+        routed_to_skill="handle_owner_command",
+        message_shape="approval_code",
+    )
+
+    rc = actions.invoke_update_proposal_status(
+        proposal_id, target, cause=cause, actor="owner", owner_input=text,
+    )
+    if rc != 0:
+        # The kernel refused (illegal transition, unknown proposal, lock
+        # timeout). Nothing was sent. Fall through so the owner hears about it.
+        return None
+    if target != "approved":
+        # A recorded refusal is a complete outcome: no coverage ask is owed.
+        return {"action": "skip",
+                "reason": (f"cf-router F8: invoked update-proposal-status "
+                           f"{target} for {proposal_id} (rc=0)")}
+
+    send_rc = actions.invoke_send_coverage_message(proposal_id)
+    if send_rc == 0:
+        return {"action": "skip",
+                "reason": (f"cf-router F8: invoked send-coverage-message "
+                           f"for {proposal_id} (rc=0)")}
+    # Approved but not sent. send-coverage-message owns the recovery — it has
+    # already moved the proposal to send_failed and fired the Pushover alert —
+    # so fall through and let the owner be told, exactly as the catering arm
+    # does on a non-zero apply.
     return None
 
 
