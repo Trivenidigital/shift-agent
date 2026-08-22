@@ -272,13 +272,17 @@ class _Pool:
             return Path(paths[self.name])
         return self.path_fn()
 
-    def lookup(self, code: str, paths: Optional[dict] = None) -> Optional[dict]:
-        """First routing-eligible row whose code equals `code`, or None."""
+    def lookup_all(self, code: str, paths: Optional[dict] = None) -> list:
+        """EVERY routing-eligible row whose code equals `code`.
+
+        The plural is the point. `lookup` returned the first match, which made a
+        duplicate inside one pool silently resolvable to whichever row the
+        iterator happened to yield first — the caller then acted on that row,
+        which for the shift pool means messaging one employee about another
+        employee's absence.
+        """
         doc = _load_json(self._path(paths))
-        for row_code, row in self.resolve_rows_fn(doc):
-            if row_code == code:
-                return row
-        return None
+        return [row for row_code, row in self.resolve_rows_fn(doc) if row_code == code]
 
     def live_codes(self, paths: Optional[dict] = None) -> set:
         doc = _load_json(self._path(paths))
@@ -327,6 +331,26 @@ class CollisionResult:
     pools: Tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class IntraPoolCollisionResult(CollisionResult):
+    """A code matched >=2 rows INSIDE one pool.
+
+    Deliberately a SUBCLASS: every existing caller tests
+    `isinstance(resolved, CollisionResult)` and fails closed on it, so the new
+    case inherits the correct behaviour without a single call-site change. A
+    sibling type would have fallen through to the `pool_name, row = resolved`
+    unpacking and raised instead of refusing.
+
+    `pools` holds the ONE pool name, so `len(pools) == 1` is what distinguishes
+    this from a cross-pool collision; `rows` is how many matched.
+
+    `rows` is REQUIRED. With a default of 0 the sentinel was constructible in a
+    state that asserts something false — "a collision of no rows" — and the
+    audit detail would have carried that untruth into the log.
+    """
+    rows: int
+
+
 # ── Public resolution + enumeration API ──────────────────────────────────────
 def resolve_code(
     code: str, *, paths: Optional[dict] = None
@@ -337,21 +361,50 @@ def resolve_code(
     ``pool_paths_under``); pools absent from it use env/default resolution.
 
     Returns:
-      (pool_name, row)   — exactly one pool matched.
-      CollisionResult    — >=2 pools matched (NEVER first-match-wins on a
-                           collision; the caller must fail closed).
-      None               — no pool matched.
+      (pool_name, row)          — exactly one row, in exactly one pool.
+      CollisionResult           — >=2 POOLS matched.
+      IntraPoolCollisionResult  — >=2 ROWS matched inside ONE pool.
+      None                      — nothing matched.
+
+    Both collision results are fail-closed sentinels and both are instances of
+    `CollisionResult`, so a caller that already refuses on one refuses on the
+    other. The second case is the one this function used to get wrong: it asked
+    each pool for its FIRST match, so two rows sharing a code inside a pool
+    resolved to whichever the iterator yielded first, with no signal that a
+    choice had been made. Cross-pool ambiguity was explicitly never
+    first-match-wins; intra-pool ambiguity silently was.
     """
-    matched: list[Tuple[str, dict]] = []
-    for pool in _POOLS:
-        row = pool.lookup(code, paths)
-        if row is not None:
-            matched.append((pool.name, row))
+    matched = rows_for_code(code, paths=paths)
     if not matched:
         return None
+    pools = tuple(dict.fromkeys(name for name, _ in matched))  # canonical order, unique
+    if len(pools) >= 2:
+        return CollisionResult(code=code, pools=pools)
     if len(matched) >= 2:
-        return CollisionResult(code=code, pools=tuple(name for name, _ in matched))
+        return IntraPoolCollisionResult(code=code, pools=pools, rows=len(matched))
     return matched[0]
+
+
+def rows_for_code(
+    code: str, *, pool: Optional[str] = None, paths: Optional[dict] = None
+) -> list:
+    """Every routing-eligible row matching `code`, as (pool_name, row) pairs.
+
+    Public because callers were hand-rolling it. Two of them did — this module's
+    own `resolve_code` (as first-match-per-pool) and cf-router's shift arm (as a
+    re-implementation of `_shift_rows`' document shape) — and the three pools
+    nobody hand-rolled for had no duplicate check at all. One reader, one shape.
+
+    `pool` narrows to a single pool by name; None scans all of them in canonical
+    order.
+    """
+    out: list = []
+    for candidate in _POOLS:
+        if pool is not None and candidate.name != pool:
+            continue
+        for row in candidate.lookup_all(code, paths):
+            out.append((candidate.name, row))
+    return out
 
 
 def all_live_codes(*, paths: Optional[dict] = None) -> set:
@@ -506,6 +559,46 @@ def _emit_collision_audit(collision: CollisionResult, detected_by: str) -> None:
         ndjson_append(log_path, entry.model_dump_json())
 
 
+def _emit_intra_pool_audit(collision: "IntraPoolCollisionResult", detected_by: str) -> None:
+    """Record an intra-pool collision as an `invariant_violation` row.
+
+    NOT `ApprovalCodeCollisionDetected`: its `pools` field is
+    `Field(min_length=2, max_length=4)`, so one pool fails validation and
+    padding to `[name, name]` would assert that two pools matched, which is
+    false. Widening that field is a schema change to a tag the deployed release
+    already reads.
+
+    `InvariantViolation` needs none of that. `check` and `detail` are
+    unconstrained free-form strings, the tag is already in the deployed
+    discriminated union, and five scripts (compliance x3, equipment, fsck)
+    already carry structured facts this way — so an old reader parses the row
+    cleanly. Zero schema delta beats a safe delta.
+
+    It is also semantically the right tag rather than a workaround: two live
+    rows sharing one approval code IS an invariant violation. Stderr alone was
+    the wrong trade — the gateway log it lands in is rotated daily/keep-14 and
+    nothing watches it, while the sentinel pages the owner exactly ONCE per
+    code+pool with no expiry, so every recurrence after the first would have
+    been invisible.
+    """
+    from safe_io import FileLock, ndjson_append  # lazy
+    from schemas import InvariantViolation  # lazy
+    ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    entry = InvariantViolation(
+        ts=ts,
+        type="invariant_violation",
+        check="approval_code_intra_pool_collision",
+        detail=(
+            f"code={collision.code} "
+            f"pool={collision.pools[0] if collision.pools else '?'} "
+            f"rows={collision.rows} detected_by={detected_by}"
+        ),
+    )
+    log_path = _decisions_log_path()
+    with FileLock(Path(str(log_path) + ".lock")):
+        ndjson_append(log_path, entry.model_dump_json())
+
+
 def _sentinel_key(collision: CollisionResult) -> str:
     """Dedup key = code + the SORTED pool set. A CHANGED collision state (the
     same code now colliding across a DIFFERENT set of pools) yields a different
@@ -542,12 +635,31 @@ def record_collision_event(collision: CollisionResult, *, detected_by: str) -> N
     Best-effort throughout: a failure to audit OR notify writes to stderr but
     never raises AND never changes the caller's routing outcome (the caller has
     already failed closed; a dropped alert leaves routing failed-closed)."""
+    intra_pool = isinstance(collision, IntraPoolCollisionResult)
     try:
-        _emit_collision_audit(collision, detected_by)
+        if intra_pool:
+            _emit_intra_pool_audit(collision, detected_by)
+        else:
+            _emit_collision_audit(collision, detected_by)
     except Exception as e:  # noqa: BLE001 — audit is best-effort
         sys.stderr.write(
             f"approval_code_pools: collision audit write failed: "
             f"{type(e).__name__}: {str(e)[:200]}\n"
+        )
+
+    if intra_pool:
+        # Belt-and-braces beside the row above. The row is the durable record
+        # (decisions.log, the audited chokepoint); this line is the one an
+        # operator tailing the gateway sees live. It lands in
+        # /opt/shift-agent/logs/hermes-gateway.log — the unit sets
+        # StandardError=append there, so `journalctl -u hermes-gateway`, which
+        # docs/deploy.md and the shift runbook both tell you to run, will NOT
+        # show it. That log is rotated daily/keep-14, which is exactly why the
+        # durable row above is not optional.
+        sys.stderr.write(
+            f"approval_code_pools: intra_pool_collision code={collision.code} "
+            f"pool={collision.pools[0] if collision.pools else '?'} "
+            f"rows={collision.rows} detected_by={detected_by}\n"
         )
 
     try:
@@ -560,10 +672,17 @@ def record_collision_event(collision: CollisionResult, *, detected_by: str) -> N
                 return  # already paged for this exact collision state — don't re-notify
             pools = ", ".join(collision.pools)
             title = "Approval-code collision"
-            message = (
-                f"Code {collision.code} matches multiple code pools ({pools}). "
-                f"Refusing to act automatically; please resolve manually."
-            )
+            if intra_pool:
+                message = (
+                    f"Code {collision.code} matches {collision.rows} records inside "
+                    f"the {pools} pool. Refusing to act automatically; please "
+                    f"resolve manually."
+                )
+            else:
+                message = (
+                    f"Code {collision.code} matches multiple code pools ({pools}). "
+                    f"Refusing to act automatically; please resolve manually."
+                )
             notify_owner_with_fallback(
                 title, message, priority=1, source="approval_code_pools",
             )
