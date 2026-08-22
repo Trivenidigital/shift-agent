@@ -28,6 +28,13 @@ on:
       - "tests/test_flyer_visual_qa.py"
       - "tests/test_flyer_quarantine.py"
       - "tests/test_flyer_brand_asset_routing.py"
+      # Run by named steps in this workflow and by no other gate: core-ci's
+      # `tests/test_flyer*.py` filter wakes on them, then subtracts them again
+      # via .github/flyer-shards/owned-elsewhere.txt. Without these three lines
+      # a change confined to one of them executes in no job at all.
+      - "tests/test_flyer_intake_fields.py"
+      - "tests/test_flyer_source_edit_sla_watchdog.py"
+      - "tests/test_flyer_tranche2_telemetry.py"
       - ".github/workflows/flyer-premium-ci.yml"
   push:
     branches: [main]
@@ -48,6 +55,13 @@ on:
       - "tests/test_flyer_visual_qa.py"
       - "tests/test_flyer_quarantine.py"
       - "tests/test_flyer_brand_asset_routing.py"
+      # Run by named steps in this workflow and by no other gate: core-ci's
+      # `tests/test_flyer*.py` filter wakes on them, then subtracts them again
+      # via .github/flyer-shards/owned-elsewhere.txt. Without these three lines
+      # a change confined to one of them executes in no job at all.
+      - "tests/test_flyer_intake_fields.py"
+      - "tests/test_flyer_source_edit_sla_watchdog.py"
+      - "tests/test_flyer_tranche2_telemetry.py"
       - ".github/workflows/flyer-premium-ci.yml"
 
 jobs:

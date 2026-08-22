@@ -25,7 +25,13 @@ on:
       - ".github/workflows/send-path-ci.yml"
 
 concurrency:
-  group: send-path-ci-${{ github.ref }}
+  # `github.ref` is refs/heads/main for EVERY commit, so keying on it alone
+  # made each merge cancel the gate still running for the merge before it —
+  # 14 of send-path-ci's last 100 main-push runs ended `cancelled` that way,
+  # leaving those SHAs with no completed result for a deploy or a bisect to
+  # read. On push the group is the commit; on a pull_request it stays the
+  # ref, so a superseded PR run is still cancelled.
+  group: send-path-ci-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
