@@ -787,7 +787,9 @@ def build_promotion_plan(
                 f"- Target SSH alias: `{host.alias}`",
                 "- Run daily check immediately before promotion.",
                 "- Install the reviewed Hermes candidate and re-apply Shift Agent patches.",
-                "- Deploy through the existing tarball path and `/usr/local/bin/shift-agent-deploy.sh`.",
+                "- Deploy through the existing tarball path, running the deploy script FROM STAGING: "
+                "`bash /opt/shift-agent/staging-new/src/agents/shift/scripts/shift-agent-deploy.sh`"
+                " — the installed `/usr/local/bin` copy is the previous release's logic.",
                 "- Verify deploy smoke, pilot readiness, gateway, cockpit, bridge, and agent-specific smoke.",
                 "- Capture the resulting deploy tag and Hermes commit in the promotion report.",
                 "",
