@@ -4,15 +4,18 @@ kind: standalone
 version: 1.0.0
 description: >
   Read-only Hermes tools over the agent's deterministic project data. Each tool
-  owns its own authorization policy: get_compliance_deadlines and
-  get_equipment_maintenance_due are owner-only and resolve the caller through the
-  existing identify-sender kernel; find_nearest_location is public and exposes
-  only configured store locations. Hermes owns intent, clarification, reasoning
-  and wording; these tools own authorization, validated reads, deterministic
+  owns its own authorization policy: get_compliance_deadlines,
+  get_equipment_maintenance_due and get_pending_catering_approvals are owner-only
+  and resolve the caller through the existing identify-sender kernel;
+  find_nearest_location and get_catering_menu_items are public and expose only
+  facts a business publishes. Hermes owns intent, clarification, reasoning and
+  wording; these tools own authorization, validated reads, deterministic
   arithmetic and — where wrong facts would reach a customer — the exact outbound
   text.
 author: Shift Agent
 provides_tools:
+  - get_pending_catering_approvals
+  - get_catering_menu_items
   - get_compliance_deadlines
   - get_equipment_maintenance_due
   - find_nearest_location
