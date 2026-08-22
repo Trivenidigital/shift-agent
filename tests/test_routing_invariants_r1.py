@@ -1172,3 +1172,155 @@ def test_identity_direct_match_wins_over_newer_canonical(actions_id):
     ])
     got = actions_mod.find_active_catering_lead_by_sender(PHONE, LID)
     assert got["lead_id"] == "LX", "direct match must win over a newer canonical-only match"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Intra-pool duplicate codes — fail closed, like cross-pool already does
+# ════════════════════════════════════════════════════════════════════════════
+# `resolve_code` was explicit that a CROSS-pool collision is "NEVER
+# first-match-wins", and `_Pool.lookup` first-match-won WITHIN a pool. Two rules
+# each defensible alone, composing into a silent wrong answer: acting on
+# whichever record the iterator happened to yield first.
+#
+# Latent, not live: every generator in the tree mints under
+# `code_generation_lock` against `all_live_codes`, and for all five pools the
+# live set is a superset of the resolvable set, so a re-mint can only ever
+# collide with a row that is not resolvable. These tests pin the guard for the
+# routes minting does not cover — an operator edit, a partial restore, or the
+# next generator that forgets the lock.
+
+
+def _two_rows_per_pool(code):
+    """One duplicate-bearing document per pool, in each pool's own shape."""
+    return {
+        pools.POOL_CATERING_LEADS: {"catering": [_catering_lead(code), _catering_lead(code)]},
+        pools.POOL_EXPENSE: {"expense": [_expense_lead(code), _expense_lead(code)]},
+        pools.POOL_SHIFT: {"shift": {
+            "P1": {"proposal_id": "P1", "code": code, "status": "sent"},
+            "P2": {"proposal_id": "P2", "code": code, "status": "sent"},
+        }},
+        pools.POOL_CATERING_FOLLOWUPS: {"followups": [_followup(code), _followup(code)]},
+    }
+
+
+@pytest.mark.parametrize("pool_name", [
+    pools.POOL_CATERING_LEADS, pools.POOL_EXPENSE,
+    pools.POOL_SHIFT, pools.POOL_CATERING_FOLLOWUPS,
+])
+def test_two_rows_sharing_a_code_in_one_pool_refuse(state_dir, pool_name):
+    """Every pool, not just the one an incident named. Three of these four had
+    no duplicate check anywhere before this — only catering (in its apply
+    script) and shift (in cf-router) hand-rolled one."""
+    _write_pools(state_dir, **_two_rows_per_pool("#DUP23")[pool_name])
+    result = pools.resolve_code("#DUP23")
+    assert isinstance(result, pools.IntraPoolCollisionResult)
+    assert result.pools == (pool_name,)
+    assert result.rows == 2
+    # The whole point of the subclass: callers already refuse on this.
+    assert isinstance(result, pools.CollisionResult)
+
+
+def test_a_single_row_still_resolves_normally(state_dir):
+    """The fail-closed path must not swallow the ordinary case."""
+    _write_pools(state_dir, shift=_shift_prop("#SOLO2"))
+    assert _reg_is_pool(pools.resolve_code("#SOLO2"), pools.POOL_SHIFT)
+
+
+def test_a_cross_pool_collision_is_still_the_plain_collision_result(state_dir):
+    """Cross-pool must NOT be reclassified — its audit row is the one that works."""
+    _write_pools(state_dir, catering=[_catering_lead("#XPL23")],
+                 shift=_shift_prop("#XPL23"))
+    result = pools.resolve_code("#XPL23")
+    assert isinstance(result, pools.CollisionResult)
+    assert not isinstance(result, pools.IntraPoolCollisionResult)
+    assert set(result.pools) == {pools.POOL_CATERING_LEADS, pools.POOL_SHIFT}
+
+
+def test_a_duplicate_that_is_not_resolvable_does_not_trip_the_guard(state_dir):
+    """Why this is latent rather than live: `all_live_codes` keeps a code out of
+    circulation while ANY row holds it, and for catering the live set is broader
+    than the resolvable set. A terminal lead sharing a code with an actionable
+    one is therefore normal and must still resolve to the actionable row."""
+    _write_pools(state_dir, catering=[
+        _catering_lead("#TERM23", status="CLOSED"),
+        _catering_lead("#TERM23"),
+    ])
+    assert _reg_is_pool(pools.resolve_code("#TERM23"), pools.POOL_CATERING_LEADS)
+
+
+def test_rows_for_code_is_the_one_reader(state_dir):
+    """The public enumeration two callers were hand-rolling."""
+    _write_pools(state_dir, **_two_rows_per_pool("#ROWS23")[pools.POOL_SHIFT])
+    assert len(pools.rows_for_code("#ROWS23")) == 2
+    assert len(pools.rows_for_code("#ROWS23", pool=pools.POOL_SHIFT)) == 2
+    assert pools.rows_for_code("#ROWS23", pool=pools.POOL_EXPENSE) == []
+    assert pools.rows_for_code("#NONE23") == []
+    assert all(name == pools.POOL_SHIFT for name, _ in pools.rows_for_code("#ROWS23"))
+
+
+def test_the_intra_pool_case_writes_no_audit_row_and_says_why(state_dir, tmp_path, capsys):
+    """The gate outcome, asserted rather than described in a comment.
+
+    `ApprovalCodeCollisionDetected.pools` is Field(min_length=2), so a one-pool
+    collision cannot be recorded truthfully: it either fails validation inside a
+    best-effort try/except (a silent hole) or claims two pools matched (a lie).
+    Until that field changes, the intra-pool case emits NO row — and must say so
+    on stderr rather than passing silently.
+    """
+    log = tmp_path / "decisions.log"
+    os.environ["SHIFT_AGENT_DECISIONS_LOG_PATH"] = str(log)
+    try:
+        pools.record_collision_event(
+            pools.IntraPoolCollisionResult(code="#AUD23", pools=("shift",), rows=2),
+            detected_by="unit",
+        )
+    finally:
+        os.environ.pop("SHIFT_AGENT_DECISIONS_LOG_PATH", None)
+    assert not log.exists() or "approval_code_collision_detected" not in log.read_text(
+        encoding="utf-8"
+    ), "an intra-pool collision must not claim a cross-pool audit shape"
+    err = capsys.readouterr().err
+    assert "intra_pool_collision" in err and "rows=2" in err, (
+        "the absent row must be traceable on stderr, not silent"
+    )
+
+
+def test_a_cross_pool_collision_still_writes_its_audit_row(state_dir, tmp_path):
+    """Guard the guard: the branch above must not have disabled the working one."""
+    log = tmp_path / "decisions2.log"
+    os.environ["SHIFT_AGENT_DECISIONS_LOG_PATH"] = str(log)
+    try:
+        pools.record_collision_event(
+            pools.CollisionResult(code="#AUD24", pools=("menu-pending", "shift")),
+            detected_by="unit",
+        )
+    finally:
+        os.environ.pop("SHIFT_AGENT_DECISIONS_LOG_PATH", None)
+    assert log.exists(), "the cross-pool audit row stopped being written"
+    assert "approval_code_collision_detected" in log.read_text(encoding="utf-8")
+
+
+def test_the_collision_audit_field_cannot_hold_every_real_pool_set():
+    """Reported, not fixed here — and pinned so the report cannot rot.
+
+    There are FIVE pools, and `ApprovalCodeCollisionDetected.pools` is
+    `max_length=4`. A genuine five-pool collision therefore fails validation
+    inside `_emit_collision_audit`'s best-effort try/except and produces stderr
+    instead of a row: the same field, the same silent-hole failure mode as the
+    min_length=2 problem above. Widening it is a schema change to a tag the
+    deployed release already reads, so it is not riding along on this fix.
+    """
+    from schemas import ApprovalCodeCollisionDetected  # noqa: PLC0415
+
+    field = ApprovalCodeCollisionDetected.model_fields["pools"]
+    bounds = [m for m in field.metadata if hasattr(m, "max_length") or hasattr(m, "min_length")]
+    assert bounds, "pools lost its length bounds — re-check the audit-shape gate"
+    assert len(pools.CODE_POOL_CANONICAL_ORDER) == 5
+    with pytest.raises(Exception):
+        ApprovalCodeCollisionDetected(
+            ts="2026-08-22T00:00:00Z",
+            type="approval_code_collision_detected",
+            code="#FIVE2",
+            pools=list(pools.CODE_POOL_CANONICAL_ORDER),
+            detected_by="unit",
+        )

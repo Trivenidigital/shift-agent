@@ -4319,26 +4319,37 @@ class TestF8ShiftDuplicateCode:
         transition.assert_not_called()
         send.assert_not_called()
 
-    def test_the_counter_reads_the_same_shape_the_pool_reads(self, mods, state_env):
-        """Guard the guard. If the counter and `_shift_rows` ever disagree about
-        pending.json's shape, the counter silently returns 0 or 2 and this
-        branch refuses everything or nothing — both invisible without this."""
-        hooks_mod, _ = mods
+    def test_the_duplicate_is_refused_by_the_registry_not_by_this_plugin(self, mods, state_env):
+        """The guard moved upstream. cf-router no longer counts rows itself —
+        `resolve_code` returns the intra-pool sentinel and the existing
+        CollisionResult arm refuses before the shift branch is reached. Pinned
+        because the plugin-side symptom (refusal) is identical either way, so
+        nothing else here would notice if the registry stopped refusing."""
+        hooks_mod, actions_mod = mods
         _seed_config(state_env, owner_jid=OWNER_JID)
-        _seed_shift_proposal(state_env)
-        assert hooks_mod._count_shift_proposals_with_code("#SHFT2") == 1
-        assert hooks_mod._count_shift_proposals_with_code("#NOPE4") == 0
         self._seed_two_sharing_a_code(state_env)
-        assert hooks_mod._count_shift_proposals_with_code("#SHFT2") == 2
 
-    def test_an_unreadable_pending_file_counts_as_zero_and_refuses(self, mods, state_env, shift_calls):
+        resolved = hooks_mod.approval_code_pools.resolve_code(
+            "#SHFT2",
+            paths=hooks_mod.approval_code_pools.pool_paths_under(
+                actions_mod.LEADS_PATH.parent),
+        )
+        assert isinstance(
+            resolved, hooks_mod.approval_code_pools.IntraPoolCollisionResult)
+        assert resolved.rows == 2
+        assert not hasattr(hooks_mod, "_count_shift_proposals_with_code"), (
+            "the hand-rolled count is back; the registry owns this now"
+        )
+
+    def test_an_unreadable_pending_file_sends_nothing(self, mods, state_env, shift_calls):
+        """A corrupt store must not approve anything. The registry loads
+        fail-open to None, so the code resolves to nothing and the owner surface
+        refuses — the same outcome the local count used to produce."""
         hooks_mod, _ = mods
         transition, send = shift_calls
         _seed_config(state_env, owner_jid=OWNER_JID)
-        _seed_shift_proposal(state_env)
-        assert hooks_mod._count_shift_proposals_with_code("#SHFT2") == 1
         state_env["pending_path"].write_text("{not json", encoding="utf-8")
-        assert hooks_mod._count_shift_proposals_with_code("#SHFT2") == 0
+
         assert hooks_mod.pre_gateway_dispatch(_make_event("#SHFT2", OWNER_JID)) is None
         transition.assert_not_called()
         send.assert_not_called()

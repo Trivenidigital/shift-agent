@@ -316,43 +316,6 @@ def _is_unqualified_shift_consent(text: str, code: str) -> bool:
     return bool(_SHIFT_BARE_CODE_RESIDUE.match(residue))
 
 
-def _count_shift_proposals_with_code(code: str) -> int:
-    """How many proposals in pending.json carry `code`.
-
-    `resolve_code` fails closed on a CROSS-pool collision, but within one pool
-    `_Pool.lookup` returns the FIRST matching row and `_shift_rows` applies no
-    status filter. Two proposals sharing a code therefore resolve silently to
-    one of them, and this branch would send a coverage ask about the wrong
-    absence to the wrong employee. Codes are minted under the shared lock
-    against `all_live_codes`, so this is unlikely — but the registry documents
-    generators outside the lock as best-effort, and it is THIS branch that
-    turns the duplicate into an outbound.
-
-    `apply-catering-owner-decision` already refuses the same way ("BUG: N
-    active leads share code; refusing"); this mirrors it at the one seam where
-    the shift equivalent can act.
-
-    Row shape deliberately mirrors `approval_code_pools._shift_rows` — the
-    pool's own reader — rather than pending.json directly: `.proposals` is a
-    dict[proposal_id, Proposal] and the pool iterates its values(). Returns 0
-    on an unreadable or unexpected document, and the caller refuses on any
-    count that is not exactly 1, so every one of those paths fails closed.
-    """
-    try:
-        path = approval_code_pools.pool_paths_under(actions.LEADS_PATH.parent)[
-            approval_code_pools.POOL_SHIFT
-        ]
-        doc = json.loads(Path(path).read_text(encoding="utf-8"))
-    except Exception:
-        return 0
-    if not isinstance(doc, dict):
-        return 0
-    proposals = doc.get("proposals", {})
-    rows = proposals.values() if isinstance(proposals, dict) else proposals
-    if not isinstance(rows, (list, tuple)) and not hasattr(rows, "__iter__"):
-        return 0
-    return sum(1 for p in rows if isinstance(p, dict) and p.get("code") == code)
-
 # Sick-call regex set (employee path — F9 replacement). Mirrors the six
 # absence-specific patterns from the old notifier. Broad courtesy/address
 # patterns were removed because F9 now skips the LLM and invokes Shift directly.
@@ -1353,7 +1316,8 @@ def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional
 
     # PR-R1: resolve the code through the centralized pool registry, in the
     # canonical order (menu-pending -> catering-leads -> expense -> shift). A
-    # code matching >=2 pools is a fail-closed CollisionResult — we REFUSE to
+    # code matching >=2 pools, OR >=2 rows inside ONE pool (a subclass, so
+    # this single isinstance check covers both), is a fail-closed CollisionResult — we REFUSE to
     # apply any approval, record the collision (audit every time + owner alert
     # once), and fall through returning None (no new reply). Thread actions' own
     # configurable state dir so the registry reads the SAME state files this
@@ -7558,10 +7522,17 @@ def _handle_shift_coverage_code(
     writes pending.json, never resolves a phone number, and never composes the
     outbound body.
 
-    Fail-closed in six places: an unaddressable row, a message that is not
-    unqualified consent, a code naming anything other than exactly one
-    proposal, a proposal that is not `awaiting_owner_approval`, and a
-    transition the kernel refuses. None of them send anything.
+    Fail-closed in five places: an unaddressable row, a message that is not
+    unqualified consent, a proposal that is not `awaiting_owner_approval`, and
+    a transition the kernel refuses. None of them send anything.
+
+    A sixth used to live here — a local count refusing when a code named more
+    than one proposal. `approval_code_pools.resolve_code` now refuses that case
+    itself, for every pool, and does it BEFORE this function is reached: the
+    `isinstance(resolved, CollisionResult)` arm in `_try_f8_intercept` catches
+    the intra-pool sentinel and also pages the owner, which the local count
+    never did. Keeping a second implementation of the pool's document shape
+    here is what the registry change exists to end.
     """
     if has_edit:
         # Nothing here is editable — the candidate and the body were fixed when
@@ -7590,13 +7561,6 @@ def _handle_shift_coverage_code(
         # A code wrapped in words that are neither consent nor refusal. The card
         # asks for a bare code or DENY; anything else is ambiguous, and an
         # ambiguous owner message must not put a shift ask in front of staff.
-        return None
-
-    matches = _count_shift_proposals_with_code(code)
-    if matches != 1:
-        # Ambiguous or unreadable. Acting would pick whichever row the pool
-        # happened to return first and message that candidate about that
-        # absence — a real employee, about the wrong shift.
         return None
 
     if row.get("status") != _SHIFT_APPROVABLE_STATUS:
