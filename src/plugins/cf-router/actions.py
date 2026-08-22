@@ -60,6 +60,12 @@ RECORD_CATERING_ACCEPTANCE_BIN = Path("/usr/local/bin/record-catering-acceptance
 CREATE_FLYER_PROJECT_BIN = Path("/usr/local/bin/create-flyer-project")
 BARE_FLYER_SEND_BIN = Path("/usr/local/bin/bare-flyer-render-and-send")  # Approach B async render+send
 HANDLE_SHIFT_SICK_CALL_BIN = Path("/usr/local/bin/handle-shift-sick-call")
+# The two halves of the Shift coverage RETURN leg. handle-shift-sick-call
+# (above) opens a proposal and sends the owner a card; these apply the
+# owner's answer to it. Both are installed by the same
+# `install -m 755 src/agents/shift/scripts/*` line in shift-agent-deploy.sh.
+UPDATE_PROPOSAL_STATUS_BIN = Path("/usr/local/bin/update-proposal-status")
+SEND_COVERAGE_MESSAGE_BIN = Path("/usr/local/bin/send-coverage-message")
 HANDLE_FLYER_ONBOARDING_BIN = Path("/usr/local/bin/handle-flyer-onboarding")
 HANDLE_FLYER_INTAKE_BIN = Path("/usr/local/bin/handle-flyer-intake")
 STORE_FLYER_BRAND_ASSET_BIN = Path("/usr/local/bin/store-flyer-brand-asset")
@@ -2178,6 +2184,58 @@ def invoke_shift_sick_call(*, chat_id: str, text: str, message_id: str) -> tuple
         return 124, exc.stdout or "", exc.stderr or "timeout"
     except OSError as exc:
         return 127, "", str(exc)
+
+
+def invoke_update_proposal_status(
+    proposal_id: str, new_status: str, *, cause: str,
+    actor: str = "owner", owner_input: str = "",
+) -> int:
+    """Transition one Shift proposal through the Shift-owned kernel.
+
+    Never writes pending.json directly — the script holds the pending lock,
+    refuses an illegal transition with EXIT_ILLEGAL_TRANSITION (9), and appends
+    the ProposalStatusChange row inside that lock. That is also what makes a
+    repeated owner tap safe: the second one finds a status the transition table
+    does not allow to move again and exits 9 without touching state.
+    """
+    try:
+        cmd = [
+            str(PYTHON_BIN), str(UPDATE_PROPOSAL_STATUS_BIN),
+            proposal_id, new_status,
+            "--cause", cause,
+            "--actor", actor,
+        ]
+        if owner_input:
+            cmd += ["--owner-input", owner_input]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        return 124
+    except OSError:
+        return 127
+
+
+def invoke_send_coverage_message(proposal_id: str) -> int:
+    """Send the coverage ask to the candidate through the hardened outbound gate.
+
+    Single argument by design: the script re-resolves the candidate phone from
+    roster.json, re-checks that the proposal is `approved`, enforces the daily
+    cap, renders the template (never free text), and writes OutboundAttempted
+    BEFORE the POST as its idempotency key. Nothing about the recipient or the
+    body is passed in from here, so an intercept cannot widen either.
+    """
+    try:
+        result = subprocess.run(
+            [str(PYTHON_BIN), str(SEND_COVERAGE_MESSAGE_BIN), proposal_id],
+            capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        return 124
+    except OSError:
+        return 127
 
 
 def audit_source_vs_new(

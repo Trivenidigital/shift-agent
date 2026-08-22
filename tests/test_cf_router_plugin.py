@@ -3925,3 +3925,285 @@ class TestF7PrimaryMode:
         assert hooks_mod._parse_headcount_from_signals(["headcount:abc"]) is None
         # Defensive: None input
         assert hooks_mod._parse_headcount_from_signals(None) is None
+
+
+# ── Shift coverage: the owner-approve leg (fix/shift-coverage-owner-approve) ──
+#
+# The namesake agent had never executed once. Intake was wired — a verified
+# employee's sick call reaches handle-shift-sick-call through F9 — but the
+# owner's answer to the card it sends hit a bare `return None` at the end of
+# _try_f8_intercept and fell through to the SKILL dispatcher, which needs the
+# `skills` toolset that is disabled on the box.
+#
+# These tests pin the four fail-closed refusals as hard as the happy path,
+# because the happy path messages a real employee.
+
+
+def _seed_shift_proposal(state_env, code="#SHFT2", status="awaiting_owner_approval",
+                         proposal_id="P0042"):
+    """One row in the shape POOL_SHIFT reads: pending.json .proposals is a
+    dict[proposal_id, Proposal] and the pool iterates its values()."""
+    state_env["pending_path"].write_text(json.dumps({
+        "proposals": {
+            proposal_id: {
+                "proposal_id": proposal_id,
+                "code": code,
+                "status": status,
+                "created_ts": "2026-08-20T09:00:00-04:00",
+                "last_updated_ts": "2026-08-20T09:00:00-04:00",
+                "absent_employee_id": "e001",
+                "absent_date": "2026-08-21",
+                "absent_shift": "evening",
+                "absent_role": "cashier",
+                "absent_reason": "fever",
+                "input_message": "cant come in tomorrow, fever",
+                "message_id": "m-intake-1",
+                "candidate_employee_id": "e002",
+                "candidate_name": "Priya",
+                "proposed_message_rendered": "Can you cover evening cashier tomorrow?",
+                "status_history": [],
+            },
+        },
+    }), encoding="utf-8")
+
+
+def _seed_expense_lead(state_env, code="#EXPN3"):
+    path = state_env["state_dir"] / "expense-bookkeeper"
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "leads.json").write_text(json.dumps({
+        "leads": [{"expense_id": "E0001", "owner_approval_code": code,
+                   "status": "AWAITING_OWNER_APPROVAL"}],
+    }), encoding="utf-8")
+
+
+OWNER_JID = "15550100002@s.whatsapp.net"
+
+
+@pytest.fixture
+def shift_calls(mods):
+    """Both Shift scripts mocked. They are hardcoded to /opt/shift-agent paths,
+    so the assertion is on the invocation contract, not on their internals —
+    the same way TestF8OwnerApprove mocks invoke_apply_owner_decision."""
+    _, actions_mod = mods
+    with patch.object(actions_mod, "invoke_update_proposal_status",
+                      return_value=0) as transition, \
+         patch.object(actions_mod, "invoke_send_coverage_message",
+                      return_value=0) as send:
+        yield transition, send
+
+
+class TestF8ShiftCoverageApprove:
+    def test_bare_code_approves_then_sends_in_that_order(self, mods, state_env, shift_calls):
+        """The card says `Reply {code} to approve + send`, so a bare code has to
+        work — and the transition must land BEFORE the outbound, never after."""
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+
+        result = hooks_mod.pre_gateway_dispatch(_make_event("#SHFT2", OWNER_JID))
+
+        assert result is not None and result["action"] == "skip"
+        transition.assert_called_once()
+        assert transition.call_args.args[:2] == ("P0042", "approved")
+        assert transition.call_args.kwargs["cause"] == "owner_code_match"
+        assert transition.call_args.kwargs["actor"] == "owner"
+        send.assert_called_once_with("P0042")
+
+    def test_explicit_approve_verb_also_approves(self, mods, state_env, shift_calls):
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+
+        result = hooks_mod.pre_gateway_dispatch(_make_event("#SHFT2 approve", OWNER_JID))
+
+        assert result is not None and result["action"] == "skip"
+        assert transition.call_args.args[:2] == ("P0042", "approved")
+        send.assert_called_once_with("P0042")
+
+    def test_DENY_is_a_refusal_and_never_reaches_staff(self, mods, state_env, shift_calls):
+        """`DENY {code}` is the exact wording the owner card prints, and DENY
+        matches no pre-existing verb regex. Without a shift-scoped deny set the
+        bare-code rule would read this as consent and message an employee."""
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+
+        result = hooks_mod.pre_gateway_dispatch(_make_event("DENY #SHFT2", OWNER_JID))
+
+        assert result is not None and result["action"] == "skip"
+        assert transition.call_args.args[:2] == ("P0042", "denied_by_owner")
+        assert transition.call_args.kwargs["cause"] == "owner_deny"
+        send.assert_not_called()
+
+    def test_cancel_transitions_to_cancelled_not_denied(self, mods, state_env, shift_calls):
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+
+        hooks_mod.pre_gateway_dispatch(_make_event("cancel #SHFT2", OWNER_JID))
+
+        assert transition.call_args.args[:2] == ("P0042", "cancelled")
+        assert transition.call_args.kwargs["cause"] == "owner_cancel"
+        send.assert_not_called()
+
+    @pytest.mark.parametrize("status", [
+        "approved", "reconciling", "sent", "send_failed",
+        "accepted", "declined", "denied_by_owner", "expired", "cancelled",
+        "no_response_timeout",
+    ])
+    def test_only_awaiting_owner_approval_may_be_approved(
+        self, mods, state_env, shift_calls, status,
+    ):
+        """The double-tap guard, and the stale-card guard, are the same check.
+        POOL_SHIFT applies NO status filter when it resolves a code, so every
+        one of these rows DOES resolve — the refusal has to happen here."""
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env, status=status)
+
+        result = hooks_mod.pre_gateway_dispatch(_make_event("#SHFT2", OWNER_JID))
+
+        assert result is None
+        transition.assert_not_called()
+        send.assert_not_called()
+
+    def test_a_second_tap_after_approval_sends_nothing(self, mods, state_env, shift_calls):
+        """The owner double-tapping the same code must not notify twice."""
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+
+        hooks_mod.pre_gateway_dispatch(_make_event("#SHFT2", OWNER_JID))
+        # The kernel moved it on; re-resolve now sees the post-approval status.
+        _seed_shift_proposal(state_env, status="sent")
+        hooks_mod.pre_gateway_dispatch(_make_event("#SHFT2", OWNER_JID))
+
+        assert transition.call_count == 1
+        assert send.call_count == 1
+
+    def test_a_refused_transition_sends_nothing(self, mods, state_env):
+        """The race the status pre-check cannot see: two taps interleave, the
+        kernel refuses the second under the pending lock with exit 9. Nothing
+        may be sent on that path."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+
+        with patch.object(actions_mod, "invoke_update_proposal_status", return_value=9), \
+             patch.object(actions_mod, "invoke_send_coverage_message") as send:
+            result = hooks_mod.pre_gateway_dispatch(_make_event("#SHFT2", OWNER_JID))
+
+        assert result is None
+        send.assert_not_called()
+
+    def test_a_failed_send_falls_through_so_the_owner_is_told(self, mods, state_env):
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+
+        with patch.object(actions_mod, "invoke_update_proposal_status", return_value=0), \
+             patch.object(actions_mod, "invoke_send_coverage_message", return_value=6):
+            result = hooks_mod.pre_gateway_dispatch(_make_event("#SHFT2", OWNER_JID))
+
+        assert result is None
+
+    @pytest.mark.parametrize("text", [
+        "what about #SHFT2?",
+        "#SHFT2 who is covering",
+        "remind me about #SHFT2 later",
+    ])
+    def test_an_ambiguous_message_is_not_consent(self, mods, state_env, shift_calls, text):
+        """A code wrapped in words that are neither consent nor refusal. The
+        card asks for a bare code or DENY; anything else must not reach staff."""
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+
+        assert hooks_mod.pre_gateway_dispatch(_make_event(text, OWNER_JID)) is None
+        transition.assert_not_called()
+        send.assert_not_called()
+
+    def test_retry_is_not_collapsed_into_approve(self, mods, state_env, shift_calls):
+        """RETRY resumes a send_failed proposal (SKILL §3) and is not implemented
+        here. Reading it as consent would re-send an ask the gate already refused."""
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env, status="send_failed")
+
+        assert hooks_mod.pre_gateway_dispatch(_make_event("RETRY #SHFT2", OWNER_JID)) is None
+        transition.assert_not_called()
+        send.assert_not_called()
+
+    def test_edit_verb_is_not_consent(self, mods, state_env, shift_calls):
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+
+        assert hooks_mod.pre_gateway_dispatch(
+            _make_event("#SHFT2 change the candidate", OWNER_JID)) is None
+        transition.assert_not_called()
+        send.assert_not_called()
+
+    def test_non_owner_sender_is_not_intercepted(self, mods, state_env, shift_calls):
+        """A screenshot-forwarded code from a non-owner must not approve a shift."""
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+
+        assert hooks_mod.pre_gateway_dispatch(
+            _make_event("#SHFT2", "9999999999@s.whatsapp.net")) is None
+        transition.assert_not_called()
+        send.assert_not_called()
+
+    def test_a_row_without_a_proposal_id_is_never_guessed(self, mods, state_env, shift_calls):
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        state_env["pending_path"].write_text(json.dumps({
+            "proposals": {"P0042": {"code": "#SHFT2",
+                                    "status": "awaiting_owner_approval"}},
+        }), encoding="utf-8")
+
+        assert hooks_mod.pre_gateway_dispatch(_make_event("#SHFT2", OWNER_JID)) is None
+        transition.assert_not_called()
+        send.assert_not_called()
+
+    def test_the_route_is_visible_in_the_audit_log(self, mods, state_env, shift_calls):
+        """Zero `dispatcher_routed` rows all-time is the evidence this leg never
+        ran; cf-router writes that row itself, so the fix has to write one too or
+        the same measurement stays blind after it ships."""
+        hooks_mod, _ = mods
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+
+        hooks_mod.pre_gateway_dispatch(_make_event("#SHFT2", OWNER_JID))
+
+        rows = [json.loads(line)
+                for line in state_env["log_path"].read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        routed = [r for r in rows if r.get("type") == "dispatcher_routed"]
+        assert len(routed) == 1
+        assert routed[0]["routed_to_skill"] == "handle_owner_command"
+
+    def test_expense_code_still_falls_through(self, mods, state_env, shift_calls):
+        """The negative control. The old `return None` covered expense AND shift;
+        only the shift half moved. An expense code has no wired apply path, so it
+        must still reach the LLM."""
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_expense_lead(state_env, code="#EXPN3")
+
+        assert hooks_mod.pre_gateway_dispatch(_make_event("#EXPN3 approve", OWNER_JID)) is None
+        transition.assert_not_called()
+        send.assert_not_called()
