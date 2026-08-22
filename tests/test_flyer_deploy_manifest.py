@@ -31,37 +31,71 @@ FLYER = REPO / "src" / "agents" / "flyer"
 SCRIPTS = FLYER / "scripts"
 DEPLOY = REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
 
-# `from flyer_x import y` / `import flyer_x` / `import flyer_x as z`
-_FLAT_IMPORT = re.compile(r"^\s*(?:from|import)\s+(flyer_[A-Za-z0-9_]+)\b", re.MULTILINE)
+# `from x import y` / `import x` / `import x as z`. Deliberately NOT limited to
+# `flyer_*`: a CLI importing any flat module the deploy owns has the same
+# failure mode, and _source_for_flat_module decides what is actually ours.
+_FLAT_IMPORT = re.compile(r"^\s*(?:from|import)\s+([A-Za-z_][A-Za-z0-9_]*)\b", re.MULTILINE)
 
 
-def _source_for_flat_module(flat_name: str) -> Path | None:
-    """Map a deployed flat name (`flyer_ttl_observe`) back to its repo source.
+def _source_for_flat_module(flat_name: str) -> tuple[Path, str] | None:
+    """Map a deployed flat name back to (repo source, installed basename).
 
-    Flyer modules deploy as src/agents/flyer/<mod>.py -> flyer_<mod>.py; a few
-    live in src/platform/ and deploy under their own name.
+    Flyer modules deploy as src/agents/flyer/<mod>.py -> flyer_<mod>.py; some
+    live in src/platform/ and deploy under their own name. Anything resolving to
+    neither is not ours to install (stdlib, third-party, a sibling CLI).
     """
-    stem = flat_name[len("flyer_"):]
-    for candidate in (FLYER / f"{stem}.py", REPO / "src" / "platform" / f"{flat_name}.py"):
+    if flat_name.startswith("flyer_"):
+        candidate = FLYER / f"{flat_name[len('flyer_'):]}.py"
         if candidate.exists():
-            return candidate
+            return candidate, f"{flat_name}.py"
+    candidate = REPO / "src" / "platform" / f"{flat_name}.py"
+    if candidate.exists():
+        return candidate, f"{flat_name}.py"
     return None
+
+
+def _installs(deploy: str, rel: str, installed_basename: str) -> bool:
+    """Does the manifest carry a real install LINE for this source?
+
+    Substring-matching the path is not enough: a comment mentioning the file
+    (`# TODO: someday install src/agents/flyer/ttl_observe.py`) would satisfy
+    that while installing nothing. Match the actual command.
+    """
+    pattern = re.compile(
+        r"^\s*install\b[^\n]*\s"
+        + re.escape(rel)
+        + r"\s+/opt/shift-agent/"
+        + re.escape(installed_basename)
+        + r"\s*$",
+        re.MULTILINE,
+    )
+    return bool(pattern.search(deploy))
+
+
+def _flyer_clis() -> list[Path]:
+    """Every file the deploy's `src/agents/flyer/scripts/*` wildcard installs.
+
+    Not filtered to extensionless files: the wildcard installs whatever is
+    there, so a `foo.py` CLI reaches the box too and must be checked.
+    """
+    return sorted(p for p in SCRIPTS.iterdir() if p.is_file())
 
 
 def test_every_module_a_flyer_cli_imports_is_in_the_deploy_manifest():
     deploy = DEPLOY.read_text(encoding="utf-8", errors="replace")
-    scripts = sorted(p for p in SCRIPTS.iterdir() if p.is_file() and p.suffix == "")
+    scripts = _flyer_clis()
     assert scripts, "no flyer CLIs found -- the glob is wrong, not the tree"
 
     missing: list[str] = []
     for script in scripts:
         body = script.read_text(encoding="utf-8", errors="replace")
         for flat_name in sorted(set(_FLAT_IMPORT.findall(body))):
-            source = _source_for_flat_module(flat_name)
-            if source is None:
+            resolved = _source_for_flat_module(flat_name)
+            if resolved is None:
                 continue  # not one of ours; nothing to install
+            source, installed_basename = resolved
             rel = source.relative_to(REPO).as_posix()
-            if rel not in deploy:
+            if not _installs(deploy, rel, installed_basename):
                 missing.append(f"{script.name} imports {flat_name}, but {rel} has no install line")
 
     assert not missing, (
@@ -77,3 +111,30 @@ def test_flyer_scripts_really_do_ship_by_wildcard():
     file needs rewriting rather than silently passing."""
     deploy = DEPLOY.read_text(encoding="utf-8", errors="replace")
     assert "install -m 755 src/agents/flyer/scripts/*" in deploy
+
+
+def test_a_comment_mentioning_the_path_does_not_satisfy_the_check():
+    """Guards the guard.
+
+    The first version of this test substring-matched the path against the whole
+    script, so appending `# TODO: someday install src/agents/flyer/ttl_observe.py`
+    to a manifest with NO install line made it pass. Reproduce that exact bypass
+    and assert it is now rejected.
+    """
+    real = DEPLOY.read_text(encoding="utf-8", errors="replace")
+    rel = "src/agents/flyer/ttl_observe.py"
+    assert _installs(real, rel, "flyer_ttl_observe.py"), "expected a real install line on this branch"
+
+    commented_only = re.sub(
+        r"^\s*install\b[^\n]*" + re.escape(rel) + r"[^\n]*$",
+        f"        # TODO: someday install {rel}",
+        real,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    assert commented_only != real, "failed to build the comment-only variant"
+    assert rel in commented_only, "the bypass must still mention the path"
+    assert not _installs(commented_only, rel, "flyer_ttl_observe.py"), (
+        "a comment naming the path satisfies the check -- the assertion is a "
+        "substring test again, not a check for the install command"
+    )
