@@ -1,0 +1,324 @@
+#!/root/.hermes/hermes-agent/venv/bin/python
+"""shift-agent-read-preflight — prove the read tools registered, WITHOUT blocking boot.
+
+Runs from hermes-gateway.service ExecStartPre. **Always exits 0.** A failure is
+recorded to the audit chokepoint and alerted to the owner; the gateway starts
+anyway.
+
+WHY THIS EXISTS
+---------------
+`hermes_cli.plugins._load_plugin` swallows every exception raised by a plugin's
+`register()` — it only logs a warning. A plugin that fails to load is therefore
+SILENT. For `shift-agent-policy` that silence is a safety hole, which is why its
+preflight refuses to start the gateway. For `shift-agent-read` the silence costs
+five READ capabilities and nothing else, and the audit of 2026-08-22 found the
+consequence: registration was provable only by reading source, so five tools
+shipped on an inference. The gateway log holds nothing from the gateway process
+at all — no plugin-load line, no tool name, ever — so a plugin that stopped
+registering would be invisible until someone asked why the owner could not get
+an answer.
+
+WHY IT DOES NOT BLOCK THE BOOT (deliberate asymmetry with the policy preflight)
+-------------------------------------------------------------------------------
+`shift-agent-policy` gates a SAFETY control: without screening the gateway
+relays unscreened outbound, so running is worse than not running, and refusing
+to start is correct.
+
+These are read tools. Losing them costs the owner the ability to ask about
+compliance deadlines. Refusing to start the gateway over that would trade a
+capability outage for a TOTAL MESSAGING OUTAGE on a live customer's WhatsApp —
+strictly the worse failure. **Fail-closed is right for authority; fail-loud is
+right for capability.** So: assert, record, alert, and let the gateway run.
+
+WHAT IT PROVES, AND WHAT IT DOES NOT
+------------------------------------
+It proves REGISTRATION: the plugin loaded and its declared tools are in the
+runtime registry under a toolset the WhatsApp platform can actually reach.
+
+It does NOT prove DISCOVERY. Whether a tool surfaces in a live model turn's
+`tool_search` needs real inbound traffic, which no boot-time check can supply.
+That half of the assumption stays open.
+
+CHECKS
+------
+  A. the shift-agent-read plugin is discovered AND enabled
+  B. its manifest declares a NON-EMPTY provides_tools (an empty list would make
+     every check below pass vacuously — the failure mode this guards is a
+     plugin.yaml that silently lost its declarations)
+  C. every declared tool is in the runtime registry, all under ONE toolset, and
+     that toolset contains nothing undeclared. Both directions matter: a tool
+     that fails to register, and a tool registered without being declared, are
+     each a drift between plugin.yaml and reality.
+  D. that toolset is REACHABLE — present in `platform_toolsets.whatsapp` and
+     absent from `agent.disabled_toolsets`. This is the check that matters most
+     on this box: `agent.disabled_toolsets` suppresses by NAME and is applied
+     last, which is why the toolset is called `shift_agent_read` rather than
+     `skills`. A tool registered into a disabled or unreachable toolset is
+     dead on arrival, and no amount of correct registration would show it.
+
+The expected tool list is DERIVED from the manifest Hermes itself parsed, never
+written out here. A hardcoded five would be wrong the day a sixth lands, and
+comparing the registry against a literal in this file would only prove this file
+agrees with itself.
+"""
+import subprocess
+import sys
+import traceback
+from pathlib import Path
+
+HERMES_ROOT = "/usr/local/lib/hermes-agent"
+APP_ROOT = "/opt/shift-agent"
+sys.path.insert(0, HERMES_ROOT)
+
+PLUGIN_NAME = "shift-agent-read"
+CONFIG_PATH = Path(f"{APP_ROOT}/config.yaml")
+HERMES_CONFIG_PATH = Path("/root/.hermes/config.yaml")
+LOG_PATH = Path(f"{APP_ROOT}/logs/decisions.log")
+LOG_LOCK = Path(f"{APP_ROOT}/logs/decisions.log.lock")
+NOTIFY_OWNER = "/usr/local/bin/shift-agent-notify-owner"
+PLATFORM = "whatsapp"
+
+FAILURES: list[tuple[str, str]] = []
+
+
+def fail(code: str, msg: str) -> None:
+    FAILURES.append((code, msg))
+    print(f"WARN    {code}: {msg}", file=sys.stderr)
+
+
+def ok(code: str, msg: str) -> None:
+    print(f"ok      {code}: {msg}")
+
+
+def _record(check: str, detail: str) -> None:
+    """Durable record via the audit chokepoint.
+
+    Not stderr: this process's stderr is appended to a gateway log that nothing
+    reads and no watchdog checks — writing the finding there would reproduce the
+    invisibility this preflight exists to end. `invariant_violation` is an
+    existing tag in the deployed LogEntry union with free-form `check`/`detail`,
+    so this adds no schema surface.
+    """
+    try:
+        if APP_ROOT not in sys.path:
+            sys.path.insert(0, APP_ROOT)
+        from pydantic import TypeAdapter
+        from safe_io import FileLock, ndjson_append, customer_now
+        from schemas import InvariantViolation
+
+        try:
+            import yaml
+            from schemas import Config
+            tz = Config.model_validate(
+                yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+            ).customer.timezone
+            now = customer_now(tz)
+        except Exception:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+
+        entry = InvariantViolation(
+            type="invariant_violation", ts=now,
+            check=check[:120], detail=detail[:500],
+        )
+        with FileLock(LOG_LOCK):
+            ndjson_append(
+                LOG_PATH, TypeAdapter(InvariantViolation).dump_json(entry).decode())
+    except Exception as exc:  # noqa: BLE001 — never let auditing break the boot
+        print(f"WARN    audit write failed: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+
+
+def _alert(message: str) -> None:
+    """Owner alert at the detection site (§12b).
+
+    `parse_mode` is not this script's to set, but the body is kept free of
+    Markdown-significant characters for the same reason the house rule exists:
+    toolset and tool names carry underscores, and an underscore-mangled alert is
+    one the owner does not recognise as an alert.
+    """
+    try:
+        subprocess.run(
+            [NOTIFY_OWNER,
+             "--title", "Shift Agent read tools did not register",
+             "--priority", "1", message],
+            check=False, timeout=30,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _load_yaml(path: Path) -> dict:
+    import yaml
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+# ── pure evaluators ───────────────────────────────────────────────────────
+# Split out from main() so the DECISIONS are testable without a live Hermes,
+# a registry, or a box. Everything below is stdlib-only and side-effect free;
+# main() supplies the runtime facts and owns all the I/O.
+
+def evaluate_tools(declared, toolset_of, tools_in_toolset):
+    """Compare declared tools against the runtime registry.
+
+    ``toolset_of(name)`` -> toolset str or None.
+    ``tools_in_toolset(toolset)`` -> iterable of tool names.
+
+    Returns ``(resolved_toolset_or_None, failures)``. The toolset is resolved
+    only when every declared tool agrees on one; a split is itself a failure and
+    leaves it None, because there is no single answer to carry into check D.
+    """
+    failures = []
+    if not declared:
+        # Guarded by check B too; repeated here so the function is safe alone.
+        return None, [("C", "no declared tools to verify")]
+
+    missing, toolsets = [], {}
+    for name in declared:
+        ts = toolset_of(name)
+        if ts is None:
+            missing.append(name)
+        else:
+            toolsets.setdefault(ts, []).append(name)
+
+    if missing:
+        failures.append((
+            "C", f"declared but NOT registered: {', '.join(sorted(missing))} "
+                 f"(register() raised and hermes swallowed it)"))
+    if len(toolsets) > 1:
+        failures.append((
+            "C", "declared tools are split across toolsets: "
+                 + "; ".join(f"{t}={sorted(n)}" for t, n in sorted(toolsets.items()))))
+        return None, failures
+    if not toolsets:
+        return None, failures
+
+    toolset = next(iter(toolsets))
+    extras = sorted(set(tools_in_toolset(toolset)) - set(declared))
+    if extras:
+        failures.append((
+            "C", f"toolset {toolset} carries UNDECLARED tools: "
+                 f"{', '.join(extras)} (plugin.yaml is out of date)"))
+    return toolset, failures
+
+
+def evaluate_reachability(toolset, disabled, platform_sets, platform=PLATFORM):
+    """Is a registered toolset actually reachable from the platform?
+
+    Registration is not reach. ``agent.disabled_toolsets`` suppresses by NAME
+    and is applied last, and a toolset absent from ``platform_toolsets.<p>`` is
+    never offered to that platform at all. Either way the tools exist and
+    nothing can call them.
+    """
+    if toolset in set(disabled):
+        return [("D", f"toolset {toolset} is in agent.disabled_toolsets - the "
+                      f"tools are registered but suppressed by name")]
+    if toolset not in set(platform_sets):
+        return [("D", f"toolset {toolset} is NOT in platform_toolsets.{platform} "
+                      f"({sorted(platform_sets)}) - the tools are registered but "
+                      f"unreachable from {platform}")]
+    return []
+
+
+def main() -> int:
+    declared: list[str] = []
+    toolset: str | None = None
+
+    # ── A/B. plugin discovered, enabled, and declaring something ──────────
+    try:
+        from hermes_cli.plugins import discover_plugins, get_plugin_manager
+
+        discover_plugins(force=True)
+        mgr = get_plugin_manager()
+
+        loaded = None
+        for key, plug in getattr(mgr, "_plugins", {}).items():
+            if key == PLUGIN_NAME or getattr(plug.manifest, "name", "") == PLUGIN_NAME:
+                loaded = plug
+                break
+
+        if loaded is None:
+            fail("A", f"{PLUGIN_NAME} plugin not discovered (check "
+                      f"/root/.hermes/plugins/{PLUGIN_NAME})")
+        elif not getattr(loaded, "enabled", False):
+            fail("A", f"{PLUGIN_NAME} discovered but NOT enabled: "
+                      f"{getattr(loaded, 'error', 'unknown reason')} "
+                      f"(add it to plugins.enabled in config.yaml)")
+        else:
+            ok("A", f"{PLUGIN_NAME} plugin enabled and loaded")
+            declared = list(getattr(loaded.manifest, "provides_tools", []) or [])
+
+        if loaded is not None and getattr(loaded, "enabled", False):
+            if not declared:
+                fail("B", f"{PLUGIN_NAME} declares no provides_tools in plugin.yaml "
+                          f"- every check below would pass vacuously")
+            else:
+                ok("B", f"manifest declares {len(declared)} tools: "
+                        f"{', '.join(sorted(declared))}")
+    except Exception as exc:  # noqa: BLE001
+        fail("AB", f"{type(exc).__name__}: {exc}")
+        traceback.print_exc()
+
+    # ── C. declared tools are registered, in one toolset, with no extras ──
+    if declared:
+        try:
+            from tools.registry import registry
+
+            toolset, problems = evaluate_tools(
+                declared,
+                registry.get_toolset_for_tool,
+                registry.get_tool_names_for_toolset,
+            )
+            for code, msg in problems:
+                fail(code, msg)
+            if toolset and not problems:
+                ok("C", f"all {len(declared)} declared tools registered under "
+                        f"toolset {toolset}")
+        except Exception as exc:  # noqa: BLE001
+            fail("C", f"{type(exc).__name__}: {exc}")
+            traceback.print_exc()
+
+    # ── D. the toolset is actually reachable from the platform ────────────
+    if toolset:
+        try:
+            hcfg = _load_yaml(HERMES_CONFIG_PATH)
+            problems = evaluate_reachability(
+                toolset,
+                (hcfg.get("agent") or {}).get("disabled_toolsets") or [],
+                (hcfg.get("platform_toolsets") or {}).get(PLATFORM) or [],
+            )
+            for code, msg in problems:
+                fail(code, msg)
+            if not problems:
+                ok("D", f"toolset {toolset} is in platform_toolsets.{PLATFORM} "
+                        f"and not disabled")
+        except Exception as exc:  # noqa: BLE001
+            fail("D", f"{type(exc).__name__}: {exc}")
+
+    # ── report ────────────────────────────────────────────────────────────
+    if FAILURES:
+        summary = "; ".join(f"[{c}] {m}" for c, m in FAILURES)
+        print(f"\n{PLUGIN_NAME} preflight FAILED - the gateway is starting anyway, "
+              f"but these read tools are unavailable:", file=sys.stderr)
+        for code, msg in FAILURES:
+            print(f"  [{code}] {msg}", file=sys.stderr)
+        _record(check=f"{PLUGIN_NAME}-preflight", detail=summary)
+        _alert(
+            "Shift Agent read tools failed their startup check. The agent is "
+            "running and messaging works, but owner read queries "
+            "(compliance, equipment, locations, catering approvals, roster) "
+            "may return nothing. Details are in the decisions log under check "
+            f"{PLUGIN_NAME}-preflight."
+        )
+        # Deliberately 0: see the module docstring. A read-capability outage
+        # must never escalate into a messaging outage.
+        return 0
+
+    print(f"OK: {PLUGIN_NAME} preflight passed "
+          f"({len(declared)} tools registered under {toolset}; "
+          f"registration proven, live discovery still unproven)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
