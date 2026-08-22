@@ -272,13 +272,26 @@ class _Pool:
             return Path(paths[self.name])
         return self.path_fn()
 
-    def lookup(self, code: str, paths: Optional[dict] = None) -> Optional[dict]:
-        """First routing-eligible row whose code equals `code`, or None."""
+    def lookup_all(self, code: str, paths: Optional[dict] = None) -> list:
+        """EVERY routing-eligible row whose code equals `code`.
+
+        The plural is the point. `lookup` returned the first match, which made a
+        duplicate inside one pool silently resolvable to whichever row the
+        iterator happened to yield first — the caller then acted on that row,
+        which for the shift pool means messaging one employee about another
+        employee's absence.
+        """
         doc = _load_json(self._path(paths))
-        for row_code, row in self.resolve_rows_fn(doc):
-            if row_code == code:
-                return row
-        return None
+        return [row for row_code, row in self.resolve_rows_fn(doc) if row_code == code]
+
+    def lookup(self, code: str, paths: Optional[dict] = None) -> Optional[dict]:
+        """First routing-eligible row whose code equals `code`, or None.
+
+        Retained for callers that only ask "is there one"; anything that ACTS on
+        the row must go through `resolve_code`, which refuses a duplicate.
+        """
+        rows = self.lookup_all(code, paths)
+        return rows[0] if rows else None
 
     def live_codes(self, paths: Optional[dict] = None) -> set:
         doc = _load_json(self._path(paths))
@@ -327,6 +340,22 @@ class CollisionResult:
     pools: Tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class IntraPoolCollisionResult(CollisionResult):
+    """A code matched >=2 rows INSIDE one pool.
+
+    Deliberately a SUBCLASS: every existing caller tests
+    `isinstance(resolved, CollisionResult)` and fails closed on it, so the new
+    case inherits the correct behaviour without a single call-site change. A
+    sibling type would have fallen through to the `pool_name, row = resolved`
+    unpacking and raised instead of refusing.
+
+    `pools` holds the ONE pool name, so `len(pools) == 1` is what distinguishes
+    this from a cross-pool collision; `rows` is how many matched.
+    """
+    rows: int = 0
+
+
 # ── Public resolution + enumeration API ──────────────────────────────────────
 def resolve_code(
     code: str, *, paths: Optional[dict] = None
@@ -337,21 +366,50 @@ def resolve_code(
     ``pool_paths_under``); pools absent from it use env/default resolution.
 
     Returns:
-      (pool_name, row)   — exactly one pool matched.
-      CollisionResult    — >=2 pools matched (NEVER first-match-wins on a
-                           collision; the caller must fail closed).
-      None               — no pool matched.
+      (pool_name, row)          — exactly one row, in exactly one pool.
+      CollisionResult           — >=2 POOLS matched.
+      IntraPoolCollisionResult  — >=2 ROWS matched inside ONE pool.
+      None                      — nothing matched.
+
+    Both collision results are fail-closed sentinels and both are instances of
+    `CollisionResult`, so a caller that already refuses on one refuses on the
+    other. The second case is the one this function used to get wrong: it asked
+    each pool for its FIRST match, so two rows sharing a code inside a pool
+    resolved to whichever the iterator yielded first, with no signal that a
+    choice had been made. Cross-pool ambiguity was explicitly never
+    first-match-wins; intra-pool ambiguity silently was.
     """
-    matched: list[Tuple[str, dict]] = []
-    for pool in _POOLS:
-        row = pool.lookup(code, paths)
-        if row is not None:
-            matched.append((pool.name, row))
+    matched = rows_for_code(code, paths=paths)
     if not matched:
         return None
+    pools = tuple(dict.fromkeys(name for name, _ in matched))  # canonical order, unique
+    if len(pools) >= 2:
+        return CollisionResult(code=code, pools=pools)
     if len(matched) >= 2:
-        return CollisionResult(code=code, pools=tuple(name for name, _ in matched))
+        return IntraPoolCollisionResult(code=code, pools=pools, rows=len(matched))
     return matched[0]
+
+
+def rows_for_code(
+    code: str, *, pool: Optional[str] = None, paths: Optional[dict] = None
+) -> list:
+    """Every routing-eligible row matching `code`, as (pool_name, row) pairs.
+
+    Public because callers were hand-rolling it. Two of them did — this module's
+    own `resolve_code` (as first-match-per-pool) and cf-router's shift arm (as a
+    re-implementation of `_shift_rows`' document shape) — and the three pools
+    nobody hand-rolled for had no duplicate check at all. One reader, one shape.
+
+    `pool` narrows to a single pool by name; None scans all of them in canonical
+    order.
+    """
+    out: list = []
+    for candidate in _POOLS:
+        if pool is not None and candidate.name != pool:
+            continue
+        for row in candidate.lookup_all(code, paths):
+            out.append((candidate.name, row))
+    return out
 
 
 def all_live_codes(*, paths: Optional[dict] = None) -> set:
@@ -542,13 +600,40 @@ def record_collision_event(collision: CollisionResult, *, detected_by: str) -> N
     Best-effort throughout: a failure to audit OR notify writes to stderr but
     never raises AND never changes the caller's routing outcome (the caller has
     already failed closed; a dropped alert leaves routing failed-closed)."""
-    try:
-        _emit_collision_audit(collision, detected_by)
-    except Exception as e:  # noqa: BLE001 — audit is best-effort
+    intra_pool = isinstance(collision, IntraPoolCollisionResult)
+    if intra_pool:
+        # NO NDJSON row for this case, deliberately. The only fitting variant is
+        # ApprovalCodeCollisionDetected, whose `pools` field is
+        # `Field(min_length=2, max_length=4)`: a one-pool collision FAILS
+        # validation, and the write happens inside a best-effort try/except, so
+        # forcing it would produce a stderr line and no row — a silent audit
+        # hole. Padding to `[name, name]` would pass validation by asserting
+        # that two pools matched, which is false. Widening the field is a schema
+        # change to a tag the deployed release already reads, which is the
+        # category where an old reader REJECTS the row instead of degrading, so
+        # it does not ride along on a safety fix. Tracked separately; the owner
+        # notification below still fires, and this line is the written record.
+        #
+        # WHERE it lands, because the obvious guess is wrong: this runs inside
+        # the gateway, whose unit sets
+        # StandardError=append:/opt/shift-agent/logs/hermes-gateway.log. It is
+        # NOT in journald, so `journalctl -u hermes-gateway` — which is what
+        # docs/deploy.md, the shift runbook and the health-check script all tell
+        # an operator to run — will not show it. grep the log file.
         sys.stderr.write(
-            f"approval_code_pools: collision audit write failed: "
-            f"{type(e).__name__}: {str(e)[:200]}\n"
+            f"approval_code_pools: intra_pool_collision code={collision.code} "
+            f"pool={collision.pools[0] if collision.pools else '?'} "
+            f"rows={collision.rows} detected_by={detected_by} "
+            f"(no audit row: ApprovalCodeCollisionDetected.pools requires >=2 pools)\n"
         )
+    else:
+        try:
+            _emit_collision_audit(collision, detected_by)
+        except Exception as e:  # noqa: BLE001 — audit is best-effort
+            sys.stderr.write(
+                f"approval_code_pools: collision audit write failed: "
+                f"{type(e).__name__}: {str(e)[:200]}\n"
+            )
 
     try:
         from safe_io import FileLock, notify_owner_with_fallback  # lazy
@@ -560,10 +645,17 @@ def record_collision_event(collision: CollisionResult, *, detected_by: str) -> N
                 return  # already paged for this exact collision state — don't re-notify
             pools = ", ".join(collision.pools)
             title = "Approval-code collision"
-            message = (
-                f"Code {collision.code} matches multiple code pools ({pools}). "
-                f"Refusing to act automatically; please resolve manually."
-            )
+            if intra_pool:
+                message = (
+                    f"Code {collision.code} matches {collision.rows} records inside "
+                    f"the {pools} pool. Refusing to act automatically; please "
+                    f"resolve manually."
+                )
+            else:
+                message = (
+                    f"Code {collision.code} matches multiple code pools ({pools}). "
+                    f"Refusing to act automatically; please resolve manually."
+                )
             notify_owner_with_fallback(
                 title, message, priority=1, source="approval_code_pools",
             )
