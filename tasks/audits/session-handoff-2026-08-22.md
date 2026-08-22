@@ -1,8 +1,16 @@
 # Session handoff — 2026-08-22
 
-**Production SHA: `6a1f128fe2abc9a9edd265b3111ad8eab6b7720f`** — `origin/main` and
-the deployed box are identical. No deploy debt. Gateway, cockpit and bridge
-healthy.
+**Production SHA: `6a1f128fe2abc9a9edd265b3111ad8eab6b7720f`** — the deployed
+artifact carries **every runtime change on `main`**. No deploy debt. Gateway,
+cockpit and bridge healthy.
+
+`main` may sit ahead of that SHA by documentation-only commits — including the
+one that added this file. That is not deploy debt, and it is stated this way on
+purpose: an equality claim between two SHAs stops being true the moment anyone
+merges a Markdown file, which would make this line quietly wrong for a reader
+who has no way to tell why. Deploy debt means **runtime** code on `main` that
+the box is not running; check it with
+`git diff --stat <box-sha>..origin/main -- src/ tools/ web/`.
 
 27 PRs merged (#723-#749), five production deploys, all runtime-verified.
 
