@@ -47,6 +47,7 @@ from schemas import (  # noqa: E402
     BriefAttempted, BriefSent, BriefSendFailed, BriefSkipped,
     CustomerBirthdayStore,
     CateringLearningSummary,
+    CATERING_TRANSITIONS,
 )
 from log_source import get_log_sources  # noqa: E402
 from exit_codes import (  # noqa: E402
@@ -70,6 +71,30 @@ SENTINEL_PATH = Path(os.environ.get("SHIFT_AGENT_BRIEF_SENTINEL_PATH", "/opt/shi
 BRIEF_MISSED_PAGE_PATH = Path(os.environ.get("SHIFT_AGENT_BRIEF_MISSED_PAGE_PATH", "/opt/shift-agent/state/last-brief-missed-page.json"))
 BIRTHDAYS_PATH = Path(os.environ.get("SHIFT_AGENT_BIRTHDAYS_PATH", "/opt/shift-agent/state/customer-birthdays.json"))
 CATERING_LEADS_PATH = Path(os.environ.get("SHIFT_AGENT_CATERING_LEADS_PATH", "/opt/shift-agent/state/catering-leads.json"))
+
+# ── Who is blocking a catering lead ──────────────────────────────────────────
+# DERIVED from the transition table, never written out. A lead is blocked on the
+# OWNER exactly when the owner is the actor who can move it next — i.e. when its
+# allowed-transition set contains one of his three decision outcomes.
+#
+# Written by hand this was wrong twice: the brief counted CUSTOMER_FINALIZED
+# alone (under-reporting the owner's open decisions and printing the rest under a
+# label naming the CUSTOMER as blocker — the 2026-08-22 stuck-leads finding), and
+# a later hand-written pair was still one status short of OWNER_EDITED. Deriving
+# it means a new owner-actionable status joins the brief with no edit here.
+_OWNER_DECISION_OUTCOMES = frozenset({"OWNER_APPROVED", "OWNER_EDITED", "OWNER_REJECTED"})
+OWNER_BLOCKED_CATERING_STATUSES = frozenset(
+    status for status, exits in CATERING_TRANSITIONS.items()
+    if exits & _OWNER_DECISION_OUTCOMES
+)
+# The one status that genuinely waits on the CUSTOMER: we asked an intake question
+# mid-conversation and they never came back (catering_lead_sweep — "QUALIFYING is
+# waiting on the CUSTOMER"). SENT_TO_CUSTOMER also waits on them but is reported on
+# its own line, and it is not an unanswered question.
+CUSTOMER_BLOCKED_CATERING_STATUSES = frozenset({"QUALIFYING"})
+
+# Cap on codes printed inline before the line stops being readable on a phone.
+_MAX_CODES_INLINE = 5
 CATERING_LEARNING_SUMMARY_PATH = Path(os.environ.get(
     "SHIFT_AGENT_CATERING_LEARNING_SUMMARY_PATH",
     "/opt/shift-agent/state/catering-learning-summary.json",
@@ -489,6 +514,48 @@ def _render_catering_learning(now_local: datetime) -> str:
         return "  - Learning summary degraded; check catering-pattern-report.timer"
 
 
+def _lead_age_days(lead: dict, now_local: datetime) -> Optional[int]:
+    """Whole days since the lead was last touched, or None if that is unknowable.
+
+    Prefers ``updated_at`` (last activity) and falls back to ``created_at``, matching
+    the anchor ``catering-lead-ttl-sweep`` uses to decide staleness. Returns None
+    rather than 0 for an unparseable or naive timestamp: a fabricated "0d" on a lead
+    that has actually been waiting for months is precisely the class of untrue
+    reassurance this whole render exists to stop.
+    """
+    for key in ("updated_at", "created_at"):
+        raw = lead.get(key)
+        if not raw:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(raw))
+            if ts.tzinfo is None:  # naive vs aware would raise on subtraction
+                continue
+            return max(0, (now_local - ts).days)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _owner_blocked_detail(owner_blocked: list, now_local: datetime) -> str:
+    """The ``(codes; oldest Nd)`` parenthetical, or "" when neither part is knowable.
+
+    HARD RULES apply here as much as to the caller: codes and a duration only —
+    never a name, a phone number or a total.
+    """
+    codes = [str(l.get("owner_approval_code") or "?") for l in owner_blocked]
+    shown = codes[:_MAX_CODES_INLINE]
+    if len(codes) > _MAX_CODES_INLINE:
+        shown.append(f"+{len(codes) - _MAX_CODES_INLINE} more")
+
+    ages = [d for d in (_lead_age_days(l, now_local) for l in owner_blocked)
+            if d is not None]
+    parts = [", ".join(shown)] if shown else []
+    if ages:
+        parts.append(f"oldest {max(ages)}d")
+    return f" ({'; '.join(parts)})" if parts else ""
+
+
 def _render_catering(now_local: datetime, include_learning: bool = False) -> str:
     """PR-CF1c-A 2026-05-12: catering pipeline summary for the daily brief.
 
@@ -498,6 +565,22 @@ def _render_catering(now_local: datetime, include_learning: bool = False) -> str
       - NEVER include customer names — cosmetic hallucination risk per the
         2026-05-11 customer-name-hallucination finding (recon doc §Bugs)
       - Counts + lead_ids + owner_approval_codes only
+
+    WHO IS BLOCKING WHAT. 2026-08-22: this render told the owner the wrong thing
+    for months. Leads in ``AWAITING_OWNER_APPROVAL`` — "quote drafted; owner needs
+    to approve" — were printed under "Awaiting customer finalize", while "Awaiting
+    your approve" counted ``CUSTOMER_FINALIZED`` alone. Three leads waited on the
+    owner for up to 74 days while his daily brief named the customer as the
+    blocker. The count was right; the attribution was wrong, and a wrong
+    attribution pointed away from the reader is the one shape that reliably
+    produces inaction.
+
+    The owner-blocked set is now DERIVED from the transition table
+    (``OWNER_BLOCKED_CATERING_STATUSES``) rather than enumerated, because
+    enumerating it is what went wrong. The line is labelled "your decision", not
+    "your approve": ``OWNER_EDITED`` is in the set and is awaiting a re-draft
+    rather than an approval, so "approve" would be a smaller version of the same
+    untruth.
 
     Returns an empty string when there are no leads at all (lets the caller
     omit the block cleanly).
@@ -536,22 +619,27 @@ def _render_catering(now_local: datetime, include_learning: bool = False) -> str
         except (ValueError, TypeError):
             continue
 
-    awaiting_finalize = [l for l in leads if l.get("status") == "AWAITING_OWNER_APPROVAL"]
-    finalized = [l for l in leads if l.get("status") == "CUSTOMER_FINALIZED"]
+    owner_blocked = [l for l in leads
+                     if l.get("status") in OWNER_BLOCKED_CATERING_STATUSES]
+    customer_blocked = [l for l in leads
+                        if l.get("status") in CUSTOMER_BLOCKED_CATERING_STATUSES]
     sent_to_customer = [l for l in leads if l.get("status") == "SENT_TO_CUSTOMER"]
 
-    pipeline_total = len(awaiting_finalize) + len(finalized) + len(sent_to_customer)
+    pipeline_total = len(owner_blocked) + len(customer_blocked) + len(sent_to_customer)
 
     lines = ["*Catering pipeline:*"]
     lines.append(f"  • New leads (24h): {new_24h}")
-    lines.append(f"  • Awaiting customer finalize: {len(awaiting_finalize)}")
 
-    if finalized:
-        codes = ", ".join(l.get("owner_approval_code", "?") for l in finalized)
-        lines.append(f"  • Awaiting your approve ({codes}): {len(finalized)}")
+    # The owner's own open decisions, with the #XXXXX codes he replies to and the
+    # age of the oldest. Both matter: without codes he has no token to act on, and
+    # without an age a lead waiting 74 days reads exactly like one from yesterday.
+    if owner_blocked:
+        detail = _owner_blocked_detail(owner_blocked, now_local)
+        lines.append(f"  • Awaiting your decision{detail}: {len(owner_blocked)}")
     else:
-        lines.append(f"  • Awaiting your approve: 0")
+        lines.append("  • Awaiting your decision: 0")
 
+    lines.append(f"  • Awaiting customer reply: {len(customer_blocked)}")
     lines.append(f"  • Quotes sent to customers: {len(sent_to_customer)}")
     lines.append(f"  • Active pipeline total: {pipeline_total}")
     return _append_learning(lines)
