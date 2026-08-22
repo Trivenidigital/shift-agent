@@ -1955,3 +1955,46 @@ def test_blank_is_detected_whatever_the_next_row_looks_like(field, shape):
         REPO_ROOT, changed=["src/platform/safe_io.py"], body="\n".join(lines) + "\n",
     )
     assert "GOV-PR-EMPTY" in out, f"blank {field!r} missed with next row {shape}:\n{out}"
+
+
+# ── 24. the subsystem heuristic must not fire on test files ────────────────
+
+
+def test_a_new_test_file_is_not_a_new_subsystem():
+    """`tests/test_cf_router_candidate_response.py` blocked a PR as "a new
+    router" because the indicators match on NAME. Every future
+    `test_*router*` / `test_*store*` / `test_*approval*` would have too, and the
+    only way past was to assert the file extends a subsystem — which is not
+    true either. A test is neither new nor an extension. Nothing under tests/
+    is installed by the deploy, so a subsystem cannot hide there."""
+    body = reuse_map(**{
+        "Affected projects": "shift-platform",
+        "Applicable directives": "docs/governance/shared-platform-directive.md",
+    })
+    for path in (
+        "tests/test_cf_router_candidate_response.py",
+        "tests/test_flyer_routing_store.py",
+        "tests/test_approvals_scheduler.py",
+    ):
+        code, out = run_checker(REPO_ROOT, changed=[path], added=[path], body=body)
+        assert "GOV-SUBSYSTEM" not in out, f"{path} tripped the subsystem heuristic:\n{out}"
+
+
+def test_the_heuristic_still_fires_on_a_real_added_subsystem():
+    """Guard the guard. Exempting tests must not exempt src/."""
+    body = reuse_map(**{
+        "Affected projects": "shift-platform",
+        "Applicable directives": "docs/governance/shared-platform-directive.md",
+    })
+    path = "src/platform/receipt_store.py"
+    code, out = run_checker(REPO_ROOT, changed=[path], added=[path], body=body)
+    assert "GOV-SUBSYSTEM-UNDECLARED" in out, f"a real added store no longer trips:\n{out}"
+
+
+def test_the_exemption_does_not_cover_a_source_file_merely_named_test():
+    """`_is_test_only_path` is narrow on purpose — a real module whose name
+    contains "test" is still source and must still be judged."""
+    assert not gov._is_test_only_path("src/platform/testing_router.py")
+    assert not gov._is_test_only_path("src/agents/flyer/latest_store.py")
+    assert gov._is_test_only_path("tests/test_cf_router_x.py")
+    assert gov._is_test_only_path("src/agents/shift/tests/test_router.py")
