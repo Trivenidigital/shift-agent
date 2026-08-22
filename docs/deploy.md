@@ -10,7 +10,7 @@
 
 # Send + deploy
 scp shift-agent-deploy.tgz main-vps:/tmp/
-ssh main-vps 'sudo tar xzf /tmp/shift-agent-deploy.tgz -C /opt/shift-agent/staging-new/ && sudo /usr/local/bin/shift-agent-deploy.sh'
+ssh main-vps 'sudo tar xzf /tmp/shift-agent-deploy.tgz -C /opt/shift-agent/staging-new/ && sudo bash /opt/shift-agent/staging-new/src/agents/shift/scripts/shift-agent-deploy.sh'
 ```
 
 That's it. Smoke test runs automatically; auto-rollback fires on smoke-test failure.
@@ -129,7 +129,7 @@ ssh main-vps 'sudo mv /opt/shift-agent/.env /opt/shift-agent/.env.symlink-saved 
               sudo bash -c "echo OPENROUTER_API_KEY=fake > /opt/shift-agent/.env"'
 
 # 2. Run a deploy — MUST fail-closed before install_artifacts
-ssh main-vps 'sudo /usr/local/bin/shift-agent-deploy.sh' ; echo "exit: $?"
+ssh main-vps 'sudo bash /opt/shift-agent/staging-new/src/agents/shift/scripts/shift-agent-deploy.sh' ; echo "exit: $?"
 # Expected: exit 1, error pointing at this section, no service state change
 
 # 3. Restore symlink
@@ -137,7 +137,7 @@ ssh main-vps 'sudo rm /opt/shift-agent/.env && \
               sudo mv /opt/shift-agent/.env.symlink-saved /opt/shift-agent/.env'
 
 # 4. Verify deploy now passes
-ssh main-vps 'sudo /usr/local/bin/shift-agent-deploy.sh'
+ssh main-vps 'sudo bash /opt/shift-agent/staging-new/src/agents/shift/scripts/shift-agent-deploy.sh'
 ```
 
 This is currently a manual procedure; bats infrastructure for automated bash-gate tests is backlogged (per PR #17 Low-5).
@@ -184,7 +184,7 @@ ssh <customer-vps> 'sudo /opt/shift-agent/staging-new/tools/migrate-env-to-symli
 ssh <customer-vps> 'sudo systemctl restart hermes-gateway shift-agent-cockpit'
 
 # Step 4 — only NOW run the deploy. The symlink-integrity gate will pass.
-ssh <customer-vps> 'sudo /usr/local/bin/shift-agent-deploy.sh'
+ssh <customer-vps> 'sudo bash /opt/shift-agent/staging-new/src/agents/shift/scripts/shift-agent-deploy.sh'
 ```
 
 If `check-env-drift.sh` reports drift, reconcile manually (the script prints sha256 hash + length per drifted key so the operator can identify placeholder-vs-real without leaking secrets) then re-run.

@@ -38,7 +38,7 @@
    ```bash
    STATE_MIGRATION_OVERRIDE=skip \
    STATE_MIGRATION_OVERRIDE_REASON="seen-ids.json has unexpected key 'foo' from manual edit; will fix in PR-CF5.1" \
-     /usr/local/bin/shift-agent-deploy.sh
+     bash /opt/shift-agent/staging-new/src/agents/shift/scripts/shift-agent-deploy.sh
    ```
 
 ## Scenario C: Rollback to a pre-CF5 tarball

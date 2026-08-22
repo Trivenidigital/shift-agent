@@ -33,8 +33,21 @@ while IFS= read -r vps; do
 
     # Per-VPS deploy. Tarball already on canary; assume operator has scp'd
     # to each remaining VPS as part of the wider deploy SOP.
-    ssh "$vps" 'cd /opt/shift-agent && /usr/local/bin/shift-agent-deploy.sh' \
-        > "$SMOKE_OUT" 2>&1 || {
+    # Run the deploy script FROM STAGING. The installed /usr/local/bin copy is
+    # written BY a deploy, so it is the PREVIOUS release's logic; a tarball that
+    # changes shift-agent-deploy.sh must not be deployed by the code it replaces.
+    #
+    # `[ -f ]` + `bash`, NOT `[ -x ]`: the script is tracked mode 100644, so a
+    # tarball built on Linux carries no x-bit and `[ -x ]` would silently select
+    # the installed copy — the exact fallback this exists to avoid — while still
+    # exiting 0. Only `install_artifacts` chmods it 755, and only at the
+    # destination. This matches shift-agent-deploy.sh's own `bash "$CLOSURE_CHECK"`
+    # and tasks/DEPLOY_CHECKLIST.md, both of which are already mode-safe.
+    #
+    # `ssh -n` because ssh inherits this loop's stdin, which is the VPS list:
+    # without it the first host's ssh drains the remaining hosts and the loop
+    # exits 0 having deployed exactly one VPS.
+    ssh -n "$vps" 'S=/opt/shift-agent/staging-new/src/agents/shift/scripts/shift-agent-deploy.sh;         [ -f "$S" ] || S=/usr/local/bin/shift-agent-deploy.sh;         cd /opt/shift-agent && bash "$S"'         > "$SMOKE_OUT" 2>&1 || {
         echo "ABORT: $vps deploy failed (see $SMOKE_OUT)" >&2
         cat "$SMOKE_OUT" >&2
         exit 1
