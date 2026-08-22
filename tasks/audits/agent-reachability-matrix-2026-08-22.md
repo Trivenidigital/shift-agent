@@ -714,12 +714,32 @@ should not be read as "one wiring change away".
   whose `register()` iterates all five tool modules, each of which is present in that directory.
   The orchestrator independently confirmed `register()` returns all five against the deployed tree.
 - **STILL NOT PROVEN — live discovery.** That any of the five appears in a real model turn's
-  `tool_search` results remains unverified. The gateway emits no plugin-load lines to journald,
-  and confirming discovery end-to-end needs a live inbound, which a read-only audit cannot do.
-  **This is now the single largest untested assumption in the matrix**: five tools are shipped on
-  the strength of registration alone, and #2 and #1 each gained one today. It does not change any
-  status — #3/#13/#19 are PARTIAL on the data gap regardless, and #1/#2 are not promoted — but it
-  is the first thing a live smoke test should settle.
+  `tool_search` results remains unverified, and confirming it end-to-end needs a live inbound,
+  which a read-only audit cannot do. **This is the single largest untested assumption in the
+  matrix**: five tools ship on the strength of registration alone, and #1 and #2 each gained one
+  today. It changes no status — #3/#13/#19 are PARTIAL on the data gap regardless, and #1/#2 are
+  not promoted — but it is the first thing a live smoke test should settle.
+
+  **↻ Correction to where this was checked.** An earlier revision said "the gateway emits no
+  plugin-load lines to journald". The gateway does not write to journald at all:
+  `hermes-gateway.service` sets `StandardOutput=append:/opt/shift-agent/logs/hermes-gateway.log`
+  and the same for `StandardError`. The search was pointed at the wrong target — the same defect
+  this document records three times elsewhere (§7 portal, §4.2b brief, §4.11 receipt), here in
+  the audit's own method.
+
+  Re-run against the correct file, the conclusion holds and sharpens. That log is **9,844 bytes
+  and contains only `ExecStartPre` preflight output** — `shift-agent-policy`'s, nothing from the
+  gateway process itself. It has zero `tool_search` / `tool_describe` / `tool_call` entries and
+  zero occurrences of any of the five tool names. **That does not prove no tool was ever called.
+  It proves there is no observability at all**: had a tool been searched, described or invoked,
+  nothing anywhere would have recorded it. A weaker claim about usage, a much stronger one about
+  instrumentation — and the one that justifies a fix.
+
+  The asymmetry points at the fix. `shift-agent-policy` proves itself at every boot via
+  `ExecStartPre=/usr/local/bin/shift-agent-policy-preflight` ("screening is live");
+  `shift-agent-read` emits nothing, which is exactly why its registration was only inferrable
+  from source. A sibling preflight would close the half of this assumption that needs no traffic
+  — registration — while leaving discovery still unproven.
 - **Inferred, not verified:** that `catering-followup-sweep.timer` was disabled deliberately.
   `systemctl` shows the vendor preset as `enabled` and the current state as `disabled`, which
   means someone or something disabled it; no record of who or why was found.
