@@ -12,6 +12,7 @@ import ast
 import fnmatch
 import re
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1066,3 +1067,122 @@ def test_the_repaired_files_are_still_both_executed_and_gated(workflow_name, pat
     executed, manifests = _workflow_execution_surface(workflow_name)
     assert path in (executed | manifests), f"{workflow_name} no longer uses {path}"
     assert _trigger_wakes(workflow_name, path), f"{workflow_name} no longer wakes on {path}"
+
+
+# ── and every test must be run by some gate ────────────────────────────────
+#
+# The inverse direction of the rule above, and it does not follow from it: a
+# gate can execute only files its triggers wake on and still leave a test file
+# that no gate executes at all. Both are needed.
+#
+# `tests/e2e/test_catering_conversation_e2e.py` was in that state. send-path-ci
+# and flyer-core-ci both enumerate with `find tests -maxdepth 1`, which cannot
+# reach `tests/e2e/`; the only recursive `pytest tests/` in the repo belongs to
+# hermes-drift-check, whose triggers are `schedule` + `workflow_dispatch`, so it
+# gates no merge. It is the only test file under a `tests/<subdir>/` path today
+# — but `maxdepth 1` is what makes the NEXT one invisible too, which is why this
+# is an invariant and not a line added to a find command.
+#
+# Sweeping for the class turned up a second: the VPS-only operator acceptance
+# gate under tools/. Both are exempt, and both exemptions are about the test
+# rather than about convenience — neither CAN run on a runner, and forcing
+# either into a gate would make things worse, not better. The e2e file would
+# collect and SKIP on every PR, which is the coverage-advertised-but-absent
+# failure `test_every_test_file_named_in_a_workflow_collects_at_least_one_test`
+# already exists to catch; the policy file would ERROR at import and turn a gate
+# permanently red. An exemption here is a written claim, and the two tests below
+# check the claim is still true of the file rather than taking it on trust.
+
+EXECUTION_EXEMPT = {
+    # Env-gated on OPENROUTER_API_KEY and makes REAL, billed model calls against
+    # a live provider. CI does not have the key and should not: running it on
+    # every PR would spend money per push, and adding it to a gate WITHOUT the
+    # key adds a cell that reports `1 skipped` forever. Its deterministic half
+    # (cf-router dispatch, the catering scripts incl. --recompose-from-sent) is
+    # gated — test_catering_recompose.py, test_create_catering_proposal_options.py
+    # and test_catering_pra_reachability.py all ride send-path-ci's glob. What is
+    # genuinely ungated is the LLM-in-the-loop conversation gate, which no CI
+    # arrangement short of a funded API key can cover.
+    "tests/e2e/test_catering_conversation_e2e.py":
+        "makes real billed OpenRouter calls; skips unconditionally without OPENROUTER_API_KEY",
+    # Imports the Hermes runtime from its INSTALLED location on a customer VPS
+    # (/usr/local/lib/hermes-agent). On a runner that path does not exist, so the
+    # module raises ModuleNotFoundError at import — a collection ERROR, not a
+    # skip. It is an operator acceptance gate run on the box during a patch port,
+    # and there is no runner configuration that makes it meaningful.
+    "tools/hermes-patch-port-v0191/test_shift_agent_policy.py":
+        "operator acceptance gate; imports the Hermes runtime installed on a VPS, absent on a runner",
+}
+
+
+def _tracked_test_files() -> list[str]:
+    """Test files as the REPOSITORY defines them, not as the working tree does.
+
+    `git ls-files` rather than a filesystem walk: a scratch file in somebody's
+    worktree is not a coverage gap, and in a repo where several agents share
+    checkouts a walk turns another lane's temp file into everyone's red test.
+    """
+    result = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=REPO_ROOT, capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise UnparseableCIConstruct(f"`git ls-files` failed: {result.stderr.strip()}")
+    return sorted(
+        path for path in result.stdout.split("\0")
+        if path.endswith(".py") and path.rsplit("/", 1)[-1].startswith("test_")
+    )
+
+
+def _executed_by_any_gate() -> set[str]:
+    executed: set[str] = set()
+    for workflow_name in GATE_WORKFLOWS:
+        executed |= _workflow_execution_surface(workflow_name)[0]
+    return executed
+
+
+def test_every_test_file_is_executed_by_some_gate():
+    """A test file no pull_request-or-push workflow runs is a test that cannot
+    fail a merge. It still reads as coverage from the file listing."""
+    ungated = sorted(set(_tracked_test_files()) - _executed_by_any_gate() - set(EXECUTION_EXEMPT))
+    assert not ungated, (
+        "these test files are executed by no merge gate, so a regression they would "
+        f"catch merges green: {ungated}. Add them to the workflow that owns their "
+        "subsystem, or add an EXECUTION_EXEMPT entry saying what about the TEST "
+        "makes it unrunnable in CI."
+    )
+
+
+def test_every_execution_exemption_names_a_real_file():
+    """An exemption for a deleted file is a stale claim that hides the next file
+    to take its path."""
+    for path in EXECUTION_EXEMPT:
+        assert (REPO_ROOT / path).is_file(), f"exempt but missing: {path}"
+
+
+def test_no_execution_exemption_is_stale():
+    """Once a gate does run the file, the exemption is a lie about the repo —
+    and worse, it would suppress the invariant if the gate later dropped it."""
+    executed = _executed_by_any_gate()
+    claimed = sorted(path for path in EXECUTION_EXEMPT if path in executed)
+    assert not claimed, (
+        f"these files are exempted from execution but a gate runs them: {claimed}. "
+        "Delete the exemption — it now hides a real regression."
+    )
+
+
+def test_the_exempted_files_still_carry_the_property_they_are_exempted_for():
+    """The reason is checked, not trusted. If the env gate is removed the e2e
+    test becomes runnable and belongs in a workflow, not on this list; if the
+    policy gate stops reaching for the on-box Hermes install, likewise."""
+    e2e = (REPO_ROOT / "tests/e2e/test_catering_conversation_e2e.py").read_text(encoding="utf-8")
+    assert "OPENROUTER_API_KEY" in e2e and "skipif" in e2e, (
+        "the catering E2E no longer skips on a missing OPENROUTER_API_KEY — if it can "
+        "run without billed model calls it should be gated, not exempted."
+    )
+    policy = (REPO_ROOT / "tools/hermes-patch-port-v0191/test_shift_agent_policy.py").read_text(
+        encoding="utf-8"
+    )
+    assert "/usr/local/lib/hermes-agent" in policy, (
+        "the policy acceptance gate no longer imports the on-box Hermes install — if it "
+        "can import on a runner it should be gated, not exempted."
+    )
