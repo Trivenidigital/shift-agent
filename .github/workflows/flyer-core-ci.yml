@@ -38,6 +38,9 @@ on:
       - "src/platform/schemas.py"
       - "tests/test_flyer*.py"
       - "tests/_flyer_replay_helpers.py"
+      # The shard lists ARE the test selection: moving a file between them
+      # changes which job runs it, and deleting a line un-gates it silently.
+      - ".github/flyer-shards/**"
       - ".github/workflows/flyer-core-ci.yml"
   push:
     branches: [main]
@@ -50,10 +53,19 @@ on:
       - "src/platform/schemas.py"
       - "tests/test_flyer*.py"
       - "tests/_flyer_replay_helpers.py"
+      # The shard lists ARE the test selection: moving a file between them
+      # changes which job runs it, and deleting a line un-gates it silently.
+      - ".github/flyer-shards/**"
       - ".github/workflows/flyer-core-ci.yml"
 
 concurrency:
-  group: flyer-core-ci-${{ github.ref }}
+  # `github.ref` is refs/heads/main for EVERY commit, so keying on it alone
+  # made each merge cancel the gate still running for the merge before it —
+  # 14 of send-path-ci's last 100 main-push runs ended `cancelled` that way,
+  # leaving those SHAs with no completed result for a deploy or a bisect to
+  # read. On push the group is the commit; on a pull_request it stays the
+  # ref, so a superseded PR run is still cancelled.
+  group: flyer-core-ci-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 permissions:
