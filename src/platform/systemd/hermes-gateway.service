@@ -22,6 +22,24 @@ EnvironmentFile=/opt/shift-agent/.env
 # /root/.hermes because stale operator backup files can block gateway startup.
 ExecStartPre=+/usr/local/bin/shift-agent-hermes-permissions
 
+# Read-tool registration check. Runs as the service user (no "+"), after the
+# permissions guard, so it sees exactly what the gateway will see.
+#
+# The leading "-" is load-bearing: it tells systemd to IGNORE this unit's exit
+# status entirely. The script already always exits 0, and the dash makes the
+# non-blocking property structural rather than a promise the script keeps — an
+# unhandled traceback still cannot stop the gateway.
+#
+# Deliberately NOT fail-closed, unlike the shift-agent-policy preflight in
+# 30-shift-agent-policy-preflight.conf. That one gates a safety control:
+# without screening the gateway relays unscreened outbound, so refusing to
+# start is correct. These are READ tools — losing them costs owner queries and
+# nothing else, and taking a live customer's WhatsApp down to protect a read
+# tool would trade a capability outage for a messaging outage. Fail-closed for
+# authority, fail-loud for capability: this one records to decisions.log and
+# alerts the owner, then gets out of the way.
+ExecStartPre=-/usr/local/bin/shift-agent-read-preflight
+
 ExecStart=/root/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main gateway run --replace
 Restart=on-failure
 RestartSec=30
