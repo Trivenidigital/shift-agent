@@ -20,9 +20,10 @@
 # otherwise be deployed by the code it replaces (the 2026-08-14 failed-safe
 # rollback).
 #
-# `bash` is load-bearing: the script is tracked mode 100644, so a tarball built
-# on Linux carries no x-bit and executing it directly fails 'Permission denied'.
-# Only install_artifacts chmods it 755, and only at the destination.
+# The script is tracked 100755 BECAUSE it re-execs itself as `"$0" rollback`
+# on every gate-failure path; a non-executable copy breaks auto-rollback on a
+# deploy that already failed. `bash` here is defence-in-depth for the entrypoint
+# only -- it does NOT cover that re-exec, so the mode is the real invariant.
 # tasks/DEPLOY_CHECKLIST.md is already mode-safe this way, and also sets the
 # HERMES_PIN_OVERRIDE that main-vps requires.
 
@@ -108,6 +109,7 @@ echo "  ssh main-vps 'sudo tar xzf /tmp/shift-agent-deploy.tgz -C /opt/shift-age
 echo "     && sudo bash /opt/shift-agent/staging-new/src/agents/shift/scripts/shift-agent-deploy.sh'"
 echo ""
 echo "  FROM STAGING via bash, not /usr/local/bin: the installed copy is the"
-echo "  PREVIOUS release deploy logic, and the script is tracked mode 644 so it"
-echo "  is not directly executable out of a Linux-built tarball."
+echo "  PREVIOUS release deploy logic. The script is tracked 100755 because it"
+echo "  re-execs itself by path on rollback; bash is defence-in-depth for the"
+echo "  entrypoint and does not cover that re-exec."
 echo "  main-vps also requires HERMES_PIN_OVERRIDE - see tasks/DEPLOY_CHECKLIST.md."
