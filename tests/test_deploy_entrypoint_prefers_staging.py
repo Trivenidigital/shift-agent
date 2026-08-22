@@ -1,21 +1,38 @@
-"""The deploy entrypoint an operator is told to run must come from STAGING.
+"""A bare deploy invocation must run the STAGING copy, via `bash`.
 
 `/usr/local/bin/shift-agent-deploy.sh` is written BY a deploy, so it is always
 the PREVIOUS release's logic. When a tarball changes `shift-agent-deploy.sh`
-itself, running the installed copy deploys the new tree with the old deploy
-logic — the trap behind the 2026-08-14 failed-safe rollback.
+itself, running the installed copy deploys the new tree with the code it was
+meant to replace - the trap behind the 2026-08-14 failed-safe rollback.
 
-`shift-agent-deploy.sh` already applies this rule to its own pre-restart gates
-("prefer the staging source copy so the FIRST deploy that introduces the gate
-still runs it; fall back to the installed copy only for rollback-tarball
-compatibility"). The operator-facing entrypoints did not, in four places at
-once — a printed hint, a source comment, a generated runbook line, and one
-script that actually executed it. This pins the whole class rather than the
-one instance that was reported.
+Two things this file learned from review, both the hard way:
+
+1. `bash "$S"`, never `[ -x "$S" ]`. The deploy script is tracked mode 100644.
+   A tarball built on Linux carries no x-bit, so an `[ -x ]` probe silently
+   selects the installed copy - the exact fallback the rule exists to prevent -
+   and still exits 0. Only `install_artifacts` chmods it 755, and only at the
+   destination. The first version looked correct purely because MSYS on the
+   Windows dev box synthesises an x-bit from the shebang, so the bug was
+   invisible from the machine that wrote it. `tasks/DEPLOY_CHECKLIST.md` and
+   the deploy script's own `bash "$CLOSURE_CHECK"` were already mode-safe.
+
+2. Assert on the LIVE INVOCATION, not on string presence. The first version
+   scanned whole files for the staging path and for fallback-ish words near any
+   installed-path mention. Two mutations passed it: demoting the staging path to
+   a comment while restoring the bare installed invocation, and replacing the
+   justification with unrelated prose containing the word "rollback" - a word
+   that appears throughout deploy tooling. It pinned documentation, not
+   behaviour.
+
+`list` and `rollback <tag>` are deliberately out of scope: they administer an
+existing install, and using the installed copy for them is correct.
 """
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -24,52 +41,147 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALLED = "/usr/local/bin/shift-agent-deploy.sh"
 STAGING = "/opt/shift-agent/staging-new/src/agents/shift/scripts/shift-agent-deploy.sh"
 
-# Files that tell a human, or a script, how to invoke the deploy entrypoint.
-ENTRYPOINT_SOURCES = (
-    "tools/build-deploy-tarball.sh",
-    "tools/canary-bulk-deploy.sh",
-    "tools/hermes-fleet-upgrade.py",
-)
+# Derived, not hardcoded. A hardcoded tuple is how docs/deploy.md - the
+# highest-traffic stale hint in the repo - stayed out of scope the first time.
+SEARCH_ROOTS = ("tools", "docs", "tasks", ".github")
+
+# Historical records, deliberately exempt. These describe what someone DID,
+# often the very incident that motivated this rule; rewriting them to say the
+# right thing would falsify the record. The test governs INSTRUCTIONS, not
+# history. Anything not matched here is in scope, so a new operational doc is
+# covered the day it lands.
+HISTORICAL_PREFIXES = ("tasks/audits/", "docs/reviews/", "docs/superpowers/")
+HISTORICAL_MARKERS = ("-plan", "-report", "runbook-state-migration")
 
 
-def _text(rel: str) -> str:
-    return (REPO_ROOT / rel).read_text(encoding="utf-8")
+def _is_historical(rel: str) -> bool:
+    return (rel.startswith(HISTORICAL_PREFIXES)
+            or any(m in rel for m in HISTORICAL_MARKERS))
+
+SUBCOMMAND = re.compile(r"shift-agent-deploy\.sh[`'\"]?\s+(list|rollback)\b")
 
 
-@pytest.mark.parametrize("rel", ENTRYPOINT_SOURCES)
-def test_entrypoint_source_names_the_staging_path(rel):
-    assert STAGING in _text(rel), (
-        f"{rel} does not name the staging deploy entrypoint. An operator following "
-        "it would run the previous release's deploy logic against the new tree."
-    )
+def _candidate_files() -> list[Path]:
+    listed = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", *SEARCH_ROOTS],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    hits = []
+    for rel in listed:
+        path = REPO_ROOT / rel
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if INSTALLED in text and not _is_historical(rel):
+            hits.append(path)
+    return hits
 
 
-@pytest.mark.parametrize("rel", ENTRYPOINT_SOURCES)
-def test_installed_path_is_never_named_without_the_staging_path(rel):
-    """The installed path may appear ONLY as a documented fallback, and only in a
-    file that has already named the staging path. A bare mention is the defect."""
-    text = _text(rel)
-    if INSTALLED not in text:
-        return
-    assert STAGING in text, (
-        f"{rel} names {INSTALLED} but never {STAGING} — that is the bare stale hint"
-    )
-    for lineno, line in enumerate(text.splitlines(), 1):
+def _bare_invocation_lines(path: Path) -> list[tuple[int, str]]:
+    """Lines that INVOKE the installed entrypoint with no subcommand."""
+    bad = []
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if INSTALLED not in line:
             continue
-        context = "\n".join(text.splitlines()[max(0, lineno - 8):lineno + 2])
-        assert re.search(r"fallback|previous release|rollback|\[ -x", context, re.I), (
-            f"{rel}:{lineno} names the installed deploy script with no fallback/"
-            f"previous-release framing nearby:\n  {line.strip()}"
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        if SUBCOMMAND.search(line):
+            continue
+        if re.search(r"\|\|\s*S=", line) or stripped.startswith("S="):
+            continue
+        bad.append((n, line.strip()))
+    return bad
+
+
+def test_no_tracked_file_invokes_the_installed_entrypoint_bare():
+    offenders = []
+    for path in _candidate_files():
+        for n, line in _bare_invocation_lines(path):
+            offenders.append(f"{path.relative_to(REPO_ROOT).as_posix()}:{n}: {line}")
+    assert not offenders, (
+        "these invoke the PREVIOUS release's deploy logic on a new tree:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_deploy_script_is_not_executable_in_git():
+    """The premise of the `bash` prefix, pinned rather than assumed."""
+    mode = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-s",
+         "src/agents/shift/scripts/shift-agent-deploy.sh"],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()[0]
+    assert mode == "100644", (
+        f"tracked mode is {mode}; if the script became executable, revisit whether "
+        "the bash prefix and the -f probe are still required"
+    )
+
+
+def test_fleet_script_probes_with_f_not_x():
+    body = (REPO_ROOT / "tools/canary-bulk-deploy.sh").read_text(encoding="utf-8")
+    assert '[ -f "$S" ]' in body, "must probe with -f; -x is false for a 644 tarball"
+    assert '[ -x "$S" ]' not in body, "still probes with -x"
+    assert 'bash "$S"' in body, "must invoke via bash, not execute directly"
+
+
+def test_fleet_script_does_not_let_ssh_eat_the_host_list():
+    """ssh inherits the loop's stdin, which IS the VPS list. Without -n the
+    first host drains the rest and the loop exits 0 having deployed one VPS."""
+    body = (REPO_ROOT / "tools/canary-bulk-deploy.sh").read_text(encoding="utf-8")
+    for n, line in enumerate(body.splitlines(), 1):
+        s = line.strip()
+        if not s.startswith("ssh ") or s.startswith("#"):
+            continue
+        assert " -n " in line or "</dev/null" in line, (
+            f"canary-bulk-deploy.sh:{n} runs ssh inside the host-list loop without "
+            f"-n; it consumes the remaining hosts:\n  {s}"
         )
 
 
-def test_the_deploy_script_still_documents_the_prefer_staging_rule():
-    """Guard the justification, not just the strings. If the deploy script stops
-    preferring staging for its own gates, the rule above needs re-deciding rather
-    than silently continuing to be enforced on the operator entrypoints."""
-    body = _text("src/agents/shift/scripts/shift-agent-deploy.sh")
-    assert "Prefer the staging source copy" in body, (
-        "shift-agent-deploy.sh no longer documents its prefer-staging rule; the "
-        "operator-entrypoint invariant above was derived from it"
+# POSIX-only: on Windows `bash` resolves to WSL, which cannot execute the
+# Windows tmp paths this builds. The assertion is about real deploy hosts,
+# which are Linux, and CI runs there.
+linux_only = pytest.mark.skipif(os.name != "posix", reason="POSIX-only: needs a native bash")
+
+
+@linux_only
+def test_the_fleet_payload_actually_selects_staging_for_a_mode_644_copy(tmp_path):
+    """Execute the real payload against a 644 staging file - the shape a
+    Linux-built tarball produces. No string assertion can catch this."""
+    body = (REPO_ROOT / "tools/canary-bulk-deploy.sh").read_text(encoding="utf-8")
+    m = re.search(r"ssh -n \"\$vps\" '(.*?)'\s", body, re.S)
+    assert m, "could not extract the ssh payload - shape changed"
+    payload = textwrap.dedent(m.group(1))
+
+    staging = tmp_path / "staging" / "shift-agent-deploy.sh"
+    staging.parent.mkdir(parents=True)
+    staging.write_text("#!/usr/bin/env bash\necho RAN=STAGING\n", encoding="utf-8")
+    staging.chmod(0o644)                       # exactly what git archive yields
+    installed = tmp_path / "installed.sh"
+    installed.write_text("#!/usr/bin/env bash\necho RAN=INSTALLED\n", encoding="utf-8")
+    installed.chmod(0o755)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+
+    def posix(p):
+        return str(p).replace("\\", "/")
+
+    script = (payload
+              .replace(STAGING, posix(staging))
+              .replace(INSTALLED, posix(installed))
+              .replace("cd /opt/shift-agent", "cd " + posix(workdir)))
+
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert "RAN=STAGING" in r.stdout, (
+        "payload did not run the staging copy for a mode-644 file - this is the "
+        f"silent-fallback regression.\nstdout={r.stdout!r} stderr={r.stderr!r}"
+    )
+
+    # Positive control: with staging absent it MUST fall back, not fail.
+    staging.unlink()
+    r2 = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert "RAN=INSTALLED" in r2.stdout, (
+        f"fallback broken when staging is absent: {r2.stdout!r} {r2.stderr!r}"
     )
