@@ -1121,12 +1121,34 @@ def _tracked_test_files() -> list[str]:
     `git ls-files` rather than a filesystem walk: a scratch file in somebody's
     worktree is not a coverage gap, and in a repo where several agents share
     checkouts a walk turns another lane's temp file into everyone's red test.
+
+    Checking the return code is not enough to describe how this fails. When
+    `git` is not on PATH at all, `subprocess.run` raises OSError BEFORE there is
+    a return code to inspect, and the bare FileNotFoundError that escapes names
+    the wrong thing: the traceback points at subprocess.py and says only "No
+    such file or directory", which reads as a missing TEST FILE in a test whose
+    whole subject is missing test files. CI runners always have git, so this
+    never fires there — it fires in the containerised Linux harness the agents
+    use to get a trustworthy result for POSIX-only suites, which is precisely
+    where a tool that misreports its own failure costs the most. One lane spent
+    a run establishing that the failure was not theirs.
     """
-    result = subprocess.run(
-        ["git", "ls-files", "-z"], cwd=REPO_ROOT, capture_output=True, text=True
-    )
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z"], cwd=REPO_ROOT, capture_output=True, text=True
+        )
+    except OSError as exc:
+        raise UnparseableCIConstruct(
+            f"cannot run `git ls-files` ({type(exc).__name__}: {exc}). This invariant "
+            "enumerates test files from the git index, so it needs `git` on PATH and "
+            f"{REPO_ROOT} to be a repository. Nothing is wrong with the test files "
+            "themselves; install git in this environment or run the suite where git "
+            "resolves."
+        ) from exc
     if result.returncode != 0:
-        raise UnparseableCIConstruct(f"`git ls-files` failed: {result.stderr.strip()}")
+        raise UnparseableCIConstruct(
+            f"`git ls-files` exited {result.returncode}: {result.stderr.strip()}"
+        )
     return sorted(
         path for path in result.stdout.split("\0")
         if path.endswith(".py") and path.rsplit("/", 1)[-1].startswith("test_")
@@ -1185,6 +1207,49 @@ def test_the_exempted_files_still_carry_the_property_they_are_exempted_for():
     assert "/usr/local/lib/hermes-agent" in policy, (
         "the policy acceptance gate no longer imports the on-box Hermes install — if it "
         "can import on a runner it should be gated, not exempted."
+    )
+
+
+def test_a_missing_git_is_reported_as_a_missing_git(monkeypatch):
+    """The enumeration shells out, so it has two failure modes, not one, and the
+    second is invisible to a return-code check: no `git` on PATH raises OSError
+    before a return code exists. Both must name git rather than surfacing as a
+    bare FileNotFoundError inside a test about missing test files."""
+    def _no_git(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(subprocess, "run", _no_git)
+    with pytest.raises(UnparseableCIConstruct) as excinfo:
+        _tracked_test_files()
+    assert "git" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, OSError), "the original error is dropped"
+
+
+def test_a_failing_git_is_reported_with_its_exit_code(monkeypatch):
+    def _broken_git(*args, **kwargs):
+        return subprocess.CompletedProcess(args, 128, "", "fatal: not a git repository")
+
+    monkeypatch.setattr(subprocess, "run", _broken_git)
+    with pytest.raises(UnparseableCIConstruct) as excinfo:
+        _tracked_test_files()
+    assert "128" in str(excinfo.value)
+    assert "not a git repository" in str(excinfo.value)
+
+
+def test_the_enumeration_is_the_only_shell_out_in_this_file():
+    """Guard the guard, and answer the question this fix raises: does any other
+    helper here have the same shell-out-and-check-rc-only shape? Today exactly
+    one does, and it is the one above. A second one added later inherits the
+    same OSError blind spot silently, so make it announce itself."""
+    source = Path(__file__).read_text(encoding="utf-8")
+    call_sites = re.findall(r"subprocess\.(run|call|check_output|check_call|Popen)\(", source)
+    # Two: the real one in _tracked_test_files, and the CompletedProcess
+    # construction above is not a call site, so only monkeypatched stand-ins add
+    # to this count — neither of which shells out.
+    assert call_sites == ["run"], (
+        f"new subprocess call site(s) in this file: {call_sites}. If one shells out to "
+        "a tool that may be absent, wrap it in try/except OSError and raise "
+        "UnparseableCIConstruct — a bare OSError here reads as a missing test file."
     )
 
 
