@@ -26,6 +26,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
@@ -290,15 +291,67 @@ _SHIFT_BARE_CODE_RESIDUE = re.compile(r"^[\s.,!:;\-–—*_\"'()\[\]]*$")
 _SHIFT_APPROVABLE_STATUS = "awaiting_owner_approval"
 
 
-def _is_bare_shift_code(text: str, code: str) -> bool:
-    """True when the owner replied with the code and nothing that changes it.
+def _is_unqualified_shift_consent(text: str, code: str) -> bool:
+    """True when the owner said yes to THIS proposal and nothing else.
 
-    The card asks for exactly this, so it has to work; but "what about #ABCDE?"
-    must NOT reach staff, which is why the residue is checked instead of simply
-    treating any non-refusal as consent.
+    Strips the code, then strips the approval verbs, then requires that nothing
+    of substance is left. `#ABCDE`, `#ABCDE approve`, `approve #ABCDE` and
+    `yes #ABCDE` all reduce to nothing and are consent.
+
+    The verb strip is the load-bearing half, and an earlier revision got it
+    wrong by testing `has_approve OR bare-code`, which let any message
+    containing an approval word skip the residue check entirely. That approved
+    AND SENT on `"#ABCDE yes but ask someone else"`, `"yes #ABCDE tomorrow
+    instead"` and `"ok #ABCDE but only if she agrees"` — a coverage ask to the
+    ORIGINAL candidate about the ORIGINAL date, which is the opposite of what
+    the owner asked for in each case. It was also self-inconsistent: `"#ABCDE
+    change the candidate"` was already refused by the edit verb.
+
+    A half-agreement is not an agreement. Anything left over after the code and
+    the verb are removed means the owner said something this branch cannot act
+    on, and the only safe reading of that is to not send.
     """
     residue = re.sub(re.escape(code), "", text, flags=re.IGNORECASE)
+    residue = _VERB_APPROVE.sub("", residue)
     return bool(_SHIFT_BARE_CODE_RESIDUE.match(residue))
+
+
+def _count_shift_proposals_with_code(code: str) -> int:
+    """How many proposals in pending.json carry `code`.
+
+    `resolve_code` fails closed on a CROSS-pool collision, but within one pool
+    `_Pool.lookup` returns the FIRST matching row and `_shift_rows` applies no
+    status filter. Two proposals sharing a code therefore resolve silently to
+    one of them, and this branch would send a coverage ask about the wrong
+    absence to the wrong employee. Codes are minted under the shared lock
+    against `all_live_codes`, so this is unlikely — but the registry documents
+    generators outside the lock as best-effort, and it is THIS branch that
+    turns the duplicate into an outbound.
+
+    `apply-catering-owner-decision` already refuses the same way ("BUG: N
+    active leads share code; refusing"); this mirrors it at the one seam where
+    the shift equivalent can act.
+
+    Row shape deliberately mirrors `approval_code_pools._shift_rows` — the
+    pool's own reader — rather than pending.json directly: `.proposals` is a
+    dict[proposal_id, Proposal] and the pool iterates its values(). Returns 0
+    on an unreadable or unexpected document, and the caller refuses on any
+    count that is not exactly 1, so every one of those paths fails closed.
+    """
+    try:
+        path = approval_code_pools.pool_paths_under(actions.LEADS_PATH.parent)[
+            approval_code_pools.POOL_SHIFT
+        ]
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    if not isinstance(doc, dict):
+        return 0
+    proposals = doc.get("proposals", {})
+    rows = proposals.values() if isinstance(proposals, dict) else proposals
+    if not isinstance(rows, (list, tuple)) and not hasattr(rows, "__iter__"):
+        return 0
+    return sum(1 for p in rows if isinstance(p, dict) and p.get("code") == code)
 
 # Sick-call regex set (employee path — F9 replacement). Mirrors the six
 # absence-specific patterns from the old notifier. Broad courtesy/address
@@ -1390,7 +1443,7 @@ def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional
     if pool_name == approval_code_pools.POOL_SHIFT:
         return _handle_shift_coverage_code(
             row=row, code=code, chat_id=chat_id, text=text,
-            message_id=message_id, has_approve=has_approve, has_edit=has_edit,
+            message_id=message_id, has_edit=has_edit,
         )
 
     # Expense codes are not F8's responsibility (owner self-chat handles menu,
@@ -7488,7 +7541,7 @@ def _build_skip_or_passthrough(*, rc: int, chat_id: str, code: str,
 
 def _handle_shift_coverage_code(
     *, row: dict, code: str, chat_id: str, text: str, message_id: str,
-    has_approve: bool, has_edit: bool,
+    has_edit: bool,
 ) -> Optional[dict]:
     """Apply an owner answer to a Shift coverage proposal, deterministically.
 
@@ -7505,9 +7558,10 @@ def _handle_shift_coverage_code(
     writes pending.json, never resolves a phone number, and never composes the
     outbound body.
 
-    Fail-closed in four places: an unaddressable row, an ambiguous message, a
-    proposal that is not `awaiting_owner_approval`, and a transition the kernel
-    refuses. None of them send anything.
+    Fail-closed in six places: an unaddressable row, a message that is not
+    unqualified consent, a code naming anything other than exactly one
+    proposal, a proposal that is not `awaiting_owner_approval`, and a
+    transition the kernel refuses. None of them send anything.
     """
     if has_edit:
         # Nothing here is editable — the candidate and the body were fixed when
@@ -7530,12 +7584,19 @@ def _handle_shift_coverage_code(
         target, cause = "cancelled", "owner_cancel"
     elif _SHIFT_VERB_DENY.search(text):
         target, cause = "denied_by_owner", "owner_deny"
-    elif has_approve or _is_bare_shift_code(text, code):
+    elif _is_unqualified_shift_consent(text, code):
         target, cause = "approved", "owner_code_match"
     else:
         # A code wrapped in words that are neither consent nor refusal. The card
         # asks for a bare code or DENY; anything else is ambiguous, and an
         # ambiguous owner message must not put a shift ask in front of staff.
+        return None
+
+    matches = _count_shift_proposals_with_code(code)
+    if matches != 1:
+        # Ambiguous or unreadable. Acting would pick whichever row the pool
+        # happened to return first and message that candidate about that
+        # absence — a real employee, about the wrong shift.
         return None
 
     if row.get("status") != _SHIFT_APPROVABLE_STATUS:

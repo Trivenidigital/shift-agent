@@ -4207,3 +4207,138 @@ class TestF8ShiftCoverageApprove:
         assert hooks_mod.pre_gateway_dispatch(_make_event("#EXPN3 approve", OWNER_JID)) is None
         transition.assert_not_called()
         send.assert_not_called()
+
+
+class TestF8ShiftQualifiedConsent:
+    """C1: an approval verb must not buy a bypass of the residue check.
+
+    Every phrasing below contains a word from _VERB_APPROVE and ALSO asks for
+    something this branch cannot do. The first revision read the verb and sent a
+    coverage ask to the original candidate about the original date — the exact
+    opposite of what the owner asked for, to a real employee. Half-agreement is
+    not agreement.
+    """
+
+    @pytest.mark.parametrize("text", [
+        "#SHFT2 yes but ask someone else",
+        "yes #SHFT2 tomorrow instead",
+        "ok #SHFT2 but only if she agrees",
+        "go #SHFT2 next week",
+        "#SHFT2 approve but move it to Friday",
+        "send #SHFT2 to a different person",
+    ])
+    def test_qualified_consent_never_sends(self, mods, state_env, shift_calls, text):
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+
+        assert hooks_mod.pre_gateway_dispatch(_make_event(text, OWNER_JID)) is None
+        transition.assert_not_called()
+        send.assert_not_called()
+
+    @pytest.mark.parametrize("text", [
+        "#SHFT2",
+        "#SHFT2 approve",
+        "approve #SHFT2",
+        "yes #SHFT2",
+        "#SHFT2 yes",
+        "ok #SHFT2",
+    ])
+    def test_unqualified_consent_still_approves(self, mods, state_env, shift_calls, text):
+        """The other half of C1: tightening consent must not break the gesture
+        the owner card actually asks for."""
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+
+        result = hooks_mod.pre_gateway_dispatch(_make_event(text, OWNER_JID))
+
+        assert result is not None and result["action"] == "skip"
+        assert transition.call_args.args[:2] == ("P0042", "approved")
+        send.assert_called_once_with("P0042")
+
+    def test_the_refusal_is_consistent_with_the_edit_verb(self, mods, state_env, shift_calls):
+        """`#SHFT2 change the candidate` was always refused. `#SHFT2 yes but ask
+        someone else` says the same thing and must be refused the same way —
+        the inconsistency was the tell that the consent path had a hole."""
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+
+        for text in ("#SHFT2 change the candidate", "#SHFT2 yes but ask someone else"):
+            assert hooks_mod.pre_gateway_dispatch(_make_event(text, OWNER_JID)) is None
+        transition.assert_not_called()
+        send.assert_not_called()
+
+
+class TestF8ShiftDuplicateCode:
+    """C2: `resolve_code` fails closed across pools but not within one."""
+
+    def _seed_two_sharing_a_code(self, state_env, code="#SHFT2"):
+        def prop(pid, candidate, date):
+            return {
+                "proposal_id": pid, "code": code, "status": "awaiting_owner_approval",
+                "created_ts": "2026-08-20T09:00:00-04:00",
+                "last_updated_ts": "2026-08-20T09:00:00-04:00",
+                "absent_employee_id": "e001", "absent_date": date,
+                "absent_shift": "evening", "absent_role": "cashier",
+                "absent_reason": "fever", "input_message": "x",
+                "message_id": "m1", "candidate_employee_id": candidate,
+                "candidate_name": candidate, "proposed_message_rendered": "cover?",
+                "status_history": [],
+            }
+        state_env["pending_path"].write_text(json.dumps({"proposals": {
+            "P0042": prop("P0042", "Priya", "2026-08-21"),
+            "P0099": prop("P0099", "Anita", "2026-08-28"),
+        }}), encoding="utf-8")
+
+    def test_two_proposals_sharing_a_code_send_nothing(self, mods, state_env, shift_calls):
+        """First-match-wins would message Priya about the 21st while silently
+        ignoring that Anita/the 28th answers to the same code. Refuse instead."""
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        self._seed_two_sharing_a_code(state_env)
+
+        assert hooks_mod.pre_gateway_dispatch(_make_event("#SHFT2", OWNER_JID)) is None
+        transition.assert_not_called()
+        send.assert_not_called()
+
+    def test_a_duplicate_also_blocks_the_refusal_path(self, mods, state_env, shift_calls):
+        """DENY is a state transition too, and the same ambiguity applies to
+        which proposal it would deny."""
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        self._seed_two_sharing_a_code(state_env)
+
+        assert hooks_mod.pre_gateway_dispatch(_make_event("DENY #SHFT2", OWNER_JID)) is None
+        transition.assert_not_called()
+        send.assert_not_called()
+
+    def test_the_counter_reads_the_same_shape_the_pool_reads(self, mods, state_env):
+        """Guard the guard. If the counter and `_shift_rows` ever disagree about
+        pending.json's shape, the counter silently returns 0 or 2 and this
+        branch refuses everything or nothing — both invisible without this."""
+        hooks_mod, _ = mods
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+        assert hooks_mod._count_shift_proposals_with_code("#SHFT2") == 1
+        assert hooks_mod._count_shift_proposals_with_code("#NOPE4") == 0
+        self._seed_two_sharing_a_code(state_env)
+        assert hooks_mod._count_shift_proposals_with_code("#SHFT2") == 2
+
+    def test_an_unreadable_pending_file_counts_as_zero_and_refuses(self, mods, state_env, shift_calls):
+        hooks_mod, _ = mods
+        transition, send = shift_calls
+        _seed_config(state_env, owner_jid=OWNER_JID)
+        _seed_shift_proposal(state_env)
+        assert hooks_mod._count_shift_proposals_with_code("#SHFT2") == 1
+        state_env["pending_path"].write_text("{not json", encoding="utf-8")
+        assert hooks_mod._count_shift_proposals_with_code("#SHFT2") == 0
+        assert hooks_mod.pre_gateway_dispatch(_make_event("#SHFT2", OWNER_JID)) is None
+        transition.assert_not_called()
+        send.assert_not_called()
