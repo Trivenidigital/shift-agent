@@ -1251,3 +1251,180 @@ def test_the_enumeration_is_the_only_shell_out_in_this_file():
         "a tool that may be absent, wrap it in try/except OSError and raise "
         "UnparseableCIConstruct — a bare OSError here reads as a missing test file."
     )
+
+
+# ── a gate that reads PR content must be woken when it changes ─────────────
+#
+# The event-type axis of the same family as the two rules above. #724 fixed
+# pull_request-vs-push PATH parity; #726 fixed executed-vs-woken and per-commit
+# identity; this is what happens when the declared ACTIVITY TYPES do not match
+# what a workflow actually reads.
+#
+# `on: pull_request:` with no `types:` means `[opened, synchronize, reopened]`.
+# `edited` is absent from that default, so editing a PR body does not re-run the
+# workflow — and architecture-governance exists to read the PR body. Its green
+# tick therefore attested to the body BEFORE the edit, not the one being merged.
+#
+# Three merged PRs had their bodies edited pre-merge and all three still pass
+# the checker today, so nothing shipped broken. The reason is luck: each edit
+# happened to be followed by a push (`synchronize`) or a close+reopen
+# (`reopened`), which re-ran the gate as a side effect. A rule nobody knew was
+# load-bearing was carrying the guarantee.
+#
+# The read set is DERIVED by scanning workflow text, never listed. A hardcoded
+# list is how the last sweep of this kind missed a file.
+
+# What a workflow can read -> the activity types that must therefore trigger it.
+# Keyed on the reads that a human EDIT can change; `.number`, `.head.sha` and
+# friends are deliberately absent because no activity type alters them.
+#
+# Labels map to `labeled`/`unlabeled`, NOT `edited` — a real distinction, and
+# getting it wrong would add a trigger that never fires for the thing it was
+# added for. Nothing reads labels today; the row exists so the first workflow
+# that does gets the right answer instead of the plausible one.
+PR_CONTENT_READS: tuple[tuple[str, str, frozenset[str]], ...] = (
+    ("PR body", r"github\.event\.pull_request\.body\b", frozenset({"edited"})),
+    ("PR title", r"github\.event\.pull_request\.title\b", frozenset({"edited"})),
+    # A base-branch change fires `edited` too, and a gate that diffs against the
+    # base is measuring something different afterwards.
+    ("PR base", r"github\.event\.pull_request\.base\b", frozenset({"edited"})),
+    # The captured body, consumed downstream by a step or a checker flag.
+    ("captured PR body", r"pr-body\.md|--pr-body\b", frozenset({"edited"})),
+    ("PR labels", r"github\.event\.pull_request\.labels\b",
+     frozenset({"labeled", "unlabeled"})),
+)
+
+# GitHub's default when `types:` is omitted.
+_DEFAULT_PR_TYPES = frozenset({"opened", "synchronize", "reopened"})
+
+# Workflows exempted from the rule, each with a reason. As with PARITY_EXEMPT,
+# an exemption is a claim someone has to write down.
+PR_CONTENT_TRIGGER_EXEMPT: dict[str, str] = {}
+
+
+def _workflow_text_without_comments(workflow_name: str) -> str:
+    """Workflow source with YAML comments removed.
+
+    A path named in a comment is documentation, not a read — architecture-
+    governance's own rationale block discusses `pull_request.base.sha` in prose,
+    and an explanation of why something is NOT read must not register as
+    reading it.
+    """
+    kept = []
+    for line in (REPO_ROOT / ".github" / "workflows" / workflow_name).read_text(
+        encoding="utf-8"
+    ).splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        kept.append(line.split(" #", 1)[0])
+    return "\n".join(kept)
+
+
+def _pull_request_types(workflow_name: str) -> frozenset[str]:
+    """Activity types that actually trigger this workflow's pull_request event."""
+    block = _workflow_data(workflow_name)["on"].get("pull_request") or {}
+    declared = block.get("types")
+    if not declared:
+        return _DEFAULT_PR_TYPES
+    return frozenset(declared)
+
+
+def _pr_content_reads(workflow_name: str) -> list[tuple[str, frozenset[str]]]:
+    """(what it reads, types it must be triggered by) for one workflow."""
+    text = _workflow_text_without_comments(workflow_name)
+    return [
+        (label, required)
+        for label, pattern, required in PR_CONTENT_READS
+        if re.search(pattern, text)
+    ]
+
+
+def _pr_content_readers() -> list[str]:
+    """Every pull_request-triggered workflow that reads editable PR content."""
+    return [
+        name for name in GATE_WORKFLOWS
+        if "pull_request" in _workflow_data(name)["on"]
+        and name not in PR_CONTENT_TRIGGER_EXEMPT
+        and _pr_content_reads(name)
+    ]
+
+
+PR_CONTENT_READERS = _pr_content_readers()
+
+
+@pytest.mark.parametrize("workflow_name", PR_CONTENT_READERS)
+def test_a_workflow_that_reads_pr_content_is_triggered_when_it_changes(workflow_name):
+    """Otherwise its green tick attests to content that is no longer there."""
+    types = _pull_request_types(workflow_name)
+    missing = []
+    for label, required in _pr_content_reads(workflow_name):
+        if not (required & types):
+            missing.append(f"reads {label} but is not triggered by {sorted(required)}")
+    assert not missing, (
+        f"{workflow_name} declares pull_request types {sorted(types)}: "
+        + "; ".join(missing)
+        + ". A change to content the workflow reads must re-run it, or the last "
+        "green result describes a version of the PR that no longer exists."
+    )
+
+
+def test_the_pr_content_reader_sweep_is_derived_not_hardcoded():
+    """A second gate that grows a PR-body read inherits the rule that day."""
+    assert "architecture-governance.yml" in PR_CONTENT_READERS, (
+        "the gate whose entire job is reading the PR body must be in the swept set"
+    )
+    for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        if path.name in PR_CONTENT_TRIGGER_EXEMPT:
+            continue
+        triggers = _workflow_data(path.name)["on"]
+        if not (isinstance(triggers, dict) and "pull_request" in triggers):
+            continue
+        if _pr_content_reads(path.name):
+            assert path.name in PR_CONTENT_READERS, (
+                f"{path.name} reads PR content but escaped the sweep"
+            )
+
+
+def test_the_governance_gate_both_reads_the_body_and_wakes_on_an_edit():
+    """Named explicitly, because the rule above is satisfiable by DELETING the
+    read instead of adding the trigger — which would remove the Capability
+    Reuse Map check rather than fix its staleness. Both halves are pinned."""
+    reads = dict(_pr_content_reads("architecture-governance.yml"))
+    assert "captured PR body" in reads, (
+        "architecture-governance no longer captures the PR body — the Capability "
+        "Reuse Map check reads it; removing the read is not a way to satisfy the "
+        "trigger rule"
+    )
+    assert "PR body" in reads, "architecture-governance no longer reads pull_request.body"
+    assert "edited" in _pull_request_types("architecture-governance.yml")
+
+
+def test_the_pr_content_detector_reads_code_and_not_prose():
+    """Guard the guard. If the detector matched nothing the parametrized test
+    would collect zero cases and pass vacuously; if it matched comments, an
+    explanation of why something is not read would demand a trigger for it."""
+    assert re.search(PR_CONTENT_READS[0][1], "PR_BODY: ${{ github.event.pull_request.body }}")
+    assert not re.search(PR_CONTENT_READS[0][1], "github.event.pull_request.number")
+    # Labels are NOT `edited` — the whole point of keeping them a separate row.
+    labels_row = next(r for r in PR_CONTENT_READS if r[0] == "PR labels")
+    assert labels_row[2] == frozenset({"labeled", "unlabeled"})
+    assert "edited" not in labels_row[2]
+    # Comments are prose: the governance file discusses base.sha in its rationale.
+    text = _workflow_text_without_comments("architecture-governance.yml")
+    assert "# pull_request.base.sha would therefore" not in text
+    assert "github.event.pull_request.body" in text
+
+
+def test_an_omitted_types_key_is_read_as_githubs_default_not_as_everything():
+    """The bug in one line: no `types:` does not mean "all types". If this
+    helper returned an empty set or a wildcard, every check above would pass on
+    exactly the configuration that caused the problem."""
+    assert _DEFAULT_PR_TYPES == frozenset({"opened", "synchronize", "reopened"})
+    assert "edited" not in _DEFAULT_PR_TYPES
+
+
+def test_every_pr_content_trigger_exemption_names_a_real_workflow():
+    for name in PR_CONTENT_TRIGGER_EXEMPT:
+        assert (REPO_ROOT / ".github" / "workflows" / name).is_file(), (
+            f"exempt but missing: {name}"
+        )

@@ -15,6 +15,21 @@ name: architecture-governance
 
 on:
   pull_request:
+    # `edited` is NOT in the default set (opened, synchronize, reopened), and
+    # this gate's whole job is to read the PR BODY. Without it a body edit does
+    # not re-run the check, so a green tick attests to the body as it was BEFORE
+    # the edit — not the one being merged. Bodies are edited often here: 31 body
+    # edits across the last 40 PRs, 14 of those PRs with at least one.
+    #
+    # Nothing shipped broken on the old trigger only because every pre-merge
+    # edit happened to be followed by a push (`synchronize`) or a close+reopen
+    # (`reopened`). That is luck, not a mechanism.
+    #
+    # `edited` also covers a base-branch change, which this gate cares about for
+    # a second reason: it diffs against the base, so retargeting the PR changes
+    # what the check is checking. It does NOT cover label changes — those are
+    # `labeled`/`unlabeled`, and nothing here reads labels.
+    types: [opened, synchronize, reopened, edited]
   push:
     branches:
       - main
