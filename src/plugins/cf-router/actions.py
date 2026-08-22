@@ -447,6 +447,50 @@ def has_pending_candidate_response(chat_id: str) -> bool:
     return False
 
 
+def sent_proposal_ids_for_candidate(chat_id: str) -> list[str]:
+    """Ids of every `sent` proposal awaiting THIS employee's YES/NO.
+
+    The list, not a bool: the caller records a reply against a proposal, so it
+    needs the id — and it must be able to see when there is more than one.
+    `has_pending_candidate_response` above answers a different question (should
+    F9 yield?) and a bool is enough there.
+
+    Two sent proposals naming the same candidate is rare but reachable: the
+    owner can send a second coverage ask to the same person while the first is
+    unanswered. The caller refuses on any count that is not exactly 1 rather
+    than guessing which shift her "yes" meant.
+
+    Returns [] on an unreadable or unexpected document, so every failure path
+    is a refusal rather than a guess.
+    """
+    identity = identify_sender_metadata(chat_id)
+    emp_id = identity.get("employee_id")
+    if not emp_id:
+        return []
+    try:
+        with PENDING_PATH.open(encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    proposals = doc.get("proposals", {}) if isinstance(doc, dict) else {}
+    if isinstance(proposals, dict):
+        rows = proposals.values()
+    elif isinstance(proposals, list):
+        rows = proposals
+    else:
+        rows = []
+    found: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("status") != "sent" or row.get("candidate_employee_id") != emp_id:
+            continue
+        proposal_id = row.get("proposal_id")
+        if isinstance(proposal_id, str) and proposal_id:
+            found.append(proposal_id)
+    return sorted(found)
+
+
 # === State lookups ===
 
 ACTIONABLE_LEAD_STATUSES = frozenset({
@@ -2188,7 +2232,7 @@ def invoke_shift_sick_call(*, chat_id: str, text: str, message_id: str) -> tuple
 
 def invoke_update_proposal_status(
     proposal_id: str, new_status: str, *, cause: str,
-    actor: str = "owner", owner_input: str = "",
+    actor: str = "owner", owner_input: str = "", response_message: str = "",
 ) -> int:
     """Transition one Shift proposal through the Shift-owned kernel.
 
@@ -2207,6 +2251,12 @@ def invoke_update_proposal_status(
         ]
         if owner_input:
             cmd += ["--owner-input", owner_input]
+        if response_message:
+            # accepted/declined carry the candidate's raw words into
+            # AcceptedProposal.response_message / DeclinedProposal.response_message,
+            # so an operator can see WHAT she actually said, not just the verdict
+            # the classifier reached.
+            cmd += ["--response-message", response_message]
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
         )

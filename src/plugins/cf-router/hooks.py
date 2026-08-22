@@ -316,6 +316,202 @@ def _is_unqualified_shift_consent(text: str, code: str) -> bool:
     return bool(_SHIFT_BARE_CODE_RESIDUE.match(residue))
 
 
+# ─── candidate reply grammar ────────────────────────────────────────────────
+#
+# The words come from the message she is actually sent, not from taste:
+#
+#     "Can you cover the {absent_shift} {absent_role} shift? Reply YES or NO."
+#         -- src/agents/shift/templates/coverage_message_to_candidate.txt
+#
+# so YES and NO must work, and everything else is a bonus that must not cost
+# safety. The risk is asymmetric — reading a refusal as consent puts a real
+# person on a shift she said she could not work — so anything that is not an
+# unqualified answer falls through to the LLM, which is exactly today's
+# behaviour and therefore not a regression.
+#
+# SKILL.md lists Hindi/Telugu/Tamil affirmatives too. Those are deliberately NOT
+# here: this is deterministic code owning an irreversible state change, and a
+# multilingual guess belongs to Hermes, which still sees every message this
+# branch declines.
+_CANDIDATE_YES_TOKENS = frozenset({
+    "yes", "y", "yep", "yeah", "yup", "ok", "okay", "sure", "confirmed", "👍",
+})
+_CANDIDATE_NO_TOKENS = frozenset({
+    "no", "n", "nope", "nah", "cant", "cannot", "unable", "declined", "👎",
+})
+# Politeness that carries no answer. Stripped so "yes please" and "no thanks"
+# are still bare answers. Deliberately excludes "ok"/"sure" — those ARE answers
+# and live in _CANDIDATE_YES_TOKENS.
+_CANDIDATE_FILLER_TOKENS = frozenset({
+    "please", "pls", "thanks", "thank", "ty", "sir", "maam", "madam",
+})
+# A qualified answer is not an answer. "yes if my sister can babysit" and
+# "yes but only until 3" are commitments the owner cannot act on.
+#
+# "not" earns its place the hard way: the table caught `"not sure yet"`
+# classifying as ACCEPTED, because "sure" is an affirmative token and nothing
+# was cancelling it. That is precisely the refusal-read-as-consent class this
+# branch exists to avoid, so a negator anywhere in the reply makes it ambiguous.
+_CANDIDATE_QUALIFIER_TOKENS = frozenset({
+    "if", "unless", "but", "only", "maybe", "might", "depends", "unsure",
+    "probably", "perhaps", "possibly", "later", "tomorrow", "after", "before",
+    "not", "dont", "doubt", "sorry",
+})
+# "no problem" / "no worries" mean the OPPOSITE of the refusal token they
+# contain. Neutralised before tokenising so they cannot be read as a decline;
+# what is left rarely reduces to a bare answer, so these land in the LLM's lap.
+_CANDIDATE_NEGATION_TRAPS = re.compile(
+    r"\bno\s+(?:problem|worries|prob|probs|issue|issues)\b", re.IGNORECASE)
+_CANDIDATE_WORD = re.compile(r"[\w']+|[\U0001F300-\U0001FAFF]", re.UNICODE)
+# A message that merely CONTAINS an answer word is not an answer. The table
+# caught `"ok so who else is working"` reading as consent under a looser cap.
+# Two bounds together: the reply must be short, and the answer word must be at
+# the front of it — where a real answer to "Reply YES or NO" actually lands.
+_CANDIDATE_MAX_TOKENS = 4
+_CANDIDATE_ANSWER_MAX_INDEX = 1
+
+
+def _classify_candidate_reply(text: str) -> Optional[str]:
+    """`"accepted"`, `"declined"`, or None when the reply is not an answer.
+
+    None is the safe default and the common case: it changes no state and lets
+    the turn continue to the LLM exactly as it does today.
+    """
+    body = _CANDIDATE_NEGATION_TRAPS.sub(" ", text or "")
+    if "?" in body:
+        # A question is a request for information, never a commitment.
+        return None
+    tokens = [t.lower().replace("'", "") for t in _CANDIDATE_WORD.findall(body)]
+    tokens = [t for t in tokens if t and t not in _CANDIDATE_FILLER_TOKENS]
+    if not tokens or len(tokens) > _CANDIDATE_MAX_TOKENS:
+        return None
+    if any(t in _CANDIDATE_QUALIFIER_TOKENS for t in tokens):
+        return None
+    # Contradiction is checked over the WHOLE reply, not just the head: in
+    # "I can't say yes" and "no I mean yes" the second signal arrives late, and
+    # a head-only check read both as a confident decline. Both signals present
+    # is the shape most likely to be read wrong, so it is refused outright
+    # rather than resolved by precedence.
+    if (any(t in _CANDIDATE_YES_TOKENS for t in tokens)
+            and any(t in _CANDIDATE_NO_TOKENS for t in tokens)):
+        return None
+    # Position, however, is judged on the head — that is where an answer to
+    # "Reply YES or NO" actually lands.
+    head = tokens[: _CANDIDATE_ANSWER_MAX_INDEX + 1]
+    if any(t in _CANDIDATE_NO_TOKENS for t in head):
+        return "declined"
+    if any(t in _CANDIDATE_YES_TOKENS for t in head):
+        return "accepted"
+    return None
+
+
+def _try_candidate_response(
+    *, text: str, chat_id: str, message_id: str,
+) -> Optional[dict]:
+    """Record a covering employee's YES/NO against her coverage proposal.
+
+    Closes the leg that had no code at all. `handle_candidate_response` exists
+    only as a SKILL.md, and the SKILL dispatcher needs the `skills` toolset that
+    is disabled on the box — so before this, her reply reached nothing and
+    `shift-agent-proposal-sweep` told the owner 30 minutes later that she never
+    responded. #734 made that newly reachable by wiring the owner's approval.
+
+    Recording the reply is the whole job here. The transition out of `sent` is
+    what makes the sweep's existing guard skip the proposal, which is what stops
+    the false "she never replied" alert. This function sends nothing: it never
+    resolves a phone number and never composes a body.
+
+    Identity binding is `candidate_employee_id`, resolved through
+    `identify_sender_metadata` — the same authority `has_pending_candidate_response`
+    uses. A sender identify-sender cannot place has no employee_id, so the lookup
+    returns nothing and this refuses. Deliberately NOT also gated on
+    `is_verified_employee_chat`: that adds an active-roster check, and an
+    employee deactivated between being asked and answering should still have her
+    answer recorded rather than silently dropped. The proposal naming her id is
+    the tighter binding anyway.
+
+    Fail-closed in five places, none of which mutate anything: a sender with no
+    resolvable employee_id, a reply that is not an unqualified YES or NO, a
+    candidate with no `sent` proposal, a candidate with more than one, and a
+    kernel that refuses the transition. Idempotence against a double reply comes
+    from the same two guards the owner-side branch uses — the first reply moves
+    the proposal out of `sent` so the second finds nothing, and the kernel
+    refuses the illegal transition under the pending lock for the race that
+    check cannot see.
+    """
+    verdict = _classify_candidate_reply(text)
+    if verdict is None:
+        return None
+
+    proposal_ids = actions.sent_proposal_ids_for_candidate(chat_id)
+    if len(proposal_ids) != 1:
+        # Zero: nothing is awaiting her answer, so a stray "yes" in normal
+        # conversation must not move state. More than one: her "yes" does not
+        # say WHICH shift, and picking would record the wrong one as covered.
+        return None
+    proposal_id = proposal_ids[0]
+
+    actions.audit_dispatcher_routed(
+        message_id=message_id,
+        chat_id=chat_id,
+        routed_to_skill="handle_candidate_response",
+        message_shape="text",
+    )
+
+    rc = actions.invoke_update_proposal_status(
+        proposal_id,
+        verdict,
+        cause="candidate_accepted" if verdict == "accepted" else "candidate_declined",
+        actor="candidate",
+        response_message=text,
+    )
+    if rc != 0:
+        # Illegal transition, unknown proposal, or lock timeout. Nothing was
+        # recorded, so do not report it as handled — fall through and let the
+        # turn continue.
+        return None
+    return {"action": "skip",
+            "reason": (f"cf-router candidate reply: invoked "
+                       f"update-proposal-status {verdict} for {proposal_id} (rc=0)")}
+
+
+def _count_shift_proposals_with_code(code: str) -> int:
+    """How many proposals in pending.json carry `code`.
+
+    `resolve_code` fails closed on a CROSS-pool collision, but within one pool
+    `_Pool.lookup` returns the FIRST matching row and `_shift_rows` applies no
+    status filter. Two proposals sharing a code therefore resolve silently to
+    one of them, and this branch would send a coverage ask about the wrong
+    absence to the wrong employee. Codes are minted under the shared lock
+    against `all_live_codes`, so this is unlikely — but the registry documents
+    generators outside the lock as best-effort, and it is THIS branch that
+    turns the duplicate into an outbound.
+
+    `apply-catering-owner-decision` already refuses the same way ("BUG: N
+    active leads share code; refusing"); this mirrors it at the one seam where
+    the shift equivalent can act.
+
+    Row shape deliberately mirrors `approval_code_pools._shift_rows` — the
+    pool's own reader — rather than pending.json directly: `.proposals` is a
+    dict[proposal_id, Proposal] and the pool iterates its values(). Returns 0
+    on an unreadable or unexpected document, and the caller refuses on any
+    count that is not exactly 1, so every one of those paths fails closed.
+    """
+    try:
+        path = approval_code_pools.pool_paths_under(actions.LEADS_PATH.parent)[
+            approval_code_pools.POOL_SHIFT
+        ]
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    if not isinstance(doc, dict):
+        return 0
+    proposals = doc.get("proposals", {})
+    rows = proposals.values() if isinstance(proposals, dict) else proposals
+    if not isinstance(rows, (list, tuple)) and not hasattr(rows, "__iter__"):
+        return 0
+    return sum(1 for p in rows if isinstance(p, dict) and p.get("code") == code)
+
 # Sick-call regex set (employee path — F9 replacement). Mirrors the six
 # absence-specific patterns from the old notifier. Broad courtesy/address
 # patterns were removed because F9 now skips the LLM and invokes Shift directly.
@@ -539,6 +735,22 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 "action": "skip",
                 "reason": f"cf-router F9: invoked handle-shift-sick-call (rc={rc})",
             }
+
+        # Candidate reply path — the RETURN leg of the coverage loop.
+        #
+        # Placed immediately AFTER F9 on purpose. A message that is BOTH a sick
+        # call and a refusal ("I can't come in tomorrow") is genuinely ambiguous,
+        # and F9 already resolves that collision the safe way: when the sender
+        # has a pending coverage ask it returns None above and neither branch
+        # acts. Sitting after F9 inherits that guard instead of re-deciding it.
+        #
+        # Before this branch existed the reply reached nothing and the
+        # no-response sweep reported her to her employer as unresponsive 30
+        # minutes later.
+        candidate_result = _try_candidate_response(
+            text=text, chat_id=chat_id, message_id=message_id)
+        if candidate_result is not None:
+            return candidate_result
 
         # F7 PRIMARY-MODE (PR-CF1d 2026-05-12) — non-owner +
         # catering classifier → intercept inside pre_gateway_dispatch and
