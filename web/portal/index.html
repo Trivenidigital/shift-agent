@@ -95,6 +95,7 @@
     .status-pill .dot{width:6px;height:6px;border-radius:50%;display:inline-block}
     .status-pill.live .dot{background:var(--navy)}
     .status-pill.scaffold .dot{background:var(--champagne)}
+    .status-pill.partial .dot{background:var(--terracotta)}
     .status-pill.future .dot{background:var(--muted)}
 
     /* Sections */
@@ -257,7 +258,7 @@
   <header class="hero">
     <div class="wrap">
       <div class="mono eyebrow">Portfolio v3 · 25-agent reshape · 2026-05-04</div>
-      <h1>A portfolio for <em>ethnic SMB owners</em>,<br>five live, sixteen scaffolded, seventeen on the horizon.</h1>
+      <h1>A portfolio for <em>ethnic SMB owners</em>,<br>two live, three deployed but not yet usable, sixteen scaffolded, seventeen on the horizon.</h1>
       <p class="lede">
         Specialized agents that share one platform — Hermes runtime, JSON-on-disk,
         per-customer VPS, single owner approval gate. Click any live agent to open its
@@ -267,6 +268,7 @@
 
       <div class="status-row" id="status-row">
         <span class="status-pill live"><span class="dot"></span><span class="num" id="count-live">5</span><span>live</span></span>
+        <span class="status-pill partial"><span class="dot"></span><span class="num" id="count-partial">3</span><span>deployed, not yet usable</span></span>
         <span class="status-pill scaffold"><span class="dot"></span><span class="num" id="count-scaffold">16</span><span>scaffolded</span></span>
         <span class="status-pill future"><span class="dot"></span><span class="num" id="count-future">17</span><span>paper-spec / backlog</span></span>
       </div>
@@ -281,7 +283,7 @@
           <span class="mono label">Tier I</span>
           <h2 class="serif">Operations &amp; <em>Synthesis</em></h2>
         </div>
-        <div class="right">Must-build for the product to exist. Today: three live, three opt-in.</div>
+        <div class="right">Must-build for the product to exist. Today: two live, two deployed but awaiting setup data, two opt-in.</div>
       </div>
       <div class="grid" id="tier1-grid"></div>
     </div>
@@ -336,10 +338,10 @@
     // #20 Owner Wellbeing → folded into #4 Daily Brief + platform quiet-hours.
     // Reframed in place: #11 Festival & Event Outreach → Festival & Peak Prep (ops-side).
     const AGENTS = [
-      // Tier 1 — Operations & Synthesis (6: 3 live + 3 opt-in)
-      { tier: 1, num: 1, name: "Shift Agent", purpose: "Sick-call coverage routing for hourly staff. Owner approves a 5-character code; the right teammate gets pinged.", state: "live", url: "http://46.62.206.192:8080/ui", state_detail: "In production. v0.2 roadmap: no-show prediction from past patterns + holiday calendar." },
+      // Tier 1 — Operations & Synthesis (6: 2 live + 2 partial + 2 opt-in)
+      { tier: 1, num: 1, name: "Shift Agent", purpose: "Sick-call coverage routing for hourly staff. Owner approves a 5-character code; the right teammate gets pinged.", state: "partial", url: "http://46.62.206.192:8080/ui", state_detail: "Sick-call intake is wired and deployed, but it has never run in production. The coverage reply and the owner-approval step are not reachable today: an owner approving a coverage code falls through to a dispatcher that cannot execute. Verified 2026-08-22 against the deployed box." },
       { tier: 1, num: 2, name: "Catering Lead", purpose: "Capture catering inquiries, draft a quote in the owner's voice, gate behind a single approval.", state: "scaffold", state_detail: "Schema and SKILLs deployed; cfg.catering.enabled = false (opt-in). v0.2 roadmap: deposit-link via Zelle/Cash App." },
-      { tier: 1, num: 3, name: "Multi-Location Coordinator", purpose: "Customers ask \"nearest store?\" → top-3 by drive time. Owners ask cross-location queries (\"who's at Houston?\") and request inter-location coverage.", state: "live", state_detail: "v0.1 LIVE 2026-05-04 (PR #62). Customer closest-store via productivity/maps (Nominatim + OSRM, zero auth, free) + Phase 1 owner queries. v0.2 roadmap: inter-location stock transfers + service-area validation for catering deliveries." },
+      { tier: 1, num: 3, name: "Multi-Location Coordinator", purpose: "Customers ask \"nearest store?\" → top-3 by drive time. Owners ask cross-location queries (\"who's at Houston?\") and request inter-location coverage.", state: "partial", state_detail: "Nearest-store lookup is deployed and public, but no store locations are configured, so every call returns \"not configured\". The owner-facing cross-location query has no execution path. Needs store addresses in config — no code. Verified 2026-08-22 against the deployed box." },
       { tier: 1, num: 4, name: "Daily Brief", purpose: "Morning WhatsApp summary of yesterday's activity and today's outlook — the agent owners actually pay for.", state: "live", state_detail: "In production. v0.2 roadmap: demand forecast (POS history + local events) + weekly owner-load summary." },
       { tier: 1, num: 5, name: "EOD Reconciliation", purpose: "End-of-day snapshot of resolved and unresolved items — feeds tomorrow's brief.", state: "live", state_detail: "In production — daily snapshot at owner-configured close time." },
       { tier: 1, num: 21, name: "Expense Bookkeeper", purpose: "Photo of a receipt → categorized expense (personal vs. business) → pushed to QuickBooks. The endemic pain in family SMBs: commingled cards.", state: "scaffold", state_detail: "Tier 1, build gate-released (2026-04-29 r2). Two investigations precede v0.1: (a) 1+ owner committed to 2-week prototype trial running ≥5 receipts/day; (b) QBO API ground-truthing (OAuth scope, attachments, sandbox approval, accountant webhooks). OCR gate retired — Catering's menu pipeline tested E2E 2026-04-29 (image → extract → reply, all in Hermes). Hermes carries the source-in / vision-extract / structured-out / response-out loop end-to-end. Genuinely net-new: QBO OAuth + write API, money-moving UX discipline. Net-new effort ~2–3 weeks." },
@@ -351,7 +353,7 @@
       { tier: 2, num: 10, name: "Catering Follow-up", purpose: "Post-event thank-you, single-question feedback, anniversary nudges 11 months later.", state: "scaffold", state_detail: "Depends on Agent #2 Catering activation." },
       { tier: 2, num: 11, name: "Festival & Peak Prep", purpose: "3–5 days before Diwali, Eid, Ugadi, Ramadan — alerts on extra staffing, inventory, menu specials. Learns from last year's actuals.", state: "scaffold", state_detail: "Reframed 2026-04-29 from customer-marketing to ops-prep (former #11 Festival & Event Outreach). Stronger framing: owners pay faster for \"don't run out of paneer during Diwali\" than for marketing campaigns." },
       { tier: 2, num: 12, name: "Hiring & Onboarding", purpose: "Paperwork tracking (W-4, I-9, food handler), training scheduling, roster entry, bite-sized SOPs via WhatsApp.", state: "scaffold", state_detail: "Awaits DocuSign or HelloSign integration. v0.2 roadmap: training curriculum + WhatsApp quizzes (from new-hire onboarding pain)." },
-      { tier: 2, num: 13, name: "Compliance Calendar", purpose: "Health inspections, license renewals, sales-tax deadlines, ServSafe logs — surfaces dates, never advises.", state: "live", state_detail: "v0.1 LIVE 2026-05-04 (PR #63 + hotfix #64). Daily 06:00 customer-local cron with 3-layer idempotency (FileLock + sentinel + orphan-Attempted scan); bounded catch-up; owner mark-done SKILL with sentinel GC. v0.2 roadmap: Google Calendar sync (gated on operator OAuth) + prefill_servsafe_log skill + send-daily-brief integration." },
+      { tier: 2, num: 13, name: "Compliance Calendar", purpose: "Health inspections, license renewals, sales-tax deadlines, ServSafe logs — surfaces dates, never advises.", state: "partial", state_detail: "The daily reminder job and the owner query are both deployed, but no compliance items have ever been entered, so there is nothing to report: the last scan recorded 0 items scanned. Needs the owner’s real deadlines entered — no code. Verified 2026-08-22 against the deployed box." },
       { tier: 2, num: 14, name: "Employee Document Tracker", purpose: "H-1B, I-9 re-verification, food-handler cert, driver's license expiry warnings.", state: "scaffold", state_detail: "Pure date logic — ready to activate. Liability-conscious: no advice, dates only." },
       { tier: 2, num: 15, name: "Cash & AR", purpose: "Invoice tracking, gentle-then-firm payment reminders, overdue escalation.", state: "scaffold", state_detail: "Awaits payment-processor sync (Stripe / Square / Razorpay)." },
       { tier: 2, num: 16, name: "Sales Tax Filing", purpose: "Multi-state filing deadlines (TX/MD/NC/SC/OH/VA), taxable-sales compilation, owner-reviewable filing packages.", state: "scaffold", state_detail: "Awaits POS sales data and per-state rule library." },
@@ -403,6 +405,7 @@
     function badge(state) {
       const map = {
         live:     { label: "Live" },
+        partial:  { label: "Not yet usable" },
         scaffold: { label: "Opt-in" },
         future:   { label: "Future" },
       };
@@ -440,7 +443,9 @@
       // Open-console link
       const linkLabel = isClickable
         ? "Open console →"
-        : (a.state === "future" ? "Not built — future" : "Configure in config.yaml");
+        : (a.state === "future" ? "Not built — future"
+          : a.state === "partial" ? "Deployed — awaiting setup data"
+          : "Configure in config.yaml");
       const link = el("span", {
         class: "open-link" + (isClickable ? "" : " disabled"),
         text: linkLabel,
@@ -460,6 +465,7 @@
     render(3, "tier3-grid");
 
     document.getElementById("count-live").textContent = AGENTS.filter(a => a.state === "live").length;
+    document.getElementById("count-partial").textContent = AGENTS.filter(a => a.state === "partial").length;
     document.getElementById("count-scaffold").textContent = AGENTS.filter(a => a.state === "scaffold").length;
     document.getElementById("count-future").textContent = AGENTS.filter(a => a.state === "future").length;
   </script>

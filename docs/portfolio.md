@@ -1113,13 +1113,31 @@ Per gap-analysis doc + Hermes-first discipline, **highest-ROI tractable next bui
 
 ---
 
-## Implementation status update — 2026-05-04 v3 (post-portfolio-expansion)
+## Implementation status update — 2026-08-22 (runtime-reconciled)
+
+> **Supersedes the 2026-05-04 v3 counts below.** Those were reconciled against the
+> DEPLOYED box on 2026-08-22 (`tasks/audits/agent-reachability-matrix-2026-08-22.md`)
+> and three of the five LIVE claims did not survive. The rule applied: a SKILL.md is
+> not an execution path — the generic `skills` toolset is disabled on the box, so an
+> agent is reachable only via a cf-router hook, a registered `shift_agent_read` tool,
+> or a systemd timer.
+
+- **2 LIVE in production** (evidence-backed): #4 Daily Brief (30 `brief_sent` in 30 days),
+  #5 EOD Reconciliation (30 `eod_snapshot`, `invariant_violations: 0`)
+- **3 DEPLOYED BUT NOT YET USABLE**: #1 Shift (sick-call intake wired, never run; owner
+  approval of a coverage code falls through to a dispatcher that cannot execute),
+  #3 Multi-Location (`find_nearest_location` registered and public, but no locations
+  configured → returns `not_configured`), #13 Compliance Calendar (tool + daily timer
+  both deployed, but 0 compliance items ever entered → `items_scanned: 0`).
+  #3 and #13 need operator data entry, not code.
+
+### Superseded 2026-05-04 v3 counts (retained as history)
 
 - **5 LIVE in production**: #1 Shift, #3 Multi-Location, #4 Daily Brief, #5 EOD, #13 Compliance Calendar
 - **12 SCAFFOLDED opt-in**: #2 Catering, #6 Inventory, #7 Supplier, #9 Festival, #10 Catering Followup, #12 Hiring, #14 Employee Docs, #15 Cash & AR, #16 Sales Tax, #19 Equipment Maintenance, #21 Expense Bookkeeper, #22 P&L Anomaly Detective
 - **16 NEW (paper-spec, placeholders only)**: #26-#41 per the new domain reorganization
 - **5 BACKLOG**: #8 Receiving & QA, #11 Festival promoted-but-scaffold-pending, #23 Order Status, #24 Upsell (old retired #24, NOT user's #34), #25 Third-Party Delivery — all per portfolio.md "build only on customer demand"
 
-**Total agent slots:** 38 (5 live + 12 scaffolded + 16 paper-spec + 5 backlog).
+**Total agent slots:** 38 (2 live + 3 deployed-not-usable + 12 scaffolded + 16 paper-spec + 5 backlog, as reconciled 2026-08-22).
 
 *Document status: v3 portfolio expansion 2026-05-04. v2 / v1 above retained for traceability.*
