@@ -542,6 +542,195 @@ def classify_stale_manual_project(project: dict, *, now: datetime, stale_after: 
     )
 
 
+# ─── stale customer-turn projects ─────────────────────────────
+#
+# `classify_stale_manual_project` above covers `manual_edit_required` only, and
+# the audit-row classifier only sees the last `scan_window_minutes`. A project
+# that simply stops moving in a CUSTOMER-turn status emits neither signal, so it
+# parks forever with nobody paged (live 2026-08-22: F0217/F0222 sat 42 days in
+# `awaiting_final_approval`, 6x their TTL, while holding their sender inside the
+# cf-router active-project intercept — the condition behind the 2026-07-20 P1-1
+# swallowed catering inquiry).
+#
+# WHY THE TTL TABLE IS DUPLICATED FROM ttl_observe RATHER THAN IMPORTED.
+# `ttl_observe` declares exactly these TTLs, but it is NOT installed on the box:
+# shift-agent-deploy.sh installs flyer modules one explicit `install` line at a
+# time and has no line for it (verified on main-vps 2026-08-22 — no
+# /opt/shift-agent/flyer_ttl_observe.py, and no `agents` package there either).
+# Importing it would have made this arm raise ImportError inside the live
+# watchdog while every package-imported local test stayed green. The duplication
+# is deliberate; drift is pinned by tests/test_flyer_stale_project_escalation.py,
+# which fails if these tables ever diverge from ttl_observe's.
+STALE_CUSTOMER_TURN_FAILURE_CLASS = "stale_customer_turn"
+
+STALE_CUSTOMER_TURN_TTL_HOURS: dict[str, int] = {
+    "intake_started": 72,
+    "collecting_required_info": 72,
+    "awaiting_assets": 72,
+    "awaiting_concept_selection": 168,
+    "awaiting_final_approval": 168,
+}
+
+# Same tolerance ttl_observe applies: a last_activity slightly ahead of `now` is
+# clock skew between the writer host and the sweep; beyond it the row is
+# self-contradictory and must not be inferred into eligibility.
+STALE_CUSTOMER_TURN_CLOCK_SKEW = timedelta(hours=1)
+
+
+def _stale_turn_last_activity(project: dict, *, now: datetime) -> datetime | None:
+    """Activity-aware last-activity for a raw project, or None if untrustworthy.
+
+    Mirrors ttl_observe.compute_last_activity + _timestamp_disposition exactly
+    (parity pinned by tests/test_flyer_stale_project_escalation.py): the max of
+    updated_at, asset delivered_at values, and manual_review timestamps.
+
+    Returns None — never a guess — when the row's timestamps cannot be trusted:
+    updated_at absent or unparseable, created_at present but unparseable, any
+    contributing timestamp unparseable, an asset delivered before the project
+    was created, or activity in the future beyond clock skew. Those rows belong
+    to the TTL-0 digest and a human, not to an automatic escalation.
+    """
+    updated_raw = project.get("updated_at")
+    if updated_raw is None or not str(updated_raw).strip():
+        return None
+    updated = _parse_recovery_ts(str(updated_raw))
+    if updated is None:
+        return None
+    created = None
+    created_raw = project.get("created_at")
+    if created_raw is not None and str(created_raw).strip():
+        created = _parse_recovery_ts(str(created_raw))
+        if created is None:
+            return None
+    candidates = [updated]
+    asset_stamps: list[datetime] = []
+    for asset in project.get("assets") or []:
+        if not isinstance(asset, dict):
+            continue
+        raw = asset.get("delivered_at")
+        if raw is None or not str(raw).strip():
+            continue
+        parsed = _parse_recovery_ts(str(raw))
+        if parsed is None:
+            return None
+        asset_stamps.append(parsed)
+    if created is not None and any(stamp < created for stamp in asset_stamps):
+        return None
+    candidates.extend(asset_stamps)
+    manual = project.get("manual_review")
+    if isinstance(manual, dict):
+        for key in ("queued_at", "completed_at", "claimed_at"):
+            raw = manual.get(key)
+            if raw is None or not str(raw).strip():
+                continue
+            parsed = _parse_recovery_ts(str(raw))
+            if parsed is None:
+                return None
+            candidates.append(parsed)
+    last_activity = max(candidates)
+    if last_activity - now > STALE_CUSTOMER_TURN_CLOCK_SKEW:
+        return None
+    return last_activity
+
+
+def classify_stale_customer_turn_project(project: dict, *, now: datetime) -> RecoverySignal | None:
+    """Classify a project parked past its status TTL awaiting the customer.
+
+    Returns None for terminal statuses, machine-active statuses,
+    `manual_edit_required` (owned by the manual queue + source-edit SLA
+    watchdog), projects still inside their TTL, and projects whose timestamps
+    are missing or self-contradictory.
+    """
+    if not isinstance(project, dict):
+        return None
+    status = str(project.get("status") or "")
+    ttl_hours = STALE_CUSTOMER_TURN_TTL_HOURS.get(status)
+    if ttl_hours is None:
+        return None
+    project_id = str(project.get("project_id") or "").strip()
+    if not project_id:
+        return None
+    last_activity = _stale_turn_last_activity(project, now=now)
+    if last_activity is None:
+        return None
+    stale_for = now - last_activity
+    if stale_for <= timedelta(hours=ttl_hours):
+        return None
+    signal_detail = "; ".join([
+        f"project_id={project_id}",
+        "stale_customer_turn=true",
+        f"project_status={status}",
+        f"ttl_hours={ttl_hours}",
+        f"stale_hours={int(stale_for.total_seconds() // 3600)}",
+    ])
+    chat_id = str(project.get("chat_id") or "").strip()
+    provider_message_id = str(project.get("original_message_id") or "").strip()
+    return RecoverySignal(
+        failure_class=STALE_CUSTOMER_TURN_FAILURE_CLASS,
+        severity="warning",
+        project_id=project_id,
+        chat_id=chat_id,
+        detail=signal_detail,
+        canonical_source=_canonical_detail(signal_detail),
+        evidence_quality="strong" if chat_id and provider_message_id else "weak",
+        provider_message_id=provider_message_id,
+        # Anchored to last activity, not to `now`: it keeps the incident's
+        # last_seen stable across the 5-minute timer, so a parked project is
+        # merged — and therefore alerted — exactly once instead of 288x a day.
+        observed_at=last_activity,
+    )
+
+
+def classify_stale_customer_turn_projects(
+    projects: Iterable[dict], *, now: datetime
+) -> list[RecoverySignal]:
+    signals: list[RecoverySignal] = []
+    for project in projects:
+        signal = classify_stale_customer_turn_project(project, now=now)
+        if signal is not None:
+            signals.append(signal)
+    return signals
+
+
+def stale_customer_turn_ttl_hours(project: dict) -> int:
+    """TTL that applied to this project's status, or 0 when unmonitored."""
+    return STALE_CUSTOMER_TURN_TTL_HOURS.get(str((project or {}).get("status") or ""), 0)
+
+
+def resolve_stale_customer_turn_incidents(
+    state: dict,
+    projects_by_id: dict,
+    now: datetime,
+) -> list[dict]:
+    """Retire stale-customer-turn incidents whose project moved on.
+
+    Without this the owner's `operator_action_required` queue only ever grows:
+    these incidents are cleared by durable project state changing, not by a
+    customer-visible repair row, so the audit-row resolution path never sees
+    them. A project the store no longer knows about is left alone rather than
+    guessed resolved.
+    """
+    resolved: list[dict] = []
+    for incident in state.get("incidents", []):
+        if not isinstance(incident, dict):
+            continue
+        if str(incident.get("failure_class") or "") != STALE_CUSTOMER_TURN_FAILURE_CLASS:
+            continue
+        if str(incident.get("status") or "open").lower() not in {"open", "operator_action_required"}:
+            continue
+        project = projects_by_id.get(str(incident.get("project_id") or "").strip())
+        if not isinstance(project, dict):
+            continue
+        if classify_stale_customer_turn_project(project, now=now) is not None:
+            continue
+        incident["status"] = "resolved"
+        incident["resolution"] = "project_left_stale_status"
+        incident["resolved_at"] = now.isoformat()
+        incident["resolution_detail"] = f"project_status={project.get('status')}"
+        resolved.append(incident)
+    return resolved
+
+
 def classify_stale_manual_projects(projects: Iterable[dict], *, now: datetime, stale_after: timedelta) -> list[RecoverySignal]:
     signals: list[RecoverySignal] = []
     for project in projects:
@@ -797,6 +986,11 @@ def resolve_incidents_from_customer_visible_repairs(
             "worker_completed_no_customer_visible_success",
             "worker_failed_no_customer_visible_success",
             "worker_unavailable",
+            # A customer-visible success is exactly what un-parks a stale
+            # customer-turn project, so it must retire the incident too;
+            # resolve_stale_customer_turn_incidents covers the operator-close
+            # and customer-reply paths that emit no repair row.
+            "stale_customer_turn",
         }
 
     for incident in state.get("incidents", []):
@@ -865,7 +1059,15 @@ def escalate_unrepaired_incidents(
         codex = incident.get("codex") if isinstance(incident.get("codex"), dict) else {}
         codex_status = str(codex.get("status") or "").strip().lower()
         last_seen = _parse_recovery_ts(str(incident.get("last_seen") or ""))
-        if codex_status in {"completed", "failed"}:
+        if str(incident.get("failure_class") or "") == STALE_CUSTOMER_TURN_FAILURE_CLASS:
+            # The TTL already elapsed before the signal was ever classified, so
+            # there is no second waiting period to serve: escalate on the run
+            # that opens it. No repair worker is owed a terminal status here —
+            # a customer who has not replied is not a defect a worker can fix.
+            age_anchor = last_seen
+            threshold = timedelta(0)
+            reason = "stale_customer_turn"
+        elif codex_status in {"completed", "failed"}:
             completed_at = _parse_recovery_ts(str(codex.get("completed_at") or codex.get("failed_at") or ""))
             age_anchor = completed_at or last_seen
             threshold = stale_after
@@ -887,7 +1089,11 @@ def escalate_unrepaired_incidents(
         incident["status"] = "operator_action_required"
         incident["operator_action"] = {
             "reason": reason,
-            "required_action": "verify_customer_outcome_or_repair_manually",
+            "required_action": (
+                "follow_up_with_customer_or_close_project"
+                if reason == "stale_customer_turn"
+                else "verify_customer_outcome_or_repair_manually"
+            ),
             "marked_at": now.isoformat(),
         }
         escalated.append(incident)
