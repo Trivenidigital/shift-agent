@@ -946,6 +946,13 @@ class FlyerRecoveryConfig(BaseModel):
     # the worker is disabled or its credentials are dead, and the operator is
     # never told (F0226 aged three weeks that way).
     worker_unavailable_escalation_minutes: int = Field(default=240, ge=5, le=1440)
+    # Kill switch for the stale customer-turn arm (per-status TTLs in
+    # recovery.STALE_CUSTOMER_TURN_TTL_HOURS). Default ON: the gap this closes
+    # was itself caused by scaffolding that shipped default-off and never
+    # graduated. Deliberately NOT written into any deployed config.yaml — the
+    # model is extra="forbid", so a key present on disk would make a rolled-back
+    # reader reject the whole config.
+    stale_customer_turn_escalation_enabled: bool = True
     max_incidents_per_run: int = Field(default=20, ge=1, le=200)
     manual_queue_stale_minutes: int = Field(default=30, ge=5, le=1440)
     worker_runner: Literal["codex", "claude"] = "codex"
@@ -5339,6 +5346,50 @@ class FlyerRecoveryOperatorActionRequired(_BaseEntry):
     required_action: Literal["verify_customer_outcome_or_repair_manually"]
 
 
+class FlyerRecoveryStaleProjectCleared(_BaseEntry):
+    """A stale-customer-turn incident retired because its project moved on.
+
+    `FlyerRecoveryResolved.resolution` is a `Literal` and carries no `detail`
+    field, so recording this there would mean widening a Literal on a known tag
+    — the one rollback shape that makes an OLD reader reject the row outright
+    instead of degrading. A new tag falls through `_UnknownLogEntry` instead.
+    """
+    type: Literal["flyer_recovery_stale_project_cleared"]
+    incident_id: str = Field(min_length=1, max_length=80)
+    project_id: str = Field(min_length=1, max_length=40)
+    project_status: str = Field(min_length=1, max_length=40)
+    resolution: Literal["project_left_stale_status"]
+
+
+class FlyerRecoveryStaleProjectEscalated(_BaseEntry):
+    """A flyer project parked past its status TTL with the customer's turn owed.
+
+    Deliberately a NEW tag rather than a new value on
+    `FlyerRecoveryOperatorActionRequired.reason`. That field is a `Literal`, and
+    a rolled-back reader REJECTS an unknown Literal value on a KNOWN tag
+    (ValidationError) whereas an unknown TAG degrades cleanly through
+    `_UnknownLogEntry` (extra="allow"). Same rollback reasoning as the
+    conflict_discriminator note above; see the LogEntry union comment.
+
+    Distinct from `FlyerRecoveryOperatorActionRequired` in meaning too: nothing
+    failed and no repair worker is owed a terminal status — the project is
+    simply waiting on a human, and the required action is a follow-up or a
+    close, never a repair.
+    """
+    type: Literal["flyer_recovery_stale_project_escalated"]
+    incident_id: str = Field(min_length=1, max_length=80)
+    project_id: str = Field(min_length=1, max_length=40)
+    project_status: str = Field(min_length=1, max_length=40)
+    # 0 means UNKNOWN, not "no TTL": the project left the monitored status set
+    # between the merge that opened the incident and the escalation that writes
+    # this row. Near-unreachable (the resolver pass runs first and retires
+    # exactly that case) but the alternative was defaulting to a plausible-
+    # looking `1`, which would put a fabricated TTL into a durable audit row.
+    ttl_hours: int = Field(ge=0, le=100_000)
+    stale_hours: int = Field(ge=0, le=1_000_000)
+    required_action: Literal["follow_up_with_customer_or_close_project"]
+
+
 class FlyerRecoveryOwnerAlert(_BaseEntry):
     type: Literal["flyer_recovery_owner_alert"]
     incident_id: str = Field(min_length=1, max_length=80)
@@ -8568,6 +8619,8 @@ LogEntry = Annotated[
         Annotated[FlyerRecoveryDeployGate, Tag("flyer_recovery_deploy_gate")],
         Annotated[FlyerRecoveryResolved, Tag("flyer_recovery_resolved")],
         Annotated[FlyerRecoveryOperatorActionRequired, Tag("flyer_recovery_operator_action_required")],
+        Annotated[FlyerRecoveryStaleProjectEscalated, Tag("flyer_recovery_stale_project_escalated")],
+        Annotated[FlyerRecoveryStaleProjectCleared, Tag("flyer_recovery_stale_project_cleared")],
         Annotated[FlyerRecoveryOwnerAlert, Tag("flyer_recovery_owner_alert")],
         Annotated[FlyerClosureCustomerNotified, Tag("flyer_closure_customer_notified")],
         Annotated[FlyerStatusResent, Tag("flyer_status_resent")],

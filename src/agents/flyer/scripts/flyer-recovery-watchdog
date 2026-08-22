@@ -35,6 +35,8 @@ from schemas import (  # noqa: E402
     FlyerRecoveryOwnerAlert,
     FlyerRecoveryRepairBundleWritten,
     FlyerRecoveryResolved,
+    FlyerRecoveryStaleProjectCleared,
+    FlyerRecoveryStaleProjectEscalated,
 )
 try:
     from agents.flyer import recovery  # type: ignore  # noqa: E402
@@ -897,6 +899,41 @@ def _resolve_recovered_incidents(
     return len(resolved)
 
 
+def _resolve_stale_customer_turn_incidents(
+    state_path: Path,
+    log_path: Path,
+    projects_by_id: dict[str, dict],
+    now: datetime,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """Retire stale-customer-turn incidents whose project moved on.
+
+    These are cleared by durable project state, not by a customer-visible repair
+    row, so the audit-row resolution pass never sees them. Runs BEFORE
+    escalation so a project that un-parked between timer ticks is never paged.
+    """
+    with recovery.recovery_state_lock(state_path):
+        state = recovery.load_recovery_state(state_path)
+        resolved = recovery.resolve_stale_customer_turn_incidents(state, projects_by_id, now)
+        if dry_run:
+            return len(resolved)
+        if not resolved:
+            return 0
+        recovery.write_recovery_state(state_path, state)
+    for incident in resolved:
+        project = projects_by_id.get(str(incident.get("project_id") or ""), {})
+        _append_audit(log_path, FlyerRecoveryStaleProjectCleared(
+            type="flyer_recovery_stale_project_cleared",
+            ts=now,
+            incident_id=str(incident.get("incident_id") or ""),
+            project_id=str(incident.get("project_id") or ""),
+            project_status=str(project.get("status") or "unknown"),
+            resolution="project_left_stale_status",
+        ))
+    return len(resolved)
+
+
 def _escalate_unrepaired_incidents(
     state_path: Path,
     log_path: Path,
@@ -904,6 +941,7 @@ def _escalate_unrepaired_incidents(
     *,
     stale_after: timedelta,
     worker_unavailable_after: timedelta | None = None,
+    projects_by_id: dict[str, dict] | None = None,
     dry_run: bool = False,
 ) -> tuple[int, set[str]]:
     with recovery.recovery_state_lock(state_path):
@@ -923,15 +961,33 @@ def _escalate_unrepaired_incidents(
     for incident in escalated:
         operator_action = incident.get("operator_action") if isinstance(incident.get("operator_action"), dict) else {}
         reason = str(operator_action.get("reason") or "worker_completed_no_customer_visible_success")
-        _append_audit(log_path, FlyerRecoveryOperatorActionRequired(
-            type="flyer_recovery_operator_action_required",
-            ts=now,
-            incident_id=str(incident.get("incident_id") or ""),
-            failure_class=str(incident.get("failure_class") or ""),
-            project_id=str(incident.get("project_id") or ""),
-            reason=reason,
-            required_action=str(operator_action.get("required_action") or "verify_customer_outcome_or_repair_manually"),
-        ))
+        if reason == "stale_customer_turn":
+            # Separate tag, not a widened Literal on the row above — see the
+            # rollback note on FlyerRecoveryStaleProjectEscalated in schemas.py.
+            project = (projects_by_id or {}).get(str(incident.get("project_id") or ""), {})
+            last_seen = recovery._parse_recovery_ts(str(incident.get("last_seen") or ""))  # type: ignore[attr-defined]
+            stale_hours = int((now - last_seen).total_seconds() // 3600) if last_seen else 0
+            _append_audit(log_path, FlyerRecoveryStaleProjectEscalated(
+                type="flyer_recovery_stale_project_escalated",
+                ts=now,
+                incident_id=str(incident.get("incident_id") or ""),
+                project_id=str(incident.get("project_id") or ""),
+                project_status=str(project.get("status") or "unknown"),
+                # 0 = unknown; see the field comment. Never fabricate a TTL.
+                ttl_hours=recovery.stale_customer_turn_ttl_hours(project),
+                stale_hours=max(stale_hours, 0),
+                required_action="follow_up_with_customer_or_close_project",
+            ))
+        else:
+            _append_audit(log_path, FlyerRecoveryOperatorActionRequired(
+                type="flyer_recovery_operator_action_required",
+                ts=now,
+                incident_id=str(incident.get("incident_id") or ""),
+                failure_class=str(incident.get("failure_class") or ""),
+                project_id=str(incident.get("project_id") or ""),
+                reason=reason,
+                required_action=str(operator_action.get("required_action") or "verify_customer_outcome_or_repair_manually"),
+            ))
         outcome = "sent" if _alert_owner_for_recovery(
             incident,
             trigger="operator_action_required",
@@ -1065,6 +1121,15 @@ def main() -> int:
         now=now,
         stale_after=timedelta(minutes=cfg.flyer.recovery.manual_queue_stale_minutes),
     ))
+    if cfg.flyer.recovery.stale_customer_turn_escalation_enabled:
+        # Durable-state arm for CUSTOMER-turn statuses. Unlike the manual-queue
+        # sweep above, these projects have no failing audit row and no repair
+        # worker owed — without this they park past their TTL forever and the
+        # owner is never told (F0217/F0222, 42 days).
+        signals.extend(recovery.classify_stale_customer_turn_projects(
+            projects_by_id.values(),
+            now=now,
+        ))
     state_path = Path(args.recovery_state_path)
     with recovery.recovery_state_lock(state_path):
         state = recovery.load_recovery_state(state_path)
@@ -1119,12 +1184,20 @@ def main() -> int:
         now,
         dry_run=args.dry_run,
     )
+    stale_projects_cleared = _resolve_stale_customer_turn_incidents(
+        state_path,
+        Path(args.log_path),
+        projects_by_id,
+        now,
+        dry_run=args.dry_run,
+    )
     operator_action_required, operator_action_required_ids = _escalate_unrepaired_incidents(
         state_path,
         Path(args.log_path),
         now,
         stale_after=timedelta(minutes=cfg.flyer.recovery.operator_escalation_stale_minutes),
         worker_unavailable_after=timedelta(minutes=cfg.flyer.recovery.worker_unavailable_escalation_minutes),
+        projects_by_id=projects_by_id,
         dry_run=args.dry_run,
     )
     repair = _process_repair_queue(
@@ -1164,6 +1237,7 @@ def main() -> int:
         "outcome_repairs": outcome_repairs,
         "resolved": resolved,
         "operator_action_required": operator_action_required,
+        "stale_projects_cleared": stale_projects_cleared,
         "owner_alert_retries": owner_alert_retries,
         "queued": repair["queued"],
         "worker_runs": repair["worker_runs"],
@@ -1177,6 +1251,7 @@ def main() -> int:
             f"outcome_repairs={outcome_repairs} "
             f"resolved={resolved} "
             f"operator_action_required={operator_action_required} "
+            f"stale_projects_cleared={stale_projects_cleared} "
             f"owner_alert_retries={owner_alert_retries} "
             f"queued={repair['queued']} worker_runs={repair['worker_runs']} incidents={summary['incidents']}"
         )
