@@ -883,8 +883,19 @@ def invoke_apply_owner_decision(code: str, decision: str,
       1. If lead has a real (non-legacy) quote_text: pipe via --quote-text-stdin
       2. Else if lead has selected_items (CUSTOMER_FINALIZED): use
          --quote-from-lead-state for server-side rendering (PR-CF1c 2026-05-12)
-      3. Else return 2 so the LLM can handle
+      3. Else (no quote source at all): invoke with NO quote flag. The
+         script's PR-CF1 guard runs BEFORE the quote-source requirement,
+         so it refuses (exit 11), audits, and reprompts the owner itself.
+         R2.H2 2026-08-23 — this used to `return 2` without running the
+         script, which handed a non-finalized approve to an LLM that needs
+         the disabled `skills` toolset. --skip-finalize is NEVER passed
+         here; that override is operator/cockpit-only.
     For `reject`: passes --reason "owner_reject_via_cf_router". Lead dict ignored.
+
+    `capture`, when supplied, receives the script's stdout/stderr and its
+    parsed final stdout JSON line under "payload" — cf-router reads
+    payload["owner_reprompt_delivered"] to decide whether the refusal was
+    actually communicated. The int return is unchanged for all callers.
 
     Always passes --sender-role owner (PR-CF1c bugfix: required arg was
     previously omitted, causing every cf-router approve invocation to fail
