@@ -14,11 +14,23 @@ import json
 from typing import get_args
 from datetime import datetime, timezone
 
-import sys
 import pytest
 from pydantic import TypeAdapter, ValidationError, Tag
 
-from schemas import LogEntry, _UnknownLogEntry, _KNOWN_LOG_ENTRY_TYPES, RawInbound, _BaseEntry
+# ONE import statement, evaluated in the same module body as `_ADAPTER` below.
+# That is load-bearing, not tidiness. Several suites (see
+# tests/test_gateway_send_throttle.py's fixture docstring) pop `schemas` out of
+# sys.modules and reload it FRESH while the session runs, so by the time a test
+# here executes, `sys.modules['schemas']` can be a DIFFERENT module object than
+# the one whose classes `_ADAPTER` validates into — two classes, same qualified
+# name. Re-resolving the class inside a test (`from schemas import ...`, or
+# `sys.modules[type(parsed).__module__]`, which is the same lookup) then compares
+# across module identities and fails on a property that is actually fine.
+# Binding here, beside the adapter, is the only form that cannot drift.
+from schemas import (
+    LogEntry, _UnknownLogEntry, _KNOWN_LOG_ENTRY_TYPES, RawInbound, _BaseEntry,
+    CfRouterIntercepted, _UnknownReasonCfRouterIntercepted,
+)
 
 
 _ADAPTER = TypeAdapter(LogEntry)
@@ -293,26 +305,18 @@ def test_cf_router_intercepted_unknown_reason_absorbed_on_read(reason):
     assert parsed.reason == reason
     assert parsed.type == "cf_router_intercepted"
     assert parsed.chat_id == _CF_ROW_BASE["chat_id"]
-    assert type(parsed).__name__ == "_UnknownReasonCfRouterIntercepted"
+    assert type(parsed) is _UnknownReasonCfRouterIntercepted
     # isinstance still holds — readers that branch on the typed class keep working.
-    # Resolve the class from the module the PARSED OBJECT came from, not by
-    # re-importing `schemas`. In a full-suite run several test files load
-    # src/platform via their own sys.path.insert + importlib, so `schemas` can
-    # exist as more than one module object; a fresh import then yields a
-    # different class than the one the adapter validated against and the check
-    # fails on module identity while the property under test is fine. This
-    # file passes 25/25 alone and failed 4 in the suite for exactly that reason.
-    _Cf = sys.modules[type(parsed).__module__].CfRouterIntercepted
-    assert isinstance(parsed, _Cf)
+    assert isinstance(parsed, CfRouterIntercepted)
 
 
 def test_cf_router_intercepted_known_reason_still_routes_to_the_strict_variant():
     """The shim must not swallow rows the Literal already covers."""
     parsed = _ADAPTER.validate_python({**_CF_ROW_BASE, "reason": "f8_owner_approve"})
-    # Same module-identity caveat as above: compare against the class as the
-    # parsed object's own module defines it.
-    _Cf = sys.modules[type(parsed).__module__].CfRouterIntercepted
-    assert type(parsed) is _Cf, "a known reason must keep validating against the Literal"
+    assert type(parsed) is CfRouterIntercepted, (
+        "a known reason must keep validating against the Literal")
+    # Belt-and-braces, identity-free: even if the two classes above were ever the
+    # same object for the wrong reason, absorption by the shim still fails here.
     assert type(parsed).__name__ == "CfRouterIntercepted", (
         "a known reason must NOT be absorbed by the phase-1 shim")
 
@@ -324,10 +328,9 @@ def test_cf_router_intercepted_writer_path_stays_strict():
     still refuse them — otherwise phase 1 would start emitting rows that a
     rollback could not read, which is exactly what it exists to prevent.
     Delete this test in the SAME commit as the phase-2 Literal widening."""
-    from schemas import CfRouterIntercepted as _Cf
     for reason in _PHASE_2_REASONS:
         with pytest.raises(ValidationError):
-            _Cf(**{**_CF_ROW_BASE, "reason": reason})
+            CfRouterIntercepted(**{**_CF_ROW_BASE, "reason": reason})
 
 
 def test_cf_router_intercepted_unknown_reason_still_validates_every_other_field():
@@ -374,8 +377,7 @@ def test_no_reason_is_both_a_literal_member_and_a_phase_2_reason():
     NOT be Literal members. When phase 2 lands, this test and
     `test_cf_router_intercepted_writer_path_stays_strict` come out together with
     the `_KNOWN_DROPPED_REASONS` entries."""
-    from schemas import CfRouterIntercepted as _Cf
-    members = set(get_args(_Cf.model_fields["reason"].annotation))
+    members = set(get_args(CfRouterIntercepted.model_fields["reason"].annotation))
     assert not (members & set(_PHASE_2_REASONS)), (
         "phase 2 has landed — remove this test, "
         "test_cf_router_intercepted_writer_path_stays_strict, and the matching "
