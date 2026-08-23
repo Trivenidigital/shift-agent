@@ -295,10 +295,38 @@ _CF_ROW_BASE = {
 # The two reasons cf-router emits TODAY that are not Literal members, so their
 # rows are silently dropped at write time. Kept in sync with
 # tests/test_catering_amendment_capture.py::_KNOWN_DROPPED_REASONS.
-_PHASE_2_REASONS = ("f8_followup_approve", "f8_followup_cancel")
+# PHASE 2 LANDED 2026-08-23. The two M5 follow-up reasons are Literal members
+# now, so they route to the strict class; what remains under test below is the
+# property phase 1 exists for — a value nobody has added yet must still be
+# absorbed rather than rejected.
+_PHASE_2_LANDED = ("f8_followup_approve", "f8_followup_cancel")
 
 
-@pytest.mark.parametrize("reason", _PHASE_2_REASONS + ("some_reason_invented_in_2027",))
+@pytest.mark.parametrize("reason", _PHASE_2_LANDED)
+def test_phase_2_reasons_now_validate_and_are_no_longer_dropped(reason):
+    """The point of the whole two-phase exercise.
+
+    Before phase 2 these failed validation inside audit_intercepted's
+    best-effort try/except, so cf-router emitted them and the row silently never
+    landed in decisions.log. They must now construct DIRECTLY — the writer path,
+    not just the reader union, because the writer is what was losing them.
+    """
+    row = CfRouterIntercepted(**{**_CF_ROW_BASE, "reason": reason})
+    assert row.reason == reason
+    assert type(row).__name__ == "CfRouterIntercepted", (
+        "a phase-2 reason must route to the strict class, not the absorbing shim")
+
+
+def test_the_shim_still_absorbs_something_nobody_has_added_yet():
+    """Phase 2 must not have removed the forward-compat property it depended on."""
+    parsed = _ADAPTER.validate_python(
+        {**_CF_ROW_BASE, "reason": "a_reason_from_a_release_after_this_one"})
+    assert type(parsed).__name__ == "_UnknownReasonCfRouterIntercepted"
+    assert parsed.reason == "a_reason_from_a_release_after_this_one"
+
+
+@pytest.mark.parametrize("reason", ("some_reason_invented_in_2027",
+                                   "a_reason_from_a_future_release"))
 def test_cf_router_intercepted_unknown_reason_absorbed_on_read(reason):
     """A reader must ingest a reason value it does not know, not reject the row."""
     parsed = _ADAPTER.validate_python({**_CF_ROW_BASE, "reason": reason})
@@ -321,16 +349,6 @@ def test_cf_router_intercepted_known_reason_still_routes_to_the_strict_variant()
         "a known reason must NOT be absorbed by the phase-1 shim")
 
 
-def test_cf_router_intercepted_writer_path_stays_strict():
-    """PHASE-1 INVARIANT. `cf-router/actions.py:audit_intercepted` builds
-    `CfRouterIntercepted(...)` DIRECTLY, never through the union, and swallows
-    the exception. So while the reader absorbs these values, the writer must
-    still refuse them — otherwise phase 1 would start emitting rows that a
-    rollback could not read, which is exactly what it exists to prevent.
-    Delete this test in the SAME commit as the phase-2 Literal widening."""
-    for reason in _PHASE_2_REASONS:
-        with pytest.raises(ValidationError):
-            CfRouterIntercepted(**{**_CF_ROW_BASE, "reason": reason})
 
 
 def test_cf_router_intercepted_unknown_reason_still_validates_every_other_field():
@@ -372,14 +390,3 @@ def test_cf_router_intercepted_unknown_reason_round_trips():
         assert dumped[key] == value, f"{key} did not round-trip"
 
 
-def test_no_reason_is_both_a_literal_member_and_a_phase_2_reason():
-    """Ratchet cross-check: while phase 1 stands, the two phase-2 reasons must
-    NOT be Literal members. When phase 2 lands, this test and
-    `test_cf_router_intercepted_writer_path_stays_strict` come out together with
-    the `_KNOWN_DROPPED_REASONS` entries."""
-    members = set(get_args(CfRouterIntercepted.model_fields["reason"].annotation))
-    assert not (members & set(_PHASE_2_REASONS)), (
-        "phase 2 has landed — remove this test, "
-        "test_cf_router_intercepted_writer_path_stays_strict, and the matching "
-        "_KNOWN_DROPPED_REASONS entries in tests/test_catering_amendment_capture.py"
-    )
