@@ -205,3 +205,35 @@ def sample_config_dict() -> dict:
 @pytest.fixture
 def now_aware() -> datetime:
     return datetime.now(tz=timezone.utc)
+
+
+# ── shared: substring privacy assertions must not scan machine timestamps ────
+#
+# A "this value must never appear in the record" assertion that runs
+# `json.dumps(row)` also scans `ts`, which carries microsecond precision. A
+# short numeric needle then collides with the clock and the test fails with no
+# leak present:
+#
+#   "280"   fired 2026-08-23 on ...T02:57:27.280053+00:00
+#   "900"   fired 2026-08-23 on a synced-report timestamp
+#
+# Both were real CI failures on unrelated PRs, and the first was "fixed" only at
+# the single call site that happened to fire — which is why the second one was
+# still there to find. Use this for any numeric needle short enough to appear in
+# a timestamp. A long needle (a phone number, an 11-digit id) cannot collide and
+# does not need it; keeping those unfiltered preserves the stronger assertion.
+_MACHINE_TIME_FIELDS = ("ts", "timestamp", "created_at", "updated_at",
+                        "generated_at", "synced_at", "completed_at")
+
+
+def privacy_blob(record, extra_exclude=()):
+    """json.dumps(record) with machine-generated time fields removed.
+
+    Every other field is still scanned, so the privacy contract is unchanged —
+    only the clock is excluded, and only because it cannot carry the value the
+    assertion is protecting.
+    """
+    if not isinstance(record, dict):
+        return json.dumps(record)
+    drop = set(_MACHINE_TIME_FIELDS) | set(extra_exclude)
+    return json.dumps({k: v for k, v in record.items() if k not in drop})

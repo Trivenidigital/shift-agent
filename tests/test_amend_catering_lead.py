@@ -716,7 +716,8 @@ def test_the_audit_row_names_the_rejected_field_without_its_value(sb, monkeypatc
     assert len(rows) == 1
     assert rows[0]["apply_error"] == "schema_rejected_values"
     assert rows[0]["rejected_fields"] == ["veg_guest_count"]
-    assert "99999" not in json.dumps(rows[0]), "PRIVACY: names, never values"
+    from conftest import privacy_blob
+    assert "99999" not in privacy_blob(rows[0]), "PRIVACY: names, never values"
 
 
 def test_a_later_amendment_still_applies_after_an_applied_with_error_record(sb, monkeypatch):
