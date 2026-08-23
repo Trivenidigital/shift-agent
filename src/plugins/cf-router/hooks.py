@@ -290,6 +290,13 @@ _SHIFT_BARE_CODE_RESIDUE = re.compile(r"^[\s.,!:;\-–—*_\"'()\[\]]*$")
 # implement), and every other status is either mid-flight or terminal.
 _SHIFT_APPROVABLE_STATUS = "awaiting_owner_approval"
 
+# Mirrors exit_codes.EXIT_TRUTH_GUARD_FAILED. The plugin deliberately does not
+# import the Shift platform module (it loads from the Hermes plugin dir, not
+# /opt/shift-agent), so the value is restated here rather than left as a bare
+# literal at the call site. TestF8OwnerApproveNonFinalizedReachable in
+# tests/test_cf_router_plugin.py asserts it stays equal to the canonical value.
+_EXIT_TRUTH_GUARD_FAILED = 11
+
 
 def _is_unqualified_shift_consent(text: str, code: str) -> bool:
     """True when the owner said yes to THIS proposal and nothing else.
@@ -1607,7 +1614,41 @@ def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional
         if has_edit:
             return None
         if has_approve:
-            rc = actions.invoke_apply_owner_decision(code, "approve", lead=lead, message_id=message_id)
+            # R2.H2 2026-08-23: a non-finalized approve is REFUSED by the
+            # apply-script (exit 11), which reprompts the owner itself. That is a
+            # complete deterministic answer, so the turn must end here — an
+            # available LLM must not double-answer it. Terminal ONLY when the
+            # reprompt actually reached the owner: if the bridge refused it,
+            # nobody was told, and closing the turn would claim otherwise. That
+            # is the silent-failure class this repair exists to close, so in
+            # that case fall through exactly as before.
+            cap: dict = {}
+            rc = actions.invoke_apply_owner_decision(
+                code, "approve", lead=lead, message_id=message_id, capture=cap)
+            payload = cap.get("payload") or {}
+            if rc == _EXIT_TRUTH_GUARD_FAILED and payload.get(
+                    "refusal") == "owner_approve_without_customer_finalize":
+                informed = payload.get("owner_reprompt_delivered") is True
+                # reason MUST be a member of CfRouterIntercepted.reason, which is
+                # a Literal. A new value would fail validation inside
+                # audit_intercepted's best-effort try/except and the row would be
+                # SILENTLY DROPPED — so the refusal is recorded under the existing
+                # f8_owner_approve value (accurate: the owner did send approve and
+                # the plugin did invoke the apply-script) with the discriminating
+                # facts in the free-text detail. No schema change, so no rollback
+                # exposure from a widened Literal either.
+                actions.audit_intercepted(
+                    reason="f8_owner_approve",
+                    chat_id=chat_id, code=code, subprocess_rc=rc,
+                    detail=("refused: not customer-finalized; owner reprompt "
+                            + ("DELIVERED" if informed else "NOT delivered")),
+                )
+                if informed:
+                    return {"action": "skip",
+                            "reason": ("cf-router F8: apply-owner-decision refused "
+                                       f"{code} (not customer-finalized); owner "
+                                       "reprompted deterministically (rc=11)")}
+                return None
             return _build_skip_or_passthrough(
                 rc=rc, chat_id=chat_id, code=code,
                 reason="f8_owner_approve",

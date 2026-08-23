@@ -874,7 +874,8 @@ def find_menu_pending_by_update_id(update_id: str) -> Optional[dict]:
 
 def invoke_apply_owner_decision(code: str, decision: str,
                                 lead: Optional[dict] = None,
-                                message_id: str = "") -> int:
+                                message_id: str = "",
+                                capture: Optional[dict] = None) -> int:
     """Invoke apply-catering-owner-decision; returns exit code.
 
     For `approve`: caller passes the lead dict (snapshot from
@@ -882,8 +883,27 @@ def invoke_apply_owner_decision(code: str, decision: str,
       1. If lead has a real (non-legacy) quote_text: pipe via --quote-text-stdin
       2. Else if lead has selected_items (CUSTOMER_FINALIZED): use
          --quote-from-lead-state for server-side rendering (PR-CF1c 2026-05-12)
-      3. Else return 2 so the LLM can handle
+      3. Else (no quote source at all): invoke with NO quote flag. The
+         script's PR-CF1 guard runs BEFORE the quote-source requirement,
+         so it refuses (exit 11), audits, and reprompts the owner itself.
+         R2.H2 2026-08-23 — this used to `return 2` without running the
+         script, which handed a non-finalized approve to an LLM that needs
+         the disabled `skills` toolset. cf-router NEVER passes
+         --skip-finalize. Note the narrower claim: the SKILL at
+         handle_catering_owner_approval/SKILL.md still instructs the LLM to
+         re-invoke with --skip-finalize if the owner says "approve anyway"
+         after seeing the reprompt, so the flag is not unreachable from
+         WhatsApp system-wide — it is unreachable from THIS deterministic
+         path, and the SKILL route needs the `skills` toolset that is
+         disabled on this box. (That SKILL text also contradicts the
+         script's own R2.H1 comment, which says the WhatsApp path must not
+         be told to use the flag. Pre-existing; recorded, not resolved here.)
     For `reject`: passes --reason "owner_reject_via_cf_router". Lead dict ignored.
+
+    `capture`, when supplied, receives the script's stdout/stderr and its
+    parsed final stdout JSON line under "payload" — cf-router reads
+    payload["owner_reprompt_delivered"] to decide whether the refusal was
+    actually communicated. The int return is unchanged for all callers.
 
     Always passes --sender-role owner (PR-CF1c bugfix: required arg was
     previously omitted, causing every cf-router approve invocation to fail
@@ -919,14 +939,47 @@ def invoke_apply_owner_decision(code: str, decision: str,
                 cmd.append("--quote-from-lead-state")
                 # No stdin; the script renders the quote itself
             else:
-                # Path 3: no quote source — let LLM handle (return non-zero)
-                return 2  # EXIT_INVALID_INPUT
+                # Path 3 (R2.H2 2026-08-23): no quote source. Previously this
+                # returned 2 WITHOUT running the script, so the owner's
+                # '#XXXXX approve' fell through to the LLM — which needs the
+                # disabled `skills` toolset and a funded model, so nothing
+                # deterministic ever answered. Run the script with NO quote flags
+                # so its PR-CF1 guard (which precedes the quote-source
+                # requirement) refuses, audits, and reprompts the owner itself.
+                #
+                # ROUTING PRECONDITION, not policy: only invoke for the exact
+                # shape where that guard fires. The guard keys on
+                # customer_finalized_at; this wrapper keys on selected_items, and
+                # they are different fields, so without this check the widened
+                # path also admits shapes the guard skips. Two of those reach
+                # EXIT_OK — an OWNER_APPROVED replay that transitions the lead to
+                # SENT_TO_CUSTOMER, and a delivery-uncertain lead that refuses to
+                # re-POST — and both would close the turn with the owner told
+                # NOTHING. Neither was reachable from WhatsApp before, and a
+                # silent success-shaped skip is the mirror of the defect being
+                # fixed. Anything outside the guard's shape keeps the old
+                # behaviour exactly.
+                #
+                # The policy itself still lives in the script. cf-router never
+                # passes --skip-finalize; the only forwarders tree-wide are the
+                # cockpit endpoint and the owner-approval SKILL (which needs the
+                # disabled `skills` toolset).
+                if not (lead.get("status") == "AWAITING_OWNER_APPROVAL"
+                        and not lead.get("customer_finalized_at")):
+                    return 2  # EXIT_INVALID_INPUT — unchanged fall-through
         elif decision == "reject":
             cmd.extend(["--reason", "owner_reject_via_cf_router"])
         result = subprocess.run(
             cmd, input=stdin_text, capture_output=True, text=True,
             env=env, timeout=SUBPROCESS_TIMEOUT_SEC,
         )
+        if capture is not None:
+            capture["stdout"] = result.stdout or ""
+            capture["stderr"] = result.stderr or ""
+            try:
+                capture["payload"] = json.loads((result.stdout or "").strip().splitlines()[-1])
+            except Exception:
+                capture["payload"] = None
         return result.returncode
     except subprocess.TimeoutExpired:
         return 124

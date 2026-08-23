@@ -4353,3 +4353,384 @@ class TestF8ShiftDuplicateCode:
         assert hooks_mod.pre_gateway_dispatch(_make_event("#SHFT2", OWNER_JID)) is None
         transition.assert_not_called()
         send.assert_not_called()
+
+
+# ============================================================================
+# F8 — owner approval of a NON-FINALIZED lead must be deterministically
+# reachable (R2.H2 2026-08-23).
+#
+# Before this fix, invoke_apply_owner_decision returned 2 WITHOUT running the
+# apply-script whenever the lead had neither quote_text nor selected_items, so
+# the owner's "#XXXXX approve" fell through to the LLM. The LLM needs the
+# `skills` toolset (disabled on the box) and a funded model, so the owner got
+# no deterministic resolution at all — three production leads sat in
+# AWAITING_OWNER_APPROVAL for weeks.
+#
+# The repair is reachability ONLY. The policy is unchanged and lives where it
+# already lived: apply-catering-owner-decision refuses a non-finalized approve
+# unless --skip-finalize is explicitly supplied, and that override stays
+# operator/cockpit-only. These tests exist to prove the repair did not turn
+# "refuse + explain" into "approve anyway".
+# ============================================================================
+
+
+class TestF8OwnerApproveNonFinalizedReachable:
+    """The deterministic refusal must reach the owner without any LLM."""
+
+    @staticmethod
+    def _seed_non_finalized(state_env, code="#ABCDE"):
+        """A legitimately-created lead: qualified, awaiting owner, never finalized.
+
+        `quote_text` is the `<legacy...>` sentinel the router treats as 'no real
+        quote', and there are no selected_items — exactly the shape
+        create-catering-lead produces and the shape L0017/L0018/L0019 hold in
+        production.
+        """
+        _seed_lead(state_env, code=code, status="AWAITING_OWNER_APPROVAL",
+                   quote_text="<legacy: no quote drafted>")
+
+    def test_non_finalized_approve_reaches_the_wrapper_with_the_right_shape(
+            self, mods, state_env):
+        """REQ 1 — hooks must hand this lead to the wrapper and close the turn.
+
+        Named for what it actually checks: the wrapper is mocked here, so this
+        does NOT prove the script runs. The script's own behaviour on this shape
+        is pinned out-of-process by
+        tests/e2e/test_catering_lifecycle_deterministic.py, and the real argv is
+        pinned by test_router_never_passes_skip_finalize below.
+        """
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        self._seed_non_finalized(state_env)
+        seen = {}
+
+        def _wrapper(code, decision, lead=None, message_id="", capture=None):
+            seen["code"] = code
+            seen["decision"] = decision
+            seen["lead_status"] = (lead or {}).get("status")
+            if capture is not None:
+                capture["payload"] = {
+                    "refusal": "owner_approve_without_customer_finalize",
+                    "owner_reprompt_delivered": True,
+                }
+            return 11
+
+        with patch.object(actions_mod, "invoke_apply_owner_decision",
+                          side_effect=_wrapper) as m:
+            event = _make_event("#ABCDE approve", "15550100002@s.whatsapp.net")
+            result = hooks_mod.pre_gateway_dispatch(event)
+
+        assert m.call_count == 1, "the wrapper must be invoked, not short-circuited"
+        assert seen == {"code": "#ABCDE", "decision": "approve",
+                        "lead_status": "AWAITING_OWNER_APPROVAL"}
+        assert result is not None and result["action"] == "skip", (
+            "once the owner has been deterministically reprompted the turn must "
+            "not also fall through to the LLM")
+
+    def test_deterministic_refusal_is_terminal_so_the_llm_cannot_double_answer(
+            self, mods, state_env):
+        """REQ 1 — turn is terminal once the deterministic response was handled."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        self._seed_non_finalized(state_env)
+
+        def _wrapper(code, decision, lead=None, message_id="", capture=None):
+            if capture is not None:
+                capture["payload"] = {
+                    "refusal": "owner_approve_without_customer_finalize",
+                    "owner_reprompt_delivered": True,
+                }
+            return 11
+
+        with patch.object(actions_mod, "invoke_apply_owner_decision", side_effect=_wrapper):
+            event = _make_event("#ABCDE approve", "15550100002@s.whatsapp.net")
+            result = hooks_mod.pre_gateway_dispatch(event)
+
+        assert result == {"action": "skip", "reason": result["reason"]} or result["action"] == "skip"
+        assert "not customer-finalized" in result["reason"]
+        assert "rc=11" in result["reason"]
+
+    def test_undelivered_reprompt_is_not_reported_as_informed(self, mods, state_env):
+        """REQ 6 — if the reprompt did not land, do NOT claim the owner was told.
+
+        The turn stays open (returns None) rather than being closed on a promise
+        that nothing kept. This is the silent-failure class the repair exists to
+        close, so it is pinned in both directions.
+        """
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        self._seed_non_finalized(state_env)
+
+        def _wrapper(code, decision, lead=None, message_id="", capture=None):
+            if capture is not None:
+                capture["payload"] = {
+                    "refusal": "owner_approve_without_customer_finalize",
+                    "owner_reprompt_delivered": False,
+                }
+            return 11
+
+        with patch.object(actions_mod, "invoke_apply_owner_decision", side_effect=_wrapper):
+            event = _make_event("#ABCDE approve", "15550100002@s.whatsapp.net")
+            result = hooks_mod.pre_gateway_dispatch(event)
+
+        assert result is None, (
+            "an undelivered reprompt must not close the turn — that would claim "
+            "the owner was informed when nothing reached them")
+
+    def test_router_never_passes_skip_finalize(self, mods, state_env):
+        """REQ 5 — the override stays operator/cockpit-only, never inferred from
+        a WhatsApp reply. Asserted on the REAL wrapper's argv, not a mock."""
+        _hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        self._seed_non_finalized(state_env)
+
+        captured = {}
+
+        class _Result:
+            returncode = 11
+            stdout = json.dumps({
+                "refusal": "owner_approve_without_customer_finalize",
+                "owner_reprompt_delivered": True,
+            })
+            stderr = ""
+
+        def _fake_subprocess_run(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            return _Result()
+
+        lead = {"lead_id": "L0001", "owner_approval_code": "#ABCDE",
+                "status": "AWAITING_OWNER_APPROVAL",
+                "quote_text": "<legacy: no quote drafted>", "selected_items": []}
+        with patch.object(actions_mod.subprocess, "run", _fake_subprocess_run):
+            rc = actions_mod.invoke_apply_owner_decision(
+                "#ABCDE", "approve", lead=lead, message_id="wamid.X")
+
+        assert rc == 11
+        assert "--skip-finalize" not in captured["cmd"], (
+            "cf-router must never infer the operator override from WhatsApp")
+        assert "--quote-text-stdin" not in captured["cmd"]
+        assert "--quote-from-lead-state" not in captured["cmd"], (
+            "there is no customer selection to render from")
+        assert "--sender-role" in captured["cmd"] and "owner" in captured["cmd"]
+
+    def test_no_model_credential_is_consulted_on_this_path(
+            self, mods, state_env):
+        """REQ 7 — the deterministic path must not depend on the model service.
+
+        Honest about its own strength: clearing OPENROUTER_API_KEY proves little
+        on its own, because nothing on this path would read it anyway. That is
+        exactly the claim, so it is also asserted directly against the source.
+        """
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        self._seed_non_finalized(state_env)
+
+        def _wrapper(code, decision, lead=None, message_id="", capture=None):
+            if capture is not None:
+                capture["payload"] = {
+                    "refusal": "owner_approve_without_customer_finalize",
+                    "owner_reprompt_delivered": True,
+                }
+            return 11
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": ""}, clear=False), \
+                patch.object(actions_mod, "invoke_apply_owner_decision", side_effect=_wrapper):
+            event = _make_event("#ABCDE approve", "15550100002@s.whatsapp.net")
+            result = hooks_mod.pre_gateway_dispatch(event)
+
+        assert result is not None and result["action"] == "skip"
+
+        # The load-bearing half: no model credential or client is referenced
+        # anywhere on the deterministic owner-decision path.
+        src = (Path(__file__).resolve().parent.parent / "src" / "plugins"
+               / "cf-router" / "actions.py").read_text(encoding="utf-8")
+        start = src.index("def invoke_apply_owner_decision(")
+        body = src[start:src.index("\ndef ", start + 10)]
+        for forbidden in ("OPENROUTER", "openrouter", "llm_call", "completion"):
+            assert forbidden not in body, (
+                f"{forbidden!r} appears on the deterministic owner-decision path")
+
+    def test_finalized_happy_path_is_untouched(self, mods, state_env):
+        """REQ 3 — CUSTOMER_FINALIZED + selected_items still renders server-side."""
+        _hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        captured = {}
+
+        class _Result:
+            returncode = 0
+            stdout = json.dumps({"lead_id": "L0001", "new_status": "SENT_TO_CUSTOMER"})
+            stderr = ""
+
+        def _fake_subprocess_run(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            return _Result()
+
+        lead = {"lead_id": "L0001", "owner_approval_code": "#ABCDE",
+                "status": "CUSTOMER_FINALIZED",
+                "quote_text": "<legacy: none>",
+                "selected_items": [{"name": "Idly (3 PCS)", "qty": 1}]}
+        with patch.object(actions_mod.subprocess, "run", _fake_subprocess_run):
+            rc = actions_mod.invoke_apply_owner_decision(
+                "#ABCDE", "approve", lead=lead, message_id="wamid.X")
+
+        assert rc == 0
+        assert "--quote-from-lead-state" in captured["cmd"]
+        assert "--skip-finalize" not in captured["cmd"]
+
+    def test_real_quote_text_legacy_path_is_untouched(self, mods, state_env):
+        """REQ 4 — a real drafted quote still goes via stdin."""
+        _hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        captured = {}
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _fake_subprocess_run(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["stdin"] = kwargs.get("input")
+            return _Result()
+
+        lead = {"lead_id": "L0001", "owner_approval_code": "#ABCDE",
+                "status": "AWAITING_OWNER_APPROVAL",
+                "quote_text": "Hi customer, your real quote. (Ref: L0001)",
+                "selected_items": []}
+        with patch.object(actions_mod.subprocess, "run", _fake_subprocess_run):
+            rc = actions_mod.invoke_apply_owner_decision(
+                "#ABCDE", "approve", lead=lead, message_id="wamid.X")
+
+        assert rc == 0
+        assert "--quote-text-stdin" in captured["cmd"]
+        assert captured["stdin"] == "Hi customer, your real quote. (Ref: L0001)"
+        assert "--skip-finalize" not in captured["cmd"]
+
+    def test_second_approval_attempt_does_not_change_state_or_double_send(
+            self, mods, state_env):
+        """REQ 2 — repeating the approval repeats the same terminal refusal and
+        mints no transition. The script is the idempotency owner; the router
+        must not accumulate side effects of its own across attempts."""
+        hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+        self._seed_non_finalized(state_env)
+        calls = []
+
+        def _wrapper(code, decision, lead=None, message_id="", capture=None):
+            calls.append(decision)
+            if capture is not None:
+                capture["payload"] = {
+                    "refusal": "owner_approve_without_customer_finalize",
+                    "owner_reprompt_delivered": True,
+                }
+            return 11
+
+        before_bytes = state_env["leads_path"].read_bytes()
+        results = []
+        with patch.object(actions_mod, "invoke_apply_owner_decision", side_effect=_wrapper):
+            for mid in ("wamid.A1", "wamid.A2"):
+                event = _make_event("#ABCDE approve", "15550100002@s.whatsapp.net",
+                                    message_id=mid)
+                results.append(hooks_mod.pre_gateway_dispatch(event))
+
+        assert calls == ["approve", "approve"]
+        assert all(r is not None and r["action"] == "skip" for r in results)
+        # Byte-identical, not field-by-field: asserting status still reads
+        # AWAITING_OWNER_APPROVAL cannot fail when the wrapper is mocked and the
+        # seed never wrote anything else. Compare the whole file, so ANY write
+        # by the router fails this.
+        assert state_env["leads_path"].read_bytes() == before_bytes, (
+            "the router wrote to the lead store on a refusal path")
+
+    def test_path3_admits_only_the_shape_whose_guard_fires(self, mods, state_env):
+        """The routing precondition, pinned shape by shape against the real wrapper.
+
+        Widening path 3 to run the script is only safe because the wrapper first
+        checks the guard's own shape. cf-router branches on `selected_items`; the
+        script's PR-CF1 guard keys on `customer_finalized_at`. They are different
+        fields, so without the precondition the widened path also admits shapes
+        the guard skips — two of which reach EXIT_OK: an OWNER_APPROVED replay
+        that transitions the lead to SENT_TO_CUSTOMER, and a delivery-uncertain
+        lead that refuses to re-POST. Both would have closed the turn with the
+        owner told nothing, and neither was reachable from WhatsApp before.
+
+        A silent success-shaped skip is the mirror image of the defect this whole
+        change exists to fix, so the boundary is asserted rather than argued.
+        """
+        _hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        shapes = [
+            # (label, status, customer_finalized_at, selected_items, quote_text,
+            #  expected: None => script not invoked, else required flag)
+            ("A  the fixed case", "AWAITING_OWNER_APPROVAL", None, [],
+             "<legacy: none>", "NO_QUOTE_FLAG"),
+            ("B  AWAITING + finalized_at set", "AWAITING_OWNER_APPROVAL",
+             "2026-08-01T10:00:00-04:00", [], "<legacy: none>", None),
+            ("C  CUSTOMER_FINALIZED, no items", "CUSTOMER_FINALIZED",
+             "2026-08-01T10:00:00-04:00", [], "<legacy: none>", None),
+            ("D2 OWNER_APPROVED replay", "OWNER_APPROVED",
+             "2026-08-01T10:00:00-04:00", [], "<legacy: none>", None),
+            ("E  delivery uncertain", "OWNER_APPROVED", None, [],
+             "<legacy: none>", None),
+            ("   happy path", "CUSTOMER_FINALIZED", "2026-08-01T10:00:00-04:00",
+             [{"name": "Idly (3 PCS)", "qty": 1}], "<legacy: none>",
+             "--quote-from-lead-state"),
+            ("   legacy real quote", "AWAITING_OWNER_APPROVAL", None, [],
+             "Hi customer, your real quote.", "--quote-text-stdin"),
+        ]
+
+        for label, status, finalized, items, quote, expected in shapes:
+            captured = {}
+
+            def _fake_run(cmd, **kwargs):
+                captured["cmd"] = list(cmd)
+                return _Result()
+
+            lead = {"lead_id": "L0001", "owner_approval_code": "#ABCDE",
+                    "status": status, "quote_text": quote, "selected_items": items}
+            if finalized is not None:
+                lead["customer_finalized_at"] = finalized
+
+            with patch.object(actions_mod.subprocess, "run", _fake_run):
+                rc = actions_mod.invoke_apply_owner_decision(
+                    "#ABCDE", "approve", lead=lead, message_id="wamid.X")
+
+            if expected is None:
+                assert "cmd" not in captured, (
+                    f"{label}: the script must NOT be invoked for this shape — "
+                    "it is outside the guard's shape and can reach EXIT_OK, "
+                    "closing the turn while telling the owner nothing")
+                assert rc == 2, f"{label}: expected the unchanged rc=2 fall-through"
+            else:
+                assert "cmd" in captured, f"{label}: the script should be invoked"
+                if expected == "NO_QUOTE_FLAG":
+                    assert "--quote-text-stdin" not in captured["cmd"]
+                    assert "--quote-from-lead-state" not in captured["cmd"]
+                else:
+                    assert expected in captured["cmd"], (
+                        f"{label}: expected {expected} in argv")
+            # invariant A, on every shape, not just the interesting one
+            assert "--skip-finalize" not in captured.get("cmd", []), (
+                f"{label}: cf-router must never pass the operator override")
+
+    def test_exit_code_constant_matches_the_canonical_source(self):
+        """The plugin restates EXIT_TRUTH_GUARD_FAILED because it cannot import
+        the Shift platform module. Pin the two together so they cannot drift."""
+        hooks_path = (Path(__file__).resolve().parent.parent
+                      / "src" / "plugins" / "cf-router" / "hooks.py")
+        codes_path = (Path(__file__).resolve().parent.parent
+                      / "src" / "platform" / "exit_codes.py")
+        import re
+        mine = re.search(r"^_EXIT_TRUTH_GUARD_FAILED\s*=\s*(\d+)",
+                         hooks_path.read_text(encoding="utf-8"), re.M)
+        canon = re.search(r"^EXIT_TRUTH_GUARD_FAILED\s*=\s*(\d+)",
+                          codes_path.read_text(encoding="utf-8"), re.M)
+        assert mine and canon, "both constants must be present"
+        assert mine.group(1) == canon.group(1), (
+            "cf-router's restated exit code drifted from exit_codes.py")
