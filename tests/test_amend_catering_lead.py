@@ -384,7 +384,16 @@ def test_amendment_applied_audit_row_records_names_not_values(sb):
     assert rows[0]["lead_id"] == "L0001"
     assert rows[0]["amendment_id"] == cap.amendment_id
     assert rows[0]["fields_changed"] == ["headcount"]
-    blob = json.dumps(rows[0])
+    # Scan every field that could carry a customer value — but NOT `ts`.
+    # The timestamp has microsecond precision, so roughly one run in a thousand
+    # produces something like ...T02:57:27.280053+00:00, which contains "280"
+    # and fails this privacy assertion on the clock rather than on a leak.
+    # Observed exactly that way in CI on 2026-08-23. `ts` is machine-generated
+    # and cannot carry the customer's headcount or their raw text, so excluding
+    # it narrows the scan to what the assertion is actually about.
+    scanned = {k: v for k, v in rows[0].items() if k != "ts"}
+    assert "ts" in rows[0], "the row must still carry a timestamp"
+    blob = json.dumps(scanned)
     assert "280" not in blob and "actually make it" not in blob
 
 
