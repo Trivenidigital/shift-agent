@@ -170,3 +170,40 @@ jobs:
         run: |
           echo "branch HEAD=$(git rev-parse HEAD) merge-ref GITHUB_SHA=${GITHUB_SHA}"
           python -m pytest -vv tests/test_catering_studio_e2e.py
+
+  # ── deterministic catering lifecycle, as SUBPROCESSES ──────────────────────
+  # A SEPARATE job, not another step of `send-path`, for one reason: the catering
+  # scripts hardcode /opt/shift-agent and /usr/local/lib/hermes-agent/venv/bin/
+  # python, and the test reproduces that layout as symlinks into its tmp_path
+  # sandbox. That needs a writable /opt and /usr/local, which the unprivileged
+  # runner user does not have — so this runs as root in a container. Same image
+  # as the local repro recipe, so a red gate reproduces verbatim.
+  #
+  # This gate is NOT tests/e2e/test_catering_conversation_e2e.py: that one is the
+  # funded real-OpenRouter conversation probe and skips without a key, which is
+  # exactly why it is not counted as blocking coverage anywhere.
+  catering-lifecycle-e2e:
+    name: catering lifecycle E2E (real CLI chain, stub transport)
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.11-slim
+    env:
+      # Same posture as the send-path job: the bridge defaults to a CLOSED
+      # loopback sink. The test points each subprocess at its own local stub.
+      HERMES_BRIDGE_URL: "http://127.0.0.1:1/__fake_test_sink__"
+      SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS: ""
+      # A skip here would be a green gate that proved nothing. With this set, the
+      # test's sandbox-unavailable path FAILS instead of skipping.
+      CATERING_LIFECYCLE_E2E_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install test deps (no project secrets)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pydantic pyyaml pytest
+
+      # -v so every lifecycle and refusal cell reports its own PASSED line, and
+      # -rs so a skip is printed with its reason rather than left as a bare 's'.
+      - name: Catering lifecycle E2E — inquiry to delivered quote, plus refusals
+        run: python -m pytest -v -rs -p no:cacheprovider tests/e2e/test_catering_lifecycle_deterministic.py
