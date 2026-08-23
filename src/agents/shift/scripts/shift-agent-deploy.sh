@@ -775,15 +775,35 @@ RECEIPT_EOF
     #   1. ADDITIVE ONLY. Never delete a drop-in, never purge a *.service.d
     #      directory. Most drop-ins on the box belong to codex tooling, not to
     #      us, and removing another tool's config is out of bounds.
-    #   2. NEVER OVERWRITE A DIFFERING FILE. A box copy that differs may be a
-    #      deliberate hand edit, and nothing here can tell the difference. We
-    #      install only what is absent, leave byte-identical copies alone, and
-    #      REPORT anything else for a human.
+    #   2. NEVER OVERWRITE A FILE THAT DIFFERS IN CONTENT. A box copy whose
+    #      content differs may be a deliberate hand edit, and nothing here can
+    #      tell the difference. We install only what is absent, leave identical
+    #      copies alone, and REPORT anything else for a human.
+    #
+    #      ONE difference we CAN classify: line endings. A copy that is
+    #      byte-identical after stripping CR is a Windows-authored file, not a
+    #      hand edit — no operator deliberately changes only the line endings of
+    #      a systemd drop-in. `20-drain-timeout.conf` on main-vps is exactly
+    #      this: 32 bytes CRLF against the repo's 30 bytes LF, dated 2026-05-23,
+    #      and it warned on EVERY deploy for three months. That is the real cost
+    #      — an unactionable warning that always fires teaches the operator to
+    #      skim drop-in warnings, so a GENUINE drift lands in a channel nobody
+    #      reads any more. (Cosmetic only: systemd tolerates CRLF, and
+    #      `systemctl show hermes-gateway -p TimeoutStopUSec` reports 4min on the
+    #      box, so the setting IS in effect.)
+    #
+    #      So we report it as its own class, with the command that fixes it, and
+    #      keep it OUT of the WARN count that means "a human must look". The
+    #      refuse-to-overwrite guard is unchanged for real content differences;
+    #      normalisation is opt-in via SHIFT_AGENT_NORMALIZE_DROPIN_EOL=1 and is
+    #      safe by construction, because it only ever runs where the content is
+    #      already proven identical.
     #   3. Only files under src/platform/systemd/<unit>.d/ are ours. Ownership
     #      was decided per file; see docs/runbooks/systemd-dropins.md for which
     #      drop-ins on the box are deliberately NOT tracked and why.
     install_tracked_dropins() {
         local dropin_diffs=0
+        local dropin_eol=0
         local dir unit dest f name target
         for dir in src/platform/systemd/*.service.d; do
             [ -d "$dir" ] || continue
@@ -799,16 +819,36 @@ RECEIPT_EOF
                     echo "  dropin INSTALLED  $unit/$name"
                 elif cmp -s "$f" "$target"; then
                     echo "  dropin unchanged  $unit/$name"
+                elif cmp -s <(tr -d '\r' < "$f") <(tr -d '\r' < "$target"); then
+                    # Identical after stripping CR: line endings only, never a
+                    # hand edit. Classified, not lumped in with real drift.
+                    if [ "${SHIFT_AGENT_NORMALIZE_DROPIN_EOL:-0}" = "1" ]; then
+                        install -m 644 "$f" "$target"
+                        echo "  dropin NORMALIZED $unit/$name — line endings only (CRLF -> LF); content byte-identical."
+                    else
+                        echo "  dropin EOL-ONLY   $unit/$name — differs ONLY in line endings; not overwriting."
+                        echo "    Content is byte-identical after stripping CR, so this is a"
+                        echo "    Windows-authored copy, not a deliberate edit. Nothing to resolve by hand."
+                        echo "    To adopt the repo copy: re-run the deploy with SHIFT_AGENT_NORMALIZE_DROPIN_EOL=1"
+                        dropin_eol=$((dropin_eol + 1))
+                    fi
                 else
                     echo "  dropin DIFFERS    $unit/$name — NOT overwriting." >&2
                     echo "    box copy may be a deliberate edit; diff and resolve by hand." >&2
-                    echo "    (a CRLF/LF-only difference still counts: compare with 'xxd')" >&2
+                    echo "    (content differs, not just line endings — those are reported separately)" >&2
                     dropin_diffs=$((dropin_diffs + 1))
                 fi
             done
         done
+        # Only CONTENT differences reach the WARN channel. A warning that always
+        # fires is a warning that no longer carries information, and the whole
+        # point of separating these is that this line stays quiet until it means
+        # something.
         if [ "$dropin_diffs" -gt 0 ]; then
-            echo "WARN: $dropin_diffs tracked drop-in(s) differ on the box and were left untouched." >&2
+            echo "WARN: $dropin_diffs tracked drop-in(s) differ IN CONTENT on the box and were left untouched." >&2
+        fi
+        if [ "$dropin_eol" -gt 0 ]; then
+            echo "  note: $dropin_eol tracked drop-in(s) differ only in line endings (cosmetic; see SHIFT_AGENT_NORMALIZE_DROPIN_EOL above)."
         fi
         return 0
     }
