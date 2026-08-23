@@ -126,6 +126,191 @@ def _isolate_notify_failed_log(tmp_path, monkeypatch):
     yield
 
 
+# ── copied-state rehearsal sandbox (P1-A 2026-08-23) ────────────────────────
+# A copied-state rehearsal of a menu mutation copied the REAL production
+# config.yaml — live Pushover user key and app token included — into a
+# `--network host` docker container running real production scripts. Nothing
+# fired, but only by luck: those scripts contain a notify_owner_with_fallback
+# call that DID page the owner for real minutes later.
+#
+# This is the ergonomic wrapper around the platform primitives in safe_io
+# (sanitize_config_for_rehearsal / assert_rehearsal_config_sterile /
+# assert_rehearsal_env_sterile / sterile_env_file_body). It deliberately does
+# NOT reimplement them: the primitives live in src/platform so an operator's
+# on-box rehearsal script gets the same guarantee as pytest does, and so the
+# sanitiser and its verifier stay separable (a verifier that shares code with
+# the sanitiser cannot catch a sanitiser that never ran).
+#
+# It extends the grain already in this file — _force_fake_bridge_sink pointing
+# the bridge at a closed loopback sink, _isolate_audit_log / _isolate_notify_*
+# routing prod paths into tmp — rather than inventing a parallel mechanism.
+# Where those fixtures default ONE door per fixture for every test, this builds
+# a whole sandbox for the specific case of a config COPIED from production.
+#
+# The subprocess env is built from a small PASSTHROUGH ALLOWLIST, not from
+# os.environ: an operator shell that has sourced the box's .env carries
+# credentials under names nobody registered, and inheriting-then-scrubbing can
+# only remove the names we thought of.
+REHEARSAL_SINK_URL = "http://127.0.0.1:1/__rehearsal_sink__"
+
+_REHEARSAL_ENV_PASSTHROUGH = (
+    # POSIX
+    "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "USER", "LOGNAME", "SHELL",
+    # Windows (the repo's non-POSIX test runner)
+    "USERPROFILE", "TMP", "TEMP", "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC",
+    "WINDIR", "PATHEXT", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+    "APPDATA", "LOCALAPPDATA",
+    # Python / pytest
+    "PYTHONPATH", "PYTHONHASHSEED", "PYTHONIOENCODING", "PYTHONUTF8",
+    "VIRTUAL_ENV", "PYTEST_CURRENT_TEST",
+)
+
+
+def sterilize_subprocess_env(env: dict, *, env_file: Path, notify_owner_bin: Path) -> dict:
+    """Neutralise every outbound credential in a subprocess environment.
+
+    Layers 1-3 of the rehearsal contract (strip credentials / close the .env
+    file fallback / repoint endpoints at sinks) WITHOUT setting the rehearsal
+    marker. That split is deliberate: the marker also makes the runtime
+    chokepoints refuse, which would change what the existing copied-state
+    suites assert. Those suites need to stay behaviourally identical while
+    becoming credential-sterile — so they get layers 1-3 and purpose-built
+    rehearsals additionally get layer 4.
+
+    Mutates and returns ``env`` so it can wrap an existing builder in one line.
+
+    ``env_file`` is written with the sterile body if it does not already exist;
+    ``notify_owner_bin`` should be a path that does NOT exist, so a sandbox that
+    installed the real shift-agent-notify-owner into /usr/local/bin cannot have
+    safe_io's NOTIFY_OWNER_BIN default resolve to it.
+    """
+    import safe_io as _safe_io
+
+    for name in _safe_io.REHEARSAL_FORBIDDEN_ENV_VARS:
+        env[name] = ""
+    env_file = Path(env_file)
+    if not env_file.exists():
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text(_safe_io.sterile_env_file_body(), encoding="utf-8")
+    env["HERMES_ENV_PATH"] = str(env_file)
+    env["SHIFT_AGENT_ENV_PATH"] = str(env_file)
+    env["PUSHOVER_API_URL"] = REHEARSAL_SINK_URL
+    env["STRIPE_ACCOUNT_URL"] = REHEARSAL_SINK_URL
+    env["OPENAI_IMAGE_EDIT_URL"] = REHEARSAL_SINK_URL
+    env["OPENROUTER_URL"] = REHEARSAL_SINK_URL
+    env["SHIFT_AGENT_NOTIFY_OWNER_BIN"] = str(notify_owner_bin)
+    return env
+
+
+class RehearsalSandbox:
+    """A credential-sterile copy of production state.
+
+    Attributes:
+        root:        sandbox directory (contains config.yaml, state/, logs/)
+        config_path: the SANITISED config.yaml the rehearsal reads
+        env_file:    the sterile .env every credential resolver is pointed at
+        env:         a COMPLETE environment for subprocess.run(env=...) — pass
+                     it directly; merging os.environ back in re-opens the door
+                     the allowlist exists to close.
+    """
+
+    __slots__ = ("root", "config_path", "env_file", "env")
+
+    def __init__(self, root: Path, config_path: Path, env_file: Path, env: dict):
+        self.root = root
+        self.config_path = config_path
+        self.env_file = env_file
+        self.env = env
+
+
+def build_rehearsal_sandbox(
+    root: Path,
+    *,
+    source_config,
+    bridge_url: str | None = None,
+    _sanitizer=None,
+    _on_ready=None,
+) -> RehearsalSandbox:
+    """Derive a credential-sterile rehearsal sandbox from a production config.
+
+    Args:
+        root: directory to build the sandbox in (created if absent).
+        source_config: a config dict, or a Path to a real ``config.yaml``.
+        bridge_url: local stub to send to. Defaults to a CLOSED loopback sink,
+            so a rehearsal that was not given a stub cannot deliver anything.
+        _sanitizer / _on_ready: test seams. ``_sanitizer`` substitutes the
+            sanitisation step so a test can prove the VERIFIER catches a
+            sanitiser that skipped a key; ``_on_ready`` is the "business code
+            would start here" hook, used to prove the refusal happens BEFORE it.
+
+    Raises:
+        safe_io.RehearsalCredentialLeak: before writing anything the rehearsal
+            would run against, if any credential survived. Fail-closed by
+            construction — the sandbox does not exist unless it is sterile.
+    """
+    import yaml as _yaml
+    import safe_io as _safe_io
+
+    root = Path(root)
+    if isinstance(source_config, (str, Path)):
+        raw = _yaml.safe_load(Path(source_config).read_text(encoding="utf-8")) or {}
+    else:
+        raw = source_config
+
+    sanitize = _sanitizer or _safe_io.sanitize_config_for_rehearsal
+    sanitized = sanitize(raw)
+
+    # FAIL-CLOSED GATE #1 — before the config is written anywhere a script
+    # could read it.
+    _safe_io.assert_rehearsal_config_sterile(sanitized, source="rehearsal config.yaml")
+
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "state").mkdir(exist_ok=True)
+    (root / "logs").mkdir(exist_ok=True)
+    config_path = root / "config.yaml"
+    config_path.write_text(_yaml.safe_dump(sanitized, sort_keys=False), encoding="utf-8")
+
+    env_file = root / ".env"
+    env_file.write_text(_safe_io.sterile_env_file_body(), encoding="utf-8")
+
+    # ALLOWLIST base, not os.environ: an operator shell that has sourced the
+    # box's .env carries credentials under names nobody registered, and
+    # inherit-then-scrub can only remove the names we thought of.
+    env = {k: os.environ[k] for k in _REHEARSAL_ENV_PASSTHROUGH if k in os.environ}
+    # Layers 1-3, shared with the existing copied-state suites so there is ONE
+    # credential-neutralisation implementation rather than two that drift.
+    sterilize_subprocess_env(
+        env,
+        env_file=env_file,
+        notify_owner_bin=root / "bin" / "no-rehearsal-pushover",
+    )
+    env["HERMES_BRIDGE_URL"] = bridge_url or REHEARSAL_SINK_URL
+    # Prod-path isolation, same three doors the autouse fixtures above cover.
+    env["SHIFT_AGENT_DECISIONS_LOG_PATH"] = str(root / "logs" / "decisions.log")
+    env["SHIFT_AGENT_NOTIFY_DEDUP_STATE"] = str(root / "state" / "notify-dedup.json")
+    env["SHIFT_AGENT_NOTIFY_FAILED_LOG"] = str(root / "logs" / "notify-failed.log")
+    # Unmistakably a rehearsal — the marker the runtime chokepoints refuse on.
+    env[_safe_io.REHEARSAL_MODE_ENV] = "1"
+
+    # FAIL-CLOSED GATE #2 — the environment the subprocess would inherit.
+    _safe_io.assert_rehearsal_env_sterile(env, source="rehearsal subprocess env")
+
+    sandbox = RehearsalSandbox(root, config_path, env_file, env)
+    if _on_ready is not None:
+        _on_ready(sandbox)
+    return sandbox
+
+
+@pytest.fixture
+def rehearsal_sandbox(tmp_path):
+    """Factory fixture: ``rehearsal_sandbox(source_config=..., ...)``."""
+    def _build(**kwargs):
+        kwargs.setdefault("root", tmp_path / "rehearsal")
+        root = kwargs.pop("root")
+        return build_rehearsal_sandbox(root, **kwargs)
+    return _build
+
+
 @pytest.fixture
 def tmp_state_dir(tmp_path: Path) -> Path:
     """Isolated state directory per test."""

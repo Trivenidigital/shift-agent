@@ -31,6 +31,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -96,7 +97,18 @@ def make_env_dir(tmp_path: Path, *, customer_tz: str = "America/New_York") -> Pa
     return tmp_path
 
 
-def _env_for_subprocess(bridge_port: int | None = None) -> dict:
+def _env_for_subprocess(bridge_port: int | None = None,
+                        sandbox_dir: Path | None = None) -> dict:
+    """Subprocess env for the B1 script harness.
+
+    P1-A: `**os.environ` handed live credentials from the operator shell to real
+    production scripts. sterilize_subprocess_env neutralises every registered
+    credential name, points the two .env FILE fallbacks at a sterile file, and
+    sinks the outbound endpoints. Layers 1-3 only — the rehearsal marker is not
+    set, so nothing this harness asserts changes.
+    """
+    from conftest import sterilize_subprocess_env
+
     env = {
         **os.environ,
         "PYTHONPATH": str(PLATFORM_DIR),
@@ -104,9 +116,13 @@ def _env_for_subprocess(bridge_port: int | None = None) -> dict:
     if bridge_port is not None:
         env["HERMES_BRIDGE_URL"] = f"http://127.0.0.1:{bridge_port}/send"
         env["SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS"] = "1"
-    return {
-        **env,
-    }
+    base = Path(sandbox_dir) if sandbox_dir is not None else Path(
+        tempfile.mkdtemp(prefix="b1-sterile-"))
+    return sterilize_subprocess_env(
+        env,
+        env_file=base / ".env-sterile",
+        notify_owner_bin=base / "bin" / "no-sandbox-pushover",
+    )
 
 
 def run_create(
@@ -170,7 +186,7 @@ sys.exit(mod.main())
 """
     return subprocess.run(
         [sys.executable, "-c", wrapper],
-        capture_output=True, text=True, env=_env_for_subprocess(bridge_port),
+        capture_output=True, text=True, env=_env_for_subprocess(bridge_port, env_dir),
         timeout=20,
     )
 
@@ -241,7 +257,7 @@ sys.exit(mod.main())
 """
     return subprocess.run(
         [sys.executable, "-c", wrapper],
-        capture_output=True, text=True, env=_env_for_subprocess(bridge_port),
+        capture_output=True, text=True, env=_env_for_subprocess(bridge_port, env_dir),
         timeout=20,
     )
 

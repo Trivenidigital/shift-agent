@@ -687,6 +687,18 @@ def notify_owner_with_fallback(
     import json as _json
     import subprocess as _subprocess
 
+    # P1-A rehearsal sterility. THE call from the motivating incident: a
+    # copied-state rehearsal ran production scripts containing this helper with
+    # the real Pushover credentials in the copied config. Refuse BEFORE the
+    # subprocess so the credentials are never handed to a process that can use
+    # them; no dead-letter row either (a refusal is not a dropped alert — the
+    # rehearsal was never supposed to page anyone). Keyed on the rehearsal
+    # marker, so production and the helper's own pytest coverage are unaffected.
+    _rehearsal_block = owner_alert_blocked_by_rehearsal(source)
+    if _rehearsal_block:
+        sys.stderr.write(f"REHEARSAL: {_rehearsal_block} title={title!r}\n")
+        return False
+
     if notify_failed_log is None:
         notify_failed_log = Path(os.environ.get("SHIFT_AGENT_NOTIFY_FAILED_LOG", NOTIFY_FAILED_LOG_DEFAULT))
     if dedup_state_path is None:
@@ -1817,6 +1829,17 @@ def bridge_send_blocked_by_test_context(target_url: Optional[str] = None) -> Opt
     ``None`` (no tripwire) for backward compatibility with direct callers."""
     if os.environ.get("FLYER_RECOVERY_NO_LIVE_SEND") == "1":
         return "refusing bridge send under FLYER_RECOVERY_NO_LIVE_SEND"
+    # P1-A rehearsal sterility: a copied-state rehearsal may NEVER reach the
+    # live bridge, and no opt-in flag overrides it — hence the placement ABOVE
+    # SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS. Only the LIVE bridge is refused; a
+    # rehearsal pointed at its own local stub still works (otherwise the
+    # rehearsal could not exercise the send path at all, and "no external call"
+    # would be indistinguishable from "nothing ran").
+    if rehearsal_mode_active() and _is_live_bridge_url(target_url):
+        return (
+            f"refusing live-bridge send under {REHEARSAL_MODE_ENV}=1 "
+            f"({target_url!r}) — point HERMES_BRIDGE_URL at a local sink"
+        )
     if os.environ.get("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS") == "1":
         if _running_under_pytest() and _is_live_bridge_url(target_url):
             raise LiveBridgeSendInTestError(
@@ -1830,6 +1853,376 @@ def bridge_send_blocked_by_test_context(target_url: Optional[str] = None) -> Opt
     if "pytest" in " ".join(sys.argv[:3]).lower():
         return "refusing bridge send from pytest context"
     return None
+
+
+# ─────────────────────────────────────────────────────────────────
+# Rehearsal credential sterility (P1-A 2026-08-23)
+#
+# A copied-state rehearsal of a menu mutation copied the REAL production
+# config.yaml — live Pushover user key and app token included — into a
+# `--network host` docker container running real production scripts. Nothing
+# fired, and that was verified afterwards, but it was LUCK: the scripts under
+# test contain a notify_owner_with_fallback call that DID fire in production
+# minutes later. Copied state is not safe merely because the files are copies,
+# if the copied credentials still authorise real external actions.
+#
+# Invariant established here:
+#   A copied-state / local rehearsal must be UNABLE to produce an externally
+#   authenticated side effect, even when production config or state was used
+#   as its source.
+#
+# Four layers, deliberately not one check (the reasoning that failed was "the
+# test currently doesn't call that branch"):
+#   1. DETERMINISTIC SANITISATION — sanitize_config_for_rehearsal replaces every
+#      registered credential-bearing config key with a sterile sentinel that is
+#      still SCHEMA-VALID (a blank pushover key fails AlertingConfig and would
+#      turn sterility into a crash, which operators then "fix" by putting the
+#      real key back).
+#   2. FAIL-CLOSED VERIFICATION — assert_rehearsal_config_sterile /
+#      assert_rehearsal_env_sterile RAISE RehearsalCredentialLeak before any
+#      business code runs. Registered keys are checked by IDENTITY (must equal
+#      the sentinel, so no shape heuristic can be fooled); every OTHER leaf is
+#      checked by production-credential SHAPE, so an unknown future door is
+#      caught too. A guard that knew only about Pushover would repeat this
+#      incident at a different door.
+#   3. SINKS — endpoints are redirected to closed local addresses, including the
+#      .env FILE fallbacks (HERMES_ENV_PATH / SHIFT_AGENT_ENV_PATH). Scrubbing
+#      os.environ alone is insufficient: every provider-key resolver in this
+#      tree falls back to reading /root/.hermes/.env and /opt/shift-agent/.env.
+#   4. RUNTIME REFUSAL — the marker env var makes the outbound chokepoints
+#      refuse (bridge_send_blocked_by_test_context above,
+#      owner_alert_blocked_by_rehearsal below), so a rehearsal that reached
+#      business code anyway still cannot emit.
+#
+# Everything here is gated on the marker env var (or on a value that is ITSELF
+# a sterile sentinel), so PRODUCTION IS BYTE-IDENTICAL: the fast path is a
+# single absent-env-var lookup.
+# ─────────────────────────────────────────────────────────────────
+
+# Unmistakable marker. Set by build_rehearsal_sandbox (tests) and by any
+# operator rehearsal script; never set on the box.
+REHEARSAL_MODE_ENV = "SHIFT_AGENT_REHEARSAL"
+
+# Every sterile replacement carries this prefix, so a credential value is
+# self-identifying as fake even when the marker env var was forgotten.
+REHEARSAL_STERILE_PREFIX = "REHEARSAL-STERILE"
+
+
+class RehearsalCredentialLeak(RuntimeError):
+    """A rehearsal was about to run with a live-looking credential in reach.
+
+    Raised BEFORE business code — the whole point is that the rehearsal never
+    starts rather than being trusted not to hit the branch that would emit.
+    """
+
+
+# Dotted config.yaml key path -> sterile replacement value.
+#
+# The replacement must keep the config SCHEMA-VALID (see AlertingConfig
+# .require_pushover) and must be inert: a sentinel string that cannot
+# authenticate, or "" where empty means "feature disabled" in the schema.
+REHEARSAL_CONFIG_CREDENTIAL_KEYS: "dict[str, object]" = {
+    # Pushover — the credentials from the incident. Non-empty sentinels because
+    # AlertingConfig REQUIRES both to be non-empty.
+    "alerting.pushover_user_key": f"{REHEARSAL_STERILE_PREFIX}-pushover-user-key",
+    "alerting.pushover_app_token": f"{REHEARSAL_STERILE_PREFIX}-pushover-app-token",
+    # healthchecks.io: the UUID in the URL *is* the credential. "" = disabled.
+    "alerting.healthchecks_io_url": "",
+    # Outbound email destination. "" = disabled.
+    "alerting.email": "",
+    # Off-site backup upload (needs AWS creds) + GPG recipient. "" both disable.
+    "backup.s3_bucket": "",
+    "backup.gpg_fingerprint": "",
+    # Commerce / money. A live payment-link template mints REAL payment links;
+    # provider="stripe" calls api.stripe.com with STRIPE_API_KEY. Both are
+    # forced to their inert defaults — a real Stripe mint cannot be rehearsed
+    # safely, so the rehearsal must not pretend otherwise.
+    "commerce.payment_checkout_url_template": "",
+    "commerce.provider": "placeholder",
+    "commerce.stripe_livemode_expected": False,
+}
+
+# Env vars that carry an outbound credential. Neutralised to "" (not deleted)
+# so a resolver's "missing key" branch fires deterministically rather than the
+# value being silently re-resolved from an inherited parent env.
+REHEARSAL_FORBIDDEN_ENV_VARS: "tuple[str, ...]" = (
+    # model providers
+    "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY", "GOOGLE_API_KEY",
+    # payments
+    "STRIPE_API_KEY", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET",
+    # owner paging
+    "PUSHOVER_APP_TOKEN", "PUSHOVER_USER_KEY",
+    # other messaging transports
+    "TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN",
+    # cockpit / auth
+    "COCKPIT_JWT_SECRET",
+    # object storage / backups
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    # mail + code hosting + accounting
+    "SMTP_PASSWORD", "GITHUB_TOKEN", "GH_TOKEN",
+    "QBO_CLIENT_SECRET", "QBO_REFRESH_TOKEN",
+)
+
+# Endpoint env vars a rehearsal must repoint at a closed/local sink, mapped to
+# the module-level default they otherwise resolve to. Enumerated here (rather
+# than left to each caller) so a new external endpoint is added in ONE place.
+REHEARSAL_SINK_ENV_VARS: "tuple[str, ...]" = (
+    "HERMES_BRIDGE_URL",      # WhatsApp bridge (default 127.0.0.1:3000)
+    "PUSHOVER_API_URL",       # shift-agent-notify-owner -> api.pushover.net
+    "STRIPE_ACCOUNT_URL",     # commerce_livemode_gate -> api.stripe.com
+    "OPENAI_IMAGE_EDIT_URL",  # flyer render -> api.openai.com
+    "OPENROUTER_URL",         # vision-auth-smoke -> openrouter.ai
+    "HERMES_ENV_PATH",        # .env fallback #1 (/root/.hermes/.env)
+    "SHIFT_AGENT_ENV_PATH",   # .env fallback #2 (/opt/shift-agent/.env)
+    # The Pushover BINARY. A sandbox that installs the real
+    # shift-agent-notify-owner into /usr/local/bin re-arms the whole Pushover
+    # path even with a sterile config, because safe_io's default points at the
+    # deployed binary (NOTIFY_OWNER_BIN).
+    "SHIFT_AGENT_NOTIFY_OWNER_BIN",
+)
+
+# Production-credential SHAPES. Two tiers:
+#   ALWAYS — an unambiguous provider prefix/format. Flagged wherever it appears,
+#            under any key name, because nothing else looks like this.
+#   HINTED — generic high-entropy shapes that would false-positive on ordinary
+#            config values (ids, hashes). Flagged only under a key whose NAME
+#            says "credential".
+_REHEARSAL_SHAPES_ALWAYS: "tuple[tuple[str, str], ...]" = (
+    (r"^sk-or-v1-", "OpenRouter API key"),
+    (r"^sk-ant-", "Anthropic API key"),
+    (r"^sk-proj-", "OpenAI project key"),
+    (r"^(sk|rk|pk)_(live|test)_[A-Za-z0-9]", "Stripe API key"),
+    (r"^whsec_", "Stripe webhook secret"),
+    (r"^\d{8,10}:[A-Za-z0-9_\-]{30,}$", "Telegram bot token"),
+    (r"^xox[baprs]-", "Slack token"),
+    (r"^gh[pousr]_[A-Za-z0-9]{20,}$", "GitHub token"),
+    (r"^github_pat_", "GitHub fine-grained PAT"),
+    (r"^AKIA[0-9A-Z]{16}$", "AWS access key id"),
+    (r"^AIza[0-9A-Za-z_\-]{35}$", "Google API key"),
+    (r"^-----BEGIN [A-Z ]*PRIVATE KEY-----", "private key material"),
+    (r"https?://(hc-ping\.com|[A-Za-z0-9.\-]*healthchecks\.io)/", "healthchecks ping URL"),
+    (r"https?://[A-Za-z0-9.\-]*hooks\.slack\.com/", "Slack webhook URL"),
+    (r"https?://api\.telegram\.org/bot", "Telegram bot API URL"),
+)
+_REHEARSAL_SHAPES_HINTED: "tuple[tuple[str, str], ...]" = (
+    (r"^[A-Za-z0-9]{30}$", "Pushover-shaped token/user key"),
+    (r"^sk-[A-Za-z0-9_\-]{20,}$", "OpenAI-style API key"),
+    (r"^[A-Fa-f0-9]{32,}$", "long hex secret"),
+)
+# Key names that mean "this holds a credential".
+_REHEARSAL_SECRET_KEY_HINT = (
+    r"(?:^|[._])(?:api_?key|key|token|secret|password|passwd|pwd|credential|"
+    r"auth|bearer|access_?key|private_?key|webhook)(?:$|[._])"
+)
+
+_rehearsal_shape_cache: "dict[str, object]" = {}
+
+
+def _rehearsal_re(pattern: str):
+    """Compile-once helper (module has no top-level `re` import on the hot path)."""
+    got = _rehearsal_shape_cache.get(pattern)
+    if got is None:
+        import re as _re
+        got = _re.compile(pattern, _re.IGNORECASE)
+        _rehearsal_shape_cache[pattern] = got
+    return got
+
+
+def rehearsal_mode_active() -> bool:
+    """True when this process was launched as a credential-sterile rehearsal.
+
+    Single absent-env-var lookup — free on the production hot path.
+    """
+    return os.environ.get(REHEARSAL_MODE_ENV) == "1"
+
+
+def value_is_rehearsal_sterile(value: object) -> bool:
+    """True when ``value`` cannot authenticate anything: empty, non-string, or
+    carrying the sterile sentinel prefix."""
+    if value is None or value is False or value == 0:
+        return True
+    if not isinstance(value, str):
+        return False
+    return value.strip() == "" or REHEARSAL_STERILE_PREFIX in value
+
+
+def owner_alert_blocked_by_rehearsal(source: str = "unknown") -> Optional[str]:
+    """Reason string when an owner alert must be refused, else None.
+
+    Mirrors :func:`bridge_send_blocked_by_test_context` in shape and intent, but
+    keyed on the REHEARSAL marker rather than on pytest context — deliberately:
+    ``notify_owner_with_fallback`` has legitimate pytest coverage (see
+    tests/test_notify_owner_with_fallback.py) which a pytest-keyed refusal would
+    silently gut. Production, which never sets the marker, is unaffected.
+    """
+    if rehearsal_mode_active():
+        return (
+            f"refusing owner alert under {REHEARSAL_MODE_ENV}=1 (source={source}) "
+            f"— a rehearsal must not page the real owner"
+        )
+    return None
+
+
+def _rehearsal_walk(node: object, prefix: str = ""):
+    """Yield (dotted_key, leaf_value) for every leaf in a nested dict/list."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield from _rehearsal_walk(v, f"{prefix}.{k}" if prefix else str(k))
+    elif isinstance(node, (list, tuple)):
+        for i, v in enumerate(node):
+            yield from _rehearsal_walk(v, f"{prefix}[{i}]")
+    else:
+        yield prefix, node
+
+
+def _rehearsal_shape_hit(key: str, value: object) -> Optional[str]:
+    """Name of the credential shape ``value`` matches, or None.
+
+    Sterile sentinels never hit — they are the intended output of sanitisation.
+    """
+    if not isinstance(value, str):
+        return None
+    v = value.strip()
+    if not v or REHEARSAL_STERILE_PREFIX in v:
+        return None
+    for pattern, label in _REHEARSAL_SHAPES_ALWAYS:
+        if _rehearsal_re(pattern).search(v):
+            return label
+    leaf = key.rsplit("[", 1)[0]
+    if _rehearsal_re(_REHEARSAL_SECRET_KEY_HINT).search(leaf):
+        for pattern, label in _REHEARSAL_SHAPES_HINTED:
+            if _rehearsal_re(pattern).search(v):
+                return label
+    return None
+
+
+def sanitize_config_for_rehearsal(config: dict) -> dict:
+    """Return a deep copy of ``config`` with every registered credential key
+    replaced by an inert, schema-valid sentinel.
+
+    Deterministic and total over :data:`REHEARSAL_CONFIG_CREDENTIAL_KEYS`: a key
+    is replaced whenever it is PRESENT (an absent key carries no credential, and
+    inventing one would change what the rehearsal exercises). Everything else —
+    customer, owner, limits, agent flags, state-shaping fields — is copied
+    verbatim so the rehearsal stays faithful to production behaviour.
+
+    This function does NOT verify its own result; call
+    :func:`assert_rehearsal_config_sterile` for that. Keeping them separate is
+    what lets the verifier catch a sanitiser that was never invoked.
+    """
+    import copy as _copy
+
+    out = _copy.deepcopy(config)
+    for dotted, replacement in REHEARSAL_CONFIG_CREDENTIAL_KEYS.items():
+        parts = dotted.split(".")
+        node = out
+        for part in parts[:-1]:
+            if not isinstance(node, dict) or part not in node:
+                node = None
+                break
+            node = node[part]
+        if isinstance(node, dict) and parts[-1] in node:
+            node[parts[-1]] = replacement
+    return out
+
+
+def assert_rehearsal_config_sterile(config: dict, *, source: str = "config") -> None:
+    """Raise :class:`RehearsalCredentialLeak` if any credential survives.
+
+    Two independent checks, because either alone has a known blind spot:
+
+    * REGISTERED keys are compared by IDENTITY against the sterile replacement.
+      No shape heuristic is involved, so a real credential that happens to look
+      innocuous still fails.
+    * EVERY OTHER leaf is matched against production-credential shapes, so a
+      door nobody registered — a future agent's ``provider_api_key`` — is caught
+      too. Covering only the doors we already know about is precisely how the
+      motivating incident would recur somewhere else.
+
+    Raises on the FIRST offender with its dotted path named, so the operator
+    fixes a key rather than a vague "something leaked".
+    """
+    offenders: "list[str]" = []
+    for dotted, replacement in REHEARSAL_CONFIG_CREDENTIAL_KEYS.items():
+        parts = dotted.split(".")
+        node: object = config
+        for part in parts:
+            if not isinstance(node, dict) or part not in node:
+                node = None
+                break
+            node = node[part]
+        if node is None:
+            continue  # key absent -> nothing to leak
+        if node != replacement:
+            offenders.append(
+                f"{dotted}: expected the sterile value {replacement!r}, found a "
+                f"live-looking value (type={type(node).__name__})"
+            )
+    for dotted, value in _rehearsal_walk(config):
+        if dotted in REHEARSAL_CONFIG_CREDENTIAL_KEYS:
+            continue  # already checked by identity above
+        hit = _rehearsal_shape_hit(dotted, value)
+        if hit:
+            offenders.append(f"{dotted}: value matches {hit}")
+    if offenders:
+        raise RehearsalCredentialLeak(
+            f"rehearsal REFUSED — live-looking credentials survived sanitisation "
+            f"in {source}: " + "; ".join(offenders) +
+            ". Sanitise with safe_io.sanitize_config_for_rehearsal() (add the key "
+            "to REHEARSAL_CONFIG_CREDENTIAL_KEYS if it is a new door)."
+        )
+
+
+def assert_rehearsal_env_sterile(env: "dict[str, str]", *, source: str = "env") -> None:
+    """Raise :class:`RehearsalCredentialLeak` if the environment a rehearsal
+    subprocess would inherit still authorises anything.
+
+    Same two-tier logic as :func:`assert_rehearsal_config_sterile`: registered
+    names by identity (must be absent or ""), everything else by shape. The
+    shape pass is what closes the .env-sourced-into-the-shell case, where the
+    variable name is not one we listed.
+    """
+    offenders: "list[str]" = []
+    for name in REHEARSAL_FORBIDDEN_ENV_VARS:
+        value = env.get(name, "")
+        if value and not value_is_rehearsal_sterile(value):
+            offenders.append(f"{name}: set to a live-looking value")
+    for name, value in env.items():
+        if name in REHEARSAL_FORBIDDEN_ENV_VARS:
+            continue
+        hit = _rehearsal_shape_hit(name, value)
+        if hit:
+            offenders.append(f"{name}: value matches {hit}")
+    if offenders:
+        raise RehearsalCredentialLeak(
+            f"rehearsal REFUSED — live-looking credentials survived in {source}: "
+            + "; ".join(offenders) +
+            ". Neutralise them (add the name to REHEARSAL_FORBIDDEN_ENV_VARS if "
+            "it is a new door)."
+        )
+
+
+def sterile_env_file_body() -> str:
+    """Body for the ``.env`` file a rehearsal points every resolver at.
+
+    Assignments are EMPTY on purpose. Every provider-key resolver in this tree
+    (``flyer/openrouter_env.openrouter_key``, ``flyer/render._read_env_value``,
+    ``commerce_livemode_gate.default_key_reader``, ``parse-menu-photo``) falls
+    back to reading ``/root/.hermes/.env`` then ``/opt/shift-agent/.env`` when
+    the process env is empty — so scrubbing ``os.environ`` alone leaves the file
+    door wide open. An empty assignment makes each resolver take its
+    "missing or placeholder" branch and refuse LOCALLY; a sentinel string would
+    instead be sent to the provider and fail as a real, outbound 401.
+    """
+    lines = [
+        "# Rehearsal-sterile .env — generated by safe_io.sterile_env_file_body().",
+        "# Every value is EMPTY so credential resolvers take their "
+        "missing-key branch",
+        "# and refuse locally instead of making an outbound authentication attempt.",
+    ]
+    lines += [f"{name}=" for name in REHEARSAL_FORBIDDEN_ENV_VARS]
+    return "\n".join(lines) + "\n"
 
 
 # ─────────────────────────────────────────────────────────────────

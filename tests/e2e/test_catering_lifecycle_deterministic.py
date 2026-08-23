@@ -414,6 +414,8 @@ def _assert_venv_shim() -> None:
 
 
 def _child_env(sb: Sandbox, bridge_url=None) -> dict:
+    from conftest import sterilize_subprocess_env
+
     env = dict(os.environ)
     # conftest re-points these at a per-test tmp dir for in-process tests. Here the
     # deployed DEFAULTS are what must be exercised — they land in the sandbox via
@@ -421,6 +423,20 @@ def _child_env(sb: Sandbox, bridge_url=None) -> dict:
     for key in ("SHIFT_AGENT_DECISIONS_LOG_PATH", "SHIFT_AGENT_NOTIFY_DEDUP_STATE",
                 "SHIFT_AGENT_NOTIFY_FAILED_LOG", "PYTHONPATH"):
         env.pop(key, None)
+    # P1-A credential sterility. This env is `dict(os.environ)` and it is fed
+    # to REAL deployed scripts (_install_scripts copies every catering AND shift
+    # script into /usr/local/bin, shift-agent-notify-owner included). An
+    # operator shell that had sourced the box's .env therefore handed this
+    # sandbox live Pushover / OpenRouter / Stripe credentials — the exact shape
+    # of the copied-state incident. Layers 1-3 only (strip credentials, close
+    # the .env file fallback, sink the endpoints); the rehearsal MARKER is NOT
+    # set, so every exit code and side effect this suite asserts on is
+    # unchanged.
+    sterilize_subprocess_env(
+        env,
+        env_file=sb.root / ".env-sterile",
+        notify_owner_bin=sb.root / "bin" / "no-sandbox-pushover",
+    )
     env.update({
         "HERMES_BRIDGE_URL": bridge_url or sb.bridge_url,
         "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1",
