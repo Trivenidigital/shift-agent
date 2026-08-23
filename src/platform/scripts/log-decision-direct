@@ -25,7 +25,9 @@ import json
 from pathlib import Path
 
 sys.path.insert(0, "/opt/shift-agent")
-from schemas import LogEntry, _UnknownLogEntry  # noqa: E402
+from schemas import (  # noqa: E402
+    LogEntry, _UnknownLogEntry, _UnknownReasonCfRouterIntercepted,
+)
 from safe_io import FileLock, ndjson_append  # noqa: E402
 from exit_codes import EXIT_OK, EXIT_INVALID_INPUT, EXIT_SCHEMA_VIOLATION  # noqa: E402
 from pydantic import TypeAdapter
@@ -66,6 +68,22 @@ def main():
             f"ERROR: refusing to write unrecognized type {entry.type!r}. "
             f"Writers must emit a known LogEntry variant; if this is a new "
             f"event, add the variant to schemas.py first.",
+            file=sys.stderr,
+        )
+        return EXIT_SCHEMA_VIOLATION
+
+    # 2026-08-23 phase 1: same rule one level down. The reason-level shim widens
+    # the union so READERS absorb a `cf_router_intercepted` row whose `reason`
+    # is not yet a Literal member; a writer reaching it here would be using the
+    # union to sneak an unmodelled reason into decisions.log, which is exactly
+    # the emission phase 1 does not start. cf-router does not write through this
+    # script — it constructs CfRouterIntercepted directly — so nothing legitimate
+    # is refused by this guard.
+    if isinstance(entry, _UnknownReasonCfRouterIntercepted):
+        print(
+            f"ERROR: refusing to write cf_router_intercepted with unrecognized "
+            f"reason {entry.reason!r}. Add the value to "
+            f"CfRouterIntercepted.reason in schemas.py first.",
             file=sys.stderr,
         )
         return EXIT_SCHEMA_VIOLATION

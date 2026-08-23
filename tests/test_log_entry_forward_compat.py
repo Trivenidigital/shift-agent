@@ -10,13 +10,27 @@ A future Pydantic version that changes Annotated/Discriminator semantics
 should surface here, not in production audit-log replay.
 """
 from __future__ import annotations
+import json
 from typing import get_args
 from datetime import datetime, timezone
 
 import pytest
 from pydantic import TypeAdapter, ValidationError, Tag
 
-from schemas import LogEntry, _UnknownLogEntry, _KNOWN_LOG_ENTRY_TYPES, RawInbound, _BaseEntry
+# ONE import statement, evaluated in the same module body as `_ADAPTER` below.
+# That is load-bearing, not tidiness. Several suites (see
+# tests/test_gateway_send_throttle.py's fixture docstring) pop `schemas` out of
+# sys.modules and reload it FRESH while the session runs, so by the time a test
+# here executes, `sys.modules['schemas']` can be a DIFFERENT module object than
+# the one whose classes `_ADAPTER` validates into — two classes, same qualified
+# name. Re-resolving the class inside a test (`from schemas import ...`, or
+# `sys.modules[type(parsed).__module__]`, which is the same lookup) then compares
+# across module identities and fails on a property that is actually fine.
+# Binding here, beside the adapter, is the only form that cannot drift.
+from schemas import (
+    LogEntry, _UnknownLogEntry, _KNOWN_LOG_ENTRY_TYPES, RawInbound, _BaseEntry,
+    CfRouterIntercepted, _UnknownReasonCfRouterIntercepted,
+)
 
 
 _ADAPTER = TypeAdapter(LogEntry)
@@ -178,14 +192,31 @@ def test_ts_validator_runs_for_unknown_entry():
     assert parsed.ts == datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
 
 
+def _union_member_models(annotated_union) -> list[type]:
+    """Every concrete model class reachable in a Tag-discriminated union.
+
+    Recurses into NESTED discriminated unions: the `cf_router_intercepted`
+    member is itself `Annotated[Union[strict, shim], Discriminator(...)]`
+    (the reason-level forward-compat shim, Case 14 below), so a flat
+    `get_args(m)[0]` would hand back a `Union` object instead of a class and
+    `issubclass` would raise. Recursing also makes the check STRONGER — the
+    nested members are inspected too, not skipped.
+    """
+    out: list[type] = []
+    for member in get_args(get_args(annotated_union)[0]):
+        inner = get_args(member)[0]
+        if isinstance(inner, type):
+            out.append(inner)
+        else:  # nested Annotated[Union[...], Discriminator(...)]
+            out.extend(_union_member_models(member))
+    return out
+
+
 # Case 12 — isinstance discrimination: only _UnknownLogEntry IS _UnknownLogEntry.
 def test_unknown_log_entry_is_only_subclass_of_self():
     """No other LogEntry variant subclasses _UnknownLogEntry. extra='allow'
     must not propagate to typed variants via inheritance."""
-    union_arg = get_args(LogEntry)[0]
-    members = []
-    for m in get_args(union_arg):
-        members.append(get_args(m)[0])
+    members = _union_member_models(LogEntry)
     leaks = [c for c in members
              if c is not _UnknownLogEntry and issubclass(c, _UnknownLogEntry)]
     assert leaks == [], (
@@ -231,4 +262,124 @@ def test_every_typed_log_entry_variant_is_registered():
         f"subclasses with a `type` Literal but absent from _KNOWN_LOG_ENTRY_TYPES, so their "
         f"rows silently route to _UnknownLogEntry. Add each to the LogEntry union "
         f"(Annotated[<Class>, Tag(\"<type>\")]) + _KNOWN_LOG_ENTRY_TYPES."
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Case 14 — reader-side forward-compat for an unknown `reason` VALUE inside the
+# KNOWN `cf_router_intercepted` tag (phase 1 of the reader-first migration,
+# 2026-08-23).
+#
+# Cases 2/3 above pin the TAG-level contract: an unknown tag degrades through
+# `_UnknownLogEntry`, a known tag with bad fields still raises. That leaves the
+# VALUE-level gap: `cf_router_intercepted` is a known tag, so a row whose
+# `reason` is not (yet) a Literal member routes to the typed variant and RAISES
+# — the one rollback shape where an old reader rejects a row instead of
+# degrading past it. `_UnknownReasonCfRouterIntercepted` closes that for this
+# field the same way `_UnknownLogEntry` closes it for the tag.
+#
+# The contract these cases pin is deliberately asymmetric:
+#   READ  (through the LogEntry union) absorbs an unknown reason.
+#   WRITE (constructing CfRouterIntercepted directly, which is what
+#          cf-router/actions.py:audit_intercepted does) still raises.
+# That asymmetry IS phase 1: deploying it emits no new row, so reverting it can
+# strand none.
+# ═══════════════════════════════════════════════════════════════════════════
+_CF_ROW_BASE = {
+    "type": "cf_router_intercepted",
+    "ts": "2026-08-23T00:00:00Z",
+    "chat_id": "19045550199@s.whatsapp.net",
+    "detail": "followup status was awaiting_owner_approval",
+}
+
+# The two reasons cf-router emits TODAY that are not Literal members, so their
+# rows are silently dropped at write time. Kept in sync with
+# tests/test_catering_amendment_capture.py::_KNOWN_DROPPED_REASONS.
+_PHASE_2_REASONS = ("f8_followup_approve", "f8_followup_cancel")
+
+
+@pytest.mark.parametrize("reason", _PHASE_2_REASONS + ("some_reason_invented_in_2027",))
+def test_cf_router_intercepted_unknown_reason_absorbed_on_read(reason):
+    """A reader must ingest a reason value it does not know, not reject the row."""
+    parsed = _ADAPTER.validate_python({**_CF_ROW_BASE, "reason": reason})
+    assert parsed.reason == reason
+    assert parsed.type == "cf_router_intercepted"
+    assert parsed.chat_id == _CF_ROW_BASE["chat_id"]
+    assert type(parsed) is _UnknownReasonCfRouterIntercepted
+    # isinstance still holds — readers that branch on the typed class keep working.
+    assert isinstance(parsed, CfRouterIntercepted)
+
+
+def test_cf_router_intercepted_known_reason_still_routes_to_the_strict_variant():
+    """The shim must not swallow rows the Literal already covers."""
+    parsed = _ADAPTER.validate_python({**_CF_ROW_BASE, "reason": "f8_owner_approve"})
+    assert type(parsed) is CfRouterIntercepted, (
+        "a known reason must keep validating against the Literal")
+    # Belt-and-braces, identity-free: even if the two classes above were ever the
+    # same object for the wrong reason, absorption by the shim still fails here.
+    assert type(parsed).__name__ == "CfRouterIntercepted", (
+        "a known reason must NOT be absorbed by the phase-1 shim")
+
+
+def test_cf_router_intercepted_writer_path_stays_strict():
+    """PHASE-1 INVARIANT. `cf-router/actions.py:audit_intercepted` builds
+    `CfRouterIntercepted(...)` DIRECTLY, never through the union, and swallows
+    the exception. So while the reader absorbs these values, the writer must
+    still refuse them — otherwise phase 1 would start emitting rows that a
+    rollback could not read, which is exactly what it exists to prevent.
+    Delete this test in the SAME commit as the phase-2 Literal widening."""
+    for reason in _PHASE_2_REASONS:
+        with pytest.raises(ValidationError):
+            CfRouterIntercepted(**{**_CF_ROW_BASE, "reason": reason})
+
+
+def test_cf_router_intercepted_unknown_reason_still_validates_every_other_field():
+    """Only the reason VALUE is absorbed. A row that is genuinely malformed in
+    any other way still raises — the shim inherits extra='forbid' and every
+    other field's constraint from the strict variant."""
+    # required field missing
+    with pytest.raises(ValidationError):
+        _ADAPTER.validate_python({"type": "cf_router_intercepted",
+                                  "ts": "2026-08-23T00:00:00Z",
+                                  "reason": "f8_followup_approve"})  # no chat_id
+    # unmodelled extra key
+    with pytest.raises(ValidationError):
+        _ADAPTER.validate_python({**_CF_ROW_BASE, "reason": "f8_followup_approve",
+                                  "not_a_field": 1})
+    # inherited constraint on a sibling field (code max_length=10)
+    with pytest.raises(ValidationError):
+        _ADAPTER.validate_python({**_CF_ROW_BASE, "reason": "f8_followup_approve",
+                                  "code": "#" + "X" * 32})
+
+
+@pytest.mark.parametrize("reason", [None, 42, ["f8_followup_approve"]])
+def test_cf_router_intercepted_non_string_reason_still_raises(reason):
+    """Forward-compat is for a future STRING value, not for a broken row."""
+    with pytest.raises(ValidationError):
+        _ADAPTER.validate_python({**_CF_ROW_BASE, "reason": reason})
+
+
+def test_cf_router_intercepted_unknown_reason_round_trips():
+    """Audit-replay tooling must get the row back byte-for-byte on the fields it
+    carries — an absorbed row that loses its reason is no better than a dropped one."""
+    row = {**_CF_ROW_BASE, "reason": "f8_followup_cancel", "code": "#AB2CD",
+           "subprocess_rc": 0}
+    parsed = _ADAPTER.validate_python(row)
+    dumped = json.loads(parsed.model_dump_json())
+    for key, value in row.items():
+        if key == "ts":
+            continue  # normalized to a tz-aware datetime by _BaseEntry
+        assert dumped[key] == value, f"{key} did not round-trip"
+
+
+def test_no_reason_is_both_a_literal_member_and_a_phase_2_reason():
+    """Ratchet cross-check: while phase 1 stands, the two phase-2 reasons must
+    NOT be Literal members. When phase 2 lands, this test and
+    `test_cf_router_intercepted_writer_path_stays_strict` come out together with
+    the `_KNOWN_DROPPED_REASONS` entries."""
+    members = set(get_args(CfRouterIntercepted.model_fields["reason"].annotation))
+    assert not (members & set(_PHASE_2_REASONS)), (
+        "phase 2 has landed — remove this test, "
+        "test_cf_router_intercepted_writer_path_stays_strict, and the matching "
+        "_KNOWN_DROPPED_REASONS entries in tests/test_catering_amendment_capture.py"
     )

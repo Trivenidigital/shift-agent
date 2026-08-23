@@ -7253,6 +7253,93 @@ class CfRouterIntercepted(_BaseEntry):
     ] = ""
 
 
+# ── Reader-side forward-compat for CfRouterIntercepted.reason (PHASE 1) ─────
+#
+# 2026-08-23. `_UnknownLogEntry` absorbs an unknown TAG. It does NOT absorb an
+# unknown VALUE inside a known tag: `cf_router_intercepted` is in
+# `_KNOWN_LOG_ENTRY_TYPES`, so `_pick_log_entry_tag` routes the row to the typed
+# variant above and the `reason` Literal raises. That asymmetry is why widening
+# this Literal is the bad rollback category — the shape the
+# `FlyerRecoveryStaleProjectEscalated` docstring sidesteps by minting a new tag,
+# and the one `cf-router/hooks.py` refuses to take at the R2.H2 refusal arm.
+#
+# The block below is the field-level analogue of `_UnknownLogEntry`, built from
+# the same primitives already used for `LogEntry` and `Proposal` (callable
+# `Discriminator` + `Tag`-wrapped members) rather than anything new.
+#
+# It is deliberately READ-ONLY, and that is the whole of phase 1:
+#   * READERS reach this variant through the `LogEntry` union, so a row whose
+#     `reason` is not (yet) a member is preserved instead of rejected.
+#   * The WRITER — `cf-router/actions.py:audit_intercepted` — constructs
+#     `CfRouterIntercepted(...)` DIRECTLY, never through the union, so it stays
+#     strict. The two reasons cf-router already passes it today
+#     (`f8_followup_approve` / `f8_followup_cancel`) keep being swallowed by its
+#     best-effort try/except exactly as they are now.
+#   * `log-decision-direct`, the generic writer chokepoint, refuses this variant
+#     by isinstance for the same reason it already refuses `_UnknownLogEntry`.
+# So deploying phase 1 writes no new row, and reverting it can strand none.
+#
+# PHASE 2 (a separate PR, only after phase 1 is deployed and proven) adds those
+# two values to the Literal, and deletes them from `_KNOWN_DROPPED_REASONS` in
+# tests/test_catering_amendment_capture.py together with the phase-1 writer-
+# strictness tests in tests/test_log_entry_forward_compat.py. At that point a
+# rollback to phase 1 degrades rather than rejects, which is the point of the
+# ordering.
+class _UnknownReasonCfRouterIntercepted(CfRouterIntercepted):
+    """Absorbing shim for a `cf_router_intercepted` row whose `reason` is not a
+    member of `CfRouterIntercepted.reason`.
+
+    Subclasses the strict variant instead of restating its fields, so every
+    other field keeps its constraint (and any field added later is inherited),
+    and so `isinstance(row, CfRouterIntercepted)` still holds for readers that
+    branch on the typed class.
+
+    Convention departure, confined to ONE field: `reason: str` rather than the
+    `Literal`. Unlike `_UnknownLogEntry` this shim does NOT set `extra="allow"`
+    — `extra="forbid"` is inherited, so an unmodelled key still raises. Only the
+    reason VALUE is absorbed; a genuinely malformed row is still a hard error.
+    """
+    # NOT Literal — that is the whole point. Bounded anyway (every member of the
+    # Literal above is a short snake_case token; the longest is ~55 chars, so 200
+    # is headroom, not a ceiling a real future reason could hit) and non-empty:
+    # an absent or blank reason is a malformed row, not a forward-compatible one.
+    reason: str = Field(min_length=1, max_length=200)
+
+
+_CF_ROUTER_INTERCEPTED_REASONS: frozenset[str] = frozenset(
+    get_args(CfRouterIntercepted.model_fields["reason"].annotation)
+)
+
+
+def _pick_cf_router_intercepted_reason_tag(v: Any) -> str:
+    """Nested discriminator for the `cf_router_intercepted` union member.
+
+    Returns "known_reason" when `reason` is already a Literal member, else the
+    "_unknown_reason_" sentinel that routes to the absorbing shim. Mirrors
+    `_pick_log_entry_tag` / `_pick_proposal_tag`: a missing or non-string
+    `reason` ALSO routes to the shim, whose `reason: str` then raises — a broken
+    row must not pass as a forward-compatible one.
+    """
+    if isinstance(v, dict):
+        r = v.get("reason")
+    else:
+        r = getattr(v, "reason", None)
+    if isinstance(r, str) and r in _CF_ROUTER_INTERCEPTED_REASONS:
+        return "known_reason"
+    return "_unknown_reason_"
+
+
+# Registered in the LogEntry union under Tag("cf_router_intercepted") in place
+# of the bare class, so the tag space and `_KNOWN_LOG_ENTRY_TYPES` are unchanged.
+_CfRouterInterceptedRead = Annotated[
+    Union[
+        Annotated[CfRouterIntercepted, Tag("known_reason")],
+        Annotated[_UnknownReasonCfRouterIntercepted, Tag("_unknown_reason_")],
+    ],
+    Discriminator(_pick_cf_router_intercepted_reason_tag),
+]
+
+
 class StateFileMigrationOverridden(_BaseEntry):
     """PR-CF5: operator used STATE_MIGRATION_OVERRIDE=skip to bypass the gate.
 
@@ -8564,7 +8651,10 @@ LogEntry = Annotated[
         # owner-action path); see the two variants above. F9
         # ShiftMissedDispatch* remains removed — see git tag
         # pre-srilu-cleanup-2026-05-04 for its class definitions if needed.
-        Annotated[CfRouterIntercepted, Tag("cf_router_intercepted")],
+        # Reader-side reason shim (phase 1): a nested Tag-discriminated union,
+        # so an unknown `reason` VALUE degrades instead of raising. The tag
+        # itself is unchanged. See _CfRouterInterceptedRead above.
+        Annotated[_CfRouterInterceptedRead, Tag("cf_router_intercepted")],
         Annotated[CfRouterRawBody, Tag("cf_router_raw_body")],
         # PR-D1: config load observability + operator reconcile audit
         Annotated[ConfigLoadFailed, Tag("config_load_failed")],
@@ -8936,6 +9026,6 @@ __all__ = [
     # PR-CF5 2026-05-03 (state-file migration)
     "StateFileMigrated", "StateFileMigrationFailed", "StateFileMigrationOverridden",
     # PR-CF6 2026-05-03 (cf-router Hermes plugin; supersedes F8 + F9)
-    "CfRouterIntercepted",
+    "CfRouterIntercepted", "_UnknownReasonCfRouterIntercepted",
     "MenuUpdateProposed", "MenuUpdateApplied", "MenuUpdateRejected",
 ]

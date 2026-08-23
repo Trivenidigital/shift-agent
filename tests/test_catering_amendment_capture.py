@@ -693,6 +693,18 @@ def _audit_intercepted_reason_literals(path: Path) -> set:
 # repair is a Literal widening whose rollback behaviour is the bad category —
 # an OLDER reader rejects the whole row instead of degrading past it.
 #
+# MIGRATION STATE: PHASE 1 LANDED (2026-08-23), PHASE 2 PENDING A DEPLOY.
+#   Phase 1 made the READ side tolerant — `_UnknownReasonCfRouterIntercepted`
+#   in src/platform/schemas.py absorbs any `cf_router_intercepted` row whose
+#   `reason` is not a Literal member, so a reader carrying phase 1 can ingest
+#   these rows. It changed nothing about what cf-router EMITS: audit_intercepted
+#   still constructs CfRouterIntercepted directly and these two reasons are
+#   still swallowed, which is why they stay listed here.
+#   Phase 2 — only once phase 1 is DEPLOYED, so a rollback lands on a tolerant
+#   reader rather than a rejecting one — adds both values to the Literal and
+#   deletes them from this set, together with the phase-1 writer-strictness
+#   tests in tests/test_log_entry_forward_compat.py (Case 14).
+#
 # This set may only ever SHRINK. A new entry means a new silently-dropped row.
 _KNOWN_DROPPED_REASONS = {
     "f8_followup_approve",   # M5 catering follow-up approve
