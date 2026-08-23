@@ -473,9 +473,12 @@ def test_05_approval_publishes_the_menu_and_activates_the_pricebook(sb: _Sandbox
     assert synced["removed_names"] == [STALE_OVERRIDE_NAME], (
         "a removed override is an item losing its committed price — name it")
     assert synced["excluded_count"] == 3     # fish / welcome drink / prawn fry
-    # PRIVACY: names, never amounts.
+    # PRIVACY: names, never amounts. Scanned with the machine timestamps removed
+    # — "900" is short enough to appear in a microsecond field, which fired in
+    # CI on 2026-08-23 with no leak present. Every other field is still scanned.
+    from conftest import privacy_blob
     assert "$" not in json.dumps(synced)
-    assert "900" not in json.dumps(synced)
+    assert "900" not in privacy_blob(synced)
 
 
 def test_06_the_adapter_output_is_exactly_what_landed(sb: _Sandbox):

@@ -1177,17 +1177,31 @@ def test_provenance_install_artifacts_lays_label_shared_chokepoint():
     import re
     text = DEPLOY.read_text(encoding="utf-8")
     i = text.index("install_artifacts() {")
-    body = text[i:i + 4000]
-    # Assert the install is GUARDED by the staged-label presence check as a contiguous
-    # block (not merely that the two literals appear somewhere) — a condition inversion,
-    # an unwrapped install, or a path typo in the real chokepoint fails here. (The real
-    # lines hardcode /opt/shift-agent and cannot run in the sandbox, so this static shape
-    # check is their primary coverage; the behavioral tests exercise the faithful stub.)
+    # Anchor on the guard itself, not a fixed byte window. `text[i:i + 4000]` was
+    # brittle in the silent direction: a comment added above the guard pushes it past
+    # the window, and the assertion then searches a slice that never contained the
+    # code it guards. Slicing to the guard's own closing `fi` cannot drift that way.
+    g = text.index('if [ -f "$src_root/.commit-hash" ]; then', i)
+    body = text[g:text.index("\n    fi\n", g)]
+    # Assert the install is GUARDED by the staged-label presence check — a condition
+    # inversion, an unwrapped install, or a path typo in the real chokepoint fails
+    # here. (The real lines hardcode /opt/shift-agent and cannot run in the sandbox,
+    # so this static shape check is their primary coverage; the behavioral tests
+    # exercise the faithful stub.)
+    #
+    # The install must be the FIRST statement after `then`, and the label removal the
+    # FIRST after `else`. Each arm may carry further statements beyond that, because
+    # the deploy also derives /opt/shift-agent/DEPLOY_RECEIPT.json from this same
+    # label inside this same guard, so the receipt can never name a commit the label
+    # disagrees with. That coupling is pinned in tests/test_deploy_provenance_receipt.py;
+    # this test stays focused on the label.
     assert re.search(
         r'if \[ -f "\$src_root/\.commit-hash" \]; then\s*\n\s*'
-        r'install -m 644 "\$src_root/\.commit-hash" /opt/shift-agent/\.commit-hash\s*\n\s*'
-        r'else\s*\n\s*rm -f /opt/shift-agent/\.commit-hash\s*\n\s*fi',
-        body), "install_artifacts must guard the label install-or-remove with the staged-label check"
+        r'install -m 644 "\$src_root/\.commit-hash" /opt/shift-agent/\.commit-hash\s*\n',
+        body), "install_artifacts must install the staged label as the first act of the guarded arm"
+    assert re.search(
+        r'\n\s*else\s*\n\s*rm -f /opt/shift-agent/\.commit-hash\s*\n',
+        body), "install_artifacts must remove a stale label when the staged artifact has none"
 
 
 # ── static: Phase-5 provenance verify compares installed to staged+authorized ─

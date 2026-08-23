@@ -151,7 +151,7 @@ if [ $((now_s - last_alert_s)) -ge $ALERT_THROTTLE_SEC ]; then
     /usr/local/bin/shift-agent-notify-owner \
         --title "Agent health issues" \
         --priority 1 \
-        "Shift Agent unhealthy: $summary. Check with 'systemctl status hermes-gateway' and 'journalctl -u hermes-gateway -f'." \
+        "Shift Agent unhealthy: $summary. Unit state: 'systemctl status hermes-gateway'. Agent errors are NOT in journalctl (the unit sets StandardError=append) — tail '/opt/shift-agent/logs/hermes-gateway.log' instead." \
         || true  # Pushover itself down — append_notify_failed already captures
     echo "$now_s" > "$LAST_ALERT_FILE"
 fi

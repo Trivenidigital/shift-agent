@@ -342,10 +342,56 @@ install_artifacts() {
     # leaves "$src_root/.commit-hash" absent -> remove any stale live label so provenance
     # is never misreported after a rollback to a pre-label release (a previously-absent
     # label likewise stays absent).
+    # Operator-facing receipt, DERIVED from the label above rather than
+    # maintained beside it. /opt/shift-agent/DEPLOY_RECEIPT.json is the artifact
+    # an auditor reaches for first — it is named for exactly the question they
+    # are asking — but until now nothing wrote it: the file on main-vps was
+    # hand-authored during a flyer deploy on 2026-06-05 and was still claiming
+    # that commit 78 days later, with nothing in it marking it wrong.
+    #
+    # Writing it HERE, in the same arm of the same guard, is the whole repair.
+    # The receipt cannot report a commit the label disagrees with, because both
+    # come from one read of the staged artifact on every path that routes
+    # through install_artifacts. It carries no independently-maintained facts —
+    # anything a reader might want to cross-check is expressed as the command
+    # that answers it, so the receipt has nothing that CAN go stale.
+    #
+    # Same failure regime as the label install directly above: under `set -e` an
+    # unwritable provenance artifact aborts the deploy, and the callers at the
+    # deploy/budget-bootstrap sites roll back. Provenance we cannot record is
+    # not a deploy we want to finish silently.
     if [ -f "$src_root/.commit-hash" ]; then
         install -m 644 "$src_root/.commit-hash" /opt/shift-agent/.commit-hash
+        _receipt_commit="$(tr -cd '[:xdigit:]' < "$src_root/.commit-hash" | head -c 40)"
+        _receipt_tmp=/opt/shift-agent/.DEPLOY_RECEIPT.json.tmp
+        # NOTE for static parsers: the JSON below closes with a brace at column
+        # 0, so a newline-brace-newline sequence no longer marks the end of this
+        # function. Nothing in the repo anchors on that today; match on the
+        # guard or on the indented `fi` instead if you need a boundary here.
+        cat > "$_receipt_tmp" <<RECEIPT_EOF
+{
+  "commit": "$_receipt_commit",
+  "installed_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "generated_by": "shift-agent-deploy.sh install_artifacts()",
+  "hand_edits": "none — rewritten in full by every deploy, removed by a rollback to a release predating the provenance label",
+  "cross_check": {
+    "commit_label": "cat /opt/shift-agent/.commit-hash",
+    "newest_artifact": "ls -t /opt/shift-agent/deploys/deploy-*.tgz | head -1",
+    "running_unit": "systemctl show hermes-gateway -p ActiveEnterTimestamp"
+  },
+  "operational_errors": "/opt/shift-agent/logs/hermes-gateway.log (NOT journalctl -u hermes-gateway; the unit sets StandardError=append)"
+}
+RECEIPT_EOF
+        chmod 644 "$_receipt_tmp"
+        # Rename, not copy: a reader must never catch a half-written receipt.
+        mv -f "$_receipt_tmp" /opt/shift-agent/DEPLOY_RECEIPT.json
+        unset _receipt_commit _receipt_tmp
     else
         rm -f /opt/shift-agent/.commit-hash
+        # A rollback to a pre-label release must not leave the newer receipt
+        # behind describing a commit that is no longer installed. Absent
+        # provenance is honest; wrong provenance is the defect being fixed.
+        rm -f /opt/shift-agent/DEPLOY_RECEIPT.json
     fi
     # Canonical WhatsApp identity (LID<->phone convergence via lid-cache). Shared
     # by the cf-router plugin, schemas.py intake-session keying, and flyer
@@ -733,15 +779,35 @@ install_artifacts() {
     #   1. ADDITIVE ONLY. Never delete a drop-in, never purge a *.service.d
     #      directory. Most drop-ins on the box belong to codex tooling, not to
     #      us, and removing another tool's config is out of bounds.
-    #   2. NEVER OVERWRITE A DIFFERING FILE. A box copy that differs may be a
-    #      deliberate hand edit, and nothing here can tell the difference. We
-    #      install only what is absent, leave byte-identical copies alone, and
-    #      REPORT anything else for a human.
+    #   2. NEVER OVERWRITE A FILE THAT DIFFERS IN CONTENT. A box copy whose
+    #      content differs may be a deliberate hand edit, and nothing here can
+    #      tell the difference. We install only what is absent, leave identical
+    #      copies alone, and REPORT anything else for a human.
+    #
+    #      ONE difference we CAN classify: line endings. A copy that is
+    #      byte-identical after stripping CR is a Windows-authored file, not a
+    #      hand edit — no operator deliberately changes only the line endings of
+    #      a systemd drop-in. `20-drain-timeout.conf` on main-vps is exactly
+    #      this: 32 bytes CRLF against the repo's 30 bytes LF, dated 2026-05-23,
+    #      and it warned on EVERY deploy for three months. That is the real cost
+    #      — an unactionable warning that always fires teaches the operator to
+    #      skim drop-in warnings, so a GENUINE drift lands in a channel nobody
+    #      reads any more. (Cosmetic only: systemd tolerates CRLF, and
+    #      `systemctl show hermes-gateway -p TimeoutStopUSec` reports 4min on the
+    #      box, so the setting IS in effect.)
+    #
+    #      So we report it as its own class, with the command that fixes it, and
+    #      keep it OUT of the WARN count that means "a human must look". The
+    #      refuse-to-overwrite guard is unchanged for real content differences;
+    #      normalisation is opt-in via SHIFT_AGENT_NORMALIZE_DROPIN_EOL=1 and is
+    #      safe by construction, because it only ever runs where the content is
+    #      already proven identical.
     #   3. Only files under src/platform/systemd/<unit>.d/ are ours. Ownership
     #      was decided per file; see docs/runbooks/systemd-dropins.md for which
     #      drop-ins on the box are deliberately NOT tracked and why.
     install_tracked_dropins() {
         local dropin_diffs=0
+        local dropin_eol=0
         local dir unit dest f name target
         for dir in src/platform/systemd/*.service.d; do
             [ -d "$dir" ] || continue
@@ -757,16 +823,36 @@ install_artifacts() {
                     echo "  dropin INSTALLED  $unit/$name"
                 elif cmp -s "$f" "$target"; then
                     echo "  dropin unchanged  $unit/$name"
+                elif cmp -s <(tr -d '\r' < "$f") <(tr -d '\r' < "$target"); then
+                    # Identical after stripping CR: line endings only, never a
+                    # hand edit. Classified, not lumped in with real drift.
+                    if [ "${SHIFT_AGENT_NORMALIZE_DROPIN_EOL:-0}" = "1" ]; then
+                        install -m 644 "$f" "$target"
+                        echo "  dropin NORMALIZED $unit/$name — line endings only (CRLF -> LF); content byte-identical."
+                    else
+                        echo "  dropin EOL-ONLY   $unit/$name — differs ONLY in line endings; not overwriting."
+                        echo "    Content is byte-identical after stripping CR, so this is a"
+                        echo "    Windows-authored copy, not a deliberate edit. Nothing to resolve by hand."
+                        echo "    To adopt the repo copy: re-run the deploy with SHIFT_AGENT_NORMALIZE_DROPIN_EOL=1"
+                        dropin_eol=$((dropin_eol + 1))
+                    fi
                 else
                     echo "  dropin DIFFERS    $unit/$name — NOT overwriting." >&2
                     echo "    box copy may be a deliberate edit; diff and resolve by hand." >&2
-                    echo "    (a CRLF/LF-only difference still counts: compare with 'xxd')" >&2
+                    echo "    (content differs, not just line endings — those are reported separately)" >&2
                     dropin_diffs=$((dropin_diffs + 1))
                 fi
             done
         done
+        # Only CONTENT differences reach the WARN channel. A warning that always
+        # fires is a warning that no longer carries information, and the whole
+        # point of separating these is that this line stays quiet until it means
+        # something.
         if [ "$dropin_diffs" -gt 0 ]; then
-            echo "WARN: $dropin_diffs tracked drop-in(s) differ on the box and were left untouched." >&2
+            echo "WARN: $dropin_diffs tracked drop-in(s) differ IN CONTENT on the box and were left untouched." >&2
+        fi
+        if [ "$dropin_eol" -gt 0 ]; then
+            echo "  note: $dropin_eol tracked drop-in(s) differ only in line endings (cosmetic; see SHIFT_AGENT_NORMALIZE_DROPIN_EOL above)."
         fi
         return 0
     }

@@ -85,8 +85,10 @@ Run on-box; expected results in parentheses:
    inside the gateway service environment (`systemctl show hermes-gateway -p Environment`)
    → `0`.
 3. Send **nothing**. Passively observe the next organic non-catering inbound
-   in `journalctl -u hermes-gateway` — routing unchanged (dispatcher_routed
-   rows normal).
+   in `/opt/shift-agent/logs/hermes-gateway.log` — routing unchanged
+   (dispatcher_routed rows normal). Note this is a FILE, not journald: the unit
+   sets `StandardError=append` there, so `journalctl -u hermes-gateway` shows
+   systemd lifecycle only and would read as "no inbound arrived".
 4. `tail decisions.log`: no `catering_lead_qualification_updated`,
    `catering_followup_*`, `catering_lead_acceptance_recorded`, or
    `catering_automation_control_changed` rows post-restart.

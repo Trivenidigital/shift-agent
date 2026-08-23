@@ -9,7 +9,12 @@ resolves the module location WITHOUT executing it (no side effects / heavy deps)
 Exit 0 = clean flat runtime; exit 1 = drift (a flyer/platform module resolved from
 outside flat /opt/shift-agent/*.py). Run BEFORE and AFTER any deploy or cleanup —
 the runtime module set must be identical and flat. Deployed to
-/usr/local/bin/flyer-deploy-smoke. See /opt/shift-agent/DEPLOY_RECEIPT.json.
+/usr/local/bin/flyer-deploy-smoke.
+
+For what release this ran against, read /opt/shift-agent/.commit-hash — the
+provenance label the deploy installs — and cross-check it against
+/opt/shift-agent/DEPLOY_RECEIPT.json, which the same deploy derives from it.
+Cite both: the label is the value, the receipt is the context around it.
 
 Lesson (tasks/lessons.md): duplicate trees on disk are NOT automatically runtime
 ambiguity — trace gateway -> script -> sys.path -> module file first, then this
