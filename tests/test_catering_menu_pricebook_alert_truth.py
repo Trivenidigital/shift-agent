@@ -209,9 +209,11 @@ def test_no_pricebook_alert_says_menu_only_and_makes_no_previous_version_claim(b
     rc, payload, alerts = _approve(box)
     assert rc == 0, payload
     assert payload["pricebook_activated"] is False
-    assert payload["price_source"] == "menu_only"
-    assert payload["live_pricebook_version"] is None
 
+    # The MESSAGE is asserted before the JSON shape on purpose. Checking the new
+    # `price_source` key first would make this test red against the pre-fix
+    # script for a missing-field reason and say nothing about what the owner was
+    # told — pinning an API, not the truth. Fail on the prose first.
     assert len(alerts) == 1, alerts
     alert = alerts[0]
 
@@ -229,6 +231,10 @@ def test_no_pricebook_alert_says_menu_only_and_makes_no_previous_version_claim(b
     # And WHY, named with the same token the audit row carries.
     assert "proposal_predates_pricebook_scope" in alert["message"]
     assert read_log_rows(box.log)[-1]["reason"] == "proposal_predates_pricebook_scope"
+
+    # ...and only then the machine-readable state the SKILL branches on.
+    assert payload["price_source"] == "menu_only"
+    assert payload["live_pricebook_version"] is None
 
 
 def test_no_pricebook_claim_matches_what_actually_prices_a_quote(box):
