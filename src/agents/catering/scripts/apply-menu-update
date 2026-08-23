@@ -546,8 +546,15 @@ def main() -> int:
     # whether there are no prices at all, or whether quoting is blocked.
     if pricebook_ok:
         live_source, live_version = "pricebook", pricebook_version
-        effect = (f"Pricebook updated to v{pricebook_version}: new quotes use "
-                  f"these prices.")
+        # `activated_version` is parsed out of the importer's stdout and stays
+        # None when that produced no JSON line. Naming a version we did not read
+        # would be the same defect one layer down, so say what is known instead.
+        effect = (
+            f"Pricebook updated to v{pricebook_version}: new quotes use these "
+            f"prices." if pricebook_version is not None else
+            "Pricebook updated: new quotes use these prices. (The importer "
+            "reported no version number; check catering_pricebook_updated.)"
+        )
     else:
         live_source, live_version = price_source.kind, price_source.version
         _title, effect = _price_effect(price_source, new_menu.version)

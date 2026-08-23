@@ -444,3 +444,31 @@ def test_success_reports_the_activated_version_as_the_live_price_source(box):
         "the reported live version must be the one the importer actually wrote")
     assert f"v{activated}" in payload["pricebook_effect"]
     assert alerts == [], "a successful activation must not page the owner"
+
+
+def test_success_with_an_unparseable_importer_version_names_no_version(box):
+    """`activated_version` is scraped from the importer's stdout and is None when
+    that yields no JSON line. Rendering "v{None}" would repeat the same defect
+    one layer down: naming a value that was never read."""
+    _seed_valid_pricebook(box)
+    box.stage_pending(fingerprint=_fingerprint_now(box))
+
+    import subprocess as _sp
+
+    real_run = _sp.run
+
+    def _swallow_stdout(*a, **kw):
+        proc = real_run(*a, **kw)
+        return _sp.CompletedProcess(proc.args, proc.returncode, "", proc.stderr)
+
+    _sp.run = _swallow_stdout
+    try:
+        rc, payload, _alerts = _approve(box)
+    finally:
+        _sp.run = real_run
+
+    assert rc == 0, payload
+    assert payload["pricebook_activated"] is True, payload
+    assert payload["live_pricebook_version"] is None
+    assert "vNone" not in payload["pricebook_effect"], payload["pricebook_effect"]
+    assert "no version number" in payload["pricebook_effect"]
