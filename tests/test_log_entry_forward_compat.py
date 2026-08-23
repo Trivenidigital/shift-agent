@@ -14,6 +14,7 @@ import json
 from typing import get_args
 from datetime import datetime, timezone
 
+import sys
 import pytest
 from pydantic import TypeAdapter, ValidationError, Tag
 
@@ -294,15 +295,26 @@ def test_cf_router_intercepted_unknown_reason_absorbed_on_read(reason):
     assert parsed.chat_id == _CF_ROW_BASE["chat_id"]
     assert type(parsed).__name__ == "_UnknownReasonCfRouterIntercepted"
     # isinstance still holds — readers that branch on the typed class keep working.
-    from schemas import CfRouterIntercepted as _Cf
+    # Resolve the class from the module the PARSED OBJECT came from, not by
+    # re-importing `schemas`. In a full-suite run several test files load
+    # src/platform via their own sys.path.insert + importlib, so `schemas` can
+    # exist as more than one module object; a fresh import then yields a
+    # different class than the one the adapter validated against and the check
+    # fails on module identity while the property under test is fine. This
+    # file passes 25/25 alone and failed 4 in the suite for exactly that reason.
+    _Cf = sys.modules[type(parsed).__module__].CfRouterIntercepted
     assert isinstance(parsed, _Cf)
 
 
 def test_cf_router_intercepted_known_reason_still_routes_to_the_strict_variant():
     """The shim must not swallow rows the Literal already covers."""
-    from schemas import CfRouterIntercepted as _Cf
     parsed = _ADAPTER.validate_python({**_CF_ROW_BASE, "reason": "f8_owner_approve"})
+    # Same module-identity caveat as above: compare against the class as the
+    # parsed object's own module defines it.
+    _Cf = sys.modules[type(parsed).__module__].CfRouterIntercepted
     assert type(parsed) is _Cf, "a known reason must keep validating against the Literal"
+    assert type(parsed).__name__ == "CfRouterIntercepted", (
+        "a known reason must NOT be absorbed by the phase-1 shim")
 
 
 def test_cf_router_intercepted_writer_path_stays_strict():
