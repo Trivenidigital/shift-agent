@@ -6996,8 +6996,20 @@ class CfRouterIntercepted(_BaseEntry):
         # phase-1 reader shim was deployed and runtime-verified on the box
         # (known member -> strict class; these two + an arbitrary future value
         # -> absorbing variant with the reason preserved; writer still
-        # refusing). A reader older than phase 1 REJECTS a row carrying these,
-        # which is why the ordering was reader-first rather than a one-liner.
+        # refusing).
+        #
+        # Precise about the rollback risk, because the obvious phrasing is wrong:
+        # at the MODEL level an older reader rejects a row carrying these. At the
+        # PRODUCTION level no reader validates against LogEntry at all — a sweep
+        # of 31 read sites found every one of them doing bare json.loads with
+        # skip-on-error, and the only strict LogEntry uses are write paths plus
+        # the deploy smoke test. So a rollback past phase 1 does not crash
+        # anything; the real blast radius is SEMANTIC DRIFT, e.g.
+        # dispatcher-accuracy-report's reason frozenset silently counting the
+        # intercept as unpaired. The reader-first ordering still earned its keep
+        # for a different reason: repo-side verification cannot see
+        # deployed-but-unversioned code, and widening the Literal lands rows
+        # immediately because cf-router already emits these strings.
         "f8_followup_approve", "f8_followup_cancel",
         "f9_sick_call_alert",
         "f7_primary_new_inquiry",          # PR-CF1d 2026-05-12
