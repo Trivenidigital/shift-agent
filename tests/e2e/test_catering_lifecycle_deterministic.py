@@ -294,9 +294,18 @@ def _install_scripts(sb: Sandbox) -> None:
                     f"deployed shift-agent box and this test will not overwrite it"
                 )
             try:
-                if target.is_symlink():
+                if target.is_symlink() or target.exists():
                     target.unlink()
-                target.symlink_to(script)
+                # COPY + chmod 755, not symlink. The catering scripts are tracked
+                # 100644 and the real deploy installs them executable; a symlink
+                # inherits the tracked 644 and every exec raises PermissionError.
+                # This passed locally only because the Windows bind mount
+                # synthesises an exec bit — the same masking that once hid a
+                # deploy bug behind `[ -x ]`. Copying mirrors what the deploy
+                # actually does, so the test cannot pass for a reason production
+                # does not share.
+                shutil.copy2(script, target)
+                target.chmod(0o755)
             except OSError as e:
                 _unavailable(f"cannot install {target} ({type(e).__name__}: {e})")
             sb.created_bin_links.append(target)
@@ -356,8 +365,14 @@ def sandbox(tmp_path):
     finally:
         server.shutdown()
         for link in sb.created_bin_links:
-            if link.is_symlink():
-                link.unlink()
+            # These are real copies now, not symlinks — remove either form, or
+            # the next run in the same container trips the "looks like a
+            # deployed box" refusal on leftovers this test created itself.
+            if link.is_symlink() or link.exists():
+                try:
+                    link.unlink()
+                except OSError:
+                    pass
         if HERMES_VENV_PY.is_symlink():
             HERMES_VENV_PY.unlink()
         if DEPLOY_ROOT.is_symlink():
