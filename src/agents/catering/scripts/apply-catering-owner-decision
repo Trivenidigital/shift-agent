@@ -917,6 +917,12 @@ def main() -> int:
             # WhatsApp natural-language reply; that path would loop indefinitely.
             # Either wait for the customer to finalize, or override via cockpit
             # (the operator-tooling path that DOES forward --skip-finalize).
+            # R2.H2 2026-08-23: report whether the reprompt ACTUALLY landed, so
+            # cf-router can treat this refusal as terminal ONLY when the owner was
+            # really told. bridge_post_2tuple returns (ok, detail); a non-exception
+            # failure (bridge 5xx, blocked send context) was previously
+            # indistinguishable from success here.
+            reprompt_delivered = False
             if cfg.owner.self_chat_jid:
                 reprompt = (
                     f"⚕ *Catering Agent*\n────────────\n"
@@ -927,9 +933,23 @@ def main() -> int:
                     f"without customer-curated items)."
                 )
                 try:
-                    _bridge_post(cfg.owner.self_chat_jid, reprompt)
+                    _ok_rp, _detail_rp = _bridge_post(cfg.owner.self_chat_jid, reprompt)
+                    reprompt_delivered = bool(_ok_rp)
+                    if not _ok_rp:
+                        sys.stderr.write(
+                            f"reprompt POST refused by bridge (non-fatal): {_detail_rp}\n")
                 except Exception as e:
                     sys.stderr.write(f"reprompt POST failed (non-fatal): {e}\n")
+            # Machine-readable outcome for cf-router, mirroring the
+            # delivery-uncertain refusal above: no state changed, nothing went
+            # to the customer, and whether the OWNER was reached is explicit.
+            print(json.dumps({
+                "lead_id": lead.lead_id,
+                "new_status": lead.status,
+                "outbound_sent": False,
+                "refusal": "owner_approve_without_customer_finalize",
+                "owner_reprompt_delivered": reprompt_delivered,
+            }))
             return EXIT_TRUTH_GUARD_FAILED
 
         # ROW 1+2 (idempotent_replay): tail-scan for quote_sent of THIS lead.

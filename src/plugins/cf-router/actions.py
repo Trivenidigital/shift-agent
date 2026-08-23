@@ -874,7 +874,8 @@ def find_menu_pending_by_update_id(update_id: str) -> Optional[dict]:
 
 def invoke_apply_owner_decision(code: str, decision: str,
                                 lead: Optional[dict] = None,
-                                message_id: str = "") -> int:
+                                message_id: str = "",
+                                capture: Optional[dict] = None) -> int:
     """Invoke apply-catering-owner-decision; returns exit code.
 
     For `approve`: caller passes the lead dict (snapshot from
@@ -919,14 +920,31 @@ def invoke_apply_owner_decision(code: str, decision: str,
                 cmd.append("--quote-from-lead-state")
                 # No stdin; the script renders the quote itself
             else:
-                # Path 3: no quote source — let LLM handle (return non-zero)
-                return 2  # EXIT_INVALID_INPUT
+                # Path 3 (R2.H2 2026-08-23): no quote source. Previously this
+                # returned 2 WITHOUT running the script, so the owner's
+                # '#XXXXX approve' fell through to the LLM — which needs the
+                # disabled `skills` toolset and a funded model. The owner got
+                # nothing deterministic. Run the script with NO quote flags: its
+                # PR-CF1 guard (which precedes the quote-source requirement)
+                # refuses, audits, and reprompts the owner itself. We do NOT
+                # pass --skip-finalize here; that override stays operator/cockpit
+                # only, so a WhatsApp reply can never approve a non-finalized
+                # lead. If the lead is not in the guard's shape the script still
+                # returns EXIT_INVALID_INPUT, preserving the old fall-through.
+                pass
         elif decision == "reject":
             cmd.extend(["--reason", "owner_reject_via_cf_router"])
         result = subprocess.run(
             cmd, input=stdin_text, capture_output=True, text=True,
             env=env, timeout=SUBPROCESS_TIMEOUT_SEC,
         )
+        if capture is not None:
+            capture["stdout"] = result.stdout or ""
+            capture["stderr"] = result.stderr or ""
+            try:
+                capture["payload"] = json.loads((result.stdout or "").strip().splitlines()[-1])
+            except Exception:
+                capture["payload"] = None
         return result.returncode
     except subprocess.TimeoutExpired:
         return 124
