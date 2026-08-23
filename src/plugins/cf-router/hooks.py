@@ -1629,12 +1629,19 @@ def _try_f8_intercept(text: str, chat_id: str, message_id: str = "") -> Optional
             if rc == _EXIT_TRUTH_GUARD_FAILED and payload.get(
                     "refusal") == "owner_approve_without_customer_finalize":
                 informed = payload.get("owner_reprompt_delivered") is True
+                # reason MUST be a member of CfRouterIntercepted.reason, which is
+                # a Literal. A new value would fail validation inside
+                # audit_intercepted's best-effort try/except and the row would be
+                # SILENTLY DROPPED — so the refusal is recorded under the existing
+                # f8_owner_approve value (accurate: the owner did send approve and
+                # the plugin did invoke the apply-script) with the discriminating
+                # facts in the free-text detail. No schema change, so no rollback
+                # exposure from a widened Literal either.
                 actions.audit_intercepted(
-                    reason="f8_owner_approve_refused_not_finalized",
+                    reason="f8_owner_approve",
                     chat_id=chat_id, code=code, subprocess_rc=rc,
-                    detail=("deterministic refusal; owner reprompt delivered"
-                            if informed else
-                            "deterministic refusal; owner reprompt NOT delivered"),
+                    detail=("refused: not customer-finalized; owner reprompt "
+                            + ("DELIVERED" if informed else "NOT delivered")),
                 )
                 if informed:
                     return {"action": "skip",

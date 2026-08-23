@@ -4641,3 +4641,124 @@ class TestF8OwnerApproveNonFinalizedReachable:
         assert mine and canon, "both constants must be present"
         assert mine.group(1) == canon.group(1), (
             "cf-router's restated exit code drifted from exit_codes.py")
+
+
+# ============================================================================
+# Class guard: every audit `reason` that reaches audit_intercepted must be a
+# member of the CfRouterIntercepted.reason Literal.
+#
+# Found the hard way 2026-08-23 while adding the owner-approval reachability
+# fix. audit_intercepted() is deliberately best-effort — its whole body sits in
+# a try/except because a raise there would turn a successful `skip` into `None`
+# and let the LLM re-run after the apply-script already fired. The price of
+# that safety is that a reason outside the Literal fails Pydantic validation
+# INSIDE the try, and the row is silently dropped: the call site looks correct,
+# the schema looks correct, only the pairing is wrong, and nothing at runtime
+# says a word. No reviewer catches that by reading either file alone, so it is
+# pinned mechanically.
+#
+# Scope is deliberate: audit_intercepted call sites, plus
+# _build_skip_or_passthrough, which forwards its `reason` straight into
+# audit_intercepted. Other functions take an unrelated `reason=` kwarg against
+# a different schema (audit_dispatcher_watchdog_suppressed) and are not in
+# scope here.
+# ============================================================================
+
+# Values cf-router already emits that are NOT in the Literal, so their audit
+# rows are being silently dropped in production TODAY. Pre-existing, found by
+# this guard on 2026-08-23, and deliberately NOT fixed in the owner-approval
+# PR: that change was authorised on one narrow axis, and the repair here is a
+# schema widening whose rollback behaviour (an older reader REJECTS the whole
+# row rather than degrading) deserves its own decision.
+#
+# This list must only ever SHRINK. A new entry means someone added a silently
+# dropped audit row.
+_KNOWN_DROPPED_REASONS = {
+    "f8_followup_approve",   # M5 catering follow-up approve — hooks.py
+    "f8_followup_cancel",    # M5 catering follow-up cancel  — hooks.py
+}
+
+
+def _cf_router_reason_literals():
+    """Authoritative allowed set, taken from the type itself.
+
+    Read via import rather than by regexing schemas.py: a text scrape of the
+    Literal block also captures words from the docstring that documents it
+    (an earlier version of this helper reported 101 values where the type has
+    96, including 'menu' three times).
+    """
+    import typing
+    platform_dir = (Path(__file__).resolve().parent.parent / "src" / "platform")
+    if str(platform_dir) not in sys.path:
+        sys.path.insert(0, str(platform_dir))
+    import schemas  # type: ignore
+    ann = schemas.CfRouterIntercepted.model_fields["reason"].annotation
+    return set(typing.get_args(ann))
+
+
+def _reasons_reaching_audit_intercepted():
+    """Literal `reason="..."` args at the two call shapes that reach the audit."""
+    import re
+    plugin_dir = (Path(__file__).resolve().parent.parent
+                  / "src" / "plugins" / "cf-router")
+    pattern = re.compile(
+        r'(?:audit_intercepted|_build_skip_or_passthrough)\s*\((?P<body>[^)]*)\)',
+        re.S)
+    found: dict[str, list[str]] = {}
+    for src in sorted(plugin_dir.glob("*.py")):
+        text = src.read_text(encoding="utf-8")
+        for call in pattern.finditer(text):
+            for m in re.finditer(r'reason=["\']([a-z0-9_]+)["\']', call.group("body")):
+                line = text[:call.start() + m.start()].count("\n") + 1
+                found.setdefault(m.group(1), []).append(f"{src.name}:{line}")
+    return found
+
+
+def test_every_audit_reason_reaching_the_chokepoint_is_in_the_schema_literal():
+    allowed = _cf_router_reason_literals()
+    assert len(allowed) > 50, "sanity: the Literal set failed to resolve"
+    emitted = _reasons_reaching_audit_intercepted()
+    assert emitted, "sanity: no audit_intercepted reason call sites found"
+
+    unknown = {r: sites for r, sites in emitted.items()
+               if r not in allowed and r not in _KNOWN_DROPPED_REASONS}
+    assert not unknown, (
+        "cf-router emits an audit reason absent from CfRouterIntercepted.reason.\n"
+        "Pydantic rejects the row inside audit_intercepted's best-effort\n"
+        "try/except, so the audit row is SILENTLY DROPPED at runtime.\n"
+        "Prefer reusing an existing value and putting the specifics in `detail`.\n"
+        "Adding to the Literal also works, but note that widening it makes an\n"
+        "OLDER reader reject the whole row after a rollback.\n"
+        f"offending: {unknown}"
+    )
+
+
+def test_the_known_dropped_list_only_shrinks():
+    """The ratchet. If someone fixes the pre-existing pair, this fails and tells
+    them to delete the entry — so the debt list cannot quietly go stale in the
+    other direction either."""
+    allowed = _cf_router_reason_literals()
+    still_broken = {r for r in _KNOWN_DROPPED_REASONS if r not in allowed}
+    assert still_broken == _KNOWN_DROPPED_REASONS, (
+        "a reason in _KNOWN_DROPPED_REASONS is now valid in the schema — "
+        "remove it from the list: "
+        f"{_KNOWN_DROPPED_REASONS - still_broken}")
+
+
+def test_the_guard_is_not_vacuous():
+    """Mutation proof: the checker must actually reject an unknown reason.
+
+    Without this, the guard above passes on an empty or mis-parsed allowed set
+    and proves nothing — the exact failure mode that let the original bug
+    through.
+    """
+    allowed = _cf_router_reason_literals()
+    assert "f8_owner_approve" in allowed, "sanity: a known-good value must be present"
+    assert "f8_owner_approve_refused_not_finalized" not in allowed, (
+        "If this value was added to the Literal, revisit the rollback note in "
+        "hooks.py: widening a Literal makes an older reader reject the row.")
+    # And prove the emitted-scan actually sees the owner-approval call site.
+    emitted = _reasons_reaching_audit_intercepted()
+    assert "f8_owner_approve" in emitted, (
+        "the scan no longer sees the owner-approve audit call — the guard would "
+        "silently stop covering the path it was written for")
