@@ -4,7 +4,7 @@
 # Enforced fail-closed at deploy (content) + alert-only by shift-agent-skills-audit.
 # DO NOT hand-edit hashes — a mismatch fail-closes the deploy.
 
-18803bce18ab0bfe926192281284e7627da302e3cd3df56fceccd03af5d9e19c  apply_catering_menu_decision
+9dc39ec007f0ca0eafcb6b7fd80b8937e12061552f36c6e2142ed3b7ed45fc71  apply_catering_menu_decision
 c050c39ebc2c5076501c24e46f3c54fa0681326584d78dcb2ffafe43ad2fc6e7  cash_ar_dispatcher
 ec5d136e1a0d82cabd8900c2e6c1c84a0dc32399cbeb8dfba46d6b7152a34345  catering_dispatcher
 5216b5a2df7ad93a54b483596896d89af16ebaa5c09c8a1a15a322118605d78a  catering_followup_dispatcher

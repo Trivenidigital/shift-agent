@@ -61,16 +61,30 @@ The script will:
 
 ## Step 3 — Confirm to owner
 
-After exit 0, read `pricebook_activated` from the script's JSON:
+After exit 0, read `pricebook_activated` and `pricebook_effect` from the JSON.
+
+`pricebook_effect` is a full sentence the script derived from the state it
+MEASURED — whether a pricebook exists at all, what version is live, and what a
+quote will therefore price from. Quote it VERBATIM. Do not paraphrase it, do not
+summarise it, and never substitute a generic line like "quotes still use the old
+prices": on a deployment with no pricebook that sentence is the opposite of the
+truth, because the corrected menu is exactly what quotes price from. The same
+sentence goes to the owner's Pushover, so the two must not diverge.
+
 - yes + `pricebook_activated: true`: *"Menu updated to v{new_version}
-  ({item_count} items). Previous v{prev_version} archived. Pricebook updated too
-  — new quotes use these prices."*
-- yes + `pricebook_activated: false`: the menu IS live but prices are NOT. Say
-  so plainly and do not round it off: *"Menu updated to v{new_version}
-  ({item_count} items). But the pricebook could NOT be updated, so quotes still
-  use the old prices: {pricebook_detail}. I've alerted you separately."* The
-  owner has already been paged; your job is to make sure the reply they are
-  reading right now does not imply prices changed when they did not.
+  ({item_count} items). Previous v{prev_version} archived. {pricebook_effect}"*
+- yes + `pricebook_activated: false`: the menu IS live and the pricebook was NOT
+  activated. Say so plainly and do not round it off: *"Menu updated to
+  v{new_version} ({item_count} items). The pricebook was not activated:
+  {pricebook_detail}. {pricebook_effect} Quotes already finalized are unchanged.
+  I've alerted you separately."* The owner has already been paged; your job is to
+  make sure the reply they are reading right now describes what actually
+  happened, not a generic failure.
+  - `price_source` in the same JSON names the state in one token if you need to
+    branch: `menu_only` (no pricebook exists — the corrected menu prices quotes),
+    `pricebook` (one is live at `live_pricebook_version` and its prices win over
+    the menu), `blocked` (present but unloadable — no new quote can be finalized
+    until it is repaired).
 - no: *"Discarded. Existing menu unchanged. Send a new photo when you're ready."*
 
 After exit 4:
