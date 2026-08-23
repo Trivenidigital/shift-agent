@@ -185,7 +185,12 @@ On your PRIMARY phone's WhatsApp: Settings → Linked Devices → remove the Her
 1. Verify your `self_chat_jid` in `config.yaml` — it may need re-populating after a re-pair.
 2. Run `sudo -u shift-agent /usr/local/bin/shift-agent-smoke-test.sh`.
 3. Check Pushover — any alerts?
-4. SSH in: `journalctl -u hermes-gateway -n 50`.
+4. SSH in and read the gateway's own log — **not** journalctl:
+   `tail -n 50 /opt/shift-agent/logs/hermes-gateway.log`.
+   The unit sets `StandardError=append:/opt/shift-agent/logs/hermes-gateway.log`,
+   so agent errors never reach journald. `journalctl -u hermes-gateway -n 50`
+   shows systemd's lifecycle only (started / stopped / exit code) — useful to
+   confirm the service crashed, useless for finding out why.
 
 ### "Employee says they messaged in sick but I never got a proposal"
 

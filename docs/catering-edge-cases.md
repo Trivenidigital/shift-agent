@@ -67,7 +67,9 @@ See `docs/deploy.md` § "Verifying after a `.env` change (smoke test)" for the c
 
 1. Hermes-gateway connected to WhatsApp (grep `/root/.hermes/logs/agent.log` for `✓ whatsapp connected`)
 2. Cockpit `/api/health` returns `{"ok":true}`
-3. No startup errors in `journalctl -u hermes-gateway -u shift-agent-cockpit` (with `code -15` filter for the expected systemd shutdown signal)
+3. No startup errors. Two places, not one:
+   - `journalctl -u hermes-gateway -u shift-agent-cockpit` (with `code -15` filter for the expected systemd shutdown signal) — this covers **systemd lifecycle only**
+   - `tail /opt/shift-agent/logs/hermes-gateway.log` — the gateway unit sets `StandardError=append` there, so every agent-side startup error lands in this file and in **no** journal
 
 ### Layer 2 — catering-specific smoke (additions for this agent)
 

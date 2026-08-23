@@ -185,5 +185,49 @@ tarball + `scp` + restart — no git checkout on the VPS.)
 
 ---
 
+## Rule 9 — Agent errors are in a FILE; `journalctl -u hermes-gateway` cannot show them
+
+**Where to look:** `/opt/shift-agent/logs/hermes-gateway.log`
+
+```bash
+ssh main-vps 'tail -n 200 /opt/shift-agent/logs/hermes-gateway.log' > .gw.txt 2>&1   # then Read .gw.txt (Rule 8)
+ssh main-vps 'zgrep -h "cf-router" /opt/shift-agent/logs/hermes-gateway.log*' > .gw.txt 2>&1
+```
+
+`hermes-gateway.service` sets **both** `StandardOutput=` and
+`StandardError=append:/opt/shift-agent/logs/hermes-gateway.log`. systemd hands the
+process that file directly, so **nothing the agent writes ever enters the journal**.
+The ~17 `sys.stderr.write` calls in `src/plugins/cf-router/` (declared at
+`actions.py:OPERATIONAL_ERROR_LOG`), the `shift-agent-policy` preflight result, Hermes'
+own warnings, and every Python traceback all land here and only here.
+
+What `journalctl -u hermes-gateway` *does* show is systemd's own lifecycle bookkeeping —
+`Started`, `Stopping`, `Main process exited, code=exited, status=1/FAILURE`,
+`Consumed … CPU time`. That is genuinely the right tool for "did it crash / when did it
+restart". It is never the right tool for "why".
+
+**This is a trap, not a preference.** A clean `journalctl` is not evidence that nothing
+failed — it is the expected output whether the agent is healthy or throwing on every
+message. Verified on main-vps 2026-08-23: a warning string present 5 times in the file
+matched 0 times across 7 days of journald for the unit.
+
+Rotation is daily, keep-14, `copytruncate`, and — unlike `decisions.log`, which moves to
+`/var/log/shift-agent-archive/` — the rotations stay **beside** the live file as
+`hermes-gateway.log.N[.gz]`. So glob `hermes-gateway.log*` for anything before today, and
+treat the whole stream as a 14-day live-tail companion to `decisions.log`, never as the
+durable record. Anything that must outlive 14 days needs an audit row.
+
+Other units differ; do not generalize this rule. Per-agent timers (catering sweeps, daily
+brief, eod-reconcile, flyer watchdogs) each append to their own
+`/opt/shift-agent/logs/<unit>.log`, while `check-compliance-deadlines` really does use
+`StandardOutput=journal`. Read the unit before choosing the command:
+`systemctl cat <unit> | grep Standard`.
+
+Mechanized by `tests/test_operator_log_location.py`, which derives the path from the unit
+file — so if the unit ever moves to `journal`, this rule fails in CI rather than in an
+incident.
+
+---
+
 *Maintenance note: this runbook indexes rules, not runtime values. Verify live flag/state values
 against `/proc` and the box per Rule 3 before acting — do not trust values quoted in any doc (§9a).*

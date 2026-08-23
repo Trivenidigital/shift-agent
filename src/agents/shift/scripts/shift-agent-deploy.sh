@@ -342,10 +342,52 @@ install_artifacts() {
     # leaves "$src_root/.commit-hash" absent -> remove any stale live label so provenance
     # is never misreported after a rollback to a pre-label release (a previously-absent
     # label likewise stays absent).
+    # Operator-facing receipt, DERIVED from the label above rather than
+    # maintained beside it. /opt/shift-agent/DEPLOY_RECEIPT.json is the artifact
+    # an auditor reaches for first — it is named for exactly the question they
+    # are asking — but until now nothing wrote it: the file on main-vps was
+    # hand-authored during a flyer deploy on 2026-06-05 and was still claiming
+    # that commit 78 days later, with nothing in it marking it wrong.
+    #
+    # Writing it HERE, in the same arm of the same guard, is the whole repair.
+    # The receipt cannot report a commit the label disagrees with, because both
+    # come from one read of the staged artifact on every path that routes
+    # through install_artifacts. It carries no independently-maintained facts —
+    # anything a reader might want to cross-check is expressed as the command
+    # that answers it, so the receipt has nothing that CAN go stale.
+    #
+    # Same failure regime as the label install directly above: under `set -e` an
+    # unwritable provenance artifact aborts the deploy, and the callers at the
+    # deploy/budget-bootstrap sites roll back. Provenance we cannot record is
+    # not a deploy we want to finish silently.
     if [ -f "$src_root/.commit-hash" ]; then
         install -m 644 "$src_root/.commit-hash" /opt/shift-agent/.commit-hash
+        _receipt_commit="$(tr -cd '[:xdigit:]' < "$src_root/.commit-hash" | head -c 40)"
+        _receipt_tmp=/opt/shift-agent/.DEPLOY_RECEIPT.json.tmp
+        cat > "$_receipt_tmp" <<RECEIPT_EOF
+{
+  "commit": "$_receipt_commit",
+  "installed_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "generated_by": "shift-agent-deploy.sh install_artifacts()",
+  "hand_edits": "none — rewritten in full by every deploy, removed by a rollback to a release predating the provenance label",
+  "cross_check": {
+    "commit_label": "cat /opt/shift-agent/.commit-hash",
+    "newest_artifact": "ls -t /opt/shift-agent/deploys/deploy-*.tgz | head -1",
+    "running_unit": "systemctl show hermes-gateway -p ActiveEnterTimestamp"
+  },
+  "operational_errors": "/opt/shift-agent/logs/hermes-gateway.log (NOT journalctl -u hermes-gateway; the unit sets StandardError=append)"
+}
+RECEIPT_EOF
+        chmod 644 "$_receipt_tmp"
+        # Rename, not copy: a reader must never catch a half-written receipt.
+        mv -f "$_receipt_tmp" /opt/shift-agent/DEPLOY_RECEIPT.json
+        unset _receipt_commit _receipt_tmp
     else
         rm -f /opt/shift-agent/.commit-hash
+        # A rollback to a pre-label release must not leave the newer receipt
+        # behind describing a commit that is no longer installed. Absent
+        # provenance is honest; wrong provenance is the defect being fixed.
+        rm -f /opt/shift-agent/DEPLOY_RECEIPT.json
     fi
     # Canonical WhatsApp identity (LID<->phone convergence via lid-cache). Shared
     # by the cf-router plugin, schemas.py intake-session keying, and flyer

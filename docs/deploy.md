@@ -157,11 +157,21 @@ ssh main-vps 'sudo tail -200 /root/.hermes/logs/agent.log | grep "✓ whatsapp c
 # Check 2: cockpit responds (proves systemd EnvironmentFile loaded with COCKPIT_COOKIE_SECURE)
 ssh main-vps 'curl -sf http://localhost:8080/api/health'
 
-# Check 3: no startup errors in journalctl
+# Check 3a: no systemd-level startup failure (lifecycle records only)
 ssh main-vps 'sudo journalctl -u hermes-gateway -u shift-agent-cockpit --since "30 seconds ago" --no-pager | grep -iE "error|auth.*invalid|missing.*env" | grep -v "code -15"'
+
+# Check 3b: no agent-level startup error. REQUIRED — 3a cannot see these.
+ssh main-vps 'tail -n 100 /opt/shift-agent/logs/hermes-gateway.log' > .gw.txt 2>&1   # then read .gw.txt
 ```
 
 The `code -15` filter excludes the expected systemd-restart-shutdown signal (the previous gateway process exiting cleanly is logged as `code -15`; without that filter, every clean restart looks like a failure).
+
+**Check 3a is not sufficient on its own.** The gateway unit sets
+`StandardOutput=append:` and `StandardError=append:/opt/shift-agent/logs/hermes-gateway.log`,
+so nothing the agent writes reaches journald — `journalctl -u hermes-gateway` carries
+systemd's own lifecycle lines and nothing else. A clean 3a with a stack trace sitting in
+3b is the normal shape of a broken deploy, so run both. (Rotated daily, keep-14, as
+`hermes-gateway.log.N[.gz]` beside the live file.) See `docs/operator-runbook.md` Rule 9.
 
 ### Customer-VPS bring-up: migration is step-0 (REQUIRED before first deploy)
 

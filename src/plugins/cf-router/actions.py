@@ -27,6 +27,28 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple, Optional, get_args
 
 # Deployed-system paths (mutable for tests)
+# Where every `sys.stderr.write` in this module and in hooks.py actually lands.
+#
+# The gateway unit sets BOTH StandardOutput and StandardError to
+# `append:/opt/shift-agent/logs/hermes-gateway.log`, so these lines never reach
+# journald. `journalctl -u hermes-gateway` returns systemd's own lifecycle
+# records only — Started / Stopped / "Main process exited" — and an operator who
+# runs it looking for one of the errors below finds an empty result and
+# concludes nothing failed. Verified on main-vps 2026-08-23: a string appearing
+# 5x in the file matched 0x across 7 days of journald for this unit.
+#
+# The file is rotated daily, keep-14, copytruncate, with the rotations left
+# beside it as hermes-gateway.log.N[.gz] (no olddir, unlike decisions.log). So
+# anything older than today is under the glob, and anything older than 14 days
+# is gone — which is why an error worth keeping gets an audit row in
+# decisions.log as well, and this stream stays the live-tail companion to it.
+#
+# Declared as a constant so the sink is discoverable from the code that fills
+# it. Deliberately NOT a logging framework: the writes below are best-effort
+# breadcrumbs on already-handled exceptions, and routing them through a handler
+# would add a failure mode to paths whose entire contract is "never raise".
+OPERATIONAL_ERROR_LOG = "/opt/shift-agent/logs/hermes-gateway.log"
+
 CONFIG_PATH = Path("/opt/shift-agent/config.yaml")
 PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
 REVENUE_ROUTE_CLARIFICATION_PATH = Path("/opt/shift-agent/state/revenue-route-clarifications.json")
