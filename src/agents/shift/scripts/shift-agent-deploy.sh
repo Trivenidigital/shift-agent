@@ -364,6 +364,10 @@ install_artifacts() {
         install -m 644 "$src_root/.commit-hash" /opt/shift-agent/.commit-hash
         _receipt_commit="$(tr -cd '[:xdigit:]' < "$src_root/.commit-hash" | head -c 40)"
         _receipt_tmp=/opt/shift-agent/.DEPLOY_RECEIPT.json.tmp
+        # NOTE for static parsers: the JSON below closes with a brace at column
+        # 0, so a newline-brace-newline sequence no longer marks the end of this
+        # function. Nothing in the repo anchors on that today; match on the
+        # guard or on the indented `fi` instead if you need a boundary here.
         cat > "$_receipt_tmp" <<RECEIPT_EOF
 {
   "commit": "$_receipt_commit",
