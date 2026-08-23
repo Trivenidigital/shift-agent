@@ -93,3 +93,43 @@ and they are about different paths.
 
 `deposit_pct: 0` · `catering-followup-sweep.timer` disabled · TTL sweep not
 armed · no live WhatsApp test · transport-evidence harness not executed.
+
+---
+
+## Found while fixing this: two audit rows silently dropped in production
+
+Not part of the LLM-fallthrough class, but the same *shape* of defect — a thing
+that looks recorded and is not — so it belongs in the same record.
+
+`CfRouterIntercepted.reason` is a `Literal` with 96 members. `audit_intercepted`
+is best-effort by design: its whole body sits in a `try/except`, because a raise
+there would convert a successful `skip` into `None` and let the LLM re-run after
+the apply-script had already fired. The consequence is that **a `reason` outside
+the Literal fails Pydantic validation inside that `try` and the row is dropped
+with no error anywhere.**
+
+Two values cf-router emits today are not in the Literal, so their rows never
+land:
+
+| reason | path | consequence |
+|---|---|---|
+| `f8_followup_approve` | M5 catering follow-up approve | owner approves a follow-up; the action happens; the audit chokepoint has no record |
+| `f8_followup_cancel` | M5 catering follow-up cancel | same |
+
+**Not fixed here.** This change was authorised on one narrow axis, and the
+repair is a schema widening whose rollback behaviour is the bad category: an
+older reader REJECTS the whole row rather than degrading past it, so adding
+Literal members needs a reader-first deploy decision of its own — the same
+two-phase shape as the `ApprovalCodeCollisionDetected.pools` `max_length=4`
+item already in the backlog.
+
+They are held in a ratchet list in `tests/test_cf_router_plugin.py`
+(`_KNOWN_DROPPED_REASONS`) that may only shrink, with a test that fails if
+someone fixes the schema and forgets to remove the entry. Any NEW dropped
+reason now fails CI.
+
+I found this by applying the rollback-category check to my own change: the
+refusal audit I first wrote used a new `reason` value and would itself have
+been silently dropped, which would have made the "recorded truthfully" claim in
+this very document false. It now reuses `f8_owner_approve` and puts the
+discriminating facts in the free-text `detail`.
