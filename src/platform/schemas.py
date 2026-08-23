@@ -6960,6 +6960,8 @@ class CfRouterIntercepted(_BaseEntry):
       - f8_owner_approve / f8_owner_reject — owner sent #XXXXX approve/reject;
         plugin invoked apply-catering-owner-decision; LLM bypassed
       - f8_menu_yes / f8_menu_no — owner sent #XXXXX yes/no on a pending menu
+      - f8_followup_approve / f8_followup_cancel — owner answered an M5
+        catering follow-up card (phase 2, 2026-08-23)
         update; plugin invoked apply-menu-update
       - f9_sick_call_alert — sick-call regex pattern detected from employee
         sender; plugin fired Pushover P2 to owner; LLM still ran normally
@@ -6988,6 +6990,15 @@ class CfRouterIntercepted(_BaseEntry):
     reason: Literal[
         "f8_owner_approve", "f8_owner_reject",
         "f8_menu_yes", "f8_menu_no",
+        # PHASE 2, 2026-08-23. cf-router has emitted these two since M5; they
+        # were never Literal members, so audit_intercepted's best-effort
+        # try/except swallowed every row silently. Widened only AFTER the
+        # phase-1 reader shim was deployed and runtime-verified on the box
+        # (known member -> strict class; these two + an arbitrary future value
+        # -> absorbing variant with the reason preserved; writer still
+        # refusing). A reader older than phase 1 REJECTS a row carrying these,
+        # which is why the ordering was reader-first rather than a one-liner.
+        "f8_followup_approve", "f8_followup_cancel",
         "f9_sick_call_alert",
         "f7_primary_new_inquiry",          # PR-CF1d 2026-05-12
         "f7_primary_followup_suppressed",  # PR-CF1d 2026-05-12

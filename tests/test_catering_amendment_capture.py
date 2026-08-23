@@ -706,10 +706,11 @@ def _audit_intercepted_reason_literals(path: Path) -> set:
 #   tests in tests/test_log_entry_forward_compat.py (Case 14).
 #
 # This set may only ever SHRINK. A new entry means a new silently-dropped row.
-_KNOWN_DROPPED_REASONS = {
-    "f8_followup_approve",   # M5 catering follow-up approve
-    "f8_followup_cancel",    # M5 catering follow-up cancel
-}
+# PHASE 2 LANDED 2026-08-23 — both entries removed after the phase-1 reader shim
+# was deployed and runtime-verified. Empty is the correct steady state: a new
+# entry here would mean a newly silently-dropped audit row, which is what the
+# guard below exists to prevent.
+_KNOWN_DROPPED_REASONS: set = set()
 
 
 def test_known_dropped_reasons_only_shrinks():
