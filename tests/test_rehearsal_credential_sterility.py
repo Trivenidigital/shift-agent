@@ -611,3 +611,159 @@ def test_sweep_lifecycle_e2e_child_env_is_sterile_at_runtime(tmp_path, prod_env)
     assert "PATH" in env
     # and the Pushover binary cannot resolve to the real script it installed
     assert not Path(env["SHIFT_AGENT_NOTIFY_OWNER_BIN"]).exists()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The DIRECT-bin Pushover path — the dominant one, proven by EXECUTION
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# safe_io.notify_owner_with_fallback is one of TWO ways to page the owner, and
+# it is the smaller one. Four scripts use the helper; roughly thirty source
+# files subprocess `/usr/local/bin/shift-agent-notify-owner` DIRECTLY, reaching
+# none of safe_io's guards. A guard proven only at the helper would leave the
+# majority of the incident's blast radius untested — the same "I checked the
+# door I thought of" shape as the incident itself.
+#
+# So this drives the REAL script end to end against a stub Pushover endpoint and
+# asserts on what the stub received, which is the only observation that
+# distinguishes "refused" from "attempted and failed".
+
+_PUSHOVER_STUB_SRC = '''
+import json, sys, threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+RECEIVED = []
+
+
+class _Stub(BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        RECEIVED.append(self.rfile.read(n).decode("utf-8"))
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"status": 1}).encode())
+
+    def log_message(self, *a):
+        return
+'''
+
+
+def _run_notify_owner(tmp_path, *, config: dict, rehearsal: bool):
+    """Execute the REAL shift-agent-notify-owner against a stub Pushover server.
+
+    Returns (exit_code, requests_received, stderr). Uses the repo's documented
+    SourceFileLoader pattern for hyphen-named scripts (tests/_b1_helpers.py) and
+    overrides the module path/URL constants AFTER exec_module, exactly as
+    test_owner_wellbeing_quiet_hours and the B1 harness do.
+    """
+    import yaml as _yaml
+
+    root = tmp_path / ("rehearsal" if rehearsal else "control")
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "state").mkdir(exist_ok=True)
+    (root / "logs").mkdir(exist_ok=True)
+    cfg_path = root / "config.yaml"
+    cfg_path.write_text(_yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    wrapper = _PUSHOVER_STUB_SRC + f'''
+srv = HTTPServer(("127.0.0.1", 0), _Stub)
+port = srv.server_address[1]
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+import pathlib, importlib.util, importlib.machinery
+sys.path.insert(0, {str(_PLATFORM_DIR)!r})
+loader = importlib.machinery.SourceFileLoader("notify_owner", {str(NOTIFY_OWNER_SCRIPT)!r})
+spec = importlib.util.spec_from_file_location("notify_owner", {str(NOTIFY_OWNER_SCRIPT)!r},
+                                              loader=loader)
+mod = importlib.util.module_from_spec(spec)
+sys.modules["notify_owner"] = mod
+spec.loader.exec_module(mod)
+
+mod.CONFIG_PATH = pathlib.Path({str(cfg_path)!r})
+mod.STATE_DIR = pathlib.Path({str(root / "state")!r})
+mod.NOTIFY_FAILED_LOG = mod.STATE_DIR / "notify-failed.log"
+mod.DECISIONS_LOG_PATH = pathlib.Path({str(root / "logs" / "decisions.log")!r})
+mod.PUSHOVER_URL = "http://127.0.0.1:%s/1/messages.json" % port
+# the WhatsApp fallback must not reach anything either
+mod.WHATSAPP_BRIDGE_URL = "http://127.0.0.1:%s/send" % port
+
+sys.argv = ["shift-agent-notify-owner", "--title", "P1A", "--priority", "1", "probe message"]
+rc = mod.main()
+print("RC=%s" % rc)
+print("RECEIVED=%s" % json.dumps(RECEIVED))
+'''
+    env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG", "TMPDIR", "SYSTEMROOT",
+                                      "PYTHONHASHSEED", "PYTHONIOENCODING")
+           if k in os.environ}
+    env["SHIFT_AGENT_DECISIONS_LOG_PATH"] = str(root / "logs" / "decisions.log")
+    if rehearsal:
+        env["SHIFT_AGENT_REHEARSAL"] = "1"
+    proc = subprocess.run([sys.executable, "-c", wrapper],
+                          capture_output=True, text=True, env=env, timeout=60)
+    assert proc.returncode == 0, f"wrapper crashed: {proc.stdout}\n{proc.stderr}"
+    rc = int(proc.stdout.split("RC=")[1].splitlines()[0])
+    received = json.loads(proc.stdout.split("RECEIVED=")[1].splitlines()[0])
+    return rc, received, proc.stderr
+
+
+def test_direct_bin_pushover_refuses_under_rehearsal_and_control_proves_reachable(tmp_path):
+    """The real notify-owner script attempts NO Pushover POST under a rehearsal,
+    and the paired control proves the stub was reachable all along.
+
+    This is the single highest-value interception point: if a rehearsal can
+    reach the Pushover transport with a usable token, the guard has failed no
+    matter how clean the config file looks.
+
+    ALTERNATE mechanism for the rehearsal green — the script never ran, or the
+    stub was never listening, so "0 requests" means nothing. Ruled out by the
+    control in the same test: identical wiring, marker OFF, real-looking
+    credentials, and the stub records exactly one POST.
+    """
+    live_cfg = production_shaped_config()
+
+    # (a) REHEARSAL: sterile config + marker on -> no POST attempted at all
+    sterile_cfg = _sio().sanitize_config_for_rehearsal(live_cfg)
+    rc, received, err = _run_notify_owner(tmp_path, config=sterile_cfg, rehearsal=True)
+    assert received == [], f"a rehearsal reached the Pushover transport: {received}"
+    # Require the SPECIFIC refusal string, not merely a non-zero exit: a crash
+    # (bad config, missing import) would also exit non-zero and would satisfy a
+    # weaker assertion while proving nothing about the guard.
+    assert "refused: rehearsal context (SHIFT_AGENT_REHEARSAL=1)" in err, (
+        f"no explicit rehearsal refusal on the Pushover path; rc={rc} stderr={err[:600]!r}"
+    )
+    assert rc != 0, "a refused alert must not report success"
+
+    # (b) CONTROL: marker off + live-looking credentials -> exactly one POST.
+    # Without this the assertion above is unfalsifiable.
+    rc2, received2, err2 = _run_notify_owner(tmp_path, config=live_cfg, rehearsal=False)
+    assert len(received2) == 1, (
+        f"control failed — the stub was never reachable, so the rehearsal's "
+        f"zero-POST result proves nothing. rc={rc2} stderr={err2[:400]!r}"
+    )
+    assert "probe+message" in received2[0] or "probe%20message" in received2[0]
+    # the control genuinely carried the credential the rehearsal must not carry
+    assert FAKE_PUSHOVER_APP_TOKEN in received2[0]
+    assert rc2 == 0
+
+
+def test_direct_bin_refuses_on_sterile_credential_even_without_the_marker(tmp_path):
+    """Belt for the forgotten marker: a sterile-sentinel credential is itself
+    the refusal trigger.
+
+    The incident happened because a step was forgotten. A guard that only works
+    when someone remembers to set an env var repeats that failure mode, so the
+    sanitised credential value is self-identifying as fake and the script
+    refuses on the VALUE alone.
+
+    ALTERNATE mechanism: the script refused for an unrelated reason (bad config,
+    crash). Ruled out by the preceding test's control, which runs the identical
+    wiring with a non-sterile credential and gets a successful POST.
+    """
+    sterile_cfg = _sio().sanitize_config_for_rehearsal(production_shaped_config())
+    rc, received, err = _run_notify_owner(tmp_path, config=sterile_cfg, rehearsal=False)
+    assert received == [], f"sterile credential still reached the transport: {received}"
+    assert "rehearsal-sterile Pushover credential" in err, (
+        f"no explicit sterile-credential refusal; rc={rc} stderr={err[:600]!r}"
+    )
+    assert rc != 0, "a refused alert must not report success"
