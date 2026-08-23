@@ -14,10 +14,21 @@ parse-menu-photo already states which prices change and which version lands, so
 the `#XXXXX yes` they type is informed consent for both.
 
 FAILURE ISOLATION: the menu is persisted FIRST and is never rolled back. If the
-pricebook activation fails, the menu stays approved, the pricebook stays
-byte-unchanged at its prior version, and the partial outcome is audited
-(catering_menu_pricebook_sync_failed) AND pushed to the owner. Prices the owner
-has not seen must never go live; prices they approved must never be lost.
+pricebook activation does not happen, the menu stays approved, the pricebook is
+left byte-unchanged, and the partial outcome is audited
+(catering_menu_pricebook_sync_failed) AND pushed to the owner via
+`notify_owner_with_fallback` in `_report_pricebook_sync_failure` (there is no
+`notify-owner` spelling anywhere in this file — grep the SYMBOL, not the noun).
+Prices the owner has not seen must never go live; prices they approved must
+never be lost.
+
+WHAT THE OWNER IS TOLD. "Not activated" is not one state, so it must not be one
+message. The alert is built from TWO measured facts, never from a canned failure
+story: the `reason` (why activation did not happen) and `PriceSource` (what
+actually prices a quote on THIS deployment right now — see that class). A
+deployment with no pricebook at all is the common case, and telling its owner
+that "the pricebook stays at its previous version" is the exact opposite of the
+truth: there is no pricebook, and the corrected menu IS what quotes price from.
 
 Usage:
   apply-menu-update --code "#A3F2X" --decision yes
@@ -42,7 +53,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
@@ -93,23 +104,62 @@ def _log(adapter: TypeAdapter, entry) -> None:
         ndjson_append(LOG_PATH, adapter.dump_json(entry).decode("utf-8"))
 
 
+class PriceSource(NamedTuple):
+    """What actually prices a quote on this deployment, MEASURED at activation
+    time rather than assumed. The owner alert states this instead of narrating a
+    generic failure.
+
+    kind:
+      "menu_only" — no pricebook file (load_pricebook returns None,
+          catering_pricing.py:1030-1036). finalize-catering-menu._load_pricebook
+          then returns None and the legacy path prices every line straight off
+          the menu index (`current_price = menu_index[item.name]`,
+          finalize-catering-menu:241). So the corrected menu IS the price source:
+          nothing "stays at its previous version", because nothing exists.
+      "pricebook" — a valid pricebook is live at `version`. compute_quote
+          resolves `item_price_overrides` FIRST and only falls back to the menu's
+          `price_usd` (catering_pricing.py:363-369), so items the pricebook
+          prices keep the OLD price and the rest follow the corrected menu.
+      "blocked" — the file is present but will not load.
+          finalize-catering-menu._load_pricebook exits 2 rather than quote at
+          pre-pricebook prices (finalize-catering-menu:207-215), so no NEW quote
+          can be finalized at all until it is repaired.
+
+    In every kind, an ALREADY-finalized quote is untouched: the send path renders
+    from the provenance frozen at finalize and never re-derives a price
+    (apply-catering-owner-decision:302, and it loads no pricebook on the send
+    path at all — only the --discount-id recompute does, at line 325).
+    """
+    kind: str
+    version: Optional[int] = None
+
+
 def _activate_pricebook(
     menu: Menu, pending: MenuPendingUpdate, now: datetime,
-) -> tuple[bool, str, Optional[object], Optional[int]]:
+) -> tuple[bool, str, Optional[object], Optional[int], PriceSource]:
     """Activate the pricebook derived from the menu just persisted.
 
-    Returns (ok, detail, sync, activated_version). NEVER raises and NEVER writes
-    the pricebook itself: it builds the document with the pure adapter and hands
-    it to the EXISTING import-catering-pricebook, which owns the validation, the
-    version bump, the archive and the audit row. The importer refuses a replay of
-    this same `update_id`, so a re-run cannot double-bump.
+    Returns (ok, detail, sync, activated_version, price_source). The last element
+    is the pricing basis observed while doing the work — the caller cannot
+    re-derive it later without a second read that could race the importer, and
+    without it the owner alert has to guess what a quote will price from.
+
+    NEVER raises and NEVER writes the pricebook itself: it builds the document
+    with the pure adapter and hands it to the EXISTING import-catering-pricebook,
+    which owns the validation, the version bump, the archive and the audit row.
+    The importer refuses a replay of this same `update_id`, so a re-run cannot
+    double-bump.
 
     A failure here is contained on purpose — the caller keeps the approved menu.
     """
     try:
         active = _pricing.load_pricebook(PRICEBOOK_PATH)
     except _pricing.PricingError as e:
-        return False, f"active_pricebook_unreadable: {e}", None, None
+        return (False, f"active_pricebook_unreadable: {e}", None, None,
+                PriceSource("blocked"))
+    # Measured ONCE, here, while the pricebook is in hand.
+    source = (PriceSource("menu_only") if active is None
+              else PriceSource("pricebook", active.version))
 
     # The card the owner approved described a diff against a SPECIFIC pricebook.
     # If someone imported a new one in between, that diff is stale and the owner
@@ -129,7 +179,7 @@ def _activate_pricebook(
             "before pricebook activation existed, so its approval card never "
             "showed a price diff. The menu is applied; prices are NOT. Re-send "
             "the menu photo to get a card that can activate prices.",
-            None, None,
+            None, None, source,
         )
     current = _pricing.pricebook_fingerprint(active)
     if stamped != current:
@@ -137,7 +187,7 @@ def _activate_pricebook(
             False,
             f"pricebook_changed_since_proposal: the card was built against "
             f"{stamped}, the live pricebook is {current}",
-            None, None,
+            None, None, source,
         )
 
     try:
@@ -147,7 +197,7 @@ def _activate_pricebook(
             source_menu_update_id=pending.update_id,
         )
     except (ValidationError, ValueError) as e:
-        return False, f"pricebook_document_invalid: {e}", None, None
+        return (False, f"pricebook_document_invalid: {e}", None, None, source)
 
     handle = tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", prefix="menu-pricebook-", delete=False, encoding="utf-8",
@@ -162,13 +212,15 @@ def _activate_pricebook(
             capture_output=True, text=True, timeout=60,
         )
     except (OSError, subprocess.SubprocessError) as e:
-        return False, f"import_unrunnable: {type(e).__name__}: {e}", None, None
+        return (False, f"import_unrunnable: {type(e).__name__}: {e}", None, None,
+                source)
     finally:
         Path(handle.name).unlink(missing_ok=True)
 
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()[:300]
-        return False, f"import_exit_{proc.returncode}: {detail}", None, None
+        return (False, f"import_exit_{proc.returncode}: {detail}", None, None,
+                source)
 
     # The version the importer actually assigned, not the one predicted — a
     # replay reports "already_active" at the version already live.
@@ -179,7 +231,8 @@ def _activate_pricebook(
             break
         except (json.JSONDecodeError, AttributeError):
             continue
-    return True, (proc.stdout or "").strip()[:300], sync, activated_version
+    return (True, (proc.stdout or "").strip()[:300], sync, activated_version,
+            source)
 
 
 def _report_pricebook_synced(
@@ -210,11 +263,114 @@ def _report_pricebook_synced(
         sys.stderr.write(f"sync audit emit failed (non-fatal): {e}\n")
 
 
+# Why activation did not happen, in the owner's terms. Keyed by the `reason`
+# token that also lands in the catering_menu_pricebook_sync_failed audit row, so
+# the alert and the audit name the same state. `import_exit_<n>` is matched by
+# prefix. The remainder of `detail` is appended for every reason EXCEPT the ones
+# listed in _STATIC_DETAIL_REASONS, whose remainder is fixed prose the headline
+# already says.
+_FAILURE_HEADLINE = {
+    # Source-NEUTRAL on purpose. An earlier draft said "No pricebook was
+    # created", which is only true when none exists — reintroducing the very
+    # coupling this split exists to break. The headline says WHY; the effect
+    # sentence, and only it, says what prices a quote.
+    "proposal_predates_pricebook_scope":
+        "Prices were not activated: this proposal predates pricebook "
+        "activation, so its approval card never showed a price diff.",
+    "pricebook_changed_since_proposal":
+        "Prices were not activated: the pricebook changed after your card was "
+        "built, so the diff you approved is stale.",
+    "active_pricebook_unreadable":
+        "The pricebook file is present but will not load.",
+    "pricebook_document_invalid":
+        "Prices were not activated: the pricebook derived from this menu failed "
+        "validation.",
+    "import_unrunnable":
+        "Prices were not activated: the pricebook importer could not be run.",
+}
+_FAILURE_ACTION = {
+    "proposal_predates_pricebook_scope":
+        "Re-send the menu photo to get a card that can activate prices.",
+    "pricebook_changed_since_proposal":
+        "Re-send the menu photo to get a card built against the live pricebook.",
+    "active_pricebook_unreadable":
+        "Repair or re-import it with import-catering-pricebook.",
+}
+_STATIC_DETAIL_REASONS = frozenset({"proposal_predates_pricebook_scope"})
+_DEFAULT_ACTION = "Re-send the menu photo to retry the activation."
+
+
+def _price_effect(source: PriceSource, menu_version: int) -> tuple[str, str]:
+    """(alert title, one-sentence effect) for a menu that landed WITHOUT its
+    pricebook activation. One sentence, one source of truth: the Pushover body
+    and the `pricebook_effect` field the SKILL reads back to the owner in chat
+    both come from here, so the two surfaces cannot drift into telling the owner
+    two different stories about their prices.
+
+    Every claim below is mechanically grounded in PriceSource's docstring.
+    """
+    if source.kind == "blocked":
+        return (
+            "Catering menu applied - pricebook unreadable, quoting BLOCKED",
+            "No new quote can be finalized until it loads: finalize refuses "
+            "rather than quote at pre-pricebook prices.",
+        )
+    if source.kind == "menu_only":
+        return (
+            "Catering menu applied - menu-only pricing (no pricebook)",
+            f"There is no pricebook on this deployment, so quotes price from "
+            f"the menu: new quotes use the corrected menu v{menu_version}.",
+        )
+    return (
+        "Catering menu applied - pricebook NOT updated",
+        f"The pricebook stays at v{source.version}: items it prices keep their "
+        f"existing prices, and items it does not price follow the corrected "
+        f"menu v{menu_version}.",
+    )
+
+
+def _owner_alert_for_failed_activation(
+    menu_version: int, reason: str, detail: str, source: PriceSource,
+) -> tuple[str, str]:
+    """(title, plain-text body) describing the MEASURED state.
+
+    Two axes, both measured, never narrated: `reason` says why activation did not
+    happen, `source` says what prices a quote as a RESULT. Collapsing either into
+    one generic string is the defect this exists to prevent — the incident alert
+    told an owner with no pricebook at all that "the pricebook stays at its
+    previous version" and that "quotes still use the old prices", when the
+    corrected menu was in fact exactly what quotes would price from.
+
+    Plain text on purpose (§12b): the reason tokens carry underscores and a
+    Markdown parse would eat them and hand the owner a mangled alert. The notify
+    chokepoint shells out to shift-agent-notify-owner, which posts to Pushover
+    with no html/monospace parameter and caps the body at 1024 chars.
+    """
+    title, effect = _price_effect(source, menu_version)
+    headline = _FAILURE_HEADLINE.get(reason, "Prices were not activated.")
+    action = _FAILURE_ACTION.get(reason, _DEFAULT_ACTION)
+    parts = [
+        f"Menu v{menu_version} is live.",
+        headline,
+        effect,
+        "Quotes already finalized are unchanged.",
+        action,
+        f"Reason: {reason}",
+    ]
+    if reason not in _STATIC_DETAIL_REASONS:
+        _, _, rest = detail.partition(":")
+        rest = " ".join(rest.split())[:240]
+        if rest:
+            parts[-1] = f"Reason: {reason} - {rest}"
+    return title, " ".join(parts)
+
+
 def _report_pricebook_sync_failure(
-    update_id: str, menu_version: int, detail: str, now: datetime,
+    update_id: str, menu_version: int, detail: str, source: PriceSource,
+    now: datetime,
 ) -> None:
-    """Audit + page the owner. The menu IS live and the pricebook is NOT, and an
-    owner who is not told that will quote from prices they think they changed."""
+    """Audit + page the owner with what MEASURABLY happened. An owner told the
+    wrong story about their prices acts on the wrong story."""
     sys.stderr.write(f"WARN: pricebook activation failed (menu is applied): {detail}\n")
     reason, _, _rest = detail.partition(":")
     try:
@@ -232,13 +388,10 @@ def _report_pricebook_sync_failure(
     try:
         # parse_mode-free plain text via the notify chokepoint: underscore-bearing
         # reasons render as garbage under Markdown (§12b).
+        title, body = _owner_alert_for_failed_activation(
+            menu_version, reason.strip(), detail, source)
         notify_owner_with_fallback(
-            "Catering menu applied, pricebook NOT updated",
-            f"Menu v{menu_version} is live, but the pricebook could not be "
-            f"activated and stays at its previous version. Quotes still use the "
-            f"old prices. Reason: {detail}",
-            priority=1,
-            source="apply-menu-update",
+            title, body, priority=1, source="apply-menu-update",
         )
     except Exception as e:  # noqa: BLE001 — alerting is best-effort
         sys.stderr.write(f"owner notify failed (non-fatal): {type(e).__name__}: {e}\n")
@@ -371,14 +524,15 @@ def main() -> int:
         # pricebook derived from it — outside MENU_LOCK (it takes the pricebook's
         # own lock) and inside PENDING_LOCK, so the pending file is still claimed
         # and a concurrent approval of the same code cannot interleave.
-        pricebook_ok, pricebook_detail, sync, pricebook_version = _activate_pricebook(
-            new_menu, pending, now)
+        (pricebook_ok, pricebook_detail, sync, pricebook_version,
+         price_source) = _activate_pricebook(new_menu, pending, now)
         if pricebook_ok and sync is not None:
             _report_pricebook_synced(
                 pending, new_menu.version, sync, pricebook_version, now)
         elif not pricebook_ok:
             _report_pricebook_sync_failure(
-                pending.update_id, new_menu.version, pricebook_detail, now)
+                pending.update_id, new_menu.version, pricebook_detail,
+                price_source, now)
 
         # Clear pending
         try:
@@ -386,11 +540,33 @@ def main() -> int:
         except FileNotFoundError:
             pass
 
+    # The SKILL's owner-facing reply is the SAME claim as the Pushover, so it
+    # reads the same measured sentence rather than composing a second one.
+    # `pricebook_activated: false` alone cannot tell it whether prices froze,
+    # whether there are no prices at all, or whether quoting is blocked.
+    if pricebook_ok:
+        live_source, live_version = "pricebook", pricebook_version
+        # `activated_version` is parsed out of the importer's stdout and stays
+        # None when that produced no JSON line. Naming a version we did not read
+        # would be the same defect one layer down, so say what is known instead.
+        effect = (
+            f"Pricebook updated to v{pricebook_version}: new quotes use these "
+            f"prices." if pricebook_version is not None else
+            "Pricebook updated: new quotes use these prices. (The importer "
+            "reported no version number; check catering_pricebook_updated.)"
+        )
+    else:
+        live_source, live_version = price_source.kind, price_source.version
+        _title, effect = _price_effect(price_source, new_menu.version)
+
     print(json.dumps({
         "update_id": pending.update_id,
         "status": "applied",
         "pricebook_activated": pricebook_ok,
         "pricebook_detail": pricebook_detail,
+        "price_source": live_source,
+        "live_pricebook_version": live_version,
+        "pricebook_effect": effect,
         "new_version": new_menu.version,
         "item_count": len(new_menu.items),
         "prev_version": prev_version,
