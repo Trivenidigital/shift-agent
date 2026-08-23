@@ -64,6 +64,7 @@ from schemas import (  # noqa: E402
 from safe_io import (  # noqa: E402
     FileLock, load_model, dump_model, ndjson_append, customer_now,
     customer_today_str, assert_local_disk, notify_owner_with_fallback,
+    REHEARSAL_MODE_ENV, rehearsal_mode_active,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_DISABLED, EXIT_CAP_EXCEEDED, EXIT_NOT_FOUND,
@@ -86,7 +87,11 @@ LOG_PATH = Path(os.environ.get("SHIFT_AGENT_DECISIONS_LOG_PATH", "/opt/shift-age
 LOG_LOCK = Path(str(LOG_PATH) + ".lock")
 DISABLED_FLAG = Path("/opt/shift-agent/state/disabled.flag")
 
-BRIDGE_SEND_URL = "http://127.0.0.1:3000/send"
+# P1-A: env-overridable. This was hardcoded, so it ignored HERMES_BRIDGE_URL
+# entirely — a copied-state rehearsal that repointed the bridge everywhere else
+# still POSTed to the live bridge from HERE. Production sets the var only in a
+# sandbox, so the deployed default is unchanged.
+BRIDGE_SEND_URL = os.environ.get("HERMES_BRIDGE_URL", "http://127.0.0.1:3000/send")
 
 # Priority-4: staging dry-run. When set truthy, skip the actual bridge POST
 # and return synthetic success. All state transitions, counter logic, locks,
@@ -103,6 +108,15 @@ def bridge_post(jid: str, text: str, timeout: int = 15) -> tuple[bool, str]:
         POST /send { chatId, message, replyTo? }
     Wrong field names (jid/text) yield HTTP 400 'chatId and message are required'.
     """
+    # P1-A: this script has its OWN bridge_post and therefore reaches none of
+    # safe_io's send chokepoints (no validate_bridge_url, no test-context
+    # guard). Refuse outright under the rehearsal marker rather than relying on
+    # the URL having been repointed — the URL override above is layer 3, this
+    # is layer 4. Keyed on the marker only, so pytest and production behaviour
+    # are unchanged. (The missing safe_io chokepoint coverage on this script is
+    # a separate, wider fix — see the PR body's residual-gaps section.)
+    if rehearsal_mode_active():
+        return False, f"refused: {REHEARSAL_MODE_ENV}=1 (rehearsal must not send)"
     data = json.dumps({"chatId": jid, "message": text}).encode()
     req = urllib.request.Request(
         BRIDGE_SEND_URL, data=data,
@@ -146,10 +160,17 @@ def _notify_owner(title: str, message: str, priority: int = 1) -> None:
     location (Daily Brief uses /logs/; safe_io default is /logs/).
     """
     from pathlib import Path as _Path
+    # P1-A: the explicit path pinned the PRODUCTION dead-letter log even under a
+    # sandbox, defeating conftest's SHIFT_AGENT_NOTIFY_FAILED_LOG isolation for
+    # this one caller. Honour the env override; the deployed default is
+    # byte-identical to the previous hardcoded value.
     notify_owner_with_fallback(
         title, message, priority,
         source="send-coverage-message",
-        notify_failed_log=_Path("/opt/shift-agent/state/notify-failed.log"),
+        notify_failed_log=_Path(os.environ.get(
+            "SHIFT_AGENT_NOTIFY_FAILED_LOG",
+            "/opt/shift-agent/state/notify-failed.log",
+        )),
     )
 
 

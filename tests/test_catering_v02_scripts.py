@@ -89,12 +89,25 @@ def env_dir(tmp_path):
 
 
 def _env(env_dir, bridge_port):
-    return {
+    # P1-A: `**os.environ` hands whatever the operator shell carries — live
+    # OpenRouter / Stripe / Pushover keys included — to real production scripts
+    # run out-of-process. sterilize_subprocess_env neutralises every registered
+    # credential and closes the .env file fallback that key resolvers read when
+    # the env var is empty. Layers 1-3 only: no rehearsal marker, so this
+    # suite's asserted behaviour is unchanged.
+    from conftest import sterilize_subprocess_env
+
+    env = {
         **os.environ,
         "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src" / "platform"),
         "HERMES_BRIDGE_URL": f"http://127.0.0.1:{bridge_port}/send",
         "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1",
     }
+    return sterilize_subprocess_env(
+        env,
+        env_file=Path(env_dir) / ".env-sterile",
+        notify_owner_bin=Path(env_dir) / "bin" / "no-sandbox-pushover",
+    )
 
 
 def _patch_paths_in_script(script_text: str, env_dir: Path) -> str:

@@ -52,7 +52,10 @@ if __name__ == "__main__" and hasattr(os, "geteuid") and os.geteuid() == 0:
     )
 
 sys.path.insert(0, "/opt/shift-agent")
-from safe_io import customer_now, FileLock, ndjson_append  # noqa: E402
+from safe_io import (  # noqa: E402
+    customer_now, FileLock, ndjson_append,
+    REHEARSAL_MODE_ENV, rehearsal_mode_active, value_is_rehearsal_sterile,
+)
 from schemas import (  # noqa: E402
     Config, OwnerNotificationSuppressed, OwnerWellbeingConfig,
     OwnerAlertDispatched, OwnerAlertDelivered,
@@ -67,8 +70,18 @@ NOTIFY_FAILED_LOG = STATE_DIR / "notify-failed.log"
 DECISIONS_LOG_PATH = Path("/opt/shift-agent/logs/decisions.log")
 # Module-level constants — extracted so tests can monkey-patch via
 # `mod.PUSHOVER_URL = stub_url` after importlib.exec_module (R1-M5 design fix).
-PUSHOVER_URL = "https://api.pushover.net/1/messages.json"
-WHATSAPP_BRIDGE_URL = "http://127.0.0.1:3000/send"
+#
+# Both are env-overridable (P1-A). They were hardcoded, which meant a
+# copied-state rehearsal — even one that had carefully repointed
+# HERMES_BRIDGE_URL at a local stub — still sent to api.pushover.net and to the
+# live bridge on port 3000 from THIS script. Under `--network host` both are
+# reachable. The env lookup happens at import time, matching the surrounding
+# NOTIFY_OWNER_BIN convention; production sets neither var, so the deployed
+# defaults are unchanged.
+PUSHOVER_URL = os.environ.get(
+    "PUSHOVER_API_URL", "https://api.pushover.net/1/messages.json"
+)
+WHATSAPP_BRIDGE_URL = os.environ.get("HERMES_BRIDGE_URL", "http://127.0.0.1:3000/send")
 
 
 def load_config() -> Config:
@@ -77,8 +90,33 @@ def load_config() -> Config:
     return Config.model_validate(raw)
 
 
+def _rehearsal_refusal(cfg: Config) -> str:
+    """Reason to refuse an outbound owner alert, or "" to proceed.
+
+    Two independent triggers, because either alone has a hole:
+
+    * the rehearsal MARKER env var — set by the sandbox builder / an operator
+      rehearsal script;
+    * a STERILE credential value — the sanitised config's Pushover slots carry
+      a self-identifying sentinel, so this fires even when the marker was
+      forgotten, which is the failure mode that produced the incident.
+
+    Production sets no marker and holds real credentials, so this returns ""
+    on every real invocation — one env lookup and one substring check.
+    """
+    if rehearsal_mode_active():
+        return f"{REHEARSAL_MODE_ENV}=1"
+    if value_is_rehearsal_sterile(cfg.alerting.pushover_app_token) or \
+            value_is_rehearsal_sterile(cfg.alerting.pushover_user_key):
+        return "config carries a rehearsal-sterile Pushover credential"
+    return ""
+
+
 def pushover_send(cfg: Config, message: str, title: str, priority: int) -> tuple[bool, str]:
     """Send via Pushover. Returns (ok, detail)."""
+    refusal = _rehearsal_refusal(cfg)
+    if refusal:
+        return False, f"refused: rehearsal context ({refusal})"
     data = {
         "token": cfg.alerting.pushover_app_token,
         "user": cfg.alerting.pushover_user_key,
@@ -111,7 +149,10 @@ def pushover_send(cfg: Config, message: str, title: str, priority: int) -> tuple
 
 
 def whatsapp_fallback(cfg: Config, message: str) -> tuple[bool, str]:
-    """Try WhatsApp self-chat via bridge port 3000. Best-effort only."""
+    """Try WhatsApp self-chat via the local bridge. Best-effort only."""
+    refusal = _rehearsal_refusal(cfg)
+    if refusal:
+        return False, f"refused: rehearsal context ({refusal})"
     self_chat_jid = cfg.owner.self_chat_jid
     if not self_chat_jid:
         return False, "self_chat_jid not configured"
