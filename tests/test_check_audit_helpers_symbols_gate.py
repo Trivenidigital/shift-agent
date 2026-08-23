@@ -98,6 +98,27 @@ def test_log_decision_direct_refuses_unknown_log_entry():
     assert "EXIT_SCHEMA_VIOLATION" in text
 
 
+def test_log_decision_direct_refuses_unknown_cf_router_reason():
+    """Same rule, the VALUE-level shim (phase 1, 2026-08-23).
+
+    `_UnknownReasonCfRouterIntercepted` widens the LogEntry union so READERS
+    absorb a `cf_router_intercepted` row whose `reason` is not yet a Literal
+    member. This chokepoint is a WRITER: letting the shim through here would
+    make the union the way to sneak an unmodelled reason into decisions.log,
+    which is the emission phase 1 deliberately does not start. Static check,
+    mirroring the _UnknownLogEntry gate above — the script hardcodes
+    /opt/shift-agent paths and cannot be executed off-box."""
+    p = Path(__file__).resolve().parent.parent / "src" / "platform" / "scripts" / "log-decision-direct"
+    text = p.read_text(encoding="utf-8")
+    assert "_UnknownReasonCfRouterIntercepted" in text, (
+        "log-decision-direct must import _UnknownReasonCfRouterIntercepted"
+    )
+    assert "isinstance(entry, _UnknownReasonCfRouterIntercepted)" in text, (
+        "log-decision-direct must refuse the cf-router reason shim at the "
+        "writer chokepoint"
+    )
+
+
 def test_pydantic_pin_is_2_10_or_newer():
     """Per PR-D1 R5-HIGH-1: callable Discriminator + Tag union pattern
     is stable from Pydantic 2.10. Older versions silently fall back."""
