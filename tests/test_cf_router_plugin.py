@@ -4389,24 +4389,25 @@ class TestF8OwnerApproveNonFinalizedReachable:
         _seed_lead(state_env, code=code, status="AWAITING_OWNER_APPROVAL",
                    quote_text="<legacy: no quote drafted>")
 
-    def test_non_finalized_approve_runs_the_script_instead_of_returning_2(
+    def test_non_finalized_approve_reaches_the_wrapper_with_the_right_shape(
             self, mods, state_env):
-        """REQ 1 — the apply-script is actually invoked. This is the whole defect:
-        previously the wrapper short-circuited and the script never ran."""
+        """REQ 1 — hooks must hand this lead to the wrapper and close the turn.
+
+        Named for what it actually checks: the wrapper is mocked here, so this
+        does NOT prove the script runs. The script's own behaviour on this shape
+        is pinned out-of-process by
+        tests/e2e/test_catering_lifecycle_deterministic.py, and the real argv is
+        pinned by test_router_never_passes_skip_finalize below.
+        """
         hooks_mod, actions_mod = mods
         _seed_config(state_env)
         self._seed_non_finalized(state_env)
-
         seen = {}
 
-        def _fake_run(cmd, **kwargs):
-            seen["cmd"] = list(cmd)
-            cap = kwargs.get("capture")
-            return 11
-
         def _wrapper(code, decision, lead=None, message_id="", capture=None):
-            seen["cmd"] = ["invoked"]
-            seen["lead"] = lead
+            seen["code"] = code
+            seen["decision"] = decision
+            seen["lead_status"] = (lead or {}).get("status")
             if capture is not None:
                 capture["payload"] = {
                     "refusal": "owner_approve_without_customer_finalize",
@@ -4414,15 +4415,17 @@ class TestF8OwnerApproveNonFinalizedReachable:
                 }
             return 11
 
-        with patch.object(actions_mod, "invoke_apply_owner_decision", side_effect=_wrapper) as m:
+        with patch.object(actions_mod, "invoke_apply_owner_decision",
+                          side_effect=_wrapper) as m:
             event = _make_event("#ABCDE approve", "15550100002@s.whatsapp.net")
             result = hooks_mod.pre_gateway_dispatch(event)
 
-        m.assert_called_once(), "the apply-script wrapper must be invoked, not short-circuited"
-        assert result is not None, (
-            "a non-finalized approve must NOT fall through to the LLM once the "
-            "owner has been deterministically reprompted")
-        assert result["action"] == "skip"
+        assert m.call_count == 1, "the wrapper must be invoked, not short-circuited"
+        assert seen == {"code": "#ABCDE", "decision": "approve",
+                        "lead_status": "AWAITING_OWNER_APPROVAL"}
+        assert result is not None and result["action"] == "skip", (
+            "once the owner has been deterministically reprompted the turn must "
+            "not also fall through to the LLM")
 
     def test_deterministic_refusal_is_terminal_so_the_llm_cannot_double_answer(
             self, mods, state_env):
@@ -4510,13 +4513,13 @@ class TestF8OwnerApproveNonFinalizedReachable:
             "there is no customer selection to render from")
         assert "--sender-role" in captured["cmd"] and "owner" in captured["cmd"]
 
-    def test_openrouter_unavailability_does_not_change_the_outcome(
+    def test_no_model_credential_is_consulted_on_this_path(
             self, mods, state_env):
         """REQ 7 — the deterministic path must not depend on the model service.
 
-        Nothing in this flow consults the LLM, so the assertion is structural:
-        the same input yields the same terminal skip with the model layer
-        removed entirely.
+        Honest about its own strength: clearing OPENROUTER_API_KEY proves little
+        on its own, because nothing on this path would read it anyway. That is
+        exactly the claim, so it is also asserted directly against the source.
         """
         hooks_mod, actions_mod = mods
         _seed_config(state_env)
@@ -4536,6 +4539,16 @@ class TestF8OwnerApproveNonFinalizedReachable:
             result = hooks_mod.pre_gateway_dispatch(event)
 
         assert result is not None and result["action"] == "skip"
+
+        # The load-bearing half: no model credential or client is referenced
+        # anywhere on the deterministic owner-decision path.
+        src = (Path(__file__).resolve().parent.parent / "src" / "plugins"
+               / "cf-router" / "actions.py").read_text(encoding="utf-8")
+        start = src.index("def invoke_apply_owner_decision(")
+        body = src[start:src.index("\ndef ", start + 10)]
+        for forbidden in ("OPENROUTER", "openrouter", "llm_call", "completion"):
+            assert forbidden not in body, (
+                f"{forbidden!r} appears on the deterministic owner-decision path")
 
     def test_finalized_happy_path_is_untouched(self, mods, state_env):
         """REQ 3 — CUSTOMER_FINALIZED + selected_items still renders server-side."""
@@ -4612,6 +4625,7 @@ class TestF8OwnerApproveNonFinalizedReachable:
                 }
             return 11
 
+        before_bytes = state_env["leads_path"].read_bytes()
         results = []
         with patch.object(actions_mod, "invoke_apply_owner_decision", side_effect=_wrapper):
             for mid in ("wamid.A1", "wamid.A2"):
@@ -4621,10 +4635,89 @@ class TestF8OwnerApproveNonFinalizedReachable:
 
         assert calls == ["approve", "approve"]
         assert all(r is not None and r["action"] == "skip" for r in results)
-        # The lead file must be byte-identical: the router changed no state.
-        after = json.loads(state_env["leads_path"].read_text(encoding="utf-8"))
-        assert after["leads"][0]["status"] == "AWAITING_OWNER_APPROVAL"
-        assert after["leads"][0].get("customer_finalized_at") in (None, "")
+        # Byte-identical, not field-by-field: asserting status still reads
+        # AWAITING_OWNER_APPROVAL cannot fail when the wrapper is mocked and the
+        # seed never wrote anything else. Compare the whole file, so ANY write
+        # by the router fails this.
+        assert state_env["leads_path"].read_bytes() == before_bytes, (
+            "the router wrote to the lead store on a refusal path")
+
+    def test_path3_admits_only_the_shape_whose_guard_fires(self, mods, state_env):
+        """The routing precondition, pinned shape by shape against the real wrapper.
+
+        Widening path 3 to run the script is only safe because the wrapper first
+        checks the guard's own shape. cf-router branches on `selected_items`; the
+        script's PR-CF1 guard keys on `customer_finalized_at`. They are different
+        fields, so without the precondition the widened path also admits shapes
+        the guard skips — two of which reach EXIT_OK: an OWNER_APPROVED replay
+        that transitions the lead to SENT_TO_CUSTOMER, and a delivery-uncertain
+        lead that refuses to re-POST. Both would have closed the turn with the
+        owner told nothing, and neither was reachable from WhatsApp before.
+
+        A silent success-shaped skip is the mirror image of the defect this whole
+        change exists to fix, so the boundary is asserted rather than argued.
+        """
+        _hooks_mod, actions_mod = mods
+        _seed_config(state_env)
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        shapes = [
+            # (label, status, customer_finalized_at, selected_items, quote_text,
+            #  expected: None => script not invoked, else required flag)
+            ("A  the fixed case", "AWAITING_OWNER_APPROVAL", None, [],
+             "<legacy: none>", "NO_QUOTE_FLAG"),
+            ("B  AWAITING + finalized_at set", "AWAITING_OWNER_APPROVAL",
+             "2026-08-01T10:00:00-04:00", [], "<legacy: none>", None),
+            ("C  CUSTOMER_FINALIZED, no items", "CUSTOMER_FINALIZED",
+             "2026-08-01T10:00:00-04:00", [], "<legacy: none>", None),
+            ("D2 OWNER_APPROVED replay", "OWNER_APPROVED",
+             "2026-08-01T10:00:00-04:00", [], "<legacy: none>", None),
+            ("E  delivery uncertain", "OWNER_APPROVED", None, [],
+             "<legacy: none>", None),
+            ("   happy path", "CUSTOMER_FINALIZED", "2026-08-01T10:00:00-04:00",
+             [{"name": "Idly (3 PCS)", "qty": 1}], "<legacy: none>",
+             "--quote-from-lead-state"),
+            ("   legacy real quote", "AWAITING_OWNER_APPROVAL", None, [],
+             "Hi customer, your real quote.", "--quote-text-stdin"),
+        ]
+
+        for label, status, finalized, items, quote, expected in shapes:
+            captured = {}
+
+            def _fake_run(cmd, **kwargs):
+                captured["cmd"] = list(cmd)
+                return _Result()
+
+            lead = {"lead_id": "L0001", "owner_approval_code": "#ABCDE",
+                    "status": status, "quote_text": quote, "selected_items": items}
+            if finalized is not None:
+                lead["customer_finalized_at"] = finalized
+
+            with patch.object(actions_mod.subprocess, "run", _fake_run):
+                rc = actions_mod.invoke_apply_owner_decision(
+                    "#ABCDE", "approve", lead=lead, message_id="wamid.X")
+
+            if expected is None:
+                assert "cmd" not in captured, (
+                    f"{label}: the script must NOT be invoked for this shape — "
+                    "it is outside the guard's shape and can reach EXIT_OK, "
+                    "closing the turn while telling the owner nothing")
+                assert rc == 2, f"{label}: expected the unchanged rc=2 fall-through"
+            else:
+                assert "cmd" in captured, f"{label}: the script should be invoked"
+                if expected == "NO_QUOTE_FLAG":
+                    assert "--quote-text-stdin" not in captured["cmd"]
+                    assert "--quote-from-lead-state" not in captured["cmd"]
+                else:
+                    assert expected in captured["cmd"], (
+                        f"{label}: expected {expected} in argv")
+            # invariant A, on every shape, not just the interesting one
+            assert "--skip-finalize" not in captured.get("cmd", []), (
+                f"{label}: cf-router must never pass the operator override")
 
     def test_exit_code_constant_matches_the_canonical_source(self):
         """The plugin restates EXIT_TRUTH_GUARD_FAILED because it cannot import
@@ -4641,124 +4734,3 @@ class TestF8OwnerApproveNonFinalizedReachable:
         assert mine and canon, "both constants must be present"
         assert mine.group(1) == canon.group(1), (
             "cf-router's restated exit code drifted from exit_codes.py")
-
-
-# ============================================================================
-# Class guard: every audit `reason` that reaches audit_intercepted must be a
-# member of the CfRouterIntercepted.reason Literal.
-#
-# Found the hard way 2026-08-23 while adding the owner-approval reachability
-# fix. audit_intercepted() is deliberately best-effort — its whole body sits in
-# a try/except because a raise there would turn a successful `skip` into `None`
-# and let the LLM re-run after the apply-script already fired. The price of
-# that safety is that a reason outside the Literal fails Pydantic validation
-# INSIDE the try, and the row is silently dropped: the call site looks correct,
-# the schema looks correct, only the pairing is wrong, and nothing at runtime
-# says a word. No reviewer catches that by reading either file alone, so it is
-# pinned mechanically.
-#
-# Scope is deliberate: audit_intercepted call sites, plus
-# _build_skip_or_passthrough, which forwards its `reason` straight into
-# audit_intercepted. Other functions take an unrelated `reason=` kwarg against
-# a different schema (audit_dispatcher_watchdog_suppressed) and are not in
-# scope here.
-# ============================================================================
-
-# Values cf-router already emits that are NOT in the Literal, so their audit
-# rows are being silently dropped in production TODAY. Pre-existing, found by
-# this guard on 2026-08-23, and deliberately NOT fixed in the owner-approval
-# PR: that change was authorised on one narrow axis, and the repair here is a
-# schema widening whose rollback behaviour (an older reader REJECTS the whole
-# row rather than degrading) deserves its own decision.
-#
-# This list must only ever SHRINK. A new entry means someone added a silently
-# dropped audit row.
-_KNOWN_DROPPED_REASONS = {
-    "f8_followup_approve",   # M5 catering follow-up approve — hooks.py
-    "f8_followup_cancel",    # M5 catering follow-up cancel  — hooks.py
-}
-
-
-def _cf_router_reason_literals():
-    """Authoritative allowed set, taken from the type itself.
-
-    Read via import rather than by regexing schemas.py: a text scrape of the
-    Literal block also captures words from the docstring that documents it
-    (an earlier version of this helper reported 101 values where the type has
-    96, including 'menu' three times).
-    """
-    import typing
-    platform_dir = (Path(__file__).resolve().parent.parent / "src" / "platform")
-    if str(platform_dir) not in sys.path:
-        sys.path.insert(0, str(platform_dir))
-    import schemas  # type: ignore
-    ann = schemas.CfRouterIntercepted.model_fields["reason"].annotation
-    return set(typing.get_args(ann))
-
-
-def _reasons_reaching_audit_intercepted():
-    """Literal `reason="..."` args at the two call shapes that reach the audit."""
-    import re
-    plugin_dir = (Path(__file__).resolve().parent.parent
-                  / "src" / "plugins" / "cf-router")
-    pattern = re.compile(
-        r'(?:audit_intercepted|_build_skip_or_passthrough)\s*\((?P<body>[^)]*)\)',
-        re.S)
-    found: dict[str, list[str]] = {}
-    for src in sorted(plugin_dir.glob("*.py")):
-        text = src.read_text(encoding="utf-8")
-        for call in pattern.finditer(text):
-            for m in re.finditer(r'reason=["\']([a-z0-9_]+)["\']', call.group("body")):
-                line = text[:call.start() + m.start()].count("\n") + 1
-                found.setdefault(m.group(1), []).append(f"{src.name}:{line}")
-    return found
-
-
-def test_every_audit_reason_reaching_the_chokepoint_is_in_the_schema_literal():
-    allowed = _cf_router_reason_literals()
-    assert len(allowed) > 50, "sanity: the Literal set failed to resolve"
-    emitted = _reasons_reaching_audit_intercepted()
-    assert emitted, "sanity: no audit_intercepted reason call sites found"
-
-    unknown = {r: sites for r, sites in emitted.items()
-               if r not in allowed and r not in _KNOWN_DROPPED_REASONS}
-    assert not unknown, (
-        "cf-router emits an audit reason absent from CfRouterIntercepted.reason.\n"
-        "Pydantic rejects the row inside audit_intercepted's best-effort\n"
-        "try/except, so the audit row is SILENTLY DROPPED at runtime.\n"
-        "Prefer reusing an existing value and putting the specifics in `detail`.\n"
-        "Adding to the Literal also works, but note that widening it makes an\n"
-        "OLDER reader reject the whole row after a rollback.\n"
-        f"offending: {unknown}"
-    )
-
-
-def test_the_known_dropped_list_only_shrinks():
-    """The ratchet. If someone fixes the pre-existing pair, this fails and tells
-    them to delete the entry — so the debt list cannot quietly go stale in the
-    other direction either."""
-    allowed = _cf_router_reason_literals()
-    still_broken = {r for r in _KNOWN_DROPPED_REASONS if r not in allowed}
-    assert still_broken == _KNOWN_DROPPED_REASONS, (
-        "a reason in _KNOWN_DROPPED_REASONS is now valid in the schema — "
-        "remove it from the list: "
-        f"{_KNOWN_DROPPED_REASONS - still_broken}")
-
-
-def test_the_guard_is_not_vacuous():
-    """Mutation proof: the checker must actually reject an unknown reason.
-
-    Without this, the guard above passes on an empty or mis-parsed allowed set
-    and proves nothing — the exact failure mode that let the original bug
-    through.
-    """
-    allowed = _cf_router_reason_literals()
-    assert "f8_owner_approve" in allowed, "sanity: a known-good value must be present"
-    assert "f8_owner_approve_refused_not_finalized" not in allowed, (
-        "If this value was added to the Literal, revisit the rollback note in "
-        "hooks.py: widening a Literal makes an older reader reject the row.")
-    # And prove the emitted-scan actually sees the owner-approval call site.
-    emitted = _reasons_reaching_audit_intercepted()
-    assert "f8_owner_approve" in emitted, (
-        "the scan no longer sees the owner-approve audit call — the guard would "
-        "silently stop covering the path it was written for")

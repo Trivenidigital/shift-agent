@@ -288,14 +288,14 @@ _SHIFT_BARE_CODE_RESIDUE = re.compile(r"^[\s.,!:;\-–—*_\"'()\[\]]*$")
 # The ONLY proposal status an owner code may approve. Deliberately not a set:
 # `send_failed` is resumed with RETRY (a separate command this branch does not
 # implement), and every other status is either mid-flight or terminal.
+_SHIFT_APPROVABLE_STATUS = "awaiting_owner_approval"
+
 # Mirrors exit_codes.EXIT_TRUTH_GUARD_FAILED. The plugin deliberately does not
 # import the Shift platform module (it loads from the Hermes plugin dir, not
 # /opt/shift-agent), so the value is restated here rather than left as a bare
 # literal at the call site. TestF8OwnerApproveNonFinalizedReachable in
 # tests/test_cf_router_plugin.py asserts it stays equal to the canonical value.
 _EXIT_TRUTH_GUARD_FAILED = 11
-
-_SHIFT_APPROVABLE_STATUS = "awaiting_owner_approval"
 
 
 def _is_unqualified_shift_consent(text: str, code: str) -> bool:

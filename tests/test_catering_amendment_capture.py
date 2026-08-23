@@ -669,7 +669,12 @@ def _audit_intercepted_reason_literals(path: Path) -> set:
             continue
         fn = node.func
         fname = fn.attr if isinstance(fn, ast.Attribute) else (fn.id if isinstance(fn, ast.Name) else None)
-        if fname != "audit_intercepted":
+        # 2026-08-23: _build_skip_or_passthrough forwards its `reason` straight
+        # into audit_intercepted, so a reason handed to IT is emitted just as
+        # surely as a direct call. Scanning only direct calls is why the two
+        # f8_followup_* reasons went years without anyone noticing their audit
+        # rows never land.
+        if fname not in ("audit_intercepted", "_build_skip_or_passthrough"):
             continue
         reason = next((kw.value for kw in node.keywords if kw.arg == "reason"), None)
         if reason is None and node.args:
@@ -681,6 +686,30 @@ def _audit_intercepted_reason_literals(path: Path) -> set:
     return literals
 
 
+# Reasons cf-router already emits that are NOT enum members, so their audit rows
+# are silently dropped in production TODAY. Surfaced 2026-08-23 by widening the
+# scan above to the forwarding wrapper. Deliberately NOT fixed in the
+# owner-approval PR: that change was authorised on one narrow axis, and the
+# repair is a Literal widening whose rollback behaviour is the bad category —
+# an OLDER reader rejects the whole row instead of degrading past it.
+#
+# This set may only ever SHRINK. A new entry means a new silently-dropped row.
+_KNOWN_DROPPED_REASONS = {
+    "f8_followup_approve",   # M5 catering follow-up approve
+    "f8_followup_cancel",    # M5 catering follow-up cancel
+}
+
+
+def test_known_dropped_reasons_only_shrinks():
+    """If someone adds these to the Literal, this fails and says to delete the
+    entry — so the debt list cannot go stale in the other direction either."""
+    allowed = _cf_router_reason_enum()
+    fixed = _KNOWN_DROPPED_REASONS & allowed
+    assert not fixed, (
+        "these are now valid enum members; remove them from "
+        f"_KNOWN_DROPPED_REASONS: {sorted(fixed)}")
+
+
 def test_audit_intercepted_literal_reasons_are_all_enum_members():
     """Drift guard (bug-CLASS): every literal reason emitted to audit_intercepted()
     across the cf-router plugin must be a CfRouterIntercepted.reason member, or the
@@ -690,7 +719,7 @@ def test_audit_intercepted_literal_reasons_are_all_enum_members():
     for name in ("hooks.py", "actions.py"):
         emitted |= _audit_intercepted_reason_literals(PLUGIN_DIR / name)
     assert emitted, "scan found zero literal reasons — the extractor regressed"
-    orphan = sorted(emitted - allowed)
+    orphan = sorted(emitted - allowed - _KNOWN_DROPPED_REASONS)
     assert not orphan, (
         "audit_intercepted() emits reason literal(s) absent from "
         "CfRouterIntercepted.reason — they would be swallowed into invisible "
