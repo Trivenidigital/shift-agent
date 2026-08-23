@@ -18,9 +18,17 @@ These tests mechanize the two halves of the repair so neither can rot:
    naming the log file beside it. journalctl is still the right tool for unit
    lifecycle; it is never sufficient on its own.
 
-Scope is `docs/` and `src/` — the surfaces an operator is pointed at today.
-`tasks/` is deliberately excluded: it holds dated audits and working notes
-whose value is being an accurate record of what was believed at the time.
+Scope is `docs/`, `src/`, and `tasks/DEPLOY_CHECKLIST.md` by name — the surfaces
+an operator is pointed at today. The rest of `tasks/` is deliberately excluded:
+it holds dated audits and working notes whose value is being an accurate record
+of what was believed at the time, and rewriting that is falsifying history.
+
+`DEPLOY_CHECKLIST.md` is named explicitly because it carried the worst instance.
+Its post-deploy step 8 asked for `journalctl -u hermes-gateway -p err --since
+-10min` to be "clean" — a check that passes whether or not the deploy broke the
+agent, since the agent's output is not in the journal at all and `-p err`
+narrows it further. A verification step that cannot fail is not a verification
+step.
 """
 from __future__ import annotations
 
@@ -63,6 +71,12 @@ def _live_operator_surfaces() -> list[Path]:
             if path.suffix in {".png", ".jpg", ".jpeg", ".pdf", ".gz", ".tgz"}:
                 continue
             files.append(path)
+    checklist = REPO_ROOT / "tasks" / "DEPLOY_CHECKLIST.md"
+    assert checklist.exists(), (
+        "tasks/DEPLOY_CHECKLIST.md is gone. It is in scope by name because its "
+        "post-deploy step pointed at journalctl; if the file moved, follow it."
+    )
+    files.append(checklist)
     return files
 
 

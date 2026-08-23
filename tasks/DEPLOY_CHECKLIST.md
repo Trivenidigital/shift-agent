@@ -44,9 +44,14 @@ tarball replacement. Deploys are OPERATOR-AUTHORIZED, one at a time, recorded.
   service restart (hermes-gateway + timers) → built-in smoke suite with AUTO-ROLLBACK.
 
 ## Post-deploy verification (read-only)
-8. Newest `/opt/shift-agent/deploys/` entry = target SHA; `systemctl is-active
-   hermes-gateway` = active; `journalctl -u hermes-gateway -p err --since -10min`
-   clean.
+8. Newest `/opt/shift-agent/deploys/` entry = target SHA (cross-check
+   `/opt/shift-agent/.commit-hash` and `/opt/shift-agent/DEPLOY_RECEIPT.json`,
+   which the deploy derives from it); `systemctl is-active hermes-gateway` =
+   active; **`tail -n 100 /opt/shift-agent/logs/hermes-gateway.log`** clean.
+   NOT `journalctl -u hermes-gateway -p err` — the unit sets
+   `StandardError=append` to that file, so the journal holds systemd lifecycle
+   only and this step passes whether or not the agent is throwing. See
+   `docs/operator-runbook.md` Rule 9.
 9. Module resolution for anything the range added: import under BOTH interpreters
    (system `python3` for scripts; `/root/.hermes/hermes-agent/venv/bin/python` for
    the gateway) with `sys.path.insert(0, "/opt/shift-agent")`, assert `__file__`.
