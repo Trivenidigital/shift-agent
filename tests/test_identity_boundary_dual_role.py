@@ -658,3 +658,50 @@ def test_automation_control_sees_one_owner_by_either_identifier(router, identifi
 def test_automation_control_still_treats_an_employee_as_non_owner(router):
     r = router(roster=_roster_with_employee_lid(), tag="autoctl_emp")
     assert r.actions.is_owner_chat(EMPLOYEE_JID) is False
+
+
+# ---- the widening this repair could have introduced --------------------------
+#
+# identify-sender's invalid branch falls back to `E164Phone.from_any`, which
+# STRIPS non-digit characters -- so `<owner-digits>@g.us` canonicalizes to the
+# owner's number and resolves with roles ["owner"]. The old `endswith("@lid")`
+# guard blocked that by ACCIDENT. Routing every identifier through the resolver
+# without a shape allowlist would have handed owner authority to a group JID.
+#
+# These are the exact strings that resolved as owner in the probe. Each must be
+# refused at `is_owner_chat` even though identify-sender still resolves it.
+
+OWNER_DIGITS = OWNER_JID.split("@")[0]
+
+@pytest.mark.parametrize("hostile", [
+    f"{OWNER_DIGITS}@g.us",                 # GROUP JID carrying the owner's digits
+    f"{OWNER_JID}@lid",                     # suffix confusion
+    OWNER_DIGITS,                           # bare digits
+    f"  {OWNER_JID}  ",                     # whitespace-padded
+    OWNER_PHONE,                            # bare E164 (never a chat_id)
+    f"{DUAL_JID}@g.us",                     # same trick with the dual identity
+])
+def test_owner_authority_is_refused_for_unsupported_identifier_shapes(router, hostile):
+    r = router(tag="ownerauth_shape")
+    assert r.actions.is_owner_chat(hostile) is False, hostile
+
+
+def test_the_hostile_shapes_still_resolve_as_owner_downstream(router):
+    """The control that makes the test above meaningful.
+
+    If identify-sender simply refused these strings, the allowlist would be
+    untested decoration. It does NOT refuse them -- it resolves the group-JID
+    form to owner membership -- so the allowlist is the only thing standing
+    between a group chat and owner authority.
+    """
+    r = router(tag="ownerauth_shape_ctl")
+    assert r.actions.has_owner_capability(f"{OWNER_DIGITS}@g.us") is True
+    assert r.actions.is_owner_chat(f"{OWNER_DIGITS}@g.us") is False
+
+
+def test_the_two_supported_shapes_are_still_admitted(router):
+    """The allowlist must not have re-broken the thing this PR fixes."""
+    r = router(tag="ownerauth_shape_pos")
+    assert r.actions.is_owner_chat(DUAL_JID) is True     # phone-JID
+    assert r.actions.is_owner_chat(DUAL_LID) is True     # LID
+    assert r.actions.is_owner_chat(OWNER_JID) is True    # fast path

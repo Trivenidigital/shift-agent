@@ -336,6 +336,21 @@ def _resolve_identify_sender(identifier: str) -> _IdentityResolution:
     return resolution
 
 
+# The only two chat identifier shapes the bridge surfaces, mirroring the strict
+# classifier in `identify-sender` (`_LID_RE` / `_PHONE_JID_RE`). Owner authority
+# is decided ONLY for these.
+#
+# This allowlist is load-bearing, not decoration. identify-sender's invalid
+# branch falls back to `E164Phone.from_any`, which STRIPS non-digit characters
+# -- so `918522041562@g.us` canonicalizes to the owner's number and resolves
+# with `roles: ["owner"]`. The old `chat_id.endswith("@lid")` guard blocked
+# that by accident; removing it without this allowlist would have granted
+# owner authority to a GROUP JID carrying the owner's digits, and to
+# `<owner-jid>@lid`, bare digits, and whitespace-padded variants. Verified by
+# probe, not reasoned about.
+_SUPPORTED_CHAT_IDENTIFIER_RE = re.compile(r"^\d{6,20}@(?:s\.whatsapp\.net|lid)$")
+
+
 def is_owner_chat(chat_id: str) -> bool:
     """True when this chat carries OWNER authority, by any identifier form.
 
@@ -373,6 +388,8 @@ def is_owner_chat(chat_id: str) -> bool:
         owner_jid = (cfg or {}).get("owner", {}).get("self_chat_jid", "")
         if owner_jid and chat_id == owner_jid:
             return True
+        if not _SUPPORTED_CHAT_IDENTIFIER_RE.match(chat_id or ""):
+            return False
         return has_owner_capability(chat_id)
     except Exception:
         return False
