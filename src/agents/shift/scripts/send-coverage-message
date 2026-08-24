@@ -64,7 +64,7 @@ from schemas import (  # noqa: E402
 from safe_io import (  # noqa: E402
     FileLock, load_model, dump_model, ndjson_append, customer_now,
     customer_today_str, assert_local_disk, notify_owner_with_fallback,
-    REHEARSAL_MODE_ENV, rehearsal_mode_active,
+    REHEARSAL_MODE_ENV, rehearsal_mode_active, validate_bridge_url,
 )
 from exit_codes import (  # noqa: E402
     EXIT_OK, EXIT_DISABLED, EXIT_CAP_EXCEEDED, EXIT_NOT_FOUND,
@@ -109,14 +109,28 @@ def bridge_post(jid: str, text: str, timeout: int = 15) -> tuple[bool, str]:
     Wrong field names (jid/text) yield HTTP 400 'chatId and message are required'.
     """
     # P1-A: this script has its OWN bridge_post and therefore reaches none of
-    # safe_io's send chokepoints (no validate_bridge_url, no test-context
-    # guard). Refuse outright under the rehearsal marker rather than relying on
+    # safe_io's send chokepoints (no test-context guard; validate_bridge_url is
+    # called explicitly below). Refuse outright under the rehearsal marker
+    # rather than relying on
     # the URL having been repointed — the URL override above is layer 3, this
     # is layer 4. Keyed on the marker only, so pytest and production behaviour
     # are unchanged. (The missing safe_io chokepoint coverage on this script is
     # a separate, wider fix — see the PR body's residual-gaps section.)
     if rehearsal_mode_active():
         return False, f"refused: {REHEARSAL_MODE_ENV}=1 (rehearsal must not send)"
+    # 2026-08-24: BRIDGE_SEND_URL became env-overridable in c22d687c (P1-A), and
+    # that change did NOT bring the validator every other reader of
+    # HERMES_BRIDGE_URL pairs with it (safe_io.bridge_post, send-daily-brief:42).
+    # Before c22d687c the URL was a hardcoded constant and therefore
+    # unexfiltratable; after it, HERMES_BRIDGE_URL=http://exfil/send silently
+    # redirected a staff phone number and the rendered message from THIS script
+    # while every other send path refused it. This closes the asymmetry we
+    # introduced. Same validator, same semantics — loopback only unless
+    # HERMES_BRIDGE_ALLOW_REMOTE=1 — so production (127.0.0.1:3000) and the
+    # local-stub tests are unaffected.
+    url_err = validate_bridge_url(BRIDGE_SEND_URL)
+    if url_err:
+        return False, f"refused: unsafe bridge url: {url_err}"
     data = json.dumps({"chatId": jid, "message": text}).encode()
     req = urllib.request.Request(
         BRIDGE_SEND_URL, data=data,
