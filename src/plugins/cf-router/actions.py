@@ -2257,12 +2257,36 @@ def audit_dispatcher_routed(
     chat_id: str,
     routed_to_skill: str,
     message_shape: str = "text",
+    authority: Optional[str] = None,
 ) -> None:
     """Emit the standard dispatcher_routed row for deterministic cf-router routes.
 
     F9 now claims verified employee sick-call traffic before the LLM. Writing the
     same route row keeps routing-accuracy monitoring aligned with the SKILL
     dispatcher contract instead of creating a parallel metric.
+
+    `authority` is the membership the ROUTE exercised — "owner" for an owner
+    command, "employee" for an employee act. Pass it wherever the route's
+    authority is fixed; `sender_role` then records what the principal was
+    ALLOWED to do rather than what a lookup happened to call them.
+
+    Why it is not inferred: `sender_role` used to come from `identity["role"]`,
+    which identify-sender documents as a LEGACY COMPATIBILITY PROJECTION whose
+    precedence is employee-first by LID ("New authorization MUST read `roles`,
+    never the scalar"). A principal who is both owner and roster employee —
+    the reference customer's operator is exactly that — therefore approved a
+    coverage proposal as `sender_role="employee"`, while the identical approval
+    by an owner-only principal recorded `sender_role="owner"`. Same act, same
+    route, two different answers, decided by identity precedence. Worse, that
+    principal's two DIFFERENT authorities — approving the proposal, then
+    answering its coverage ask as the candidate — were indistinguishable.
+
+    Deliberately NOT a widened Literal: `DispatcherRouted.sender_role` already
+    admits "owner" and "employee", so naming the authority needs no schema
+    change and carries no rollback exposure. And deliberately NOT retro-fitted
+    to every caller: the catering / expense arms accept more than one sender
+    role, so their authority is not a property of the route and they keep the
+    legacy scalar unchanged.
     """
     try:
         _ensure_platform_path()
@@ -2277,7 +2301,7 @@ def audit_dispatcher_routed(
             type="dispatcher_routed",
             ts=datetime.now(timezone.utc),
             message_id=message_id,
-            sender_role=identity.get("role", "unknown"),
+            sender_role=authority or identity.get("role", "unknown"),
             message_shape=message_shape,  # type: ignore[arg-type]
             routed_to_skill=routed_to_skill,
             sender_phone=identity.get("phone_normalized"),

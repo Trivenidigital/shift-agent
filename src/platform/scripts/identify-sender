@@ -15,8 +15,13 @@ Output (JSON to stdout):
   A principal may hold BOTH relationships at once:
   {"role": "employee", "roles": ["employee", "owner"], "employee_id": "e008", ...}
 
+  An identifier that names MORE THAN ONE roster employee resolves to nobody:
+  {"role": "error", "roles": [], "error": "ambiguous_identifier: ..."}
+
 `roles` is the authorization surface and is independent of which identifier
-(phone or LID) was used to look the principal up.
+(phone or LID) was used to look the principal up. So is the ambiguity refusal:
+whether two roster rows claim one WhatsApp account does not depend on which of
+that account's identifiers the caller happened to hold.
 
 `role` is a LEGACY COMPATIBILITY PROJECTION. It preserves each branch's
 original precedence — employee-first by LID, primary-owner-first by phone — so
@@ -26,7 +31,9 @@ for "customer". New authorization MUST read `roles`, never the scalar.
 
 Exit codes:
   0 — resolved (even if unknown; the JSON indicates role)
-  2 — state-file-load-failure (roster/config could not be loaded); caller should trigger dead-man
+  2 — state-file-load-failure (roster/config could not be loaded), OR the
+      identifier is ambiguous (two roster rows claim it); caller should trigger
+      dead-man / fail closed
   5 — Pydantic schema violation in config/roster
 """
 
@@ -98,8 +105,37 @@ def _match_owner_identity(owner, *, phone=None, lid=None):
     return None
 
 
-def _employee_by_phone_any_status(roster, phone):
-    """Status-neutral phone lookup mirroring `Roster.find_by_phone`.
+class _AmbiguousIdentifier(Exception):
+    """Two or more roster rows claim ONE WhatsApp account.
+
+    Nothing enforces that a phone or a LID names a single employee —
+    `Roster.check_referential_integrity` uniques `id` and nothing else — so a
+    hand-edited or imported roster can contain two rows holding the same
+    number. Before this refusal the resolver returned whichever row came FIRST
+    IN THE FILE, which meant re-ordering the same roster changed who an absence
+    was recorded against, who the coverage ask was addressed to, and whose
+    `employee_id` a YES/NO reply was bound to.
+
+    Refusing is the same shape as every other "more than one match" in this
+    codebase — `sent_proposal_ids_for_candidate` refuses on a count that is not
+    exactly 1, and `approval_code_pools.resolve_code` returns a
+    `CollisionResult` rather than a first canonical match. Identity is the one
+    place a guess is least affordable, so it refuses too.
+    """
+
+    def __init__(self, employee_ids, *, phone=None, lid=None):
+        self.employee_ids = sorted(employee_ids)
+        self.phone = phone
+        self.lid = lid
+        held = " / ".join(x for x in (phone, lid) if x)
+        super().__init__(
+            f"ambiguous_identifier: {held} is claimed by roster employees "
+            f"{', '.join(self.employee_ids)}; refusing to guess"
+        )
+
+
+def _employees_by_phone_any_status(roster, phone):
+    """EVERY status-neutral phone match, mirroring `Roster.find_by_phone`.
 
     `Roster.find_by_phone` skips every employee whose status is not "active"
     (schemas.py). Using it here would make membership depend on WHICH
@@ -114,13 +150,17 @@ def _employee_by_phone_any_status(roster, phone):
 
     `phone_history` effective windows are preserved exactly as upstream: a
     reassigned number outside its window must NOT confer membership on its
-    former holder, or a recycled phone would silently inherit an identity.
+    former holder, or a recycled phone would silently inherit an identity. That
+    window is also what keeps a legitimately reassigned number OUT of the
+    ambiguity refusal below: the former holder simply does not match.
     """
     canonical = E164Phone.from_any(phone)
     now = datetime.now(timezone.utc)
+    found = []
     for emp in roster.employees:
         if emp.phone == canonical:
-            return emp
+            found.append(emp)
+            continue
         for hist in emp.phone_history:
             if hist.phone != canonical:
                 continue
@@ -128,26 +168,38 @@ def _employee_by_phone_any_status(roster, phone):
                 continue
             if hist.effective_to is not None and hist.effective_to < now:
                 continue
-            return emp
-    return None
+            found.append(emp)
+            break
+    return found
 
 
 def _match_employee(roster, *, phone=None, lid=None):
-    """Return the matching Employee, else None. Checks both identifiers.
+    """Return the ONE matching Employee, None if there is none.
 
-    Status is NOT filtered on EITHER path — see `_employee_by_phone_any_status`
-    for why that symmetry is load-bearing. Active-status enforcement lives in
-    the consumer (`is_employee_chat` / `has_employee_capability`).
+    Raises `_AmbiguousIdentifier` when the identifiers name two or more
+    DISTINCT employees. The LID branch no longer wins by running first: an
+    account whose LID is on one roster row and whose phone is on another is not
+    resolvable, and picking the LID row would be a guess dressed as precedence.
+
+    Status is NOT filtered on EITHER path — see
+    `_employees_by_phone_any_status` for why that symmetry is load-bearing.
+    Active-status enforcement lives in the consumer (`is_employee_chat` /
+    `has_employee_capability`), and a terminated row sharing a number is just
+    as ambiguous as an active one because membership is resolved before status.
     """
+    matched = {}
     if lid is not None:
         for emp in roster.employees:
             if emp.lid and emp.lid == lid:
-                return emp
+                matched.setdefault(emp.id, emp)
     if phone is not None:
-        emp = _employee_by_phone_any_status(roster, phone)
-        if emp:
-            return emp
-    return None
+        for emp in _employees_by_phone_any_status(roster, phone):
+            matched.setdefault(emp.id, emp)
+    if not matched:
+        return None
+    if len(matched) > 1:
+        raise _AmbiguousIdentifier(matched, phone=phone, lid=lid)
+    return next(iter(matched.values()))
 
 
 def _resolve_principal(cfg, roster, *, phone=None, lid=None):
@@ -178,6 +230,14 @@ def _resolve_principal(cfg, roster, *, phone=None, lid=None):
                     eff_lid = emp.lid
         if eff_lid is None:
             eff_lid = getattr(owner_match, "lid", None)
+
+    # The ambiguity refusal is BRANCH-INDEPENDENT, on the same terms as
+    # membership. Once the identifiers are widened, re-ask with BOTH of them:
+    # a LID lookup that matched one row while a second row holds the same
+    # phone is the same collision seen from the other side, and one WhatsApp
+    # account must not resolve by LID and refuse by phone.
+    if emp is not None:
+        _match_employee(roster, phone=eff_phone, lid=eff_lid)
 
     return emp, owner_match, eff_phone, eff_lid
 
@@ -266,23 +326,34 @@ def main():
     # BEGIN shift-agent-multirole (memberships are branch-independent; the
     # scalar keeps each branch's ORIGINAL precedence so no existing consumer
     # observes a behavior change)
-    if kind == "lid":
-        emp, owner_match, eff_phone, eff_lid = _resolve_principal(
-            cfg, roster, lid=normalized)
-        # Original LID precedence: employee checked first, owner second.
-        if emp is not None:
-            scalar = "employee"
-        elif owner_match is not None:
-            scalar = "owner"
-        else:
-            scalar = "unknown"
-        return _emit(scalar, emp, owner_match, cfg,
-                     phone=eff_phone, lid=eff_lid or normalized)
+    try:
+        if kind == "lid":
+            emp, owner_match, eff_phone, eff_lid = _resolve_principal(
+                cfg, roster, lid=normalized)
+            # Original LID precedence: employee checked first, owner second.
+            if emp is not None:
+                scalar = "employee"
+            elif owner_match is not None:
+                scalar = "owner"
+            else:
+                scalar = "unknown"
+            return _emit(scalar, emp, owner_match, cfg,
+                         phone=eff_phone, lid=eff_lid or normalized)
 
-    # kind == "phone"
-    canonical = normalized
-    emp, owner_match, eff_phone, eff_lid = _resolve_principal(
-        cfg, roster, phone=canonical)
+        # kind == "phone"
+        canonical = normalized
+        emp, owner_match, eff_phone, eff_lid = _resolve_principal(
+            cfg, roster, phone=canonical)
+    except _AmbiguousIdentifier as exc:
+        # Fail closed and say why. Every deployed consumer already treats a
+        # non-zero exit as "identity unresolved" and fails closed on it — the
+        # cf-router memo additionally announces the turn once (§12a), so this
+        # does not become a new silent-failure surface. The roster needs an
+        # operator edit; retrying will not fix it.
+        print(json.dumps({"role": "error", "roles": [], "error": str(exc),
+                          "employee_ids": exc.employee_ids}))
+        print(f"identify-sender: {exc}", file=sys.stderr)
+        return EXIT_INVALID_INPUT
     # Original phone precedence: the PRIMARY owner identity wins first, then
     # the roster. An authorized-identity-only match is new configuration that
     # could not exist before, so resolving it to "owner" regresses nothing.
