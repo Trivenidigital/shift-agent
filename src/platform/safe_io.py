@@ -3097,9 +3097,14 @@ def _page_turn_send_budget_exhausted(
             f"conversation. Message content is withheld from this alert by design."
         )
     try:
+        # `tripped_*`, not `count`/`limit`: for `draft_exhausted` these are the
+        # DRAFT counters while the `send_budget_exhausted` audit row records the
+        # finalized pair, and two different numbers under one name would read as
+        # a contradiction rather than two different bounds.
         sys.stderr.write(
             f"send_budget_exhausted_alert_dispatched turn_id={turn_id} "
-            f"reason={reason} count={count} limit={limit} jid={jid}\n"
+            f"reason={reason} tripped_count={count} tripped_limit={limit} "
+            f"jid={jid}\n"
         )
     except Exception:
         pass
