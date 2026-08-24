@@ -705,3 +705,48 @@ def test_the_two_supported_shapes_are_still_admitted(router):
     assert r.actions.is_owner_chat(DUAL_JID) is True     # phone-JID
     assert r.actions.is_owner_chat(DUAL_LID) is True     # LID
     assert r.actions.is_owner_chat(OWNER_JID) is True    # fast path
+
+
+# ---- owner membership is config-ANCHORED but roster-REACHABLE ---------------
+#
+# `_resolve_principal` widens the identifiers from the matched roster row
+# before asking `_match_owner_identity`, so a roster row that pairs another
+# phone with `owner.lid` resolves as owner. This is characterization, not
+# endorsement: the LID direction was already live before the phone-JID repair,
+# and the repair adds its mirror. Pinned so that if anyone later decides owner
+# membership should be config-ONLY, these tests fail and say where to look.
+
+def test_roster_row_holding_the_owner_lid_reaches_owner_membership(env):
+    """Phone side. Reachable only AFTER the phone-JID repair."""
+    roster = _roster_doc(extra_employees=[
+        {"id": "e099", "name": "Holds Owner LID", "role": "floor",
+         "phone": "+15125550199", "lid": OWNER_LID, "status": "active",
+         "languages": ["en"], "can_cover_roles": ["floor"]}])
+    rc, doc = resolve(env(roster=roster), "15125550199@s.whatsapp.net")
+    assert rc == 0
+    assert "owner" in (doc.get("roles") or []), (
+        "roster-mediated owner reachability changed -- update the docstring in "
+        "actions.is_owner_chat, which documents this as a known property")
+
+
+def test_roster_row_holding_the_owner_phone_reaches_owner_membership(env):
+    """LID side. Pre-existing: True before the repair as well."""
+    roster = _roster_doc(extra_employees=[
+        {"id": "e098", "name": "Holds Owner Phone", "role": "floor",
+         "phone": OWNER_PHONE, "lid": "888000111222333@lid", "status": "active",
+         "languages": ["en"], "can_cover_roles": ["floor"]}])
+    rc, doc = resolve(env(roster=roster), "888000111222333@lid")
+    assert rc == 0
+    assert "owner" in (doc.get("roles") or [])
+
+
+def test_a_roster_row_with_neither_owner_identifier_gets_nothing(env):
+    """The control. Without this, the two tests above would also pass if the
+    resolver simply called everybody an owner."""
+    roster = _roster_doc(extra_employees=[
+        {"id": "e097", "name": "Unrelated", "role": "floor",
+         "phone": "+15125550199", "lid": "999000111222333@lid",
+         "status": "active", "languages": ["en"], "can_cover_roles": ["floor"]}])
+    rc, doc = resolve(env(roster=roster), "15125550199@s.whatsapp.net")
+    assert rc == 0
+    assert (doc.get("roles") or []) == ["employee"]

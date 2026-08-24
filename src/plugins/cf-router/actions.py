@@ -372,9 +372,22 @@ def is_owner_chat(chat_id: str) -> bool:
     phone-JID form did not merely lose the owner branch -- `not is_owner`
     routed it into the CUSTOMER branch.
 
-    This grants nobody new authority. Only identities already holding owner
-    membership through configuration pass, which is exactly the set step 2
-    admitted on the LID side already.
+    The admitted set is exactly the CONFIGURED owner-membership set, reached by
+    either supported identifier. It is NOT merely "what the LID side already
+    admitted" -- that set was strictly smaller, because the deployed
+    `authorized_identities` entry carries a phone and no `lid`, so the alias was
+    reachable by LID only via a roster row holding both. Stating the weaker
+    claim would mislead the next reader, so it is stated the accurate way.
+
+    Note what that implies, because it is easy to get backwards: owner
+    membership is config-ANCHORED but roster-REACHABLE. `_resolve_principal`
+    widens the identifiers from the matched roster row before asking
+    `_match_owner_identity`, so a row pairing another phone with `owner.lid`
+    resolves as owner. That path was already live on the LID side before this
+    change; this change adds its mirror on the phone side. No such row exists on
+    the deployed roster, and `shift-agent-lid-learn` cannot create one -- it
+    only sets `lid` on a row whose phone already matches the observed pairing.
+    The residual is conditional on a bridge defect and is tracked separately.
 
     Fail-closed on every error, exactly as before: unreadable config,
     resolver failure, and an ambiguous identifier (identify-sender exits 2,
