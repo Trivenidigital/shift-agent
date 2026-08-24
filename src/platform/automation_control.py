@@ -263,17 +263,118 @@ _STATE_ALERT_DEDUP_MIN = 60
 _last_state_alert_monotonic: float = 0.0
 
 
+def _load_failure_class(status: str) -> str:
+    """Classify a non-clean ``safe_load_json`` status by WHAT ACTUALLY HAPPENED to
+    the file, because only one of these three quarantines anything (see
+    ``safe_io.safe_load_json``):
+
+      - ``"quarantined"`` (``corrupt:``) — invalid JSON AND the rename-aside
+        SUCCEEDED. No live file remains, so every LATER read returns 'missing' →
+        HEALTHY → every conversation reads 'active': suppression really is wiped.
+      - ``"unrenamed"`` (``corrupt_unrenamed:``) — invalid JSON and the rename
+        FAILED. The bad file is still in place, every read keeps failing, and the
+        outbound backstop (``safe_io._automation_control_suppressed_mode``) fails
+        CLOSED on any non-clean status — so suppression did NOT reset; the kernel
+        is over-suppressing instead.
+      - ``"unreadable"`` (``oserror:``) — the file was never parsed and never
+        modified (permissions / mount / disk). Same fail-CLOSED consequence.
+
+    Anything else is ``"unknown"``: a future status this function has not been
+    taught, where claiming either outcome would be a guess."""
+    s = str(status or "")
+    if s.startswith("corrupt_unrenamed:"):
+        return "unrenamed"
+    if s.startswith("corrupt:"):
+        return "quarantined"
+    if s.startswith("oserror:"):
+        return "unreadable"
+    return "unknown"
+
+
+# Per-class consequence, stated once so the operator page and the audit row (the
+# two places this fact is reported) cannot drift apart.
+_LOAD_FAILURE_AUDIT_DETAIL = {
+    "quarantined": (
+        "file QUARANTINED (renamed aside); no live state file remains, so later "
+        "reads see 'missing' and every conversation reads active - STOP/opt-out "
+        "and human-takeover suppression are wiped"
+    ),
+    "unrenamed": (
+        "quarantine FAILED, bad file left in place; reads keep failing and the "
+        "outbound backstop fails CLOSED - suppression did NOT reset, automated "
+        "sends are being blocked"
+    ),
+    "unreadable": (
+        "file not modified and not quarantined; reads keep failing and the "
+        "outbound backstop fails CLOSED - suppression did NOT reset, automated "
+        "sends are being blocked"
+    ),
+    "unknown": (
+        "unrecognised failure status; whether the file was quarantined is not "
+        "known here; the outbound backstop fails CLOSED meanwhile"
+    ),
+}
+
+_LOAD_FAILURE_PAGE = {
+    "quarantined": (
+        "catering automation-control state corrupted (file quarantined)",
+        "The catering automation-control state file held invalid JSON and WAS "
+        "renamed aside to a .corrupt-<epoch> copy. No live state file remains, "
+        "so every later read sees no file and every conversation reads active: "
+        "STOP/opt-out, pause and human-takeover suppression are WIPED and "
+        "automated replies can resume for customers who opted out or are under "
+        "human takeover. Re-apply those modes; the renamed copy still holds the "
+        "old records.",
+    ),
+    "unrenamed": (
+        "catering automation-control state unreadable (quarantine FAILED)",
+        "The catering automation-control state file holds invalid JSON AND the "
+        "rename-aside failed, so nothing was quarantined - the bad file is still "
+        "in place and every read will keep failing. Suppression has NOT reset to "
+        "active: the outbound backstop fails CLOSED on any non-clean read, so "
+        "automated sends to conversations this kernel covers are being BLOCKED, "
+        "not leaked. Repair or move the file by hand; until then the kernel "
+        "over-suppresses.",
+    ),
+    "unreadable": (
+        "catering automation-control state unreadable (I/O error)",
+        "The catering automation-control state file could not be read (OS error "
+        "- permissions, mount or disk). Nothing was quarantined and the file was "
+        "not modified, so its records are intact on disk. Suppression has NOT "
+        "reset to active: the outbound backstop fails CLOSED on any non-clean "
+        "read, so automated sends to conversations this kernel covers are being "
+        "BLOCKED, not leaked. Fix the permissions or the state mount.",
+    ),
+    "unknown": (
+        "catering automation-control state read failed",
+        "The catering automation-control state read returned an unrecognised "
+        "failure status, so whether the file was quarantined is not known from "
+        "here - check the stderr line for the exact status. The outbound "
+        "backstop fails CLOSED on any non-clean read, so automated sends to "
+        "conversations this kernel covers are being BLOCKED meanwhile.",
+    ),
+}
+
+
 def _alert_state_corrupt(status: str) -> None:
-    """§12b: the automation-control state read FAILED (corrupt / oserror). This is
-    the repo's silent-reversal class — safe_load_json renames a corrupt file aside,
-    so EVERY subsequent read returns 'missing' → HEALTHY → every conversation reads
-    'active' → opt-outs and human-takeovers are SILENTLY WIPED and automation
-    resumes, with no operator visibility. Page the operator at detection so they
-    know suppression state may have been reset.
+    """§12b: the automation-control state read FAILED. Page the operator at
+    detection — but with the consequence that ACTUALLY follows from this status,
+    not one story for all of them.
+
+    Only ``corrupt:`` is the repo's silent-reversal class (safe_load_json renamed
+    the file aside, so every later read is 'missing' → HEALTHY → every
+    conversation reads 'active' and opt-outs / human-takeovers are SILENTLY
+    WIPED). ``corrupt_unrenamed:`` and ``oserror:`` move NOTHING and keep
+    failing, and the outbound backstop fails CLOSED on a non-clean read — so
+    telling the operator the file "was quarantined" and suppression "may have
+    reset to active" is backwards on both halves for those two: the kernel is
+    over-suppressing, not leaking. See :func:`_load_failure_class`.
 
     Best-effort — NEVER raises into the read path. Throttled once/hour (in-process
-    + the notify chokepoint's cross-process same-message dedup). PLAIN TEXT body
-    (no Markdown) per the §12b lesson so underscore-bearing mode names like
+    + the notify chokepoint's cross-process same-message dedup). The in-process
+    bound is GLOBAL across classes, so a second failure of a DIFFERENT class
+    inside the hour rides the stderr line instead of a second page. PLAIN TEXT
+    body (no Markdown) per the §12b lesson so underscore-bearing mode names like
     ``opted_out`` are not mangled.
 
     DEEPER FIX (backlog): after a corruption event, REBUILD suppression state by
@@ -285,27 +386,24 @@ def _alert_state_corrupt(status: str) -> None:
     if _last_state_alert_monotonic and (now - _last_state_alert_monotonic) < _STATE_ALERT_THROTTLE_SEC:
         return
     _last_state_alert_monotonic = now
-    # Structured audit row (traceable, carries the specific status).
+    failure_class = _load_failure_class(status)
+    # Structured audit row (traceable, carries the specific status). Same
+    # consequence text as the page below, so the two surfaces cannot drift.
     _emit(
         "health_check_failure",
         {
             "check": "catering_automation_control_state_corrupt",
             "detail": (
-                f"automation-control state read {status}; STOP/opt-out + "
-                f"human-takeover suppression may have reset to active"
+                f"automation-control state read {status}; "
+                f"{_LOAD_FAILURE_AUDIT_DETAIL[failure_class]}"
             )[:500],
         },
     )
-    # §12b operator page — STABLE title+body (no variable status in the deduped
-    # message) so the once/hour same-message dedup throttles it; the status rides
-    # the audit row + stderr instead.
-    title = "catering automation-control state corrupted"
-    body = (
-        "The catering automation-control state file failed to read and was "
-        "quarantined. STOP/opt-out and human-takeover suppression may have reset "
-        "to active (automated replies could resume for customers who opted out or "
-        "are under human takeover). Verify and re-apply as needed."
-    )
+    # §12b operator page — one title+body per failure CLASS (not per status
+    # string), so the once/hour same-message dedup still throttles a persistent
+    # fault while a materially different failure still reads differently. The
+    # exact status rides the audit row + stderr.
+    title, body = _LOAD_FAILURE_PAGE[failure_class]
     try:
         sys.stderr.write(
             f"catering_automation_control_state_corrupt_alert_dispatched status={status}\n"
