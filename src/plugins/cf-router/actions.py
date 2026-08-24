@@ -337,16 +337,34 @@ def _resolve_identify_sender(identifier: str) -> _IdentityResolution:
 
 
 def is_owner_chat(chat_id: str) -> bool:
-    """Check if chat_id matches owner per config.yaml OR via identify-sender.
+    """True when this chat carries OWNER authority, by any identifier form.
 
-    Two-step check (mirrors F8 watchdog F13 fix):
-      1. Strict equality against owner.self_chat_jid (the phone-JID side).
-      2. If chat_id ends with @lid, fall back to identify-sender → role check.
-         The bridge inbound notify often surfaces the owner's LID
-         (<digits>@lid) rather than the phone-JID configured in
-         owner.self_chat_jid; without this fallback, owner #XXXXX commands
-         on the LID side would silently fail to be intercepted.
-    Returns False on any error (config unreadable, identify-sender failure).
+    Two-step check:
+      1. Strict equality against owner.self_chat_jid. Kept as a fast path so
+         the primary owner stays reachable with no subprocess and no roster
+         dependency -- it is the one identity that must resolve even if
+         identify-sender or roster.json is broken.
+      2. Otherwise defer to `has_owner_capability`, the shared membership
+         check, for EVERY identifier form.
+
+    Step 2 used to be guarded by `chat_id.endswith("@lid")`, which made owner
+    authority a property of WHICH IDENTIFIER the bridge happened to surface.
+    `OwnerAuthorizedIdentity` grants owner membership to a principal, and
+    identify-sender documents `roles` as branch-independent by contract -- so
+    the same authorized human was owner by LID and non-owner by phone-JID.
+    Concretely: `#XXXXX` on an awaiting-approval proposal fired F8 by LID and
+    silently did nothing by phone-JID, and in `_try_automation_control` the
+    phone-JID form did not merely lose the owner branch -- `not is_owner`
+    routed it into the CUSTOMER branch.
+
+    This grants nobody new authority. Only identities already holding owner
+    membership through configuration pass, which is exactly the set step 2
+    admitted on the LID side already.
+
+    Fail-closed on every error, exactly as before: unreadable config,
+    resolver failure, and an ambiguous identifier (identify-sender exits 2,
+    so the resolution is not ok) all return False. The ONLY behaviour this
+    change moves is the identifier gating on step 2.
     """
     try:
         import yaml  # type: ignore
@@ -355,20 +373,7 @@ def is_owner_chat(chat_id: str) -> bool:
         owner_jid = (cfg or {}).get("owner", {}).get("self_chat_jid", "")
         if owner_jid and chat_id == owner_jid:
             return True
-        # F13: LID fallback via identify-sender.
-        # Reads OWNER MEMBERSHIP, not the legacy scalar: a principal who is
-        # both owner and roster employee resolves scalar `employee` by LID, and
-        # a scalar check here would reject every owner-only operation for them.
-        if chat_id.endswith("@lid"):
-            resolution = _resolve_identify_sender(chat_id)
-            if not resolution.ok:
-                return False
-            roles = resolution.doc.get("roles")
-            if isinstance(roles, list):
-                return "owner" in roles
-            # Older identify-sender without `roles` (rollback window).
-            return resolution.doc.get("role") == "owner"
-        return False
+        return has_owner_capability(chat_id)
     except Exception:
         return False
 
