@@ -2936,7 +2936,7 @@ def turn_send_budget_gate(
                     jid, budget.turn_id, "config_failed", 0, budget.limit,
                 )
                 _page_turn_send_budget_exhausted(
-                    jid, budget.turn_id, 0, budget.limit,
+                    jid, budget.turn_id, 0, budget.limit, "config_failed",
                 )
             return False
 
@@ -2983,8 +2983,15 @@ def turn_send_budget_gate(
         )
         if not budget.paged:
             budget.paged = True
+            # Page with the counters of the bound that ACTUALLY tripped: the
+            # separate draft-transport ceiling for `draft_exhausted` (the
+            # finalized pair would read 0/5 — a cap that was never reached), the
+            # finalized cap otherwise.
             _page_turn_send_budget_exhausted(
-                jid, budget.turn_id, budget.count, budget.limit,
+                jid, budget.turn_id,
+                budget.draft_count if reason == "draft_exhausted" else budget.count,
+                budget.draft_limit if reason == "draft_exhausted" else budget.limit,
+                reason,
             )
         return False
     except Exception as e:  # noqa: BLE001 — any machinery fault → FAIL CLOSED
@@ -3031,25 +3038,68 @@ def _emit_turn_send_budget_suppressed(
 
 
 def _page_turn_send_budget_exhausted(
-    jid: str, turn_id: str, count: int, limit: int,
+    jid: str, turn_id: str, count: int, limit: int, reason: str,
 ) -> None:
-    """Page the operator ONCE for an exhausted inbound turn, through the §12b
+    """Page the operator ONCE per suppressing inbound turn, through the §12b
     owner-alert path (plain text — no Markdown, so the underscore-bearing turn-id
     can't be mangled) bracketed by `*_alert_dispatched` / `*_alert_delivered`
     stderr lines so every fire is traceable in journalctl regardless of delivery.
-    Caller guards this to ONE call per turn via the budget's `paged` flag."""
-    title = "per-turn send budget exhausted"
-    body = (
-        f"SUPPRESSED further sends: inbound turn {turn_id} for conversation {jid} "
-        f"hit its per-turn send cap ({limit}). Every further send this turn is "
-        f"DROPPED at the adapter seam (a TRUE suppression, not a template "
-        f"substitute) — a send loop is likely spiraling; investigate the "
-        f"conversation. Message content is withheld from this alert by design."
-    )
+    Caller guards this to ONE call per turn via the budget's `paged` flag.
+
+    The body is DERIVED FROM ``reason`` — the three states this gate pages for are
+    materially different and one shared story was false for two of them:
+
+      - ``config_failed`` — the config was never READ (the boundary read threw), so
+        NO cap was measured and NOTHING was counted. ``count``/``limit`` are the
+        fail-closed placeholders (0 / DEFAULT_TURN_SEND_BUDGET_LIMIT, frozen by
+        :func:`begin_inbound_turn_send_budget`), NOT a configured limit, so the
+        message must not quote them as one — and nothing observed here is evidence
+        of a send loop.
+      - ``exhausted`` — the FINALIZED cap was genuinely hit. Every further send
+        this turn, finalized AND draft, stops (``_TurnSendBudget.reserve`` refuses
+        drafts too once ``count >= limit``).
+      - ``draft_exhausted`` — only the SEPARATE draft-transport ceiling tripped
+        while the finalized cap still has room, so finalized sends this turn are
+        STILL ADMITTED and the customer still gets the reply. ``count``/``limit``
+        are the DRAFT counters here (the caller passes them).
+    """
+    if reason == "config_failed":
+        title = "per-turn send budget: config read FAILED (fail-closed)"
+        body = (
+            f"SUPPRESSED every send of inbound turn {turn_id} for conversation "
+            f"{jid}: the per-turn send-budget config could NOT be read at the "
+            f"turn boundary, so the turn fails closed. No cap was measured - no "
+            f"sends were counted and no configured limit is known, so this is a "
+            f"config or machinery fault, NOT evidence of a send loop. The "
+            f"customer gets silence for this turn until the config reads "
+            f"cleanly. Check the GATEWAY TURN SEND BUDGET settings and the "
+            f"stderr line 'turn_send_budget begin config-read failed'."
+        )
+    elif reason == "draft_exhausted":
+        title = "per-turn draft-transport ceiling hit"
+        body = (
+            f"DROPPED progressive draft frames: inbound turn {turn_id} for "
+            f"conversation {jid} hit its per-turn DRAFT transport ceiling "
+            f"({count}/{limit} draft relays). The finalized send cap is NOT "
+            f"exhausted - finalized sends this turn are STILL ADMITTED, so the "
+            f"customer still receives the reply, just without live streaming. "
+            f"This looks like a runaway draft/streaming loop rather than a send "
+            f"spiral. Message content is withheld from this alert by design."
+        )
+    else:
+        title = "per-turn send budget exhausted"
+        body = (
+            f"SUPPRESSED further sends: inbound turn {turn_id} for conversation "
+            f"{jid} hit its finalized per-turn send cap ({count}/{limit}). Every "
+            f"further send this turn - finalized AND progressive draft - is "
+            f"DROPPED at the adapter seam (a TRUE suppression, not a template "
+            f"substitute); a send loop is likely spiraling, so investigate the "
+            f"conversation. Message content is withheld from this alert by design."
+        )
     try:
         sys.stderr.write(
             f"send_budget_exhausted_alert_dispatched turn_id={turn_id} "
-            f"count={count} limit={limit} jid={jid}\n"
+            f"reason={reason} count={count} limit={limit} jid={jid}\n"
         )
     except Exception:
         pass
@@ -3116,6 +3166,20 @@ _DISABLED_ALERT_THROTTLE_SEC = 3600
 _DISABLED_ALERT_DEDUP_MIN = 60
 _last_disabled_alert_monotonic: float = 0.0
 
+# The kill switch refuses at TWO seams whose customer-visible outcomes are
+# OPPOSITE, so the §12b body cannot be one story (see _alert_agent_disabled_send):
+#   - bridge_post / bridge_send_media / bridge_send_cta (_agent_disabled_drop) —
+#     a TRUE drop before transport; the caller gets status="disabled" and the
+#     recipient gets silence.
+#   - the gateway seam (front_brain_screen_gateway_send) — front_brain_screen_
+#     gateway_send is contractually `-> str` and the injected adapter wrapper
+#     relays whatever it returns, so it SUBSTITUTES _gateway_seam_refusal_text's
+#     safe template. The customer receives a message; silence is exactly what did
+#     NOT happen there.
+# A send_kind not listed here is treated as a drop — the conservative default,
+# since every non-gateway caller today is a bridge_* drop.
+_DISABLED_SUBSTITUTING_SEND_KINDS = frozenset({"gateway_send"})
+
 
 def _disabled_flag_path() -> Path:
     """Kill-switch flag path, resolved at CALL time from SHIFT_AGENT_DISABLED_FLAG
@@ -3138,13 +3202,21 @@ def _alert_agent_disabled_send(send_kind: str) -> None:
     """§12b page: traffic is still arriving at the send chokepoint while the
     operator kill switch is engaged. That is a real operator-visible condition —
     either something restarted the gateway/timers after `shift-agent-disable`, or
-    a subprocess is running that the disable never stopped — and the customer is
-    getting silence either way.
+    a subprocess is running that the disable never stopped.
+
+    What the CUSTOMER experiences depends on which seam refused, and the two are
+    opposites, so that clause is derived from ``send_kind`` via
+    ``_DISABLED_SUBSTITUTING_SEND_KINDS`` rather than asserted: a bridge send is
+    dropped before transport (true silence), while the gateway seam substitutes
+    the safe template and still relays a string. The rest of the body — the
+    cause and the remedy — is identical for both, so the notify chokepoint's
+    same-message dedup still throttles each variant.
 
     Best-effort — NEVER raises into the send path. Throttled once/hour in-process
-    plus the notify chokepoint's cross-process same-message dedup. PLAIN-TEXT
-    body with a STABLE title+message (the varying send_kind rides the audit row +
-    stderr, never the deduped message) per the §12b lesson."""
+    (that bound is GLOBAL, so a second refusal at the OTHER seam inside the hour
+    rides stderr + the audit row instead of a second page) plus the notify
+    chokepoint's cross-process same-message dedup. PLAIN-TEXT body per the §12b
+    lesson."""
     global _last_disabled_alert_monotonic
     now = time.monotonic()
     if (
@@ -3153,13 +3225,27 @@ def _alert_agent_disabled_send(send_kind: str) -> None:
     ):
         return
     _last_disabled_alert_monotonic = now
+    if send_kind in _DISABLED_SUBSTITUTING_SEND_KINDS:
+        outcome = (
+            "A gateway free-form reply was refused at the seam; that seam always "
+            "relays a string, so the customer received the safe template - a "
+            "SUBSTITUTION, not a drop, and NOT silence."
+        )
+    else:
+        outcome = (
+            "A bridge send was DROPPED before transport, so that message was "
+            "never delivered (a TRUE drop - the caller got status=disabled) and "
+            "the recipient got silence."
+        )
     title = "shift-agent DISABLED but sends are still being attempted"
     body = (
         "The kill-switch flag state/disabled.flag is present, so the send "
-        "chokepoint is refusing outbound messages — customers and staff are "
-        "getting silence. Either something restarted the agent after "
-        "shift-agent-disable, or a timer/subprocess the disable did not stop is "
-        "still running. Run shift-agent-enable to restore, or stop the caller."
+        f"chokepoint is refusing outbound messages. {outcome} Either something "
+        "restarted the agent after shift-agent-disable, or a timer/subprocess "
+        "the disable did not stop is still running. Run shift-agent-enable to "
+        "restore, or stop the caller. This page is throttled to once an hour "
+        "per process; further refusals ride stderr and the "
+        "outbound refused-disabled audit rows."
     )
     try:
         sys.stderr.write(
