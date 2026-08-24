@@ -465,6 +465,10 @@ def _try_candidate_response(
         chat_id=chat_id,
         routed_to_skill="handle_candidate_response",
         message_shape="text",
+        # Answering a coverage ask is an EMPLOYEE act. Named explicitly because
+        # a candidate who is ALSO the owner (the reference customer's operator
+        # is both) must not have her reply recorded as a privileged action.
+        authority="employee",
     )
 
     # Read the shift details BEFORE the transition — the alert names the shift
@@ -751,6 +755,9 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
                 chat_id=chat_id,
                 routed_to_skill="handle_sick_call",
                 message_shape="text",
+                # The gate above is `is_verified_employee_chat`, so this arm
+                # runs on EMPLOYEE membership and nothing else.
+                authority="employee",
             )
             rc, _out, _err = actions.invoke_shift_sick_call(
                 chat_id=chat_id,
@@ -7866,6 +7873,11 @@ def _handle_shift_coverage_code(
         chat_id=chat_id,
         routed_to_skill="handle_owner_command",
         message_shape="approval_code",
+        # Reached only behind `is_owner_chat`, and it puts a coverage ask in
+        # front of staff — the single most privileged act in this loop. It is
+        # recorded as OWNER authority even when the same human is also the
+        # roster employee the legacy scalar would have named instead.
+        authority="owner",
     )
 
     rc = actions.invoke_update_proposal_status(

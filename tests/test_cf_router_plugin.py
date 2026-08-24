@@ -810,6 +810,11 @@ class TestF9SickCallAlert:
             chat_id="100000000000001@lid",
             routed_to_skill="handle_sick_call",
             message_shape="text",
+            # This arm's gate is `is_verified_employee_chat`, so the row names
+            # EMPLOYEE authority rather than inheriting identify-sender's legacy
+            # scalar — which for a sender who is also the owner would have said
+            # something else. See tests/test_identity_boundary_dual_role.py.
+            authority="employee",
         )
         mock_shift.assert_called_once_with(
             chat_id="100000000000001@lid",
