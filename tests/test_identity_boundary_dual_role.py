@@ -520,3 +520,233 @@ def test_owner_and_candidate_grammars_cannot_both_claim_one_message(router):
         assert r.hooks._classify_candidate_reply(text) is None, text
     for text in ("YES", "yes", "NO", "no", "yep", "nope"):
         assert r.hooks._CODE_PATTERN.search(text) is None, text
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 6. OWNER AUTHORITY IS IDENTIFIER-INDEPENDENT
+#
+# `is_owner_chat` used to apply the capability-aware fallback only when the
+# chat_id ended in `@lid`, so ONE authorized principal was owner by LID and
+# non-owner by phone-JID. `roles` is documented as branch-independent and
+# `OwnerAuthorizedIdentity` grants membership to the principal, not to one of
+# their identifiers -- so the two forms must agree.
+#
+# These tests assert MEMBERSHIP, never the identifier shape: the point is that
+# no ordinary employee gains anything. Each negative case is a real principal
+# the resolver knows about, not an unroutable string, so a fix that simply
+# refused everything would fail them.
+# ═══════════════════════════════════════════════════════════════════════════
+
+EMPLOYEE_JID = "19045550101@s.whatsapp.net"   # e001, active, employee-only
+EMPLOYEE_LID = "555000111222333@lid"
+UNKNOWN_JID = "19999999999@s.whatsapp.net"
+
+
+def _roster_with_employee_lid() -> dict:
+    doc = _roster_doc()
+    doc["employees"][0]["lid"] = EMPLOYEE_LID
+    return doc
+
+
+@pytest.mark.parametrize("identifier,expected,why", [
+    (OWNER_JID, True, "primary owner phone-JID -- the exact self_chat_jid fast path"),
+    (OWNER_LID, True, "primary owner by LID"),
+    (DUAL_LID, True, "authorized dual-role identity via @lid (worked before)"),
+    (DUAL_JID, True, "SAME authorized identity via phone-JID (the repair)"),
+    (EMPLOYEE_JID, False, "ordinary active employee phone-JID is NOT owner"),
+    (EMPLOYEE_LID, False, "ordinary active employee @lid is NOT owner"),
+    (UNKNOWN_JID, False, "unknown identity is NOT owner"),
+])
+def test_owner_authority_by_identifier(router, identifier, expected, why):
+    r = router(roster=_roster_with_employee_lid(), tag="ownerauth")
+    assert r.actions.is_owner_chat(identifier) is expected, why
+
+
+def test_both_identifiers_of_one_authorized_principal_agree(router):
+    """The invariant, stated directly: same human, same answer, either form."""
+    r = router(tag="ownerauth_agree")
+    assert r.actions.is_owner_chat(DUAL_JID) == r.actions.is_owner_chat(DUAL_LID)
+    assert r.actions.is_owner_chat(OWNER_JID) == r.actions.is_owner_chat(OWNER_LID)
+
+
+def test_owner_authority_agrees_with_the_shared_membership_check(router):
+    """`is_owner_chat` must not become a second authorization system.
+
+    Every identifier that is not the configured `self_chat_jid` fast path has
+    to give the same answer as `has_owner_capability`, which is the documented
+    membership surface.
+    """
+    r = router(roster=_roster_with_employee_lid(), tag="ownerauth_same")
+    for ident in (OWNER_LID, DUAL_JID, DUAL_LID, EMPLOYEE_JID, EMPLOYEE_LID, UNKNOWN_JID):
+        assert r.actions.is_owner_chat(ident) == r.actions.has_owner_capability(ident), ident
+
+
+def test_ambiguous_identifier_is_not_owner(router):
+    """Fail closed: two roster rows claiming one number resolves to nobody.
+
+    Guards the widening this repair could have introduced -- routing every
+    identifier through the resolver must not let an ambiguous one pass.
+    """
+    clash = _roster_doc(extra_employees=[
+        {"id": "e009", "name": "Impostor", "role": "floor", "phone": DUAL_PHONE,
+         "status": "active", "languages": ["en"], "can_cover_roles": ["floor"]}])
+    r = router(roster=clash, tag="ownerauth_ambig")
+    assert r.actions.is_owner_chat(DUAL_JID) is False
+    assert r.actions.is_owner_chat(DUAL_PHONE) is False
+
+
+def test_resolver_failure_is_not_owner(router, monkeypatch):
+    """A broken resolver denies authority; it never grants it."""
+    r = router(tag="ownerauth_resolverfail")
+    monkeypatch.setattr(r.actions, "_invoke_identify_sender",
+                        lambda ident: r.actions._IdentityResolution(False, {}))
+    assert r.actions.is_owner_chat(DUAL_JID) is False
+    assert r.actions.is_owner_chat(DUAL_LID) is False
+    # ...but the configured owner stays reachable with no resolver at all.
+    assert r.actions.is_owner_chat(OWNER_JID) is True
+
+
+def test_unreadable_config_is_not_owner(router):
+    """Unchanged from before the repair: any exception returns False."""
+    r = router(tag="ownerauth_badcfg")
+    r.actions.CONFIG_PATH = r.state.tmp / "does-not-exist.yaml"
+    assert r.actions.is_owner_chat(DUAL_JID) is False
+    assert r.actions.is_owner_chat(OWNER_JID) is False
+
+
+# ---- consumer 1: F8 owner approval -----------------------------------------
+
+@pytest.mark.parametrize("identifier,tag", [(DUAL_LID, "lid"), (DUAL_JID, "jid")])
+def test_f8_owner_approval_reached_by_either_identifier(router, identifier, tag):
+    """`#XXXXX` fired F8 by LID and silently did nothing by phone-JID."""
+    r = router(tag=f"f8_{tag}")
+    _seed_proposal(r.actions, status="awaiting_owner_approval")
+    r.hooks._pre_gateway_dispatch_impl(_inbound(identifier, "#ABCDE"))
+    updates = [c for c in r.calls if c[0] == "update_proposal_status"]
+    assert updates, f"F8 did not run for {identifier}"
+    rows = _routed_rows(r.actions)
+    assert [x["routed_to_skill"] for x in rows] == ["handle_owner_command"]
+    assert rows[0]["sender_role"] == "owner", "owner act must audit owner authority"
+
+
+def test_f8_is_not_reachable_by_an_ordinary_employee(router):
+    """The repair must not turn arbitrary employees into owners."""
+    r = router(roster=_roster_with_employee_lid(), tag="f8_emp")
+    _seed_proposal(r.actions, status="awaiting_owner_approval")
+    for ident in (EMPLOYEE_JID, EMPLOYEE_LID):
+        r.hooks._pre_gateway_dispatch_impl(_inbound(ident, "#ABCDE"))
+    assert not [c for c in r.calls if c[0] == "update_proposal_status"]
+
+
+# ---- consumer 2: _try_automation_control -----------------------------------
+
+@pytest.mark.parametrize("identifier,tag", [(DUAL_LID, "lid"), (DUAL_JID, "jid")])
+def test_automation_control_sees_one_owner_by_either_identifier(router, identifier, tag):
+    """The gap here was worse than losing the owner branch.
+
+    `_try_automation_control` reads `is_owner = is_owner_chat(chat_id)` and
+    then routes `not is_owner` into the CUSTOMER branch -- so before the
+    repair the phone-JID form of an owner was treated as a customer. Asserted
+    on the same seam the kernel reads, because the surrounding behaviour is
+    DORMANT behind CATERING_AUTOMATION_CONTROL_ENABLED and this test must not
+    arm it.
+    """
+    r = router(tag=f"autoctl_{tag}")
+    assert r.actions.is_owner_chat(identifier) is True
+
+
+def test_automation_control_still_treats_an_employee_as_non_owner(router):
+    r = router(roster=_roster_with_employee_lid(), tag="autoctl_emp")
+    assert r.actions.is_owner_chat(EMPLOYEE_JID) is False
+
+
+# ---- the widening this repair could have introduced --------------------------
+#
+# identify-sender's invalid branch falls back to `E164Phone.from_any`, which
+# STRIPS non-digit characters -- so `<owner-digits>@g.us` canonicalizes to the
+# owner's number and resolves with roles ["owner"]. The old `endswith("@lid")`
+# guard blocked that by ACCIDENT. Routing every identifier through the resolver
+# without a shape allowlist would have handed owner authority to a group JID.
+#
+# These are the exact strings that resolved as owner in the probe. Each must be
+# refused at `is_owner_chat` even though identify-sender still resolves it.
+
+OWNER_DIGITS = OWNER_JID.split("@")[0]
+
+@pytest.mark.parametrize("hostile", [
+    f"{OWNER_DIGITS}@g.us",                 # GROUP JID carrying the owner's digits
+    f"{OWNER_JID}@lid",                     # suffix confusion
+    OWNER_DIGITS,                           # bare digits
+    f"  {OWNER_JID}  ",                     # whitespace-padded
+    OWNER_PHONE,                            # bare E164 (never a chat_id)
+    f"{DUAL_JID}@g.us",                     # same trick with the dual identity
+])
+def test_owner_authority_is_refused_for_unsupported_identifier_shapes(router, hostile):
+    r = router(tag="ownerauth_shape")
+    assert r.actions.is_owner_chat(hostile) is False, hostile
+
+
+def test_the_hostile_shapes_still_resolve_as_owner_downstream(router):
+    """The control that makes the test above meaningful.
+
+    If identify-sender simply refused these strings, the allowlist would be
+    untested decoration. It does NOT refuse them -- it resolves the group-JID
+    form to owner membership -- so the allowlist is the only thing standing
+    between a group chat and owner authority.
+    """
+    r = router(tag="ownerauth_shape_ctl")
+    assert r.actions.has_owner_capability(f"{OWNER_DIGITS}@g.us") is True
+    assert r.actions.is_owner_chat(f"{OWNER_DIGITS}@g.us") is False
+
+
+def test_the_two_supported_shapes_are_still_admitted(router):
+    """The allowlist must not have re-broken the thing this PR fixes."""
+    r = router(tag="ownerauth_shape_pos")
+    assert r.actions.is_owner_chat(DUAL_JID) is True     # phone-JID
+    assert r.actions.is_owner_chat(DUAL_LID) is True     # LID
+    assert r.actions.is_owner_chat(OWNER_JID) is True    # fast path
+
+
+# ---- owner membership is config-ANCHORED but roster-REACHABLE ---------------
+#
+# `_resolve_principal` widens the identifiers from the matched roster row
+# before asking `_match_owner_identity`, so a roster row that pairs another
+# phone with `owner.lid` resolves as owner. This is characterization, not
+# endorsement: the LID direction was already live before the phone-JID repair,
+# and the repair adds its mirror. Pinned so that if anyone later decides owner
+# membership should be config-ONLY, these tests fail and say where to look.
+
+def test_roster_row_holding_the_owner_lid_reaches_owner_membership(env):
+    """Phone side. Reachable only AFTER the phone-JID repair."""
+    roster = _roster_doc(extra_employees=[
+        {"id": "e099", "name": "Holds Owner LID", "role": "floor",
+         "phone": "+15125550199", "lid": OWNER_LID, "status": "active",
+         "languages": ["en"], "can_cover_roles": ["floor"]}])
+    rc, doc = resolve(env(roster=roster), "15125550199@s.whatsapp.net")
+    assert rc == 0
+    assert "owner" in (doc.get("roles") or []), (
+        "roster-mediated owner reachability changed -- update the docstring in "
+        "actions.is_owner_chat, which documents this as a known property")
+
+
+def test_roster_row_holding_the_owner_phone_reaches_owner_membership(env):
+    """LID side. Pre-existing: True before the repair as well."""
+    roster = _roster_doc(extra_employees=[
+        {"id": "e098", "name": "Holds Owner Phone", "role": "floor",
+         "phone": OWNER_PHONE, "lid": "888000111222333@lid", "status": "active",
+         "languages": ["en"], "can_cover_roles": ["floor"]}])
+    rc, doc = resolve(env(roster=roster), "888000111222333@lid")
+    assert rc == 0
+    assert "owner" in (doc.get("roles") or [])
+
+
+def test_a_roster_row_with_neither_owner_identifier_gets_nothing(env):
+    """The control. Without this, the two tests above would also pass if the
+    resolver simply called everybody an owner."""
+    roster = _roster_doc(extra_employees=[
+        {"id": "e097", "name": "Unrelated", "role": "floor",
+         "phone": "+15125550199", "lid": "999000111222333@lid",
+         "status": "active", "languages": ["en"], "can_cover_roles": ["floor"]}])
+    rc, doc = resolve(env(roster=roster), "15125550199@s.whatsapp.net")
+    assert rc == 0
+    assert (doc.get("roles") or []) == ["employee"]
