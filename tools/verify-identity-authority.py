@@ -30,17 +30,27 @@ import sys
 import tempfile
 from pathlib import Path
 
-CONFIG = Path("/opt/shift-agent/config.yaml")
-ROSTER = Path("/opt/shift-agent/state/roster.json")
+CONFIG = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+# The roster lives at the SHIFT_ROOT, not under state/. Resolved rather than
+# assumed: the first spelling of this constant was state/roster.json and the
+# verifier died on FileNotFoundError against the real box.
+ROSTER = Path(os.environ.get("SHIFT_AGENT_ROSTER_PATH", "/opt/shift-agent/roster.json"))
 IDENTIFY = Path("/usr/local/bin/identify-sender")
 PLATFORM = Path("/opt/shift-agent/src/platform")
 
-# Keys whose values must never reach a subprocess environment from this script.
-_SECRET_KEYS = {
-    "pushover", "pushover_token", "pushover_user", "token", "api_key",
-    "apikey", "secret", "password", "webhook", "bridge_token", "openrouter",
-    "openrouter_api_key", "telegram", "telegram_bot_token", "credentials",
-}
+# SUBSTRING tokens, not exact key names. The first version of this used an
+# exact-match set and silently redacted NOTHING against the real config, whose
+# keys are `alerting.pushover_user_key` / `alerting.pushover_app_token` -- so
+# `_assert_sterile` passed vacuously on an empty set. A sterility guard that
+# cannot find the secrets is worse than none, because it reports success.
+_SECRET_TOKENS = (
+    "token", "key", "secret", "password", "passwd", "webhook", "credential",
+    "pushover", "openrouter", "telegram", "apikey", "auth",
+)
+
+
+def _is_secret_key(k) -> bool:
+    return any(t in str(k).lower() for t in _SECRET_TOKENS)
 _REDACTED = "REDACTED-BY-VERIFIER"
 
 
@@ -50,7 +60,7 @@ def _redact(node):
     if isinstance(node, dict):
         out = {}
         for k, v in node.items():
-            if str(k).lower() in _SECRET_KEYS:
+            if _is_secret_key(k):
                 out[k] = _REDACTED if not isinstance(v, (dict, list)) else _redact(v)
             else:
                 out[k] = _redact(v)
@@ -63,7 +73,7 @@ def _redact(node):
 def _collect_secret_values(node, acc):
     if isinstance(node, dict):
         for k, v in node.items():
-            if str(k).lower() in _SECRET_KEYS and isinstance(v, str) and len(v) >= 8:
+            if _is_secret_key(k) and isinstance(v, str) and len(v) >= 8:
                 acc.add(v)
             _collect_secret_values(v, acc)
     elif isinstance(node, list):
@@ -75,6 +85,12 @@ def _collect_secret_values(node, acc):
 def _assert_sterile(written: Path, originals: set):
     """Prove the sterilisation worked instead of trusting that it did."""
     blob = written.read_text(encoding="utf-8", errors="replace")
+    if not originals:
+        raise SystemExit(
+            "REFUSING TO RUN: the redactor found NO secret-shaped values in the "
+            "config. Either the config genuinely has none, or the token list no "
+            "longer matches its key names -- and the second case makes every "
+            "sterility claim below vacuous. Verify before proceeding.")
     leaked = sorted(s for s in originals if s and s in blob)
     if leaked:
         raise SystemExit(
@@ -111,6 +127,47 @@ def resolve(env, identifier):
         return p.returncode, json.loads(p.stdout)
     except json.JSONDecodeError:
         return p.returncode, {"_stdout": p.stdout[:200], "_stderr": p.stderr[-200:]}
+
+
+def _load_is_owner_chat(env):
+    """Import the LIVE cf-router actions and return its `is_owner_chat`.
+
+    Pointed at the sterile copies via module globals, so the boundary is
+    exercised against the same state the resolver saw. Returns None if the
+    plugin cannot be loaded -- reported as a failed check, never skipped
+    silently.
+    """
+    import importlib.machinery, importlib.util
+    plugin = Path("/root/.hermes/plugins/cf-router/actions.py")
+    if not plugin.exists():
+        return None
+    try:
+        pkg = "cf_router_verify_pkg"
+        spec_pkg = importlib.machinery.ModuleSpec(pkg, loader=None, is_package=True)
+        mod_pkg = importlib.util.module_from_spec(spec_pkg)
+        mod_pkg.__path__ = [str(plugin.parent)]
+        sys.modules[pkg] = mod_pkg
+        spec = importlib.util.spec_from_file_location("%s.actions" % pkg, plugin)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["%s.actions" % pkg] = mod
+        spec.loader.exec_module(mod)
+        mod.CONFIG_PATH = Path(env["SHIFT_AGENT_CONFIG_PATH"])
+        mod.ROSTER_PATH = Path(env["SHIFT_AGENT_ROSTER_PATH"])
+        real = mod._invoke_identify_sender
+
+        def spawn(identifier):
+            p = subprocess.run([sys.executable, str(IDENTIFY), identifier],
+                               capture_output=True, text=True, timeout=30, env=env)
+            if p.returncode != 0:
+                return mod._IdentityResolution(False, {})
+            try:
+                return mod._IdentityResolution(True, json.loads(p.stdout))
+            except json.JSONDecodeError:
+                return mod._IdentityResolution(False, {})
+        mod._invoke_identify_sender = spawn
+        return mod.is_owner_chat
+    except Exception:
+        return None
 
 
 def main():
@@ -182,6 +239,46 @@ def main():
         check("at least one ordinary-employee negative was exercised",
               checked > 0, {"negatives_run": checked})
 
+        # 4b. The AUTHORIZATION BOUNDARY itself, not just membership.
+        #     `is_owner_chat` is what F8 and automation-control actually call,
+        #     and it applies a shape allowlist that membership does not. These
+        #     shapes RESOLVE as owner through identify-sender and must still be
+        #     refused here -- checking membership alone would miss that.
+        boundary = _load_is_owner_chat(env)
+        if boundary is None:
+            check("is_owner_chat boundary loadable", False,
+                  {"note": "cf-router actions could not be imported"})
+        else:
+            digits = owner_jid.split("@")[0] if owner_jid else ""
+            hostile = [
+                ("%s@g.us" % digits, "group JID carrying owner digits"),
+                ("%s@lid" % owner_jid, "malformed double-suffix JID"),
+                (digits, "bare digits"),
+                ("  %s  " % owner_jid, "whitespace-padded JID"),
+                ("status@broadcast", "broadcast address"),
+            ]
+            for ident, why in hostile:
+                check("boundary REFUSES %s" % why, boundary(ident) is False,
+                      {"identifier": ident})
+            # ...and still admits the supported forms.
+            check("boundary admits primary owner JID", boundary(owner_jid) is True,
+                  {"identifier": owner_jid})
+            for alias in aliases:
+                jid = alias.lstrip("+") + "@s.whatsapp.net"
+                check("boundary admits authorized phone-JID", boundary(jid) is True,
+                      {"identifier": jid})
+                emp = by_phone.get(alias)
+                if emp and emp.get("lid"):
+                    check("boundary admits authorized LID",
+                          boundary(emp["lid"]) is True, {"identifier": emp["lid"]})
+            for e in emps:
+                if e.get("phone") in set(aliases) or e.get("status") != "active":
+                    continue
+                jid = e["phone"].lstrip("+") + "@s.whatsapp.net"
+                check("boundary refuses ordinary employee %s" % e.get("id"),
+                      boundary(jid) is False, {"identifier": jid})
+                break
+
         # 5. Unknown identity -> not owner, not employee.
         rc, doc = resolve(env, "19999999999@s.whatsapp.net")
         check("unknown identity has no memberships",
@@ -192,7 +289,7 @@ def main():
         dup = copy.deepcopy(roster)
         if aliases and dup.get("employees"):
             dup["employees"].append({
-                "id": "zzz_verify_probe", "name": "Ambiguity Probe",
+                "id": "e999", "name": "Ambiguity Probe",  # EmployeeId is ^e\d{3,}$
                 "role": "floor", "phone": aliases[0], "status": "active",
                 "languages": ["en"], "can_cover_roles": ["floor"]})
             dpath = work / "roster-dup.json"
@@ -200,9 +297,14 @@ def main():
             denv = dict(env, SHIFT_AGENT_ROSTER_PATH=str(dpath))
             ident = aliases[0].lstrip("+") + "@s.whatsapp.net"
             rc, doc = resolve(denv, ident)
-            check("duplicate identifier fails closed (rc!=0, no owner role)",
-                  rc != 0 and "owner" not in (doc.get("roles") or []),
-                  {"rc": rc, "error": str(doc.get("error"))[:120]})
+            # rc != 0 alone is NOT enough: an invalid probe row makes the
+            # whole roster fail to load (rc=5) and the check passes for the
+            # wrong reason. Demand the AMBIGUITY refusal specifically.
+            err = str(doc.get("error") or "")
+            check("duplicate identifier fails closed via AMBIGUITY refusal",
+                  rc != 0 and "ambiguous_identifier" in err
+                  and "owner" not in (doc.get("roles") or []),
+                  {"rc": rc, "error": err[:120]})
             check("production roster untouched by the ambiguity probe",
                   json.loads(ROSTER.read_text(encoding="utf-8")) == roster, {})
 
