@@ -1,11 +1,26 @@
 #!/usr/bin/env python3
 """Route-level proof that the DEPLOYED cf-router routes authority correctly.
 
-Drives the real `_pre_gateway_dispatch_impl` from /root/.hermes/plugins against
-COPIED state, with every state-mutating and transport call stubbed. Production
-state files are never opened for write and no message is ever sent -- the stubs
-record calls instead of performing them, and the run asserts at the end that
-the production proposal store is byte-unchanged.
+Drives the registered wrapper `pre_gateway_dispatch` from /root/.hermes/plugins
+against COPIED state, with every state-mutating and transport call stubbed.
+
+The WRAPPER, deliberately -- not `_pre_gateway_dispatch_impl`. The wrapper owns
+the turn-identity memo and the inbound-dedupe gate, so calling the impl
+directly exercises a path production never takes. Driving the impl was itself
+one of the defects this verifier hit during the c6eddc4c deployment.
+
+Production state is protected by MECHANISM, not by intention: `load_plugin`
+enumerates every module-level Path under the live SHIFT_ROOT and redirects it
+into a temp dir, so a store this script has never heard of is still redirected.
+An earlier version asserted "production state files are never opened for write"
+while writing synthetic entries into the production cf-router inbound-dedupe
+store -- because it redirected a hand-picked list of four paths. A claim with no
+mechanism behind it cannot notice when it stops being true.
+
+Both guarantees are then ASSERTED rather than trusted: the stubs record calls
+instead of performing them (so no message is sent), and the run compares the
+production proposal store byte-for-byte, requiring it to be PRESENT so the
+comparison cannot pass by both sides being absent.
 
 Proves, for the dual-role principal:
   F8 owner approval by LID       -> handle_owner_command, sender_role=owner

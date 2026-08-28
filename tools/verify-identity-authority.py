@@ -9,9 +9,16 @@ Credential-sterile by construction
 The production config is copied to a scratch dir and every secret-shaped key
 is REPLACED before `identify-sender` is pointed at it. An earlier rehearsal in
 this programme copied state faithfully and carried live Pushover keys with it;
-copying is not sterilising. The sterilisation is asserted, not assumed --
-`_assert_sterile` re-reads the written file and fails if any known secret
-value survives.
+copying is not sterilising.
+
+`_assert_sterile` re-reads the WRITTEN file and fails if a collected secret
+survives -- and, first, REFUSES TO RUN when it collected none at all. That
+second clause is the load-bearing one. This guard once matched key names
+exactly, found nothing in a config whose keys are `alerting.pushover_user_key`
+and `alerting.pushover_app_token`, and then reported success for having
+verified that an empty set had not leaked. "Fails if any known secret survives"
+was true the whole time and meant nothing, because the known set was empty.
+A guard that cannot find the secrets must not be able to report an all-clear.
 
 `identify-sender` needs only `owner.phone`, `owner.self_chat_jid`,
 `owner.lid` and `owner.authorized_identities`, so redacting the rest cannot
