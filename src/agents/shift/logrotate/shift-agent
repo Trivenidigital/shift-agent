@@ -69,3 +69,137 @@
     notifempty
     create 0640 shift-agent shift-agent
 }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Timer-driven oneshot units that write via systemd `StandardOutput=append:`.
+#
+# Every log below was covered by NO logrotate stanza until 2026-09-01.
+# flyer-recovery-watchdog.log had reached 105 MB and was still growing; the
+# rest were small only because their units run rarely, which is luck rather
+# than design. tests/test_logrotate_coverage.py now fails if a unit gains an
+# append: target without a stanza here.
+#
+# `create`, not copytruncate: all of these are Type=oneshot fired by a timer,
+# so the process exits between runs and holds no fd across the rotation
+# window. An earlier draft used copytruncate on the theory that `append:`
+# implies a long-lived fd; the coverage test disproved it by failing on
+# send-daily-brief, eod-reconcile and prune-expense-receipts, which are the
+# same shape and have always used `create`.
+#
+# 0640 shift-agent shift-agent matches the stanzas above and the units'
+# `User=`. On-disk ownership today is inconsistent (some root:root from
+# systemd having created the file first); rotation normalises it. systemd
+# reopens the path each run, so the change is invisible to the units.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Flyer recovery watchdog — the 105 MB one.
+/opt/shift-agent/logs/flyer-recovery-watchdog.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+}
+
+# Flyer source-edit SLA watchdog.
+/opt/shift-agent/logs/flyer-source-edit-sla-watchdog.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+}
+
+# Catering follow-up sweep (timer currently disabled; missingok covers the absent file).
+/opt/shift-agent/logs/catering-followup-sweep.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+}
+
+# Catering lead TTL sweep.
+/opt/shift-agent/logs/catering-lead-ttl-sweep.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+}
+
+# Catering owner-action watchdog.
+/opt/shift-agent/logs/catering-owner-action-watchdog.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+}
+
+# Catering pattern report.
+/opt/shift-agent/logs/catering-pattern-report.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+}
+
+# Catering proposal expiry sweep.
+/opt/shift-agent/logs/catering-proposal-expiry-sweep.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+}
+
+# OpenRouter balance watchdog. NOT journald -- this file is the ONLY
+# record of the balance alarm, so losing it loses the alarm history.
+/opt/shift-agent/logs/openrouter-balance.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+}
+
+# Routing accuracy summary.
+/opt/shift-agent/logs/routing-accuracy-summary.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+}
+
+# Triveni portal.
+/opt/shift-agent/logs/triveni-portal.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 shift-agent shift-agent
+}

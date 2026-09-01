@@ -861,6 +861,15 @@ RECEIPT_EOF
     # logrotate — Shift-Agent
     [ -f src/agents/shift/logrotate/shift-agent ] && install -m 644 src/agents/shift/logrotate/shift-agent /etc/logrotate.d/
 
+    # logrotate — Cockpit. Installed from the repo (LF) rather than left as a
+    # hand-placed file: the box copy was installed manually on 2026-05-31 with
+    # CRLF line endings, which logrotate cannot parse ("lines must begin with a
+    # keyword or a filename"), so cockpit-audit.log and cockpit.log did not
+    # rotate for three months and logrotate.service reported failed nightly.
+    # Installing it here makes the rotation versioned and self-healing.
+    # `install` normalises nothing, so the repo file MUST stay LF.
+    [ -f web/deploy/logrotate.conf ] && install -m 644 web/deploy/logrotate.conf /etc/logrotate.d/shift-agent-cockpit
+
     # Daily Brief agent (Agent #4)
     if [ -d src/agents/daily_brief/scripts ] && compgen -G "src/agents/daily_brief/scripts/*" > /dev/null; then
         install -m 755 src/agents/daily_brief/scripts/* /usr/local/bin/
