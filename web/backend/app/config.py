@@ -121,7 +121,25 @@ class Settings(BaseModel):
     # Sensitive config fields requiring fresh OTP for PATCH
     sensitive_config_fields: frozenset[str] = frozenset(
         {
+            # Owner IDENTITY. All four decide WHO holds owner authority, so
+            # they belong behind the same Pushover-OTP gate. `identify-sender`
+            # `_match_owner_identity` matches against owner.phone, owner.lid
+            # AND every `authorized_identities` entry, so writing any of them
+            # confers owner capability -- the same self-recovery-prevention
+            # class the Pushover gate already exists for. Before 2026-09-01
+            # only `owner.phone` was listed, so a plain authenticated session
+            # could append an authorized identity and gain owner authority
+            # without a step-up, while changing owner.phone demanded one.
+            #
+            # No circular lockout: OTP is delivered via PUSHOVER, not
+            # WhatsApp, so gating the WhatsApp identity fields cannot lock the
+            # owner out of the gate that protects them. `self_chat_jid` is
+            # additionally auto-repaired by the WhatsApp re-pair flow, which
+            # calls `save_config` directly and never passes through this gate.
             "owner.phone",
+            "owner.lid",
+            "owner.self_chat_jid",
+            "owner.authorized_identities",
             "alerting.pushover_user_key",
             "alerting.pushover_app_token",
             "backup.gpg_recipient_email",
