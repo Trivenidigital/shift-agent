@@ -63,16 +63,14 @@ jobs:
           COCKPIT_JWT_SECRET: "0000000000000000000000000000000000000000000000000000000000000000"
           PUSHOVER_APP_TOKEN: "stub-app-token"
           PUSHOVER_USER_KEY: "stub-user-key"
-        # The two manual-queue-complete deselects are MAIN-INHERITED breakage,
-        # not this branch's: they passed on the 2026-07-07 main run with
-        # byte-identical web/ code, and were broken src-side by the flyer audit
-        # remediation (#621, 2026-07-18) — cockpit-ci simply never ran between.
-        # Flyer-scoped fix tracked in the catering-studio completion record;
-        # remove the deselects when it lands.
-        run: >
-          .venv/bin/pytest -v --tb=short
-          --deselect tests/test_flyer_admin.py::test_manual_queue_complete_attaches_operator_asset_and_backs_up
-          --deselect tests/test_flyer_admin.py::test_manual_queue_complete_is_idempotent_failure
+        # The two manual-queue-complete deselects are GONE as of 2026-09-01.
+        # They were never a product defect: #621 gave the src-side manual-queue
+        # writer a FLYER_STATE_ROOT override plus a guard refusing production
+        # paths under pytest, and the cockpit harness never set that env var.
+        # tests/conftest.py now redirects it alongside COCKPIT_TEST_MODE, so
+        # the whole file runs. Do not re-add a deselect without recording what
+        # was verified -- these two sat unrun for six weeks.
+        run: .venv/bin/pytest -v --tb=short
 
       # Catering Studio E2E read model (M7 companion): the Studio's view of a
       # FINISHED lifecycle — dashboard counts, the booked lead's list row, and the
