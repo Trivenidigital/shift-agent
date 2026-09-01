@@ -10,9 +10,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from . import audit as audit_mod
 from .config import get_settings
+from .state import PrivilegedIdentityViolation
 from .routers import audit, auth, catering, commerce, config, decisions, disclosures, flyer, health, pending, roster, safety, schedule, whatsapp
 
 settings = get_settings()
@@ -51,6 +53,25 @@ app.add_middleware(
     allow_methods=[],
     allow_headers=[],
 )
+
+# Cross-store privileged-identity guard. Registered app-wide rather than
+# wrapped around individual routes, so EVERY current and future roster
+# mutation reports the same way -- `roster_session` is the single chokepoint
+# all four cockpit roster writers already share.
+#
+# 409, not 422: the submitted document is well-formed and schema-valid. What
+# is refused is the resulting cross-store STATE, which is a conflict with
+# owner configuration, not a malformed request.
+@app.exception_handler(PrivilegedIdentityViolation)
+async def _privileged_identity_violation_handler(_request, exc):
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": "roster mutation refused: privileged-identity violation",
+            "violations": exc.violations,
+        },
+    )
+
 
 # Public routes
 app.include_router(health.router)

@@ -27,6 +27,9 @@ if str(_AGENT_ROOT) not in sys.path:
 
 import safe_io  # noqa: E402
 from schemas import Config, PendingStore, Roster, SendCounter  # noqa: E402
+from privileged_identity import (  # noqa: E402
+    check_privileged_identity_integrity,
+)
 
 from .config import get_settings  # noqa: E402
 
@@ -37,6 +40,41 @@ def _unwrap_loaded(model):
     if isinstance(model, tuple):
         return model[0]
     return model
+
+
+class PrivilegedIdentityViolation(Exception):
+    """A roster mutation would stitch identifiers across owner principals.
+
+    Carries the structured violations so the caller can name the row and the
+    conflicting identifiers rather than reporting a generic refusal.
+    """
+
+    def __init__(self, violations):
+        self.violations = [v.as_dict() for v in violations]
+        super().__init__(
+            "roster mutation would create %d privileged-identity violation(s): %s"
+            % (len(violations), "; ".join(v.detail for v in violations))
+        )
+
+
+def _privileged_violations(roster: Roster) -> dict:
+    """Violations keyed by (employee_id, reason), or {} if unevaluable.
+
+    Returns {} rather than raising when the owner config cannot be read: this
+    guard must never be the reason a roster edit becomes impossible. The write
+    it protects is already gated by auth; a config read failure is an
+    availability problem, not a licence to stitch identities, and the
+    resolver-side refusals from #773 still stand underneath.
+    """
+    try:
+        owner = load_config().owner
+    except Exception:
+        return {}
+    try:
+        found = check_privileged_identity_integrity(roster.model_dump(mode="json"), owner)
+    except Exception:
+        return {}
+    return {(v.employee_id, v.reason): v for v in found}
 
 
 @contextmanager
@@ -52,6 +90,7 @@ def roster_session() -> Iterator[tuple[Roster, "RosterCommitter"]]:
     """
     with safe_io.flock(settings.roster_path):
         roster = _unwrap_loaded(safe_io.load_model(settings.roster_path, Roster))
+        before_violations = _privileged_violations(roster)
         committer = RosterCommitter(roster)
         try:
             yield roster, committer
@@ -61,6 +100,17 @@ def roster_session() -> Iterator[tuple[Roster, "RosterCommitter"]]:
         if committer.committed:
             # Re-validate after mutation — referential integrity etc.
             Roster.model_validate(roster.model_dump())
+            # Cross-store privileged-identity guard. Compares BEFORE against
+            # AFTER and refuses only violations this mutation INTRODUCES, so a
+            # roster that already contains one stays editable -- a guard that
+            # rejects any present violation would lock the operator out of
+            # fixing exactly the row that needs fixing.
+            introduced = [
+                v for key, v in _privileged_violations(roster).items()
+                if key not in before_violations
+            ]
+            if introduced:
+                raise PrivilegedIdentityViolation(introduced)
             safe_io.dump_model(settings.roster_path, roster)
 
 
