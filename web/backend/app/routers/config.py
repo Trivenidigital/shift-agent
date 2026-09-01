@@ -46,10 +46,37 @@ def _set_dotted(obj: dict, path: str, value: Any) -> None:
     cur[parts[-1]] = value
 
 
+def _sensitive_touched(keys) -> list[str]:
+    """Sensitive paths a patch would write, including via an ANCESTOR key.
+
+    A plain set intersection was not enough. `_set_dotted` writes at whatever
+    depth the caller names, so a key of `"owner"` replaces the entire owner
+    block -- phone, lid and authorized_identities together -- while
+    `"owner" in {"owner.phone", ...}` is False. That bypassed the step-up for
+    `owner.phone` as well, and predates the owner-identity fields added
+    alongside this helper.
+
+    Matching is on DOTTED SEGMENTS, so `owner_backup` does not collide with
+    `owner`. Both directions are covered: an ancestor key (writes the sensitive
+    field as part of a subtree) and a descendant key (writes a leaf inside a
+    sensitive subtree, which matters for `owner.authorized_identities`, whose
+    entries are addressable individually).
+    """
+    hits: set[str] = set()
+    for key in keys:
+        key_parts = str(key).split(".")
+        for sensitive in settings.sensitive_config_fields:
+            s_parts = sensitive.split(".")
+            n = min(len(key_parts), len(s_parts))
+            if key_parts[:n] == s_parts[:n]:
+                hits.add(sensitive)
+    return sorted(hits)
+
+
 @router.patch("")
 async def patch_config(body: ConfigPatch, request: Request, _=Depends(require_auth)):
     """Patch flat dotted-path fields. Sensitive fields blocked here -> use /sensitive."""
-    sensitive = settings.sensitive_config_fields & body.fields.keys()
+    sensitive = _sensitive_touched(body.fields.keys())
     if sensitive:
         raise HTTPException(
             403,
