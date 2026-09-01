@@ -218,3 +218,133 @@ def test_cache_trimmed_after_apply(fixture_dir):
     phones = {p["phone"] for p in final_cache["pairs"]}
     assert "+15550100001" not in phones  # applied → trimmed
     assert "+15551234567" in phones  # unknown → kept for retry
+
+
+# ── phone_history effective windows (2026-09-01) ─────────────────────────────
+#
+# lid-learn matched ANY phone_history entry regardless of its window, while
+# Roster.find_by_phone and identify-sender both skip a closed assignment --
+# and find_by_phone documents that window as precisely what stops a recycled
+# number from inheriting an identity.
+#
+# Consequence: a number an employee gave up, now held by someone else, still
+# matched that employee's row, so the new holder's LID was written onto it.
+# Where the row also carries an owner-authorized phone, the stranger's LID
+# then resolves to OWNER. Measured against the real resolver, not theorised.
+
+def _with_history(fixture_dir, entries, *, emp_id="e004"):
+    import json as _json
+    roster = _json.loads((fixture_dir / "roster.json").read_text())
+    emp = next(e for e in roster["employees"] if e["id"] == emp_id)
+    emp["phone_history"] = entries
+    (fixture_dir / "roster.json").write_text(_json.dumps(roster))
+    return roster
+
+
+RECYCLED = "+15550109999"
+
+
+def test_expired_history_entry_does_not_capture_a_recycled_number(fixture_dir):
+    """The defect. e004 gave this number up; someone else holds it now."""
+    _with_history(fixture_dir, [{
+        "phone": RECYCLED,
+        "effective_from": "2024-01-01T00:00:00+00:00",
+        "effective_to": "2024-06-01T00:00:00+00:00",   # CLOSED
+    }])
+    before = _content_hash(fixture_dir / "roster.json")
+
+    r = _run(fixture_dir, {"schema_version": 1, "pairs": [
+        {"phone": RECYCLED, "lid": "999000000000001@lid",
+         "learned_ts": "2026-04-28T00:00:00+00:00"}]})
+
+    assert r.returncode == 0, r.stderr
+    roster = json.loads((fixture_dir / "roster.json").read_text())
+    e004 = next(e for e in roster["employees"] if e["id"] == "e004")
+    assert e004.get("lid") is None, "a stranger's LID was written onto e004"
+    # WITNESS: nothing was written at all, and no audit row claims otherwise.
+    assert _content_hash(fixture_dir / "roster.json") == before
+    assert (fixture_dir / "decisions.log").read_text().strip() == ""
+
+
+def test_an_open_history_entry_still_captures(fixture_dir):
+    """The paired control.
+
+    Without this, a fix that simply ignored phone_history entirely would pass
+    the test above. An OPEN window is a live assignment and must still match.
+    """
+    _with_history(fixture_dir, [{
+        "phone": RECYCLED,
+        "effective_from": "2024-01-01T00:00:00+00:00",   # no effective_to
+    }])
+
+    r = _run(fixture_dir, {"schema_version": 1, "pairs": [
+        {"phone": RECYCLED, "lid": "999000000000002@lid",
+         "learned_ts": "2026-04-28T00:00:00+00:00"}]})
+
+    assert r.returncode == 0, r.stderr
+    roster = json.loads((fixture_dir / "roster.json").read_text())
+    e004 = next(e for e in roster["employees"] if e["id"] == "e004")
+    assert e004["lid"] == "999000000000002@lid"
+
+
+def test_a_primary_phone_match_is_unaffected_by_history_handling(fixture_dir):
+    """Second control: the ordinary path must not regress."""
+    _with_history(fixture_dir, [{
+        "phone": RECYCLED,
+        "effective_from": "2024-01-01T00:00:00+00:00",
+        "effective_to": "2024-06-01T00:00:00+00:00",
+    }])
+    r = _run(fixture_dir, {"schema_version": 1, "pairs": [
+        {"phone": "+15550100001", "lid": "100000000000009@lid",
+         "learned_ts": "2026-04-28T00:00:00+00:00"}]})
+    assert r.returncode == 0, r.stderr
+    roster = json.loads((fixture_dir / "roster.json").read_text())
+    e004 = next(e for e in roster["employees"] if e["id"] == "e004")
+    assert e004["lid"] == "100000000000009@lid"
+
+
+# ── config validation before write (2026-09-01) ──────────────────────────────
+
+def test_a_malformed_owner_lid_is_refused_by_the_audit_model(fixture_dir):
+    r"""A malformed LID never reaches either store -- but NOT for the reason
+    I first assumed, and the difference is worth recording.
+
+    I added `Config.model_validate` to the config write path because the
+    roster path was validated and the config path was a bare yaml dump, so
+    `OwnerConfig.lid`'s ^\d{6,20}@lid$ pattern appeared never to run for the
+    OWNER. A mutant run disproved that: removing the new validation left this
+    test still passing.
+
+    The actual refusal comes from `LidLearned.new_lid`, which carries the same
+    pattern and is constructed while the pair is processed -- before any write
+    is attempted. So the config path was already covered for this input.
+
+    The added `Config.model_validate` is therefore defence in depth with no
+    currently-reachable trigger, not a fix for a live defect. It is kept for
+    symmetry with the roster write, and this test asserts the mechanism that
+    ACTUALLY refuses, with a witness, so the next reader is not misled.
+    """
+    before = _content_hash(fixture_dir / "config.yaml")
+
+    r = _run(fixture_dir, {"schema_version": 1, "pairs": [
+        {"phone": "+15550100002", "lid": "not-a-valid-lid",
+         "learned_ts": "2026-04-28T00:00:00+00:00"}]})
+
+    assert r.returncode != 0, "a malformed owner lid was accepted"
+    # WITNESS: names the model that refused, so an unrelated crash cannot pass.
+    assert "LidLearned" in r.stderr, r.stderr[-400:]
+    assert "new_lid" in r.stderr
+    # WITNESS: refused BEFORE persistence, and nothing was audited either.
+    assert _content_hash(fixture_dir / "config.yaml") == before
+    assert (fixture_dir / "decisions.log").read_text().strip() == ""
+
+
+def test_a_wellformed_owner_lid_is_still_applied(fixture_dir):
+    """The control. Validation must not block the legitimate case."""
+    import yaml
+    r = _run(fixture_dir, {"schema_version": 1, "pairs": [
+        {"phone": "+15550100002", "lid": "200000000000001@lid",
+         "learned_ts": "2026-04-28T00:00:00+00:00"}]})
+    assert r.returncode == 0, r.stderr
+    cfg = yaml.safe_load((fixture_dir / "config.yaml").read_text())
+    assert cfg["owner"]["lid"] == "200000000000001@lid"
