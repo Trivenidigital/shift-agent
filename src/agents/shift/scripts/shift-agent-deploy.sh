@@ -868,7 +868,14 @@ RECEIPT_EOF
     # rotate for three months and logrotate.service reported failed nightly.
     # Installing it here makes the rotation versioned and self-healing.
     # `install` normalises nothing, so the repo file MUST stay LF.
-    [ -f web/deploy/logrotate.conf ] && install -m 644 web/deploy/logrotate.conf /etc/logrotate.d/shift-agent-cockpit
+    #
+    # It lives under src/ because the deploy ARTIFACT is `src tools
+    # .commit-hash` (see the rollback snapshot below) -- `web/` is never
+    # shipped by this deploy. The first version of this line read from
+    # web/deploy/ and was therefore DEAD: CI was green, the config was
+    # correct in the repo, and the box kept its CRLF copy. Verifying the
+    # deployed box, not the deploy script, is what caught it.
+    [ -f src/agents/shift/logrotate/shift-agent-cockpit ] && install -m 644 src/agents/shift/logrotate/shift-agent-cockpit /etc/logrotate.d/shift-agent-cockpit
 
     # Daily Brief agent (Agent #4)
     if [ -d src/agents/daily_brief/scripts ] && compgen -G "src/agents/daily_brief/scripts/*" > /dev/null; then
