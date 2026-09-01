@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -18,6 +19,23 @@ os.environ.setdefault("COCKPIT_TEST_MODE", "1")
 os.environ.setdefault("COCKPIT_JWT_SECRET", "0" * 64)
 os.environ.setdefault("PUSHOVER_APP_TOKEN", "stub")
 os.environ.setdefault("PUSHOVER_USER_KEY", "stub")
+
+# FLYER_STATE_ROOT is read SRC-side by src/agents/flyer/manual_queue.py:441,
+# which the cockpit imports. COCKPIT_TEST_MODE redirects `Settings` paths but
+# has no reach into that module, so without this the manual-queue write path
+# resolves to /opt/shift-agent/state/flyer and `safe_io` refuses it under
+# pytest -- correctly, since it is a production path.
+#
+# That is the whole of the "main-inherited breakage" that has kept
+# test_manual_queue_complete_* --deselect'ed from cockpit-ci since
+# 2026-07-18: the production code was fine and had an env override the whole
+# time; the cockpit harness simply never set it. Set here rather than in the
+# two tests so the next test to touch a flyer write path cannot hit the same
+# wall silently.
+os.environ.setdefault(
+    "FLYER_STATE_ROOT",
+    str(Path(tempfile.mkdtemp(prefix="cockpit-test-flyer-")) / "flyer"),
+)
 
 # Make the agent's safe_io + schemas importable from the project's src/.
 # The cockpit code does `sys.path.insert(0, "/opt/shift-agent")` at import
