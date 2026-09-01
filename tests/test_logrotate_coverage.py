@@ -42,7 +42,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 LOGROTATE_FILES = [
     REPO / "src" / "agents" / "shift" / "logrotate" / "shift-agent",
-    REPO / "web" / "deploy" / "logrotate.conf",
+    REPO / "src" / "agents" / "shift" / "logrotate" / "shift-agent-cockpit",
 ]
 DEPLOY = REPO / "src" / "agents" / "shift" / "scripts" / "shift-agent-deploy.sh"
 
@@ -138,19 +138,21 @@ def test_decisions_log_does_not_use_copytruncate():
 
 # ── 3. the config actually reaches the box ───────────────────────────────────
 
+# The deploy ARTIFACT is `src tools .commit-hash` -- see the rollback snapshot
+# in shift-agent-deploy.sh. Anything outside those roots never reaches the box.
+ARTIFACT_ROOTS = ("src/", "tools/")
+
+
 @pytest.mark.parametrize(
     "source,target",
     [
         ("src/agents/shift/logrotate/shift-agent", "/etc/logrotate.d/"),
-        ("web/deploy/logrotate.conf", "/etc/logrotate.d/shift-agent-cockpit"),
+        ("src/agents/shift/logrotate/shift-agent-cockpit",
+         "/etc/logrotate.d/shift-agent-cockpit"),
     ],
 )
 def test_deploy_installs_the_logrotate_config(source, target):
-    """A correct config in the repo is worth nothing if nothing installs it.
-
-    The cockpit config was correct in-repo the whole time it was broken on the
-    box, because only a hand-placed copy existed there.
-    """
+    """A correct config in the repo is worth nothing if nothing installs it."""
     script = DEPLOY.read_text(encoding="utf-8")
     assert source in script, f"deploy script never references {source}"
     line = next(
@@ -158,3 +160,44 @@ def test_deploy_installs_the_logrotate_config(source, target):
     )
     assert line is not None, f"{source} is mentioned but never installed"
     assert target in line, f"{source} is installed somewhere other than {target}"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "src/agents/shift/logrotate/shift-agent",
+        "src/agents/shift/logrotate/shift-agent-cockpit",
+    ],
+)
+def test_installed_sources_are_inside_the_deploy_artifact(source):
+    """The check the first version of this file was MISSING.
+
+    It asserted only that the deploy script references the file. That was
+    green while the install line read from `web/deploy/`, which the artifact
+    never ships -- so the config was correct in the repo, correct in the
+    script, and still CRLF on the box. The deploy ran, reported success, and
+    changed nothing. Only verifying the deployed box caught it.
+
+    "The deploy script installs it" is not "the file reaches the box".
+    """
+    assert source.startswith(ARTIFACT_ROOTS), (
+        f"{source} is outside the deploy artifact roots {ARTIFACT_ROOTS}; the "
+        f"install line can never fire"
+    )
+    assert (REPO / source).exists(), f"{source} does not exist"
+
+
+def test_no_logrotate_config_is_installed_from_outside_the_artifact():
+    """Generalises the above to any FUTURE install line, not just today's two."""
+    offenders = []
+    for line in DEPLOY.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or "logrotate.d" not in line or "install " not in line:
+            continue
+        for token in stripped.split():
+            if "/" in token and token.endswith(("shift-agent", "shift-agent-cockpit", ".conf")):
+                if not token.startswith(ARTIFACT_ROOTS) and not token.startswith("/etc"):
+                    offenders.append(token)
+    assert not offenders, (
+        f"logrotate configs installed from outside {ARTIFACT_ROOTS}: {offenders}"
+    )

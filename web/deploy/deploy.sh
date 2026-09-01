@@ -23,7 +23,10 @@ rsync -az --delete web/frontend/dist/ "$VPS:/opt/shift-agent/cockpit/static/"
 echo "==> Install systemd unit + Caddy + logrotate"
 scp web/deploy/shift-agent-cockpit.service "$VPS:/tmp/shift-agent-cockpit.service"
 scp web/deploy/Caddyfile "$VPS:/tmp/cockpit-Caddyfile"
-scp web/deploy/logrotate.conf "$VPS:/tmp/cockpit-logrotate"
+# Single source of truth with the shift-agent deploy, which installs the
+# same file from the artifact. Two copies would drift, and the drift is
+# invisible until logrotate fails to parse one of them.
+scp src/agents/shift/logrotate/shift-agent-cockpit "$VPS:/tmp/cockpit-logrotate"
 scp web/deploy/rotate-jwt-secret.sh "$VPS:/tmp/rotate-jwt-secret.sh"
 scp web/deploy/jwt-rotate.cron "$VPS:/tmp/jwt-rotate.cron"
 
