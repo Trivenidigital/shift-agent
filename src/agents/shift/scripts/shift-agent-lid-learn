@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # BEGIN shift-agent-sender-id
@@ -55,6 +56,42 @@ def _load_cache() -> dict | None:
     except json.JSONDecodeError as e:
         sys.stderr.write(f"lid-learn: cache parse failed: {e}\n")
         return None
+
+
+
+def _history_entry_active(entry: dict, phone: str, now) -> bool:
+    """True when `entry` assigns `phone` and its window is open at `now`.
+
+    Deliberately mirrors `Roster.find_by_phone`, which documents the window as
+    exactly what stops a recycled number from inheriting an identity. A
+    permissive parse would re-open the defect, so an unparseable timestamp
+    makes the entry NOT match rather than defaulting to open.
+    """
+    if entry.get("phone") != phone:
+        return False
+
+    def _dt(value):
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return "unparseable"
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    start, end = _dt(entry.get("effective_from")), _dt(entry.get("effective_to"))
+    if start == "unparseable" or end == "unparseable":
+        return False
+    ref = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    if start is not None and start > ref:
+        return False
+    if end is not None and end < ref:
+        return False
+    return True
 
 
 def main() -> int:
@@ -109,8 +146,17 @@ def main() -> int:
             # Employees
             for emp in roster_doc.get("employees", []):
                 matches_primary = emp.get("phone") == phone
+                # phone_history matches ONLY inside its effective window --
+                # mirroring Roster.find_by_phone (schemas.py) and
+                # identify-sender, both of which skip a closed assignment.
+                # This function did not, and that difference was the whole
+                # defect: a number an employee gave up, now held by someone
+                # else, still matched that employee's row, so the new holder's
+                # LID was written onto it. Where the row also carries an
+                # owner-authorized phone, the stranger's LID then resolves to
+                # OWNER -- measured against the real resolver, not theorised.
                 matches_history = any(
-                    h.get("phone") == phone
+                    _history_entry_active(h, phone, now)
                     for h in (emp.get("phone_history") or [])
                 )
                 if not (matches_primary or matches_history):
@@ -138,6 +184,12 @@ def main() -> int:
             atomic_write_json(ROSTER, roster_doc, mode=0o644)
 
         if cfg_dirty:
+            # Validate before write, symmetrically with the roster path above.
+            # Without this, `OwnerConfig.lid`'s ^\d{6,20}@lid$ pattern NEVER
+            # ran on this path: a malformed LID was rejected for an employee
+            # and accepted for the OWNER, whose identity is the more
+            # privileged of the two.
+            Config.model_validate(cfg_doc)
             # Use safe_io.atomic_write_text for full durability semantics:
             # tmp file with PID+ms suffix (no race), fsync the tmp file,
             # rename, fsync the parent dir. Direct tmp.write_text + os.replace
