@@ -155,7 +155,18 @@ def imported_platform_modules(files, platform_modules: set[str]) -> tuple[set[st
 PLATFORM_MODULES = platform_module_names(PLATFORM_DIR)
 SCRIPT_FILES = sorted(p for p in (REPO / "src" / "agents").glob("*/scripts/**/*") if p.is_file())
 PLATFORM_FILES = sorted(PLATFORM_DIR.glob("*.py"))
-SCAN_FILES = SCRIPT_FILES + PLATFORM_FILES
+# 2026-09-02: the cockpit backend was OUT OF SCOPE, and that was the gap.
+# web/backend/app/state.py inserts /opt/shift-agent into sys.path and then does
+# `from privileged_identity import ...` -- exactly the flat-layout import this
+# guard exists to protect -- but nothing under web/ was scanned, so #778 could
+# add a platform module, #781 could import it from the cockpit, and both could
+# merge green while the module was never installed. The cockpit would have
+# raised ImportError on startup; the release transaction's staged validation
+# caught it before cutover. Widening the scan root is the durable fix.
+COCKPIT_FILES = sorted(
+    p for p in (REPO / "web" / "backend" / "app").rglob("*.py") if p.is_file()
+)
+SCAN_FILES = SCRIPT_FILES + PLATFORM_FILES + COCKPIT_FILES
 
 
 # ════════════════════════════════════════════════════════════════════════════

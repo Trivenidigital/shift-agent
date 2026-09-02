@@ -331,6 +331,12 @@ install_artifacts() {
     # Python modules — flat layout at /opt/shift-agent/ matches scripts' sys.path
     install -m 644 src/platform/schemas.py /opt/shift-agent/schemas.py
     install -m 644 src/platform/safe_io.py /opt/shift-agent/safe_io.py
+    # Cross-store privileged-identity invariant (#778). Imported by the
+    # cockpit's state.py through its /opt/shift-agent sys.path insert, so it
+    # must live on the flat layout like schemas/safe_io. Omitted when #778
+    # landed, which made the cockpit unimportable until this line existed --
+    # caught by the release transaction's staged validation, before cutover.
+    install -m 644 src/platform/privileged_identity.py /opt/shift-agent/privileged_identity.py
     # Provenance label: record the running release's commit at the live tree root.
     # install_artifacts is the SHARED chokepoint every path routes through — forward
     # deploy), budget-bootstrap Phase 4, AND rollback) (which re-runs install_artifacts
