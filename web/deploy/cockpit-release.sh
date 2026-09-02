@@ -185,27 +185,38 @@ curl -sS --max-time 10 "$HEALTH_URL" >/dev/null 2>&1 \
 # A /health 200 is NOT verification. Assert the security behaviour itself,
 # against the live tree, using a throwaway config so the real owner identity
 # is never touched.
+# The python block sys.exit(1)s on any failed assertion, and its status is
+# read via PIPESTATUS -- `$?` after a pipeline reports sed, not python, so
+# a gate written that way could never fail. That is the exact defect class
+# this repo keeps paying for, so it is named rather than left implicit.
 sudo -u shift-agent env PYTHONPATH="$BACKEND" COCKPIT_JWT_SECRET="$(printf '0%.0s' $(seq 64))" \
-    "$VENV/bin/python" - <<'PY' 2>&1 | sed 's/^/    /'
+    "$VENV/bin/python" - <<'PYCHK' 2>&1 | sed 's/^/    /'
 import sys
 sys.path.insert(0, "/opt/shift-agent/cockpit/backend")
 from app.config import get_settings
 from app.routers.config import _sensitive_touched
+
+ok = True
+def check(label, cond):
+    global ok
+    ok = ok and bool(cond)
+    print(("PASS" if cond else "FAIL"), label)
+
 s = get_settings()
-need = ["owner.phone", "owner.lid", "owner.self_chat_jid", "owner.authorized_identities"]
-for f in need:
-    print(("PASS" if f in s.sensitive_config_fields else "FAIL"), "gated:", f)
-print(("PASS" if _sensitive_touched(["owner"]) else "FAIL"),
-      "ancestor key {'owner'} is caught ->", _sensitive_touched(["owner"]))
-print(("PASS" if _sensitive_touched(["owner.authorized_identities.0.phone"]) else "FAIL"),
-      "descendant key is caught")
-print(("PASS" if _sensitive_touched(["owner.name"]) == [] else "FAIL"),
-      "control: owner.name still patchable without step-up")
-print(("PASS" if _sensitive_touched(["customer.name"]) == [] else "FAIL"),
-      "control: customer.name still patchable without step-up")
-PY
-LIVE_SEC=$?
-gate "live security assertions executed" "$LIVE_SEC"
+for f in ("owner.phone", "owner.lid", "owner.self_chat_jid",
+          "owner.authorized_identities"):
+    check("gated: %s" % f, f in s.sensitive_config_fields)
+check("ancestor key owner is caught", bool(_sensitive_touched(["owner"])))
+check("descendant key is caught",
+      bool(_sensitive_touched(["owner.authorized_identities.0.phone"])))
+# Paired controls: a gate that refused everything would pass the four above.
+check("control: owner.name still patchable",
+      _sensitive_touched(["owner.name"]) == [])
+check("control: customer.name still patchable",
+      _sensitive_touched(["customer.name"]) == [])
+sys.exit(0 if ok else 1)
+PYCHK
+gate "live security assertions" "${PIPESTATUS[0]}"
 
 ss -tlnp 2>/dev/null | grep -q "127.0.0.1:8081" \
     && gate "cockpit still bound to loopback only" 0 \
