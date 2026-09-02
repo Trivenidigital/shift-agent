@@ -51,9 +51,15 @@ popd > /dev/null
 echo "==> Staging payload to $VPS:$STAGING"
 ssh "$VPS" "rm -rf $STAGING && mkdir -p $STAGING/deploy"
 
-rsync -az --exclude '__pycache__' --exclude '.pytest_cache' --exclude 'tests' \
-    web/backend/ "$VPS:$STAGING/backend/"
-rsync -az web/frontend/dist/ "$VPS:$STAGING/static/"
+# tar-over-ssh rather than rsync: rsync is NOT present on a Windows developer
+# machine, and the previous script assumed a Linux/Mac dev box -- one more
+# reason it could not run from here. tar ships with Git Bash and with every
+# POSIX host, so this works from either. The box still uses rsync for the
+# static cutover, where it IS installed and --delete semantics matter.
+ssh "$VPS" "mkdir -p $STAGING/backend $STAGING/static"
+tar czf - --exclude=__pycache__ --exclude=.pytest_cache --exclude=tests \
+    -C web/backend . | ssh "$VPS" "tar xzf - -C $STAGING/backend"
+tar czf - -C web/frontend/dist . | ssh "$VPS" "tar xzf - -C $STAGING/static"
 
 scp -q web/deploy/shift-agent-cockpit.service "$VPS:$STAGING/deploy/"
 scp -q web/deploy/jwt-rotate.cron            "$VPS:$STAGING/deploy/"
