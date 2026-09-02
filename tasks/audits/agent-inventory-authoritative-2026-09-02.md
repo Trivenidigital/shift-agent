@@ -176,10 +176,21 @@ sits inside a bare `except Exception` that writes only to stderr.
 ## 6. NOT_DETERMINED, carried honestly
 
 - Whether catering's 2026-08-23 event came from a real customer or the operator.
-  (Separately established: that event was **not** a half-failure —
-  `proposal_predates_pricebook_scope` is a deliberate fail-closed refusal, the
-  owner was notified with the remedy, and there is no pricebook on the box at
-  all. Catering's PARTIAL status should not rest on it.)
+
+  **Settled separately: that event was NOT a half-failure.**
+  `proposal_predates_pricebook_scope` is a deliberate fail-closed refusal — the
+  proposal predated pricebook activation, so the owner's card never showed a
+  price diff and they never consented to a price change. The menu applied
+  correctly (v2→v3, 77 items) and the owner was notified with the remedy. It
+  logs under `*_sync_failed` only because the `LogEntry` union has exactly two
+  variants and no "not applicable" one — an audit-naming wart, not a defect.
+
+  **Catering's PARTIAL therefore rests on absence of exercise, not on a
+  defect.** Verified on the box: `catering.deposit_pct: 0` (deliberately off,
+  operator-owned) and **no pricebook has ever existed** — only
+  `catering-pricebook-template.json`. So two of three critical-path
+  capabilities, deposit collection and price sync, have zero exercise history
+  in either direction. Only menu-item application has ever run.
 - Provenance of `e006`'s LID value — lid-learn never ran, so it was seeded some
   other way; `roster.json` has a single mtime for the whole file.
 - Whether `/root/.hermes/skills/` is byte-identical to `skills-manifest.txt`

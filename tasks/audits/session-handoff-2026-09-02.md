@@ -99,7 +99,7 @@ consistent: **one directory = one agent**.
 | equipment_maintenance | **Y — preflight check D, 2026-09-02** | Y | tool registered + armed | **N** | DEPLOYED_AWAITING_ORGANIC_E2E | zero invocations ever | seed + one real query |
 | compliance | **Y — preflight check D, 2026-09-02** | Y | 2 real tool calls 2026-08-08 | N | BLOCKED_ON_REAL_DATA/CONFIG | `cfg.compliance` absent; items file absent | operator sets flag + seeds REAL dates |
 | multi_location | Y (`customer_location_query`) | Y | code-complete | N | DEPLOYED_AWAITING_APPLICABLE_DATA | single-location customer | await a real second location |
-| catering | Y (cf-router F7) | Y | Y | NOT_DETERMINED | PARTIAL | M1 gates OFF; traffic provenance unknown | check sender identity of the 08-23 event |
+| catering | Y (cf-router F7) | Y | Y — menu-apply works (v2→v3, 77 items); price-sync correctly fail-closed | NOT_DETERMINED | PARTIAL | `deposit_pct=0` (deliberate) + **no pricebook has ever existed on this box** → 2 of 3 critical-path capabilities never exercised, none defective | activate a pricebook + nonzero `deposit_pct` deliberately, then observe one full cycle |
 | flyer | Y (cf-router) | Y | partial | N | PARTIAL | open P0/P1s + one stuck project | flyer backlog |
 | expense_bookkeeper | intake Y | Y | partial | N | PARTIAL | QBO push raises `NotImplementedError` | build `RealQBOClient` (money-adjacent) |
 | catering_followup | N | Y | — | N | NOT_IMPLEMENTED | trigger hook self-declared absent | wire the CLOSED transition |
