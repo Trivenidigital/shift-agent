@@ -467,43 +467,13 @@ function _shiftResolveSender(msg, sock, lidToPhoneMap) {
   return { senderId, senderPhone, senderLid, fromMe };
 }
 
-const _SHIFT_LID_CACHE_PATH = '/opt/shift-agent/state/lid-cache.json';
-const _SHIFT_LID_CACHE_ENABLED = ['1','true','yes','on'].includes(
-  String(process.env.WHATSAPP_LID_CACHE_WRITE || '').toLowerCase()
-);
-let _shiftLidCacheChain = Promise.resolve();
-
-async function _shiftWriteLidCacheImpl(phone, lid) {
-  if (!_SHIFT_LID_CACHE_ENABLED || !phone || !lid) return;
-  const fs = (await import('fs')).promises;
-  let cur = { schema_version: 1, pairs: [] };
-  try {
-    const raw = await fs.readFile(_SHIFT_LID_CACHE_PATH, 'utf-8');
-    if (raw && raw.trim()) {
-      const parsed = JSON.parse(raw);
-      if (parsed.schema_version === 1) cur = parsed;
-    }
-  } catch (e) { /* ENOENT or parse error → start fresh */ }
-  if (cur.pairs.some(p => p.phone === phone && p.lid === lid)) return;
-  cur.pairs = cur.pairs.filter(p => p.phone !== phone);
-  cur.pairs.push({ phone, lid, learned_ts: new Date().toISOString() });
-  const tmp = _SHIFT_LID_CACHE_PATH + '.tmp-' + process.pid + '-' + Date.now();
-  const fh = await fs.open(tmp, 'w');
-  try {
-    await fh.writeFile(JSON.stringify(cur, null, 2));
-    await fh.sync();
-  } finally {
-    await fh.close();
-  }
-  await fs.rename(tmp, _SHIFT_LID_CACHE_PATH);
-}
-
-function _shiftWriteLidCacheEntry(phone, lid) {
-  _shiftLidCacheChain = _shiftLidCacheChain.then(
-    () => _shiftWriteLidCacheImpl(phone, lid).catch(e => console.error('[lid-cache] write failed:', e))
-  );
-  return _shiftLidCacheChain;
-}
+// The LID -> phone cache backfill was retired 2026-08-01 (proven never to
+// have fired: buildLidMap keyed bare LID digits, lookups used
+// "<lid>@lid"). The live bridge.js has carried this comment and no writer
+// since that date, and tools/hermes-patch-port-v0191/patch1_port_v0191.py
+// already omits it. THIS generator still emitted the dead functions, so a
+// future patch cycle run through this file would have silently
+// reintroduced code removed for being proven broken.
 // END shift-agent-sender-id
 '''
 
@@ -1527,7 +1497,6 @@ def _patch_bridge_js():
         f'{indent}  event.fromMe = _s.fromMe;\n'
         f'{indent}  event.senderPhone = _s.senderPhone;\n'
         f'{indent}  event.senderLid = _s.senderLid;\n'
-        f'{indent}  _shiftWriteLidCacheEntry(_s.senderPhone, _s.senderLid);\n'
         f'{indent}}} catch (_e) {{ console.error("[shift-agent] resolve failed:", _e); }}\n'
         f'{indent}// END shift-agent-sender-id (event-shape extension)\n'
     )
