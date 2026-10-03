@@ -26,6 +26,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from fixtures_fleet import build_catering_pricing_inputs, write_catering_pricebook
+
 pytestmark = pytest.mark.skipif(
     platform.system() == "Windows",
     reason="apply-script imports safe_io (fcntl-only)",
@@ -89,6 +91,10 @@ def env_dir(tmp_path):
         "catering": {"enabled": True},
     }
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    # Ticket 0: the customer send is refused without a real (non-placeholder)
+    # pricebook and deliverable provenance on the lead. These cells are about the
+    # FINALIZE guard, so the priced surface is made valid rather than exercised.
+    write_catering_pricebook(state)
     return tmp_path
 
 
@@ -115,6 +121,8 @@ def _seed_lead(env_dir, *, status="AWAITING_OWNER_APPROVAL",
         "quote_total_usd": quote_total_usd,
         "customer_finalized_at": customer_finalized_at,
         "last_finalize_message_id": last_finalize_message_id,
+        "pricing_inputs": build_catering_pricing_inputs(
+            guest_count=headcount, total_usd=quote_total_usd or 400),
     }
     store = {"leads": [lead], "next_lead_seq": 2}
     (env_dir / "state" / "catering-leads.json").write_text(
@@ -172,6 +180,7 @@ mod.CONFIG_PATH = pathlib.Path({str(env_dir / 'config.yaml')!r})
 mod.LEADS_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json')!r})
 mod.LEADS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json.lock')!r})
 mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
+mod.PRICEBOOK_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-pricebook.json')!r})
 mod.TEMPLATE_DIR = pathlib.Path({str(env_dir / 'templates')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
 sys.exit(mod.main())

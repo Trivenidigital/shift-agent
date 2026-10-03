@@ -608,7 +608,13 @@ def _to_owner(sb: _Sandbox, since: int) -> list[dict]:
 # 1. Seed: menu + a NON-placeholder pricebook (the real import script).
 # ═════════════════════════════════════════════════════════════════════════════
 def test_01_seed_menu_and_pricebook(sb: _Sandbox):
-    sb.menu.write_text(MENU_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+    # Synthetic owner-confirmed servings for this success-path rehearsal.
+    # The historical golden menu and live menu contain no such confirmation;
+    # production must refuse automatic sizing until the owner supplies it.
+    menu_fixture = json.loads(MENU_FIXTURE.read_text(encoding="utf-8"))
+    for item in menu_fixture["items"]:
+        item["serves"] = 10
+    sb.menu.write_text(json.dumps(menu_fixture), encoding="utf-8")
 
     # Commit the two add-on items commercially via item_price_overrides (same
     # cents as the menu). Menu-sourced lines honestly price "estimated"; the
@@ -1088,8 +1094,11 @@ def test_09_owner_approval_sends_the_governed_quote_once(sb: _Sandbox):
     assert len(cust) == 1, f"exactly one customer quote send, got {len(cust)}"
     quote = cust[0]["message"]
     assert "valid until" in quote, f"the quote must state its validity window:\n{quote}"
-    assert str(_lead(sb, sb.lead_id)["quote_total_usd"]) in quote, (
-        f"the delivered quote must carry the persisted total:\n{quote}")
+    # Delivery must preserve the independently computed cents, not the legacy
+    # rounded whole-dollar field used by older lead readers.
+    expected_money = f"${sb.expected_total_cents // 100:,}.{sb.expected_total_cents % 100:02d}"
+    assert f"Total: {expected_money}" in quote, (
+        f"the delivered quote must carry the exact approved total:\n{quote}")
     assert str(FINAL_HEADCOUNT) in quote, f"the amended headcount must appear:\n{quote}"
 
     lead = _lead(sb, sb.lead_id)

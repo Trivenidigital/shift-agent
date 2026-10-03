@@ -97,10 +97,55 @@ _KERNEL_DERIVED_FLAGS = (
     FLAG_DISCOUNT_NEEDS_CODE,
 )
 
+# Flags that mean "the kernel could not resolve a number here". Every one of
+# them is emitted alongside price_status="pending_owner_review" by compute_quote,
+# so for a FRESH computation this list is redundant and changes nothing.
+#
+# It exists for STORED provenance. A CateringPricingInputs record is a frozen
+# copy, not a live computation: a hand-edited row, a partially migrated one, or
+# one written by an older finalize can carry a blocking flag next to a firmer
+# `price_status`. The two halves disagree and the FLAG is the honest half — it
+# names a specific number nobody could price. Deliverability therefore reads
+# BOTH, so a string compare alone can never wave such a record through.
+#
+# Deliberately narrower than _KERNEL_DERIVED_FLAGS: below_min_per_guest,
+# below_package_min_guests and discount_requires_owner_code are advisory (the
+# kernel leaves the status firm when they fire) and must not become send blocks.
+_DELIVERY_BLOCKING_FLAGS = (
+    FLAG_PLACEHOLDER_PRICEBOOK,
+    FLAG_MISSING_PRICE,
+    FLAG_MISSING_FEE_INPUT,
+)
+
 # CateringSelectedItem.qty is bounded at 500 by the state schema; a
 # headcount-scaled default basket clamps to it rather than emitting an
 # unpersistable quantity.
 MAX_LINE_QTY = 500
+
+
+def delivery_blocking_flags(flags: Any) -> list[str]:
+    """The subset of `flags` that on its own forbids showing this to a customer.
+
+    Matches both the bare flag and its `flag:<detail>` form (missing_price and
+    missing_fee_input always carry a detail suffix)."""
+    out = []
+    for f in flags or []:
+        s = str(f)
+        if any(s == b or s.startswith(b + ":") for b in _DELIVERY_BLOCKING_FLAGS):
+            out.append(s)
+    return out
+
+
+def status_is_deliverable(price_status: Any, flags: Any = ()) -> bool:
+    """May a quote with this status and these flags be shown to a customer?
+
+    THE single definition — QuoteComputation.is_deliverable() delegates here, and
+    callers holding stored CateringPricingInputs (which has no method of its own)
+    call it directly, so a lead's frozen provenance and a fresh computation are
+    judged by exactly the same rule."""
+    if price_status == "pending_owner_review":
+        return False
+    return not delivery_blocking_flags(flags)
 
 
 class PricingError(ValueError):
@@ -213,8 +258,11 @@ class QuoteComputation(BaseModel):
         """True iff this computation may be shown to a customer as pricing.
 
         False for a placeholder pricebook or any unresolved price — the hard
-        refusal the placeholder flag exists to drive."""
-        return self.price_status != "pending_owner_review"
+        refusal the placeholder flag exists to drive. Delegates to
+        `status_is_deliverable` so the same rule judges a stored
+        CateringPricingInputs record, which carries the same two fields and no
+        method of its own."""
+        return status_is_deliverable(self.price_status, self.flags)
 
     def total_per_guest_cents(self) -> int:
         return _round_half_up(Decimal(self.total_cents) / Decimal(self.guest_count))
@@ -704,6 +752,27 @@ def render_quote_lines(qc: QuoteComputation) -> str:
 
 
 # ── Headcount-scaled default basket (BL-CATER-03 fix) ────────────────────────
+def quantity_for_guests(guest_count: int, serves: Optional[int], *,
+                        require_confirmed: bool = False, item_name: str = "item") -> int:
+    """Shared servings arithmetic; selected options require confirmed units.
+
+    Legacy default baskets retain their one-per-guest fallback and bound. New
+    selected-option sizing refuses unknown portions and excessive quantities.
+    """
+    if not isinstance(guest_count, int) or isinstance(guest_count, bool) or guest_count < 1:
+        raise PricingError("Confirm the event headcount before selecting a menu option")
+    if require_confirmed and serves is None:
+        raise PricingError(
+            f"Confirm servings per priced unit for {item_name!r} in the menu "
+            "(per order/tray/person), then retry; or finalize explicit quantities")
+    quantity = math.ceil(guest_count / (serves or 1))
+    if require_confirmed and quantity > MAX_LINE_QTY:
+        raise PricingError(
+            f"{item_name!r} requires {quantity} units, above the {MAX_LINE_QTY} "
+            "unit limit; split the order or finalize explicit quantities")
+    return min(quantity, MAX_LINE_QTY)
+
+
 def default_basket(
     guest_count: int,
     pricebook: Optional[CateringPricebook],
@@ -745,8 +814,7 @@ def default_basket(
                      or (item.price_usd is not None and item.price_usd > 0))
         if not has_price:
             continue
-        serves = item.serves or 1
-        qty = min(math.ceil(guest_count / serves), MAX_LINE_QTY)
+        qty = quantity_for_guests(guest_count, item.serves)
         out.append((item.name, max(qty, 1)))
     return None, out
 

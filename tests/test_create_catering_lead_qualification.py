@@ -18,7 +18,7 @@ import json
 import os
 import sys
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -39,7 +39,10 @@ for _p in (SRC, SRC / "platform"):
 import catering_qualification as cq  # noqa: E402
 
 FULLY_QUALIFIED = {
-    "headcount": 120, "event_date": "2026-09-15", "event_type": "wedding",
+    "headcount": 120,
+    # Keep qualification fixtures ahead of the real past-date guard.
+    "event_date": (datetime.now(timezone.utc) + timedelta(days=90)).date().isoformat(),
+    "event_type": "wedding",
     "venue": "Grand Ballroom", "service_style": "buffet",
     "dietary_restrictions": ["veg"],
 }

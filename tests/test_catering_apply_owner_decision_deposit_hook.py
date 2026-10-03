@@ -25,6 +25,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from fixtures_fleet import build_catering_pricing_inputs, write_catering_pricebook
+
 
 pytestmark = pytest.mark.skipif(
     platform.system() == "Windows",
@@ -49,6 +51,10 @@ def isolated_state(tmp_path: Path) -> dict:
     leads_lock = state / "catering-leads.json.lock"
     log_path = logs / "decisions.log"
     config_path = tmp_path / "config.yaml"
+    # Ticket 0: no customer send without a real pricebook + deliverable
+    # provenance. This suite drives the script as a real subprocess, so the
+    # path arrives via the env override rather than a module attribute.
+    pricebook_path = write_catering_pricebook(state)
 
     env = {
         **os.environ,
@@ -56,6 +62,7 @@ def isolated_state(tmp_path: Path) -> dict:
         "SHIFT_AGENT_LEADS_PATH": str(leads_path),
         "SHIFT_AGENT_LEADS_LOCK": str(leads_lock),
         "SHIFT_AGENT_LOG_PATH": str(log_path),
+        "SHIFT_AGENT_CATERING_PRICEBOOK_PATH": str(pricebook_path),
         "COMMERCE_CARTS_PATH": str(commerce_state / "carts.json"),
         "COMMERCE_ORDERS_PATH": str(commerce_state / "orders.json"),
         "COMMERCE_INTENTS_PATH": str(commerce_state / "payment_intents.json"),
@@ -67,6 +74,7 @@ def isolated_state(tmp_path: Path) -> dict:
         "leads_path": leads_path,
         "log_path": log_path,
         "config_path": config_path,
+        "pricebook_path": pricebook_path,
         "commerce_state": commerce_state,
         "env": env,
     }
@@ -130,6 +138,10 @@ def _write_lead_awaiting_approval(leads_path: Path, code: str = "#A3F2X",
             "headcount": headcount,
             "event_date": "2026-06-15",
         },
+        "pricing_inputs": build_catering_pricing_inputs(
+            guest_count=headcount, total_usd=quote_total_usd,
+            items=[{"name": "Biryani", "qty": headcount,
+                    "price_usd": quote_total_usd // headcount}]),
     }
     leads_path.write_text(json.dumps({"leads": [lead]}, indent=2), encoding="utf-8")
     return lead["lead_id"]

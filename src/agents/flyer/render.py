@@ -1621,6 +1621,19 @@ def _poster_layout_requirements(project: FlyerProject, *, force_background_only:
                 "- Keep the visual language category-safe for the stated business type; avoid restaurant/grocery and cultural-celebration styling unless the customer explicitly asks for it."
                 f"{footer_safe_area}"
             )
+        if len(plan.items) == 1 and _typeset_contract_applies(project):
+            return (
+                "- Build a single-offer restaurant advertisement: one brand masthead, one campaign headline, "
+                "one appetizing hero food photograph, one item/price lockup, and the location/contact footer.\n"
+                "- The supplied item is the entire offer. Do not add menu lists, additional item cards, "
+                "or empty decorative menu rows. Any badge/row styling describes this ONE offer only.\n"
+                "- Keep the campaign headline in one place; never repeat it over the hero photograph.\n"
+                "- Pair the item name and price visibly in the single offer lockup; supporting food imagery stays unlabeled.\n"
+                "- Every pictorial food element, including small icons, must match the declared item. "
+                "Do not introduce unrelated dishes or food icons as decoration. Abstract ornamental flourishes are allowed.\n"
+                "- Use the available space for the hero photograph and readable copy, not unfilled template panels."
+                f"{footer_safe_area}"
+            )
         return (
             "- Build a full restaurant/menu poster with a premium/editorial restaurant-advertisement finish, not an ordinary menu template or background template.\n"
             "- Use product-specific close-up food imagery based on the listed menu items.\n"
@@ -2603,8 +2616,11 @@ def _resolve_style_directives(project: FlyerProject) -> tuple[str, str, str]:
     )
     typeset_section = (
         "TEXT TO RENDER - these numbered strings are the ONLY text allowed in the art; "
-        f"render each VERBATIM, spelled exactly:\n{sec1}\n\n"
+        f"render each EXACTLY ONCE, VERBATIM, spelled exactly:\n{sec1}\n\n"
         f"HOW TO SET EACH LINE (instructions for you - these words are NEVER painted):\n{sec2}"
+        + (f"\n\nCOPY COUNT: EXACTLY {len(items)} menu item(s). " if items else "\n\nCOPY COUNT: ")
+        + "Each declared headline appears once. "
+        "Do not repeat copy to fill space; no empty menu rows, cards, or unfilled placeholder panels."
         f"{uniform_discipline}"
     )
     vocab = ", ".join(vocab_entries)

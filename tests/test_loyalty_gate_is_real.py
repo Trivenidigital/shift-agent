@@ -43,17 +43,13 @@ SEND_BRIEF = REPO / "src" / "agents" / "daily_brief" / "scripts" / "send-daily-b
 
 def _load_send_brief(env_dir: Path):
     sys.path.insert(0, str(PLATFORM_DIR))
-    for _modname in ("schemas", "safe_io", "exit_codes", "log_source"):
-        _path = PLATFORM_DIR / f"{_modname}.py"
-        if not _path.exists():
-            continue
-        _loader = importlib.machinery.SourceFileLoader(_modname, str(_path))
-        _spec = importlib.util.spec_from_file_location(
-            _modname, str(_path), loader=_loader
+    # Preserve schema class identities shared by already-imported agents.
+    for modname in ("schemas", "safe_io", "exit_codes", "log_source"):
+        path = PLATFORM_DIR / f"{modname}.py"
+        mod = importlib.import_module(modname)
+        assert Path(mod.__file__).resolve() == path.resolve(), (
+            f"{modname} must come from the repository platform directory"
         )
-        _mod = importlib.util.module_from_spec(_spec)
-        sys.modules[_modname] = _mod
-        _spec.loader.exec_module(_mod)
 
     loader = importlib.machinery.SourceFileLoader("send_brief", str(SEND_BRIEF))
     spec = importlib.util.spec_from_file_location(

@@ -420,7 +420,7 @@ def activate_customer(
         target_plan = customer.plan_id
         if expected_plan != target_plan:
             return AccountResult(False, True, "", customer.customer_id, customer.status, detail="expected_plan_mismatch")
-    elif customer.status == "active" and customer.pending_plan_id:
+    elif customer.status in {"active", "trial"} and customer.pending_plan_id:
         target_plan = customer.pending_plan_id
         clearing_pending = True
         if expected_plan != target_plan:

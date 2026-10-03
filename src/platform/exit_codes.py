@@ -104,12 +104,16 @@ EXIT_FOLLOWUP_SUPPRESSED = 16
 # different discount.
 EXIT_PRICING_PROVENANCE_MISSING = 17
 
-# 18 — the price the customer would have received is not deliverable: its
-# price_status is "pending_owner_review" (placeholder pricebook, an unresolvable
-# item price, or a per-unit fee whose multiplier was never supplied). The kernel
-# has said the number is not a final quote, so the send is refused rather than
-# labelled and sent anyway. Distinct from EXIT_TRUTH_GUARD_FAILED (=11), which is
-# about the DRAFTED TEXT; this is about the NUMBER.
+# 18 — the price the customer would have received is not deliverable. Either the
+# kernel rated it "pending_owner_review" (placeholder pricebook, an unresolvable
+# item price, or a per-unit fee whose multiplier was never supplied), or there
+# was never a basis to rate it at all: no pricebook file on the configured path,
+# an unreadable one, or a lead carrying no CateringPricingInputs. Ticket 0 added
+# that second half — a MISSING pricebook used to fall through to the literal
+# "estimated" and send, which is strictly worse than the placeholder case this
+# code already refused. Refused BEFORE any state write, so the lead is untouched.
+# Distinct from EXIT_TRUTH_GUARD_FAILED (=11), which is about the DRAFTED TEXT;
+# this is about the NUMBER.
 EXIT_PRICE_PENDING_OWNER_REVIEW = 18
 
 # 19 — finalize-catering-menu was asked to price a per-person package for more

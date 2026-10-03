@@ -221,3 +221,62 @@ def build_catering_menu() -> dict:
             {"name": "Paneer Tikka", "unit": "tray"},
         ],
     }
+
+
+# ── catering pricebook + pricing provenance (Ticket 0 send gate) ─────────────
+# apply-catering-owner-decision refuses the customer send unless a real
+# (non-placeholder) pricebook exists on PRICEBOOK_PATH *and* the lead carries
+# deliverable CateringPricingInputs. Before that gate, a lead with no provenance
+# and no pricebook at all sent anyway — so every approve-path suite here seeded
+# neither. These two builders are the shared minimum that makes such a suite
+# exercise the SEND rather than the refusal; a suite that wants the refusal
+# omits one of them deliberately.
+def build_catering_pricebook(**over) -> dict:
+    """Minimal VALID, non-placeholder pricebook. `placeholder=True` for a seed
+    book the send gate must refuse."""
+    doc = {
+        "version": 1,
+        "effective_date": "2026-01-01",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "currency": "USD",
+        "placeholder": False,
+        "per_person_packages": [],
+        "fixed_fees": [],
+        "tax_rate_bps": 0,
+        "approved_discounts": [],
+        "item_price_overrides": {},
+        "notes": "",
+    }
+    doc.update(over)
+    return doc
+
+
+def write_catering_pricebook(state_dir: Path, **over) -> Path:
+    p = Path(state_dir) / "catering-pricebook.json"
+    p.write_text(json.dumps(build_catering_pricebook(**over)), encoding="utf-8")
+    return p
+
+
+def build_catering_pricing_inputs(*, guest_count: int = 50, total_usd: int = 400,
+                                  items: list[dict] | None = None,
+                                  price_status: str = "estimated",
+                                  flags: list[str] | None = None,
+                                  pricebook_version: int = 1) -> dict:
+    """The cents-exact commitment finalize freezes onto a lead — the provenance
+    the send gate requires. `items` are `{name, qty, price_usd}` (the
+    selected_items shape); omit for a single synthetic line worth `total_usd`."""
+    if items is None:
+        items = [{"name": "Veg Biryani", "qty": 1, "price_usd": total_usd}]
+    lines = [{"name": it["name"], "qty": it["qty"],
+              "unit_cents": int(it["price_usd"]) * 100} for it in items]
+    return {
+        "guest_count": guest_count,
+        "line_items": lines,
+        "fees": [],
+        "tax_rate_bps": 0,
+        "pricebook_version": pricebook_version,
+        "subtotal_cents": sum(l["unit_cents"] * l["qty"] for l in lines),
+        "total_cents": int(total_usd) * 100,
+        "price_status": price_status,
+        "flags": flags or [],
+    }

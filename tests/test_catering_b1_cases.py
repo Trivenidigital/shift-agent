@@ -35,6 +35,7 @@ pytestmark = pytest.mark.skipif(
 # pytest does not collect it). pytest puts the test file's directory on
 # sys.path before collection, so the bare import below resolves.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fixtures_fleet import build_catering_pricing_inputs  # noqa: E402
 from _b1_helpers import (  # noqa: E402
     BridgeStub, bridge_post_text, lookup_prior_leads_by_phone_helper,
     make_env_dir, mk_lead, read_audit_entries, read_leads,
@@ -66,6 +67,14 @@ def _mark_first_lead_finalized(env_dir: Path, selected_items: list[dict]) -> Non
     lead["status"] = "CUSTOMER_FINALIZED"
     lead["customer_finalized_at"] = datetime.now(timezone.utc).isoformat()
     lead["selected_items"] = selected_items
+    # Ticket 0: a CUSTOMER_FINALIZED lead carries the cents-exact provenance
+    # finalize freezes; without it the send gate refuses (never invent cents).
+    if selected_items:
+        lead["pricing_inputs"] = build_catering_pricing_inputs(
+            guest_count=(lead.get("extracted") or {}).get("headcount") or 1,
+            total_usd=int(sum(it["price_usd"] for it in selected_items)),
+            items=[{"name": it["name"], "qty": it["qty"],
+                    "price_usd": int(it["price_usd"])} for it in selected_items])
     (env_dir / "state" / "catering-leads.json").write_text(
         json.dumps(store),
         encoding="utf-8",

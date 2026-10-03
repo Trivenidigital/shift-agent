@@ -41,6 +41,8 @@ from typing import Optional
 
 import yaml
 
+from fixtures_fleet import write_catering_pricebook
+
 # Script paths (resolved from this file's location: tests/_b1_helpers.py -> repo root)
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 CREATE = _REPO_ROOT / "src" / "agents" / "catering" / "scripts" / "create-catering-lead"
@@ -94,6 +96,10 @@ def make_env_dir(tmp_path: Path, *, customer_tz: str = "America/New_York") -> Pa
         "catering": {"enabled": True},
     }
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    # Ticket 0: apply-catering-owner-decision refuses the customer send without a
+    # real (non-placeholder) pricebook on PRICEBOOK_PATH. The B1 cases are about
+    # lifecycle and identity, so the priced surface is made valid here.
+    write_catering_pricebook(tmp_path / "state")
     return tmp_path
 
 
@@ -172,6 +178,7 @@ mod.LEADS_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json')!r}
 mod.LEADS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json.lock')!r})
 mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
 mod.TEMPLATE_DIR = pathlib.Path({str(env_dir / 'templates')!r})
+mod.PRICEBOOK_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-pricebook.json')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
 
 if {use_now!r}:
@@ -250,6 +257,7 @@ mod.LEADS_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json')!r}
 mod.LEADS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json.lock')!r})
 mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
 mod.TEMPLATE_DIR = pathlib.Path({str(env_dir / 'templates')!r})
+mod.PRICEBOOK_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-pricebook.json')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
 {menu_override}
 

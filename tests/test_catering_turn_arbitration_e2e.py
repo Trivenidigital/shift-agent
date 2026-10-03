@@ -33,7 +33,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from fixtures_fleet import ensure_fcntl_stub, load_script, read_log_rows
+from fixtures_fleet import (
+    build_catering_pricing_inputs, ensure_fcntl_stub, load_script,
+    read_log_rows, write_catering_pricebook,
+)
 
 ensure_fcntl_stub()
 
@@ -67,6 +70,7 @@ class _Sandbox:
         self.proposals = self.state / "catering-proposals.json"
         self.menu = self.state / "catering-menu.json"
         self.log = self.logs / "decisions.log"
+        self.pricebook = self.state / "catering-pricebook.json"
 
 
 def _build_sandbox(root: Path) -> _Sandbox:
@@ -96,7 +100,16 @@ def _build_sandbox(root: Path) -> _Sandbox:
         "quote_text": "Seed quote pending owner review.", "owner_approval_code": "#GEMAZ",
     }]}
     sb.leads.write_text(json.dumps(leads, indent=2), encoding="utf-8")
-    sb.menu.write_text(MENU_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+    # Synthetic owner-confirmed units for this routing rehearsal; never infer
+    # these servings for the live menu, whose unknown units must refuse sizing.
+    menu = json.loads(MENU_FIXTURE.read_text(encoding="utf-8"))
+    for item in menu["items"]:
+        item["serves"] = 10
+    sb.menu.write_text(json.dumps(menu), encoding="utf-8")
+    # Ticket 0: apply-catering-owner-decision refuses the customer send without a
+    # real (non-placeholder) pricebook. These cells are about turn IDENTITY, so
+    # the priced surface is made valid rather than exercised.
+    write_catering_pricebook(sb.state)
     sb.proposals.write_text(json.dumps({"schema_version": 1, "next_sequence": 1, "sets": []}), encoding="utf-8")
     sb.log.write_text("", encoding="utf-8")
     return sb
@@ -629,6 +642,7 @@ def _run_apply_approve(sb: _Sandbox, module_name: str, code: str, logical_turn_i
     mod.LEADS_LOCK = Path(str(sb.leads) + ".lock")
     mod.LOG_PATH = sb.log
     mod.LEDGER_PATH = sb.state / "catering-quote-ledger.json"
+    mod.PRICEBOOK_PATH = sb.pricebook
     _wire_bridge(mod, [], "apply-owner-decision", ok=bridge_ok)
     argv = ["apply-catering-owner-decision", "--code", code, "--decision", "approve",
             "--sender-role", "owner", "--quote-from-lead-state",
@@ -649,6 +663,10 @@ def _seed_finalized_lead(sb: _Sandbox, lead_id: str, code: str) -> None:
                       "budget_hint_usd": None, "notes": "", "off_menu_items": []},
         "selected_items": [{"name": "Idly (3 PCS)", "qty": 40, "price_usd": 6}],
         "quote_total_usd": 240,
+        # Ticket 0: the send gate needs cents-exact provenance on the lead.
+        "pricing_inputs": build_catering_pricing_inputs(
+            guest_count=40, total_usd=240,
+            items=[{"name": "Idly (3 PCS)", "qty": 40, "price_usd": 6}]),
         "quote_text": "pending", "owner_approval_code": code,
     })
     sb.leads.write_text(json.dumps(leads), encoding="utf-8")
@@ -733,6 +751,7 @@ def test_quote_sent_lead_missing_divergence_row_carries_identity(tmp_path):
     mod.LEADS_LOCK = Path(str(sb.leads) + ".lock")
     mod.LOG_PATH = sb.log
     mod.LEDGER_PATH = sb.state / "catering-quote-ledger.json"
+    mod.PRICEBOOK_PATH = sb.pricebook
 
     def _bp_then_vanish(jid, message):
         # customer receives the quote, but the lead disappears before the re-load

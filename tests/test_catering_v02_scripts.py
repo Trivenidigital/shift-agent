@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from fixtures_fleet import build_catering_pricing_inputs, write_catering_pricebook
+
 pytestmark = pytest.mark.skipif(
     platform.system() == "Windows",
     reason="catering scripts depend on safe_io which uses fcntl (Linux only)",
@@ -85,6 +87,9 @@ def env_dir(tmp_path):
         "catering": {"enabled": True},
     }
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    # Ticket 0: apply-catering-owner-decision refuses the customer send without a
+    # real (non-placeholder) pricebook on PRICEBOOK_PATH.
+    write_catering_pricebook(state)
     return tmp_path
 
 
@@ -168,6 +173,7 @@ mod.LEADS_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json')!r}
 mod.LEADS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json.lock')!r})
 mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
 mod.TEMPLATE_DIR = pathlib.Path({str(env_dir / 'templates')!r})
+mod.PRICEBOOK_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-pricebook.json')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
 
 if {use_now_override!r}:
@@ -237,6 +243,7 @@ mod.LEADS_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json')!r}
 mod.LEADS_LOCK = pathlib.Path({str(env_dir / 'state' / 'catering-leads.json.lock')!r})
 mod.LOG_PATH = pathlib.Path({str(env_dir / 'logs' / 'decisions.log')!r})
 mod.TEMPLATE_DIR = pathlib.Path({str(env_dir / 'templates')!r})
+mod.PRICEBOOK_PATH = pathlib.Path({str(env_dir / 'state' / 'catering-pricebook.json')!r})
 mod.BRIDGE_URL = "http://127.0.0.1:{bridge_port}/send"
 sys.exit(mod.main())
 """
@@ -246,6 +253,23 @@ sys.exit(mod.main())
         capture_output=True, text=True, env=_env(env_dir, bridge_port),
         timeout=20,
     )
+
+
+def _grant_pricing_provenance(env_dir, code, *, total_usd=400):
+    """Ticket 0: freeze the cents-exact provenance finalize would have written.
+
+    create-catering-lead does not price a lead, and the send gate now refuses a
+    lead with none — so an approve-and-send cell has to say, explicitly, that
+    this lead WAS priced. Stated here rather than hidden in the runner: these
+    cells assert the send happens, and what makes it legal should be visible."""
+    p = env_dir / "state" / "catering-leads.json"
+    doc = json.loads(p.read_text())
+    for lead in doc.get("leads", []):
+        if lead.get("owner_approval_code") == code:
+            lead["pricing_inputs"] = build_catering_pricing_inputs(
+                guest_count=(lead.get("extracted") or {}).get("headcount") or 1,
+                total_usd=total_usd)
+    p.write_text(json.dumps(doc), encoding="utf-8")
 
 
 def _read_leads(env_dir):
@@ -366,7 +390,9 @@ def test_apply_approve_sends_quote_to_customer(env_dir, bridge_server):
     code = out1["approval_code"]
     assert len(_requests_to(BridgeStub.requests, "19045550100@s.whatsapp.net")) == 1  # owner card
 
-    # 2) Apply approve
+    # 2) Apply approve — the lead was priced through the kernel (Ticket 0: the
+    #    send gate refuses one that was not)
+    _grant_pricing_provenance(env_dir, code)
     r2 = _run_apply(env_dir, port, code, "approve")
     assert r2.returncode == 0, r2.stderr
     out2 = json.loads(r2.stdout.strip().splitlines()[-1])
@@ -438,8 +464,9 @@ def test_apply_double_approve_rejected(env_dir, bridge_server):
     port, _ = bridge_server
     r1 = _run_create(env_dir, port, {"headcount": 12})
     out1 = json.loads(r1.stdout.strip().splitlines()[-1])
+    _grant_pricing_provenance(env_dir, out1["approval_code"])
     r2 = _run_apply(env_dir, port, out1["approval_code"], "approve")
-    assert r2.returncode == 0
+    assert r2.returncode == 0, r2.stderr
     # Second approve — code now applies to a SENT_TO_CUSTOMER lead, not AWAITING_*
     r3 = _run_apply(env_dir, port, out1["approval_code"], "approve")
     assert r3.returncode == 4  # not found in AWAITING_OWNER_APPROVAL

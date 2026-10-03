@@ -380,7 +380,8 @@ def test_discount_on_approve_sends_the_recomputed_total_to_the_customer(
     assert _read_lead(env_dir)["status"] == "SENT_TO_CUSTOMER"
     sent = json.dumps(bridge_server.requests)
     assert "375" in sent, "the customer must read the discounted total"
-    assert "$400" not in sent, "the pre-discount total must not survive in the text"
+    assert "Total: $375.00" in sent
+    assert "Total: $400" not in sent, "the undiscounted amount may be a subtotal only"
 
 
 def test_approve_with_a_discount_commits_a_version(bridge_server, env_dir):
@@ -406,3 +407,127 @@ def test_a_lead_with_no_selected_items_cannot_be_discounted(bridge_server, env_d
     _seed_lead(env_dir, items=[])
     assert _run(env_dir, "--decision", "edit", "--edit-text", "x",
                 "--discount-id", "flat25") == 15
+
+
+# ── send gate: no customer price without real pricebook-backed provenance ───
+# Ticket 0. The gate is supposed to refuse a quote the kernel has not blessed,
+# but it only ever compared one string, and that string came from a fallback
+# that returns "estimated" when there is NO provenance at all. On the live box
+# no pricebook file exists and every approvable lead carries
+# `pricing_inputs: None`, so the gate passed on every real lead and a
+# customer-facing price labelled "estimated" — derived from a menu recompute
+# against a pricebook that does not exist — would have been sent.
+#
+# A MISSING pricebook must not behave better than a PLACEHOLDER one.
+
+def _read_audit(env_dir):
+    log_file = env_dir / "logs" / "decisions.log"
+    if not log_file.exists():
+        return []
+    return [json.loads(l) for l in log_file.read_text(encoding="utf-8").splitlines()
+            if l.strip()]
+
+
+def _refusal_row(env_dir):
+    rows = [r for r in _read_audit(env_dir)
+            if r["type"] == "catering_quote_skill_failed"]
+    return rows[-1] if rows else None
+
+
+def _assert_send_refused(env_dir, bridge_server, rc, *, reason_fragment):
+    """WITNESS the refusal: rc alone proves nothing about what ran."""
+    assert rc == 18, f"expected EXIT_PRICE_PENDING_OWNER_REVIEW, got {rc}"
+    # the send seam was never reached
+    assert bridge_server.requests == []
+    # the lead never moved toward SENT_TO_CUSTOMER
+    lead = _read_lead(env_dir)
+    assert lead["status"] == "CUSTOMER_FINALIZED"
+    assert lead.get("quote_valid_until") is None
+    # nothing downstream was told the lead advanced
+    types_ = {r["type"] for r in _read_audit(env_dir)}
+    assert "catering_lead_status_change" not in types_
+    assert "catering_quote_sent" not in types_
+    assert _ledger(env_dir) == []
+    # and the refusal names WHY, not just that it happened
+    row = _refusal_row(env_dir)
+    assert row is not None, "no catering_quote_skill_failed row was written"
+    assert row["reason"] == "price_pending_owner_review"
+    assert reason_fragment in row["detail"], row["detail"]
+
+
+def test_approve_refuses_when_the_pricebook_file_does_not_exist(bridge_server, env_dir):
+    """The live-box case: no pricebook on disk at all. The old gate read
+    `pricing_inputs.price_status` == "estimated" and sent."""
+    _seed_lead(env_dir)
+    (env_dir / "state" / "catering-pricebook.json").unlink()
+    rc = _run(env_dir, "--decision", "approve", "--quote-from-lead-state")
+    _assert_send_refused(env_dir, bridge_server, rc, reason_fragment="missing_pricebook")
+
+
+def test_approve_refuses_when_the_pricebook_file_is_unreadable(bridge_server, env_dir):
+    """A corrupt book is not a licence to fall back to no book."""
+    _seed_lead(env_dir)
+    (env_dir / "state" / "catering-pricebook.json").write_text("{not json", encoding="utf-8")
+    rc = _run(env_dir, "--decision", "approve", "--quote-from-lead-state")
+    _assert_send_refused(env_dir, bridge_server, rc, reason_fragment="unreadable_pricebook")
+
+
+def test_approve_refuses_on_a_placeholder_pricebook(bridge_server, env_dir):
+    """Pre-existing exit-18 behaviour, pinned: the kernel already rated this
+    lead pending_owner_review and the gate already refused it."""
+    (env_dir / "state" / "catering-pricebook.json").write_text(
+        json.dumps(_pricebook(placeholder=True)), encoding="utf-8")
+    _seed_lead(env_dir, price_status="pending_owner_review",
+               flags=["placeholder_pricebook"])
+    rc = _run(env_dir, "--decision", "approve", "--quote-from-lead-state")
+    _assert_send_refused(env_dir, bridge_server, rc,
+                         reason_fragment="placeholder_pricebook")
+
+
+def test_a_placeholder_pricebook_refuses_even_when_the_lead_looks_priced(
+    bridge_server, env_dir,
+):
+    """Frozen provenance is a record, not a warrant. A lead whose stored
+    price_status says "estimated" is still un-sendable while the only pricebook
+    in existence is seed data."""
+    (env_dir / "state" / "catering-pricebook.json").write_text(
+        json.dumps(_pricebook(placeholder=True)), encoding="utf-8")
+    _seed_lead(env_dir, price_status="estimated")
+    rc = _run(env_dir, "--decision", "approve", "--quote-from-lead-state")
+    _assert_send_refused(env_dir, bridge_server, rc,
+                         reason_fragment="placeholder_pricebook")
+
+
+def test_approve_refuses_a_lead_with_no_pricing_provenance(bridge_server, env_dir):
+    """A real book exists, but this lead was never priced through the kernel.
+    There is no basis for a number, so no number goes to a customer — the
+    script must never invent cents from whole-dollar selected_items."""
+    _seed_lead(env_dir, pricing_inputs=None)
+    rc = _run(env_dir, "--decision", "approve", "--quote-from-lead-state")
+    _assert_send_refused(env_dir, bridge_server, rc,
+                         reason_fragment="missing_pricing_provenance")
+
+
+def test_approve_refuses_when_provenance_flags_block_delivery(bridge_server, env_dir):
+    """is_deliverable(), not a string compare. A stored record can carry
+    price_status "estimated" alongside a flag that the kernel would only ever
+    have emitted with pending_owner_review — a hand-edited or partially
+    migrated row. The blocking flag wins."""
+    _seed_lead(env_dir, price_status="estimated",
+               flags=["missing_price:Paneer Tikka"])
+    rc = _run(env_dir, "--decision", "approve", "--quote-from-lead-state")
+    _assert_send_refused(env_dir, bridge_server, rc,
+                         reason_fragment="missing_price:Paneer Tikka")
+
+
+def test_approve_proceeds_on_a_real_pricebook_with_deliverable_provenance(
+    bridge_server, env_dir,
+):
+    """The gate must not be a brick wall: a non-placeholder pricebook plus
+    kernel-frozen, deliverable provenance sends exactly as before."""
+    _seed_lead(env_dir)
+    rc = _run(env_dir, "--decision", "approve", "--quote-from-lead-state")
+    assert rc == 0
+    assert _read_lead(env_dir)["status"] == "SENT_TO_CUSTOMER"
+    assert len(bridge_server.requests) == 1
+    assert _refusal_row(env_dir) is None
