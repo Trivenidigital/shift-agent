@@ -9164,3 +9164,35 @@ def test_ab_matrix_never_widens_a_genuinely_ambiguous_cell(tmp_path, monkeypatch
     for phone, chat_id in [(CUST_PHONE, ""), (CUST_PHONE, "99999999999999@lid"),
                            (CUST_PHONE, CUST_LID), (None, "")]:
         assert actions.find_flyer_customer_by_sender(phone, chat_id) is None, (phone, chat_id)
+
+
+@pytest.mark.parametrize("brief", [
+    "Create a new flyer for Lakshmi's Kitchen. Business name: Lakshmi's Kitchen. Business address: 90 Brybar Dr St Johns FL. Vegetable Biryani $9.99.",
+    "Create a new restaurant flyer.\nBusiness name: Lakshmi's Kitchen\nBusiness address: 90 Brybar Dr St Johns FL\nVegetable Biryani $9.99.",
+])
+def test_new_flyer_factual_business_labels_are_not_account_changes(brief):
+    actions = _load_actions()
+    assert actions.is_strong_new_flyer_request(brief)
+    assert not actions.is_flyer_regulated_account_intent(brief)
+
+
+@pytest.mark.parametrize("brief", [
+    "Create a new flyer. Save these details to my account; Business name: Cedar Kitchen.",
+    "Create a new flyer. Rename my business; Business name: Cedar Kitchen.",
+    "Create a new flyer. Refresh my profile; Business name: Cedar Kitchen.",
+    "Create a new flyer. Update my saved details; Business name: Cedar Kitchen.",
+    "Create a new flyer. Change my account details. Business address: 42 Cedar Lane.",
+    "Business name: Lakshmi's Kitchen",
+    "Business address: 90 Brybar Dr",
+    "Update business name: Lakshmi's Kitchen",
+    "Create a new flyer. Change my business address: 90 Brybar Dr.",
+    "Create a new flyer. Business name: I paid.",
+    "Create a new flyer. Business name: Lakshmi. I paid.",
+    "Create a new flyer. Business name: Lakshmi. Upgrade to Growth.",
+    "Create a new flyer. Business name: Lakshmi. Send me a payment link.",
+    "Create a new flyer. Business name: Lakshmi. Refund my payment.",
+    "Create a new flyer. Business address: Change my phone number.",
+    "Create a new flyer. Business name: Lakshmi. Do not update business WhatsApp.",
+])
+def test_new_flyer_factual_labels_do_not_hide_regulated_account_intents(brief):
+    assert _load_actions().is_flyer_regulated_account_intent(brief)
