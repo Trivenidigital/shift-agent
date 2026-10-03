@@ -275,3 +275,10 @@ Propagation requirement: gateway, cockpit and relevant long-running owner-action
 Recovered candidate full Linux suite: **10,137 passed,56skipped,193warnings in1130.97s; exit0**. All1,787snapshot files unchanged. Evidence: ../artifacts/release-suite.log,release-suite.exit,final-source-integrity.json. Governance and skill manifest pass. Staged39files match worktree bytes;11files differ from recovered bytes only by Git-required LF normalization. Existing source/test bytes match the verified frozen input after that normalization; no runtime behavior changed while tests ran.
 
 The canonical tarball builder will use --skip-pytest after this complete exact-source gate to avoid repeating the same18-minute suite; its skill-manifest check remains mandatory. Linux clone from the actual release commit preserves executable modes. Every packaged file byte and executable mode must match its Git blob before shipping.
+
+
+### CI dependency correction
+
+The local full suite passed, but PR send-path CI failed one of 6,488 tests: the repaired Expense fixture imported optional Pillow, while that CI job deliberately installs only pytest, Pydantic and YAML. Replace only fixture generation with identical valid JPEG bytes using the standard library; retain actual image validation and all orphan/audit assertions. No production code or CI dependency change. Verify both with and without Pillow, then rerun CI before merge/deploy.
+
+Fixture verification: 4 tests passed with Pillow and the same 4 passed without Pillow in isolated Linux containers. CI failure retained; the original 10,137-test local full result remains evidence for the runtime candidate, followed by this test-only correction.
