@@ -282,3 +282,25 @@ The canonical tarball builder will use --skip-pytest after this complete exact-s
 The local full suite passed, but PR send-path CI failed one of 6,488 tests: the repaired Expense fixture imported optional Pillow, while that CI job deliberately installs only pytest, Pydantic and YAML. Replace only fixture generation with identical valid JPEG bytes using the standard library; retain actual image validation and all orphan/audit assertions. No production code or CI dependency change. Verify both with and without Pillow, then rerun CI before merge/deploy.
 
 Fixture verification: 4 tests passed with Pillow and the same 4 passed without Pillow in isolated Linux containers. CI failure retained; the original 10,137-test local full result remains evidence for the runtime candidate, followed by this test-only correction.
+
+
+### Authorized deployment completed — 2026-10-03
+
+PR #796 passed all eight checks and was squash-merged to main commit 0ea5af389a4625fd31f529cb9f87bb6064b77840. Canonical tarball SHA256 f258949763dfe88b841ee63ade2893ba01f57fb0b9cdc89633380802148aa807; all 421 packaged file bytes and executable modes match Git. Remote checksum verified before extraction. Existing staged deploy completed as deploy-20261003-004544-0ea5af38 with all smoke checks passing; DEPLOY_RECEIPT.json confirms the full commit. No pin override or Hermes/bridge upgrade.
+
+Postdeploy gateway, cockpit and owner-action watchdog active; bridge connected with queue zero; pilot-readiness-check passed17/17. All three processes have the scoped automation settings, owner forwarding remains off, and catering-followup-sweep.timer remains disabled. Installed closure gate proved76 flat runtime modules byte-identical and80 dependency imports current. Prior rollback retained.
+
+Controlled STOP/RESUME simulation used real normal WhatsApp acknowledgements to the verified US number, with zero intervening suppression sends and final conversation mode active. This does not prove genuine handset ingress or customer-authored approval. Catering serving quantities remain unconfirmed, and self-owner WhatsApp approval remains blocked; use the existing OTP-protected owner cockpit for supervised approval.
+
+New runtime finding: linked SQLite3.50.4 warning on existing Hermes WAL databases. Investigating supported dependency remedy separately; no blind Hermes upgrade or live journal-mode change.
+
+
+### Reproduced postdeploy brief routing gap
+
+The normal public router rejected an explicit NEW fictional test brief because factual Business name: metadata matched the existing account guard before generation. F0226 unchanged; no new project/render. Planned narrow fix: retain exact account-command precedence; only for explicit strong NEW requests remove standalone declarative Business name:/Business address: label tokens from matching, preserve their values, then apply every existing account/payment guard. Reuse existing cf-router functions/store/locked-fact/approval/render/send workflow; no new primitive or subsystem. Shared impact: routing correction for Flyer, retaining account protection and Catering priority. Existing Capability Reuse Maps and Hermes-first analysis remain applicable. Validate recorded/newline briefs plus mixed payment/mutation cases; independent safety review; normal CI and canonical redeploy. User's existing approval covers fixing reproduced launch blockers.
+
+Independent review found two mixed account-update phrases could lose the label guard. Both added regressions failed; label exclusion now applies only without change/update/set/edit/modify/replace/remove/delete verbs anywhere. This deliberately preserves existing conservative handling for briefs mixed with editing/account instructions. Plain brief live rehearsal generated F0227 and bridge-confirmed preview3EB0404DC25A3350A29EA1; approved test headline and profile facts visually inspected, separate simulated approval pending.
+
+Final conservative condition additionally preserves guard for save/rename/store/remember/overwrite/reset and account/profile/settings/details/saved contexts. Three further reviewer cases reproduced failing and corrected. All415 router tests pass.
+
+F0227 rehearsal completed through public router: actual preview, visually inspected headline/item9.99/lockedfacts, separately quoted simulated APPROVE, all4normal final asset sends bridge-confirmed (WhatsApp image, Instagram post/story, PDF). F0226 unchanged. Inbound request and approval are explicitly simulated, not handset or organic evidence. Unlabeled raita in food photography accepted as accompaniment context, no extra offered/priced dish claim.

@@ -2086,12 +2086,12 @@ The user explicitly authorized commit, PR and deployment after checks, and contr
 The old checkout was removed externally. All 39 reviewed files were recovered byte-for-byte from the SHA-verified review bundle into branch codex/catering-flyer-release-20261002. Original checkout remains untouched. Fresh full-suite verification runs from a frozen recovered snapshot.
 
 - [x] Restore and verify exact reviewed file hashes.
-- [ ] Complete fresh full tests, governance and independent release/runtime reviews.
-- [ ] Commit reviewed candidate; create/attach PR; complete required checks and authorized merge.
-- [ ] Build canonical tarball from clean reviewed main commit, verify source modes and artifact SHA.
-- [ ] Verify current deployed receipt, ancestry, idle queues, identities, flags and rollback target.
-- [ ] Deploy through existing staged tarball procedure; verify hashes, runtime and pilot-readiness gate.
-- [ ] Scope existing intake/STOP/takeover settings only after owner echo/reachability review. Shared gateway impact applies to all active agents; preserve nonpilot behavior or explicitly document any required restriction.
+- [x] Complete fresh full tests, governance and independent release/runtime reviews.
+- [x] Commit reviewed candidate; create/attach PR; complete required checks and authorized merge.
+- [x] Build canonical tarball from clean reviewed main commit, verify source modes and artifact SHA.
+- [x] Verify current deployed receipt, ancestry, idle queues, identities, flags and rollback target.
+- [x] Deploy through existing staged tarball procedure; verify hashes, runtime and pilot-readiness gate.
+- [x] Scope existing intake/STOP/takeover settings only after owner echo/reachability review. Shared gateway impact applies to all active agents; preserve nonpilot behavior or explicitly document any required restriction.
 - [ ] Exercise verified test identities through real approval and delivery; retain audit and transport evidence.
 - [ ] Report truthful product readiness; defer broad onboarding and automatic Catering sizing if facts remain unavailable.
 
@@ -2117,3 +2117,14 @@ Propagation requirement: gateway, cockpit and relevant long-running owner-action
 Recovered candidate full Linux suite: **10,137 passed,56skipped,193warnings in1130.97s; exit0**. All1,787snapshot files unchanged. Evidence: ../artifacts/release-suite.log,release-suite.exit,final-source-integrity.json. Governance and skill manifest pass. Staged39files match worktree bytes;11files differ from recovered bytes only by Git-required LF normalization. Existing source/test bytes match the verified frozen input after that normalization; no runtime behavior changed while tests ran.
 
 The canonical tarball builder will use --skip-pytest after this complete exact-source gate to avoid repeating the same18-minute suite; its skill-manifest check remains mandatory. Linux clone from the actual release commit preserves executable modes. Every packaged file byte and executable mode must match its Git blob before shipping.
+
+
+### Authorized deployment completed — 2026-10-03
+
+PR #796 passed all eight checks and was squash-merged to main commit 0ea5af389a4625fd31f529cb9f87bb6064b77840. Canonical tarball SHA256 f258949763dfe88b841ee63ade2893ba01f57fb0b9cdc89633380802148aa807; all 421 packaged file bytes and executable modes match Git. Remote checksum verified before extraction. Existing staged deploy completed as deploy-20261003-004544-0ea5af38 with all smoke checks passing; DEPLOY_RECEIPT.json confirms the full commit. No pin override or Hermes/bridge upgrade.
+
+Postdeploy gateway, cockpit and owner-action watchdog active; bridge connected with queue zero; pilot-readiness-check passed17/17. All three processes have the scoped automation settings, owner forwarding remains off, and catering-followup-sweep.timer remains disabled. Installed closure gate proved76 flat runtime modules byte-identical and80 dependency imports current. Prior rollback retained.
+
+Controlled STOP/RESUME simulation used real normal WhatsApp acknowledgements to the verified US number, with zero intervening suppression sends and final conversation mode active. This does not prove genuine handset ingress or customer-authored approval. Catering serving quantities remain unconfirmed, and self-owner WhatsApp approval remains blocked; use the existing OTP-protected owner cockpit for supervised approval.
+
+New runtime finding: linked SQLite3.50.4 warning on existing Hermes WAL databases. Investigating supported dependency remedy separately; no blind Hermes upgrade or live journal-mode change.

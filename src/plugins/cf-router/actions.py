@@ -6188,6 +6188,20 @@ def is_flyer_regulated_account_intent(text: str) -> bool:
         return True
     if not body:
         return False
+    if is_strong_new_flyer_request(body) and not re.search(
+        r"\b(?:change|update|set|edit|modify|replace|remove|delete|rename|save|store|"
+        r"remember|overwrite|reset|account|profile|settings|details|saved)\b",
+        body, re.IGNORECASE,
+    ):
+        # Only declarative NEW briefs may exclude factual business labels. Exclude only standalone
+        # label tokens; preserve values and every payment/account mutation check.
+        # "Update business name:" is not a standalone label and stays guarded.
+        body = re.sub(
+            r"(^|[.;\n])([ \t]*)business[ \t]+(?:name|address)[ \t]*:",
+            lambda match: match.group(1) + match.group(2),
+            body,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
     return bool(_FLYER_REGULATED_ACCOUNT_PATTERN.search(body) or _FLYER_REGULATED_PAYMENT_PATTERN.search(body))
 
 
