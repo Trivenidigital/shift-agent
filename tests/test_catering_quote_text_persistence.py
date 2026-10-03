@@ -23,7 +23,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from fixtures_fleet import ensure_fcntl_stub, load_script
+from fixtures_fleet import (
+    build_catering_pricing_inputs, ensure_fcntl_stub, load_script,
+    write_catering_pricebook,
+)
 
 ensure_fcntl_stub()
 
@@ -94,6 +97,9 @@ def env_dir(tmp_path):
         "catering": {"enabled": True, "proposal_validity_days": 14},
     }
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    # Ticket 0: no send without a real pricebook + deliverable provenance.
+    # This suite is about the TEXT, so the priced surface is made valid.
+    write_catering_pricebook(tmp_path / "state")
     return tmp_path
 
 
@@ -110,6 +116,9 @@ def _seed(env_dir, *, status="CUSTOMER_FINALIZED"):
         "selected_items": [{"name": "Veg Biryani", "qty": 4, "price_usd": 100}],
         "customer_finalized_at": "2026-07-25T11:00:00-04:00",
         "owner_approval_code": "#ABCDE",
+        "pricing_inputs": build_catering_pricing_inputs(
+            guest_count=50, total_usd=400,
+            items=[{"name": "Veg Biryani", "qty": 4, "price_usd": 100}]),
     }
     (env_dir / "state" / "catering-leads.json").write_text(
         json.dumps({"leads": [lead]}), encoding="utf-8")
@@ -131,6 +140,7 @@ def _run(env_dir, *argv, stdin_text=""):
     mod.LEADS_LOCK = env_dir / "state" / "catering-leads.json.lock"
     mod.LOG_PATH = env_dir / "logs" / "decisions.log"
     mod.LEDGER_PATH = env_dir / "state" / "catering-quote-ledger.json"
+    mod.PRICEBOOK_PATH = env_dir / "state" / "catering-pricebook.json"
     old_argv, old_stdin = sys.argv, sys.stdin
     sys.argv = ["apply-catering-owner-decision", "--code", "#ABCDE",
                 "--sender-role", "owner", *argv]
@@ -192,6 +202,24 @@ def test_the_persisted_quote_states_its_validity_period(bridge_server, env_dir):
     _seed(env_dir)
     _run(env_dir, "--decision", "approve", "--quote-from-lead-state")
     assert "valid until" in _read_lead(env_dir)["quote_text"]
+
+
+def test_long_committed_quote_keeps_all_items_and_total(bridge_server, env_dir):
+    _seed(env_dir)
+    path = env_dir / "state" / "catering-leads.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    items = [{"name": f"Dish {i} " + "special " * 12, "qty": 1, "unit_cents": 4000}
+             for i in range(10)]
+    doc["leads"][0]["pricing_inputs"]["line_items"] = items
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    assert _run(env_dir, "--decision", "approve", "--quote-from-lead-state") == 0
+    text = _read_lead(env_dir)["quote_text"]
+    assert len(text) > 600
+    for item in items:
+        assert item["name"].strip() in text
+    assert "Total: $400.00" in text
+    assert "2026-09-15" in text
+    assert _sent_bodies(bridge_server)[-1].endswith(text)
 
 
 # ── the failure and no-send paths ───────────────────────────────────────────

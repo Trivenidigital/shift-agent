@@ -242,8 +242,14 @@ def run_finalize(env, *cli, message_id="m1"):
                          "--customer-message-id", message_id, *cli])
 
 
-def run_apply(env, *cli, stdin_text=""):
+def run_apply(env, *cli, stdin_text="", now=None):
     mod = _bind_paths(load_script("mb_apply", APPLY), env)
+    if now is not None:
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now.astimezone(tz) if tz is not None else now.replace(tzinfo=None)
+        mod.datetime = FixedDatetime
     return _invoke(mod, ["apply-catering-owner-decision", "--code", CODE,
                          "--sender-role", "owner", *cli], stdin_text=stdin_text)
 
@@ -506,6 +512,91 @@ def test_a_deliverable_quote_is_still_sent(bridge, env):
     assert read_lead(env)["status"] == "SENT_TO_CUSTOMER"
 
 
+def test_customer_quote_uses_frozen_cents_and_includes_package(bridge, env):
+    seed_lead(env)
+    assert run_finalize(env, *PACKAGE_LEAD)[0] == 0
+    inputs = read_lead(env)["pricing_inputs"]
+    assert inputs["total_cents"] == 402690
+    assert run_apply(env, "--decision", "approve", "--quote-from-lead-state")[0] == 0
+    text = sent_text(bridge)
+    assert "Total: $4,026.90" in text
+    assert inputs["package_name"] in text
+    assert pricing.format_cents(inputs["package_price_per_person_cents"]) in text
+
+
+@pytest.mark.parametrize("invented", ["Total: $1.", "The entire booking costs one dollar."])
+def test_drafted_money_cannot_override_frozen_quote(bridge, env, invented):
+    seed_lead(env)
+    assert run_finalize(env, *PACKAGE_LEAD)[0] == 0
+    rc, _ = run_apply(env, "--decision", "approve", "--quote-text-stdin",
+                      stdin_text=f"Event 2026-08-15 for 200 guests. {invented}")
+    assert rc == 0
+    text = sent_text(bridge)
+    assert invented not in text
+    assert "Total: $4,026.90" in text
+    assert any(read_lead(env)["quote_text"] in row.get("message", "")
+               for row in bridge.requests if row.get("chatId") == CUSTOMER_JID)
+
+
+def test_discount_customer_quote_preserves_computed_cents(bridge, env):
+    seed_lead(env)
+    assert run_finalize(env, *PACKAGE_LEAD)[0] == 0
+    inputs = pricing.CateringPricingInputs.model_validate(read_lead(env)["pricing_inputs"])
+    book = pricing.load_pricebook(env / "state" / "catering-pricebook.json")
+    expected = pricing.recompute_from_inputs(inputs, pricebook=book, discount_id="festival-flat")
+    assert run_apply(env, "--decision", "approve", "--quote-from-lead-state",
+                     "--discount-id", "festival-flat")[0] == 0
+    assert f"Total: {pricing.format_cents(expected.total_cents)}" in sent_text(bridge)
+
+
+@pytest.mark.parametrize("discount_cents", [7500, 1])
+def test_discounted_quote_retry_preserves_the_approved_text(
+    bridge, env, monkeypatch, discount_cents,
+):
+    write_pricebook(env, lambda pb: next(
+        d for d in pb["approved_discounts"] if d["id"] == "festival-flat"
+    ).update(value=discount_cents))
+    seed_lead(env)
+    assert run_finalize(env, *PACKAGE_LEAD)[0] == 0
+    with monkeypatch.context() as offline:
+        offline.setenv("HERMES_BRIDGE_URL", DEAD_BRIDGE_URL)
+        offline.setattr(safe_io, "BRIDGE_URL", DEAD_BRIDGE_URL)
+        assert run_apply(env, "--decision", "approve", "--quote-from-lead-state",
+                         "--discount-id", "festival-flat")[0] == 6
+    approved_text = read_lead(env)["quote_text"]
+    assert "Discount (Festival flat discount)" in approved_text
+    assert run_apply(env, "--decision", "approve", "--quote-from-lead-state")[0] == 18
+    assert read_lead(env)["quote_text"] == approved_text
+    assert run_apply(env, "--decision", "approve", "--quote-from-lead-state",
+                     "--discount-id", "festival-flat")[0] == 0
+    assert read_lead(env)["quote_text"] == approved_text
+    assert any(row.get("message", "").endswith(approved_text)
+               for row in bridge.requests if row.get("chatId") == CUSTOMER_JID)
+
+
+@pytest.mark.parametrize("retry_at,expected_rc", [
+    (datetime(2026, 10, 1, 23, 59, 30, tzinfo=timezone.utc), 0),
+    (datetime(2026, 10, 2, 0, 1, tzinfo=timezone.utc), 0),
+    (datetime(2026, 10, 20, tzinfo=timezone.utc), 18),
+])
+def test_failed_retry_never_renews_quote_validity(bridge, env, monkeypatch, retry_at, expected_rc):
+    seed_lead(env)
+    assert run_finalize(env, *PACKAGE_LEAD)[0] == 0
+    with monkeypatch.context() as offline:
+        offline.setenv("HERMES_BRIDGE_URL", DEAD_BRIDGE_URL)
+        offline.setattr(safe_io, "BRIDGE_URL", DEAD_BRIDGE_URL)
+        assert run_apply(env, "--decision", "approve", "--quote-from-lead-state",
+                         now=datetime(2026, 10, 1, 23, 59, tzinfo=timezone.utc))[0] == 6
+    before = read_lead(env)
+    customer_sends_before = sum(row.get("chatId") == CUSTOMER_JID for row in bridge.requests)
+    assert run_apply(env, "--decision", "approve", "--quote-from-lead-state", now=retry_at)[0] == expected_rc
+    after = read_lead(env)
+    assert after["quote_text"] == before["quote_text"]
+    assert after["quote_valid_until"] == before["quote_valid_until"]
+    if expected_rc:
+        assert sum(row.get("chatId") == CUSTOMER_JID for row in bridge.requests) == customer_sends_before
+
+
 # ── HIGH 4 — every priced customer message states how firm the price is ──────
 def test_the_server_rendered_quote_carries_the_price_status_label(bridge, env):
     seed_lead(env)
@@ -516,14 +607,22 @@ def test_the_server_rendered_quote_carries_the_price_status_label(bridge, env):
 
 def test_an_owner_drafted_quote_carries_the_label_too(bridge, env):
     """The stdin path emitted a bare "Total: $X". An owner's prose is not a
-    kernel computation, so it floors at "estimated" — but it is still labelled."""
-    seed_lead(env, status="CUSTOMER_FINALIZED",
-              quote_text="Quote for L0001", quote_total_usd=4027,
-              customer_finalized_at="2026-07-30T11:00:00Z",
-              selected_items=[{"name": "Gulab Jamun", "qty": 10, "price_usd": 5}])
+    kernel computation, so the label it carries is the one frozen at finalize —
+    here a Menu retail price with no pricebook override, which floors at
+    "estimated" rather than claiming "exact".
+
+    Ticket 0: this cell used to seed a CUSTOMER_FINALIZED lead directly, with no
+    pricing_inputs at all, and the send went through on a hardcoded "estimated"
+    fallback. That fallback is gone — an owner's prose is still not a kernel
+    computation, but the LEAD must have been priced by one."""
+    seed_lead(env)
+    assert run_finalize(
+        env, "--selected-items-json",
+        '[{"name":"Paneer Tikka","qty":10,"price_usd":12}]',
+        "--quote-total-usd", "120")[0] == 0
     rc, _ = run_apply(
         env, "--decision", "approve", "--quote-text-stdin",
-        stdin_text="For your event on 2026-08-15 for 200 guests. Total: $4027.")
+        stdin_text="For your event on 2026-08-15 for 200 guests. Total: $120.")
     assert rc == 0
     assert "Price status: estimated" in sent_text(bridge)
 
@@ -538,7 +637,7 @@ def test_the_label_reflects_the_discounted_recompute(bridge, env):
     # The discount comes off the SUBTOTAL and the tax is recomputed on what is
     # left, so it is not $75 off the taxed total:
     #   372000 - 7500 = 364500c taxable -> tax 30071c -> 394571c = $3,945.71
-    assert "3946" in body
+    assert "Total: $3,945.71" in body
 
 
 # ── MEDIUM 5 — a package cannot be quoted above the per-line quantity bound ──

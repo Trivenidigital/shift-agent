@@ -23,7 +23,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from fixtures_fleet import ensure_fcntl_stub, load_script
+from fixtures_fleet import (
+    build_catering_pricing_inputs, ensure_fcntl_stub, load_script,
+    write_catering_pricebook,
+)
 
 ensure_fcntl_stub()
 
@@ -93,6 +96,10 @@ def env_dir(tmp_path):
         "catering": {"enabled": True},
     }
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    # Ticket 0: the send gate refuses without a real pricebook. A hold test is
+    # about the HOLD, so the priced surface is made valid here and the
+    # unhappy pricing paths are pinned in test_catering_owner_discount.py.
+    write_catering_pricebook(tmp_path / "state")
     return tmp_path
 
 
@@ -113,6 +120,7 @@ def _seed_lead(env_dir, *, on_hold=False, hold_reason=None):
         "quote_version": 0, "owner_approval_code": "#ABCDE",
         "customer_replied": False,
         "customer_finalized_at": "2026-07-30T11:00:00-04:00",
+        "pricing_inputs": build_catering_pricing_inputs(guest_count=50, total_usd=400),
         "on_hold": on_hold, "hold_reason": hold_reason,
         "hold_set_at": "2026-07-30T12:00:00-04:00" if on_hold else None,
     }
@@ -147,6 +155,7 @@ def _run_apply(env_dir, monkeypatch, *, decision="approve", quote_text=""):
     mod.LEADS_PATH = env_dir / "state" / "catering-leads.json"
     mod.LEADS_LOCK = env_dir / "state" / "catering-leads.json.lock"
     mod.LOG_PATH = env_dir / "logs" / "decisions.log"
+    mod.PRICEBOOK_PATH = env_dir / "state" / "catering-pricebook.json"
 
     argv = ["apply-catering-owner-decision", "--code", "#ABCDE",
             "--decision", decision, "--sender-role", "owner"]

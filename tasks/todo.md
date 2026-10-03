@@ -2056,3 +2056,64 @@ Review/verification:
 - Fix: commits `022d2563` and `a95198fd` now apply fully opaque masks to the shared-price reference overlay's left content column and bottom/footer deck, mirrored in the embedded fallback renderer.
 - Verification: focused renderer tests passed (`3 passed`), syntax/diff checks passed, broader flyer regression gate passed (`837 passed, 19 warnings`), and the full deploy builder passed (`3569 passed, 894 skipped, 67 warnings`).
 - Deploy/send: `a95198fd` is live as `deploy-20260613-190657-a95198fd`; services are active and cockpit health returned HTTP 200. Regenerated `F0155` as asset `A0006` (`sha256=1392485bfb4bc03f75e978fad9be1bf532d61400e71b24aea74ce495e62a43d8`), copied raw preview to `C:\Testing\F0155-opaque-mask-a95198f.png`, visually inspected it, and sent it to `201975216009469@lid` with outbound message `3EB03378662B769496F8DB` at `2026-06-13T19:10:34Z`.
+
+
+# Overnight Catering and Flyer readiness
+
+Plan: [catering-flyer-launch-plan.md](catering-flyer-launch-plan.md)
+
+- [x] Review Claude analysis with independent Catering, Flyer and scope reviewers.
+- [x] Isolate checkout; preserve pending Catering changes.
+- [x] Initial runtime check: gateway active, setup check 17/17; bridge disconnected.
+- [x] Diagnose and address transport blocker (existing restart recovered connection).
+- [x] Repair and test Flyer trial paid activation.
+- [x] Validate Catering pricing/approval source path (117 Linux tests; live owner rehearsal pending).
+- [x] Rehearse Catering offline journey and correct selected-option quantities (276 affected tests; synthetic serving facts labeled).
+- [x] Inspect a funded candidate Flyer preview and all four final formats; verify QA and preserve rejected attempts.
+- [ ] Complete live owner/customer approval and transport rehearsal with verified test identities.
+- [x] Independent safety and operational review of scoped code fixes.
+- [x] Prepare review bundle, review body, source snapshot and release evidence.
+- [x] Complete full-suite verification and readiness report: 10,137 passed, 56 skipped; all 1,787 snapshot files unchanged.
+
+## Review
+See [launch release record](catering-flyer-launch-release.md). Source candidate independently reviewed; full immutable Linux snapshot passed (10,137 passed, 56 skipped). Earlier focused results and test-fixture repairs are documented separately without summing overlapping counts. Funding verified and actual final artifacts inspected. Live owner identity, approved commercial menu facts, scoped controls and release authorization still required; no production-ready claim.
+
+
+## Authorized release continuation — 2026-10-02
+
+The user explicitly authorized commit, PR and deployment after checks, and controlled WhatsApp rehearsals with owner +918522041562 and customer +17329837841. Approval does not supply missing serving quantities. Reuse the six Capability Reuse Maps above. No new subsystem or architecture exception is proposed.
+
+The old checkout was removed externally. All 39 reviewed files were recovered byte-for-byte from the SHA-verified review bundle into branch codex/catering-flyer-release-20261002. Original checkout remains untouched. Fresh full-suite verification runs from a frozen recovered snapshot.
+
+- [x] Restore and verify exact reviewed file hashes.
+- [ ] Complete fresh full tests, governance and independent release/runtime reviews.
+- [ ] Commit reviewed candidate; create/attach PR; complete required checks and authorized merge.
+- [ ] Build canonical tarball from clean reviewed main commit, verify source modes and artifact SHA.
+- [ ] Verify current deployed receipt, ancestry, idle queues, identities, flags and rollback target.
+- [ ] Deploy through existing staged tarball procedure; verify hashes, runtime and pilot-readiness gate.
+- [ ] Scope existing intake/STOP/takeover settings only after owner echo/reachability review. Shared gateway impact applies to all active agents; preserve nonpilot behavior or explicitly document any required restriction.
+- [ ] Exercise verified test identities through real approval and delivery; retain audit and transport evidence.
+- [ ] Report truthful product readiness; defer broad onboarding and automatic Catering sizing if facts remain unavailable.
+
+
+### Live role correction and release review
+
+At 2026-10-02T23:51:37Z the user-designated customer phone was removed from owner.authorized_identities only. Backup: /opt/shift-agent/config.yaml.before-customer-role-20261002T235137Z. Schema validation passed before/after. identify-sender now returns owner-only for India and employee-only (no owner) for both US phone and its LID. Existing roster e008 was preserved; customer-path evidence will therefore be employee-as-customer, not stranger onboarding. Gateway cached settings will be reverified after the authorized deployment restart.
+
+Independent scope review: actual live receipt a98431f5 is an ancestor of candidate base98bf; intervening committed changes are audit docs and retirement of a LID-cache patch generator. Existing live Hermes pin gate passes with all overrides unset; do not use the stale July override. Prior deploy-20260902-015029-a98431f5.tgz is present for rollback.
+
+Owner forwarding remains disabled: review showed bot-mode outgoing chunks/media captions are not persistently marked, and recentlySentIds resets on restart. Enabling forwarding alone is unsafe. Existing OTP-protected cockpit owner decision is an alternative for a supervised Catering pilot; WhatsApp self-owner proof remains blocked.
+
+
+### Scoped configuration staged
+
+2026-10-02T23:54:02Z: existing master, STOP and takeover flags set to1 for only the two verified phones and their LIDs; FLYER_STYLE_REGISTERS_ALLOWLIST narrowed from* to the US customer phone/LID. Backup /root/.hermes/.env.before-pilot-controls-20261002T235402Z. Every other environment value preserved; env symlink unchanged; forwarding remains off. Independent reviewers verified matching and consuming paths. No new store/control implementation.
+
+Propagation requirement: gateway, cockpit and relevant long-running owner-action-watchdog processes retain old env until restart. Timer jobs load EnvironmentFile on next run; disabled follow-up timer stays disabled. Verify effective process env after source release. New typeset generation is scoped; duplicate-headline QA still checks existing artifacts bearing a typeset marker regardless of allowlist.
+
+
+### Fresh release gate passed
+
+Recovered candidate full Linux suite: **10,137 passed,56skipped,193warnings in1130.97s; exit0**. All1,787snapshot files unchanged. Evidence: ../artifacts/release-suite.log,release-suite.exit,final-source-integrity.json. Governance and skill manifest pass. Staged39files match worktree bytes;11files differ from recovered bytes only by Git-required LF normalization. Existing source/test bytes match the verified frozen input after that normalization; no runtime behavior changed while tests ran.
+
+The canonical tarball builder will use --skip-pytest after this complete exact-source gate to avoid repeating the same18-minute suite; its skill-manifest check remains mandatory. Linux clone from the actual release commit preserves executable modes. Every packaged file byte and executable mode must match its Git blob before shipping.

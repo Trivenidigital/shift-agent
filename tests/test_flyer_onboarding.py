@@ -2202,6 +2202,120 @@ def test_confirmation_summary_supports_direct_edits(tmp_path):
     assert store.customers[0].business_name == "New Name"
 
 
+@pytest.fixture
+def trial_with_requested_paid_plan(tmp_path):
+    state_path = tmp_path / "customers.json"
+    now = datetime(2026, 10, 2, tzinfo=timezone.utc)
+    customer = _trial_customer(
+        customer_id="CUST0001", business_name="Trial restaurant",
+        phone="+15550100001", now=now,
+    )
+    state_path.write_text(FlyerCustomerStore(customers=[customer]).model_dump_json(), encoding="utf-8")
+    for text in ("CHANGE PLAN Growth", "CONFIRM UPDATE"):
+        result = handle_account_command(
+            state_path=state_path, sender_phone="+15550100001", sender_role="customer",
+            chat_id="15550100001@s.whatsapp.net", text=text, now=now,
+        )
+        assert result.ok, result.detail
+    pending = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8")).customers[0]
+    assert (pending.status, pending.plan_id, pending.pending_plan_id) == ("trial", "trial", "growth")
+    return state_path, now
+
+
+def test_trial_paid_activation_uses_requested_plan_and_is_idempotent(trial_with_requested_paid_plan):
+    state_path, now = trial_with_requested_paid_plan
+    payment = dict(
+        state_path=state_path, customer_id="CUST0001", provider="manual",
+        payment_reference="manual-growth-paid", expected_plan="growth",
+        amount_cents=6999, currency="USD",
+    )
+    result = activate_customer(**payment, now=now)
+    assert result.ok, result.detail
+    active = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8")).customers[0]
+    assert (active.status, active.plan_id) == ("active", "growth")
+    assert active.pending_plan_id == active.pending_plan_checkout_url == active.pending_plan_payment_state == ""
+    assert active.pending_plan_requested_at is None
+    assert active.pending_plan_amount_cents is None
+    assert active.current_period_start == now
+    assert active.current_period_end == datetime(2026, 11, 2, tzinfo=timezone.utc)
+    assert len(active.payment_records) == 1
+    assert active.payment_records[0].plan_id == "growth"
+    assert active.payment_records[0].amount_cents == 6999
+    assert active.payment_records[0].currency == "USD"
+    saved = state_path.read_bytes()
+    replay = activate_customer(**payment, now=now + timedelta(days=1))
+    assert replay.ok, replay.detail
+    assert state_path.read_bytes() == saved  # No second payment or billing-period reset.
+    for changed in ({"expected_plan": "starter"}, {"amount_cents": 4999}, {"currency": "INR"}):
+        replay = activate_customer(**{**payment, **changed}, now=now)
+        assert not replay.ok
+        assert replay.detail == "payment_reference_replay_mismatch"
+        assert state_path.read_bytes() == saved
+
+
+@pytest.mark.parametrize("changed,detail", [
+    ({"expected_plan": "starter"}, "pending_plan_mismatch"),
+    ({"expected_plan": "trial", "amount_cents": 0}, "pending_plan_mismatch"),
+    ({"amount_cents": 4999}, "payment_not_confirmed"),
+    ({"currency": "INR"}, "currency_mismatch"),
+    ({"payment_reference": ""}, "payment_reference_required"),
+])
+def test_trial_paid_activation_rejects_wrong_payment_without_mutation(trial_with_requested_paid_plan, changed, detail):
+    state_path, now = trial_with_requested_paid_plan
+    saved = state_path.read_bytes()
+    result = activate_customer(**{
+        "state_path": state_path, "customer_id": "CUST0001", "provider": "manual",
+        "payment_reference": "manual-growth-paid", "expected_plan": "growth",
+        "amount_cents": 6999, "currency": "USD", "now": now, **changed,
+    })
+    assert not result.ok
+    assert result.detail == detail
+    assert state_path.read_bytes() == saved
+
+
+def test_trial_paid_activation_payment_reference_cannot_be_reused_by_another_customer(trial_with_requested_paid_plan):
+    state_path, now = trial_with_requested_paid_plan
+    payment = dict(
+        state_path=state_path, provider="manual", payment_reference="manual-growth-paid",
+        expected_plan="growth", amount_cents=6999, currency="USD", now=now,
+    )
+    result = activate_customer(customer_id="CUST0001", **payment)
+    assert result.ok, result.detail
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    other = _trial_customer(
+        customer_id="CUST0002", business_name="Other restaurant",
+        phone="+15550100002", now=now,
+    ).model_copy(update={"pending_plan_id": "growth"})
+    store.customers.append(other)
+    state_path.write_text(store.model_dump_json(), encoding="utf-8")
+    saved = state_path.read_bytes()
+    result = activate_customer(customer_id="CUST0002", **payment)
+    assert not result.ok
+    assert result.detail == "payment_reference_already_used"
+    assert state_path.read_bytes() == saved
+
+
+@pytest.mark.parametrize("status,pending_plan", [
+    ("trial", ""), ("suspended", "growth"), ("cancelled", "growth"),
+])
+def test_trial_paid_activation_still_requires_eligible_confirmed_request(trial_with_requested_paid_plan, status, pending_plan):
+    state_path, now = trial_with_requested_paid_plan
+    store = FlyerCustomerStore.model_validate_json(state_path.read_text(encoding="utf-8"))
+    store.customers[0] = store.customers[0].model_copy(update={
+        "status": status, "pending_plan_id": pending_plan,
+    })
+    state_path.write_text(store.model_dump_json(), encoding="utf-8")
+    saved = state_path.read_bytes()
+    result = activate_customer(
+        state_path=state_path, customer_id="CUST0001", provider="manual",
+        payment_reference="manual-growth-paid", expected_plan="growth",
+        amount_cents=6999, currency="USD", now=now,
+    )
+    assert not result.ok
+    assert result.detail == "no_pending_activation"
+    assert state_path.read_bytes() == saved
+
+
 def test_account_activation_is_idempotent_and_reference_unique(tmp_path):
     state_path = tmp_path / "customers.json"
     now = datetime(2026, 5, 15, tzinfo=timezone.utc)

@@ -1110,6 +1110,35 @@ def _near_duplicate_item_blockers(project: FlyerProject, raw_text: str) -> list[
     return blockers
 
 
+def _duplicate_headline_blockers(project: FlyerProject, raw_text: str, *, artifact_path) -> list[str]:
+    """Enforce the rendered typeset contract using exact OCR lines, not substrings.
+
+    Shared text in a different declared role may legitimately appear twice.
+    Legacy/reference layouts have no once-only contract and remain unchanged.
+    """
+    if not _typeset_marker_applies(artifact_path):
+        return []
+
+    def normalized(value: str) -> str:
+        return re.sub(r"[\W_]+", " ", value.casefold()).strip()
+
+    headline_ids = {"campaign_title", "headline"}
+    other_values = {normalized(str(f.value or "")) for f in project.locked_facts
+                    if f.fact_id not in headline_ids}
+    lines = [normalized(line) for line in raw_text.splitlines() if line.strip()]
+    seen: set[str] = set()
+    blockers: list[str] = []
+    for fact in project.locked_facts:
+        value = str(fact.value or "").strip()
+        norm = normalized(value)
+        if fact.fact_id not in headline_ids or not norm or norm in seen or norm in other_values:
+            continue
+        seen.add(norm)
+        if lines.count(norm) > 1:
+            blockers.append(f"duplicate headline visible: {value}")
+    return blockers
+
+
 def _inferred_item_coverage_blockers(project: FlyerProject, raw_text: str) -> list[str]:
     """Intent-aware QA (bounded-creative-planner slice 3): every planner-inferred
     item (source='hermes_inferred') that the project committed to MUST be rendered.
@@ -1405,6 +1434,7 @@ _BLOCK_TIER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^duplicate item price visible: item:\d+ "), "duplicate_item_price"),
     (re.compile(r"^near-duplicate item visible: "), "near_duplicate_item"),
     (re.compile(r"^duplicate item visible: "), "duplicate_item"),
+    (re.compile(r"^duplicate headline visible: "), "duplicate_headline"),
     (re.compile(r"^internal asset id visible: "), "internal_asset_id"),
     # bounded-creative-planner: a committed inferred item that did not render is a
     # block-tier intent failure (explicit, not implicit-via-default; Codex r5 #2).
@@ -2108,6 +2138,7 @@ def run_visual_qa(
             blockers.append(f"missing required visible fact: {fact.fact_id}")
     blockers.extend(_item_price_pair_blockers(project, extracted_text))
     blockers.extend(_near_duplicate_item_blockers(project, extracted_text))
+    blockers.extend(_duplicate_headline_blockers(project, extracted_text, artifact_path=artifact_path))
     blockers.extend(_unexpected_phone_blockers(project, extracted_text))
     blockers.extend(_fabricated_offer_price_blockers(project, extracted_text))
     # Graduation commit 4 — QA hardening batch (exhibit-backed; see

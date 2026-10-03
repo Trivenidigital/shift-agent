@@ -3,8 +3,8 @@
 Per docs/hermes-alignment.md Part 1 §Testing pattern, SKILL.md interpretation
 is Kimi's runtime concern — not unit-tested. This file is the cheapest
 observability layer: catches contributor mistakes that would silently break
-the LLM-drafting paradigm change (forgotten flag rename, missing truth-guard
-constraint prose, RCE-class log-decision-direct interpolation creeping back).
+the canonical quote contract (missing price/authorization gates, draft text
+transport, RCE-class log-decision-direct interpolation creeping back).
 
 Pure regex / file-existence checks. Windows + Linux.
 """
@@ -29,19 +29,31 @@ def test_skill_file_exists():
     assert SKILL_PATH.exists()
 
 
-def test_v04_paradigm_change_note(skill_text):
-    """Top-of-file callout that this is the LLM-drafting v0.4 paradigm change."""
-    assert "v0.4" in skill_text
-    assert "LLM-drafted" in skill_text or "LLM drafted" in skill_text
-    # Should explicitly state apply-script accepts text on stdin.
-    assert "--quote-text-stdin" in skill_text
+def test_canonical_money_authority_documented(skill_text):
+    """Customer money comes from committed inputs or a validated discount."""
+    assert "frozen pricing inputs" in skill_text
+    assert "validated discount computation" in skill_text
+    assert "Models do not supply monetary prose" in skill_text
+    assert "real commercial pricebook" in skill_text
+    assert "deliverable pricing provenance" in skill_text
 
 
-def test_quote_text_stdin_invocation_present(skill_text):
-    """Approve flow must pipe drafted text via stdin to --quote-text-stdin."""
-    assert "echo \"$QUOTE_TEXT\"" in skill_text or "$QUOTE_TEXT" in skill_text
-    # The literal flag must appear in an invocation block.
-    assert "--decision approve --quote-text-stdin" in skill_text
+
+def test_approve_invocations_use_committed_quote_and_authenticated_role(skill_text):
+    """Both ordinary approval and the explicit finalize override keep gates."""
+    blocks = re.findall(r"```bash\n(.*?)```", skill_text, re.DOTALL)
+    approvals = [block for block in blocks if "--decision approve" in block]
+    assert len(approvals) == 2
+    for block in approvals:
+        assert "--decision approve --quote-from-lead-state" in block
+        assert '--code "$CODE"' in block
+        assert '--sender-role "<owner|employee|customer|unknown from sender block>"' in block
+        assert "RC=$?" in block
+        assert "--quote-text-stdin" not in block
+    assert "role resolved by `identify-sender`" in skill_text
+    assert "exit 12 (privilege denied)" in skill_text
+    assert "override never bypasses pricebook/provenance gates" in skill_text
+
 
 
 def test_template_paths_purged(skill_text):
@@ -50,28 +62,23 @@ def test_template_paths_purged(skill_text):
     assert "catering_quote_to_customer.txt" not in skill_text
 
 
-def test_truth_guard_constraints_documented(skill_text):
-    """LLM must be told: headcount integer + ISO date parenthetical mandatory.
-
-    Without these prose constraints in the SKILL prompt, the LLM will
-    omit one or both — and apply-script's truth-guard will reject every
-    draft, causing a retry storm on canary."""
-    # Headcount constraint
-    assert "headcount" in skill_text.lower()
-    headcount_section = skill_text.lower()
-    assert "literal headcount integer" in headcount_section or \
-           "literal integer" in headcount_section
-    # ISO date constraint
-    assert "(YYYY-MM-DD)" in skill_text
-    assert "parenthetical" in skill_text.lower() or "parens" in skill_text.lower()
+def test_legacy_draft_checks_and_canonical_delivery_documented(skill_text):
+    """Legacy callers retain sanity checks without controlling quote money."""
+    assert "--quote-text-stdin" in skill_text
+    assert "checks draft size, date and headcount" in skill_text
+    assert "Its prose is not forwarded" in skill_text
+    assert "same canonical quote is delivered" in skill_text
 
 
-def test_plain_prose_constraint_documented(skill_text):
-    """LLM must be told: no markdown delimiters."""
-    assert "plain prose" in skill_text.lower() or "plain-prose" in skill_text.lower()
-    # Must explicitly call out markdown delimiters (apply-script strips
-    # them anyway, but better to draft clean).
-    assert "markdown" in skill_text.lower()
+
+def test_complete_cents_and_quote_fields_preserved(skill_text):
+    """The canonical quote keeps every money field and refuses oversize text."""
+    normalized = " ".join(skill_text.split())
+    assert "exact cents, package and item prices, the total, headcount, event date and validity deadline" in normalized
+    assert "never truncates the committed quote at the legacy 600-character draft cap" in normalized
+    assert "stored text limit are refused before state mutation or sending" in normalized
+    assert "never use it to compose a customer price" in normalized
+
 
 
 def test_jq_n_arg_pattern_for_log_decision_direct(skill_text):
@@ -141,22 +148,23 @@ def test_hard_rules_section_present(skill_text):
            "interpolation" in skill_text.lower()
 
 
-def test_lead_ref_signoff_documented(skill_text):
-    """Drafted quote should sign off with `(Ref: $LEAD_ID)` per Step 3b
-    constraint 9 — gives operator a way to correlate WhatsApp messages to
-    leads.json entries when investigating issues."""
-    assert "Ref:" in skill_text
-    assert "LEAD_ID" in skill_text or "lead_id" in skill_text
+def test_lead_and_approval_code_audit_correlation_preserved(skill_text):
+    """Correlation belongs to the existing state writer and structured audit."""
+    assert '--code "$CODE"' in skill_text
+    assert '--arg lead_id "$LEAD_ID"' in skill_text
+    assert '--arg code "$CODE"' in skill_text
+    assert "lead_id:$lead_id" in skill_text
+    assert "code:$code" in skill_text
 
 
-def test_single_turn_documented(skill_text):
-    """Per design v3 §1 step 'LLM drafts customer-facing quote text' is
-    Hermes substrate — single-turn flow should be explicit in SKILL prose."""
-    lowered = skill_text.lower()
-    assert "single llm turn" in lowered or \
-           "single-turn" in lowered or \
-           "same kimi turn" in lowered or \
-           "no second llm round-trip" in lowered
+
+def test_single_existing_quote_delivery_path_documented(skill_text):
+    normalized = " ".join(skill_text.split())
+    assert "call the existing state writer" in normalized
+    assert "Never send a separate customer quote" in normalized
+    assert "NEVER send the quote directly from this SKILL" in normalized
+    assert "`_bridge_post` is the only path" in normalized
+
 
 
 # ──────── Review fixes ────────
@@ -198,15 +206,17 @@ def test_review_fix_h4_lead_id_fallback(skill_text):
            'LEAD_ID="UNKNOWN"' in skill_text
 
 
-def test_review_fix_m2_printf_not_echo(skill_text):
-    """Review M2: SKILL Step 4 must use `printf '%s'` not `echo "$QUOTE_TEXT"`
-    to avoid the trailing-newline that echo appends (would land in the
-    customer's WhatsApp message)."""
-    assert "printf '%s' \"$QUOTE_TEXT\"" in skill_text, \
-        "Regression of review M2: SKILL.md must use printf not echo for stdin pipe"
-    # Defensive: echo of QUOTE_TEXT must NOT appear anywhere (the entire
-    # pipe-to-apply-script path uses printf).
-    assert "echo \"$QUOTE_TEXT\"" not in skill_text
+def test_no_model_draft_transport_to_approval(skill_text):
+    """Canonical approval must not pipe generated text into the state writer."""
+    blocks = re.findall(r"```bash\n(.*?)```", skill_text, re.DOTALL)
+    approvals = [block for block in blocks if "--decision approve" in block]
+    assert approvals
+    for block in approvals:
+        assert "$QUOTE_TEXT" not in block
+        assert "--quote-text-stdin" not in block
+        assert "| /usr/local/bin/apply-catering-owner-decision" not in block
+        assert "--quote-from-lead-state" in block
+
 
 
 def test_review_fix_m3_pipestatus_capture(skill_text):
@@ -220,13 +230,15 @@ def test_review_fix_m3_pipestatus_capture(skill_text):
     assert "log-decision-direct returned" in skill_text
 
 
-def test_review_fix_m1_sec_prompt_injection_hardening(skill_text):
-    """Review M1-sec: SKILL Step 3b must instruct the LLM to treat
-    customer-derived fields as untrusted data, not commands."""
-    lowered = skill_text.lower()
-    assert "untrusted" in lowered or "do not follow" in lowered or \
-           "not commands" in lowered, \
-        "SKILL must include prompt-injection hardening prose in Step 3b"
+def test_customer_prose_cannot_authorize_money_or_new_items(skill_text):
+    """Structural draft isolation supplements the authenticated owner gate."""
+    normalized = " ".join(skill_text.split())
+    assert "Its prose is not forwarded" in normalized
+    assert "Do not use a draft to change price, promise booking, or introduce items" in normalized
+    assert "NEVER substitute prose, rounded totals or newly inferred items" in normalized
+    assert "if it isn't `owner`" in normalized
+    assert "Owner edits remain instructions for the existing edit/finalize workflow" in normalized
+
 
 
 def test_exit_code_11_truth_guard_failed_documented(skill_text):

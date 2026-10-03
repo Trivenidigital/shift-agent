@@ -37,6 +37,7 @@ from schemas import (  # noqa: E402
     is_proposal_set_transition_allowed,
 )
 from catering_paths import CATERING_MENU_PATH  # noqa: E402
+from catering_pricing import PricingError, quantity_for_guests, usd_to_cents, cents_to_whole_dollars  # noqa: E402
 # M3 validity window. Reusing the SWEEP's own predicate (rather than re-deriving
 # `expires_at <= now` here) keeps ONE definition of "expired": a set this script
 # would still accept but the sweep would retire is exactly the inconsistency the
@@ -399,7 +400,7 @@ def _current_menu_items_by_name() -> dict[str, MenuItem]:
     return {item.name: item for item in menu.items}
 
 
-def _selected_items(option: CateringProposalOption) -> tuple[list[dict], int]:
+def _selected_items(option: CateringProposalOption, guest_count: int | None) -> tuple[list[dict], int]:
     menu_items = _current_menu_items_by_name()
     selected: list[CateringSelectedItem] = []
     total = 0
@@ -411,11 +412,17 @@ def _selected_items(option: CateringProposalOption) -> tuple[list[dict], int]:
             raise MenuSelectionError(f"unavailable menu item: {name}")
         if menu_item.price_usd is None:
             raise MenuSelectionError(f"missing price for menu item: {name}")
-        price = int(round(menu_item.price_usd))
-        item = CateringSelectedItem(name=name, qty=1, price_usd=price)
+        try:
+            qty = quantity_for_guests(guest_count, menu_item.serves,
+                                      require_confirmed=True, item_name=name)
+        except PricingError as exc:
+            raise MenuSelectionError(str(exc)) from exc
+        unit_cents = usd_to_cents(menu_item.price_usd)
+        price = cents_to_whole_dollars(unit_cents)
+        item = CateringSelectedItem(name=name, qty=qty, price_usd=price)
         selected.append(item)
-        total += item.qty * item.price_usd
-    return [item.model_dump() for item in selected], total
+        total += item.qty * unit_cents
+    return [item.model_dump() for item in selected], cents_to_whole_dollars(total)
 
 
 def _clarification_text(options: list[CateringProposalOption]) -> str:
@@ -546,6 +553,13 @@ def _claim_selection(
     option_id: str,
     customer_message_id: str,
 ) -> SelectionClaim | SelectionClaimFailure:
+    # Read and release the lead lock before taking the proposal lock. Finalize
+    # rechecks current headcount before committing; this is selection preflight.
+    with FileLock(LEADS_LOCK):
+        leads, lead_status = load_model(LEADS_PATH, CateringLeadStore, default=CateringLeadStore())
+        assert_load_status_clean(LEADS_PATH, lead_status, context="selection portion preflight")
+        lead = next((row for row in leads.leads if row.lead_id == lead_id), None)
+        guest_count = lead.extracted.headcount if lead is not None else None
     with FileLock(PROPOSALS_LOCK):
         store, load_status = load_model(PROPOSALS_PATH, CateringProposalStore, default=CateringProposalStore())
         assert_load_status_clean(PROPOSALS_PATH, load_status, context="proposal-selection claim")
@@ -606,7 +620,7 @@ def _claim_selection(
                 exit_code=EXIT_INVALID_INPUT,
             )
         try:
-            selected_items, total = _selected_items(selected_option)
+            selected_items, total = _selected_items(selected_option, guest_count)
         except MenuSelectionError as e:
             return SelectionClaimFailure(
                 proposal_set_id=proposal_set_id,
@@ -756,17 +770,19 @@ def _finalize(code: str, customer_message_id: str, selected_items: list[dict], t
         logical_turn_id,
         "--selected-items-json",
         json.dumps(selected_items),
+        "--scale-selected-to-headcount",
         "--quote-total-usd",
         str(total),
     ]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=60).returncode
 
 
-def _notify_owner_card_failed(lead_id: str, proposal_set_id: str, option_id: str) -> None:
-    message = (
+def _notify_owner_card_failed(lead_id: str, proposal_set_id: str, option_id: str,
+                              detail: str = "") -> None:
+    message = (f"Catering lead {lead_id}, option {option_id} needs review: {detail}" if detail else (
         f"lead_id={lead_id} proposal_set_id={proposal_set_id} option {option_id} "
         "was selected, but finalize-catering-menu could not deliver the owner card."
-    )
+    ))
     try:
         subprocess.run(
             [
@@ -774,7 +790,7 @@ def _notify_owner_card_failed(lead_id: str, proposal_set_id: str, option_id: str
                 "--priority",
                 "2",
                 "--title",
-                "Catering proposal owner card failed",
+                "Catering portion review required" if detail else "Catering proposal owner card failed",
                 message,
             ],
             check=False,
@@ -874,8 +890,16 @@ def main() -> int:
         return EXIT_NOT_FOUND
 
     if isinstance(claim, SelectionClaimFailure):
+        if claim.reason == "invalid_selection":
+            _notify_owner_card_failed(args.lead_id, claim.proposal_set_id, option_id, claim.detail)
         _emit_transition_refusals(claim.refusals)
-        _post(args.customer_jid, _failed_text(claim.options) if claim.options else _no_active_proposal_text(), lead_id=args.lead_id)
+        if claim.reason == "invalid_selection":
+            response = (BRIDGE_PREFIX + "This menu option needs restaurant review of serving sizes "
+                        "and event details before we can confirm quantities and pricing. "
+                        "No priced quote has been sent.")
+        else:
+            response = _failed_text(claim.options) if claim.options else _no_active_proposal_text()
+        _post(args.customer_jid, response, lead_id=args.lead_id)
         _audit_failed(args.lead_id, claim.reason, claim.detail, claim.proposal_set_id)
         return claim.exit_code
 

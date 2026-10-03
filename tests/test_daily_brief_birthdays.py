@@ -47,26 +47,22 @@ EXIT_INVALID_INPUT = 2
 
 def _load_send_brief(env_dir: Path):
     """Load send-daily-brief as a module via importlib SourceFileLoader.
-    Pre-loads schemas/safe_io/exit_codes/log_source from the test PLATFORM_DIR
-    into sys.modules to bypass deployed-vs-test schema race."""
+    Pin the repository's platform modules without replacing shared identities."""
     import importlib.machinery
     import importlib.util
 
     sys.path.insert(0, str(PLATFORM_DIR))
 
-    # Pre-load platform modules into sys.modules so the script's imports hit
-    # the test versions (lessons from #41 + #32).
+    # Import before the script prepends its deployed path. Re-executing schemas
+    # here would replace Pydantic classes held by already-imported Flyer modules.
     for _modname in ("schemas", "safe_io", "exit_codes", "log_source"):
         _path = PLATFORM_DIR / f"{_modname}.py"
         if not _path.exists():
             continue
-        _loader = importlib.machinery.SourceFileLoader(_modname, str(_path))
-        _spec = importlib.util.spec_from_file_location(
-            _modname, str(_path), loader=_loader,
+        _mod = importlib.import_module(_modname)
+        assert Path(_mod.__file__).resolve() == _path.resolve(), (
+            f"{_modname} must come from the repository platform directory"
         )
-        _mod = importlib.util.module_from_spec(_spec)
-        sys.modules[_modname] = _mod
-        _spec.loader.exec_module(_mod)
 
     loader = importlib.machinery.SourceFileLoader("send_brief", str(SEND_BRIEF))
     spec = importlib.util.spec_from_file_location(
@@ -88,6 +84,26 @@ def _seed_birthdays(env_dir: Path, customers: list[dict]) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+@pytest.mark.parametrize("loader_module", [
+    "test_daily_brief_birthdays",
+    "test_daily_brief_catering_learning",
+    "test_daily_brief_owner_blocked_leads",
+    "test_loyalty_gate_is_real",
+])
+def test_send_brief_loader_preserves_shared_platform_module_identity(tmp_path, loader_module):
+    import importlib
+
+    original = {
+        name: importlib.import_module(name)
+        for name in ("schemas", "safe_io", "exit_codes", "log_source")
+    }
+    original_fact = original["schemas"].FlyerLockedFact
+    importlib.import_module(loader_module)._load_send_brief(tmp_path)
+    for name, module in original.items():
+        assert sys.modules[name] is module, f"loader replaced shared module {name}"
+    assert sys.modules["schemas"].FlyerLockedFact is original_fact
 
 
 @pytest.fixture

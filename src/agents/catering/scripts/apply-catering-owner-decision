@@ -4,7 +4,10 @@
 Called by Kimi (via the handle_catering_owner_approval SKILL) when the
 owner has replied to a catering approval card with a code + verb. This
 script is deterministic — it transitions the lead's status and, on
-APPROVE, sends the quote to the customer.
+APPROVE, sends the quote to the customer. Customer quote content is rendered
+from validated pricing provenance. The legacy --quote-text-stdin protocol still
+checks draft size/date/headcount, but its prose is not forwarded to customers;
+it cannot introduce prices or promises outside the approved quote.
 
 Usage:
   apply-catering-owner-decision \\
@@ -34,8 +37,16 @@ Exit codes:
   14 — lead is ON HOLD (M4/G4); approve refused BEFORE any state change, so the
        lead is untouched. Do NOT retry — clear with set-catering-lead-hold --off
   15 — --discount-id names a discount the current pricebook does not approve
-  16 — --discount-id on a lead with no pricing provenance; re-finalize it first
-  17 — the quote is pending_owner_review and is not deliverable to a customer
+  17 — --discount-id on a lead with no pricing provenance; re-finalize it first
+  18 — the number is not deliverable to a customer: no pricebook on disk, an
+       unreadable one, a placeholder one, no pricing provenance on the lead, or
+       provenance the kernel rates pending_owner_review, or a retry that would
+       change the already-approved text. Refused BEFORE any
+       state write, so the lead is untouched.
+
+  (The three above were listed as 15/16/17 here until Ticket 0; 16 is
+  EXIT_FOLLOWUP_SUPPRESSED and never returned by this script. exit_codes.py is
+  canonical — this list restates it.)
 """
 from __future__ import annotations
 
@@ -47,7 +58,7 @@ import subprocess
 import sys
 import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -117,7 +128,15 @@ LEDGER_PATH = Path(os.environ.get(
 # deleted, which this file still satisfies — no menu path, no Menu import). A
 # discount, by contrast, is a published commercial term the owner must be held to,
 # so it MUST be validated against the pricebook rather than taken on trust.
-PRICEBOOK_PATH = CATERING_PRICEBOOK_PATH
+#
+# Ticket 0 widened this constant's reach: it now also gates the CUSTOMER SEND,
+# not just --discount-id, so the subprocess-invoking suites need to reach it too.
+# catering_paths keeps its constants env-free by design (single-tenant tree,
+# tests monkeypatch the consuming module's attribute), so the override lives
+# HERE — exactly like LEADS_PATH / LOG_PATH / LEDGER_PATH above, and for the
+# same reason: a monkeypatched module attribute cannot cross a subprocess.
+PRICEBOOK_PATH = Path(os.environ.get(
+    "SHIFT_AGENT_CATERING_PRICEBOOK_PATH", str(CATERING_PRICEBOOK_PATH)))
 
 # PR-B v3 — drafted-quote stdin caps and Unicode strip categories.
 # 8KB stdin read cap is generous (LLM drafts run ~300-500 chars in practice);
@@ -132,7 +151,7 @@ _STRIP_UNICODE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn"})
 _MARKDOWN_DELIM_RE = re.compile(r"[*_~`]+")
 
 
-def _normalize_quote_text(s: str) -> str:
+def _normalize_quote_text(s: str, *, truncate: bool = True) -> str:
     """PR-B v3 — strip control/format Unicode + markdown delimiters; cap length.
 
     NFC normalize, drop Cc/Cf/Cs/Co/Cn categories (control + format + surrogate
@@ -153,27 +172,80 @@ def _normalize_quote_text(s: str) -> str:
         chars.append(ch)
     out = "".join(chars)
     out = _MARKDOWN_DELIM_RE.sub("", out)
-    return out[:_QUOTE_OUTPUT_CAP_CHARS]
+    return out[:_QUOTE_OUTPUT_CAP_CHARS] if truncate else out
 
 
-def _resolve_price_status(lead, quote_computation) -> str:
-    """How firm is the number this send is about to put in front of a customer?
+def _resolve_send_price_gate(lead, quote_computation) -> tuple[str, Optional[str]]:
+    """May this number go to a customer, and how firm is it?
 
-    Three sources, in decreasing authority:
-      1. a discount recompute this invocation just ran — the kernel's verdict on
-         the number actually being sent;
-      2. the provenance frozen at finalize, for the server-rendered quote, which
-         restates exactly that committed number;
-      3. "estimated" otherwise — the M3 rule for an owner-authored free-text
-         body, and the honest floor for a lead finalized before provenance
-         existed. Never "exact": this script reads no catalog (PR-B v3), so it
-         has nothing on which to claim a number is firm.
+    Returns `(price_status, refusal_detail)`. `refusal_detail` is None when the
+    send may proceed; otherwise it names the specific failure for the audit row
+    and the operator, and the caller must refuse BEFORE any state write.
+
+    The old `_resolve_price_status` answered only the second half, and its final
+    branch returned the literal "estimated" whenever there was no provenance at
+    all. The historical 2026-09-02 inventory recorded no commercial pricebook;
+    a legacy lead with `pricing_inputs: None` could therefore pass as estimated
+    without any kernel-backed price. Runtime data can change after that audit;
+    this gate checks the actual files and lead on every invocation.
+    A MISSING pricebook must not behave better
+    than a PLACEHOLDER one, which that same gate has always refused.
+
+    Four conditions, all required:
+      1. a pricebook exists on the configured path and is readable;
+      2. it is not the seed placeholder;
+      3. provenance is real — a kernel computation from this invocation, or the
+         CateringPricingInputs frozen at finalize. Never reconstructed: whole-
+         dollar `selected_items` cannot yield cents nobody committed to;
+      4. that provenance is DELIVERABLE by `is_deliverable()` / its stored twin
+         `status_is_deliverable()`, which reads the flags as well as the status —
+         a frozen record can carry `missing_price:<item>` next to a firmer
+         status, and the flag is the honest half.
     """
+    try:
+        import catering_pricing as _pricing
+    except Exception as e:  # noqa: BLE001 — no kernel, no basis for a price
+        return "pending_owner_review", f"pricing_kernel_unavailable: {e}"
+
+    try:
+        pricebook = _pricing.load_pricebook(PRICEBOOK_PATH)
+    except Exception as e:  # noqa: BLE001 — present-but-invalid; never fall back
+        return "pending_owner_review", f"unreadable_pricebook at {PRICEBOOK_PATH}: {e}"
+    if pricebook is None:
+        return "pending_owner_review", (
+            f"missing_pricebook at {PRICEBOOK_PATH} — no commercial source of "
+            f"truth exists, so no number here is a quote"
+        )
+    if pricebook.is_placeholder():
+        return "pending_owner_review", (
+            f"{_pricing.FLAG_PLACEHOLDER_PRICEBOOK} — pricebook v{pricebook.version} "
+            f"is seed data, not the owner's prices"
+        )
+
     if quote_computation is not None:
-        return quote_computation.price_status
-    if getattr(lead, "pricing_inputs", None) is not None:
-        return lead.pricing_inputs.price_status
-    return "estimated"
+        source, price_status, flags = (
+            "quote_computation", quote_computation.price_status,
+            list(quote_computation.flags))
+        deliverable = quote_computation.is_deliverable()
+    elif getattr(lead, "pricing_inputs", None) is not None:
+        inputs = lead.pricing_inputs
+        source, price_status, flags = (
+            "pricing_inputs", inputs.price_status, list(inputs.flags))
+        deliverable = _pricing.status_is_deliverable(price_status, flags)
+    else:
+        return "pending_owner_review", (
+            "missing_pricing_provenance — this lead carries no CateringPricingInputs "
+            "and no recompute ran, so there is no cents-exact basis for the number. "
+            "Re-finalize it against the current pricebook"
+        )
+
+    if not deliverable:
+        blocking = _pricing.delivery_blocking_flags(flags)
+        reasons = ", ".join(blocking or flags) or "(no flags recorded)"
+        return price_status, (
+            f"not deliverable ({source} price_status={price_status}): {reasons}"
+        )
+    return price_status, None
 
 
 def _price_status_line(price_status: str) -> str:
@@ -189,23 +261,36 @@ def _price_status_line(price_status: str) -> str:
 
 def _render_quote_from_lead_state(lead, validity_days: int,
                                   price_status: str = "estimated",
-                                  now: Optional[datetime] = None) -> str:
-    """PR-CF1c 2026-05-12: render a default quote text from lead state alone.
+                                  now: Optional[datetime] = None,
+                                  quote_computation=None) -> str:
+    """Render only committed cents, or this invocation's validated discount.
 
-    Mirrors finalize-catering-menu's --auto-default shape — server-authoritative,
-    no LLM composition, no hallucination surface. Same body shape used in the
-    one-shot manual verification on L0005 (see tasks/hermes-v0-13-0-plugin-api-
-    recon-2026-05-11.md Phase 9 §"verbatim jq spec"). The _truth_guard_check
-    that follows this rendering will pass naturally because the rendered text
-    contains the lead's headcount and event_date by construction.
+    The legacy whole-dollar fields lose cents and package detail. A new discount
+    must use its computation, because frozen inputs describe the original quote.
+    No catalog is re-read and no draft can introduce commercial terms.
     """
+    from catering_pricing import format_cents, render_quote_lines
+
     customer_name = lead.customer_name or "(unknown)"
     customer_phone = lead.customer_phone or "(unknown)"
-    items_lines: list[str] = []
-    for it in (lead.selected_items or []):
-        items_lines.append(f"- {it.name} x{it.qty} @ ${it.price_usd}")
-    items_block = "\n".join(items_lines) if items_lines else "- (no items selected)"
-    total = lead.quote_total_usd or 0
+    if quote_computation is not None:
+        price_block = render_quote_lines(quote_computation)
+    else:
+        inputs = lead.pricing_inputs  # required by the send gate before rendering
+        lines: list[str] = []
+        if inputs.package_id is not None:
+            lines.append(
+                f"Package: {inputs.package_name or inputs.package_id} — "
+                f"{format_cents(inputs.package_price_per_person_cents)}/guest "
+                f"x{inputs.guest_count}")
+        for item in inputs.line_items:
+            lines.append(f"- {item.name} x{item.qty} @ {format_cents(item.unit_cents)}")
+        for fee in inputs.fees:
+            if fee.units is not None:
+                lines.append(f"Fee: {fee.name} — {format_cents(fee.unit_cents * fee.units)}")
+        lines.append(f"Total: {format_cents(inputs.total_cents)}")
+        lines.append(_price_status_line(price_status))
+        price_block = "\n".join(lines)
     event_date = (lead.extracted.event_date if lead.extracted else None) or "(TBD)"
     headcount = (lead.extracted.headcount if lead.extracted else None) or 0
     # M3: a priced customer quote states how long it stands. Same helper (and same
@@ -217,10 +302,8 @@ def _render_quote_from_lead_state(lead, validity_days: int,
     validity = _quote_validity_line(now or datetime.now(timezone.utc), validity_days)
     return (
         f"Quote for {lead.lead_id} ({customer_name} / {customer_phone}):\n"
-        f"{items_block}\n\n"
-        f"Total: ${total}\n"
-        f"{_price_status_line(price_status)}\n"
-        f"Event: {event_date} | Headcount: {headcount}\n"
+        f"{price_block}\n"
+        f"Event: {event_date} | Headcount: {headcount} guests\n"
         f"{validity}"
     )
 
@@ -1090,19 +1173,55 @@ def main() -> int:
             quote_rendered_at = datetime.now(timezone.utc)
             quote_valid_until = _expires_at_from(
                 quote_rendered_at, cfg.catering.proposal_validity_days)
+            if prev_status == "OWNER_APPROVED" and lead.quote_delivery_status == "failed":
+                original_deadline = lead.quote_valid_until
+                if (original_deadline is None or original_deadline.tzinfo is None
+                        or original_deadline <= quote_rendered_at):
+                    _emit_quote_skill_failed_best_effort(
+                        lead.lead_id, code, "price_pending_owner_review",
+                        "Approved quote is expired or has no valid deadline. "
+                        "Re-finalize before approving a new quote.",
+                    )
+                    return EXIT_PRICE_PENDING_OWNER_REVIEW
+                # Retry the same approval, not a new validity promise. Rendering
+                # from its original deadline also survives a UTC date boundary.
+                quote_valid_until = original_deadline
+                quote_rendered_at = original_deadline - timedelta(
+                    days=cfg.catering.proposal_validity_days)
 
-            price_status_for_send = _resolve_price_status(lead, quote_computation)
-            if price_status_for_send == "pending_owner_review":
-                flags = list(getattr(quote_computation, "flags", None)
-                             or getattr(lead.pricing_inputs, "flags", None) or [])
-                reasons = ", ".join(flags) or "(no flags recorded)"
+            # PR-CF1c: the REQUEST SHAPE is checked before the NUMBER. Asking for
+            # a server-rendered quote on a lead with nothing selected is a
+            # malformed ask, and naming it is more actionable than a pricing
+            # verdict on a body that could not have been rendered either way.
+            # Both refuse before any state write, so this is diagnostic order
+            # only — Ticket 0 put the price gate first and swallowed this message.
+            if args.quote_from_lead_state and not lead.selected_items:
                 _emit_quote_skill_failed_best_effort(
-                    lead.lead_id, code, "price_pending_owner_review", reasons,
+                    lead.lead_id, code, "missing_quote_text",
+                    "--quote-from-lead-state set but lead has no selected_items "
+                    "(customer hasn't finalized yet)",
+                )
+                sys.stderr.write(
+                    "PR-CF1c: --quote-from-lead-state requires CUSTOMER_FINALIZED "
+                    "lead with non-empty selected_items\n"
+                )
+                return EXIT_INVALID_INPUT
+
+            price_status_for_send, price_refusal = _resolve_send_price_gate(
+                lead, quote_computation)
+            if price_refusal is not None:
+                _emit_quote_skill_failed_best_effort(
+                    lead.lead_id, code, "price_pending_owner_review", price_refusal,
                 )
                 sys.stderr.write(
                     f"refusing to send lead {lead.lead_id} {code}: the quote is "
-                    f"pending owner review and is not a final price. Reasons: "
-                    f"{reasons}.\n"
+                    f"not a deliverable price. Reason: {price_refusal}.\n"
+                    f"  missing_pricebook        -> import real prices with "
+                    f"import-catering-pricebook\n"
+                    f"  unreadable_pricebook     -> repair the file in place; it is "
+                    f"never quarantined\n"
+                    f"  missing_pricing_provenance -> re-finalize the lead against "
+                    f"the current pricebook\n"
                     f"  missing_fee_input:<id>   -> re-run with --staff-count / "
                     f"--miles, or re-finalize with the multiplier known\n"
                     f"  placeholder_pricebook    -> import real prices with "
@@ -1115,20 +1234,11 @@ def main() -> int:
             # PR-CF1c 2026-05-12: --quote-from-lead-state renders server-side
             # from lead state and bypasses the stdin requirement.
             if args.quote_from_lead_state:
-                if not lead.selected_items:
-                    _emit_quote_skill_failed_best_effort(
-                        lead.lead_id, code, "missing_quote_text",
-                        "--quote-from-lead-state set but lead has no selected_items "
-                        "(customer hasn't finalized yet)",
-                    )
-                    sys.stderr.write(
-                        "PR-CF1c: --quote-from-lead-state requires CUSTOMER_FINALIZED "
-                        "lead with non-empty selected_items\n"
-                    )
-                    return EXIT_INVALID_INPUT
+                # selected_items was already required above, before the price gate.
                 raw_quote = _render_quote_from_lead_state(
                     lead, cfg.catering.proposal_validity_days,
-                    price_status_for_send, now=quote_rendered_at)
+                    price_status_for_send, now=quote_rendered_at,
+                    quote_computation=quote_computation)
             else:
                 if not args.quote_text_stdin:
                     _emit_quote_skill_failed_best_effort(
@@ -1158,7 +1268,8 @@ def main() -> int:
                     )
                     sys.stderr.write("PR-B v3: stdin empty\n")
                     return EXIT_INVALID_INPUT
-            quote_text = _normalize_quote_text(raw_quote)
+            quote_text = _normalize_quote_text(
+                raw_quote, truncate=not args.quote_from_lead_state)
             # M2 ruling: the label is appended AFTER normalize + the 600-char cap,
             # because it is a server-authored statement about the number, not part
             # of the drafted body the caps and the strip exist to police. The
@@ -1192,6 +1303,34 @@ def main() -> int:
                 # handles; truth-guard fail needs a re-DRAFT (only the SKILL
                 # can do that). Collision would silently misroute retry logic.
                 return EXIT_TRUTH_GUARD_FAILED
+
+            # Preserve the legacy stdin protocol and draft sanity checks, but
+            # never forward its unvalidated money, items or booking promises.
+            # Both approval entry points deliver the same committed quote.
+            # Canonical itemization must not be cut by the 600-character draft
+            # cap: that could remove items, cents, the date or the total.
+            quote_text = _normalize_quote_text(
+                _render_quote_from_lead_state(
+                    lead, cfg.catering.proposal_validity_days,
+                    price_status_for_send, now=quote_rendered_at,
+                    quote_computation=quote_computation),
+                truncate=False,
+            )
+            if len(quote_text) > 16384:
+                _emit_quote_skill_failed_best_effort(
+                    lead.lead_id, code, "missing_quote_text",
+                    "Committed quote exceeds the stored quote text limit",
+                )
+                return EXIT_INVALID_INPUT
+            if (prev_status == "OWNER_APPROVED"
+                    and lead.quote_delivery_status == "failed"
+                    and quote_text != lead.quote_text):
+                _emit_quote_skill_failed_best_effort(
+                    lead.lead_id, code, "price_pending_owner_review",
+                    "Retry would change the approved quote. Supply the original "
+                    "discount and terms, or re-finalize before approving again.",
+                )
+                return EXIT_PRICE_PENDING_OWNER_REVIEW
 
             # M3: persist the EXACT normalized text the customer is about to
             # receive. Until now NO write site ever put it on the lead — all three

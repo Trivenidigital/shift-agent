@@ -195,7 +195,9 @@ def test_orphan_flags_persist_before_vision_error_early_return(extract_mod, monk
     receipts.mkdir(parents=True)
     logs.mkdir()
     image = tmp_path / "receipt.jpg"
-    image.write_bytes(b"fake jpeg bytes")
+    # Reach the injected vision failure through real image validation.
+    from PIL import Image
+    Image.new("RGB", (32, 32), "white").save(image, format="JPEG")
 
     extract_mod.CONFIG_PATH = _write_config(tmp_path)
     extract_mod.LEADS_PATH = state / "leads.json"

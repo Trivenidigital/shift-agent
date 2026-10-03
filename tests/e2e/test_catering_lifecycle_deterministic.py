@@ -67,6 +67,7 @@ import yaml
 # tests/conftest.py puts src/platform on sys.path, so the exit codes under test
 # are the SAME constants the scripts return — a renumbering cannot drift past
 # this file unnoticed.
+from fixtures_fleet import build_catering_pricebook  # noqa: E402
 from exit_codes import (  # noqa: E402
     EXIT_DEPENDENCY_DOWN,
     EXIT_INVALID_INPUT,
@@ -344,7 +345,21 @@ def sandbox(tmp_path):
             shutil.copy(template, root / "templates" / template.name)
     (root / "config.yaml").write_text(yaml.safe_dump(_config(root)), encoding="utf-8")
     (root / "roster.json").write_text(json.dumps({"employees": []}), encoding="utf-8")
-    shutil.copy(MENU_FIXTURE, root / "state" / "catering-menu.json")
+    # Retain all historical item/price rows but explicitly supply SYNTHETIC
+    # owner-confirmed servings for this success rehearsal. Live missing units
+    # must refuse selection; the original golden fixture remains untouched.
+    pilot_menu = json.loads(MENU_FIXTURE.read_text(encoding="utf-8"))
+    for item in pilot_menu["items"]:
+        item["serves"] = 10
+    (root / "state" / "catering-menu.json").write_text(json.dumps(pilot_menu), encoding="utf-8")
+    # Ticket 0: apply-catering-owner-decision refuses the customer send unless a
+    # real (non-placeholder) pricebook exists and the lead carries the kernel
+    # provenance finalize freezes against it. This book is deliberately inert —
+    # no packages, fees, overrides or tax — so the chain still prices from the
+    # menu's retail numbers and every total asserted below is unchanged; what it
+    # adds is the commercial source of truth the send now requires to exist.
+    (root / "state" / "catering-pricebook.json").write_text(
+        json.dumps(build_catering_pricebook()), encoding="utf-8")
 
     _BridgeStub.sink = []
     server = HTTPServer(("127.0.0.1", 0), _BridgeStub)
@@ -595,9 +610,11 @@ def test_full_lifecycle_inquiry_to_quote_delivered(sandbox):
     quotes = sb.to(CUSTOMER_JID)[before:]
     assert len(quotes) == 1, f"expected exactly one quote send, got {len(quotes)}"
     body = quotes[0]["message"]
-    assert str(lead["quote_total_usd"]) in body, (
+    total_cents = lead["pricing_inputs"]["total_cents"]
+    exact_total = f"${total_cents // 100:,}.{total_cents % 100:02d}"
+    assert f"Total: {exact_total}" in body, (
         f"the quote the customer received does not carry the approved total "
-        f"{lead['quote_total_usd']}: {body!r}"
+        f"{exact_total}: {body!r}"
     )
     assert lead["selected_items"][0]["name"] in body, (
         f"the quote does not name the items the customer selected: {body!r}"
@@ -815,13 +832,16 @@ def test_sandbox_never_resolves_to_production(sandbox, tmp_path):
     assert str(sb.log_path.resolve()).startswith(str(tmp_path.resolve()) + os.sep)
 
 
-def test_menu_fixture_is_the_78_item_production_menu(sandbox):
+def test_menu_fixture_preserves_78_rows_with_explicit_synthetic_servings(sandbox):
     """The menu under test is the real one, not a toy. A shrunken fixture would
-    quietly weaken every auto-generation assertion in this file."""
+    quietly weaken every auto-generation assertion in this file. Servings are
+    synthetic confirmed facts; this test does not certify live portion data."""
     menu = json.loads(MENU_FIXTURE.read_text(encoding="utf-8"))
     assert len(menu["items"]) == MENU_FIXTURE_ITEM_COUNT, len(menu["items"])
     copied = json.loads(sandbox.menu_path.read_text(encoding="utf-8"))
-    assert copied == menu, "the sandbox copy diverged from the fixture"
+    for item in menu["items"]:
+        item["serves"] = 10
+    assert copied == menu, "only explicit rehearsal serving facts may differ"
 
 
 def test_zz_menu_fixture_was_not_mutated():

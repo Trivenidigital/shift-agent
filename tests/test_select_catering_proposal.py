@@ -162,11 +162,11 @@ def _seed_menu(env_dir: Path, items: list[dict] | None = None) -> None:
                 "source_image_id": None,
                 "items": items
                 or [
-                    {"name": "Gulab Jamun", "price_usd": 3, "category": "dessert", "available": True},
-                    {"name": "Chicken Biryani", "price_usd": 15, "category": "main", "available": True},
-                    {"name": "Aloo Paratha", "price_usd": 5, "category": "main", "available": True},
-                    {"name": "Paneer Tikka", "price_usd": 12, "category": "appetizer", "available": True},
-                    {"name": "Samosa", "price_usd": 2, "category": "appetizer", "available": True},
+                    {"name": "Gulab Jamun", "price_usd": 3, "category": "dessert", "available": True, "serves": 50},
+                    {"name": "Chicken Biryani", "price_usd": 15, "category": "main", "available": True, "serves": 50},
+                    {"name": "Aloo Paratha", "price_usd": 5, "category": "main", "available": True, "serves": 50},
+                    {"name": "Paneer Tikka", "price_usd": 12, "category": "appetizer", "available": True, "serves": 50},
+                    {"name": "Samosa", "price_usd": 2, "category": "appetizer", "available": True, "serves": 50},
                 ],
                 "notes": "",
             }
@@ -795,17 +795,17 @@ def test_selection_uses_current_menu_prices_for_multi_item_option(bridge_server,
     "menu_items,expected_detail",
     [
         (None, "menu load failed"),
-        ([{"name": "Gulab Jamun", "price_usd": 3, "category": "dessert", "available": True}], "missing menu item"),
+        ([{"name": "Gulab Jamun", "price_usd": 3, "category": "dessert", "available": True, "serves": 50}], "missing menu item"),
         (
             [
-                {"name": "Gulab Jamun", "price_usd": 3, "category": "dessert", "available": True},
+                {"name": "Gulab Jamun", "price_usd": 3, "category": "dessert", "available": True, "serves": 50},
                 {"name": "Chicken Biryani", "price_usd": 15, "category": "main", "available": False},
             ],
             "unavailable menu item",
         ),
         (
             [
-                {"name": "Gulab Jamun", "price_usd": 3, "category": "dessert", "available": True},
+                {"name": "Gulab Jamun", "price_usd": 3, "category": "dessert", "available": True, "serves": 50},
                 {"name": "Chicken Biryani", "price_usd": None, "category": "main", "available": True},
             ],
             "missing price",
@@ -837,7 +837,8 @@ def test_menu_problem_blocks_finalize_and_audits_invalid_selection(
     rc = _run_main(mod, "Option 2")
 
     assert rc == 2
-    assert calls == []
+    assert not any(str(mod.FINALIZE_BIN) in call for call in calls)
+    assert any(str(mod.NOTIFY_OWNER_BIN) in call for call in calls)
     selected_set = _read_store(env_dir)["sets"][0]
     assert selected_set["status"] == "SENT"
     assert selected_set["selected_option_id"] is None
@@ -932,3 +933,48 @@ def test_successful_sends_emit_no_unconfirmed_row(bridge_server, env_dir, monkey
 
     assert _run_main(mod, "Option 2") == 0
     assert _unconfirmed(env_dir) == []
+
+
+@pytest.mark.parametrize("headcount,serves,expected_qty", [(50, 10, 5), (51, 10, 6)])
+def test_selected_option_scales_only_its_confirmed_items(bridge_server, env_dir, monkeypatch, headcount, serves, expected_qty):
+    port, _ = bridge_server
+    _seed_lead(env_dir)
+    path = env_dir / "state" / "catering-leads.json"
+    doc = json.loads(path.read_text())
+    doc["leads"][0]["extracted"]["headcount"] = headcount
+    path.write_text(json.dumps(doc))
+    _seed_proposals(env_dir, [_proposal_set("CPS-L0014-000001", "SENT")])
+    _seed_menu(env_dir, [{"name": "Gulab Jamun", "price_usd": 3, "serves": serves},
+                         {"name": "Unselected", "price_usd": 1, "serves": 1}])
+    mod, calls = _load_script(env_dir, port, monkeypatch)
+    assert _run_main(mod, "Option 2") == 0
+    argv = next(c for c in calls if str(mod.FINALIZE_BIN) in c)
+    selected = json.loads(argv[argv.index("--selected-items-json") + 1])
+    assert [(i["name"], i["qty"]) for i in selected] == [("Gulab Jamun", expected_qty)]
+    assert "--scale-selected-to-headcount" in argv
+
+
+@pytest.mark.parametrize("headcount,serves", [(50, None), (None, 10), (501, 1)])
+def test_unknown_or_excessive_portions_leave_selection_unclaimed(bridge_server, env_dir, monkeypatch, headcount, serves):
+    port, bridge = bridge_server
+    _seed_lead(env_dir)
+    path = env_dir / "state" / "catering-leads.json"
+    doc = json.loads(path.read_text())
+    doc["leads"][0]["extracted"]["headcount"] = headcount
+    path.write_text(json.dumps(doc))
+    _seed_proposals(env_dir, [_proposal_set("CPS-L0014-000001", "SENT")])
+    _seed_menu(env_dir, [{"name": "Gulab Jamun", "price_usd": 3, "serves": serves}])
+    lead_before = path.read_bytes()
+    proposals = env_dir / "state" / "catering-proposals.json"
+    proposal_before = proposals.read_bytes()
+    mod, calls = _load_script(env_dir, port, monkeypatch)
+    assert _run_main(mod, "Option 2") == 2
+    assert not any(str(mod.FINALIZE_BIN) in c for c in calls)
+    assert path.read_bytes() == lead_before
+    assert proposals.read_bytes() == proposal_before
+    assert any(str(mod.NOTIFY_OWNER_BIN) in c for c in calls)
+    customer_message = bridge.requests[-1]["message"]
+    assert "serving sizes" in customer_message
+    assert "No priced quote has been sent" in customer_message
+    assert "reply with" not in customer_message.lower()
+    assert "--" not in customer_message.replace("------------", "")

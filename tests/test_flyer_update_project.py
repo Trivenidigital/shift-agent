@@ -1141,12 +1141,12 @@ def _store_with_queued_row(tmp_path: Path, *, queued_at: str, reason_code: str =
     return json.dumps(store)
 
 
-def test_manual_reason_code_choices_match_the_schema():
+def test_manual_reason_code_choices_match_the_schema(monkeypatch):
     """Set equality against FlyerManualReviewReason, mirroring the SLA watchdog's
     guard. This catches a regression to a hand-maintained list; it cannot catch
     the decision to add a new reason value — that is a schema-side choice, and
     this test only insists the CLI is not silently narrower than it."""
-    module = _load_script(pytest.MonkeyPatch())
+    module = _load_script(monkeypatch)
     assert set(module.MANUAL_REASON_CODES) == _manual_review_reasons()
 
 
