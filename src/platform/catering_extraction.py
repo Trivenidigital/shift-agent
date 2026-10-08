@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import bisect
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -944,9 +945,177 @@ def detect_quote_acceptance(text: str) -> Optional[dict]:
     return None
 
 
+# ── Explicit per-item quantities ─────────────────────────────────────────────
+# "10 trays of Idly, 5 of Chicken Biryani" -> [("Idly (3 PCS)", 10), ("Chicken
+# Biryani", 5)], so a customer who names items and counts can reach the owner
+# card through finalize-catering-menu instead of an operator CLI step.
+#
+# GOVERNANCE (catering-studio directive, "probabilistic vs deterministic"): how a
+# customer's PHRASE is read may be heuristic — that is menu-item name
+# interpretation. What it MAPS TO may not be: a phrase resolves to a canonical
+# menu name only by exact normalized equality or a UNIQUE token-containment
+# match; anything else comes back unmatched, with suggestions, for the customer
+# to confirm. No price is read or produced here — every cent is
+# catering_pricing.compute_quote's, downstream.
+EXPLICIT_QTY_MIN = 1
+EXPLICIT_QTY_MAX = 200
+EXPLICIT_QTY_MAX_SUGGESTIONS = 3
+
+_QTY_UNIT = r"(?:trays?|portions?|orders?|plates?|servings?|pcs|pieces?|boxes|box|packs?|units?)"
+_QTY_SEGMENT_SPLIT_RE = re.compile(r"[,;\n]+|\s+and\s+|\s*&\s*", re.IGNORECASE)
+_QTY_TRAILING_FILLER_RE = re.compile(
+    r"(?:[\s.!?]|\b(?:please|pls|plz|thanks|thank\s+you|thx)\b)+$", re.IGNORECASE)
+# "10 trays of Idly", "4 x Masala Dosa", "4× Masala Dosa", "I'll take 2 trays of Idly"
+_QTY_BEFORE_NAME_RE = re.compile(
+    rf"^(?:.*?\s)??(?P<qty>\d{{1,4}})\s*(?P<x>[x×](?![a-z]))?\s*(?P<unit>{_QTY_UNIT}\b)?"
+    r"\s*(?P<of>of\b)?\s*(?P<name>[^\d\s].*)$",
+    re.IGNORECASE,
+)
+# "Masala Dosa x 4", "Masala Dosa: 4", "Idly - 10 trays"
+_NAME_BEFORE_QTY_RE = re.compile(
+    rf"^(?P<name>.*?[^\d\s])\s*(?P<sep>\s[x×]|×|[-:])\s*(?P<qty>\d{{1,4}})\s*(?P<unit>{_QTY_UNIT})?$",
+    re.IGNORECASE,
+)
+_PARENTHETICAL_RE = re.compile(r"\([^)]*\)")
+_NON_WORD_RE = re.compile(r"[^\w\s]+")
+# Trimmed from the EDGES of a phrase only ("I'll take ... please"), never from
+# inside it, so a menu name is never shortened.
+_PHRASE_EDGE_STOPWORDS = frozenset({
+    "a", "an", "the", "of", "i", "ll", "we", "you", "me", "us", "take", "want",
+    "need", "get", "add", "give", "have", "like", "would", "could", "can", "also",
+    "just", "please", "pls", "plz", "thanks", "thank",
+})
+# A count of PEOPLE is the headcount, not an item — never an item phrase.
+_HEADCOUNT_NOUNS = frozenset({
+    "people", "person", "persons", "guest", "guests", "pax", "ppl", "attendees",
+    "heads", "members", "adults", "kids", "children", "folks",
+})
+
+
+@dataclass(frozen=True)
+class ExplicitLineItems:
+    """Result of `extract_explicit_line_items`. `matched` rows are
+    {"name": canonical menu name, "qty": int}; `unmatched` holds the customer's
+    raw phrases; `suggestions` maps each unmatched phrase to up to
+    EXPLICIT_QTY_MAX_SUGGESTIONS exact menu names (possibly none)."""
+    matched: list = field(default_factory=list)
+    unmatched: list = field(default_factory=list)
+    has_quantity_signal: bool = False
+    suggestions: dict = field(default_factory=dict)
+
+
+def _item_tokens(name: str, *, keep_parenthetical: bool) -> tuple:
+    s = (name or "").casefold()
+    if not keep_parenthetical:
+        s = _PARENTHETICAL_RE.sub(" ", s)
+    return tuple(_NON_WORD_RE.sub(" ", s).split())
+
+
+def _trim_phrase_edges(tokens: tuple) -> tuple:
+    start, end = 0, len(tokens)
+    while start < end and tokens[start] in _PHRASE_EDGE_STOPWORDS:
+        start += 1
+    while end > start and tokens[end - 1] in _PHRASE_EDGE_STOPWORDS:
+        end -= 1
+    return tokens[start:end]
+
+
+def _resolve_item_phrase(full: tuple, stripped: tuple, keys: list) -> Optional[str]:
+    """Most specific tier first; a tier that hits MORE than one item is ambiguous
+    and stops the search (a looser tier can only be more ambiguous)."""
+    tiers = (
+        lambda k: k[1] == full,
+        lambda k: k[2] == stripped,
+        lambda k: set(stripped) <= set(k[2]),
+    )
+    for hit in tiers:
+        names = [k[0] for k in keys if hit(k)]
+        if names:
+            return names[0] if len(names) == 1 else None
+    return None
+
+
+def _suggest_menu_names(stripped: tuple, keys: list) -> list:
+    want = set(stripped)
+    scored = []
+    for index, (name, _full, item_stripped) in enumerate(keys):
+        have = set(item_stripped)
+        overlap = len(want & have)
+        if overlap:
+            scored.append((-overlap / len(want | have), index, name))
+    return [name for _score, _index, name in sorted(scored)[:EXPLICIT_QTY_MAX_SUGGESTIONS]]
+
+
+def extract_explicit_line_items(text: str, menu_names) -> ExplicitLineItems:
+    """Explicit per-item quantities in `text`, resolved against `menu_names`.
+
+    PURE and deterministic. Segments split on `,` `;` newline ` and ` ` & `; each
+    segment is read as `N [x|×] [unit] [of] NAME` or `NAME (x|×|-|:) N [unit]`.
+    A segment whose name is a headcount noun ("50 people") or carries no letters
+    is not an item phrase. A phrase that resolves to no single menu item is
+    reported unmatched only when it is plainly an item phrase — it carried a
+    unit / multiplier / "of", or shares a word with a menu name — so a stray
+    number ("at 7 pm") never triggers a clarification. A bare number alone
+    ("Option 2") is never a quantity signal. Quantities outside
+    EXPLICIT_QTY_MIN..EXPLICIT_QTY_MAX are unmatched, never clamped. Repeated
+    items are summed.
+    """
+    keys = [
+        (name, _item_tokens(name, keep_parenthetical=True), _item_tokens(name, keep_parenthetical=False))
+        for name in dict.fromkeys(menu_names or [])
+    ]
+    totals: dict = {}
+    raws: dict = {}
+    unmatched: list = []
+    suggestions: dict = {}
+    for segment in _QTY_SEGMENT_SPLIT_RE.split(text or ""):
+        raw = _QTY_TRAILING_FILLER_RE.sub("", segment.strip()).strip()
+        if not raw:
+            continue
+        m = _NAME_BEFORE_QTY_RE.match(raw)
+        marked = bool(m and (m.group("sep").strip() in {"x", "X", "×"} or m.group("unit")))
+        if m is None:
+            m = _QTY_BEFORE_NAME_RE.match(raw)
+            marked = bool(m and (m.group("x") or m.group("unit") or m.group("of")))
+        if m is None:
+            continue
+        full = _trim_phrase_edges(_item_tokens(m.group("name"), keep_parenthetical=True))
+        stripped = _trim_phrase_edges(_item_tokens(m.group("name"), keep_parenthetical=False))
+        if not any(any(c.isalpha() for c in tok) for tok in stripped):
+            continue
+        if _HEADCOUNT_NOUNS & set(stripped):
+            continue
+        qty = int(m.group("qty"))
+        name = _resolve_item_phrase(full, stripped, keys)
+        if name is not None:
+            totals[name] = totals.get(name, 0) + qty
+            raws.setdefault(name, []).append(raw)
+            continue
+        nearest = _suggest_menu_names(stripped, keys)
+        if marked or nearest:
+            unmatched.append(raw)
+            suggestions[raw] = nearest
+
+    matched = []
+    for name, qty in totals.items():
+        if EXPLICIT_QTY_MIN <= qty <= EXPLICIT_QTY_MAX:
+            matched.append({"name": name, "qty": qty})
+        else:
+            for raw in raws[name]:
+                unmatched.append(raw)
+                suggestions[raw] = [name]
+    return ExplicitLineItems(
+        matched=matched,
+        unmatched=unmatched,
+        has_quantity_signal=bool(matched or unmatched),
+        suggestions=suggestions,
+    )
+
+
 __all__ = [
     "extract_catering_fields",
     "detect_quote_acceptance",
+    "extract_explicit_line_items", "ExplicitLineItems",
     "parse_month_day_event_date", "parse_numeric_event_date", "parse_event_date",
     "parse_headcount", "parse_headcount_from_signals", "parse_guest_split_count",
     "parse_event_type", "parse_service_style", "parse_delivery_or_pickup",

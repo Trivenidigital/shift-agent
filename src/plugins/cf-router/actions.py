@@ -54,6 +54,8 @@ PENDING_PATH = Path("/opt/shift-agent/state/pending.json")
 REVENUE_ROUTE_CLARIFICATION_PATH = Path("/opt/shift-agent/state/revenue-route-clarifications.json")
 LEADS_PATH = Path("/opt/shift-agent/state/catering-leads.json")
 PROPOSALS_PATH = Path("/opt/shift-agent/state/catering-proposals.json")
+MENU_PATH = Path("/opt/shift-agent/state/catering-menu.json")
+PRICEBOOK_PATH = Path("/opt/shift-agent/state/catering-pricebook.json")
 MENU_PENDING_PATH = Path("/opt/shift-agent/state/catering-menu-pending.json")
 FLYER_PROJECTS_PATH = Path("/opt/shift-agent/state/flyer/projects.json")
 FLYER_CUSTOMERS_PATH = Path("/opt/shift-agent/state/flyer/customers.json")
@@ -78,6 +80,7 @@ CREATE_CATERING_PROPOSALS_BIN = Path("/usr/local/bin/create-catering-proposal-op
 AMEND_CATERING_LEAD_BIN = Path("/usr/local/bin/amend-catering-lead")  # M1 apply path
 APPROVE_CATERING_FOLLOWUP_BIN = Path("/usr/local/bin/approve-catering-followup")  # M5
 SELECT_CATERING_PROPOSAL_BIN = Path("/usr/local/bin/select-catering-proposal")
+FINALIZE_CATERING_MENU_BIN = Path("/usr/local/bin/finalize-catering-menu")
 RECORD_CATERING_ACCEPTANCE_BIN = Path("/usr/local/bin/record-catering-acceptance")  # M3
 CREATE_FLYER_PROJECT_BIN = Path("/usr/local/bin/create-flyer-project")
 BARE_FLYER_SEND_BIN = Path("/usr/local/bin/bare-flyer-render-and-send")  # Approach B async render+send
@@ -604,6 +607,13 @@ OPEN_LEAD_STATUSES = ACTIONABLE_LEAD_STATUSES | frozenset({"QUALIFYING"})
 # `record-catering-acceptance` re-checks this server-side; this copy is admission.
 POST_QUOTE_LEAD_STATUSES = frozenset({"SENT_TO_CUSTOMER"})
 
+# Explicit-quantity arm: the statuses finalize-catering-menu accepts (its own
+# guard, finalize-catering-menu main() "not actionable"). Admission copy only —
+# finalize re-checks under its lock. OWNER_APPROVED is deliberately absent.
+FINALIZE_ELIGIBLE_LEAD_STATUSES = frozenset({
+    "AWAITING_OWNER_APPROVAL", "CUSTOMER_FINALIZED", "OWNER_EDITED",
+})
+
 
 def find_catering_lead_by_code(code: str) -> Optional[dict]:
     """Look up a non-terminal catering lead by owner_approval_code.
@@ -650,10 +660,18 @@ def send_canonical_followup_reply(chat_id: str, lead_id: str, message_id: str = 
         f"They'll send a final quote within 24 hours. "
         f"Reply here if you need to adjust the inquiry."
     )
+    return send_catering_customer_text(chat_id, lead_id, template, message_id)
+
+
+def send_catering_customer_text(chat_id: str, lead_id: str, text: str,
+                                message_id: str = "") -> bool:
+    """Send a fixed, code-composed catering text to the customer through
+    send-catering-ack (bridge prefix + JID handling + send audit live there).
+    Returns True on send success; never raises."""
     cmd = [
         str(SEND_CATERING_ACK_BIN),
         "--customer-jid", chat_id,
-        "--message-text", template,
+        "--message-text", text,
         "--lead-id", lead_id,
     ]
     # PR-4 (charter §4.2): pass the inbound native message id as logical_turn_id
@@ -1108,6 +1126,87 @@ def invoke_select_catering_proposal(lead_id: str, chat_id: str, message_id: str,
         return 124
     except Exception:
         return 1
+
+
+def invoke_finalize_selected_items(code: str, message_id: str, selected_items: list[dict],
+                                   quote_total_usd: int) -> tuple[int, dict]:
+    """Explicit-quantity arm: invoke finalize-catering-menu with the customer's
+    OWN quantities. Never `--scale-selected-to-headcount` — the customer named
+    the counts, so finalize takes them verbatim (and needs no `serves`).
+
+    Returns (exit code, finalize's stdout JSON or {}). finalize re-prices every
+    line from the pricebook under its own truth guard and sends the owner card.
+    """
+    try:
+        result = subprocess.run(
+            [
+                str(PYTHON_BIN),
+                str(FINALIZE_CATERING_MENU_BIN),
+                "--code", code,
+                "--customer-message-id", message_id,
+                # PR-4 (charter §4.2): the owner-card row links to this inbound.
+                "--logical-turn-id", message_id,
+                "--selected-items-json", json.dumps(selected_items),
+                "--quote-total-usd", str(quote_total_usd),
+            ],
+            capture_output=True, text=True,
+            env=os.environ.copy(), timeout=SUBPROCESS_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, {}
+    except Exception:
+        return 1, {}
+    payload: dict = {}
+    lines = (result.stdout or "").strip().splitlines()
+    if lines:
+        try:
+            parsed = json.loads(lines[-1])
+            if isinstance(parsed, dict):
+                payload = parsed
+        except ValueError:
+            pass
+    return result.returncode, payload
+
+
+def extract_explicit_line_items_from_menu(text: str):
+    """Explicit per-item quantities in `text`, resolved against the AVAILABLE
+    items of the live menu (an unavailable item must not be quotable through an
+    override). None when the menu cannot be read. Never raises."""
+    try:
+        _ensure_platform_path()
+        from catering_extraction import extract_explicit_line_items  # type: ignore
+        with MENU_PATH.open(encoding="utf-8") as f:
+            menu = json.load(f)
+        names = [str(item.get("name") or "") for item in menu.get("items", [])
+                 if isinstance(item, dict) and item.get("available", True) and item.get("name")]
+        return extract_explicit_line_items(text, names)
+    except Exception:
+        return None
+
+
+def price_explicit_line_items(matched: list[dict], guest_count: int):
+    """Price the matched (name, qty) pairs through THE kernel
+    (catering_pricing.compute_quote: pricebook override first, else menu price).
+    Returns the QuoteComputation, or None when no pricebook exists or the
+    menu / pricebook / kernel refuses. Never raises, never guesses."""
+    try:
+        _ensure_platform_path()
+        import catering_pricing  # type: ignore
+        from safe_io import load_model  # type: ignore
+        from schemas import Menu  # type: ignore
+        menu, status = load_model(MENU_PATH, Menu)
+        if status != "ok":
+            return None
+        pricebook = catering_pricing.load_pricebook(PRICEBOOK_PATH)
+        if pricebook is None:
+            return None
+        return catering_pricing.compute_quote(
+            guest_count, None,
+            [(row["name"], row["qty"]) for row in matched],
+            None, pricebook, menu,
+        )
+    except Exception:
+        return None
 
 
 def invoke_record_catering_acceptance(lead_id: str, chat_id: str, message_id: str,

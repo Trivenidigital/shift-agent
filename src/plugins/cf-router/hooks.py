@@ -58,6 +58,8 @@ import catering_amendments  # type: ignore  # noqa: E402
 # stdlib (regex + dict shaping) — no IO, no LLM, no network.
 import catering_extraction  # type: ignore  # noqa: E402
 import catering_qualification  # type: ignore  # noqa: E402
+# Explicit-quantity arm: cents -> whole dollars for finalize's int-dollar CLI.
+import catering_pricing  # type: ignore  # noqa: E402
 # PR-5: deterministic per-conversation automation-control kernel (STOP/pause/
 # opt-out + human takeover). Imported flat like the modules above so an import
 # failure surfaces LOUD at plugin-load time. DORMANT behind
@@ -143,6 +145,17 @@ def f7_qualification_gate_enabled() -> bool:
 
 def f7_acceptance_arm_enabled() -> bool:
     return os.environ.get(CATERING_ACCEPTANCE_ARM_ENV, "0") == "1"
+
+
+# F7 EXPLICIT-QUANTITY ARM — see _try_explicit_qty_intercept. Default "1", but it
+# is ALSO gated per sender by the automation-control allowlist
+# (automation_control.enabled), so it only reaches allowlisted chats. "0" is the
+# kill switch: routing is then byte-identical to before the arm existed.
+CATERING_EXPLICIT_QTY_ENV = "CATERING_EXPLICIT_QTY_ENABLED"
+
+
+def f7_explicit_qty_enabled() -> bool:
+    return os.environ.get(CATERING_EXPLICIT_QTY_ENV, "1") == "1"
 
 # 30s rescue window — matches the deployed F7 daemon's WATCHDOG_TIMEOUT_SECS.
 # PRESERVED (not removed) for backwards-compat with TestF7DispatcherWatchdog,
@@ -1280,8 +1293,9 @@ def _pre_gateway_dispatch_impl(event: Any, gateway: Any = None, session_store: A
             # the lead lookup is the last admission check — evaluated ONLY when the
             # cheap signal checks have all failed.
             if not (is_catering or _has_f7_followup_signal(signals) or proposal_workflow):
-                admit = (f7_qualification_gate_enabled()
-                         and _sender_has_qualifying_lead(chat_id))
+                admit = ((f7_qualification_gate_enabled()
+                          and _sender_has_qualifying_lead(chat_id))
+                         or _sender_has_explicit_qty_lead(chat_id, text))
             else:
                 admit = True
             if admit:
@@ -7171,6 +7185,32 @@ def _sender_has_qualifying_lead(chat_id: str) -> bool:
         return False
 
 
+def _explicit_qty_gate_open(chat_id: str) -> bool:
+    """Kill switch AND the automation-control allowlist (no allowlist of its own)."""
+    return f7_explicit_qty_enabled() and automation_control.enabled(chat_id)
+
+
+def _sender_has_explicit_qty_lead(chat_id: str, text: str) -> bool:
+    """Admission for "10 trays of Idly, 4 Masala Dosa": item counts carry no
+    catering signal, so admit when the sender's open lead can still be finalized
+    AND the text names at least one menu item with a quantity. Ordered cheap-
+    first (env, one menu read) before identity resolution spawns identify-sender.
+    Never raises."""
+    try:
+        if not _explicit_qty_gate_open(chat_id):
+            return False
+        extraction = actions.extract_explicit_line_items_from_menu(text)
+        if extraction is None or not extraction.matched:
+            return False
+        phone, role = actions.lid_to_phone_via_identify_sender(chat_id)
+        if role == "owner":
+            return False
+        lead = actions.find_active_catering_lead_by_sender(phone, chat_id)
+        return bool(lead) and lead.get("status") in actions.FINALIZE_ELIGIBLE_LEAD_STATUSES
+    except Exception:  # noqa: BLE001 — admission widening must never break routing
+        return False
+
+
 def _has_f7_followup_signal(signals: list[str]) -> bool:
     """Return True when weak catering signals are enough for Branch B only.
 
@@ -7477,6 +7517,109 @@ def _try_catering_acceptance_intercept(
     return None
 
 
+def _explicit_qty_ack_text(matched: list[dict]) -> str:
+    """Mirrors select-catering-proposal's post-finalize `_ack_text` — same promise,
+    no price (the owner has not approved one yet)."""
+    items = ", ".join(f"{row['qty']} x {row['name']}" for row in matched)
+    return (f"Got it - your selection ({items}) is saved for owner approval. "
+            "Final pricing comes after owner review.")
+
+
+def _explicit_qty_clarification_text(extraction: Any) -> str:
+    lines = ["I couldn't match these to our menu:"]
+    for phrase in extraction.unmatched:
+        options = extraction.suggestions.get(phrase) or []
+        if options:
+            lines.append(f'- "{phrase}" - did you mean: {", ".join(options)}?')
+        else:
+            lines.append(f'- "{phrase}"')
+    lines.append(
+        f"Please reply with the exact menu names and quantities "
+        f"({catering_extraction.EXPLICIT_QTY_MIN}-{catering_extraction.EXPLICIT_QTY_MAX} "
+        f"each), for example: 10 x {extraction.matched[0]['name']}.")
+    return "\n".join(lines)
+
+
+def _try_explicit_qty_intercept(
+    text: str, chat_id: str, event: Any, *, active_lead: dict, message_id: str,
+) -> Optional[dict]:
+    """A customer with a finalize-eligible lead names items AND counts.
+
+    Every pair matched + headcount known + the kernel says deliverable → invoke
+    finalize-catering-menu with the customer's quantities verbatim (it re-prices,
+    persists CUSTOMER_FINALIZED and sends the owner card), then acknowledge the
+    customer. Some phrases unmatched → ONE clarification naming them with up to
+    three exact menu names each; no state change. Headcount missing, no
+    pricebook, an undeliverable quote, or finalize exiting non-zero → None so the
+    existing path handles the inbound (nothing new sent to the customer).
+
+    Audit: `cf_router_intercepted` under the EXISTING `f7_proposal_selection`
+    reason (the Literal is not widened); the detail starts `explicit_qty`.
+    The caller has already returned None for the owner.
+    """
+    if active_lead.get("status") not in actions.FINALIZE_ELIGIBLE_LEAD_STATUSES:
+        return None
+    if not _explicit_qty_gate_open(chat_id):
+        return None
+    extraction = actions.extract_explicit_line_items_from_menu(text)
+    if extraction is None or not extraction.matched:
+        return None
+
+    lead_id = active_lead.get("lead_id", "?")
+    code = active_lead.get("owner_approval_code") or ""
+    native_id = _extract_native_message_id(event)
+
+    def _audit(outcome: str, rc: Optional[int] = None) -> None:
+        actions.audit_intercepted(
+            reason="f7_proposal_selection", chat_id=chat_id, code=code, subprocess_rc=rc,
+            detail=(f"explicit_qty matched={len(extraction.matched)} "
+                    f"unmatched={len(extraction.unmatched)} code={code} "
+                    f"active {lead_id}; {outcome}"),
+        )
+
+    if extraction.unmatched:
+        sent = actions.send_catering_customer_text(
+            chat_id, lead_id, _explicit_qty_clarification_text(extraction), native_id)
+        _audit(f"clarification_sent={sent} phrases={extraction.unmatched!r}")
+        return {"action": "skip",
+                "reason": f"cf-router F7 explicit quantities: clarification for {lead_id}"}
+
+    headcount = (active_lead.get("extracted") or {}).get("headcount")
+    if not isinstance(headcount, int) or headcount < 1:
+        _audit("fallthrough=headcount_missing")
+        return None
+    qc = actions.price_explicit_line_items(extraction.matched, headcount)
+    if qc is None:
+        _audit("fallthrough=pricing_unavailable")
+        return None
+    if not qc.is_deliverable():
+        _audit(f"fallthrough=not_deliverable price_status={qc.price_status} flags={qc.flags}")
+        return None
+
+    items = [{"name": ln.name, "qty": ln.qty,
+              "price_usd": catering_pricing.cents_to_whole_dollars(ln.unit_cents)}
+             for ln in qc.lines]
+    # finalize's truth guard compares this against the kernel's line + per-person
+    # subtotal (fees and tax are server-only), so that is the number passed.
+    guard_total = catering_pricing.cents_to_whole_dollars(
+        qc.items_subtotal_cents + qc.per_person_subtotal_cents)
+    rc, payload = actions.invoke_finalize_selected_items(code, message_id, items, guard_total)
+    if rc not in {0, 6}:
+        # 6 = state persisted but the owner card failed (finalize pages the owner
+        # itself). Anything else changed nothing the customer should hear about.
+        _audit(f"finalize_rc={rc} total_cents={qc.total_cents}", rc)
+        return None
+    replay = bool(payload.get("replay"))
+    ack_sent = False
+    if not replay:
+        ack_sent = actions.send_catering_customer_text(
+            chat_id, lead_id, _explicit_qty_ack_text(extraction.matched), native_id)
+    _audit(f"finalize_rc={rc} total_cents={qc.total_cents} replay={replay} "
+           f"ack_sent={ack_sent}", rc)
+    return {"action": "skip",
+            "reason": f"cf-router F7 explicit quantities finalized for {lead_id}"}
+
+
 def _try_f7_primary_intercept(
     text: str, chat_id: str, event: Any,
     signals: Optional[list[str]] = None,
@@ -7544,6 +7687,16 @@ def _try_f7_primary_intercept(
         )
         if result is not None:
             return result
+
+    # Explicit per-item quantities ("10 trays of Idly, 5 of Chicken Biryani") —
+    # BEFORE the option selection below, whose ACTION_OPTION_RE reads "I'll take 2
+    # trays of Idly" as Option 2, and before the R2A capture, which would only
+    # file the order as an amendment. Gated off => None => unchanged routing.
+    explicit_result = _try_explicit_qty_intercept(
+        text, chat_id, event, active_lead=active_lead, message_id=message_id,
+    )
+    if explicit_result is not None:
+        return explicit_result
 
     # Compound-intent-aware SELECTION — turn-arbitration 2026-07-26. Runs BEFORE the
     # proposal-request-regeneration path. When a SENT selectable set already exists for
