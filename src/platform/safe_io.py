@@ -1348,6 +1348,41 @@ def front_brain_outbound_enforce_enabled(jid: str) -> bool:
     return _front_brain_normalize_chat_key(jid) in allowlist
 
 
+def _front_brain_owner_directed(jid: str) -> bool:
+    """True when `jid` normalizes to a PRIMARY owner identity
+    (owner.self_chat_jid / owner.phone / owner.lid).
+
+    Used ONLY by the scripted bridge_post seam (via exempt_owner=True on
+    _front_brain_outbound_enforce): the owner is the control plane, not a
+    customer, and every owner card / brief is sent to these identities.
+    Incident 2026-10-05..08: after the 2026-10-03 owner swap the allowlisted
+    owner identity got the generic ack in place of the daily brief
+    ("scheduled", "Quotes sent") every morning, while send-daily-brief
+    recorded brief_sent. The gateway LLM-reply seam does NOT use this — the
+    owner's free-form LLM chat stays screened (07-31 owner false-success
+    class). `authorized_identities` are deliberately excluded: they are owner
+    AUTHORIZATION only, never a notification destination, and a dual-role
+    manager's customer conversation must stay screened.
+
+    Plain yaml + dict access, NOT Config validation — an operator-edited file
+    must not break sends. Any fault → False (screen, i.e. the prior behavior).
+    Re-read on every call: sends are rare, and a stale cache after an owner
+    swap is the exact failure this exists to fix."""
+    try:
+        import yaml as _yaml
+        cfg_path = Path(os.environ.get("SHIFT_AGENT_CONFIG_PATH", "/opt/shift-agent/config.yaml"))
+        doc = _yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+        owner = doc.get("owner") if isinstance(doc, dict) else None
+        if not isinstance(owner, dict):
+            return False
+        identities = [owner.get("self_chat_jid"), owner.get("phone"), owner.get("lid")]
+        owner_keys = {_front_brain_normalize_chat_key(str(i)) for i in identities if i}
+        owner_keys.discard("")
+        return _front_brain_normalize_chat_key(jid) in owner_keys
+    except Exception:
+        return False
+
+
 def _front_brain_chat_key_hash(jid: str) -> str:
     """sha256[:32] of the raw jid — mirrors cf-router actions._short_hash so the
     review surface never persists a raw chat identifier."""
@@ -1381,6 +1416,7 @@ def _front_brain_outbound_enforce(
     action_context: "Optional[ActionExecutionContext]" = None,
     logical_turn_id: str = "",
     send_attempt_id: str = "",
+    exempt_owner: bool = False,
 ) -> str:
     """Screen a composed outbound reply and return the SAFE text to send.
 
@@ -1405,8 +1441,15 @@ def _front_brain_outbound_enforce(
     2026-08-08: an action_context asserting completion (claims_action_completed)
     WITHOUT verified_action_result short-circuits to the fallback before the
     screen runs. The screen is wording-based; that invariant is not, so no
-    phrasing of an unverified completion claim can pass here either."""
+    phrasing of an unverified completion claim can pass here either.
+
+    exempt_owner (bridge_post only): an admitted send to a PRIMARY owner
+    identity returns ``message`` unchanged with zero side effects — see
+    _front_brain_owner_directed. Default False so the gateway seam and any
+    future caller stay screened unless they opt in."""
     if not front_brain_outbound_enforce_enabled(jid):
+        return message
+    if exempt_owner and _front_brain_owner_directed(jid):
         return message
 
     chat_hash = _front_brain_chat_key_hash(jid)
@@ -3459,10 +3502,12 @@ def bridge_post(
     # admitted chat's composed reply fails the free-form screen, this rewrites
     # `message` to a safe fallback (never blocks) and emits the review/refusal
     # audit rows. Runs BEFORE the regulated-intent policy so the downstream lint
-    # sees the safe text.
+    # sees the safe text. Scripted sends to the PRIMARY owner identity skip the
+    # screen (exempt_owner) — the owner is the control plane (2026-10 daily
+    # brief incident); the gateway LLM-reply seam does not opt in.
     message = _front_brain_outbound_enforce(
         jid, message, fallback_template=fallback_template,
-        action_context=action_context,
+        action_context=action_context, exempt_owner=True,
     )
     # PR-ζ chokepoint discipline. Refuses + emits audit row when None-context
     # caller is not allowlisted; runs the PR-γ lint on regulated sends. A NON-

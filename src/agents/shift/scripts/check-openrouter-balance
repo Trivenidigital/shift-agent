@@ -9,6 +9,11 @@ shift-agent-notify-owner chokepoint (Pushover-primary, plain text — no
 Markdown parse mode anywhere, per CLAUDE.md §12b) when the remaining balance
 drops below the threshold.
 
+It also checks the API key's own spend cap (GET /api/v1/auth/key: limit /
+limit_remaining). A key at its cap returns HTTP 403 "Key limit exceeded" on
+every call even while the account still has credits, so the two are
+evaluated independently and both always run.
+
 Key resolution: process env first (systemd EnvironmentFile=/opt/shift-agent/.env
 is read by systemd as root before User= drops privileges, so the key is in the
 environment even though the unit user cannot read /root/.hermes/.env), then the
@@ -18,13 +23,19 @@ on-box env files — the shared flyer_openrouter_env chokepoint.
   openrouter_balance_ok / openrouter_balance_check_failed /
   openrouter_balance_alert_dispatched / openrouter_balance_alert_delivered /
   openrouter_balance_alert_delivery_failed
+  openrouter_key_limit_ok / openrouter_key_limit_check_failed /
+  openrouter_key_limit_alert_dispatched / openrouter_key_limit_alert_delivered /
+  openrouter_key_limit_alert_delivery_failed
 so journalctl can always distinguish "healthy", "checker broken", and
 "alert fired but delivery failed".
 
-Threshold: OPENROUTER_BALANCE_ALERT_THRESHOLD_USD (default 5).
+Thresholds: OPENROUTER_BALANCE_ALERT_THRESHOLD_USD (default 5) for the account
+balance; OPENROUTER_KEY_LIMIT_ALERT_THRESHOLD_USD (default 5) for the key's
+limit_remaining (an uncapped key, limit null, is always ok).
 
-Exit codes: 0 healthy or alert delivered; 6 credits fetch failed OR alert
-delivery failed (EXIT_DEPENDENCY_DOWN — trips the systemd OnFailure handler).
+Exit codes: 0 only when every check is healthy or its alert was delivered;
+6 if either fetch failed OR either alert's delivery failed
+(EXIT_DEPENDENCY_DOWN — trips the systemd OnFailure handler).
 """
 from __future__ import annotations
 
@@ -36,6 +47,7 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "platform"))
@@ -48,8 +60,10 @@ except ImportError:
     from agents.flyer.openrouter_env import openrouter_key  # noqa: E402
 
 CREDITS_URL = "https://openrouter.ai/api/v1/credits"
+KEY_URL = "https://openrouter.ai/api/v1/auth/key"
 TIMEOUT_SEC = 30
 DEFAULT_THRESHOLD_USD = 5.0
+DEFAULT_KEY_THRESHOLD_USD = 5.0
 NOTIFY_BIN = "/usr/local/bin/shift-agent-notify-owner"
 
 
@@ -76,23 +90,60 @@ def fetch_balance(credits_json_path: str = "") -> float:
     return float(data["total_credits"]) - float(data["total_usage"])
 
 
-def main() -> int:
-    p = argparse.ArgumentParser()
-    p.add_argument("--threshold-usd", type=float,
-                   default=float(os.environ.get("OPENROUTER_BALANCE_ALERT_THRESHOLD_USD", DEFAULT_THRESHOLD_USD)))
-    p.add_argument("--notify-bin", default=NOTIFY_BIN)
-    p.add_argument("--credits-json", default="", help="test injection: read the credits response from this file instead of the API")
-    args = p.parse_args()
+def fetch_key_limit(key_json_path: str = "") -> tuple[Optional[float], Optional[float]]:
+    """Return ``(limit, limit_remaining)`` in USD for the API key itself.
 
+    ``limit`` is null for an uncapped key -> ``(None, None)``.
+    ``key_json_path`` injects a response document for tests."""
+    if key_json_path:
+        doc = json.loads(Path(key_json_path).read_text(encoding="utf-8"))
+    else:
+        key = openrouter_key()
+        if not key or "PLACEHOLDER" in key:
+            raise RuntimeError("OPENROUTER_API_KEY missing or placeholder")
+        req = urllib.request.Request(
+            KEY_URL, headers={"Authorization": f"Bearer {key}"}, method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
+            doc = json.loads(resp.read().decode("utf-8"))
+    data = doc["data"]
+    if data["limit"] is None:
+        return None, None
+    return float(data["limit"]), float(data["limit_remaining"])
+
+
+def _notify(notify_bin: str, prefix: str, title: str, message: str, **delivered_fields) -> bool:
+    """Page the owner; emit ``<prefix>_alert_delivered`` / ``_delivery_failed``.
+
+    Returns True only when the notify chokepoint exited 0."""
+    try:
+        proc = subprocess.run(
+            [notify_bin, "--title", title, "--priority", "1", message],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _emit(f"{prefix}_alert_delivery_failed", error=f"{type(exc).__name__}: {exc}"[:300])
+        return False
+    if proc.returncode != 0:
+        _emit(f"{prefix}_alert_delivery_failed",
+              notify_exit_code=proc.returncode,
+              stderr=(proc.stderr or "").strip()[:300])
+        return False
+    _emit(f"{prefix}_alert_delivered", **delivered_fields)
+    return True
+
+
+def check_balance(args: argparse.Namespace) -> bool:
+    """Account-balance check. True = ok or alert delivered."""
     try:
         balance = fetch_balance(args.credits_json)
     except Exception as exc:  # noqa: BLE001 — any failure here is DEPENDENCY_DOWN
         _emit("openrouter_balance_check_failed", error=f"{type(exc).__name__}: {exc}"[:300])
-        return EXIT_DEPENDENCY_DOWN
+        return False
 
     if balance >= args.threshold_usd:
         _emit("openrouter_balance_ok", balance_usd=round(balance, 2), threshold_usd=args.threshold_usd)
-        return EXIT_OK
+        return True
 
     # Plain text on purpose (§12b): dollar amounts and thresholds must not be
     # mangled by any Markdown parsing downstream.
@@ -102,21 +153,54 @@ def main() -> int:
         f"calls fail once credits hit $0 - top up at openrouter.ai/credits."
     )
     _emit("openrouter_balance_alert_dispatched", balance_usd=round(balance, 2), threshold_usd=args.threshold_usd)
+    return _notify(args.notify_bin, "openrouter_balance", "OpenRouter credits low", message,
+                   balance_usd=round(balance, 2))
+
+
+def check_key_limit(args: argparse.Namespace) -> bool:
+    """Per-key spend-cap check. True = ok (incl. uncapped) or alert delivered.
+
+    Independent of the account balance: a key at its own cap returns HTTP 403
+    "Key limit exceeded" on every call even while the account has credits."""
     try:
-        proc = subprocess.run(
-            [args.notify_bin, "--title", "OpenRouter credits low", "--priority", "1", message],
-            capture_output=True, text=True, timeout=60,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        _emit("openrouter_balance_alert_delivery_failed", error=f"{type(exc).__name__}: {exc}"[:300])
-        return EXIT_DEPENDENCY_DOWN
-    if proc.returncode != 0:
-        _emit("openrouter_balance_alert_delivery_failed",
-              notify_exit_code=proc.returncode,
-              stderr=(proc.stderr or "").strip()[:300])
-        return EXIT_DEPENDENCY_DOWN
-    _emit("openrouter_balance_alert_delivered", balance_usd=round(balance, 2))
-    return EXIT_OK
+        limit, remaining = fetch_key_limit(args.key_json)
+    except Exception as exc:  # noqa: BLE001 — any failure here is DEPENDENCY_DOWN
+        _emit("openrouter_key_limit_check_failed", error=f"{type(exc).__name__}: {exc}"[:300])
+        return False
+
+    if limit is None or remaining >= args.key_threshold_usd:
+        _emit("openrouter_key_limit_ok",
+              limit_usd=limit,
+              limit_remaining_usd=None if remaining is None else round(remaining, 2),
+              threshold_usd=args.key_threshold_usd)
+        return True
+
+    message = (
+        f"OpenRouter KEY cap nearly exhausted: ${remaining:.2f} remaining of "
+        f"${limit:.2f} cap (threshold ${args.key_threshold_usd:.2f}). All model "
+        f"calls return HTTP 403 at $0 - raise the key limit at openrouter.ai/settings/keys."
+    )
+    _emit("openrouter_key_limit_alert_dispatched",
+          limit_usd=limit, limit_remaining_usd=round(remaining, 2), threshold_usd=args.key_threshold_usd)
+    return _notify(args.notify_bin, "openrouter_key_limit", "OpenRouter key limit low", message,
+                   limit_usd=limit, limit_remaining_usd=round(remaining, 2))
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--threshold-usd", type=float,
+                   default=float(os.environ.get("OPENROUTER_BALANCE_ALERT_THRESHOLD_USD", DEFAULT_THRESHOLD_USD)))
+    p.add_argument("--key-threshold-usd", type=float,
+                   default=float(os.environ.get("OPENROUTER_KEY_LIMIT_ALERT_THRESHOLD_USD", DEFAULT_KEY_THRESHOLD_USD)))
+    p.add_argument("--notify-bin", default=NOTIFY_BIN)
+    p.add_argument("--credits-json", default="", help="test injection: read the credits response from this file instead of the API")
+    p.add_argument("--key-json", default="", help="test injection: read the auth/key response from this file instead of the API")
+    args = p.parse_args()
+
+    # Both checks always run: one alerting or failing must never hide the other.
+    balance_ok = check_balance(args)
+    key_ok = check_key_limit(args)
+    return EXIT_OK if (balance_ok and key_ok) else EXIT_DEPENDENCY_DOWN
 
 
 if __name__ == "__main__":

@@ -231,3 +231,258 @@ def test_bridge_post_flag_off_emits_no_front_brain_rows(monkeypatch):
     safe_io.bridge_post("chat@c.us", PROMISE_MSG, fallback_template=FALLBACK)
     rows = _read_rows(monkeypatch)
     assert not [r for r in rows if r["type"].startswith("front_brain_")]
+
+
+# ── owner-directed exemption, bridge_post seam only (incident 2026-10-05..08) ─
+# The owner is the control plane, not a customer: after the 2026-10-03 owner
+# swap the allowlisted owner identity received the generic ack in place of the
+# daily brief every morning. SCRIPTED sends (bridge_post -> exempt_owner=True)
+# to a PRIMARY owner identity skip the screen. The predicate is untouched, the
+# gateway LLM-reply seam stays screened for the owner, authorized_identities
+# stay screened, and every non-owner admitted chat is still screened (the
+# witness half of each case).
+
+OWNER_PHONE = "+17329837841"
+OWNER_SELF_JID = "17329837841@s.whatsapp.net"
+OWNER_LID = "201975216009469@lid"
+AUTH_PHONE = "+15550100777"
+AUTH_LID = "301975216009469@lid"
+CUSTOMER_JID = "15550100001@s.whatsapp.net"
+BRIEF_MSG = "Good morning! 2 shifts scheduled today. Quotes sent: 3."
+
+
+def _write_owner_config(tmp_path, monkeypatch, body: str | None = None) -> Path:
+    cfg = tmp_path / "config.yaml"
+    if body is None:
+        body = (
+            "owner:\n"
+            "  name: Owner\n"
+            f"  phone: '{OWNER_PHONE}'\n"
+            f"  self_chat_jid: '{OWNER_SELF_JID}'\n"
+            f"  lid: '{OWNER_LID}'\n"
+            "  authorized_identities:\n"
+            f"    - phone: '{AUTH_PHONE}'\n"
+            f"      lid: '{AUTH_LID}'\n"
+        )
+    cfg.write_text(body, encoding="utf-8")
+    monkeypatch.setenv("SHIFT_AGENT_CONFIG_PATH", str(cfg))
+    return cfg
+
+
+def _owner_exempt(jid, msg, **kw):
+    return safe_io._front_brain_outbound_enforce(jid, msg, exempt_owner=True, **kw)
+
+
+def test_owner_predicate_untouched(tmp_path, monkeypatch):
+    # The admission predicate stays a pure env check: the owner IS admitted.
+    _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, f"{OWNER_PHONE},{CUSTOMER_JID}")
+    assert safe_io.front_brain_outbound_enforce_enabled(OWNER_SELF_JID) is True
+    _enable(monkeypatch, "*")
+    assert safe_io.front_brain_outbound_enforce_enabled(OWNER_SELF_JID) is True
+
+
+def test_owner_self_chat_exempt_while_customer_still_screened(tmp_path, monkeypatch):
+    _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, f"{OWNER_PHONE},{CUSTOMER_JID}")
+    # TARGET: owner admitted by the allowlist, yet not screened when opted in.
+    assert _owner_exempt(OWNER_SELF_JID, PROMISE_MSG, fallback_template=FALLBACK) == PROMISE_MSG
+    assert _read_rows(monkeypatch) == []
+    # WITNESS: the same message to an allowlisted NON-owner chat is screened.
+    assert _owner_exempt(CUSTOMER_JID, PROMISE_MSG, fallback_template=FALLBACK) == FALLBACK
+    assert [r for r in _read_rows(monkeypatch) if r["type"] == "front_brain_outbound_refused"]
+
+
+def test_owner_screened_without_opt_in(tmp_path, monkeypatch):
+    # exempt_owner defaults False: a caller that does not opt in (the gateway
+    # seam, any future caller) screens the owner like anyone else.
+    _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, OWNER_PHONE)
+    out = safe_io._front_brain_outbound_enforce(OWNER_SELF_JID, PROMISE_MSG, fallback_template=FALLBACK)
+    assert out == FALLBACK
+    assert [r for r in _read_rows(monkeypatch) if r["type"] == "front_brain_outbound_refused"]
+
+
+def test_owner_daily_brief_text_reaches_owner_unchanged(tmp_path, monkeypatch):
+    # The incident shape: a "scheduled" / "Quotes sent" brief to the owner.
+    _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, f"{OWNER_PHONE},{CUSTOMER_JID}")
+    assert _owner_exempt(OWNER_SELF_JID, BRIEF_MSG) == BRIEF_MSG
+    assert _read_rows(monkeypatch) == []
+    # WITNESS: the brief text itself trips the screen when sent to a customer.
+    assert _owner_exempt(CUSTOMER_JID, BRIEF_MSG) == safe_io.FRONT_BRAIN_SAFE_GENERIC_ACK
+
+
+@pytest.mark.parametrize("jid", [
+    OWNER_SELF_JID,
+    OWNER_LID,
+    OWNER_PHONE,
+    "17329837841",
+    "17329837841@c.us",
+])
+def test_primary_owner_identity_variants_exempt(tmp_path, monkeypatch, jid):
+    _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, "*")
+    assert _owner_exempt(jid, PROMISE_MSG, fallback_template=FALLBACK) == PROMISE_MSG
+    assert _read_rows(monkeypatch) == []
+
+
+@pytest.mark.parametrize("jid", [
+    AUTH_PHONE,
+    "15550100777@s.whatsapp.net",
+    AUTH_LID,
+])
+def test_authorized_identity_still_screened(tmp_path, monkeypatch, jid):
+    # authorized_identities are owner AUTHORIZATION only, never a notification
+    # destination: a dual-role manager's customer conversation stays screened.
+    _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, "*")
+    assert _owner_exempt(jid, PROMISE_MSG, fallback_template=FALLBACK) == FALLBACK
+    assert [r for r in _read_rows(monkeypatch) if r["type"] == "front_brain_outbound_refused"]
+
+
+def test_wildcard_still_exempts_owner_but_screens_others(tmp_path, monkeypatch):
+    _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, "*")
+    assert _owner_exempt(OWNER_SELF_JID, PROMISE_MSG) == PROMISE_MSG
+    assert _owner_exempt(CUSTOMER_JID, PROMISE_MSG) == safe_io.FRONT_BRAIN_SAFE_GENERIC_ACK
+
+
+def test_missing_config_no_exemption(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHIFT_AGENT_CONFIG_PATH", str(tmp_path / "absent.yaml"))
+    _enable(monkeypatch, OWNER_PHONE)
+    assert _owner_exempt(OWNER_SELF_JID, PROMISE_MSG, fallback_template=FALLBACK) == FALLBACK
+
+
+@pytest.mark.parametrize("body", [
+    "owner: [unclosed\n",          # yaml parse error
+    "- just\n- a\n- list\n",       # not a mapping
+    "owner: null\n",               # owner missing
+    "owner:\n  name: Owner\n",     # no identity keys
+    "",                            # empty file
+])
+def test_unreadable_or_partial_config_no_exemption(tmp_path, monkeypatch, body):
+    _write_owner_config(tmp_path, monkeypatch, body)
+    _enable(monkeypatch, OWNER_PHONE)
+    assert _owner_exempt(OWNER_SELF_JID, PROMISE_MSG, fallback_template=FALLBACK) == FALLBACK
+
+
+def test_config_is_directory_no_exemption(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHIFT_AGENT_CONFIG_PATH", str(tmp_path))
+    _enable(monkeypatch, OWNER_PHONE)
+    assert _owner_exempt(OWNER_SELF_JID, PROMISE_MSG, fallback_template=FALLBACK) == FALLBACK
+
+
+def test_flag_off_or_not_admitted_performs_no_config_read(tmp_path, monkeypatch):
+    monkeypatch.delenv("FRONT_BRAIN_OUTBOUND_ENFORCE", raising=False)
+    monkeypatch.setenv("SHIFT_AGENT_CONFIG_PATH", str(tmp_path / "nonexistent.yaml"))
+    assert _owner_exempt(OWNER_SELF_JID, PROMISE_MSG) == PROMISE_MSG
+    # The owner lookup itself is never consulted for OFF / empty / non-admitted.
+    lookups: list = []
+    monkeypatch.setattr(safe_io, "_front_brain_owner_directed",
+                        lambda jid: lookups.append(jid) or True)
+    assert _owner_exempt(OWNER_SELF_JID, PROMISE_MSG) == PROMISE_MSG
+    monkeypatch.setenv("FRONT_BRAIN_OUTBOUND_ENFORCE", "1")
+    monkeypatch.setenv("FRONT_BRAIN_OUTBOUND_ENFORCE_ALLOWLIST", "")
+    assert _owner_exempt(OWNER_SELF_JID, PROMISE_MSG) == PROMISE_MSG
+    monkeypatch.setenv("FRONT_BRAIN_OUTBOUND_ENFORCE_ALLOWLIST", CUSTOMER_JID)
+    assert _owner_exempt(OWNER_SELF_JID, PROMISE_MSG) == PROMISE_MSG
+    assert lookups == []
+    # Nor when the caller does not opt in, even for an admitted chat.
+    safe_io._front_brain_outbound_enforce(CUSTOMER_JID, CLEAN_MSG)
+    assert lookups == []
+    # WITNESS: an admitted, opted-in chat DOES consult it.
+    assert _owner_exempt(CUSTOMER_JID, PROMISE_MSG) == PROMISE_MSG
+    assert lookups == [CUSTOMER_JID]
+
+
+def test_owner_lookup_rereads_config_after_owner_swap(tmp_path, monkeypatch):
+    # No caching: an owner swap takes effect on the next send.
+    cfg = _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, "*")
+    assert _owner_exempt(OWNER_SELF_JID, PROMISE_MSG) == PROMISE_MSG
+    cfg.write_text(
+        "owner:\n  name: New\n  phone: '+15550100999'\n"
+        "  self_chat_jid: '15550100999@s.whatsapp.net'\n",
+        encoding="utf-8",
+    )
+    assert _owner_exempt(OWNER_SELF_JID, PROMISE_MSG) == safe_io.FRONT_BRAIN_SAFE_GENERIC_ACK
+    assert _owner_exempt("15550100999@s.whatsapp.net", PROMISE_MSG) == PROMISE_MSG
+
+
+def test_gateway_seam_still_screens_owner(tmp_path, monkeypatch):
+    # The owner's free-form LLM chat exits via the gateway seam, which does NOT
+    # opt in: a PROMISE reply to the owner is still substituted (07-31 owner
+    # false-success class).
+    _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, f"{OWNER_PHONE},{CUSTOMER_JID}")
+    monkeypatch.setenv("FRONT_BRAIN_CHAT_BUDGET_PATH", str(tmp_path / "budget.json"))
+    monkeypatch.setenv("FRONT_BRAIN_CHAT_DAILY_CAP", "30")
+    monkeypatch.setenv("FRONT_BRAIN_COMPOSE_TIMEOUT_SEC", "4.0")
+    out = safe_io.front_brain_screen_gateway_send(OWNER_SELF_JID, PROMISE_MSG, fallback_template=FALLBACK)
+    assert out == FALLBACK
+    refused = [r for r in _read_rows(monkeypatch) if r["type"] == "front_brain_outbound_refused"]
+    assert len(refused) == 1 and "promise_ban" in refused[0]["hit_classes"]
+
+
+def _unregulated_ctx():
+    # A non-regulated context so the PR-zeta null-context refusal does not end
+    # the send before transport (the pytest caller is not on its allowlist).
+    from schemas import ActionExecutionContext
+    return ActionExecutionContext(
+        action_id="daily_brief.send", is_regulated_action=False, verified_action_result=False,
+    )
+
+
+def _capture_bridge_payloads(monkeypatch) -> list[dict]:
+    """Swap urlopen inside safe_io for a sink that records the JSON payload and
+    acks with a message id; never touches a real bridge."""
+    sent: list[dict] = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"id": "fake-mid-1"}'
+
+    def _fake_urlopen(req, timeout=None):
+        sent.append(json.loads(req.data.decode("utf-8")))
+        return _Resp()
+
+    monkeypatch.setattr(safe_io.urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setenv("SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS", "1")
+    return sent
+
+
+def test_bridge_post_to_owner_sends_composed_text(tmp_path, monkeypatch):
+    _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, f"{OWNER_PHONE},{CUSTOMER_JID}")
+    sent = _capture_bridge_payloads(monkeypatch)
+    ok, _mid, err, status = safe_io.bridge_post(OWNER_SELF_JID, BRIEF_MSG, action_context=_unregulated_ctx())
+    assert (ok, status) == (True, "sent"), err
+    assert sent == [{"chatId": OWNER_SELF_JID, "message": BRIEF_MSG}]
+    assert not [r for r in _read_rows(monkeypatch) if r["type"].startswith("front_brain_")]
+
+
+def test_bridge_post_to_customer_still_substituted(tmp_path, monkeypatch):
+    # WITNESS for the bridge seam: same config, non-owner chat -> screened.
+    _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, f"{OWNER_PHONE},{CUSTOMER_JID}")
+    sent = _capture_bridge_payloads(monkeypatch)
+    safe_io.bridge_post(CUSTOMER_JID, PROMISE_MSG, fallback_template=FALLBACK,
+                        action_context=_unregulated_ctx())
+    assert sent and sent[-1]["message"] == FALLBACK
+    assert [r for r in _read_rows(monkeypatch) if r["type"] == "front_brain_outbound_refused"]
+
+
+def test_bridge_post_to_authorized_identity_still_substituted(tmp_path, monkeypatch):
+    _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, "*")
+    sent = _capture_bridge_payloads(monkeypatch)
+    safe_io.bridge_post("15550100777@s.whatsapp.net", PROMISE_MSG, fallback_template=FALLBACK,
+                        action_context=_unregulated_ctx())
+    assert sent and sent[-1]["message"] == FALLBACK

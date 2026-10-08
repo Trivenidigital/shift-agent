@@ -2128,3 +2128,18 @@ Postdeploy gateway, cockpit and owner-action watchdog active; bridge connected w
 Controlled STOP/RESUME simulation used real normal WhatsApp acknowledgements to the verified US number, with zero intervening suppression sends and final conversation mode active. This does not prove genuine handset ingress or customer-authored approval. Catering serving quantities remain unconfirmed, and self-owner WhatsApp approval remains blocked; use the existing OTP-protected owner cockpit for supervised approval.
 
 New runtime finding: linked SQLite3.50.4 warning on existing Hermes WAL databases. Investigating supported dependency remedy separately; no blind Hermes upgrade or live journal-mode change.
+
+
+# Catering + Flyer production-readiness continuation — 2026-10-08
+
+Plan + evidence: [catering-flyer-readiness-20261008.md](catering-flyer-readiness-20261008.md). Runbook: `docs/runbooks/catering-flyer-supervised-pilot.md`.
+
+- [x] P1 current truth on main-vps (deploy 50a1daa0 = origin/main; services/bridge/runtime/readiness green; identities verified)
+- [x] Found: owner-directed sends substituted by the front-brain screen since 10-05 (daily brief lost, `brief_sent` false) → fix C1 (`safe_io` owner exemption) red→green in Docker
+- [x] Found: OpenRouter key cap exhausted (403 on every model call), no watchdog → fix C2 (`check-openrouter-balance` key-cap alert) red→green
+- [x] Found: F0228 (genuine 10-03 handset request) + F0226 fail on price-less menu photos (`reference_extract.py:736`) — documented limitation; SLA pages ~every 30 min until rows close
+- [x] Found: `flyer-recovery-watchdog` runs as root via foreign drop-in (runbook `codex-dropin-cleanup-runbook.md`) → R4 held
+- [ ] Operator: raise key cap + top up credits (R1); approve R2/R3/R4; catering business facts (R5)
+- [ ] Independent reviews (authorization/pricing; runtime/deployment) of commit bbf07048
+- [ ] Push, PR, CI, canonical tarball, deploy, receipt + service-account verification
+- [ ] P2 genuine flyer journey from +19802005023 (CUST0005); P3 genuine catering journey; P4 monitoring/rollback
