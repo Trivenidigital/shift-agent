@@ -1444,12 +1444,27 @@ def _front_brain_outbound_enforce(
     phrasing of an unverified completion claim can pass here either.
 
     exempt_owner (bridge_post only): an admitted send to a PRIMARY owner
-    identity returns ``message`` unchanged with zero side effects — see
-    _front_brain_owner_directed. Default False so the gateway seam and any
-    future caller stay screened unless they opt in."""
+    identity returns ``message`` unchanged, unscreened — see
+    _front_brain_owner_directed. Its only side effect is one
+    ``front_brain_owner_exempt_send`` row recording the text that went out
+    (observability; the review/refusal rows are not written because the screen
+    did not run). Default False so the gateway seam and any future caller stay
+    screened unless they opt in."""
     if not front_brain_outbound_enforce_enabled(jid):
         return message
     if exempt_owner and _front_brain_owner_directed(jid):
+        # Best-effort (_try_emit_audit_row never raises): an audit-write fault
+        # must not change what the owner receives.
+        _try_emit_audit_row(
+            "front_brain_owner_exempt_send",
+            {
+                "chat_key_hash": _front_brain_chat_key_hash(jid),
+                "seam": "bridge_post",
+                "exempt_reason": "primary_owner",
+                "message_text": str(message or "")[:2000],
+                "send_attempt_id": send_attempt_id or uuid.uuid4().hex,
+            },
+        )
         return message
 
     chat_hash = _front_brain_chat_key_hash(jid)
@@ -3421,6 +3436,7 @@ def bridge_post(
     action_context: "Optional[ActionExecutionContext]" = None,
     fallback_template: "Optional[str]" = None,
     automation_control_ack: bool = False,
+    exempt_owner: bool = True,
 ) -> Tuple[bool, str, str, str]:
     """POST to local Hermes bridge. Returns (success, message_id, error_str, status).
 
@@ -3472,6 +3488,11 @@ def bridge_post(
     FRONT_BRAIN_OUTBOUND_ENFORCE) refuses the composed reply. Ignored unless the
     flag+allowlist admit `jid`; falls back to FRONT_BRAIN_SAFE_GENERIC_ACK when
     None/blank. The tier never blocks the customer — it always sends something.
+
+    exempt_owner (default True): a send to a PRIMARY owner identity skips the
+    front-brain screen (recorded by a front_brain_owner_exempt_send row). A
+    caller that relays caller-supplied / LLM-drafted text (send-catering-ack's
+    --message-text) passes False so the owner is screened like anyone else.
     """
     bad = validate_bridge_url(BRIDGE_URL)
     if bad:
@@ -3504,10 +3525,11 @@ def bridge_post(
     # audit rows. Runs BEFORE the regulated-intent policy so the downstream lint
     # sees the safe text. Scripted sends to the PRIMARY owner identity skip the
     # screen (exempt_owner) — the owner is the control plane (2026-10 daily
-    # brief incident); the gateway LLM-reply seam does not opt in.
+    # brief incident); the gateway LLM-reply seam does not opt in, nor does a
+    # caller relaying arbitrary text (exempt_owner=False).
     message = _front_brain_outbound_enforce(
         jid, message, fallback_template=fallback_template,
-        action_context=action_context, exempt_owner=True,
+        action_context=action_context, exempt_owner=exempt_owner,
     )
     # PR-ζ chokepoint discipline. Refuses + emits audit row when None-context
     # caller is not allowlisted; runs the PR-γ lint on regulated sends. A NON-
