@@ -1325,6 +1325,10 @@ PRICES_OMITTED_DIRECTIVE = (
 )
 
 
+# Same currency set visual_qa treats as a visible price ($ handled separately).
+_NON_DOLLAR_CURRENCY_RE = re.compile(r"[₹€£]|\brs\.?\s?\d", re.IGNORECASE)
+
+
 def _is_price_bearing_fact(fact: FlyerLockedFact) -> bool:
     fid = fact.fact_id
     return (
@@ -1332,6 +1336,7 @@ def _is_price_bearing_fact(fact: FlyerLockedFact) -> bool:
         or fid.startswith("offer")
         or (fid.startswith("item:") and fid.endswith(":price"))
         or "$" in (fact.value or "")
+        or bool(_NON_DOLLAR_CURRENCY_RE.search(fact.value or ""))
     )
 
 

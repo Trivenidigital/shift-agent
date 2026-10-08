@@ -487,3 +487,177 @@ def test_source_edit_low_confidence_when_vision_returns_garbage(tmp_path, monkey
     # Even on parse failure, text-only replacements are still attached.
     assert result.source_contract is not None
     assert result.source_contract.requested_replacements.get("Triveni Express") == "Lakshmi's Kitchen"
+
+
+# --- Review fixes F1-F5 (29ce50e3): driven through the REAL OpenRouter vision
+# provider with realistic South-Indian OCR JSON (parentheticals, footers,
+# section headers, non-dollar currency). -------------------------------------
+
+ROUTER_WRAP_INTENT = "{}\nUploaded reference image/template is attached. Use it when designing this flyer."
+ROUTER_WRAP_PLAIN = "Create flyer from uploaded template/reference. Customer requested: {}"
+
+SOUTH_INDIAN_OCR = {
+    "visible_text": (
+        "LAKSHMI'S KITCHEN\nTIFFINS\nIdli (3 PCS)\nMedu Vada (2 PCS)\nMasala Dosa\nMysore Masala Dosa.\n"
+        "Pongal\nServed with sambar & chutney\nOpen 7 days\nCall 904-555-0123\n90 Brybar Dr, St Johns FL\nVeg / Non-Veg"
+    ),
+    "sections": [
+        {"heading": "TIFFINS", "items": ["Idli (3 PCS)", "Medu Vada (2 PCS)", "Masala Dosa", "Mysore Masala Dosa.", "Pongal"]},
+        {"heading": "BEVERAGES", "items": ["Filter Coffee", "Mango Lassi"]},
+        {"heading": "Contact", "items": [
+            "Call 904-555-0123", "Open 7 days", "Served with sambar & chutney", "Veg / Non-Veg",
+            "90 Brybar Dr, St Johns FL", "Contains nuts - ask staff",
+        ]},
+        {"heading": "Specials", "items": ["APPETIZERS", "Chettinad Chicken Curry", "Kothu Parotta", "మసాలా దోశ"]},
+    ],
+    "confidence": "high",
+}
+SOUTH_INDIAN_DISHES = [
+    "Idli (3 PCS)", "Medu Vada (2 PCS)", "Masala Dosa", "Mysore Masala Dosa", "Pongal",
+    "Filter Coffee", "Mango Lassi", "Chettinad Chicken Curry", "Kothu Parotta", "మసాలా దోశ",
+]
+SOUTH_INDIAN_JUNK = ["Call 904-555-0123", "Open 7 days", "Served with sambar & chutney", "Veg / Non-Veg", "Contains nuts - ask staff"]
+
+
+def _vision_extract(tmp_path, parsed, raw_request, *, allowed=True):
+    from agents.flyer.reference_extract import OpenRouterVisionReferenceExtractionProvider, extract_reference
+
+    provider = OpenRouterVisionReferenceExtractionProvider(api_key="k", call_json=lambda _payload: parsed)
+    return extract_reference(_asset(tmp_path), raw_request=raw_request, provider=provider, priceless_menu_allowed=allowed)
+
+
+def _item_names(result):
+    return [fact.value for fact in result.extracted_facts if fact.fact_id.startswith("item:") and fact.fact_id.endswith(":name")]
+
+
+def test_real_vision_provider_keeps_parenthetical_and_non_latin_dishes_and_drops_footers(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+
+    result = _vision_extract(tmp_path, SOUTH_INDIAN_OCR, ROUTER_WRAP_INTENT.format(PRICELESS_MENU_RAW_REQUEST.splitlines()[0]))
+
+    assert result.status == "ok", result.detail
+    assert _item_names(result) == SOUTH_INDIAN_DISHES
+    assert not any(junk in _item_names(result) for junk in SOUTH_INDIAN_JUNK)
+    assert "APPETIZERS" not in _item_names(result)
+    assert "prices omitted" in result.detail
+    assert "ignored non-item lines" in result.detail
+    for junk in SOUTH_INDIAN_JUNK:
+        assert junk in result.detail
+
+
+def test_same_items_request_with_unparseable_item_is_low_confidence(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    parsed = {
+        "visible_text": "Idli\nMasala Dosa\n2 Vada Combo",
+        "sections": [{"heading": "Tiffins", "items": ["Idli", "Masala Dosa", "2 Vada Combo"]}],
+        "confidence": "high",
+    }
+
+    result = _vision_extract(tmp_path, parsed, PRICELESS_MENU_RAW_REQUEST)
+
+    assert result.status == "low_confidence"
+    assert result.extracted_facts == []
+    assert result.detail.startswith("1 of 3 items unparsed")
+
+
+def test_priceless_reference_without_menu_intent_stays_low_confidence_even_when_allowlisted(tmp_path, monkeypatch):
+    # The router wrapper alone makes a Diwali poster classify as menu_reference;
+    # its bullet lines must not become locked menu items.
+    from agents.flyer.reference_extract import classify_reference_role
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    raw = ROUTER_WRAP_INTENT.format("Make a Diwali flyer like this for my restaurant")
+    parsed = {
+        "visible_text": "Happy Diwali\nFestival of Lights\nJoin us for celebrations",
+        "sections": [{"heading": "Happy Diwali", "items": ["Live Music", "Rangoli Contest", "Kids Activities", "Fireworks"]}],
+        "confidence": "high",
+    }
+    assert classify_reference_role(raw, _asset(tmp_path)) == "menu_reference"
+
+    result = _vision_extract(tmp_path, parsed, raw)
+
+    assert result.status == "low_confidence"
+    assert result.extracted_facts == []
+    assert result.detail == "price-less reference without menu intent"
+
+
+def test_f0226_update_menu_request_shape_is_ok(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    parsed = {
+        "visible_text": "Idli Sambar\nMasala Dosa\nPongal",
+        "sections": [{"heading": "Tiffins", "items": ["Idli Sambar", "Masala Dosa", "Pongal"]}],
+        "confidence": "high",
+    }
+
+    result = _vision_extract(tmp_path, parsed, ROUTER_WRAP_PLAIN.format("Update menu"))
+
+    assert result.role == "menu_reference"
+    assert result.status == "ok", result.detail
+    assert _item_names(result) == ["Idli Sambar", "Masala Dosa", "Pongal"]
+
+
+def test_vision_price_not_printed_on_photo_is_dropped(tmp_path, monkeypatch):
+    from agents.flyer.facts import reference_prices_omitted
+    from schemas import FlyerProject
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    parsed = {
+        "visible_text": "Tiffins\nIdli\nMasala Dosa\nPongal",
+        "sections": [{"heading": "Tiffins", "items": [{"name": "Idli", "price": "$6.99"}, {"name": "Masala Dosa", "price": ""}, "Pongal"]}],
+        "confidence": "high",
+    }
+
+    result = _vision_extract(tmp_path, parsed, PRICELESS_MENU_RAW_REQUEST)
+
+    assert result.status == "ok", result.detail
+    assert _item_names(result) == ["Idli", "Masala Dosa", "Pongal"]
+    assert not any(fact.fact_id.endswith(":price") or "$" in fact.value for fact in result.extracted_facts)
+    assert "dropped unseen price: $6.99" in result.detail
+    now = datetime(2026, 10, 3, tzinfo=timezone.utc)
+    project = FlyerProject(
+        project_id="F0228", status="generating_concepts", customer_phone="+15550100001",
+        created_at=now, updated_at=now, original_message_id="m-ref", raw_request=PRICELESS_MENU_RAW_REQUEST,
+        locked_facts=result.extracted_facts, reference_extractions=[result],
+    )
+    assert reference_prices_omitted(project) is True
+
+
+def test_vision_price_printed_on_photo_is_kept(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    parsed = {
+        "visible_text": "Idli $6.99\nMasala Dosa $8.99",
+        "sections": [{"heading": "Tiffins", "items": [{"name": "Idli", "price": "$6.99"}, {"name": "Masala Dosa", "price": "$8.99"}]}],
+        "confidence": "high",
+    }
+
+    result = _vision_extract(tmp_path, parsed, PRICELESS_MENU_RAW_REQUEST)
+
+    by_id = {fact.fact_id: fact.value for fact in result.extracted_facts}
+    assert result.status == "ok", result.detail
+    assert by_id["item:0:price"] == "$6.99"
+    assert by_id["item:1:price"] == "$8.99"
+
+
+def test_non_dollar_trailing_price_is_split_off_the_item_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    parsed = {
+        "visible_text": "Paneer Butter Masala Rs 220\nKothu Parotta ₹180",
+        "sections": [{"heading": "Specials", "items": ["Paneer Butter Masala Rs 220", "Kothu Parotta ₹180"]}],
+        "confidence": "high",
+    }
+
+    result = _vision_extract(tmp_path, parsed, PRICELESS_MENU_RAW_REQUEST, allowed=False)
+
+    by_id = {fact.fact_id: fact.value for fact in result.extracted_facts}
+    assert result.status == "ok", result.detail
+    assert by_id["item:0:name"] == "Paneer Butter Masala"
+    assert by_id["item:0:price"] == "Rs 220"
+    assert by_id["item:1:name"] == "Kothu Parotta"
+    assert by_id["item:1:price"] == "₹180"
+
+
+def test_reference_extraction_prompt_forbids_estimated_prices_and_footer_items():
+    from agents.flyer.reference_extract import REFERENCE_EXTRACTION_PROMPT
+
+    assert "Never estimate, infer or fill in a price" in REFERENCE_EXTRACTION_PROMPT
+    assert "sections[].items are dishes/products only" in REFERENCE_EXTRACTION_PROMPT

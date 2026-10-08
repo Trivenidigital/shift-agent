@@ -1455,3 +1455,19 @@ def test_reference_prices_omitted_false_without_reference():
     ])
 
     assert reference_prices_omitted(project) is False
+
+
+@pytest.mark.parametrize("value", ["Rs 50 off", "Rs. 120", "₹50 off", "€5 lunch", "£5 tea", "Get 5$ off"])
+def test_reference_prices_omitted_counts_non_dollar_currency_as_a_price(value):
+    from agents.flyer.facts import reference_prices_omitted
+
+    items = [("item:0:name", "Idli Sambar")]
+    project = _project(
+        locked_facts=[
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Idli Sambar", source="reference_vision", required=True),
+            FlyerLockedFact(fact_id="headline", label="Headline", value=value, source="customer_text", required=True),
+        ],
+        reference_extractions=[_priceless_menu_extraction(items)],
+    )
+
+    assert reference_prices_omitted(project) is False
