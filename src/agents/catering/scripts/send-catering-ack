@@ -38,6 +38,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import sys
@@ -49,7 +50,7 @@ sys.path.insert(0, "/opt/shift-agent")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "platform"))
 
 from safe_io import load_model, ndjson_append  # noqa: E402
-from safe_io import bridge_post as _bridge_post_4tuple  # noqa: E402  # P17b: status is consumed
+from safe_io import bridge_post as _bridge_post_canonical  # noqa: E402
 from schemas import (  # noqa: E402
     CateringCustomerAckSent, CateringCustomerAckFailed,
     CateringCustomerSendUnconfirmed,
@@ -76,6 +77,16 @@ MAX_ACK_BODY_CHARS = 3500
 
 # Valid JID suffixes — anything else is rejected as malformed input.
 _VALID_JID_SUFFIXES = ("@s.whatsapp.net", "@lid")
+
+# P17b: the canonical 4-tuple chokepoint (status is consumed). Bound with
+# exempt_owner=False: this script relays a caller-supplied --message-text body
+# (historically LLM-drafted), so it must NOT inherit bridge_post's scripted-owner
+# exemption from the front-brain screen — a body aimed at the owner identity is
+# screened like any other. Bound HERE rather than passed at the call so the name
+# the e2e harness and unit tests patch (`_bridge_post_4tuple`) keeps its
+# (jid, message) call shape. The aliased import above is what the chokepoint
+# policy scan (tests/test_catering_followup_scripts.py) keys on — keep it.
+_bridge_post_4tuple = functools.partial(_bridge_post_canonical, exempt_owner=False)
 
 
 def _now_iso() -> str:

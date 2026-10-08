@@ -16,9 +16,9 @@ import urllib.request
 
 from schemas import FlyerProject, FlyerVisualQAReport
 try:
-    from flyer_facts import requests_generated_item_suggestions  # type: ignore
+    from flyer_facts import reference_prices_omitted, requests_generated_item_suggestions  # type: ignore
 except ImportError:
-    from agents.flyer.facts import requests_generated_item_suggestions
+    from agents.flyer.facts import reference_prices_omitted, requests_generated_item_suggestions
 try:
     from flyer_semantic_brief import semantic_visibility_policy, visible_wrong_brand_blockers  # type: ignore
 except ImportError:
@@ -259,6 +259,11 @@ def _unexpected_phone_blockers(project: FlyerProject, extracted_text: str) -> li
 # Left-boundary guard mirrors _PRICE_AMOUNT_RE: a "$"-price embedded in a garbled
 # alnum/decimal run (e.g. OCR gluing "id3$4.99") must not false-fire as a price.
 _PRICE_RE = re.compile(r"(?<![a-z0-9.])\$\s?\d[\d,]*(?:\.\d{1,2})?", re.IGNORECASE)
+# Price-less menu reference: any currency amount is fabricated, not only `$`.
+_ANY_CURRENCY_AMOUNT_RE = re.compile(
+    r"(?<![a-z0-9.])(?:[$₹€£]|\brs\.?)\s?\d[\d,]*(?:\.\d{1,2})?",
+    re.IGNORECASE,
+)
 # Slice-1 deferral: the bare `\bfree\b` term can false-positive on a brand name
 # containing "free" on no-offer projects. Acceptable for Slice 1 — a false-positive
 # only triggers a safe retry/deterministic-fallback, never a wrong customer flyer.
@@ -331,10 +336,22 @@ def _fabricated_offer_price_blockers(project: FlyerProject, extracted_text: str)
 
     Price-check gate: only activated when the project has at least one locked price
     fact. If the customer provided no prices, the AI was given creative latitude on
-    pricing and we should not flag those prices as fabricated."""
+    pricing and we should not flag those prices as fabricated — EXCEPT when the
+    owner's menu reference carried items without prices (reference_prices_omitted):
+    then every visible currency amount is fabricated."""
     blockers: list[str] = []
     locked = _locked_price_set(project)
-    if locked:
+    if reference_prices_omitted(project):
+        # The owner's menu reference has no prices: there is no latitude — any
+        # visible amount was invented.
+        seen_omitted: set[str] = set()
+        for tok in _ANY_CURRENCY_AMOUNT_RE.findall(extracted_text or ""):
+            normalized = _norm_price(tok)
+            if normalized in seen_omitted:
+                continue
+            seen_omitted.add(normalized)
+            blockers.append(f"fabricated price visible: {tok.strip()}")
+    elif locked:
         # Only flag unexpected prices when at least one price is locked.
         # Projects with no locked prices gave the AI creative latitude.
         seen: set[str] = set()

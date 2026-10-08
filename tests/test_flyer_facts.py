@@ -1386,3 +1386,88 @@ def test_item_price_no_phantom_when_duplicate_name_claims_segment():
     names = [f.value for f in facts if f.fact_id.endswith(":name")]
     assert "Free Gift" not in names
     assert names.count("Samosa") == 1  # the duplicate is deduped, not re-added
+
+
+def _priceless_menu_extraction(facts, *, status="ok", role="menu_reference"):
+    from schemas import FlyerReferenceExtraction
+
+    return FlyerReferenceExtraction(
+        asset_id="A0001",
+        role=role,
+        provider="openrouter_vision",
+        status=status,
+        extracted_facts=[
+            FlyerLockedFact(fact_id=fid, label="Item", value=value, source="reference_vision", required=True)
+            for fid, value in facts
+        ],
+    )
+
+
+def test_reference_prices_omitted_true_for_priceless_menu_reference():
+    from agents.flyer.facts import reference_prices_omitted
+
+    items = [("item:0:name", "Idli Sambar"), ("item:1:name", "Masala Dosa")]
+    project = _project(
+        locked_facts=[FlyerLockedFact(fact_id=fid, label="Item", value=v, source="reference_vision", required=True) for fid, v in items],
+        reference_extractions=[_priceless_menu_extraction(items)],
+    )
+
+    assert reference_prices_omitted(project) is True
+
+
+@pytest.mark.parametrize(
+    "extraction_facts, locked_extra, status, role",
+    [
+        # reference itself carries a price
+        ([("item:0:name", "Idli Sambar"), ("item:0:price", "$7")], [], "ok", "menu_reference"),
+        # a shared/combo price on the reference
+        ([("item:0:name", "Idli Sambar"), ("pricing_structure", "Any 2 for $9.99")], [], "ok", "menu_reference"),
+        # the customer typed a price — not omitted
+        ([("item:0:name", "Idli Sambar")], [("item:0:price", "$7")], "ok", "menu_reference"),
+        # extraction did not succeed
+        ([("item:0:name", "Idli Sambar")], [], "low_confidence", "menu_reference"),
+        # not a menu reference
+        ([("item:0:name", "Idli Sambar")], [], "ok", "old_flyer_reference"),
+        # no item names at all
+        ([("campaign_title", "Breakfast Menu")], [], "ok", "menu_reference"),
+    ],
+)
+def test_reference_prices_omitted_false_cases(extraction_facts, locked_extra, status, role):
+    from agents.flyer.facts import reference_prices_omitted
+
+    locked = [
+        FlyerLockedFact(fact_id=fid, label="Fact", value=v, source="reference_vision", required=True)
+        for fid, v in [*extraction_facts, *locked_extra]
+    ]
+    project = _project(
+        locked_facts=locked,
+        reference_extractions=[_priceless_menu_extraction(extraction_facts, status=status, role=role)],
+    )
+
+    assert reference_prices_omitted(project) is False
+
+
+def test_reference_prices_omitted_false_without_reference():
+    from agents.flyer.facts import reference_prices_omitted
+
+    project = _project(locked_facts=[
+        FlyerLockedFact(fact_id="item:0:name", label="Item", value="Idli Sambar", source="customer_text", required=True)
+    ])
+
+    assert reference_prices_omitted(project) is False
+
+
+@pytest.mark.parametrize("value", ["Rs 50 off", "Rs. 120", "₹50 off", "€5 lunch", "£5 tea", "Get 5$ off"])
+def test_reference_prices_omitted_counts_non_dollar_currency_as_a_price(value):
+    from agents.flyer.facts import reference_prices_omitted
+
+    items = [("item:0:name", "Idli Sambar")]
+    project = _project(
+        locked_facts=[
+            FlyerLockedFact(fact_id="item:0:name", label="Item", value="Idli Sambar", source="reference_vision", required=True),
+            FlyerLockedFact(fact_id="headline", label="Headline", value=value, source="customer_text", required=True),
+        ],
+        reference_extractions=[_priceless_menu_extraction(items)],
+    )
+
+    assert reference_prices_omitted(project) is False

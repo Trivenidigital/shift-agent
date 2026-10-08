@@ -1,6 +1,8 @@
 # Catering + Flyer Studio — supervised pilot operator runbook
 
-**Status:** 2026-10-08, written against deploy `50a1daa0` on main-vps. Supplements
+**Status:** 2026-10-08, written against deploy `50a1daa0`; the pending releases are
+`8411b8c3` (PR #798, blocked at the deploy's vision-auth gate by the OpenRouter key cap)
+and the gap branch `launch/catering-flyer-gaps-20261008`. Supplements
 `production-pilot-shift-catering-daily-brief.md` (smoke script), `release.md`,
 `rollback.md`, `catering-rollback.md`, `codex-dropin-cleanup-runbook.md`. It does not
 repeat them.
@@ -27,7 +29,12 @@ Go only if: `.commit-hash` label and receipt `commit` both equal the expected re
 `queueLength: 0`; owner resolves with `"owner"` in roles; readiness READY; both
 `openrouter_balance_ok` and `openrouter_key_limit_ok` (a key at its cap returns HTTP 403
 on every model call — nothing in Flyer works, and the symptom in state is
-`provider_unavailable` / `reference_low_confidence`, not an error you will see).
+`provider_unavailable` / `reference_low_confidence`, not an error you will see); the
+deploy's own `vision-auth-smoke` exits 0 (`/usr/local/bin/vision-auth-smoke`; HTTP 403 =
+key cap exhausted and NO deploy can complete).
+`flyer-recovery-watchdog.service` must show `User=shift-agent`
+(`systemctl cat flyer-recovery-watchdog.service | grep ^User`; the root drop-in was
+quarantined to `/root/quarantine/codex-dropins-20261008T151914Z/` on 2026-10-08).
 
 Always run product CLIs as the service account with the gateway's environment
 (`runuser -u shift-agent -m -- …`). Root-run writers re-own state files and break the
@@ -54,37 +61,72 @@ watchdogs (incident 2026-10-03; `codex-dropin-cleanup-runbook.md` §2).
 6. Duplicate `APPROVE` after delivery: the router replies with the project status and
    does not resend. A replayed native message id is dropped.
 
-Known limitation (open): a **menu photo without prices** is rejected as
-`reference_low_confidence` (`reference_extract.py:736`) and lands in the manual queue —
-both genuine attempts to date (F0226, F0228) failed this way. Ask customers for a text
-brief, or a menu with prices, until that rule is revisited.
+Menu photo without prices: since the gap release, a `menu_reference` whose items carry no
+prices is accepted for customers listed in `FLYER_PRICELESS_MENU_ALLOWLIST` (comma-separated
+E.164 phones or `*`; unset = previous behaviour, i.e. `manual_edit_required /
+reference_low_confidence` with detail `price-less menus not enabled for this customer`).
+The flyer renders the item names with NO prices; the prompt forbids prices and visual QA
+treats any visible currency amount as `fabricated price visible` → manual review. To enable
+for the pilot identities set `FLYER_PRICELESS_MENU_ALLOWLIST=+17329837841,+19802005023` in
+`/root/.hermes/.env` (edit the symlink TARGET, back it up first) and restart
+`hermes-gateway`. Recovering a project already queued (F0226, F0228):
+`runuser -u shift-agent -m -- flyer-manual-queue --retry-extraction F0228` resets the failed
+extraction and returns the project to `generating_concepts` (sends nothing); then
+`runuser -u shift-agent -m -- /usr/local/bin/generate-flyer-concepts --project-id F0228`
+renders previews into `state/flyer/` — NOTE: previews rendered this way are NOT delivered to
+the customer (only the router's inbound path sends them); use it to inspect the result, and
+have the customer re-send the photo for an end-to-end delivery.
 
-Trial/quota: `CUST0005` is a trial account (3 flyers, 1 used). Quota blocks return
-"Please complete payment first" — do not fake activation; the operator path is
-`manage-flyer-account --activate-customer <CUSTnnnn> --provider manual --payment-reference <real ref> --amount-cents <n>`.
+Trial/quota: `CUST0005` (+19802005023, `primary_chat_id 269612545511591@lid`) is a trial
+account: 3 flyers per period, 1 used; the period rolls forward automatically
+(`account._roll_period`) so a trial never expires by date — it is eligible for the journey
+today. Quota-blocked trial reply: "Your free trial has used N/M sample flyers… reply CHANGE
+PLAN STARTER/GROWTH/UNLIMITED". Legitimate trial → paid path (never fake it): (1) an admin
+number of the account (business WhatsApp / onboarding phone) sends `CHANGE PLAN STARTER`;
+(2) the same number replies `CONFIRM UPDATE` (sets `pending_plan_id`, audit
+`flyer_account_updated`); (3) after a REAL payment, operator runs
+`runuser -u shift-agent -m -- manage-flyer-account --activate-customer CUST0005 --provider manual --payment-reference <real reference> --expected-plan starter --amount-cents 4999`.
+`--expected-plan` must equal the pending plan or the CLI refuses (`no_pending_activation`).
+A manual reference is recorded, not verified against a processor — only enter one you hold.
 
 ## 2. Catering — customer journey (explicit quantities; automatic sizing held)
 
 Facts: menu v3 has 77 items and **no confirmed serving sizes**; pricebook v2 packages
 are pilot/test rates (`updated_by: manual`). `deposit_pct = 0`;
 `CATERING_ACCEPTANCE_ARM = 0` (customer "we accept" is not booked automatically).
+Pricebook packages: 'Vegetarian Buffet' $14.99/person and 'Mixed Veg and Non-Veg Buffet'
+$19.99/person (min 25) are PILOT values per the pricebook notes; `tax_rate_bps=0` is not a
+real tax rate — do not quote a paying customer on them.
 
 1. Customer sends an inquiry with date, headcount and event type, e.g.
    `Catering for a birthday on November 21 for 40 guests, pickup 6pm. Please send menu options. TEST ONLY - NOT A REAL ORDER.`
    → lead created (owner card sent to `owner.self_chat_jid`), proposal options sent.
-2. Customer replies `I'll take Option 1`. With no serving facts the selection is refused
-   with "needs restaurant review of serving sizes" and the owner is paged — this is the
-   fail-closed guard from PR #796, not a defect.
-3. Operator converts the request to explicit quantities (menu names must match exactly):
-   ```
-   runuser -u shift-agent -m -- finalize-catering-menu --code <#CODE> \
-     --customer-message-id <id> \
-     --selected-items-json '[{"name":"Idly (3 PCS)","qty":10,"price_usd":5.99}]' \
-     --quote-total-usd 60
-   ```
-   (`--quote-total-usd` is an integer; the kernel recomputes cents from the items.)
-   This finalizes the customer side and sends the owner card ending
-   `Reply: #CODE approve / #CODE edit <changes> / #CODE reject <reason>`.
+2. Customer states explicit quantities, e.g. `10 trays of Idly, 7 Masala Dosa, 5 Chicken Biryani`.
+   The explicit-quantity arm (gap release; sender must be in its OWN allowlist
+   `CATERING_EXPLICIT_QTY_ALLOWLIST` — comma-separated E.164 phones / chat ids, `*` = everyone,
+   unset = arm OFF; STOP/takeover suppression still applies upstream) matches each phrase to
+   exactly one menu name, prices it with the pricebook kernel, runs `finalize-catering-menu`
+   WITHOUT headcount scaling, sends the owner card and acks the customer ("…saved for owner
+   approval. Final pricing comes after owner review."). It only finalizes a lead in
+   `AWAITING_OWNER_APPROVAL` / `OWNER_EDITED`; on an already `CUSTOMER_FINALIZED` lead, and
+   whenever it cannot price (headcount unknown, pricebook missing, finalize error), the
+   customer gets the standard "with the owner" reply and the owner card is NOT changed — it
+   never falls back to option selection. A phrase that matches no single menu item gets ONE
+   clarification listing up to 3 exact menu names; nothing is saved. Any removal/negation
+   wording ("cancel", "remove", "instead of", "not", "also add") makes the whole message
+   non-explicit and it follows the previous (amendment-capture) path.
+   To enable for the pilot: `CATERING_EXPLICIT_QTY_ALLOWLIST=+19802005023` (the owner is
+   excluded from the arm by role anyway) in `/root/.hermes/.env` (symlink TARGET; back up
+   first) and restart `hermes-gateway`.
+   `I'll take Option 1` (tier/option pick) is still refused with "needs restaurant review of
+   serving sizes" while no item has a confirmed `serves` (fail-closed guard, PR #796). Beware:
+   before the gap release "I'll take 2 trays of Idly" was read as Option 2; the explicit arm
+   now runs first.
+3. Operator fallback (only if the arm stood down):
+   `runuser -u shift-agent -m -- finalize-catering-menu --code <#CODE> --customer-message-id <id> --selected-items-json '[{"name":"Idly (3 PCS)","qty":10,"price_usd":6}]' --quote-total-usd 60`
+   — `price_usd` and `--quote-total-usd` are WHOLE DOLLARS (ints; `5.99` is rejected); the
+   kernel recomputes cents from the pricebook and the total must be within min(5%, $25) of
+   the item subtotal.
 4. Owner (`+17329837841`) replies `#CODE approve`. `apply-catering-owner-decision` sends
    the frozen integer-cent quote to the customer; lead → `SENT_TO_CUSTOMER`. The
    OTP-protected cockpit (`POST /leads/{id}/decision`) is the alternative route.
@@ -101,7 +143,10 @@ Controls: customer `STOP` / `PAUSE` / `RESUME` (whole message); owner
 |---|---|---|
 | Owner receives "Thanks for your message! I'm here to help…" instead of the brief/card | `decisions.log` `front_brain_outbound_refused` | Scripted `bridge_post` sends to the primary owner (`owner.self_chat_jid`/`phone`/`lid`) are exempt from the front-brain screen since the 2026-10 fix; the owner's free-form LLM chat and any `authorized_identities` alias are still screened by design. If the row names a scripted owner send, check `config.yaml` `owner.*` matches the live owner. |
 | Hourly Pushover "Flyer manual queue SLA breach" | `flyer-manual-queue --triage` | Dispose the row: `--complete <id> --asset <path>` or `--close <id> --reason … [--no-notify]` |
-| Flyer stuck `manual_edit_required` with `reference_low_confidence` | project `reference_extractions.detail` | Price-less menu photo; ask for a text brief or prices |
+| Flyer stuck `manual_edit_required` with `reference_low_confidence` | project `reference_extractions.detail` | Price-less menu photo; enable `FLYER_PRICELESS_MENU_ALLOWLIST` for the customer, then `flyer-manual-queue --retry-extraction <id>` (see §1) |
+| Owner receives the brief/card — verify content | `decisions.log` `front_brain_owner_exempt_send.message_text` (gap release) | The exact body delivered to the owner; absence of `front_brain_outbound_refused` alone is not evidence |
+| Deploy aborts `vision-auth-smoke: AUTH FAIL — HTTP 403` and auto-rolls back | `check-openrouter-balance` → `openrouter_key_limit_*` | Raise the per-key cap at openrouter.ai/settings/keys (separate from account credits); no override exists for this gate |
+| Customer quantities answered with a clarification | `audit_intercepted` detail `explicit_qty … clarification_sent` | Expected when a phrase matches no single menu name; customer repeats with exact names |
 | Model calls fail, state shows `provider_unavailable` | `check-openrouter-balance` events | Raise key cap / top up credits (openrouter.ai) |
 | Root-owned files under `state/` | `find /opt/shift-agent/state -user root` | A writer ran as root; `chown shift-agent:shift-agent` (modes preserved) and find the root runner (drop-ins!) |
 | Catering send suppressed `automation_suppressed:read_error` | `catering_automated_send_suppressed` rows | state file unreadable by the service account — ownership |
@@ -112,7 +157,15 @@ Controls: customer `STOP` / `PAUSE` / `RESUME` (whole message); owner
   `/opt/shift-agent/config.yaml.before-*`), restart `hermes-gateway shift-agent-cockpit
   catering-owner-action-watchdog`, verify `/proc/<pid>/environ`.
 - Code: `shift-agent-deploy rollback <deploy-tag>` (targets: `ls /opt/shift-agent/deploys`);
-  current prior tag `deploy-20261003-004544-0ea5af38`.
+  current prior tag `deploy-20261003-013123-50a1daa0` (live).
+  `deploys/deploy-20261008-155259-8411b8c3.tgz` is the staging snapshot of a FAILED attempt,
+  not a release.
+- Before rolling back PAST the gap release: unset `FLYER_PRICELESS_MENU_ALLOWLIST` and
+  `CATERING_EXPLICIT_QTY_ALLOWLIST` first and dispose of in-flight price-less flyer projects
+  (`flyer-manual-queue --list`; close or let them finish) — the older `visual_qa` has no
+  `reference_prices_omitted` guard and would treat a price-less menu as "creative latitude".
+  The new `decisions.log` row `front_brain_owner_exempt_send` is tolerated by older readers
+  (`_UnknownLogEntry`).
 - Then the mandatory checks in `rollback.md` (locked facts, QR, fallback) and
   `catering-rollback.md`.
 
@@ -120,6 +173,7 @@ Controls: customer `STOP` / `PAUSE` / `RESUME` (whole message); owner
 
 `alert-integrity-watchdog` (decisions.log freshness), `shift-agent-health` (5 min),
 `openrouter-balance-check` (daily 14:00 UTC — balance **and** key cap),
-`flyer-source-edit-sla-watchdog`, `flyer-recovery-watchdog` (must run as `shift-agent`),
+`flyer-source-edit-sla-watchdog`, `flyer-recovery-watchdog` (must run as `shift-agent`; verified 2026-10-08 15:21Z after the
+drop-in quarantine),
 `catering-owner-action-watchdog` (service). Owner pages go through
 `shift-agent-notify-owner` (Pushover, plain text).

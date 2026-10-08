@@ -24,6 +24,11 @@ from schemas import (
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT_SEC = 60
 REFERENCE_VISION_MODEL = os.environ.get("FLYER_REFERENCE_VISION_MODEL") or os.environ.get("VISION_MODEL") or "openai/gpt-4o-mini"
+PRICES_OMITTED_DETAIL = "items extracted; no prices on reference - prices omitted"
+PRICELESS_MENU_NOT_ENABLED_DETAIL = (
+    "no prices on reference; price-less menus not enabled for this customer "
+    "(FLYER_PRICELESS_MENU_ALLOWLIST)"
+)
 
 REFERENCE_EXTRACTION_PROMPT = """Read this uploaded reference/menu flyer image for Flyer Studio.
 
@@ -38,6 +43,8 @@ Return STRICT JSON only:
 Rules:
 - Do not invent items or prices.
 - Preserve prices exactly as visible.
+- If no price is printed next to an item, return the name only. Never estimate, infer or fill in a price. A menu with no printed prices must produce no prices.
+- sections[].items are dishes/products only; put contact, hours, allergen notes and taglines in visible_text.
 - Preserve item/menu names exactly as visible. If a snack/menu list is arranged in columns, return each item separately in sections[].items.
 - Include section headings such as "Snack Picks" when visible.
 - If no readable menu/reference text exists, use an empty visible_text string and confidence "low".
@@ -236,6 +243,7 @@ class OpenRouterVisionReferenceExtractionProvider(ReferenceExtractionProvider):
         self.api_key = api_key
         self.model = model or REFERENCE_VISION_MODEL
         self._call_json = call_json
+        self.last_visible_text = ""
 
     def extract_text(self, asset: FlyerAsset, raw_request: str) -> tuple[str, str]:
         key = (self.api_key or _openrouter_key()).strip()
@@ -265,6 +273,9 @@ class OpenRouterVisionReferenceExtractionProvider(ReferenceExtractionProvider):
         except (OSError, KeyError, IndexError, TypeError, json.JSONDecodeError, urllib.error.URLError, urllib.error.HTTPError):
             return "", "provider_unavailable"
         text = _reference_structured_text(parsed)
+        # The photo's own readable text, kept apart from the structured items so
+        # extract_reference can refuse an item price the photo never showed.
+        self.last_visible_text = str(parsed.get("visible_text") or parsed.get("extracted_text") or "")
         confidence = str(parsed.get("confidence") or "low").lower()
         if not text:
             return "", "low_confidence"
@@ -295,7 +306,53 @@ class SidecarReferenceExtractionProvider(ReferenceExtractionProvider):
         return sidecar.read_text(encoding="utf-8"), "ok"
 
 
-def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[FlyerLockedFact]:
+_NON_ITEM_KEYWORD_RE = re.compile(
+    r"\b(?:open|hours?|call|phone|served\s+with|contains|allergens?|ask\s+staff|follow\s+us|order\s+online)\b"
+    r"|\bveg\s*/\s*non[\s-]?veg\b|www\.|@",
+    flags=re.IGNORECASE,
+)
+_ADDRESS_RE = re.compile(
+    r"^\d+\s+\S.*\b(?:st|street|dr|drive|ave|avenue|rd|road|blvd|ln|lane|hwy|way|pkwy|suite|ste)\b",
+    flags=re.IGNORECASE,
+)
+_SECTION_HEADER_WORDS = {
+    "appetizers", "starters", "mains", "main", "course", "entrees", "desserts", "sweets",
+    "beverages", "drinks", "tiffins", "breakfast", "lunch", "dinner", "specials", "sides",
+    "snacks", "combos", "menu", "curries", "breads", "soups", "salads",
+}
+# Trailing non-dollar currency price on an item line ("Kothu Parotta ₹180",
+# "Paneer Butter Masala Rs 220"). `$` lines keep their existing parser.
+_TRAILING_CURRENCY_PRICE_RE = re.compile(
+    r"^(?P<name>.+?)\s*[-:]?\s*(?P<cur>rs\.?|₹|€|£)\s*(?P<amt>\d+(?:\.\d{1,2})?)\s*$",
+    flags=re.IGNORECASE,
+)
+
+
+def _is_non_item_line(name: str) -> bool:
+    """Footer/meta text a vision model lists as a menu item (contact, hours,
+    allergen notes, taglines, addresses, bare section headers). Never a dish."""
+    if re.search(r"\d{7,}", re.sub(r"[\s().-]", "", name)):
+        return True
+    if _NON_ITEM_KEYWORD_RE.search(name) or _ADDRESS_RE.search(name):
+        return True
+    words = name.split()
+    return (
+        name.upper() == name
+        and len(words) <= 3
+        and any(word.strip("&,").casefold() in _SECTION_HEADER_WORDS for word in words)
+    )
+
+
+def _facts_from_text(
+    text: str,
+    *,
+    asset: FlyerAsset,
+    source: str,
+    report: dict | None = None,
+) -> list[FlyerLockedFact]:
+    """`report`, when given, receives `non_item_lines` (footer/meta bullets
+    dropped as non-items), `unparsed_lines` (flattened "- " item lines that
+    produced nothing) and `bullet_lines` (count of flattened "- " lines)."""
     items: list[dict[str, str]] = []
     pricing_facts: list[FlyerLockedFact] = []
     schedule_facts: list[FlyerLockedFact] = []
@@ -306,10 +363,12 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
         r"(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60}?)\s*(?:-|:)?\s*\$\s*(?P<price>\d+(?:\.\d{2})?)\b(?P<tail>[^\n\r,;]*)",
         flags=re.IGNORECASE,
     )
+    bullet_marker = r"^\s*(?:[-*]|\u2022|\u2605|\u2606|\u25cf|\u25aa|\u2023|\u27a4|>>?|[»›]|\d+[.)])\s+"
     bullet_item = re.compile(
-        r"^\s*(?:[-*]|\u2022|\u2605|\u2606|\u25cf|\u25aa|\u2023|\u27a4|>>?|[»›]|\d+[.)])\s+(?P<name>[A-Za-z][A-Za-z0-9 '&/-]{1,60})\s*$",
+        bullet_marker + r"(?P<name>[^\W\d_][\w\u0900-\u0dff '\u2019&/().,:+-]{1,80})\s*$",
         flags=re.IGNORECASE,
     )
+    bullet_prefix = re.compile(bullet_marker + r"(?P<rest>\S.*)$")
     promo_tail = re.compile(r"^\s*(?:off|discount|save|coupon|credit|cashback|%|\bpercent\b)", flags=re.IGNORECASE)
     promo_name = re.compile(r"^(?:save|coupon|discount|offer|deal|special|weekend special|cashback|credit)\b", flags=re.IGNORECASE)
     shared_price_name = re.compile(r"^(?:any|all|every|each)\b", flags=re.IGNORECASE)
@@ -327,13 +386,22 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
         flags=re.IGNORECASE,
     )
 
+    non_item_lines: list[str] = []
+    unparsed_lines: list[str] = []
+    bullet_lines = 0
+    line_consumed = False
+
     def clean(value: str) -> str:
         return " ".join((value or "").strip(" .,:;-").split())
 
     def add_item_name(name: str, price: str = "") -> None:
+        nonlocal line_consumed
         name = clean(name)
         name = re.sub(r"^(?:and|with|include|includes)\s+", "", name, flags=re.IGNORECASE).strip()
-        if not name or promo_name.search(name):
+        if not name:
+            return
+        line_consumed = True
+        if promo_name.search(name):
             return
         key = name.lower()
         if key in seen_names:
@@ -350,9 +418,11 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
         items.append(item)
 
     def add_pricing(value: str) -> None:
+        nonlocal line_consumed
         value = clean(value)
         if not value:
             return
+        line_consumed = True
         key = value.lower()
         if key in seen_pricing:
             return
@@ -421,8 +491,21 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
                 campaign_title = value
 
     pending_shared_price_name = ""
+    current_flat_line = ""
+
+    def finish_line() -> None:
+        nonlocal current_flat_line
+        if current_flat_line and not line_consumed:
+            unparsed_lines.append(current_flat_line)
+        current_flat_line = ""
+
     for line in (text or "").splitlines():
+        finish_line()
+        line_consumed = False
         clean_line = clean(line)
+        if line.lstrip().startswith("- "):
+            bullet_lines += 1
+            current_flat_line = clean_line
         if pending_shared_price_name:
             price_match = price_only.match(line)
             if price_match:
@@ -435,12 +518,23 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
             schedule_match = recurring_schedule.search(clean_line)
             if schedule_match:
                 add_schedule(schedule_match.group(0).upper())
-        bullet_match = bullet_item.match(line)
+        bullet_text_match = bullet_prefix.match(line)
+        if bullet_text_match and "$" not in line and _is_non_item_line(clean(bullet_text_match.group("rest"))):
+            non_item_lines.append(clean(bullet_text_match.group("rest")))
+            line_consumed = True
+            continue
+        currency_match = _TRAILING_CURRENCY_PRICE_RE.match(line) if "$" not in line else None
+        bullet_match = bullet_item.match(currency_match.group("name") if currency_match else line)
         if bullet_match and "$" not in line:
-            add_item_name(bullet_match.group("name"))
+            price = ""
+            if currency_match:
+                cur = currency_match.group("cur")
+                price = f"{cur}{'' if len(cur) == 1 else ' '}{currency_match.group('amt')}"
+            add_item_name(bullet_match.group("name"), price)
             continue
         if clean_line and shared_price_name.search(clean_line) and "$" not in clean_line:
             pending_shared_price_name = clean_line
+            line_consumed = True
             continue
         shared_anywhere_match = shared_price_anywhere.search(clean_line)
         if shared_anywhere_match:
@@ -455,6 +549,9 @@ def _facts_from_text(text: str, *, asset: FlyerAsset, source: str) -> list[Flyer
                 continue
             price = f"${match.group('price')}"
             add_item_name(name, price)
+    finish_line()
+    if report is not None:
+        report.update(non_item_lines=non_item_lines, unparsed_lines=unparsed_lines, bullet_lines=bullet_lines)
     item_pricing_text = " ".join(
         [text or "", campaign_title]
         + [item.get("name", "") for item in items]
@@ -516,8 +613,46 @@ def _request_requires_reference_menu_items(raw_request: str) -> bool:
             "use as a reference",
             "source flyer",
             "attached flyer",
+            "same exact items",
+            "same items",
         )
     )
+
+
+# Sentences the router / intake wrap around every photo caption (cf-router
+# hooks._flyer_raw_request_with_reference, intake.py). They say nothing about
+# what the customer wants, so menu intent is judged on the text without them.
+_REFERENCE_WRAPPER_SENTENCES = (
+    "Uploaded reference image/template is attached. Use it when designing this flyer.",
+    "Create flyer from uploaded template/reference. Customer requested:",
+)
+_MENU_INTENT_RE = re.compile(r"\b(?:menu|items|dishes|our food)\b", flags=re.IGNORECASE)
+
+
+def _request_has_menu_intent(raw_request: str) -> bool:
+    text = raw_request or ""
+    for sentence in _REFERENCE_WRAPPER_SENTENCES:
+        text = text.replace(sentence, " ")
+    return _request_requires_reference_menu_items(text) or bool(_MENU_INTENT_RE.search(text))
+
+
+def priceless_menu_enabled(customer_phone: str) -> bool:
+    """FLYER_PRICELESS_MENU_ALLOWLIST rollout gate, same allowlist semantics as
+    style_registers_enabled: comma-separated phones/JIDs (normalized both
+    sides), a literal ``*`` = every customer, unset/empty = nobody."""
+    try:
+        from style_registers import _normalize_phone  # type: ignore
+    except ImportError:
+        from agents.flyer.style_registers import _normalize_phone
+    raw_entries = [p.strip() for p in
+                   os.environ.get("FLYER_PRICELESS_MENU_ALLOWLIST", "").split(",") if p.strip()]
+    if "*" in raw_entries:
+        return True
+    allowlist = {_normalize_phone(p) for p in raw_entries}
+    allowlist.discard("")
+    if not allowlist:
+        return False
+    return _normalize_phone(customer_phone) in allowlist
 
 
 def build_reference_extraction_provider() -> ReferenceExtractionProvider:
@@ -665,6 +800,7 @@ def extract_reference(
     *,
     raw_request: str,
     provider: ReferenceExtractionProvider | None = None,
+    priceless_menu_allowed: bool = False,
 ) -> FlyerReferenceExtraction:
     role = classify_reference_role(raw_request, asset)
     provider = provider or NoopReferenceExtractionProvider()
@@ -725,7 +861,24 @@ def extract_reference(
             extracted_at=datetime.now(timezone.utc),
         )
     source = "reference_ocr" if provider.provider_name == "sidecar" else "reference_vision"
-    facts = _facts_from_text(text, asset=asset, source=source)
+    parse_report: dict = {}
+    facts = _facts_from_text(text, asset=asset, source=source, report=parse_report)
+    notes: list[str] = []
+    if parse_report.get("non_item_lines"):
+        notes.append("ignored non-item lines: " + ", ".join(parse_report["non_item_lines"]))
+    # A model may "helpfully" fill in a price the photo does not show. When the
+    # provider exposes the photo's own visible text, an item price whose amount
+    # is not in it is dropped, never locked.
+    visible_text = str(getattr(provider, "last_visible_text", "") or "")
+    if visible_text:
+        kept = []
+        for fact in facts:
+            amount = re.search(r"\d+(?:\.\d{1,2})?", fact.value) if fact.fact_id.endswith(":price") else None
+            if amount and not re.search(rf"(?<![\d.]){re.escape(amount.group(0))}(?!\d)", visible_text):
+                notes.append(f"dropped unseen price: {fact.value}")
+                continue
+            kept.append(fact)
+        facts = kept
     has_item_name = any(fact.fact_id.startswith("item:") and fact.fact_id.endswith(":name") for fact in facts)
     has_pricing_fact = any(
         fact.fact_id == "pricing_structure"
@@ -733,9 +886,24 @@ def extract_reference(
         or (fact.fact_id.startswith("item:") and fact.fact_id.endswith(":price"))
         for fact in facts
     )
-    if role == "menu_reference" and not has_pricing_fact:
+    requires_menu_items = _request_requires_reference_menu_items(raw_request)
+    unparsed = parse_report.get("unparsed_lines") or []
+    item_lines = int(parse_report.get("bullet_lines") or 0) - len(parse_report.get("non_item_lines") or [])
+    items_unparsed = role == "menu_reference" and requires_menu_items and bool(unparsed)
+    # A menu photo without prices is still a menu: keep the item names and
+    # render without prices (never invent them) — for allowlisted customers,
+    # and only when the customer's own words ask for a menu. Only empty when
+    # no item names were found either.
+    priceless_menu = role == "menu_reference" and not has_pricing_fact and has_item_name
+    priceless_menu_blocked = priceless_menu and not priceless_menu_allowed
+    priceless_without_intent = priceless_menu and priceless_menu_allowed and not _request_has_menu_intent(raw_request)
+    if role == "menu_reference" and not has_pricing_fact and (
+        not has_item_name or priceless_menu_blocked or priceless_without_intent
+    ):
         facts = []
-    if role == "menu_reference" and _request_requires_reference_menu_items(raw_request) and not has_item_name:
+    if role == "menu_reference" and requires_menu_items and not has_item_name:
+        facts = []
+    if items_unparsed:
         facts = []
     has_menu_fact = any(
         fact.fact_id == "pricing_structure"
@@ -744,12 +912,25 @@ def extract_reference(
         for fact in facts
     )
     ok = status == "ok" and bool(facts) and has_menu_fact
+    if items_unparsed:
+        detail = f"{len(unparsed)} of {item_lines} items unparsed: " + ", ".join(unparsed)
+    elif priceless_menu_blocked:
+        detail = PRICELESS_MENU_NOT_ENABLED_DETAIL
+    elif priceless_without_intent:
+        detail = "price-less reference without menu intent"
+    elif not ok:
+        detail = "no high-confidence item/price facts extracted"
+    elif role == "menu_reference" and not has_pricing_fact:
+        detail = PRICES_OMITTED_DETAIL
+    else:
+        detail = ""
+    detail = "; ".join([part for part in (detail, *notes) if part])[:500]
     return FlyerReferenceExtraction(
         asset_id=asset.asset_id,
         role=role,
         provider=provider.provider_name,
         status="ok" if ok else "low_confidence",
         extracted_facts=facts,
-        detail="" if ok else "no high-confidence item/price facts extracted",
+        detail=detail,
         extracted_at=datetime.now(timezone.utc),
     )

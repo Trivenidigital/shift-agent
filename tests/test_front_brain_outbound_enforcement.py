@@ -273,6 +273,24 @@ def _owner_exempt(jid, msg, **kw):
     return safe_io._front_brain_outbound_enforce(jid, msg, exempt_owner=True, **kw)
 
 
+def _exempt_rows(monkeypatch) -> list[dict]:
+    return [r for r in _read_rows(monkeypatch) if r["type"] == "front_brain_owner_exempt_send"]
+
+
+def _assert_only_owner_exempt_row(monkeypatch, jid: str, msg: str) -> None:
+    """An exempt owner send writes exactly ONE row — the positive record of the
+    delivered text — and no review/refusal row (the screen did not run)."""
+    rows = _read_rows(monkeypatch)
+    assert [r["type"] for r in rows] == ["front_brain_owner_exempt_send"], rows
+    row = rows[0]
+    assert row["message_text"] == msg[:2000]
+    assert row["seam"] == "bridge_post"
+    assert row["exempt_reason"] == "primary_owner"
+    assert row["chat_key_hash"] == safe_io._front_brain_chat_key_hash(jid)
+    assert row["send_attempt_id"]
+    ADAPTER.validate_python(row)
+
+
 def test_owner_predicate_untouched(tmp_path, monkeypatch):
     # The admission predicate stays a pure env check: the owner IS admitted.
     _write_owner_config(tmp_path, monkeypatch)
@@ -287,10 +305,11 @@ def test_owner_self_chat_exempt_while_customer_still_screened(tmp_path, monkeypa
     _enable(monkeypatch, f"{OWNER_PHONE},{CUSTOMER_JID}")
     # TARGET: owner admitted by the allowlist, yet not screened when opted in.
     assert _owner_exempt(OWNER_SELF_JID, PROMISE_MSG, fallback_template=FALLBACK) == PROMISE_MSG
-    assert _read_rows(monkeypatch) == []
+    _assert_only_owner_exempt_row(monkeypatch, OWNER_SELF_JID, PROMISE_MSG)
     # WITNESS: the same message to an allowlisted NON-owner chat is screened.
     assert _owner_exempt(CUSTOMER_JID, PROMISE_MSG, fallback_template=FALLBACK) == FALLBACK
     assert [r for r in _read_rows(monkeypatch) if r["type"] == "front_brain_outbound_refused"]
+    assert len(_exempt_rows(monkeypatch)) == 1  # the screened send added none
 
 
 def test_owner_screened_without_opt_in(tmp_path, monkeypatch):
@@ -308,7 +327,7 @@ def test_owner_daily_brief_text_reaches_owner_unchanged(tmp_path, monkeypatch):
     _write_owner_config(tmp_path, monkeypatch)
     _enable(monkeypatch, f"{OWNER_PHONE},{CUSTOMER_JID}")
     assert _owner_exempt(OWNER_SELF_JID, BRIEF_MSG) == BRIEF_MSG
-    assert _read_rows(monkeypatch) == []
+    _assert_only_owner_exempt_row(monkeypatch, OWNER_SELF_JID, BRIEF_MSG)
     # WITNESS: the brief text itself trips the screen when sent to a customer.
     assert _owner_exempt(CUSTOMER_JID, BRIEF_MSG) == safe_io.FRONT_BRAIN_SAFE_GENERIC_ACK
 
@@ -324,7 +343,7 @@ def test_primary_owner_identity_variants_exempt(tmp_path, monkeypatch, jid):
     _write_owner_config(tmp_path, monkeypatch)
     _enable(monkeypatch, "*")
     assert _owner_exempt(jid, PROMISE_MSG, fallback_template=FALLBACK) == PROMISE_MSG
-    assert _read_rows(monkeypatch) == []
+    _assert_only_owner_exempt_row(monkeypatch, jid, PROMISE_MSG)
 
 
 @pytest.mark.parametrize("jid", [
@@ -423,6 +442,20 @@ def test_gateway_seam_still_screens_owner(tmp_path, monkeypatch):
     assert out == FALLBACK
     refused = [r for r in _read_rows(monkeypatch) if r["type"] == "front_brain_outbound_refused"]
     assert len(refused) == 1 and "promise_ban" in refused[0]["hit_classes"]
+    # The gateway seam never opts in, so it never records an exempt send either.
+    assert _exempt_rows(monkeypatch) == []
+
+
+def test_gateway_seam_clean_owner_reply_emits_no_exempt_row(tmp_path, monkeypatch):
+    # A PASSING owner reply on the gateway seam is screened (review row), not exempt.
+    _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, "*")
+    monkeypatch.setenv("FRONT_BRAIN_CHAT_BUDGET_PATH", str(tmp_path / "budget.json"))
+    monkeypatch.setenv("FRONT_BRAIN_CHAT_DAILY_CAP", "30")
+    monkeypatch.setenv("FRONT_BRAIN_COMPOSE_TIMEOUT_SEC", "4.0")
+    assert safe_io.front_brain_screen_gateway_send(OWNER_SELF_JID, CLEAN_MSG) == CLEAN_MSG
+    assert [r for r in _read_rows(monkeypatch) if r["type"] == "front_brain_reply_composed"]
+    assert _exempt_rows(monkeypatch) == []
 
 
 def _unregulated_ctx():
@@ -465,6 +498,27 @@ def test_bridge_post_to_owner_sends_composed_text(tmp_path, monkeypatch):
     ok, _mid, err, status = safe_io.bridge_post(OWNER_SELF_JID, BRIEF_MSG, action_context=_unregulated_ctx())
     assert (ok, status) == (True, "sent"), err
     assert sent == [{"chatId": OWNER_SELF_JID, "message": BRIEF_MSG}]
+    # Exactly one positive record of the delivered brief; no review/refusal row.
+    _assert_only_owner_exempt_row(monkeypatch, OWNER_SELF_JID, BRIEF_MSG)
+
+
+def test_bridge_post_owner_exempt_row_records_full_text_capped(tmp_path, monkeypatch):
+    _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, "*")
+    sent = _capture_bridge_payloads(monkeypatch)
+    long_brief = BRIEF_MSG + " " + ("detail " * 400)
+    ok, _mid, err, status = safe_io.bridge_post(OWNER_SELF_JID, long_brief, action_context=_unregulated_ctx())
+    assert (ok, status) == (True, "sent"), err
+    assert sent[-1]["message"] == long_brief  # the send itself is never truncated
+    rows = _exempt_rows(monkeypatch)
+    assert len(rows) == 1 and rows[0]["message_text"] == long_brief[:2000]
+
+
+def test_bridge_post_owner_flag_off_emits_no_exempt_row(tmp_path, monkeypatch):
+    _write_owner_config(tmp_path, monkeypatch)
+    monkeypatch.delenv("FRONT_BRAIN_OUTBOUND_ENFORCE", raising=False)
+    _capture_bridge_payloads(monkeypatch)
+    safe_io.bridge_post(OWNER_SELF_JID, BRIEF_MSG, action_context=_unregulated_ctx())
     assert not [r for r in _read_rows(monkeypatch) if r["type"].startswith("front_brain_")]
 
 
@@ -477,6 +531,49 @@ def test_bridge_post_to_customer_still_substituted(tmp_path, monkeypatch):
                         action_context=_unregulated_ctx())
     assert sent and sent[-1]["message"] == FALLBACK
     assert [r for r in _read_rows(monkeypatch) if r["type"] == "front_brain_outbound_refused"]
+    assert _exempt_rows(monkeypatch) == []
+
+
+# ── bridge_post(exempt_owner=False): callers relaying arbitrary text opt OUT ──
+# send-catering-ack sends a caller-supplied --message-text body. It must not
+# inherit the owner exemption: a lint-failing body to the owner is substituted.
+
+def test_bridge_post_exempt_owner_false_screens_owner(tmp_path, monkeypatch):
+    _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, f"{OWNER_PHONE},{CUSTOMER_JID}")
+    sent = _capture_bridge_payloads(monkeypatch)
+    ok, _mid, err, status = safe_io.bridge_post(
+        OWNER_SELF_JID, PROMISE_MSG, fallback_template=FALLBACK,
+        action_context=_unregulated_ctx(), exempt_owner=False,
+    )
+    assert (ok, status) == (True, "sent"), err
+    assert sent == [{"chatId": OWNER_SELF_JID, "message": FALLBACK}]
+    refused = [r for r in _read_rows(monkeypatch) if r["type"] == "front_brain_outbound_refused"]
+    assert len(refused) == 1 and "promise_ban" in refused[0]["hit_classes"]
+    assert _exempt_rows(monkeypatch) == []
+
+
+def test_bridge_post_default_still_exempts_owner(tmp_path, monkeypatch):
+    # WITNESS for the opt-out: the same call without exempt_owner=False is exempt.
+    _write_owner_config(tmp_path, monkeypatch)
+    _enable(monkeypatch, f"{OWNER_PHONE},{CUSTOMER_JID}")
+    sent = _capture_bridge_payloads(monkeypatch)
+    safe_io.bridge_post(OWNER_SELF_JID, PROMISE_MSG, fallback_template=FALLBACK,
+                        action_context=_unregulated_ctx())
+    assert sent == [{"chatId": OWNER_SELF_JID, "message": PROMISE_MSG}]
+    _assert_only_owner_exempt_row(monkeypatch, OWNER_SELF_JID, PROMISE_MSG)
+
+
+def test_send_catering_ack_opts_out_of_owner_exemption():
+    # Static: the script's only send seam is bound with exempt_owner=False, and
+    # it still CALLS that seam (the name the e2e harness patches).
+    script = (REPO / "src" / "agents" / "catering" / "scripts" / "send-catering-ack").read_text(encoding="utf-8")
+    # The aliased import stays so the chokepoint policy scan
+    # (tests/test_catering_followup_scripts.py) still sees this script.
+    assert "from safe_io import bridge_post as _bridge_post_canonical" in script
+    assert "_bridge_post_4tuple = functools.partial(_bridge_post_canonical, exempt_owner=False)" in script
+    assert "_bridge_post_4tuple(jid, full_message)" in script
+    assert "from safe_io import bridge_post as _bridge_post_4tuple" not in script
 
 
 def test_bridge_post_to_authorized_identity_still_substituted(tmp_path, monkeypatch):

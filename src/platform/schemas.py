@@ -7789,6 +7789,23 @@ class FrontBrainOutboundRefused(_BaseEntry):
     template_fallback_used: bool = True
 
 
+class FrontBrainOwnerExemptSend(_BaseEntry):
+    """A scripted send to a PRIMARY owner identity skipped the front-brain
+    screen (safe_io._front_brain_outbound_enforce, exempt_owner=True — the
+    bridge_post seam only). Observability only: the send goes out unchanged and
+    neither `front_brain_reply_composed` nor `front_brain_outbound_refused` is
+    written for it, so without this row nothing records what the owner was sent.
+    message_text is the exact text handed to the bridge (capped at 2000 chars,
+    same cap as reply_text). New tag, not a widened field elsewhere: a rollback
+    target without this variant routes the row to `_UnknownLogEntry`."""
+    type: Literal["front_brain_owner_exempt_send"]
+    chat_key_hash: str = Field(default="", max_length=64)
+    seam: Literal["bridge_post"] = "bridge_post"
+    exempt_reason: Literal["primary_owner"] = "primary_owner"
+    message_text: str = Field(..., max_length=2000)
+    send_attempt_id: str = ""
+
+
 class OutboundTurnOverrideApplied(_BaseEntry):
     """A turn-bound deterministic override replaced the composed reply at the
     gateway egress seam.
@@ -8802,6 +8819,8 @@ LogEntry = Annotated[
         Annotated[FrontBrainReplyComposed, Tag("front_brain_reply_composed")],
         # Front-brain outbound enforcement — refusal audit (P0-3a)
         Annotated[FrontBrainOutboundRefused, Tag("front_brain_outbound_refused")],
+        # 2026-10-08 — positive record of a screen-exempt scripted owner send
+        Annotated[FrontBrainOwnerExemptSend, Tag("front_brain_owner_exempt_send")],
         Annotated[OutboundTurnOverrideApplied, Tag("outbound_turn_override_applied")],
         # Front-brain Phase-1 — durable unfulfillable-request queue (item 5)
         Annotated[FrontBrainRequestQueued, Tag("front_brain_request_queued")],

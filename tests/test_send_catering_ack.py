@@ -83,7 +83,7 @@ def env_dir(tmp_path):
     return tmp_path
 
 
-def _run_script(env_dir, bridge_port, customer_jid, message_text, lead_id=""):
+def _run_script(env_dir, bridge_port, customer_jid, message_text, lead_id="", extra_env=None):
     """Run send-catering-ack with overridden LOG_PATH + BRIDGE_URL via importlib."""
     args = [
         "send-catering-ack",
@@ -126,7 +126,8 @@ print(json.dumps({{"rc": rc, "stdout": buf_out.getvalue()}}))
         # its intended connect-refused behavior; never the live bridge :3000.)
         env={**os.environ,
              "HERMES_BRIDGE_URL": f"http://127.0.0.1:{bridge_port}/send",
-             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1"},
+             "SHIFT_AGENT_ALLOW_BRIDGE_IN_TESTS": "1",
+             **(extra_env or {})},
     )
     return result
 
@@ -270,3 +271,54 @@ def test_prefix_matches_bridge_template_bypass_regex(bridge_server, env_dir):
     bridge_regex = re.compile(r"^⚕ \*[A-Za-z][A-Za-z ]*\*\n[─\-]+\n")
     assert bridge_regex.match(sent_msg), \
         f"prefix does not match bridge template_bypass regex: {sent_msg[:80]!r}"
+
+
+# ---------- Front-brain owner exemption (2026-10-08) ----------
+#
+# bridge_post exempts scripted sends to the PRIMARY owner from the front-brain
+# screen. This script relays a caller-supplied --message-text body (historically
+# LLM-drafted), so it opts OUT (exempt_owner=False): a lint-failing body aimed at
+# the owner identity is still substituted and refused-audited.
+
+OWNER_JID = "17329837841@s.whatsapp.net"
+PROMISE_BODY = "We guarantee a full refund and free delivery by Friday."
+
+
+def _owner_enforce_env(env_dir):
+    cfg = env_dir / "config.yaml"
+    cfg.write_text(
+        "owner:\n  name: Owner\n  phone: '+17329837841'\n"
+        f"  self_chat_jid: '{OWNER_JID}'\n",
+        encoding="utf-8",
+    )
+    return {
+        "SHIFT_AGENT_CONFIG_PATH": str(cfg),
+        "FRONT_BRAIN_OUTBOUND_ENFORCE": "1",
+        "FRONT_BRAIN_OUTBOUND_ENFORCE_ALLOWLIST": "*",
+        "SHIFT_AGENT_DECISIONS_LOG_PATH": str(env_dir / "logs" / "fb-decisions.log"),
+        # The screen imports agents.flyer.customer_copy_policy (flat-renamed on
+        # the box); the subprocess wrapper only puts src/platform on sys.path.
+        "PYTHONPATH": str(PLATFORM_DIR.parent),
+    }
+
+
+def _fb_rows(env_dir):
+    p = env_dir / "logs" / "fb-decisions.log"
+    if not p.exists():
+        return []
+    return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+def test_ack_to_owner_is_still_screened(bridge_server, env_dir):
+    port, stub = bridge_server
+    res = _run_script(env_dir, port, customer_jid=OWNER_JID, message_text=PROMISE_BODY,
+                      extra_env=_owner_enforce_env(env_dir))
+    parsed = json.loads(res.stdout.strip().splitlines()[-1])
+    assert parsed["rc"] == 0, f"non-zero exit; stderr: {res.stderr}"
+    assert len(stub.requests) == 1
+    assert PROMISE_BODY not in stub.requests[0]["message"], "lint-failing body reached the owner"
+    rows = _fb_rows(env_dir)
+    assert "FRONT_BRAIN enforce unavailable" not in res.stderr, res.stderr  # the screen really ran
+    refused = [r for r in rows if r["type"] == "front_brain_outbound_refused"]
+    assert len(refused) == 1 and "promise_ban" in refused[0]["hit_classes"]
+    assert not [r for r in rows if r["type"] == "front_brain_owner_exempt_send"]

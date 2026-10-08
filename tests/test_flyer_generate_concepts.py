@@ -204,6 +204,94 @@ def test_generate_extracts_pending_reference_facts_before_render(monkeypatch, tm
     assert persisted["status"] == "awaiting_final_approval"
 
 
+def test_generate_priceless_menu_reference_renders_without_prices_not_manual(monkeypatch, tmp_path, capsys):
+    """F0226/F0228 shape after `flyer-manual-queue --retry-extraction`: the owner's
+    menu photo has item names but no prices. Extraction is `ok`, the items become
+    locked facts, generation proceeds to render — never manual_edit_required."""
+    module = _load_script(monkeypatch)
+    from schemas import FlyerVisualQAReport  # noqa: E402
+    from agents.flyer.facts import reference_prices_omitted  # noqa: E402
+
+    monkeypatch.setenv("FLYER_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLYER_PRICELESS_MENU_ALLOWLIST", "+15550100001")
+    state_path = tmp_path / "projects.json"
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    reference = asset_dir / "F0228-reference.png"
+    reference.write_bytes(b"fake image bytes")
+    rendered = asset_dir / "F0228-C1.png"
+    project = _project_with_pending_reference(reference)
+    project.update({
+        "project_id": "F0228",
+        "status": "generating_concepts",
+        "raw_request": (
+            "Create similar flyer for Lakshmi's kitchen , same exact items\n"
+            "Uploaded reference image/template is attached. Use it when designing this flyer."
+        ),
+    })
+    state_path.write_text(json.dumps({"schema_version": 1, "next_sequence": 2, "projects": [project]}), encoding="utf-8")
+    items = ["Idli Sambar", "Masala Dosa", "Medu Vada", "Pongal", "Filter Coffee"]
+
+    class PricelessMenuProvider:
+        provider_name = "fake_vision"
+
+        def extract_text(self, _asset, _raw_request):
+            return "\n".join(f"- {item}" for item in items), "ok"
+
+    rendered_projects = []
+
+    def fake_render(project, _asset_dir, **_kwargs):
+        rendered_projects.append(project)
+        rendered.write_bytes(b"rendered")
+        return [types.SimpleNamespace(
+            path=rendered,
+            kind="concept_preview",
+            output_format="concept_preview",
+            width=1080,
+            height=1350,
+            concept_id="C1",
+        )]
+
+    def fake_qa(project, path, *, output_format, asset_id):
+        return FlyerVisualQAReport(
+            project_id=project.project_id,
+            asset_id=asset_id,
+            artifact_path=str(path),
+            artifact_sha256="b" * 64,
+            project_version=project.version,
+            output_format=output_format,
+            provider="test",
+            qa_source="sidecar_test",
+            status="passed",
+            checked_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(module, "build_reference_extraction_provider", lambda: PricelessMenuProvider())
+    monkeypatch.setattr(module, "render_concept_previews", fake_render)
+    monkeypatch.setattr(module, "run_visual_qa", fake_qa)
+    monkeypatch.setattr(module, "write_visual_qa_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sys, "argv", [
+        "generate-flyer-concepts",
+        "--project-id", "F0228",
+        "--state-path", str(state_path),
+        "--asset-dir", str(asset_dir),
+        "--config-path", str(tmp_path / "config.yaml"),
+    ])
+
+    assert module.main() == 0
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["projects"][0]
+
+    assert rendered_projects, "render must run for a price-less menu reference"
+    locked_values = [fact.value for fact in rendered_projects[0].locked_facts]
+    assert set(items).issubset(locked_values)
+    assert not any("$" in value for value in locked_values)
+    assert reference_prices_omitted(rendered_projects[0]) is True
+    assert persisted["reference_extractions"][0]["status"] == "ok"
+    assert "prices omitted" in persisted["reference_extractions"][0]["detail"]
+    assert persisted["status"] != "manual_edit_required"
+    assert persisted["manual_review"]["status"] == "none"
+
+
 def test_generate_persists_structured_generation_prompt_not_raw_request(monkeypatch, tmp_path, capsys):
     module = _load_script(monkeypatch)
     from schemas import FlyerVisualQAReport  # noqa: E402
@@ -324,7 +412,7 @@ def test_generate_deferred_source_edit_template_extracts_source_contract_before_
         "projects": [project],
     }), encoding="utf-8")
 
-    def fake_extract_reference(asset, *, raw_request, provider):
+    def fake_extract_reference(asset, *, raw_request, provider, **_kwargs):
         return FlyerReferenceExtraction(
             asset_id=asset.asset_id,
             role="source_edit_template",
@@ -433,7 +521,7 @@ def test_generate_deferred_source_edit_template_provider_failure_queues_manual_r
         "projects": [project],
     }), encoding="utf-8")
 
-    def fake_extract_reference(asset, *, raw_request, provider):
+    def fake_extract_reference(asset, *, raw_request, provider, **_kwargs):
         return FlyerReferenceExtraction(
             asset_id=asset.asset_id,
             role="source_edit_template",
@@ -498,7 +586,7 @@ def test_generate_deferred_source_edit_template_non_provider_failure_keeps_refer
         "projects": [project],
     }), encoding="utf-8")
 
-    def fake_extract_reference(asset, *, raw_request, provider):
+    def fake_extract_reference(asset, *, raw_request, provider, **_kwargs):
         return FlyerReferenceExtraction(
             asset_id=asset.asset_id,
             role="source_edit_template",

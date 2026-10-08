@@ -632,6 +632,97 @@ def test_full_lifecycle_inquiry_to_quote_delivered(sandbox):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# EXPLICIT QUANTITIES — customer names items + counts, no option, no operator CLI
+# ═════════════════════════════════════════════════════════════════════════════
+def _cents(cents: int) -> str:
+    return f"${cents // 100:,}.{cents % 100:02d}"
+
+
+def _plugin_env(sb: Sandbox, monkeypatch) -> None:
+    """The cf-router plugin runs IN this process (it is a Hermes plugin, not a
+    script), and its subprocesses inherit os.environ — so os.environ becomes the
+    same sterile child env the scripts above get."""
+    env = _child_env(sb)
+    for key in list(os.environ):
+        if key not in env:
+            monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    # The arm's own allowlist, as the operator sets it: an E.164 phone.
+    monkeypatch.setenv("CATERING_EXPLICIT_QTY_ALLOWLIST", CUSTOMER_PHONE)
+
+
+def test_explicit_quantities_reach_owner_card_and_quote_with_no_operator_step(sandbox, monkeypatch):
+    """inquiry with headcount -> "10 trays of Idly and 7 Masala Dosa please" through
+    the REAL cf-router hook -> finalize-catering-menu (no headcount scaling) ->
+    CUSTOMER_FINALIZED + owner card -> owner `#CODE approve` through the REAL F8
+    intercept -> SENT_TO_CUSTOMER at the frozen kernel cents.
+
+    The quantities are chosen so headcount scaling would give a DIFFERENT answer
+    (serves=10, 50 guests -> 5 of each): 10 and 7 surviving verbatim is the
+    witness that the explicit path, not the option path, priced this."""
+    from types import SimpleNamespace
+
+    from catering_pricing import derive_item_overrides
+    from schemas import Menu
+    from test_catering_turn_arbitration_e2e import _load_plugin
+
+    sb = sandbox
+    menu = Menu.model_validate(json.loads(sb.menu_path.read_text(encoding="utf-8")))
+    overrides, _excluded = derive_item_overrides(menu.items)
+    (sb.state / "catering-pricebook.json").write_text(
+        json.dumps(build_catering_pricebook(item_price_overrides=overrides)), encoding="utf-8")
+
+    lead = open_lead(sb, "wamid.EQ.001")
+    lead_id, code = lead["lead_id"], lead["owner_approval_code"]
+    assert lead["extracted"]["headcount"] == 50
+    owner_before, customer_before = len(sb.to(OWNER_JID)), len(sb.to(CUSTOMER_JID))
+
+    _plugin_env(sb, monkeypatch)
+    hooks, actions = _load_plugin()
+    actions.lid_to_phone_via_identify_sender = (
+        lambda cid: ("+19045550100", "owner") if cid == OWNER_JID else (CUSTOMER_PHONE, "customer"))
+
+    text = "10 trays of Idly and 7 Masala Dosa please"
+    out = hooks.pre_gateway_dispatch(SimpleNamespace(
+        text=text, chat_id=CUSTOMER_JID, message_id="wamid.EQ.002"))
+    assert out is not None and out["action"] == "skip" and "explicit" in out["reason"], out
+
+    lead = sb.lead(lead_id)
+    assert lead["status"] == "CUSTOMER_FINALIZED", lead["status"]
+    assert [(i["name"], i["qty"]) for i in lead["selected_items"]] == [
+        ("Idly (3 PCS)", 10), ("Masala Dosa", 7)]
+    expected_cents = overrides["Idly (3 PCS)"] * 10 + overrides["Masala Dosa"] * 7
+    pricing = lead["pricing_inputs"]
+    assert pricing["total_cents"] == expected_cents, pricing
+    assert pricing["price_status"] == "exact", "every line priced from the pricebook override"
+    cards = sb.to(OWNER_JID)[owner_before:]
+    assert len(cards) == 1, f"expected one owner card, got {cards}"
+    assert f"{code} approve" in cards[0]["message"], cards[0]["message"]
+    # L1: each card line is the kernel's cents (10 × $5.99 = $59.90), not the
+    # rounded whole-dollar unit × qty ($60) that stopped adding up to the total.
+    idly_line = f"Idly (3 PCS) × 10  {_cents(overrides['Idly (3 PCS)'] * 10)}"
+    assert idly_line in cards[0]["message"], cards[0]["message"]
+    assert overrides["Idly (3 PCS)"] % 100, "precondition: a non-whole-dollar unit price"
+    acks = sb.to(CUSTOMER_JID)[customer_before:]
+    assert len(acks) == 1 and "saved for owner approval" in acks[0]["message"], acks
+    assert not any(row.get("type") == "catering_proposal_selected"
+                   for row in map(json.loads, sb.log_path.read_text(encoding="utf-8").splitlines())
+                   if row), "the option path must not have run"
+
+    customer_before = len(sb.to(CUSTOMER_JID))
+    approved = hooks._try_f8_intercept(f"{code} approve", OWNER_JID, "wamid.EQ.003")
+    assert approved is not None and approved["action"] == "skip", approved
+    lead = sb.lead(lead_id)
+    assert lead["status"] == "SENT_TO_CUSTOMER", lead["status"]
+    assert lead["pricing_inputs"]["total_cents"] == expected_cents, "cents frozen at finalize"
+    quotes = sb.to(CUSTOMER_JID)[customer_before:]
+    assert len(quotes) == 1, quotes
+    assert f"Total: {_cents(expected_cents)}" in quotes[0]["message"], quotes[0]["message"]
+    assert_only_stub_saw_traffic(sb)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # NEGATIVES — each asserts the SPECIFIC refusal, never merely "nonzero"
 # ═════════════════════════════════════════════════════════════════════════════
 def test_unknown_approval_code_is_refused(sandbox):

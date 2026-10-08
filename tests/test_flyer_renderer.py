@@ -5829,3 +5829,100 @@ def test_dense_flag_on_scoped_other_number_unaffected(monkeypatch):
     monkeypatch.setenv("FLYER_PREMIUM_OVERLAY_ALLOWLIST", "+15550100001")
     other = _weekend_project().model_copy(update={"customer_phone": "+19998887777"})
     assert render_module._integrated_poster_eligible(other) is True   # still integrated
+
+
+# --- Price-less menu reference (F0226/F0228 shape): the owner's menu photo has
+# item names but no prices. The flyer keeps the items and shows NO prices. ---
+
+PRICELESS_MENU_ITEMS = ["Idli Sambar", "Masala Dosa", "Medu Vada", "Pongal", "Filter Coffee"]
+
+
+def _priceless_menu_reference_project(*, with_reference: bool = True) -> FlyerProject:
+    item_facts = [
+        FlyerLockedFact(fact_id=f"item:{idx}:name", label="Item", value=name, source="reference_vision", required=True)
+        for idx, name in enumerate(PRICELESS_MENU_ITEMS)
+    ]
+    project = _triveni_shared_price_reference_project().model_copy(update={
+        "project_id": "F0228",
+        "raw_request": (
+            "Create similar flyer for Lakshmi's kitchen , same exact items\n"
+            "Uploaded reference image/template is attached. Use it when designing this flyer."
+        ),
+        "fields": FlyerRequestFields(
+            event_or_business_name="Lakshmi's Kitchen",
+            venue_or_location="90 Brybar Dr St Johns FL",
+            contact_info="+15550100001",
+            notes="same exact items. Uploaded reference image/template is attached.",
+            preferred_language="en",
+        ),
+        "locked_facts": [
+            fact for fact in _triveni_shared_price_reference_project().locked_facts
+            if not fact.fact_id.startswith("item:") and fact.fact_id not in {"pricing_structure", "campaign_title"}
+        ] + item_facts,
+    })
+    if with_reference:
+        project = project.model_copy(update={"reference_extractions": [FlyerReferenceExtraction(
+            asset_id="A0001",
+            role="menu_reference",
+            provider="openrouter_vision",
+            status="ok",
+            extracted_facts=item_facts,
+            detail="items extracted; no prices on reference - prices omitted",
+        )]})
+    return project
+
+
+def test_priceless_menu_reference_prompt_forbids_prices():
+    from agents.flyer.facts import PRICES_OMITTED_DIRECTIVE
+
+    project = _priceless_menu_reference_project()
+    block = render_module._poster_copy_block(project)
+    prompt = _image_prompt(project, concept_id="C1", output_format="concept_preview", size=(1080, 1350))
+
+    assert PRICES_OMITTED_DIRECTIVE in block
+    assert PRICES_OMITTED_DIRECTIVE in prompt
+    for name in PRICELESS_MENU_ITEMS:
+        assert f"- {name}" in block
+    assert "$" not in block
+
+
+def test_prompt_has_no_price_omission_directive_without_priceless_reference():
+    from agents.flyer.facts import PRICES_OMITTED_DIRECTIVE
+
+    assert PRICES_OMITTED_DIRECTIVE not in render_module._poster_copy_block(
+        _priceless_menu_reference_project(with_reference=False))
+    assert PRICES_OMITTED_DIRECTIVE not in render_module._poster_copy_block(_triveni_shared_price_reference_project())
+
+
+def test_priceless_menu_reference_offline_pil_render_draws_no_price(tmp_path, monkeypatch):
+    from PIL import Image, ImageDraw, ImageFont
+
+    drawn: list[str] = []
+
+    class RecordingDraw:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def text(self, xy, text, *args, **kwargs):
+            drawn.append(str(text))
+            return self._inner.text(xy, text, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    class RecordingImageDraw:
+        @staticmethod
+        def Draw(img, *args, **kwargs):
+            return RecordingDraw(ImageDraw.Draw(img, *args, **kwargs))
+
+    monkeypatch.setattr(render_module, "_load_pillow", lambda: (Image, RecordingImageDraw, ImageFont))
+    project = _priceless_menu_reference_project()
+
+    specs = render_concept_previews(project, tmp_path)
+
+    assert specs and specs[0].path.exists()
+    joined = "\n".join(drawn)
+    for name in PRICELESS_MENU_ITEMS:
+        assert name in joined
+    assert "$" not in joined
+    assert all(price == "" for _name, price in render_module._poster_copy_plan(project).items)

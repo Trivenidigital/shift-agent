@@ -33,9 +33,9 @@ import uuid
 from schemas import FlyerAsset, FlyerCustomerStore, FlyerOutputFormat, FlyerProject
 
 try:
-    from flyer_facts import fact_value, requests_generated_item_suggestions  # type: ignore
+    from flyer_facts import PRICES_OMITTED_DIRECTIVE, fact_value, reference_prices_omitted, requests_generated_item_suggestions  # type: ignore
 except ImportError:  # pragma: no cover - src layout fallback
-    from agents.flyer.facts import fact_value, requests_generated_item_suggestions
+    from agents.flyer.facts import PRICES_OMITTED_DIRECTIVE, fact_value, reference_prices_omitted, requests_generated_item_suggestions
 try:
     from flyer_campaign_scene_prompts import campaign_scene_prompt_block, select_campaign_scene  # type: ignore
 except ImportError:  # pragma: no cover - src layout fallback
@@ -1292,6 +1292,8 @@ def _poster_copy_block(project: FlyerProject, *, force_background_only: bool = F
         lines.append("Offer details:")
         for detail in plan.detail_lines:
             lines.append(f"- {detail}")
+    if reference_prices_omitted(project):
+        lines.append(PRICES_OMITTED_DIRECTIVE)
     if not (_background_only_eligible(project) or force_background_only):
         # Only the integrated-text path renders these facts itself; the legibility
         # guidance is contradictory under the background-only (textless) contract.
@@ -2622,6 +2624,7 @@ def _resolve_style_directives(project: FlyerProject) -> tuple[str, str, str]:
         + "Each declared headline appears once. "
         "Do not repeat copy to fill space; no empty menu rows, cards, or unfilled placeholder panels."
         f"{uniform_discipline}"
+        + (f"\n\n{PRICES_OMITTED_DIRECTIVE}" if reference_prices_omitted(project) else "")
     )
     vocab = ", ".join(vocab_entries)
     ban_line = (
