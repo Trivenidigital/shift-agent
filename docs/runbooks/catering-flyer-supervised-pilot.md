@@ -102,13 +102,22 @@ real tax rate — do not quote a paying customer on them.
    `Catering for a birthday on November 21 for 40 guests, pickup 6pm. Please send menu options. TEST ONLY - NOT A REAL ORDER.`
    → lead created (owner card sent to `owner.self_chat_jid`), proposal options sent.
 2. Customer states explicit quantities, e.g. `10 trays of Idly, 7 Masala Dosa, 5 Chicken Biryani`.
-   The explicit-quantity arm (gap release; `CATERING_EXPLICIT_QTY_ENABLED` default 1 AND
-   sender in `CATERING_AUTOMATION_CONTROL_ALLOWLIST`) matches each phrase to exactly one menu
-   name, prices it with the pricebook kernel, runs `finalize-catering-menu` WITHOUT headcount
-   scaling, sends the owner card and acks the customer ("…saved for owner approval. Final
-   pricing comes after owner review."). A phrase that matches no single menu item gets ONE
-   clarification listing up to 3 exact menu names; nothing is saved. Headcount unknown → the
-   arm stands down (quote would be un-approvable) and the message follows the previous path.
+   The explicit-quantity arm (gap release; sender must be in its OWN allowlist
+   `CATERING_EXPLICIT_QTY_ALLOWLIST` — comma-separated E.164 phones / chat ids, `*` = everyone,
+   unset = arm OFF; STOP/takeover suppression still applies upstream) matches each phrase to
+   exactly one menu name, prices it with the pricebook kernel, runs `finalize-catering-menu`
+   WITHOUT headcount scaling, sends the owner card and acks the customer ("…saved for owner
+   approval. Final pricing comes after owner review."). It only finalizes a lead in
+   `AWAITING_OWNER_APPROVAL` / `OWNER_EDITED`; on an already `CUSTOMER_FINALIZED` lead, and
+   whenever it cannot price (headcount unknown, pricebook missing, finalize error), the
+   customer gets the standard "with the owner" reply and the owner card is NOT changed — it
+   never falls back to option selection. A phrase that matches no single menu item gets ONE
+   clarification listing up to 3 exact menu names; nothing is saved. Any removal/negation
+   wording ("cancel", "remove", "instead of", "not", "also add") makes the whole message
+   non-explicit and it follows the previous (amendment-capture) path.
+   To enable for the pilot: `CATERING_EXPLICIT_QTY_ALLOWLIST=+19802005023` (the owner is
+   excluded from the arm by role anyway) in `/root/.hermes/.env` (symlink TARGET; back up
+   first) and restart `hermes-gateway`.
    `I'll take Option 1` (tier/option pick) is still refused with "needs restaurant review of
    serving sizes" while no item has a confirmed `serves` (fail-closed guard, PR #796). Beware:
    before the gap release "I'll take 2 trays of Idly" was read as Option 2; the explicit arm
@@ -151,6 +160,12 @@ Controls: customer `STOP` / `PAUSE` / `RESUME` (whole message); owner
   current prior tag `deploy-20261003-013123-50a1daa0` (live).
   `deploys/deploy-20261008-155259-8411b8c3.tgz` is the staging snapshot of a FAILED attempt,
   not a release.
+- Before rolling back PAST the gap release: unset `FLYER_PRICELESS_MENU_ALLOWLIST` and
+  `CATERING_EXPLICIT_QTY_ALLOWLIST` first and dispose of in-flight price-less flyer projects
+  (`flyer-manual-queue --list`; close or let them finish) — the older `visual_qa` has no
+  `reference_prices_omitted` guard and would treat a price-less menu as "creative latitude".
+  The new `decisions.log` row `front_brain_owner_exempt_send` is tolerated by older readers
+  (`_UnknownLogEntry`).
 - Then the mandatory checks in `rollback.md` (locked facts, QR, fallback) and
   `catering-rollback.md`.
 
